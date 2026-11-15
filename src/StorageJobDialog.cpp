@@ -25,34 +25,54 @@ public:
  }
  void OnCancel() override {EndDialog(IDC_COPY_CANCEL);}
 };
+class StorageSpinner : public CStatic {
+ unsigned frame_=0;
+ void draw(HDC target) {
+  CRect client;GetClientRect(&client);const int width=client.Width(),height=client.Height();
+  HDC buffer=CreateCompatibleDC(target);HBITMAP bitmap=CreateCompatibleBitmap(target,width,height);
+  if(!buffer||!bitmap){if(bitmap)DeleteObject(bitmap);if(buffer)DeleteDC(buffer);return;}
+  HGDIOBJ previous=SelectObject(buffer,bitmap);RECT bounds={0,0,width,height};
+  COLORREF background=GetSysColor(COLOR_3DFACE),accent=GetSysColor(COLOR_HIGHLIGHT);
+  HBRUSH fill=CreateSolidBrush(background);FillRect(buffer,&bounds,fill);DeleteObject(fill);
+  // Three-pixel null-pen ellipses can rasterize to no visible fill.
+  int dot=max(4,min(width,height)/7);double radius=min(width,height)*0.33;
+  HGDIOBJ pen=SelectObject(buffer,GetStockObject(NULL_PEN));
+  for(unsigned n=0;n<8;++n){
+   unsigned strength=40+((n+8-frame_)%8)*30;
+   auto blend=[&](int a,int b){return BYTE((a*strength+b*(255-strength))/255);};
+   COLORREF color=RGB(blend(GetRValue(accent),GetRValue(background)),blend(GetGValue(accent),GetGValue(background)),blend(GetBValue(accent),GetBValue(background)));
+   HBRUSH brush=CreateSolidBrush(color);
+   HGDIOBJ oldBrush=SelectObject(buffer,brush);double angle=n*3.141592653589793/4;
+   int x=int(width/2+radius*cos(angle)),y=int(height/2+radius*sin(angle));
+   ::Ellipse(buffer,x-dot/2,y-dot/2,x+(dot+1)/2,y+(dot+1)/2);
+   SelectObject(buffer,oldBrush);DeleteObject(brush);
+  }
+  SelectObject(buffer,pen);
+  BitBlt(target,0,0,width,height,buffer,0,0,SRCCOPY);
+  SelectObject(buffer,previous);DeleteObject(bitmap);DeleteDC(buffer);
+ }
+public:
+ void Start(){SetTimer(1,120,nullptr);Invalidate(FALSE);}
+ LRESULT WindowProc(UINT message,WPARAM w,LPARAM l) override {
+  if(message==WM_ERASEBKGND)return TRUE;
+  if(message==WM_PAINT){CPaintDC dc(this);draw(dc.GetSafeHdc());return 0;}
+  if(message==WM_PRINTCLIENT){if(w)draw(reinterpret_cast<HDC>(w));return 0;}
+  if(message==WM_TIMER&&w==1){frame_=(frame_+1)%8;Invalidate(FALSE);
+#ifdef HFV_TESTING
+   ++storageUiTest.spinnerTicks;
+#endif
+   return 0;
+  }
+  return CStatic::WindowProc(message,w,l);
+ }
+};
 class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
  CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false,cancellable_=false;
  ITaskbarList3* taskbar_=nullptr;bool uninitialize_=false;TBPFLAG taskbarState_=TBPF_NOPROGRESS;
  HWND owner_;
  std::function<void(HWND)> beforeClose_;
- unsigned spinnerFrame_=0;bool explanationShown_=false;
- void drawSpinner(const DRAWITEMSTRUCT& item) {
-  const int width=item.rcItem.right-item.rcItem.left,height=item.rcItem.bottom-item.rcItem.top;
-  HDC buffer=CreateCompatibleDC(item.hDC);HBITMAP bitmap=CreateCompatibleBitmap(item.hDC,width,height);
-  if(!buffer||!bitmap){if(bitmap)DeleteObject(bitmap);if(buffer)DeleteDC(buffer);return;}
-  HGDIOBJ previous=SelectObject(buffer,bitmap);RECT bounds={0,0,width,height};
-  COLORREF background=GetSysColor(COLOR_3DFACE),accent=GetSysColor(COLOR_HIGHLIGHT);
-  HBRUSH fill=CreateSolidBrush(background);FillRect(buffer,&bounds,fill);DeleteObject(fill);
-  int dot=max(2,min(width,height)/8);double radius=min(width,height)*0.33;
-  HGDIOBJ pen=SelectObject(buffer,GetStockObject(NULL_PEN));
-  for(unsigned n=0;n<8;++n){
-   unsigned strength=40+((n+8-spinnerFrame_)%8)*30;
-   auto blend=[&](int a,int b){return BYTE((a*strength+b*(255-strength))/255);};
-   HBRUSH brush=CreateSolidBrush(RGB(blend(GetRValue(accent),GetRValue(background)),blend(GetGValue(accent),GetGValue(background)),blend(GetBValue(accent),GetBValue(background))));
-   HGDIOBJ oldBrush=SelectObject(buffer,brush);double angle=n*3.141592653589793/4;
-   int x=int(width/2+radius*cos(angle)),y=int(height/2+radius*sin(angle));
-   Ellipse(buffer,x-dot/2,y-dot/2,x+(dot+1)/2,y+(dot+1)/2);
-   SelectObject(buffer,oldBrush);DeleteObject(brush);
-  }
-  SelectObject(buffer,pen);BitBlt(item.hDC,item.rcItem.left,item.rcItem.top,width,height,buffer,0,0,SRCCOPY);
-  SelectObject(buffer,previous);DeleteObject(bitmap);DeleteDC(buffer);
- }
+ StorageSpinner spinner_;bool explanationShown_=false;
  void state(TBPFLAG value) {
   if(taskbar_&&value!=taskbarState_){taskbar_->SetProgressState(owner_,value);taskbarState_=value;}
  }
@@ -114,7 +134,10 @@ public:
  ~JobDialog(){state(TBPF_NOPROGRESS);if(taskbar_)taskbar_->Release();if(uninitialize_)CoUninitialize();}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();SetWindowText(title_);
+  if(storageOnly_){spinner_.SubclassDlgItem(IDC_SW_SPINNER,this);spinner_.Start();}
 #ifdef HFV_TESTING
+  extern void ProbeStorageSpinner(CWnd*);
+  if(storageOnly_&&hidden_)ProbeStorageSpinner(this);
   ++storageUiTest.dialogCreations;
   if(!storageOnly_)storageUiTest.copyBarCount=(GetDlgItem(IDC_CP_BAR)?1:0)+(GetDlgItem(IDC_CP_FILE_BAR)?1:0);
   if(storageOnly_){
@@ -135,7 +158,6 @@ public:
  void OnOK() override {}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l) override {
   if(message==WM_DESTROY)PrepareToClose();
-  if(message==WM_DRAWITEM&&w==IDC_SW_SPINNER){drawSpinner(*reinterpret_cast<DRAWITEMSTRUCT*>(l));return TRUE;}
   if(message==WM_CLOSE)return 0;
   if(message==WM_APP+94){
    if(keepWindow_&&job_->done()){KillTimer(1);EndModalLoop(IDOK);}
@@ -148,11 +170,6 @@ public:
 #ifdef HFV_TESTING
    if(hidden_&&cancellable_&&storageUiTest.cancelOnTimer&&!job_->cancelled())OnCancel();
 #endif
-   if(storageOnly_&&spinnerFrame_!=((GetTickCount()-started_)/120)%8){spinnerFrame_=((GetTickCount()-started_)/120)%8;GetDlgItem(IDC_SW_SPINNER)->Invalidate(FALSE);
-#ifdef HFV_TESTING
-    ++storageUiTest.spinnerTicks;
-#endif
-   }
 #ifdef HFV_TESTING
    ++storageUiTest.timerTicks;
    if(owner_&&!::IsWindowEnabled(owner_))storageUiTest.disabledDuring=true;

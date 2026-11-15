@@ -3,11 +3,28 @@
 #include "stdafx.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
+#include "resource.h"
 #include "RefreshStorage.h"
 #include "FakeFloppy.h"
 #include <atomic>
 #include <stdio.h>
 #include <stdexcept>
+namespace {bool spinnerVisible=false,spinnerFrameChanged=false;unsigned spinnerPixels=0;DWORD spinnerStyle=0;int spinnerWidth=0,spinnerHeight=0;}
+void ProbeStorageSpinner(CWnd* dialog) {
+ CWnd* spinner=dialog->GetDlgItem(IDC_SW_SPINNER);spinnerPixels=0;spinnerVisible=false;spinnerFrameChanged=false;
+ if(!spinner)return;spinnerStyle=spinner->GetStyle();spinnerVisible=(spinnerStyle&WS_VISIBLE)!=0;
+ CRect bounds;spinner->GetClientRect(&bounds);CClientDC screen(spinner);CDC memory;memory.CreateCompatibleDC(&screen);
+ spinnerWidth=bounds.Width();spinnerHeight=bounds.Height();
+ CBitmap bitmap;bitmap.CreateCompatibleBitmap(&screen,bounds.Width(),bounds.Height());CBitmap* previous=memory.SelectObject(&bitmap);
+ memory.FillSolidRect(&bounds,GetSysColor(COLOR_3DFACE));
+ spinner->SendMessage(WM_PRINTCLIENT,reinterpret_cast<WPARAM>(memory.GetSafeHdc()),PRF_CLIENT);
+ std::vector<COLORREF> first;
+ for(int y=0;y<bounds.Height();++y)for(int x=0;x<bounds.Width();++x){auto pixel=memory.GetPixel(x,y);first.push_back(pixel);if(pixel!=GetSysColor(COLOR_3DFACE))++spinnerPixels;}
+ spinner->SendMessage(WM_TIMER,1,0);
+ spinner->SendMessage(WM_PRINTCLIENT,reinterpret_cast<WPARAM>(memory.GetSafeHdc()),PRF_CLIENT);
+ for(int y=0;y<bounds.Height();++y)for(int x=0;x<bounds.Width();++x)if(first[y*bounds.Width()+x]!=memory.GetPixel(x,y))spinnerFrameChanged=true;
+ memory.SelectObject(previous);
+}
 class SyntheticOwner : public CWnd {
 public:
  unsigned paints=0;
@@ -51,6 +68,8 @@ int RunDeviceWaitGuiTest(const char* report) {
    check(HfvDeviceWait::invoke([]{Sleep(100);return TRUE;})!=FALSE,"First session read failed");
    check(!owner.IsWindowEnabled(),"Session restored owner before action finished");
    check(storageUiTest.simpleStorageLayout,"Storage wait must contain spinner, fixed status and explanation without copy fields or bar");
+   fprintf(out,"Spinner rendering: style=%08lX visible=%d painted_pixels=%u size=%dx%d frames_changed=%d\n",spinnerStyle,spinnerVisible,spinnerPixels,spinnerWidth,spinnerHeight,spinnerFrameChanged);fflush(out);
+   check(spinnerVisible&&spinnerPixels>=8&&spinnerFrameChanged,"Storage spinner must paint visible pixels and change rendered frames");
    check(storageUiTest.explanationShows==0&&storageUiTest.storageMessage=="Waiting for storage...","Short wait must retain fixed status without explanation");
    {
     StorageAction nested;

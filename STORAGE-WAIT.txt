@@ -44,3 +44,11 @@ successfully; the included regression results are from the prior build.
 The measured-width experiment has been reverted. The fixed 220 x 50 dialog-unit
 layout is restored, including reserved space for the delayed explanation.
 Startup/media checks retain the matching spinner layout. Regression tests passed.
+
+Spinner visibility fix: the spinner now paints through its own static-control
+window, using a local animation timer and double buffering. Dots have a four-
+pixel minimum: the previous three-pixel null-pen ellipses produced no visible
+fill in the regression test despite successful GDI draw calls. Dialog size,
+status text and delayed explanation are unchanged. Hidden offscreen rendering
+tests now verify visible pixels and distinct animation frames; all storage,
+CD image and floppy regressions passed. No computer control was used.
