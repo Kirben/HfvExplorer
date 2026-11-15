@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Optional independent interoperability checks. Requires WSL and hfsprogs.
 # Uses only newly created image files. No mounts or physical devices.
-param([string]$Directory)
+param([string]$Directory,[switch]$IncrementalOnly)
 $ErrorActionPreference='Stop'
 if(!$Directory){$Directory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-HFSPlus-interop-'+[Guid]::NewGuid().ToString('N'))}
 New-Item -ItemType Directory -Path $Directory -ErrorAction Stop | Out-Null
@@ -16,6 +16,7 @@ function Check([string]$path){
  $output | Tee-Object -FilePath ($path+'.fsck.log') | Write-Host
  if($LASTEXITCODE -ne 0 -or ($output -match 'Invalid |incorrect|needs.*repair|Repairing volume|was repaired|corrupt').Count){throw "Independent checker rejected $path"}
 }
+if(!$IncrementalOnly){
 $own=Join-Path $Directory 'own.dsk'; & $exe $own;if($LASTEXITCODE){throw 'Own formatter/core tests failed'};Check $own
 $reference=Join-Path $Directory 'reference.dsk';NewReference $reference;& $exe --modify $reference;if($LASTEXITCODE){throw 'Reference-image write failed'};Check $reference
 $fragmented=Join-Path $Directory 'fragmented.dsk';& $exe --fragmented $fragmented;if($LASTEXITCODE){throw 'Fragmented fixture failed'};Check $fragmented
@@ -30,3 +31,14 @@ foreach($mode in @('hfsx','hfsx-ci')){
 $referenceX=Join-Path $Directory 'reference-hfsx.dsk';NewReference $referenceX $true;& $exe --modify $referenceX;if($LASTEXITCODE){throw 'Reference HFSX write failed'};Check $referenceX
 $referenceXCrash=Join-Path $Directory 'reference-hfsx-crash.dsk';NewReference $referenceXCrash $true;& $exe --crash-existing $referenceXCrash;if($LASTEXITCODE){throw 'Reference HFSX crash fixture failed'};Check $referenceXCrash;& $exe --check-recovered $referenceXCrash;if($LASTEXITCODE){throw 'Reference HFSX recovery failed'}
 Write-Host 'PASS: HFSX case-sensitive/case-insensitive formatting and writes, reference HFSX mutation, and independent journal replay.'
+}
+$largeCatalog=Join-Path $Directory 'large-catalog.dsk';& $exe --incremental-large-catalog $largeCatalog;if($LASTEXITCODE){throw 'Large map-chain catalog failed'};Check $largeCatalog
+$forks=Join-Path $Directory 'fragmented-forks.dsk';& $exe --fragmented-forks $forks;if($LASTEXITCODE){throw 'Fragmented forks failed'};Check $forks
+$resized=Join-Path $Directory 'resized.dsk';& $exe --incremental-resize $resized;if($LASTEXITCODE){throw 'Journal enlargement failed'};Check $resized
+foreach($phase in @('journal-resize-data-flushed','journal-resize-new-log-committed','journal-resize-jib-written','journal-resize-jib-committed','journal-resize-home-flushed','journal-resize-cleared')){
+ $path=Join-Path $Directory ($phase+'.dsk');& $exe --incremental-resize-crash $phase $path;if($LASTEXITCODE){throw "Resize crash fixture failed: $phase"};Check $path
+}
+foreach($x in @($false,$true)){
+ $path=Join-Path $Directory ('resize-reference-'+$x+'.dsk');NewReference $path $x;& $exe --incremental-reference $path;if($LASTEXITCODE){throw 'Reference journal enlargement failed'};Check $path
+}
+Write-Host 'PASS: independent incremental catalog/map-chain updates, fragmented data/resource forks, journal enlargement and every relocation interruption boundary.'

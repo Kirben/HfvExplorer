@@ -2,14 +2,13 @@
 // On-disk structures are decoded explicitly, following Apple TN1150. No native
 // structs, compiler packing assumptions, or third-party filesystem engine.
 #include "HfsPlusDisk.h"
+#include "HfsPlusBTree.h"
 #include <ctime>
 namespace HfsPlus {
 namespace {
 using namespace Disk;
 uint32_t Now() { return uint32_t(uint64_t(time(nullptr)) + 2082844800ULL); }
-struct Record {
-    Bytes key, value;
-};
+using Record = TreeRecord;
 std::u16string String(const uint8_t *p, size_t available) {
     Check(available >= 2, "Truncated Unicode name");
     unsigned n = U16(p);
@@ -165,7 +164,7 @@ std::vector<Record> ReadTree(View &view, const Fork &fork, uint32_t bs, unsigned
             Check(padded <= b - a, "Truncated HFS+ record");
             result.push_back({Bytes(node.begin() + a, node.begin() + a + kl),
                               Bytes(node.begin() + a + padded, node.begin() + b)});
-            Check(result.size() <= 2000000, "HFS+ catalog exceeds this implementation's record limit");
+            Check(result.size() <= expected, "HFS+ leaf count exceeds its header");
         }
         previous = leaf;
         leaf = U32(node.data());
@@ -173,10 +172,10 @@ std::vector<Record> ReadTree(View &view, const Fork &fork, uint32_t bs, unsigned
     Check(result.size() == expected && previous == last, "HFS+ leaf count mismatch");
     return result;
 }
-// Build a complete balanced B+tree. Reusing an existing metadata fork means all
-// changed nodes are journaled; expansion allocates fresh blocks before commit.
-Bytes BuildTree(const std::vector<Record> &records, bool catalog, uint32_t clump = 65536,
-                uint32_t allocationBlock = 4096, bool caseSensitive = false) {
+// Bootstrap only: formatting starts with a few root/journal records. Existing
+// trees are edited incrementally by Disk::BTree below, never rebuilt.
+Bytes BuildInitialTree(const std::vector<Record> &records, bool catalog, uint32_t clump = 65536,
+                       uint32_t allocationBlock = 4096, bool caseSensitive = false) {
     const unsigned ns = 4096;
     std::vector<Bytes> nodes(1, Bytes(ns, 0));
     struct Index {
@@ -306,13 +305,31 @@ struct Volume::Impl {
     bool write = false, usable = true, caseSensitive = false;
     Fork allocation, extents, catalog;
     std::vector<Record> catalogRecords, overflow;
+    std::vector<Record> committedCatalog, committedOverflow;
+    Bytes committedBitmap;
+    Fork committedCatalogFork, committedExtentsFork;
+    const Bytes *allocationExclusions = nullptr;
     std::map<uint32_t, Entry> entries;
     explicit Impl(Source &s, bool w) : source(s), view(s), journal(view), write(w) {
         Check(!w || s.Writable(), "Cannot open a read-only image for writing");
         view.base = Locate(s, view.length);
         Check(view.base != UINT64_MAX, "No HFS+ volume found");
         LoadHeader();
-        journal.Open(header, w);
+        // A relocated journal can be discovered through either committed redo
+        // copy. Follow JIB after each replay; read-only mounts use the overlay.
+        std::set<uint64_t> journalLocations;
+        for (;;) {
+            Journal current(view);
+            current.Open(header, w);
+            journal.Adopt(current);
+            if (!journal.enabled)
+                break;
+            auto info = view.Read(journal.infoOffset, 180);
+            uint64_t next = U64(info.data() + 36);
+            if (next == journal.offset && U64(info.data() + 44) == journal.size)
+                break;
+            Check(journalLocations.insert(journal.offset).second, "Cyclic relocated journal chain");
+        }
         LoadHeader();
         // Read extents first; the extents file itself must bootstrap from its inline extents.
         allocation = DecodeFork(header.data() + 112);
@@ -320,6 +337,9 @@ struct Volume::Impl {
         catalog = DecodeFork(header.data() + 272);
         Validate(extents);
         overflow = ReadTree(view, extents, bs, 10);
+        for (const auto &r : overflow)
+            Check(r.key.size() == 12 && r.value.size() == 64 && (r.key[2] == 0 || r.key[2] == 0xff),
+                  "Invalid HFS+ extents-overflow record");
         Complete(allocation, 6, 0);
         Complete(catalog, 4, 0);
         Validate(allocation);
@@ -336,6 +356,14 @@ struct Volume::Impl {
               "Binary filename comparison requires an HFSX volume");
         LoadEntries();
         AuditAllocation();
+        Snapshot();
+    }
+    void Snapshot() {
+        committedCatalog = catalogRecords;
+        committedOverflow = overflow;
+        committedBitmap = bitmap;
+        committedCatalogFork = catalog;
+        committedExtentsFork = extents;
     }
     void LoadHeader() {
         header = view.Read(1024, 512);
@@ -380,7 +408,7 @@ struct Volume::Impl {
             const Record *found = nullptr;
             for (auto &r : overflow) {
                 Check(r.key.size() == 12 && r.value.size() == 64, "Invalid overflow extent record");
-                if (r.key[2] == (which ? 0x80 : 0) && U32(r.key.data() + 4) == id &&
+                if (r.key[2] == (which ? 0xff : 0) && U32(r.key.data() + 4) == id &&
                     U32(r.key.data() + 8) == have) {
                     Check(!found, "Duplicate overflow extent record");
                     found = &r;
@@ -567,7 +595,7 @@ struct Volume::Impl {
         else
             bitmap[n / 8] &= uint8_t(~mask);
     }
-    Fork Allocate(uint64_t size, bool contiguous = false) {
+    Fork Allocate(uint64_t size, bool contiguous = false, bool previouslyFree = false) {
         Check(size <= INT64_MAX, "HFS+ fork exceeds Apple's signed 64-bit limit");
         uint64_t count = size / bs + (size % bs != 0);
         Check(count <= total, "HFS+ fork is larger than volume");
@@ -576,10 +604,15 @@ struct Volume::Impl {
         f.blocks = uint32_t(count);
         if (!count)
             return f;
+        auto unavailable = [&](uint32_t i) {
+            uint8_t mask = uint8_t(0x80 >> (i % 8));
+            return Used(i) || (allocationExclusions && ((*allocationExclusions)[i / 8] & mask)) ||
+                   (previouslyFree && (committedBitmap[i / 8] & mask));
+        };
         if (contiguous) {
             uint32_t run = 0;
             for (uint32_t i = 1; i < total - 1; ++i) {
-                run = Used(i) ? 0 : run + 1;
+                run = unavailable(i) ? 0 : run + 1;
                 if (run == count) {
                     f.extents.push_back({i - run + 1, run});
                     break;
@@ -589,7 +622,7 @@ struct Volume::Impl {
         } else {
             uint64_t left = count;
             for (uint32_t i = 1; i < total - 1 && left; ++i) {
-                if (Used(i))
+                if (unavailable(i))
                     continue;
                 if (!f.extents.empty() && uint64_t(f.extents.back().start) + f.extents.back().count == i)
                     ++f.extents.back().count;
@@ -615,7 +648,7 @@ struct Volume::Impl {
         overflow.erase(std::remove_if(overflow.begin(), overflow.end(),
                                       [&](const Record &r) {
                                           return U32(r.key.data() + 4) == id &&
-                                                 r.key[2] == (which ? 0x80 : 0);
+                                                 r.key[2] == (which ? 0xff : 0);
                                       }),
                        overflow.end());
         uint32_t logical = 0;
@@ -627,7 +660,7 @@ struct Volume::Impl {
             Record r;
             r.key.assign(12, 0);
             P16(r.key.data(), 10);
-            r.key[2] = which ? 0x80 : 0;
+            r.key[2] = which ? 0xff : 0;
             P32(r.key.data() + 4, id);
             P32(r.key.data() + 8, logical);
             r.value.assign(64, 0);
@@ -720,17 +753,234 @@ struct Volume::Impl {
                     throw Error("Entry has extended attributes; modification is not supported yet");
         }
     }
-    void Metadata(Fork &f, const Bytes &data, uint32_t id) {
-        if (uint64_t(f.blocks) * bs != data.size()) {
-            Fork replacement = Allocate(data.size(), true);
-            Free(f);
-            f = std::move(replacement);
+    uint64_t GrowMetadata(Fork &f, uint64_t minimum, uint32_t id) {
+        uint64_t target = ((minimum + bs - 1) / bs) * bs;
+        if (target <= f.size)
+            return f.size;
+        Fork extra = Allocate(target - uint64_t(f.blocks) * bs, false, true);
+        Bytes zeros(65536, 0);
+        for (auto e : extra.extents) {
+            uint64_t at = uint64_t(e.start) * bs, n = uint64_t(e.count) * bs;
+            while (n) {
+                size_t part = size_t((std::min)(n, uint64_t(zeros.size())));
+                view.Write(at, zeros.data(), part);
+                at += part;
+                n -= part;
+            }
+            if (!f.extents.empty() && uint64_t(f.extents.back().start) + f.extents.back().count == e.start)
+                f.extents.back().count += e.count;
+            else
+                f.extents.push_back(e);
         }
-        f.size = data.size();
+        f.blocks += extra.blocks;
+        f.size = target;
+        Check(id != 3 || f.extents.size() <= 8, "Extents-tree bootstrap requires inline extents");
         Overflow(id, 0, f);
-        ForkStage(view, f, bs, data);
+        return f.size;
     }
-    void Commit(const std::function<void(const char *)> &fault) {
+    void StageForkRange(Fork &f, uint64_t offset, const void *buffer, size_t length) {
+        Check(Range(offset, length, f.size), "Metadata write outside fork");
+        auto p = static_cast<const uint8_t *>(buffer);
+        for (auto e : f.extents) {
+            uint64_t bytes = uint64_t(e.count) * bs;
+            if (offset >= bytes) {
+                offset -= bytes;
+                continue;
+            }
+            size_t n = size_t((std::min)(uint64_t(length), bytes - offset));
+            view.Stage(uint64_t(e.start) * bs + offset, p, n);
+            offset = 0;
+            p += n;
+            length -= n;
+            if (!length)
+                return;
+        }
+        Check(!length, "Incomplete metadata fork");
+    }
+    static int ExtentOrder(const Record &a, const Record &b) {
+        uint32_t x = U32(a.key.data() + 4), y = U32(b.key.data() + 4);
+        if (x != y)
+            return x < y ? -1 : 1;
+        if (a.key[2] != b.key[2])
+            return a.key[2] < b.key[2] ? -1 : 1;
+        x = U32(a.key.data() + 8);
+        y = U32(b.key.data() + 8);
+        return x == y ? 0 : x < y ? -1 : 1;
+    }
+    template <class Erase, class Set, class Compare>
+    static void Difference(const std::vector<Record> &old, const std::vector<Record> &current,
+                           Compare compare, Erase erase, Set set) {
+        size_t a = 0, b = 0;
+        while (a < old.size() || b < current.size()) {
+            int order = a == old.size() ? 1 : b == current.size() ? -1 : compare(old[a], current[b]);
+            if (order < 0)
+                erase(old[a++]);
+            else if (order > 0)
+                set(current[b++]);
+            else {
+                if (old[a].value != current[b].value || old[a].key != current[b].key)
+                    set(current[b]);
+                ++a;
+                ++b;
+            }
+        }
+    }
+    void UpdateTree(Fork &f, uint32_t id, const std::vector<Record> &old,
+                    const std::vector<Record> &records) {
+        auto order = [&](const Record &a, const Record &b) {
+            return id == 4 ? Order(a, b) : ExtentOrder(a, b);
+        };
+        BTree tree([&](uint64_t o, void *p, size_t n) { ForkRead(view, f, bs, o, p, n); },
+                   [&](uint64_t o, const void *p, size_t n) { StageForkRange(f, o, p, n); },
+                   [&](uint64_t n) { return GrowMetadata(f, n, id); },
+                   [&](const Bytes &a, const Bytes &b) { return order(Record{a, {}}, Record{b, {}}); });
+        Difference(
+            old, records, order,
+            [&](const Record &r) { Check(tree.Erase(r.key), "Missing B-tree record during deletion"); },
+            [&](const Record &r) { tree.Set(r); });
+        tree.Flush();
+    }
+    struct Change {
+        Record record;
+        bool erase;
+    };
+    template <class Compare>
+    static std::vector<Change> Changes(const std::vector<Record> &old, const std::vector<Record> &desired,
+                                       Compare compare) {
+        std::vector<Change> changes;
+        Difference(
+            old, desired, compare, [&](const Record &r) { changes.push_back({r, true}); },
+            [&](const Record &r) { changes.push_back({r, false}); });
+        return changes;
+    }
+    template <class Compare>
+    static std::vector<Record> Merge(const std::vector<Record> &fresh, const std::vector<Change> &changes,
+                                     Compare compare) {
+        std::vector<Record> result;
+        size_t a = 0, b = 0;
+        while (a < fresh.size() || b < changes.size()) {
+            int order = a == fresh.size()     ? 1
+                        : b == changes.size() ? -1
+                                              : compare(fresh[a], changes[b].record);
+            if (order < 0)
+                result.push_back(fresh[a++]);
+            else if (order > 0) {
+                if (!changes[b].erase)
+                    result.push_back(changes[b].record);
+                ++b;
+            } else {
+                if (!changes[b].erase)
+                    result.push_back(changes[b].record);
+                ++a;
+                ++b;
+            }
+        }
+        return result;
+    }
+    void GrowJournal(uint64_t required, const std::function<void(const char *)> &fault) {
+        Check(journal.enabled && journal.start == journal.end, "Cannot enlarge an active journal");
+        Check(required < INT64_MAX / 2 && journal.size < INT64_MAX / 2, "No room for a larger journal");
+        uint64_t target =
+            (std::max)(journal.size * 2, required * 2 + journal.headerSize + journal.listSize + 1024 * 1024);
+        target = (target + bs - 1) / bs * bs;
+        Check(target < view.length, "Not enough space to enlarge the journal");
+        auto catalogChanges = Changes(committedCatalog, catalogRecords,
+                                      [&](const Record &a, const Record &b) { return Order(a, b); });
+        auto overflowChanges = Changes(committedOverflow, overflow, ExtentOrder);
+        overflowChanges.erase(std::remove_if(overflowChanges.begin(), overflowChanges.end(),
+                                             [](const Change &c) {
+                                                 auto id = U32(c.record.key.data() + 4);
+                                                 return id == 3 || id == 4;
+                                             }),
+                              overflowChanges.end());
+        Bytes desiredBitmap = bitmap;
+        auto discardGrowth = [&](const Fork &now, const Fork &old) {
+            uint64_t skip = old.blocks;
+            for (auto e : now.extents) {
+                if (skip >= e.count) {
+                    skip -= e.count;
+                    continue;
+                }
+                for (uint32_t n = uint32_t(skip); n < e.count; ++n) {
+                    uint32_t block = e.start + n;
+                    Check(!(committedBitmap[block / 8] & (0x80 >> (block % 8))),
+                          "Metadata growth reused a committed allocation");
+                    desiredBitmap[block / 8] &= uint8_t(~(0x80 >> (block % 8)));
+                }
+                skip = 0;
+            }
+        };
+        discardGrowth(catalog, committedCatalogFork);
+        discardGrowth(extents, committedExtentsFork);
+        uint32_t nextId = U32(header.data() + 64);
+        {
+            Impl preparation(source, true);
+            preparation.allocationExclusions = &bitmap;
+            uint32_t file = 0;
+            for (auto &pair : preparation.entries)
+                if (!pair.second.directory) {
+                    const auto &fork = pair.second.forks[0];
+                    if (fork.extents.size() == 1 && uint64_t(fork.extents[0].start) * bs == journal.offset &&
+                        fork.size >= journal.size) {
+                        Check(!file, "Ambiguous journal file");
+                        file = pair.first;
+                    }
+                }
+            Check(file, "Cannot locate the allocated journal file for enlargement");
+            Fork replacement = preparation.Allocate(target, true, true);
+            Bytes zeros(65536, 0);
+            uint64_t at = uint64_t(replacement.extents[0].start) * bs;
+            for (uint64_t n = target; n;) {
+                size_t part = size_t((std::min)(n, uint64_t(zeros.size())));
+                preparation.view.Write(at, zeros.data(), part);
+                at += part;
+                n -= part;
+            }
+            auto &entry = preparation.Get(file);
+            Fork old = entry.forks[0];
+            entry.forks[0] = replacement;
+            preparation.UpdateEntry(entry);
+            preparation.Overflow(file, 0, replacement);
+            preparation.Free(old);
+            auto info = preparation.view.Read(preparation.journal.infoOffset, 180);
+            P32(info.data(), U32(info.data()) & ~4u);
+            P64(info.data() + 36, uint64_t(replacement.extents[0].start) * bs);
+            P64(info.data() + 44, target);
+            preparation.view.Stage(preparation.journal.infoOffset, info.data(), info.size());
+            Journal mirror(preparation.view);
+            mirror.EmptyAt(uint64_t(replacement.extents[0].start) * bs, target, preparation.journal);
+            preparation.Commit(fault, &mirror, false);
+        }
+        // Rebase the still-uncommitted user operation on the independently
+        // committed enlargement. New file data was excluded from its allocator.
+        Impl fresh(source, true);
+        view.patches.clear();
+        view.base = fresh.view.base;
+        view.length = fresh.view.length;
+        catalogRecords = Merge(fresh.catalogRecords, catalogChanges,
+                               [&](const Record &a, const Record &b) { return Order(a, b); });
+        overflow = Merge(fresh.overflow, overflowChanges, ExtentOrder);
+        for (size_t i = 0; i < bitmap.size(); ++i) {
+            uint8_t mask = committedBitmap[i] ^ desiredBitmap[i];
+            fresh.bitmap[i] = uint8_t((fresh.bitmap[i] & ~mask) | (desiredBitmap[i] & mask));
+        }
+        header = fresh.header;
+        P32(header.data() + 64, (std::max)(nextId, U32(header.data() + 64)));
+        bitmap = std::move(fresh.bitmap);
+        allocation = fresh.allocation;
+        catalog = fresh.catalog;
+        extents = fresh.extents;
+        journal.Adopt(fresh.journal);
+        committedCatalog = std::move(fresh.committedCatalog);
+        committedOverflow = std::move(fresh.committedOverflow);
+        committedBitmap = std::move(fresh.committedBitmap);
+        committedCatalogFork = fresh.committedCatalogFork;
+        committedExtentsFork = fresh.committedExtentsFork;
+        LoadEntries();
+        AuditAllocation();
+    }
+    void Commit(const std::function<void(const char *)> &fault, Journal *mirror = nullptr,
+                bool allowGrow = true) {
         Guard();
         std::map<uint32_t, uint32_t> counts, folderCounts;
         for (auto &e : entries)
@@ -739,20 +989,21 @@ struct Volume::Impl {
                 if (e.second.directory || !memcmp(e.second.finder.data(), "fdrpMACS", 8))
                     ++folderCounts[e.second.parent];
             }
-        for (auto &pair : entries)
-            if (pair.second.directory) {
-                auto r = CatalogRecord(pair.first);
-                uint32_t count = counts[pair.first];
+        for (auto &record : catalogRecords)
+            if (U16(record.value.data()) == 1) {
+                auto r = &record;
+                uint32_t id = U32(r->value.data() + 8);
+                uint32_t count = counts[id];
                 if (U32(r->value.data() + 4) != count) {
                     P32(r->value.data() + 4, count);
                     P32(r->value.data() + 16, Now());
                 }
                 if (U16(header.data()) == 0x4858 && (U16(r->value.data() + 2) & 0x10))
-                    P32(r->value.data() + 84, folderCounts[pair.first]);
+                    P32(r->value.data() + 84, folderCounts[id]);
             }
         std::sort(catalogRecords.begin(), catalogRecords.end(),
                   [&](const Record &a, const Record &b) { return Order(a, b) < 0; });
-        Metadata(catalog, BuildTree(catalogRecords, true, 65536, bs, caseSensitive), 4);
+        UpdateTree(catalog, 4, committedCatalog, catalogRecords);
         std::sort(overflow.begin(), overflow.end(), [](const Record &a, const Record &b) {
             uint32_t ai = U32(a.key.data() + 4), bi = U32(b.key.data() + 4);
             if (ai != bi)
@@ -761,9 +1012,13 @@ struct Volume::Impl {
                 return a.key[2] < b.key[2];
             return U32(a.key.data() + 8) < U32(b.key.data() + 8);
         });
-        Metadata(extents, BuildTree(overflow, false, 65536, bs), 3);
+        UpdateTree(extents, 3, committedOverflow, overflow);
         Check(extents.extents.size() <= 8, "Extents tree cannot bootstrap itself");
-        ForkStage(view, allocation, bs, bitmap);
+        for (size_t offset = 0; offset < bitmap.size(); offset += 512) {
+            size_t n = (std::min)(size_t(512), bitmap.size() - offset);
+            if (memcmp(bitmap.data() + offset, committedBitmap.data() + offset, n))
+                StageForkRange(allocation, offset, bitmap.data() + offset, n);
+        }
         uint32_t free = 0, files = 0, folders = 0;
         for (uint32_t i = 0; i < total; ++i)
             if (!Used(i))
@@ -787,7 +1042,17 @@ struct Volume::Impl {
         EncodeFork(header.data() + 272, catalog, 65536);
         view.Stage(1024, header.data(), 512);
         view.Stage(view.length - 1024, header.data(), 512);
-        journal.Commit(fault);
+        if (mirror)
+            journal.CommitReplacement(*mirror, fault);
+        else if (!journal.Fits()) {
+            Check(allowGrow, "Journal cannot bootstrap enlargement");
+            auto needed = journal.RequiredBytes();
+            GrowJournal(needed, fault);
+            Commit(fault);
+            return;
+        } else
+            journal.Commit(fault);
+        Snapshot();
     }
 };
 bool Volume::Recognizes(Source &s) {
@@ -1053,10 +1318,10 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled, 
         return CompareNames(String(a.key.data() + 6, a.key.size() - 6),
                             String(b.key.data() + 6, b.key.size() - 6), sensitive) < 0;
     });
-    auto tree = BuildTree(records, true, 65536, bs, sensitive);
+    auto tree = BuildInitialTree(records, true, 65536, bs, sensitive);
     catalog.size = tree.size();
     ForkStage(view, catalog, bs, tree);
-    tree = BuildTree({}, false, 65536, bs);
+    tree = BuildInitialTree({}, false, 65536, bs);
     extents.size = tree.size();
     ForkStage(view, extents, bs, tree);
     Bytes bitmap(size_t(allocation.size), 0);

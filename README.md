@@ -32,8 +32,13 @@ Current filesystem support
 - Ordinary files and both forks are supported. Compressed files and hard-link
   resolution are rejected explicitly. Existing extended attributes are kept;
   modifying an entry with attributes/ACLs is refused. Encryption and expanded
-  timestamps are unsupported. Metadata transactions must fit the journal;
-  B-tree rebuilding currently supports one header map (about 30,000 nodes).
+  timestamps are unsupported.
+- Catalog and extents B-trees are updated incrementally, including node splits,
+  merges and linked allocation maps. There is no fixed catalog-record or
+  single-header-map ceiling. Catalog entries are still loaded into memory.
+  Internal journals grow automatically when a metadata transaction needs more
+  space; growth requires a suitable contiguous free region on the image.
+  The extents-overflow file retains the format's eight-inline-extent requirement.
 - MFS remains read-only. Existing classic HFS CD/floppy support is unchanged.
 
 Tests: .\build-x64.ps1 -Test runs the full suite, including real HFS+ reads and

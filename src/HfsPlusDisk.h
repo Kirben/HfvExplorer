@@ -249,8 +249,7 @@ struct Journal {
                 if (number == UINT64_MAX)
                     continue;
                 Check(number <= UINT64_MAX / headerSize && Range(number * headerSize, n, view.length) &&
-                          !Overlaps(number * headerSize, n) &&
-                          !(number * headerSize < infoOffset + 512 && infoOffset < number * headerSize + n),
+                          !Overlaps(number * headerSize, n),
                       "Journal target outside volume or inside journal metadata");
                 Check(!(flags2 & 1) || !ck || Sum(data.data(), n) == ck, "Journal data checksum mismatch");
                 for (size_t j = 0; j < n; j += 512) {
@@ -271,7 +270,34 @@ struct Journal {
             StoreHeader();
         }
     }
-    void Commit(const std::function<void(const char *)> &fault) {
+    void Adopt(const Journal &j) {
+        offset = j.offset;
+        size = j.size;
+        start = j.start;
+        end = j.end;
+        infoOffset = j.infoOffset;
+        headerSize = j.headerSize;
+        listSize = j.listSize;
+        sequence = j.sequence;
+        little = j.little;
+        enabled = j.enabled;
+        needsInit = j.needsInit;
+        header = j.header;
+    }
+    void EmptyAt(uint64_t where, uint64_t bytes, const Journal &model) {
+        Adopt(model);
+        offset = where;
+        size = bytes;
+        start = end = headerSize;
+        needsInit = false;
+        header.assign(headerSize, 0);
+        W32(header.data(), 0x4a4e4c78);
+        W32(header.data() + 4, 0x12345678);
+        W64(header.data() + 24, size);
+        W32(header.data() + 32, listSize);
+        W32(header.data() + 40, headerSize);
+    }
+    void Prune() {
         for (auto i = view.patches.begin(); i != view.patches.end();) {
             Sector previous;
             view.source.Read(view.base + i->first * 512, previous.data(), 512);
@@ -280,35 +306,8 @@ struct Journal {
             else
                 ++i;
         }
-        if (view.patches.empty())
-            return;
-        Check(view.source.Writable(), "Image is read-only");
-        view.source.Flush();
-        if (fault)
-            fault("data-flushed");
-        if (!enabled) {
-            // Non-journaled volumes cannot provide crash-atomic metadata. Mark them dirty
-            // before the first home write, then publish clean headers only after flush.
-            auto primary = view.patches.find(2), alternate = view.patches.find((view.length - 1024) / 512);
-            Check(primary != view.patches.end() && alternate != view.patches.end(),
-                  "Missing transaction volume headers");
-            Sector cleanPrimary = primary->second, cleanAlternate = alternate->second;
-            auto dirty = view.Read(1024, 512);
-            P32(dirty.data() + 4, U32(dirty.data() + 4) & ~0x100u);
-            view.Write(1024, dirty.data(), 512);
-            view.source.Flush();
-            view.patches.erase(2);
-            view.patches.erase((view.length - 1024) / 512);
-            view.Apply();
-            view.Write(view.length - 1024, cleanAlternate.data(), 512);
-            view.source.Flush();
-            view.Write(1024, cleanPrimary.data(), 512);
-            view.source.Flush();
-            if (fault)
-                fault("home-flushed");
-            return;
-        }
-        Check(start == end, "Journal must be replayed before writing");
+    }
+    std::map<uint64_t, Bytes> Blocks() {
         // Emit one metadata transaction, with as many block lists as necessary.
         // Use the native journal sector size, preserving untouched bytes on 2K/4K media.
         std::map<uint64_t, Bytes> blocks;
@@ -322,13 +321,30 @@ struct Journal {
             }
             memcpy(i->second.data() + (p.first * 512) % headerSize, p.second.data(), 512);
         }
+        return blocks;
+    }
+    uint64_t RequiredBytes() {
+        if (!enabled)
+            return 0;
+        std::set<uint64_t> blocks;
+        for (auto &p : view.patches)
+            blocks.insert(p.first * 512 / headerSize);
         size_t capacity = (listSize - 16) / 16 - 1;
-        uint64_t total =
-            uint64_t(blocks.size()) * headerSize + ((blocks.size() + capacity - 1) / capacity) * listSize;
-        Check(total < size - headerSize, "Metadata transaction exceeds journal capacity");
+        return uint64_t(blocks.size()) * headerSize + ((blocks.size() + capacity - 1) / capacity) * listSize;
+    }
+    bool Fits() {
+        Prune();
+        return !enabled || RequiredBytes() < size - headerSize;
+    }
+    void WriteLog(const std::function<void(const char *)> &fault) {
+        Check(enabled && start == end, "Journal must be empty before committing");
+        auto blocks = Blocks();
+        size_t capacity = (listSize - 16) / 16 - 1;
+        Check(RequiredBytes() < size - headerSize, "Journal has insufficient physical capacity");
         if (needsInit) {
             StoreHeader();
-            auto info = view.Read(infoOffset, 180);
+            Bytes info(180);
+            view.source.Read(view.base + infoOffset, info.data(), info.size());
             P32(info.data(), U32(info.data()) & ~4u);
             view.Write(infoOffset, info.data(), info.size());
             view.source.Flush();
@@ -366,6 +382,75 @@ struct Journal {
         StoreHeader();
         if (fault)
             fault("journal-committed");
+    }
+    // Prepare a complete redo transaction in the unreachable replacement log,
+    // then atomically switch JIB (one device sector). This is the commit point.
+    // Before the switch the old empty journal and filesystem remain authoritative;
+    // afterwards native replay opens the new log directly. In particular, never
+    // make an old journal replay change JIB: a native kernel could otherwise keep
+    // using the old journal object after replay. No private recovery format.
+    void CommitReplacement(Journal &replacement, const std::function<void(const char *)> &fault) {
+        Prune();
+        Check(start == end && replacement.Fits(), "Replacement journal cannot encode relocation");
+        view.source.Flush();
+        if (fault)
+            fault("journal-resize-data-flushed");
+        replacement.StoreHeader();
+        replacement.WriteLog([&](const char *at) {
+            if (fault && strcmp(at, "journal-committed") == 0)
+                fault("journal-resize-new-log-committed");
+        });
+        Check(infoOffset % headerSize == 0, "Unaligned journal info block");
+        auto info = view.Read(infoOffset, headerSize);
+        view.Write(infoOffset, info.data(), info.size());
+        if (fault)
+            fault("journal-resize-jib-written");
+        view.source.Flush();
+        if (fault)
+            fault("journal-resize-jib-committed");
+        for (auto &patch : view.patches)
+            view.Write(patch.first * 512, patch.second.data(), 512);
+        view.source.Flush();
+        view.patches.clear();
+        if (fault)
+            fault("journal-resize-home-flushed");
+        replacement.start = replacement.end;
+        replacement.StoreHeader();
+        Adopt(replacement);
+        if (fault)
+            fault("journal-resize-cleared");
+    }
+    void Commit(const std::function<void(const char *)> &fault) {
+        Prune();
+        if (view.patches.empty())
+            return;
+        Check(view.source.Writable(), "Image is read-only");
+        view.source.Flush();
+        if (fault)
+            fault("data-flushed");
+        if (!enabled) {
+            // Non-journaled volumes cannot provide crash-atomic metadata. Mark them dirty
+            // before the first home write, then publish clean headers only after flush.
+            auto primary = view.patches.find(2), alternate = view.patches.find((view.length - 1024) / 512);
+            Check(primary != view.patches.end() && alternate != view.patches.end(),
+                  "Missing transaction volume headers");
+            Sector cleanPrimary = primary->second, cleanAlternate = alternate->second;
+            auto dirty = view.Read(1024, 512);
+            P32(dirty.data() + 4, U32(dirty.data() + 4) & ~0x100u);
+            view.Write(1024, dirty.data(), 512);
+            view.source.Flush();
+            view.patches.erase(2);
+            view.patches.erase((view.length - 1024) / 512);
+            view.Apply();
+            view.Write(view.length - 1024, cleanAlternate.data(), 512);
+            view.source.Flush();
+            view.Write(1024, cleanPrimary.data(), 512);
+            view.source.Flush();
+            if (fault)
+                fault("home-flushed");
+            return;
+        }
+        WriteLog(fault);
         view.Apply();
         if (fault)
             fault("home-flushed");
