@@ -2,8 +2,8 @@ Current unofficial x64 build
 ----------------------------
 Target: Windows 7 SP1 with KB2533623 or a superseding update; Windows 8/8.1,
 10 and 11 x64. Build with pinned v143 14.44 tools and matching static MFC/CRT.
-See WINDOWS-COMPATIBILITY.txt for prerequisites, build instructions, completed
-checks and OS versions still awaiting VM execution tests. The original readme
+Build and run checks with build-x64.ps1. Older Windows versions still await
+VM execution tests. The original readme
 below describes the historical release and its obsolete drivers.
 
 HFV/DSK Explorer v. 1.3.0 -- a tool for vMac and Executor(DOS/Win32) users.
