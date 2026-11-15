@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "DeviceWait.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerTreeView.h"
 #include "HFVExplorerDoc.h"
@@ -590,6 +591,7 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 
 void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult) 
 {
+ if(StorageUi::busy()){*pResult=0;return;}
 	HTREEITEM hItem;
 	unsigned long id = 0;
 	CString name;

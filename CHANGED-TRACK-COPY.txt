@@ -1,0 +1,45 @@
+Changed-track floppy copies and single-file progress
+
+Ordinary copying onto a 1.44 MB classic HFS floppy now writes only tracks that
+differ between the original snapshot and the modified working image. Changes
+include file data, resource forks, catalogs, allocation maps and volume metadata.
+Each track is 9,216 bytes (18 sectors). Unchanged tracks receive no writes.
+
+The sequence, in one progress dialog, is:
+1. Read the whole destination into the working image and apply the copy.
+2. Lock/dismount the destination and compare the entire disk to the snapshot.
+3. Write only changed tracks, checking media readiness/generation before each.
+4. Read back every changed track, checking media readiness/generation before
+   each read and again at completion. Compare every byte against the new image.
+
+The original-disk comparison remains a full read so changes on otherwise
+untouched tracks are also caught before any writes start. It still takes time.
+Only the write and readback phases become shorter for small changes. A copy
+touching most of the disk may see little speed improvement. Multiple separately
+selected files may still run separate transactions; a folder uses one transaction.
+
+Write/verification progress and diagnostic counts use the number of changed
+tracks. Unsupported flush is accepted only after all changed-track readbacks
+match and the final media check passes. Other flush errors remain failures.
+Identical images cause no writes or flush. Explicit Format HFS and Write image
+operations retain full-disk writes and full-disk readback verification.
+
+Single-file copies use one progress bar throughout the job. Folder copies keep
+the overall and current-file bars, even if the folder contains just one file.
+The taskbar continues to follow the job progress. Storage waits retain their
+spinner, fixed message, delayed explanation and owner-window restoration fix.
+
+Validation: Release and Test builds passed. Simulated tests cover three isolated
+changed tracks at the start, middle and end of the disk; only those three are
+written/read back, following the complete 160-track original comparison. They
+also cover unchanged images, changes on untouched tracks, short writes/reads,
+readback corruption, genuine and unsupported flush errors, media changes between
+writes and at final verification, alignment, locking and cleanup. Real copy jobs
+test nested folders and both forks, one/two-bar layouts, a one-file folder, one
+dialog across floppy phases, source retention and restoring the owner window.
+No physical drives or computer control were used. Real-device speed and desktop
+visuals still need manual testing. Changes are committed locally; no push performed.
+
+Extract into a fresh folder. Close the previous version before running the new
+HFVExplorer.exe. Copy a small file to an existing HFS floppy, leave it inserted
+through verification, then check the file by reopening/copying it back.

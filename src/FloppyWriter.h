@@ -17,10 +17,12 @@ typedef void (*FloppyProgress)(const char* phase,unsigned completed,unsigned tot
 class FloppyWriter {
 public:
     explicit FloppyWriter(FloppyWriteApi* api=nullptr);
-    // Writes exactly one validated 1,474,560-byte HFS image. Browsing remains
-    // read-only; writable handles exist only for this explicit transaction.
+    // Without expectedOriginal, write/verify the complete 1.44 MB image.
+    // With it, compare the whole original disk under lock, then write/verify
+    // only tracks whose bytes differ. No low-level format in this mode.
     bool WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks=false,
-                    FloppyProgress progress=nullptr,void* context=nullptr);
+                    FloppyProgress progress=nullptr,void* context=nullptr,
+                    const std::vector<BYTE>* expectedOriginal=nullptr);
     DWORD Error() const {return error_;}
     DWORD FlushError() const {return flushError_;}
     bool WritesStarted() const {return writesStarted_;}
@@ -28,6 +30,7 @@ public:
     DWORD Offset() const {return offset_;}
     unsigned WrittenTracks() const {return writtenTracks_;}
     unsigned VerifiedTracks() const {return verifiedTracks_;}
+    unsigned PlannedTracks() const {return plannedTracks_;}
     const std::string& Diagnostics() const {return diagnostics_;}
 private:
     void Mark(const char* stage,DWORD offset=0,DWORD requested=0);
@@ -38,7 +41,7 @@ private:
     bool writesStarted_;
     std::string stage_,diagnostics_;
     DWORD offset_=0,requested_=0,transferred_=0;
-    unsigned writtenTracks_=0,verifiedTracks_=0;
+    unsigned writtenTracks_=0,verifiedTracks_=0,plannedTracks_=160;
 };
 bool PrepareFloppyHfs(const char* name,std::vector<BYTE>& image,std::string& error);
 bool LoadFloppyHfs(const char* path,std::vector<BYTE>& image,std::string& error);

@@ -1,3 +1,4 @@
+#include "DeviceWait.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ReadOnlyCd.h"
 #include <winioctl.h>
@@ -23,7 +24,7 @@ bool sendReadCommand(HANDLE h, ScsiRequest& packet, void* buffer, DWORD bytes) {
     packet.request.SenseInfoLength = sizeof(packet.sense);
     packet.request.SenseInfoOffset = offsetof(ScsiRequest, sense);
     DWORD returned = 0;
-    if (!DeviceIoControl(h, IOCTL_SCSI_PASS_THROUGH_DIRECT, &packet, sizeof(packet),
+    if (!HfvMediaControl(h, IOCTL_SCSI_PASS_THROUGH_DIRECT, &packet, sizeof(packet),
                          &packet, sizeof(packet), &returned, NULL)) return false;
     if (packet.request.ScsiStatus || packet.request.DataTransferLength != bytes) {
         SetLastError(ERROR_IO_DEVICE); return false;
@@ -39,8 +40,8 @@ ReadOnlyCd::ReadOnlyCd() : handle_(INVALID_HANDLE_VALUE), scsiHandle_(INVALID_HA
 }
 ReadOnlyCd::~ReadOnlyCd() { Close(); }
 void ReadOnlyCd::Close() {
-    if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
-    if (scsiHandle_ != INVALID_HANDLE_VALUE) CloseHandle(scsiHandle_);
+    if (handle_ != INVALID_HANDLE_VALUE) HfvMediaClose(handle_);
+    if (scsiHandle_ != INVALID_HANDLE_VALUE) HfvMediaClose(scsiHandle_);
     if (scratch_) VirtualFree(scratch_, 0, MEM_RELEASE);
     handle_ = scsiHandle_ = INVALID_HANDLE_VALUE; scratch_ = NULL;
     mediaSize_ = volumeOffset_ = 0; volumeSize_ = 0; error_ = 0;
@@ -53,7 +54,7 @@ bool ReadOnlyCd::EnsureScsiHandle() {
     if (scsiHandle_ != INVALID_HANDLE_VALUE) return true;
     // Windows requires both access rights for the pass-through IOCTL. The only
     // commands issued on this handle are READ CAPACITY(10) and READ(10).
-    scsiHandle_ = CreateFileA(devicePath_, GENERIC_READ | GENERIC_WRITE,
+    scsiHandle_ = HfvMediaOpen(devicePath_, GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     return scsiHandle_ != INVALID_HANDLE_VALUE;
 }
@@ -87,18 +88,18 @@ bool ReadOnlyCd::OpenDrive(int drive) {
     char root[] = "A:\\"; root[0] += (char)drive;
     if (GetDriveTypeA(root) != DRIVE_CDROM) { error_ = ERROR_BAD_DEVICE; return false; }
     sprintf(devicePath_, "\\\\.\\%c:", 'A' + drive);
-    handle_ = CreateFileA(devicePath_, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    handle_ = HfvMediaOpen(devicePath_, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
     if (handle_ == INVALID_HANDLE_VALUE) { error_ = GetLastError(); return false; }
     scratch_ = (BYTE*)VirtualAlloc(NULL, kTransfer, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!scratch_) { error_ = ERROR_NOT_ENOUGH_MEMORY; return false; }
     DWORD returned = 0; GET_LENGTH_INFORMATION length = {};
-    if (DeviceIoControl(handle_, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &length, sizeof(length), &returned, NULL)
+    if (HfvMediaControl(handle_, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &length, sizeof(length), &returned, NULL)
         && length.Length.QuadPart > 0) lengthSize_ = (ULONGLONG)length.Length.QuadPart;
     {
         CDROM_READ_TOC_EX query = {}; query.Format = CDROM_READ_TOC_EX_FORMAT_TOC; query.Msf = 0;
         CDROM_TOC toc = {};
-        if (DeviceIoControl(handle_, IOCTL_CDROM_READ_TOC_EX, &query, sizeof(query),
+        if (HfvMediaControl(handle_, IOCTL_CDROM_READ_TOC_EX, &query, sizeof(query),
                             &toc, sizeof(toc), &returned, NULL) && returned >= 12) {
             unsigned tracks = (returned - FIELD_OFFSET(CDROM_TOC, TrackData)) / sizeof(TRACK_DATA);
             for (unsigned n = 0; n < tracks && n < ARRAYSIZE(toc.TrackData); ++n)
@@ -113,7 +114,7 @@ bool ReadOnlyCd::OpenDrive(int drive) {
 #ifdef HFV_CD_TESTING
 bool ReadOnlyCd::OpenFixture(const char* path, ULONGLONG reportedLength) {
     Close(); fixture_ = true;
-    handle_ = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    handle_ = HfvMediaOpen(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (handle_ == INVALID_HANDLE_VALUE) { error_ = GetLastError(); return false; }
     LARGE_INTEGER size;
     if (!GetFileSizeEx(handle_, &size)) { error_ = GetLastError(); return false; }
@@ -128,7 +129,7 @@ bool ReadOnlyCd::OpenFixture(const char* path, ULONGLONG reportedLength) {
 bool ReadOnlyCd::ReadSectors(ULONGLONG offset, DWORD count, void* buffer) {
     LARGE_INTEGER pos; pos.QuadPart = offset;
     DWORD got = 0;
-    if (SetFilePointerEx(handle_, pos, NULL, FILE_BEGIN) && ReadFile(handle_, buffer, count, &got, NULL) && got == count)
+    if (HfvMediaSeek(handle_, pos, NULL, FILE_BEGIN) && HfvMediaRead(handle_, buffer, count, &got, NULL) && got == count)
         return true;
     DWORD fileError = GetLastError();
     if (!fixture_ && (offset / kSector) <= MAXDWORD && ScsiRead((DWORD)(offset / kSector), (WORD)(count / kSector), buffer))

@@ -19,6 +19,8 @@
  */
 
 #include "stdafx.h"
+#include "StorageJobDialog.h"
+#include "DeviceWait.h"
 #include "HFVExplorer.h"
 
 #include "MainFrm.h"
@@ -142,6 +144,7 @@ HFONT CHFVExplorerApp::get_font()
 
 CHFVExplorerApp::~CHFVExplorerApp()
 {
+ StorageUi::state().wait=nullptr;StorageUi::state().thread=0;
 	kill_childs();
 	floppy_module_global_final();
 	SaveSettings();
@@ -333,9 +336,15 @@ void CHFVExplorerApp::CheckDefaultSettings(void)
 	}
 }
 
+int CHFVExplorerApp::ExitInstance(){ShutdownStorageUi();return CWinApp::ExitInstance();}
+
 BOOL CHFVExplorerApp::InitInstance()
 {
 #ifdef HFV_TESTING
+ extern int RunCopyProgressTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-copy-progress")==0)ExitProcess(RunCopyProgressTest(__argv[2]));
+ extern int RunDeviceWaitGuiTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-device-wait")==0)ExitProcess(RunDeviceWaitGuiTest(__argv[2]));
  extern int RunLargeImageGuiTest(const char*,const char*);
  extern int RunFloppyGuiTest(const char*,const char*);
  if(__argc==4 && strcmp(__argv[1],"--verify-floppy")==0) ExitProcess(RunFloppyGuiTest(__argv[2],__argv[3]));
@@ -344,6 +353,7 @@ BOOL CHFVExplorerApp::InitInstance()
   ExitProcess(RunLargeImageGuiTest(__argv[2],__argv[3]));
  ExitProcess(2);
 #endif
+ InitializeStorageUi();
  // Keep this experimental port's preferences separate from the historical app.
  char settingsPath[MAX_PATH];
  GetModuleFileName(NULL, settingsPath, MAX_PATH);

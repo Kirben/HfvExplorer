@@ -92,6 +92,7 @@ protected:  // control bar embedded members
 	CToolBar    m_wndToolBar;
 	UINT_PTR m_timer;
 	BOOL m_volcheck_enabled;
+ bool m_deviceChangeDeferred=false;
 	BOOL m_was_zoomed;
 	char m_waiting_emulator1[100];
 	char m_waiting_emulator2[100];

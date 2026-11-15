@@ -20,6 +20,8 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "DeviceWait.h"
+#include "CopyProgress.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerListView.h"
 #include "HFVExplorerDoc.h"
@@ -740,7 +742,7 @@ void pc_date_to_string( FILETIME *time, char *buf )
 int CHFVExplorerListView::list_fat_insert(
 		LPSTR name, 
 		int isdir, 
-		DWORD size_in_bytes,
+		hfv_size_t size_in_bytes,
 		FILETIME *creation_date,
 		FILETIME *modification_date,
 		HICON hicon16,
@@ -1401,7 +1403,7 @@ int CHFVExplorerListView::copy_item_to_dir(
 		}
 	}
 
-	if( 0 == HFSIFACE_copy( 
+	if( 0 == CopyWithProgress(
 		srcvolpath, 
 		srcname, 
 		destvolpath, 
@@ -1537,7 +1539,7 @@ int CHFVExplorerListView::do_file_to_folder(
 	}
 
 	isdir = get_lparam_isdir(m_cl->GetItemData(source));
-	if( 0 == HFSIFACE_copy( 
+	if( 0 == CopyWithProgress(
 		srcvolpath, 
 		srcname, 
 		destvolpath, 
@@ -2357,7 +2359,7 @@ void CHFVExplorerListView::update_callback(
 			do_update_finder = FALSE;
 		}
 		HFSIFACE_set_modein( 4, pApp->m_copyin_appledouble );
-		copyret = HFSIFACE_copy( 
+		copyret = CopyWithProgress(
 			doc_win_name, 
 			doc_win_name,
 			destvolpath, 
@@ -2434,7 +2436,7 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
 	int was_moved, copyret;
 	srcname = document.GetBuffer(_MAX_PATH);
 
-	copyret = HFSIFACE_copy( 
+	copyret = CopyWithProgress(
 		srcvolpath, 
 		srcname,
 		doc_win_name, 
@@ -4650,6 +4652,7 @@ void CHFVExplorerListView::OnLButtonUp(UINT nFlags, CPoint point)
 
 void CHFVExplorerListView::OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult) 
 {
+ if(StorageUi::busy()){*pResult=0;return;}
 	NM_LISTVIEW* pNMListView = (NM_LISTVIEW*)pNMHDR;
 	// TODO: Add your control notification handler code here
 	

@@ -28,3 +28,11 @@ int cpo_raw(hfsvol *, char *, char *);
 int cpo_raw_resource( hfsvol *, char *, char *);
 void copyout_set_last_open_file( const char *path );
 void copyout_get_last_open_file( char *path, int maxpath );
+
+// Optional observer; byte counts are source bytes read, before conversion.
+typedef void (*copyout_progress_fn)(const char*,unsigned long,unsigned long long,int,void*);
+void copyout_set_progress(copyout_progress_fn,void*);
+typedef int (*copyout_overwrite_fn)(const char*,void*);
+void copyout_set_overwrite(copyout_overwrite_fn,void*);
+int copyout_was_skipped(void);
+int copyout_destination_opened(void);

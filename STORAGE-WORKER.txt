@@ -1,0 +1,68 @@
+STORAGE WORKER REDESIGN - COMPARISON BUILD
+Branch: image-only-x64. Committed locally; no push performed. Native DPI experiment is excluded.
+
+The copy path now submits complete jobs to one persistent, serialized worker.
+Worker inputs and progress/results are ordinary owned values. The UI uses its
+normal MFC modal loop and a timer to display progress; it does not run the copy,
+pump selected messages, or toggle enabled state for each low-level read.
+The prior application PumpMessage override and batch/paint wait logic are gone.
+
+One completion path closes the dialog, clears taskbar progress, restores the
+owner's original enabled state/focus when appropriate, and delivers the result.
+Errors and exceptions finish through that path. Media-change refresh is deferred
+until completion. Shutdown drains queued jobs and disables UI dispatch before
+static device teardown.
+
+Mac-to-Windows folder copies first scan the selected tree on the worker.
+The taskbar and upper bar report overall source bytes processed for that job,
+including work explicitly skipped. The lower bar/path report the current file.
+The scan is indeterminate and may take time on slow media; percentages are not
+guessed. Completed/skipped counts, source MiB and elapsed time are shown.
+Other copy directions use the worker too, but currently have indeterminate
+progress rather than the Mac-export byte counters.
+
+Existing destination folders are merged for copy jobs. Conflicting Mac-export
+files offer Replace, Replace all (this job only), Skip or Cancel. Destination
+checks handle files above 2 GiB. A newly appearing file is not silently truncated.
+Skip/Cancel before opening an output preserves it; unrelated files are retained.
+Completed earlier files are not rolled back after a later error/cancellation.
+Replacement after explicit approval is not a transactional backup mechanism.
+
+Refresh drive probing runs on the worker and returns a snapshot to the UI.
+Existing catalog parsing/view construction remains legacy UI code. Slow native
+calls from those paths use the same worker and one waiting window per action.
+Multiple reads and nested browse/refresh calls reuse that window. It closes
+once at the end, restoring the main window without repeated wait popups.
+This is not a claim that every old application path has been rewritten: Windows
+shell/file-dialog extensions, legacy metadata/config parsing and the separate
+explicit floppy-format transaction remain outside this copy/scan redesign.
+A Windows driver request already in progress can still take time to return.
+
+VALIDATION
+Release and Test builds passed. Hidden synthetic-owner tests exercise delayed
+fake floppy reads through ReadOnlyFloppy, read errors, worker exceptions, normal
+UI timer/paint delivery, dialog closure and restoration after success/failure.
+They also check a previously disabled owner, persistent-thread serialization,
+scan snapshots, queue draining and refusal of work after shutdown.
+Multiple slow/fast reads, nested actions and read errors verify one wait window
+per action, with closure/restoration at the outer action boundary.
+Actual recursive copy jobs are tested for both Mac forks, Automatic text/raw/
+MacBinary selection, overall counts, existing directory merging, Replace all,
+Skip, Cancel, preservation of unrelated files and source-error completion.
+Actual copy/conflict jobs also run through the hidden modal coordinator and
+verify owner restoration. Sparse >2-GiB destinations test overwrite decisions.
+CD fixture and simulated read-only/write floppy regressions passed.
+No physical devices or computer control were used. Live taskbar/dialog visuals
+and your particular CD/USB drive still need manual testing.
+
+MANUAL TEST
+Extract into a fresh folder and run HFVExplorer.exe.
+Copy one Mac CD folder to a new hard-disk destination and select Automatic.
+Check overall/current-file progress and that the copy window closes.
+Repeat into that destination to try Skip or Replace/Replace all.
+Then try View > Refresh. No formatting or physical writes are required.
+
+
+STORAGE WAIT UPDATE
+Native storage waits now use a spinner, fixed status and explanation after
+five seconds. Owner restoration occurs before dialog closure. See STORAGE-WAIT.txt.

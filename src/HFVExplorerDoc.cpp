@@ -22,6 +22,9 @@
 
 //#include "afx.h"
 #include "stdafx.h"
+#include "RefreshStorage.h"
+#include "StorageJobDialog.h"
+#include "HostFileSizes.h"
 #include "HFVExplorer.h"
 
 #include "HFVExplorerDoc.h"
@@ -249,44 +252,20 @@ void CHFVExplorerDoc::enum_volumes_ext( LPSTR mask, LPSTR ext )
 	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
 }
 
-void CHFVExplorerDoc::enum_floppies( void )
+void CHFVExplorerDoc::enum_floppies(void)
 {
-#if defined(HFV_IMAGE_ONLY)
- return;
-#endif
-	char name[_MAX_PATH];
-	int i;
-
-	for(i=0; i<MAX_FLOPPIES; i++) {
-		if(is_hfs_floppy_present(i)) {
-			get_floppy_volume_file_name( i, name );
-			if(get_volume_index_by_filename( CString(name) ) < 0 ) {
-				insert_volume( CString(name), 1, 0, 0, 0 );
-			}
-		}
-	}
+ for(const auto& media:ScanPhysicalMedia(true,false)) {
+  char path[MAX_PATH];get_floppy_volume_file_name(media.drive,path);
+  if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),1,0,0,0);
+ }
 }
-
 void CHFVExplorerDoc::enum_cds(void)
 {
-	char name[_MAX_PATH];
-	char rootdir[20], letter;
-	int i;
-
-	for( letter = 'C'; letter <= 'Z'; letter++ ) {
-		i = (int)( letter - 'A' );
-		wsprintf( rootdir, "%c:\\", letter );
-		if(GetDriveType( rootdir ) == DRIVE_CDROM) {
-			if(is_hfs_cd_present(i)) {
-				get_cd_volume_file_name( i, name );
-				if(get_volume_index_by_filename( CString(name) ) < 0 ) {
-					insert_volume( CString(name), 0, 1, 0, 0 );
-				}
-			}
-		}
-	}
+ for(const auto& media:ScanPhysicalMedia(false,true)) {
+  char path[MAX_PATH];get_cd_volume_file_name(media.drive,path);
+  if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),0,1,0,0);
+ }
 }
-
 void CHFVExplorerDoc::enum_hds(void)
 {
 #if defined(HFV_IMAGE_ONLY) || defined(HFV_READONLY_CD)
@@ -828,7 +807,7 @@ void CHFVExplorerDoc::fat_walk( int volinx, LPSTR path, int list )
 					pApp->m_list->list_fat_insert( 
 						pure_name,
 						isdir,
-						FindFileData.nFileSizeLow,
+						HostDirectoryEntrySize(FindFileData),
 						&FindFileData.ftCreationTime,
 						&FindFileData.ftLastWriteTime,
 						hicon16,
@@ -869,7 +848,7 @@ void CHFVExplorerDoc::fat_walk( int volinx, LPSTR path, int list )
 					pApp->m_list->list_fat_insert( 
 						(LPSTR)FindFileData.cFileName,
 						isdir,
-						FindFileData.nFileSizeLow,
+						HostDirectoryEntrySize(FindFileData),
 						&FindFileData.ftCreationTime,
 						&FindFileData.ftLastWriteTime,
 						0, 0, "", "",
@@ -928,7 +907,7 @@ void CHFVExplorerDoc::fat_walk( int volinx, LPSTR path, int list )
 					pApp->m_list->list_fat_insert( 
 						(LPSTR)FindFileData.cFileName,
 						isdir,
-						FindFileData.nFileSizeLow,
+						HostDirectoryEntrySize(FindFileData),
 						&FindFileData.ftCreationTime,
 						&FindFileData.ftLastWriteTime,
 						hicon16, hicon32,
@@ -2030,6 +2009,7 @@ void CHFVExplorerDoc::new_hfs_walk( int volinx, long id, CString searchname )
 
 void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString partial_name )
 {
+ StorageAction storageAction;
 	unsigned long parent_link_id = 0;
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -2080,6 +2060,7 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 #pragma optimize("",off)
 void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 {
+ StorageAction storageAction;
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 
@@ -2157,6 +2138,7 @@ CString CHFVExplorerDoc::hfs_find_match(
 
 BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName) 
 {
+ StorageAction storageAction;
 	int mfs=TryOpenMfsBrowser(lpszPathName,AfxGetMainWnd());
 	if(mfs) return mfs>0;
 
@@ -2441,6 +2423,7 @@ void CHFVExplorerDoc::check_hfv_file_times( int ask )
 
 void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL check_hds)
 {
+ StorageAction storageAction;
 	int mac;
 
 	clear_all_caches();
@@ -2448,9 +2431,12 @@ void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL c
 	int prev_silence = silencer( 1 );
 
 	CString currdir = get_directory( 0, &mac );
-	if(check_floppies) enum_floppies();
+	for(const auto& media:ScanPhysicalMedia(check_floppies!=FALSE,check_cds!=FALSE)) {
+  char path[MAX_PATH];if(media.floppy)get_floppy_volume_file_name(media.drive,path);else get_cd_volume_file_name(media.drive,path);
+  if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),media.floppy,!media.floppy,0,0);
+ }
 	if(check_hds) enum_hds();
-	if(check_cds) enum_cds();
+
 
 	OnOpenDocument("") ;
 
@@ -2461,6 +2447,7 @@ void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL c
 
 void CHFVExplorerDoc::CheckNewFloppy( int index )
 {
+ StorageAction storageAction;
 	char name[_MAX_PATH];
 
 	if(is_floppy_by_index(index)) {

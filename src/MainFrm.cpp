@@ -19,6 +19,8 @@
  */
 
 #include "stdafx.h"
+#include "DeviceWait.h"
+#include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
 #include <errno.h>
 #include "ImageSize.h"
@@ -561,6 +563,7 @@ static HANDLE get_top_window_phandle( void )
 
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
+ if(HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	int i, count;
 	wait_item_struct *w;
@@ -796,6 +799,26 @@ void CMainFrame::OnChildRegistration(WPARAM wParam, LPARAM lParam)
 
 LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) 
 {
+ if(message==WM_COMMAND&&!StorageUi::busy()){
+  StorageAction storageAction;
+  return CFrameWnd::WindowProc(message,wParam,lParam);
+ }
+ if(message==WM_DEVICECHANGE&&StorageUi::state().sessionOpen){
+  if((wParam==DBT_DEVICEARRIVAL||wParam==DBT_DEVICEREMOVECOMPLETE)&&lParam&&
+     reinterpret_cast<DEV_BROADCAST_HDR*>(lParam)->dbch_devicetype==DBT_DEVTYP_VOLUME)m_deviceChangeDeferred=true;
+  return TRUE;
+ }
+ if(HfvDeviceWait::busy()) {
+  if(message==WM_DEVICECHANGE) {
+   if((wParam==DBT_DEVICEARRIVAL||wParam==DBT_DEVICEREMOVECOMPLETE)&&lParam&&
+      reinterpret_cast<DEV_BROADCAST_HDR*>(lParam)->dbch_devicetype==DBT_DEVTYP_VOLUME)m_deviceChangeDeferred=true;
+   return TRUE;
+  }
+  if(message==WM_COMMAND || message==WM_CLOSE)return 0;
+ }
+ if(message==WM_APP+91 && m_deviceChangeDeferred) {
+  m_deviceChangeDeferred=false;PostMessage(WM_COMMAND,ID_VIEW_REFRESH);return 0;
+ }
 	if(message == our_child_registration) {
 		OnChildRegistration(wParam,lParam);
 	} else if(message == WM_DEVICECHANGE) {

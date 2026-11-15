@@ -16,7 +16,9 @@ or after a read error so stale handles and cached volume information are reset.
 Blank, FAT, MFS and unreadable discs do not appear as supported HFS volumes.
 
 The browsing backend stays read-only. A separate explicit 1.44 MB HFS format/
-image-write feature is available under Tools; see FLOPPY-WRITE.txt. Eject/
+image-write feature is available under Tools; see FLOPPY-WRITE.txt. Normal
+file/folder copying onto 1.44 MB HFS media uses a staged write transaction;
+see FLOPPY-FILE-COPY.txt. Other filesystem editing remains disabled. Eject/
 reload and the old physical-media commands remain disabled.
 
 Compatibility

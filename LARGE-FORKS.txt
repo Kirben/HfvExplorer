@@ -1,3 +1,13 @@
+COMPATIBILITY CORRECTION (2026-11-15)
+Apple documents classic HFS with a maximum file size of about 2 GiB:
+https://developer.apple.com/library/archive/technotes/tn/tn1150.html
+This port's unsigned, beyond-2-GiB fork handling is an extension of the old
+library's interpretation, tested with synthetic fixtures. It is not a promise
+that classic Mac OS or other HFS implementations can read those files.
+The implementation still uses 32-bit on-disk logical/physical fork lengths;
+allocation-block rounding and available space can impose a lower usable limit.
+Host/image offsets are a separate 64-bit issue.
+
 Individual classic HFS forks larger than 2 GiB
 2026-11-15
 

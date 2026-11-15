@@ -1,0 +1,60 @@
+FILE SIZE AUDIT - 2026-11-15
+
+Fixed in this build
+- Windows-side file listings passed only nFileSizeLow through a DWORD parameter.
+  The high/low fields are now combined and passed as a 64-bit size. Directory
+  item counts remain counts. Boundary tests include 4 GiB + 37 bytes.
+- New overwrite decisions use Win32 attributes rather than a 32-bit stat check.
+  An existing file above 2 GiB cannot bypass the prompt through stat overflow.
+  A sparse existing destination above 2 GiB is tested and preserved by Skip.
+- Worker per-file/overall progress and aggregate fork totals are 64-bit.
+
+Remaining explicit/format limits
+- Apple specifies classic HFS files at about 2 GiB. This port's beyond-2-GiB
+  support uses an unsigned 32-bit fork interpretation and is an extension.
+  Do not infer classic-Mac interoperability from synthetic Windows tests.
+  https://developer.apple.com/library/archive/technotes/tn/tn1150.html
+- The extended parser still cannot represent a fork above 0xffffffff bytes.
+  Physical EOF/allocation rounding, free space and extent limits can reduce that.
+- Image creation is explicitly capped at 0xffffffff 512-byte sectors
+  (2 TiB minus 512 bytes). This is the formatter/sector-address range, not
+  the same thing as an individual fork length or host container-file length.
+- The native read-only CD adapter rejects HFS volume lengths above LONG_MAX.
+  That remains a real implementation ceiling, relevant to larger DVDs/images,
+  not typical 650/700-MB CDs. Its offset/size API needs a separate 64-bit port.
+- hfs_read returns a signed 32-bit count: each read is capped at LONG_MAX.
+  hfs_write rejects a larger single call. Chunked streams can be much larger;
+  that per-call bound is not itself a 2-GiB file-length bound.
+- MFS/Disk Copy/AppleSingle and MacBinary/BinHex retain their on-disk field widths.
+  The MFS AppleSingle exporter already sums offsets in 64 bits and rejects an
+  export that exceeds its 32-bit descriptor range.
+- Several old text configuration/mapping loaders still read whole files using
+  32-bit counts (try_patch_bpp and FileTypeMapping). They are not general-purpose
+  disk/fork streaming paths and are not validated for enormous config files.
+- Old Floppy.cpp/Vxdiface source still contains 32-bit arithmetic but is excluded
+  from this x64 project. It must not be mistaken for the active native backend.
+- The destination Windows filesystem imposes its own limits.
+
+Verification scope
+The existing large-image/large-fork regression suite is preserved. This audit
+does not claim a new exhaustive test at every representable maximum; the new
+boundary tests specifically cover Windows display and overwrite decisions.
+
+RESEARCH FOLLOW-UP
+I did not verify a real-world archive or supported workflow that requires
+individual classic-HFS forks above Apple's documented approximately 2-GiB limit.
+This is not proof that no such files exist.
+Linux's maintained classic-HFS reader does interpret logical fork lengths as u32
+in hfs_inode_read_fork. That is concrete code evidence for permissive reading,
+not a verified interoperability test or a reason to promise extended writes:
+https://github.com/torvalds/linux/blob/master/fs/hfs/inode.c
+Apple's public HFS record definition uses int32_t for both logical fork lengths:
+https://github.com/apple-oss-distributions/hfs/blob/main/core/hfs_format.h
+CiderPress II advertises up-to-4-GB HFS volumes; that says nothing about a
+greater-than-2-GiB file or fork:
+https://ciderpress2.com/features.html
+
+No new write policy has been enforced in this build. The existing unsigned
+large-fork implementation remains present, with the compatibility correction.
+Recommended policy: Apple-compatible writes by default, permissive recovery
+reads of existing oversized forks, and retain 64-bit host/container offsets.

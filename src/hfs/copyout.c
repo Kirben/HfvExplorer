@@ -20,6 +20,7 @@
 /* Modified for emx by Marcus Better, July 1997 */
 
 #ifdef WIN32
+# include <windows.h>
 # include <io.h>
 # include <stdio.h>
 # include <direct.h>
@@ -51,6 +52,27 @@ void mac_to_pc_charset( unsigned char *s );
 
 extern int crlf_translation;
 
+static int copyout_opened=0;
+int copyout_destination_opened(void){return copyout_opened;}
+static int copyout_skipped=0;
+int copyout_was_skipped(void){return copyout_skipped;}
+static copyout_overwrite_fn copyout_overwrite=0;
+static void* copyout_overwrite_context=0;
+void copyout_set_overwrite(copyout_overwrite_fn observer,void* context) {copyout_overwrite=observer;copyout_overwrite_context=context;}
+static copyout_progress_fn copyout_observer = 0;
+static void *copyout_context = 0;
+static char copyout_source[_MAX_PATH];
+static unsigned copyout_forks=3;
+static unsigned long long copyout_expected=0;
+void copyout_set_progress(copyout_progress_fn observer,void *context) {
+ copyout_observer=observer;copyout_context=context;
+}
+static long copyout_read(hfsfile *file,void *buffer,unsigned long length) {
+ long result=hfs_read(file,buffer,length);
+ if(result>0 && copyout_observer)copyout_observer(copyout_source,(unsigned long)result,copyout_expected,0,copyout_context);
+ return result;
+}
+#define hfs_read copyout_read
 char *cpo_error = "no error";
 
 static char m_last_opened_file[_MAX_PATH];
@@ -467,6 +489,9 @@ hfsfile *opensrc(hfsvol *vol, char *srcname, char **dsthint, char *ext)
       return 0;
     }
 
+  strncpy(copyout_source,srcname,sizeof(copyout_source)-1);copyout_source[sizeof(copyout_source)-1]=0;
+  copyout_expected=((copyout_forks&1)?(unsigned long long)ent.u.file.dsize:0)+((copyout_forks&2)?(unsigned long long)ent.u.file.rsize:0);
+  if(copyout_observer)copyout_observer(copyout_source,0,copyout_expected,0,copyout_context);
   strcpy(name, ent.name);
 
 	if(strcmp(name,"Icon\x00D") == 0) {
@@ -541,7 +566,12 @@ int opendst(char *dstname, char *hint)
 #ifdef WIN32
       if((curdir=_getcwd(curdirbuffer, _MAX_PATH)) == NULL)
 #elif __EMX__
-      if((curdir=_getcwd2(NULL, 0)) == NULL)
+  if (strcmp(dstname, "-") == 0) {
+    _fsetmode(stdout, "b");
+    fd = dup(STDOUT_FILENO);
+  }
+  else
+    fd = open(dstname, O_BINARY | O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #else
       dirfd = open(".", O_RDONLY);
       if (dirfd < 0)
@@ -569,14 +599,40 @@ int opendst(char *dstname, char *hint)
     }
 
 #ifdef WIN32
-  fd = open(dstname, O_BINARY | O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  {
+   int decision=1,exclusive=0;char absolute[_MAX_PATH];
+   if(copyout_overwrite) {
+    DWORD attributes=GetFileAttributesA(dstname),error=GetLastError();
+    if(attributes!=INVALID_FILE_ATTRIBUTES) {
+     DWORD length=GetFullPathNameA(dstname,sizeof(absolute),absolute,0);
+     if(!length || length>=sizeof(absolute))strcpy(absolute,dstname);
+     decision=copyout_overwrite(absolute,copyout_overwrite_context);
+    } else if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND)decision=-1;else exclusive=1;
+   }
+   if(decision==2)fd=-2;
+   else if(decision<=0){cpo_error=decision==0?"Copy cancelled":"Could not check the destination";fd=-1;}
+   else fd = open(dstname, O_BINARY | O_WRONLY | O_CREAT | (exclusive?O_EXCL:O_TRUNC), 0666);
+  }
 #elif __EMX__
   if (strcmp(dstname, "-") == 0) {
     _fsetmode(stdout, "b");
     fd = dup(STDOUT_FILENO);
   }
   else
-    fd = open(dstname, O_BINARY | O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    {
+   int decision=1,exclusive=0;char absolute[_MAX_PATH];
+   if(copyout_overwrite) {
+    DWORD attributes=GetFileAttributesA(dstname),error=GetLastError();
+    if(attributes!=INVALID_FILE_ATTRIBUTES) {
+     DWORD length=GetFullPathNameA(dstname,sizeof(absolute),absolute,0);
+     if(!length || length>=sizeof(absolute))strcpy(absolute,dstname);
+     decision=copyout_overwrite(absolute,copyout_overwrite_context);
+    } else if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND)decision=-1;else exclusive=1;
+   }
+   if(decision==2)fd=-2;
+   else if(decision<=0){cpo_error=decision==0?"Copy cancelled":"Could not check the destination";fd=-1;}
+   else fd = open(dstname, O_BINARY | O_WRONLY | O_CREAT | (exclusive?O_EXCL:O_TRUNC), 0666);
+  }
 #else
   if (strcmp(dstname, "-") == 0)
     fd = dup(STDOUT_FILENO);
@@ -584,7 +640,7 @@ int opendst(char *dstname, char *hint)
     fd = open(dstname, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #endif
 
-  if (fd < 0)
+  if (fd < 0 && fd != -2)
     {
       cpo_error = "error opening destination file";
       fd = -1;
@@ -602,6 +658,7 @@ int opendst(char *dstname, char *hint)
 #endif
     }
 
+  if(fd>=0)copyout_opened=1;
   return fd;
 }
 
@@ -615,6 +672,7 @@ int openfiles(hfsvol *vol, char *srcname, char *dstname, char *ext,
 {
   char *dsthint;
 
+  copyout_skipped=0;copyout_opened=0;
   *ifile = opensrc(vol, srcname, &dsthint, ext);
   if (*ifile == 0)
     return -1;
@@ -622,8 +680,8 @@ int openfiles(hfsvol *vol, char *srcname, char *dstname, char *ext,
   *ofile = opendst(dstname, dsthint);
   if (*ofile < 0)
     {
-      hfs_close(*ifile);
-      return -1;
+      hfs_close(*ifile);*ifile=0;copyout_skipped=(*ofile==-2);
+      return *ofile==-2?0:-1;
     }
 
   return 0;
@@ -647,6 +705,7 @@ void closefiles(hfsfile *ifile, int ofile, int *result)
       cpo_error = hfs_error;
       *result = -1;
     }
+  if(*result==0 && copyout_observer)copyout_observer(copyout_source,0,copyout_expected,1,copyout_context);
 }
 
 /* Interface Routines ====================================================== */
@@ -660,8 +719,10 @@ int cpo_macb(hfsvol *vol, char *srcname, char *dstname)
   hfsfile *ifile;
   int ofile, result = 0;
 
+  copyout_forks=3;
   if (openfiles(vol, srcname, dstname, ".bin", &ifile, &ofile) < 0)
     return -1;
+  if(!ifile)return 0;
 
   result = do_macb(ifile, ofile);
   closefiles(ifile, ofile, &result);
@@ -678,8 +739,10 @@ int cpo_binh(hfsvol *vol, char *srcname, char *dstname)
   hfsfile *ifile;
   int ofile, result;
 
+  copyout_forks=3;
   if (openfiles(vol, srcname, dstname, ".hqx", &ifile, &ofile) < 0)
     return -1;
+  if(!ifile)return 0;
 
   result = do_binh(ifile, ofile);
   closefiles(ifile, ofile, &result);
@@ -696,8 +759,10 @@ int cpo_text(hfsvol *vol, char *srcname, char *dstname)
   hfsfile *ifile;
   int ofile, result = 0;
 
+  copyout_forks=1;
   if (openfiles(vol, srcname, dstname, ".txt", &ifile, &ofile) < 0)
     return -1;
+  if(!ifile)return 0;
 
 	if(crlf_translation) {
 		setmode(ofile, O_TEXT);
@@ -720,8 +785,10 @@ int cpo_raw(hfsvol *vol, char *srcname, char *dstname)
   hfsfile *ifile;
   int ofile, result = 0;
 
+  copyout_forks=1;
   if (openfiles(vol, srcname, dstname, 0, &ifile, &ofile) < 0)
     return -1;
+  if(!ifile)return 0;
 
   result = do_raw(ifile, ofile);
   closefiles(ifile, ofile, &result);
@@ -735,8 +802,10 @@ int cpo_raw_resource(hfsvol *vol, char *srcname, char *dstname)
   hfsfile *ifile;
   int ofile, result = 0;
 
+  copyout_forks=2;
   if (openfiles(vol, srcname, dstname, 0, &ifile, &ofile) < 0)
     return -1;
+  if(!ifile)return 0;
 
   if (hfs_setfork(ifile, 1) < 0) {
 		result = -1;

@@ -11,7 +11,8 @@ Use Tools > 1.44 MB floppy format/write...
   data and resource forks; its volume name is FloppyTest.
 - Both operations require an explicit erase confirmation naming the drive.
   All original data on that disc will be overwritten. Ordinary disc browsing
-  remains read-only; direct file editing on physical floppies is not enabled.
+  remains read-only at the adapter level. Normal file copying now uses a
+  staged, verified write transaction; see FLOPPY-FILE-COPY.txt.
 - Low-level format tracks first is optional and unchecked by default. Leave
   it unchecked for an already sector-formatted 1.44 MB disc, including most
   factory-formatted blank discs. It uses IOCTL_DISK_FORMAT_TRACKS and may be

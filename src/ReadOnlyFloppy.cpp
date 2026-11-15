@@ -1,3 +1,4 @@
+#include "DeviceWait.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ReadOnlyFloppy.h"
 #include <stdio.h>
@@ -9,24 +10,24 @@ class WindowsFloppyReadApi : public FloppyReadApi {
 public:
     UINT DriveType(int drive) override {char root[]="A:\\";root[0]+=char(drive);return GetDriveTypeA(root);}
     HANDLE Open(const char* path,DWORD access,DWORD sharing,DWORD flags) override {
-        return CreateFileA(path,access,sharing,NULL,OPEN_EXISTING,flags,NULL);
+        return HfvMediaOpen(path,access,sharing,NULL,OPEN_EXISTING,flags,NULL);
     }
     bool Geometry(HANDLE handle,DISK_GEOMETRY& geometry) override {
         DWORD returned=0;
-        if(!DeviceIoControl(handle,IOCTL_DISK_GET_DRIVE_GEOMETRY,NULL,0,&geometry,sizeof(geometry),&returned,NULL)) return false;
+        if(!HfvMediaControl(handle,IOCTL_DISK_GET_DRIVE_GEOMETRY,NULL,0,&geometry,sizeof(geometry),&returned,NULL)) return false;
         if(returned<sizeof(geometry)) {SetLastError(ERROR_INVALID_DATA);return false;}
         return true;
     }
     bool Verify(HANDLE handle,DWORD& changeCount) override {
         DWORD returned=0;changeCount=0;
         // This query and all other floppy IOCTLs in this module are read-only.
-        return DeviceIoControl(handle,IOCTL_STORAGE_CHECK_VERIFY,NULL,0,&changeCount,sizeof(changeCount),&returned,NULL)!=FALSE;
+        return HfvMediaControl(handle,IOCTL_STORAGE_CHECK_VERIFY,NULL,0,&changeCount,sizeof(changeCount),&returned,NULL)!=FALSE;
     }
     bool Read(HANDLE handle,ULONGLONG offset,DWORD count,void* buffer,DWORD& got) override {
         LARGE_INTEGER position;position.QuadPart=offset;got=0;
-        return SetFilePointerEx(handle,position,NULL,FILE_BEGIN) && ReadFile(handle,buffer,count,&got,NULL);
+        return HfvMediaSeek(handle,position,NULL,FILE_BEGIN) && HfvMediaRead(handle,buffer,count,&got,NULL);
     }
-    void Close(HANDLE handle) override {CloseHandle(handle);}
+    void Close(HANDLE handle) override {HfvMediaClose(handle);}
 };
 WindowsFloppyReadApi nativeApi;
 unsigned be16(const BYTE* p) {return unsigned(p[0])*256+p[1];}

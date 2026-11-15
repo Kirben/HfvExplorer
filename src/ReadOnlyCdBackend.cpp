@@ -33,6 +33,11 @@ int pathDrive(const char* path) {
 Descriptor* descriptor(int fd) {
     return fd >= kFdBase && fd < kFdBase + kFdCount && descriptors[fd-kFdBase].open ? &descriptors[fd-kFdBase] : NULL;
 }
+bool ensureFloppy(int drive) {
+    if(!floppies[drive]) return false;
+    if(floppies[drive]->Handle()!=INVALID_HANDLE_VALUE) return true;
+    return floppies[drive]->OpenDrive(drive)&&floppies[drive]->FindHfs();
+}
 bool virtualFd(int fd) { return fd >= kFdBase && fd < kFdBase + kFdCount; }
 int hookedStat(const char* path, struct _stat64* st) {
     if (pathDrive(path) >= 0) { errno = ENOENT; return -1; }
@@ -63,6 +68,7 @@ int hookedRead(int fd, void* buffer, unsigned count) {
     Descriptor* d=descriptor(fd);
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _read(fd,buffer,count); }
     if (count > INT_MAX) { errno=EINVAL; return -1; }
+    if(d->floppy&&!ensureFloppy(d->drive)){errno=EIO;return -1;}
     DWORD available=(d->floppy?floppies[d->drive]->VolumeSize():cds[d->drive].VolumeSize()) - d->position;
     count=min(count,available);
     if (!(d->floppy?floppies[d->drive]->ReadVolume(d->position,count,buffer):cds[d->drive].ReadVolume(d->position,count,buffer))) { errno=EIO; return -1; }
@@ -75,6 +81,7 @@ int hookedWrite(int fd, const void* buffer, unsigned count) {
 hfv_offset_t hookedSeek(int fd, hfv_offset_t offset, int origin) {
     Descriptor* d=descriptor(fd);
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _lseeki64(fd,offset,origin); }
+    if(d->floppy&&!ensureFloppy(d->drive)){errno=EIO;return -1;}
     LONGLONG size=d->floppy?floppies[d->drive]->VolumeSize():cds[d->drive].VolumeSize();
     LONGLONG base=origin==SEEK_SET?0:origin==SEEK_CUR?d->position:origin==SEEK_END?size:-1;
     if(base<0 || offset < -base || offset > size-base) { errno=EINVAL; return -1; }
@@ -125,6 +132,12 @@ int is_hfs_cd_present(int drive) {
 }
 void get_cd_volume_file_name(int drive,char* name) { sprintf(name,"%c:\\NP~1_2~3.DSK",'A'+drive); }
 int readonly_media_path(const char* path) {return pathDrive(path)>=0;}
+int physical_floppy_path(const char* path) {
+    int drive=pathDrive(path);return drive>=0&&toupper((unsigned char)path[4])=='O'?drive:-1;
+}
+void physical_floppy_suspend(int drive) {
+    if(drive>=0&&drive<MAX_DEVICES&&floppies[drive]) floppies[drive]->Close();
+}
 HANDLE floppy_init(int drive,BOOL) {
     if(drive<0 || drive>=MAX_DEVICES) return NULL;
     if(flcds[drive].refcount) {if(flcds[drive].type!=FLTYPE_FLOPPY) return NULL; ++flcds[drive].refcount;return flcds[drive].handle;}
@@ -137,7 +150,8 @@ HANDLE floppy_init(int drive,BOOL) {
 #endif
     }
     if(!floppies[drive]->OpenDrive(drive) || !floppies[drive]->FindHfs()) {floppies[drive]->Close();return NULL;}
-    flcds[drive].handle=floppies[drive]->Handle();flcds[drive].refcount=1;flcds[drive].type=FLTYPE_FLOPPY;
+    // Stable adapter identity survives reopening the native handle.
+    flcds[drive].handle=reinterpret_cast<HANDLE>(floppies[drive]);flcds[drive].refcount=1;flcds[drive].type=FLTYPE_FLOPPY;
     flcds[drive].sector_size=512;flcds[drive].volume_start=0;return flcds[drive].handle;
 }
 void floppy_final(int drive) {
@@ -146,7 +160,7 @@ void floppy_final(int drive) {
 }
 long get_floppy_size(HANDLE handle,int drive) {
     return drive>=0 && drive<MAX_DEVICES && floppies[drive] && flcds[drive].type==FLTYPE_FLOPPY &&
-        handle && handle==flcds[drive].handle?(long)floppies[drive]->VolumeSize():0;
+        handle && handle==flcds[drive].handle && ensureFloppy(drive)?(long)floppies[drive]->VolumeSize():0;
 }
 int floppy_read(HANDLE handle,int drive,ULONG offset,int count,char* buffer) {
     if(!get_floppy_size(handle,drive) || count<0) return 0;
@@ -175,6 +189,7 @@ void floppy_get_geometry(int drive,int* c,int* h,int* s,int* bytes) {
 }
 }
 #ifdef HFV_FLOPPY_TESTING
+FloppyReadApi* physical_floppy_test_api(int drive) {return drive>=0&&drive<MAX_DEVICES?floppyApis[drive]:nullptr;}
 bool readonly_floppy_attach_api(int drive,FloppyReadApi* api) {
     if(drive<0 || drive>=MAX_DEVICES || flcds[drive].refcount) return false;
     delete floppies[drive];floppies[drive]=NULL;floppyApis[drive]=api;return true;

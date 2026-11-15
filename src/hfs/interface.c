@@ -55,7 +55,18 @@
 
 int set_file_size( char *path, hfv_size_t new_size );
 
+static int HFSIFACE_merge=0;
+int HFSIFACE_copy_options(int merge){int previous=HFSIFACE_merge;HFSIFACE_merge=merge;return previous;}
+static int copy_directory_create(const char* path) {
+ DWORD attributes;
+ if(CreateDirectoryA(path,NULL))return 1;
+ if(!HFSIFACE_merge || GetLastError()!=ERROR_ALREADY_EXISTS)return 0;
+ attributes=GetFileAttributesA(path);
+ return attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_DIRECTORY);
+}
 static char HFSIFACE_copyout_mode = 'a';
+char HFSIFACE_copy_mode(void){return HFSIFACE_copyout_mode;}
+char HFSIFACE_exchange_copy_mode(char mode){char old=HFSIFACE_copyout_mode;HFSIFACE_copyout_mode=mode;return old;}
 static char HFSIFACE_copyin_mode = 'a';
 static char HFSIFACE_copyout_ad = 1;
 
@@ -740,10 +751,10 @@ int HFSIFACE_copy_one_file(
 
 			result = do_copyout( vol1, 1, &source, tmp, HFSIFACE_copyout_mode );
 			if(result != 0) {
-				if(0 == build_target_dir_name( 1, 0, new_source, source, tmp )) {
+				if(copyout_destination_opened() && 0 == build_target_dir_name( 1, 0, new_source, source, tmp )) {
 					DeleteFile(new_source);
 				}
-			} else {
+			} else if(!copyout_was_skipped()) {
 				if(*extension && 0 == build_target_dir_name( 1, 0, new_source, source, tmp )) {
 					strcpy( tmp2, new_source );
 					modify_extension( tmp2, extension );
@@ -754,7 +765,7 @@ int HFSIFACE_copy_one_file(
 						}
 					}
 				}
-				if(move_if_possible) {
+				if(move_if_possible && !copyout_was_skipped()) {
 					if(hfs_delete(vol1, source) == 0) *pwas_moved = 1;
 				}
 			}
@@ -853,7 +864,7 @@ int HFSIFACE_dir_copy(
 			result = 1;
 		}
 	} else {
-		if(!CreateDirectory(tdir,NULL)) {
+		if(!copy_directory_create(tdir)) {
 			if(!HFSIFACE_m_silent) {
 				if(exists(tdir)) {
 					MessageBox( error_hwnd, "The directory already exists.", tdir, MB_OK | MB_ICONSTOP );
@@ -870,7 +881,7 @@ int HFSIFACE_dir_copy(
 			hfsdirent ent;
 			dir = hfs_opendir( vol1, source );
 			if(dir == 0) {
-				hfs_perrorp(source);
+				hfs_perrorp(source);result=1;
 			} else {
 				while (hfs_readdir(dir, &ent) >= 0) {
 					UPDATE_TIME_CONSUMING(0);
@@ -890,7 +901,8 @@ int HFSIFACE_dir_copy(
 						if(result != 0) break;
 					}
 				}
-				hfs_closedir(dir);
+				if(result==0 && errno!=ENOENT){hfs_perrorp(source);result=1;}
+                hfs_closedir(dir);
 			}
 		} else {
 			HANDLE fh;

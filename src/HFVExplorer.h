@@ -134,6 +134,7 @@ protected:
 	//{{AFX_VIRTUAL(CHFVExplorerApp)
 	public:
 	virtual BOOL InitInstance();
+ virtual int ExitInstance() override;
 	virtual BOOL OnIdle(LONG lCount);
 	//}}AFX_VIRTUAL
 

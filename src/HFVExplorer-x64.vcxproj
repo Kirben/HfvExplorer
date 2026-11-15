@@ -79,8 +79,8 @@
     <ClCompile Include="ImageOnly.cpp" />
     <ClCompile Include="ReadOnlyCd.cpp" />
     <ClCompile Include="MfsImage.cpp" /><ClCompile Include="MfsBrowser.cpp" />
-    <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" /><ClCompile Include="..\tests\LargeForkGuiTest.cpp" /><ClCompile Include="..\tests\FloppyGuiTest.cpp" />
-    <ClCompile Include="ReadOnlyCdBackend.cpp" /><ClCompile Include="ReadOnlyFloppy.cpp" /><ClCompile Include="FloppyWriter.cpp" /><ClCompile Include="FloppyWriteDialog.cpp" />
+    <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" /><ClCompile Include="..\tests\LargeForkGuiTest.cpp" /><ClCompile Include="..\tests\FloppyGuiTest.cpp" /><ClCompile Include="..\tests\DeviceWaitGuiTest.cpp" /><ClCompile Include="..\tests\CopyProgressTest.cpp" />
+    <ClCompile Include="ReadOnlyCdBackend.cpp" /><ClCompile Include="ReadOnlyFloppy.cpp" /><ClCompile Include="FloppyWriter.cpp" /><ClCompile Include="FloppyWriteDialog.cpp" /><ClCompile Include="CopyProgress.cpp" /><ClCompile Include="StorageJobDialog.cpp" /><ClCompile Include="RefreshStorage.cpp" />
     <ResourceCompile Include="HFVExplorer.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

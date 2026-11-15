@@ -14,6 +14,7 @@ static void check(bool ok,const char* action) {if(!ok){fprintf(stderr,"FAIL: %s 
 class FakeWriter : public FloppyWriteApi {
 public:
  FakeFloppy fake;DWORD flushOverride=0;int failure=0;bool locked=false,ordered=true,flags=true;unsigned writes=0,formats=0,flushes=0,unlocks=0;
+ std::vector<ULONGLONG> writeOffsets,readbackOffsets;
  explicit FakeWriter(const std::vector<BYTE>& media):fake(media) {}
  UINT DriveType(int d) override {return fake.DriveType(d);}
  HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f) override {
@@ -22,7 +23,7 @@ public:
  }
  bool Geometry(HANDLE h,DISK_GEOMETRY& g) override {bool ok=fake.Geometry(h,g);if(failure==2)g.MediaType=RemovableMedia;return ok;}
  bool Verify(HANDLE h,DWORD& c) override {if(failure==12 && writes==11){SetLastError(ERROR_NOT_READY);return false;}return fake.Verify(h,c);}
- bool Read(HANDLE h,ULONGLONG o,DWORD n,void* p,DWORD& got) override {if(failure==14 && o==11*9216){got=0;SetLastError(ERROR_NOT_READY);return false;}bool ok=fake.Read(h,o,n,p,got);if((failure==8 || failure==16) && ok)static_cast<BYTE*>(p)[0]^=1;return ok;}
+ bool Read(HANDLE h,ULONGLONG o,DWORD n,void* p,DWORD& got) override {if(writes)readbackOffsets.push_back(o);if(failure==14 && o==11*9216){got=0;SetLastError(ERROR_NOT_READY);return false;}bool ok=fake.Read(h,o,n,p,got);if((failure==8 || failure==16 || (failure==17&&writes)) && ok)static_cast<BYTE*>(p)[0]^=1;if(failure==18&&writes&&got)--got;return ok;}
  void Close(HANDLE h) override {fake.Close(h);locked=false;}
  bool Lock(HANDLE) override {if(failure==3){SetLastError(ERROR_ACCESS_DENIED);return false;}locked=true;return true;}
  bool Dismount(HANDLE) override {ordered&=locked;if(failure==4){SetLastError(ERROR_ACCESS_DENIED);return false;}return true;}
@@ -33,6 +34,7 @@ public:
  }
  bool Write(HANDLE,ULONGLONG o,DWORD n,const void* p,DWORD& wrote) override {
   ordered&=locked && o%512==0 && n%512==0 && uintptr_t(p)%512==0;++writes;
+  writeOffsets.push_back(o);
   if(failure==13 && writes==12){wrote=0;SetLastError(ERROR_NOT_READY);return false;}
   if(failure==5){SetLastError(ERROR_WRITE_PROTECT);return false;}
   wrote=failure==6?n-1:n;memcpy(fake.media.data()+size_t(o),p,wrote);
@@ -40,6 +42,13 @@ public:
  }
  bool Flush(HANDLE) override {++flushes;if(flushOverride){SetLastError(flushOverride);return false;}if(failure==7 || failure==15 || failure==16){SetLastError(failure==7?ERROR_WRITE_FAULT:ERROR_NOT_READY);return false;}return true;}
 };
+struct ChangedProgress {bool valid=true;unsigned written=0,verified=0,checked=0;};
+static void changedProgress(const char* phase,unsigned completed,unsigned total,void* context) {
+ auto& p=*static_cast<ChangedProgress*>(context);p.valid&=completed<=total;
+ if(!strcmp(phase,"Writing")){p.valid&=total==3;p.written=completed;}
+ if(!strcmp(phase,"Verifying")){p.valid&=total==3;p.verified=completed;}
+ if(!strcmp(phase,"Checking original disk")){p.valid&=total==160;p.checked=completed;}
+}
 static void progress(const char* phase,unsigned completed,unsigned total,void*) {
  if(!completed || completed%20==0 || completed==total) {printf("%s %u/%u\n",phase,completed,total);fflush(stdout);}
 }
@@ -78,6 +87,35 @@ int main(int argc,char** argv) {
   check(writer.WriteImage(25,image,tracks)&&api.fake.media==image&&api.flags&&api.ordered&&api.writes==160&&api.flushes==1&&api.fake.opens==api.fake.closes,"aligned locked image write and full readback");
   check(api.formats==(tracks?1:0),"track format is explicitly optional");
  }
+ auto modified=image;modified[400]^=1;modified[79*9216+1234]^=1;modified[159*9216+9215]^=1;
+ const std::vector<ULONGLONG> changed={0,79*9216,159*9216};
+ {
+  FakeWriter api(image);FloppyWriter writer(&api);ChangedProgress p;api.flushOverride=ERROR_INVALID_FUNCTION;
+  check(writer.WriteImage(0,modified,false,changedProgress,&p,&image),"changed-track write succeeds with verified unsupported flush");
+  check(api.fake.media==modified&&api.writeOffsets==changed&&api.readbackOffsets==changed&&api.fake.reads==163,"only first/middle/last changed tracks written and read back after full original comparison");
+  check(writer.PlannedTracks()==3&&writer.WrittenTracks()==3&&writer.VerifiedTracks()==3&&p.valid&&p.checked==160&&p.written==3&&p.verified==3,"progress and diagnostics count changed tracks rather than all 160");
+  check(api.fake.aligned&&api.ordered&&api.formats==0&&api.fake.opens==api.fake.closes&&!api.locked,"changed-track transfer alignment, lock and cleanup");
+ }
+ {
+  FakeWriter api(image);FloppyWriter writer(&api);
+  check(writer.WriteImage(0,image,false,nullptr,nullptr,&image)&&writer.PlannedTracks()==0&&!writer.WritesStarted()&&api.writes==0&&api.flushes==0&&api.fake.reads==160,"unchanged image is checked without writes or flush");
+ }
+ {
+  FakeWriter api(image);api.fake.media[6*9216+8]^=1;FloppyWriter writer(&api);
+  check(!writer.WriteImage(0,modified,false,nullptr,nullptr,&image)&&writer.Error()==ERROR_MEDIA_CHANGED&&api.writes==0,"change on an otherwise untouched track rejected before any write");
+ }
+ for(int fail:{6,7,9,17,18}) {
+  FakeWriter api(image);api.failure=fail;FloppyWriter writer(&api);
+  check(!writer.WriteImage(0,modified,false,nullptr,nullptr,&image)&&writer.Error()!=0,"changed-track short writes, real flush errors, media changes and readback errors remain failures");
+  check(api.fake.opens==api.fake.closes&&!api.locked&&api.unlocks==1,"changed-track errors release lock and handle");
+  if(fail==9)check(writer.Error()==ERROR_MEDIA_CHANGED&&api.writes==1,"media change checked between changed-track writes");
+  if(fail==17)check(writer.Error()==ERROR_CRC&&writer.VerifiedTracks()==0,"changed-track readback corruption not accepted");
+ }
+ {
+  FakeWriter api(image);api.fake.changeAfterRead=163;FloppyWriter writer(&api);
+  check(!writer.WriteImage(0,modified,false,nullptr,nullptr,&image)&&writer.Error()==ERROR_MEDIA_CHANGED&&writer.VerifiedTracks()==3,"final media check retained after final changed-track readback");
+ }
+ puts("PASS: changed-track writes/readbacks, full original-disk guard, no-change operation, changed-track progress totals, unsupported flush, short transfers, corruption, media changes and cleanup; simulated media only");
  for(int fail=1;fail<=11;++fail) {
   std::vector<BYTE> original(1474560,0xa5);FakeWriter api(original);api.failure=fail;FloppyWriter writer(&api);
   check(!writer.WriteImage(0,image,fail==10)&&writer.Error()!=0,"operation failures are reported");

@@ -67,3 +67,19 @@ int mount_flags( char *path );
 #ifdef __cplusplus
 } //extern "C"
 #endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+int HFSIFACE_copy_options(int merge);
+char HFSIFACE_copy_mode(void);
+#ifdef __cplusplus
+}
+#endif
+#ifdef __cplusplus
+extern "C" {
+#endif
+char HFSIFACE_exchange_copy_mode(char);
+#ifdef __cplusplus
+}
+#endif

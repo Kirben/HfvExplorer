@@ -71,5 +71,16 @@ if($Test -or $TestFloppy) {
  if(!$floppyTest.WaitForExit(30000)) { $floppyTest.Kill(); throw 'Headless floppy test timed out.' }
  if(Test-Path -LiteralPath $floppyReport) { Get-Content -LiteralPath $floppyReport }
  if($floppyTest.ExitCode -ne 0) { throw "Headless floppy test failed; retained $floppyDirectory" }
+ $waitReport=Join-Path $floppyDirectory 'device-wait-report.txt'
+ $waitTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-device-wait',('"'+$waitReport+'"')) -WindowStyle Hidden -PassThru
+ if(!$waitTest.WaitForExit(30000)) {throw 'Device wait test timed out.'}
+ if(Test-Path -LiteralPath $waitReport) {Get-Content -LiteralPath $waitReport}
+ if($waitTest.ExitCode -ne 0) {throw "Device wait tests failed; retained $floppyDirectory"}
+ $copyDirectory=Join-Path $floppyDirectory 'copy-progress'
+ $copyTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-copy-progress',('"'+$copyDirectory+'"')) -WindowStyle Hidden -PassThru
+ if(!$copyTest.WaitForExit(30000)) {throw 'Copy progress test timed out.'}
+ $copyReport=Join-Path $copyDirectory 'copy-progress-report.txt'
+ if(Test-Path -LiteralPath $copyReport) {Get-Content -LiteralPath $copyReport}
+ if($copyTest.ExitCode -ne 0) {throw "Copy progress tests failed; retained $copyDirectory"}
  Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
 }

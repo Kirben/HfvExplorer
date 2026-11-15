@@ -6,6 +6,9 @@ extern "C" {
 void readonly_cd_backend_init(void);
 void readonly_cd_backend_final(void);
 int readonly_media_path(const char* path);
+int physical_floppy_path(const char* path);
+// Release the native read handle; outstanding readers reopen on next use.
+void physical_floppy_suspend(int drive);
 #ifdef __cplusplus
 }
 #endif
@@ -16,4 +19,5 @@ bool readonly_cd_attach_fixture(int drive, const char* path);
 #if defined(HFV_FLOPPY_TESTING) && defined(__cplusplus)
 class FloppyReadApi;
 bool readonly_floppy_attach_api(int drive,FloppyReadApi* api);
+FloppyReadApi* physical_floppy_test_api(int drive);
 #endif

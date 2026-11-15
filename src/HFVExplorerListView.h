@@ -166,7 +166,7 @@ public:
 	int list_fat_insert(
 			LPSTR name, 
 			int isdir, 
-			DWORD size_in_bytes,
+			hfv_size_t size_in_bytes,
 			FILETIME *creation_date,
 			FILETIME *modification_date,
 			HICON hicon16,

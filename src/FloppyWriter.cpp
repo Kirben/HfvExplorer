@@ -55,13 +55,17 @@ void FloppyWriter::Mark(const char* stage,DWORD offset,DWORD requested) {
 }
 void FloppyWriter::Report(bool ok,int drive) {
  char line[768];unsigned track=offset_/kTrack;
- sprintf(line,"\r\nRESULT=%s target=%c: error=%lu stage=%s offset=%lu sector=%lu cylinder=%u head=%u sector_in_track=%lu requested=%lu transferred=%lu completed_writes=%u/160 completed_readbacks=%u/160 writes_started=%d\r\n",
- ok?"PASS":"FAIL",'A'+drive,error_,stage_.c_str(),offset_,offset_/512,track/2,track%2,(offset_%kTrack)/512+1,requested_,transferred_,writtenTracks_,verifiedTracks_,writesStarted_);
+ sprintf(line,"\r\nRESULT=%s target=%c: error=%lu stage=%s offset=%lu sector=%lu cylinder=%u head=%u sector_in_track=%lu requested=%lu transferred=%lu completed_writes=%u/%u completed_readbacks=%u/%u writes_started=%d\r\n",
+ ok?"PASS":"FAIL",'A'+drive,error_,stage_.c_str(),offset_,offset_/512,track/2,track%2,(offset_%kTrack)/512+1,requested_,transferred_,writtenTracks_,plannedTracks_,verifiedTracks_,plannedTracks_,writesStarted_);
  diagnostics_+=line;
 }
-bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks,FloppyProgress progress,void* context) {
-    error_=flushError_=0;writesStarted_=false;writtenTracks_=verifiedTracks_=0;diagnostics_.clear();Mark("Validate source image");
-    if(drive<0 || drive>25 || !ValidateFloppyHfs(image)) {error_=ERROR_INVALID_PARAMETER;Report(false,drive);return false;}
+bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks,FloppyProgress progress,void* context,const std::vector<BYTE>* expectedOriginal) {
+    error_=flushError_=0;writesStarted_=false;writtenTracks_=verifiedTracks_=0;plannedTracks_=160;diagnostics_.clear();Mark("Validate source image");
+    if(drive<0 || drive>25 || !ValidateFloppyHfs(image) || (expectedOriginal && (formatTracks || expectedOriginal->size()!=kImage))) {error_=ERROR_INVALID_PARAMETER;Report(false,drive);return false;}
+    std::vector<DWORD> tracks;
+    for(DWORD offset=0;offset<kImage;offset+=kTrack)
+        if(!expectedOriginal || memcmp(image.data()+offset,expectedOriginal->data()+offset,kTrack))tracks.push_back(offset);
+    plannedTracks_=unsigned(tracks.size());
     Mark("Check drive type");
     if(api_->DriveType(drive)!=DRIVE_REMOVABLE) {error_=ERROR_BAD_DEVICE;Report(false,drive);return false;}
     char path[16];sprintf(path,"\\\\.\\%c:",'A'+drive);
@@ -95,6 +99,25 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
     Mark("Allocate transfer buffer");
     scratch=(BYTE*)VirtualAlloc(NULL,kTrack*2,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     if(!scratch) {SetLastError(ERROR_NOT_ENOUGH_MEMORY);return finish(false);}
+    if(expectedOriginal) {
+        for(DWORD offset=0;offset<kImage;offset+=kTrack) {
+            Mark("Check original disk before copying",offset,kTrack);
+            if(progress) progress("Checking original disk",offset/kTrack,160,context);
+            if(!api_->Verify(handle,current)) return finish(false);
+            if(current!=generation) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
+            DWORD got=0;
+            if(!api_->Read(handle,offset,kTrack,scratch,got)) return finish(false);
+            if(got!=kTrack) {SetLastError(ERROR_READ_FAULT);return finish(false);}
+            if(memcmp(scratch,expectedOriginal->data()+offset,kTrack)) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
+        }
+        if(progress) progress("Checking original disk",160,160,context);
+    }
+    if(!plannedTracks_) {
+        Mark("Final media readiness check");
+        if(!api_->Verify(handle,current)) return finish(false);
+        if(current!=generation) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
+        return finish(true);
+    }
     if(formatTracks) {
         writesStarted_=true;
         if(progress) progress("Formatting tracks",0,160,context);
@@ -106,40 +129,40 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
         Mark("Check media after track format");
         if(!api_->Verify(handle,generation)) return finish(false);
     }
-    for(DWORD offset=0;offset<kImage;offset+=kTrack) {
+    for(DWORD offset:tracks) {
         Mark("Media readiness before write",offset,kTrack);
-        if(progress) progress("Checking media before write",writtenTracks_,160,context);
+        if(progress) progress("Checking media before write",writtenTracks_,plannedTracks_,context);
         if(!api_->Verify(handle,current)) return finish(false);
         if(current!=generation) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
         memcpy(scratch,image.data()+offset,kTrack);DWORD wrote=0;writesStarted_=true;
         Mark("WriteFile track transfer",offset,kTrack);
-        if(progress) progress("Writing",writtenTracks_,160,context);
+        if(progress) progress("Writing",writtenTracks_,plannedTracks_,context);
         bool wroteOk=api_->Write(handle,offset,kTrack,scratch,wrote);transferred_=wrote;
         if(!wroteOk) return finish(false);
         if(wrote!=kTrack) {SetLastError(ERROR_WRITE_FAULT);return finish(false);}
         ++writtenTracks_;
-        if(progress) progress("Writing",writtenTracks_,160,context);
+        if(progress) progress("Writing",writtenTracks_,plannedTracks_,context);
     }
     Mark("Flush written data",kImage);
-    if(progress) progress("Flushing written data",writtenTracks_,160,context);
+    if(progress) progress("Flushing written data",writtenTracks_,plannedTracks_,context);
     if(!api_->Flush(handle)) {
         flushError_=GetLastError();if(!flushError_)flushError_=ERROR_WRITE_FAULT;
         char line[160];sprintf(line,"Flush failed: error=%lu; continuing readback without treating the flush as successful\r\n",flushError_);diagnostics_+=line;
     }
-    for(DWORD offset=0;offset<kImage;offset+=kTrack) {
+    for(DWORD offset:tracks) {
         Mark("Media readiness before readback",offset,kTrack);
-        if(progress) progress("Checking media before readback",verifiedTracks_,160,context);
+        if(progress) progress("Checking media before readback",verifiedTracks_,plannedTracks_,context);
         if(!api_->Verify(handle,current)) return finish(false);
         if(current!=generation) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
         DWORD got=0;
         Mark("ReadFile readback transfer",offset,kTrack);
-        if(progress) progress("Verifying",verifiedTracks_,160,context);
+        if(progress) progress("Verifying",verifiedTracks_,plannedTracks_,context);
         bool readOk=api_->Read(handle,offset,kTrack,scratch,got);transferred_=got;
         if(!readOk) return finish(false);
         stage_="Compare readback";
         if(got!=kTrack || memcmp(scratch,image.data()+offset,kTrack)) {SetLastError(ERROR_CRC);return finish(false);}
         ++verifiedTracks_;
-        if(progress) progress("Verifying",verifiedTracks_,160,context);
+        if(progress) progress("Verifying",verifiedTracks_,plannedTracks_,context);
     }
     Mark("Final media readiness check",kImage);
     if(!api_->Verify(handle,current)) return finish(false);
