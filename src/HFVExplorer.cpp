@@ -341,6 +341,8 @@ int CHFVExplorerApp::ExitInstance(){ShutdownStorageUi();return CWinApp::ExitInst
 BOOL CHFVExplorerApp::InitInstance()
 {
 #ifdef HFV_TESTING
+ extern int RunCdImageTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-cd-image")==0)ExitProcess(RunCdImageTest(__argv[2]));
  extern int RunCopyProgressTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-copy-progress")==0)ExitProcess(RunCopyProgressTest(__argv[2]));
  extern int RunDeviceWaitGuiTest(const char*);

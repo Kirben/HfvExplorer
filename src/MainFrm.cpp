@@ -22,6 +22,7 @@
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
+#include "CdImageDialog.h"
 #include <errno.h>
 #include "ImageSize.h"
 #include "HFVPreviewView.h"
@@ -70,7 +71,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_UPDATE_COMMAND_UI(ID_FILE_RELOAD, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_CD_EJECT_RELOAD, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_CD_EJECT_EJECT, OnUpdatePhysicalMedia)
- ON_UPDATE_COMMAND_UI(ID_TOOLS_DUMPCDDEBUG, OnUpdatePhysicalMedia)
+
  ON_UPDATE_COMMAND_UI(ID_TOOLS_BURN, OnUpdatePhysicalMedia)
 	//{{AFX_MSG_MAP(CMainFrame)
 	ON_WM_CREATE()
@@ -88,6 +89,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
 	ON_COMMAND(ID_TOOLS_FLOPPY_WRITE, OnToolsFloppyWrite)
+
 	ON_COMMAND(ID_TOOLS_DUMPCDDEBUG, OnToolsDumpcddebug)
 	ON_COMMAND(ID_CD_EJECT_RELOAD, OnCdEjectReload)
 	ON_COMMAND(ID_CD_EJECT_EJECT, OnCdEjectEject)
@@ -1206,24 +1208,9 @@ void CMainFrame::OnFileVolumefromfloppy()
 	}
 }
 
-void CMainFrame::OnToolsDumpcddebug() 
+void CMainFrame::OnToolsDumpcddebug()
 {
-	CAskDump dlg;
-	char path[_MAX_PATH], *p;
-	unsigned int start, count;
-
-	dlg.m_dump_path = "";
-	dlg.m_start = "0x00000000";
-	dlg.m_blocks = "0x200";
-	if(dlg.DoModal() == IDOK) {
-		lstrcpy( path, dlg.m_dump_path.GetBuffer(_MAX_PATH) );
-		p = dlg.m_start.GetBuffer(100);
-		start = strtoul(p,NULL,0);
-		p = dlg.m_blocks.GetBuffer(100);
-		count = strtoul(p,NULL,0);
-		UpdateWindow();
-		dump_first_cd( path, start, count );
-	}
+ ShowCdImageDialog(this);
 }
 
 #if 0

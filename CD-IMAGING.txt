@@ -1,0 +1,46 @@
+Native read-only data CD imaging
+
+Choose Tools > Dump CD to file..., select the drive, choose an output path,
+and click Save image. Existing output files offer Replace, Replace all, Skip or
+Cancel through the storage job's overwrite dialog. No custom driver is used.
+
+This first version supports one data track starting at LBA zero. Audio,
+mixed-mode, multiple-track and multisession layouts are rejected. The image is
+the complete readable 2,048-byte logical data-sector stream, including any
+Apple partition map and HFS/ISO hybrid data. It is not an audio BIN/CUE or a
+2,352-byte raw-sector/subchannel capture. The .iso extension does not convert
+the original filesystem to ISO 9660. Burning is not implemented in this build.
+
+The data length comes from the TOC lead-out in a media-identity-checked open.
+HFS metadata cannot increase the length beyond that reported by the drive.
+Shortened media is copied as reported; absent sectors are not synthesized.
+HFVExplorer's existing image browser may not reopen a partitioned whole-CD .iso
+directly; this command preserves the whole-disc data image for compatible tools.
+
+The persistent storage worker streams the image in bounded chunks. One dialog
+and the taskbar show completed/total bytes. Cancel takes effect between device
+reads; an in-progress Windows driver request may take time to return.
+
+Media generation is checked around TOC acquisition, before and after each
+chunk, and at completion. The output is written to a temporary file in the
+destination folder, flushed and closed, then moved into place. Read errors,
+short reads, media changes, cancellation and host-write errors discard the
+temporary image. A pre-existing output is preserved if copying fails; a newly
+appearing output is not silently overwritten. The image is not reread from
+the optical disc a second time or accompanied by a verification checksum.
+
+The operation issues only read commands to the optical drive. The existing
+SCSI fallback can require additional handle access rights under Windows but
+its commands remain read-only. No burn, erase, write or format is performed.
+
+Validation: Release/Test builds and simulated tests passed. Tests cover actual
+TOC layout rejection, big-endian/64-bit length calculation, complete-sector
+byte fidelity, progress totals, read errors, short reads, media changes at
+mid-copy and completion, unsupported media, overwrite/skip/cancel decisions,
+replacement publication, destination creation/race failures, temporary cleanup,
+slow reads, the Cancel button and main-window restoration before dialog close.
+Existing storage/copy/floppy regressions also passed. No real optical/floppy
+devices or computer control were used. Hardware validation remains manual.
+
+These CD imaging changes are committed locally. Previous storage changes are in the
+single local commit 0451452. No local commits have been pushed to GitHub.

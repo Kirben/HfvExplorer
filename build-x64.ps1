@@ -82,5 +82,11 @@ if($Test -or $TestFloppy) {
  $copyReport=Join-Path $copyDirectory 'copy-progress-report.txt'
  if(Test-Path -LiteralPath $copyReport) {Get-Content -LiteralPath $copyReport}
  if($copyTest.ExitCode -ne 0) {throw "Copy progress tests failed; retained $copyDirectory"}
+ $cdImageDirectory=Join-Path $floppyDirectory 'cd-image'
+ $cdImageTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-cd-image',('"'+$cdImageDirectory+'"')) -WindowStyle Hidden -PassThru
+ if(!$cdImageTest.WaitForExit(30000)) {throw 'CD image tests timed out.'}
+ $cdImageReport=Join-Path $cdImageDirectory 'cd-image-report.txt'
+ if(Test-Path -LiteralPath $cdImageReport) {Get-Content -LiteralPath $cdImageReport}
+ if($cdImageTest.ExitCode -ne 0) {throw "CD image tests failed; retained $cdImageDirectory"}
  Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
 }

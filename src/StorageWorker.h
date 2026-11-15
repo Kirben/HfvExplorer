@@ -15,7 +15,7 @@ struct Progress {
  std::string path,phase="Preparing";
  unsigned long long bytes=0,processed=0,fileBytes=0,fileTotal=0,totalBytes=0;
  unsigned files=0,skipped=0,totalFiles=0;
- bool scanning=true,fileCopy=false;
+ bool scanning=true,fileCopy=false,byteTransfer=false;
 };
 struct Result {int code=0;DWORD error=0;std::string message;bool moved=false;};
 class Cancelled : public std::exception {public:const char* what()const noexcept override{return "Storage job cancelled";}};

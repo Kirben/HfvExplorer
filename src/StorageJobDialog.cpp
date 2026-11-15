@@ -27,7 +27,7 @@ public:
 };
 class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
- CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false;
+ CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false,cancellable_=false;
  ITaskbarList3* taskbar_=nullptr;bool uninitialize_=false;TBPFLAG taskbarState_=TBPF_NOPROGRESS;
  HWND owner_;
  std::function<void(HWND)> beforeClose_;
@@ -78,6 +78,7 @@ class JobDialog : public CDialog {
    progress.files+progress.skipped,progress.totalFiles,progress.skipped,double(progress.bytes)/(1024*1024),(GetTickCount()-started_)/1000);
   if(progress.fileCopy&&!progress.totalFiles)status.Format("Elapsed: %lu seconds",(GetTickCount()-started_)/1000);
   if(!progress.fileCopy)status.Format("Elapsed: %lu seconds",(GetTickCount()-started_)/1000);
+  if(progress.byteTransfer&&progress.totalBytes)status.Format("%.2f / %.2f MiB; %u%%; %lu seconds",double(progress.processed)/(1024*1024),double(progress.totalBytes)/(1024*1024),unsigned(min(progress.processed,progress.totalBytes)*100/progress.totalBytes),(GetTickCount()-started_)/1000);
   CString path=progress.path.c_str();
   if(progress.fileTotal){CString percent;percent.Format(" (%u%%)",unsigned(min(progress.fileBytes,progress.fileTotal)*100/progress.fileTotal));path+=percent;}
   CString old;GetDlgItemText(IDC_CP_FILE,old);if(old!=path)SetDlgItemText(IDC_CP_FILE,path);
@@ -105,8 +106,8 @@ class JobDialog : public CDialog {
 public:
  void BeforeClose(std::function<void(HWND)> callback){beforeClose_=std::move(callback);}
  void PrepareToClose(){if(beforeClose_)beforeClose_(GetSafeHwnd());}
- JobDialog(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,CWnd* owner,bool keepWindow=false,bool storageOnly=false,bool singleFile=false)
-  :CDialog(storageOnly?IDD_STORAGE_WAIT:singleFile?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,owner),job_(job),title_(title),hidden_(hidden),keepWindow_(keepWindow),storageOnly_(storageOnly),owner_(owner?owner->GetSafeHwnd():nullptr) {
+ JobDialog(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,CWnd* owner,bool keepWindow=false,bool storageOnly=false,bool singleFile=false,bool cancellable=false)
+  :CDialog(storageOnly?IDD_STORAGE_WAIT:cancellable?IDD_CD_IMAGE_PROGRESS:singleFile?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,owner),job_(job),title_(title),hidden_(hidden),keepWindow_(keepWindow),storageOnly_(storageOnly),cancellable_(cancellable),owner_(owner?owner->GetSafeHwnd():nullptr) {
   if(!hidden_){HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);uninitialize_=SUCCEEDED(init);
    if((SUCCEEDED(init)||init==RPC_E_CHANGED_MODE)&&SUCCEEDED(CoCreateInstance(CLSID_TaskbarList,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&taskbar_)))&&FAILED(taskbar_->HrInit())){taskbar_->Release();taskbar_=nullptr;}}
  }
@@ -130,7 +131,7 @@ public:
   if(job_->done())PostMessage(WM_APP+94,0,0);
   return RunModalLoop(MLF_NOKICKIDLE);
  }
- void OnCancel() override {}
+ void OnCancel() override {if(cancellable_){job_->cancel();GetDlgItem(IDCANCEL)->EnableWindow(FALSE);SetDlgItemText(IDCANCEL,"Cancelling...");}}
  void OnOK() override {}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l) override {
   if(message==WM_DESTROY)PrepareToClose();
@@ -144,6 +145,9 @@ public:
   if(hidden_&&message==WM_WINDOWPOSCHANGING)reinterpret_cast<WINDOWPOS*>(l)->flags&=~SWP_SHOWWINDOW;
 #endif
   if(message==WM_TIMER&&w==1){
+#ifdef HFV_TESTING
+   if(hidden_&&cancellable_&&storageUiTest.cancelOnTimer&&!job_->cancelled())OnCancel();
+#endif
    if(storageOnly_&&spinnerFrame_!=((GetTickCount()-started_)/120)%8){spinnerFrame_=((GetTickCount()-started_)/120)%8;GetDlgItem(IDC_SW_SPINNER)->Invalidate(FALSE);
 #ifdef HFV_TESTING
     ++storageUiTest.spinnerTicks;
@@ -232,7 +236,7 @@ public:
 };
 unsigned actionDepth=0;
 std::unique_ptr<NativeSession> nativeSession;
-void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false) {
+void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false) {
  INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_PROGRESS_CLASS};InitCommonControlsEx(&controls);
  ActiveUiJob active;
  CWnd* owner=AfxGetMainWnd();
@@ -246,7 +250,7 @@ void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden
   std::shared_ptr<Storage::Job> job;
   ~Lifetime(){if(!job->done()){job->cancel();job->wait();}}
  } lifetime={job};
- JobDialog dialog(job,title,hidden,owner,false,storageOnly,singleFile);
+ JobDialog dialog(job,title,hidden,owner,false,storageOnly,singleFile,cancellable);
  dialog.BeforeClose([&restore](HWND window){restore.restore(window);});
  if(dialog.DoModal()!=IDOK){job->cancel();job->wait();}
  job->wait();
@@ -266,9 +270,9 @@ StorageAction::~StorageAction(){
  if(active_&&--actionDepth==0){ActiveUiJob closing;nativeSession.reset();}
 }
 void InitializeStorageUi(){StorageUi::initialize(waitNative);}
-Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> work,const char* title,bool hidden,bool singleFile) {
+Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> work,const char* title,bool hidden,bool singleFile,bool cancellable) {
  if(StorageUi::busy())return {1,ERROR_BUSY,"Another storage operation is active"};
- auto job=Storage::worker().submit(std::move(work));wait(job,title,hidden,false,singleFile);return job->result();
+ auto job=Storage::worker().submit(std::move(work));wait(job,title,hidden,false,singleFile,cancellable);return job->result();
 }
 Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)> work,bool hidden) {
  if(StorageUi::busy())return {1,ERROR_BUSY,"Another storage operation is active"};
