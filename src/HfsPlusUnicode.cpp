@@ -42,7 +42,7 @@ uint16_t Fold(uint16_t c) {
     return p ? p[1] : c;
 }
 } // namespace
-std::u16string Normalize(const std::u16string &name) {
+std::u16string Normalize(const std::u16string &name, bool caseSensitive) {
     std::u32string decomposed;
     std::u16string result;
     for (size_t i = 0; i < name.size(); ++i) {
@@ -78,11 +78,18 @@ std::u16string Normalize(const std::u16string &name) {
     if (result == u"." || result == u".." || result.find(u'/') != std::u16string::npos ||
         result.find(char16_t(0)) != std::u16string::npos)
         throw Error("Invalid HFS+ name");
-    if (!CompareNames(result, u""))
+    if (!caseSensitive && !CompareNames(result, u""))
         throw Error("HFS+ name consists only of ignorable characters");
     return result;
 }
 int CompareNames(const std::u16string &a, const std::u16string &b, bool sensitive) {
+    if (sensitive) {
+        size_t count = (std::min)(a.size(), b.size());
+        for (size_t i = 0; i < count; ++i)
+            if (a[i] != b[i])
+                return uint16_t(a[i]) < uint16_t(b[i]) ? -1 : 1;
+        return a.size() == b.size() ? 0 : a.size() < b.size() ? -1 : 1;
+    }
     size_t i = 0, j = 0;
     for (;;) {
         uint16_t x = 0, y = 0;

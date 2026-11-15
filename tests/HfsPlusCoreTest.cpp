@@ -86,9 +86,9 @@ void basic(bool journaled) {
     }
     must(writes == disk.writes, "Read-only mount wrote image");
 }
-void crashes() {
+void crashes(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     Memory clean(16 * 1024 * 1024);
-    Volume::Format(clean, u"Crash test", true);
+    Volume::Format(clean, u"Crash test", true, kind);
     for (const char *phase :
          {"data-flushed", "journal-data-flushed", "journal-committed", "home-flushed", "journal-cleared"}) {
         Memory disk = clean;
@@ -139,10 +139,10 @@ void crashes() {
     fails([&] { Volume v(disk, true); }, "Corrupt journal accepted");
     must(disk.bytes == original, "Failed replay changed image");
 }
-void journalGeometry() {
+void journalGeometry(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     for (unsigned sector : {512u, 2048u, 4096u}) {
         Memory disk(16 * 1024 * 1024);
-        Volume::Format(disk, u"Wrapped journal", true);
+        Volume::Format(disk, u"Wrapped journal", true, kind);
         auto vh = disk.bytes.data() + 1024;
         uint64_t info = uint64_t(Disk::U32(vh + 12)) * Disk::U32(vh + 40),
                  offset = Disk::U64(disk.bytes.data() + info + 36),
@@ -217,9 +217,9 @@ void fragmentCatalog(Memory &disk) {
     Disk::P16(leaf + 4092, 90);
     memcpy(disk.bytes.data() + disk.Size() - 1024, vh, 512);
 }
-void fragmentedCatalog() {
+void fragmentedCatalog(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     Memory disk(16 * 1024 * 1024);
-    Volume::Format(disk, u"Fragmented catalog", true);
+    Volume::Format(disk, u"Fragmented catalog", true, kind);
     fragmentCatalog(disk);
     {
         Volume v(disk, true);
@@ -273,17 +273,27 @@ void containers() {
     }
     auto h = raw.bytes.data() + 1024;
     Disk::P16(h, 0x4858);
-    Disk::P16(h + 2, 5);
+    Disk::P16(h + 2, 6);
     uint32_t catalog = Disk::U32(h + 288);
     raw.bytes[uint64_t(catalog) * 4096 + 51] = 0xbc;
     unsigned writes = raw.writes;
-    fails([&] { Volume v(raw, true); }, "HFSX writes enabled prematurely");
-    must(raw.writes == writes, "HFSX write attempt modified image");
-    {
-        Volume v(raw);
-        must(v.List().size() == 2, "HFSX read-only listing");
-    }
+    fails([&] { Volume v(raw, true); }, "Unknown HFSX version accepted for writing");
+    fails([&] { Volume v(raw); }, "Unknown HFSX version accepted for reading");
+    must(raw.writes == writes, "Unknown HFSX version modified image");
     must(CompareNames(u"Readme", u"README", true) != 0, "HFSX case-sensitive comparison");
+    Memory hx(raw.bytes.size());
+    Volume::Format(hx, u"HFSX APM", true, Volume::FormatKind::HfsXCaseSensitive);
+    memcpy(apm.bytes.data() + 4096, hx.bytes.data(), hx.bytes.size());
+    memcpy(apm.bytes.data() + 560, "Apple_HFSX", 11);
+    {
+        Volume v(apm, true);
+        must(v.IsHfsX(), "Apple_HFSX partition not recognized");
+        v.MakeDirectory(2, u"Written through APM");
+    }
+    memcpy(wrapper.bytes.data() + 4096, hx.bytes.data(), hx.bytes.size());
+    writes = wrapper.writes;
+    fails([&] { Volume v(wrapper, true); }, "HFSX in a legacy HFS wrapper accepted");
+    must(wrapper.writes == writes, "Invalid wrapped HFSX modified source");
 }
 uint8_t *catalogValue(Memory &disk, uint32_t id) {
     auto header = disk.bytes.data() + 1024;
@@ -301,6 +311,77 @@ uint8_t *catalogValue(Memory &disk, uint32_t id) {
         leaf = Disk::U32(node);
     }
     throw Error("Test catalog entry missing");
+}
+void hfsx(bool journaled, bool sensitive) {
+    Memory disk(32 * 1024 * 1024);
+    auto kind = sensitive ? Volume::FormatKind::HfsXCaseSensitive : Volume::FormatKind::HfsXCaseInsensitive;
+    Volume::Format(disk, u"HFSX", journaled, kind);
+    must(Disk::U16(disk.bytes.data() + 1024) == 0x4858 && Disk::U16(disk.bytes.data() + 1026) == 5,
+         "HFSX v5 headers");
+    uint32_t a, b = 0, folder;
+    {
+        Volume v(disk, true);
+        must(v.IsHfsX() && v.CaseSensitive() == sensitive && v.Journaled() == journaled, "HFSX mode");
+        a = v.Put(2, u"Readme", 123, 97, pattern);
+        if (sensitive) {
+            b = v.Put(2, u"README", 43, 71, pattern);
+            v.Put(2, u"Readme\u200c", 7, 0, pattern);
+            v.Put(2, u"\u200c", 5, 0, pattern);
+        } else {
+            fails([&] { v.Put(2, u"README", 1, 0, pattern); }, "Case-insensitive HFSX duplicate accepted");
+            fails([&] { v.Put(2, u"Readme\u200c", 1, 0, pattern); },
+                  "Case-insensitive ignorable duplicate accepted");
+        }
+        v.Put(2, u"\u00e9", 1, 0, pattern);
+        fails([&] { v.Put(2, u"e\u0301", 1, 0, pattern); }, "Canonical equivalent HFSX duplicate accepted");
+        v.Rename(a, 2, u"readme");
+        if (sensitive)
+            fails([&] { v.Rename(a, 2, u"README"); }, "HFSX rename collision accepted");
+        v.Put(2, u"readme", 91, 17, pattern, nullptr, true);
+        verify(v, a, 0, 91);
+        if (sensitive)
+            verify(v, b, 0, 43);
+        folder = v.MakeDirectory(2, u"Folder");
+        auto sub = v.MakeDirectory(folder, u"Sub");
+        must(Disk::U32(catalogValue(disk, 2) + 84) == 1 && Disk::U32(catalogValue(disk, folder) + 84) == 1,
+             "HFSX folder counters after creation");
+        v.Rename(sub, 2, u"Sub");
+        must(Disk::U32(catalogValue(disk, 2) + 84) == 2 && Disk::U32(catalogValue(disk, folder) + 84) == 0,
+             "HFSX folder counters after move");
+        v.Remove(sub);
+        // Force catalog index/leaf rebuilding while preserving its comparison mode.
+        for (unsigned i = 0; i < 80; ++i) {
+            std::u16string name = u"Entry ";
+            name += char16_t('A' + i / 26);
+            name += char16_t('A' + i % 26);
+            name += std::u16string(70, u'x');
+            v.Put(folder, name, 13, 7, pattern);
+        }
+    }
+    {
+        Volume v(disk, true);
+        must(v.CaseSensitive() == sensitive, "HFSX mode survived catalog rebuild");
+        verify(v, a, 1, 17);
+        if (sensitive)
+            verify(v, b, 1, 71);
+        must(v.List(folder).size() == 80, "HFSX indexed catalog reopened");
+        v.Remove(a);
+    }
+    must(Disk::U16(disk.bytes.data() + 1024) == 0x4858 && Disk::U16(disk.bytes.data() + 1026) == 5,
+         "HFSX changed into HFS+");
+    {
+        Volume v(disk);
+        must(v.IsHfsX() && !v.Writable(), "HFSX read-only open");
+    }
+    auto flags = Disk::U16(catalogValue(disk, folder) + 2);
+    Disk::P16(catalogValue(disk, folder) + 2, flags | 0x40);
+    unsigned writes = disk.writes;
+    {
+        Volume v(disk, true);
+        fails([&] { v.Rename(folder, 2, u"Linked subtree"); },
+              "Unsupported directory hard-link topology was changed");
+    }
+    must(disk.writes == writes, "Rejected hard-link topology edit changed the image");
 }
 void permissions() {
     Memory disk(16 * 1024 * 1024);
@@ -356,9 +437,9 @@ void trees() {
                 verify(v, e.id, 1, 17);
     }
 }
-void fragmented() {
+void fragmented(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     Memory disk(16 * 1024 * 1024);
-    Volume::Format(disk, u"Fragmented", true);
+    Volume::Format(disk, u"Fragmented", true, kind);
     uint32_t result;
     {
         Volume v(disk, true);
@@ -423,13 +504,13 @@ void failures() {
     fails([&] { Volume v(disk, true); }, "Free metadata block accepted");
     must(writes == disk.writes, "Corrupt image mount wrote source");
 }
-void large(const wchar_t *path) {
+void large(const wchar_t *path, Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     uint8_t low[32], high[32];
     pattern(0, 0, low, sizeof(low));
     pattern(0, 0x80000000ULL, high, sizeof(high));
     must(memcmp(low, high, sizeof(low)) != 0, "Large-fork pattern must detect a 2 GiB offset alias");
     auto disk = CreateImage(path, 6ULL * 1024 * 1024 * 1024);
-    Volume::Format(*disk, u"Large HFS+ forks", true);
+    Volume::Format(*disk, u"Large HFS forks", true, kind);
     uint32_t id;
     const uint64_t length = 0x80010003ULL;
     {
@@ -456,7 +537,9 @@ void large(const wchar_t *path) {
             }
         }
     }
-    puts("PASS: native image writes and persisted reads beyond 2 GiB in both HFS+ forks");
+    puts(kind == Volume::FormatKind::HfsPlus
+             ? "PASS: native image writes and persisted reads beyond 2 GiB in both HFS+ forks"
+             : "PASS: native image writes and persisted reads beyond 2 GiB in both HFSX forks");
 }
 int wmain(int argc, wchar_t **argv) {
     try {
@@ -464,6 +547,23 @@ int wmain(int argc, wchar_t **argv) {
             argc = 1;
         if (argc == 3 && !wcscmp(argv[1], L"--large")) {
             large(argv[2]);
+            return 0;
+        }
+        if (argc == 3 && !wcscmp(argv[1], L"--large-hfsx")) {
+            large(argv[2], Volume::FormatKind::HfsXCaseSensitive);
+            return 0;
+        }
+        if (argc == 3 && (!wcscmp(argv[1], L"--hfsx") || !wcscmp(argv[1], L"--hfsx-ci"))) {
+            auto disk = CreateImage(argv[2], 128 * 1024 * 1024);
+            bool sensitive = !wcscmp(argv[1], L"--hfsx");
+            Volume::Format(*disk, u"HFVExplorer HFSX", true,
+                           sensitive ? Volume::FormatKind::HfsXCaseSensitive
+                                     : Volume::FormatKind::HfsXCaseInsensitive);
+            Volume v(*disk, true);
+            auto folder = v.MakeDirectory(2, u"Folder");
+            v.Put(folder, u"Readme", 10000, 5000, pattern);
+            if (sensitive)
+                v.Put(folder, u"README", 99, 17, pattern);
             return 0;
         }
         if (argc == 3 && !wcscmp(argv[1], L"--check-recovered")) {
@@ -507,12 +607,23 @@ int wmain(int argc, wchar_t **argv) {
             Volume v(*disk, true);
             auto folder = v.MakeDirectory(2, u"From HFVExplorer \u00e9");
             v.Put(folder, u"Both forks", 100001, 5555, pattern);
+            if (v.IsHfsX() && v.CaseSensitive()) {
+                auto a = v.Put(folder, u"Readme", 777, 23, pattern);
+                v.Put(folder, u"README", 99, 31, pattern);
+                v.Rename(a, folder, u"readme");
+                auto nested = v.MakeDirectory(folder, u"Nested");
+                v.Rename(nested, 2, u"Moved folder");
+            }
             puts("PASS: imported into independently formatted image");
             return 0;
         }
-        if (argc == 3 && !wcscmp(argv[1], L"--crash")) {
+        if (argc == 3 && (!wcscmp(argv[1], L"--crash") || !wcscmp(argv[1], L"--crash-hfsx") ||
+                          !wcscmp(argv[1], L"--crash-hfsx-ci"))) {
             auto disk = CreateImage(argv[2], 128 * 1024 * 1024);
-            Volume::Format(*disk, u"Journal recovery", true);
+            Volume::Format(*disk, u"Journal recovery", true,
+                           !wcscmp(argv[1], L"--crash")        ? Volume::FormatKind::HfsPlus
+                           : !wcscmp(argv[1], L"--crash-hfsx") ? Volume::FormatKind::HfsXCaseSensitive
+                                                               : Volume::FormatKind::HfsXCaseInsensitive);
             Volume v(*disk, true);
             v.fault = [](const char *at) {
                 if (!strcmp(at, "journal-committed"))
@@ -530,6 +641,19 @@ int wmain(int argc, wchar_t **argv) {
         fragmented();
         fragmentedCatalog();
         containers();
+        for (bool journaled : {false, true})
+            for (bool sensitive : {false, true})
+                hfsx(journaled, sensitive);
+        crashes(Volume::FormatKind::HfsXCaseSensitive);
+        crashes(Volume::FormatKind::HfsXCaseInsensitive);
+        for (auto kind : {Volume::FormatKind::HfsXCaseSensitive, Volume::FormatKind::HfsXCaseInsensitive}) {
+            journalGeometry(kind);
+            fragmented(kind);
+            fragmentedCatalog(kind);
+        }
+        must(CompareNames(std::u16string(1, 0) + u"a", u"a", true) < 0, "HFSX binary comparison skipped NUL");
+        must(CompareNames(std::u16string(1, 0) + u"a", std::u16string(1, 0) + u"b", true) < 0,
+             "HFSX binary comparison stopped at NUL");
         permissions();
         failures();
         must(Normalize(u"\uac01") == u"\u1100\u1161\u11a8", "Hangul decomposition");
@@ -546,7 +670,8 @@ int wmain(int argc, wchar_t **argv) {
             auto folder = v.MakeDirectory(2, u"Unicode \u00e9");
             v.Put(folder, u"Both forks", 65539, 777, pattern);
         }
-        puts("PASS: own HFS+ formatter, read/write both forks, Unicode, multi-level catalog, journal "
+        puts("PASS: own HFS+ / HFSX formatters, both HFSX comparison modes, directory counts, read/write "
+             "both forks, Unicode, multi-level catalog, journal "
              "commit/replay, crash phases, corrupt journal and read-only recovery");
         return 0;
     } catch (const std::exception &e) {

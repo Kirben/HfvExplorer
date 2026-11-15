@@ -13,16 +13,22 @@ Current filesystem support
   belong on HFS+; oversized classic imports are rejected before creation.
 - HFS+ disk images: format, browse, import/export data and resource forks,
   overwrite files, create folders, rename entries and delete files or
-  empty folders. File > Format HFS+ image creates a new image (8 MiB minimum),
+  empty folders. File > Format HFS+ / HFSX image creates a new image (8 MiB minimum),
   with journaling enabled by default. File > Open volume opens a separate
-  Unicode HFS+ browser. Transfers use raw data/resource files, without BinHex
+  Unicode HFS+ / HFSX browser. Transfers use raw data/resource files, without BinHex
   or MacBinary conversion. It is not yet integrated into the classic main tree.
-- HFS+ internal journals support read/write transactions and replay. A read-only
+- HFSX v5 supports formatting, browsing and read/write in both case-sensitive
+  and case-insensitive modes, with or without journaling. Case-sensitive names
+  preserve ignorable characters and distinguish Readme from README. Catalog
+  comparison mode, volume version and directory counts survive all writes.
+  Apple_HFSX partitions are supported; HFSX inside an HFS wrapper is rejected.
+  HFSX shares the image browser and the general limitations listed below.
+- HFS+ and HFSX internal journals support read/write transactions and replay. A read-only
   open replays into memory without changing the image. Non-journaled writes
   are supported but cannot provide journaled recovery after interruption.
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
-  Physical HFS+ CD/floppy access, GPT images, compressed DMG containers and
-  external journals are not implemented. HFSX is read-only in this update.
+  Physical HFS+ / HFSX CD/floppy access, GPT images, compressed DMG containers and
+  external journals are not implemented.
 - Ordinary files and both forks are supported. Compressed files and hard-link
   resolution are rejected explicitly. Existing extended attributes are kept;
   modifying an entry with attributes/ACLs is refused. Encryption and expanded
@@ -31,7 +37,8 @@ Current filesystem support
 - MFS remains read-only. Existing classic HFS CD/floppy support is unchanged.
 
 Tests: .\build-x64.ps1 -Test runs the full suite, including real HFS+ reads and
-writes beyond 2 GiB in both forks. -TestHfsPlus runs only the HFS+ checks.
+writes beyond 2 GiB in both forks of HFS+ and HFSX images. -TestHfsPlus runs
+only the HFS+ / HFSX checks.
 Optional independent checks use tests\test-hfsplus-interop.ps1 with WSL and
 hfsprogs installed; neither is needed to run HFVExplorer. Tested on Windows 11;
 older Windows execution tests remain pending. No custom storage driver is used.

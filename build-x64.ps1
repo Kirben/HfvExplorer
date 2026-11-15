@@ -34,6 +34,8 @@ if($Test -or $TestHfsPlus) {
  if($LASTEXITCODE){throw "HFS+ core tests failed; retained $hfsPlusDirectory"}
  & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large (Join-Path $hfsPlusDirectory 'large.dsk')
  if($LASTEXITCODE){throw "HFS+ large-fork tests failed; retained $hfsPlusDirectory"}
+ & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large-hfsx (Join-Path $hfsPlusDirectory 'large-hfsx.dsk')
+ if($LASTEXITCODE){throw "HFSX large-fork tests failed; retained $hfsPlusDirectory"}
  & $msbuild "$PSScriptRoot\src\HFVExplorer-x64.vcxproj" /p:Configuration=Test /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE){throw 'HFS+ hidden UI test build failed.'}
  $hfsPlusUi=Join-Path $hfsPlusDirectory 'ui'
