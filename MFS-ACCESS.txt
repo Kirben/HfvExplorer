@@ -1,0 +1,65 @@
+Read-only MFS disk images (experimental x64 port)
+2026-11-15
+
+Use File > Open and select an MFS image. Supported containers are raw sector
+images and uncompressed Disk Copy 4.2 images. Recognition uses the MFS
+signature, not the filename extension. The file picker includes .dsk, .hfv,
+.img, .image, .mfs and .dc42; All Files can be used for other extensions.
+
+MFS opens in its own flat, read-only browser. It lists the full file name,
+data/resource fork lengths, type/creator, version and locked flag. MFS has
+no filesystem directory hierarchy. Its 255-byte MacRoman names and file
+versions are retained independently of the HFS browser's Str31 fields.
+The source image is opened with GENERIC_READ and denies sharing for writers.
+The parser's byte-source interface has no write operation.
+
+Select a file and choose:
+- Export AppleSingle: writes a new .as file with both forks, the original
+  MacRoman name, Finder information and creation/modification dates.
+- Export data fork: writes the data bytes only, for use with Windows tools.
+Export never overwrites an existing path. Choose another filename if needed.
+The suggested Windows filename is sanitized/shortened where necessary;
+AppleSingle's embedded original name is preserved. Empty forks are supported.
+MFS file versions and the file's locked bit are shown in the browser but do
+not have dedicated entries in this AppleSingle export. Preserve the source
+image when complete filesystem-level metadata is needed.
+
+Scope
+- Images only: no MFS floppy/CD device access, formatting, import, rename,
+  deletion or in-place modification. The HFS browser remains separate.
+- File > Open is required; MFS images are not mounted by the HFS auto-scan.
+- No MFS drag-and-drop transfers or Finder folder emulation are added.
+- Disk Copy tag data and checksums are not interpreted or verified. Compressed
+  Disk Copy/NDIF, DiskCopy 6, flux images, partitioned MFS and other wrappers
+  are not supported. Convert those to raw sectors with a suitable tool first.
+- Invalid layouts, inconsistent directory counts, cyclic/cross-linked chains,
+  reserved directory blocks used as data, and truncated chains are rejected.
+  This is a strict reader, not a damaged-volume recovery tool.
+- The existing application's image-path picker uses the Windows ANSI code
+  page. Names inside MFS images are displayed through Unicode MacRoman
+  conversion. Export uses a Unicode Windows save dialog.
+
+Validation
+  .\build-x64.ps1 -Test
+The new tests compile the same MfsImage.cpp used by the application. Generated
+400/800 KiB sector fixtures independently pack allocation-map bits and exercise
+raw/DC42 containers, multiple directory sectors, long MacRoman names, file
+versions, both fragmented forks, backward/unaligned reads, EOF clipping, empty
+forks, Finder information, timestamps and directory-reserved allocation blocks.
+AppleSingle descriptors, both payloads, dates, names and Finder data are checked
+independently. Existing output/source overwrite attempts are rejected; a live
+source denies a competing write handle. Failed exports remove partial output.
+Source bytes are compared before and after reads and exports. Corrupt fixtures
+cover geometry, bounds, flags, IDs, names, file counts, lengths and chains.
+Existing small/large HFS, overflow-extents and synthetic CD tests also pass.
+All tests are headless and use disposable files. No computer control or physical
+drive access was used. The MFS dialog was built but not visually smoke-tested;
+real archived MFS disk images have not yet been validated in this port.
+
+Format references (used as documentation; Apple sample code was not copied):
+https://developer.apple.com/library/archive/samplecode/MFSLives/Introduction/Intro.html
+https://developer.apple.com/library/archive/samplecode/MFSLives/Listings/MFSCore_c.html
+https://www.rfc-editor.org/rfc/rfc1740
+
+This remains an unofficial port of HFVExplorer. Original copyright and GPL
+notices are preserved. MFS is distinct from HFS, HFS+ and HFSX.

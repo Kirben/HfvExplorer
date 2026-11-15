@@ -241,3 +241,9 @@
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
+
+#define IDD_MFS_BROWSER 1800
+#define IDC_MFS_LIST 1200
+#define IDC_MFS_EXPORT 1201
+#define IDC_MFS_DATA 1202
+#define IDC_MFS_STATUS 1203

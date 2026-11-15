@@ -552,7 +552,7 @@ void CHFVExplorerApp::OnFileOpen()
 
 	CFileDialog dlg( TRUE, _T("DSK"), name,
 				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
-				_T("DSK, HFV and HFx Files|*.dsk;*.hf*|All Files|*.*||") );
+				_T("Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		name = dlg.GetPathName();
 		OpenDocumentFile(name);

@@ -38,4 +38,10 @@ if($Test) {
  if(Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
  if($headless.ExitCode -ne 0) { throw "Headless image tests failed; retained $largeDirectory" }
  Write-Host "Large-image tests retained at $largeDirectory (6 GiB logical sparse file)."
+ & $msbuild "$PSScriptRoot\tests\mfs-readonly.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Read-only MFS test build failed.' }
+ $mfsDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-MFS-'+[Guid]::NewGuid().ToString('N'))
+ & "$PSScriptRoot\bin\x64\mfs-readonly.exe" $mfsDirectory
+ if($LASTEXITCODE) { throw "Read-only MFS tests failed; retained $mfsDirectory" }
+ Write-Host "MFS fixtures and exports retained at $mfsDirectory"
 }

@@ -1351,3 +1351,16 @@ LANGUAGE 9, 1
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
 
+
+IDD_MFS_BROWSER DIALOGEX 0, 0, 540, 270
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "MFS image (read-only)"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "", IDC_MFS_STATUS, 10, 9, 515, 12
+    CONTROL "", IDC_MFS_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 10, 26, 520, 199
+    LTEXT "AppleSingle preserves both forks, the original name and Finder metadata.", IDC_STATIC, 10, 231, 520, 12
+    PUSHBUTTON "Export AppleSingle...", IDC_MFS_EXPORT, 10, 249, 112, 14
+    PUSHBUTTON "Export data fork...", IDC_MFS_DATA, 130, 249, 102, 14
+    DEFPUSHBUTTON "Close", IDCANCEL, 478, 249, 52, 14
+END

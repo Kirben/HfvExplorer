@@ -39,5 +39,6 @@ and headless storage tests, without windows, drive discovery or optical I/O.
 - Existing small-image, 6 GiB read/write and synthetic read-only CD tests run
   in the same suite. No user media is modified.
 
-Scope remains classic HFS. MFS, HFS+ and HFSX are not added. Physical CDs
+Scope of this reader remains classic HFS. MFS is now supported separately
+by a read-only image browser (MFS-ACCESS.txt). HFS+ and HFSX are not added. CDs
 remain read-only. Existing compiler conversion/deprecation warnings remain.

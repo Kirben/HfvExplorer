@@ -78,6 +78,7 @@
     <ClCompile Include="hfs\interface.c" />
     <ClCompile Include="ImageOnly.cpp" />
     <ClCompile Include="ReadOnlyCd.cpp" />
+    <ClCompile Include="MfsImage.cpp" /><ClCompile Include="MfsBrowser.cpp" />
     <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" />
     <ClCompile Include="ReadOnlyCdBackend.cpp" />
     <ResourceCompile Include="HFVExplorer.rc" />

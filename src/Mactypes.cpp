@@ -379,7 +379,7 @@ BOOL CHFVVolume::find_volume_MDB()
 	while(!found && i < 8192) {
 		if( *(unsigned short *)p == 0x4442 ) { // these are still in Motorola
 			found = 1;
-		} else if( *(int *)p == 0xD7D2 ) { // still in Motorola
+		} else if( *(unsigned short *)p == 0xD7D2 ) { // still in Motorola
 			found = 2;
 		} else {
 			i += 512;
@@ -397,7 +397,7 @@ BOOL CHFVVolume::find_volume_MDB()
 			macpc_MDB( &m_MDB );
 			break;
 		case 2:
-			AfxMessageBox( "Old flat MFS volumes not supported.", MB_OK | MB_ICONHAND );
+			// MFS images use the dedicated read-only browser on File > Open.
 			break;
 	}
 	return(found == 1);
