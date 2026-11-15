@@ -19,6 +19,8 @@ Scope
 - Classic HFS disk images; this does not add HFS+ support.
 - Read-only MFS images open in a dedicated flat browser with fork-preserving
   AppleSingle export. See MFS-ACCESS.txt for formats, tests and limitations.
+- Individual data/resource forks above 2 GiB passed full read/write and
+  MacBinary round-trip tests. See LARGE-FORKS.txt for limits and coverage.
 - Fragmented data/resource forks, catalogs and extents-overflow trees are
   supported. See OVERFLOW-EXTENTS.txt for tests and bounds checks.
 - Read-only classic HFS/hybrid CD access uses built-in Windows device APIs.

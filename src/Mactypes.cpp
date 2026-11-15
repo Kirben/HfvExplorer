@@ -643,20 +643,18 @@ void CHFVFile::Close()
 	m_opened = 0;
 }
 
-hfv_offset_t CHFVFile::Seek( hfv_offset_t lOff, UINT nFrom )
+hfv_offset_t CHFVFile::Seek(hfv_offset_t offset,UINT origin)
 {
-	if(!m_opened) return(0);
-
-	if(nFrom == CFile::begin) {
-		m_offset = lOff;
-	} else if(nFrom == CFile::current) {
-		m_offset += lOff;
-	} else { // end
-		m_offset = m_file_size + lOff; // TEST: WAS: -lOff
-	}
-	return(m_offset);
+ if(!m_opened) return -1;
+ hfv_offset_t base;
+ if(origin==CFile::begin) base=0;
+ else if(origin==CFile::current) base=m_offset;
+ else if(origin==CFile::end) base=m_file_size;
+ else return -1;
+ if((offset>0 && base>INT64_MAX-offset) || (offset<0 && base<INT64_MIN-offset)) return -1;
+ m_offset=base+offset;
+ return m_offset;
 }
-
 static unsigned extWord(const BYTE* p) { return ((unsigned)p[0]<<8)|p[1]; }
 static LongInt extLong(const BYTE* p) { return ((LongInt)extWord(p)<<16)|extWord(p+2); }
 

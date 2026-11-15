@@ -137,6 +137,8 @@ int hfs_closedir(hfsdir *);
 hfsfile *hfs_open(hfsvol *, char *);
 int hfs_setfork(hfsfile *, int);
 int hfs_getfork(hfsfile *);
+/* Windows long results are signed 32-bit: stream large forks in chunks.
+   Reads cap each result at LONG_MAX; larger write requests fail with EINVAL. */
 long hfs_read(hfsfile *, void *, unsigned long);
 long hfs_write(hfsfile *, void *, unsigned long);
 int hfs_truncate(hfsfile *, unsigned long);

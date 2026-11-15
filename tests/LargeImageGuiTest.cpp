@@ -13,6 +13,7 @@ static void require(bool ok,const char* operation) {
     if(!ok) throw operation;
 }
 void RunFragmentedGuiTests(const char* metadata,FILE* report);
+void RunLargeForkGuiTests(const char* metadata,FILE* report);
 int RunLargeImageGuiTest(const char* metadata,const char* reportPath) {
     FILE* report=NULL;
     HANDLE reportHandle=CreateFileA(reportPath,GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_NEW,0,NULL);
@@ -90,6 +91,7 @@ int RunLargeImageGuiTest(const char* metadata,const char* reportPath) {
         }
         volume.close();
         RunFragmentedGuiTests(metadata,report);
+        RunLargeForkGuiTests(metadata,report);
         fprintf(report,"PASS: GUI storage classes: 6 GiB length, seeks and persistent writes across 2/4 GiB, alias guards, high HFS extents, both forks, creation size parsing\n");
     } catch(const char* operation) { fprintf(report,"FAIL: %s\n",operation); fclose(report); return 1; }
       catch(CException* error) { char text[512]; error->GetErrorMessage(text,sizeof(text)); fprintf(report,"FAIL: MFC: %s\n",text); error->Delete(); fclose(report); return 1; }

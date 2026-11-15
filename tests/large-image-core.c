@@ -17,6 +17,7 @@ static void check(int ok,const char* action) {
     if(!ok) { fprintf(stderr,"FAIL: %s (errno=%d; HFS=%s)\n",action,errno,hfs_error?hfs_error:""); exit(1); }
 }
 void CreateFragmentedFixture(const char* directory);
+void CreateLargeForkFixture(const char* directory);
 int main(int argc,char** argv) {
     const uint64_t gib=1024ULL*1024*1024;
     LargeImageManifest manifest = {0};
@@ -94,6 +95,7 @@ int main(int argc,char** argv) {
     { struct _stat64 st; check(fhook_stat(image,&st)==0 && st.st_size==6*gib,"64-bit host stat"); }
     fhook_close(fd);
     CreateFragmentedFixture(argv[1]);
+    CreateLargeForkFixture(argv[1]);
     readonly_cd_backend_final();
     { FILE* out=fopen(meta,"wb"); check(out!=NULL,"create GUI test manifest"); check(fwrite(&manifest,sizeof(manifest),1,out)==1,"save test manifest"); fclose(out); }
     puts("PASS: sparse 6 GiB HFS format, crossing 2 GiB and above 4 GiB writes, both forks, reopen, byte fidelity, 64-bit seek/stat");

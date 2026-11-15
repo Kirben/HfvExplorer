@@ -24,6 +24,7 @@
 // #define PARENTIDFLAG 0xFFFF8000ul
 
 #include "ftypes.h"
+#include "HostOffsets.h"
 
 typedef struct {
 	int type;
@@ -147,7 +148,7 @@ public:
 	int list_insert( 
 		LPSTR name, 
 		int isdir, 
-		unsigned long size_in_bytes,
+		hfv_size_t size_in_bytes,
 		unsigned long creation_date,
 		unsigned long modification_date,
 		char *stype,

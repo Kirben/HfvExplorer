@@ -1243,9 +1243,11 @@ long hfs_read(hfsfile *file, void *buf, unsigned long len)
 
   f_getptrs(file, &lglen, 0, 0);
 
+  if (file->pos >= *lglen) return 0;
   if (len > *lglen - file->pos)
     len = *lglen - file->pos;
 
+  if (len > 0x7fffffffUL) len = 0x7fffffffUL; /* signed transfer result */
   count = len;
   while (count)
     {
@@ -1300,6 +1302,7 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
   f_getptrs(file, &lglen, &pylen, 0);
 
   if (len > 0xffffffffUL - file->pos) { ERROR(EFBIG, "classic HFS fork size limit"); return -1; }
+  if (len > 0x7fffffffUL) { ERROR(EINVAL, "transfer count exceeds signed API range"); return -1; }
   count = len;
 
   /* set flag to update (at least) the modification time */
@@ -1406,11 +1409,11 @@ hfv_offset_t hfs_lseek(hfsfile *file, hfv_offset_t offset, int from)
       break;
 
     case SEEK_CUR:
-      newpos = file->pos + offset;
+      newpos = offset > (hfv_offset_t)*lglen - file->pos ? *lglen : (hfv_offset_t)file->pos + offset;
       break;
 
     case SEEK_END:
-      newpos = *lglen + offset;
+      newpos = offset > 0 ? *lglen : (hfv_offset_t)*lglen + offset;
       break;
 
     default:

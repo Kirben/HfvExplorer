@@ -1,0 +1,67 @@
+Individual classic HFS forks larger than 2 GiB
+2026-11-15
+
+Audit and fixes
+- Raw, raw-resource, binary-mode text and AppleDouble data imports previously
+  stopped at LONG_MAX bytes and could report success for a truncated copy.
+  Unbounded copies now continue to EOF; bounded resource copies report a
+  premature EOF as an error.
+- MacBinary II and BinHex import lengths now retain all 32 unsigned bits.
+  Their streaming buffers and per-call transfer counts remain small.
+- AppleDouble resource offsets use a checked 64-bit CRT seek. Invalid input
+  descriptor handles are rejected correctly.
+- Physical fork allocation and EOF rounding use checked arithmetic, avoiding
+  a wrap to zero near 4 GiB. Clumps are capped to the representable remaining
+  allocation rather than overflowing the on-disk physical EOF.
+- Core and GUI relative seeks avoid signed 64-bit overflow. Core reads avoid
+  unsigned remaining-length underflow when positioned beyond EOF.
+- The Windows core API returns a signed 32-bit long transfer count: reads cap
+  each result at LONG_MAX and writes larger than LONG_MAX fail with EINVAL.
+  Large forks are transferred using multiple calls.
+- The GUI's combined data/resource byte count and KB rounding use 64-bit
+  arithmetic. Both forks can exceed 2 GiB without their sum wrapping at 4 GiB.
+- Resource-map cursor arithmetic and allocation-size arithmetic were widened
+  where the GUI previously narrowed offsets into signed Windows long fields.
+
+Tests
+  .\build-x64.ps1 -Test
+
+The same production HFS core and copy modules are exercised headlessly:
+- Import a complete 2,147,549,221-byte patterned raw data fork; stream a separate
+  resource fork of the same length into the same HFS file.
+- Overwrite across 0x80000000 in both forks, flush, unmount, reopen and read
+  every byte of both forks back in bounded chunks.
+- Export the complete file as MacBinary II (a host file larger than 4 GiB),
+  delete the disposable original, reimport it, reopen and verify every byte
+  of both forks again. Both catalog lengths retain their unsigned high bit.
+- Truncate and append above 2 GiB, persist and check the tails using the GUI
+  storage classes. GUI tests also check signed-boundary reads, EOF clipping
+  and extreme relative seek rejection.
+- Use the production AppleDouble metadata reader and importer with Finder
+  information and resource data located above 2 GiB in a sparse host file.
+- Focused tests check physical-allocation and rounded-EOF rollover, oversized
+  per-call writes, and BinHex headers whose unsigned fork lengths exceed
+  LONG_MAX but whose payloads are deliberately truncated.
+- Existing small HFS, large-image, overflow-extents, synthetic CD and MFS
+  regressions also pass. No computer control or physical drive access is used.
+
+The test suite now streams many GiB and retains approximately 10 GiB of large
+fork fixtures in addition to its sparse images. It prints their directories.
+The console copy tests stub only unused GUI/character-set services for ASCII
+fixtures; the AppleDouble GUI test uses the actual application helper.
+
+Limits and remaining validation
+The disk format remains classic HFS. Logical and physical fork lengths are
+32-bit fields. Because physical length must be allocation-block aligned, the
+maximum allocatable fork length in this implementation is:
+  floor(0xffffffff / allocationBlockSize) * allocationBlockSize
+It can therefore be less than the nominal 4 GiB minus one-byte logical limit.
+Boundary guards were tested without attempting a complete near-4-GiB fork.
+The largest complete forks validated here are 2,147,549,221 bytes each.
+
+Full multi-GiB BinHex encoding/decoding, full multi-GiB AppleDouble resource
+transfers, translated-text transfers and HFS-to-HFS copies have not each been
+tested end-to-end at that size. BinHex high-bit header handling and AppleDouble
+high-offset seeking were tested separately. Resource-byte I/O support is not
+a conformance audit of every resource, icon, PICT or font parser. Compatibility
+with old Mac OS releases/applications is not established by these Windows tests.

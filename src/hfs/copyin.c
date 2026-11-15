@@ -83,7 +83,7 @@ void copyin_set_raw_param( char *type, char *creator, int strip )
  * DESCRIPTION:	perform copy using MacBinary II translation
  */
 static
-int do_macb(int ifile, hfsfile *ofile, long dsize, long rsize)
+int do_macb(int ifile, hfsfile *ofile, unsigned long dsize, unsigned long rsize)
 {
   char buf[HFS_BLOCKSZ * 4];
   long bytes, chunk;
@@ -158,7 +158,7 @@ int do_macb(int ifile, hfsfile *ofile, long dsize, long rsize)
  * DESCRIPTION:	perform copy using BinHex translation
  */
 static
-int do_binh(hfsfile *ofile, long dsize, long rsize)
+int do_binh(hfsfile *ofile, unsigned long dsize, unsigned long rsize)
 {
   char buf[HFS_BLOCKSZ * 4];
   long bytes;
@@ -273,23 +273,25 @@ int do_text(int ifile, hfsfile *ofile)
  * DESCRIPTION:	perform copy using no translation
  */
 static
-int do_raw(int ifile, hfsfile *ofile,long copy_count)
+int do_raw(int ifile, hfsfile *ofile,hfv_size_t copy_count)
 {
   char buf[HFS_BLOCKSZ * 4];
   long bytes, howmucho;
 
   while (copy_count > 0) {
 		howmucho = sizeof(buf);
-		if(howmucho > copy_count) howmucho = copy_count;
+		if((hfv_size_t)howmucho > copy_count) howmucho = (long)copy_count;
     bytes = read(ifile, buf, howmucho);
     if (bytes < 0)
 		{
 			cpi_error = "error reading source file";
 			return -1;
 		}
-		else if (bytes == 0)
+		else if (bytes == 0) {
+			if(copy_count != ~(hfv_size_t)0) { cpi_error = "source fork is truncated"; return -1; }
 			break;
-		copy_count -= bytes;
+		}
+		if(copy_count != ~(hfv_size_t)0) copy_count -= bytes;
     if (hfs_write(ofile, buf, bytes) < 0)
 		{
 			cpi_error = hfs_error;
@@ -501,7 +503,7 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
   char *dsthint, type[5], creator[5];
   unsigned char buf[MACB_BLOCKSZ];
   unsigned short crc;
-  long dsize, rsize;
+  unsigned long dsize, rsize;
 
   ifile = opensrc(srcname, &dsthint, ".bin");
   if (ifile < 0)
@@ -551,14 +553,6 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
   dsize = d_getl(&buf[83]);
   rsize = d_getl(&buf[87]);
 
-  if (dsize < 0 || dsize > 0x7fffffff ||
-      rsize < 0 || rsize > 0x7fffffff)
-    {
-      cpi_error = "invalid MacBinary file header (bad file length)";
-      close(ifile);
-      return -1;
-    }
-
   dsthint = (char *) &buf[2];
 
   memcpy(type,    &buf[65], 4);
@@ -603,7 +597,7 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
  */
 static
 int binhx(char *fname, char *type, char *creator, short *fdflags,
-	  long *dsize, long *rsize)
+	  unsigned long *dsize, unsigned long *rsize)
 {
   int len;
   unsigned char byte, word[2], lword[4];
@@ -657,13 +651,6 @@ int binhx(char *fname, char *type, char *creator, short *fdflags,
     }
   *rsize = d_getl(lword);
 
-  if (*dsize < 0 || *dsize > 0x7fffffff ||
-      *rsize < 0 || *rsize > 0x7fffffff)
-    {
-      cpi_error = "invalid BinHex file header (bad file length)";
-      return -1;
-    }
-
   if (bh_readcrc() < 0)
     {
       cpi_error = bh_error;
@@ -684,7 +671,7 @@ int cpi_binh(char *srcname, hfsvol *vol, char *dstname)
   hfsdirent ent;
   char *dsthint, fname[HFS_MAX_FLEN + 1], type[5], creator[5];
   short fdflags;
-  long dsize, rsize;
+  unsigned long dsize, rsize;
 
   ifile = opensrc(srcname, &dsthint, ".hqx");
   if (ifile < 0)
@@ -768,7 +755,7 @@ int cpi_text(char *srcname, hfsvol *vol, char *dstname)
 	  result = do_text(ifile, ofile);
 	} else {
 		setmode(ifile, O_BINARY);
-	  result = do_raw(ifile, ofile, MAXLONG);
+	  result = do_raw(ifile, ofile, ~(hfv_size_t)0);
 	}
   closefiles(ifile, ofile, &result);
 
@@ -806,7 +793,7 @@ int cpi_raw(char *srcname, hfsvol *vol, char *dstname)
       return -1;
     }
 
-  result = do_raw(ifile, ofile, MAXLONG);
+  result = do_raw(ifile, ofile, ~(hfv_size_t)0);
   closefiles(ifile, ofile, &result);
 
   return result;
@@ -832,7 +819,7 @@ int cpi_raw_resource(char *srcname, hfsvol *vol, char *dstname)
 	if(hfs_setfork(ofile, 1) < 0) {
 		result = -1;
 	} else {
-	  result = do_raw(ifile, ofile, MAXLONG);
+	  result = do_raw(ifile, ofile, ~(hfv_size_t)0);
 	}
 
   closefiles(ifile, ofile, &result);
@@ -857,11 +844,11 @@ int cpi_double( char *fdata, char *fres, hfsvol *vol, char *dstname )
 
 	// Open %file first so we get hint from real name
 	ifile1 = opensrc( fres, &dsthint, 0 );
-  if (ifile1 == 0)
+  if (ifile1 < 0)
     return -1;
 
 	ifile0 = opensrc( fdata, &dsthint, 0 );
-  if (ifile0 == 0) {
+  if (ifile0 < 0) {
 		close(ifile1);
     return -1;
 	}
@@ -878,14 +865,14 @@ int cpi_double( char *fdata, char *fres, hfsvol *vol, char *dstname )
     cpi_error = hfs_error;
 		result = -1;
 	} else {
-	  result = do_raw(ifile0, ofile, MAXLONG);
+	  result = do_raw(ifile0, ofile, ~(hfv_size_t)0);
 		if(result == 0) {
 		  if(hfs_setfork(ofile, 1) < 0) {
 				cpi_error = hfs_error;
 				result = -1;
 			} else {
-				lseek( ifile1, rstart, SEEK_SET );
-				result = do_raw(ifile1, ofile, rlength);
+				if(_lseeki64(ifile1,(hfv_offset_t)rstart,SEEK_SET)<0) { cpi_error="error seeking AppleDouble resource fork"; result=-1; }
+				if(result==0) result = do_raw(ifile1, ofile, rlength);
 			}
 		}
 	}

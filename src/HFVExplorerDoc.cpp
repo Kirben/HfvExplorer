@@ -1267,10 +1267,10 @@ int CHFVExplorerDoc::walk_resource_fork( CFile *fp, LongInt type_to_check, Integ
 	resource_type_item type_item;
 	resource_ref_list_entry ref_entry;
 	int res, typ;
-	long offs1, offs2, res_data_offset;
+	hfv_offset_t offs1, offs2, res_data_offset;
 	Integer type_count1; // count-1
 	LongInt data_len;
-	long g_offset;
+	hfv_offset_t g_offset;
 
 	UPDATE_TIME_CONSUMING(1);
 
@@ -1278,11 +1278,11 @@ int CHFVExplorerDoc::walk_resource_fork( CFile *fp, LongInt type_to_check, Integ
 
 	fp->Read( &res_header, sizeof(resource_header) );
 	macpc_resource_header( &res_header );
-	fp->Seek( g_offset+res_header.resource_map_offset, CFile::begin );
+	fp->Seek( (hfv_offset_t)g_offset+res_header.resource_map_offset, CFile::begin );
 	fp->Read( &map_header, sizeof(resource_map_header) );
 	macpc_resource_map_header( &map_header );
 
-	offs1 = g_offset + res_header.resource_map_offset + map_header.type_list_offset;
+	offs1 = (hfv_offset_t)g_offset + res_header.resource_map_offset + map_header.type_list_offset;
 	fp->Seek( offs1, CFile::begin );
 	fp->Read( &type_count1, sizeof(type_count1) );
 	MACPC_W(type_count1);
@@ -1299,7 +1299,7 @@ int CHFVExplorerDoc::walk_resource_fork( CFile *fp, LongInt type_to_check, Integ
 		fp->Read( &type_item, sizeof(resource_type_item) );
 		macpc_resource_type_item( &type_item );
 		if(type_item.res_type == type_to_check) {
-			offs2 = (long)res_header.resource_map_offset + 
+			offs2 = (hfv_offset_t)res_header.resource_map_offset +
 							map_header.type_list_offset + type_item.ref_list_offset;
 			offs2 += g_offset;
 
@@ -1311,7 +1311,7 @@ int CHFVExplorerDoc::walk_resource_fork( CFile *fp, LongInt type_to_check, Integ
 				if( ref_entry.res_id == id_to_check ) {
 					// found item
 					res_data_offset = 
-							g_offset + res_header.resource_data_offset +
+							(hfv_offset_t)g_offset + res_header.resource_data_offset +
 							( ((long)ref_entry.res_data_offset_hi << 16) |
 								ref_entry.res_data_offset_lo );
 					fp->Seek( res_data_offset, CFile::begin );
@@ -1360,10 +1360,10 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource(
 	resource_type_item type_item;
 	resource_ref_list_entry ref_entry;
 	int res, typ;
-	long offs1, offs2, res_data_offset;
+	hfv_offset_t offs1, offs2, res_data_offset;
 	Integer type_count1; // count-1
 	LongInt data_len;
-	long g_offset;
+	hfv_offset_t g_offset;
 	HANDLE h = 0;
 
 	CHFVFile f;
@@ -1380,11 +1380,11 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource(
 	macpc_resource_header( &res_header );
 	if(!res_header.resource_data_length ||
 		 !res_header.resource_map_length) return(0);
-	fp->Seek( g_offset+res_header.resource_map_offset, CFile::begin );
+	fp->Seek( (hfv_offset_t)g_offset+res_header.resource_map_offset, CFile::begin );
 	fp->Read( &map_header, sizeof(resource_map_header) );
 	macpc_resource_map_header( &map_header );
 
-	offs1 = g_offset + res_header.resource_map_offset + map_header.type_list_offset;
+	offs1 = (hfv_offset_t)g_offset + res_header.resource_map_offset + map_header.type_list_offset;
 	fp->Seek( offs1, CFile::begin );
 	fp->Read( &type_count1, sizeof(type_count1) );
 	MACPC_W(type_count1);
@@ -1397,7 +1397,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource(
 		fp->Read( &type_item, sizeof(resource_type_item) );
 		macpc_resource_type_item( &type_item );
 		if(type_item.res_type == type_to_check) {
-			offs2 = (long)res_header.resource_map_offset + 
+			offs2 = (hfv_offset_t)res_header.resource_map_offset +
 							map_header.type_list_offset + type_item.ref_list_offset;
 			offs2 += g_offset;
 
@@ -1409,7 +1409,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource(
 				if( (ref_entry.res_attrib & resCompressed) == 0) {
 					if( nocheck || ref_entry.res_id == id_to_check ) {
 						res_data_offset = 
-								g_offset + res_header.resource_data_offset +
+								(hfv_offset_t)g_offset + res_header.resource_data_offset +
 								( ((long)ref_entry.res_data_offset_hi << 16) |
 									ref_entry.res_data_offset_lo );
 						fp->Seek( res_data_offset, CFile::begin );
@@ -1419,7 +1419,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource(
 						// read "data_len" bytes
 						if(h) GlobalFree(h);
 						// Add 2000 to make space for compressed icons ...
-						h = GlobalAlloc( GHND, data_len+2000 );
+						h = GlobalAlloc( GHND, (SIZE_T)data_len+2000 );
 						if(h) {
 							LPSTR p = (LPSTR)GlobalLock( h );
 							fp->Read( p, data_len );
@@ -1446,7 +1446,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource2(
 	resource_type_item type_item;
 	resource_ref_list_entry ref_entry;
 	int res, typ;
-	long offs1, offs2, res_data_offset;
+	hfv_offset_t offs1, offs2, res_data_offset;
 	Integer type_count1; // count-1
 	LongInt data_len;
 	HANDLE h = 0;
@@ -1456,11 +1456,11 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource2(
 	macpc_resource_header( &res_header );
 	if(!res_header.resource_data_length ||
 		 !res_header.resource_map_length) return(0);
-	fp->Seek( g_offset+res_header.resource_map_offset, CFile::begin );
+	fp->Seek( (hfv_offset_t)g_offset+res_header.resource_map_offset, CFile::begin );
 	fp->Read( &map_header, sizeof(resource_map_header) );
 	macpc_resource_map_header( &map_header );
 
-	offs1 = g_offset + res_header.resource_map_offset + map_header.type_list_offset;
+	offs1 = (hfv_offset_t)g_offset + res_header.resource_map_offset + map_header.type_list_offset;
 	fp->Seek( offs1, CFile::begin );
 	fp->Read( &type_count1, sizeof(type_count1) );
 	MACPC_W(type_count1);
@@ -1470,7 +1470,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource2(
 		fp->Read( &type_item, sizeof(resource_type_item) );
 		macpc_resource_type_item( &type_item );
 		if(type_item.res_type == type_to_check) {
-			offs2 = (long)res_header.resource_map_offset + 
+			offs2 = (hfv_offset_t)res_header.resource_map_offset +
 							map_header.type_list_offset + type_item.ref_list_offset;
 			offs2 += g_offset;
 
@@ -1482,7 +1482,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource2(
 				if( (ref_entry.res_attrib & resCompressed) == 0) {
 					if( nocheck || ref_entry.res_id == id_to_check ) {
 						res_data_offset = 
-								g_offset + res_header.resource_data_offset +
+								(hfv_offset_t)g_offset + res_header.resource_data_offset +
 								( ((long)ref_entry.res_data_offset_hi << 16) |
 									ref_entry.res_data_offset_lo );
 						fp->Seek( res_data_offset, CFile::begin );
@@ -1491,7 +1491,7 @@ HANDLE CHFVExplorerDoc::mac_load_any_resource2(
 						MACPC_D(data_len);
 						// read "data_len" bytes
 						// Add 2000 to make space for compressed icons ...
-						h = GlobalAlloc( GHND, data_len+2000 );
+						h = GlobalAlloc( GHND, (SIZE_T)data_len+2000 );
 						if(h) {
 							LPSTR p = (LPSTR)GlobalLock( h );
 							fp->Read( p, data_len );
@@ -1583,7 +1583,7 @@ HICON CHFVExplorerDoc::mac_load_icon( int volinx, CatDataRec *pCDR, int small )
 void CHFVExplorerDoc::hfs_walk_callback( hfs_item_type *pitem, int finder_view_mode )
 {
 	int isdir;
-	unsigned long size_in_bytes;
+	hfv_size_t size_in_bytes;
 	unsigned long creation_date;
 	unsigned long modification_date;
 	char stype[100];
@@ -1659,7 +1659,7 @@ void CHFVExplorerDoc::hfs_walk_callback( hfs_item_type *pitem, int finder_view_m
 			OSType fdType = pitem->catdatarec.u.f.filUsrWds.fdType;
 			OSType fdCreator = pitem->catdatarec.u.f.filUsrWds.fdCreator;
 			if(pitem->catdatarec.cdrType == cdrFilRec) {
-				size_in_bytes = pitem->catdatarec.u.f.filLgLen + 
+				size_in_bytes = (hfv_size_t)pitem->catdatarec.u.f.filLgLen +
 												pitem->catdatarec.u.f.filRLgLen;
 				creation_date = pitem->catdatarec.u.f.filCrDat;
 				modification_date = pitem->catdatarec.u.f.filMdDat;

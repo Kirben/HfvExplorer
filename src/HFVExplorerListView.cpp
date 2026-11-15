@@ -537,7 +537,7 @@ void CHFVExplorerListView::set_origo( int x, int y )
 int CHFVExplorerListView::list_insert(
 		LPSTR name, 
 		int isdir, 
-		unsigned long size_in_bytes,
+		hfv_size_t size_in_bytes,
 		unsigned long creation_date,
 		unsigned long modification_date,
 		char *stype,
@@ -620,9 +620,9 @@ int CHFVExplorerListView::list_insert(
 	iActualItem = m_cl->InsertItem(&lvitem);
 
 	if(isdir) {
-		wsprintf( buf, "%ld items", size_in_bytes );
+		sprintf( buf, "%I64u items", (hfv_size_t)size_in_bytes );
 	} else {
-		wsprintf( buf, "%ld KB", (size_in_bytes + 1023) / 1024 );
+		sprintf( buf, "%I64u KB", ((hfv_size_t)size_in_bytes + 1023) / 1024 );
 	}
 	lvitem.mask = LVIF_TEXT;
 	lvitem.iItem = iActualItem;
@@ -791,9 +791,9 @@ int CHFVExplorerListView::list_fat_insert(
 	iActualItem = m_cl->InsertItem(&lvitem);
 
 	if(isdir) {
-		wsprintf( buf, "%ld items", size_in_bytes );
+		sprintf( buf, "%I64u items", (hfv_size_t)size_in_bytes );
 	} else {
-		wsprintf( buf, "%ld KB", (size_in_bytes + 1023) / 1024 );
+		sprintf( buf, "%I64u KB", ((hfv_size_t)size_in_bytes + 1023) / 1024 );
 	}
 	lvitem.mask = LVIF_TEXT;
 	lvitem.iItem = iActualItem;

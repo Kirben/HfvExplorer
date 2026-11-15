@@ -148,7 +148,17 @@ int f_alloc(hfsfile *file)
   if (clumpsz == 0)
     clumpsz = vol->mdb.drClpSiz;
 
-  blocks.xdrNumABlks = clumpsz / vol->mdb.drAlBlkSiz;
+  f_getptrs(file, 0, &pylen, 0);
+  /* Physical EOF is also a 32-bit on-disk field. Never wrap at 4 GiB. */
+  {
+    unsigned long available = (0xffffffffUL - *pylen) / vol->mdb.drAlBlkSiz;
+    unsigned long request = clumpsz / vol->mdb.drAlBlkSiz;
+    if (!available) { ERROR(EFBIG, "classic HFS physical fork size limit"); return -1; }
+    if (!request) request = 1;
+    if (request > available) request = available;
+    if (request > 65535UL) request = 65535UL;
+    blocks.xdrNumABlks = (unsigned short)request;
+  }
 
   if (v_allocblocks(vol, &blocks) < 0)
     return -1;
@@ -281,7 +291,11 @@ int f_trunc(hfsfile *file)
   f_getptrs(file, &lglen, &pylen, &extrec);
 
   alblksz  = file->vol->mdb.drAlBlkSiz;
-  newpylen = (*lglen / alblksz + (*lglen % alblksz != 0)) * alblksz;
+  {
+    hfv_size_t rounded = ((hfv_size_t)*lglen + alblksz - 1) / alblksz * alblksz;
+    if (rounded > 0xffffffffULL) { ERROR(EFBIG, "classic HFS physical fork size limit"); return -1; }
+    newpylen = (unsigned long)rounded;
+  }
 
   if (newpylen > *pylen)
     {

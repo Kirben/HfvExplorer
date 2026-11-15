@@ -9,6 +9,11 @@ if($LASTEXITCODE) { throw 'Application build failed.' }
 & $msbuild "$PSScriptRoot\tests\cd-probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
 if($LASTEXITCODE) { throw 'CD diagnostic build failed.' }
 if($Test) {
+ & $msbuild "$PSScriptRoot\tests\fork-limits.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Fork-limit test build failed.' }
+ $forkLimits=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-fork-limits-'+[Guid]::NewGuid().ToString('N'))
+ & "$PSScriptRoot\bin\x64\fork-limits.exe" $forkLimits
+ if($LASTEXITCODE) { throw "Fork-limit tests failed; retained $forkLimits" }
  & $msbuild "$PSScriptRoot\tests\image-roundtrip.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE) { throw 'Test build failed.' }
  $testImage=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-'+[Guid]::NewGuid().ToString('N')+'.dsk')
@@ -37,7 +42,7 @@ if($Test) {
  if(!$headless.WaitForExit(30000)) { $headless.Kill(); throw 'Headless image test timed out.' }
  if(Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
  if($headless.ExitCode -ne 0) { throw "Headless image tests failed; retained $largeDirectory" }
- Write-Host "Large-image tests retained at $largeDirectory (6 GiB logical sparse file)."
+ Write-Host "Large-image tests retained at $largeDirectory (includes approximately 10 GiB of large-fork fixtures)."
  & $msbuild "$PSScriptRoot\tests\mfs-readonly.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE) { throw 'Read-only MFS test build failed.' }
  $mfsDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-MFS-'+[Guid]::NewGuid().ToString('N'))
