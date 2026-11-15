@@ -1,6 +1,7 @@
 Floppy menu and General options update
 =====================================
-Supported platform: Windows 10/11 x64.
+Target platforms: Windows 7 SP1 + KB2533623 (or superseding update), Windows
+8/8.1, 10 and 11 x64. See WINDOWS-COMPATIBILITY.txt for validation status.
 
 File > Format new volume... lists removable drives in its destination list.
 Selecting <Format floppy A:> fixes the size to 1440 kB. Choose a volume name

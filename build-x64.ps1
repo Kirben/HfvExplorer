@@ -1,8 +1,12 @@
 param([switch]$Test,[switch]$TestFloppy,[switch]$TestCd)
 $ErrorActionPreference='Stop'
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.ATLMFC -property installationPath
-if(!$vs) { throw 'Install Visual Studio C++ tools and the MFC x86/x64 component first.' }
+$instances=(& $vswhere -all -products '*' -format json | ConvertFrom-Json)
+$vs=$instances | Where-Object {
+ (Test-Path -LiteralPath (Join-Path $_.installationPath 'VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe')) -and
+ (Test-Path -LiteralPath (Join-Path $_.installationPath 'VC\Tools\MSVC\14.44.35207\atlmfc\lib\x64\nafxcw.lib'))
+} | Select-Object -First 1 -ExpandProperty installationPath
+if(!$vs){throw 'Install v143 14.44 (17.14) x86/x64 tools and matching MFC in one Visual Studio instance. v145 cannot target Windows 7/8.'}
 $msbuild=Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
 & $msbuild "$PSScriptRoot\src\HFVExplorer-x64.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
 if($LASTEXITCODE) { throw 'Application build failed.' }
@@ -12,6 +16,15 @@ if(Test-Path -LiteralPath $compiledHelp) {Copy-Item -LiteralPath $compiledHelp -
 if($LASTEXITCODE) { throw 'CD diagnostic build failed.' }
 & $msbuild "$PSScriptRoot\tests\floppy-probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
 if($LASTEXITCODE) { throw 'Floppy diagnostic build failed.' }
+& $msbuild "$PSScriptRoot\tests\compatibility-probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+if($LASTEXITCODE){throw 'Compatibility probe build failed.'}
+& "$PSScriptRoot\bin\x64\compatibility-probe.exe"
+if($LASTEXITCODE){throw 'Host prerequisite or compatibility policy test failed.'}
+$startupReport=Join-Path $PSScriptRoot 'bin\x64\compatibility-startup.txt'
+$startup=Start-Process -FilePath "$PSScriptRoot\bin\x64\HFVExplorer.exe" -ArgumentList @('--compatibility-report',('"'+$startupReport+'"')) -WindowStyle Hidden -PassThru
+if(!$startup.WaitForExit(30000)){$startup.Kill();throw 'Release compatibility startup timed out.'}
+if($startup.ExitCode -ne 0){throw 'Release compatibility startup failed.'}
+
 if($TestCd) {
  & $msbuild "$PSScriptRoot\tests\image-roundtrip.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE){throw 'CD fixture builder failed.'}
@@ -128,4 +141,11 @@ if($Test -or $TestFloppy) {
  if(Test-Path -LiteralPath $mediaReport) {Get-Content -LiteralPath $mediaReport}
  if($mediaTest.ExitCode -ne 0) {throw "Media control tests failed; retained $mediaDirectory"}
  Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
+}
+if($Test) {
+ $auditFiles=@("$PSScriptRoot\bin\x64\HFVExplorer.exe","$PSScriptRoot\bin\x64\cd-probe.exe","$PSScriptRoot\bin\x64\floppy-probe.exe","$PSScriptRoot\bin\x64\compatibility-probe.exe","$PSScriptRoot\bin\tests\HFVExplorer.exe")
+ & python "$PSScriptRoot\tests\audit-windows-imports.py" --report "$PSScriptRoot\bin\x64\windows-import-audit.json" @auditFiles
+ if($LASTEXITCODE){throw 'Windows compatibility import audit failed.'}
+ & python "$PSScriptRoot\tests\test-import-audit.py" "$PSScriptRoot\bin\x64\compatibility-probe.exe"
+ if($LASTEXITCODE){throw 'Import auditor negative/positive tests failed.'}
 }

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010100;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ResourceCompile><PreprocessorDefinitions>WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010100;%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile>
+    <Link><MinimumRequiredVersion>6.01</MinimumRequiredVersion><AdditionalOptions>/OSVERSION:6.1 %(AdditionalOptions)</AdditionalOptions></Link>
+    <Manifest><AdditionalManifestFiles>$(MSBuildThisFileDirectory)src\WindowsCompatibility.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
+  </ItemDefinitionGroup>
+  <Target Name="VerifyCompatibilityToolset" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(PlatformToolset)' != 'v143' Or '$(VCToolsVersion)' != '14.44.35207'" Text="Windows 7/8 compatibility requires the pinned v143 14.44.35207 compiler, static CRT and matching MFC. Install the 14.44 (17.14) x86/x64 tools and MFC components." />
+  </Target>
+</Project>
