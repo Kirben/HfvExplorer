@@ -5,7 +5,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <string.h>
-inline bool ParseImageSize(const char* text, hfv_size_t* result) {
+inline bool ParseImageSize(const char* text, hfv_size_t* result,hfv_size_t maximum=0xffffffffULL*512) {
     if (!text || !result) return false;
     while (isspace((unsigned char)*text)) ++text;
     if (!isdigit((unsigned char)*text)) return false;
@@ -21,8 +21,9 @@ inline bool ParseImageSize(const char* text, hfv_size_t* result) {
     else if (!_stricmp(suffix,"K") || !_stricmp(suffix,"KB") || !_stricmp(suffix,"KiB")) unit=1024;
     else if (!_stricmp(suffix,"M") || !_stricmp(suffix,"MB") || !_stricmp(suffix,"MiB")) unit=1024ULL*1024;
     else if (!_stricmp(suffix,"G") || !_stricmp(suffix,"GB") || !_stricmp(suffix,"GiB")) unit=1024ULL*1024*1024;
+    else if (!_stricmp(suffix,"T") || !_stricmp(suffix,"TB") || !_stricmp(suffix,"TiB")) unit=1024ULL*1024*1024*1024;
     else return false;
-    if (value > (0xffffffffULL*512)/unit) return false;
+    if (value > maximum/unit) return false;
     value *= unit;
     if (value < 800*1024 || value % 512) return false;
     *result = value; return true;

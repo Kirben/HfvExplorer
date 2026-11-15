@@ -47,16 +47,17 @@ static void testHighAppleDouble(const CString& directory) {
 void RunLargeForkGuiTests(const char* metadata,FILE* report) {
  CString directory=metadata;directory=directory.Left(directory.ReverseFind('\\')+1);
  LargeForkManifest m={};FILE* source=fopen(directory+"large-forks.meta","rb");check(source!=NULL,"open large-fork manifest");
- size_t n=fread(&m,sizeof(m),1,source);fclose(source);check(n==1 && m.length>0x80000000UL,"validate >2 GiB fork fixture");
+ size_t n=fread(&m,sizeof(m),1,source);fclose(source);check(n==1 && m.length==0x7fffffffUL,"validate Apple-maximum fork fixture");
  CHFVVolume volume;volume.m_file_name=m.image;check(volume.open()!=0,"GUI opens volume with both large forks");
+ for(unsigned fork=0;fork<2;++fork){CatDataRec oversized={};oversized.u.f.filLgLen=fork?0:0x80000000UL;oversized.u.f.filRLgLen=fork?0x80000000UL:0;CHFVFile file;check(file.open_by_CDR(&volume,&oversized,fork?CHFVFile::OpenResourceFork:CHFVFile::OpenDataFork)==0,"GUI rejects classic fork above Apple maximum");}
  CatDataRec entry={};entry.u.f.filFlNum=m.fileID;entry.u.f.filLgLen=entry.u.f.filRLgLen=m.length;
  for(unsigned i=0;i<3;++i) {
   entry.u.f.filExtRec[i].xdrStABN=m.data[i].start;entry.u.f.filExtRec[i].xdrNumABlks=m.data[i].count;
   entry.u.f.filRExtRec[i].xdrStABN=m.resource[i].start;entry.u.f.filRExtRec[i].xdrNumABlks=m.resource[i].count;
  }
- const hfv_offset_t offsets[]={0,0x7fffffe0LL,0x80000013LL,hfv_offset_t(m.length)-37};
+ const hfv_offset_t offsets[]={0,0x7fffffe0LL,hfv_offset_t(m.length)-137,hfv_offset_t(m.length)-37};
  for(unsigned fork=0;fork<2;++fork) {
-  CHFVFile file;check(file.open_by_CDR(&volume,&entry,fork?CHFVFile::OpenResourceFork:CHFVFile::OpenDataFork)!=0,"GUI opens >2 GiB fork");
+  CHFVFile file;check(file.open_by_CDR(&volume,&entry,fork?CHFVFile::OpenResourceFork:CHFVFile::OpenDataFork)!=0,"GUI opens Apple-maximum fork");
   BYTE bytes[128];
   for(hfv_offset_t offset:offsets) {
    check(file.Seek(offset,CFile::begin)==offset,"GUI seek past signed fork limit");
@@ -69,6 +70,6 @@ void RunLargeForkGuiTests(const char* metadata,FILE* report) {
   check(file.Seek(0,CFile::end)==m.length && file.Read(bytes,1)==0,"GUI large-fork EOF");
  }
  volume.close();testHighAppleDouble(directory);
- fprintf(report,"PASS: GUI individual forks >2 GiB: both forks, signed-boundary/tail reads, EOF, extreme seek rejection, production AppleDouble metadata/import above 2 GiB\n");
+ fprintf(report,"PASS: GUI classic forks at Apple maximum: both forks, oversized-fork rejection, boundary/tail reads, EOF, extreme seek rejection, production AppleDouble metadata/import at host offsets above 2 GiB\n");
 }
 #endif

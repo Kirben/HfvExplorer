@@ -552,6 +552,9 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
 
   dsize = d_getl(&buf[83]);
   rsize = d_getl(&buf[87]);
+  if (dsize > HFS_MAX_FORK_SIZE || rsize > HFS_MAX_FORK_SIZE) {
+    cpi_error = "bad file length: classic HFS maximum is 2 GiB minus one per fork"; close(ifile); return -1;
+  }
 
   dsthint = (char *) &buf[2];
 
@@ -650,6 +653,9 @@ int binhx(char *fname, char *type, char *creator, short *fdflags,
       return -1;
     }
   *rsize = d_getl(lword);
+  if (*dsize > HFS_MAX_FORK_SIZE || *rsize > HFS_MAX_FORK_SIZE) {
+    cpi_error = "bad file length: classic HFS maximum is 2 GiB minus one per fork"; return -1;
+  }
 
   if (bh_readcrc() < 0)
     {
@@ -743,6 +749,7 @@ int cpi_text(char *srcname, hfsvol *vol, char *dstname)
   if (ifile < 0)
     return -1;
 
+  if (_filelengthi64(ifile) > HFS_MAX_FORK_SIZE) { cpi_error="classic HFS source fork exceeds Apple limit"; close(ifile); return -1; }
   ofile = opendst(vol, dstname, dsthint, TEXT_TYPE, TEXT_CREA);
   if (ofile == 0)
     {
@@ -786,6 +793,7 @@ int cpi_raw(char *srcname, hfsvol *vol, char *dstname)
 		// duplicates? should check if the file exists and if so modify new_hint
 	}
 
+  if (_filelengthi64(ifile) > HFS_MAX_FORK_SIZE) { cpi_error="classic HFS source fork exceeds Apple limit"; close(ifile); return -1; }
   ofile = opendst(vol, dstname, dsthint, raw_type, raw_crea);
   if (ofile == 0)
     {
@@ -810,6 +818,7 @@ int cpi_raw_resource(char *srcname, hfsvol *vol, char *dstname)
   if (ifile < 0)
     return -1;
 
+  if (_filelengthi64(ifile) > HFS_MAX_FORK_SIZE) { cpi_error="classic HFS source fork exceeds Apple limit"; close(ifile); return -1; }
   ofile = opendst(vol, dstname, dsthint, raw_type, raw_crea);
   if (ofile == 0) {
       close(ifile);
@@ -853,6 +862,7 @@ int cpi_double( char *fdata, char *fres, hfsvol *vol, char *dstname )
     return -1;
 	}
 
+  if (_filelengthi64(ifile0) > HFS_MAX_FORK_SIZE || rlength > HFS_MAX_FORK_SIZE) { cpi_error="classic HFS source fork exceeds Apple limit"; close(ifile0); close(ifile1); return -1; }
 	remove_ardi_special_chars( dsthint );
   ofile = opendst( vol, dstname, dsthint, typestr, creatorstr );
   if (ofile == 0) {

@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "HfsPlusBrowser.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
@@ -91,6 +92,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_WM_PALETTECHANGED()
 	ON_WM_DROPFILES()
 	ON_COMMAND(ID_FILE_NEWVOLUME, OnFileNewvolume)
+ ON_COMMAND(ID_FILE_NEWHFSPLUS, OnFileNewHfsPlus)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
 
@@ -983,6 +985,8 @@ int read_floppy( int drive, char *path )
 }
 
 static void ReleaseFloppyForWrite(int drive,void* context);
+
+void CMainFrame::OnFileNewHfsPlus() {FormatHfsPlusImage(this);}
 
 void CMainFrame::OnFileNewvolume() 
 {

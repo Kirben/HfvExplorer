@@ -37,6 +37,7 @@
 #include "AskNewVolume.h"
 #include "MainFrm.h"
 #include "MfsBrowser.h"
+#include "HfsPlusBrowser.h"
 #include "floppy.h"
 #include "adouble.h"
 #include "aspecial.h"
@@ -2138,9 +2139,11 @@ CString CHFVExplorerDoc::hfs_find_match(
 
 BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName) 
 {
- StorageAction storageAction;
+	int hplus=TryOpenHfsPlusBrowser(lpszPathName,AfxGetMainWnd());
+	if(hplus) return hplus>0;
 	int mfs=TryOpenMfsBrowser(lpszPathName,AfxGetMainWnd());
 	if(mfs) return mfs>0;
+ StorageAction storageAction;
 
 	int i;
 	int param_is_volume = 0;

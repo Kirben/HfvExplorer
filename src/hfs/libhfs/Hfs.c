@@ -1189,6 +1189,9 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
       return 0;
     }
 
+  if (file->cat.u.fil.filLgLen > HFS_MAX_FORK_SIZE || file->cat.u.fil.filRLgLen > HFS_MAX_FORK_SIZE) {
+    FREE(file); ERROR(EFBIG, "classic HFS fork exceeds Apple's 2 GiB minus one limit"); return 0;
+  }
   file->vol   = vol;
   file->clump = file->cat.u.fil.filClpSize;
   file->flags = 0;
@@ -1301,8 +1304,8 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
 
   f_getptrs(file, &lglen, &pylen, 0);
 
-  if (len > 0xffffffffUL - file->pos) { ERROR(EFBIG, "classic HFS fork size limit"); return -1; }
   if (len > 0x7fffffffUL) { ERROR(EINVAL, "transfer count exceeds signed API range"); return -1; }
+  if (file->pos > HFS_MAX_FORK_SIZE || len > HFS_MAX_FORK_SIZE - file->pos) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
   count = len;
 
   /* set flag to update (at least) the modification time */
@@ -1367,6 +1370,7 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
  */
 int hfs_truncate(hfsfile *file, unsigned long len)
 {
+  if (len > HFS_MAX_FORK_SIZE) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
   unsigned long *lglen;
 
   f_getptrs(file, &lglen, 0, 0);
