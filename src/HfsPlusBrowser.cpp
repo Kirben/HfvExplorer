@@ -72,6 +72,7 @@ bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter
 class NameDialog : public CDialog {
   public:
     std::wstring value;
+    bool caseSensitive = false;
     explicit NameDialog(CWnd *p) : CDialog(IDD_HPLUS_NAME, p) {}
     BOOL OnInitDialog() override {
         CDialog::OnInitDialog();
@@ -83,7 +84,7 @@ class NameDialog : public CDialog {
     void OnOK() override {
         value = Text(m_hWnd, IDC_HPLUS_NAME);
         try {
-            HfsPlus::Normalize(U16(value));
+            HfsPlus::Normalize(U16(value), caseSensitive);
             CDialog::OnOK();
         } catch (const std::exception &e) {
             AfxMessageBox(e.what());
@@ -95,18 +96,31 @@ class FormatDialog : public CDialog {
     std::u16string name;
     uint64_t size = 0;
     bool journaled = true;
+    HfsPlus::Volume::FormatKind kind = HfsPlus::Volume::FormatKind::HfsPlus;
     explicit FormatDialog(CWnd *p) : CDialog(IDD_HPLUS_FORMAT, p) {}
+    HfsPlus::Volume::FormatKind SelectedKind() {
+        int selected = int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCURSEL));
+        if (selected < 0 || selected > 2)
+            throw HfsPlus::Error("Choose a filesystem format.");
+        return static_cast<HfsPlus::Volume::FormatKind>(selected);
+    }
     BOOL OnInitDialog() override {
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd, IDC_HPLUS_NAME);
         SetDlgItemTextW(m_hWnd, IDC_HPLUS_NAME, L"Untitled");
         SetDlgItemText(IDC_HPLUS_SIZE, "128 MiB");
         CheckDlgButton(IDC_HPLUS_JOURNAL, BST_CHECKED);
+        for (const char *label :
+             {"HFS+ (case-insensitive)", "HFSX (case-sensitive)", "HFSX (case-insensitive)"})
+            SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+        SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, 0);
         return TRUE;
     }
     void OnOK() override {
         try {
-            name = HfsPlus::Normalize(U16(Text(m_hWnd, IDC_HPLUS_NAME)));
+            kind = SelectedKind();
+            name = HfsPlus::Normalize(U16(Text(m_hWnd, IDC_HPLUS_NAME)),
+                                      kind == HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
             CString text;
             GetDlgItemText(IDC_HPLUS_SIZE, text);
             hfv_size_t parsed = 0;
@@ -200,7 +214,9 @@ class Browser : public CDialog {
             Cell(list_.m_hWnd, int(i), 2, e.directory ? L"" : std::to_wstring(e.forks[0].size));
             Cell(list_.m_hWnd, int(i), 3, e.directory ? L"" : std::to_wstring(e.forks[1].size));
         }
-        auto title = Wide(volume_->Name()) + L" - HFS+" + (volume_->Journaled() ? L" (journaled)" : L"") +
+        auto title = Wide(volume_->Name()) + (volume_->IsHfsX() ? L" - HFSX" : L" - HFS+") +
+                     (volume_->CaseSensitive() ? L" (case-sensitive)" : L" (case-insensitive)") +
+                     (volume_->Journaled() ? L" (journaled)" : L"") +
                      (volume_->Writable() ? L"" : L" (read-only)");
         SetWindowTextW(m_hWnd, title.c_str());
         auto status = Wide(volume_->Stat(folder_).name) + L"  |  " + std::to_wstring(entries_.size()) +
@@ -321,6 +337,7 @@ class Browser : public CDialog {
         }
         if (command == IDC_HPLUS_MKDIR) {
             NameDialog name(this);
+            name.caseSensitive = volume_->CaseSensitive();
             name.value = L"New folder";
             if (name.DoModal() == IDOK) {
                 Run([&](Storage::Job &) { volume_->MakeDirectory(folder_, U16(name.value)); });
@@ -334,6 +351,7 @@ class Browser : public CDialog {
                 return TRUE;
             auto e = entries_[i];
             NameDialog name(this);
+            name.caseSensitive = volume_->CaseSensitive();
             name.value = Wide(e.name);
             if (name.DoModal() == IDOK) {
                 Run([&](Storage::Job &) { volume_->Rename(e.id, folder_, U16(name.value)); });
@@ -347,7 +365,7 @@ class Browser : public CDialog {
                 return TRUE;
             auto e = entries_[i];
             if (MessageBoxW(m_hWnd, (L"Delete " + Wide(e.name) + L" from this image?").c_str(),
-                            L"Delete HFS+ entry", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                            L"Delete Mac entry", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 Run([&](Storage::Job &) { volume_->Remove(e.id); });
                 Reload();
             }
@@ -387,7 +405,7 @@ class Browser : public CDialog {
                         },
                         &entry.finder, true);
                 },
-                "Import HFS+ resource fork", true);
+                "Import resource fork", true);
             Reload();
             return TRUE;
         }
@@ -396,15 +414,18 @@ class Browser : public CDialog {
             if (!FileDialog(m_hWnd, path, false, L"All files\0*.*\0\0", nullptr))
                 return TRUE;
             NameDialog name(this);
+            name.caseSensitive = volume_->CaseSensitive();
             auto slash = path.find_last_of(L"\\/");
             name.value = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
             if (name.DoModal() != IDOK)
                 return TRUE;
             bool overwrite = false;
             for (auto &e : entries_)
-                if (!HfsPlus::CompareNames(e.name, HfsPlus::Normalize(U16(name.value)))) {
+                if (!HfsPlus::CompareNames(e.name,
+                                           HfsPlus::Normalize(U16(name.value), volume_->CaseSensitive()),
+                                           volume_->CaseSensitive())) {
                     if (MessageBoxW(m_hWnd, L"Replace the existing file and its resource fork?",
-                                    L"HFS+ overwrite", MB_YESNO | MB_ICONQUESTION) != IDYES)
+                                    L"Overwrite Mac file", MB_YESNO | MB_ICONQUESTION) != IDYES)
                         return TRUE;
                     overwrite = true;
                     break;
@@ -427,7 +448,7 @@ class Browser : public CDialog {
                         },
                         nullptr, overwrite);
                 },
-                "Import file into HFS+", true);
+                "Import data into Mac image", true);
             Reload();
             return TRUE;
         }
@@ -486,10 +507,10 @@ void FormatHfsPlusImage(CWnd *parent) {
     auto result = ShowStorageJob(
         [&](Storage::Job &) {
             auto source = HfsPlus::CreateImage(path.c_str(), options.size);
-            HfsPlus::Volume::Format(*source, options.name, options.journaled);
+            HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
             return Storage::Result{};
         },
-        "Format HFS+ image");
+        "Format Mac image");
     if (result.code) {
         AfxMessageBox(result.message.c_str());
         return;
@@ -539,6 +560,12 @@ int RunHfsPlusUiTest(const char *directory) {
         require(IsWindowUnicode(::GetDlgItem(format.m_hWnd, IDC_HPLUS_NAME)) &&
                     format.IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED,
                 "Unicode format defaults");
+        require(format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCOUNT) == 3,
+                "HFSX format choices missing");
+        for (int choice = 0; choice < 3; ++choice) {
+            format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, choice);
+            require(static_cast<int>(format.SelectedKind()) == choice, "Format choice not applied");
+        }
         format.DestroyWindow();
         std::wstring path = WidePath((std::string(directory) + "\\ui.dsk").c_str());
         {
@@ -568,7 +595,26 @@ int RunHfsPlusUiTest(const char *directory) {
                 require(!browser.GetDlgItem(id)->IsWindowEnabled(), "Read-only write control enabled");
             browser.DestroyWindow();
         }
-        fprintf(report, "PASS: hidden HFS+ browser and formatter, Unicode name editing, root listing, "
+        {
+            std::wstring xPath = WidePath((std::string(directory) + "\\hfsx-ui.dsk").c_str());
+            auto source = HfsPlus::CreateImage(xPath.c_str(), 16 * 1024 * 1024);
+            HfsPlus::Volume::Format(*source, u"HFSX UI", true,
+                                    HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+            auto volume = std::unique_ptr<HfsPlus::Volume>(new HfsPlus::Volume(*source, true));
+            volume->Put(2, u"Readme", 0, 0, [](unsigned, uint64_t, void *, size_t) {});
+            volume->Put(2, u"README", 0, 0, [](unsigned, uint64_t, void *, size_t) {});
+            Browser browser(std::move(source), std::move(volume), &owner);
+            require(browser.Create(IDD_HPLUS_BROWSER, &owner) != FALSE, "HFSX browser");
+            wchar_t title[256];
+            GetWindowTextW(browser.m_hWnd, title, 256);
+            require(wcsstr(title, L"HFSX") && wcsstr(title, L"case-sensitive"), "HFSX mode not shown");
+            require(browser.GetDlgItem(IDC_HPLUS_IMPORT)->IsWindowEnabled() &&
+                        ::SendDlgItemMessage(browser.m_hWnd, IDC_HPLUS_LIST, LVM_GETITEMCOUNT, 0, 0) == 4,
+                    "Writable case-sensitive browser entries");
+            browser.DestroyWindow();
+        }
+        fprintf(report, "PASS: hidden HFS+ / HFSX browser and formatter, format mode selection, writable "
+                        "HFSX case-distinct files, Unicode name editing, root listing, "
                         "journal default, read-only controls, serialized storage job and owner restoration. "
                         "No computer control or physical devices used.\n");
     } catch (const std::exception &e) {

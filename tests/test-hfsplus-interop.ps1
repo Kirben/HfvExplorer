@@ -8,7 +8,7 @@ New-Item -ItemType Directory -Path $Directory -ErrorAction Stop | Out-Null
 $Directory=(Resolve-Path -LiteralPath $Directory).Path
 $exe=Join-Path $PSScriptRoot '..\bin\x64\hfsplus-tests.exe'
 function LinuxPath([string]$path){$value=& wsl -e wslpath -a $path;if($LASTEXITCODE){throw 'WSL path conversion failed'};return $value.Trim()}
-function NewReference([string]$path){$file=[IO.File]::Open($path,[IO.FileMode]::CreateNew);try{$file.SetLength(134217728)}finally{$file.Dispose()}; & wsl -e /usr/sbin/mkfs.hfsplus -J -v Reference (LinuxPath $path);if($LASTEXITCODE){throw 'Reference formatter failed'}}
+function NewReference([string]$path,[bool]$HfsX=$false){$file=[IO.File]::Open($path,[IO.FileMode]::CreateNew);try{$file.SetLength(134217728)}finally{$file.Dispose()}; if($HfsX){& wsl -e /usr/sbin/mkfs.hfsplus -s -J -v Reference (LinuxPath $path)}else{& wsl -e /usr/sbin/mkfs.hfsplus -J -v Reference (LinuxPath $path)};if($LASTEXITCODE){throw 'Reference formatter failed'}}
 function Check([string]$path){
  # hfsprogs 540.1's -n mode also incorrectly flags its own pristine output.
  # Use disposable writable fixtures, and reject any reported structural repair.
@@ -22,3 +22,11 @@ $fragmented=Join-Path $Directory 'fragmented.dsk';& $exe --fragmented $fragmente
 $crash=Join-Path $Directory 'crash.dsk';& $exe --crash $crash;if($LASTEXITCODE){throw 'Crash fixture failed'};Check $crash;& $exe --check-recovered $crash;if($LASTEXITCODE){throw 'Own journal was not replayed'}
 $referenceCrash=Join-Path $Directory 'reference-crash.dsk';NewReference $referenceCrash;& $exe --crash-existing $referenceCrash;if($LASTEXITCODE){throw 'Reference journal crash fixture failed'};Check $referenceCrash;& $exe --check-recovered $referenceCrash;if($LASTEXITCODE){throw 'Reference-volume journal was not replayed'}
 Write-Host "PASS: independent formatting, HFS+ writes, fragmented catalog and committed-journal replay in both byte orders. Fixtures retained at $Directory."
+
+foreach($mode in @('hfsx','hfsx-ci')){
+ $path=Join-Path $Directory ($mode+'.dsk'); & $exe ('--'+$mode) $path;if($LASTEXITCODE){throw 'Own HFSX format/write failed'};Check $path
+ $path=Join-Path $Directory ($mode+'-crash.dsk'); & $exe ('--crash-'+$mode) $path;if($LASTEXITCODE){throw 'Own HFSX journal fixture failed'};Check $path;& $exe --check-recovered $path;if($LASTEXITCODE){throw 'HFSX recovery failed'}
+}
+$referenceX=Join-Path $Directory 'reference-hfsx.dsk';NewReference $referenceX $true;& $exe --modify $referenceX;if($LASTEXITCODE){throw 'Reference HFSX write failed'};Check $referenceX
+$referenceXCrash=Join-Path $Directory 'reference-hfsx-crash.dsk';NewReference $referenceXCrash $true;& $exe --crash-existing $referenceXCrash;if($LASTEXITCODE){throw 'Reference HFSX crash fixture failed'};Check $referenceXCrash;& $exe --check-recovered $referenceXCrash;if($LASTEXITCODE){throw 'Reference HFSX recovery failed'}
+Write-Host 'PASS: HFSX case-sensitive/case-insensitive formatting and writes, reference HFSX mutation, and independent journal replay.'

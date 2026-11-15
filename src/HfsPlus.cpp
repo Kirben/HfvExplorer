@@ -95,8 +95,11 @@ uint64_t Locate(Source &s, uint64_t &length) {
         uint32_t bs = U32(vh.data() + 20);
         uint64_t b = uint64_t(U16(vh.data() + 28)) * 512 + uint64_t(U16(vh.data() + 126)) * bs;
         length = uint64_t(U16(vh.data() + 128)) * bs;
-        if (Range(b, length, s.Size()) && length >= 2048)
+        if (Range(b, length, s.Size()) && length >= 2048) {
+            auto embedded = Disk::Read(s, b + 1024, 2);
+            Check(U16(embedded.data()) != 0x4858, "HFSX must not be embedded in an HFS wrapper");
             return b;
+        }
     }
     auto dd = Disk::Read(s, 0, 512);
     uint32_t step = U16(dd.data()) == 0x4552 ? U16(dd.data() + 2) : 512;
@@ -114,7 +117,7 @@ uint64_t Locate(Source &s, uint64_t &length) {
         auto p = Disk::Read(s, uint64_t(i) * step, 512);
         if (U16(p.data()) != 0x504d)
             throw Error("Invalid Apple partition entry");
-        if (memcmp(p.data() + 48, "Apple_HFS", 9))
+        if (memcmp(p.data() + 48, "Apple_HFS", 10) && memcmp(p.data() + 48, "Apple_HFSX", 11))
             continue;
         uint64_t base = uint64_t(U32(p.data() + 8)) * step, n = uint64_t(U32(p.data() + 12)) * step;
         if (n < 2048 || !Range(base, n, s.Size()))
@@ -173,7 +176,7 @@ std::vector<Record> ReadTree(View &view, const Fork &fork, uint32_t bs, unsigned
 // Build a complete balanced B+tree. Reusing an existing metadata fork means all
 // changed nodes are journaled; expansion allocates fresh blocks before commit.
 Bytes BuildTree(const std::vector<Record> &records, bool catalog, uint32_t clump = 65536,
-                uint32_t allocationBlock = 4096) {
+                uint32_t allocationBlock = 4096, bool caseSensitive = false) {
     const unsigned ns = 4096;
     std::vector<Bytes> nodes(1, Bytes(ns, 0));
     struct Index {
@@ -279,7 +282,7 @@ Bytes BuildTree(const std::vector<Record> &records, bool catalog, uint32_t clump
     P32(p + 22, uint32_t(total));
     P32(p + 26, uint32_t(total - inUse));
     P32(p + 32, clump);
-    p[37] = catalog ? 0xcf : 0;
+    p[37] = catalog ? (caseSensitive ? 0xbc : 0xcf) : 0;
     P32(p + 38, catalog ? 6 : 2);
     P16(header.data() + ns - 2, 14);
     P16(header.data() + ns - 4, 120);
@@ -329,7 +332,8 @@ struct Volume::Impl {
         catalogRecords = ReadTree(view, catalog, bs, 516, &compare);
         caseSensitive = compare == 0xbc;
         Check(compare == 0xcf || compare == 0xbc, "Unknown HFS+ filename comparison");
-        Check(!write || !caseSensitive, "HFSX writing is not enabled");
+        Check(U16(header.data()) == 0x4858 || !caseSensitive,
+              "Binary filename comparison requires an HFSX volume");
         LoadEntries();
         AuditAllocation();
     }
@@ -347,7 +351,6 @@ struct Volume::Impl {
         view.length = uint64_t(total) * bs;
         Check(U32(header.data() + 48) <= total, "Invalid HFS+ free block count");
         if (write) {
-            Check(sig == 0x482b, "HFSX is currently read-only");
             uint32_t attributes = U32(header.data() + 4);
             Check(!(attributes & 0xc080), "HFS+ volume is locked or inconsistent");
             Check((attributes & 0x2000) || (attributes & 0x100),
@@ -682,7 +685,7 @@ struct Volume::Impl {
         r.key = Key(e.parent, e.name);
         r.value.assign(e.directory ? 88 : 248, 0);
         P16(r.value.data(), e.directory ? 1 : 2);
-        P16(r.value.data() + 2, e.directory ? 0 : 2);
+        P16(r.value.data() + 2, e.directory ? (U16(header.data()) == 0x4858 ? 0x10 : 0) : 2);
         P32(r.value.data() + 8, id);
         for (unsigned i = 12; i <= 28; i += 4)
             P32(r.value.data() + i, e.created);
@@ -698,6 +701,8 @@ struct Volume::Impl {
         Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & 6) && !(r->value[41] & 6),
               "HFS+ entry is locked");
         Check(!(r->value[41] & 0x20), "Compressed HFS+ files cannot be modified");
+        Check(!e.directory || !(U16(r->value.data() + 2) & 0x60),
+              "Directory hard-link topology cannot be modified");
         if (!e.directory) {
             Check(memcmp(e.finder.data(), "hlnkhfs+", 8) && memcmp(e.finder.data(), "fdrpMACS", 8),
                   "HFS+ hard links cannot be modified");
@@ -727,10 +732,13 @@ struct Volume::Impl {
     }
     void Commit(const std::function<void(const char *)> &fault) {
         Guard();
-        std::map<uint32_t, uint32_t> counts;
+        std::map<uint32_t, uint32_t> counts, folderCounts;
         for (auto &e : entries)
-            if (e.first != 2)
+            if (e.first != 2) {
                 ++counts[e.second.parent];
+                if (e.second.directory || !memcmp(e.second.finder.data(), "fdrpMACS", 8))
+                    ++folderCounts[e.second.parent];
+            }
         for (auto &pair : entries)
             if (pair.second.directory) {
                 auto r = CatalogRecord(pair.first);
@@ -739,10 +747,12 @@ struct Volume::Impl {
                     P32(r->value.data() + 4, count);
                     P32(r->value.data() + 16, Now());
                 }
+                if (U16(header.data()) == 0x4858 && (U16(r->value.data() + 2) & 0x10))
+                    P32(r->value.data() + 84, folderCounts[pair.first]);
             }
         std::sort(catalogRecords.begin(), catalogRecords.end(),
                   [&](const Record &a, const Record &b) { return Order(a, b) < 0; });
-        Metadata(catalog, BuildTree(catalogRecords, true, 65536, bs), 4);
+        Metadata(catalog, BuildTree(catalogRecords, true, 65536, bs, caseSensitive), 4);
         std::sort(overflow.begin(), overflow.end(), [](const Record &a, const Record &b) {
             uint32_t ai = U32(a.key.data() + 4), bi = U32(b.key.data() + 4);
             if (ai != bi)
@@ -787,6 +797,8 @@ bool Volume::Recognizes(Source &s) {
 Volume::Volume(Source &s, bool w) : p_(new Impl(s, w)) {}
 Volume::~Volume() = default;
 bool Volume::Journaled() const { return p_->journal.enabled; }
+bool Volume::IsHfsX() const { return U16(p_->header.data()) == 0x4858; }
+bool Volume::CaseSensitive() const { return p_->caseSensitive; }
 bool Volume::Writable() const { return p_->write && p_->usable; }
 std::u16string Volume::Name() const { return p_->entries.at(2).name; }
 uint64_t Volume::FreeBytes() const { return uint64_t(U32(p_->header.data() + 48)) * p_->bs; }
@@ -824,7 +836,7 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name) {
     p.Parent(parent);
     Entry e;
     e.parent = parent;
-    e.name = Normalize(name);
+    e.name = Normalize(name, p.caseSensitive);
     e.directory = true;
     Check(!p.Existing(parent, e.name), "HFS+ name already exists");
     try {
@@ -844,7 +856,7 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     p.Parent(parent);
     Entry e;
     e.parent = parent;
-    e.name = Normalize(name);
+    e.name = Normalize(name, p.caseSensitive);
     uint32_t existing = p.Existing(parent, e.name);
     Fork old[2];
     if (existing) {
@@ -902,7 +914,7 @@ void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
     Entry e = p.Get(id);
     p.Mutable(e);
     p.RemovalParent(e.parent);
-    auto normalized = Normalize(name);
+    auto normalized = Normalize(name, p.caseSensitive);
     uint32_t existing = p.Existing(parent, normalized);
     Check(!existing || existing == id, "HFS+ name already exists");
     for (uint32_t i = parent; i != 1; i = p.Get(i).parent)
@@ -947,9 +959,13 @@ void Volume::Remove(uint32_t id) {
         throw;
     }
 }
-void Volume::Format(Source &source, const std::u16string &name, bool journaled) {
+void Volume::Format(Source &source, const std::u16string &name, bool journaled, FormatKind kind) {
     Check(source.Writable(), "Cannot format a read-only image");
-    auto normalized = Normalize(name);
+    Check(kind == FormatKind::HfsPlus || kind == FormatKind::HfsXCaseSensitive ||
+              kind == FormatKind::HfsXCaseInsensitive,
+          "Unknown format kind");
+    bool hfsx = kind != FormatKind::HfsPlus, sensitive = kind == FormatKind::HfsXCaseSensitive;
+    auto normalized = Normalize(name, sensitive);
     uint64_t length = source.Size();
     Check(length >= 8 * 1024 * 1024 && length % 4096 == 0 && length <= INT64_MAX,
           "HFS+ format requires an image of at least 8 MiB, multiple of 4096");
@@ -962,8 +978,8 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled) 
     uint32_t total = uint32_t(length / bs);
     View view(source);
     Bytes vh(512, 0);
-    P16(vh.data(), 0x482b);
-    P16(vh.data() + 2, 4);
+    P16(vh.data(), hfsx ? 0x4858 : 0x482b);
+    P16(vh.data() + 2, hfsx ? 5 : 4);
     P32(vh.data() + 4, 0x100 | (journaled ? 0x2000 : 0));
     P32(vh.data() + 8, journaled ? 0x4846534a : 0x48465658);
     for (unsigned i = 16; i <= 28; i += 4)
@@ -1003,7 +1019,7 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled) 
         r.key = Key(parent, nm);
         r.value.assign(folder ? 88 : 248, 0);
         P16(r.value.data(), folder ? 1 : 2);
-        P16(r.value.data() + 2, folder ? 0 : 2);
+        P16(r.value.data() + 2, folder ? (hfsx ? 0x10 : 0) : 2);
         P32(r.value.data() + 8, id);
         for (unsigned i = 12; i <= 28; i += 4)
             P32(r.value.data() + i, Now());
@@ -1030,14 +1046,14 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled) 
         P32(records[0].value.data() + 4, 2);
         P32(vh.data() + 32, 2);
     }
-    std::sort(records.begin(), records.end(), [](const Record &a, const Record &b) {
+    std::sort(records.begin(), records.end(), [sensitive](const Record &a, const Record &b) {
         uint32_t x = U32(a.key.data() + 2), y = U32(b.key.data() + 2);
         if (x != y)
             return x < y;
         return CompareNames(String(a.key.data() + 6, a.key.size() - 6),
-                            String(b.key.data() + 6, b.key.size() - 6)) < 0;
+                            String(b.key.data() + 6, b.key.size() - 6), sensitive) < 0;
     });
-    auto tree = BuildTree(records, true, 65536, bs);
+    auto tree = BuildTree(records, true, 65536, bs, sensitive);
     catalog.size = tree.size();
     ForkStage(view, catalog, bs, tree);
     tree = BuildTree({}, false, 65536, bs);

@@ -42,12 +42,14 @@ struct Entry {
     uint32_t created = 0, modified = 0;
 };
 // Unicode 3.2 canonical decomposition, with the exclusions required by TN1150.
-std::u16string Normalize(const std::u16string &);
+std::u16string Normalize(const std::u16string &, bool caseSensitive = false);
 int CompareNames(const std::u16string &, const std::u16string &, bool caseSensitive = false);
 class Volume {
   public:
+    enum class FormatKind { HfsPlus, HfsXCaseSensitive, HfsXCaseInsensitive };
     static bool Recognizes(Source &);
-    static void Format(Source &, const std::u16string &name, bool journaled = true);
+    static void Format(Source &, const std::u16string &name, bool journaled = true,
+                       FormatKind kind = FormatKind::HfsPlus);
     explicit Volume(Source &, bool write = false);
     ~Volume();
     std::vector<Entry> List(uint32_t parent = 2) const;
@@ -61,6 +63,8 @@ class Volume {
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);
     void Remove(uint32_t id);
     bool Journaled() const;
+    bool IsHfsX() const;
+    bool CaseSensitive() const;
     bool Writable() const;
     std::u16string Name() const;
     uint64_t FreeBytes() const;
