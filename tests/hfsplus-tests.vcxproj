@@ -14,6 +14,6 @@
     <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_READONLY_CD;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
     <Link><SubSystem>Console</SubSystem><AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
-<ItemGroup><ClCompile Include="HfsPlusCoreTest.cpp"/><ClCompile Include="..\src\HfsPlus.cpp"/><ClCompile Include="..\src\HfsPlusUnicode.cpp"/><ClCompile Include="..\src\HfsPlusFile.cpp"/></ItemGroup>
+<ItemGroup><ClCompile Include="HfsPlusCoreTest.cpp"/><ClCompile Include="HfsPlusBTreeTest.cpp"/><ClCompile Include="..\src\HfsPlus.cpp"/><ClCompile Include="..\src\HfsPlusUnicode.cpp"/><ClCompile Include="..\src\HfsPlusFile.cpp"/></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

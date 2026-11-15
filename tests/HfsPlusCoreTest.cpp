@@ -2,6 +2,7 @@
 #include "HfsPlusDisk.h"
 #include <cstdio>
 using namespace HfsPlus;
+void RunIncrementalBTreeTests();
 void must(bool ok, const char *text) {
     if (!ok)
         throw Error(text);
@@ -10,6 +11,7 @@ struct Memory : Source {
     Bytes bytes;
     bool writable = true;
     unsigned writes = 0, flushes = 0;
+    int failWrite = -1, failFlush = -1;
     explicit Memory(size_t size) : bytes(size, 0) {}
     uint64_t Size() const override { return bytes.size(); }
     bool Writable() const override { return writable; }
@@ -18,11 +20,17 @@ struct Memory : Source {
         memcpy(p, bytes.data() + o, n);
     }
     void Write(uint64_t o, const void *p, size_t n) override {
+        if (failWrite >= 0 && writes == unsigned(failWrite))
+            throw Error("Injected metadata write error");
         must(writable && Disk::Range(o, n, bytes.size()), "Memory write range");
         memcpy(bytes.data() + o, p, n);
         ++writes;
     }
-    void Flush() override { ++flushes; }
+    void Flush() override {
+        if (failFlush >= 0 && flushes == unsigned(failFlush))
+            throw Error("Injected metadata flush error");
+        ++flushes;
+    }
 };
 template <class F> void fails(F f, const char *message) {
     bool threw = false;
@@ -297,13 +305,26 @@ void containers() {
 }
 uint8_t *catalogValue(Memory &disk, uint32_t id) {
     auto header = disk.bytes.data() + 1024;
-    uint32_t blockSize = Disk::U32(header + 40), catalog = Disk::U32(header + 288);
-    auto tree = disk.bytes.data() + uint64_t(catalog) * blockSize;
+    uint32_t blockSize = Disk::U32(header + 40);
+    auto address = [&](uint64_t offset, size_t length) {
+        for (unsigned i = 0; i < 8; ++i) {
+            uint64_t bytes = uint64_t(Disk::U32(header + 292 + i * 8)) * blockSize;
+            if (offset >= bytes) {
+                offset -= bytes;
+                continue;
+            }
+            must(length <= bytes - offset, "Fixture node crosses extents");
+            return disk.bytes.data() + uint64_t(Disk::U32(header + 288 + i * 8)) * blockSize + offset;
+        }
+        throw Error("Fixture needs too many inline catalog extents");
+    };
+    auto tree = address(0, 120);
+    unsigned nodeSize = Disk::U16(tree + 32);
     uint32_t leaf = Disk::U32(tree + 24);
     while (leaf) {
-        auto node = tree + uint64_t(leaf) * 4096;
+        auto node = address(uint64_t(leaf) * nodeSize, nodeSize);
         for (unsigned i = 0; i < Disk::U16(node + 10); ++i) {
-            unsigned offset = Disk::U16(node + 4096 - 2 * (i + 1));
+            unsigned offset = Disk::U16(node + nodeSize - 2 * (i + 1));
             auto value = node + offset + ((Disk::U16(node + offset) + 3) & ~1u);
             if (Disk::U16(value) <= 2 && Disk::U32(value + 8) == id)
                 return value;
@@ -311,6 +332,226 @@ uint8_t *catalogValue(Memory &disk, uint32_t id) {
         leaf = Disk::U32(node);
     }
     throw Error("Test catalog entry missing");
+}
+std::u16string longName(unsigned n) {
+    std::u16string name = u"Entry ";
+    name += char16_t('A' + n / 26);
+    name += char16_t('A' + n % 26);
+    name += std::u16string(235, u'x');
+    return name;
+}
+void smallJournal(Memory &disk) {
+    auto h = disk.bytes.data() + 1024;
+    unsigned bs = Disk::U32(h + 40);
+    uint64_t jib = uint64_t(Disk::U32(h + 12)) * bs;
+    uint64_t offset = Disk::U64(disk.bytes.data() + jib + 36);
+    uint32_t journalId = 0;
+    {
+        Volume v(disk);
+        for (auto e : v.List())
+            if (!e.directory && !e.forks[0].extents.empty() &&
+                uint64_t(e.forks[0].extents[0].start) * bs == offset)
+                journalId = e.id;
+    }
+    must(journalId != 0, "Fixture journal file");
+    auto r = catalogValue(disk, journalId);
+    uint32_t old = Disk::U32(r + 100), keep = 12288 / bs, start = Disk::U32(r + 104);
+    must(keep && 12288 % bs == 0 && Disk::U32(r + 108) == old, "Fixture journal allocation");
+    auto bitmap = disk.bytes.data() + uint64_t(Disk::U32(h + 128)) * bs;
+    for (uint32_t i = keep; i < old; ++i)
+        bitmap[(start + i) / 8] &= uint8_t(~(0x80 >> ((start + i) % 8)));
+    Disk::P64(r + 88, 12288);
+    Disk::P32(r + 100, keep);
+    Disk::P32(r + 108, keep);
+    Disk::P32(h + 48, Disk::U32(h + 48) + old - keep);
+    memcpy(disk.bytes.data() + disk.Size() - 1024, h, 512);
+    Disk::P64(disk.bytes.data() + jib + 44, 12288);
+    Disk::View view(disk);
+    Disk::Journal journal(view);
+    auto j = disk.bytes.data() + offset;
+    journal.little = Disk::U32(j + 4) == 0x78563412;
+    unsigned headerSize = journal.R32(j + 40);
+    journal.W64(j + 8, headerSize);
+    journal.W64(j + 16, headerSize);
+    journal.W64(j + 24, 12288);
+    journal.W32(j + 36, 0);
+    journal.W32(j + 36, Disk::Sum(j, 44));
+}
+Memory resizeFixture(Volume::FormatKind kind) {
+    Memory disk(32 * 1024 * 1024);
+    Volume::Format(disk, u"Journal enlargement", true, kind);
+    {
+        Volume v(disk, true);
+        for (unsigned i = 0; i < 80; ++i)
+            v.MakeDirectory(2, longName(i));
+    }
+    smallJournal(disk);
+    return disk;
+}
+uint64_t journalBytes(Memory &disk) {
+    auto h = disk.bytes.data() + 1024;
+    return Disk::U64(disk.bytes.data() + uint64_t(Disk::U32(h + 12)) * Disk::U32(h + 40) + 44);
+}
+void exerciseResize(Memory &disk, const char *phase = nullptr, bool recover = true) {
+    std::vector<uint32_t> files;
+    bool fired = false;
+    std::u16string attempted;
+    bool grew = false;
+    {
+        Volume v(disk, true);
+        if (phase)
+            v.fault = [&](const char *at) {
+                if (!strcmp(at, phase)) {
+                    fired = true;
+                    throw Error("Injected journal enlargement interruption");
+                }
+            };
+        auto folders = v.List();
+        uint32_t parent = 0;
+        for (auto e : folders)
+            if (e.directory)
+                parent = e.id;
+        must(parent != 0, "Resize fixture folder");
+        for (unsigned i = 0; i < 80; ++i) {
+            attempted = longName(i + 100);
+            try {
+                files.push_back(v.Put(parent, attempted, 65539, 5007, pattern));
+            } catch (const Error &) {
+                if (!fired)
+                    throw;
+                break;
+            }
+            if (journalBytes(disk) > 12288) {
+                grew = true;
+                break;
+            }
+        }
+    }
+    must(phase ? fired : grew, "Operation never exercised journal enlargement");
+    unsigned writes = disk.writes;
+    {
+        Volume v(disk);
+        for (auto id : files) {
+            verify(v, id, 0, 65539);
+            verify(v, id, 1, 5007);
+        }
+        if (fired) {
+            for (auto e : v.List()) {
+                if (!e.directory)
+                    continue;
+                for (auto f : v.List(e.id))
+                    must(f.name != attempted, "Uncommitted user file appeared during journal relocation");
+            }
+        }
+    }
+    must(disk.writes == writes, "Read-only resize recovery wrote source");
+    if (recover) {
+        Volume v(disk, true);
+        for (auto id : files)
+            verify(v, id, 0, 65539);
+        v.MakeDirectory(2, u"Recovered");
+    }
+}
+void journalResizeTests() {
+    for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
+                      Volume::FormatKind::HfsXCaseInsensitive}) {
+        auto disk = resizeFixture(kind);
+        exerciseResize(disk);
+    }
+    auto original = resizeFixture(Volume::FormatKind::HfsXCaseSensitive);
+    for (auto phase :
+         {"journal-resize-data-flushed", "journal-resize-new-log-committed", "journal-resize-jib-written",
+          "journal-resize-jib-committed", "journal-resize-home-flushed", "journal-resize-cleared"}) {
+        Memory disk = original;
+        exerciseResize(disk, phase);
+    }
+    puts("PASS: automatic journal enlargement, preserved pending file data, both journal-location recovery "
+         "paths, read-only recovery and every relocation crash boundary");
+}
+void resizeIoErrors() {
+    auto original = resizeFixture(Volume::FormatKind::HfsXCaseSensitive);
+    unsigned failures = 0;
+    for (unsigned mode = 0; mode < 2; ++mode)
+        for (unsigned index = 0; index < (mode ? 16u : 80u); ++index) {
+            Memory disk = original;
+            disk.writes = disk.flushes = 0;
+            if (mode)
+                disk.failFlush = int(index);
+            else
+                disk.failWrite = int(index);
+            try {
+                exerciseResize(disk);
+            } catch (const Error &) {
+                ++failures;
+            }
+            disk.failWrite = disk.failFlush = -1;
+            {
+                Volume v(disk);
+                for (auto folder : v.List()) {
+                    if (!folder.directory)
+                        continue;
+                    for (auto file : v.List(folder.id))
+                        if (!file.directory) {
+                            verify(v, file.id, 0, 65539);
+                            verify(v, file.id, 1, 5007);
+                        }
+                }
+            }
+            {
+                Volume v(disk, true);
+                v.MakeDirectory(2, u"IO error recovery");
+            }
+        }
+    must(failures > 50, "I/O fault injection did not cover relocation");
+    puts("PASS: write/flush failures throughout journal growth leave a recoverable filesystem and complete "
+         "file forks");
+}
+Memory largeCatalog() {
+    Memory disk(256 * 1024 * 1024);
+    Volume::Format(disk, u"Beyond header map");
+    auto h = disk.bytes.data() + 1024;
+    unsigned bs = Disk::U32(h + 40), old = Disk::U32(h + 288), oldCount = Disk::U32(h + 292);
+    Bytes saved(65536);
+    memcpy(saved.data(), disk.bytes.data() + uint64_t(old) * bs, saved.size());
+    const uint32_t first = 3000, nodes = 40000, map = 30720;
+    auto bitmap = disk.bytes.data() + uint64_t(Disk::U32(h + 128)) * bs;
+    for (uint32_t i = 0; i < oldCount; ++i)
+        bitmap[(old + i) / 8] &= uint8_t(~(0x80 >> ((old + i) % 8)));
+    for (uint32_t i = 0; i < nodes; ++i) {
+        must(!(bitmap[(first + i) / 8] & (0x80 >> ((first + i) % 8))),
+             "Large catalog fixture overlaps allocation");
+        bitmap[(first + i) / 8] |= uint8_t(0x80 >> ((first + i) % 8));
+    }
+    memcpy(disk.bytes.data() + uint64_t(first) * bs, saved.data(), saved.size());
+    auto tree = disk.bytes.data() + uint64_t(first) * bs;
+    Disk::P32(tree, map);
+    Disk::P32(tree + 36, nodes);
+    Disk::P32(tree + 40, nodes - 3);
+    auto extra = tree + uint64_t(map) * 4096;
+    extra[8] = 2;
+    Disk::P16(extra + 10, 1);
+    Disk::P16(extra + 4094, 14);
+    Disk::P16(extra + 4092, 4090);
+    extra[14] = 0x80;
+    Disk::P64(h + 272, uint64_t(nodes) * bs);
+    Disk::P32(h + 284, nodes);
+    Disk::P32(h + 288, first);
+    Disk::P32(h + 292, nodes);
+    Disk::P32(h + 48, Disk::U32(h + 48) - (nodes - oldCount));
+    memcpy(disk.bytes.data() + disk.Size() - 1024, h, 512);
+    {
+        Volume v(disk, true);
+        auto before = disk.writes;
+        v.MakeDirectory(2, u"Incremental edit");
+        must(disk.writes - before < 128, "Small change rewrote large catalog");
+    }
+    must(Disk::U64(h + 272) == uint64_t(nodes) * bs && Disk::U32(tree + 36) == nodes,
+         "Existing catalog was replaced or shrunk");
+    {
+        Volume v(disk);
+        must(v.List().size() == 3, "Large map-chain catalog reopened");
+    }
+    return disk;
 }
 void hfsx(bool journaled, bool sensitive) {
     Memory disk(32 * 1024 * 1024);
@@ -335,6 +576,10 @@ void hfsx(bool journaled, bool sensitive) {
         v.Put(2, u"\u00e9", 1, 0, pattern);
         fails([&] { v.Put(2, u"e\u0301", 1, 0, pattern); }, "Canonical equivalent HFSX duplicate accepted");
         v.Rename(a, 2, u"readme");
+        {
+            Volume reopened(disk);
+            must(reopened.Stat(a).name == u"readme", "Case-only rename was not written to disk");
+        }
         if (sensitive)
             fails([&] { v.Rename(a, 2, u"README"); }, "HFSX rename collision accepted");
         v.Put(2, u"readme", 91, 17, pattern, nullptr, true);
@@ -437,14 +682,14 @@ void trees() {
                 verify(v, e.id, 1, 17);
     }
 }
-void fragmented(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
+void fragmented(Volume::FormatKind kind = Volume::FormatKind::HfsPlus, const wchar_t *output = nullptr) {
     Memory disk(16 * 1024 * 1024);
     Volume::Format(disk, u"Fragmented", true, kind);
     uint32_t result;
     {
         Volume v(disk, true);
         std::vector<uint32_t> ids;
-        for (unsigned i = 0; i < 40; ++i) {
+        for (unsigned i = 0; i < 80; ++i) {
             std::u16string name = u"Block ";
             name += char16_t('A' + i / 26);
             name += char16_t('A' + i % 26);
@@ -454,11 +699,17 @@ void fragmented(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
             v.Remove(ids[i]);
         result = v.Put(2, u"Overflow forks", 31 * 4096 + 7, 19 * 4096 + 9, pattern);
         must(v.Stat(result).forks[0].extents.size() > 8, "Fragmentation did not create overflow extents");
+        must(v.Stat(result).forks[1].extents.size() > 8, "Resource fork did not use overflow extents");
     }
     {
         Volume v(disk, true);
         verify(v, result, 0, 31 * 4096 + 7);
         verify(v, result, 1, 19 * 4096 + 9);
+        if (output) {
+            auto image = CreateImage(output, disk.Size());
+            image->Write(0, disk.bytes.data(), disk.bytes.size());
+            image->Flush();
+        }
         v.Remove(result);
     }
 }
@@ -543,6 +794,50 @@ void large(const wchar_t *path, Volume::FormatKind kind = Volume::FormatKind::Hf
 }
 int wmain(int argc, wchar_t **argv) {
     try {
+        auto saveMemory = [](Memory &memory, const wchar_t *path) {
+            auto out = CreateImage(path, memory.Size());
+            out->Write(0, memory.bytes.data(), memory.bytes.size());
+            out->Flush();
+        };
+        if (argc == 3 && !wcscmp(argv[1], L"--incremental-large-catalog")) {
+            auto memory = largeCatalog();
+            saveMemory(memory, argv[2]);
+            return 0;
+        }
+        if (argc == 3 && !wcscmp(argv[1], L"--incremental-resize")) {
+            auto memory = resizeFixture(Volume::FormatKind::HfsXCaseSensitive);
+            exerciseResize(memory);
+            saveMemory(memory, argv[2]);
+            return 0;
+        }
+        if (argc == 4 && !wcscmp(argv[1], L"--incremental-resize-crash")) {
+            std::string phase;
+            for (auto c : std::wstring(argv[2]))
+                phase += char(c);
+            auto memory = resizeFixture(Volume::FormatKind::HfsXCaseSensitive);
+            exerciseResize(memory, phase.c_str(), false);
+            saveMemory(memory, argv[3]);
+            return 0;
+        }
+        if (argc == 3 && !wcscmp(argv[1], L"--incremental-reference")) {
+            auto source = OpenImage(argv[2], true);
+            Memory memory(size_t(source->Size()));
+            source->Read(0, memory.bytes.data(), memory.bytes.size());
+            {
+                Volume v(memory, true);
+                for (unsigned i = 0; i < 80; ++i)
+                    v.MakeDirectory(2, longName(i));
+            }
+            smallJournal(memory);
+            exerciseResize(memory);
+            source->Write(0, memory.bytes.data(), memory.bytes.size());
+            source->Flush();
+            return 0;
+        }
+        if (argc == 3 && !wcscmp(argv[1], L"--fragmented-forks")) {
+            fragmented(Volume::FormatKind::HfsXCaseSensitive, argv[2]);
+            return 0;
+        }
         if (argc == 2 && !wcscmp(argv[1], L"--self-test"))
             argc = 1;
         if (argc == 3 && !wcscmp(argv[1], L"--large")) {
@@ -632,6 +927,12 @@ int wmain(int argc, wchar_t **argv) {
             fails([&] { v.MakeDirectory(2, u"Recovered directory"); }, "Crash did not fire");
             puts("PASS: retained committed journal without applying home blocks");
             return 0;
+        }
+        RunIncrementalBTreeTests();
+        journalResizeTests();
+        resizeIoErrors();
+        {
+            auto fixture = largeCatalog();
         }
         basic(false);
         basic(true);
