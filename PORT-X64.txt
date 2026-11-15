@@ -1,4 +1,4 @@
-HFVExplorer x64: HFS images, read-only MFS and CDs (experimental port)
+HFVExplorer x64: HFS/MFS images, read-only CDs/floppies (experimental port)
 2026-11-15
 
 This is a local, unofficial port of ObsoleteMadness/HfvExplorer at
@@ -24,8 +24,11 @@ Scope
 - Fragmented data/resource forks, catalogs and extents-overflow trees are
   supported. See OVERFLOW-EXTENTS.txt for tests and bounds checks.
 - Read-only classic HFS/hybrid CD access uses built-in Windows device APIs.
-  Physical floppies, hard disks, eject/reload and CD burning remain disabled.
+  Hard disks, eject/reload and CD burning remain disabled. Explicit 1.44 MB
+  HFS floppy format/image writing is described in FLOPPY-WRITE.txt.
   No cdenable.sys, VxD or VWIN32 code is built.
+- Native read-only HFS floppy access supports Windows-reported standard MFM
+  geometry. Real hardware remains unverified; see FLOPPY-ACCESS.txt.
 - Windows manages display scaling because the legacy layout uses fixed pixels.
   This improves readability on high-DPI displays; bitmap icons may be soft.
 - Old emulator integrations and WinHelp are not validated by this port.

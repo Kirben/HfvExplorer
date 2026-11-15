@@ -251,7 +251,7 @@ void CHFVExplorerDoc::enum_volumes_ext( LPSTR mask, LPSTR ext )
 
 void CHFVExplorerDoc::enum_floppies( void )
 {
-#if defined(HFV_IMAGE_ONLY) || defined(HFV_READONLY_CD)
+#if defined(HFV_IMAGE_ONLY)
  return;
 #endif
 	char name[_MAX_PATH];

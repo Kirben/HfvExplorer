@@ -41,7 +41,7 @@ Implementation
   supported. Candidate MDB geometry and all read bounds are checked.
 - Separate pseudo-file descriptors adapt the CD to the existing HFS core.
   Each has its own seek position. Writable opens and writes return EROFS;
-  the HFS core mounts the volume read-only. Physical floppy/hard-disk access,
+  the HFS core mounts the volume read-only. Raw hard-disk access,
   disc burning and tray controls remain disabled.
 - The application manifest retains Windows-managed display scaling.
 
@@ -78,3 +78,5 @@ The latter uses generated, disposable fixtures; it never opens optical drives.
 Source: src/ReadOnlyCd.*, src/ReadOnlyCdBackend.*, tests/cd-*.cpp.
 The historical driver sources remain in the checkout for reference only;
 they are excluded from the current project.
+
+Native read-only HFS floppy access was added separately; see FLOPPY-ACCESS.txt.

@@ -9,7 +9,7 @@
   <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseOfMfc>Static</UseOfMfc><CharacterSet>MultiByte</CharacterSet></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup><OutDir>$(ProjectDir)..\bin\x64\</OutDir><IntDir>$(ProjectDir)..\obj\x64\</IntDir><TargetName>HFVExplorer</TargetName></PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)'=='Test'"><OutDir>$(ProjectDir)..\bin\tests\</OutDir><IntDir>$(ProjectDir)..\obj\gui-tests\</IntDir><HFVTestDefinitions>HFV_TESTING;</HFVTestDefinitions></PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Test'"><OutDir>$(ProjectDir)..\bin\tests\</OutDir><IntDir>$(ProjectDir)..\obj\gui-tests\</IntDir><HFVTestDefinitions>HFV_TESTING;HFV_FLOPPY_TESTING;</HFVTestDefinitions></PropertyGroup>
   <ItemDefinitionGroup>
     <!-- The original UI uses fixed 96-DPI pixels. Let Windows scale it. -->
     <Manifest><EnableDpiAwareness>false</EnableDpiAwareness></Manifest>
@@ -79,8 +79,8 @@
     <ClCompile Include="ImageOnly.cpp" />
     <ClCompile Include="ReadOnlyCd.cpp" />
     <ClCompile Include="MfsImage.cpp" /><ClCompile Include="MfsBrowser.cpp" />
-    <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" /><ClCompile Include="..\tests\LargeForkGuiTest.cpp" />
-    <ClCompile Include="ReadOnlyCdBackend.cpp" />
+    <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" /><ClCompile Include="..\tests\LargeForkGuiTest.cpp" /><ClCompile Include="..\tests\FloppyGuiTest.cpp" />
+    <ClCompile Include="ReadOnlyCdBackend.cpp" /><ClCompile Include="ReadOnlyFloppy.cpp" /><ClCompile Include="FloppyWriter.cpp" /><ClCompile Include="FloppyWriteDialog.cpp" />
     <ResourceCompile Include="HFVExplorer.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

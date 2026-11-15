@@ -1,0 +1,87 @@
+Native read-only physical floppy access (experimental x64 port)
+2026-11-15
+
+Status
+Implemented and tested with simulated devices and generated disk images.
+A later read-only probe opened the user-provided USB drive at A: and reported
+1.44 MB geometry. Real HFS-disc, write/format and Mac interoperability tests
+remain pending. A Macintosh disc is not needed for automated simulated tests.
+
+Use
+Insert a compatible classic HFS floppy and choose View > Refresh. Native
+floppy detection checks removable drive letters A: through Z: and adds valid
+HFS media to the Mac volume tree. Startup floppy probing remains disabled.
+Browse and copy files out as with a read-only CD. Refresh after changing discs
+or after a read error so stale handles and cached volume information are reset.
+Blank, FAT, MFS and unreadable discs do not appear as supported HFS volumes.
+
+The browsing backend stays read-only. A separate explicit 1.44 MB HFS format/
+image-write feature is available under Tools; see FLOPPY-WRITE.txt. Eject/
+reload and the old physical-media commands remain disabled.
+
+Compatibility
+- Internal and USB drives use the same native Windows path. Windows must
+  expose a removable drive letter, report supported floppy geometry and
+  permit raw read access. Some systems may require running as administrator.
+- Accepted geometries are 80 cylinders, 2 heads, 512-byte sectors, with 9, 18
+  or 36 sectors/track and the matching Windows media-type value. These are
+  720 KiB MFM, 1.44 MB MFM (1,474,560 bytes), and 2.88 MB MFM respectively.
+  The practical Macintosh target is a 1.44 MB HFS disc.
+- A USB bridge that reports only generic RemovableMedia/Unknown geometry is
+  currently rejected. Ordinary flash drives and hard disks are not accepted
+  as floppies merely because they have a removable drive letter.
+- Macintosh 400K/800K GCR discs cannot be read by ordinary PC/USB floppy
+  hardware. Accepting 720 KiB MFM geometry does not add 800K GCR support.
+  Flux-device integration, physical MFS, partitioned floppy layouts and
+  nonstandard/protected formats are not added here.
+
+Optional hardware diagnostic (run manually only when desired)
+From the extracted build folder:
+  .\floppy-probe.exe A:
+Replace A: with the selected floppy drive letter. The diagnostic opens only
+that drive, reports geometry, then attempts an HFS mount and root listing.
+It has no write/format/eject commands. A readable PC-formatted or blank disc
+can establish that opening/geometry queries work, but it cannot validate HFS
+compatibility. A failed HFS identification alone does not establish corruption.
+The diagnostic was built, but was not run against hardware in this task.
+
+Implementation
+- CreateFile with GENERIC_READ, FILE_FLAG_NO_BUFFERING and shared read/write
+  access; no custom driver, SCSI pass-through or write-access handle.
+- Read-only IOCTL_DISK_GET_DRIVE_GEOMETRY and IOCTL_STORAGE_CHECK_VERIFY queries.
+- Aligned temporary buffers and sector-aligned reads serve unaligned HFS byte
+  requests. Bounds, short reads, device errors and media-change errors are
+  checked. Errors invalidate the session until reopen; no sectors are invented.
+- Media-change counters are compared when returned by the Windows driver;
+  otherwise detection relies on native verification/read errors. The adapter
+  checks before and after each sector transfer. Refresh remains necessary
+  after a disc swap to discard higher-level filesystem caches.
+- Reserved paths such as A:\NO~1_2~3.DSK identify the native read-only view.
+  File hooks reject writable opens and all writes, and HFS mounts read-only.
+  The GUI adapter rejects Write/SetLength and reports floppy I/O failures.
+- Legacy Windows 9x/custom-driver code is still excluded. Hard-disk raw access,
+  legacy physical-media writes and tray commands remain disabled.
+
+Tests
+  .\build-x64.ps1 -TestFloppy
+Builds the release and diagnostic, runs simulated transport/HFS tests and runs
+the GUI storage adapter headlessly. The physical diagnostic is never launched.
+The complete .\build-x64.ps1 -Test suite also includes these tests.
+
+Coverage includes access flags, geometry/device rejection, arbitrary drive
+letters, aligned and multi-transfer reads, bounds/EOF, independent descriptors,
+reference-counted handles, no-media/access/CRC/short-read errors, media changes
+before and during reads, and cleanup after failure. A generated 1.44 MB HFS
+image tests data/resource extraction and rejection of format/create/write/
+truncate/delete/rename/mkdir operations. GUI tests check the real adapter's
+volume identity, seek/EOF behavior, write protection and failed-open cleanup.
+All media bytes are checked unchanged. Existing HFS, CD, MFS, fork-limit and
+large-image/fork GUI-reader regressions also pass. No computer control is used.
+
+Windows API references:
+https://learn.microsoft.com/windows/win32/api/winioctl/ne-winioctl-media_type
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_get_drive_geometry
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_check_verify
+
+This is a local unofficial HFVExplorer port; original copyright/GPL notices
+remain in place. Full hardware validation remains a separate outstanding step.

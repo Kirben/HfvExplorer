@@ -1256,7 +1256,11 @@ BOOL is_floppy_by_char( char letter )
 
 	letter = toupper(letter);
 	wsprintf( rootdir, "%c:\\", letter );
+	#ifdef HFV_READONLY_CD
+	return letter>='A' && letter<='Z' && GetDriveType(rootdir)==DRIVE_REMOVABLE;
+#else
 	return( (letter == 'A' || letter == 'B') && GetDriveType(rootdir) == DRIVE_REMOVABLE );
+#endif
 }
 
 BOOL is_floppy_by_index( int index )

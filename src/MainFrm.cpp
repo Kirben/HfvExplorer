@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "FloppyWriteDialog.h"
 #include <errno.h>
 #include "ImageSize.h"
 #include "HFVPreviewView.h"
@@ -84,6 +85,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_NEWVOLUME, OnFileNewvolume)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
+	ON_COMMAND(ID_TOOLS_FLOPPY_WRITE, OnToolsFloppyWrite)
 	ON_COMMAND(ID_TOOLS_DUMPCDDEBUG, OnToolsDumpcddebug)
 	ON_COMMAND(ID_CD_EJECT_RELOAD, OnCdEjectReload)
 	ON_COMMAND(ID_CD_EJECT_EJECT, OnCdEjectEject)
@@ -1495,3 +1497,17 @@ void CMainFrame::OnToolsBurn()
 }
 
 void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) { ui->Enable(FALSE); }
+
+static void ReleaseFloppyForWrite(int drive,void* context)
+{
+ CHFVExplorerDoc* document=(CHFVExplorerDoc*)context;
+ HFSIFACE_get_dir_flush();
+ for(int i=0;i<document->m_hfs_count;++i)
+  if(document->m_volumes[i].m_file.m_hfloppy && document->m_volumes[i].m_file.m_drive==drive) document->m_volumes[i].close();
+}
+void CMainFrame::OnToolsFloppyWrite()
+{
+ CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
+ ShowFloppyWriteDialog(this,ReleaseFloppyForWrite,app->m_doc);
+ SendMessage(WM_COMMAND,ID_VIEW_REFRESH);
+}

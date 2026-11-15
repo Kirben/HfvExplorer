@@ -51,6 +51,7 @@
 #include "copyin.h"
 #include "copyout.h"
 #include "..\tmap.h"
+#include "../ReadOnlyCdBackend.h"
 
 int set_file_size( char *path, hfv_size_t new_size );
 
@@ -89,6 +90,7 @@ int crlf_translation = 1;
 
 int mount_flags( char *path )
 {
+	if(readonly_media_path(path)) return O_RDONLY;
 	char buffer[10];
 	int flags;
 

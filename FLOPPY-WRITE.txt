@@ -1,0 +1,171 @@
+1.44 MB HFS floppy format / image write
+2026-11-15
+
+Use Tools > 1.44 MB floppy format/write...
+- Select the target drive letter.
+- Format HFS creates a complete empty classic HFS filesystem with the chosen
+  volume name, then writes all 1,474,560 bytes to the floppy.
+- Write image writes a raw HFS image of exactly 1,474,560 bytes. Add files to
+  an image using the existing HFS image browser, then write that image to disc.
+  The included floppy-test.dsk contains a generated Payload test file with
+  data and resource forks; its volume name is FloppyTest.
+- Both operations require an explicit erase confirmation naming the drive.
+  All original data on that disc will be overwritten. Ordinary disc browsing
+  remains read-only; direct file editing on physical floppies is not enabled.
+- Low-level format tracks first is optional and unchecked by default. Leave
+  it unchecked for an already sector-formatted 1.44 MB disc, including most
+  factory-formatted blank discs. It uses IOCTL_DISK_FORMAT_TRACKS and may be
+  unsupported by USB drives. An unsupported request fails, without silently
+  switching to another formatting operation.
+
+First manual test on A:
+1. Close any older HFVExplorer instance and run this build.
+2. Open Tools > 1.44 MB floppy format/write..., select A:, and enter MacTest.
+3. Leave low-level formatting unchecked. Click Format HFS and confirm the
+   explicit erase prompt only if the disc in A: may be erased.
+4. Wait for the complete write and readback verification. Close the dialog;
+   the volume list refreshes, and the MacTest HFS volume should appear.
+5. To test image writing, reopen the dialog, Browse to floppy-test.dsk, select
+   A:, click Write image and confirm erasure again. After verification/refresh,
+   FloppyTest should contain Payload (data: 8193 bytes; resource: 1025 bytes).
+If an operation fails, report its Windows error number and whether writing
+started. An access-denied error may require closing programs using the drive
+or running HFVExplorer as administrator. A failure after writing starts can
+leave an incomplete disc. Do not remove or change the disc during an operation.
+
+Guards and verification
+- Only removable drives reporting F3_1Pt44_512, 80 cylinders, 2 heads, 18
+  sectors/track and 512-byte sectors are accepted. Other floppy capacities,
+  generic flash-drive geometries and fixed disks are rejected.
+- The complete source image is prepared/read into memory before confirmation.
+  Raw HFS signature/allocation layout and exact image size are checked.
+  This is not a general filesystem repair or source-image integrity checker.
+- Writable handles are local to the explicit operation. The code requires a
+  successful FSCTL_LOCK_VOLUME before FSCTL_DISMOUNT_VOLUME or any writes.
+- Writes are aligned and bounded to the full 1.44 MB medium. Media-change
+  counters are checked, writes are flushed, and every sector is read back and
+  compared with the input. Errors, short writes and mismatches report failure.
+- Handles are unlocked/closed on success or failure. No automatic retry
+  bypasses write protection, a failed lock, unsupported geometry or an error.
+- A drive must already report readable 1.44 MB geometry. Truly unformatted or
+  damaged media that cannot supply this geometry is not currently supported.
+- This makes a data floppy, not a bootable Macintosh system disk. Macintosh
+  400K/800K GCR formats and physical MFS are still unsupported.
+
+Validation/status
+  .\build-x64.ps1 -TestFloppy
+Runs simulated writer/format tests plus read-only transport and headless GUI
+adapter tests. Simulated coverage includes HFS preparation, full locked writes
+and readback, optional track formatting, write protection, lock/dismount errors,
+short writes, flush failure, corrupted readback, media change, invalid targets/
+images and failure cleanup. These automated tests do not write physical media.
+
+A read-only probe successfully opened the user-provided USB floppy at A: and
+reported exact 1.44 MB geometry. It did not identify an HFS filesystem. A physical
+write test was not run: automatic approval review rejected erasing/replacing A:
+without explicit destructive-operation confirmation. No target backup was made
+and no disc writes were performed in that rejected attempt. Real formatting,
+write/readback, USB-driver compatibility and Mac interoperability remain pending
+the user's manual test or explicit authorization for an assisted hardware test.
+The new dialog was compiled but not visually exercised through computer control.
+
+Windows references:
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-fsctl_lock_volume
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-fsctl_dismount_volume
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_format_tracks
+
+DIAGNOSTIC BUILD v1
+This build adds failure-stage, byte-offset, sector and completed-track reporting.
+A host-side temporary log is written after each operation; its full path appears
+in the result dialog. It is only created on a fixed host volume, never a floppy.
+The log records the operation trace and final Windows error, requested/transferred
+byte counts, zero-based cylinder/head and sector, and completed write/readback counts.
+The write size remains one 9,216-byte track. No automatic retries were added.
+
+To test after the successful Windows full format:
+1. Extract this package to a new folder and run its HFVExplorer.exe.
+2. Tools > 1.44 MB floppy format/write; choose A: and a volume name.
+3. Leave low-level track formatting unchecked. Choose Format HFS and confirm
+   erasure only for the test disk. This replaces its Windows FAT filesystem.
+4. If it fails, copy the error details and attach the diagnostic log named in
+   the dialog. The disk may be incomplete after a failure.
+
+Release and headless Test builds passed. Simulated tests distinguish error 21
+in the readiness check before track 12, the write of track 12, and readback of
+track 12. Existing simulated write/read-only and headless GUI-adapter tests pass.
+No physical drive was accessed for this diagnostic build. This adds diagnostics;
+it does not yet establish or fix the cause of the USB-drive failure.
+
+HFVExplorer floppy diagnostics v2
+
+The user test log confirmed 160/160 successful write calls followed by Windows
+error 21 from FlushFileBuffers. Verification had not started. The old visual
+progress display was stale, not evidence that writing stopped at track 11.
+
+Changes:
+- Disk operations run on a worker thread while the modal dialog processes UI
+  messages. Closing and duplicate operations stay blocked during disk I/O.
+- The display explicitly shows the flush phase.
+- A flush failure is logged and readback is attempted. If all sectors match,
+  the result still warns that flushing failed and durability is unconfirmed.
+- If readback fails too, the report preserves both errors.
+- No automatic retry, skipped media checks or changed write size was added.
+
+Manual test (erases the selected floppy):
+1. Extract into a new folder, close the old app, and run this HFVExplorer.exe.
+2. Tools > 1.44 MB floppy format/write. Select A: and the volume name.
+3. Leave low-level track formatting unchecked and choose Format HFS.
+4. Confirm erasure for the test floppy. Watch Writing, Flushing and Verifying.
+5. Send the final result and the host-side diagnostic log path shown in it.
+No preliminary Windows format is needed for this retry.
+
+Validation:
+Release app and headless Test app built successfully. Simulated floppy writer,
+read-only floppy and headless GUI-storage adapter tests passed. New tests cover
+flush error 21 with all 160 matching readbacks, and flush error 21 followed by
+readback corruption (CRC error). Existing track-11 failure tests also passed.
+The responsive dialog was compiled but has not been visually exercised.
+No physical drive was accessed and no computer control was used for this build.
+
+Flushing API reference:
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
+FLOPPY PROGRESS BAR BUILD
+The floppy format/write dialog now shows a progress bar with per-stage track
+counts and percentages. Writing and verification each run from 0 to 160 tracks.
+Formatting and flushing show an animated waiting indicator because those Windows
+calls do not expose partial progress. Failures leave a red progress indicator.
+
+Extract to a new folder and run HFVExplorer.exe. The existing disk does not need
+to be reformatted just to use this build. A new format/write still erases the disk.
+
+The flush-unsupported result handling remains as in diagnostics v2: a flush
+failure is reported even when all sectors match. Logs remain available.
+Release and Test builds and simulated/headless floppy tests passed.
+No physical devices or computer control were used. Visual UI validation remains
+for the user; the dialog was compiled without opening it.
+UNSUPPORTED FLUSH FIX
+The progress-bar build now reports successful completion when the optional flush
+request returns ERROR_INVALID_FUNCTION (1) or ERROR_NOT_SUPPORTED (50), provided
+all 160 writes and all 160 full-track readbacks succeeded, the final media check
+passed, and unlocking succeeded. The success dialog includes an informational
+note about unsupported flushing. The original flush code remains in diagnostics.
+Other flush errors, incomplete writes, failed reads, mismatches, media changes,
+and unlock errors remain failures. No flush request is skipped or retried.
+
+Extract this package into a new folder and run its HFVExplorer.exe.
+Your already verified floppy does not need to be reformatted to use this build.
+Formatting or writing another image still erases the selected target disk.
+
+Release and Test builds and all simulated/headless floppy tests passed. Added
+coverage for unsupported errors 1 and 50, readback corruption and I/O failure
+after unsupported flushing, unlock failure, and genuine flush failures despite
+matching readback. No physical drive access or computer control was used.
+STABLE PROGRESS DISPLAY
+Writing and Verifying remain visible during routine per-track media checks.
+Those checks still run and remain in the diagnostic trace. Unchanged status
+text and progress positions are not repainted; marquee animation changes only
+when entering or leaving formatting/flushing. Track counts and percentages
+continue updating. The unsupported-flush fix is included.
+Extract to a new folder and run HFVExplorer.exe. No new format is required.
+Release/Test builds and simulated/headless floppy checks passed. No physical
+drive access or computer control was used; visual validation remains manual.

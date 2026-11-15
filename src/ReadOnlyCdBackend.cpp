@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "ReadOnlyCd.h"
 #include "ReadOnlyCdBackend.h"
+#include "ReadOnlyFloppy.h"
 #include "floppy.h"
 #define _FHOOK_INTERNAL_
 #include "filehook.h"
@@ -14,15 +15,20 @@
 
 namespace {
 ReadOnlyCd cds[MAX_DEVICES];
+ReadOnlyFloppy* floppies[MAX_DEVICES] = {};
+#ifdef HFV_FLOPPY_TESTING
+FloppyReadApi* floppyApis[MAX_DEVICES] = {};
+#endif
 const int kFdBase = 0x10000000, kFdCount = 128;
-struct Descriptor { bool open; int drive; long position; } descriptors[kFdCount] = {};
+struct Descriptor { bool open; int drive; long position; bool floppy; } descriptors[kFdCount] = {};
 #ifdef HFV_CD_TESTING
 char fixtures[MAX_DEVICES][MAX_PATH] = {};
 #endif
 int pathDrive(const char* path) {
     if (!path || strlen(path) != sizeof("A:\\NP~1_2~3.DSK") - 1 || path[1] != ':') return -1;
     int drive = toupper((unsigned char)path[0]) - 'A';
-    return drive >= 0 && drive < MAX_DEVICES && !_stricmp(path + 1, ":\\NP~1_2~3.DSK") ? drive : -1;
+    return drive >= 0 && drive < MAX_DEVICES &&
+        (!_stricmp(path + 1, ":\\NP~1_2~3.DSK") || !_stricmp(path + 1, ":\\NO~1_2~3.DSK")) ? drive : -1;
 }
 Descriptor* descriptor(int fd) {
     return fd >= kFdBase && fd < kFdBase + kFdCount && descriptors[fd-kFdBase].open ? &descriptors[fd-kFdBase] : NULL;
@@ -40,7 +46,9 @@ int hookedOpen(const char* path, int flags, ...) {
     }
     if (flags & (_O_WRONLY|_O_RDWR|_O_CREAT|_O_TRUNC|_O_APPEND)) { errno = EROFS; return -1; }
     for (int n=0; n<kFdCount; ++n) if (!descriptors[n].open) {
-        if (!cd_init(drive, TRUE)) { errno = EIO; return -1; }
+        bool floppy=toupper((unsigned char)path[4])=='O';
+        if (!(floppy?floppy_init(drive,TRUE):cd_init(drive, TRUE))) { errno = EIO; return -1; }
+        descriptors[n].floppy=floppy;
         descriptors[n].drive=drive; descriptors[n].position=0; descriptors[n].open=true;
         return kFdBase+n;
     }
@@ -49,15 +57,15 @@ int hookedOpen(const char* path, int flags, ...) {
 int hookedClose(int fd) {
     Descriptor* d=descriptor(fd);
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _close(fd); }
-    cd_final(d->drive); d->open=false; return 0;
+    if(d->floppy) floppy_final(d->drive); else cd_final(d->drive); d->open=false; return 0;
 }
 int hookedRead(int fd, void* buffer, unsigned count) {
     Descriptor* d=descriptor(fd);
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _read(fd,buffer,count); }
     if (count > INT_MAX) { errno=EINVAL; return -1; }
-    DWORD available=cds[d->drive].VolumeSize() - d->position;
+    DWORD available=(d->floppy?floppies[d->drive]->VolumeSize():cds[d->drive].VolumeSize()) - d->position;
     count=min(count,available);
-    if (!cds[d->drive].ReadVolume(d->position,count,buffer)) { errno=EIO; return -1; }
+    if (!(d->floppy?floppies[d->drive]->ReadVolume(d->position,count,buffer):cds[d->drive].ReadVolume(d->position,count,buffer))) { errno=EIO; return -1; }
     d->position+=count; return count;
 }
 int hookedWrite(int fd, const void* buffer, unsigned count) {
@@ -67,11 +75,10 @@ int hookedWrite(int fd, const void* buffer, unsigned count) {
 hfv_offset_t hookedSeek(int fd, hfv_offset_t offset, int origin) {
     Descriptor* d=descriptor(fd);
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _lseeki64(fd,offset,origin); }
-    LONGLONG position=offset;
-    if (origin==SEEK_CUR) position+=d->position;
-    else if (origin==SEEK_END) position+=cds[d->drive].VolumeSize();
-    else if (origin!=SEEK_SET) { errno=EINVAL; return -1; }
-    if (position < 0 || position > cds[d->drive].VolumeSize()) { errno=EINVAL; return -1; }
+    LONGLONG size=d->floppy?floppies[d->drive]->VolumeSize():cds[d->drive].VolumeSize();
+    LONGLONG base=origin==SEEK_SET?0:origin==SEEK_CUR?d->position:origin==SEEK_END?size:-1;
+    if(base<0 || offset < -base || offset > size-base) { errno=EINVAL; return -1; }
+    LONGLONG position=base+offset;
     d->position=(long)position; return d->position;
 }
 }
@@ -83,11 +90,12 @@ void readonly_cd_backend_init(void) {
 void readonly_cd_backend_final(void) {
     for(int n=0;n<kFdCount;++n) if(descriptors[n].open) hookedClose(kFdBase+n);
     for(int n=0;n<MAX_DEVICES;++n) { cds[n].Close(); flcds[n].handle=NULL; flcds[n].refcount=0; }
+    for(int n=0;n<MAX_DEVICES;++n) { delete floppies[n]; floppies[n]=NULL; }
     fhook_set_real_funcs();
 }
 HANDLE cd_init(int drive, BOOL) {
     if(drive<0 || drive>=MAX_DEVICES) return NULL;
-    if(flcds[drive].refcount) { ++flcds[drive].refcount; return flcds[drive].handle; }
+    if(flcds[drive].refcount) { if(flcds[drive].type!=FLTYPE_CD) return NULL; ++flcds[drive].refcount; return flcds[drive].handle; }
     bool opened;
 #ifdef HFV_CD_TESTING
     if(fixtures[drive][0]) opened=cds[drive].OpenFixture(fixtures[drive]); else
@@ -100,7 +108,7 @@ HANDLE cd_init(int drive, BOOL) {
     return flcds[drive].handle;
 }
 void cd_final(int drive) {
-    if(drive<0 || drive>=MAX_DEVICES || !flcds[drive].refcount) return;
+    if(drive<0 || drive>=MAX_DEVICES || flcds[drive].type!=FLTYPE_CD || !flcds[drive].refcount) return;
     if(--flcds[drive].refcount==0) { cds[drive].Close(); flcds[drive].handle=NULL; }
 }
 long get_cd_size(HANDLE h,int drive) {
@@ -116,7 +124,62 @@ int is_hfs_cd_present(int drive) {
     cd_final(drive); return 1;
 }
 void get_cd_volume_file_name(int drive,char* name) { sprintf(name,"%c:\\NP~1_2~3.DSK",'A'+drive); }
+int readonly_media_path(const char* path) {return pathDrive(path)>=0;}
+HANDLE floppy_init(int drive,BOOL) {
+    if(drive<0 || drive>=MAX_DEVICES) return NULL;
+    if(flcds[drive].refcount) {if(flcds[drive].type!=FLTYPE_FLOPPY) return NULL; ++flcds[drive].refcount;return flcds[drive].handle;}
+    if(!floppies[drive]) {
+#ifdef HFV_FLOPPY_TESTING
+        if(!floppyApis[drive]) return NULL; // Tests never fall through to hardware.
+        floppies[drive]=new ReadOnlyFloppy(floppyApis[drive]);
+#else
+        floppies[drive]=new ReadOnlyFloppy();
+#endif
+    }
+    if(!floppies[drive]->OpenDrive(drive) || !floppies[drive]->FindHfs()) {floppies[drive]->Close();return NULL;}
+    flcds[drive].handle=floppies[drive]->Handle();flcds[drive].refcount=1;flcds[drive].type=FLTYPE_FLOPPY;
+    flcds[drive].sector_size=512;flcds[drive].volume_start=0;return flcds[drive].handle;
 }
+void floppy_final(int drive) {
+    if(drive<0 || drive>=MAX_DEVICES || flcds[drive].type!=FLTYPE_FLOPPY || !flcds[drive].refcount) return;
+    if(--flcds[drive].refcount==0) {floppies[drive]->Close();flcds[drive].handle=NULL;}
+}
+long get_floppy_size(HANDLE handle,int drive) {
+    return drive>=0 && drive<MAX_DEVICES && floppies[drive] && flcds[drive].type==FLTYPE_FLOPPY &&
+        handle && handle==flcds[drive].handle?(long)floppies[drive]->VolumeSize():0;
+}
+int floppy_read(HANDLE handle,int drive,ULONG offset,int count,char* buffer) {
+    if(!get_floppy_size(handle,drive) || count<0) return 0;
+    if(floppies[drive]->ReadVolume(offset,(DWORD)count,buffer)) return count;
+    SetLastError(floppies[drive]->Error());return 0;
+}
+int floppy_write(HANDLE,int,ULONG,int,char*) {SetLastError(ERROR_WRITE_PROTECT);return 0;}
+void get_floppy_volume_file_name(int drive,char* name) {sprintf(name,"%c:\\NO~1_2~3.DSK",'A'+drive);}
+int is_hfs_floppy_present(int drive) {HANDLE handle=floppy_init(drive,TRUE);if(!handle) return 0;floppy_final(drive);return 1;}
+int is_any_floppy_present(int drive) {
+    if(drive<0 || drive>=MAX_DEVICES) return 0;
+#ifdef HFV_FLOPPY_TESTING
+    if(!floppyApis[drive]) return 0;
+    ReadOnlyFloppy device(floppyApis[drive]);
+#else
+    ReadOnlyFloppy device;
+#endif
+    return device.OpenDrive(drive)?1:0;
+}
+int get_floppy_max_size(int drive) {return drive>=0 && drive<MAX_DEVICES && floppies[drive]?(int)floppies[drive]->MediaSize():0;}
+void floppy_get_geometry(int drive,int* c,int* h,int* s,int* bytes) {
+    *c=*h=*s=*bytes=0;
+    if(drive<0 || drive>=MAX_DEVICES || !floppies[drive]) return;
+    const DISK_GEOMETRY& g=floppies[drive]->MediaGeometry();
+    *c=(int)g.Cylinders.QuadPart;*h=(int)g.TracksPerCylinder;*s=(int)g.SectorsPerTrack;*bytes=(int)g.BytesPerSector;
+}
+}
+#ifdef HFV_FLOPPY_TESTING
+bool readonly_floppy_attach_api(int drive,FloppyReadApi* api) {
+    if(drive<0 || drive>=MAX_DEVICES || flcds[drive].refcount) return false;
+    delete floppies[drive];floppies[drive]=NULL;floppyApis[drive]=api;return true;
+}
+#endif
 #ifdef HFV_CD_TESTING
 bool readonly_cd_attach_fixture(int drive,const char* path) {
     if(drive<0 || drive>=MAX_DEVICES || flcds[drive].refcount || strlen(path)>=MAX_PATH) return false;

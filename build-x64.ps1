@@ -1,4 +1,4 @@
-param([switch]$Test)
+param([switch]$Test,[switch]$TestFloppy)
 $ErrorActionPreference='Stop'
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.ATLMFC -property installationPath
@@ -8,6 +8,8 @@ $msbuild=Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
 if($LASTEXITCODE) { throw 'Application build failed.' }
 & $msbuild "$PSScriptRoot\tests\cd-probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
 if($LASTEXITCODE) { throw 'CD diagnostic build failed.' }
+& $msbuild "$PSScriptRoot\tests\floppy-probe.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+if($LASTEXITCODE) { throw 'Floppy diagnostic build failed.' }
 if($Test) {
  & $msbuild "$PSScriptRoot\tests\fork-limits.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE) { throw 'Fork-limit test build failed.' }
@@ -49,4 +51,25 @@ if($Test) {
  & "$PSScriptRoot\bin\x64\mfs-readonly.exe" $mfsDirectory
  if($LASTEXITCODE) { throw "Read-only MFS tests failed; retained $mfsDirectory" }
  Write-Host "MFS fixtures and exports retained at $mfsDirectory"
+}
+
+if($Test -or $TestFloppy) {
+ & $msbuild "$PSScriptRoot\tests\floppy-write.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Floppy writer test build failed.' }
+ & "$PSScriptRoot\bin\x64\floppy-write.exe"
+ if($LASTEXITCODE) { throw 'Simulated floppy writer tests failed.' }
+ & $msbuild "$PSScriptRoot\tests\floppy-readonly.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Read-only floppy test build failed.' }
+ $floppyDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-floppy-'+[Guid]::NewGuid().ToString('N'))
+ & "$PSScriptRoot\bin\x64\floppy-readonly.exe" $floppyDirectory
+ if($LASTEXITCODE) { throw "Read-only floppy tests failed; retained $floppyDirectory" }
+ & $msbuild "$PSScriptRoot\src\HFVExplorer-x64.vcxproj" /p:Configuration=Test /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Headless floppy GUI-adapter test build failed.' }
+ $floppyImage=Join-Path $floppyDirectory 'floppy-hfs.dsk'
+ $floppyReport=Join-Path $floppyDirectory 'gui-floppy-report.txt'
+ $floppyTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-floppy',('"'+$floppyImage+'"'),('"'+$floppyReport+'"')) -WindowStyle Hidden -PassThru
+ if(!$floppyTest.WaitForExit(30000)) { $floppyTest.Kill(); throw 'Headless floppy test timed out.' }
+ if(Test-Path -LiteralPath $floppyReport) { Get-Content -LiteralPath $floppyReport }
+ if($floppyTest.ExitCode -ne 0) { throw "Headless floppy test failed; retained $floppyDirectory" }
+ Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
 }

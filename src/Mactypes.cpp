@@ -462,9 +462,10 @@ BOOL CDSKFile::Open(
 	char name[_MAX_PATH];
 
 	for(i=0; i<MAX_FLOPPIES; i++) {
-		if(is_floppy_by_index(i)) {
+		{ // Match only the reserved path; the backend validates device geometry.
 			get_floppy_volume_file_name( i, name );
 			if(stricmp(name,lpszFileName) == 0) {
+				if(nOpenFlags & (CFile::modeWrite|CFile::modeReadWrite|CFile::modeCreate)) { SetLastError(ERROR_WRITE_PROTECT); return FALSE; }
 				m_drive = i;
 				m_hfloppy = floppy_init( i, TRUE );
 				m_seek = 0;
@@ -540,59 +541,45 @@ BOOL CDSKFile::GetStatus(CFileStatus& rStatus)
 	return(CFile::GetStatus(rStatus));
 }
 
-ULONGLONG CDSKFile::Seek(LONGLONG lOff, UINT nFrom)
+ULONGLONG CDSKFile::Seek(LONGLONG offset,UINT origin)
 {
-	hfv_offset_t sz;
-	hfv_offset_t new_seek;
-
-	if(m_drive != IS_NO_FLOPPY) {
-		if(m_hfloppy || m_hcd || m_hd) {
-			if(m_hfloppy)
-				sz = get_floppy_size(m_hfloppy,m_drive);
-			else if(m_hd)
-				sz = get_hd_size(m_hd,m_drive);
-			else
-				sz = get_cd_size(m_hcd,m_drive);
-			new_seek = m_seek;
-			switch( nFrom ) {
-				case begin:
-					new_seek = lOff;
-					break;
-				case current:
-					new_seek += lOff;
-					break;
-				case end:
-					// TESTTEST: WAS: - Off
-					new_seek = sz + lOff;
-					break;
-			}
-			if(new_seek < 0 || new_seek >= sz) {
-				return(-1);
-			} else {
-				m_seek = new_seek;
-				return(m_seek);
-			}
-		} else {
-			return(-1);
-		}
-	}
-	return(CFile::Seek(lOff, nFrom));
+ if(m_drive!=IS_NO_FLOPPY) {
+  if(!m_hfloppy && !m_hcd && !m_hd) return ULONGLONG(-1);
+  LONGLONG size=(LONGLONG)GetLength();
+  LONGLONG base=origin==begin?0:origin==current?m_seek:origin==end?size:-1;
+  if(size<0 || base<0 || offset < -base || offset > size-base) return ULONGLONG(-1);
+  m_seek=base+offset;return m_seek;
+ }
+ return CFile::Seek(offset,origin);
 }
-
+void CDSKFile::Write(const void* buffer,UINT count)
+{
+ if(m_drive!=IS_NO_FLOPPY) AfxThrowFileException(CFileException::accessDenied,ERROR_WRITE_PROTECT);
+ CFile::Write(buffer,count);
+}
+void CDSKFile::SetLength(ULONGLONG length)
+{
+ if(m_drive!=IS_NO_FLOPPY) AfxThrowFileException(CFileException::accessDenied,ERROR_WRITE_PROTECT);
+ CFile::SetLength(length);
+}
 UINT CDSKFile::Read(void* lpBuf, UINT nCount)
 {
 	if(m_drive != IS_NO_FLOPPY) {
+		ULONGLONG length=GetLength();
+		if(m_seek<0 || (ULONGLONG)m_seek>length) return 0;
+		nCount=(UINT)min((ULONGLONG)nCount,length-m_seek);
 		int got = 0;
 		if(m_hfloppy) {
-			got = floppy_read( m_hfloppy, m_drive, m_seek, nCount, (char *)lpBuf );
+			got = floppy_read( m_hfloppy, m_drive, (ULONG)m_seek, nCount, (char *)lpBuf );
 			if(got > 0) m_seek += got;
 		} else if(m_hd) {
-			got = cd_read( m_hd, m_drive, m_seek, nCount, (char *)lpBuf, FALSE );
+			got = cd_read( m_hd, m_drive, (ULONG)m_seek, nCount, (char *)lpBuf, FALSE );
 			if(got > 0) m_seek += got;
 		} else if(m_hcd) {
-			got = cd_read( m_hcd, m_drive, m_seek, nCount, (char *)lpBuf, TRUE );
+			got = cd_read( m_hcd, m_drive, (ULONG)m_seek, nCount, (char *)lpBuf, TRUE );
 			if(got > 0) m_seek += got;
 		}
+		if(m_hfloppy && nCount && got==0) AfxThrowFileException(CFileException::hardIO,GetLastError());
 		return(got);
 	}
 	return(CFile::Read(lpBuf, nCount));
@@ -887,6 +874,7 @@ int CHFVVolume::open()
 	}
 	CATCH( CFileException, e )
 	{
+		close();
 	}
 	END_CATCH
 

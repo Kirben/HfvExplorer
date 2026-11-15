@@ -437,6 +437,8 @@ public:
 	void Close();
 	BOOL GetStatus( CFileStatus& rStatus );
 	ULONGLONG Seek(LONGLONG lOff, UINT nFrom);
+	void Write(const void* buffer,UINT count) override;
+	void SetLength(ULONGLONG length) override;
 	UINT Read(void* lpBuf, UINT nCount);
 	ULONGLONG GetLength(void) const;
 

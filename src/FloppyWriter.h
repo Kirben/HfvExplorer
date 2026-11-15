@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#pragma once
+#include "ReadOnlyFloppy.h"
+#include <vector>
+#include <string>
+
+class FloppyWriteApi : public FloppyReadApi {
+public:
+    virtual bool Lock(HANDLE)=0;
+    virtual bool Dismount(HANDLE)=0;
+    virtual bool Unlock(HANDLE)=0;
+    virtual bool FormatTracks1440(HANDLE)=0;
+    virtual bool Write(HANDLE,ULONGLONG,DWORD,const void*,DWORD&)=0;
+    virtual bool Flush(HANDLE)=0;
+};
+typedef void (*FloppyProgress)(const char* phase,unsigned completed,unsigned total,void* context);
+class FloppyWriter {
+public:
+    explicit FloppyWriter(FloppyWriteApi* api=nullptr);
+    // Writes exactly one validated 1,474,560-byte HFS image. Browsing remains
+    // read-only; writable handles exist only for this explicit transaction.
+    bool WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks=false,
+                    FloppyProgress progress=nullptr,void* context=nullptr);
+    DWORD Error() const {return error_;}
+    DWORD FlushError() const {return flushError_;}
+    bool WritesStarted() const {return writesStarted_;}
+    const std::string& Stage() const {return stage_;}
+    DWORD Offset() const {return offset_;}
+    unsigned WrittenTracks() const {return writtenTracks_;}
+    unsigned VerifiedTracks() const {return verifiedTracks_;}
+    const std::string& Diagnostics() const {return diagnostics_;}
+private:
+    void Mark(const char* stage,DWORD offset=0,DWORD requested=0);
+    void Report(bool ok,int drive);
+    FloppyWriteApi* api_;
+    DWORD error_;
+    DWORD flushError_=0;
+    bool writesStarted_;
+    std::string stage_,diagnostics_;
+    DWORD offset_=0,requested_=0,transferred_=0;
+    unsigned writtenTracks_=0,verifiedTracks_=0;
+};
+bool PrepareFloppyHfs(const char* name,std::vector<BYTE>& image,std::string& error);
+bool LoadFloppyHfs(const char* path,std::vector<BYTE>& image,std::string& error);
+bool ValidateFloppyHfs(const std::vector<BYTE>& image);

@@ -144,6 +144,7 @@ protected:
 	afx_msg void OnFileEject();
 	afx_msg void OnFileReload();
 	afx_msg void OnToolsBurn();
+	afx_msg void OnToolsFloppyWrite();
  afx_msg void OnUpdatePhysicalMedia(CCmdUI* ui);
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()

@@ -22,6 +22,6 @@
 <ClCompile Include="..\src\hfs\libhfs\node.c" />
 <ClCompile Include="..\src\hfs\libhfs\record.c" />
 <ClCompile Include="..\src\hfs\libhfs\volume.c" />
-<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-readonly.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /></ItemGroup>
+<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-readonly.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -39,7 +39,11 @@ typedef struct {
 	ULONG volume_start;
 } flcd_device_type;
 #define MAX_DEVICES 26
+#ifdef HFV_READONLY_CD
+#define MAX_FLOPPIES 26 // Native USB/internal floppy drives may have any drive letter.
+#else
 #define MAX_FLOPPIES 2
+#endif
 enum { FLTYPE_FLOPPY=0, FLTYPE_CD, FLTYPE_HD };
 extern flcd_device_type flcds[MAX_DEVICES];
 
