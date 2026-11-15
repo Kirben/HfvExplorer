@@ -619,6 +619,7 @@ ULONGLONG CDSKFile::GetLength() const
 
 CHFVFile::CHFVFile()
 {
+	m_opened=0; m_mapped_blocks=0; m_resolving=false; m_file_id=0; m_fork=0;
 	m_isbtree = 0;
 	m_file_size = 0;
 	m_start = 0;
@@ -656,33 +657,131 @@ hfv_offset_t CHFVFile::Seek( hfv_offset_t lOff, UINT nFrom )
 	return(m_offset);
 }
 
+static unsigned extWord(const BYTE* p) { return ((unsigned)p[0]<<8)|p[1]; }
+static LongInt extLong(const BYTE* p) { return ((LongInt)extWord(p)<<16)|extWord(p+2); }
+
+// Read a complete node and validate its record-offset table before examining keys.
+bool CHFVFile::ReadExtentNode(LongInt number, BYTE* bytes, unsigned& records, BYTE& kind)
+{
+ if(!number || number>=m_header_rec.bthNNodes ||
+    (hfv_size_t)number*NODESIZE+NODESIZE>m_file_size) return false;
+ Seek((hfv_offset_t)number*NODESIZE,CFile::begin);
+ if(Read(bytes,NODESIZE)!=NODESIZE) return false;
+ kind=bytes[8]; records=extWord(bytes+10);
+ if(!records || records>(NODESIZE-14)/2-1) return false;
+ unsigned limit=NODESIZE-2*(records+1), previous=14;
+ for(unsigned r=0;r<=records;++r) {
+  unsigned offset=extWord(bytes+NODESIZE-2*(r+1));
+  if(offset<previous || offset>limit || (r && offset==previous)) return false;
+  previous=offset;
+ }
+ return true;
+}
+
+bool CHFVFile::LookupExtents(LongInt id, BYTE fork, unsigned fabn, ExtDescriptor* result)
+{
+ // A corrupt self-reference must not recurse indefinitely. Restore the logical
+ // cursor because an extents-file lookup can be nested inside another read.
+ if(m_resolving || !m_opened || m_header_rec.bthNodeSize!=NODESIZE) return false;
+ struct Restore { CHFVFile* file; hfv_offset_t offset; ~Restore(){file->m_offset=offset;file->m_resolving=false;} } restore={this,m_offset};
+ m_resolving=true;
+ LongInt node=id==CNID_EXTENTS_FILE?m_header_rec.bthFNode:m_header_rec.bthRoot;
+ unsigned height=m_header_rec.bthDepth;
+ // Self-bootstrap follows only the already readable leaf chain. All other
+ // lookups descend the index by (file ID, unsigned fork type, start FABN).
+ for(LongInt visited=0;node && visited<m_header_rec.bthNNodes;++visited) {
+  BYTE bytes[NODESIZE],kind; unsigned records;
+  if(!ReadExtentNode(node,bytes,records,kind)) return false;
+  bool self=id==CNID_EXTENTS_FILE;
+  if(self ? kind!=ndLeafNode : (!height || bytes[9]!=height ||
+     kind!=(height==1?ndLeafNode:ndIndxNode))) return false;
+  LongInt child=0;
+  for(unsigned r=0;r<records;++r) {
+   unsigned begin=extWord(bytes+NODESIZE-2*(r+1));
+   unsigned end=extWord(bytes+NODESIZE-2*(r+2));
+   if(end-begin<8 || bytes[begin]!=7) return false;
+   const BYTE* key=bytes+begin;
+   LongInt keyID=extLong(key+2); unsigned keyFork=key[1], keyBlock=extWord(key+6);
+   int comparison=keyID!=id?(keyID<id?-1:1):keyFork!=fork?(keyFork<fork?-1:1):keyBlock!=fabn?(keyBlock<fabn?-1:1):0;
+   if(kind==ndIndxNode) {
+    if(end-begin<12) return false;
+    if(comparison<=0) child=extLong(key+8); else break;
+   } else if(comparison==0) {
+    if(end-begin<20) return false;
+    for(unsigned i=0;i<3;++i) {
+     result[i].xdrStABN=(Integer)extWord(key+8+i*4);
+     result[i].xdrNumABlks=(Integer)extWord(key+10+i*4);
+    }
+    return true;
+   } else if(comparison>0) return false;
+  }
+  if(self) node=extLong(bytes);
+  else { node=child; --height; }
+ }
+ return false;
+}
+
+bool CHFVFile::EnsureExtents(hfv_size_t position)
+{
+ unsigned blockSize=m_pvol->m_MDB.drAlBlkSiz;
+ if(!blockSize) return false;
+ while(position>=(hfv_size_t)m_mapped_blocks*blockSize) {
+  if(!m_mapped_blocks || m_mapped_blocks>=m_pvol->m_MDB.drNmAlBlks) return false;
+  ExtDescriptor extra[3];
+  if(!m_pvol->m_extents_file.LookupExtents(m_file_id,m_fork,m_mapped_blocks,extra) ||
+     !AppendExtents(extra)) return false;
+ }
+ return true;
+}
+
+bool CHFVFile::AppendExtents(const ExtDescriptor* extents)
+{
+ unsigned blocks=m_mapped_blocks; bool terminated=false;
+ for(unsigned i=0;i<3;++i) {
+  unsigned start=extents[i].xdrStABN,count=extents[i].xdrNumABlks;
+  if(!count) { terminated=true; continue; }
+  if(terminated || start>=m_pvol->m_MDB.drNmAlBlks ||
+     count>m_pvol->m_MDB.drNmAlBlks-start ||
+     count>m_pvol->m_MDB.drNmAlBlks-blocks) return false;
+  blocks+=count;
+ }
+ if(blocks==m_mapped_blocks) return false;
+ for(unsigned i=0;i<3 && extents[i].xdrNumABlks;++i) m_extents.push_back(extents[i]);
+ m_mapped_blocks=blocks;
+ return true;
+}
+
 UINT CHFVFile::Read(void* lpBuf, UINT nCount)
 {
- if(!m_opened || m_offset < 0 || (hfv_size_t)m_offset >= m_file_size) return 0;
- UINT total = 0;
- nCount = (UINT)min((hfv_size_t)nCount, (hfv_size_t)m_file_size - m_offset);
- while(total < nCount) {
-  hfv_offset_t left = m_offset;
-  int extent;
-  for(extent=0; extent<3; ++extent) {
-   hfv_offset_t bytes = (hfv_offset_t)m_first_extents[extent].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
-   if(left < bytes) break;
-   left -= bytes;
+ if(!m_opened || m_offset<0 || (hfv_size_t)m_offset>=m_file_size) return 0;
+ UINT total=0;
+ nCount=(UINT)min((hfv_size_t)nCount,(hfv_size_t)m_file_size-m_offset);
+ while(total<nCount) {
+  if(!EnsureExtents(m_offset)) break;
+  hfv_offset_t left=m_offset;
+  size_t extent;
+  for(extent=0;extent<m_extents.size();++extent) {
+   hfv_offset_t bytes=(hfv_offset_t)m_extents[extent].xdrNumABlks*m_pvol->m_MDB.drAlBlkSiz;
+   if(left<bytes) break;
+   left-=bytes;
   }
-  if(extent==3) break; // Extents-overflow traversal is outside this legacy reader.
-  hfv_offset_t bytes = (hfv_offset_t)m_first_extents[extent].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
-  hfv_offset_t pos = m_pvol->m_hfs_start + (hfv_offset_t)m_first_extents[extent].xdrStABN * m_pvol->m_MDB.drAlBlkSiz + left;
-  UINT chunk = (UINT)min((hfv_size_t)(nCount-total), (hfv_size_t)(bytes-left));
-  if(m_pvol->m_file.Seek(pos,CFile::begin) != (ULONGLONG)pos) break;
-  UINT got = m_pvol->m_file.Read((BYTE*)lpBuf+total,chunk);
-  m_offset += got; total += got;
-  if(got != chunk) break;
+  if(extent==m_extents.size()) break;
+  hfv_offset_t bytes=(hfv_offset_t)m_extents[extent].xdrNumABlks*m_pvol->m_MDB.drAlBlkSiz;
+  hfv_offset_t pos=m_pvol->m_hfs_start+(hfv_offset_t)m_extents[extent].xdrStABN*m_pvol->m_MDB.drAlBlkSiz+left;
+  UINT chunk=(UINT)min((hfv_size_t)(nCount-total),(hfv_size_t)(bytes-left));
+  if(m_pvol->m_file.Seek(pos,CFile::begin)!=(ULONGLONG)pos) break;
+  UINT got=m_pvol->m_file.Read((BYTE*)lpBuf+total,chunk);
+  m_offset+=got; total+=got;
+  if(got!=chunk) break;
  }
  return total;
 }
+
 int CHFVFile::intern_open()
 {
 	NodeDescriptor ndescr;
+	m_extents.clear(); m_mapped_blocks=0; m_resolving=false;
+	if(m_file_size && !AppendExtents(m_first_extents)) { m_opened=0; return 0; }
 
 	// file global start point in real file
 	m_start = m_pvol->m_hfs_start + (hfv_offset_t)m_first_extents[0].xdrStABN * m_pvol->m_MDB.drAlBlkSiz;
@@ -692,13 +791,16 @@ int CHFVFile::intern_open()
 
 	if(m_isbtree) {
 		Seek( 0, CFile::begin );
-		Read( &ndescr, sizeof(NodeDescriptor) );
+		if(Read( &ndescr, sizeof(NodeDescriptor) )!=sizeof(NodeDescriptor)) { Close(); return 0; }
 		macpc_ndescr( &ndescr );
-		Read( &m_header_rec, sizeof(BTHdrRec) );
+		if(Read( &m_header_rec, sizeof(BTHdrRec) )!=sizeof(BTHdrRec)) { Close(); return 0; }
 		macpc_header_rec( &m_header_rec );
+		if(ndescr.ndType!=ndHdrNode || m_header_rec.bthNodeSize!=NODESIZE ||
+		   (hfv_size_t)m_header_rec.bthNNodes*NODESIZE>m_file_size) { Close(); return 0; }
 		Seek( 128, CFile::current );
 		Read( &m_map_record, sizeof(m_map_record) );
 	}
+	if(m_file_id==CNID_EXTENTS_FILE && m_file_size && !EnsureExtents(m_file_size-1)) { Close(); return 0; }
 	return(1);
 }
 
@@ -709,6 +811,8 @@ int CHFVFile::open_by_CDR( CHFVVolume *pvol, CatDataRec *pCDR, int type )
 	m_isbtree = 0;
 	m_name = "Catalog File";
 	m_clump_size = pCDR->u.f.filClpSize;
+	m_file_id=pCDR->u.f.filFlNum;
+	m_fork=type==OpenResourceFork?0xff:0;
 	if(type == OpenResourceFork) {
 		m_file_size = pCDR->u.f.filRLgLen;
 		memcpy( m_first_extents, pCDR->u.f.filRExtRec, sizeof(ExtDescriptor) * 3 );
@@ -723,6 +827,7 @@ int CHFVFile::open_special( CHFVVolume *pvol, int which )
 {
 	m_pvol = pvol;
 	m_isbtree = 1;
+	m_file_id=which==OpenCatalog?CNID_CATALOG_FILE:CNID_EXTENTS_FILE; m_fork=0;
 
 	if(which == OpenCatalog) {
 		m_name = "Catalog File";
@@ -772,8 +877,8 @@ int CHFVVolume::open()
 				m_hfs_start = m_MDB.drAlBlSt * 512;
 				// m_hfs_start = m_MDB.drAlBlSt * m_MDB.drAlBlkSiz;
 
-				m_catalog_file.open_special( this, CHFVFile::OpenCatalog );
-				m_extents_file.open_special( this, CHFVFile::OpenExtents );
+				if(!m_extents_file.open_special(this,CHFVFile::OpenExtents) ||
+				   !m_catalog_file.open_special(this,CHFVFile::OpenCatalog)) { close(); return 0; }
 				m_volume_name = CString(m_MDB.drVN);
 			} else {
 				close();

@@ -25,9 +25,9 @@ has a 6 GiB logical size but is sparse on a supporting filesystem.
 Limits
 6 GiB is the largest image validated in this change. Classic HFS format
 limits remain; accepting a size is not a guarantee every legacy operation
-supports it. The GUI reader retains its historical three initial extents
-limit for a fork; fragmented files requiring overflow extents remain a
-separate issue. This change does not provide physical-disk writes or CD writes.
+supports it. Overflow extents are now supported for file forks and catalogs;
+see OVERFLOW-EXTENTS.txt for the implementation and fragmented-volume tests.
+This change does not provide physical-disk writes or CD writes.
 
 The release build contains no test command-line mode. The source and tests
 are local modifications to the unofficial ObsoleteMadness mirror; original

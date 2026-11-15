@@ -287,6 +287,7 @@ struct _hfsfile_ {
   struct _hfsfile_ *next;
 };
 
+# define HFS_EXT_BOOTSTRAP 0x02 /* extents-file lookup recursion guard */
 # define HFS_UPDATE_CATREC	0x01
 
 typedef struct {

@@ -98,7 +98,40 @@ int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
   memcpy(&extsave, &file->ext, sizeof(ExtDataRec));
   fabnsave = file->fabn;
 
-  found = bt_search(&file->vol->ext, pkey, np);
+  if (file->cat.u.fil.filFlNum == 3)
+    {
+      /* The root can itself be beyond the inline extents. Bootstrap the
+         overflow file from readable leaves instead of recursing via its root. */
+      unsigned long visits = 0;
+      if (file->flags & HFS_EXT_BOOTSTRAP) {
+        ERROR(EIO, "recursive extents-file bootstrap");
+        return -1;
+      }
+      file->flags |= HFS_EXT_BOOTSTRAP;
+      np->bt = &file->vol->ext;
+      np->nnum = np->bt->hdr.bthFNode;
+      found = 0;
+      while (np->nnum && visits++ < np->bt->hdr.bthNNodes) {
+        unsigned r;
+        if (bt_getnode(np) < 0 || (unsigned char)np->nd.ndType != ndLeafNode) { found = -1; break; }
+        for (r = 0; r < np->nd.ndNRecs; ++r) {
+          unsigned start = np->roff[r], end = np->roff[r+1];
+          int comparison;
+          if (start < 14 || end < start + 20 || end > (unsigned)(HFS_BLOCKSZ-2*(np->nd.ndNRecs+1)) ||
+              np->data[start] != 7) { found = -1; break; }
+          comparison = r_compareextkeys(np->data+start,pkey);
+          if (comparison == 0) { np->rnum = r; found = 1; break; }
+          if (comparison > 0) { found = -1; break; }
+        }
+        if (found) break;
+        np->nnum = np->nd.ndFLink;
+      }
+      if (np->nnum && !found) found = -1;
+      file->flags &= ~HFS_EXT_BOOTSTRAP;
+    }
+  else
+    found = bt_search(&file->vol->ext, pkey, np);
+
 
   memcpy(&file->ext, &extsave, sizeof(ExtDataRec));
   file->fabn = fabnsave;

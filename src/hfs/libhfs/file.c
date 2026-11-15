@@ -122,6 +122,7 @@ int f_doblock(hfsfile *file, unsigned long num, block *bp,
 	  abnum -= num;
 	}
 
+      if (fabn <= file->fabn) { ERROR(EIO, "empty extent record"); return -1; }
       if (v_extsearch(file, fabn, &file->ext, 0) <= 0)
 	return -1;
 

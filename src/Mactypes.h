@@ -23,6 +23,9 @@
 
 #include "charset.h"
 #include "HostOffsets.h"
+#ifdef __cplusplus
+#include <vector>
+#endif
 
 #pragma pack(1)
 typedef unsigned short Integer;
@@ -403,6 +406,15 @@ public:
 	enum OpenFileType { OpenResourceFork = 0x0, OpenDataFork = 0x1 };
 
 protected:
+	bool AppendExtents(const ExtDescriptor* extents);
+	bool EnsureExtents(hfv_size_t position);
+	bool LookupExtents(LongInt id, BYTE fork, unsigned fabn, ExtDescriptor* result);
+	bool ReadExtentNode(LongInt number, BYTE* bytes, unsigned& records, BYTE& kind);
+	std::vector<ExtDescriptor> m_extents;
+	LongInt m_file_id;
+	BYTE m_fork;
+	unsigned m_mapped_blocks;
+	bool m_resolving;
 	LongInt m_clump_size;
 	LongInt m_file_size;
 	ExtDescriptor m_first_extents[3];

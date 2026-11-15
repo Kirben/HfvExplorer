@@ -17,6 +17,8 @@ This port does not automatically register file associations.
 
 Scope
 - Classic HFS disk images; this does not add HFS+ support.
+- Fragmented data/resource forks, catalogs and extents-overflow trees are
+  supported. See OVERFLOW-EXTENTS.txt for tests and bounds checks.
 - Read-only classic HFS/hybrid CD access uses built-in Windows device APIs.
   Physical floppies, hard disks, eject/reload and CD burning remain disabled.
   No cdenable.sys, VxD or VWIN32 code is built.
