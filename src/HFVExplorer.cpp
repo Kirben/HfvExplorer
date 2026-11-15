@@ -336,6 +336,8 @@ int CHFVExplorerApp::ExitInstance(){ShutdownStorageUi();return CWinApp::ExitInst
 BOOL CHFVExplorerApp::InitInstance()
 {
 #ifdef HFV_TESTING
+ extern int RunFindFilesTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-find-files")==0)ExitProcess(RunFindFilesTest(__argv[2]));
  extern int RunCdBurnTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-cd-burn")==0)ExitProcess(RunCdBurnTest(__argv[2]));
  extern int RunCdImageTest(const char*);

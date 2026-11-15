@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "stdafx.h"
+#include "FindFiles.h"
+#include "charset.h"
+#include <fcntl.h>
+#include <set>
+#include <algorithm>
+#include <cerrno>
+extern "C" {
+#include "hfs/libhfs/hfs.h"
+}
+namespace {
+std::vector<char> pathBuffer(const std::string& path){if(path.empty()||path.size()>=MAX_PATH)throw std::runtime_error("A search path is empty or exceeds the supported length");return std::vector<char>(path.c_str(),path.c_str()+path.size()+1);}
+std::string display(std::string text){auto b=pathBuffer(text);mac_to_pc_charset(reinterpret_cast<unsigned char*>(b.data()));return b.data();}
+struct Folder {std::string path;unsigned depth=0;long id=0;};
+class Search {
+ const FindRequest& request_;FindResults& output_;Storage::Job& job_;DWORD last_=0;
+public:
+ Search(const FindRequest& request,FindResults& output,Storage::Job& job):request_(request),output_(output),job_(job){}
+ void progress(const std::string& path,bool force=false){
+  if(job_.cancelled())throw Storage::Cancelled();
+  DWORD now=GetTickCount();if(!force&&now-last_<100)return;last_=now;
+  Storage::Progress p;p.phase="Finding files";p.path=path;p.detail=std::to_string(output_.checked)+" entries checked; "+std::to_string(output_.hits.size())+" matches";job_.progress(p);
+ }
+ bool hit(const std::string& name,const std::string& parent,const std::string& full,bool folder,unsigned long long bytes){
+  ++output_.checked;progress(parent);
+  if((!folder||request_.includeFolders)&&FindNameMatches(name,request_.pattern,request_.caseSensitive)){
+   if(output_.hits.size()>=request_.limit){output_.truncated=true;return false;}
+   output_.hits.push_back({name,parent,full,bytes,folder});
+  }return true;
+ }
+ void queued(std::vector<Folder>& pending,Folder folder){
+  if(folder.depth>128||folder.path.size()>=MAX_PATH||pending.size()>=100000)throw std::runtime_error("Search stopped at the supported folder depth, path length or pending-folder limit");
+  pending.push_back(std::move(folder));
+ }
+ void mac(){
+  auto volumePath=pathBuffer(request_.location.volume);hfsvol* volume=hfs_mount(volumePath.data(),0,O_RDONLY);
+  if(!volume)throw std::runtime_error(hfs_error?hfs_error:"Could not open the Macintosh volume");
+  struct Close{hfsvol* value;~Close(){hfs_umount(value);}} close={volume};
+  auto root=pathBuffer(request_.location.directory);pc_to_mac_charset(reinterpret_cast<unsigned char*>(root.data()));
+  std::string start=root.data();if(start.find(':')==std::string::npos)start+=':';
+  auto startPath=pathBuffer(start);hfsdirent entry={};
+  if(hfs_stat(volume,startPath.data(),&entry)<0||!(entry.flags&HFS_ISDIR))throw std::runtime_error("The selected search location is not an accessible Macintosh folder");
+  std::vector<Folder> pending={{start,0,entry.cnid}};std::set<long> visited;
+  while(!pending.empty()){
+   Folder folder=std::move(pending.back());pending.pop_back();progress(display(folder.path),true);
+   if(!visited.insert(folder.id).second)throw std::runtime_error("Search stopped because the Macintosh catalog repeats a folder ID");
+   auto path=pathBuffer(folder.path);hfsdir* directory=hfs_opendir(volume,path.data());
+   if(!directory)throw std::runtime_error(hfs_error?hfs_error:"Could not read a Macintosh folder");
+   struct CloseDir{hfsdir* value;~CloseDir(){hfs_closedir(value);}} closeDir={directory};
+   for(;;){
+    errno=0;if(hfs_readdir(directory,&entry)<0){if(errno==ENOENT)break;throw std::runtime_error(hfs_error?hfs_error:"Could not read the Macintosh catalog");}
+    std::string full=folder.path+(folder.path.back()==':'?"":":")+entry.name;bool isDirectory=(entry.flags&HFS_ISDIR)!=0;
+    if(!hit(display(entry.name),display(folder.path),display(full),isDirectory,isDirectory?0:static_cast<unsigned long long>(entry.u.file.dsize)+entry.u.file.rsize))return;
+    if(isDirectory&&request_.recursive)queued(pending,{full,folder.depth+1,entry.cnid});
+   }
+  }
+ }
+ void windows(){
+  const std::string root=request_.location.directory;DWORD attributes=GetFileAttributesA(root.c_str());
+  if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The selected search location is not an accessible Windows folder");
+  std::vector<Folder> pending={{root,0,0}};
+  while(!pending.empty()){
+   Folder folder=std::move(pending.back());pending.pop_back();progress(folder.path,true);
+   std::string prefix=folder.path+(folder.path.back()=='\\'?"":"\\"),mask=prefix+"*";
+   if(mask.size()>=MAX_PATH)throw std::runtime_error("A Windows search path exceeds the supported length");
+   WIN32_FIND_DATAA entry={};HANDLE handle=FindFirstFileA(mask.c_str(),&entry);
+   if(handle==INVALID_HANDLE_VALUE){
+    DWORD error=GetLastError();if(error==ERROR_FILE_NOT_FOUND)continue;
+    if(folder.depth==0)throw std::runtime_error("Could not enumerate the selected Windows folder (Windows error "+std::to_string(error)+")");
+    ++output_.unreadable;continue;
+   }
+   struct Close{HANDLE value;~Close(){FindClose(value);}} close={handle};
+   for(;;){
+    if(strcmp(entry.cFileName,".")&&strcmp(entry.cFileName,"..")){
+     bool isDirectory=(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;std::string full=prefix+entry.cFileName;
+     if(full.size()>=MAX_PATH)throw std::runtime_error("Search stopped because a Windows path exceeds the supported length");
+     unsigned long long size=(static_cast<unsigned long long>(entry.nFileSizeHigh)<<32)|entry.nFileSizeLow;
+     if(!hit(entry.cFileName,folder.path,full,isDirectory,isDirectory?0:size))return;
+     if(isDirectory&&request_.recursive&&!(entry.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))queued(pending,{full,folder.depth+1,0});
+    }
+    if(!FindNextFileA(handle,&entry)){DWORD error=GetLastError();if(error!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed (Windows error "+std::to_string(error)+")");break;}
+   }
+  }
+ }
+};
+}
+bool FindNameMatches(std::string name,std::string pattern,bool caseSensitive){
+ if(pattern.empty())return false;
+ if(!caseSensitive){if(!name.empty())CharUpperBuffA(&name[0],DWORD(name.size()));CharUpperBuffA(&pattern[0],DWORD(pattern.size()));}
+ if(pattern=="*.*")pattern="*";
+ if(pattern.find_first_of("*?")==std::string::npos)return name.find(pattern)!=std::string::npos;
+ size_t n=0,p=0,star=std::string::npos,retry=0;
+ while(n<name.size()){
+  if(p<pattern.size()&&(pattern[p]=='?'||pattern[p]==name[n])){++n;++p;}
+  else if(p<pattern.size()&&pattern[p]=='*'){star=p++;retry=n;}
+  else if(star!=std::string::npos){p=star+1;n=++retry;}
+  else return false;
+ }
+ while(p<pattern.size()&&pattern[p]=='*')++p;return p==pattern.size();
+}
+std::function<Storage::Result(Storage::Job&)> MakeFindFilesJob(FindRequest request,std::shared_ptr<FindResults> results){
+ return [=](Storage::Job& job)->Storage::Result {
+  if(!results||request.pattern.empty()||request.pattern.size()>255||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
+  if(job.cancelled())throw Storage::Cancelled();
+  *results={};Search search(request,*results,job);
+  try{if(request.location.mac)search.mac();else search.windows();}
+  catch(const Storage::Cancelled&){throw;}
+  catch(const std::exception& error){return {1,ERROR_READ_FAULT,error.what()};}
+  std::sort(results->hits.begin(),results->hits.end(),[](const FindHit& a,const FindHit& b){int compared=_stricmp(a.name.c_str(),b.name.c_str());return compared?compared<0:a.path<b.path;});
+  search.progress(request.location.directory,true);return {};
+ };
+}

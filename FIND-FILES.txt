@@ -1,0 +1,47 @@
+Find files and folders
+
+Select a folder or volume in the main tree, then use Tools > Find..., the Find
+toolbar button, or F3. Enter part of a name or a wildcard pattern (* and ?).
+Plain text means "name contains"; wildcard patterns match the entire name.
+Matching is case-insensitive unless Match case is checked. *.* also matches
+extensionless files. This searches names, not the contents of files or forks.
+
+By default, search starts in the selected folder and includes subfolders.
+Search entire selected volume starts at its root instead. Include folder names
+also returns matching folders. Supported main-tree locations are Windows
+folders and mounted classic HFS images, native CDs and native Mac floppies.
+The separate MFS browser is outside this main-window command.
+
+The persistent storage worker performs read-only directory enumeration while
+one progress window shows the current folder, checked entries and match count.
+The total entry count is unknown, so progress is indeterminate. Cancel takes
+effect between entries/device reads; a driver call already in progress may
+take time to return. This retains the current serialized storage design.
+
+Results show names, containing folders, byte sizes and file/folder kind. HFS
+sizes include both data and resource forks; Windows sizes retain all 64 bits.
+Double-click a result or use Show in folder to close results, navigate to its
+parent in HFVExplorer, and select it. Matching HFS volume names are disambiguated
+using the originating mounted volume. If an item disappeared or current view
+settings hide it, a message explains why it could not be selected. No files are
+opened as applications or modified by searching.
+
+The results list uses virtual rows. Searches are limited to 10,000 matches and
+report truncation; narrow the pattern if this occurs. Directory junctions and
+symbolic links below the starting folder are not followed. Unreadable Windows
+subfolders are skipped and counted; a root access error, HFS read/catalog error
+or path/depth limit stops the search with an error, retaining available matches
+as incomplete results. The app's existing ANSI paths/MAX_PATH limits apply.
+
+Validation: Release and Test builds passed. Automated tests cover substring,
+case and wildcard matching, extensionless names, HFS/Windows folder scopes and
+recursion, folder-name inclusion, both-fork sizes, sparse >4-GiB Windows file
+metadata, result limits, path/read errors, unchanged source image/media,
+read-only physical-adapter behavior, virtual result text/selection, empty
+results, slow reads, cancellation and owner restoration. Existing storage,
+spinner, copy, CD imaging, native-burn simulation and floppy tests passed too.
+The directory-link test was skipped on this machine because Windows denied
+symbolic-link creation (error 1314). No computer control or physical drives were
+used. Main-window navigation and real-device behavior require manual testing.
+
+Changes are committed locally. Nothing has been pushed to GitHub.

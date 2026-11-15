@@ -98,6 +98,7 @@ class JobDialog : public CDialog {
    progress.files+progress.skipped,progress.totalFiles,progress.skipped,double(progress.bytes)/(1024*1024),(GetTickCount()-started_)/1000);
   if(progress.fileCopy&&!progress.totalFiles)status.Format("Elapsed: %lu seconds",(GetTickCount()-started_)/1000);
   if(!progress.fileCopy)status.Format("Elapsed: %lu seconds",(GetTickCount()-started_)/1000);
+  if(!progress.detail.empty()){status=progress.detail.c_str();CString elapsed;elapsed.Format("; %lu seconds",(GetTickCount()-started_)/1000);status+=elapsed;}
   if(progress.byteTransfer&&progress.totalBytes)status.Format("%.2f / %.2f MiB; %u%%; %lu seconds",double(progress.processed)/(1024*1024),double(progress.totalBytes)/(1024*1024),unsigned(min(progress.processed,progress.totalBytes)*100/progress.totalBytes),(GetTickCount()-started_)/1000);
   CString path=progress.path.c_str();
   if(progress.fileTotal){CString percent;percent.Format(" (%u%%)",unsigned(min(progress.fileBytes,progress.fileTotal)*100/progress.fileTotal));path+=percent;}

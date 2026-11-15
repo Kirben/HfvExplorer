@@ -94,5 +94,11 @@ if($Test -or $TestFloppy) {
  $cdBurnReport=Join-Path $cdBurnDirectory 'cd-burn-report.txt'
  if(Test-Path -LiteralPath $cdBurnReport) {Get-Content -LiteralPath $cdBurnReport}
  if($cdBurnTest.ExitCode -ne 0) {throw "CD burn tests failed; retained $cdBurnDirectory"}
+ $findDirectory=Join-Path $floppyDirectory 'find-files'
+ $findTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-find-files',('"'+$findDirectory+'"')) -WindowStyle Hidden -PassThru
+ if(!$findTest.WaitForExit(30000)) {throw 'Find-files tests timed out.'}
+ $findReport=Join-Path $findDirectory 'find-report.txt'
+ if(Test-Path -LiteralPath $findReport) {Get-Content -LiteralPath $findReport}
+ if($findTest.ExitCode -ne 0) {throw "Find-files tests failed; retained $findDirectory"}
  Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
 }

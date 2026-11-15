@@ -24,6 +24,7 @@
 #include "FloppyWriteDialog.h"
 #include "CdImageDialog.h"
 #include "CdBurnDialog.h"
+#include "FindFilesDialog.h"
 #include <errno.h>
 #include "ImageSize.h"
 #include "HFVPreviewView.h"
@@ -107,6 +108,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_EJECT, OnFileEject)
 	ON_COMMAND(ID_FILE_RELOAD, OnFileReload)
 	ON_COMMAND(ID_TOOLS_BURN, OnToolsBurn)
+ ON_COMMAND(ID_TOOLS_FIND, OnToolsFind)
 	//}}AFX_MSG_MAP
 	// Global help commands
 	ON_COMMAND(ID_HELP_FINDER, CFrameWnd::OnHelpFinder)
@@ -1459,4 +1461,27 @@ void CMainFrame::OnToolsFloppyWrite()
  CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
  ShowFloppyWriteDialog(this,ReleaseFloppyForWrite,app->m_doc);
  SendMessage(WM_COMMAND,ID_VIEW_REFRESH);
+}
+
+void CMainFrame::OnToolsFind()
+{
+ CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
+ if(!app->m_doc||!app->m_tree)return;
+ HTREEITEM item=app->m_tree->m_ct->GetSelectedItem();
+ if(!item){AfxMessageBox("Select a folder or volume to search first.");return;}
+ DWORD_PTR data=app->m_tree->m_ct->GetItemData(item);int type=app->m_tree->get_lparam_type(data),index=app->m_tree->get_lparam_volinx(data);
+ int mac=0;CString path=app->m_doc->get_directory(item,&mac);FindLocation location;
+ location.mac=mac!=0;location.directory=(LPCSTR)path;location.volumeIndex=index;
+ if(path.IsEmpty()){AfxMessageBox("Select a folder or volume to search first.");return;}
+ if(type==LIST_HFS&&index>=0&&index<app->m_doc->m_hfs_count){location.volume=(LPCSTR)app->m_doc->m_volumes[index].m_file_name;location.root=(LPCSTR)(app->m_doc->m_volumes[index].m_volume_name+":");}
+ else if(type==LIST_FAT&&index>=0&&index<app->m_doc->m_fat_count){location.root=std::string(1,app->m_doc->m_fats[index].m_letter)+":\\";}
+ else {AfxMessageBox("Select a folder or volume to search first.");return;}
+ FindHit selected;if(!ShowFindFilesDialog(this,location,selected))return;
+ app->m_doc->my_chdir(selected.parent.c_str(),location.mac,location.mac?index:-1);
+ if(app->m_list){auto& list=app->m_list->GetListCtrl();
+  for(int row=0;row<list.GetItemCount();++row)if(list.GetItemText(row,0).CompareNoCase(selected.name.c_str())==0){
+   list.SetItemState(-1,0,LVIS_SELECTED|LVIS_FOCUSED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);list.EnsureVisible(row,FALSE);app->m_list->SetFocus();return;
+  }
+ }
+ AfxMessageBox("The folder was opened, but the item is not visible. It may have changed or be hidden by the current view settings.");
 }

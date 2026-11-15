@@ -2293,7 +2293,7 @@ void CHFVExplorerDoc::build_pc_tree( int volinx, CString path )
 	dbdb( "build_pc_tree END");
 }
 
-void CHFVExplorerDoc::my_chdir( CString path, int mac )
+void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 {
 	int volinx, dummy;
 	CString volname, dir, subdir, rest;
@@ -2319,6 +2319,7 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac )
 			if(htree) {
 				pApp->m_tree->enable_selchange(1);
 				pApp->m_tree->GetTreeCtrl().EnsureVisible( htree );
+				pApp->m_dosicons = save_view_dos_icons;
 				pApp->m_tree->GetTreeCtrl().SelectItem( htree );
 				return;
 			}
@@ -2333,6 +2334,7 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac )
 	}
 
 	if(my_split_path( path, volname, &volinx, dir, mac )) {
+  if(preferredVolume>=0&&preferredVolume<m_hfs_count&&volname.CompareNoCase(m_volumes[preferredVolume].m_volume_name)==0)volinx=preferredVolume;
 		pApp->m_tree->enable_selchange(1);
 		set_current_hitem( m_volumes[volinx].m_rootitem );
 		open_sub_directory( volinx, CNID_ROOT_ID, m_volumes[volinx].m_volume_name );

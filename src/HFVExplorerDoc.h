@@ -123,7 +123,7 @@ protected: // create from serialization only
 	void open_parent_directory( unsigned long id );
 	CString get_directory( HTREEITEM hItem, int *pmac );
 	int my_split_path( CString path, CString &volname, int *volinx, CString &dir, int mac );
-	void my_chdir( CString path, int mac );
+	void my_chdir( CString path, int mac, int preferredVolume = -1 );
 	void set_current_hitem( HTREEITEM hItem );
 	HTREEITEM get_current_hitem();
 
