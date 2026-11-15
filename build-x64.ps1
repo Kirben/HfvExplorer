@@ -23,4 +23,19 @@ if($Test) {
  $fixtureDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-CD-tests-'+[Guid]::NewGuid().ToString('N'))
  & "$PSScriptRoot\bin\x64\cd-readonly.exe" $populatedImage $fixtureDirectory
  if($LASTEXITCODE) { throw "Read-only CD tests failed; retained $fixtureDirectory" }
+ & $msbuild "$PSScriptRoot\tests\large-image-core.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Large-image core test build failed.' }
+ $largeDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-large-'+[Guid]::NewGuid().ToString('N'))
+ & "$PSScriptRoot\bin\x64\large-image-core.exe" $largeDirectory
+ if($LASTEXITCODE) { throw "Large-image core tests failed; retained $largeDirectory" }
+ & $msbuild "$PSScriptRoot\src\HFVExplorer-x64.vcxproj" /p:Configuration=Test /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE) { throw 'Headless GUI-storage test build failed.' }
+ $manifest=Join-Path $largeDirectory 'manifest.bin'
+ $report=Join-Path $largeDirectory 'gui-report.txt'
+ # The Test configuration exits before preferences, drive discovery or window creation.
+ $headless=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-large-image',('"'+$manifest+'"'),('"'+$report+'"')) -WindowStyle Hidden -PassThru
+ if(!$headless.WaitForExit(30000)) { $headless.Kill(); throw 'Headless image test timed out.' }
+ if(Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
+ if($headless.ExitCode -ne 0) { throw "Headless image tests failed; retained $largeDirectory" }
+ Write-Host "Large-image tests retained at $largeDirectory (6 GiB logical sparse file)."
 }

@@ -1,3 +1,4 @@
+#include "HostOffsets.h"
 /*
  * HFVExplorer
  * Copyright (C) 1997-1998 by Anygraaf Oy
@@ -70,7 +71,7 @@ void dump_icon( HICON hicon ); //debug
 #ifdef __cplusplus
 extern "C" {
 #endif
-int set_file_size( char *path, DWORD new_size );
+int set_file_size( char *path, hfv_size_t new_size );
 BOOL is_floppy_by_char( char letter );
 BOOL is_floppy_by_index( int index );
 

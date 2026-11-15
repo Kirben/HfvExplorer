@@ -19,6 +19,8 @@
  */
 
 #include "stdafx.h"
+#include <errno.h>
+#include "ImageSize.h"
 #include "HFVPreviewView.h"
 #include "resource.h"
 #include "MainFrm.h"
@@ -818,7 +820,7 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
 	return CFrameWnd::WindowProc(message, wParam, lParam);
 }
 
-int ask_new_volume( char *volpath, char *vname, int *psize, int *normal )
+int ask_new_volume( char *volpath, char *vname, hfv_size_t *psize, int *normal )
 {
 	CAskNewVolume dlg;
 	int ret, drive;
@@ -832,21 +834,11 @@ int ask_new_volume( char *volpath, char *vname, int *psize, int *normal )
 		lstrcpy( vname, dlg.m_volname.GetBuffer(_MAX_PATH) );
 		lstrcpy( volpath, dlg.m_volpath.GetBuffer(_MAX_PATH) );
 		p = dlg.m_volsize_ex.GetBuffer(100);
-		*psize = atol(p);
-		s = strchr(p,' ');
-		if(s) {
-			while(*s == ' ') s++;
-			if(toupper(*s) == 'M') *psize *= (1024*1024);
-			else if(toupper(*s) == 'K') *psize *= (1024);
-			else if(toupper(*s) == 'G') {
-				if(*psize > 2) {
-					AfxMessageBox( "File size limited to 2 GB." );
-					*psize = 2;
-				} 
-				*psize *= (1024*1024*1024);
-			}
-		}
-		if(dlg.m_volpath == dlg.get_floppy_a_name()) {
+        if(!ParseImageSize(p,psize)) {
+            AfxMessageBox("Invalid image size. Use a whole number with kB, MB or GB units, aligned to 512 bytes.");
+            return 0;
+        }
+        if(dlg.m_volpath == dlg.get_floppy_a_name()) {
 			*normal = 0;
 			drive = 0;
 		} else if(dlg.m_volpath == dlg.get_floppy_b_name()) {
@@ -1011,7 +1003,7 @@ void CMainFrame::OnFileNewvolume()
 	char vname[MAX_PATH];
 	CHFVExplorerApp	*pApp;
 	CString currdir = "";
-	int size, init;
+	hfv_size_t size; int init;
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 
@@ -1032,9 +1024,9 @@ void CMainFrame::OnFileNewvolume()
 	if(currdir != "") pApp->m_doc->my_chdir( currdir, 1 );
 }
 
-int get_file_size( const char *volpath )
+hfv_size_t get_file_size( const char *volpath )
 {
-	int l = 0;
+	hfv_size_t l = 0;
 	CFile file;
 
 	if(do_open_file( &file, volpath )) {
@@ -1078,13 +1070,13 @@ int ask_vol_to_floppy( char *volpath, int *pdrive, int to_floppy )
 					AfxMessageBox( "Cannot open the file " + dlg.m_volname + "." );
 					ret = 0;
 				} else {
-					int C0, H0, S0, nSec, sz, fsz;
+					int C0, H0, S0, nSec, sz; hfv_size_t fsz;
 					floppy_get_geometry( *pdrive, &C0, &H0, &S0, &nSec );
 					sz = C0 * H0 * S0 * nSec;
 					fsz = get_file_size(volpath);
 					if(fsz > sz) {
 						CString cs;
-						cs.Format( "The file is larger (%d bytes) than the disk size (%d bytes). The file will be truncated, with unpredictable results. Go on anyway?", fsz, sz );
+						cs.Format( "The file is larger (%I64u bytes) than the disk size (%d bytes). The file will be truncated, with unpredictable results. Go on anyway?", fsz, sz );
 						if(AfxMessageBox( cs, MB_YESNO ) != IDYES) 
 						{
 							ret = 0;

@@ -22,6 +22,7 @@
 #define _MACTYPES_H_
 
 #include "charset.h"
+#include "HostOffsets.h"
 
 #pragma pack(1)
 typedef unsigned short Integer;
@@ -387,7 +388,7 @@ public:
 
 	int Open( CHFVVolume *pvol );
 	void Close();
-	LONG Seek( LONG lOff, UINT nFrom );
+	hfv_offset_t Seek( hfv_offset_t lOff, UINT nFrom );
 	UINT Read( void* lpBuf, UINT nCount );
 	int intern_open();
 	int open_special( CHFVVolume *pvol, int which );
@@ -406,9 +407,9 @@ protected:
 	LongInt m_file_size;
 	ExtDescriptor m_first_extents[3];
 	int m_isbtree;
-	long m_start;
-	long m_fast_limit;
-	long m_offset;
+	hfv_offset_t m_start;
+	hfv_offset_t m_fast_limit;
+	hfv_offset_t m_offset;
 	CHFVVolume *m_pvol;
 };
 
@@ -423,15 +424,15 @@ public:
 		CFileException* pError = NULL);
 	void Close();
 	BOOL GetStatus( CFileStatus& rStatus );
-	LONG Seek(LONG lOff, UINT nFrom);
+	ULONGLONG Seek(LONGLONG lOff, UINT nFrom);
 	UINT Read(void* lpBuf, UINT nCount);
-	DWORD GetLength(void);
+	ULONGLONG GetLength(void) const;
 
 	int m_drive;
 	HANDLE m_hfloppy;
 	HANDLE m_hcd;
 	HANDLE m_hd;
-	LONG m_seek;
+	hfv_offset_t m_seek;
 };
 
 class CHFVVolume
@@ -456,7 +457,7 @@ public:
 	CFileStatus m_file_last_status;
 	BOOL m_file_opened;
 	CTime m_file_last_modified;
-	unsigned long m_length;
+	hfv_size_t m_length;
 	HTREEITEM m_rootitem;
 	int m_free;
 	int m_is_floppy;

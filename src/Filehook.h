@@ -23,18 +23,19 @@
 #include <sys/stat.h>
 #include <io.h>
 #include <fcntl.h>
+#include "HostOffsets.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 
-typedef int (*ftype_stat)(const char *, struct stat *);
+typedef int (*ftype_stat)(const char *, struct _stat64 *);
 typedef int (*ftype_open)(const char *, int, ...);
 typedef int (*ftype_close)(int);
 typedef int (*ftype_read)(int, void *, unsigned int);
 typedef int (*ftype_write)(int, const void *, unsigned int);
-typedef long (*ftype_lseek)(int, long, int);
+typedef hfv_offset_t (*ftype_lseek)(int, hfv_offset_t, int);
 
 extern ftype_stat fhook_stat;
 extern ftype_open fhook_open;

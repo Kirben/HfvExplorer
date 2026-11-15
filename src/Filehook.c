@@ -44,12 +44,12 @@
 		Just make sure to give file name which does not exist.
 */
 
-ftype_stat  fhook_stat  = stat;
+ftype_stat  fhook_stat  = _stat64;
 ftype_open  fhook_open  = open;
 ftype_close fhook_close = close;
 ftype_read  fhook_read  = read;
 ftype_write fhook_write = write;
-ftype_lseek fhook_lseek = lseek;
+ftype_lseek fhook_lseek = _lseeki64;
 
 static ftype_stat  fake_stat = 0;
 static ftype_open  fake_open = 0;
@@ -64,12 +64,12 @@ static void fhook_init_fsystem( void )
 
 void fhook_set_real_funcs( void )
 {
-	fhook_stat =  stat;
+	fhook_stat =  _stat64;
 	fhook_open =  open;
 	fhook_close = close;
 	fhook_read =  read;
 	fhook_write = write;
-	fhook_lseek = lseek;
+	fhook_lseek = _lseeki64;
 }
 
 void fhook_set_fake_funcs( void )

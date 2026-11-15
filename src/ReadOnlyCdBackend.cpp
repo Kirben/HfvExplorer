@@ -28,9 +28,9 @@ Descriptor* descriptor(int fd) {
     return fd >= kFdBase && fd < kFdBase + kFdCount && descriptors[fd-kFdBase].open ? &descriptors[fd-kFdBase] : NULL;
 }
 bool virtualFd(int fd) { return fd >= kFdBase && fd < kFdBase + kFdCount; }
-int hookedStat(const char* path, struct stat* st) {
+int hookedStat(const char* path, struct _stat64* st) {
     if (pathDrive(path) >= 0) { errno = ENOENT; return -1; }
-    return stat(path, st);
+    return _stat64(path, st);
 }
 int hookedOpen(const char* path, int flags, ...) {
     int drive = pathDrive(path);
@@ -64,9 +64,9 @@ int hookedWrite(int fd, const void* buffer, unsigned count) {
     if (virtualFd(fd)) { errno=EROFS; return -1; }
     return _write(fd,buffer,count);
 }
-long hookedSeek(int fd, long offset, int origin) {
+hfv_offset_t hookedSeek(int fd, hfv_offset_t offset, int origin) {
     Descriptor* d=descriptor(fd);
-    if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _lseek(fd,offset,origin); }
+    if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _lseeki64(fd,offset,origin); }
     LONGLONG position=offset;
     if (origin==SEEK_CUR) position+=d->position;
     else if (origin==SEEK_END) position+=cds[d->drive].VolumeSize();

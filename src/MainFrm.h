@@ -20,8 +20,9 @@
 
 #ifndef _MAINFRM_DEFINED
 #define _MAINFRM_DEFINED
+#include "HostOffsets.h"
 
-int ask_new_volume( char *volpath, char *vname, int *psize, int *normal );
+int ask_new_volume( char *volpath, char *vname, hfv_size_t *psize, int *normal );
 
 #define MYTIMERID 123
 

@@ -179,7 +179,7 @@ int getblock(hfsvol *vol, unsigned long bnum, block *bp)
   printf("READ: vol 0x%x block %lu\n", (unsigned int) vol, bnum);
 # endif
 
-  if (lseek(vol->fd, (vol->vstart + bnum) << HFS_BLOCKSZ_BITS, SEEK_SET) < 0)
+  if (lseek(vol->fd, ((hfv_offset_t)vol->vstart + bnum) * HFS_BLOCKSZ, SEEK_SET) < 0)
     {
       ERROR(errno, "error seeking device");
       return -1;
@@ -219,7 +219,7 @@ int putblock(hfsvol *vol, unsigned long bnum, block *bp)
   printf("WRITE: vol 0x%x block %lu\n", (unsigned int) vol, bnum);
 # endif
 
-  if (lseek(vol->fd, (vol->vstart + bnum) << HFS_BLOCKSZ_BITS, SEEK_SET) < 0)
+  if (lseek(vol->fd, ((hfv_offset_t)vol->vstart + bnum) * HFS_BLOCKSZ, SEEK_SET) < 0)
     {
       ERROR(errno, "error seeking device");
       return -1;

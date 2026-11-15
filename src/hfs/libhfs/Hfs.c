@@ -74,7 +74,7 @@ hfsvol *hfs_curvol;		/* current volume */
  */
 hfsvol *hfs_mount(char *path, int pnum, int flags)
 {
-  struct stat dev;
+  struct _stat64 dev;
   hfsvol *vol = 0;
 
 #ifndef WIN32
@@ -100,12 +100,12 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
 	// if (stat(path, &dev) >= 0)
 
 		{
-      struct stat mdev;
+      struct _stat64 mdev;
       hfsvol *check;
 
       for (check = hfs_mounts; check; check = check->next)
 	{
-	  if (fstat(check->fd, &mdev) >= 0 &&
+	  if (_fstat64(check->fd, &mdev) >= 0 &&
 	      mdev.st_dev == dev.st_dev &&
 	      mdev.st_ino == dev.st_ino &&
 	      (check->pnum == 0 || check->pnum == pnum))
@@ -423,8 +423,8 @@ int hfs_vstat(hfsvol *vol, hfsvolent *ent)
 
   ent->flags     = (vol->flags & HFS_READONLY) ? HFS_ISLOCKED : 0;
 
-  ent->totbytes  = vol->mdb.drNmAlBlks * vol->mdb.drAlBlkSiz;
-  ent->freebytes = vol->mdb.drFreeBks  * vol->mdb.drAlBlkSiz;
+  ent->totbytes  = (hfv_size_t)vol->mdb.drNmAlBlks * vol->mdb.drAlBlkSiz;
+  ent->freebytes = (hfv_size_t)vol->mdb.drFreeBks  * vol->mdb.drAlBlkSiz;
 
   ent->alblocksz = vol->mdb.drAlBlkSiz;
   ent->clumpsz   = vol->mdb.drClpSiz;
@@ -514,12 +514,15 @@ int hfs_format(char *path, int pnum, char *vname)
       unsigned long low, high, mid;
       block b;
 
-      for (low = 0, high = 2879; b_readlb(&vol, high, &b) >= 0; high *= 2)
-	low = high;
+      for (low = 0, high = 2879; b_readlb(&vol, high, &b) >= 0; ) {
+        low = high;
+        if (high == 0xffffffffUL) { close(vol.fd); ERROR(EFBIG, "image exceeds classic HFS sector range"); return -1; }
+        high = high > 0xffffffffUL / 2 ? 0xffffffffUL : high * 2;
+      }
 
       while (low < high - 1)
 	{
-	  mid = (low + high) / 2;
+	  mid = low + (high - low) / 2;
 
 	  if (b_readlb(&vol, mid, &b) < 0)
 	    high = mid;
@@ -1240,7 +1243,7 @@ long hfs_read(hfsfile *file, void *buf, unsigned long len)
 
   f_getptrs(file, &lglen, 0, 0);
 
-  if (file->pos + len > *lglen)
+  if (len > *lglen - file->pos)
     len = *lglen - file->pos;
 
   count = len;
@@ -1296,6 +1299,7 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
 
   f_getptrs(file, &lglen, &pylen, 0);
 
+  if (len > 0xffffffffUL - file->pos) { ERROR(EFBIG, "classic HFS fork size limit"); return -1; }
   count = len;
 
   /* set flag to update (at least) the modification time */
@@ -1388,10 +1392,10 @@ int hfs_truncate(hfsfile *file, unsigned long len)
  * NAME:	hfs->lseek()
  * DESCRIPTION:	change file seek pointer
  */
-long hfs_lseek(hfsfile *file, long offset, int from)
+hfv_offset_t hfs_lseek(hfsfile *file, hfv_offset_t offset, int from)
 {
   unsigned long *lglen;
-  long newpos;
+  hfv_offset_t newpos;
 
   f_getptrs(file, &lglen, 0, 0);
 
@@ -1419,7 +1423,7 @@ long hfs_lseek(hfsfile *file, long offset, int from)
   else if (newpos > *lglen)
     newpos = *lglen;
 
-  file->pos = newpos;
+  file->pos = (unsigned long)newpos;
 
   return newpos;
 }

@@ -18,6 +18,7 @@
  */
 
 # include <time.h>
+# include "../../HostOffsets.h"
 
 # define HFS_BLOCKSZ		512
 # define HFS_BLOCKSZ_BITS	9
@@ -33,8 +34,8 @@ typedef struct {
   char name[HFS_MAX_VLEN + 1];	/* name of volume */
   int flags;			/* volume flags */
 
-  unsigned long totbytes;	/* total bytes on volume */
-  unsigned long freebytes;	/* free bytes on volume */
+  hfv_size_t totbytes;	/* total bytes on volume */
+  hfv_size_t freebytes;	/* free bytes on volume */
 
   unsigned long alblocksz;	/* volume allocation block size */
   unsigned long clumpsz;	/* default file clump size */
@@ -139,7 +140,7 @@ int hfs_getfork(hfsfile *);
 long hfs_read(hfsfile *, void *, unsigned long);
 long hfs_write(hfsfile *, void *, unsigned long);
 int hfs_truncate(hfsfile *, unsigned long);
-long hfs_lseek(hfsfile *, long, int);
+hfv_offset_t hfs_lseek(hfsfile *, hfv_offset_t, int);
 int hfs_close(hfsfile *);
 
 int hfs_stat(hfsvol *, char *, hfsdirent *);

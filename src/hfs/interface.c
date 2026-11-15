@@ -22,6 +22,7 @@
 #ifdef WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winioctl.h>
 #undef ERROR
 #endif
 
@@ -51,7 +52,7 @@
 #include "copyout.h"
 #include "..\tmap.h"
 
-int set_file_size( char *path, DWORD new_size );
+int set_file_size( char *path, hfv_size_t new_size );
 
 static char HFSIFACE_copyout_mode = 'a';
 static char HFSIFACE_copyin_mode = 'a';
@@ -132,7 +133,7 @@ void hfs_pinfo(hfsvolent *ent)
 	strcat( buf, line );
   sprintf(line,"Volume was last modified on %s", ctime(&ent->mddate));
 	strcat( buf, line );
-  sprintf(line,"Volume has %lu bytes free\n", ent->freebytes);
+  sprintf(line,"Volume has %I64u bytes free\n", ent->freebytes);
 	strcat( buf, line );
 	MessageBox( error_hwnd, buf, "HFS", 0 );
 }
@@ -1111,7 +1112,7 @@ int fill_with_nulls( HANDLE hf, long size )
 	return(1);
 }
 
-int init_format( char *volpath, long size )
+int init_format( char *volpath, hfv_size_t size )
 {
 	HANDLE hf;
 	int result = 0;
@@ -1129,6 +1130,9 @@ int init_format( char *volpath, long size )
 			FILE_ATTRIBUTE_NORMAL,
 			NULL );
 		if(hf != INVALID_HANDLE_VALUE) {
+			DWORD ignored;
+			// Mark this new image sparse when its host filesystem supports it.
+			DeviceIoControl(hf,FSCTL_SET_SPARSE,NULL,0,NULL,0,&ignored,NULL);
 			/*
 			if(fill_with_nulls( hf, size )) {
 				result = 1;
@@ -1227,11 +1231,11 @@ void make_desktop( char *volpath )
 int HFSIFACE_format( 
 	char *volpath, 
 	char *vname, 
-	long size,
+	hfv_size_t size,
 	BOOL initialize
 )
 {
-	int result = 0;
+	int result = 1;
 	int partno = 0;
 	char mac_vname[_MAX_PATH];
 	
@@ -1246,6 +1250,7 @@ int HFSIFACE_format(
 			END_TIME_CONSUMING;
 		  hfs_perror(volpath);
 		} else {
+			result = 0;
 			// make_desktop(volpath);
 			END_TIME_CONSUMING;
 		}

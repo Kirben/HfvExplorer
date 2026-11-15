@@ -7,7 +7,7 @@ copyright notices and GPL licensing are preserved. It is not an official
 release by Lauri Pesonen or Anygraaf.
 
 Run
-Open the HFVExplorer-x64-cd folder and run HFVExplorer.exe. Keep it in a writable location.
+Open the extracted build folder and run HFVExplorer.exe. Keep it in a writable location.
 No custom driver or MFC runtime installation is required to run the executable.
 Optical-device access may require administrator privileges. See CD-ACCESS.txt
 for the read-only D: diagnostic. Use File > Open volume for HFV/DSK
@@ -23,8 +23,8 @@ Scope
 - Windows manages display scaling because the legacy layout uses fixed pixels.
   This improves readability on high-DPI displays; bitmap icons may be soft.
 - Old emulator integrations and WinHelp are not validated by this port.
-- Large-file offsets have not been modernized. Use images smaller than 2 GiB;
-  an x64 executable does not itself remove the historical offset limits.
+- Image offsets and sizes use 64-bit host arithmetic. A 6 GiB classic HFS
+  image passed reads/writes across 2 GiB and above 4 GiB. See LARGE-IMAGES.txt.
 
 Build
 Requires Visual Studio 2026 C++ tools (v145), Windows SDK and the MFC x86/x64

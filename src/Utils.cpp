@@ -1230,7 +1230,7 @@ HCURSOR _start_time_consuming(int update)
 	return(cu);
 }
 
-int set_file_size( char *path, DWORD new_size )
+int set_file_size( char *path, hfv_size_t new_size )
 {
 	CFile f;
 	int result = 0;

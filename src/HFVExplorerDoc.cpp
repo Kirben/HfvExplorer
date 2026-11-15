@@ -157,7 +157,7 @@ int check_zero_size( char *lpszPathName )
 	DWORD sizelo, sizehi;
 	HANDLE hFile;
 	char vname[_MAX_PATH];
-	int file_size, init;
+	hfv_size_t file_size; int init;
 
 	if(lpszPathName && *lpszPathName) {
 		hFile = CreateFile(
@@ -2114,9 +2114,9 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 			msg = "Exploring Configurations";
 		} else {
 			msg.Format( 
-				"Exploring \"%s\": %ld kB free", 
+				"Exploring \"%s\": %I64u kB free",
 				dirname, 
-				m_volumes[volinx].m_MDB.drFreeBks * m_volumes[volinx].m_MDB.drAlBlkSiz / 1024 );
+				(hfv_size_t)m_volumes[volinx].m_MDB.drFreeBks * m_volumes[volinx].m_MDB.drAlBlkSiz / 1024 );
 		}
 		pApp->m_pStatusBar->SetPaneText( 0, msg );
 	}

@@ -1,3 +1,4 @@
+#include "../HostOffsets.h"
 /*
  * HFVExplorer
  * Copyright (C) 1997-1998 by Anygraaf Oy
@@ -42,7 +43,7 @@ int HFSIFACE_copy(
 int HFSIFACE_rename( char *volpath, char *oldname, char *newname );
 int HFSIFACE_mkdir( char *volpath, char *path );
 int HFSIFACE_rmdir( char *volpath, char *path );
-int HFSIFACE_format( char *volpath, char *vname, long size, BOOL initialize );
+int HFSIFACE_format( char *volpath, char *vname, hfv_size_t size, BOOL initialize );
 
 int HFSIFACE_mount(char *path);
 int HFSIFACE_umount(char *path);

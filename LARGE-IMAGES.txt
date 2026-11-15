@@ -1,0 +1,34 @@
+Large classic HFS images (experimental x64 port)
+2026-11-15
+
+Host image lengths, seeks, allocation-block offsets and free-space reporting
+now use 64-bit values. Serialized classic HFS records retain their original
+field widths; this does not add HFS+ or enlarge classic HFS file-fork fields.
+New-volume sizes accept whole numbers with B, KB/KiB, MB/MiB or GB/GiB suffixes
+(binary units). For example, enter 6GB for a 6 GiB volume. Image creation uses
+sparse files where the host filesystem supports them.
+
+Validation
+Run .\build-x64.ps1 -Test from the source checkout.
+- Formats and reopens a sparse 6 GiB HFS image using the production HFS core.
+- Writes patterned data across 2 GiB and above 4 GiB, verifies data/resource
+  forks byte-for-byte after unmount and reopen, and checks 64-bit seek/stat.
+- Exercises the actual MFC storage classes headlessly: persistent writes on
+  both sides of 2/4 GiB, low-offset alias guards, end-relative seeks, high HFS
+  extents, extent-boundary reads, both forks and new-volume size parsing.
+- Runs existing small-image round-trip and synthetic read-only CD tests.
+The headless Test configuration exits before drive discovery, preferences or
+window creation. These tests use disposable image files, not physical media.
+Test files are retained at the paths printed by the script; the large image
+has a 6 GiB logical size but is sparse on a supporting filesystem.
+
+Limits
+6 GiB is the largest image validated in this change. Classic HFS format
+limits remain; accepting a size is not a guarantee every legacy operation
+supports it. The GUI reader retains its historical three initial extents
+limit for a fork; fragmented files requiring overflow extents remain a
+separate issue. This change does not provide physical-disk writes or CD writes.
+
+The release build contains no test command-line mode. The source and tests
+are local modifications to the unofficial ObsoleteMadness mirror; original
+copyright and GPL notices are preserved.

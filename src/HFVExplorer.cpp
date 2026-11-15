@@ -335,6 +335,13 @@ void CHFVExplorerApp::CheckDefaultSettings(void)
 
 BOOL CHFVExplorerApp::InitInstance()
 {
+#ifdef HFV_TESTING
+ extern int RunLargeImageGuiTest(const char*,const char*);
+ // No settings, CD discovery, window creation, or GUI event loop in test mode.
+ if(__argc==4 && strcmp(__argv[1], "--verify-large-image")==0)
+  ExitProcess(RunLargeImageGuiTest(__argv[2],__argv[3]));
+ ExitProcess(2);
+#endif
  // Keep this experimental port's preferences separate from the historical app.
  char settingsPath[MAX_PATH];
  GetModuleFileName(NULL, settingsPath, MAX_PATH);

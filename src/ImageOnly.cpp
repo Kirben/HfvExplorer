@@ -17,7 +17,7 @@ void cd_log_restore_enable(int, char*) {}
 void clear_cache_by_drive_index(int) {}
 BOOL writeback_flush_all(void) { return TRUE; }
 int silencer(int) { return 0; }
-int exists(const char* path) { struct stat st; return stat(path, &st) == 0; }
+int exists(const char* path) { struct _stat64 st; return _stat64(path, &st) == 0; }
 HANDLE floppy_init(int, BOOL) { return NULL; }
 HANDLE hd_init(int, BOOL) { return NULL; }
 void floppy_final(int) {}

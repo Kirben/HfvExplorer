@@ -540,10 +540,10 @@ BOOL CDSKFile::GetStatus(CFileStatus& rStatus)
 	return(CFile::GetStatus(rStatus));
 }
 
-LONG CDSKFile::Seek(LONG lOff, UINT nFrom)
+ULONGLONG CDSKFile::Seek(LONGLONG lOff, UINT nFrom)
 {
-	LONG sz;
-	long new_seek;
+	hfv_offset_t sz;
+	hfv_offset_t new_seek;
 
 	if(m_drive != IS_NO_FLOPPY) {
 		if(m_hfloppy || m_hcd || m_hd) {
@@ -598,7 +598,7 @@ UINT CDSKFile::Read(void* lpBuf, UINT nCount)
 	return(CFile::Read(lpBuf, nCount));
 }
 
-DWORD CDSKFile::GetLength()
+ULONGLONG CDSKFile::GetLength() const
 {
 	if(m_drive != IS_NO_FLOPPY) {
 		if(m_hfloppy) {
@@ -642,7 +642,7 @@ void CHFVFile::Close()
 	m_opened = 0;
 }
 
-LONG CHFVFile::Seek( LONG lOff, UINT nFrom )
+hfv_offset_t CHFVFile::Seek( hfv_offset_t lOff, UINT nFrom )
 {
 	if(!m_opened) return(0);
 
@@ -656,53 +656,37 @@ LONG CHFVFile::Seek( LONG lOff, UINT nFrom )
 	return(m_offset);
 }
 
-UINT CHFVFile::Read( void* lpBuf, UINT nCount )
+UINT CHFVFile::Read(void* lpBuf, UINT nCount)
 {
-	UINT ret, ret_pp = 0;
-	long pos, left, bytes_in_block, xtra;
-	int i;
-
-	if(!m_opened) return(0);
-
-	pos = m_start + m_offset;
-
-	if(m_offset >= m_fast_limit) {
-
-		// __asm int 3
-
-		left = m_offset;
-		for(i=0; i<3; i++) {
-			bytes_in_block = m_first_extents[i].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
-			if(left < bytes_in_block) {
-				pos = m_pvol->m_hfs_start + 
-							m_first_extents[i].xdrStABN * m_pvol->m_MDB.drAlBlkSiz +
-							left;
-				if(left + (long)nCount > bytes_in_block) {
-					// hits fragment borders
-					xtra = bytes_in_block - left;
-					ret_pp = Read( &((char *)lpBuf)[xtra], nCount - xtra );
-					nCount = xtra;
-				}
-				break;
-			} else {
-				left -= bytes_in_block;
-			}
-		}
-	}
-
-	m_pvol->m_file.Seek( pos, CFile::begin );
-	ret = m_pvol->m_file.Read( lpBuf, nCount );
-	m_offset += ret;
-	return(ret_pp + ret);
+ if(!m_opened || m_offset < 0 || (hfv_size_t)m_offset >= m_file_size) return 0;
+ UINT total = 0;
+ nCount = (UINT)min((hfv_size_t)nCount, (hfv_size_t)m_file_size - m_offset);
+ while(total < nCount) {
+  hfv_offset_t left = m_offset;
+  int extent;
+  for(extent=0; extent<3; ++extent) {
+   hfv_offset_t bytes = (hfv_offset_t)m_first_extents[extent].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
+   if(left < bytes) break;
+   left -= bytes;
+  }
+  if(extent==3) break; // Extents-overflow traversal is outside this legacy reader.
+  hfv_offset_t bytes = (hfv_offset_t)m_first_extents[extent].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
+  hfv_offset_t pos = m_pvol->m_hfs_start + (hfv_offset_t)m_first_extents[extent].xdrStABN * m_pvol->m_MDB.drAlBlkSiz + left;
+  UINT chunk = (UINT)min((hfv_size_t)(nCount-total), (hfv_size_t)(bytes-left));
+  if(m_pvol->m_file.Seek(pos,CFile::begin) != (ULONGLONG)pos) break;
+  UINT got = m_pvol->m_file.Read((BYTE*)lpBuf+total,chunk);
+  m_offset += got; total += got;
+  if(got != chunk) break;
+ }
+ return total;
 }
-
 int CHFVFile::intern_open()
 {
 	NodeDescriptor ndescr;
 
 	// file global start point in real file
-	m_start = m_pvol->m_hfs_start + m_first_extents[0].xdrStABN * m_pvol->m_MDB.drAlBlkSiz;
-	m_fast_limit = m_first_extents[0].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
+	m_start = m_pvol->m_hfs_start + (hfv_offset_t)m_first_extents[0].xdrStABN * m_pvol->m_MDB.drAlBlkSiz;
+	m_fast_limit = (hfv_offset_t)m_first_extents[0].xdrNumABlks * m_pvol->m_MDB.drAlBlkSiz;
 	m_offset = 0;
 	m_opened = 1;
 
