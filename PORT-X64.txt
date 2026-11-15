@@ -1,3 +1,7 @@
+Current compatibility target: Windows 7 SP1 + KB2533623 or a superseding update,
+Windows 8/8.1, 10 and 11 x64. See WINDOWS-COMPATIBILITY.txt. Historical validation
+notes below describe earlier builds; current tools are v143 with static MFC/CRT.
+
 HFVExplorer x64: HFS/MFS images, read-only CDs/floppies (experimental port)
 2026-11-15
 
@@ -36,7 +40,7 @@ Scope
   image passed reads/writes across 2 GiB and above 4 GiB. See LARGE-IMAGES.txt.
 
 Build
-Requires Visual Studio 2026 C++ tools (v145), Windows SDK and the MFC x86/x64
+Requires pinned v143 14.44.35207 C++ tools, Windows SDK and matching MFC x86/x64
 component Microsoft.VisualStudio.Component.VC.ATLMFC.
 From PowerShell in this checkout:
   .\build-x64.ps1

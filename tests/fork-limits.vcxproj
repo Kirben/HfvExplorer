@@ -5,8 +5,9 @@
   </ItemGroup>
   <PropertyGroup Label="Globals"><ProjectGuid>{4821FF16-2666-48AA-BF8D-30C47D566625}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseOfMfc>false</UseOfMfc><CharacterSet>MultiByte</CharacterSet></PropertyGroup>
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><VCToolsVersion>14.44.35207</VCToolsVersion><UseOfMfc>false</UseOfMfc><CharacterSet>MultiByte</CharacterSet></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="..\WindowsCompatibility.props" />
   <PropertyGroup><OutDir>$(ProjectDir)..\bin\x64\</OutDir><IntDir>$(ProjectDir)..\obj\fork-limits\</IntDir><TargetName>fork-limits</TargetName></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><MultiProcessorCompilation>true</MultiProcessorCompilation><WarningLevel>Level3</WarningLevel><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>HFV_READONLY_CD;__EMX__;WIN32;NDEBUG;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling></ClCompile>

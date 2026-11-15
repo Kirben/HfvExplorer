@@ -1,6 +1,6 @@
 HFVExplorer help
 ===============
-HFVExplorer.chm is compiled HTML Help for Windows 10/11. Keep it next to
+HFVExplorer.chm is compiled HTML Help for the Windows 7-11 x64 target build. Keep it next to
 HFVExplorer.exe. Help, F1 and Shift+F1 open the manual; the old WinHelp
 placeholder is no longer used. Per-control context help is not implemented.
 

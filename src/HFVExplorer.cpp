@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "WindowsCompatibility.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
@@ -332,6 +333,13 @@ int CHFVExplorerApp::ExitInstance(){ShutdownStorageUi();return CWinApp::ExitInst
 
 BOOL CHFVExplorerApp::InitInstance()
 {
+ auto windows=WindowsCompatibility::Current();
+ if(__argc==3&&!strcmp(__argv[1],"--compatibility-report")){
+  FILE* output=nullptr;if(fopen_s(&output,__argv[2],"w")||!output)ExitProcess(2);
+  WindowsCompatibility::Report(output,windows);fclose(output);ExitProcess(WindowsCompatibility::Supported(windows)?0:1);
+ }
+ if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
+
 #ifdef HFV_TESTING
  extern int RunMediaControlTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-media-control")==0)ExitProcess(RunMediaControlTest(__argv[2]));

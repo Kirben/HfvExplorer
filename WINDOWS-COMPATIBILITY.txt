@@ -1,0 +1,59 @@
+Windows compatibility build
+===========================
+Target: Windows 7 SP1 with KB2533623 or a superseding update; Windows 8,
+Windows 8.1, Windows 10 and Windows 11. x64 only.
+
+Build configuration
+- Pinned v143 14.44.35207 tools with matching 14.44 MFC and static CRT/MFC.
+  A separate Visual C++ Redistributable or Universal CRT package is not bundled
+  or required by the executable's import table. v145 is rejected by the build.
+- WINVER/_WIN32_WINNT 0x0601, NTDDI 0x06010100 and PE OS/subsystem 6.1.
+- Compatibility manifest declares Windows 7, 8, 8.1 and 10/11.
+- Startup uses RtlGetVersion rather than a manifest-limited version result.
+  Windows 7 requires SP1 and the AddDllDirectory/RemoveDllDirectory/
+  SetDefaultDllDirectories API set. Feature detection accepts superseding
+  updates; it does not require the literal KB2533623 entry in update history.
+- Storage, taskbar progress, IMAPI2 CD burning and the existing bitmap DPI
+  scaling remain enabled. No native DPI experiment was applied.
+
+Build: build-x64.ps1 -Test
+Requires the v143 14.44 (17.14) x86/x64 compiler and matching MFC components
+in one Visual Studio instance. The script locates that instance by actual files.
+Python 3 is needed by -Test for the PE import auditor and its negative tests.
+The build tools themselves run on the build host; deployment targets differ.
+
+Validation status
+Windows 11: actual v143 release startup and prerequisite report passed; the
+fixture/injected-device regression tests passed on this host.
+Windows 7 SP1 + required update: policy tests and static checks pass; actual
+execution NOT YET TESTED (no VM available).
+Windows 8, 8.1 and 10: policy tests and static checks pass; actual execution
+NOT YET TESTED on these OS versions in this session.
+No physical floppy/CD read, write, burn, eject or load request was tested.
+
+Static import audit checks AMD64, PE versions, supportedOS GUIDs, absence of
+unbundled CRT/MFC DLL dependencies, reviewed Windows 7 system DLL names,
+known post-Windows-7 API imports and explicitly reviewed legacy OLE ordinals.
+It examines normal AND delay-load imports. This is not an exhaustive Windows 7
+export database or a substitute for running the application on each OS.
+OLE ordinal names were resolved from Microsoft system exports for review;
+the named Automation and OLE dialog APIs predate Windows 7. Unknown ordinals
+or DLL dependencies fail the audit until reviewed explicitly.
+
+VM validation
+Extract the package onto a local NTFS volume on the target OS (the sparse-file
+tests need filesystem support). The optional compatibility-test folder
+contains a prerequisite probe and a synthetic test executable. Run:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\compatibility-test\test-runtime.ps1
+This writes reports into a new results folder and launches only hidden tests.
+It does not discover/access physical drives or alter normal application settings.
+Test Windows 7 SP1 both without the DLL-search update (probe must reject) and
+with KB2533623 or a superseding update (probe and runtime tests must pass).
+Run again on Windows 8, 8.1, 10 and 11 before claiming full runtime validation.
+
+Primary references
+https://learn.microsoft.com/cpp/overview/supported-platforms-visual-cpp
+https://learn.microsoft.com/windows/win32/api/libloaderapi/nf-libloaderapi-adddlldirectory
+https://learn.microsoft.com/windows/win32/api/libloaderapi/nf-libloaderapi-setdefaultdlldirectories
+https://learn.microsoft.com/windows/win32/api/oledlg/nf-oledlg-oleuibusya
+https://learn.microsoft.com/windows/win32/api/gdiplusinit/nf-gdiplusinit-gdiplusstartup
