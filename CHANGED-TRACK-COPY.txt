@@ -1,3 +1,0 @@
-Ordinary floppy copies now use direct buffered writes, matching the original
-copying model. The prior staged changed-track implementation has been replaced.
-See FLOPPY-FILE-COPY.txt for current behavior and error semantics.
