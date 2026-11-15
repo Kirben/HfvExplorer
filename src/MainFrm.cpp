@@ -59,11 +59,19 @@ UINT our_child_registration = RegisterWindowMessage("HFVRegisterChild");
 IMPLEMENT_DYNCREATE(CMainFrame, CFrameWnd)
 
 BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
+ ON_UPDATE_COMMAND_UI(ID_FILE_VOLUMETOFLOPPY, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_FILE_VOLUMEFROMFLOPPY, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_FILE_EJECT, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_FILE_RELOAD, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_CD_EJECT_RELOAD, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_CD_EJECT_EJECT, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_TOOLS_DUMPCDDEBUG, OnUpdatePhysicalMedia)
+ ON_UPDATE_COMMAND_UI(ID_TOOLS_BURN, OnUpdatePhysicalMedia)
 	//{{AFX_MSG_MAP(CMainFrame)
 	ON_WM_CREATE()
-	ON_COMMAND(ID_VIEW_DETAILS, OnViewDetails)
+	ON_COMMAND(ID_HFV_VIEW_DETAILS, OnViewDetails)
 	ON_COMMAND(ID_VIEW_LARGEICONS, OnViewLargeicons)
-	ON_COMMAND(ID_VIEW_LIST, OnViewList)
+	ON_COMMAND(ID_HFV_VIEW_LIST, OnViewList)
 	ON_COMMAND(ID_VIEW_SMALLICONS, OnViewSmallicons)
 	ON_COMMAND(ID_VIEW_OPTIONS, OnViewOptions)
 	ON_WM_ACTIVATEAPP()
@@ -485,7 +493,7 @@ void CMainFrame::OnViewOptions()
 	OnProgramProperties();
 }
 
-void CMainFrame::OnActivateApp(BOOL bActive, HTASK hTask) 
+void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 {
 	CFrameWnd::OnActivateApp(bActive, hTask);
 	
@@ -547,7 +555,7 @@ static HANDLE get_top_window_phandle( void )
 	return( hProcess );
 }
 
-void CMainFrame::OnTimer(UINT nIDEvent) 
+void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	int i, count;
@@ -710,7 +718,7 @@ void CMainFrame::WaitEmulator2(
 	w->m_start_watch_emulator = GetTickCount() + 2500ul;
 	// get_process_list( w->m_process_list );
 
-	m_wait_items.Add( (DWORD)w );
+	m_wait_items.Add( (DWORD_PTR)w );
 
 	m_was_zoomed = IsZoomed();
 	// ShowWindow( SW_MINIMIZE );
@@ -1235,7 +1243,7 @@ void CMainFrame::OnCdEjectEject()
 void CMainFrame::OnCdEjectEjectReload( int reload )
 {
 	HTREEITEM hItem;
-	DWORD dw;
+	DWORD_PTR dw;
 	int volinx, type, dev_type;
 	CString *pcs;
 	char rootdir[20];
@@ -1423,7 +1431,7 @@ void CMainFrame::OnToolsBurn()
 	CString errstr;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	HTREEITEM hItem;
-	DWORD dw;
+	DWORD_PTR dw;
 	int volinx;
 	HFVExplorerTreeView *tree;
 
@@ -1493,3 +1501,5 @@ void CMainFrame::OnToolsBurn()
 		PostQuitMessage(0);
 	}
 }
+
+void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) { ui->Enable(FALSE); }

@@ -335,11 +335,11 @@ void mac_date_to_string( unsigned long date, char *buf )
 #else
 void mac_date_to_string( unsigned long date, char *buf )
 {
-	long crdate;
+	time_t crdate;
 	char *p;
 
 	crdate = d_toutime(date);
-	p = ctime( (const long *)&crdate );
+	p = ctime( &crdate );
 
 	if(p) {
 		lstrcpy( buf, p );

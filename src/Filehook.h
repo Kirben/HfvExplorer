@@ -20,17 +20,14 @@
 
 #ifndef _FILEHOOK_H_
 #define _FILEHOOK_H_
+#include <sys/stat.h>
+#include <io.h>
+#include <fcntl.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-_CRTIMP int __cdecl stat(const char *, struct stat *);
-_CRTIMP int __cdecl open(const char *, int, ...);
-_CRTIMP int __cdecl close(int);
-_CRTIMP int __cdecl read(int, void *, unsigned int);
-_CRTIMP int __cdecl write(int, const void *, unsigned int);
-_CRTIMP long __cdecl lseek(int, long, int);
 
 typedef int (*ftype_stat)(const char *, struct stat *);
 typedef int (*ftype_open)(const char *, int, ...);

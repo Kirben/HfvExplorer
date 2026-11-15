@@ -77,7 +77,7 @@ LPARAM CHFVExplorerListView::make_lparam(
 {
 	list_lparam_struct *p = new list_lparam_struct;
 	if(!p) return(0);
-	m_pointer_array->Add( (DWORD)p );
+	m_pointer_array->Add( (DWORD_PTR)p );
 	p->type = type;
 	p->volinx = volinx;
 	p->id = id;
@@ -136,7 +136,7 @@ int CHFVExplorerListView::get_lparam_isdir( LPARAM lparam )
 
 int CHFVExplorerListView:: get_inx_isdir(int inx)
 {
-	DWORD dat = m_cl->GetItemData( inx );
+	DWORD_PTR dat = m_cl->GetItemData( inx );
 	if(!dat) return(-1);
 	return(get_lparam_isdir(dat));
 }
@@ -175,7 +175,7 @@ int CHFVExplorerListView::get_lparam_creation( LPARAM lparam, DWORD *lo, DWORD *
 
 int CHFVExplorerListView:: get_inx_type(int inx)
 {
-	DWORD dat = m_cl->GetItemData( inx );
+	DWORD_PTR dat = m_cl->GetItemData( inx );
 	if(!dat) return(-1);
 	return(get_lparam_type(dat));
 }
@@ -204,7 +204,7 @@ int CHFVExplorerListView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl 
 void CHFVExplorerListView::destroy_pointers()
 {
 	int i, count = m_pointer_array->GetSize();
-	DWORD dw;
+	DWORD_PTR dw;
 	list_lparam_struct *p;
 
 	for(i=0; i<count; i++) {
@@ -234,7 +234,7 @@ CHFVExplorerListView::CHFVExplorerListView()
 
 	m_cl = &this->GetListCtrl();
 
-	m_pointer_array = new CDWordArray;
+	m_pointer_array = new CPointerWordArray;
 	m_pointer_array->SetSize( 400, 50 );
 	m_dragging = 0;
 
@@ -963,7 +963,7 @@ CString make_mac_chrset( CString cs )
 void get_execute_error_string( HINSTANCE hi, CString &s )
 {
 	// cannot use this - ids change: s->LoadString( EXE_ERRBASE + (int)hi );
-	switch( (int)hi ) {
+	switch( (INT_PTR)hi ) {
 		case 0:
 			s = "The operating system is out of memory or resources";
 			break;
@@ -1038,7 +1038,7 @@ void pc_activate( char *path )
 
 int CHFVExplorerListView::get_path( int inx, CString &doc_name )
 {
-	DWORD dat;
+	DWORD_PTR dat;
 
 	dat = m_cl->GetItemData( inx );
 	if(!dat) return(0);
@@ -1137,7 +1137,7 @@ BOOL CHFVExplorerListView::new_folder(void)
 	char new_dir_name[_MAX_PATH];
 	char new_name[_MAX_PATH];
 	int len, volinx;
-	DWORD data;
+	DWORD_PTR data;
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 	tv = pApp->m_tree;
@@ -1320,7 +1320,7 @@ int CHFVExplorerListView::copy_item_to_dir(
 	// int dtype;
 	int ok=0, volinx, isdir, was_moved;
 	int hfs_source = 0, hfs_dest = 0;
-	DWORD data;
+	DWORD_PTR data;
 
 	char srcvolpath[_MAX_PATH];
 	char destvolpath[_MAX_PATH];
@@ -1440,7 +1440,7 @@ int CHFVExplorerListView::do_rename(
 	int check_lock
 )
 {
-	DWORD ds = m_cl->GetItemData( item );
+	DWORD_PTR ds = m_cl->GetItemData( item );
 	char volpath[_MAX_PATH];
 	char old_path[_MAX_PATH];
 	char new_path[_MAX_PATH];
@@ -1497,8 +1497,8 @@ int CHFVExplorerListView::do_file_to_folder(
 	int source, int dest, int action
 )
 {
-	DWORD ds = m_cl->GetItemData( source );
-	DWORD dd = m_cl->GetItemData( dest );
+	DWORD_PTR ds = m_cl->GetItemData( source );
+	DWORD_PTR dd = m_cl->GetItemData( dest );
 	char srcvolpath[_MAX_PATH];
 	char destvolpath[_MAX_PATH];
 	char *srcname;
@@ -1594,7 +1594,7 @@ int CHFVExplorerListView::new_bowser_on( CString start_dir )
 
 	GetModuleFileName( pApp->m_hInstance, modulex, MAX_PATH-1 );
 	p = start_dir.GetBuffer(MAX_PATH);
-	wsprintf( params, "\"@!%ld %s\"", (long)pApp->m_main->m_hWnd, p );
+	wsprintf( params, "\"@!%Iu %s\"", (UINT_PTR)pApp->m_main->m_hWnd, p );
 	start_dir.ReleaseBuffer();
 	hi = ShellExecute( this->m_hWnd, "open", modulex, params, dir, SW_SHOW );
 	if( hi <= (HINSTANCE)32 ) {
@@ -1942,7 +1942,7 @@ int CHFVExplorerListView::make_e_dos_param_file_name( LPSTR lpszParamsFile )
 
 int CHFVExplorerListView::save_icon( int doc_inx, LPSTR lpszIconFile, int is_doc )
 {
-	DWORD dat;
+	DWORD_PTR dat;
 	HICON hicon16 = 0, hicon32 = 0;
 	int ret = 0;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -1993,7 +1993,7 @@ void pc_validate_charset( LPSTR s )
 
 void make_shortcut_name( LPCSTR objpath, LPSTR linkname )
 {
-	char *p;
+	const char *p;
 	int ismac;
 
 	*linkname = 0;
@@ -2010,8 +2010,8 @@ void make_shortcut_name( LPCSTR objpath, LPSTR linkname )
 		if(ismac) {
 			pc_validate_charset( linkname );
 		} else {
-			p = strrchr( linkname, '.' );
-			if(p) *p = 0;
+			char *extension = strrchr( linkname, '.' );
+			if(extension) *extension = 0;
 		}
 	}
 }
@@ -2974,7 +2974,7 @@ void CHFVExplorerListView::go_up( int control )
 void CHFVExplorerListView::activate_list_item( int inx, int control, int make_shortcut ) 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	unsigned long dat, id = 0;
+	DWORD_PTR dat; unsigned long id = 0;
 	CString name, type, creator, host_program;
 	int entry_type, isdir, volinx;
 	char path[MAX_PATH];
@@ -3130,7 +3130,7 @@ void CHFVExplorerListView::update_current_view()
 	tc = tv->m_ct;
 
 	htree = tc->GetSelectedItem();
-	DWORD dw = tc->GetItemData( htree );
+	DWORD_PTR dw = tc->GetItemData( htree );
 	if(tv->get_lparam_path( dw, path, MAX_PATH ) && m_pDocument) {
 		volinx = tv->get_lparam_volinx( dw );
 		if(volinx >= 0) {
@@ -3145,7 +3145,7 @@ void CHFVExplorerListView::inx2volname(
 	char *volpath, 
 	int size )
 {
-	unsigned long dat = m_cl->GetItemData( inx );
+	DWORD_PTR dat = m_cl->GetItemData( inx );
 	int volinx = get_lparam_volinx( dat );
 	CString cs;
 
@@ -3372,7 +3372,7 @@ void CHFVExplorerListView::toggle_label_colors( void )
 
 	while( (inx = m_cl->GetNextItem(inx,LVNI_ALL)) >= 0 ) {
 		if(pApp->m_show_labels) {
-			long dat = m_cl->GetItemData( inx );
+			DWORD_PTR dat = m_cl->GetItemData( inx );
 			int finder_color = get_lparam_finder_color( dat );
 			color = INDEXTOOVERLAYMASK(finder_color);
 		}
@@ -3384,7 +3384,7 @@ void CHFVExplorerListView::set_label_color( int finder_color )
 {
 	int inx, color;
 	LV_ITEM	lvitem;
-	long dat;
+	DWORD_PTR dat;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
 	color = INDEXTOOVERLAYMASK(finder_color);
@@ -3403,7 +3403,7 @@ void CHFVExplorerListView::set_label_color( int finder_color )
 			if(dat) {
 				list_lparam_struct *p = (list_lparam_struct *)dat;
 				p->finder_color = finder_color;
-				dat = (long)p;
+				dat = (DWORD_PTR)p;
 				m_cl->SetItemData(inx,dat);
 			}
 
@@ -3438,7 +3438,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 	int pop_created = 0;
 	int pop_created2 = 0;
 	int pop_created3 = 0;
-	long id, dat;
+	long id; DWORD_PTR dat;
 	// CString str;
 	char *label_string;
 
@@ -3473,7 +3473,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 					cpop3.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_COLOR_PERSONAL, get_label_text(FINDER_COLOR_PERSONAL) );
 					cpop3.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_COLOR_PROJECT_1, get_label_text(FINDER_COLOR_PROJECT_1) );
 					cpop3.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_COLOR_PROJECT_2, get_label_text(FINDER_COLOR_PROJECT_2) );
-					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT)cpop3.m_hMenu, "Label..." );
+					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT_PTR)cpop3.m_hMenu, "Label..." );
 				}
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_PROGRAM_OPTIONS, "&Options..." );
 				cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
@@ -3520,7 +3520,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_DELETE, "&Delete\tDel" );
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_MAP_THIS, "&Map selected files..\tF4" );
 				
-				if(pop_created) cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT)cpop.m_hMenu, "Open &with..." );
+				if(pop_created) cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT_PTR)cpop.m_hMenu, "Open &with..." );
 				if(cpop2.CreatePopupMenu()) {
 					pop_created2 = 1;
 					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_E_DOS, "Executor &DOS" );
@@ -3529,7 +3529,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_SS, "&Shapeshifter" );
 					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_FUSION, "&Fusion DOS" );
 					// cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_WINDOWS, "&Associated Windows program" );
-					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT)cpop2.m_hMenu, "Create &Shortcut for..." );
+					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT_PTR)cpop2.m_hMenu, "Create &Shortcut for..." );
 				}
 				cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_NEW_FOLDER, "&New Folder..." );
@@ -3546,7 +3546,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 					cpop3.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_COLOR_PERSONAL, get_label_text(FINDER_COLOR_PERSONAL) );
 					cpop3.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_COLOR_PROJECT_1, get_label_text(FINDER_COLOR_PROJECT_1) );
 					cpop3.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_COLOR_PROJECT_2, get_label_text(FINDER_COLOR_PROJECT_2) );
-					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT)cpop3.m_hMenu, "Label..." );
+					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT_PTR)cpop3.m_hMenu, "Label..." );
 				}
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_PROGRAM_OPTIONS, "&Options..." );
 				cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
@@ -4217,7 +4217,7 @@ void CHFVExplorerListView::OnPaint()
 	UINT nChanged = dc.RealizePalette();
 	
 	for(i=0; i<count; i++) {
-		long dat;
+		DWORD_PTR dat;
 		HICON hicon;
 		CRect result_rect;
 		CString text;
@@ -4528,7 +4528,7 @@ void CHFVExplorerListView::OnMouseMove(UINT nFlags, CPoint point)
 
 int CHFVExplorerListView::drop_list_to_tree( int item, HTREEITEM htree, int action )
 {
-	DWORD ldat;
+	DWORD_PTR ldat;
 
 	if(item < 0 || htree == 0) return(0);
 	
@@ -4586,7 +4586,7 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
 		ensure_pane(PANE_LIST);
 
 		if(m_iItemDrop >= 0) {
-			DWORD dw_drag, dw_drop;
+			DWORD_PTR dw_drag, dw_drop;
 			int drag_is_dir, drop_is_dir;
 			
 			m_iItemDrag = -1;
@@ -4657,7 +4657,7 @@ void CHFVExplorerListView::OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult)
 		  (pNMListView->uOldState & LVIS_FOCUSED) == 0) {
 		int item = pNMListView->iItem;
 		if((item >= 0) && m_cl) {
-			DWORD dat = m_cl->GetItemData( item );
+			DWORD_PTR dat = m_cl->GetItemData( item );
 			if(dat) {
 				CHFVExplorerApp	*pApp;
 				pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -4832,7 +4832,7 @@ DWORD CHFVExplorerListView::stupid_get_date( int inx, int whichone )
 
 typedef struct {
 	CString *cs;
-	DWORD save_data;
+	DWORD_PTR save_data;
 } SortString;
 
 int CALLBACK clCompareFunc(
@@ -4910,7 +4910,7 @@ void CHFVExplorerListView::do_report_sort(void)
 						}
 					}
 					*/
-					DWORD dat, lo = 0, hi = 0;
+					DWORD_PTR dat; DWORD lo = 0, hi = 0;
 					dat = m_cl->GetItemData(i);
 					if(dat) {
 						if(m_sorted_by_column == FIELD_CREATED) {
@@ -4936,7 +4936,7 @@ void CHFVExplorerListView::do_report_sort(void)
 			}
 		}
 		ss->save_data = m_cl->GetItemData(i);
-		m_cl->SetItemData(i,(DWORD)ss);
+		m_cl->SetItemData(i,(DWORD_PTR)ss);
 	}
 
 	m_cl->SortItems( clCompareFunc, m_sort_is_ascending );
@@ -4995,7 +4995,7 @@ void CHFVExplorerListView::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 	nItem = lpDrawItemStruct->itemID;
 
 	if(nItem >= 0) {
-		long dat;
+		DWORD_PTR dat;
 		HICON hicon;
 		CRect result_rect;
 		CString text;
@@ -5125,7 +5125,7 @@ void CHFVExplorerListView::edit_paste(void)
 		char destname[_MAX_PATH];
 		CString destdir;
 		int ismac;
-		DWORD dest_data, dest_volinx, dest_type;
+		DWORD_PTR dest_data; DWORD dest_volinx, dest_type;
 
 		dest_data = tc->GetItemData( hItem );
 		dest_volinx = tv->get_lparam_volinx( dest_data );

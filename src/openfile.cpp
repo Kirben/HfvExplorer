@@ -52,8 +52,8 @@ void ReplaceCharacters( CString *s, char from_ch, char to_ch )
 	}
 }
 
-const fat_char = '\\';
-const hfs_char = ':';
+const char fat_char = '\\';
+const char hfs_char = ':';
 
 char get_system_char( int system )
 {
@@ -125,7 +125,7 @@ open_file_type::~open_file_type()
 
 int open_file_type::fill_values()
 {
-	DWORD dat;
+	DWORD_PTR dat;
 	CListCtrl *cl;
 	CHFVExplorerListView *cv;
 	char p[MAX_PATH];
@@ -154,7 +154,7 @@ int open_file_type::fill_values()
 
 int open_file_type::fill_values_htree( open_file_type *namefrom)
 {
-	DWORD dat;
+	DWORD_PTR dat;
 	CTreeCtrl *ct;
 	HFVExplorerTreeView *cv;
 	char p[MAX_PATH];

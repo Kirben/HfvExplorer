@@ -335,10 +335,18 @@ void CHFVExplorerApp::CheckDefaultSettings(void)
 
 BOOL CHFVExplorerApp::InitInstance()
 {
+ // Keep this experimental port's preferences separate from the historical app.
+ char settingsPath[MAX_PATH];
+ GetModuleFileName(NULL, settingsPath, MAX_PATH);
+ char *filename = strrchr(settingsPath, '\\');
+ if(filename) strcpy(filename + 1, "HFVExplorer-x64.ini");
+ free((void*)m_pszProfileName);
+ m_pszProfileName = _strdup(settingsPath);
 	LoadSettings();
 	CheckDefaultSettings();
 
 	m_prevVersion = m_version;
+ m_startup_floppies = m_startup_cds = m_startup_hds = m_do_harddisks = m_patch = FALSE;
 
 	if(m_version != "1.2.5") {
 		m_version = "1.2.5";
@@ -379,7 +387,7 @@ BOOL CHFVExplorerApp::InitInstance()
 	AddDocTemplate(pDocTemplate);
 
 	EnableShellOpen();
-	RegisterShellFileTypes(TRUE);
+	// File associations are deliberately not registered by this portable build.
 
 	CHFVCommandLineInfo cmdInfo;
 	ParseCommandLine(cmdInfo);
@@ -480,9 +488,9 @@ BOOL CHFVExplorerApp::OnIdle(LONG lCount)
 
 			CHFVExplorerApp	*pApp;
 			pApp = (CHFVExplorerApp *)AfxGetApp();
-			long w;
+			LPARAM w;
 			// __asm int 3
-			w = (long)pApp->m_main->m_hWnd;
+			w = (LPARAM)pApp->m_main->m_hWnd;
 			::PostMessage( m_parent_hwnd, our_child_registration, CHILDMAGIC, (LPARAM)w );
 		}
 		m_main->SetWindowPos( insertafter, x, y, cx, cy, flags );
@@ -508,7 +516,7 @@ BOOL CHFVExplorerApp::OnIdle(LONG lCount)
 
 void CHFVExplorerApp::add_child( HWND hi ) 
 {
-	child_array.Add( (DWORD) hi );
+	child_array.Add( (DWORD_PTR) hi );
 }
 
 void CHFVExplorerApp::kill_childs() 

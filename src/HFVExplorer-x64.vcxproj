@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{9414DA96-3D4F-40AE-A00C-47B58F85762F}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v145</PlatformToolset><UseOfMfc>Static</UseOfMfc><CharacterSet>MultiByte</CharacterSet></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(ProjectDir)..\bin\x64\</OutDir><IntDir>$(ProjectDir)..\obj\x64\</IntDir><TargetName>HFVExplorer</TargetName></PropertyGroup>
+  <ItemDefinitionGroup>
+    <!-- The original UI uses fixed 96-DPI pixels. Let Windows scale it. -->
+    <Manifest><EnableDpiAwareness>false</EnableDpiAwareness></Manifest>
+    <ClCompile><MultiProcessorCompilation>true</MultiProcessorCompilation><WarningLevel>Level3</WarningLevel><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>HFV_IMAGE_ONLY;__EMX__;WIN32;NDEBUG;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_IMAGE_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
+    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="AskDir.cpp" />
+    <ClCompile Include="AskDump.cpp" />
+    <ClCompile Include="AskNewVolume.cpp" />
+    <ClCompile Include="AskProperties.cpp" />
+    <ClCompile Include="AskVolumeToFloppy.cpp" />
+    <ClCompile Include="aspecial.c" />
+    <ClCompile Include="Bndl.cpp" />
+    <ClCompile Include="cache.cpp" />
+    <ClCompile Include="CFATVolume.cpp" />
+    <ClCompile Include="charset.c" />
+    <ClCompile Include="DynCopyModeSelect.cpp" />
+    <ClCompile Include="FileTypeMapping.cpp" />
+    <ClCompile Include="HFVCommandLineInfo.cpp" />
+    <ClCompile Include="HFVExplorer.cpp" />
+    <ClCompile Include="HFVExplorerDoc.cpp" />
+    <ClCompile Include="HFVExplorerListView.cpp" />
+    <ClCompile Include="HFVExplorerTreeView.cpp" />
+    <ClCompile Include="HFVExplorerView.cpp" />
+    <ClCompile Include="HFVPreviewView.cpp" />
+    <ClCompile Include="icon.cpp" />
+    <ClCompile Include="mactypes.cpp" />
+    <ClCompile Include="MainFrm.cpp" />
+    <ClCompile Include="openfile.cpp" />
+    <ClCompile Include="OptionsPage1.cpp" />
+    <ClCompile Include="OptionsPage10.cpp" />
+    <ClCompile Include="OptionsPage2.cpp" />
+    <ClCompile Include="OptionsPage3.cpp" />
+    <ClCompile Include="OptionsPage4.cpp" />
+    <ClCompile Include="OptionsPage5.cpp" />
+    <ClCompile Include="OptionsPage6.cpp" />
+    <ClCompile Include="OptionsPage7.cpp" />
+    <ClCompile Include="OptionsPage8.cpp" />
+    <ClCompile Include="OptionsPage9.cpp" />
+    <ClCompile Include="OptionsSheet.cpp" />
+    <ClCompile Include="part.cpp" />
+    <ClCompile Include="shell.cpp" />
+    <ClCompile Include="special.cpp" />
+    <ClCompile Include="StdAfx.cpp" />
+    <ClCompile Include="utils.cpp" />
+    <ClCompile Include="vmacpatch.c" />
+    <ClCompile Include="hfs\binhex.c" />
+    <ClCompile Include="hfs\libhfs\block.c" />
+    <ClCompile Include="hfs\libhfs\btree.c" />
+    <ClCompile Include="hfs\copyhfs.c" />
+    <ClCompile Include="hfs\copyin.c" />
+    <ClCompile Include="hfs\copyout.c" />
+    <ClCompile Include="hfs\crc.c" />
+    <ClCompile Include="hfs\libhfs\data.c" />
+    <ClCompile Include="hfs\libhfs\file.c" />
+    <ClCompile Include="hfs\hcopy.c" />
+    <ClCompile Include="hfs\hcwd.c" />
+    <ClCompile Include="hfs\libhfs\hfs.c" />
+    <ClCompile Include="hfs\libhfs\low.c" />
+    <ClCompile Include="hfs\libhfs\node.c" />
+    <ClCompile Include="hfs\libhfs\record.c" />
+    <ClCompile Include="hfs\libhfs\volume.c" />
+    <ClCompile Include="filehook.c" />
+    <ClCompile Include="hfs\interface.c" />
+    <ClCompile Include="ImageOnly.cpp" />
+    <ResourceCompile Include="HFVExplorer.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -121,7 +121,7 @@ public:
 	CString m_hpburner_path;
 
 protected:
-	CDWordArray child_array;
+	CPointerWordArray child_array;
 /*
 	CString m_title;
 	CString m_current_directory;

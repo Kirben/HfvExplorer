@@ -46,7 +46,7 @@
 class CHFVExplorerDoc : public CDocument
 {
 protected: // create from serialization only
-	CDWordArray *m_icon_array;
+	CPointerWordArray *m_icon_array;
 	CHFVExplorerDoc();
 	DECLARE_DYNCREATE(CHFVExplorerDoc)
 	void OnCleanDocument();

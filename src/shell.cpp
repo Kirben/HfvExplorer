@@ -149,7 +149,7 @@ HRESULT CreateLink (
    // shortcut in persistent storage. 
     hres = psl->QueryInterface(IID_IPersistFile, (LPVOID *)&ppf); 
     if (SUCCEEDED(hres)) { 
-      WORD wsz[MAX_PATH]; 
+      WCHAR wsz[MAX_PATH];
       MultiByteToWideChar( 
 						CP_ACP, 0, lpszPathLink, -1, wsz, MAX_PATH); 
 			hres = ppf->Save((LPCOLESTR)wsz, TRUE); 

@@ -180,7 +180,7 @@ hfsvol *hfs_remount(mountent *ment, int flags)
   hfsvolent vent;
 
   if (ment == 0) {
-    fprintf( stderr, "%s: No volume is current; use `hmount' or `hvol'\n" );
+    fprintf( stderr, "No volume is current; use `hmount' or `hvol'\n" );
 		return 0;
   }
 

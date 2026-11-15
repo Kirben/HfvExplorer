@@ -210,8 +210,8 @@
 #define IDC_COPT8_SHAPESHIFTER_USE_REMOVER 1097
 #define ID_VIEW_LARGEICONS              32772
 #define ID_VIEW_SMALLICONS              32773
-#define ID_VIEW_LIST                    32774
-#define ID_VIEW_DETAILS                 32775
+#define ID_HFV_VIEW_LIST                    32774
+#define ID_HFV_VIEW_DETAILS                 32775
 #define ID_VIEW_OPTIONS                 32776
 #define ID_VIEW_REFRESH                 32777
 #define ID_TOOLS_FIND                   32778

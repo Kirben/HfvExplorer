@@ -81,6 +81,8 @@ void CAskNewVolume::OnVolnameBrowse()
 BOOL CAskNewVolume::OnInitDialog() 
 {
 	CDialog::OnInitDialog();
+ CComboBox* paths = (CComboBox*)GetDlgItem(IDC_VOLPATH);
+ for(int n=paths->GetCount()-1; n>=0; --n) { CString text; paths->GetLBText(n,text); if(text==get_floppy_a_name() || text==get_floppy_b_name()) paths->DeleteString(n); }
 	
 	if(m_volpath != "") {
 		HWND w = GetSafeHwnd();

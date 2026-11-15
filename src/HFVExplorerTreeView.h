@@ -97,7 +97,7 @@ protected:
 	CImageList *m_pimagelistSmall;
 
 protected:
-	CDWordArray m_pointer_array;
+	CPointerWordArray m_pointer_array;
 
 // Attributes
 public:

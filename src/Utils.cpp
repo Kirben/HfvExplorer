@@ -206,12 +206,12 @@ int isdirectory( const CString &fpath )
 
 void get_extension( const char *p, char *extension )
 {
-	char *s;
+	const char *s;
 	s = strrchr( p, '.' );
 	if(s) {
 		strcpy( extension, s+1 );
-		s = strrchr( extension, '\"' );
-		if(s) *s = 0;
+		char *quote = strrchr( extension, '\"' );
+		if(quote) *quote = 0;
 	} else {
 		*extension = 0;
 	}
@@ -224,7 +224,7 @@ static void expand_wildcards( char *ext, char *tmpl )
 
 	p = strchr( ext, '*' );
 	while(p) {
-		i = (ULONG)p - (ULONG)ext;
+		i = (ULONG)(p - ext);
 		if(strlen(tmpl) > i) {
 			*p = tmpl[i];
 		}

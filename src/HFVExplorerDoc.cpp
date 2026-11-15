@@ -73,7 +73,7 @@ void clear_all_caches(void)
 
 void CHFVExplorerDoc::init_mac_icons()
 {
-	m_icon_array = new CDWordArray;
+	m_icon_array = new CPointerWordArray;
 	m_icon_array->SetSize( 200, 20 );
 	init_hash_table();
 }
@@ -81,7 +81,7 @@ void CHFVExplorerDoc::init_mac_icons()
 void CHFVExplorerDoc::destroy_icon_cache()
 {
 	int i, count = m_icon_array->GetSize();
-	DWORD dw;
+	DWORD_PTR dw;
 
 	for(i=0; i<count; i++) {
 		dw = m_icon_array->GetAt( i );
@@ -95,7 +95,7 @@ void CHFVExplorerDoc::destroy_icon_cache()
 void CHFVExplorerDoc::add_to_icon_cache( HICON hicon )
 {
 	ASSERT( m_icon_array != 0 );
-	if(hicon) m_icon_array->Add( (DWORD)hicon );
+	if(hicon) m_icon_array->Add( (DWORD_PTR)hicon );
 }
 
 int CHFVExplorerDoc::get_volume_index_by_filename( CString name )
@@ -250,6 +250,9 @@ void CHFVExplorerDoc::enum_volumes_ext( LPSTR mask, LPSTR ext )
 
 void CHFVExplorerDoc::enum_floppies( void )
 {
+#ifdef HFV_IMAGE_ONLY
+ return;
+#endif
 	char name[_MAX_PATH];
 	int i;
 
@@ -265,6 +268,9 @@ void CHFVExplorerDoc::enum_floppies( void )
 
 void CHFVExplorerDoc::enum_cds(void)
 {
+#ifdef HFV_IMAGE_ONLY
+ return;
+#endif
 	char name[_MAX_PATH];
 	char rootdir[20], letter;
 	int i;
@@ -285,6 +291,9 @@ void CHFVExplorerDoc::enum_cds(void)
 
 void CHFVExplorerDoc::enum_hds(void)
 {
+#ifdef HFV_IMAGE_ONLY
+ return;
+#endif
 	char name[_MAX_PATH];
 	char rootdir[20], letter;
 	int i, type;
@@ -560,7 +569,7 @@ HICON get_dos_icon( CHFVExplorerApp *pApp, char *p )
 		hicon = ::ExtractIcon( pApp->m_hInstance, p, 0 );
 		return( hicon );
 	}
-	if( (unsigned int)FindExecutable( p, "", executable ) > 32) {
+	if( (UINT_PTR)FindExecutable( p, "", executable ) > 32) {
 		hicon = ::ExtractIcon( pApp->m_hInstance, executable, 0 );
 		if(hicon && hicon != (HICON)1) return( hicon );
 	}
@@ -1839,7 +1848,7 @@ void CHFVExplorerDoc::open_parent_directory(unsigned long id)
 				pApp->m_tree->GetTreeCtrl().SelectItem( hItem );
 			}
 		} else {
-			long dat;
+			DWORD_PTR dat;
 			dat = pApp->m_tree->GetTreeCtrl().GetItemData( hItem );
 			volinx = pApp->m_tree->get_lparam_volinx(dat);
 			if(pApp->m_tree->get_lparam_type(dat) == TREE_FAT) {
@@ -1870,7 +1879,7 @@ CString CHFVExplorerDoc::get_directory (
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 	if(!hItem) hItem = pApp->m_tree->GetTreeCtrl().GetSelectedItem();
 	if(hItem) {
-		long dat;
+		DWORD_PTR dat;
 		dat = pApp->m_tree->GetTreeCtrl().GetItemData( hItem );
 		switch(pApp->m_tree->get_lparam_type(dat)) {
 			case LIST_UNKNOWN:
@@ -2325,7 +2334,7 @@ void CHFVExplorerDoc::build_pc_tree( int volinx, CString path )
 
 	while(p) {
 		strcpy( subpath, start );
-		i = (long)p - (long)start;
+		i = p - start;
 		if(first) i++; // root dir backlash
 		first = 0;
 		subpath[i] = 0;

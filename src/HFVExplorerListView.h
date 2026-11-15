@@ -67,7 +67,7 @@ protected:
 	void CreatePalette();
 
 	CListCtrl *m_cl;
-	CDWordArray *m_pointer_array;
+	CPointerWordArray *m_pointer_array;
 	// COLORREF m_bkcolor;
 	CImageList* m_drag_list;
 	int m_dragging;

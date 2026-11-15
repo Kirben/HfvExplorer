@@ -47,12 +47,12 @@ END_MESSAGE_MAP()
 
 CHFVExplorerView::CHFVExplorerView()
 {
-	CView::CView();
+
 }
 
 CHFVExplorerView::~CHFVExplorerView()
 {
-	CView::~CView();
+
 }
 
 BOOL CHFVExplorerView::PreCreateWindow(CREATESTRUCT& cs)

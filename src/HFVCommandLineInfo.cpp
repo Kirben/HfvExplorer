@@ -40,7 +40,7 @@ void CHFVCommandLineInfo::ParseParam(
 		pApp->m_opendir = CString(pszParam).Mid( 1 );
 		if(pApp->m_opendir.GetAt(0) == '!') {
 			s = pApp->m_opendir.GetBuffer(MAX_PATH);
-			pApp->m_parent_hwnd = (HWND)atol(&s[1]);
+			pApp->m_parent_hwnd = (HWND)(UINT_PTR)_strtoui64(&s[1], NULL, 10);
 			pApp->m_opendir.ReleaseBuffer();
 			i = pApp->m_opendir.Find(' ');
 			pApp->m_opendir = pApp->m_opendir.Mid( i+1 );

@@ -33,3 +33,11 @@
 
 
 #include <afxcview.h>
+
+#include <afxtempl.h>
+typedef CArray<DWORD_PTR, DWORD_PTR> CPointerWordArray;
+
+// Windows RPC headers define small as a macro; legacy icon code uses it as a name.
+#ifdef small
+#undef small
+#endif

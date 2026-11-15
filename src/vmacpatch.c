@@ -63,9 +63,9 @@ int patch_entry( char *lines, int linlen, char *entry, char *newval, BOOL specia
 				// do not overwrite but insert at beginning
 				end = start;
 			}
-			oldlen = (int)( (unsigned int)end - (unsigned int)start );
+			oldlen = (int)( end - start );
 			newlen = strlen(newval);
-			count = linlen - (int)((unsigned int)start - (unsigned int)lines) + 1;
+			count = linlen - (int)(start - lines) + 1;
 			if(newlen > oldlen) {
 				memmove( start + (newlen-oldlen), start, count );
 			} else if(newlen < oldlen) {

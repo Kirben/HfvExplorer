@@ -89,14 +89,14 @@ public:
 protected:  // control bar embedded members
 	CStatusBar  m_wndStatusBar;
 	CToolBar    m_wndToolBar;
-	UINT m_timer;
+	UINT_PTR m_timer;
 	BOOL m_volcheck_enabled;
 	BOOL m_was_zoomed;
 	char m_waiting_emulator1[100];
 	char m_waiting_emulator2[100];
 	
 	// Pointers to wait_item_struct
-	CDWordArray m_wait_items;
+	CPointerWordArray m_wait_items;
 
 	/*
 	HANDLE m_waiting_emulator_process;
@@ -119,8 +119,8 @@ protected:
 	afx_msg void OnViewList();
 	afx_msg void OnViewSmallicons();
 	afx_msg void OnViewOptions();
-	afx_msg void OnActivateApp(BOOL bActive, HTASK hTask);
-	afx_msg void OnTimer(UINT nIDEvent);
+	afx_msg void OnActivateApp(BOOL bActive, DWORD hTask);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg BOOL OnQueryNewPalette();
 	afx_msg void OnPaletteChanged(CWnd* pFocusWnd);
 	afx_msg void OnDropFiles(HDROP hDropInfo);
@@ -143,6 +143,7 @@ protected:
 	afx_msg void OnFileEject();
 	afx_msg void OnFileReload();
 	afx_msg void OnToolsBurn();
+ afx_msg void OnUpdatePhysicalMedia(CCmdUI* ui);
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()
 };

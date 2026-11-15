@@ -90,7 +90,7 @@ LPARAM HFVExplorerTreeView::make_lparam(
 {
 	lparam_struct *p = new lparam_struct;
 	if(!p) return(0);
-	m_pointer_array.Add( (DWORD)p );
+	m_pointer_array.Add( (DWORD_PTR)p );
 	p->type = type;
 	p->volinx = volinx;
 	p->id = id;
@@ -128,7 +128,7 @@ int HFVExplorerTreeView::get_lparam_type( LPARAM lparam )
 
 int HFVExplorerTreeView::get_htree_type( HTREEITEM htree )
 {
-	DWORD dat = m_ct->GetItemData( htree );
+	DWORD_PTR dat = m_ct->GetItemData( htree );
 	if(!dat) return(LIST_UNKNOWN);
 	return(get_lparam_type( dat ));
 }
@@ -152,7 +152,7 @@ int HFVExplorerTreeView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl )
 void HFVExplorerTreeView::destroy_pointers()
 {
 	int i, count = m_pointer_array.GetSize();
-	DWORD dw;
+	DWORD_PTR dw;
 	lparam_struct *p;
 
 	for(i=0; i<count; i++) {
@@ -261,7 +261,7 @@ HTREEITEM HFVExplorerTreeView::find_item(
 	if( id2 == id && volinx == vol2 ) return(root);
 	if( m_ct->ItemHasChildren(root) ) {
 		h = m_ct->GetChildItem( root );
-		if(h != 0 && (DWORD)h != 0xFFFFFFFF) {
+		if(h != 0 && h != (HTREEITEM)(INT_PTR)-1) {
 			r = find_item( volinx, h, id );
 			if(r) return(r);
 			h = m_ct->GetNextSiblingItem( h );
@@ -282,7 +282,7 @@ HTREEITEM HFVExplorerTreeView::tree_find_fat( HTREEITEM root, LPSTR path )
 	HTREEITEM h, r;
 	int len1, len2;
 	char p[MAX_PATH];
-	long dat;
+	DWORD_PTR dat;
 
 	int loopguard = 0;
 
@@ -605,7 +605,7 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 
 	hItem = pNMTreeView->itemNew.hItem;
 	if( hItem ) {
-		DWORD dw = m_ct->GetItemData( hItem );
+		DWORD_PTR dw = m_ct->GetItemData( hItem );
 		if(dw) {
 			type = get_lparam_type( dw );
 			switch(type) {
@@ -666,7 +666,7 @@ void HFVExplorerTreeView::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags)
 
 BOOL HFVExplorerTreeView::is_cd_item( HTREEITEM hItem )
 {
-	DWORD dw;
+	DWORD_PTR dw;
 	BOOL result = FALSE;
 	int volinx;
 
@@ -721,7 +721,7 @@ BOOL HFVExplorerTreeView::OnCommand(WPARAM wParam, LPARAM lParam)
 	int volinx, type;
 	CString *pcs;
 	HTREEITEM hItem;
-	DWORD dw;
+	DWORD_PTR dw;
 
 	switch( cmd ) {
 		// NOT USED
