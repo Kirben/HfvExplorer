@@ -1013,52 +1013,6 @@ CHFVExplorerDoc::CHFVExplorerDoc()
 	// m_pc_show_invisibles = 1;
 	update_invisible_attributes();
 
-	if( pApp->m_prevVersion != "1.2.0" && // ??? what's this.
-			pApp->m_prevVersion != "1.2.1" &&
-			pApp->m_prevVersion != "1.2.2" &&
-			pApp->m_prevVersion != "1.2.3" &&
-			pApp->m_prevVersion != "1.2.4" &&
-			pApp->m_prevVersion != "1.2.5" ) 
-	{
-		if(exists_icon_cache_file()) {
-			int answer = AfxMessageBox(
-				"This version of HFVExplorer has many fixes that make Mac icons display (more) correctly. "
-				"In order this to be possible, however, the old icon cache file HFVICONS.DAT must be deleted "
-				"and rebuilt. This is a safe operation. Is it ok to delete it now?"
-				"",
-				MB_YESNO
-			);
-			if(answer == IDYES) {
-				if(delete_cache_OK() && !exists_icon_cache_file()) {
-					AfxMessageBox( 
-						"The cache file is now deleted and will be recreated. "
-						"You may notice that some icons seem to be missing, typically preferences and documents. This is normal, "
-						"and they will eventually reappear as you scan through the folders containing the creator applications, "
-						"which contain the bundle and icon resources. "
-						"You may also notice that at first the browsing is a bit slower -- this is because HFVExplorer "
-						"must spend some time in building the icons."
-						"\r\n\r\n"
-						"Have a nice day!"
-						"",
-						MB_OK
-					);
-				} else {
-					AfxMessageBox( 
-						"The icon cache file could not be deleted. If you have other installations of HFVExplorer, please "
-						"make sure to manually delete the file HFVICONS.DAT from each one of them. Do this only once, "
-						"since the file will immediately reappear. Only old data is invalid."
-						"\r\n\r\n"
-						"Have a nice day!"
-						"",
-						MB_OK
-					);
-				}
-			} else {
-				AfxMessageBox( "Your icons may not be correct until the cache file is deleted.", MB_OK );
-			}
-		}
-	}
-
 	init_mac_icons();
 
 	m_hfs_count = 0;
