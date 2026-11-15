@@ -23,6 +23,7 @@
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
 #include "CdImageDialog.h"
+#include "CdBurnDialog.h"
 #include <errno.h>
 #include "ImageSize.h"
 #include "HFVPreviewView.h"
@@ -72,7 +73,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_UPDATE_COMMAND_UI(ID_CD_EJECT_RELOAD, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_CD_EJECT_EJECT, OnUpdatePhysicalMedia)
 
- ON_UPDATE_COMMAND_UI(ID_TOOLS_BURN, OnUpdatePhysicalMedia)
+
 	//{{AFX_MSG_MAP(CMainFrame)
 	ON_WM_CREATE()
 	ON_COMMAND(ID_HFV_VIEW_DETAILS, OnViewDetails)
@@ -425,7 +426,6 @@ void CMainFrame::OnProgramProperties()
 	propSheet.m_Page9.m_fusion_batch_path = pApp->m_fusion_batch_path;
 	propSheet.m_Page9.m_fusion_use_remover = pApp->m_fusion_use_remover;
 
-	propSheet.m_Page10.m_hpburner_path = pApp->m_hpburner_path;
 
 	if (propSheet.DoModal() == IDOK) {
 		page = propSheet.m_last_active_page;
@@ -475,7 +475,6 @@ void CMainFrame::OnProgramProperties()
 		pApp->m_fusion_batch_path = propSheet.m_Page9.m_fusion_batch_path;
 		pApp->m_fusion_use_remover = propSheet.m_Page9.m_fusion_use_remover;
 
-		pApp->m_hpburner_path = propSheet.m_Page10.m_hpburner_path;
 
 		HFSIFACE_set_copy_modes( 
 			pApp->m_copyout_mode,
@@ -1428,82 +1427,22 @@ void CMainFrame::OnFileReload()
 // move to .h
 extern void get_execute_error_string( HINSTANCE hi, CString &s );
 
-void CMainFrame::OnToolsBurn() 
+void CMainFrame::OnToolsBurn()
 {
-	HINSTANCE hi;
-	char params[_MAX_PATH], volfilename[_MAX_PATH];
-	CString errstr;
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	HTREEITEM hItem;
-	DWORD_PTR dw;
-	int volinx;
-	HFVExplorerTreeView *tree;
-
-	tree = pApp->m_tree;
-	if(!tree) return;
-	hItem = tree->m_ct->GetSelectedItem();
-	if(!hItem) {
-		AfxMessageBox( "You must select the volume to burn.", MB_OK | MB_ICONSTOP );
-		return;
-	}
-
-	dw = tree->m_ct->GetItemData( hItem );
-	if(!dw) {
-		AfxMessageBox( "Nothing to burn.", MB_OK | MB_ICONSTOP );
-		return;
-	}
-
-	if(tree->get_lparam_type(dw)!=LIST_HFS) {
-		AfxMessageBox( "You must first select a Mac volume file to burn.", MB_OK | MB_ICONSTOP );
-		return;
-	}
-
-	volinx = tree->get_lparam_volinx( dw );
-
-	if( pApp->m_doc->m_volumes[volinx].m_is_floppy ||
-			pApp->m_doc->m_volumes[volinx].m_is_cd ||
-			pApp->m_doc->m_volumes[volinx].m_is_hd ||
-			pApp->m_doc->m_volumes[volinx].m_is_removable )
-	{
-		AfxMessageBox( "You can ONLY burn Mac volume files (*.HF?, *.DSK) -- not floppies, Zip disks, CD's or hard disks.", MB_OK | MB_ICONSTOP );
-		return;
-	}
-
-	strcpy( volfilename, (LPCSTR)pApp->m_doc->m_volumes[volinx].m_file_name );
-
-	if(pApp->m_hpburner_path == "" || !exists( pApp->m_hpburner_path )) {
-		AfxMessageBox( 
-			"HPBurner is not installed correctly. Please check the options.", MB_OK | MB_ICONSTOP
-		);
-		return;
-	}
-
-	wsprintf( params, "\"/BURNFILE:%s\"", volfilename );
-
-	AfxMessageBox( 
-		"HPBurner will now launch. HFVExplorer will close in order to prevent you from accidentally modifying the volume file during the burn process.", MB_OK | MB_ICONINFORMATION
-	);
-
-
-	hi = ShellExecute(
-		NULL, // hwnd
-		"open",
-		(LPCSTR)pApp->m_hpburner_path,
-		params, // params
-		NULL, // dir
-		SW_SHOWNORMAL
-	);
-	if( hi <= (HINSTANCE)32 ) {
-		CString errstr;
-		get_execute_error_string( hi, errstr );
-		AfxMessageBox( 
-			CString("Could not execute command \"") + 
-			pApp->m_hpburner_path + CString(" ") + CString(params) + CString("\":\n") + errstr + CString("."), 
-			MB_OK | MB_ICONSTOP
-		);
-	} else {
-		PostQuitMessage(0);
-	}
+ CString initial;
+ CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
+ if(app->m_tree&&app->m_doc){
+  HTREEITEM item=app->m_tree->m_ct->GetSelectedItem();
+  if(item){DWORD_PTR data=app->m_tree->m_ct->GetItemData(item);
+   if(app->m_tree->get_lparam_type(data)==LIST_HFS){
+    int index=app->m_tree->get_lparam_volinx(data);
+    if(index>=0&&index<app->m_doc->m_hfs_count){auto& volume=app->m_doc->m_volumes[index];
+     if(!volume.m_is_floppy&&!volume.m_is_cd&&!volume.m_is_hd&&!volume.m_is_removable)initial=volume.m_file_name;
+    }
+   }
+  }
+ }
+ ShowCdBurnDialog(this,initial);
 }
 
 void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) { ui->Enable(FALSE); }

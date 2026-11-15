@@ -42,7 +42,7 @@
     <ClCompile Include="MainFrm.cpp" />
     <ClCompile Include="openfile.cpp" />
     <ClCompile Include="OptionsPage1.cpp" />
-    <ClCompile Include="OptionsPage10.cpp" />
+
     <ClCompile Include="OptionsPage2.cpp" />
     <ClCompile Include="OptionsPage3.cpp" />
     <ClCompile Include="OptionsPage4.cpp" />
@@ -80,7 +80,7 @@
     <ClCompile Include="ReadOnlyCd.cpp" />
     <ClCompile Include="MfsImage.cpp" /><ClCompile Include="MfsBrowser.cpp" />
     <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" /><ClCompile Include="..\tests\LargeForkGuiTest.cpp" /><ClCompile Include="..\tests\FloppyGuiTest.cpp" /><ClCompile Include="..\tests\DeviceWaitGuiTest.cpp" /><ClCompile Include="..\tests\CopyProgressTest.cpp" />
-    <ClCompile Include="ReadOnlyCdBackend.cpp" /><ClCompile Include="ReadOnlyFloppy.cpp" /><ClCompile Include="FloppyWriter.cpp" /><ClCompile Include="FloppyWriteDialog.cpp" /><ClCompile Include="CopyProgress.cpp" /><ClCompile Include="StorageJobDialog.cpp" /><ClCompile Include="RefreshStorage.cpp" /><ClCompile Include="CdImage.cpp" /><ClCompile Include="CdImageDialog.cpp" /><ClCompile Include="..\tests\CdImageTest.cpp" />
+    <ClCompile Include="ReadOnlyCdBackend.cpp" /><ClCompile Include="ReadOnlyFloppy.cpp" /><ClCompile Include="FloppyWriter.cpp" /><ClCompile Include="FloppyWriteDialog.cpp" /><ClCompile Include="CopyProgress.cpp" /><ClCompile Include="StorageJobDialog.cpp" /><ClCompile Include="RefreshStorage.cpp" /><ClCompile Include="CdImage.cpp" /><ClCompile Include="CdImageDialog.cpp" /><ClCompile Include="CdBurn.cpp" /><ClCompile Include="CdBurnDialog.cpp" /><ClCompile Include="..\tests\CdBurnTest.cpp" /><ClCompile Include="..\tests\CdImageTest.cpp" />
     <ResourceCompile Include="HFVExplorer.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -9,7 +9,7 @@ mixed-mode, multiple-track and multisession layouts are rejected. The image is
 the complete readable 2,048-byte logical data-sector stream, including any
 Apple partition map and HFS/ISO hybrid data. It is not an audio BIN/CUE or a
 2,352-byte raw-sector/subchannel capture. The .iso extension does not convert
-the original filesystem to ISO 9660. Burning is not implemented in this build.
+the original filesystem to ISO 9660. Native CD image burning is now available; see CD-BURNING.txt.
 
 The data length comes from the TOC lead-out in a media-identity-checked open.
 HFS metadata cannot increase the length beyond that reported by the drive.

@@ -118,7 +118,6 @@ public:
 	BOOL m_disable_autofloppy;
 	BOOL m_do_harddisks;
 
-	CString m_hpburner_path;
 
 protected:
 	CPointerWordArray child_array;

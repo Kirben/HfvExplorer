@@ -526,26 +526,6 @@ BEGIN
                     8
 END
 
-IDD_OPTIONS_PAGE_10 DIALOG DISCARDABLE  0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "HPBurner"
-FONT 8, "MS Sans Serif"
-BEGIN
-    EDITTEXT        IDC_COPT10_HPBURNER_PATH,7,19,192,13,ES_AUTOHSCROLL
-    PUSHBUTTON      ">>",IDC_COPT10_HPBURNER_BROWSE,209,19,22,14
-    LTEXT           "HPBurner location:",IDC_STATIC,7,9,184,8
-    LTEXT           "You can burn the selected HFS volume file to CDR or CDRW using the ""Burn CD"" command in Tools menu, if you have all of the following:",
-                    IDC_STATIC,7,43,232,25
-    LTEXT           "HPBurner external application. The full path must be defined in the field above.",
-                    IDC_STATIC,20,74,195,19
-    LTEXT           "ASPI layer from Adaptec.",IDC_STATIC,20,98,219,14
-    LTEXT           "HP CD-Writer+ 7100. Probably works with HP models 7xxx and Phillips 36xx, but these are not tested.",
-                    IDC_STATIC,20,116,195,21
-    LTEXT           "Please DO NOT send me requests to support other models. HPBurner may or may not support some other models in the future.",
-                    IDC_STATIC,7,146,195,25
-END
-
-
 #ifndef _MAC
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -701,13 +681,6 @@ BEGIN
         BOTTOMMARGIN, 191
     END
 
-    IDD_OPTIONS_PAGE_10, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
-    END
 END
 #endif    // APSTUDIO_INVOKED
 
@@ -866,12 +839,12 @@ IDC_POINTER_COPY        CURSOR  DISCARDABLE     "arrowcop.cur"
 
 STRINGTABLE PRELOAD DISCARDABLE 
 BEGIN
-    IDR_MAINFRAME           "HFVExplorer x64 (images + read-only CDs)\n\nHFVExp\nHFV Files (*.hfv)\n.HFV\nHFVExplorer.Document\nHFVExp Document"
+    IDR_MAINFRAME           "HFVExplorer x64\n\nHFVExp\nHFV Files (*.hfv)\n.HFV\nHFVExplorer.Document\nHFVExp Document"
 END
 
 STRINGTABLE PRELOAD DISCARDABLE 
 BEGIN
-    AFX_IDS_APP_TITLE       "HFVExplorer x64 (images + read-only CDs)"
+    AFX_IDS_APP_TITLE       "HFVExplorer x64"
     AFX_IDS_IDLEMESSAGE     "For Help, press F1"
     AFX_IDS_HELPMODEMESSAGE "Select an object on which to get Help"
 END
@@ -1459,4 +1432,18 @@ BEGIN
  LTEXT "",IDC_CP_FILE,10,48,330,12,SS_PATHELLIPSIS
  LTEXT "",IDC_CP_STATUS,10,66,330,12
  PUSHBUTTON "Cancel",IDCANCEL,270,88,70,18
+END
+IDD_CD_BURN DIALOGEX 0,0,350,136
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Burn CDR/CDRW"
+FONT 9, "Segoe UI"
+BEGIN
+ LTEXT "Recorder:",IDC_STATIC,10,12,55,12
+ COMBOBOX IDC_CDB_RECORDER,70,10,270,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ LTEXT "Image file:",IDC_STATIC,10,42,55,12
+ EDITTEXT IDC_CDB_IMAGE,70,40,200,14,ES_AUTOHSCROLL
+ PUSHBUTTON "Browse...",IDC_CDB_BROWSE,280,39,60,16
+ LTEXT "Blank CD-R/CD-RW only. Use a raw data image whose size is a multiple of 2048 bytes. The disc will be finalized and fully verified.",IDC_STATIC,10,68,330,30
+ DEFPUSHBUTTON "Prepare...",IDOK,190,110,70,18
+ PUSHBUTTON "Cancel",IDCANCEL,270,110,70,18
 END

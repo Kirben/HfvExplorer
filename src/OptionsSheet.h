@@ -27,7 +27,6 @@
 #include "OptionsPage7.h"
 #include "OptionsPage8.h"
 #include "OptionsPage9.h"
-#include "OptionsPage10.h"
 
 /////////////////////////////////////////////////////////////////////////////
 // COptionsSheet
@@ -53,7 +52,6 @@ public:
 	COptionsPage7 m_Page7;
 	COptionsPage8 m_Page8;
 	COptionsPage9 m_Page9;
-	COptionsPage10 m_Page10;
 
 // Operations
 public:

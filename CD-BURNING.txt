@@ -1,0 +1,56 @@
+Native CD image burning (IMAPI2)
+
+Use the existing Tools > Burn CDR/CDRW... command. HPBurner and ASPI are no
+longer needed, and the HPBurner options tab/path settings have been removed
+from the active application. HFVExplorer stays open during recording.
+
+1. Choose the recorder and an existing raw data image. A selected disk-image
+   volume is offered as the initial path; otherwise Browse for an image.
+2. Click Prepare. This opens the source read-only and checks recorder support,
+   blank media and capacity. It does not burn or erase anything.
+3. Review the recorder, image path and size in the confirmation, then choose
+   Yes to start. The source and inserted media are checked again before writing.
+4. One progress window/taskbar indicator follows preparation, writing,
+   finalization and verification. Cancel is passed to IMAPI through its progress
+   events; a device operation already in progress may take time to stop.
+
+This version requires a blank, writable CD-R or CD-RW. It never automatically
+erases, overwrites or appends to existing media. DVD/BD, audio tracks, BIN/CUE,
+multisession authoring and file-tree-to-ISO creation are outside this command.
+The raw image is burned as its existing bytes, preserving any HFS or hybrid
+layout; it must already contain a filesystem suitable for the intended reader.
+It must be nonempty, a multiple of 2,048 bytes, and fit the blank disc. Headered
+container formats need conversion to a raw image first. No padding or format
+conversion is performed by HFVExplorer.
+
+The source is held with write-denying file/stream access while recording. File
+identity, size and modification time must still match the prepared image. If
+another program holds it writable, close that use and prepare again. Native
+IMAPI recorder access is acquired without forcing a mounted volume to dismount
+and is released on completion/error. Recording itself uses IMAPI2 data writing,
+buffer-underrun protection, forced finalization and mandatory full verification.
+If full verification cannot be configured, recording is refused. Success is
+reported only after the verified Write call succeeds. Cancellation or failure
+after recording was requested can leave an incomplete disc.
+
+IMAPI2 and its IBurnVerification interface are required. Full verification is
+available natively on Windows 7 and later, with Microsoft's storage feature
+updates required on older systems. No custom driver or HPBurner executable is
+loaded. Old HPBurner configuration keys, if present, are ignored.
+
+Validation: Release and Test builds passed. Simulated recorder tests cover
+read-only preparation, blank/support/capacity guards, source byte fidelity and
+locking, revalidation after preparation, changed sources, unavailable/failed
+verification, cancellation before/during writing, slow responsive progress,
+owner restoration, complete-preflight dialog closure, removal of the HPBurner
+tab/resource and options-page bounds. Existing CD dump, storage spinner/copy
+and floppy regression tests also passed. No physical recorder was enumerated,
+burned or erased during testing, and no computer control was used. Real drive,
+media and Macintosh interoperability validation remains manual.
+
+These changes are committed locally. Nothing has been pushed to GitHub.
+
+Microsoft API references:
+https://learn.microsoft.com/en-us/windows/win32/api/imapi2/nf-imapi2-idiscformat2data-write
+https://learn.microsoft.com/en-us/windows/win32/api/imapi2/nn-imapi2-iburnverification
+https://learn.microsoft.com/en-us/windows/win32/api/imapi2/nf-imapi2-idiscrecorder2-acquireexclusiveaccess

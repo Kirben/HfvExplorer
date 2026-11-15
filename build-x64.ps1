@@ -88,5 +88,11 @@ if($Test -or $TestFloppy) {
  $cdImageReport=Join-Path $cdImageDirectory 'cd-image-report.txt'
  if(Test-Path -LiteralPath $cdImageReport) {Get-Content -LiteralPath $cdImageReport}
  if($cdImageTest.ExitCode -ne 0) {throw "CD image tests failed; retained $cdImageDirectory"}
+ $cdBurnDirectory=Join-Path $floppyDirectory 'cd-burn'
+ $cdBurnTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-cd-burn',('"'+$cdBurnDirectory+'"')) -WindowStyle Hidden -PassThru
+ if(!$cdBurnTest.WaitForExit(30000)) {throw 'CD burn tests timed out.'}
+ $cdBurnReport=Join-Path $cdBurnDirectory 'cd-burn-report.txt'
+ if(Test-Path -LiteralPath $cdBurnReport) {Get-Content -LiteralPath $cdBurnReport}
+ if($cdBurnTest.ExitCode -ne 0) {throw "CD burn tests failed; retained $cdBurnDirectory"}
  Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
 }

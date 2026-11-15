@@ -253,15 +253,15 @@ public:
 };
 unsigned actionDepth=0;
 std::unique_ptr<NativeSession> nativeSession;
-void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false) {
+void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool retainNative=true) {
  INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_PROGRESS_CLASS};InitCommonControlsEx(&controls);
  ActiveUiJob active;
  CWnd* owner=AfxGetMainWnd();
- if(actionDepth&&storageOnly){
+ if(actionDepth&&storageOnly&&retainNative){
   if(!nativeSession)nativeSession.reset(new NativeSession(job,title,hidden,owner));
   nativeSession->wait(job);return;
  }
- if(!storageOnly)nativeSession.reset();
+ if(!storageOnly||!retainNative)nativeSession.reset();
  OwnerRecovery restore(owner);
  struct Lifetime{
   std::shared_ptr<Storage::Job> job;
@@ -293,7 +293,7 @@ Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> wor
 }
 Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)> work,bool hidden) {
  if(StorageUi::busy())return {1,ERROR_BUSY,"Another storage operation is active"};
- auto job=Storage::worker().submit(std::move(work));wait(job,"Waiting for storage",hidden,true);return job->result();
+ auto job=Storage::worker().submit(std::move(work));wait(job,"Waiting for storage",hidden,true,false,false,false);return job->result();
 }
 void ShutdownStorageUi(){
  nativeSession.reset();StorageUi::state().wait=nullptr;StorageUi::state().thread=0;
