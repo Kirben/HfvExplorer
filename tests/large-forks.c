@@ -46,7 +46,7 @@ static void verifyFork(hfsfile* file,unsigned fork,unsigned long length,unsigned
  free(expected);
 }
 void CreateLargeForkFixture(const char* directory) {
- const unsigned capacity=4*1024*1024;const unsigned long length=0x80010025UL;
+ const unsigned capacity=4*1024*1024;const unsigned long length=0x7fffffffUL;
  LargeForkManifest m={0};char source[1100],binary[1100],meta[1100],name[]="LargeForks:BigForks",label[]="LargeForks";
  unsigned char* bytes=malloc(capacity);uint64_t offset;HANDLE host;LARGE_INTEGER size;DWORD ignored,wrote;
  hfsvol* volume;hfsfile* file;hfsdirent entry;unsigned fork,i;
@@ -60,22 +60,22 @@ void CreateLargeForkFixture(const char* directory) {
  host=CreateFileA(source,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create full raw source");
  for(offset=0;offset<length;) {
   unsigned n=length-offset<capacity?(unsigned)(length-offset):capacity;payload(bytes,n,offset,17);
-  must(WriteFile(host,bytes,n,&wrote,NULL)&&wrote==n,"write full >2 GiB raw source");offset+=n;
+  must(WriteFile(host,bytes,n,&wrote,NULL)&&wrote==n,"write full at Apple maximum raw source");offset+=n;
  }
  CloseHandle(host);printf("Importing %lu-byte raw data fork...\n",length);fflush(stdout);
  volume=hfs_mount(m.image,0,O_RDWR);must(volume!=NULL,"mount fork test volume");
  must(cpi_raw(source,volume,name)==0,"raw import must not silently stop at LONG_MAX");
- must(hfs_stat(volume,name,&entry)==0 && entry.u.file.dsize==length,"raw-imported fork length exceeds 2 GiB");
+ must(hfs_stat(volume,name,&entry)==0 && entry.u.file.dsize==length,"raw-imported fork length equals Apple maximum");
  file=hfs_open(volume,name);must(file!=NULL,"open large data fork");must(hfs_setfork(file,1)==0,"select resource fork");
  for(offset=0;offset<length;) {
   unsigned n=length-offset<capacity?(unsigned)(length-offset):capacity;payload(bytes,n,offset,118);
-  must(hfs_write(file,bytes,n)==n,"stream complete >2 GiB resource fork");offset+=n;
+  must(hfs_write(file,bytes,n)==n,"stream complete at Apple maximum resource fork");offset+=n;
   if(offset%(512ULL*1024*1024)==0) {printf("Wrote resource fork: %llu MiB\n",offset/(1024*1024));fflush(stdout);}
  }
  // Overwrites spanning the signed boundary must not alias to low fork offsets.
  for(fork=0;fork<2;++fork) {
-  must(hfs_setfork(file,fork)==0 && hfs_lseek(file,0x7fffffe0LL,SEEK_SET)==0x7fffffe0LL,"seek to signed boundary");
-  payload(bytes,128,0x7fffffe0ULL,17+fork*101);must(hfs_write(file,bytes,128)==128,"overwrite across signed boundary");
+  must(hfs_setfork(file,fork)==0 && hfs_lseek(file,length-128,SEEK_SET)==length-128,"seek to signed boundary");
+  payload(bytes,128,length-128,17+fork*101);must(hfs_write(file,bytes,128)==128,"overwrite at maximum EOF");
  }
  // Reject oversized single-call write counts before touching a tiny buffer.
  must(hfs_setfork(file,0)==0,"select limit-test fork");
@@ -84,24 +84,24 @@ void CreateLargeForkFixture(const char* directory) {
  { hfsfile fake=*file;unsigned short freeBefore=volume->mdb.drFreeBks;
    fake.cat.u.fil.filPyLen=(0xffffffffUL/volume->mdb.drAlBlkSiz)*volume->mdb.drAlBlkSiz;
    must(f_alloc(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==freeBefore,"4 GiB physical allocation rollover rejected"); }
- must(hfs_close(file)==0 && hfs_umount(volume)==0,"persist both >2 GiB forks");
+ must(hfs_close(file)==0 && hfs_umount(volume)==0,"persist both at Apple maximum forks");
  volume=hfs_mount(m.image,0,O_RDONLY);must(volume!=NULL,"reopen both large forks");file=hfs_open(volume,name);must(file!=NULL,"reopen large file");
  for(fork=0;fork<2;++fork) verifyFork(file,fork,length,bytes,capacity);
  must(hfs_close(file)==0,"close full verification");
  printf("Exporting both large forks as MacBinary II...\n");fflush(stdout);
- must(cpo_macb(volume,name,binary)==0,"export >2 GiB fork sizes as MacBinary II");must(hfs_umount(volume)==0,"close export volume");
+ must(cpo_macb(volume,name,binary)==0,"export at Apple maximum fork sizes as MacBinary II");must(hfs_umount(volume)==0,"close export volume");
  // Free the original before reimport so the round trip fits the 6 GiB image.
  volume=hfs_mount(m.image,0,O_RDWR);must(volume!=NULL,"mount round-trip destination");must(hfs_delete(volume,name)==0,"remove disposable original before reimport");
- printf("Reimporting MacBinary II with both length fields above LONG_MAX...\n");fflush(stdout);
+ printf("Reimporting MacBinary II with both length fields at LONG_MAX...\n");fflush(stdout);
  must(cpi_macb(binary,volume,name)==0,"MacBinary II unsigned fork length import");must(hfs_umount(volume)==0,"persist MacBinary round trip");
  volume=hfs_mount(m.image,0,O_RDWR);must(volume!=NULL,"reopen MacBinary round trip");file=hfs_open(volume,name);must(file!=NULL,"open round-trip file");
  must(hfs_fstat(file,&entry)==0 && entry.u.file.dsize==length && entry.u.file.rsize==length,"both lengths survive full transfer");
  for(fork=0;fork<2;++fork) verifyFork(file,fork,length,bytes,capacity);
  // Truncate above the signed boundary and append back to the original size.
  for(fork=0;fork<2;++fork) {
-  must(hfs_setfork(file,fork)==0 && hfs_truncate(file,length-37)==0,"truncate >2 GiB fork");
+  must(hfs_setfork(file,fork)==0 && hfs_truncate(file,length-37)==0,"truncate at Apple maximum fork");
   must(hfs_lseek(file,0,SEEK_END)==length-37,"large truncated EOF");payload(bytes,37,length-37,17+fork*101);
-  must(hfs_write(file,bytes,37)==37,"append to >2 GiB fork");
+  must(hfs_write(file,bytes,37)==37,"append to at Apple maximum fork");
  }
  must(hfs_close(file)==0 && hfs_umount(volume)==0,"persist truncate/append");
  volume=hfs_mount(m.image,0,O_RDONLY);must(volume!=NULL,"reopen truncate/append");file=hfs_open(volume,name);must(file!=NULL,"open final fixture");
@@ -112,5 +112,5 @@ void CreateLargeForkFixture(const char* directory) {
  }
  must(hfs_close(file)==0 && hfs_umount(volume)==0,"close final large-fork fixture");free(bytes);
  { FILE* out=fopen(meta,"wb");must(out!=NULL && fwrite(&m,sizeof(m),1,out)==1,"write GUI large-fork manifest");fclose(out); }
- puts("PASS: individual forks >2 GiB: full raw import, resource write, full readback, boundary overwrite, MacBinary export/import, reopen, truncate/append, count and allocation limit guards");fflush(stdout);
+ puts("PASS: individual forks at Apple maximum: full raw import, resource write, full readback, boundary overwrite, MacBinary export/import, reopen, truncate/append, count and allocation limit guards");fflush(stdout);
 }

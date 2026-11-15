@@ -796,6 +796,7 @@ int CHFVFile::open_by_CDR( CHFVVolume *pvol, CatDataRec *pCDR, int type )
 	m_isbtree = 0;
 	m_name = "Catalog File";
 	m_clump_size = pCDR->u.f.filClpSize;
+	if(pCDR->u.f.filLgLen>0x7fffffffUL || pCDR->u.f.filRLgLen>0x7fffffffUL) return 0;
 	m_file_id=pCDR->u.f.filFlNum;
 	m_fork=type==OpenResourceFork?0xff:0;
 	if(type == OpenResourceFork) {

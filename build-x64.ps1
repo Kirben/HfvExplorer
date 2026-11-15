@@ -1,4 +1,4 @@
-param([switch]$Test,[switch]$TestFloppy,[switch]$TestCd)
+param([switch]$Test,[switch]$TestFloppy,[switch]$TestCd,[switch]$TestHfsPlus)
 $ErrorActionPreference='Stop'
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $instances=(& $vswhere -all -products '*' -format json | ConvertFrom-Json)
@@ -25,6 +25,24 @@ $startup=Start-Process -FilePath "$PSScriptRoot\bin\x64\HFVExplorer.exe" -Argume
 if(!$startup.WaitForExit(30000)){$startup.Kill();throw 'Release compatibility startup timed out.'}
 if($startup.ExitCode -ne 0){throw 'Release compatibility startup failed.'}
 
+if($Test -or $TestHfsPlus) {
+ & $msbuild "$PSScriptRoot\tests\hfsplus-tests.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE){throw 'HFS+ core test build failed.'}
+ $hfsPlusDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-HFSPlus-'+[Guid]::NewGuid().ToString('N'))
+ New-Item -ItemType Directory -Path $hfsPlusDirectory | Out-Null
+ & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" (Join-Path $hfsPlusDirectory 'formatted.dsk')
+ if($LASTEXITCODE){throw "HFS+ core tests failed; retained $hfsPlusDirectory"}
+ & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large (Join-Path $hfsPlusDirectory 'large.dsk')
+ if($LASTEXITCODE){throw "HFS+ large-fork tests failed; retained $hfsPlusDirectory"}
+ & $msbuild "$PSScriptRoot\src\HFVExplorer-x64.vcxproj" /p:Configuration=Test /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE){throw 'HFS+ hidden UI test build failed.'}
+ $hfsPlusUi=Join-Path $hfsPlusDirectory 'ui'
+ $hfsPlusTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-hfsplus-ui',('"'+$hfsPlusUi+'"')) -WindowStyle Hidden -PassThru
+ if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
+ if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
+ Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ Write-Host "HFS+ test images retained at $hfsPlusDirectory; no physical devices accessed."
+}
 if($TestCd) {
  & $msbuild "$PSScriptRoot\tests\image-roundtrip.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE){throw 'CD fixture builder failed.'}

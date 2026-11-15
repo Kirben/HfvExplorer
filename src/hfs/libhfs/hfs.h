@@ -23,6 +23,7 @@
 # define HFS_BLOCKSZ		512
 # define HFS_BLOCKSZ_BITS	9
 
+# define HFS_MAX_FORK_SIZE 0x7fffffffUL /* Apple classic HFS logical EOF */
 # define HFS_MAX_FLEN		31
 # define HFS_MAX_VLEN		27
 
