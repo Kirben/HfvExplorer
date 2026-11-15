@@ -36,7 +36,10 @@ class CAskNewVolume : public CDialog
 public:
 	CAskNewVolume(CWnd* pParent = NULL);   // standard constructor
 
-	CString get_floppy_a_name(void);
+	bool m_allowFloppies = false;
+ static CString FloppyLabel(int drive);
+ static int FloppySelection(const CString& text);
+ CString get_floppy_a_name(void);
 	CString get_floppy_b_name(void);
 
 // Dialog Data
@@ -63,6 +66,7 @@ protected:
 	//{{AFX_MSG(CAskNewVolume)
 	afx_msg void OnVolnameBrowse();
 	virtual BOOL OnInitDialog();
+ virtual UINT DriveKind(int drive);
 	virtual void OnOK();
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()

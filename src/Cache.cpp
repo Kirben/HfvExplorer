@@ -19,7 +19,12 @@
  */
 
 // #include "afx.h"
+#ifdef HFV_STANDALONE_CACHE
+#include <windows.h>
+#include <string.h>
+#else
 #include "stdafx.h"
+#endif
 #include "cache.h"
 
 #ifdef __cplusplus
@@ -43,6 +48,7 @@ void cache_clear( cachetype *cptr )
 static int init( cachetype *cptr, int sector_size )
 {
 	cache_clear( cptr );
+	cptr->res_count = 0;
 	cptr->sector_size = sector_size;
 	cptr->blocks = (char *)VirtualAlloc( 
 			NULL, NBLOCKS*sector_size, 
@@ -53,7 +59,11 @@ static int init( cachetype *cptr, int sector_size )
 	cptr->LRU = (DWORD *)VirtualAlloc( 
 			NULL, NBLOCKS*sizeof(DWORD), 
 			MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
-	return(cptr->blocks != NULL);
+	if(cptr->blocks && cptr->block && cptr->LRU)return 1;
+    if(cptr->blocks)VirtualFree(cptr->blocks,0,MEM_RELEASE);
+    if(cptr->block)VirtualFree(cptr->block,0,MEM_RELEASE);
+    if(cptr->LRU)VirtualFree(cptr->LRU,0,MEM_RELEASE);
+    cptr->blocks=0;cptr->block=0;cptr->LRU=0;return 0;
 }
 
 static void final( cachetype *cptr )

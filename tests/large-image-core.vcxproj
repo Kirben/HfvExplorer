@@ -22,6 +22,6 @@
 <ClCompile Include="..\src\hfs\libhfs\node.c" />
 <ClCompile Include="..\src\hfs\libhfs\record.c" />
 <ClCompile Include="..\src\hfs\libhfs\volume.c" />
-<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="large-image-core.c" /><ClCompile Include="fragmented-fixture.c" /><ClCompile Include="large-forks.c" /><ClCompile Include="..\src\hfs\copyin.c" /><ClCompile Include="..\src\hfs\copyout.c" /><ClCompile Include="..\src\hfs\binhex.c" /><ClCompile Include="..\src\hfs\crc.c" /><ClCompile Include="..\src\aspecial.c" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /></ItemGroup>
+<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="large-image-core.c" /><ClCompile Include="fragmented-fixture.c" /><ClCompile Include="large-forks.c" /><ClCompile Include="..\src\hfs\copyin.c" /><ClCompile Include="..\src\hfs\copyout.c" /><ClCompile Include="..\src\hfs\binhex.c" /><ClCompile Include="..\src\hfs\crc.c" /><ClCompile Include="..\src\aspecial.c" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\DirectFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /><ClCompile Include="..\src\cache.cpp"><PreprocessorDefinitions>HFV_STANDALONE_CACHE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

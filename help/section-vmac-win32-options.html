@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>vMac options</title></head><body><p><a href="manual.html">Manual contents</a></p><blockquote><p><a name="vMac_Win32_options"></a>vMac Win32 options
+</p><center>
+<p><img height="523" src="dlg_setup_vmac.gif" width="522"/></p></center>
+
+<p><br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+</p><p><b><i>vMac Win32 path:</i></b>
+</p><blockquote>Make this to point to the vMac.exe (may be named differently).</blockquote>
+
+<p><br/><b><i>vMac system volume file:</i></b>
+</p><blockquote>Should be the HFV or DSK file path where you boot vMac from.
+After any changes, press <b><i>Install files required by vMac.</i></b></blockquote>
+
+<p><br/><b><i>vMac "startup item"s folder name:</i></b>
+</p><blockquote>The default value is usually fine. Modify if you have renamed
+your system folder.</blockquote>
+
+<p><br/><b><i>Install files required by vMac:</i></b>
+</p><blockquote>This command does the following:
+<blockquote>Create a folder named "vMacLink".
+<br/>Copy vMac.ini to "vMacLink".
+<br/>Copy vMac.pram to "vMacLink".
+<br/>Create a shortcut to <b><i>vMac Win32 path</i></b>.</blockquote>
+The purpose of all this is to make a fresh vMac environment without modifying
+your current vMac.ini file. HFVExplorer needs to make changes to the ini
+file, and I felt it would be safer this way. You need to press this button
+again after changing <b><i>vMac system volume file.</i></b></blockquote>
+<b><i>Launch method:</i></b>
+<blockquote>Always use alias launching. Apple events launching is unsupported
+and bound to be removed.</blockquote>
+
+<p><br/><a name="Remove_alias"></a><b><i>Remove alias after launching:</i></b>
+</p><blockquote>If selected, installs a tiny application into the startup items
+folder. It lurks in the background for 5 seconds and removes the alias
+used for launching.</blockquote>
+
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<p>
+</p><hr width="50%"/>
+</blockquote></body></html>

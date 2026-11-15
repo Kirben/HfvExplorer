@@ -17,6 +17,28 @@ static std::vector<BYTE> load(const char* path) {
     FILE* file=fopen(path,"rb");check(file!=NULL,"open fixture");fseek(file,0,SEEK_END);long size=ftell(file);rewind(file);
     check(size>0,"fixture length");std::vector<BYTE> bytes(size);check(fread(bytes.data(),1,bytes.size(),file)==bytes.size(),"load fixture");fclose(file);return bytes;
 }
+static void originalCache(const std::vector<BYTE>& bytes) {
+    FakeFloppy api(bytes);ReadOnlyFloppy disk(&api);BYTE data[512];
+    check(disk.OpenDrive(0),"open original-cache fixture");
+    std::vector<BYTE> batch(70001);unsigned checks=api.verifies;
+    check(disk.ReadBytes(511,DWORD(batch.size()),batch.data())&&!memcmp(batch.data(),bytes.data()+511,batch.size()),"batched contiguous miss byte fidelity");
+    check(api.reads==3&&api.verifies-checks==4,"one request media check plus post-transfer checks, without duplicate pre-checks");
+    unsigned reads=api.reads;checks=api.verifies;
+    for(unsigned i=0;i<100;++i)check(disk.ReadBytes(1024,512,data)&&!memcmp(data,bytes.data()+1024,512),"original cache repeated bytes");
+    check(api.reads==reads&&api.verifies==checks+100&&api.opens==1,"100 repeated reads use cached sectors and reuse the handle, while still checking media");
+    std::vector<BYTE> thousand(1000*512);
+    check(disk.OpenDrive(0)&&disk.ReadBytes(0,DWORD(thousand.size()),thousand.data()),"fill original 1000-sector cache");
+    reads=api.reads;check(disk.ReadBytes(999*512,512,data)&&api.reads==reads,"last cached sector retained");
+    check(disk.ReadBytes(1000*512,512,data),"cache capacity overflow");
+    reads=api.reads;check(disk.ReadBytes(0,512,data)&&api.reads==reads+1&&!memcmp(data,bytes.data(),512),"original replacement policy evicts old sector without losing bytes");
+    ++api.changeCount;reads=api.reads;
+    check(!disk.ReadBytes(0,512,data)&&disk.Error()==ERROR_MEDIA_CHANGED&&api.reads==reads,"changed disk cannot return cached bytes");
+    --api.changeCount;check(disk.OpenDrive(0)&&disk.ReadBytes(0,512,data)&&api.reads==reads+1,"reopen clears cached sectors");
+    api.readError=ERROR_CRC;check(!disk.ReadBytes(1400*512,512,data),"uncached read error invalidates session");
+    check(!disk.ReadBytes(0,512,data),"cached data cannot hide prior I/O error");
+    disk.Close();check(api.opens==api.closes&&api.media==bytes,"cache handles balanced and media unchanged");
+    puts("PASS: original 1000-sector cache, contiguous read batching, cached repeat/overlap, exact media-check counts, handle reuse, eviction and cache invalidation on errors/media change/reopen");
+}
 static void transport(const std::vector<BYTE>& bytes) {
     FakeFloppy fake(bytes);ReadOnlyFloppy disk(&fake);BYTE data[70001];
     check(!disk.OpenDrive(-1) && !disk.OpenDrive(26) && fake.opens==0,"reject invalid drive indices before opening");
@@ -104,6 +126,6 @@ int main(int argc,char** argv) {
     for(unsigned i=0;i<sizeof(bytes);++i) bytes[i]=BYTE(i*37);check(hfs_write(payload,bytes,sizeof(bytes))==sizeof(bytes),"write fixture data fork");
     check(hfs_setfork(payload,1)==0,"select fixture resource fork");for(unsigned i=0;i<1025;++i) bytes[i]=BYTE(i*71);
     check(hfs_write(payload,bytes,1025)==1025 && hfs_close(payload)==0 && hfs_umount(volume)==0,"persist fixture");
-    auto original=load(path.c_str());transport(original);backend(original);check(load(path.c_str())==original,"fixture file unchanged by native-read tests");
+    auto original=load(path.c_str());transport(original);originalCache(original);backend(original);check(load(path.c_str())==original,"fixture file unchanged by native-read tests");
     puts("PASS: native read-only floppy: open access/geometry, aligned sector I/O, bounds/EOF, device and media-change errors, descriptor isolation, HFS fork extraction, mutation rejection and unchanged media; all devices simulated");return 0;
 }

@@ -5,6 +5,7 @@
 #include "StorageJobDialog.h"
 #include "charset.h"
 #include "FloppyWriter.h"
+#include "DirectFloppy.h"
 #include "ReadOnlyCdBackend.h"
 #include <vector>
 #include <fcntl.h>
@@ -16,6 +17,7 @@ extern "C" {
 #include "hfs/copyin.h"
 #include "hfs/Copyhfs.h"
 extern char* cph_error;
+void HFSIFACE_get_dir_flush(void);
 }
 namespace {
 // Error pointers in the old libraries can retain a default or a previous error.
@@ -27,59 +29,25 @@ std::string copyError() {
  if(usefulError(cpo_error))return cpo_error;
  return errno?std::string("Copy failed: ")+strerror(errno):"The copy failed; no further error information was supplied.";
 }
-struct TemporaryImage {
- char path[MAX_PATH]={};
- ~TemporaryImage(){if(*path)DeleteFileA(path);}
- bool create(const std::vector<BYTE>& bytes) {
-  char folder[MAX_PATH];if(!GetTempPathA(MAX_PATH,folder)||!GetTempFileNameA(folder,"hfc",0,path))return false;
-  char image[MAX_PATH];if(strlen(path)+4>=MAX_PATH){SetLastError(ERROR_FILENAME_EXCED_RANGE);return false;}
-  strcpy_s(image,path);strcat_s(image,".dsk");if(!MoveFileA(path,image))return false;strcpy_s(path,image);
-  HANDLE h=CreateFileA(path,GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);if(h==INVALID_HANDLE_VALUE)return false;
-  DWORD wrote=0;bool ok=WriteFile(h,bytes.data(),DWORD(bytes.size()),&wrote,nullptr)&&wrote==bytes.size();
-  DWORD error=ok?0:GetLastError();CloseHandle(h);SetLastError(error);return ok;
- }
-};
-void floppyCopyProgress(const char* phase,unsigned completed,unsigned total,void* context) {
- auto& job=*static_cast<Storage::Job*>(context);Storage::Progress p;
- // Readiness checks are intentionally not separate visible phases.
- p.phase=strstr(phase,"readback")||!strcmp(phase,"Verifying")?"Verifying floppy":
-  strstr(phase,"original")?"Checking destination floppy":
-  strstr(phase,"Flushing")?"Flushing floppy":"Writing floppy";
- p.scanning=false;p.totalBytes=total;p.processed=completed;job.progress(p);
-}
 Storage::Result copyToFloppy(Storage::Job& job,int drive,const std::string& sourceVolume,const std::string& source,
  const std::string& targetVolume,const std::string& target,int directory,int move,char mode) {
- FloppyReadApi* readApi=nullptr;FloppyWriteApi* writeApi=nullptr;
+ FloppyWriteApi* api=nullptr;
 #ifdef HFV_FLOPPY_TESTING
- readApi=physical_floppy_test_api(drive);writeApi=dynamic_cast<FloppyWriteApi*>(readApi);
- if(!writeApi)return {1,ERROR_NOT_SUPPORTED,"No simulated writable floppy is attached"};
+ api=dynamic_cast<FloppyWriteApi*>(physical_floppy_test_api(drive));
+ if(!api)return {1,ERROR_NOT_SUPPORTED,"No simulated writable floppy is attached"};
 #endif
- Storage::Progress p;p.phase="Reading destination floppy";job.progress(p);
- ReadOnlyFloppy reader(readApi);
- if(!reader.OpenDrive(drive)||!reader.FindHfs())return {1,reader.Error(),"Could not read the destination HFS floppy"};
- if(reader.MediaSize()!=1474560)return {1,ERROR_NOT_SUPPORTED,"File copying currently supports 1.44 MB HFS floppies"};
- std::vector<BYTE> original(reader.MediaSize());
- if(!reader.ReadBytes(0,DWORD(original.size()),original.data()))return {1,reader.Error(),"Could not read every sector of the destination floppy"};
- reader.Close();if(job.cancelled())throw Storage::Cancelled();
- TemporaryImage stage;
- if(!stage.create(original))return {1,GetLastError(),"Could not create the temporary floppy image"};
- // Only the working image is writable during filesystem changes. Source files
- // stay intact even if the later physical write or readback fails.
+ HFSIFACE_get_dir_flush();physical_floppy_suspend(drive);
+ DirectFloppy disk(api);
+ if(!disk.Open(drive))return {1,disk.Error(),"Could not open and lock the destination HFS floppy (Windows error "+std::to_string(disk.Error())+")."};
  bool sameVolume=!_stricmp(sourceVolume.c_str(),targetVolume.c_str());
- auto result=MakeCopyJob(sameVolume?stage.path:sourceVolume,source,stage.path,target,directory,sameVolume?move:0,mode)(job);
- if(result.code)return result;
- std::vector<BYTE> modified;std::string error;
- if(!LoadFloppyHfs(stage.path,modified,error))return {1,ERROR_INVALID_DATA,error};
- if(job.cancelled())throw Storage::Cancelled();
- if(modified==original)return {};
- physical_floppy_suspend(drive);
- FloppyWriter writer(writeApi);
- if(!writer.WriteImage(drive,modified,false,floppyCopyProgress,&job,&original)) {
-  char detail[256];sprintf_s(detail,"Floppy copy failed at %s (Windows error %lu). %s",writer.Stage().c_str(),writer.Error(),
-   writer.WritesStarted()?"Writing started; the disk may be incomplete. Source files were retained.":"No sectors were written.");
-  return {1,writer.Error(),detail};
- }
- result.moved=sameVolume&&result.moved;return result;
+ Storage::Result result;
+ try {result=MakeCopyJob(sourceVolume,source,targetVolume,target,directory,sameVolume?move:0,mode)(job);}
+ catch(...){HFSIFACE_get_dir_flush();disk.Finish();throw;}
+ HFSIFACE_get_dir_flush();
+ auto p=job.progress();p.phase="Flushing floppy";job.progress(p);
+ if(!disk.Finish())return {1,disk.Error(),"Floppy copy failed while writing/flushing buffered data (Windows error "+std::to_string(disk.Error())+"). "+(sameVolume&&move?"The floppy may be incomplete; the move may have been partly applied.":"The destination may be incomplete; source files were retained.")};
+ if(result.code){result.moved=false;if(disk.WritesStarted())result.message+=" The destination may contain partial files.";}
+ return result;
 }
 bool macVolume(const std::string& path) {
  size_t n=path.size();return n>=4 && path[n-4]=='.' &&
@@ -132,7 +100,7 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
    return {1,error,message};
   }
   int floppy=physical_floppy_path(targetVolume.c_str());
-  if(floppy>=0)return copyToFloppy(job,floppy,sourceVolume,source,targetVolume,target,directory,move,mode);
+  if(floppy>=0&&!DirectFloppy::Current(floppy))return copyToFloppy(job,floppy,sourceVolume,source,targetVolume,target,directory,move,mode);
   auto sv=buffer(sourceVolume),s=buffer(source),tv=buffer(targetVolume),t=buffer(target);
   ExportJobContext context={job,{}};context.progress.path=source;context.progress.fileCopy=true;context.progress.phase="Scanning selected files";job.progress(context.progress);
   if(macVolume(sourceVolume)&&!macVolume(targetVolume)) {

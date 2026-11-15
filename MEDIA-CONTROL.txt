@@ -1,0 +1,31 @@
+Native eject and reload media
+============================
+File > Eject media / Reload media and the existing context-menu commands are
+enabled for the selected physical CD or Windows removable drive. Image files,
+fixed disks and unsupported selections are excluded. Menu updates use cached
+drive information; the worker rechecks it before acting.
+
+HFVExplorer releases its selected drive's HFS readers and sector caches first.
+Eject locks and dismounts the volume, then sends IOCTL_STORAGE_EJECT_MEDIA.
+A busy volume is retried for about one second and is never force-dismounted.
+Reload sends IOCTL_STORAGE_LOAD_MEDIA without locking an absent disc, allowing
+an empty CD tray to close. Empty optical drives can also receive eject requests.
+Other applications' media-removal locks are not explicitly cleared.
+
+Device support is required. Ordinary manual-eject floppy drives may reject
+automatic eject/load; the error explains that manual removal/insertion is needed.
+Reload is a device load request, not Refresh and not USB device reconnection.
+Access-denied, in-use, unsupported and other errors are reported accurately.
+All paths close their control handle and release any acquired volume lock.
+The storage worker keeps the UI responsive and the volume list refreshes after
+the operation. Media arrival notifications can refresh a disc still spinning up.
+
+Validation used simulated CD/removable devices only. Tests cover command order,
+empty trays, fixed/image exclusion, own-reader/cache invalidation, busy/unsupported
+and access errors, drive-type changes, cleanup, slow calls and owner restoration.
+No physical eject/load request was sent for this update.
+
+Microsoft API references:
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_eject_media
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_load_media
+https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-fsctl_lock_volume

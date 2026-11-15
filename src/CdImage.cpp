@@ -47,11 +47,24 @@ Storage::Result failure(DWORD error,const std::string& reason,unsigned long long
  return {1,error,reason+" (Windows error "+std::to_string(error)+", byte offset "+std::to_string(offset)+")."};
 }
 }
-std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::string output,std::shared_ptr<CdImageSource> injected) {
+std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::string output,std::shared_ptr<MediaImageSource> source,std::string medium) {
  return [=](Storage::Job& job)->Storage::Result {
   if(drive<0||drive>25)return failure(ERROR_INVALID_PARAMETER,"Invalid source drive");
   char destination[MAX_PATH];DWORD length=GetFullPathNameA(output.c_str(),MAX_PATH,destination,nullptr);
   if(!length||length>=MAX_PATH)return failure(ERROR_FILENAME_EXCED_RANGE,"The output path is too long or invalid");
+#ifndef HFV_TESTING
+  char sourceRoot[]={char('A'+drive),':','\\',0};
+  char sourceVolume[MAX_PATH]={},destinationVolume[MAX_PATH]={};
+  // Resolve mount points too: saving onto the source would modify it while
+  // the imaging operation promises read-only source access.
+  if(GetVolumeNameForVolumeMountPointA(sourceRoot,sourceVolume,MAX_PATH)){
+   char volumePath[MAX_PATH]={};
+   if(GetVolumePathNameA(destination,volumePath,MAX_PATH)&&GetVolumeNameForVolumeMountPointA(volumePath,destinationVolume,MAX_PATH)&&!_stricmp(sourceVolume,destinationVolume))
+    return failure(ERROR_INVALID_PARAMETER,"Save the image on a different drive from the source");
+  }
+#endif
+  if(destination[1]==':' && (destination[0]==char('A'+drive)||destination[0]==char('a'+drive)))
+   return failure(ERROR_INVALID_PARAMETER,"Save the image on a different drive from the source");
   DWORD attributes=GetFileAttributesA(destination);bool replace=attributes!=INVALID_FILE_ATTRIBUTES;
   if(replace){
    if(attributes&FILE_ATTRIBUTE_DIRECTORY)return failure(ERROR_ACCESS_DENIED,"The output path is a folder");
@@ -60,43 +73,47 @@ std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::stri
    if(choice==Storage::ConflictChoice::Cancel)throw Storage::Cancelled();
   }
   if(job.cancelled())throw Storage::Cancelled();
-  auto source=injected?injected:std::make_shared<NativeCdImageSource>();
-  Storage::Progress p;p.path=destination;p.phase="Opening data CD";p.byteTransfer=true;job.progress(p);
+  if(!source)return failure(ERROR_INVALID_PARAMETER,"No image source was supplied");
+  Storage::Progress p;p.path=destination;p.phase="Opening "+medium;p.byteTransfer=true;job.progress(p);
   std::string reason;
   if(!source->Open(drive,reason))return failure(source->Error(),reason);
   auto size=source->Size();
   if(!size||size%2048||size>0x7fffffffffffffffULL)return failure(ERROR_INVALID_DATA,"The drive reported an invalid data-image length");
   DWORD generation=0,current=0;
-  if(!source->Verify(generation))return failure(source->Error(),"Could not establish CD media identity");
+  if(!source->Verify(generation))return failure(source->Error(),"Could not establish "+medium+" media identity");
   char directory[MAX_PATH];strcpy_s(directory,destination);char* slash=strrchr(directory,'\\');
   if(!slash)return failure(ERROR_INVALID_NAME,"The output path has no folder");slash[1]=0;
   Output file;
   if(!GetTempFileNameA(directory,"hcd",0,file.temporary))return failure(GetLastError(),"Could not create the temporary image");
   file.handle=CreateFileA(file.temporary,GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
   if(file.handle==INVALID_HANDLE_VALUE)return failure(GetLastError(),"Could not open the temporary image");
-  std::vector<BYTE> buffer(64*1024);p.scanning=false;p.totalBytes=size;p.phase="Reading CD image";job.progress(p);
+  std::vector<BYTE> buffer(64*1024);p.scanning=false;p.totalBytes=size;p.phase="Reading "+medium+" image";job.progress(p);
   for(unsigned long long offset=0;offset<size;){
    if(job.cancelled())throw Storage::Cancelled();
-   if(!source->Verify(current))return failure(source->Error(),"CD media check failed",offset);
-   if(current!=generation)return failure(ERROR_MEDIA_CHANGED,"CD media changed; the image was discarded",offset);
+   if(!source->Verify(current))return failure(source->Error(),medium+" media check failed",offset);
+   if(current!=generation)return failure(ERROR_MEDIA_CHANGED,medium+" media changed; the image was discarded",offset);
    DWORD count=DWORD(min(size-offset,(unsigned long long)buffer.size())),got=0,wrote=0;
-   if(!source->Read(offset,count,buffer.data(),got))return failure(source->Error(),"CD sector read failed; missing sectors were not synthesized",offset);
-   if(got!=count)return failure(ERROR_READ_FAULT,"Short CD sector read; the image was discarded",offset);
-   if(!source->Verify(current))return failure(source->Error(),"CD media check failed after reading",offset);
-   if(current!=generation)return failure(ERROR_MEDIA_CHANGED,"CD media changed while reading; the image was discarded",offset);
+   if(!source->Read(offset,count,buffer.data(),got))return failure(source->Error(),medium+" sector read failed; missing sectors were not synthesized",offset);
+   if(got!=count)return failure(ERROR_READ_FAULT,"Short "+medium+" sector read; the image was discarded",offset);
+   if(!source->Verify(current))return failure(source->Error(),medium+" media check failed after reading",offset);
+   if(current!=generation)return failure(ERROR_MEDIA_CHANGED,medium+" media changed while reading; the image was discarded",offset);
    if(!WriteFile(file.handle,buffer.data(),count,&wrote,nullptr))return failure(GetLastError(),"Writing the image file failed",offset);
    if(wrote!=count)return failure(ERROR_WRITE_FAULT,"Short write to the image file",offset);
    offset+=count;p.bytes=p.processed=offset;job.progress(p);
   }
   if(job.cancelled())throw Storage::Cancelled();
-  if(!source->Verify(current))return failure(source->Error(),"Final CD media check failed",size);
-  if(current!=generation)return failure(ERROR_MEDIA_CHANGED,"CD media changed at completion; the image was discarded",size);
-  p.phase="Saving CD image";job.progress(p);
+  if(!source->Verify(current))return failure(source->Error(),"Final "+medium+" media check failed",size);
+  if(current!=generation)return failure(ERROR_MEDIA_CHANGED,medium+" media changed at completion; the image was discarded",size);
+  p.phase="Saving "+medium+" image";job.progress(p);
   if(!FlushFileBuffers(file.handle))return failure(GetLastError(),"Flushing the image file failed",size);
   HANDLE handle=file.handle;file.handle=INVALID_HANDLE_VALUE;
   if(!CloseHandle(handle))return failure(GetLastError(),"Closing the image file failed",size);
   if(job.cancelled())throw Storage::Cancelled();
   if(!MoveFileExA(file.temporary,destination,MOVEFILE_WRITE_THROUGH|(replace?MOVEFILE_REPLACE_EXISTING:0)))return failure(GetLastError(),"Could not publish the completed image",size);
-  file.temporary[0]=0;p.phase="CD image saved";job.progress(p);return {};
+  file.temporary[0]=0;p.phase=medium+" image saved";job.progress(p);return {};
  };
+}
+
+std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::string output,std::shared_ptr<CdImageSource> source) {
+ return MakeMediaImageJob(drive,std::move(output),source?source:std::make_shared<NativeCdImageSource>(),"CD");
 }

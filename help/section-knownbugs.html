@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>Known bugs</title></head><body><p><a href="manual.html">Manual contents</a></p><h1>
+
+<hr width="100%"/><a name="KnownBugs"></a>Known bugs</h1>
+
+<ul>
+<li>
+Copying when the file already exists: behaves badly, does not ask for confirmation
+to overwrite. If you copy a file and there is a *folder* with same name,
+not even error message is given, and the copying fails.</li>
+
+<br/> 
+<li>
+CD eject button does not work with some configurations (HP7110e &amp; NT
+is a known problem) and freezes. Reason unknown, could be driver or firmware.</li>
+
+<br/> 
+<li>
+In report view, file dates seem to be wrong (again/still?). I thought that
+it was fixed. oh well.</li>
+
+<br/> 
+<li>
+Properties and file mappings with F4 does not work for AppleDouble files.</li>
+
+<br/> 
+<li>
+Root folder of DOS volumes: two first items are overlapped (in some systems).
+Could be a bug in Common dialog control libraries, since not all systems
+have this problem.</li>
+
+<br/> 
+<li>
+AppleDouble launching for Executor DOS works only with short file names.
+Not much I can do for it.</li>
+
+<br/> 
+<li>
+vMac launch has problems under NT 5 beta 2. Seems to be a beta bug, cannot
+resolve shortcuts properly.</li>
+
+<br/> 
+<li>
+Finder view mode: in some systems, the scroll bars always appear and the
+window is scrolled a few pixels. Very annoying. Strangely enough, I cannot
+repeat this on my development machine. I can repeat it with my backup machine
+so there's hope to get it eventually fixed. Could be a bug in MFC libraries
+which is already fixed.</li>
+
+<br/> 
+<li>
+Options dialog: some "browse" buttons outsmart themselves when a directory
+name contains spaces.</li>
+
+<br/> 
+<li>
+Shapeshifter launching crashes sometimes if "Remove alias" is on. Hard
+to fix since it can be repeated by manually launching two aliases in SS
+within narrow enough time frame. If this happens to you, do not use "Remove
+alias".</li>
+</ul>
+
+<br/> 
+</body></html>

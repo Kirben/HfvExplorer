@@ -1,0 +1,35 @@
+Original CD caching restored for the native x64 reader
+====================================================
+ReadOnlyCd now uses the original cache.cpp implementation: 1,000 slots of
+2,048 bytes each, and the original 32-sector (64 KiB) read-ahead policy.
+Sector keys are absolute media offsets, so partitioned HFS volumes share the
+correct cache entries. Contiguous misses are read in batches; cached bytes
+avoid additional ReadFile or SCSI READ(10) requests. Native read-only access,
+capacity detection, shortened-partition handling and HFS validation remain.
+
+Read-ahead is clipped to the real reported capacity. If speculative sectors
+cannot be read, the reader retries only the sectors needed by the request.
+Required-sector errors and short reads are failures; bytes are not synthesized.
+Failed transfers never populate the cache or return their partial data.
+
+The media generation is checked before each logical read, including cache hits,
+and after physical transfers. Media changes and I/O errors invalidate the cache
+and session until reopen. Close/reopen, refresh and eject/reload discard cached
+sectors through the existing handle lifecycle. If no usable media counter can
+be established, reads proceed without application caching or read-ahead. Losing
+an established identity is an error, rather than silently returning cached data.
+
+The original cache API uses int sector keys. Positions beyond INT_MAX CD sectors
+use uncached reads to avoid truncation/aliasing; byte offsets remain 64-bit.
+This change does not expand the classic-HFS CD adapter's existing volume limits.
+
+Validation: original cache capacity/read-ahead, 100 repeated cached reads with
+no extra sector I/O, overlapping unaligned reads, eviction, EOF clipping, media
+changes during and between reads, read errors, short reads, speculative retry,
+reopen invalidation, missing/lost identity, source byte preservation, partition
+maps, shortened HFS partitions and both-fork extraction. Simulated storage/UI,
+copy, floppy and native eject/reload regressions also pass.
+
+Reproduce: build-x64.ps1 -TestCd -TestFloppy
+All tests use host fixture files or injected devices. No physical CD access or
+computer control was used. Real-drive performance remains to be measured.

@@ -82,8 +82,10 @@ BOOL CAskNewVolume::OnInitDialog()
 {
 	CDialog::OnInitDialog();
  CComboBox* paths = (CComboBox*)GetDlgItem(IDC_VOLPATH);
- for(int n=paths->GetCount()-1; n>=0; --n) { CString text; paths->GetLBText(n,text); if(text==get_floppy_a_name() || text==get_floppy_b_name()) paths->DeleteString(n); }
-	
+ for(int n=paths->GetCount()-1;n>=0;--n){CString text;paths->GetLBText(n,text);if(FloppySelection(text)>=0)paths->DeleteString(n);}
+ if(m_allowFloppies && m_volpath.IsEmpty())
+  for(int drive=0;drive<26;++drive)if(DriveKind(drive)==DRIVE_REMOVABLE)paths->AddString(FloppyLabel(drive));
+
 	if(m_volpath != "") {
 		HWND w = GetSafeHwnd();
 		if(w) {
@@ -121,32 +123,36 @@ CString CAskNewVolume::get_floppy_b_name(void)
 	return( "<Format floppy B:>" );
 }
 
-BOOL CAskNewVolume::OnCommand(WPARAM wParam, LPARAM lParam) 
-{
-	char *p = m_volpath.GetBuffer(_MAX_PATH);
-
-	if(wParam == IDOK) {
-		UpdateData(TRUE);
-		if(m_volname == "") {
-			AfxMessageBox( "You must give a name for the volume." );
-			return(0);
-		} if(m_volpath == "") {
-			AfxMessageBox( "Please define the volume path." );
-			return(0);
-		} else if(atol(m_volsize_ex.GetBuffer(100)) == 0) {
-			AfxMessageBox( "Volume size cannot be zero." );
-			return(0);
-		} else if( strlen(p) < 5 || !isalpha(p[0]) ||
-					p[1] != ':' || p[2] != '\\')
-		{
-			if(m_volpath != get_floppy_a_name() &&
-				 m_volpath != get_floppy_b_name()) 
-			{
-				AfxMessageBox( "Please define *full* volume path." );
-				return(0);
-			}
-		}
-	}
-	
-	return CDialog::OnCommand(wParam, lParam);
+CString CAskNewVolume::FloppyLabel(int drive) {CString text;text.Format("<Format floppy %c:>",'A'+drive);return text;}
+int CAskNewVolume::FloppySelection(const CString& text) {
+ for(int drive=0;drive<26;++drive)if(text==FloppyLabel(drive))return drive;return -1;
+}
+UINT CAskNewVolume::DriveKind(int drive) {
+#ifdef HFV_TESTING
+ return DRIVE_NO_ROOT_DIR; // Tests override this seam; never inspect hardware.
+#else
+ char root[]={char('A'+drive),':','\\',0};return GetDriveTypeA(root);
+#endif
+}
+BOOL CAskNewVolume::OnCommand(WPARAM wParam,LPARAM lParam) {
+ if(LOWORD(wParam)==IDC_VOLPATH && (HIWORD(wParam)==CBN_SELCHANGE||HIWORD(wParam)==CBN_EDITCHANGE)){
+  CString path;auto combo=(CComboBox*)GetDlgItem(IDC_VOLPATH);
+  int selected=combo->GetCurSel();
+  if(HIWORD(wParam)==CBN_SELCHANGE&&selected!=CB_ERR)combo->GetLBText(selected,path);else combo->GetWindowText(path);
+  bool floppy=m_allowFloppies&&FloppySelection(path)>=0;
+  if(floppy)SetDlgItemText(IDC_VOLSIZE_EX,"1440 kB");
+  GetDlgItem(IDC_VOLSIZE_EX)->EnableWindow(!floppy);GetDlgItem(IDC_VOLNAME_BROWSE)->EnableWindow(!floppy);
+ }
+ if(LOWORD(wParam)==IDOK){
+  if(!UpdateData(TRUE))return TRUE;
+  if(m_volname.IsEmpty()){AfxMessageBox("You must give a name for the volume.");return TRUE;}
+  if(m_allowFloppies&&FloppySelection(m_volpath)>=0){m_volsize_ex="1440 kB";return CDialog::OnCommand(wParam,lParam);}
+  if(FloppySelection(m_volpath)>=0){AfxMessageBox("This operation requires an image file.");return TRUE;}
+  if(m_volpath.IsEmpty()){AfxMessageBox("Please define the volume path.");return TRUE;}
+  if(atol(m_volsize_ex)==0){AfxMessageBox("Volume size cannot be zero.");return TRUE;}
+  if(m_volpath.GetLength()<5||!isalpha((unsigned char)m_volpath[0])||m_volpath[1]!=':'||m_volpath[2]!='\\'){
+   AfxMessageBox("Please define the full image file path.");return TRUE;
+  }
+ }
+ return CDialog::OnCommand(wParam,lParam);
 }

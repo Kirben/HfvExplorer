@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>Example</title></head><body><p><a href="manual.html">Manual contents</a></p><h3>
+<a name="typemap_sample_start"></a>Example</h3>
+There is a chance that previous chapter was somewhat confusing to you.
+Never fear, this example probably will make things clearer. We start from
+scratch; you have no type mappings at all defined, and you have two text
+files, one made by SimpleText and the other made by Tex-Edit. For the purposes
+of this example, we prefer Tex-Edit over Simple Text.
+<br/> 
+<br/> 
+<br/>
+<br/>
+<center>
+<p><img height="232" src="typemap_sampe_01.gif" width="326"/></p></center>
+Basically, we want to create the mapping shown above.
+<br/> 
+<br/> 
+<br/>
+<br/>
+<center>
+<p><img height="155" src="typemap_sampe_02.gif" width="650"/></p></center>
+Here are the two text files in a new folder. Select the files first, and
+then hit <b>F4</b> (keyboard) key to open the type mapping dialog.
+<br/> 
+<br/> 
+<br/>
+<center>
+<p><img height="405" src="typemap_sampe_03.gif" width="562"/></p></center>
+
+<p>HFVExplorer opens the dialog shown above. It has extracted the type
+and creator information for the files, but some info is now required from
+you. Particularly note the text "C O N F L I C T ..." at the top of the
+dialog. It means that the selected mapping is not ok, because two different
+mappings try to map the type "???" to something.
+<br/> 
+<br/> 
+<br/>
+</p><center>
+<p><img height="405" src="typemap_sampe_05.gif" width="562"/></p></center>
+
+<p>The colored ellipses show what we needed to change. The <font color="#3366FF">blue
+ellipse</font> is the DOS extension; we entered "TXT" for both of the types.
+The descriptive text in the <font color="#33FF33">green ellipse</font>
+is optional, but for convenience, we entered here the descriptions -- "Simple
+Text file" and "Tex-Edit file". The <font color="#FF0000">red circle</font>
+is the interesting part. We unchecked it for SimpleText, but left Tex-Edit
+checked. This means that whenever we copy from DOS to HFS volumes a TXT
+file, Tex-Edit type and creator information is used, not SimpleText. We
+simply cannot have both. Note that as a result, HFVExplorer does not complain
+with "C O N F L I C T ..." any more.
+</p><p>That's it, the mappings are ready. We close the dialog with OK, and
+let's try it out by <a href="section-transfer.html#Transfer">copying the files</a> to the drive
+"E:\".
+<br/> 
+<br/> 
+<br/>
+</p><center>
+<p><img height="189" src="typemap_sampe_06.gif" width="390"/></p></center>
+
+<p>The file type mappings work only for "Raw copy" copy modes, and we know
+that the text is in the data fork. Therefore, we select "<b>Raw copy, data
+fork</b>" and click the <b>Ok to All</b> button.
+<br/> 
+<br/> 
+<br/>
+</p><center>
+<p><img height="133" src="typemap_sampe_07.gif" width="303"/></p></center>
+
+<p>The E: drive now has two new files, and the extension is TXT for both
+of them.
+<br/> 
+<br/> 
+<br/>
+</p><center>
+<p><img height="189" src="typemap_sampe_08.gif" width="390"/></p></center>
+
+<p>Now let's copy the files back from the E: drive to the HFS volume. Again
+we use Raw copy, and want the data to be put in the data fork.
+<br/> 
+<br/> 
+<br/>
+</p><center>
+<p><img height="132" src="typemap_sampe_09.gif" width="303"/></p></center>
+Both files are now Tex-Edit files.
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+</body></html>

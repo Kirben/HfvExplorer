@@ -66,7 +66,6 @@ public:
 	int		m_dosicons;
 	int		m_fat_icon_time_limit;
 	BOOL	m_mountall;
-	BOOL	m_patch;
 	BOOL	m_startup_floppies;
 	BOOL	m_startup_cds;
 	BOOL	m_startup_hds;

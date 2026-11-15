@@ -101,6 +101,7 @@ int crlf_translation = 1;
 
 int mount_flags( char *path )
 {
+    if(physical_floppy_writable(path))return O_RDWR;
 	if(readonly_media_path(path)) return O_RDONLY;
 	char buffer[10];
 	int flags;

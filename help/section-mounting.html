@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>Mounting volumes</title></head><body><p><a href="manual.html">Manual contents</a></p><h1>
+
+<hr width="100%"/><a name="Mounting"></a>Mounting volumes</h1>
+"Mounting" is a term commonly used with file systems and devices. It simply
+means making the volume file (or whatever) accessible to the target system.
+<p>When HFVExplorer is started, it scans the home directory for all files
+named as *.HFV (Executor volume files), *.DSK (vMac volume files) and *.HFx
+where 'x' is a digit 0..9 (Fusion volume files). If the file contains a
+valid HFS volume, it is mounted automatically. At this time, any floppies
+and CD's are checked too for Mac media. If you do not access floppies (or
+CD's) often, you can <a href="section-general-options.html#General_options">turn off</a> either startup
+floppy check or startup CD check, or both.
+</p><p>When a new floppy is inserted, press <b>F5</b> (keyboard) key to refresh
+the view.
+</p><p>When a new Mac or hybrid CD is inserted, it is detected and mounted
+automatically if you have auto-insert notification enabled. Depending on
+the system, it may take some time before HFVExplorer gets the arrival or
+removal messages; just be patient. If you don't use auto-insert notification
+(maybe because of some cd burner software), or any time you wish to refresh
+the view, press the <b>F5</b> key.
+</p><p>Use the <b><a href="section-menu-file.html#command_open">File menu / Open command</a></b>
+to mount a new volume file. After the file is mounted once, next time you
+launch HFVExplorer you can use the <a href="section-menu-file.html#command_recent_files">recent
+file list</a> from the file menu to mount it.
+</p><p>Volumes can also be mounted by dragging and dropping a HFV (or DSK,
+or HFx) file from Windows Explorer.
+</p><p>There is an alternative way to format a volume file: right-click an
+empty space in Windows Explorer. Select <i>New/HFVExp Document</i>. Double-click
+the new document. HFVExplorer will launch, prompt the name and the size
+of the file, and format it.
+<br/> 
+<br/> 
+<br/> 
+</p></body></html>

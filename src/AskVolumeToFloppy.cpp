@@ -46,7 +46,10 @@ void CAskVolumeToFloppy::DoDataExchange(CDataExchange* pDX)
 {
 	CDialog::DoDataExchange(pDX);
 	//{{AFX_DATA_MAP(CAskVolumeToFloppy)
-	DDX_CBIndex(pDX, IDC_DUMP_TO_FLOPPY, m_drive);
+	int selected=-1;auto drives=(CComboBox*)GetDlgItem(IDC_DUMP_TO_FLOPPY);
+ if(!pDX->m_bSaveAndValidate)for(int n=0;n<drives->GetCount();++n)if(int(drives->GetItemData(n))==m_drive)selected=n;
+ DDX_CBIndex(pDX,IDC_DUMP_TO_FLOPPY,selected);
+ if(pDX->m_bSaveAndValidate)m_drive=selected==CB_ERR?-1:int(drives->GetItemData(selected));
 	DDX_Text(pDX, IDC_VOLPATH, m_volname);
 	DDV_MaxChars(pDX, m_volname, 255);
 	//}}AFX_DATA_MAP
@@ -77,6 +80,23 @@ void CAskVolumeToFloppy::OnVolnameBrowse()
 BOOL CAskVolumeToFloppy::OnInitDialog() 
 {
 	CDialog::OnInitDialog();
-	SetWindowText( m_caption );
+	SetWindowText(m_caption);
+ auto drives=(CComboBox*)GetDlgItem(IDC_DUMP_TO_FLOPPY);drives->ResetContent();
+ for(int drive=0;drive<26;++drive)if(DriveKind(drive)==DRIVE_REMOVABLE){CString name;name.Format("%c:",'A'+drive);int n=drives->AddString(name);drives->SetItemData(n,drive);}
+ if(drives->GetCount())drives->SetCurSel(0);
 	return TRUE;
+}
+
+UINT CAskVolumeToFloppy::DriveKind(int drive) {
+#ifdef HFV_TESTING
+ return DRIVE_NO_ROOT_DIR;
+#else
+ char root[]={char('A'+drive),':','\\',0};return GetDriveTypeA(root);
+#endif
+}
+void CAskVolumeToFloppy::OnOK() {
+ if(!UpdateData(TRUE))return;
+ if(m_drive<0){AfxMessageBox("No target drive was selected.");return;}
+ if(m_volname.IsEmpty()){AfxMessageBox("Please define the volume file path.");return;}
+ CDialog::OnOK();
 }

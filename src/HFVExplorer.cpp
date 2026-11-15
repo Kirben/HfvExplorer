@@ -87,7 +87,6 @@ CHFVExplorerApp::CHFVExplorerApp()
 	m_dosicons = 1;
 	m_fat_icon_time_limit = 0;
 	m_mountall = TRUE;
-	m_patch = TRUE;
 	m_startup_floppies = TRUE;
 	m_startup_cds = TRUE;
 	m_startup_hds = TRUE;
@@ -166,7 +165,6 @@ void CHFVExplorerApp::LoadSettings(void)
 	m_dosicons = GetProfileInt("Setup","DosIcons",1);
 	m_fat_icon_time_limit = GetProfileInt("Setup","DosIconTimeLimit",0);
 	m_mountall = GetProfileInt("Setup","MountAllDisks",1);
-	m_patch = GetProfileInt("Setup","PatchCDVSD",1);
 	m_startup_floppies = GetProfileInt("Setup","StartupFloppyCheck",1);
 	m_startup_cds = GetProfileInt("Setup","StartupCDCheck",1);
 	m_startup_hds = GetProfileInt("Setup","StartupHDCheck",1);
@@ -243,7 +241,6 @@ void CHFVExplorerApp::SaveSettings(void)
 	WriteProfileInt("Setup","DosIcons",m_dosicons);
 	WriteProfileInt("Setup","DosIconTimeLimit",m_fat_icon_time_limit);
 	WriteProfileInt("Setup","MountAllDisks",m_mountall);
-	WriteProfileInt("Setup","PatchCDVSD",m_patch);
 	WriteProfileInt("Setup","StartupFloppyCheck",m_startup_floppies);
 	WriteProfileInt("Setup","StartupCDCheck",m_startup_cds);
 	WriteProfileInt("Setup","StartupHDCheck",m_startup_hds);
@@ -336,6 +333,10 @@ int CHFVExplorerApp::ExitInstance(){ShutdownStorageUi();return CWinApp::ExitInst
 BOOL CHFVExplorerApp::InitInstance()
 {
 #ifdef HFV_TESTING
+ extern int RunMediaControlTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-media-control")==0)ExitProcess(RunMediaControlTest(__argv[2]));
+ extern int RunFloppyMenuTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-floppy-menu")==0)ExitProcess(RunFloppyMenuTest(__argv[2]));
  extern int RunFindFilesTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-find-files")==0)ExitProcess(RunFindFilesTest(__argv[2]));
  extern int RunCdBurnTest(const char*);
@@ -366,7 +367,7 @@ BOOL CHFVExplorerApp::InitInstance()
 	CheckDefaultSettings();
 
 	m_prevVersion = m_version;
- m_startup_floppies = m_startup_hds = m_do_harddisks = m_patch = FALSE;
+ m_startup_hds = m_do_harddisks = FALSE;
 
 	if(m_version != "1.2.5") {
 		m_version = "1.2.5";
@@ -377,7 +378,6 @@ BOOL CHFVExplorerApp::InitInstance()
 	HFSIFACE_set_copy_modes( m_copyout_mode, m_copyin_mode, m_copyin_appledouble );
 
 	floppy_module_global_init();
-	set_patch_option( m_patch );
 
 	CString log_name;
 	log_name = GetProfileString( "Setup","LogFile",NULL );

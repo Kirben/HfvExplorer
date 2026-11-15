@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>View menu</title></head><body><p><a href="manual.html">Manual contents</a></p><a name="menu_view"></a><b><i>View menu</i></b>
+<blockquote><a name="command_icon_large"></a><img height="15" src="tool_view_icon_big.gif" width="16"/><b><i>View
+as large icons</i></b>
+<br/><a name="command_icon_small"></a><img height="15" src="tool_view_icon_small.gif" width="16"/><b><i>View
+as small icons</i></b>
+<br/><a name="command_list"></a><img height="15" src="tool_view_list.gif" width="16"/><b><i>View
+as list</i></b>
+<br/><a name="command_details"></a><img height="15" src="tool_view_report.gif" width="16"/><b><i>View
+details (report)</i></b>
+<blockquote>These commands select the appearance of the window content,
+and are mostly the same as in Windows Explorer. Report view differs somewhat
+in that it displays some Mac specific columns, that is, type, creator and
+label.</blockquote>
+<img height="253" src="report_sort.gif" width="784"/>
+<blockquote>Click on the column headers to sort according the field; click
+the same column header again to reverse the sorting direction (ascending/descending).</blockquote>
+
+<br/> 
+<p><a name="command_finder"></a><img height="15" src="tool_view_finder.gif" width="16"/><b><i>Finder
+view</i></b>
+</p><blockquote>This view mode is special for HFVExplorer. It displays the
+items in the same view mode and using same locations that Finder would.</blockquote>
+
+<center><img height="280" src="icon_mode_difference.gif" width="757"/></center>
+
+<blockquote>The first time Finder view is selected, HFVExplorer displays
+the view last used in the Finder, either list, small icons or large icons.
+If you select Finder view mode again when <i>already</i> in Finder view,
+a large icon Finder view is forced. (Curiously enough, this was originally
+a bug in HFVExplorer, but I liked the feature and decided not to fix it.)
+<p>Finder view, unlike the all other modes, also writes back the positions
+of the icons if you move them around. There is a caveat: if you copy or
+move files when in Finder mode, the positions are not immediately recorded,
+but only after you move them <b>again</b> using mouse. This is a security
+measure since I have yet to come up with a decent automatic icon placement
+algorithm, something similar or (hopefully) better than found in MacOS
+Finder.
+</p><p>The repositioning uses Finder "magic rectangles", and requires a MacOS
+System version 7.1.1 or later to work. Note that Finder relocates items
+only when it "sees" them; if some application (including Finder itself;
+i.e. "Recent" folders) has installed new files and you have never opened
+the window in Finder, the files may be layered on top of each other. HFVExplorer
+tries to place them "somewhere".
+<br/> </p></blockquote>
+<b><i>Refresh (F5 keyboard key)</i></b>:
+<blockquote>Rebuilds the tree view; refreshes all the volume files and
+checks the presence of any floppies and CD's.</blockquote>
+</blockquote>
+
+<hr width="100%"/></body></html>

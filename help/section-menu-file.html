@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>File menu</title></head><body><p><a href="manual.html">Manual contents</a></p><blockquote><p><a name="menu_file"></a><b><i>File menu</i></b></p></blockquote>
+
+<blockquote><a name="command_new"></a><img height="15" src="tool_new.gif" width="16"/><b><i>Format
+a new volume file:</i></b>
+<blockquote>This command is used for two purposes: to format a new HFV
+volume file, or to format a floppy disk. You will see a dialog box like
+this:</blockquote>
+
+<center>
+<p><br/><img height="275" src="dlg_new_volume.gif" width="438"/></p></center>
+
+<blockquote>First enter a name for your new volume. It must be at most
+27 characters long, and may not contain colons (":") or backslashes ("\").
+<p>Select the volume size next. Open the combo box to see some preconfigured
+sizes. However, you are not required to stick with those, but can enter
+any size you like (between 800k and 2GB). Just type "57MB" (without quotes)
+to format a 57 megabyte volume file.
+</p><p>To format a floppy, click on the combo-box highlighted with a <font color="#FF0000">red</font>
+circle, and select the floppy drive -- either A: or B:. To format a volume
+file, click on the button indicated with <font color="#33FF33">green</font>
+ellipse.
+</p><p>When you are ready, click OK to start the process. It will take a while,
+and there's no proper progress indicator at the moment, but you will no
+doubt notice when the new volume is ready: the hard disk (or floppy) stops
+making noise and HFVExplorer mounts the new volume.
+</p><p>There is an alternative way to format a volume file: right-click an
+empty space in Windows Explorer. Select <i>New/HFVExp Document</i>. Double-click
+the new document. HFVExplorer will launch, prompt the name and the size
+of the file, and format it.</p></blockquote>
+
+<br/> 
+<br/> 
+<p><a name="command_open"></a><img height="15" src="tool_open.gif" width="16"/><b><i>Open
+a volume file</i></b>:
+</p><blockquote>Opens ("mounts") a new volume file. If you have all your volume
+files in the same directory as HFVExplorer itself, you will rarely need
+this command. HFVExplorer mounts all the HFV, DSK and HFx files from the
+startup directory automatically.</blockquote>
+
+<blockquote>You will presented with a Windows common file open dialog:</blockquote>
+
+<center>
+<p><br/><img height="319" src="dlg_open_volume.gif" width="566"/></p></center>
+
+<blockquote>Nothing special here, just browse to the volume file and open
+it. You can also drag and drop an HFV file from Windows Explorer.</blockquote>
+
+<br/> 
+<p><a name="command_read"></a><img height="15" src="tool_read.gif" width="16"/><b><i>Read
+a volume from floppy</i></b>:
+</p><blockquote>If you have Macintosh formatted 1.4MB floppies, you can <a href="section-mounting.html#Mounting">mount</a>
+them to HFVExplorer and access the files directly. This works fine but
+is rather slow. Instead, you may want to create a new HFV file from the
+contents of the floppy disk. This command does just that.</blockquote>
+
+<center>
+<p><br/><img height="219" src="dlg_read_volume.gif" width="438"/></p></center>
+
+<blockquote>Select the source floppy drive (A: or B:), and type in the
+full path of the new volume file. You can also use the browse button indicated
+with
+<font color="#33FF33">green</font> ellipse to browse to a desired
+folder and file name.</blockquote>
+
+<blockquote>Again, click OK to start the operation. It is not particularly
+fast but has the ability to recover from some floppy read errors. The new
+volume will be mounted automatically after the operation is finished.</blockquote>
+
+<br/> 
+<p><a name="command_write"></a><img height="15" src="tool_write.gif" width="16"/><b><i>Write
+a volume to floppy:</i></b>
+</p><blockquote>This command writes a volume file to a floppy disk. The file
+must be 1.4 MB or less. Select the target  floppy drive (A: or B:),
+and use the browse button indicated with <font color="#33FF33">green</font>
+ellipse to browse to the desired source volume file.</blockquote>
+
+<center><img height="219" src="dlg_write_volume.gif" width="438"/></center>
+
+<p><br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+</p><p><a name="command_reload"></a><img height="15" src="tool_tray1.gif" width="16"/><b><i>Reload
+CD tray</i></b>:
+</p><blockquote>This command is actually not in file menu, but should be. It
+reloads the CD tray, if open. Just for fun.</blockquote>
+<a name="command_eject"></a><img height="15" src="tool_tray0.gif" width="16"/><b><i>   
+Eject CD tray</i></b>:
+<blockquote>This command is actually not in file menu, but should be. It
+ejects the CD tray if it's closed. Just for fun.</blockquote>
+<a name="command_print"></a><img height="15" src="tool_print.gif" width="16"/><b><i>Print
+(not implemented)</i></b>:
+<blockquote>Not much need for this, will probably disappear.</blockquote>
+<b><i>Recent files</i></b>:
+<blockquote><a name="command_recent_files"></a>HFVExplorer keeps track
+of ten recently mounted files in the file menu. Provided that the file
+has not been deleted or moved, selecting the file name mounts it.</blockquote>
+</blockquote>
+
+<blockquote>
+<hr width="100%"/></blockquote></body></html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>Troubleshooting</title></head><body><p><a href="manual.html">Manual contents</a></p><h1>
+
+<hr width="100%"/><a name="Troubleshooting"></a>Troubleshooting</h1>
+See also <a href="section-knownbugs.html#KnownBugs">Known Bugs</a>.
+<br/> 
+<p><a name="trouble_cd_1"></a><b>PROBLEM</b>: None of the Mac CD's mount.
+</p><blockquote><a href="section-installation.html#Installation">Make sure</a> that you copied Cdenable.vxd
+(Windows 9x) or Cdenable.sys (Windows NT 4-5) to the correct folder.
+<p>Check the size of Cdenable.vxd (does not apply to Windows NT). For some
+time, I kept an unzipped version available at my site, and some people
+downloaded it with recent versions of  Netscape, which seem to have
+major trouble in determining which files are text files and which ones
+are not. Unfortunately, Netscape thinks Cdenable.vxd is a text file, and
+performs a cr/lf  line end conversion, resulting in a corrupted file.
+The correct size (currently) is 10400 bytes, the corrupted size was 10445
+bytes.
+</p><p><a href="section-general-options.html#win95_patch">Make sure</a> that you have the "Patch..." option
+is checked in the settings (Windows 95, 98).</p></blockquote>
+<a name="trouble_cd_2"></a><b>PROBLEM</b>: Some Mac CD's mount, some don't.
+<blockquote>It has turned out that Toast (a cd burner software for Macintosh,
+by Adaptec) allows writing of CD's with very long volume names. Although
+it correctly cuts the name at 27 characters in MDB, the entry in Catalog
+File is longer which causes problems for  HFVExplorer. To mount such
+CD's, edit the file "HFVExplorer.ini" in your Windows directory as shown
+below:
+<p><tt>  [Setup]</tt>
+<br/><tt>  UsePartialNames=1 ; default value is 0</tt>
+</p><p>If there is an entry "UsePartialNames" already, change the value to
+be "1", otherwise create new entry. This has the effect that any requests
+to the hfsutils core are made with partial file paths instead of full file
+paths:
+</p><p><tt>":MyFolder:Myfile.xxx"</tt>
+</p><p>instead of
+</p><p><tt>"MyMacVolume:MyFolder:Myfile.xxx"</tt>
+</p><p>Once I'm sure that this works always, I may turn it on by default.
+<br/> </p></blockquote>
+
+<p><br/><a name="trouble_floppy_1"></a><b>PROBLEM</b>: Mac floppy disks
+do not mount.
+</p><blockquote>Only 1.4MB Mac floppies can be read in HFVExplorer. 400k and
+800k Mac floppies cannot me read, due to the limitations of PC floppy controller.
+<p>The floppies are not mounted automatically, you need to press the <b>F5</b>
+(keyboard) key to detect them.</p></blockquote>
+<a name="trouble_icon_1"></a><b>PROBLEM</b>: Shortcut icons look worse
+on Windows desktop than in HFVExplorer.
+<blockquote>Starting from version 1.2.7, HFVExplorer saves icons in 256
+colors. To show the icons correctly in Windows desktop, enable in Control
+panel: "Display" / "Plus!" / "Show icons using all possible colors".</blockquote>
+<a name="trouble_start_slow_1"></a><b>PROBLEM</b>: Launching of HFVExplorer
+seems to get slower and slower.
+<blockquote>HFVExplorer uses very extensive icon caching. It stores virtually
+all Mac icons it ever sees (except custom icons) in a file "HFVICONS.DAT".
+This results in fast browsing, but there are no free lunches: the startup
+time grows longer. If you feel that it has gone intolerably far, just delete
+the file. HFVExplorer will notice this, and start collecting the icons
+again. First it may seem that some files which previously had icons don't
+have them any more (like documents and preferences), but eventually they
+will reappear as you browse through the folders containing the applications
+that created the files.
+<p>Moreover, if you have been using HFVExplorer for a long time and never
+deleted the cache file, it is a good idea to do it now. Some time ago there
+was fixes for some icon related bugs. These bugs caused bad looking icons,
+but you won't notice any difference until the cache is deleted once.
+</p><p>Disabling <a href="section-general-options.html#startup_floppy_check">floppy check</a> and <a href="section-general-options.html#startup_cd_check">CD
+check</a> is another way to make the startup faster.
+<br/> 
+<br/> </p></blockquote>
+<a name="trouble_flicker_1"></a><b>PROBLEM</b>: There's a lot of screen
+updating after copying and moving files.
+<blockquote>The reasons for this are historical. HFVExplorer originally
+used it's own read-only HFS functions, but version 1.1.0 incorporated <a href="section-relatedwork.html#RelatedWork">HFS
+utils</a> code which allows me to write to the volumes. However, some parts
+of the program still use the original functions, and to keep the things
+in synch a refresh is sometimes needed.
+<p>There's nothing you can do for it. Fixing this would require a major
+rewrite. I have not decided whether I will do that.
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+<br/> </p></blockquote>
+
+</body></html>

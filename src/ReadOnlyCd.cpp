@@ -36,6 +36,7 @@ bool sendReadCommand(HANDLE h, ScsiRequest& packet, void* buffer, DWORD bytes) {
 ReadOnlyCd::ReadOnlyCd() : handle_(INVALID_HANDLE_VALUE), scsiHandle_(INVALID_HANDLE_VALUE),
     scratch_(NULL), mediaSize_(0), volumeOffset_(0), volumeSize_(0), error_(0),
     fixture_(false), passThroughUsed_(false) {
+    cache_init(&cache_);
     declaredVolumeSize_ = 0; lengthSize_ = tocSize_ = scsiSize_ = 0; scsiCapacityError_ = 0; devicePath_[0] = 0;
 }
 ReadOnlyCd::~ReadOnlyCd() { Close(); }
@@ -43,6 +44,10 @@ void ReadOnlyCd::Close() {
     if (handle_ != INVALID_HANDLE_VALUE) HfvMediaClose(handle_);
     if (scsiHandle_ != INVALID_HANDLE_VALUE) HfvMediaClose(scsiHandle_);
     if (scratch_) VirtualFree(scratch_, 0, MEM_RELEASE);
+    cache_final(&cache_);generation_=0;identity_=invalid_=false;cacheable_=true;
+#ifdef HFV_CD_TESTING
+    test=TestState{};
+#endif
     handle_ = scsiHandle_ = INVALID_HANDLE_VALUE; scratch_ = NULL;
     mediaSize_ = volumeOffset_ = 0; volumeSize_ = 0; error_ = 0;
     declaredVolumeSize_ = 0;
@@ -127,6 +132,10 @@ bool ReadOnlyCd::OpenFixture(const char* path, ULONGLONG reportedLength) {
 }
 #endif
 bool ReadOnlyCd::ReadSectors(ULONGLONG offset, DWORD count, void* buffer) {
+#ifdef HFV_CD_TESTING
+    if(fixture_){++test.reads;test.bytes+=count;if(test.changeAfterRead==test.reads)++test.generation;
+        if(test.readError||test.shortRead||(test.failAbove&&count>test.failAbove)){error_=test.readError?test.readError:test.shortRead?ERROR_READ_FAULT:ERROR_CRC;return false;}}
+#endif
     LARGE_INTEGER pos; pos.QuadPart = offset;
     DWORD got = 0;
     if (HfvMediaSeek(handle_, pos, NULL, FILE_BEGIN) && HfvMediaRead(handle_, buffer, count, &got, NULL) && got == count)
@@ -137,19 +146,51 @@ bool ReadOnlyCd::ReadSectors(ULONGLONG offset, DWORD count, void* buffer) {
     error_ = fixture_ ? (got < count ? ERROR_HANDLE_EOF : fileError) : GetLastError();
     return false;
 }
-bool ReadOnlyCd::ReadBytes(ULONGLONG offset, DWORD count, void* buffer) {
-    if (handle_ == INVALID_HANDLE_VALUE || !scratch_ || (!buffer && count)) { error_ = ERROR_INVALID_HANDLE; return false; }
-    if (offset > mediaSize_ || count > mediaSize_ - offset) { error_ = ERROR_HANDLE_EOF; return false; }
-    BYTE* out = (BYTE*)buffer;
-    while (count) {
-        ULONGLONG aligned = offset & ~(ULONGLONG)(kSector - 1);
-        DWORD skip = (DWORD)(offset - aligned), chunk = min(count, kTransfer - skip);
-        DWORD read = (skip + chunk + kSector - 1) & ~(kSector - 1);
-        if (read > mediaSize_ - aligned) { error_ = ERROR_HANDLE_EOF; return false; }
-        if (!ReadSectors(aligned, read, scratch_)) return false;
-        memcpy(out, scratch_ + skip, chunk); out += chunk; offset += chunk; count -= chunk;
+bool ReadOnlyCd::ReadFailure(DWORD error){cache_clear(&cache_);invalid_=true;error_=error?error:ERROR_READ_FAULT;SetLastError(error_);return false;}
+bool ReadOnlyCd::CheckIdentity(){
+    if(invalid_)return false;if(!cacheable_)return true;
+    DWORD current=0,returned=0;
+#ifdef HFV_CD_TESTING
+    if(fixture_){++test.checks;if(test.noIdentity){if(identity_)return ReadFailure(ERROR_NOT_SUPPORTED);cacheable_=false;cache_clear(&cache_);return true;}current=test.generation;returned=sizeof(current);}
+    else
+#endif
+    {
+        if(!HfvMediaControl(handle_,IOCTL_STORAGE_CHECK_VERIFY,nullptr,0,&current,sizeof(current),&returned,nullptr)){
+            DWORD e=GetLastError();if(!identity_&&(e==ERROR_NOT_SUPPORTED||e==ERROR_INVALID_FUNCTION)){cacheable_=false;cache_clear(&cache_);return true;}
+            return ReadFailure(e);
+        }
     }
-    error_ = ERROR_SUCCESS; return true;
+    if(returned<sizeof(current)){if(identity_)return ReadFailure(ERROR_NOT_SUPPORTED);cacheable_=false;cache_clear(&cache_);return true;}
+    if(identity_&&current!=generation_)return ReadFailure(ERROR_MEDIA_CHANGED);
+    generation_=current;identity_=true;return true;
+}
+bool ReadOnlyCd::ReadBytes(ULONGLONG offset,DWORD count,void* buffer){
+    if(handle_==INVALID_HANDLE_VALUE||!scratch_||(!buffer&&count)){error_=ERROR_INVALID_HANDLE;return false;}
+    if(invalid_)return false;
+    if(offset>mediaSize_||count>mediaSize_-offset){error_=ERROR_HANDLE_EOF;return false;}
+    if(!count)return true;if(!CheckIdentity())return false;
+    BYTE* out=(BYTE*)buffer;BYTE sector[kSector];
+    while(count){
+        ULONGLONG aligned=offset&~ULONGLONG(kSector-1),block=aligned/kSector;
+        DWORD skip=DWORD(offset-aligned),chunk=min(count,kTransfer-skip);
+        bool cached=cacheable_&&block<=INT_MAX;
+        if(cached&&cache_get(&cache_,int(block),(char*)sector)){
+            DWORD n=min(count,kSector-skip);memcpy(out,sector+skip,n);out+=n;offset+=n;count-=n;continue;
+        }
+        DWORD required=(skip+chunk+kSector-1)&~(kSector-1);
+        if(required>mediaSize_-aligned){error_=ERROR_HANDLE_EOF;return false;}
+        // Original CD_READ_AHEAD_SECTORS=32. Clip speculation at real media EOF.
+        DWORD transfer=cached?DWORD(min(ULONGLONG(kTransfer),(mediaSize_-aligned)&~ULONGLONG(kSector-1))):required;
+        if(!ReadSectors(aligned,transfer,scratch_)){
+            DWORD error=error_;if(!CheckIdentity())return false;
+            if(transfer==required||!ReadSectors(aligned,required,scratch_))return ReadFailure(transfer==required?error:error_);
+            transfer=required;
+        }
+        if(!CheckIdentity())return false;
+        if(cacheable_)for(DWORD n=0;n<transfer/kSector;++n)if(block+n<=INT_MAX)cache_put(&cache_,int(block+n),(char*)scratch_+n*kSector,kSector);
+        memcpy(out,scratch_+skip,chunk);out+=chunk;offset+=chunk;count-=chunk;
+    }
+    error_=ERROR_SUCCESS;return true;
 }
 bool ReadOnlyCd::CheckVolume(ULONGLONG offset, ULONGLONG length, bool allowShortened) {
     BYTE mdb[512];

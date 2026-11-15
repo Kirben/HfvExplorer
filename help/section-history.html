@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>History</title></head><body><p><a href="manual.html">Manual contents</a></p><h1>
+
+<hr width="100%"/><a name="History"></a>History</h1>
+
+<p><br/><tt>Versions 1.1.0-1.0.4</tt>
+<br/><tt>--------------------</tt>
+<br/><tt>- 32 MB limit in HFV files fixed</tt>
+<br/><tt>  (Misunderstanding between logical sector size and</tt>
+<br/><tt>  physical sector size).</tt>
+</p><p><tt>- Better support for special characters when launching</tt>
+<br/><tt>  applications. Requires Executor version 2.0n or later.</tt>
+</p><p><tt>- Default viewer for types "TEXT", "ttro" and "ttxt</tt>
+<br/><tt>  is now "System:Shareware:Tex-Edit:Tex-Edit"</tt>
+</p><p><tt>- 1.0.1 crashed when opened dos volumes.</tt>
+<br/><tt>  (Visual Studio 5.0 optimization bug)</tt>
+</p><p><tt>- AppleDouble launching: new versions of Executor</tt>
+<br/><tt>  seem to want drive letter to be lowercase,</tt>
+<br/><tt>  otherwise you get always browser only.</tt>
+<br/><tt>  Both programs changed to respect this feature.</tt>
+</p><p><tt>- Old: lists *.HFV. Now: *.HFV and *.DSK</tt>
+</p><p><tt>- about box: version number -&gt; 1.0.4</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.1.0:</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Copy / Move files or folders</tt>
+<br/><tt>    - Drag &amp; drop: drop to tree view (left pane
+of the</tt>
+<br/><tt>      window), or a folder in the right
+pane.</tt>
+<br/><tt>    - No multi-selection so far.</tt>
+<br/><tt>    - Control &amp; shift à la Windows Explorer</tt>
+<br/><tt>      to force copy or move; otherwise
+auto-selection</tt>
+<br/><tt>        mode. That is, move
+inside same volume, copy</tt>
+<br/><tt>        if volume changes.</tt>
+<br/><tt>        Cursor shows a "+" when
+copy will be performed.</tt>
+<br/><tt>    - can copy between fat/hfs</tt>
+<br/><tt>    - auto type convert when copying between fat
+&amp; hfs:</tt>
+<br/><tt>        fat -&gt; hfs:</tt>
+<br/><tt>           
+*.bin (Mac Binary II) -&gt; data &amp; resource forks</tt>
+<br/><tt>           
+*.hqx (binhex) -&gt; data &amp; resource forks</tt>
+<br/><tt>        hfs -&gt; fat:</tt>
+<br/><tt>           
+data &amp; resource forks -&gt; *.bin (Mac Binary II)</tt>
+<br/><tt>        txt, c, h:</tt>
+<br/><tt>          CR/LF conversion,
+file name extension</tt>
+<br/><tt>        Conversion code directly
+from HFS tools.</tt>
+<br/><tt>        Will be customized later.</tt>
+<br/><tt>    - drag on top of "Up" button -&gt; copy/move to
+parent directory</tt>
+</p><p><tt>- Direct access to floppies. After floppy change, press F5</tt>
+<br/><tt>  to force update of the screen.</tt>
+</p><p><tt>- delete file / folder (all contents!), asks for confirmation</tt>
+</p><p><tt>- create folder: right mouse click context menu.</tt>
+</p><p><tt>- rename file / folder: click the (already) selected name</tt>
+<br/><tt>  under icon -&gt; wait 1 sec -&gt; edit the name. Just like</tt>
+<br/><tt>  in Explorer.</tt>
+</p><p><tt>- Format New Volume</tt>
+<br/><tt>    - Sizes the file, creates HFS structures and
+Desktop</tt>
+<br/><tt>    - menu command</tt>
+<br/><tt>    - create New document with Explorer context
+menu.</tt>
+<br/><tt>      double-click -&gt; will ask name/size
+and format.</tt>
+<br/><tt>    - if you want to format a floppy, select from</tt>
+<br/><tt>      combo the appropriate drive</tt>
+</p><p><tt>- Now contains *two* HFS routine sets - my own and</tt>
+<br/><tt>  Hfsutils' (see credits).</tt>
+<br/><tt>  I will eventually discard my own code.</tt>
+</p><p><tt>- "File" menu contains two commands to dump a volume</tt>
+<br/><tt>  to a floppy / create a volume from a floppy.</tt>
+</p><p><tt>- HFS code now taken from Hfsutils by Marcus Better:</tt>
+<br/><tt>  http://www.student.nada.kth.se/~f96-bet/hfsutils/</tt>
+<br/><tt>  email: Marcus.Better@abc.se</tt>
+<br/><tt>  Originally Copyright (C) 1996, 1997 by Robert Leslie, email:
+rob@mars.org</tt>
+</p><p><tt>- GNU GPL (General Public License) now. See "Copying".</tt>
+<br/><tt>  Source code available by request, email: lpesonen@client.fi</tt>
+</p><p><tt>- MFC42.DLL not needed anymore.</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.1.1:</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- No fatal bugs reported since 1.1.0, so I assume that disk</tt>
+<br/><tt>  writing functions are ok.</tt>
+</p><p><tt>- Deleting from fat volume was broken (simply didn't delete!)</tt>
+<br/><tt>  in 1.1.0, fixed.</tt>
+</p><p><tt>- Fixed a bug that caused HFS -&gt; HFS copied files</tt>
+<br/><tt>  to be shown with standard icons only.</tt>
+<br/><tt>  (Failed to clear the "inited" finder flag after copying)</tt>
+</p><p><tt>- Creating own "Desktop" (after format) was a bad idea.</tt>
+<br/><tt>  Does not work, but prevents Finder from copying stuff</tt>
+<br/><tt>  to Desktop later. Removed.</tt>
+<br/><tt>  Erroneous Desktops should be deleted. Affects</tt>
+<br/><tt>  vMac only, Executor seems not use Desktop.</tt>
+</p><p><tt>- CD support. HFS cd's and hybrid ISO/HFS.</tt>
+<br/><tt>    - No support for High Sierra.</tt>
+<br/><tt>    - No support for ISO with Apple Extensions.
+They are</tt>
+<br/><tt>      shown as FAT volumes, with icon
+information missing.</tt>
+<br/><tt>    - CD auto notification supported, just pop in
+the CD</tt>
+<br/><tt>      and it should appear in the tree
+view.</tt>
+<br/><tt>      In some machines, the auto-insertion/arrival
+messages</tt>
+<br/><tt>      take long time to reach applications.
+There</tt>
+<br/><tt>      is nothing HFVExplorer can do about
+it, press</tt>
+<br/><tt>      F5 if you don't want to wait.</tt>
+<br/><tt>  - Small memory leak (custom icons).</tt>
+<br/><tt>    Windows 95:</tt>
+<br/><tt>      - Seems to work ok now. Requires
+that CDENABLE.VXD is copied to</tt>
+<br/><tt>        your Windows directory.
+System dir is ok too, as any directory</tt>
+<br/><tt>        within path. Do NOT
+copy to HFVExplorer directory.</tt>
+<br/><tt>      - ALSO when HFVExplorer is running,
+DOS Executor (and any other</tt>
+<br/><tt>        program) is able to
+see cd's, too - and using protected mode</tt>
+<br/><tt>        drivers! No MSCDEX required.
+In some machines, you had to boot</tt>
+<br/><tt>    to MS-DOS mode to see CD drive.</tt>
+<br/><tt>    NT 4.0:</tt>
+<br/><tt>      More limited so far, does not open
+all cd's.</tt>
+</p><p><tt>- AppleDouble now supported when copying/deleting files</tt>
+<br/><tt>  to HFS volumes. From HFS volumes creates MacBinary II.</tt>
+</p><p><tt>- About box: credits edited. Version updated 1.1.1</tt>
+</p><p><tt>- DSK filter added to "Open" dialog.</tt>
+</p><p><tt>- Some missing tool tips added.</tt>
+</p><p><tt>- NEW icon in tool bar opens now the Format dialog.</tt>
+</p><p><tt>- New way to create volumes: in Windows Explorer,</tt>
+<br/><tt>  right-click and select New/HFVExp Document.</tt>
+<br/><tt>  Creates empty file, double-click it to open</tt>
+<br/><tt>  it in HFV Explorer -&gt; will ask volume name and size.</tt>
+</p><p><tt>- Option dialog: first page is now functional.</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.1.1b &amp; c</tt>
+<br/><tt>------------------</tt>
+<br/><tt>- Attempted to fix cache bug.</tt>
+<br/><tt>- Bundle bit was lost when copying HFS -&gt; HFS</tt>
+<br/><tt>  causing missing icons.</tt>
+</p><p><tt>Version 1.1.1d</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Fixed a bug in reading from CD.</tt>
+<br/><tt>  (caused missing icons and the previous "Known bug: sometimes</tt>
+<br/><tt>  has problems opening items in the root directory of the
+CD."</tt>
+<br/> 
+</p><p><tt>Version 1.1.1e</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Fixed a bug in reading from CD.</tt>
+<br/><tt>  Failed to mount some CD's with partition</tt>
+<br/><tt>  located at very high addresses, near end of disk.</tt>
+<br/> 
+</p><p><tt>Version 1.1.1f</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Following performance improvements:</tt>
+<br/><tt>  - Read-ahead code for CD's.</tt>
+<br/><tt>  - Larger cache.</tt>
+<br/><tt>  - Does not update screen so often any more.</tt>
+<br/><tt>    Could be still better.</tt>
+<br/><tt>- Memory leaks fixed.</tt>
+<br/> 
+</p><p><tt>Version 1.1.1g</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Properties dialog. Click file/folder</tt>
+<br/><tt>  with right mouse button (or Alt-Enter).</tt>
+<br/><tt>  Select properties. Be careful in what you change.</tt>
+<br/><tt>- Name locked items cannot be renamed any more, without</tt>
+<br/><tt>  removing the lock first (properties).</tt>
+<br/><tt>- Tool bar buttons to eject/reload all CD trays.</tt>
+<br/> 
+</p><p><tt>Version 1.1.1h</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Failed to mount hybrid CD's with boot block zeroed out.</tt>
+<br/><tt>  Fixed. For example, Executor 2 CD.</tt>
+<br/> 
+</p><p><tt>Version 1.1.1i</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Support for pure Mac CD's under Windows NT.</tt>
+<br/><tt>  CDENABLE.SYS must be copied to your System32\Drivers</tt>
+<br/><tt>  directory. After copying the driver, the program</tt>
+<br/><tt>  must be run once with system administrator rights.</tt>
+<br/><tt>  Later normal user rights suffice.</tt>
+<br/> 
+</p><p><tt>Version 1.2.0</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- Faster directory browsing. Especially large volumes</tt>
+<br/><tt>  and directories work better, and CD's. The performance</tt>
+<br/><tt>  hit was tremendous if the volume had files more than</tt>
+<br/><tt>  a specific threshold.</tt>
+</p><p><tt>- Multiple item selection -- move, copy, delete.</tt>
+<br/><tt>  Works as in Explorer (or in any multi-selection list control).</tt>
+</p><p><tt>- File copy mode selection for HFS -&gt; FAT and FAT -&gt; HFS.</tt>
+<br/><tt>  Selected from Options dialog (new property page).</tt>
+<br/><tt>  Maybe in future there will be file type mapping.</tt>
+</p><p><tt>- "Create shortcut" command implemented for Executor/DOS,</tt>
+<br/><tt>  Executor/Win32 and vMac, including a launcher app for vMac,</tt>
+<br/><tt>  and an automatic alias creator.</tt>
+<br/><tt>  Places an icon on the Windows desktop, pointing to either
+a document</tt>
+<br/><tt>  or an application. Automatic Mac icon extraction.</tt>
+<br/><tt>  If you want the special characters to be shown in icon names,</tt>
+<br/><tt>  change the desktop icon font (Control Panel/Display/</tt>
+<br/><tt>  Appearance/Icon "Font") to something else than MS Sans Serif,</tt>
+<br/><tt>  perhaps Arial, which may be ugly but has more visible characters.</tt>
+<br/><tt>  Icons and parameter files are placed into subdirectory "Links".</tt>
+<br/><tt>  Helper directory "vMacLink" contains a link to the vMac
+installation.</tt>
+<br/><tt>  Click the button "Install files required by vMac" to set
+up this</tt>
+<br/><tt>  directory.</tt>
+</p><p><tt>- "Open with" supports the tree emulators (E/DOS, E/Win32, vMac).</tt>
+<br/><tt>  *** IMPORTANT *** : DO NOT try to copy/move/delete/create
+new files</tt>
+<br/><tt>  in HFVExplorer when the emulator is running. MacOS doesn't
+like</tt>
+<br/><tt>  anything happening behind its back. The file accesses are
+not properly</tt>
+<br/><tt>  synchronized, and if unlucky, you may suffer data loss.</tt>
+<br/><tt>  HFVExplorer tries to protect you from this, but its protection</tt>
+<br/><tt>  schemes are far from perfect. It takes care that its own
+data</tt>
+<br/><tt>  structures are always in sync, but the emulators don't do
+this.</tt>
+<br/><tt>  After the emulator terminates, HFVExplorer checks if it
+needs to</tt>
+<br/><tt>  update the file structures and if so, it does this. That's
+the</tt>
+<br/><tt>  reason why it takes a while when emulator terminates --
+if one bit</tt>
+<br/><tt>  of data has changed in a volume file, the only safe way
+is to</tt>
+<br/><tt>  reload the whole volume.</tt>
+</p><p><tt>- You should normally use the alias launching method with vMac,</tt>
+<br/><tt>  and only try Apple events method if this fails. Executor
+users</tt>
+<br/><tt>  should not be concerned with the launching method since
+appropriate</tt>
+<br/><tt>  way is selected automatically. Just make sure that you don't</tt>
+<br/><tt>  claim in the setup dialog that your Windows Executor is
+DOS</tt>
+<br/><tt>  or vice versa -- this information has to be correct.</tt>
+</p><p><tt>- Icon corruption bug fixed. To get rid of the old</tt>
+<br/><tt>  corrupted icons, the icon cache file "HFVICONS.DAT" must
+be deleted.</tt>
+<br/><tt>  HFVExplorer will ask you whether it's ok to delete this
+file.</tt>
+<br/><tt>  After deleting the file, you may notice that some icons,</tt>
+<br/><tt>  typically various preference files but some documents as
+well,</tt>
+<br/><tt>  do not have proper icons. This is normal, since HFVExplorer</tt>
+<br/><tt>  does not load icons from MacOS Desktop file or Desktop database,</tt>
+<br/><tt>  but uses its own system. The icons will eventually reappear
+after</tt>
+<br/><tt>  you browse through the folder containing the creator applications</tt>
+<br/><tt>  which has the bundle resources and icons.</tt>
+</p><p><tt>- Resolves folder custom icons.</tt>
+</p><p><tt>- Resolves (some) alias types icons.</tt>
+</p><p><tt>- HFS and FAT default icons are now in different colors.</tt>
+<br/><tt>  The new plain icons are best shown if you have window color
+something</tt>
+<br/><tt>  different than white (Control Panel/Display/Appearance/item
+"Window")</tt>
+</p><p><tt>- Folder "Icon\x00D" file is copied out to FAT volumes as "Icon~"</tt>
+<br/><tt>  This file contains the custom icons of a folder, if any.</tt>
+</p><p><tt>- CD's were mounted as R/W file systems, causing strange error</tt>
+<br/><tt>  messages even when copying succeeded.</tt>
+</p><p><tt>- Accelerator F2 to edit file name.</tt>
+</p><p><tt>- Obsolete tool buttons removed, new buttons added</tt>
+<br/><tt>  to read a volume file from floppy and write one to a floppy.</tt>
+</p><p><tt>- Some more tool tips added.</tt>
+</p><p><tt>- Possibility to limit the time spent in creating DOS icons.</tt>
+<br/><tt>  In options dialog.</tt>
+</p><p><tt>- Mac vs. ANSI character set fixes. Some characters may still</tt>
+<br/><tt>  be incorrect, but see the note in "Create shortcut" above.</tt>
+</p><p><tt>- Uses Arial font in most places now. Yes I know it's ugly,</tt>
+<br/><tt>  but MS Sans Serif does not have some important special</tt>
+<br/><tt>  characters.</tt>
+</p><p><tt>- Possibility to hide/show "invisible" files.</tt>
+</p><p><tt>- Pressing return or double-clicking now opens Executor/Win32 by
+default.</tt>
+<br/><tt>  You can change this behavior from the options dialog.</tt>
+</p><p><tt>- Changing of "is alias" enabled in properties dialog.</tt>
+</p><p><tt>- Many miscellaneous bug fixes.</tt>
+</p><p><tt>- Hook1508 -- a tool to help DOS Executor see the HFS (non-hybrid)</tt>
+<br/><tt>  CD's under Windows NT 4.0. Not included in this  archive,</tt>
+<br/><tt>  available at http://www.clinet.fi/~lpesonen/ftp/executor</tt>
+<br/><tt>  If you intend to use Hook1508 with HFVExplorer shortcuts
+and/or</tt>
+<br/><tt>  launching, you should either create a .bat or modify AUTOXEC.NT,</tt>
+<br/><tt>  or make a custom version AUTOXEC.NT. The procedure is described</tt>
+<br/><tt>  in Hook1508 read me file.</tt>
+<br/> 
+</p><p><tt>Version 1.2.0 -- additon to same version</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- "Icon\x00D" is now treated as invisible file even if the</tt>
+<br/><tt>  corresponding flag is not set.</tt>
+</p><p><tt>- Explained the netbios problem under NT.</tt>
+<br/> 
+</p><p><tt>Version 1.2.1</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- Configurable font and point size (Options/General)</tt>
+<br/><tt>- Remembers window position and size</tt>
+<br/><tt>- Mac floppies are now detected when "A:\" is clicked.</tt>
+<br/><tt>- Bugs in emulator launching code fixed</tt>
+<br/><tt>- Minor cosmetic fixes</tt>
+<br/><tt>- List view now always shows the selection</tt>
+<br/><tt>- Some special characters fixed in AppleDouble names</tt>
+<br/><tt>- CD support for Windows 98, was previously a separate download.</tt>
+<br/><tt>  (Check the size of \Windows\System\cdenable.vxd -- should
+be 10400 bytes.</tt>
+<br/><tt>  Some users experienced file corruption when downloading
+the separate vxd.)</tt>
+<br/> 
+</p><p><tt>Version 1.2.2</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- Japanese font support, thanks to Mr. Noda (noda@lyra.vega.or.jp).</tt>
+<br/><tt>- Japanese users please check the option "Font character set is
+SJIS (Japanese)"</tt>
+<br/><tt>  in "General" page of the options, change Font (for example
+"MS gothic")</tt>
+<br/><tt>  and restart HFVExplorer.</tt>
+<br/> 
+</p><p><tt>Version 1.2.3</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- File type conversion table DOS extension &lt;--&gt; MacOS type/creator.</tt>
+<br/><tt>  See "Options/Copying Files/Raw copy file type mappings".</tt>
+<br/><tt>  Click the "?" button for help.</tt>
+<br/><tt>  Initially, the program comes with no preset mappings, but
+once you</tt>
+<br/><tt>  have typed in some they can be easily shared with other
+people with</tt>
+<br/><tt>  export/import commands.</tt>
+<br/><tt>- New right-click popup menu command to prefill the mapping dialog</tt>
+<br/><tt>  with currently selected item(s), either DOS or HFS files
+will do.</tt>
+<br/><tt>  Function key F4 does the same thing.</tt>
+<br/><tt>- Copying files between HFS and DOS does not change ' ' &lt;-&gt;
+'_' any more.</tt>
+<br/><tt>  Some other character mapping fixes in file names.</tt>
+<br/> 
+</p><p><tt>Version 1.2.4</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- File type conversion table (1.2.3): fixed a bug which caused
+types and</tt>
+<br/><tt>  creators that contain special characters to be ignored.</tt>
+</p><p><tt>- In report (details) list view, columns may now be sorted by clicking</tt>
+<br/><tt>  the column header. Click again to reverse the order (asdending/descending).</tt>
+</p><p><tt>- Creating new volume file is much faster now.</tt>
+</p><p><tt>- Yet another experimental feature: "Finder view mode" tool button.</tt>
+<br/><tt>  Shows the files and folders in original positions and uses
+Finder "magic rectangle"</tt>
+<br/><tt>  to reposition moved icons. Use a small font point size.</tt>
+</p><p><tt>  Works under any System version, but positioning new items
+works only under</tt>
+<br/><tt>  System 7.1.1 or later.</tt>
+</p><p><tt>  Note that Finder relocates items only when it "sees" them;
+if some application</tt>
+<br/><tt>  (including Finder itself; i.e. "Recent" folders) has installed
+new files</tt>
+<br/><tt>  and you have never opened the window in Finder, the files
+may be layered</tt>
+<br/><tt>  on top of each other. HFVExplorer tries to place them "somewhere".</tt>
+</p><p><tt>  If you copy new files into a folder and do not move them
+in "Finder view mode",</tt>
+<br/><tt>  they may not be shown exactly in same positions in Finder
+and HFVExplorer.</tt>
+<br/><tt>  This is because HFVExplorer does not try to mimic the Finder
+automatic</tt>
+<br/><tt>  placement function. Either move them in HFVExplorer or visit
+the folder in Finder.</tt>
+</p><p><tt>  "Go up..." button is not available in Finder view, there
+is no good place for it.</tt>
+<br/><tt>  Use the new keyboard shortcut Backspace to move upwards
+(used to work when the</tt>
+<br/><tt>  focus was in tree view, now works always).</tt>
+</p><p><tt>  (Check "http://developer.apple.com/technotes/tb/tb_42.html"
+for a discussion</tt>
+<br/><tt>  on the problems when positioning Finder icons.)</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.5 (in-house)</tt>
+<br/><tt>------------------------</tt>
+<br/><tt>- DOS report view said that all folders have "0 items". Fixed.</tt>
+<br/><tt>- AppleDouble report view displayed an incorrect number for folder
+item count. Fixed.</tt>
+<br/><tt>- A message "Failed to set item properties" was generated every
+time</tt>
+<br/><tt>  when trying to move within a window in read-only media,
+when "Finder view"</tt>
+<br/><tt>  was selected. Fixed.</tt>
+<br/><tt>- Launch support for WinUAE/Shapeshifter (please see the bug list).</tt>
+<br/><tt>- Launch support for Fusion demo (not completed).</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.6</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- Sorting by HFS creation/modification date was intolerably slow.
+Fixed.</tt>
+<br/><tt>- Some icons crashed the program. Now they shouldn't any more,
+but they</tt>
+<br/><tt>  are shown garbled. Not perfect, but will do for now.</tt>
+<br/><tt>- Some popup menu reorderings.</tt>
+<br/><tt>- Fixed some problems with WinUAE/Shapeshifter launching.</tt>
+<br/><tt>- Launch support for Fusion finished.</tt>
+<br/><tt>- Alias launching for vMac, Fusion and ShapeShifter: optionally,
+installs</tt>
+<br/><tt>  a tiny Mac app into Startup folder (HFVExplorer Remover).
+It's only purpose</tt>
+<br/><tt>  is to wait in background for 5 seconds and then delete the
+alias.</tt>
+<br/><tt>  This is safer than the old method which deleted the alias
+under Windows.</tt>
+<br/><tt>  Check "Remove alias" in the corresponding emulator dialog
+to activate this feature.</tt>
+<br/><tt>- Apple events launching should not be used any more.</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.6 (addition)</tt>
+<br/><tt>------------------------</tt>
+<br/><tt>- Updated bug list.</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.7 (icon facelift release)</tt>
+<br/><tt>-------------------------------------</tt>
+<br/><tt>- Compressed icons are not shown any more (result was garbage).</tt>
+<br/><tt>  Generic icons are used instead. Decompression algorithm
+is not documented, see:</tt>
+<br/><tt>  http://developer.apple.com/technotes/tb/tb_555.html</tt>
+<br/><tt>- Icons 16 colors -&gt; 256 colors. Both in list view and shortcuts.</tt>
+<br/><tt>  Requires "thousands of colors" display mode at minimum.
+15, 16, 24 and 32 bits supported.</tt>
+<br/><tt>  To show the icons correctly in Windows desktop, enable in
+Control panel:</tt>
+<br/><tt>  "Display" / "Plus!" / "Show icons using all possible colors".</tt>
+<br/><tt>- "Save icon..." command (right click menu), works for folders
+too.</tt>
+<br/><tt>- Finder label colors. Displayed as superimposed colored pedestals
+right below</tt>
+<br/><tt>  the icons. Not perfect (will probably change later), but
+the way MacOS shows</tt>
+<br/><tt>  the labels of colored icons is (arguably) even worse.</tt>
+<br/><tt>  Right click items to change labels.</tt>
+<br/><tt>  Uses default colors and texts (Red=Hot, Orange=Essential
+etc).</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.8</tt>
+<br/><tt>-------------</tt>
+<br/><tt>- It turned out that Toast allows writing of CD's with very long
+volume</tt>
+<br/><tt>  names. Although it correctly cuts the name at 27 characters
+in MDB,</tt>
+<br/><tt>  the entry in Catalog File is longer which causes problems
+for</tt>
+<br/><tt>  HFVExplorer. To mount such CD's, edit the file "HFVExplorer.ini"
+in</tt>
+<br/><tt>  your Windows directory as shown below:</tt>
+</p><p><tt>  [Setup]</tt>
+<br/><tt>  UsePartialNames=1 ; default value is 0</tt>
+</p><p><tt>  If there is entry "UsePartialNames" already, change the value
+to be "1",</tt>
+<br/><tt>  otherwise create new entry.</tt>
+</p><p><tt>  This has the effect that any requests to the hfsutils core
+are made</tt>
+<br/><tt>  with partial file paths instead of full file paths:</tt>
+<br/><tt>     ":MyFolder:Myfile.xxx"</tt>
+<br/><tt>  instead of</tt>
+<br/><tt>     "MyMacVolume:MyFolder:Myfile.xxx"</tt>
+<br/><tt>  Once I'm sure that this works always, I may turn it on by
+default.</tt>
+</p><p><tt>- Support for volume files named as HFx (where x is anything).</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.9 (bug fixes)</tt>
+<br/><tt>-------------------------</tt>
+<br/><tt>- Fixed some special character issues when copying files</tt>
+<br/><tt>  between HFS and FAT file systems.</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.10 (bug fixes)</tt>
+<br/><tt>--------------------------</tt>
+<br/><tt>- Folder custom icons were lost when copying from HFS -&gt; FAT and
+back again.</tt>
+<br/><tt>- A bug in deletion fixed (HFS &amp; FAT); sometimes, one had to
+try delete twice</tt>
+<br/><tt>  before a nested folder was completely deleted.</tt>
+<br/><tt>- If a folder name had any special characters, then the creation
+of a subfolder</tt>
+<br/><tt>  below it failed (when copying a deep  directory structure).</tt>
+<br/><tt>  This was a new bug in 1.2.9.</tt>
+<br/> 
+<br/> 
+</p><p><tt>Version 1.2.11 (clipboard release)</tt>
+<br/><tt>----------------------------------</tt>
+<br/><tt>- "Cut", "Copy" &amp; "Paste" -- these work mostly like in Explorer.</tt>
+<br/><tt>- "Cut Append" &amp; "Copy Append" -- the selected items are appended
+to the</tt>
+<br/><tt>  clipboard file list. You can even mix "Cut Append" and "Copy
+Append"</tt>
+<br/><tt>  commands so that one "Paste" command copies some files and
+cuts some.</tt>
+<br/><tt>- Escape empties the clipboard ("Cut" and "Copy" also empty it
+before a refill)</tt>
+<br/><tt>- Added more checks for illegal copy attempts. The destination
+folder may</tt>
+<br/><tt>  not be a subfolder of the source folder, etc.</tt>
+<br/><tt>- "Select All" command. Control-A.</tt>
+<br/><tt>- When moving directory structures between HFS and FAT, not all
+files</tt>
+<br/><tt>  were deleted but empty directories was left behind. Fixed.</tt>
+<br/><tt>- The default action changed when the "A:\" or "B:\" floppy symbols
+are clicked.</tt>
+<br/><tt>  Starting from version 1.2.1, Mac floppies were detected
+too, but this</tt>
+<br/><tt>  is not the case any more. There seems to be some very nasty
+bug related</tt>
+<br/><tt>  to this feature, and therefore it's only accessible by manually
+editing</tt>
+<br/><tt>  HFVExplorer.ini. If you really want that feature back, change
+the following:</tt>
+</p><p><tt>      [Setup]</tt>
+<br/><tt>      DisableAutoFloppy=0</tt>
+</p><p><tt>  Normally, you should press F5 to refresh the screen after</tt>
+<br/><tt>  inserting/changing/removing floppies.</tt>
+<br/> 
+</p><p><tt>Version 1.2.12</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Tool buttons for "Cut Append" &amp; "Copy Append".</tt>
+<br/><tt>- One comment was left out about 1.2.11 "Append" command</tt>
+<br/><tt>  description: note that you can append from different</tt>
+<br/><tt>  folders, even from different volumes and medias (but do</tt>
+<br/><tt>  not change the floppy or cd when collecting files).</tt>
+<br/><tt>- HTML help.</tt>
+<br/> 
+<br/> 
+</p><p><a name="History_latest"></a><tt>Version 1.2.13</tt>
+<br/><tt>--------------</tt>
+<br/><tt>- Launching Mac documents with Windows applications (a new "emulator").</tt>
+<br/><tt>  The documents are copied to the Windows temporary folder
+and opened.</tt>
+<br/><tt>  When the application (not document) is closed, the user
+is prompted</tt>
+<br/><tt>  whether to update the changes, if there are any.</tt>
+<br/><tt>  Multiple documents can be open at the same time. The changes
+are tracked</tt>
+<br/><tt>  file by file.</tt><tt></tt>
+</p><p><tt>  If the original document does not have an extension, a file
+type</tt>
+<br/><tt>  mapping must be created; a dialog box will open automatically.</tt><tt></tt>
+</p><p><tt>  Under Windows NT, launching to 16 bit Windows apps does not</tt>
+<br/><tt>  work properly. The document opens ok, but HFVExplorer does
+not</tt>
+<br/><tt>  recognize when the application is terminated.</tt><tt></tt>
+</p><p><tt>- Default emulator (after first time installation) is now the one</tt>
+<br/><tt>  described above.</tt><tt></tt>
+</p><p><tt>- Copying HFS-&gt;FAT: file type mappings are not enforced</tt>
+<br/><tt>  any more if the path already contains an(y) extension.</tt>
+<br/> 
+<br/> 
+<br/> 
+<br/> 
+</p></body></html>

@@ -35,7 +35,6 @@ public:
 	enum { IDD = IDD_OPTIONS_PAGE_1 };
 	int		m_dosicons;
 	BOOL	m_mountall;
-	BOOL	m_patch;
 	BOOL	m_startup_floppies;
 	BOOL	m_startup_cds;
 	int		m_fat_icon_time_limit;

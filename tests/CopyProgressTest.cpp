@@ -9,6 +9,9 @@
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "FloppyWriter.h"
+#include "DirectFloppy.h"
+#define _FHOOK_INTERNAL_
+#include "Filehook.h"
 #include "ReadOnlyCdBackend.h"
 #include "FakeFloppy.h"
 #include "Mactypes.h"
@@ -35,13 +38,13 @@ public:
  bool Verify(HANDLE h,DWORD& n) override{return disk.Verify(h,n);}
  bool Read(HANDLE h,ULONGLONG o,DWORD n,void* p,DWORD& got) override {
   bool ok=disk.Read(h,o,n,p,got);
-  if(ok&&writes&&failure==4)static_cast<BYTE*>(p)[0]^=1;
+  if(failure==4){SetLastError(ERROR_CRC);return false;}
   return ok;
  }
  void Close(HANDLE h) override{disk.Close(h);}
  bool Lock(HANDLE) override {
   ++locks;if(failure==2){SetLastError(ERROR_ACCESS_DENIED);return false;}
-  locked=true;if(failure==5)disk.media[400]^=1;return true;
+  locked=true;if(failure==5)++disk.changeCount;return true;
  }
  bool Dismount(HANDLE) override{return locked;}
  bool Unlock(HANDLE) override{locked=false;return true;}
@@ -50,7 +53,7 @@ public:
   if(!locked)throw std::runtime_error("Write without lock");++writes;
   wrote=failure==3?n-1:n;memcpy(disk.media.data()+size_t(o),p,wrote);return true;
  }
- bool Flush(HANDLE) override{SetLastError(ERROR_INVALID_FUNCTION);return false;}
+ bool Flush(HANDLE) override{SetLastError(failure==6?ERROR_WRITE_FAULT:ERROR_INVALID_FUNCTION);return false;}
 };
 struct Progress {ULONGLONG bytes=0;unsigned files=0,events=0;bool named=true;ULONGLONG fileBytes=0,expected=0;bool bounded=true;};
 void observe(const char* path,unsigned long bytes,unsigned long long total,int complete,void* context) {
@@ -139,6 +142,20 @@ int RunCopyProgressTest(const char* directory) {
   std::vector<BYTE> blank;std::string floppyError;
   check(PrepareFloppyHfs("FloppyCopy",blank,floppyError),"prepare ordinary-copy floppy");
   readonly_cd_backend_init();char floppyPath[64];get_floppy_volume_file_name(25,floppyPath);
+  {
+   CopyFloppy buffered(blank);DirectFloppy direct(&buffered);check(direct.Open(25),"open direct buffer fixture");
+   BYTE changed[1024],readBack[1024];memset(changed,0x5a,sizeof(changed));unsigned reads=buffered.disk.reads;
+   check(direct.Write(512,512,changed)&&direct.Write(1024,512,changed+512)&&buffered.writes==0,"adjacent writes accumulate in original-style writeback buffer");
+   check(direct.Read(512,sizeof(readBack),readBack)&&!memcmp(changed,readBack,sizeof(changed))&&buffered.writes==0&&buffered.disk.reads==reads,"read-your-writes uses coherent sector cache before flush");
+   bool protectedOtherThread=false;std::thread other([&]{protectedOtherThread=readonly_media_path(floppyPath)&&fhook_open(floppyPath,O_RDWR)<0&&errno==EROFS;});other.join();
+   check(protectedOtherThread,"write permission is scoped to the copy worker thread");
+   check(direct.Finish()&&buffered.writes==1&&!memcmp(buffered.disk.media.data()+512,changed,sizeof(changed)),"one contiguous buffered write, no readback pass, unsupported flush accepted with write-through I/O");
+  }
+  check(readonly_media_path(floppyPath)&&!DirectFloppy::Current(25),"read-only browsing restored after direct scope");
+  {
+   CopyFloppy swapped(blank);DirectFloppy direct(&swapped);BYTE sector[512]={};check(direct.Open(25)&&direct.Write(0,sizeof(sector),sector),"buffer before media swap");++swapped.disk.changeCount;
+   check(!direct.Finish()&&direct.Error()==ERROR_MEDIA_CHANGED&&swapped.writes==0,"media change prevents buffered writes from reaching replacement disk");
+  }
   auto physicalCopy=[&](CopyFloppy& api,const std::string& fromVolume,const std::string& from,int dir,int move=0) {
    check(readonly_floppy_attach_api(25,&api),"attach copy floppy");
    auto job=Storage::worker().submit(MakeCopyJob(fromVolume,from,floppyPath,"FloppyCopy:",dir,move,'a'));
@@ -147,7 +164,7 @@ int RunCopyProgressTest(const char* directory) {
   CopyFloppy physical(blank);
   auto physicalResult=physicalCopy(physical,(LPCSTR)image,"CopyTest:Folder",1,1);
   unsigned changedTracks=0;for(size_t offset=0;offset<blank.size();offset+=9216)if(memcmp(blank.data()+offset,physical.disk.media.data()+offset,9216))++changedTracks;
-  check(physicalResult.code==0&&!physicalResult.moved&&changedTracks>0&&changedTracks<160&&physical.writes==changedTracks&&!physical.locked,"recursive copy writes only changed tracks with verified unsupported flush and source retention");
+  check(physicalResult.code==0&&!physicalResult.moved&&changedTracks>0&&changedTracks<160&&physical.writes>0&&physical.disk.requestedReadBytes<blank.size()&&!physical.locked,"recursive direct copy avoids whole-disk passes, flushes buffered writes and retains source");
   check(readonly_floppy_attach_api(25,&physical),"reattach populated floppy");
   CDSKFile browsing;check(browsing.Open(floppyPath,CFile::modeRead)!=FALSE,"keep browsing handle during floppy copy");
   volume=hfs_mount(floppyPath,0,O_RDONLY);check(volume!=nullptr,"mount physical copy output");
@@ -164,21 +181,22 @@ int RunCopyProgressTest(const char* directory) {
   char importedName[]="FloppyCopy:Game";file=hfs_open(volume,importedName);check(file!=nullptr,"imported MacBinary filename");
   hfsdirent retained;check(hfs_stat(volume,copied,&retained)==0,"later import retains previously copied folder and file");
   check(hfs_read(file,readData.data(),(unsigned long)readData.size())==readData.size()&&hfs_setfork(file,1)==0&&hfs_read(file,readResource.data(),(unsigned long)readResource.size())==readResource.size()&&hfs_close(file)==0&&hfs_umount(volume)==0&&readData==data&&readResource==resource,"Windows MacBinary import preserves forks and existing folder");
-  for(int failure=1;failure<=5;++failure){
+  for(int failure=1;failure<=6;++failure){
    CopyFloppy bad(blank);bad.failure=failure;auto result=physicalCopy(bad,(LPCSTR)image,"CopyTest:Folder",1,1);
    check(result.code!=0&&result.message!="no error"&&!result.message.empty()&&!result.moved,"physical copy errors are meaningful and retain source");
    if(failure<=2)check(bad.writes==0&&bad.disk.media==blank,"write-protect/lock failure leaves disk untouched");
    if(failure==5)check(bad.writes==0&&result.error==ERROR_MEDIA_CHANGED,"changed disk rejected before writing");
    if(failure==3)check(result.error==ERROR_WRITE_FAULT,"short floppy write reported");
-   if(failure==4)check(result.error==ERROR_CRC,"readback mismatch reported");
+   if(failure==4)check(result.error==ERROR_CRC,"read error reported");
+   if(failure==6)check(result.error==ERROR_WRITE_FAULT,"real flush failure is reported");
    check(!bad.locked&&bad.disk.opens==bad.disk.closes,"physical failure closes and unlocks handles");
    check(readonly_floppy_attach_api(25,nullptr),"detach failed copy floppy");
   }
   CString tooBig=root+"\\TooBig";CFile oversized;check(oversized.Open(tooBig,CFile::modeCreate|CFile::modeReadWrite)!=FALSE,"create insufficient-space source");oversized.SetLength(2*1024*1024);oversized.Close();
   CopyFloppy full(blank);auto noSpace=physicalCopy(full,(LPCSTR)root,(LPCSTR)tooBig,0);
-  check(noSpace.code!=0&&noSpace.message!="no error"&&full.writes==0&&full.disk.media==blank,"disk full fails on working image without physical writes");
+  check(noSpace.code!=0&&noSpace.message!="no error"&&!full.locked&&full.disk.opens==full.disk.closes,"disk full reports failure and releases the direct writer");
   check(readonly_floppy_attach_api(25,nullptr),"detach full fixture");
-  fprintf(out,"PASS: ordinary physical floppy copies: nested folders, HFS and Windows sources, both forks, existing-reader reopening, full-disk staging, write protection, locking, short writes, readback corruption, swapped media, unsupported flush and source retention; simulated devices only.\n");fflush(out);
+  fprintf(out,"PASS: ordinary physical floppy copies: nested folders, HFS and Windows sources, both forks, existing-reader reopening, direct buffered writes without full-disk passes, write protection, locking, short writes, read errors, swapped media, unsupported flush and source retention; simulated devices only.\n");fflush(out);
   CString hugeDirectory=root+"\\HugeTarget";check(CreateDirectoryA(hugeDirectory,nullptr)!=FALSE,"create large-output conflict folder");
   CString hugePath=hugeDirectory+"\\Game.bin";HANDLE huge=CreateFileA(hugePath,GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
   check(huge!=INVALID_HANDLE_VALUE,"create sparse large conflict");DWORD ignored;LARGE_INTEGER length;length.QuadPart=0x80001000ULL;

@@ -22,7 +22,7 @@
 #define _MAINFRM_DEFINED
 #include "HostOffsets.h"
 
-int ask_new_volume( char *volpath, char *vname, hfv_size_t *psize, int *normal );
+int ask_new_volume( char *volpath, char *vname, hfv_size_t *psize, int *normal, int *floppyDrive = nullptr );
 
 #define MYTIMERID 123
 
@@ -36,6 +36,8 @@ typedef struct {
 	DWORD m_start_watch_emulator;
 	// CDWordArray m_process_list;
 } wait_item_struct;
+
+struct MediaControlTarget;
 
 class CMainFrame : public CFrameWnd
 {
@@ -86,6 +88,7 @@ public:
 	void LoadWindowPosition(void);
 	void SaveWindowPosition(void);
 	void OnCdEjectEjectReload( int reload );
+ MediaControlTarget SelectedMediaControlTarget() const;
 
 protected:  // control bar embedded members
 	CStatusBar  m_wndStatusBar;
@@ -146,7 +149,6 @@ protected:
 	afx_msg void OnFileReload();
 	afx_msg void OnToolsBurn();
  afx_msg void OnToolsFind();
-	afx_msg void OnToolsFloppyWrite();
 
  afx_msg void OnUpdatePhysicalMedia(CCmdUI* ui);
 	//}}AFX_MSG

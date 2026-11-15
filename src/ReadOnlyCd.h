@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <windows.h>
+#include "cache.h"
 
 // Byte-addressed, read-only view of the first classic HFS volume on a data CD.
 // All device commands are fixed READ(10)/READ CAPACITY(10) commands.
@@ -26,6 +27,7 @@ public:
     const char* Transport() const { return passThroughUsed_ ? "SCSI READ(10)" : "ReadFile"; }
 #ifdef HFV_CD_TESTING
     bool OpenFixture(const char* path, ULONGLONG reportedLength = 0);
+    struct TestState {unsigned reads=0,checks=0,changeAfterRead=0;ULONGLONG bytes=0;DWORD generation=7,readError=0,failAbove=0;bool shortRead=false,noIdentity=false;} test;
 #endif
 private:
     ReadOnlyCd(const ReadOnlyCd&);
@@ -36,6 +38,9 @@ private:
     bool EnsureScsiHandle();
     bool CheckVolume(ULONGLONG offset, ULONGLONG length, bool allowShortened = false);
     void SelectCapacity();
+    bool CheckIdentity();
+    bool ReadFailure(DWORD error);
+    cachetype cache_={};DWORD generation_=0;bool identity_=false,cacheable_=true,invalid_=false;
     HANDLE handle_, scsiHandle_;
     BYTE* scratch_;
     ULONGLONG mediaSize_, volumeOffset_;

@@ -60,6 +60,8 @@ protected:
 	//{{AFX_MSG(CAskVolumeToFloppy)
 	afx_msg void OnVolnameBrowse();
 	virtual BOOL OnInitDialog();
+ virtual void OnOK();
+ virtual UINT DriveKind(int drive);
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()
 };

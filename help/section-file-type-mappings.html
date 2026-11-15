@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>File type mappings</title></head><body><p><a href="manual.html">Manual contents</a></p><h2>
+
+<hr width="100%"/><a name="file_type_mappings"></a>File type mappings</h2>
+ 
+<h3>
+Setup dialog</h3>
+These settings apply only when the <a href="section-file-conversions.html#file_conversions">copy mode</a>
+is "raw data" or "raw resource".
+<p>Note that you can have multiple mappings for one dos extension in direction
+HFS-&gt;DOS, but only one in direction DOS-&gt;HFS. Similarly, many dos extensions
+may map to the same type/creator pair, but in the direction HFS-&gt;DOS only
+one type/creator pair is allowed. <a href="section-typemap-sample-start.html#typemap_sample_start">The example</a>
+should make this less confusing.
+</p><p>If the currently selected item conflicts with some other item, you will
+see text CONFLICT at the top of the dialog. Typically you'll see this after
+every DUPLICATE command until you change the new line. Conflicts are removed
+when you restart the program or open the dialog again.
+</p><p>Your default mappings are saved in "\Windows\HFVExplorer.ftm". Back
+up this file when you have done most of your definitions.
+</p><p>Tip: select some items in HFVExplorer list view, right-click one of
+them and give command "Map selected items" (or hit <b>F4</b>).
+<br/> 
+<br/> 
+<br/>
+</p><center>
+<p><img height="405" src="typemap_sampe_00.gif" width="562"/></p></center>
+
+<p><br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+</p><p><b><i>Mapping enabled</i></b>:
+</p><blockquote>If "Mapping enabled" is not selected, no mappings are performed
+(except those made by other copy modes).</blockquote>
+
+<p><br/><b><i>"?"</i></b>:
+</p><blockquote>Shows some help.</blockquote>
+
+<p><br/><b><i>Strip</i></b>:
+</p><blockquote>Removes (strips) the DOS extension when a file is copied to
+HFS volume. Potential pitfall: take care not to copy two or more files
+which would degenerate to the same name ... only one of them would remain.
+Sorry about that. Will be fixed some time in future.</blockquote>
+
+<p><br/><b><i>HFS -&gt; DOS</i></b>:
+<br/><b><i>DOS -&gt; HFS</i></b>:
+</p><blockquote>You can specify that the conversion will take place when transferring
+files from DOS to HFS, vice versa, or both.</blockquote>
+
+<p><br/><b><i>Import...</i></b>:
+</p><blockquote>Combines FTM files with the current list. If there is a conflict,
+old definition is overwritten -- no questions asked.</blockquote>
+
+<p><br/><b><i>Export, Export selected...</i></b>:
+</p><blockquote>Use these to backup your definitions or share them with other
+people. Saves FTM files.</blockquote>
+
+<p><br/><b><i>Duplicate</i></b>:
+</p><blockquote>After duplicating the selected mapping, there is always a CONFLICT.
+Edit the conversion directions, ot type/mapping info to remove the conflict.</blockquote>
+
+<br/> 
+<p>
+</p><hr width="50%"/>
+</body></html>

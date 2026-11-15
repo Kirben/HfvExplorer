@@ -27,6 +27,39 @@ static void save(const std::string& path,const std::vector<BYTE>& bytes) {
     int fd=_open(path.c_str(),_O_BINARY|_O_CREAT|_O_EXCL|_O_WRONLY,_S_IREAD|_S_IWRITE);
     check(fd>=0,"exclusive fixture creation"); check(_write(fd,bytes.data(),(unsigned)bytes.size())==(int)bytes.size(),"save fixture"); _close(fd);
 }
+static void originalCache(const std::string& root){
+    std::vector<BYTE> bytes(1200*2048);for(size_t n=0;n<bytes.size();++n)bytes[n]=BYTE(n*37+n/2048);
+    auto path=root+"cache.iso";save(path,bytes);ReadOnlyCd cd;BYTE out[7000];
+    check(cd.OpenFixture(path.c_str())&&cd.ReadBytes(37,100,out)&&!memcmp(out,bytes.data()+37,100),"cache first partial sector fidelity");
+    check(cd.test.reads==1&&cd.test.bytes==65536&&NBLOCKS==1000,"original 32-sector read-ahead and 1000 cache slots");
+    for(unsigned n=0;n<100;++n)check(cd.ReadBytes(2048+n,100,out)&&!memcmp(out,bytes.data()+2048+n,100),"read-ahead cache fidelity");
+    check(cd.test.reads==1&&cd.test.checks==102,"100 repeated reads avoid sector I/O and retain identity checks");
+    check(cd.ReadBytes(2047,sizeof(out),out)&&!memcmp(out,bytes.data()+2047,sizeof(out))&&cd.test.reads==1,"overlapping unaligned cached sectors");
+    ++cd.test.generation;unsigned reads=cd.test.reads;out[0]=0xa5;
+    check(!cd.ReadBytes(0,1,out)&&cd.Error()==ERROR_MEDIA_CHANGED&&cd.test.reads==reads&&out[0]==0xa5,"changed media cannot return cached bytes");
+    --cd.test.generation;check(!cd.ReadBytes(0,1,out),"media-change session invalid until reopen");
+    check(cd.OpenFixture(path.c_str()),"cache reopen");std::vector<BYTE> whole(bytes.size());
+    check(cd.ReadBytes(0,DWORD(whole.size()),whole.data())&&whole==bytes,"multi-transfer cached read fidelity");reads=cd.test.reads;
+    check(cd.ReadBytes(0,1,out)&&cd.test.reads==reads+1&&out[0]==bytes[0],"bounded cache eviction refetches old sectors");
+    check(cd.OpenFixture(path.c_str())&&cd.ReadBytes(bytes.size()-1,1,out)&&out[0]==bytes.back()&&cd.test.bytes==2048,"read-ahead clipped at real EOF");
+    check(!cd.ReadBytes(bytes.size(),1,out),"cache never extends capacity");
+    for(int fault=0;fault<3;++fault){
+        check(cd.OpenFixture(path.c_str()),"open cache error fixture");out[0]=0xa5;
+        if(fault==0)cd.test.readError=ERROR_CRC;if(fault==1)cd.test.shortRead=true;if(fault==2)cd.test.changeAfterRead=1;
+        check(!cd.ReadBytes(0,1,out)&&out[0]==0xa5,"error or changed transfer not returned/cached");
+        check(cd.Error()==(fault==0?ERROR_CRC:fault==1?ERROR_READ_FAULT:ERROR_MEDIA_CHANGED),"precise cached read failure");
+        cd.test.readError=0;cd.test.shortRead=false;check(!cd.ReadBytes(0,1,out),"failed session cannot return stale bytes");
+    }
+    check(cd.OpenFixture(path.c_str()),"open speculative read fallback");cd.test.failAbove=2048;
+    check(cd.ReadBytes(37,100,out)&&!memcmp(out,bytes.data()+37,100)&&cd.test.reads==2,"failed speculative read retries exact requested sector");reads=cd.test.reads;
+    check(cd.ReadBytes(0,1,out)&&cd.test.reads==reads,"successful exact retry is cached");
+    check(cd.OpenFixture(path.c_str()),"open missing identity fixture");cd.test.noIdentity=true;
+    check(cd.ReadBytes(0,1,out)&&cd.ReadBytes(0,1,out)&&cd.test.reads==2&&cd.test.bytes==4096,"unavailable media counter disables caching and speculative read-ahead");
+    check(cd.OpenFixture(path.c_str())&&cd.ReadBytes(0,1,out),"establish cached identity before losing counter");cd.test.noIdentity=true;out[0]=0xa5;
+    check(!cd.ReadBytes(0,1,out)&&cd.Error()==ERROR_NOT_SUPPORTED&&out[0]==0xa5,"loss of established identity invalidates cache/session");
+    cd.Close();check(load(path.c_str())==bytes,"cache leaves source unchanged");
+    puts("PASS: original CD 1000-sector cache and 32-sector read-ahead, repeated/overlap reads, eviction, EOF clipping, generation changes, read/short-read faults, exact-read fallback, reopen invalidation and unsupported identity fallback; fixture files only");
+}
 static void exercise(const std::string& path,const std::vector<BYTE>& original,DWORD start,DWORD length) {
     ReadOnlyCd cd;
     check(cd.OpenFixture(path.c_str()),"open read-only sector fixture");
@@ -71,6 +104,7 @@ int main(int argc,char** argv) {
     check(CreateDirectoryA(argv[2],NULL)!=0,"exclusive test directory creation");
     std::vector<BYTE> raw=load(argv[1]);
     std::string root=std::string(argv[2])+"\\";
+    originalCache(root);
     std::string plain=root+"plain.iso"; save(plain,raw); exercise(plain,raw,0,(DWORD)raw.size());
     check(load(plain.c_str())==raw,"plain fixture unchanged");
     for(DWORD blockSize=512;blockSize<=2048;blockSize*=4) {

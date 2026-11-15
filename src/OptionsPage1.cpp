@@ -38,7 +38,6 @@ COptionsPage1::COptionsPage1() : CPropertyPage(COptionsPage1::IDD)
 	//{{AFX_DATA_INIT(COptionsPage1)
 	m_dosicons = -1;
 	m_mountall = FALSE;
-	m_patch = FALSE;
 	m_startup_floppies = FALSE;
 	m_startup_cds = FALSE;
 	m_fat_icon_time_limit = 0;
@@ -59,7 +58,6 @@ void COptionsPage1::DoDataExchange(CDataExchange* pDX)
 	//{{AFX_DATA_MAP(COptionsPage1)
 	DDX_CBIndex(pDX, IDC_DOSICONS, m_dosicons);
 	DDX_Check(pDX, IDC_OPTIONS_MOUNT_ALL, m_mountall);
-	DDX_Check(pDX, IDC_OPTIONS_PATCH, m_patch);
 	DDX_Check(pDX, IDC_OPTIONS_STARTUP_FLOPPIES, m_startup_floppies);
 	DDX_Check(pDX, IDC_OPTIONS_STARTUP_CDS, m_startup_cds);
 	DDX_Text(pDX, IDC_FAT_ICON_TIME_LIMIT, m_fat_icon_time_limit);
@@ -102,8 +100,6 @@ static int CALLBACK EnumFontFamProc(
 BOOL COptionsPage1::OnInitDialog() 
 {
 	CPropertyPage::OnInitDialog();
- GetDlgItem(IDC_OPTIONS_PATCH)->EnableWindow(FALSE);
- GetDlgItem(IDC_OPTIONS_STARTUP_FLOPPIES)->EnableWindow(FALSE);
  GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->EnableWindow(FALSE);
 
 	HDC hdc = ::GetDC( ::GetDesktopWindow() );

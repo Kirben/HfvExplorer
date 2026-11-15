@@ -35,15 +35,16 @@ DWORD be32(const BYTE* p) {return DWORD(be16(p))*65536+be16(p+2);}
 }
 FloppyReadApi& NativeFloppyReadApi() {return nativeApi;}
 ReadOnlyFloppy::ReadOnlyFloppy(FloppyReadApi* api):api_(api?api:&nativeApi),handle_(INVALID_HANDLE_VALUE),
- scratch_(nullptr),geometry_(),size_(0),error_(0),changeCount_(0),hfs_(false),invalid_(false) {}
+ scratch_(nullptr),geometry_(),size_(0),error_(0),changeCount_(0),hfs_(false),invalid_(false) {cache_init(&cache_);}
 ReadOnlyFloppy::~ReadOnlyFloppy() {Close();}
 void ReadOnlyFloppy::Close() {
     if(handle_!=INVALID_HANDLE_VALUE) api_->Close(handle_);
     if(scratch_) VirtualFree(scratch_,0,MEM_RELEASE);
+    cache_final(&cache_);
     handle_=INVALID_HANDLE_VALUE;scratch_=nullptr;size_=error_=changeCount_=0;hfs_=invalid_=false;memset(&geometry_,0,sizeof(geometry_));
 }
 bool ReadOnlyFloppy::OpenFailure(DWORD error) {Close();error_=error;return false;}
-bool ReadOnlyFloppy::ReadFailure(DWORD error) {invalid_=true;error_=error?error:ERROR_READ_FAULT;return false;}
+bool ReadOnlyFloppy::ReadFailure(DWORD error) {cache_clear(&cache_);invalid_=true;error_=error?error:ERROR_READ_FAULT;return false;}
 bool ReadOnlyFloppy::VerifySameMedia() {
     DWORD current=0;
     if(!api_->Verify(handle_,current)) return ReadFailure(GetLastError());
@@ -55,7 +56,7 @@ bool ReadOnlyFloppy::OpenDrive(int drive) {
     if(drive<0 || drive>25) return OpenFailure(ERROR_INVALID_PARAMETER);
     if(api_->DriveType(drive)!=DRIVE_REMOVABLE) return OpenFailure(ERROR_BAD_DEVICE);
     char device[16];sprintf(device,"\\\\.\\%c:",'A'+drive);
-    handle_=api_->Open(device,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_NO_BUFFERING);
+    handle_=api_->Open(device,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_RANDOM_ACCESS);
     if(handle_==INVALID_HANDLE_VALUE) return OpenFailure(GetLastError());
     if(!api_->Geometry(handle_,geometry_)) return OpenFailure(GetLastError());
     unsigned sectors=geometry_.MediaType==F3_720_512?9:geometry_.MediaType==F3_1Pt44_512?18:geometry_.MediaType==F3_2Pt88_512?36:0;
@@ -75,15 +76,25 @@ bool ReadOnlyFloppy::ReadBytes(ULONGLONG offset,DWORD count,void* bytes) {
     if(!bytes && count) {error_=ERROR_INVALID_PARAMETER;return false;}
     if(offset>size_ || count>size_-offset) {error_=ERROR_HANDLE_EOF;return false;}
     if(!count) return true;
-    BYTE* out=static_cast<BYTE*>(bytes);
+    // Original floppy_read policy: check cached 512-byte sectors first,
+    // then batch the remaining contiguous miss. FLOPPY_READ_AHEAD_SECTORS
+    // was 1, so do not fetch unrelated tracks. One media check covers this
+    // logical request; validate each new physical transfer before caching it.
+    if(!VerifySameMedia())return false;
+    BYTE* out=static_cast<BYTE*>(bytes);BYTE sector[kSector];
     while(count) {
-        if(!VerifySameMedia()) return false;
-        ULONGLONG aligned=offset&~ULONGLONG(kSector-1);
-        DWORD skip=DWORD(offset-aligned),chunk=min(count,kTransfer-skip);
+        DWORD block=DWORD(offset/kSector),skip=DWORD(offset%kSector);
+        if(cache_get(&cache_,block,(char*)sector)){
+            DWORD chunk=min(count,kSector-skip);
+            memcpy(out,sector+skip,chunk);out+=chunk;offset+=chunk;count-=chunk;continue;
+        }
+        ULONGLONG aligned=offset-skip;
+        DWORD chunk=min(count,kTransfer-skip);
         DWORD transfer=(skip+chunk+kSector-1)&~(kSector-1),got=0;
-        if(!api_->Read(handle_,aligned,transfer,scratch_,got)) return ReadFailure(GetLastError());
-        if(got!=transfer) return ReadFailure(ERROR_READ_FAULT);
-        if(!VerifySameMedia()) return false;
+        if(!api_->Read(handle_,aligned,transfer,scratch_,got))return ReadFailure(GetLastError());
+        if(got!=transfer)return ReadFailure(ERROR_READ_FAULT);
+        if(!VerifySameMedia())return false;
+        for(DWORD n=0;n<transfer/kSector;++n)cache_put(&cache_,block+n,(char*)scratch_+n*kSector,kSector);
         memcpy(out,scratch_+skip,chunk);out+=chunk;offset+=chunk;count-=chunk;
     }
     error_=ERROR_SUCCESS;return true;

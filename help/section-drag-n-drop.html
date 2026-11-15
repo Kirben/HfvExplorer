@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>Drag and drop</title></head><body><p><a href="manual.html">Manual contents</a></p><h2>
+<a name="drag_n_drop"></a>Drag and drop</h2>
+For a long time, this was the only way to copy and move files in HFVExplorer.
+<center>
+<p><img height="369" src="copy_by_d_n_d.gif" width="788"/></p></center>
+
+<p>In the picture above, the user has started to drag the file "WinRC Notes"
+from a Mac volume over the Windows volume "G:\", which is highlighted to
+indicate where the file would drop if the mouse button was released now.
+Note the cursor shape. It indicates whether the file will be <b>copied</b>
+(<img height="28" src="cursor_cp.gif" width="25"/>)or <b>moved (<img height="19" src="cursor_mv.gif" width="13"/>)</b>.
+When you drag and drop within the same volume, a <b>move</b> is assumed
+by default. When dragging and dropping between different volumes, a <b>copy</b>
+operation is assumed. Holding the <b>shift</b> (keyboard) key down you
+can force a move, and holding <b>control</b> key down forces a copy. The
+cursor is updated accordingly. Control and shift keys were chosen to achieve
+maximum compatibility with Windows Explorer.
+</p><p>When the mouse button is released, either a copy or move will take place.
+If the source volume type is different than the target volume type (one
+being an HFS volume and the other not), <a href="section-file-conversions.html#file_conversions">file
+conversions</a> may take place <a href="section-copying-options.html#Copying_options">if so specified</a>,
+or
+<a href="section-file-type-mappings.html#file_type_mappings">file type mappings</a>, again <a href="section-copying-options.html#Copying_options">if
+so specified</a>.
+</p><p><a name="ask_copy_mode"></a>If the file conversion is performed, it
+is done silently, without asking you anything. Depending on the settings
+mentioned above, the file conversion may present you the following dialog:
+</p><center>
+<p><img height="189" src="dyn_copy_mode_select.gif" width="390"/></p></center>
+
+<p>... and you select the copy mode from the combo box, and click <b>OK</b>
+for each individual file or subfolder, or <b>OK to All</b> to use the selected
+mode for the rest of the files.
+<br/> 
+<br/> 
+<br/> 
+</p></body></html>

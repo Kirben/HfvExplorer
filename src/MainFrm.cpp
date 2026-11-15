@@ -22,6 +22,11 @@
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
+#include "FloppyWriter.h"
+#include "charset.h"
+#include "FloppyImage.h"
+#include "MediaControl.h"
+#include "ReadOnlyCdBackend.h"
 #include "CdImageDialog.h"
 #include "CdBurnDialog.h"
 #include "FindFilesDialog.h"
@@ -67,8 +72,6 @@ UINT our_child_registration = RegisterWindowMessage("HFVRegisterChild");
 IMPLEMENT_DYNCREATE(CMainFrame, CFrameWnd)
 
 BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
- ON_UPDATE_COMMAND_UI(ID_FILE_VOLUMETOFLOPPY, OnUpdatePhysicalMedia)
- ON_UPDATE_COMMAND_UI(ID_FILE_VOLUMEFROMFLOPPY, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_FILE_EJECT, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_FILE_RELOAD, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_CD_EJECT_RELOAD, OnUpdatePhysicalMedia)
@@ -90,7 +93,6 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_NEWVOLUME, OnFileNewvolume)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
-	ON_COMMAND(ID_TOOLS_FLOPPY_WRITE, OnToolsFloppyWrite)
 
 	ON_COMMAND(ID_TOOLS_DUMPCDDEBUG, OnToolsDumpcddebug)
 	ON_COMMAND(ID_CD_EJECT_RELOAD, OnCdEjectReload)
@@ -111,10 +113,10 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_COMMAND(ID_TOOLS_FIND, OnToolsFind)
 	//}}AFX_MSG_MAP
 	// Global help commands
-	ON_COMMAND(ID_HELP_FINDER, CFrameWnd::OnHelpFinder)
+	ON_COMMAND(ID_HELP_FINDER, OnHelp)
 	// ON_COMMAND(ID_HELP, CFrameWnd::OnHelp)
-	ON_COMMAND(ID_CONTEXT_HELP, CFrameWnd::OnContextHelp)
-	ON_COMMAND(ID_DEFAULT_HELP, CFrameWnd::OnHelpFinder)
+	ON_COMMAND(ID_CONTEXT_HELP, OnHelp)
+	ON_COMMAND(ID_DEFAULT_HELP, OnHelp)
 END_MESSAGE_MAP()
 
 static UINT indicators[] =
@@ -385,7 +387,6 @@ void CMainFrame::OnProgramProperties()
 	propSheet.m_Page1.m_dosicons = pApp->m_dosicons;
 	propSheet.m_Page1.m_fat_icon_time_limit = pApp->m_fat_icon_time_limit;
 
-	propSheet.m_Page1.m_patch = pApp->m_patch;
 	propSheet.m_Page1.m_startup_floppies = pApp->m_startup_floppies;
 	propSheet.m_Page1.m_startup_cds = pApp->m_startup_cds;
 	propSheet.m_Page1.m_startup_hds = pApp->m_startup_hds;
@@ -434,7 +435,6 @@ void CMainFrame::OnProgramProperties()
 		pApp->m_mountall = propSheet.m_Page1.m_mountall;
 		pApp->m_dosicons = propSheet.m_Page1.m_dosicons;
 		pApp->m_fat_icon_time_limit = propSheet.m_Page1.m_fat_icon_time_limit;
-		pApp->m_patch = propSheet.m_Page1.m_patch;
 		pApp->m_startup_floppies = propSheet.m_Page1.m_startup_floppies;
 		pApp->m_startup_cds = propSheet.m_Page1.m_startup_cds;
 		pApp->m_startup_hds = propSheet.m_Page1.m_startup_hds;
@@ -493,7 +493,6 @@ void CMainFrame::OnProgramProperties()
 
 		pApp->SaveSettings();
 
-		set_patch_option( pApp->m_patch );
 	}
 }
 
@@ -848,63 +847,21 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
 	return CFrameWnd::WindowProc(message, wParam, lParam);
 }
 
-int ask_new_volume( char *volpath, char *vname, hfv_size_t *psize, int *normal )
+int ask_new_volume(char* volpath,char* vname,hfv_size_t* psize,int* normal,int* floppyDrive)
 {
-	CAskNewVolume dlg;
-	int ret, drive;
-	char *p, *s;
-
-	dlg.m_volname = CString(vname);
-	dlg.m_volpath = CString(volpath);
-	dlg.m_volsize_ex = "1440 kB";
-	ret = (dlg.DoModal() == IDOK);
-	if(ret) {
-		lstrcpy( vname, dlg.m_volname.GetBuffer(_MAX_PATH) );
-		lstrcpy( volpath, dlg.m_volpath.GetBuffer(_MAX_PATH) );
-		p = dlg.m_volsize_ex.GetBuffer(100);
-        if(!ParseImageSize(p,psize)) {
-            AfxMessageBox("Invalid image size. Use a whole number with kB, MB or GB units, aligned to 512 bytes.");
-            return 0;
-        }
-        if(dlg.m_volpath == dlg.get_floppy_a_name()) {
-			*normal = 0;
-			drive = 0;
-		} else if(dlg.m_volpath == dlg.get_floppy_b_name()) {
-			*normal = 0;
-			drive = 1;
-		} else {
-			*normal = 1;
-			drive = -1;
-		}
-		if(drive >= 0) {
-			get_floppy_volume_file_name( drive, volpath );
-			int is_hfs = 0, is_any = 1;
-			is_hfs = is_hfs_floppy_present( drive );
-			if(!is_hfs) is_any = is_any_floppy_present( drive );
-			if(is_any) {
-				CString cs;
-				int maxsize = get_floppy_max_size(drive);
-				if(maxsize == 0) {
-					ret = 0;
-				} if(maxsize == *psize) {
-					// AfxMessageBox( "Ready to format. All old data from the floppy will be destroyed." );
-				} else if(maxsize > *psize) {
-					*psize = maxsize;
-					cs.Format( "Size increased to the maximum of %d bytes.", maxsize );
-					AfxMessageBox( cs );
-				} else {
-					*psize = maxsize;
-					cs.Format( "Size decreased to the maximum of %d bytes.", maxsize );
-					AfxMessageBox( cs );
-				}
-				AfxMessageBox( "Ready to format. All old data from the floppy will be destroyed." );
-			} else {
-				AfxMessageBox( "There is no floppy present in the drive. Please insert one and try again." );
-				ret = 0;
-			}
-		}
-	}
-	return(ret);
+ CAskNewVolume dlg;dlg.m_allowFloppies=floppyDrive && !*volpath;
+ if(floppyDrive)*floppyDrive=-1;
+ dlg.m_volname=vname;dlg.m_volpath=volpath;dlg.m_volsize_ex="1440 kB";
+ if(dlg.DoModal()!=IDOK)return 0;
+ int drive=CAskNewVolume::FloppySelection(dlg.m_volpath);
+ if(drive>=0){
+  if(!dlg.m_allowFloppies||!floppyDrive)return 0;
+  *floppyDrive=drive;*normal=0;*psize=1474560;*volpath=0;lstrcpy(vname,dlg.m_volname);return 1;
+ }
+ if(!ParseImageSize(dlg.m_volsize_ex,psize)){
+  AfxMessageBox("Invalid image size. Use a whole number with kB, MB or GB units, aligned to 512 bytes.");return 0;
+ }
+ lstrcpy(vname,dlg.m_volname);lstrcpy(volpath,dlg.m_volpath);*normal=1;return 1;
 }
 
 int write_floppy( int drive, char *path )
@@ -1025,6 +982,8 @@ int read_floppy( int drive, char *path )
 	return(ok);
 }
 
+static void ReleaseFloppyForWrite(int drive,void* context);
+
 void CMainFrame::OnFileNewvolume() 
 {
 	char volpath[MAX_PATH];
@@ -1037,7 +996,15 @@ void CMainFrame::OnFileNewvolume()
 
 	*volpath = 0;
 	*vname = 0;
-	if(!ask_new_volume( volpath, vname, &size, &init )) return;
+	int floppyDrive=-1;
+ if(!ask_new_volume(volpath,vname,&size,&init,&floppyDrive))return;
+ if(floppyDrive>=0){
+  std::vector<BYTE> image;std::string error;
+  pc_to_mac_charset((unsigned char*)vname);
+  if(!PrepareFloppyHfs(vname,image,error)){AfxMessageBox(error.c_str());return;}
+  WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume",ReleaseFloppyForWrite,pApp->m_doc);
+  SendMessage(WM_COMMAND,ID_VIEW_REFRESH);return;
+ }
 
 	if(0 != HFSIFACE_format( volpath, vname, size, init )) {
 		return;
@@ -1150,24 +1117,6 @@ void CMainFrame::go_home_dir(void)
 	if(p) _chdir( dir );
 }
 
-void CMainFrame::OnFileVolumetofloppy() 
-{
-	int drive = 0;
-	char volpath[_MAX_PATH];
-
-	go_home_dir();
-
-	*volpath = 0;
-	drive = 0;
-	if(!ask_vol_to_floppy( volpath, &drive, 1 )) return;
-	UpdateWindow();
-	if(write_floppy( drive, volpath )) {
-		AfxMessageBox( 
-			"Please note that you have now visible two volumes with same names. "\
-			"This may cause some problebs, so remove the floppy now and "\
-			"press F5 to update the screen." );
-	}
-}
 
 void CMainFrame::MountPath(char *name) 
 {
@@ -1184,29 +1133,12 @@ void CMainFrame::MountPath(char *name)
 	if(currdir != "") pApp->m_doc->my_chdir( currdir, 1 );
 }
 
-void CMainFrame::OnFileVolumefromfloppy() 
+void CMainFrame::OnFileVolumefromfloppy()
 {
-	int drive = 0;
-	char volpath[_MAX_PATH];
-
-	go_home_dir();
-
-	*volpath = 0;
-	drive = 0;
-	if(!ask_vol_to_floppy( volpath, &drive, 0 )) return;
-	UpdateWindow();
-	if(read_floppy( drive, volpath )) {
-		if(AfxMessageBox( 
-			"Volume was succesfully created. Mount it now?",
-			MB_YESNO ) == IDYES) 
-		{
-			MountPath(volpath) ;
-			AfxMessageBox( 
-				"Please note that you have now visible two volumes with same names. "\
-				"This may cause some problems, so remove the floppy now and "\
-				"press F5 to update the screen." );
-		}
-	}
+ CAskVolumeToFloppy dialog(this);dialog.to_floppy=FALSE;dialog.m_caption="Create a volume file from floppy";
+ if(dialog.DoModal()!=IDOK)return;
+ auto result=ShowStorageJob(MakeFloppyImageJob(dialog.m_drive,(LPCSTR)dialog.m_volname),"Reading floppy image",false,true,true);
+ if(result.code&&result.error!=ERROR_CANCELLED)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
 }
 
 void CMainFrame::OnToolsDumpcddebug()
@@ -1245,67 +1177,26 @@ void CMainFrame::OnCdEjectEject()
 }
 #endif
 
-void CMainFrame::OnCdEjectEjectReload( int reload )
+MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
 {
-	HTREEITEM hItem;
-	DWORD_PTR dw;
-	int volinx, type, dev_type;
-	CString *pcs;
-	char rootdir[20];
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	HFVExplorerTreeView *tree;
-
-	tree = pApp->m_tree;
-	if(!tree) return;
-	hItem = tree->m_ct->GetSelectedItem();
-	if(!hItem) return;
-
-	dw = tree->m_ct->GetItemData( hItem );
-	if(dw) {
-		type = tree->get_lparam_type( dw );
-		volinx = tree->get_lparam_volinx( dw );
-		if(type==LIST_HFS || type==LIST_FAT) {
-			if(type==LIST_HFS) {
-				pcs = &pApp->m_doc->m_volumes[volinx].m_file_name;
-			} else {
-				pcs = &pApp->m_doc->m_fats[volinx].m_volume_name;
-			}
-			if(*pcs != "") {
-				wsprintf( rootdir, "%c:\\", pcs->GetAt(0) );
-				dev_type = GetDriveType( rootdir );
-				if(dev_type == DRIVE_CDROM || dev_type == DRIVE_REMOVABLE) {
-					if(reload == 0 && dev_type == DRIVE_CDROM) {
-						int i;
-						for( i=0; i<pApp->m_doc->m_hfs_count; i++) {
-							if(pApp->m_doc->m_volumes[i].m_is_cd && 
-								 pApp->m_doc->m_volumes[i].m_file_name.GetAt(0) == *rootdir)
-							{
-								pApp->m_doc->m_volumes[i].close();
-								cd_final( toupper(*rootdir) - 'A' );
-							}
-						}
-					}
-					if(eject_media( pcs->GetAt(0), reload )) {
-						// Oddly enough, we check for new media only if we're
-						// removing a disk! :)
-						// After removing, we must delete the item from
-						// the tree, and the func below does this.
-						// After a reload, we cannot immediately call
-						// the function, could lock up the system.
-						// If the auto-insert notification is enabled,
-						// there is no problem.
-						if(!reload) {
-							if(dev_type == DRIVE_REMOVABLE) {
-								pApp->m_tree->enable_selchange(0);
-								pApp->m_doc->CheckNewMedia( FALSE, FALSE, TRUE );
-								pApp->m_tree->enable_selchange(1);
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+ auto app=(CHFVExplorerApp*)AfxGetApp();if(!app||!app->m_doc||!app->m_tree)return {};
+ auto tree=app->m_tree;HTREEITEM item=tree->m_ct->GetSelectedItem();if(!item)return {};
+ DWORD_PTR data=tree->m_ct->GetItemData(item);int type=tree->get_lparam_type(data),index=tree->get_lparam_volinx(data);
+ if(type==LIST_HFS&&index>=0&&index<app->m_doc->m_hfs_count)return MacMediaControlTarget(app->m_doc->m_volumes[index].m_file_name);
+ if(type==LIST_FAT&&index>=0&&index<app->m_doc->m_fat_count){auto& volume=app->m_doc->m_fats[index];return {toupper((unsigned char)volume.m_letter)-'A',volume.m_type};}
+ return {};
+}
+void CMainFrame::OnCdEjectEjectReload(int reload)
+{
+ auto target=SelectedMediaControlTarget();if(!CanControlMedia(target))return;
+ auto app=(CHFVExplorerApp*)AfxGetApp();auto document=app->m_doc;
+ auto result=ShowStorageWaitJob(MakeMediaControlJob(target,reload!=0,nullptr,[=]{
+  HFSIFACE_get_dir_flush();
+  for(int i=0;i<document->m_hfs_count;++i){auto mounted=MacMediaControlTarget(document->m_volumes[i].m_file_name);if(mounted.drive==target.drive)document->m_volumes[i].close();}
+  native_media_suspend(target.drive);
+ }));
+ if(result.code)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
+ m_deviceChangeDeferred=false;PostMessage(WM_COMMAND,ID_VIEW_REFRESH);
 }
 
 void CMainFrame::OnCdEjectEject() 
@@ -1320,7 +1211,14 @@ void CMainFrame::OnCdEjectReload()
 
 void CMainFrame::OnHelp() 
 {
-	AfxMessageBox( "Help is not yet available, sorry." );
+	char executable[MAX_PATH]={};
+ DWORD count=GetModuleFileNameA(nullptr,executable,MAX_PATH);
+ if(!count||count>=MAX_PATH){AfxMessageBox("Could not locate the help folder.");return;}
+ char* slash=strrchr(executable,'\\');if(!slash)return;slash[1]=0;
+ CString help=executable;help+="HFVExplorer.chm";
+ if(GetFileAttributesA(help)==INVALID_FILE_ATTRIBUTES){AfxMessageBox("HFVExplorer.chm was not found. Keep the help file beside HFVExplorer.exe.");return;}
+ HINSTANCE result=ShellExecuteA(GetSafeHwnd(),"open",help,nullptr,executable,SW_SHOWNORMAL);
+ if((INT_PTR)result<=32)AfxMessageBox("Windows could not open HFVExplorer.chm.");
 }
 
 void CMainFrame::SaveWindowPosition(void)
@@ -1447,7 +1345,7 @@ void CMainFrame::OnToolsBurn()
  ShowCdBurnDialog(this,initial);
 }
 
-void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) { ui->Enable(FALSE); }
+void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) {ui->Enable(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&CanControlMedia(SelectedMediaControlTarget()));}
 
 static void ReleaseFloppyForWrite(int drive,void* context)
 {
@@ -1456,10 +1354,14 @@ static void ReleaseFloppyForWrite(int drive,void* context)
  for(int i=0;i<document->m_hfs_count;++i)
   if(document->m_volumes[i].m_file.m_hfloppy && document->m_volumes[i].m_file.m_drive==drive) document->m_volumes[i].close();
 }
-void CMainFrame::OnToolsFloppyWrite()
+void CMainFrame::OnFileVolumetofloppy()
 {
  CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
- ShowFloppyWriteDialog(this,ReleaseFloppyForWrite,app->m_doc);
+ CAskVolumeToFloppy dialog(this);dialog.to_floppy=TRUE;dialog.m_caption="Write a volume file to floppy";
+ if(dialog.DoModal()!=IDOK)return;
+ std::vector<BYTE> image;std::string error;
+ if(!LoadFloppyHfs(dialog.m_volname,image,error)){AfxMessageBox(error.c_str());return;}
+ WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname,ReleaseFloppyForWrite,app->m_doc);
  SendMessage(WM_COMMAND,ID_VIEW_REFRESH);
 }
 

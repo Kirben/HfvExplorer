@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include <winioctl.h>
+#include "cache.h"
 
 // Deliberately read-only OS boundary. Tests supply this interface instead of
 // opening devices; there is no write/format/eject operation to substitute.
@@ -36,6 +37,7 @@ private:
     bool OpenFailure(DWORD error);
     bool ReadFailure(DWORD error);
     bool VerifySameMedia();
+    cachetype cache_;
     FloppyReadApi* api_;
     HANDLE handle_;
     BYTE* scratch_;

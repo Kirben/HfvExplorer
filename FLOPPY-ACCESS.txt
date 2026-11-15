@@ -10,16 +10,15 @@ remain pending. A Macintosh disc is not needed for automated simulated tests.
 Use
 Insert a compatible classic HFS floppy and choose View > Refresh. Native
 floppy detection checks removable drive letters A: through Z: and adds valid
-HFS media to the Mac volume tree. Startup floppy probing remains disabled.
+HFS media to the Mac volume tree. Startup floppy probing follows the General option.
 Browse and copy files out as with a read-only CD. Refresh after changing discs
 or after a read error so stale handles and cached volume information are reset.
 Blank, FAT, MFS and unreadable discs do not appear as supported HFS volumes.
 
 The browsing backend stays read-only. A separate explicit 1.44 MB HFS format/
-image-write feature is available under Tools; see FLOPPY-WRITE.txt. Normal
-file/folder copying onto 1.44 MB HFS media uses a staged write transaction;
-see FLOPPY-FILE-COPY.txt. Other filesystem editing remains disabled. Eject/
-reload and the old physical-media commands remain disabled.
+image-write feature is available under File; see FLOPPY-WRITE.txt. Normal
+file/folder copying onto 1.44 MB HFS media uses scoped direct buffered writes;
+see FLOPPY-FILE-COPY.txt. Other filesystem editing remains disabled. Eject/reload use native Windows requests when the drive supports them. File menu image read/write commands use the native backend.
 
 Compatibility
 - Internal and USB drives use the same native Windows path. Windows must
@@ -48,7 +47,7 @@ compatibility. A failed HFS identification alone does not establish corruption.
 The diagnostic was built, but was not run against hardware in this task.
 
 Implementation
-- CreateFile with GENERIC_READ, FILE_FLAG_NO_BUFFERING and shared read/write
+- CreateFile with GENERIC_READ, FILE_FLAG_RANDOM_ACCESS and shared read/write
   access; no custom driver, SCSI pass-through or write-access handle.
 - Read-only IOCTL_DISK_GET_DRIVE_GEOMETRY and IOCTL_STORAGE_CHECK_VERIFY queries.
 - Aligned temporary buffers and sector-aligned reads serve unaligned HFS byte
@@ -62,7 +61,7 @@ Implementation
   File hooks reject writable opens and all writes, and HFS mounts read-only.
   The GUI adapter rejects Write/SetLength and reports floppy I/O failures.
 - Legacy Windows 9x/custom-driver code is still excluded. Hard-disk raw access,
-  legacy physical-media writes and tray commands remain disabled.
+  legacy driver paths remain disabled; eject/load requests use native Windows APIs.
 
 Tests
   .\build-x64.ps1 -TestFloppy

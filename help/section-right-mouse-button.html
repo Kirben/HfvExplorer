@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"/><title>Using the right mouse
+button</title></head><body><p><a href="manual.html">Manual contents</a></p><h1>
+
+<hr width="100%"/><a name="right_mouse_button"></a>Using the right mouse
+button</h1>
+The right mouse button is context sensitive; meaning that when you click
+on different items, a different menu will pop up. If you have nothing selected,
+the following menu will show:
+<center>
+<p><img height="66" src="context_menu_1.gif" width="124"/></p></center>
+
+<p><a name="new_folder"></a><i>New Folder</i> is used to create, huh, a
+new folder. It just prompts you the name of the folder and creates it.
+</p><p><a name="Show_Hide_labels"></a><i>Show/Hide labels</i> toggles the label
+displaying on and off. Labels are show as superimposed colored pedestals.
+The picture below demonstrates the effect of displaying and hiding of the
+labels. The "TeachText" application is marked as "Hot" all the time.
+</p><center>
+<p><img height="294" src="show_hide_labels.gif" width="785"/></p></center>
+<i>Options...</i> opens the complex setup dialog which is described in
+detail <a href="section-command-options.html#command_options">elsewhere</a>.
+<br/> 
+<p>
+</p><hr width="50%"/>
+<br/> 
+<p>If you have a file (as opposed to a folder) selected when you right-click,
+the following menu pops up:
+<br/> 
+<br/> 
+<br/>
+<br/>
+</p><center>
+<p><img height="244" src="context_menu_2.gif" width="202"/></p></center>
+
+<p><i>Open (xxx) </i>tries to launch the selected application or document
+into the <a href="section-shortcuts-options.html#Shortcuts_options">default emulator</a>.
+</p><p><i>Delete</i> prompts for a confirmation to delete the selected file(s)
+and if you agree, does it.
+</p><p><i>Map selected files</i>... opens a dialog where you can <a href="section-file-type-mappings.html#file_type_mappings">define
+file type mappings</a>.
+</p><p><i>Open with...</i> opens another submenu where you can select into
+which emulator launch the selected document or application.
+</p><p><a name="create_shortcut"></a><i>Create Shortcut for...</i> opens a
+submenu where you select the target emulator. A shortcut will be placed
+on your Windows desktop. The Mac icon is extracted and saved to a subdirectory
+"Links" which is created in the HFVExplorer home directory. You can later
+on launch the application/document by double-clicking the desktop icon,
+HFVExplorer does not need to be running at that time. The helper application
+"vMacLink" is used to pass the information to the emulator, except in case
+of Executor (parameters are passed in command line or parameter file).
+</p><p><i>New Folder</i> is described <a href="section-right-mouse-button.html#new_folder">above</a>.
+</p><p><a name="save_icon"></a><i>Save icon...</i> prompts for a file name
+and saves the Mac icon of the selected item. You can also take the icons
+from the "Links" subdirectory, but since you cannot create shortcuts to
+folders, this is the only way to extract folder icons.
+</p><p><i>Show/Hide labels</i> is described <a href="section-right-mouse-button.html#Show_Hide_labels">above</a>.
+</p><p><a name="label_command"></a><i>Label...</i> opens a submenu to define
+or remove the label (color) of the selected files. The colors are not customizable,
+but standard Mac colors are used (Red=Hot, Orange=Essential etc.).
+</p><p><i>Options...</i> opens the complex setup dialog which is described
+in detail <a href="section-command-options.html#command_options">elsewhere</a>.
+</p><p><a name="properties_command"></a><i>Properties...</i> opens a dialog
+where you can tweak the internal HFS info of the selected file. A word
+of warning is in order: walk softly here. You can do some mediocre damage
+to your files by carelessly modifying these values. The most dangerous
+settings are disabled: you cannot convert a file to a folder, for example,
+which would be fatal. Below is the properties of "TeachText":
+</p><center>
+<p><img height="503" src="file_properties.gif" width="756"/></p></center>
+
+<p>Usually, you only need to come here if you want to change the Type/Creator
+info of the file. The name can also be changed here, but more easily by
+<a href="section-list-view.html#command_rename">pressing
+the <b>F2</b> (keyboard) key</a>. "Created", "Modified" and "Backup" fields
+are not decoded to a human readable form. You can still copy and paste
+a value from some other item's properties.
+<br/> 
+<br/> 
+</p><p>
+</p><hr width="50%"/>
+<br/> 
+<p>If you have a folder (as opposed to a file) selected when you right-click,
+the following menu pops up:
+</p><center>
+<p><img height="204" src="context_menu_3.gif" width="203"/></p></center>
+
+<p><i>Open Folder</i> moves yo down in the directory structure into the
+selected folder. Usually you just hit "<b>Enter</b>" (keyboard) instead.
+</p><p><i>Delete</i> prompts for a confirmation to delete the selected file(s)
+and if you agree, deletes the folder and its contents, including all subfolders
+and the files inside.
+</p><p><i>Map selected files</i>... opens a dialog where you can <a href="section-file-type-mappings.html#file_type_mappings">define
+file type mappings</a>.
+</p><p><i>New Folder</i> is described <a href="section-right-mouse-button.html#new_folder">above</a>.
+</p><p><i>Save Icon...</i> is described <a href="section-right-mouse-button.html#save_icon">above</a>.
+</p><p><i>Show/Hide labels</i> is described <a href="section-right-mouse-button.html#Show_Hide_labels">above</a>.
+</p><p><i>Label...</i> is described <a href="section-right-mouse-button.html#label_command">above</a>.
+</p><p><i>Options...</i> opens the complex setup dialog which is described
+in detail <a href="section-command-options.html#command_options">elsewhere</a>.
+</p><p><i>Properties....</i> is described <a href="section-right-mouse-button.html#properties_command">above</a>.
+Instead of showing some file specific info, it displays folder specific
+info.
+<br/> 
+<br/> 
+</p></body></html>

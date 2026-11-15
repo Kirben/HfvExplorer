@@ -1,49 +1,31 @@
 Ordinary file copying to physical HFS floppies
+============================================
+Use normal file/folder copying onto an existing 1.44 MB classic HFS floppy.
+The worker now copies directly, following the original filesystem path. It
+uses a 1,000-sector cache and merges adjacent writes in a 64 KiB buffer.
+There is no full-disk snapshot, temporary working image, original-disk comparison
+or separate readback pass for ordinary copies. Copy progress is followed by
+Flushing floppy. Formatting/full-image writing still uses full readback.
 
-Use the normal file/folder copy commands or drag and drop onto an existing
-1.44 MB classic HFS floppy. Windows imports use the selected import mode;
-HFS-to-HFS copies preserve both forks. Existing unrelated files are retained.
-Blank/FAT disks must first be initialized using the separate format command.
-720 KB and 2.88 MB disks remain browse/export-only in this build.
+Windows imports use the selected conversion mode; HFS copies preserve both
+forks and folder structure. Existing unrelated files are retained. Browsing
+stays read-only; writable access is scoped to the serialized copy worker.
+The worker checks HFS geometry/media identity, closes the browsing handle,
+locks/dismounts the destination and uses unbuffered write-through writes.
+Media-generation checks remain; a swapped disk cannot receive buffered writes.
+Pending writes are flushed at completion. Unsupported explicit flush requests
+are accepted for this write-through path; other flush failures are errors.
+Completion confirms accepted writes, not a separate readback comparison.
 
-The storage worker first reads the whole destination into a temporary image.
-It applies the selected copy to that image. A source-read error, insufficient
-free space, or other staging failure leaves the physical disk untouched.
-No low-level track formatting occurs during ordinary copying.
+Direct copying can leave partial files or filesystem changes after insufficient
+space, cancellation or an I/O failure, as with the original direct-write path.
+Cross-volume Move currently retains source files; same-volume moves use HFS
+rename/move behavior. Keep the disk inserted until copying and flushing finish.
+Normal read-only browsing does not enable arbitrary filesystem editing.
+720 KB and 2.88 MB physical media remain browse/export-only.
 
-After staging, the worker closes its browsing handle, opens a write-through
-handle and locks/dismounts the volume. It compares every original sector under
-the lock before writing. A changed disk is rejected without starting writes.
-It then writes only changed tracks and verifies each by reading it back.
-Unsupported flush is accepted only after all changed-track readbacks and media
-checks, as with explicit image writing. Other flush errors remain failures.
-All handles are closed/unlocked on completion or error; existing GUI readers
-reopen on their next access. Failed copy operations request a view refresh.
-
-The initial snapshot and locked original comparison still read the whole disk.
-Only changed tracks are written and read back. Multiple separately selected files may
-each run a transaction; copying a containing folder uses one transaction.
-Once physical writing starts, removal or an I/O failure can leave the disk
-incomplete. Keep the disk inserted until writing and verification finish.
-Cross-volume Move to a floppy currently copies and retains the source files.
-Rename/delete/property editing through the browsing adapter remains read-only.
-Existing-name handling follows the existing HFS importer/copy routines; this
-does not add the Mac-export Replace/Skip dialog to HFS destinations.
-
-Copy failures no longer display the legacy libraries' default "no error" text.
-Each job clears stale copy errors and selects an actual library error or a
-meaningful fallback. Physical errors identify the stage, Windows error number,
-and whether writing started.
-
-Tests use simulated devices only. They cover recursive HFS copies and Windows
-MacBinary imports, both forks, retaining earlier files, reopening an existing
-GUI reader, full-disk staging, write-protected media, lock failures, short writes,
-readback mismatch, media replacement, unsupported flush and source retention.
-The existing slow-read, worker, owner-restoration and floppy regressions pass.
-No physical media or computer control was used to validate this addition.
-
-Waiting for storage now retains one fixed status message for native reads.
-The spinner and delayed explanation are now implemented; see STORAGE-WAIT.txt.
-
-
-See CHANGED-TRACK-COPY.txt for the optimization and single-file progress layout.
+Tests: direct write buffering, read-your-writes cache, worker-thread-only write
+permission, no full-disk read/write cycles, HFS/Windows sources and both forks,
+existing-reader reopening, write protection, lock/read/short-write/flush errors,
+media changes before flushing, full-disk errors, source retention and responsive
+single-dialog completion. All drives simulated; no computer control used.
