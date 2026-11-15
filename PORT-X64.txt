@@ -1,4 +1,4 @@
-HFVExplorer x64: image-only experimental port
+HFVExplorer x64: images and read-only CDs (experimental port)
 2026-11-15
 
 This is a local, unofficial port of ObsoleteMadness/HfvExplorer at
@@ -7,17 +7,19 @@ copyright notices and GPL licensing are preserved. It is not an official
 release by Lauri Pesonen or Anygraaf.
 
 Run
-Open the HFVExplorer-x64-images folder and run HFVExplorer.exe. Keep it in a writable location.
-No driver, administrator privileges or MFC runtime installation is required
-to run the statically linked executable. Use File > Open volume for HFV/DSK
+Open the HFVExplorer-x64-cd folder and run HFVExplorer.exe. Keep it in a writable location.
+No custom driver or MFC runtime installation is required to run the executable.
+Optical-device access may require administrator privileges. See CD-ACCESS.txt
+for the read-only D: diagnostic. Use File > Open volume for HFV/DSK
 images. Normal Windows folders remain visible for file transfers.
 Preferences are saved beside the executable in HFVExplorer-x64.ini.
 This port does not automatically register file associations.
 
 Scope
 - Classic HFS disk images; this does not add HFS+ support.
-- Physical Macintosh floppies, CDs, removable disks, eject/reload and CD
-  burning are disabled. No cdenable.sys, VxD or VWIN32 code is built.
+- Read-only classic HFS/hybrid CD access uses built-in Windows device APIs.
+  Physical floppies, hard disks, eject/reload and CD burning remain disabled.
+  No cdenable.sys, VxD or VWIN32 code is built.
 - Windows manages display scaling because the legacy layout uses fixed pixels.
   This improves readability on high-DPI displays; bitmap icons may be soft.
 - Old emulator integrations and WinHelp are not validated by this port.
@@ -37,13 +39,13 @@ to simplify debugging of the old code. Existing non-pointer conversion and
 deprecated API warnings remain; a successful build is not an exhaustive audit.
 
 Changes
-- Added a current MSBuild x64/MFC project and driver-free ImageOnly backend.
+- Added a current MSBuild x64/MFC project and driver-free storage backend.
 - Replaced pointer/handle DWORD containers and item data with pointer-width
   storage. Corrected pointer differences, sort payloads and message signatures.
 - Updated incompatible CRT declarations, const usage, reserved identifiers,
   old constructor calls, wide-character buffers and ctime argument types.
 - Fixed List/Details command IDs colliding with current MFC resources.
-- Disabled physical-media UI commands and startup discovery.
+- Disabled physical-media write/tray commands; added read-only CD discovery.
 - Isolated preferences and retained manual control over file associations.
 - Disabled the incorrect DPI-aware manifest declaration.
 
@@ -54,6 +56,9 @@ Validation
   flushes/unmounts, reopens read-only, verifies both forks byte-for-byte and
   Finder type/creator metadata, enumerates, deletes and verifies persistence.
 - The same core HFS sources are compiled into the test and the GUI.
+- Synthetic-CD tests passed. The user verified mounting/listing and GUI access
+  to LucasArts CD Game Pack on D:, including its shortened HFS partition.
+  See CD-ACCESS.txt.
 - UI smoke test opened the populated image and browsed its folder/file.
 - GUI import/export, complex real-world volumes, emulator launching and
   cross-machine compatibility have not been exhaustively tested.

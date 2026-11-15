@@ -11,8 +11,8 @@
   <ItemDefinitionGroup>
     <!-- The original UI uses fixed 96-DPI pixels. Let Windows scale it. -->
     <Manifest><EnableDpiAwareness>false</EnableDpiAwareness></Manifest>
-    <ClCompile><MultiProcessorCompilation>true</MultiProcessorCompilation><WarningLevel>Level3</WarningLevel><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>HFV_IMAGE_ONLY;__EMX__;WIN32;NDEBUG;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_IMAGE_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
+    <ClCompile><MultiProcessorCompilation>true</MultiProcessorCompilation><WarningLevel>Level3</WarningLevel><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>HFV_READONLY_CD;__EMX__;WIN32;NDEBUG;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_READONLY_CD;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
     <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -75,6 +75,8 @@
     <ClCompile Include="filehook.c" />
     <ClCompile Include="hfs\interface.c" />
     <ClCompile Include="ImageOnly.cpp" />
+    <ClCompile Include="ReadOnlyCd.cpp" />
+    <ClCompile Include="ReadOnlyCdBackend.cpp" />
     <ResourceCompile Include="HFVExplorer.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

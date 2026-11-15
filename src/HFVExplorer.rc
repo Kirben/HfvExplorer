@@ -301,7 +301,7 @@ CAPTION "About DSK/HFV Explorer"
 FONT 8, "MS Sans Serif"
 BEGIN
     ICON            IDR_MAINFRAME,IDC_STATIC,11,14,20,20
-    LTEXT           "HFVExplorer x64 - image-only port",IDC_STATIC,39,13,156,8,
+    LTEXT           "HFVExplorer x64 - images / CDs",IDC_STATIC,39,13,156,8,
                     SS_NOPREFIX
     LTEXT           "Copyright © 1997-1999 Anygraaf Oy. All rights reserved.",
                     IDC_STATIC,39,25,205,8
@@ -864,12 +864,12 @@ IDC_POINTER_COPY        CURSOR  DISCARDABLE     "arrowcop.cur"
 
 STRINGTABLE PRELOAD DISCARDABLE 
 BEGIN
-    IDR_MAINFRAME           "HFVExplorer x64 (images only)\n\nHFVExp\nHFV Files (*.hfv)\n.HFV\nHFVExplorer.Document\nHFVExp Document"
+    IDR_MAINFRAME           "HFVExplorer x64 (images + read-only CDs)\n\nHFVExp\nHFV Files (*.hfv)\n.HFV\nHFVExplorer.Document\nHFVExp Document"
 END
 
 STRINGTABLE PRELOAD DISCARDABLE 
 BEGIN
-    AFX_IDS_APP_TITLE       "HFVExplorer x64 (images only)"
+    AFX_IDS_APP_TITLE       "HFVExplorer x64 (images + read-only CDs)"
     AFX_IDS_IDLEMESSAGE     "For Help, press F1"
     AFX_IDS_HELPMODEMESSAGE "Select an object on which to get Help"
 END

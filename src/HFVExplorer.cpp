@@ -346,7 +346,7 @@ BOOL CHFVExplorerApp::InitInstance()
 	CheckDefaultSettings();
 
 	m_prevVersion = m_version;
- m_startup_floppies = m_startup_cds = m_startup_hds = m_do_harddisks = m_patch = FALSE;
+ m_startup_floppies = m_startup_hds = m_do_harddisks = m_patch = FALSE;
 
 	if(m_version != "1.2.5") {
 		m_version = "1.2.5";

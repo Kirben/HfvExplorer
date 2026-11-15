@@ -250,7 +250,7 @@ void CHFVExplorerDoc::enum_volumes_ext( LPSTR mask, LPSTR ext )
 
 void CHFVExplorerDoc::enum_floppies( void )
 {
-#ifdef HFV_IMAGE_ONLY
+#if defined(HFV_IMAGE_ONLY) || defined(HFV_READONLY_CD)
  return;
 #endif
 	char name[_MAX_PATH];
@@ -268,9 +268,6 @@ void CHFVExplorerDoc::enum_floppies( void )
 
 void CHFVExplorerDoc::enum_cds(void)
 {
-#ifdef HFV_IMAGE_ONLY
- return;
-#endif
 	char name[_MAX_PATH];
 	char rootdir[20], letter;
 	int i;
@@ -291,7 +288,7 @@ void CHFVExplorerDoc::enum_cds(void)
 
 void CHFVExplorerDoc::enum_hds(void)
 {
-#ifdef HFV_IMAGE_ONLY
+#if defined(HFV_IMAGE_ONLY) || defined(HFV_READONLY_CD)
  return;
 #endif
 	char name[_MAX_PATH];
