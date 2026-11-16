@@ -4,6 +4,7 @@
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
+#include "VolumeCoordinator.h"
 #include "BrowserPresentation.h"
 #include "HostFileSizes.h"
 #include "special.h"
@@ -174,6 +175,8 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
 {
  BrowserDirectory::ObserveRead("classic-directory");
  BrowserDirectory::Snapshot snapshot;snapshot.capabilitiesKnown=true;
+ snapshot.resourceKey=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
+ if(m_classicRevision[volinx]!=snapshot.revision){m_volumes[volinx].close();if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reload changed classic HFS metadata");m_classicRevision[volinx]=snapshot.revision;}
  auto& selectedVolume=m_volumes[volinx];DWORD sourceAttributes=(selectedVolume.m_is_cd||selectedVolume.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(selectedVolume.m_file_name);
  bool writable=!selectedVolume.m_is_cd&&(sourceAttributes==INVALID_FILE_ATTRIBUTES||!(sourceAttributes&FILE_ATTRIBUTE_READONLY));
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;

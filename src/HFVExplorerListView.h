@@ -62,6 +62,7 @@ public:
  void BindBrowserSession(BrowserSession* session){m_browserSession=session;}
 
  friend class MainMacBrowser;
+ friend class BrowserSession;
  std::map<LPARAM,BrowserDirectory::Row> m_browser_rows;
  MacBrowser::Capabilities m_directory_capabilities;
  bool m_directory_capabilities_known=false;

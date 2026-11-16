@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MacBrowserModel.h"
+#include "VolumeCoordinator.h"
 #include "HfsPlusDisk.h"
 #include "charset.h"
 #include <fcntl.h>
@@ -32,6 +33,7 @@ struct RootScope {
 class Classic final : public Volume {
     hfsvol *volume_ = nullptr;
     std::string image_;
+    std::string resourceKey_;
     std::string imageIdentity_;
     bool write_;
     std::map<uint32_t,std::string> paths_;
@@ -50,6 +52,7 @@ class Classic final : public Volume {
     }
 public:
     Classic(const std::string &image, std::string root, bool write) : write_(write),image_(image) {
+        resourceKey_=VolumeCoord::ImageKey(image);
         imageIdentity_=image;HANDLE identity=CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
         if(identity!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(identity,&info))imageIdentity_=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);CloseHandle(identity);}
         std::vector<char> converted(root.begin(),root.end());converted.push_back(0);pc_to_mac_charset((unsigned char*)converted.data());root=converted.data();
@@ -60,6 +63,7 @@ public:
     }
     ~Classic(){if(volume_)hfs_umount(volume_);}
     void Close()override{if(volume_){auto v=volume_;volume_=nullptr;Check(hfs_umount(v)==0);}}
+    std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name()const override{return Decode(paths_.at(2));}
     const char *Kind()const override{return "HFS";}
     bool Writable()const override{return write_&&volume_&&!(volume_->flags&HFS_READONLY);}

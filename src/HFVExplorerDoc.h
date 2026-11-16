@@ -47,7 +47,9 @@
 class CHFVExplorerDoc : public CDocument
 {
  friend class MainMacBrowser;
+ friend class BrowserSession;
  std::unique_ptr<BrowserSession> m_browserSession;
+ uint64_t m_classicRevision[MAX_HFS_VOLUMES]{};
  type_creator_link_t* hash_table[ICONTABLESIZE]{};
  int icons_in_cache=0,hash_file_ok=0,hash_file_impossible=0;
  bool hash_file_writable=false;

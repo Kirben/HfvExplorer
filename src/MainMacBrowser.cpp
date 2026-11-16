@@ -3,6 +3,7 @@
 #include "HFVExplorer.h"
 #include "MainMacBrowser.h"
 #include "FileOperations.h"
+#include "VolumeCoordinator.h"
 #include "BrowserSession.h"
 #include "BrowserPresentation.h"
 #include "BrowserDirectory.h"
@@ -49,7 +50,7 @@ bool Hidden(BrowserSession& session_) {
 bool Run(BrowserSession& session_,std::function<void(Storage::Job&)> work,bool copy=false,bool single=false) {
     auto body=[&](Storage::Job& job){work(job);return Storage::Result{};};
     auto result=copy?ShowStorageJob(body,"Copying files",Hidden(session_),single,true,session_.Owner()):ShowStorageWaitJob(body,Hidden(session_),session_.Owner());
-    if(result.code&&result.error!=ERROR_CANCELLED&&!Hidden(session_))AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
+    if(result.code&&result.error!=ERROR_CANCELLED&&!Hidden(session_)&&!session_.Refreshing())AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
     return result.code==0;
 }
 bool RunOperation(BrowserSession& session,FileOperations::Request request,bool copy=false,bool single=false){
@@ -109,17 +110,25 @@ struct MainMacBrowser::State {
         if(!m.volume->Writable())label+=L" [read-only]";
         m.root=Insert(index,2,nullptr,label,true);
     }
-    bool Show(int index,uint32_t id,HTREEITEM item) {
-        if(showing)return true;showing=true;struct Done{bool& flag;~Done(){flag=false;}}done{showing};
-        auto volume=mounts.at(index).volume;std::vector<Entry> entries;uint64_t free=0;bool mutableFolder=true;
+    bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false) {
+        if(showing)return true;session_.ClearCurrent();showing=true;struct Done{bool& flag;~Done(){flag=false;}}done{showing};
+        auto volume=mounts.at(index).volume;uint64_t revision=0;std::wstring folderTitle;std::vector<std::pair<uint32_t,std::vector<Entry>>> levels;std::vector<Entry> entries;uint64_t free=0;bool mutableFolder=true;
         std::vector<uint32_t> ancestors;for(auto a=item;a;a=session_.Tree()->m_ct->GetParentItem(a)){auto p=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(a));ancestors.push_back(uint32_t(p->id));}
         if(!Run(session_,[&](Storage::Job&){
+            VolumeCoord::Lease read({{volume->ResourceKey(),VolumeCoord::Mode::Read}});revision=VolumeCoord::Revision(volume->ResourceKey());
+            if(rebuild){
+                id=2;for(auto old:ancestors){try{if(volume->Stat(old).directory){id=old;break;}}catch(const std::exception&){}}
+                std::vector<uint32_t> chain;std::set<uint32_t> parents;uint32_t at=id;
+                while(at!=2){if(chain.size()>128||!parents.insert(at).second)throw HfsPlus::Error("Cyclic folder ancestry");chain.push_back(at);at=volume->Stat(at).parent;}
+                chain.push_back(2);ancestors=chain;
+                for(auto parent=chain.rbegin();parent!=chain.rend();++parent)if(*parent!=id)levels.push_back({*parent,volume->List(*parent)});
+            }
             std::set<uint32_t> visited;
             for(auto ancestor:ancestors){
                 auto e=volume->Stat(ancestor);auto key=e.resolvedId?e.resolvedId:e.id;
                 if(!visited.insert(key).second)throw HfsPlus::Error("Cyclic directory hard link");
             }
-            auto currentFolder=volume->Stat(id);mutableFolder=(currentFolder.id==2||!currentFolder.protectedFile)&&!currentFolder.hardLink;
+            auto currentFolder=volume->Stat(id);folderTitle=Wide(currentFolder.name);mutableFolder=(currentFolder.id==2||!currentFolder.protectedFile)&&!currentFolder.hardLink;
             entries=volume->List(id);free=volume->FreeBytes();})){
             auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
             auto root=mounts[index].root;for(auto child=tree->m_ct->GetChildItem(root);child;){auto next=tree->m_ct->GetNextSiblingItem(child);tree->m_ct->DeleteItem(child);child=next;}
@@ -127,6 +136,12 @@ struct MainMacBrowser::State {
             session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});shown.clear();current=index;folder=2;folderMutable=false;return false;}
         entries.erase(std::remove_if(entries.begin(),entries.end(),[](const Entry& e){return !App().m_show_invisible_mac&&((uint16_t(e.finder[8])<<8|e.finder[9])&0x4000);}),entries.end());
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
+        if(rebuild){
+            auto root=mounts[index].root;tree->delete_subdir_contents(root);std::map<uint32_t,HTREEITEM> pathItems;pathItems[2]=root;
+            for(auto& level:levels)for(auto& entry:level.second)if(entry.directory&&(App().m_show_invisible_mac||!((uint16_t(entry.finder[8])<<8|entry.finder[9])&0x4000)||std::find(ancestors.begin(),ancestors.end(),entry.id)!=ancestors.end()))pathItems[entry.id]=Insert(index,entry.id,pathItems.at(level.first),Wide(entry.name));
+            item=pathItems.at(id);
+        }
+        if(id!=2)TreeText(session_,item,folderTitle);
         // Replace only this directory's child nodes, never unrelated volumes.
         for(HTREEITEM child=control.GetChildItem(item);child;){auto next=control.GetNextSiblingItem(child);control.DeleteItem(child);child=next;}
         std::map<uint32_t,HTREEITEM> children;
@@ -138,7 +153,7 @@ struct MainMacBrowser::State {
             auto row=BrowserDirectory::FromMac(e,index,volume->Supports());
             list->InsertBrowserRow(row,e.directory?children[e.id]:nullptr);
         }
-        shown=std::move(entries);current=index;folder=id;folderMutable=mutableFolder;control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);session_.MacBrowser().Sort(FIELD_NAME,true);
+        session_.Observe(volume->ResourceKey(),revision,LIST_MAC,index,id);shown=std::move(entries);current=index;folder=id;folderMutable=mutableFolder;control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);session_.MacBrowser().Sort(FIELD_NAME,true);
         if(session_.Status()){CString status;status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
             session_.Status()->SetPaneText(0,status);}
         return true;
@@ -179,6 +194,7 @@ int MainMacBrowser::OpenImage(const std::wstring& path) {
         if(!state_->mounts[i].root)state_->Root(int(i));state_->Show(int(i),2,state_->mounts[i].root);return 1;}
     std::shared_ptr<Volume> volume;bool ok=Run(session_,[&](Storage::Job&){volume=MacBrowser::OpenImage(wide);});
     if(!ok)return -1;if(!volume)return 0;
+    for(size_t n=0;n<state_->mounts.size();++n)if(state_->mounts[n].volume&&state_->mounts[n].volume->ResourceKey()==volume->ResourceKey()){state_->Show(int(n),2,state_->mounts[n].root);return 1;}
     state_->mounts.push_back({volume,wide,nullptr,-1});int i=int(state_->mounts.size()-1);state_->Root(i);state_->Show(i,2,state_->mounts[i].root);
     int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,nullptr,0,nullptr,nullptr);
     std::string ansi(n,0);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,&ansi[0],n,nullptr,&lost);
@@ -195,11 +211,17 @@ bool MainMacBrowser::Select(LPARAM data){auto p=reinterpret_cast<lparam_struct*>
     state_->Show(p->volinx,uint32_t(p->id),session_.Tree()->m_ct->GetSelectedItem());return true;}
 bool MainMacBrowser::Refresh(){int i;uint32_t id;if(!state_->Selected(i,id))return false;
     auto& mount=state_->mounts[i];
-    bool ready=Run(session_,[&](Storage::Job&){if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No HFS+ / HFSX disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
+    bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No HFS+ / HFSX disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
     if(!ready){if(mount.drive>=0){ReleaseCd(mount.drive);return false;}session_.List()->initialize_volume("",0);return true;}
     if(mount.drive>=0){id=2;state_->Show(i,2,mount.root);}
     else if(!state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem())&&id!=2)state_->Show(i,2,mount.root);
     return true;
+}
+bool MainMacBrowser::RefreshForChange(const std::string& key){
+ int index;uint32_t id;if(!state_->Selected(index,id)||state_->mounts[index].volume->ResourceKey()!=key)return false;
+ // Read the ancestry, ancestor directories and current listing under one read
+ // lease, then rebuild the affected tree path and list in a single UI batch.
+ if(!state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),true))throw HfsPlus::Error("Cannot refresh the changed volume");return true;
 }
 void MainMacBrowser::ReleaseCd(int drive){
     std::vector<std::shared_ptr<Volume>> released;
@@ -229,7 +251,7 @@ bool MainMacBrowser::Activate(int row){auto p=reinterpret_cast<list_lparam_struc
 bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!Writable())return true;
     int i;uint32_t id;state_->Selected(i,id);std::wstring name=L"New Folder";
     if(EditHfsPlusName(session_.Owner(),name,state_->mounts[i].volume->CaseSensitive())){
-        Run(session_,[&](Storage::Job&){state_->mounts[i].volume->MakeDirectory(id,U16(name));});Refresh();}return true;}
+        Run(session_,[&](Storage::Job&){auto volume=state_->mounts[i].volume;{VolumeCoord::Lease write({{volume->ResourceKey(),VolumeCoord::Mode::Write}});volume->MakeDirectory(id,U16(name));}VolumeCoord::Changed({volume->ResourceKey()});});Refresh();}return true;}
 bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())return true;
     auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
     auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(p->type!=LIST_MAC)return true;auto volume=state_->mounts[p->volinx].volume;uint32_t id=uint32_t(p->id);

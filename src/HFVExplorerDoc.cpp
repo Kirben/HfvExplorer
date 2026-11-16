@@ -647,8 +647,8 @@ int CHFVExplorerDoc::get_afp(
 void CHFVExplorerDoc::fat_walk(int volinx,LPSTR path,int list){
  auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());BrowserDirectory::Snapshot snapshot;std::string directory=path;
  auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,directory.c_str(),list!=0,job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
- if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
- apply_browser_directory(snapshot,list!=0);if(list)GetBrowserSession().List()->do_report_sort();
+ if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ apply_browser_directory(snapshot,list!=0);if(list){GetBrowserSession().List()->do_report_sort();GetBrowserSession().Observe(snapshot.resourceKey,snapshot.revision,LIST_FAT,volinx,2,directory);}
 }
 
 #pragma optimize("",on)
@@ -1368,7 +1368,7 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
  long parent=GetBrowserSession().Tree()->get_parent_id(m_volumes[volinx].m_rootitem,volinx,id);
  BrowserDirectory::Snapshot snapshot;
  auto result=ShowStorageWaitJob([&](Storage::Job&){snapshot=read_classic_browser_directory(volinx,id,path,GetBrowserSession().finderLayout!=0,parent);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
- if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
  int finder_view_mode=snapshot.finderMode;
  if(GetBrowserSession().finderLayout){
 		switch(finder_view_mode) {
@@ -1421,12 +1421,13 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
 		}
   GetBrowserSession().List()->set_origo(snapshot.originX,snapshot.originY);
  }
- apply_browser_directory(snapshot,true);GetBrowserSession().List()->do_report_sort();
+ apply_browser_directory(snapshot,true);GetBrowserSession().List()->do_report_sort();GetBrowserSession().Observe(snapshot.resourceKey,snapshot.revision,LIST_HFS,volinx,uint32_t(id),(LPCSTR)path);
 }
 
 
 void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString partial_name )
 {
+ GetBrowserSession().ClearCurrent();
  StorageAction storageAction;
 	unsigned long parent_link_id = 0;
 	CHFVExplorerApp	*pApp;
@@ -1478,6 +1479,7 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 #pragma optimize("",off)
 void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 {
+ if(list)GetBrowserSession().ClearCurrent();
  StorageAction storageAction;
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -1646,9 +1648,15 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 
 	GetBrowserSession().Tree()->enable_selchange(1);
 	// if(m_hfs_count && m_volumes[0].m_rootitem) {
-	if(showme >= 0) {
-		set_current_hitem( m_volumes[showme].m_rootitem );
-	}
+ if(showme>=0)set_current_hitem(m_volumes[showme].m_rootitem);
+ else{
+  // With Mac floppy discovery disabled, A: can be the first tree root.
+  // Initial selection must not probe an empty removable/CD drive implicitly.
+  HTREEITEM startupRoot=nullptr;
+  for(int i=0;i<m_fat_count;++i)if(m_fats[i].m_type==DRIVE_FIXED){startupRoot=m_fats[i].m_rootitem;break;}
+  if(startupRoot)set_current_hitem(startupRoot);
+ }
+
 	
  GetBrowserSession().MacBrowser().RebuildTree();
 	return(1);

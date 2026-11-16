@@ -339,6 +339,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunVolumeCoordinationTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-volume-coordination"))ExitProcess(RunVolumeCoordinationTest(__argv[2]));
  extern int RunFileOperationsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-file-operations"))ExitProcess(RunFileOperationsTest(__argv[2]));
  extern int RunBrowserSessionTest(const char*);

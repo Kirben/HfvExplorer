@@ -44,6 +44,7 @@ public:
  void BindBrowserSession(BrowserSession* session){m_browserSession=session;}
 
  friend class MainMacBrowser;
+ friend class BrowserSession;
 protected:
 	HFVExplorerTreeView();           // protected constructor used by dynamic creation
 	DECLARE_DYNCREATE(HFVExplorerTreeView)

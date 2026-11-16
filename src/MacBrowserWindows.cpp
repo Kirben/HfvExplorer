@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MacBrowserModel.h"
+#include "VolumeCoordinator.h"
 #include "HfsPlusDisk.h"
 #include "BrowserPresentation.h"
 #include <set>
@@ -79,6 +80,7 @@ std::wstring Temp(const std::wstring &directory) {
 }
 class Windows final : public Volume {
     std::map<uint32_t,std::wstring> paths_;
+    std::string resourceKey_;
     std::map<uint32_t,std::shared_ptr<File>> dataReaders_,resourceReaders_;
     uint32_t next_ = 3;
     uint32_t Id(const std::wstring &p) {
@@ -115,9 +117,11 @@ public:
     explicit Windows(std::wstring root) {
         root=BrowserPresentation::WindowsPath(root);
         while(root.size()>7&&(root.back()==L'\\'||root.back()==L'/'))root.pop_back();
+        resourceKey_=VolumeCoord::HostKey(root);
         paths_[2] = root; Check(Describe(2).directory, "Destination is not a folder");
     }
     Entry DescribeFile(const std::wstring& path){return Describe(Id(BrowserPresentation::WindowsPath(path)));}
+    std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name() const override { return U16(paths_.at(2)); }
     const char *Kind() const override { return "Windows"; }
     bool Writable() const override { return true; }

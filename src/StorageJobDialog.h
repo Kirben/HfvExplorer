@@ -3,6 +3,15 @@
 #include "StorageWorker.h"
 void InitializeStorageUi();
 bool StorageOwnerShouldActivate(bool originallyEnabled,HWND owner,HWND dialog,HWND foreground);
+// Notification refreshes must not activate/disable an unrelated browser or
+// show progress popups. Reads stay on the worker; only paint/timer/notification
+// messages are dispatched while their snapshots are obtained.
+class StorageQuietRefresh {
+public:
+ StorageQuietRefresh();~StorageQuietRefresh();
+ StorageQuietRefresh(const StorageQuietRefresh&)=delete;
+ StorageQuietRefresh& operator=(const StorageQuietRefresh&)=delete;
+};
 class StorageAction {
  bool active_;
 public:

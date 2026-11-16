@@ -36,6 +36,7 @@ struct Delayed:Volume {
  std::shared_ptr<Volume> inner;DWORD ui=GetCurrentThreadId();unsigned delay=0;bool failRead=false,wrongThread=false;uint32_t failRemove=0;CWnd* owner=nullptr;CWnd* other=nullptr;bool onlyOwnerDisabled=false;
  explicit Delayed(std::shared_ptr<Volume> v):inner(std::move(v)){}
  void Thread(){wrongThread|=GetCurrentThreadId()==ui;}
+ std::string ResourceKey()const override{return inner->ResourceKey();}
  std::u16string Name()const override{return inner->Name();}const char* Kind()const override{return inner->Kind();}bool Writable()const override{return inner->Writable();}bool CaseSensitive()const override{return inner->CaseSensitive();}uint64_t FreeBytes()const override{return inner->FreeBytes();}
  Entry Stat(uint32_t id)override{Thread();return inner->Stat(id);}std::vector<Entry> List(uint32_t p)override{Thread();return inner->List(p);}
  void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{Thread();if(delay){onlyOwnerDisabled=owner&&!owner->IsWindowEnabled()&&other&&other->IsWindowEnabled();Sleep(delay);}if(failRead&&n)throw HfsPlus::Error("Injected slow read error");inner->Read(id,f,at,p,n);}

@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $coordination=Join-Path $hfsPlusDirectory 'volume-coordination'
+ $coordinationTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-volume-coordination',('"'+$coordination+'"')) -WindowStyle Hidden -PassThru
+ if(!$coordinationTest.WaitForExit(60000)){$coordinationTest.Kill();throw 'Volume coordination tests timed out.'}
+ Get-Content (Join-Path $coordination 'volume-coordination-report.txt')
+ if($coordinationTest.ExitCode -ne 0){throw "Volume coordination tests failed; retained $coordination"}
  $operations=Join-Path $hfsPlusDirectory 'file-operations'
  $operationTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-file-operations',('"'+$operations+'"')) -WindowStyle Hidden -PassThru
  if(!$operationTest.WaitForExit(60000)){$operationTest.Kill();throw 'Independent file-operation tests timed out.'}

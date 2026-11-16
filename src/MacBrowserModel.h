@@ -32,6 +32,7 @@ using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
 class Volume {
 public:
     virtual ~Volume() = default;
+    virtual std::string ResourceKey()const{return "adapter:"+std::to_string(reinterpret_cast<uintptr_t>(this));}
     virtual std::u16string Name() const = 0;
     virtual const char *Kind() const = 0;
     virtual std::string Description() const { return Kind(); }
@@ -54,7 +55,7 @@ public:
     virtual void Rename(uint32_t id, uint32_t parent, const std::u16string &) = 0;
     virtual void Remove(uint32_t id) = 0;
 };
-std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable);
+std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {});
 std::shared_ptr<Volume> OpenImage(const std::wstring &path); // null = unrecognized
 std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = not HFS+/HFSX
 // Drive roots only; unrecognized/unreadable media falls back, recognized mount errors propagate.

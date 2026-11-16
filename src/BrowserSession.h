@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <memory>
+#include "VolumeCoordinator.h"
 class CHFVExplorerDoc;
 class HFVExplorerTreeView;
 class CHFVExplorerListView;
@@ -9,6 +10,18 @@ class MainMacBrowser;
 // One session per browser document/window. Preferences and the serialized
 // storage worker remain application-wide; navigation and pane bindings do not.
 class BrowserSession {
+ struct Notifications;
+ std::unique_ptr<Notifications> notifications_;
+ VolumeCoord::Subscription subscription_;
+ struct Context {std::string key,path;uint64_t revision=0;int type=0,index=-1;uint32_t folder=2;};
+ struct KnownRoot{int type,index;std::string origin;};
+ std::map<std::string,std::vector<KnownRoot>> roots_;
+ Context current_;
+ std::map<std::string,uint64_t> seen_,dirty_;
+ bool refreshing_=false;
+ void ProcessChanges();
+ void RefreshLegacy(const Context&);
+
     CHFVExplorerDoc* document_;
     std::unique_ptr<MainMacBrowser> browser_;
     HFVExplorerTreeView* tree_=nullptr;
@@ -33,5 +46,12 @@ public:
     CWnd* Owner()const{return owner_;}
     CStatusBar* Status()const{return status_;}
     MainMacBrowser& MacBrowser()const{return *browser_;}
+    void Watch(const std::string&);
+    void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={});
+    bool Refreshing()const{return refreshing_;}
+    void ClearCurrent(){current_=Context{};}
+#ifdef HFV_TESTING
+    unsigned notificationRefreshes=0,notificationErrors=0;
+#endif
     bool finderLayout=false;
 };
