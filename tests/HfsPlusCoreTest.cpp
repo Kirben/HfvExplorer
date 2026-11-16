@@ -60,6 +60,20 @@ void verify(Volume &v, uint32_t id, unsigned fork, uint64_t size) {
     }
     must(v.Read(id, fork, size, actual.data(), 1) == 0, "EOF");
 }
+void stagedRangeValidation() {
+    Memory disk(4096);
+    Disk::View view(disk);
+    Disk::Sector bytes; bytes.fill(0x71);
+    view.Stage(0, bytes.data(), bytes.size());
+    view.Stage(3584, bytes.data(), bytes.size());
+    view.length = 2048; // A replayed header can reduce the final volume range.
+    auto original = disk.bytes;
+    auto writes = disk.writes, flushes = disk.flushes;
+    fails([&] { view.Apply(); }, "Out-of-range staged write accepted");
+    must(disk.bytes == original && disk.writes == writes && disk.flushes == flushes,
+         "Invalid staged range caused partial image writes");
+    puts("PASS: all staged metadata ranges are validated before any image write");
+}
 void basic(bool journaled) {
     Memory disk(32 * 1024 * 1024);
     Volume::Format(disk, u"Test \u00e9", journaled);
@@ -985,6 +999,7 @@ int wmain(int argc, wchar_t **argv) {
             puts("PASS: retained committed journal without applying home blocks");
             return 0;
         }
+        stagedRangeValidation();
         RunHfsPlusCompressionTests();
         RunIncrementalBTreeTests();
         journalResizeTests();
