@@ -327,10 +327,13 @@ static int path2volinx(char *path)
 
 int HFSIFACE_delete( char *volpath, char *path )
 {
-	int volinx, result = 0;
+	int volinx, result = 1;
   hfsvol *vol;
 	char mac_path[_MAX_PATH];
 	
+	if(!volpath||!*volpath||!path||!*path||strlen(path)>=sizeof(mac_path)) {
+		hfs_error="Invalid or oversized HFS deletion path";errno=ENAMETOOLONG;return 1;
+	}
 	HFSIFACE_internal_init();
 	strcpy( mac_path, path );
 	pc_to_mac_charset(mac_path);
@@ -343,7 +346,7 @@ int HFSIFACE_delete( char *volpath, char *path )
 				if (hfs_delete(vol, mac_path) < 0) {
 					hfs_perror(mac_path);
 					result = 1;
-				}
+				} else result = 0;
 				if (hfs_umount(vol) < 0 && result == 0) {
 					hfs_perror("Error closing HFS volume");
 					result = 1;
@@ -438,10 +441,13 @@ int do_delete_directory( hfsvol *vol, char *path )
 
 int HFSIFACE_rmdir( char *volpath, char *path )
 {
-	int volinx, result = 0;
+	int volinx, result = 1;
   hfsvol *vol;
 	char mac_path[_MAX_PATH];
 	
+	if(!volpath||!*volpath||!path||!*path||strlen(path)>=sizeof(mac_path)) {
+		hfs_error="Invalid or oversized HFS deletion path";errno=ENAMETOOLONG;return 1;
+	}
 	HFSIFACE_internal_init();
 	strcpy( mac_path, path );
 	pc_to_mac_charset(mac_path);
@@ -453,7 +459,7 @@ int HFSIFACE_rmdir( char *volpath, char *path )
 			if (vol != 0) {
 				if(do_delete_directory( vol, mac_path ) != 0) {
 					result = 1;
-				}
+				} else result = 0;
 				if (hfs_umount(vol) < 0 && result == 0) {
 					hfs_perror("Error closing HFS volume");
 					result = 1;
@@ -469,11 +475,15 @@ int HFSIFACE_rmdir( char *volpath, char *path )
 
 int HFSIFACE_rename( char *volpath, char *oldname, char *newname )
 {
-	int volinx, result = 0;
+	int volinx, result = 1;
   hfsvol *vol;
 	char mac_oldname[_MAX_PATH];
 	char mac_newname[_MAX_PATH];
 	
+	if(!volpath||!*volpath||!oldname||!*oldname||!newname||!*newname||
+	   strlen(oldname)>=sizeof(mac_oldname)||strlen(newname)>=sizeof(mac_newname)) {
+		hfs_error="Invalid or oversized HFS rename path";errno=ENAMETOOLONG;return 1;
+	}
 	HFSIFACE_internal_init();
 	strcpy( mac_oldname, oldname );
 	strcpy( mac_newname, newname );
@@ -488,7 +498,7 @@ int HFSIFACE_rename( char *volpath, char *oldname, char *newname )
 				if (hfs_rename(vol, mac_oldname, mac_newname) < 0) {
 					hfs_perror(mac_oldname);
 					result = 1;
-				}
+				} else result = 0;
 				if (hfs_umount(vol) < 0 && result == 0) {
 					hfs_perror("Error closing HFS volume");
 					result = 1;
