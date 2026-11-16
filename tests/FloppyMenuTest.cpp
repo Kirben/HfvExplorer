@@ -11,11 +11,20 @@
 #include "FloppyWriter.h"
 #include "FakeFloppy.h"
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#undef ERROR
+#include "hfs/libhfs/internal.h"
 #include "hfs/interface.h"
+#define _FHOOK_INTERNAL_
+#include "Filehook.h"
 }
 #include <stdexcept>
 namespace {
+ftype_write originalWrite;
+bool failUnmountWrite=false,failCleanMarker=false;
+int unmountWrite(int fd,const void* bytes,unsigned count) {
+ if(failUnmountWrite||(failCleanMarker&&count==512&&((const unsigned char*)bytes)[0]==0x42&&((const unsigned char*)bytes)[1]==0x44&&(((const unsigned char*)bytes)[10]&1))){failUnmountWrite=false;failCleanMarker=false;errno=EIO;hfs_error=const_cast<char*>("Injected unmount write failure");return -1;}
+ return originalWrite(fd,bytes,count);
+}
 void require(bool value,const char* text){if(!value)throw std::runtime_error(text);}
 class NewVolumeDialogTest : public CAskNewVolume {
  UINT DriveKind(int drive) override{return drive==0||drive==25?DRIVE_REMOVABLE:drive==2?DRIVE_FIXED:DRIVE_NO_ROOT_DIR;}
@@ -58,6 +67,21 @@ int RunFloppyMenuTest(const char* directory){
   require(HFSIFACE_format(const_cast<char*>(fresh.c_str()),label,1474560,TRUE)==0,"valid new classic HFS image format");
   HFSIFACE_silencer(oldSilent);
   fprintf(report,"PASS: new classic HFS formatting validates names/sizes before creation and preserves existing files.\n");
+  for(int failure : {0,1,2,3}) {
+   std::string path=root+"\\unmount"+std::to_string(failure)+".dsk";
+   {CFile f;require(f.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create unmount fixture");f.SetLength(4*1024*1024);f.Close();}
+   require(hfs_format(const_cast<char*>(path.c_str()),0,label)==0,"format unmount fixture");
+   hfsvol* volume=hfs_mount(const_cast<char*>(path.c_str()),0,O_RDWR);require(volume!=nullptr,"mount unmount fixture");
+   char entry[]="SafeFormat:Pending",type[]="TEXT",creator[]="TEST";
+   require(hfs_create(volume,entry,type,creator)==0,"create pending entry");hfsfile* file=hfs_open(volume,entry);require(file!=nullptr&&hfs_write(file,const_cast<char*>("PENDING"),7)==7,"write open file");
+   if(failure==1)file->parid=0x7ffffff0; // Force a file-catalog close failure.
+   originalWrite=fhook_write;if(failure==2||failure==3){failUnmountWrite=failure==2;failCleanMarker=failure==3;fhook_write=unmountWrite;}
+   int result=hfs_umount(volume);fhook_write=originalWrite;
+   require((result!=0)==(failure!=0),"unmount suppressed a pending metadata/write error");
+   CFile f;require(f.Open(path.c_str(),CFile::modeRead)!=FALSE,"read unmount marker");f.Seek(1024+10,CFile::begin);unsigned char flags[2];require(f.Read(flags,2)==2,"read HFS attributes");f.Close();
+   require(((flags[0]&1)!=0)==(failure==0),"failed unmount published a clean HFS marker");
+  }
+  fprintf(report,"PASS: unmount reports file-close/cache-write failures and keeps failed volumes dirty; normal unmount remains clean.\n");
   FakeFloppy sourceDisk(std::vector<BYTE>(1474560));
   auto sameDrive=Storage::worker().submit(MakeFloppyImageJob(0,"A:\\unsafe.dsk",&sourceDisk));sameDrive->wait();
   require(sameDrive->result().code!=0&&sourceDisk.opens==0,"source drive accepted as image destination");

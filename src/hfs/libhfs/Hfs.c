@@ -330,44 +330,47 @@ void hfs_flushall(void)
  */
 int hfs_umount(hfsvol *vol)
 {
-  int result = 0;
+  int result = 0, saved_errno = 0;
+  char *saved_error = 0;
+  if (v_getvol(&vol) < 0) return -1;
+  if (--vol->refs) return hfs_flush(vol);
 
-  if (v_getvol(&vol) < 0)
-    return -1;
-
-  if (--vol->refs)
-    return v_flush(vol, 0);
-
-  /* close all open files and directories */
-
-  while (vol->files)
-    hfs_close(vol->files);
-
-  while (vol->dirs)
-    hfs_closedir(vol->dirs);
-
-  if (v_flush(vol, 1) < 0 ||
-      b_finish(vol) < 0)
-    result = -1;
-
-  if (close(vol->fd) < 0 && result == 0)
-    {
-      ERROR(errno, "error closing device");
-      result = -1;
+  /* Close failures must not be hidden by a later successful cache flush. */
+  while (vol->files) {
+    if (hfs_close(vol->files) < 0 && result == 0) {
+      result = -1; saved_errno = errno; saved_error = hfs_error;
     }
+  }
+  while (vol->dirs) hfs_closedir(vol->dirs);
 
-  if (vol->prev)
-    vol->prev->next = vol->next;
-  if (vol->next)
-    vol->next->prev = vol->prev;
-
-  if (vol == hfs_mounts)
-    hfs_mounts = vol->next;
-  if (vol == hfs_curvol)
-    hfs_curvol = 0;
-
+  /* Flush dirty metadata/data before publishing the clean-unmount marker. */
+  if ((v_flush(vol, 0) < 0 || b_flush(vol) < 0) && result == 0) {
+    result = -1; saved_errno = errno; saved_error = hfs_error;
+  }
+  if (result == 0 && v_flush(vol, 1) < 0) {
+    result = -1; saved_errno = errno; saved_error = hfs_error;
+  }
+  if (result == 0 && b_flush(vol) < 0) {
+    result = -1; saved_errno = errno; saved_error = hfs_error;
+  }
+  if (result != 0 && !(vol->flags & HFS_READONLY)) {
+    vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
+    vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB;
+    (void)v_flush(vol, 0); /* Best effort: retain a dirty marker on failure. */
+  }
+  /* Always release the block cache, even after a metadata flush error. */
+  if (b_finish(vol) < 0 && result == 0) {
+    result = -1; saved_errno = errno; saved_error = hfs_error;
+  }
+  if (close(vol->fd) < 0 && result == 0) {
+    result = -1; saved_errno = errno; saved_error = "error closing device";
+  }
+  if (vol->prev) vol->prev->next = vol->next;
+  if (vol->next) vol->next->prev = vol->prev;
+  if (vol == hfs_mounts) hfs_mounts = vol->next;
+  if (vol == hfs_curvol) hfs_curvol = 0;
   v_destruct(vol);
-
+  if (result) { errno = saved_errno; hfs_error = saved_error; }
   return result;
 }
 
