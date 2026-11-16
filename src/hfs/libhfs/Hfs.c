@@ -299,6 +299,8 @@ int hfs_flush(hfsvol *vol)
   if (v_getvol(&vol) < 0)
     return -1;
 
+  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled after rollback failure");return -1;}
+
   for (file = vol->files; file; file = file->next)
     {
       if (f_flush(file) < 0)
@@ -333,6 +335,9 @@ int hfs_umount(hfsvol *vol)
   int result = 0, saved_errno = 0;
   char *saved_error = 0;
   if (v_getvol(&vol) < 0) return -1;
+  if(vol->flags&HFS_WRITE_FAILED) {
+    result=-1;saved_errno=EIO;saved_error="Classic HFS rollback failed; volume was not cleanly closed";
+  }
   if (--vol->refs) return hfs_flush(vol);
 
   /* Close failures must not be hidden by a later successful cache flush. */
@@ -1741,7 +1746,7 @@ int hfs_create(hfsvol *vol, char *path, char *type, char *creator)
  * NAME:	hfs->delete()
  * DESCRIPTION:	remove both forks of a file
  */
-int hfs_delete(hfsvol *vol, char *path)
+static int hfs_delete_impl(hfsvol *vol, char *path)
 {
   hfsfile file;
   CatKeyRec key;
@@ -1828,7 +1833,7 @@ int hfs_delete(hfsvol *vol, char *path)
  * NAME:	hfs->rename()
  * DESCRIPTION:	change the name of and/or move a file or directory
  */
-int hfs_rename(hfsvol *vol, char *srcpath, char *dstpath)
+static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 {
   hfsvol *srcvol;
   CatDataRec src, dst;
@@ -2026,4 +2031,23 @@ int hfs_rename(hfsvol *vol, char *srcpath, char *dstpath)
     }
 
   return 0;
+}
+
+/* Bind undo to the resolved source volume, including absolute HFS paths. */
+static int mutation_source(hfsvol **vol,char *path) {
+ CatDataRec data;int found;
+ if(v_getvol(vol)<0)return -1;
+ found=v_resolve(vol,path,&data,0,0,0);
+ if(found==0)ERROR(ENOENT,"HFS entry not found");
+ return found>0?0:-1;
+}
+int hfs_delete(hfsvol *vol,char *path) {
+ int result;
+ if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ result=hfs_delete_impl(vol,path);return b_end_mutation(vol,result);
+}
+int hfs_rename(hfsvol *vol,char *source,char *destination) {
+ int result;
+ if(mutation_source(&vol,source)<0||b_begin_mutation(vol)<0)return -1;
+ result=hfs_rename_impl(vol,source,destination);return b_end_mutation(vol,result);
 }

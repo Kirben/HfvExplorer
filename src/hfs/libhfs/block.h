@@ -26,3 +26,6 @@ int b_writelb(hfsvol *, unsigned long, block *);
 
 int b_readab(hfsvol *, unsigned int, unsigned int, block *);
 int b_writeab(hfsvol *, unsigned int, unsigned int, block *);
+
+int b_begin_mutation(hfsvol *);
+int b_end_mutation(hfsvol *, int);

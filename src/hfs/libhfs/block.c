@@ -206,6 +206,88 @@ int getblock(hfsvol *vol, unsigned long bnum, block *bp)
   return 0;
 }
 
+/* Runtime undo for serialized classic-HFS metadata operations. This is not
+ * a persistent journal: it handles reported errors, not process/power loss. */
+#define UNDO_BUCKETS 2048
+#define UNDO_MAX_BLOCKS 65536
+struct undo_block { unsigned long sector; unsigned next; block before; };
+struct mutation {
+ hfsvol *volume;
+ hfsvol saved;
+ block *bitmap;
+ char *extmap,*catmap;
+ bcache *cache;
+ struct undo_block *blocks;
+ unsigned used,capacity,buckets[UNDO_BUCKETS];
+};
+static struct mutation *active_mutation;
+static int putblock(hfsvol *, unsigned long, block *);
+static void free_mutation(struct mutation *m) {
+ FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->blocks);FREE(m);
+}
+static void *save_memory(const void *p,size_t size) {
+ void *copy;if(!p||!size)return 0;
+ copy=malloc(size);if(copy)memcpy(copy,p,size);return copy;
+}
+int b_begin_mutation(hfsvol *vol) {
+ struct mutation *m;size_t bitmap_size;
+ if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes disabled after rollback failure");return -1;}
+ if(vol->flags&HFS_READONLY){ERROR(EROFS,"Volume is read-only");return -1;}
+ if(active_mutation){ERROR(EBUSY,"Nested classic HFS mutation");return -1;}
+ if(hfs_flush(vol)<0){vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;return -1;}
+ m=(struct mutation*)calloc(1,sizeof(*m));
+ if(!m){ERROR(ENOMEM,"Cannot allocate HFS undo state");return -1;}
+ m->volume=vol;m->saved=*vol;
+ bitmap_size=SIZE(block,(vol->mdb.drNmAlBlks+4095)/4096);
+ m->bitmap=(block*)save_memory(vol->vbm,bitmap_size);
+ m->extmap=(char*)save_memory(vol->ext.map,vol->ext.mapsz);
+ m->catmap=(char*)save_memory(vol->cat.map,vol->cat.mapsz);
+ m->cache=(bcache*)save_memory(vol->cache,sizeof(bcache));
+ if((vol->vbm&&!m->bitmap)||(vol->ext.map&&!m->extmap)||(vol->cat.map&&!m->catmap)||(vol->cache&&!m->cache)) {
+  free_mutation(m);ERROR(ENOMEM,"Cannot snapshot HFS metadata");return -1;
+ }
+ active_mutation=m;return 0;
+}
+static int remember_block(hfsvol *vol,unsigned long sector) {
+ struct mutation *m=active_mutation;unsigned bucket,index;
+ if(!m||m->volume!=vol)return 0;
+ bucket=(sector^(sector>>11))&(UNDO_BUCKETS-1);
+ for(index=m->buckets[bucket];index;index=m->blocks[index-1].next)
+  if(m->blocks[index-1].sector==sector)return 0;
+ if(m->used==UNDO_MAX_BLOCKS){ERROR(ENOMEM,"HFS metadata undo limit exceeded");return -1;}
+ if(m->used==m->capacity) {
+  unsigned capacity=m->capacity?m->capacity*2:128;
+  struct undo_block *blocks=(struct undo_block*)realloc(m->blocks,SIZE(struct undo_block,capacity));
+  if(!blocks){ERROR(ENOMEM,"Cannot grow HFS undo records");return -1;}
+  m->blocks=blocks;m->capacity=capacity;
+ }
+ if(getblock(vol,sector,&m->blocks[m->used].before)<0)return -1;
+ m->blocks[m->used].sector=sector;m->blocks[m->used].next=m->buckets[bucket];
+ m->buckets[bucket]=++m->used;return 0;
+}
+int b_end_mutation(hfsvol *vol,int result) {
+ struct mutation *m=active_mutation;unsigned i;int rollback=0,saved_errno;char *saved_error;block verify;
+ if(!m||m->volume!=vol){ERROR(EIO,"Missing HFS undo state");return -1;}
+ if(result==0&&hfs_flush(vol)<0)result=-1;
+ saved_errno=errno;saved_error=hfs_error;active_mutation=0;
+ if(result<0) {
+  for(i=m->used;i>0;--i) {
+   struct undo_block *b=&m->blocks[i-1];
+   if(putblock(vol,b->sector,&b->before)<0||getblock(vol,b->sector,&verify)<0||memcmp(verify,b->before,HFS_BLOCKSZ))rollback=-1;
+  }
+  /* Restore deep-owned maps as well as the B-tree headers, bitmap and cache.
+     The copied cache links still refer to this same original cache allocation. */
+  FREE(vol->ext.map);FREE(vol->cat.map);
+  *vol=m->saved;vol->ext.map=m->extmap;vol->cat.map=m->catmap;m->extmap=m->catmap=0;
+  if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,(vol->mdb.drNmAlBlks+4095)/4096));
+  if(m->cache)memcpy(vol->cache,m->cache,sizeof(bcache));
+  if(rollback)vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
+ }
+ free_mutation(m);
+ if(rollback){ERROR(EIO,"Classic HFS rollback failed; writes disabled; close and repair the image");return -1;}
+ errno=saved_errno;hfs_error=saved_error;return result;
+}
+
 /*
  * NAME:	putblock()
  * DESCRIPTION:	write a block to the physical device
@@ -214,6 +296,8 @@ static
 int putblock(hfsvol *vol, unsigned long bnum, block *bp)
 {
   int bytes;
+  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled");return -1;}
+  if(remember_block(vol,bnum)<0)return -1;
 
 # ifdef DEBUG
   printf("WRITE: vol 0x%x block %lu\n", (unsigned int) vol, bnum);
@@ -442,6 +526,7 @@ int b_readlb(hfsvol *vol, unsigned long bnum, block *bp)
 {
   int found;
   bucket *b;
+  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Reopen/repair HFS after rollback failure");return -1;}
 
   if (vol->cache == 0)
     return getblock(vol, bnum, bp);
@@ -466,6 +551,7 @@ int b_readlb(hfsvol *vol, unsigned long bnum, block *bp)
 int b_writelb(hfsvol *vol, unsigned long bnum, block *bp)
 {
   bucket *b;
+  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled");return -1;}
 
   if (vol->cache == 0)
     return putblock(vol, bnum, bp);
