@@ -166,6 +166,22 @@ int RunCopyProgressTest(const char* directory) {
   check(replaced.first->result().code==0 && replaced.second==1 && replaced.first->progress().files==2 &&
    replaced.first->progress().processed==replaced.first->progress().totalBytes,"replace-all handles one conflict and completes the folder total");
   check(load(root+"\\Folder\\Nested\\Game.bin")==macbinary && load(root+"\\Folder\\Unrelated")==std::vector<BYTE>({'K','E','E','P'}),"overwrite replaces selected file and preserves unrelated files");
+  // A failed replacement must preserve the previous file and the moved source.
+  CString safePath=root+"\\preserved.bin";
+  for(int fault : {1,2,3}) {
+   {CFile f;check(f.Open(safePath,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create previous output");f.Write("ORIGINAL",8);f.Close();}
+   copyout_test_fault(fault);
+   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)safePath,0,1,'a'));
+   while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}
+   copyout_test_fault(0);
+   check(job->result().code!=0&&load(safePath)==std::vector<BYTE>({'O','R','I','G','I','N','A','L'}),"failed write/flush/publish preserves previous Windows output");
+   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen source after failed move");
+   hfsdirent preserved;check(hfs_stat(volume,binary,&preserved)==0&&preserved.u.file.dsize==data.size()&&preserved.u.file.rsize==resource.size(),"failed move retains HFS source and both forks");
+   check(hfs_umount(volume)==0,"close preserved source");
+  }
+  WIN32_FIND_DATAA leftover;HANDLE search=FindFirstFileA((root+"\\HFV*.tmp"),&leftover);
+  check(search==INVALID_HANDLE_VALUE,"failed exports remove only their staged temporary files");
+  fprintf(out,"PASS: failed Windows replacements preserve previous output and move source on write, flush and publication failures.\n");
   auto failed=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Missing",(LPCSTR)root,(LPCSTR)root,0,0,'a'));
   failed->wait();check(failed->result().code!=0,"source scan errors reach completion");
   auto hostFailure=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)(root+"\\DoesNotExist"),(LPCSTR)root,(LPCSTR)(root+"\\NoOutput"),0,0,'a'));
