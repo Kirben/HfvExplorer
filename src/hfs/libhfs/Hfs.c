@@ -1376,7 +1376,7 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
  * NAME:	hfs->truncate()
  * DESCRIPTION:	truncate an open file
  */
-int hfs_truncate(hfsfile *file, unsigned long len)
+static int hfs_truncate_impl(hfsfile *file, unsigned long len)
 {
   if (len > HFS_MAX_FORK_SIZE) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
   unsigned long *lglen;
@@ -2079,4 +2079,18 @@ int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
  int result;
  if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
  result=hfs_setattr_impl(vol,path,entry);return b_end_mutation(vol,result);
+}
+
+int hfs_truncate(hfsfile *file,unsigned long length) {
+ unsigned long *logical;int result;hfsvol *vol;
+ /* Preserve the public range check before touching a caller-supplied file. */
+ if(length>HFS_MAX_FORK_SIZE){ERROR(EFBIG,"classic HFS fork exceeds Apple limit");return -1;}
+ f_getptrs(file,&logical,0,0);
+ if(*logical<=length)return 0;
+ vol=file->vol;
+ if(b_begin_mutation(vol)<0)return -1;
+ result=hfs_truncate_impl(file,length);
+ if(result==0&&f_trunc(file)<0)result=-1;
+ if(result==0&&f_flush(file)<0)result=-1;
+ return b_end_mutation(vol,result);
 }
