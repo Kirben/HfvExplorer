@@ -6,6 +6,8 @@
 #include <vector>
 #include <stdexcept>
 #include <winioctl.h>
+#include "RenameName.h"
+extern int fat_rename(char*,char*);
 extern int DeleteFATDir(CString&);
 extern int DeleteHostSelection(const CString&,bool);
 extern "C" {
@@ -77,6 +79,19 @@ int RunFileMutationTest(const char* directory) {
   save(paired,"KEEP");{CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create protected pair");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
   check(SetFileAttributesA(paired,FILE_ATTRIBUTE_READONLY)!=FALSE,"protect selected data file");
   check(!DeleteHostSelection(paired,false)&&load(sidecar)==appleDouble,"failed data deletion removed its companion");SetFileAttributesA(paired,FILE_ATTRIBUTE_NORMAL);
+  CString renameDirectory=root+"\\Rename",cwdDirectory=root+"\\Decoys";check(CreateDirectoryA(renameDirectory,nullptr)&&CreateDirectoryA(cwdDirectory,nullptr),"create rename fixtures");
+  save(renameDirectory+"\\Before","SELECTED");save(cwdDirectory+"\\Before","DECOY");
+  char cwd[MAX_PATH];check(GetCurrentDirectoryA(sizeof(cwd),cwd)!=0&&SetCurrentDirectoryA(cwdDirectory)!=FALSE,"set decoy working directory");
+  char relativeOld[]="Before",relativeNew[]="After";
+  check(!fat_rename(relativeOld,relativeNew)&&load(cwdDirectory+"\\Before")==std::vector<BYTE>({'D','E','C','O','Y'}),"relative rename touched unrelated working-directory entry");
+  CString oldPath=renameDirectory+"\\Before",newPath=renameDirectory+"\\After";
+  check(fat_rename(oldPath.GetBuffer(),newPath.GetBuffer())!=0,"absolute rename failed");oldPath.ReleaseBuffer();newPath.ReleaseBuffer();
+  check(SetCurrentDirectoryA(cwd)!=FALSE,"restore working directory");
+  check(load(newPath)==std::vector<BYTE>({'S','E','L','E','C','T','E','D'})&&GetFileAttributesA(cwdDirectory+"\\After")==INVALID_FILE_ATTRIBUTES,"rename escaped selected folder");
+  save(oldPath,"OTHER");check(!fat_rename(newPath.GetBuffer(),oldPath.GetBuffer()),"rename overwrote existing destination");newPath.ReleaseBuffer();oldPath.ReleaseBuffer();
+  for(const char* name : {"..","../Other","..\\Other","Other:Stream","Trailing.","Trailing "})check(!HfvValidRenameLeaf(name,false),"Windows rename accepts path/stream syntax");
+  check(!HfvValidRenameLeaf("Parent:Other",true)&&HfvValidRenameLeaf("Valid name",true),"HFS rename leaf validation");
+  fprintf(report,"PASS: Windows renames require absolute paths, preserve CWD decoys/collisions, and reject path or stream names.\n");
   fprintf(report,"PASS: companion deletion requires validated AppleDouble metadata and successful primary deletion; unrelated files are preserved.\n");
   fprintf(report,"PASS: Windows recursive deletion removes junctions without following them, handles dotfiles and stops on errors.\n");
   fprintf(report,"PASS: recursive HFS root deletion is rejected before any child mutation.\n");
