@@ -89,6 +89,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_VIEW_SMALLICONS, OnViewSmallicons)
 	ON_COMMAND(ID_VIEW_OPTIONS, OnViewOptions)
 	ON_WM_ACTIVATEAPP()
+ ON_WM_ACTIVATE()
 	ON_WM_TIMER()
 	ON_WM_QUERYNEWPALETTE()
 	ON_WM_PALETTECHANGED()
@@ -141,7 +142,7 @@ CMainFrame::CMainFrame()
 {
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_main = this;
+ m_timer=0;m_was_zoomed=FALSE;
 	*m_waiting_emulator1 = 0;
 	*m_waiting_emulator2 = 0;
 	m_emulator_window_detected = 0;
@@ -194,12 +195,9 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 	EnableDocking(CBRS_ALIGN_ANY);
 	DockControlBar(&m_wndToolBar);
 
-	pApp->m_pStatusBar = &m_wndStatusBar;
+ // Pane and command ownership belongs to this frame's BrowserSession.
 
-	pApp->m_wndSplitter = &m_wndSplitter;
-	pApp->m_wndSplitter2 = &m_wndSplitter2;
-
-	HFSIFACE_init( GetSafeHwnd() );
+	HFSIFACE_init( 0 ); // Only registered frames become legacy error owners.
 
 	LoadWindowPosition();
 
@@ -264,7 +262,7 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
  auto list=(CHFVExplorerListView*)m_wndSplitter.GetPane(0,PANE_LIST);
  m_browserSession=&static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc)->GetBrowserSession();
  m_browserSession->Attach(this,tree,list,nullptr,&m_wndStatusBar);
- pApp->m_doc=static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc);pApp->m_tree=tree;pApp->m_list=list; // Single-frame compatibility for launchers/timers.
+
  tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();
 
 	m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
@@ -319,7 +317,7 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
  auto preview=(CHFVPreviewView*)m_wndSplitter2.GetPane(1,0);
  m_browserSession=&static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc)->GetBrowserSession();
  m_browserSession->Attach(this,tree,list,preview,&m_wndStatusBar);
- pApp->m_doc=static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc);pApp->m_tree=tree;pApp->m_list=list;pApp->m_pre=preview; // Legacy single-frame services only.
+
  tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();preview->Initialize();
 
 	m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
@@ -505,11 +503,22 @@ void CMainFrame::OnViewOptions()
 	OnProgramProperties();
 }
 
+void CMainFrame::OnActivate(UINT state,CWnd* other,BOOL minimized){
+ CFrameWnd::OnActivate(state,other,minimized);
+ if(state!=WA_INACTIVE)static_cast<CHFVExplorerApp*>(AfxGetApp())->ActivateBrowser(this);
+}
+BOOL CMainFrame::OnCmdMsg(UINT id,int code,void* extra,AFX_CMDHANDLERINFO* info){
+ // Commands and update-UI queries may target an inactive frame explicitly.
+ // The view/document chain remains the frame's own; old app-only commands
+ // receive the same owner, including during accelerator dispatch.
+ if(code==CN_COMMAND&&!info)static_cast<CHFVExplorerApp*>(AfxGetApp())->ActivateBrowser(this);
+ return CFrameWnd::OnCmdMsg(id,code,extra,info);
+}
 void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 {
 	CFrameWnd::OnActivateApp(bActive, hTask);
 	
-	if(bActive) {
+	if(bActive && m_browserSession && GetBrowserSession().Document() && !StorageUi::busy() && !StorageUi::state().sessionOpen) {
 		// check HFV files for changes
 		CHFVExplorerApp	*pApp;
 		pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -744,6 +753,7 @@ BOOL CMainFrame::DestroyWindow()
 	m_timer = 0;
 	m_volcheck_enabled = FALSE;
 	
+ static_cast<CHFVExplorerApp*>(AfxGetApp())->ForgetBrowser(this);
 	return CFrameWnd::DestroyWindow();
 }
 
@@ -752,13 +762,13 @@ void CMainFrame::OnPaletteChanged(CWnd* pFocusWnd)
 	CFrameWnd::OnPaletteChanged(pFocusWnd);
 	
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	GetBrowserSession().List()->_OnPaletteChanged(pFocusWnd);
+	if(m_browserSession&&GetBrowserSession().List())GetBrowserSession().List()->_OnPaletteChanged(pFocusWnd);
 }
 
 BOOL CMainFrame::OnQueryNewPalette() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	return(GetBrowserSession().List()->_OnQueryNewPalette());
+	return m_browserSession&&GetBrowserSession().List()?GetBrowserSession().List()->_OnQueryNewPalette():FALSE;
 	// return CFrameWnd::OnQueryNewPalette();
 }
 
@@ -805,6 +815,7 @@ void CMainFrame::OnChildRegistration(WPARAM wParam, LPARAM lParam)
 
 LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) 
 {
+ if((message==WM_COMMAND||message==WM_CLOSE)&&(StorageUi::busy()||StorageUi::state().sessionOpen))return 0;
  if(message==WM_COMMAND&&!StorageUi::busy()){
   StorageAction storageAction;
   return CFrameWnd::WindowProc(message,wParam,lParam);
@@ -1215,6 +1226,11 @@ void CMainFrame::SaveWindowPosition(void)
 	}
 }
 
+void CMainFrame::ActivateFrame(int show){
+ if(m_restoreMaximized && show!=SW_HIDE && show!=SW_SHOWMINIMIZED && show!=SW_MINIMIZE && show!=SW_SHOWMINNOACTIVE)show=SW_SHOWMAXIMIZED;
+ m_restoreMaximized=false;
+ CFrameWnd::ActivateFrame(show);
+}
 void CMainFrame::LoadWindowPosition(void)
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -1225,12 +1241,9 @@ void CMainFrame::LoadWindowPosition(void)
 	int cy = pApp->GetProfileInt("WindowPosition","cy",500);
 	int zoomed = pApp->GetProfileInt("WindowPosition","Maximized",0);
 
-	if(zoomed) {
-		SetWindowPos( NULL, x, y, cx, cy, SWP_NOZORDER );
-		ShowWindow( SW_SHOWMAXIMIZED );
-	}	else {
-		SetWindowPos( NULL, x, y, cx, cy, SWP_NOZORDER );
-	}
+ m_restoreMaximized=zoomed!=0;
+ // Position now, show only after document initialization/registration.
+ SetWindowPos(NULL,x,y,cx,cy,SWP_NOZORDER|SWP_NOACTIVATE);
 }
 
 void CMainFrame::OnEditCopy() 
@@ -1288,7 +1301,12 @@ void CMainFrame::OnClose()
 		if(answer == IDNO) do_close = FALSE;
 	}
 	
-	if(do_close) CFrameWnd::OnClose();
+ if(do_close){
+  // CFrameWnd::OnClose shuts down every document when this is m_pMainWnd.
+  // Each browser is a separate document: close only this one instead.
+  auto document=GetBrowserSession().Document();
+  if(document&&document->CanCloseFrame(this))document->OnCloseDocument();
+ }
 }
 
 void CMainFrame::OnFileEject() 

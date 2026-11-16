@@ -305,6 +305,8 @@ void HFSIFACE_internal_init( void )
   // curvol = -1; //static in hcwd, initialized already.
 }
 
+void HFSIFACE_set_error_window( HWND hwnd ) { error_hwnd = hwnd; }
+
 void HFSIFACE_init( HWND hwnd )
 {
 	// _fmode = _O_BINARY;

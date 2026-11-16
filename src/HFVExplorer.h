@@ -22,6 +22,7 @@
 	#error include 'stdafx.h' before including this file for PCH
 #endif
 
+#include <vector>
 #include "resource.h"       // main symbols
 #include "HFVExplorerListView.h"
 #include "HFVExplorerTreeView.h"
@@ -40,6 +41,17 @@ public:
 	CHFVExplorerApp();
 	~CHFVExplorerApp();
 
+ CDocTemplate* m_browserTemplate=nullptr;
+ std::vector<CMainFrame*> m_browsers;
+ void InstallBrowserTemplate(CRuntimeClass* doc=nullptr,CRuntimeClass* frame=nullptr);
+ CMainFrame* CreateBrowser(BOOL visible=TRUE);
+ void RegisterBrowser(CMainFrame*);
+ void ActivateBrowser(CMainFrame*);
+ void ForgetBrowser(CMainFrame*);
+ CDocument* OpenDocumentFile(LPCTSTR path) override;
+ afx_msg void OnNewBrowser();
+ afx_msg void OnUpdateNewBrowser(CCmdUI*);
+ afx_msg void OnExitBrowsers();
 	void LoadSettings(void);
 	void SaveSettings(void);
 	void CheckDefaultSettings(void);

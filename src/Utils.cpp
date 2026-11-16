@@ -1184,7 +1184,7 @@ HCURSOR _start_time_consuming(int update)
 	if(update) {
 		CHFVExplorerApp	*pApp;
 		pApp = (CHFVExplorerApp *)AfxGetApp();
-		pApp->m_list->UpdateWindow();
+		if(pApp->m_list && IsWindow(pApp->m_list->GetSafeHwnd()))pApp->m_list->UpdateWindow();
 	}
 	return(cu);
 }

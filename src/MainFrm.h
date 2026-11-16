@@ -43,6 +43,7 @@ class BrowserSession;
 class CMainFrame : public CFrameWnd
 {
  BrowserSession* m_browserSession=nullptr;
+ bool m_restoreMaximized=false;
 protected: // create from serialization only
 	CSplitterWnd m_wndSplitter;
 	CSplitterWnd m_wndSplitter2;
@@ -64,6 +65,7 @@ public:
 	//{{AFX_VIRTUAL(CMainFrame)
 	public:
 	virtual BOOL PreCreateWindow(CREATESTRUCT& cs);
+ void ActivateFrame(int show=-1) override;
 	virtual BOOL DestroyWindow();
 	protected:
 	virtual BOOL OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext);
@@ -93,6 +95,8 @@ public:
 	void OnCdEjectEjectReload( int reload );
  MediaControlTarget SelectedMediaControlTarget() const;
  BOOL OnCommand(WPARAM,LPARAM) override;
+ BOOL OnCmdMsg(UINT,int,void*,AFX_CMDHANDLERINFO*) override;
+ afx_msg void OnActivate(UINT,CWnd*,BOOL);
  afx_msg void OnUpdateMacTransfer(CCmdUI*);
  afx_msg void OnUpdateMacEdit(CCmdUI*);
 
