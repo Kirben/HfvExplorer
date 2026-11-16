@@ -52,6 +52,37 @@ void mac_to_pc_charset( unsigned char *s );
 
 extern int crlf_translation;
 
+#ifdef WIN32
+/* Stage output next to its destination. Never truncate the previous copy. */
+static char copyout_temporary[_MAX_PATH], copyout_destination[_MAX_PATH];
+static int copyout_replace;
+#ifdef HFV_TESTING
+static int copyout_fault;
+void copyout_test_fault(int stage) { copyout_fault=stage; }
+#else
+#define copyout_fault 0
+#endif
+static int stage_output(const char* path, int replace) {
+ char folder[_MAX_PATH],*leaf;DWORD length;
+ HANDLE handle;int fd;
+ length=GetFullPathNameA(path,sizeof(copyout_destination),copyout_destination,&leaf);
+ if(!length||length>=sizeof(copyout_destination)||!leaf)return -1;
+ strcpy(folder,copyout_destination);folder[leaf-copyout_destination]=0;
+ if(!GetTempFileNameA(folder,"HFV",0,copyout_temporary))return -1;
+ handle=CreateFileA(copyout_temporary,GENERIC_WRITE,0,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
+ if(handle==INVALID_HANDLE_VALUE){DeleteFileA(copyout_temporary);*copyout_temporary=0;return -1;}
+ fd=_open_osfhandle((intptr_t)handle,O_BINARY|O_WRONLY);
+ if(fd<0){CloseHandle(handle);DeleteFileA(copyout_temporary);*copyout_temporary=0;return -1;}
+ copyout_replace=replace;
+ return fd;
+}
+static int checked_output_write(int fd,const void* data,unsigned count) {
+ if(copyout_fault==1){return -1;}
+ return _write(fd,data,count);
+}
+#define write checked_output_write
+#endif
+
 static int copyout_opened=0;
 int copyout_destination_opened(void){return copyout_opened;}
 static int copyout_skipped=0;
@@ -604,18 +635,17 @@ int opendst(char *dstname, char *hint)
 
 #ifdef WIN32
   {
-   int decision=1,exclusive=0;char absolute[_MAX_PATH];
-   if(copyout_overwrite) {
-    DWORD attributes=GetFileAttributesA(dstname),error=GetLastError();
-    if(attributes!=INVALID_FILE_ATTRIBUTES) {
-     DWORD length=GetFullPathNameA(dstname,sizeof(absolute),absolute,0);
-     if(!length || length>=sizeof(absolute))strcpy(absolute,dstname);
-     decision=copyout_overwrite(absolute,copyout_overwrite_context);
-    } else if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND)decision=-1;else exclusive=1;
+   int decision=1;DWORD attributes=GetFileAttributesA(dstname),error=GetLastError();
+   int existing=attributes!=INVALID_FILE_ATTRIBUTES;char absolute[_MAX_PATH];
+   if(!existing&&error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)decision=-1;
+   else if(existing&&copyout_overwrite) {
+    DWORD length=GetFullPathNameA(dstname,sizeof(absolute),absolute,0);
+    if(!length||length>=sizeof(absolute)){decision=-1;}
+    else decision=copyout_overwrite(absolute,copyout_overwrite_context);
    }
    if(decision==2)fd=-2;
    else if(decision<=0){cpo_error=decision==0?"Copy cancelled":"Could not check the destination";fd=-1;}
-   else fd = open(dstname, O_BINARY | O_WRONLY | O_CREAT | (exclusive?O_EXCL:O_TRUNC), 0666);
+   else fd=stage_output(dstname,existing);
   }
 #elif __EMX__
   if (strcmp(dstname, "-") == 0) {
@@ -662,7 +692,9 @@ int opendst(char *dstname, char *hint)
 #endif
     }
 
+#ifndef WIN32
   if(fd>=0)copyout_opened=1;
+#endif /* Windows staged output owns its cleanup; callers must not delete the destination. */
   return fd;
 }
 
@@ -698,6 +730,11 @@ int openfiles(hfsvol *vol, char *srcname, char *dstname, char *ext,
 static
 void closefiles(hfsfile *ifile, int ofile, int *result)
 {
+#ifdef WIN32
+  if(*result==0&&(copyout_fault==2||_commit(ofile)<0)) {
+   cpo_error="Error flushing completed output";*result=-1;
+  }
+#endif
   if (close(ofile) < 0 && *result == 0)
     {
       cpo_error = "error closing destination file";
@@ -709,6 +746,13 @@ void closefiles(hfsfile *ifile, int ofile, int *result)
       cpo_error = hfs_error;
       *result = -1;
     }
+#ifdef WIN32
+  if(*result==0&&(copyout_fault==3||!MoveFileExA(copyout_temporary,copyout_destination,
+       MOVEFILE_WRITE_THROUGH|(copyout_replace?MOVEFILE_REPLACE_EXISTING:0)))) {
+   cpo_error="Could not publish completed output; previous destination retained";*result=-1;
+  }
+  if(*copyout_temporary){DeleteFileA(copyout_temporary);*copyout_temporary=0;}
+#endif
   if(*result==0 && copyout_observer)copyout_observer(copyout_source,0,copyout_expected,1,copyout_context);
 }
 

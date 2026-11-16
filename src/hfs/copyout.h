@@ -37,3 +37,8 @@ typedef int (*copyout_overwrite_fn)(const char*,void*);
 void copyout_set_overwrite(copyout_overwrite_fn,void*);
 int copyout_was_skipped(void);
 int copyout_destination_opened(void);
+
+#ifdef HFV_TESTING
+/* Failure injection for host-output preservation tests: write, flush, publish. */
+void copyout_test_fault(int stage);
+#endif
