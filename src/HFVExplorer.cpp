@@ -339,6 +339,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunMainMacBrowserTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-main-mac-browser")==0)ExitProcess(RunMainMacBrowserTest(__argv[2]));
  extern int RunFileMutationTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-file-mutations")==0)ExitProcess(RunFileMutationTest(__argv[2]));
  extern int RunHfsPlusCdTest(const char*);

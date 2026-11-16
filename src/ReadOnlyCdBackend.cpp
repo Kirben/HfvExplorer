@@ -66,6 +66,11 @@ int hookedClose(int fd) {
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _close(fd); }
     if(!d->direct){if(d->floppy)floppy_final(d->drive);else cd_final(d->drive);} d->open=false; return 0;
 }
+int hookedIdentity(int fd,const char* path) {
+    auto d=descriptor(fd);if(!d)return virtualFd(fd)?0:-1;
+    // A drive letter is not a media identity; force a fresh removable-media probe.
+    (void)path;return 0;
+}
 int hookedSync(int fd) {
     Descriptor* d=descriptor(fd);
     if(!d){if(virtualFd(fd)){errno=EBADF;return -1;}return _commit(fd);}
@@ -108,6 +113,7 @@ extern "C" {
 void readonly_cd_backend_init(void) {
     fhook_init_fake_funcs(hookedStat,hookedOpen,hookedClose,hookedRead,hookedWrite,hookedSeek);
     fhook_init_sync(hookedSync);
+    fhook_init_identity(hookedIdentity);
     fhook_set_fake_funcs();
 }
 void readonly_cd_backend_final(void) {

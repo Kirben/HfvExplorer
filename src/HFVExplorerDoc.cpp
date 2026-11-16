@@ -22,6 +22,7 @@
 
 //#include "afx.h"
 #include "stdafx.h"
+#include "MainMacBrowser.h"
 #include "RefreshStorage.h"
 #include "StorageJobDialog.h"
 #include "HostFileSizes.h"
@@ -36,7 +37,6 @@
 #include "hfs\interface.h"
 #include "AskNewVolume.h"
 #include "MainFrm.h"
-#include "MfsBrowser.h"
 #include "HfsPlusBrowser.h"
 #include "floppy.h"
 #include "adouble.h"
@@ -2022,7 +2022,7 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 		}
 	}
 	// After the read-only Mac browser closes, keep the Windows side of hybrids available.
-	if(list && TryOpenHfsPlusCdBrowser(path, AfxGetMainWnd()) < 0) return;
+	if(list && MainMacBrowser::Get().OpenCd(path) != 0) return;
 	fat_walk( volinx, path, list );
 	dbdb("open_fat_directory END");
 }
@@ -2080,10 +2080,8 @@ CString CHFVExplorerDoc::hfs_find_match(
 
 BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName) 
 {
-	int hplus=TryOpenHfsPlusBrowser(lpszPathName,AfxGetMainWnd());
-	if(hplus) return hplus>0;
-	int mfs=TryOpenMfsBrowser(lpszPathName,AfxGetMainWnd());
-	if(mfs) return mfs>0;
+	int native=MainMacBrowser::Get().OpenImage(lpszPathName);
+ if(native)return native>0;
  StorageAction storageAction;
 
 	int i;
@@ -2101,6 +2099,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 	if(lpszPathName && *lpszPathName ) {
 		param_is_volume = is_extension( (char *)lpszPathName, ".HF*" );
 		param_is_volume |= is_extension( (char *)lpszPathName, ".DSK" );
+        param_is_volume |= is_extension((char *)lpszPathName,".IMG") || is_extension((char *)lpszPathName,".HFS") || is_extension((char *)lpszPathName,".ISO");
 	}
 
 	if(param_is_volume) {
@@ -2173,6 +2172,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		set_current_hitem( m_volumes[showme].m_rootitem );
 	}
 	
+ MainMacBrowser::Get().RebuildTree();
 	return(1);
 }
 
@@ -2307,6 +2307,7 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 
 void CHFVExplorerDoc::OnCleanDocument()
 {
+ MainMacBrowser::Get().DetachTree();
 	CHFVExplorerApp	*pApp;
 	int i;
 
@@ -2331,6 +2332,7 @@ void CHFVExplorerDoc::OnCloseDocument()
 		pApp->m_tree->tree_delete_images();
 	}
 	OnCleanDocument();
+ MainMacBrowser::Get().Clear();
 	CDocument::OnCloseDocument();
 }
 
@@ -2398,6 +2400,7 @@ void CHFVExplorerDoc::CheckNewFloppy( int index )
 
 void CHFVExplorerDoc::OnViewRefresh() 
 {
+ if(MainMacBrowser::Get().Refresh())return;
 	CheckNewMedia( TRUE, TRUE, TRUE);
 
 	/*

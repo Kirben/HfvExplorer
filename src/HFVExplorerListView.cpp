@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "MainMacBrowser.h"
 #include "RenameName.h"
 #include "DeviceWait.h"
 #include "CopyProgress.h"
@@ -553,7 +554,7 @@ int CHFVExplorerListView::list_insert(
 		LPPOINT ppoint,
 		BOOL is_inited,
 		int finder_view_mode,
-		int finder_color
+		int finder_color, int storageType, int *insertedRow
 )
 {
 	LV_ITEM	lvitem;
@@ -607,7 +608,7 @@ int CHFVExplorerListView::list_insert(
 	lvitem.iSubItem = FIELD_NAME;
 	lvitem.pszText = name;
 	lvitem.iImage = image;
-	lvitem.lParam = make_lparam( LIST_HFS, volinx, id, "", isdir, htree,
+	lvitem.lParam = make_lparam( storageType, volinx, id, "", isdir, htree,
 		hicon32 ? hicon32 : hicon16, hicon16 ? hicon16 : hicon32,
 		creation_date, 0, modification_date, 0, finder_color );
 
@@ -621,6 +622,7 @@ int CHFVExplorerListView::list_insert(
 	}
 
 	iActualItem = m_cl->InsertItem(&lvitem);
+    if(insertedRow)*insertedRow=iActualItem;
 
 	if(isdir) {
 		sprintf( buf, "%I64u items", (hfv_size_t)size_in_bytes );
@@ -1044,7 +1046,7 @@ int CHFVExplorerListView::get_path( int inx, CString &doc_name )
 	DWORD_PTR dat;
 
 	dat = m_cl->GetItemData( inx );
-	if(!dat) return(0);
+	if(!dat || get_lparam_type(dat)==LIST_MAC) return(0);
 	doc_name = "";
 	if(get_lparam_type(dat) == LIST_FAT) {
 		char fullpath[MAX_PATH];
@@ -1130,6 +1132,7 @@ int ask_dir( char *new_name )
 	
 BOOL CHFVExplorerListView::new_folder(void)
 {
+ if(MainMacBrowser::Get().NewFolder())return TRUE;
 	CHFVExplorerApp	*pApp;
 	CTreeCtrl *tc;
 	HFVExplorerTreeView *tv;
@@ -1317,6 +1320,7 @@ int CHFVExplorerListView::copy_item_to_dir(
 	int input_volinx
 )
 {
+ int nativeDrop=MainMacBrowser::Get().Drop(item,htree,action);if(nativeDrop>=0)return nativeDrop;
 	CHFVExplorerApp	*pApp;
 	CTreeCtrl *tc;
 	HFVExplorerTreeView *tv;
@@ -1506,6 +1510,8 @@ int CHFVExplorerListView::do_file_to_folder(
 	int source, int dest, int action
 )
 {
+ auto destination=(list_lparam_struct*)m_cl->GetItemData(dest);
+ if(destination&&destination->type==LIST_MAC&&destination->isdir){int result=MainMacBrowser::Get().Drop(source,destination->htree,action);if(result>=0)return result;}
 	DWORD_PTR ds = m_cl->GetItemData( source );
 	DWORD_PTR dd = m_cl->GetItemData( dest );
 	char srcvolpath[_MAX_PATH];
@@ -2982,6 +2988,7 @@ void CHFVExplorerListView::go_up( int control )
 
 void CHFVExplorerListView::activate_list_item( int inx, int control, int make_shortcut ) 
 {
+ if(MainMacBrowser::Get().Activate(inx))return;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	DWORD_PTR dat; unsigned long id = 0;
 	CString name, type, creator, host_program;
@@ -3127,6 +3134,7 @@ void CHFVExplorerListView::OnLButtonDblClk(UINT nFlags, CPoint point)
 #pragma optimize("g",off)
 void CHFVExplorerListView::update_current_view()
 {
+ if(MainMacBrowser::Get().Refresh())return;
 	CHFVExplorerApp	*pApp;
 	CTreeCtrl *tc;
 	HFVExplorerTreeView *tv;
@@ -3275,6 +3283,7 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 #pragma optimize("g",off)
 void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 {
+ if(MainMacBrowser::Get().Delete(confirm!=FALSE))return;
 	int inx = -1, count = 0;
 	int stype, isdir;
 	CString nam, fullpath;
@@ -3442,6 +3451,7 @@ void CHFVExplorerListView::set_label_color( int finder_color )
 
 void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point) 
 {
+ if(MainMacBrowser::Get().ContextMenu(point))return;
 	CMenu cm, cpop, cpop2, cpop3;
 	int inx, hit = 0;
 	int pop_created = 0;
@@ -3596,6 +3606,7 @@ void CHFVExplorerListView::OnSysKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags )
 
 void CHFVExplorerListView::on_properties( int inx ) 
 {
+ if(MainMacBrowser::Get().Properties(inx))return;
 	CString fullpath;
 	int stype = get_inx_type(inx);
 	// int isdir = get_inx_isdir(inx);
@@ -3833,6 +3844,7 @@ void CHFVExplorerListView::save_icon_command( int inx )
 
 BOOL CHFVExplorerListView::OnCommand(WPARAM wParam, LPARAM lParam) 
 {
+ if(MainMacBrowser::Get().Command(LOWORD(wParam)))return TRUE;
 	int handled = 1;
 	UINT cmd = LOWORD(wParam);
 	int inx;
@@ -4593,6 +4605,10 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
 			set_tree_drop_target( m_TreeiItemDrop, 0 );
 		}
 		ensure_pane(PANE_LIST);
+        HTREEITEM nativeTarget=m_TreeiItemDrop;
+        if(m_iItemDrop>=0){auto p=(list_lparam_struct*)m_cl->GetItemData(m_iItemDrop);if(p&&p->isdir)nativeTarget=p->htree;}
+        if(nativeTarget&&MainMacBrowser::Get().DropSelection(nativeTarget,action)){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->m_tree->enable_selchange(1);pApp->EnableTimer(prevTimer);return;}
+
 
 		if(m_iItemDrop >= 0) {
 			DWORD_PTR dw_drag, dw_drop;
@@ -4672,7 +4688,7 @@ void CHFVExplorerListView::OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult)
 				CHFVExplorerApp	*pApp;
 				pApp = (CHFVExplorerApp *)AfxGetApp();
 				if(pApp && pApp->m_pre) {
-					pApp->m_pre->set_file( (list_lparam_struct *)dat );
+					pApp->m_pre->set_file( get_lparam_type(dat)==LIST_MAC ? nullptr : (list_lparam_struct *)dat );
 				}
 			}
 		}
@@ -4765,6 +4781,7 @@ void CHFVExplorerListView::OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult)
 
 void CHFVExplorerListView::OnBeginlabeledit(NMHDR* pNMHDR, LRESULT* pResult) 
 {
+ if(MainMacBrowser::Get().Active()){*pResult=1;return;}
 	LV_DISPINFO* pDispInfo = (LV_DISPINFO*)pNMHDR;
 
 	m_editing_item = pDispInfo->item.iItem;
@@ -4871,6 +4888,7 @@ int CALLBACK clCompareFunc(
 // since this is O(n) but the callback is probably O(n*log(n))
 void CHFVExplorerListView::do_report_sort(void) 
 {
+ if(MainMacBrowser::Get().Active()){MainMacBrowser::Get().Sort(m_sorted_by_column,m_sort_is_ascending!=FALSE);return;}
 	int i, count, isdir, space_inx;
 	CString *cs, zeroes;
 	SortString *ss;
@@ -4978,6 +4996,7 @@ void CHFVExplorerListView::OnColumnclick(NMHDR* pNMHDR, LRESULT* pResult)
 
 void CHFVExplorerListView::OnEditLabel() 
 {
+ if(MainMacBrowser::Get().Rename())return;
 	int nItem;
 	nItem = m_cl->GetNextItem(-1,LVNI_SELECTED);
 	if(nItem >= 0) {
@@ -5060,6 +5079,7 @@ BOOL in_string_list( LPCSTR path, CStringArray & arr )
 
 void CHFVExplorerListView::edit_cut_copy( BOOL cutting, BOOL append )
 {
+ if(MainMacBrowser::Get().Capture(cutting!=FALSE,append!=FALSE))return;
 	int inx = -1, count = 0, isdir, type, volinx;
 	CString fullpath;
 	char srcvolpath[_MAX_PATH];
@@ -5112,6 +5132,7 @@ void CHFVExplorerListView::edit_cut_append(void)
 
 void CHFVExplorerListView::edit_paste(void)
 {
+ if(MainMacBrowser::Get().Paste())return;
 	int i, j, count, action, fat_changed = 0;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	HTREEITEM hItem;
@@ -5248,6 +5269,7 @@ fatal_exit:
 
 		if(fat_changed) update_current_view();
 	}
+ MainMacBrowser::Get().LegacyClipboardChanged();
 }
 
 void CHFVExplorerListView::edit_select_all(void)

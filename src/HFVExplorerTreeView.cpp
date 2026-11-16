@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "MainMacBrowser.h"
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerTreeView.h"
@@ -91,7 +92,10 @@ LPARAM HFVExplorerTreeView::make_lparam(
 {
 	lparam_struct *p = new lparam_struct;
 	if(!p) return(0);
-	m_pointer_array.Add( (DWORD_PTR)p );
+	INT_PTR slot;
+ if(m_free_slots.empty()){slot=m_pointer_array.GetSize();m_pointer_array.Add((DWORD_PTR)p);}
+ else{slot=m_free_slots.back();m_free_slots.pop_back();m_pointer_array.SetAt(slot,(DWORD_PTR)p);}
+ m_pointer_slots[(DWORD_PTR)p]=slot;
 	p->type = type;
 	p->volinx = volinx;
 	p->id = id;
@@ -164,6 +168,7 @@ void HFVExplorerTreeView::destroy_pointers()
 		}
 	}
 	m_pointer_array.RemoveAll();
+ m_pointer_slots.clear();m_free_slots.clear();
 }
 
 HTREEITEM HFVExplorerTreeView::tree_insert( 
@@ -566,6 +571,7 @@ HFVExplorerTreeView::~HFVExplorerTreeView()
 BEGIN_MESSAGE_MAP(HFVExplorerTreeView, CTreeView)
 	//{{AFX_MSG_MAP(HFVExplorerTreeView)
 	ON_NOTIFY_REFLECT(TVN_SELCHANGED, OnSelchanged)
+ ON_NOTIFY_REFLECT(TVN_DELETEITEM, OnDeleteItem)
 	ON_WM_CHAR()
 	ON_WM_CONTEXTMENU()
 	//}}AFX_MSG_MAP
@@ -589,8 +595,14 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 /////////////////////////////////////////////////////////////////////////////
 // HFVExplorerTreeView message handlers
 
+void HFVExplorerTreeView::OnDeleteItem(NMHDR* header,LRESULT* result){
+ auto item=reinterpret_cast<NMTREEVIEW*>(header);DWORD_PTR key=DWORD_PTR(item->itemOld.lParam);auto found=m_pointer_slots.find(key);
+ if(found!=m_pointer_slots.end()){INT_PTR slot=found->second;m_pointer_array.SetAt(slot,0);m_free_slots.push_back(slot);m_pointer_slots.erase(found);delete reinterpret_cast<lparam_struct*>(key);}
+ *result=0;
+}
 void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult) 
 {
+ if(((CHFVExplorerApp*)AfxGetApp())->m_list && ((CHFVExplorerApp*)AfxGetApp())->m_list->IsDragging()){*pResult=0;return;}
  if(StorageUi::busy()){*pResult=0;return;}
 	HTREEITEM hItem;
 	unsigned long id = 0;
@@ -611,6 +623,7 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 		if(dw) {
 			type = get_lparam_type( dw );
 			switch(type) {
+    case LIST_MAC: MainMacBrowser::Get().Select(dw); break;
 				case LIST_HFS:
 				case LIST_SPEC:
 					id = get_lparam_id( dw );
@@ -676,6 +689,7 @@ BOOL HFVExplorerTreeView::is_cd_item( HTREEITEM hItem )
 	dw = m_ct->GetItemData( hItem );
 	if(dw) {
 		switch(get_lparam_type( dw )) {
+   case LIST_MAC: return MainMacBrowser::Get().SelectedCdDrive()>=0;
 			case LIST_HFS:
 				volinx = get_lparam_volinx( dw );
 				if(((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_is_cd) result = TRUE;

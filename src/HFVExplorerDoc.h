@@ -45,6 +45,7 @@
 
 class CHFVExplorerDoc : public CDocument
 {
+ friend class MainMacBrowser;
 protected: // create from serialization only
 	CPointerWordArray *m_icon_array;
 	CHFVExplorerDoc();

@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
+#include "BrowserPresentation.h"
 #include <shobjidl.h>
 #include <cmath>
 #pragma comment(lib,"ole32.lib")
@@ -15,10 +16,10 @@ bool StorageOwnerShouldActivate(bool originallyEnabled,HWND owner,HWND dialog,HW
 }
 namespace {
 class ConflictDialog : public CDialog {
- CString path_;
+ std::string path_;bool utf8_;
 public:
- ConflictDialog(const std::string& path,CWnd* owner):CDialog(IDD_COPY_CONFLICT,owner),path_(path.c_str()){}
- BOOL OnInitDialog() override {CDialog::OnInitDialog();SetDlgItemText(IDC_CONFLICT_PATH,path_);return TRUE;}
+ ConflictDialog(const std::string& path,CWnd* owner,bool utf8):CDialog(IDD_COPY_CONFLICT,owner),path_(path),utf8_(utf8){}
+ BOOL OnInitDialog() override {CDialog::OnInitDialog();if(utf8_){BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(path_).c_str());}else SetDlgItemText(IDC_CONFLICT_PATH,path_.c_str());return TRUE;}
  BOOL OnCommand(WPARAM w,LPARAM l) override {
   if(LOWORD(w)>=IDC_REPLACE && LOWORD(w)<=IDC_COPY_CANCEL){EndDialog(LOWORD(w));return TRUE;}
   return CDialog::OnCommand(w,l);
@@ -102,7 +103,9 @@ class JobDialog : public CDialog {
   if(progress.byteTransfer&&progress.totalBytes)status.Format("%.2f / %.2f MiB; %u%%; %lu seconds",double(progress.processed)/(1024*1024),double(progress.totalBytes)/(1024*1024),unsigned(min(progress.processed,progress.totalBytes)*100/progress.totalBytes),(GetTickCount()-started_)/1000);
   CString path=progress.path.c_str();
   if(progress.fileTotal){CString percent;percent.Format(" (%u%%)",unsigned(min(progress.fileBytes,progress.fileTotal)*100/progress.fileTotal));path+=percent;}
-  CString old;GetDlgItemText(IDC_CP_FILE,old);if(old!=path)SetDlgItemText(IDC_CP_FILE,path);
+  CString old;
+  if(progress.utf8){BrowserPresentation::UnicodeControl(m_hWnd,IDC_CP_FILE,L"STATIC");auto wide=BrowserPresentation::FromUtf8(progress.path);if(BrowserPresentation::Text(::GetDlgItem(m_hWnd,IDC_CP_FILE))!=wide)SetDlgItemTextW(m_hWnd,IDC_CP_FILE,wide.c_str());}
+  else{GetDlgItemText(IDC_CP_FILE,old);if(old!=path)SetDlgItemText(IDC_CP_FILE,path);}
   GetDlgItemText(IDC_CP_STATUS,old);if(old!=status)SetDlgItemText(IDC_CP_STATUS,status);
   GetDlgItemText(IDC_CP_PHASE,old);if(old!=progress.phase.c_str())SetDlgItemText(IDC_CP_PHASE,progress.phase.c_str());
   bool waiting=progress.scanning || (!progress.totalBytes&&!progress.totalFiles);
@@ -184,7 +187,7 @@ public:
     else
 #endif
     {
-     ConflictDialog prompt(conflict,this);INT_PTR choice=prompt.DoModal();
+     ConflictDialog prompt(conflict,this,job_->progress().utf8);INT_PTR choice=prompt.DoModal();
      job_->resolve(choice==IDC_REPLACE?Storage::ConflictChoice::Replace:choice==IDC_REPLACE_ALL?Storage::ConflictChoice::ReplaceAll:choice==IDC_SKIP?Storage::ConflictChoice::Skip:Storage::ConflictChoice::Cancel);
     }
     SetTimer(1,50,nullptr);

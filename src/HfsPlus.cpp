@@ -1327,7 +1327,7 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name) {
 }
 uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
-                     const std::array<uint8_t, 32> *finder, bool overwrite) {
+                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates) {
     auto &p = *p_;
     p.Guard();
     p.Parent(parent);
@@ -1375,6 +1375,11 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
             p.UpdateEntry(e);
         } else
             p.New(e);
+        if (dates) {
+            e.created=(*dates)[0];e.modified=(*dates)[1];
+            auto record=p.CatalogRecord(e.id);P32(record->value.data()+12,e.created);P32(record->value.data()+16,e.modified);
+            p.entries[e.id]=e;
+        }
         p.Overflow(e.id, 0, e.forks[0]);
         p.Overflow(e.id, 1, e.forks[1]);
         p.Commit(fault);
@@ -1407,6 +1412,9 @@ void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
         p.usable = false;
         throw;
     }
+}
+void Volume::ValidateRemoval(uint32_t id)const {
+    auto& p=*p_;p.Guard();auto entry=p.Get(id);p.Mutable(entry);p.RemovalParent(entry.parent);
 }
 void Volume::Remove(uint32_t id) {
     auto &p = *p_;

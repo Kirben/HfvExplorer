@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "MainMacBrowser.h"
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusBrowser.h"
@@ -587,6 +588,10 @@ int TryOpenHfsPlusCdBrowser(const char *path, CWnd *parent) {
             return browser.DoModal() == -1 ? -1 : 1;
         }, [](const std::string &message) { AfxMessageBox(message.c_str(), MB_OK | MB_ICONERROR); });
 }
+bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
+ NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
+ if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
+}
 void FormatHfsPlusImage(CWnd *parent) {
     FormatDialog options(parent);
     if (options.DoModal() != IDOK)
@@ -606,19 +611,7 @@ void FormatHfsPlusImage(CWnd *parent) {
         AfxMessageBox(result.message.c_str());
         return;
     }
-    std::unique_ptr<HfsPlus::Source> source;
-    std::unique_ptr<HfsPlus::Volume> volume;
-    result = ShowStorageWaitJob([&](Storage::Job &) {
-        source = HfsPlus::OpenImage(path.c_str(), true);
-        volume.reset(new HfsPlus::Volume(*source, true));
-        return Storage::Result{};
-    });
-    if (result.code) {
-        AfxMessageBox(result.message.c_str());
-        return;
-    }
-    Browser browser(std::move(source), std::move(volume), parent);
-    browser.DoModal();
+    MainMacBrowser::Get().OpenImage(path);
 }
 #ifdef HFV_TESTING
 bool TestAutomaticCdSelection(std::function<std::unique_ptr<HfsPlus::Source>(int)> open,

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "resource.h"
 #include "FindFilesDialog.h"
+#include "BrowserPresentation.h"
 #include "StorageJobDialog.h"
 namespace {
 class FindOptions : public CDialog {
@@ -10,18 +11,20 @@ public:
  FindOptions(CWnd* owner,FindLocation location):CDialog(IDD_FIND_FILES,owner){request.location=std::move(location);}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();SetDlgItemText(IDC_FIND_SCOPE,request.location.directory.c_str());CheckDlgButton(IDC_FIND_RECURSIVE,BST_CHECKED);
+  if(request.location.native){BrowserPresentation::UnicodeEdit(m_hWnd,IDC_FIND_PATTERN);BrowserPresentation::UnicodeControl(m_hWnd,IDC_FIND_SCOPE,L"STATIC");SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(request.location.directory).c_str());}
   ((CEdit*)GetDlgItem(IDC_FIND_PATTERN))->LimitText(255);GetDlgItem(IDC_FIND_PATTERN)->SetFocus();return FALSE;
  }
  BOOL OnCommand(WPARAM w,LPARAM l) override {
-  if(LOWORD(w)==IDC_FIND_WHOLE){SetDlgItemText(IDC_FIND_SCOPE,(IsDlgButtonChecked(IDC_FIND_WHOLE)?request.location.root:request.location.directory).c_str());return TRUE;}
+  if(LOWORD(w)==IDC_FIND_WHOLE){auto text=IsDlgButtonChecked(IDC_FIND_WHOLE)?request.location.root:request.location.directory;if(request.location.native)SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(text).c_str());else SetDlgItemText(IDC_FIND_SCOPE,text.c_str());return TRUE;}
   return CDialog::OnCommand(w,l);
  }
  void OnOK() override {
   CString pattern;GetDlgItemText(IDC_FIND_PATTERN,pattern);
   if(pattern.IsEmpty()){AfxMessageBox("Enter a filename, part of a name, or a wildcard pattern.");return;}
-  request.pattern=(LPCSTR)pattern;request.recursive=IsDlgButtonChecked(IDC_FIND_RECURSIVE)!=0;
+  auto widePattern=BrowserPresentation::Text(::GetDlgItem(m_hWnd,IDC_FIND_PATTERN));
+  request.pattern=request.location.native?BrowserPresentation::Utf8(std::u16string(widePattern.begin(),widePattern.end())):std::string((LPCSTR)pattern);request.recursive=IsDlgButtonChecked(IDC_FIND_RECURSIVE)!=0;
   request.caseSensitive=IsDlgButtonChecked(IDC_FIND_CASE)!=0;request.includeFolders=IsDlgButtonChecked(IDC_FIND_FOLDERS)!=0;
-  if(IsDlgButtonChecked(IDC_FIND_WHOLE))request.location.directory=request.location.root;
+  if(IsDlgButtonChecked(IDC_FIND_WHOLE)){request.location.directory=request.location.root;if(request.location.native){request.location.nativeFolder=2;request.location.nativePath={2};}}
   CDialog::OnOK();
  }
 };
@@ -33,6 +36,7 @@ public:
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();auto list=(CListCtrl*)GetDlgItem(IDC_FIND_RESULTS);list->SetExtendedStyle(LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES);
   CRect rect;list->GetClientRect(&rect);int width=rect.Width()-GetSystemMetrics(SM_CXVSCROLL)-4;
+  if(results_.utf8)list->SendMessage(CCM_SETUNICODEFORMAT,TRUE);
   list->InsertColumn(0,"Name",LVCFMT_LEFT,width*23/100);list->InsertColumn(1,"Containing folder",LVCFMT_LEFT,width*49/100);
   list->InsertColumn(2,mac_?"Bytes (both forks)":"Bytes",LVCFMT_RIGHT,width*18/100);list->InsertColumn(3,"Kind",LVCFMT_LEFT,width*10/100);
   list->SetItemCountEx(int(results_.hits.size()),LVSICF_NOINVALIDATEALL|LVSICF_NOSCROLL);
@@ -46,6 +50,15 @@ public:
  }
  BOOL OnNotify(WPARAM w,LPARAM l,LRESULT* value) override {
   auto header=reinterpret_cast<NMHDR*>(l);
+  if(header->idFrom==IDC_FIND_RESULTS&&header->code==LVN_GETDISPINFOW){
+   auto info=reinterpret_cast<NMLVDISPINFOW*>(l);int row=info->item.iItem;
+   if((info->item.mask&LVIF_TEXT)&&row>=0&&size_t(row)<results_.hits.size()){
+    const auto& hit=results_.hits[row];std::wstring text;
+    switch(info->item.iSubItem){case 0:text=BrowserPresentation::FromUtf8(hit.name);break;case 1:text=BrowserPresentation::FromUtf8(hit.parent);break;
+     case 2:if(!hit.folder)text=std::to_wstring(hit.bytes);break;case 3:text=hit.folder?L"Folder":L"File";break;}
+    if(info->item.pszText&&info->item.cchTextMax>0)wcsncpy_s(info->item.pszText,info->item.cchTextMax,text.c_str(),_TRUNCATE);
+   }*value=0;return TRUE;
+  }
   if(header->idFrom==IDC_FIND_RESULTS&&header->code==LVN_GETDISPINFOA){
    auto info=reinterpret_cast<NMLVDISPINFOA*>(l);int row=info->item.iItem;
    if((info->item.mask&LVIF_TEXT)&&row>=0&&size_t(row)<results_.hits.size()){

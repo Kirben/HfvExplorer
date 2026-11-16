@@ -24,24 +24,35 @@ Current filesystem support
   Runtime undo is not a persistent journal and does not protect against power loss.
 - HFS+ disk images: format, browse, import/export data and resource forks,
   overwrite files, create folders, rename entries and delete files or
-  empty folders. File > Format HFS+ / HFSX image creates a new image (8 MiB minimum),
-  with journaling enabled by default. File > Open volume opens a separate
-  Unicode HFS+ / HFSX browser. Transfers use raw data/resource files, without BinHex
-  or MacBinary conversion. It is not yet integrated into the classic main tree.
+  folder trees. File > Format HFS+ / HFSX image creates a new image (8 MiB minimum),
+  with journaling enabled by default. File > Open volume mounts HFS+ / HFSX and
+  read-only MFS images in the main tree and list alongside classic HFS and Windows
+  folders. Unicode names, 64-bit fork sizes and filesystem capabilities use a
+  shared presentation/transfer model; ordinary navigation, Copy/Paste/Cut, folder
+  creation, rename, delete, search, sorting and properties use the main interface.
+  File > Import file and raw data/resource fork export remain available.
+  Replace resource fork preserves the existing data fork. These adapters transfer
+  both forks, Finder information and creation/modification dates; they do not
+  add BinHex/MacBinary conversion to HFS+ / HFSX. Windows transfers use validated
+  AppleDouble %filename companions with staged publication/rollback. The companion
+  requires a Windows-compatible name of at most 254 UTF-16 units and a resource
+  fork below 4 GiB; raw fork export has neither AppleDouble restriction.
+  Folder operations are not whole-tree atomic. Moves revalidate the source
+  before deletion and retain source items when copying/finalization fails.
 - HFSX v5 supports formatting, browsing and read/write in both case-sensitive
   and case-insensitive modes, with or without journaling. Case-sensitive names
   preserve ignorable characters and distinguish Readme from README. Catalog
   comparison mode, volume version and directory counts survive all writes.
   Apple_HFSX partitions are supported; HFSX inside an HFS wrapper is rejected.
-  HFSX shares the image browser and the general limitations listed below.
+  HFSX shares the main browser and the general limitations listed below.
 - HFS+ and HFSX internal journals support read/write transactions and replay. A read-only
   open replays into memory without changing the image. Non-journaled writes
   are supported but cannot provide journaled recovery after interruption.
 - Selecting a CD drive automatically detects HFS+ / HFSX and opens supported
-  single-track data CDs read-only in the Unicode browser, including Apple-partitioned
-  hybrids. After closing that browser, the Windows side remains available. Both forks,
+  single-track data CDs read-only in the main tree/list, including Apple-partitioned
+  hybrids. The Windows drive entry remains available separately. Both forks,
   compressed files and hard links use the same readers as disk images. Media
-  changes invalidate cached listings and require closing/reopening the browser.
+  changes invalidate cached listings; Refresh reopens the disc and starts at its root.
   Internal journal replay stays in memory; no device write is issued.
   Tools > Dump CD to file saves the complete data track, including its partition
   map and Windows side of a hybrid, and the result can be reopened as an image.
@@ -74,8 +85,10 @@ Current filesystem support
   BinHex 4.0 (.hqx) and MacBinary II remain separate options; version I has no
   header CRC or low-byte Finder flags. Legacy headers require zero reserved
   bytes, and declared fork lengths are checked before replacing a destination.
-  The separate HFS+/HFSX browser still transfers raw forks only.
-- MFS remains read-only. Existing classic HFS CD/floppy support is unchanged.
+  HFS+/HFSX main-browser transfers use both-fork copies or explicit raw fork export.
+- MFS remains read-only in the common main browser. Its original MacRoman names
+  (up to 255 bytes), file versions and both forks remain readable. Classic HFS
+  CD/floppy access remains native and retains its existing media restrictions.
 
 Tests: .\build-x64.ps1 -Test runs the full suite, including real HFS+ reads and
 writes beyond 2 GiB in both forks of HFS+ and HFSX images. -TestHfsPlus runs

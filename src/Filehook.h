@@ -34,6 +34,7 @@ typedef int (*ftype_stat)(const char *, struct _stat64 *);
 typedef int (*ftype_open)(const char *, int, ...);
 typedef int (*ftype_close)(int);
 typedef int (*ftype_sync)(int);
+typedef int (*ftype_identity)(int,const char*);
 typedef int (*ftype_read)(int, void *, unsigned int);
 typedef int (*ftype_write)(int, const void *, unsigned int);
 typedef hfv_offset_t (*ftype_lseek)(int, hfv_offset_t, int);
@@ -57,6 +58,8 @@ extern ftype_lseek fhook_lseek;
 
 /* Install the native adapter flush hook before selecting fake functions. */
 void fhook_init_sync(ftype_sync);
+void fhook_init_identity(ftype_identity);
+int fhook_same_file(int fd,const char* path);
 void fhook_set_real_funcs( void );
 void fhook_set_fake_funcs( void );
 void fhook_init_fake_funcs(

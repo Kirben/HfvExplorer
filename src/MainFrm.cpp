@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "MainMacBrowser.h"
 #include "HfsPlusBrowser.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
@@ -93,6 +94,9 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_WM_DROPFILES()
 	ON_COMMAND(ID_FILE_NEWVOLUME, OnFileNewvolume)
  ON_COMMAND(ID_FILE_NEWHFSPLUS, OnFileNewHfsPlus)
+ ON_UPDATE_COMMAND_UI_RANGE(ID_FILE_MAC_IMPORT,ID_FILE_MAC_IMPORT_RESOURCE,OnUpdateMacTransfer)
+ ON_UPDATE_COMMAND_UI(ID_EDIT_CUT,OnUpdateMacEdit)
+ ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE,OnUpdateMacEdit)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
 
@@ -1155,6 +1159,7 @@ MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
  auto app=(CHFVExplorerApp*)AfxGetApp();if(!app||!app->m_doc||!app->m_tree)return {};
  auto tree=app->m_tree;HTREEITEM item=tree->m_ct->GetSelectedItem();if(!item)return {};
  DWORD_PTR data=tree->m_ct->GetItemData(item);int type=tree->get_lparam_type(data),index=tree->get_lparam_volinx(data);
+ if(type==LIST_MAC){int drive=MainMacBrowser::Get().SelectedCdDrive();if(drive>=0)return {drive,DRIVE_CDROM};}
  if(type==LIST_HFS&&index>=0&&index<app->m_doc->m_hfs_count)return MacMediaControlTarget(app->m_doc->m_volumes[index].m_file_name);
  if(type==LIST_FAT&&index>=0&&index<app->m_doc->m_fat_count){auto& volume=app->m_doc->m_fats[index];return {toupper((unsigned char)volume.m_letter)-'A',volume.m_type};}
  return {};
@@ -1162,6 +1167,7 @@ MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
 void CMainFrame::OnCdEjectEjectReload(int reload)
 {
  auto target=SelectedMediaControlTarget();if(!CanControlMedia(target))return;
+ if(MainMacBrowser::Get().SelectedCdDrive()==target.drive)MainMacBrowser::Get().ReleaseCd(target.drive);
  auto app=(CHFVExplorerApp*)AfxGetApp();auto document=app->m_doc;
  auto result=ShowStorageWaitJob(MakeMediaControlJob(target,reload!=0,nullptr,[=]{
   HFSIFACE_get_dir_flush();
@@ -1340,6 +1346,7 @@ void CMainFrame::OnFileVolumetofloppy()
 
 void CMainFrame::OnToolsFind()
 {
+ if(MainMacBrowser::Get().Find())return;
  CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
  if(!app->m_doc||!app->m_tree)return;
  HTREEITEM item=app->m_tree->m_ct->GetSelectedItem();
@@ -1359,4 +1366,26 @@ void CMainFrame::OnToolsFind()
   }
  }
  AfxMessageBox("The folder was opened, but the item is not visible. It may have changed or be hidden by the current view settings.");
+}
+
+BOOL CMainFrame::OnCommand(WPARAM w,LPARAM l){
+ switch(LOWORD(w)){
+ case ID_FILE_MAC_IMPORT:MainMacBrowser::Get().Import();return TRUE;
+ case ID_FILE_MAC_IMPORT_RESOURCE:MainMacBrowser::Get().ImportResource();return TRUE;
+ case ID_FILE_MAC_EXPORT_DATA:MainMacBrowser::Get().Export(0);return TRUE;
+ case ID_FILE_MAC_EXPORT_RESOURCE:MainMacBrowser::Get().Export(1);return TRUE;
+ }
+ return CFrameWnd::OnCommand(w,l);
+}
+void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
+ auto& browser=MainMacBrowser::Get();bool enabled=false;
+ if(!StorageUi::busy()){
+  if(ui->m_nID==ID_FILE_MAC_IMPORT)enabled=browser.Writable();
+  else if(ui->m_nID==ID_FILE_MAC_IMPORT_RESOURCE)enabled=browser.CanExport()&&browser.SelectionWritable();
+  else enabled=browser.CanExport();
+ }
+ ui->Enable(enabled);
+}
+void CMainFrame::OnUpdateMacEdit(CCmdUI* ui){
+ auto& browser=MainMacBrowser::Get();ui->Enable(!StorageUi::busy()&&(!browser.Active()||(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable())));
 }

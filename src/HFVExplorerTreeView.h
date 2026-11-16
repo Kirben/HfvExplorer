@@ -24,6 +24,8 @@
 // HFVExplorerTreeView view
 
 #include "ftypes.h"
+#include <unordered_map>
+#include <vector>
 
 typedef struct {
 	int type;
@@ -34,6 +36,7 @@ typedef struct {
 
 class HFVExplorerTreeView : public CTreeView
 {
+ friend class MainMacBrowser;
 protected:
 	HFVExplorerTreeView();           // protected constructor used by dynamic creation
 	DECLARE_DYNCREATE(HFVExplorerTreeView)
@@ -98,6 +101,8 @@ protected:
 
 protected:
 	CPointerWordArray m_pointer_array;
+ std::unordered_map<DWORD_PTR,INT_PTR> m_pointer_slots;
+ std::vector<INT_PTR> m_free_slots;
 
 // Attributes
 public:
@@ -124,6 +129,7 @@ protected:
 	// Generated message map functions
 protected:
 	//{{AFX_MSG(HFVExplorerTreeView)
+	afx_msg void OnDeleteItem(NMHDR*,LRESULT*);
 	afx_msg void OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnChar(UINT nChar, UINT nRepCnt, UINT nFlags);
 	afx_msg void OnContextMenu(CWnd* pWnd, CPoint point);

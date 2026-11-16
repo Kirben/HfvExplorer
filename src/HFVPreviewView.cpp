@@ -165,6 +165,7 @@ void CHFVPreviewView::set_show( int onoff )
 
 void CHFVPreviewView::set_file( list_lparam_struct *lparam )
 {
+	if(!lparam){m_show=0;memset(&m_lparam,0,sizeof(m_lparam));update();return;}
 	memcpy( &m_lparam, lparam, sizeof(m_lparam) );
 	m_show = 1;
 	update();
