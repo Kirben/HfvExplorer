@@ -293,7 +293,7 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
  * NAME:	hfs->flush()
  * DESCRIPTION:	flush all pending changes to an HFS volume
  */
-int hfs_flush(hfsvol *vol)
+int hfs_flush_raw(hfsvol *vol)
 {
   hfsfile *file;
 
@@ -341,12 +341,19 @@ int hfs_umount(hfsvol *vol)
   }
   if (--vol->refs) return hfs_flush(vol);
 
-  /* Close failures must not be hidden by a later successful cache flush. */
-  while (vol->files) {
-    if (hfs_close(vol->files) < 0 && result == 0) {
-      result = -1; saved_errno = errno; saved_error = hfs_error;
+  /* A rolled-back close keeps its file view for retry. Bound shutdown
+     retries so a persistent read/validation error cannot hang unmount. */
+  while(vol->files) {
+    hfsfile *file=vol->files;
+    if(hfs_close(file)<0) {
+      if(result==0){result=-1;saved_errno=errno;saved_error=hfs_error;}
+      if(vol->files==file&&hfs_close(file)<0&&vol->files==file) {
+        b_quarantine_volume(vol,"Pending HFS file could not be finalized; writes disabled; repair before writing");
+        hfs_close(file); // A quarantined close only releases memory.
+      }
     }
   }
+  if((vol->flags&HFS_WRITE_FAILED)&&vol->failure_message){saved_errno=EIO;saved_error=vol->failure_message;result=-1;}
   while (vol->dirs) hfs_closedir(vol->dirs);
 
   /* Flush dirty metadata/data before publishing the clean-unmount marker. */
@@ -1456,23 +1463,27 @@ hfv_offset_t hfs_lseek(hfsfile *file, hfv_offset_t offset, int from)
  */
 int hfs_close(hfsfile *file)
 {
-  hfsvol *vol = file->vol;
-  int result = 0;
-
-  if (f_trunc(file) < 0 ||
-      f_flush(file) < 0)
-    result = -1;
-
-  if (file->prev)
-    file->prev->next = file->next;
-  if (file->next)
-    file->next->prev = file->prev;
-  if (file == vol->files)
-    vol->files = file->next;
-
-  FREE(file);
-
-  return result;
+  hfsvol *vol=file->vol;int result=0;
+  if(vol->flags&HFS_WRITE_FAILED)result=-1;
+  else if(!(vol->flags&HFS_READONLY)) {
+    unsigned long *logical,*physical;hfv_size_t rounded;
+    f_getptrs(file,&logical,&physical,0);
+    rounded=((hfv_size_t)*logical+vol->mdb.drAlBlkSiz-1)/vol->mdb.drAlBlkSiz*vol->mdb.drAlBlkSiz;
+    if((file->flags&HFS_UPDATE_CATREC)||*physical!=rounded) {
+      if(b_begin_mutation(vol)<0) {
+        if(!(vol->flags&HFS_WRITE_FAILED))return -1; // Keep the view for retry.
+        result=-1;
+      } else {
+        if(f_trunc(file)<0||f_flush(file)<0)result=-1;
+        result=b_end_mutation(vol,result);
+        if(result<0&&!(vol->flags&HFS_WRITE_FAILED))return -1;
+      }
+    }
+  }
+  if(file->prev)file->prev->next=file->next;
+  if(file->next)file->next->prev=file->prev;
+  if(file==vol->files)vol->files=file->next;
+  FREE(file);return result;
 }
 
 /* High-Level Catalog Routines ============================================= */
@@ -2100,4 +2111,11 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
  if(result==0&&f_trunc(file)<0)result=-1;
  if(result==0&&f_flush(file)<0)result=-1;
  return b_end_mutation(vol,result);
+}
+
+int hfs_flush(hfsvol *vol) {
+ if(v_getvol(&vol)<0)return -1;
+ if(vol->flags&HFS_READONLY)return hfs_flush_raw(vol);
+ if(b_begin_mutation(vol)<0)return -1;
+ return b_end_mutation(vol,0);
 }

@@ -66,6 +66,15 @@ int hookedClose(int fd) {
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _close(fd); }
     if(!d->direct){if(d->floppy)floppy_final(d->drive);else cd_final(d->drive);} d->open=false; return 0;
 }
+int hookedSync(int fd) {
+    Descriptor* d=descriptor(fd);
+    if(!d){if(virtualFd(fd)){errno=EBADF;return -1;}return _commit(fd);}
+    if(!d->direct||!d->writable){errno=EROFS;return -1;}
+    auto disk=DirectFloppy::Current(d->drive);
+    if(!disk){errno=EBADF;return -1;}
+    if(!disk->Finish()){errno=EIO;return -1;}
+    return 0;
+}
 int hookedRead(int fd, void* buffer, unsigned count) {
     Descriptor* d=descriptor(fd);
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _read(fd,buffer,count); }
@@ -98,6 +107,7 @@ hfv_offset_t hookedSeek(int fd, hfv_offset_t offset, int origin) {
 extern "C" {
 void readonly_cd_backend_init(void) {
     fhook_init_fake_funcs(hookedStat,hookedOpen,hookedClose,hookedRead,hookedWrite,hookedSeek);
+    fhook_init_sync(hookedSync);
     fhook_set_fake_funcs();
 }
 void readonly_cd_backend_final(void) {

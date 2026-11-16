@@ -47,6 +47,7 @@
 ftype_stat  fhook_stat  = _stat64;
 ftype_open  fhook_open  = open;
 ftype_close fhook_close = close;
+ftype_sync fhook_sync = _commit;
 ftype_read  fhook_read  = read;
 ftype_write fhook_write = write;
 ftype_lseek fhook_lseek = _lseeki64;
@@ -54,6 +55,9 @@ ftype_lseek fhook_lseek = _lseeki64;
 static ftype_stat  fake_stat = 0;
 static ftype_open  fake_open = 0;
 static ftype_close fake_close = 0;
+static ftype_sync fake_sync = 0;
+static int missing_sync(int fd) { (void)fd; errno=EIO; return -1; }
+void fhook_init_sync(ftype_sync sync) {fake_sync=sync;}
 static ftype_read  fake_read = 0;
 static ftype_write fake_write = 0;
 static ftype_lseek fake_lseek = 0;
@@ -67,6 +71,7 @@ void fhook_set_real_funcs( void )
 	fhook_stat =  _stat64;
 	fhook_open =  open;
 	fhook_close = close;
+	fhook_sync = _commit;
 	fhook_read =  read;
 	fhook_write = write;
 	fhook_lseek = _lseeki64;
@@ -77,6 +82,7 @@ void fhook_set_fake_funcs( void )
 	fhook_stat =  fake_stat;
 	fhook_open =  fake_open;
 	fhook_close = fake_close;
+	fhook_sync = fake_sync?fake_sync:missing_sync;
 	fhook_read =  fake_read;
 	fhook_write = fake_write;
 	fhook_lseek = fake_lseek;

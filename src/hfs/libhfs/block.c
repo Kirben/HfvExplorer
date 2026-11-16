@@ -259,7 +259,7 @@ int b_begin_mutation(hfsvol *vol) {
  }
  active_mutation=m;
  /* Earlier pending writes also need undo coverage before they reach disk. */
- if(hfs_flush(vol)<0){b_end_mutation(vol,-1);return -1;}
+ if(hfs_flush_raw(vol)<0){b_end_mutation(vol,-1);return -1;}
  return 0;
 }
 static int remember_block(hfsvol *vol,unsigned long sector) {
@@ -323,6 +323,10 @@ static int save_failed_undo(struct mutation *m,char *path) {
  CloseHandle(file);return ok;
 }
 #endif
+void b_quarantine_volume(hfsvol *vol,const char *message) {
+ FREE(vol->failure_message);vol->failure_message=(char*)save_memory(message,strlen(message)+1);
+ vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
+}
 static void quarantine_mutation(struct mutation *m,hfsvol *vol) {
  char message[512];
 #ifdef WIN32
@@ -331,19 +335,20 @@ static void quarantine_mutation(struct mutation *m,hfsvol *vol) {
  else
 #endif
  snprintf(message,sizeof(message),"Classic HFS rollback failed; writes disabled. Undo records could not be saved. Repair before writing.");
- vol->failure_message=(char*)save_memory(message,strlen(message)+1);
- vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
+ b_quarantine_volume(vol,message);
 }
 int b_end_mutation(hfsvol *vol,int result) {
  struct mutation *m=active_mutation;unsigned i;int rollback=0,saved_errno;char *saved_error;block verify;
  if(!m||m->volume!=vol){ERROR(EIO,"Missing HFS undo state");return -1;}
- if(result==0&&hfs_flush(vol)<0)result=-1;
+ if(result==0&&hfs_flush_raw(vol)<0)result=-1;
+ if(result==0&&m->used&&fhook_sync(vol->fd)<0){ERROR(errno,"Error flushing HFS device");result=-1;}
  saved_errno=errno;saved_error=hfs_error;active_mutation=0;
  if(result<0) {
   for(i=m->used;i>0;--i) {
    struct undo_block *b=&m->blocks[i-1];
    if(putblock(vol,b->sector,&b->before)<0||getblock(vol,b->sector,&verify)<0||memcmp(verify,b->before,HFS_BLOCKSZ))rollback=-1;
   }
+  if(m->used&&fhook_sync(vol->fd)<0)rollback=-1;
   /* Restore deep-owned maps as well as the B-tree headers, bitmap and cache.
      The copied cache links still refer to this same original cache allocation. */
   FREE(vol->ext.map);FREE(vol->cat.map);

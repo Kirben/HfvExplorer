@@ -13,6 +13,16 @@ extern "C" {
 }
 namespace {
 ftype_write originalWrite;
+ftype_sync originalSync;
+unsigned syncCalls, syncFailures;
+int failingSync(int fd) {
+ ++syncCalls;
+ if(syncFailures){--syncFailures;errno=EIO;return -1;}
+ return originalSync(fd);
+}
+ftype_read originalRead;
+int failingRead(int,void*,unsigned){errno=EIO;return -1;}
+
 unsigned calls,failAt;int mode;bool fired;
 void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 int failingWrite(int fd,const void* data,unsigned count) {
@@ -97,6 +107,40 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  file=hfs_open(volume,name);char appended[6];require(file&&hfs_lseek(file,4097,SEEK_SET)==4097&&hfs_read(file,appended,6)==6&&!memcmp(appended,"APPEND",6),"rollback lost earlier pending data");
  require(hfs_close(file)==0&&hfs_umount(volume)==0,"close pending-update verification");
  fprintf(report,"PASS: rollback preserves earlier pending file data and open-file positions across pre-operation flush failures.\n");
+ // Commit flush failures must restore sectors before discarding undo state.
+ originalSync=fhook_sync;
+ for(int cache=0;cache<2;++cache) {
+  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount commit-flush fixture");
+  if(!cache)require(b_finish(volume)==0,"disable commit-flush cache");
+  syncCalls=0;syncFailures=1;fhook_sync=failingSync;
+  int synced=hfs_mkdir(volume,unrelated);fhook_sync=originalSync;
+  require(synced<0&&syncCalls==2&&!(volume->flags&HFS_WRITE_FAILED),"commit flush failure did not roll back and flush restoration");
+  verify(volume);require(hfs_umount(volume)==0&&load(path)==seed,"commit flush failure left changed image");
+ }
+ fprintf(report,"PASS: commit flush failures restore and flush original sectors in both cache modes.\n");
+ // Failed close preserves its pending file view for explicit retry or unmount.
+ for(int cache=0;cache<2;++cache)for(int retry=0;retry<2;++retry) {
+  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount close-retry fixture");
+  if(!cache)require(b_finish(volume)==0,"disable close-retry cache");
+  file=hfs_open(volume,name);require(file&&hfs_lseek(file,0,SEEK_END)>=0&&hfs_write(file,const_cast<char*>("APPEND"),6)==6,"prepare close-retry update");
+  auto pos=file->pos;calls=0;failAt=0;mode=retry;fired=false;fhook_write=failingWrite;
+  int closed=hfs_close(file);fhook_write=originalWrite;
+  require(closed<0&&fired&&volume->files==file&&file->pos==pos&&!(volume->flags&HFS_WRITE_FAILED),"failed close discarded pending file view");
+  if(retry)require(hfs_close(file)==0,"explicit close retry");
+  require(hfs_umount(volume)==0,"unmount retry of pending close");
+  volume=hfs_mount(path.GetBuffer(),0,O_RDONLY);path.ReleaseBuffer();require(volume!=nullptr,"reopen close-retry image");
+  file=hfs_open(volume,name);require(file&&hfs_lseek(file,4097,SEEK_SET)==4097&&hfs_read(file,appended,6)==6&&!memcmp(appended,"APPEND",6),"failed close lost pending append");
+  require(hfs_close(file)==0&&hfs_umount(volume)==0,"close retry verification");
+ }
+ fprintf(report,"PASS: failed/short close writes retain file views; explicit close and unmount retries preserve pending data.\n");
+ // Persistent preimage read errors must not loop forever while closing.
+ save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount persistent-read fixture");
+ require(b_finish(volume)==0,"disable persistent-read cache");file=hfs_open(volume,name);
+ require(file&&hfs_lseek(file,0,SEEK_END)>=0&&hfs_write(file,const_cast<char*>("APPEND"),6)==6,"prepare persistent-read update");
+ originalRead=fhook_read;fhook_read=failingRead;calls=0;failAt=~0u;mode=0;fired=false;fhook_write=failingWrite;
+ require(hfs_umount(volume)<0&&calls==0,"persistent close read failure hung or wrote without undo");
+ fhook_read=originalRead;fhook_write=originalWrite;
+ fprintf(report,"PASS: persistent before-image read failures stop unmount after bounded retries without device writes.\n");
  // A device that also rejects undo writes must be fenced, not retried as clean.
  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount unrecoverable-write fixture");
  hfsfile* held=hfs_open(volume,blockerName);require(held!=nullptr,"hold unrelated file during rollback failure");
