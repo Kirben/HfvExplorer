@@ -323,9 +323,12 @@ struct Volume::Impl {
         // A relocated journal can be discovered through either committed redo
         // copy. Follow JIB after each replay; read-only mounts use the overlay.
         std::set<uint64_t> journalLocations;
+        bool replayPending = false;
         for (;;) {
             Journal current(view);
-            current.Open(header, w);
+            // Recovery is an overlay until all filesystem validation succeeds.
+            current.Open(header, false);
+            replayPending |= current.enabled && current.start != current.end;
             journal.Adopt(current);
             if (!journal.enabled)
                 break;
@@ -361,6 +364,13 @@ struct Volume::Impl {
               "Binary filename comparison requires an HFSX volume");
         LoadEntries();
         AuditAllocation();
+        if (w && replayPending) {
+            view.Apply();
+            // Only the final referenced journal may be cleared: an older journal
+            // region can already have been freed/reused by the recovered state.
+            journal.start = journal.end;
+            journal.StoreHeader();
+        }
         Snapshot();
     }
     void Snapshot() {

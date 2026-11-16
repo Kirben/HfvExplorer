@@ -148,6 +148,25 @@ void crashes(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     auto original = disk.bytes;
     fails([&] { Volume v(disk, true); }, "Corrupt journal accepted");
     must(disk.bytes == original, "Failed replay changed image");
+    // A valid redo log does not authorize writes to an otherwise damaged filesystem.
+    Memory damaged = clean;
+    {
+        Volume v(damaged, true);
+        v.fault = [](const char *at) {
+            if (!strcmp(at, "journal-committed")) throw Error("Committed redo fixture");
+        };
+        fails([&] { v.MakeDirectory(2, u"Pending recovery"); }, "Create valid pending redo");
+    }
+    auto header = damaged.bytes.data() + 1024;
+    auto allocation = uint64_t(Disk::U32(header + 128)) * Disk::U32(header + 40);
+    damaged.bytes[size_t(allocation)] &= 0x7f; // Reserved boot block falsely marked free.
+    auto unchanged = damaged.bytes;
+    auto writesBefore = damaged.writes, flushesBefore = damaged.flushes;
+    fails([&] { Volume v(damaged); }, "Damaged replayed allocation accepted read-only");
+    fails([&] { Volume v(damaged, true); }, "Damaged replayed allocation accepted writable");
+    must(damaged.bytes == unchanged && damaged.writes == writesBefore && damaged.flushes == flushesBefore,
+         "Rejected writable recovery modified image or cleared its journal");
+
 }
 void journalGeometry(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     for (unsigned sector : {512u, 2048u, 4096u}) {
