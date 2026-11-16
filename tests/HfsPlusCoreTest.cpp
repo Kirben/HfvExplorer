@@ -182,6 +182,55 @@ void crashes(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
          "Rejected writable recovery modified image or cleared its journal");
 
 }
+void mutationCrashes(Volume::FormatKind kind) {
+    Memory clean(16 * 1024 * 1024);
+    Volume::Format(clean, u"Mutation recovery", true, kind);
+    uint32_t folder, destination, nested, file, empty, unaffected;
+    {
+        Volume v(clean, true);
+        folder=v.MakeDirectory(2,u"Source");destination=v.MakeDirectory(2,u"Destination");
+        nested=v.MakeDirectory(folder,u"Nested");empty=v.MakeDirectory(2,u"Empty");
+        file=v.Put(folder,u"Both forks",8197,5003,pattern);
+        unaffected=v.Put(2,u"Unaffected",777,913,pattern);
+        auto before=clean.bytes;auto writes=clean.writes;
+        fails([&]{v.Remove(folder);},"Nonempty folder deletion accepted");
+        fails([&]{v.Rename(folder,nested,u"Cycle");},"Folder move into descendant accepted");
+        must(clean.bytes==before&&clean.writes==writes,"Rejected folder mutation wrote image");
+    }
+    for(unsigned operation=0;operation<4;++operation)
+        for(const char* phase : {"data-flushed","journal-data-flushed","journal-committed","home-flushed","journal-cleared"}) {
+            Memory disk=clean;
+            {
+                Volume v(disk,true);
+                v.fault=[&](const char* at){if(!strcmp(at,phase))throw Error("Mutation crash");};
+                fails([&]{
+                    if(operation==0)v.Rename(file,destination,u"Renamed");
+                    if(operation==1)v.Rename(folder,destination,u"Moved folder");
+                    if(operation==2)v.Remove(file);
+                    if(operation==3)v.Remove(empty);
+                },"Mutation crash phase not exercised");
+                must(!v.Writable(),"Failed mutation remained writable");
+            }
+            bool committed=strcmp(phase,"data-flushed")&&strcmp(phase,"journal-data-flushed");
+            auto writes=disk.writes;
+            auto inspect=[&](Volume& v){
+                verify(v,unaffected,0,777);verify(v,unaffected,1,913);
+                if(operation==2&&committed)fails([&]{v.Stat(file);},"Deleted file survived committed journal");
+                else {
+                    auto entry=v.Stat(file);verify(v,file,0,8197);verify(v,file,1,5003);
+                    must(entry.parent==(operation==0&&committed?destination:folder),"Recovered file parent mismatch");
+                    must(entry.name==(operation==0&&committed?u"Renamed":u"Both forks"),"Recovered file name mismatch");
+                }
+                must(v.Stat(folder).parent==(operation==1&&committed?destination:2),"Recovered directory move mismatch");
+                must(v.Stat(nested).parent==folder,"Directory move detached descendants");
+                if(operation==3&&committed)fails([&]{v.Stat(empty);},"Deleted folder survived committed journal");
+                else must(v.Stat(empty).parent==2,"Empty folder lost before commit");
+            };
+            {Volume v(disk);inspect(v);}
+            must(disk.writes==writes,"Read-only mutation recovery wrote image");
+            {Volume v(disk,true);inspect(v);v.Put(2,u"After recovery",1025,513,pattern);inspect(v);}
+        }
+}
 void journalGeometry(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
     for (unsigned sector : {512u, 2048u, 4096u}) {
         Memory disk(16 * 1024 * 1024);
@@ -1010,6 +1059,9 @@ int wmain(int argc, wchar_t **argv) {
         basic(false);
         basic(true);
         crashes();
+        for(auto kind : {Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive})
+            mutationCrashes(kind);
+        puts("PASS: HFS+/HFSX file/folder rename/delete recovery at every journal boundary; both forks and unrelated entries preserved");
         journalGeometry();
         trees();
         fragmented();
