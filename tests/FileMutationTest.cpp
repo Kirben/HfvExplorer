@@ -16,6 +16,7 @@ extern "C" {
 #include "hfs/interface.h"
 int do_delete_directory(hfsvol*,char*);
 }
+void RunClassicWriteFailureTests(const char*,FILE*);
 namespace {
 bool junction(const CString& link,const CString& target) {
  if(!CreateDirectoryA(link,nullptr))return false;
@@ -37,6 +38,7 @@ int RunFileMutationTest(const char* directory) {
  CString root=directory,image=root+"\\mutations.dsk";FILE* report=nullptr;fopen_s(&report,(root+"\\file-mutations-report.txt"),"w");if(!report)return 2;
  int silent=HFSIFACE_silencer(1);
  try {
+  RunClassicWriteFailureTests(directory,report);
   {CFile f;check(f.Open(image,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create HFS fixture");f.SetLength(4*1024*1024);}
   char label[]="MutationTest",fileName[]="MutationTest:Keep",type[]="TEXT",creator[]="TEST";
   check(hfs_format(image.GetBuffer(),0,label)==0,"format mutation fixture");image.ReleaseBuffer();

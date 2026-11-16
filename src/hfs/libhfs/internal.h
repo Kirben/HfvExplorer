@@ -381,6 +381,7 @@ struct _hfsvol_ {
 };
 
 # define HFS_READONLY		0x01
+# define HFS_WRITE_FAILED 0x80 /* Rollback/baseline failed: no further I/O writes. */
 
 # define HFS_UPDATE_MDB		0x10
 # define HFS_UPDATE_ALTMDB	0x20
