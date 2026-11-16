@@ -395,13 +395,21 @@ int do_delete_directory( hfsvol *vol, char *path )
 	hfsdirent ent;
 	char new_source[_MAX_PATH];
 
+	hfsdirent selected;
+	if(!path || !*path || hfs_stat(vol, path, &selected) < 0) return -1;
+	if(selected.cnid <= HFS_CNID_ROOTDIR) {
+		hfs_error="Cannot delete an HFS volume root";errno=EINVAL;return -1;
+	}
 	dir = hfs_opendir( vol, path );
 	if(dir == 0) {
 		hfs_perror(path);
 		return(-1);
 	} else {
 		while (hfs_readdir(dir, &ent) >= 0) {
-			sprintf( new_source, "%s:%s", path, ent.name );
+			if(strlen(path)+strlen(ent.name)+2 > sizeof(new_source)) {
+				hfs_closedir(dir);hfs_error="HFS delete path is too long";errno=ENAMETOOLONG;return -1;
+			}
+			sprintf(new_source, "%s%s%s", path, path[strlen(path)-1]==':'?"":":", ent.name);
 			if(ent.flags & HFS_ISDIR) {
 				if(do_delete_directory( vol, new_source ) != 0) {
 					break;
