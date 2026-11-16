@@ -341,6 +341,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunHfsPlusCdTest(const char*);
+ if(__argc==3 && strcmp(__argv[1],"--verify-hfsplus-cd")==0)ExitProcess(RunHfsPlusCdTest(__argv[2]));
  extern int RunHfsPlusUiTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-hfsplus-ui")==0)ExitProcess(RunHfsPlusUiTest(__argv[2]));
  extern int RunMediaControlTest(const char*);

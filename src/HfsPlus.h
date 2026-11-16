@@ -22,6 +22,8 @@ class Source {
     virtual void Read(uint64_t, void *, size_t) = 0;
     virtual void Write(uint64_t, const void *, size_t) = 0;
     virtual void Flush() = 0;
+    // Removable read-only sources validate media even for cached catalog reads.
+    virtual void CheckMedia() {}
 };
 std::unique_ptr<Source> OpenImage(const wchar_t *, bool write);
 std::unique_ptr<Source> CreateImage(const wchar_t *, uint64_t size);

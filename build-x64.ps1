@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $hfsPlusCd=Join-Path $hfsPlusDirectory 'cd'
+ $cdTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-hfsplus-cd',('"'+$hfsPlusCd+'"')) -WindowStyle Hidden -PassThru
+ if(!$cdTest.WaitForExit(60000)){$cdTest.Kill();throw 'HFS+ CD tests timed out.'}
+ if($cdTest.ExitCode -ne 0){throw 'HFS+ CD tests failed.'}
+ Get-Content (Join-Path $hfsPlusCd 'hfsplus-cd-report.txt')
  Write-Host "HFS+ test images retained at $hfsPlusDirectory; no physical devices accessed."
 }
 if($TestCd) {

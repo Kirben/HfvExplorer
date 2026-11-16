@@ -1246,6 +1246,7 @@ bool Volume::Writable() const { return p_->write && p_->usable; }
 std::u16string Volume::Name() const { return p_->entries.at(2).name; }
 uint64_t Volume::FreeBytes() const { return uint64_t(U32(p_->header.data() + 48)) * p_->bs; }
 std::vector<Entry> Volume::List(uint32_t parent) const {
+    p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
     uint32_t target = p_->Resolve(parent);
     Check(p_->Get(target).directory, "Not an HFS+ folder");
@@ -1272,10 +1273,12 @@ std::vector<Entry> Volume::List(uint32_t parent) const {
     return result;
 }
 Entry Volume::Stat(uint32_t id) const {
+    p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
     return p_->Presented(id);
 }
 uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer, size_t n) {
+    p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
     Check(fork < 2, "Invalid HFS+ fork");
     uint32_t target = p_->Resolve(id);

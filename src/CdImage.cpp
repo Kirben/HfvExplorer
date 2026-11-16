@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "CdImage.h"
+#include "DeviceWait.h"
 #include "ReadOnlyCd.h"
 #include "CdImageToc.h"
 #include <vector>
@@ -15,7 +16,7 @@ public:
   if(!Verify(before)){reason="Could not establish CD media identity";return false;}
   CDROM_READ_TOC_EX query={};query.Format=CDROM_READ_TOC_EX_FORMAT_TOC;query.Msf=0;
   CDROM_TOC toc={};DWORD returned=0;
-  if(!DeviceIoControl(cd_.Handle(),IOCTL_CDROM_READ_TOC_EX,&query,sizeof(query),&toc,sizeof(toc),&returned,nullptr)){
+  if(!HfvMediaControl(cd_.Handle(),IOCTL_CDROM_READ_TOC_EX,&query,sizeof(query),&toc,sizeof(toc),&returned,nullptr)){
    error_=GetLastError();reason="Could not read the CD table of contents";return false;
   }
   if(!CdImageSupportedToc(toc,returned)){
@@ -29,7 +30,7 @@ public:
  unsigned long long Size() const override{return size_;}
  bool Verify(DWORD& generation) override {
   DWORD returned=0;generation=0;
-  if(!DeviceIoControl(cd_.Handle(),IOCTL_STORAGE_CHECK_VERIFY,nullptr,0,&generation,sizeof(generation),&returned,nullptr)){error_=GetLastError();return false;}
+  if(!HfvMediaControl(cd_.Handle(),IOCTL_STORAGE_CHECK_VERIFY,nullptr,0,&generation,sizeof(generation),&returned,nullptr)){error_=GetLastError();return false;}
   if(returned<sizeof(generation)){error_=ERROR_NOT_SUPPORTED;return false;}
   if(ready_&&generation!=identity_){error_=ERROR_MEDIA_CHANGED;return false;}return true;
  }
@@ -114,6 +115,9 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
  };
 }
 
+std::shared_ptr<CdImageSource> MakeNativeCdImageSource() {
+ return std::make_shared<NativeCdImageSource>();
+}
 std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::string output,std::shared_ptr<CdImageSource> source) {
- return MakeMediaImageJob(drive,std::move(output),source?source:std::make_shared<NativeCdImageSource>(),"CD");
+ return MakeMediaImageJob(drive,std::move(output),source?source:MakeNativeCdImageSource(),"CD");
 }

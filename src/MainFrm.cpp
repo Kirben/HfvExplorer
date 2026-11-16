@@ -93,6 +93,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_WM_DROPFILES()
 	ON_COMMAND(ID_FILE_NEWVOLUME, OnFileNewvolume)
  ON_COMMAND(ID_FILE_NEWHFSPLUS, OnFileNewHfsPlus)
+ ON_COMMAND(ID_FILE_OPENHFSPLUSCD, OnFileOpenHfsPlusCd)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
 
@@ -1391,3 +1392,5 @@ void CMainFrame::OnToolsFind()
  }
  AfxMessageBox("The folder was opened, but the item is not visible. It may have changed or be hidden by the current view settings.");
 }
+
+void CMainFrame::OnFileOpenHfsPlusCd() {if(!StorageUi::busy())OpenHfsPlusCdBrowser(this);}

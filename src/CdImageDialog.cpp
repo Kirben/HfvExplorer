@@ -16,7 +16,7 @@ public:
  }
  BOOL OnCommand(WPARAM w,LPARAM l) override {
   if(LOWORD(w)==IDC_CDI_BROWSE){
-   CFileDialog save(FALSE,"iso",nullptr,OFN_HIDEREADONLY|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR,"Data CD images (*.iso)|*.iso|Raw images (*.img)|*.img|All files (*.*)|*.*||",this);
+   CFileDialog save(FALSE,"iso",nullptr,OFN_HIDEREADONLY|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR,"CD data-track images (*.iso;*.cdr)|*.iso;*.cdr|Raw images (*.img)|*.img|All files (*.*)|*.*||",this);
    if(save.DoModal()==IDOK)SetDlgItemText(IDC_CDI_PATH,save.GetPathName());return TRUE;
   }
   return CDialog::OnCommand(w,l);

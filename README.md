@@ -26,8 +26,17 @@ Current filesystem support
 - HFS+ and HFSX internal journals support read/write transactions and replay. A read-only
   open replays into memory without changing the image. Non-journaled writes
   are supported but cannot provide journaled recovery after interruption.
+- File > Open HFS+ / HFSX CD opens physical single-track data CDs read-only in
+  the Unicode browser, including Apple-partitioned/hybrid discs. Both forks,
+  compressed files and hard links use the same readers as disk images. Media
+  changes invalidate cached listings and require closing/reopening the browser.
+  Internal journal replay stays in memory; no device write is issued.
+  Tools > Dump CD to file saves the complete data track, including its partition
+  map and Windows side of a hybrid, and the result can be reopened as an image.
+  Audio, mixed-mode, multisession and nonzero-start data tracks remain unsupported
+  by this HFS+ CD path and raw-image dump.
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
-  Physical HFS+ / HFSX CD/floppy access, GPT images, compressed DMG containers and
+  Physical HFS+ / HFSX floppy access, GPT images, compressed DMG containers and
   external journals are not implemented.
 - Compressed-file reads decode decmpfs stored data (1/9/10), zlib (3/4), LZVN
   (7/8), LZFSE (11/12) and LZBITMAP (13/14), from attributes or resource-fork blocks. Listings show
