@@ -11,5 +11,6 @@ public:
  virtual DWORD Error() const=0;
 };
 using CdImageSource=MediaImageSource;
+std::shared_ptr<CdImageSource> MakeNativeCdImageSource();
 std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::string output,std::shared_ptr<MediaImageSource> source,std::string medium);
 std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::string output,std::shared_ptr<CdImageSource> source=nullptr);

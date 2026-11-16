@@ -81,7 +81,7 @@
     <ClCompile Include="ReadOnlyCd.cpp" />
     <ClCompile Include="MfsImage.cpp" />
     <ClCompile Include="HfsPlus.cpp" />
-    <ClCompile Include="HfsPlusFile.cpp" />
+    <ClCompile Include="HfsPlusFile.cpp" /><ClCompile Include="HfsPlusCd.cpp" /><ClCompile Include="..\tests\HfsPlusCdTest.cpp" />
     <ClCompile Include="HfsPlusUnicode.cpp" />
     <ClCompile Include="HfsPlusBrowser.cpp" /><ClCompile Include="MfsBrowser.cpp" />
     <ClCompile Include="..\tests\LargeImageGuiTest.cpp" /><ClCompile Include="..\tests\FragmentedGuiTest.cpp" /><ClCompile Include="..\tests\LargeForkGuiTest.cpp" /><ClCompile Include="..\tests\FloppyGuiTest.cpp" /><ClCompile Include="..\tests\DeviceWaitGuiTest.cpp" /><ClCompile Include="..\tests\CopyProgressTest.cpp" />

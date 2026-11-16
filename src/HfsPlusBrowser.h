@@ -2,3 +2,5 @@
 #pragma once
 int TryOpenHfsPlusBrowser(const char *path, CWnd *parent);
 void FormatHfsPlusImage(CWnd *parent);
+
+void OpenHfsPlusCdBrowser(CWnd *parent);

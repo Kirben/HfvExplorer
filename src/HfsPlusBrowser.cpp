@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusBrowser.h"
+#include "HfsPlusCd.h"
 #include "StorageJobDialog.h"
 #include "ImageSize.h"
 #include <commdlg.h>
@@ -142,7 +143,7 @@ class Browser : public CDialog {
     CListCtrl list_;
     uint32_t folder_ = 2;
     std::vector<uint32_t> navigation_;
-    bool broken_ = false;
+    bool broken_ = false, optical_ = false;
 #ifdef HFV_TESTING
     unsigned lastJobTicks_ = 0;
 #endif
@@ -167,6 +168,19 @@ class Browser : public CDialog {
         if (result.code) {
             if (!hiddenHfsPlusTest)
                 AfxMessageBox(result.message.c_str(), MB_OK | MB_ICONERROR);
+            if (optical_) {
+                // A destination/export error does not invalidate a good CD.
+                // A failed source remains latched to prevent stale catalog use.
+                auto ready = ShowStorageWaitJob([&](Storage::Job &) {
+                    source_->CheckMedia(); return Storage::Result{};
+                }, hiddenHfsPlusTest);
+                if (ready.code) {
+                    broken_ = true; entries_.clear(); list_.DeleteAllItems(); list_.EnableWindow(FALSE);
+                    for (int id : {IDC_HPLUS_DATA, IDC_HPLUS_RESOURCE, IDC_HPLUS_UP})
+                        GetDlgItem(id)->EnableWindow(FALSE);
+                    SetDlgItemText(IDC_HPLUS_STATUS, "CD unavailable. Close and reopen this browser.");
+                }
+            }
             if (volume_ && !volume_->Writable() && source_->Writable()) {
                 // Discard an aborted in-memory transaction; replay a durable
                 // journal if the failed operation had reached its commit point.
@@ -200,7 +214,10 @@ class Browser : public CDialog {
     void Reload() {
         if (broken_)
             return;
-        if (!Run([&](Storage::Job &) { entries_ = volume_->List(folder_); }))
+        std::u16string folderName;
+        if (!Run([&](Storage::Job &) {
+            entries_ = volume_->List(folder_); folderName = volume_->Stat(folder_).name;
+        }))
             return;
         list_.DeleteAllItems();
         for (size_t i = 0; i < entries_.size(); ++i) {
@@ -218,11 +235,12 @@ class Browser : public CDialog {
             Cell(list_.m_hWnd, int(i), 3, e.directory ? L"" : std::to_wstring(e.forks[1].size));
         }
         auto title = Wide(volume_->Name()) + (volume_->IsHfsX() ? L" - HFSX" : L" - HFS+") +
+                     (optical_ ? L" CD" : L"") +
                      (volume_->CaseSensitive() ? L" (case-sensitive)" : L" (case-insensitive)") +
                      (volume_->Journaled() ? L" (journaled)" : L"") +
                      (volume_->Writable() ? L"" : L" (read-only)");
         SetWindowTextW(m_hWnd, title.c_str());
-        auto status = Wide(volume_->Stat(folder_).name) + L"  |  " + std::to_wstring(entries_.size()) +
+        auto status = Wide(folderName) + L"  |  " + std::to_wstring(entries_.size()) +
                       L" items  |  " + std::to_wstring(volume_->FreeBytes()) + L" bytes free";
         SetDlgItemTextW(m_hWnd, IDC_HPLUS_STATUS, status.c_str());
         GetDlgItem(IDC_HPLUS_UP)->EnableWindow(folder_ != 2);
@@ -278,6 +296,11 @@ class Browser : public CDialog {
 
   public:
 #ifdef HFV_TESTING
+    bool TestCdFailure() {
+        bool result = Run([&](Storage::Job &) { volume_->List(); });
+        return !result && broken_ && !list_.IsWindowEnabled() && list_.GetItemCount() == 0 &&
+               !GetDlgItem(IDC_HPLUS_DATA)->IsWindowEnabled() && !GetDlgItem(IDC_HPLUS_UP)->IsWindowEnabled();
+    }
     bool TestFeatureNavigation() {
         int row = -1;
         for (size_t i = 0; i < entries_.size(); ++i)
@@ -307,8 +330,9 @@ class Browser : public CDialog {
         return true;
     }
 #endif
-    Browser(std::unique_ptr<HfsPlus::Source> source, std::unique_ptr<HfsPlus::Volume> volume, CWnd *parent)
-        : CDialog(IDD_HPLUS_BROWSER, parent), source_(std::move(source)), volume_(std::move(volume)) {}
+    Browser(std::unique_ptr<HfsPlus::Source> source, std::unique_ptr<HfsPlus::Volume> volume, CWnd *parent,
+            bool optical = false)
+        : CDialog(IDD_HPLUS_BROWSER, parent), source_(std::move(source)), volume_(std::move(volume)), optical_(optical) {}
     BOOL OnInitDialog() override {
         CDialog::OnInitDialog();
         list_.SubclassDlgItem(IDC_HPLUS_LIST, this);
@@ -489,6 +513,34 @@ class Browser : public CDialog {
         return CDialog::OnCommand(w, l);
     }
 };
+class CdDialog : public CDialog {
+  public:
+    int drive = -1;
+    std::function<bool(int)> available;
+    explicit CdDialog(CWnd *owner, std::function<bool(int)> probe = {})
+        : CDialog(IDD_HPLUS_CD, owner), available(std::move(probe)) {}
+    BOOL OnInitDialog() override {
+        CDialog::OnInitDialog(); auto combo = static_cast<CComboBox *>(GetDlgItem(IDC_CDI_DRIVE));
+        for (int n = 0; n < 26; ++n) {
+            char root[] = "A:\\"; root[0] += char(n);
+            if (available ? available(n) : GetDriveTypeA(root) == DRIVE_CDROM) {
+                int row = combo->AddString(root); combo->SetItemData(row, n);
+            }
+        }
+        if (combo->GetCount()) combo->SetCurSel(0);
+        GetDlgItem(IDOK)->EnableWindow(combo->GetCount() != 0);
+        return TRUE;
+    }
+    bool ReadDrive() {
+        auto combo = static_cast<CComboBox *>(GetDlgItem(IDC_CDI_DRIVE)); int row = combo->GetCurSel();
+        if (row == CB_ERR) return false;
+        drive = int(combo->GetItemData(row)); return true;
+    }
+    void OnOK() override {
+        if (!ReadDrive()) { AfxMessageBox("Select a CD drive."); return; }
+        CDialog::OnOK();
+    }
+};
 } // namespace
 int TryOpenHfsPlusBrowser(const char *path, CWnd *parent) {
     if (!path || !*path)
@@ -530,6 +582,20 @@ int TryOpenHfsPlusBrowser(const char *path, CWnd *parent) {
     Browser browser(std::move(source), std::move(volume), parent);
     return browser.DoModal() == -1 ? -1 : 1;
 }
+void OpenHfsPlusCdBrowser(CWnd *parent) {
+    CdDialog options(parent); if (options.DoModal() != IDOK) return;
+    std::unique_ptr<HfsPlus::Source> source;
+    std::unique_ptr<HfsPlus::Volume> volume;
+    auto result = ShowStorageWaitJob([&](Storage::Job &) {
+        source = HfsPlus::OpenCd(options.drive);
+        if (!HfsPlus::Volume::Recognizes(*source))
+            throw HfsPlus::Error("No HFS+ or HFSX volume found. Classic HFS CDs use the main browser.");
+        volume.reset(new HfsPlus::Volume(*source, false));
+        return Storage::Result{};
+    });
+    if (result.code) { AfxMessageBox(result.message.c_str(), MB_OK | MB_ICONERROR); return; }
+    Browser browser(std::move(source), std::move(volume), parent, true); browser.DoModal();
+}
 void FormatHfsPlusImage(CWnd *parent) {
     FormatDialog options(parent);
     if (options.DoModal() != IDOK)
@@ -564,6 +630,38 @@ void FormatHfsPlusImage(CWnd *parent) {
     browser.DoModal();
 }
 #ifdef HFV_TESTING
+bool TestHfsPlusCdBrowser(std::unique_ptr<HfsPlus::Source> source, CWnd *owner,
+                          std::function<void()> changeMedia) {
+    struct Hidden { bool old = hiddenHfsPlusTest; Hidden() { hiddenHfsPlusTest = true; }
+        ~Hidden() { hiddenHfsPlusTest = old; } } hidden;
+    {
+        CMenu menu; if (!menu.LoadMenu(IDR_MAINFRAME) ||
+            menu.GetMenuState(ID_FILE_OPENHFSPLUSCD, MF_BYCOMMAND) == UINT(-1)) return false;
+        CdDialog chooser(owner, [](int n) { return n == 3 || n == 4; });
+        if (!chooser.Create(IDD_HPLUS_CD, owner)) return false;
+        bool choices = chooser.SendDlgItemMessage(IDC_CDI_DRIVE, CB_GETCOUNT) == 2;
+        chooser.SendDlgItemMessage(IDC_CDI_DRIVE, CB_SETCURSEL, 1);
+        choices = choices && chooser.ReadDrive() && chooser.drive == 4;
+        chooser.DestroyWindow(); if (!choices) return false;
+        CdDialog empty(owner, [](int) { return false; });
+        if (!empty.Create(IDD_HPLUS_CD, owner)) return false;
+        bool disabled = !empty.GetDlgItem(IDOK)->IsWindowEnabled(); empty.DestroyWindow();
+        if (!disabled) return false;
+    }
+    std::unique_ptr<HfsPlus::Volume> volume;
+    auto result = ShowStorageWaitJob([&](Storage::Job &) {
+        volume.reset(new HfsPlus::Volume(*source, false)); return Storage::Result{};
+    }, true);
+    if (result.code) return false;
+    Browser browser(std::move(source), std::move(volume), owner, true);
+    if (!browser.Create(IDD_HPLUS_BROWSER, owner)) return false;
+    bool valid = true;
+    for (int id : {IDC_HPLUS_IMPORT, IDC_HPLUS_IMPORT_RESOURCE, IDC_HPLUS_MKDIR, IDC_HPLUS_RENAME, IDC_HPLUS_DELETE})
+        valid = valid && !browser.GetDlgItem(id)->IsWindowEnabled();
+    CString title; browser.GetWindowText(title); valid = valid && title.Find(" CD") >= 0;
+    changeMedia(); valid = browser.TestCdFailure() && valid && owner->IsWindowEnabled();
+    browser.DestroyWindow(); return valid;
+}
 int RunHfsPlusUiTest(const char *directory) {
     if (!CreateDirectoryA(directory, nullptr))
         return 2;
