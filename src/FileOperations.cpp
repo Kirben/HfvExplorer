@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "FileOperations.h"
+#include "VolumeCoordinator.h"
 #include "DirectFloppy.h"
 #include "ReadOnlyCdBackend.h"
 #include "RenameName.h"
@@ -125,6 +126,13 @@ Storage::Result ReplaceResource(const Request& request,Storage::Job& job,Complet
  volume->Put(original.parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){Cancel(job);if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);progress.bytes+=n;progress.fileBytes+=n;progress.processed+=n;job.progress(progress);},true);
  if(!request.sources[0].volume)from.first->Close();completion.complete=true;completion.completed=1;return {};
 }
+std::string Resource(const Location& item){if(item.volume)return item.volume->ResourceKey();if(item.type==LIST_FAT)return VolumeCoord::HostKey(item.windowsPath);return VolumeCoord::ImageKey(item.classicImage);}
+std::vector<VolumeCoord::Access> Resources(const Request& request){
+ using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
+ if(request.kind==Kind::LegacyCopy){auto key=[](const std::string& volume,const std::string& path){return Absolute(path)?VolumeCoord::HostKey(VolumeCoord::Wide(path)):VolumeCoord::ImageKey(volume);};access.push_back({key(request.sourceVolume,request.sourcePath),request.move?Mode::Write:Mode::Read});access.push_back({key(request.targetVolume,request.targetPath),Mode::Write});return access;}
+ for(auto& source:request.sources)access.push_back({Resource(source),(request.kind==Kind::Rename||request.kind==Kind::Delete||source.cut)?Mode::Write:Mode::Read});
+ if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork)access.push_back({Resource(request.target),Mode::Write});return access;
+}
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
  Cancel(job);
  if(request.kind==Kind::Copy)return CopyRequest(request,job,completion);
@@ -143,9 +151,13 @@ Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->m
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
  auto job=Storage::worker().submit([state,values](Storage::Job& job){Completion completion;Storage::Result result;
-  try{result=Execute(*values,job,completion);}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
+  try{Cancel(job);VolumeCoord::Lease access(Resources(*values));result=Execute(*values,job,completion); }
+  catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
+  std::vector<std::string> changed;
+  for(auto& item:completion.affected){try{if(auto volume=item.volume.lock())changed.push_back(volume->ResourceKey());else if(item.type==LIST_FAT)changed.push_back(VolumeCoord::HostKey(item.windowsPath));else if(!item.classicImage.empty())changed.push_back(VolumeCoord::ImageKey(item.classicImage));}catch(...){/* Keep the operation result if a removed path cannot be identified. */}}
+  VolumeCoord::Changed(changed);
   {std::lock_guard<std::mutex> lock(state->mutex);state->completion=std::move(completion);}return result;
  });
  {auto& registry=Registry::Get();std::lock_guard<std::mutex> lock(registry.mutex);

@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
+#include "BrowserDirectory.h"
 #include "MainMacBrowser.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
@@ -108,7 +109,13 @@ int RunBrowserSessionTest(const char* directory){
   {Doc startup;Frame frame;CCreateContext context{};context.m_pCurrentDoc=&startup;context.m_pNewViewClass=RUNTIME_CLASS(CHFVExplorerView);
    app.m_pMainWnd=nullptr;Check(frame.LoadFrame(IDR_MAINFRAME,WS_OVERLAPPEDWINDOW,nullptr,&context)!=FALSE,"create real hidden browser frame");
    Check(!frame.IsWindowVisible()&&app.m_pMainWnd==nullptr&&startup.GetBrowserSession().Owner()==&frame,"startup frame/session binding");
-   Check(startup.OnNewDocument()!=FALSE,"initialize real browser document");startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
+   app.m_startup_floppies=FALSE;startup.m_fat_count=2;
+   startup.m_fats[0].m_letter='Z';startup.m_fats[0].m_type=DRIVE_REMOVABLE;startup.m_fats[0].m_volume_name="Z:\\";
+   startup.m_fats[1].m_letter=wa[0];startup.m_fats[1].m_type=DRIVE_FIXED;startup.m_fats[1].m_volume_name=wa;
+   bool probedRemovable=false;BrowserDirectory::testObserveRead=[&](const char* path){probedRemovable|=std::string(path).find("Z:")==0;};
+   Check(startup.OnNewDocument()!=FALSE,"initialize real browser document");BrowserDirectory::testObserveRead={};
+   Check(!probedRemovable&&startup.GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_fats[1].m_rootitem,"startup selected/probed an empty floppy with detection disabled");
+startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
    Check(startup.GetBrowserSession().List()->GetListCtrl().GetItemCount()==2,"real startup directory listing");
    frame.SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);Check(!startup.GetBrowserSession().finderLayout,"frame command routing");
    frame.DestroyWindow();Check(startup.GetBrowserSession().Tree()==nullptr&&startup.GetBrowserSession().List()==nullptr&&startup.GetBrowserSession().Owner()==nullptr,"frame pane lifetime detachment");
@@ -116,7 +123,8 @@ int RunBrowserSessionTest(const char* directory){
   app.m_doc=&b.doc;app.m_tree=&b.tree;app.m_list=&b.list;app.m_pMainWnd=&b.owner;
   first.reset();Check(app.m_doc==&b.doc&&app.m_tree==&b.tree&&app.m_list==&b.list&&b.doc.HasIcon('BBBB')&&b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(b.list,L"Second file")>=0,"closing A invalidated session B");
   fprintf(report,"PASS: two hidden browser sessions with independent mounts, navigation, selection, sort/layout, native clipboard and classic Finder icon tables; Windows folders and same-named classic HFS images; explicit slow-read owner routing, errors/retry, pre-main-window startup, real hidden frame creation/commands/teardown, pane ownership and closing one session while the other stays usable. No physical devices or computer control.\n");
- }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());result=1;}
+  fprintf(report,"PASS: with floppy detection disabled and an unavailable removable root listed first, startup chooses a fixed root without probing removable media.\n");
+ }catch(const std::exception& e){BrowserDirectory::testObserveRead={};fprintf(report,"FAIL: %s\n",e.what());result=1;}
  app.m_doc=nullptr;app.m_tree=nullptr;app.m_list=nullptr;app.m_pMainWnd=nullptr;fclose(report);return result;
 }
 #endif

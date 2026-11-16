@@ -26,6 +26,7 @@ struct Row {
     std::shared_ptr<OwnedIcons> ownedIcons;
 };
 struct Snapshot {
+    std::string resourceKey;uint64_t revision=0;
     std::vector<Row> rows;
     MacBrowser::Capabilities capabilities;
     bool capabilitiesKnown=false;

@@ -21,6 +21,7 @@ public:
     bool Active() const;
     bool Activate(int row);
     bool Refresh();
+    bool RefreshForChange(const std::string&);
     bool NewFolder();
     bool Rename();
     bool Delete(bool confirm);

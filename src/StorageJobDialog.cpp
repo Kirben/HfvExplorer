@@ -4,6 +4,7 @@
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "FileOperations.h"
+#include "VolumeCoordinator.h"
 #include "BrowserPresentation.h"
 #include <shobjidl.h>
 #include <cmath>
@@ -256,11 +257,23 @@ public:
   job->wait();
  }
 };
-unsigned actionDepth=0;
+unsigned actionDepth=0,quietRefreshDepth=0;
+void quietWait(const std::shared_ptr<Storage::Job>& job){
+ struct Lifetime{std::shared_ptr<Storage::Job> job;~Lifetime(){job->wait();}}lifetime{job};
+ while(WaitForSingleObject(job->event(),10)!=WAIT_OBJECT_0){
+  // Do not run input commands against a listing whose snapshot is in flight.
+  // Leave input/quit messages queued for the normal loop after the read.
+  for(UINT type:{UINT(WM_PAINT),UINT(WM_TIMER),UINT(VolumeCoord::Notification),UINT(WM_NULL)}){
+   MSG message;while(PeekMessage(&message,nullptr,type,type,PM_REMOVE))DispatchMessage(&message);
+  }
+ }
+}
+
 std::unique_ptr<NativeSession> nativeSession;
 void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool retainNative=true,CWnd* explicitOwner=nullptr,bool fileLayout=false) {
  INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_PROGRESS_CLASS};InitCommonControlsEx(&controls);
  ActiveUiJob active;
+ if(quietRefreshDepth&&storageOnly){quietWait(job);return;}
  CWnd* owner=explicitOwner?explicitOwner:AfxGetMainWnd();
  if(actionDepth&&storageOnly&&retainNative){
   if(!nativeSession)nativeSession.reset(new NativeSession(job,title,hidden,owner));
@@ -285,6 +298,8 @@ void waitNative(const std::shared_ptr<Storage::Job>& job){
  wait(job,"Waiting for storage",hidden,true);
 }
 }
+StorageQuietRefresh::StorageQuietRefresh(){++quietRefreshDepth;}
+StorageQuietRefresh::~StorageQuietRefresh(){--quietRefreshDepth;}
 StorageAction::StorageAction():active_(GetCurrentThreadId()==StorageUi::state().thread&&!StorageUi::busy()){
  if(active_)++actionDepth;
 }

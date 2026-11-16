@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MacBrowserModel.h"
+#include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "BrowserPresentation.h"
 #include <set>
@@ -15,6 +16,7 @@ class Plus final : public Volume {
     std::unique_ptr<HfsPlus::Source> source_;
     std::unique_ptr<HfsPlus::Volume> volume_;
     bool writable_, usable_ = true;
+    std::string resourceKey_;
     template<class F> auto Mutate(F work) -> decltype(work()) {
         if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access");
         try { return work(); }
@@ -36,8 +38,9 @@ class Plus final : public Volume {
         for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;return e;
     }
 public:
-    Plus(std::unique_ptr<HfsPlus::Source> source, bool write)
-        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write) {}
+    Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key)
+        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)) {}
+    std::string ResourceKey()const override{return resourceKey_.empty()?Volume::ResourceKey():resourceKey_;}
     std::u16string Name() const override { return volume_->Name(); }
     const char *Kind() const override { return volume_->IsHfsX() ? "HFSX" : "HFS+"; }
     std::string Description()const override {
@@ -74,6 +77,7 @@ public:
 class Mfs final : public Volume {
     std::unique_ptr<MfsImageSource> source_;
     MfsImage image_;
+    std::string resourceKey_;
     std::map<uint32_t, size_t> entries_;
     Entry EntryAt(size_t i) {
         const auto &e = image_.Entries().at(i); Entry out;
@@ -86,10 +90,11 @@ class Mfs final : public Volume {
     }
     void Refuse() { throw HfsPlus::Error("MFS disk images are read-only"); }
 public:
-    explicit Mfs(std::unique_ptr<MfsImageSource> source) : source_(std::move(source)) {
+    explicit Mfs(std::unique_ptr<MfsImageSource> source,std::string key) : source_(std::move(source)),resourceKey_(std::move(key)) {
         if (!image_.Open(*source_)) throw HfsPlus::Error(image_.Error());
         for (size_t i = 0; i < image_.Entries().size(); ++i) entries_[uint32_t(i + 3)] = i;
     }
+    std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name() const override { return U16(MfsDisplayName(image_.VolumeName())); }
     const char *Kind() const override { return "MFS"; }
     bool Writable() const override { return false; }
@@ -157,26 +162,28 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     ++progress.files; job.progress(progress); return true;
 }
 }
-std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write) {
-    return std::make_shared<Plus>(std::move(s), write);
+std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key) {
+    return std::make_shared<Plus>(std::move(s), write,std::move(key));
 }
 std::shared_ptr<Volume> OpenImage(const std::wstring &path) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
+    auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     auto source = HfsPlus::OpenImage(path.c_str(), false);
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
-        try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true), true); }
-        catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false), false); }
+        try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true), true,key); }
+        catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false), false,key); }
     }
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);
     if (!MfsImage::Recognizes(*mfs)) return {};
-    return std::make_shared<Mfs>(std::move(mfs));
+    return std::make_shared<Mfs>(std::move(mfs),key);
+    });
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {
     auto source = HfsPlus::OpenCd(drive, std::move(media));
     if (!HfsPlus::Volume::Recognizes(*source)) return {};
-    try { return FromHfsPlus(std::move(source), false); }
+    try { return FromHfsPlus(std::move(source), false,VolumeCoord::DeviceKey(drive)); }
     catch (const std::exception &e) { throw DetectedVolumeError(e.what()); }
 }
 std::shared_ptr<Volume> OpenCdRoot(const char *root,

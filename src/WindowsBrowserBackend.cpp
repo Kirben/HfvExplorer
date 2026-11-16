@@ -23,7 +23,7 @@ std::string key(std::string name){if(!name.empty())CharUpperBuffA(&name[0],DWORD
 }
 BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int volume,const char* directory,bool listing,Storage::Job& job){
  BrowserDirectory::ObserveRead(directory);
- BrowserDirectory::Snapshot snapshot;auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
  std::string prefix=directory;if(prefix.empty())throw std::runtime_error("Select a Windows folder");if(prefix.back()!='\\')prefix+='\\';
  bool afp=is_afp_directory(const_cast<char*>(directory))!=0;
  char root[]={directory[0],':',char(92),0};bool writable=GetDriveTypeA(root)!=DRIVE_CDROM;
@@ -49,7 +49,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int v
  // The view receives only a normalized row and its operation binding.
  {
   Find find;WIN32_FIND_DATAA info{};find.handle=FindFirstFileA((prefix+"%*.*").c_str(),&info);
-  if(find.handle==INVALID_HANDLE_VALUE&&GetLastError()!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("Cannot enumerate Windows resource companions");
+  if(find.handle==INVALID_HANDLE_VALUE&&GetLastError()!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("Cannot read Windows folder (Windows error "+std::to_string(GetLastError())+").");
   if(find.handle!=INVALID_HANDLE_VALUE)do{
    if(job.cancelled())throw Storage::Cancelled();HICON small=nullptr,large=nullptr;char name[MAX_PATH],type[20]{},creator[20]{};int show=0;
    if(get_apple_double(prefix.c_str(),info.cFileName,&small,&large,name,type,creator,&show)){

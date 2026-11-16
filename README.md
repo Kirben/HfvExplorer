@@ -18,8 +18,8 @@ icon tables are independent too. Storage-backed directory jobs receive their
 owning frame explicitly, including during startup before MFC sets `m_pMainWnd`.
 
 This prepares the browser for multiple windows. The application still exposes
-one main frame: cross-window refresh/clipboard coordination, legacy launcher
-services and the multi-window commands are later
+one main frame: cross-window clipboard coordination, legacy launcher services
+and the multi-window commands are later
 steps. The classic HFS engine and storage worker remain serialized.
 
 `--verify-browser-sessions NEW_DIRECTORY` in the Test build exercises two hidden
@@ -50,8 +50,7 @@ captured full paths so operations do not reconstruct paths from a later tree
 selection.
 
 The GUI still waits for operations through its progress dialog. Background
-operation UI, cross-window volume coordination/refresh, and multiple-window
-commands are separate steps; this change does not enable concurrent writers.
+operation UI and multiple-window commands are separate steps; this change does not enable concurrent writers.
 New-folder creation and formatting keep their existing worker paths.
 
 Run the Test build with `--verify-file-operations NEW_DIRECTORY` for detached
@@ -61,6 +60,44 @@ real journaled HFS+/HFSX, classic HFS and Windows operations. Tests include hidd
 progress/owner restoration and classic recursive-delete cancellation, with no
 physical media access. `--verify-shared-browser` also exercises actual classic
 HFS and Windows view rename/delete adapters with unrelated tree selection.
+
+Volume coordination and session refresh
+---------------------------------------
+
+File-operation requests acquire all participating volumes together: sources are
+read resources, destinations/moved sources are write resources, and duplicate
+resources merge to the stronger access mode. Conflicts fail as busy before any
+mutation. The storage worker still serializes filesystem execution; this does
+not introduce parallel access to the legacy HFS engine.
+
+Images use Windows file identity, including case/path and hard-link aliases.
+Windows folders use their host-volume identity; physical media use the device
+identity. Native HFS+/HFSX/MFS image browsers share a weakly cached backend in
+this process, preserving the existing cross-process writable-image exclusion
+and avoiding separate stale native caches. The final browser/job reference
+releases the backend; the coordinator does not hold an idle writer open.
+
+Completed operations publish revision changes for resources that may have been
+modified, including on partial failure. Each browser session has a private
+message-only mailbox: worker threads never call a browser object. Notifications
+coalesce, defer during storage dialogs/writers/editing, and refresh affected
+active views on the UI thread without progress popups or focus changes. Snapshots acknowledge the revision actually read,
+so an explicit originating-window refresh avoids duplicate work without losing
+changes arriving between reading and subscribing. Native views retain their
+folder, surviving selection and sort order; a deleted current folder falls back
+to a surviving ancestor. Classic HFS cached readers are invalidated/reopened,
+and legacy Windows/classic views use the same notification delivery. Inactive
+legacy roots discard stale child paths and refill when selected; read errors
+clear the affected listing and retry on a subsequent change.
+
+This is an in-process operation/refresh service, not an external filesystem
+watcher. The application still exposes one main window. Test with
+`--verify-volume-coordination NEW_DIRECTORY`; the suite covers access conflicts,
+shared aliases, coalescing, busy deferral, late subscriptions, partial failures,
+folder rename/deletion, Windows/classic refresh and closed sessions with queued
+messages. All browser windows used by tests are hidden; no physical media is
+accessed. Startup tests also cover disabled floppy detection, choosing a fixed
+Windows root instead of probing an empty removable drive automatically.
 
 Storage ownership
 -----------------
