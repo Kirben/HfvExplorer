@@ -744,22 +744,21 @@ int HFSIFACE_copy_one_file(
 				prepare_for_copyout_raw( vol1, source, tmp, extension );
 			}
 
+			if(*extension) {
+				DWORD attributes = GetFileAttributesA(tmp);
+				if(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+					if(build_target_dir_name(1, 0, new_source, source, tmp) != 0) return 1;
+					strcpy(tmp, new_source);
+				}
+				modify_extension(tmp, extension);
+			}
+
 			result = do_copyout( vol1, 1, &source, tmp, HFSIFACE_copyout_mode );
 			if(result != 0) {
 				if(copyout_destination_opened() && 0 == build_target_dir_name( 1, 0, new_source, source, tmp )) {
 					DeleteFile(new_source);
 				}
 			} else if(!copyout_was_skipped()) {
-				if(*extension && 0 == build_target_dir_name( 1, 0, new_source, source, tmp )) {
-					strcpy( tmp2, new_source );
-					modify_extension( tmp2, extension );
-					if(stricmp(tmp2,new_source) != 0) {
-						DeleteFile( tmp2 );
-						if(MoveFile( new_source, tmp2 )) {
-							copyout_set_last_open_file(tmp2);
-						}
-					}
-				}
 				if(move_if_possible && !copyout_was_skipped()) {
 					if(hfs_delete(vol1, source) == 0) *pwas_moved = 1;
 				}

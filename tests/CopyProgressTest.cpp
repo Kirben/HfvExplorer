@@ -27,6 +27,8 @@ extern "C" {
 #include "hfs/interface.h"
 #include "hfs/copyout.h"
 }
+void import_map(CString& path);
+extern "C" int tmap_final(void);
 namespace {
 class CopyFloppy : public FloppyWriteApi {
 public:
@@ -182,6 +184,24 @@ int RunCopyProgressTest(const char* directory) {
   WIN32_FIND_DATAA leftover;HANDLE search=FindFirstFileA((root+"\\HFV*.tmp"),&leftover);
   check(search==INVALID_HANDLE_VALUE,"failed exports remove only their staged temporary files");
   fprintf(out,"PASS: failed Windows replacements preserve previous output and move source on write, flush and publication failures.\n");
+  // Extension mapping must prompt for the final filename, never delete it after copying.
+  CString mapping=root+"\\mapping.txt",mapped=root+"\\Game.safe",unmapped=root+"\\Game";
+  {CFile f;check(f.Open(mapping,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create mapping");const char line[]="safe,,APPL,TEST,x,,test\r\n";f.Write(line,sizeof(line)-1);f.Close();}
+  import_map(mapping);
+  for(auto choice : {Storage::ConflictChoice::Skip,Storage::ConflictChoice::Cancel,Storage::ConflictChoice::ReplaceAll}) {
+   for(const auto& path : {mapped,unmapped}){CFile f;check(f.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create mapped conflict");f.Write("KEEP",4);f.Close();}
+   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)root,0,0,'r'));
+   unsigned conflicts=0;std::string pending;
+   while(!job->done()) {
+    auto conflict=job->conflict();if(!conflict.empty()&&conflict!=pending){pending=conflict;++conflicts;check(conflict==(LPCSTR)mapped,"conflict names mapped destination");job->resolve(choice);}Sleep(1);
+   }
+   check(conflicts==1,"mapped export asks before replacing final output");
+   check(load(unmapped)==std::vector<BYTE>({'K','E','E','P'}),"raw mapping does not alter intermediate filename");
+   if(choice==Storage::ConflictChoice::ReplaceAll)check(job->result().code==0&&load(mapped)==data,"mapped replacement publishes exact data fork");
+   else check(load(mapped)==std::vector<BYTE>({'K','E','E','P'}),"mapped skip/cancel preserves previous file");
+  }
+  tmap_final();
+  fprintf(out,"PASS: raw extension mapping checks the final output conflict; skip/cancel preserves it and replacement preserves unrelated files.\n");
   auto failed=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Missing",(LPCSTR)root,(LPCSTR)root,0,0,'a'));
   failed->wait();check(failed->result().code!=0,"source scan errors reach completion");
   auto hostFailure=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)(root+"\\DoesNotExist"),(LPCSTR)root,(LPCSTR)(root+"\\NoOutput"),0,0,'a'));
