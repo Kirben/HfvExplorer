@@ -17,9 +17,12 @@ $release=Join-Path (Split-Path -Parent $here) 'HFVExplorer.exe'
 Run-Hidden $release @('--compatibility-report',(Join-Path $OutputDirectory 'release-startup.txt'))
 $app=Join-Path $here 'HFVExplorer-tests.exe'
 Run-Hidden $app @('--verify-device-wait',(Join-Path $OutputDirectory 'device-wait.txt'))
+Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--feature-fixture',(Join-Path $OutputDirectory 'feature-links.dsk'))
 foreach($test in @('copy-progress','cd-image','cd-burn','find-files','floppy-menu','media-control','hfsplus-ui')){
  Run-Hidden $app @(('--verify-'+$test),(Join-Path $OutputDirectory $test))
 }
 Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--self-test')
+$compression=Join-Path $here 'test-hfsplus-compression.ps1'
+if(Test-Path -LiteralPath $compression){& $compression -Directory (Join-Path $OutputDirectory 'native-compression')}
 'PASS: prerequisite policy, real release startup, simulated storage/copy/media/UI regressions.' | Set-Content (Join-Path $OutputDirectory 'summary.txt')
 Write-Output "Reports: $OutputDirectory"

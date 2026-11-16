@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<ItemGroup>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\HfsPlusCompression.cpp" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\adler32.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\crc32.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inflate.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inffast.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inftrees.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\zutil.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_decode_base.c" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_fse.c" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzvn_decode_base.c" />
+</ItemGroup>
+</Project>

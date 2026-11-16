@@ -3,6 +3,7 @@
 // structs, compiler packing assumptions, or third-party filesystem engine.
 #include "HfsPlusDisk.h"
 #include "HfsPlusBTree.h"
+#include "HfsPlusCompression.h"
 #include <ctime>
 namespace HfsPlus {
 namespace {
@@ -310,6 +311,10 @@ struct Volume::Impl {
     Fork committedCatalogFork, committedExtentsFork;
     const Bytes *allocationExclusions = nullptr;
     std::map<uint32_t, Entry> entries;
+    std::vector<Record> attributeRecords;
+    bool attributesLoaded = false;
+    std::map<uint32_t, std::unique_ptr<Compression>> compressedReaders;
+    uint32_t fileMetadata = 0, directoryMetadata = 0;
     explicit Impl(Source &s, bool w) : source(s), view(s), journal(view), write(w) {
         Check(!w || s.Writable(), "Cannot open a read-only image for writing");
         view.base = Locate(s, view.length);
@@ -435,6 +440,10 @@ struct Volume::Impl {
                             String(b.key.data() + 6, b.key.size() - 6), caseSensitive);
     }
     void LoadEntries() {
+        compressedReaders.clear();
+        attributeRecords.clear();
+        attributesLoaded = false;
+        fileMetadata = directoryMetadata = 0;
         entries.clear();
         const Record *previous = nullptr;
         for (auto &r : catalogRecords) {
@@ -451,6 +460,7 @@ struct Volume::Impl {
             e.parent = U32(r.key.data() + 2);
             e.name = String(r.key.data() + 6, r.key.size() - 6);
             e.directory = type == 1;
+            e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
             e.created = U32(r.value.data() + 12);
             e.modified = U32(r.value.data() + 16);
@@ -477,6 +487,34 @@ struct Volume::Impl {
             Check(entries.emplace(e.id, std::move(e)).second, "Duplicate HFS+ catalog ID");
         }
         Check(entries.count(2) && entries.at(2).directory, "Missing HFS+ root directory");
+        for (auto &pair : entries) {
+            auto &e = pair.second;
+            if (e.parent != 2 || !e.directory)
+                continue;
+            if (e.name == std::u16string(4, 0) + u"HFS+ Private Data" ||
+                e.name == std::u16string(4, 0x2400) + u"HFS+ Private Data") {
+                Check(!fileMetadata, "Ambiguous HFS+ hard-link metadata directory");
+                fileMetadata = e.id;
+            }
+            if (e.name == u".HFS+ Private Directory Data\r")
+                directoryMetadata = e.id;
+        }
+        // Never expose or mutate hidden backing inodes through the ordinary UI.
+        for (auto &pair : entries) {
+            auto &e = pair.second;
+            uint32_t parent = e.id;
+            std::set<uint32_t> seen;
+            while (parent != 2 && seen.insert(parent).second) {
+                if (parent == fileMetadata || parent == directoryMetadata) {
+                    e.protectedFile = true;
+                    break;
+                }
+                auto i = entries.find(parent);
+                if (i == entries.end())
+                    break; // AuditAllocation reports malformed parent chains.
+                parent = i->second.parent;
+            }
+        }
     }
     void Guard() {
         Check(usable, "Reopen the HFS+ image after a failed operation");
@@ -486,6 +524,146 @@ struct Volume::Impl {
         auto p = entries.find(id);
         Check(p != entries.end(), "HFS+ entry not found");
         return p->second;
+    }
+    void LoadAttributes() {
+        if (attributesLoaded)
+            return;
+        Fork f = DecodeFork(header.data() + 352);
+        if (f.size) {
+            Complete(f, 8, 0);
+            Validate(f);
+            auto records = ReadTree(view, f, bs, 522);
+            for (const auto &r : records)
+                Check(r.key.size() >= 14 && 14 + uint64_t(U16(r.key.data() + 12)) * 2 == r.key.size() &&
+                          U16(r.key.data() + 12) <= 255 && r.value.size() >= 4,
+                      "Invalid HFS+ attribute record");
+            attributeRecords = std::move(records);
+        }
+        attributesLoaded = true;
+    }
+    Bytes Attribute(uint32_t id, const std::u16string &name) {
+        LoadAttributes();
+        std::map<uint32_t, const Record *> parts;
+        for (const auto &r : attributeRecords)
+            if (U32(r.key.data() + 4) == id && String(r.key.data() + 12, r.key.size() - 12) == name)
+                Check(parts.emplace(U32(r.key.data() + 8), &r).second, "Duplicate HFS+ attribute extent");
+        Check(parts.count(0), "Compressed file has no com.apple.decmpfs attribute");
+        auto &v = parts.at(0)->value;
+        if (U32(v.data()) == 0x10) {
+            Check(parts.size() == 1 && v.size() >= 16 && U32(v.data() + 12) <= v.size() - 16 &&
+                      v.size() - 16 - U32(v.data() + 12) <= 1,
+                  "Invalid inline HFS+ attribute size");
+            return Bytes(v.begin() + 16, v.begin() + 16 + U32(v.data() + 12));
+        }
+        Check(U32(v.data()) == 0x20 && v.size() == 88, "Unknown HFS+ attribute storage type");
+        Fork f = DecodeFork(v.data() + 8);
+        uint64_t have = 0;
+        for (auto e : f.extents)
+            have += e.count;
+        size_t used = 1;
+        while (have < f.blocks) {
+            auto i = parts.find(uint32_t(have));
+            Check(i != parts.end() && i->second->value.size() == 72 && U32(i->second->value.data()) == 0x30,
+                  "Missing HFS+ attribute overflow extents");
+            uint64_t previous = have;
+            for (unsigned n = 0; n < 8; ++n) {
+                auto p = i->second->value.data() + 8 + n * 8;
+                Extent e{U32(p), U32(p + 4)};
+                if (e.count) {
+                    f.extents.push_back(e);
+                    have += e.count;
+                }
+            }
+            Check(have > previous && have <= f.blocks, "Invalid HFS+ attribute overflow extents");
+            ++used;
+        }
+        Check(parts.size() == used, "Unexpected HFS+ attribute extents");
+        Validate(f);
+        // decmpfs's inline payload is one compression unit, not an unbounded
+        // allocation requested by untrusted attribute metadata.
+        Check(f.size <= 131088, "Oversized com.apple.decmpfs attribute");
+        for (auto e : f.extents)
+            for (uint32_t n = 0; n < e.count; ++n)
+                Check(Used(e.start + n), "Attribute refers to unallocated blocks");
+        Bytes out(size_t(f.size));
+        ForkRead(view, f, bs, 0, out.data(), out.size());
+        return out;
+    }
+    bool IsCompressed(uint32_t id) { return Get(id).compressed; }
+    Compression &Compressed(uint32_t id) {
+        auto i = compressedReaders.find(id);
+        if (i == compressedReaders.end()) {
+            auto attribute = Attribute(id, u"com.apple.decmpfs");
+            Fork resource = Get(id).forks[1];
+            auto reader = std::unique_ptr<Compression>(new Compression(
+                std::move(attribute), resource.size, [this, resource](uint64_t offset, void *p, size_t n) {
+                    ForkRead(view, resource, bs, offset, p, n);
+                }));
+            // Keep one active file's decoded unit, not 64 KiB for every file
+            // ever exported from a large catalog.
+            compressedReaders.clear();
+            i = compressedReaders.emplace(id, std::move(reader)).first;
+        }
+        return *i->second;
+    }
+    int LinkKind(uint32_t id) {
+        auto &e = Get(id);
+        if (e.directory)
+            return 0;
+        bool file = !memcmp(e.finder.data(), "hlnkhfs+", 8);
+        bool folder =
+            !memcmp(e.finder.data(), "fdrpMACS", 8) && (U16(CatalogRecord(id)->value.data() + 2) & 0x20);
+        if (!file && !folder)
+            return 0;
+        // Matching Finder signatures alone can also occur on ordinary files.
+        // Apple additionally requires the root/private-directory creation date.
+        bool date = e.created == Get(2).created || (fileMetadata && e.created == Get(fileMetadata).created);
+        return date ? (folder ? 2 : 1) : 0;
+    }
+    uint32_t Resolve(uint32_t id) {
+        std::set<uint32_t> seen;
+        for (;;) {
+            Check(seen.insert(id).second, "Cyclic HFS+ hard-link reference");
+            int kind = LinkKind(id);
+            if (!kind)
+                return id;
+            uint32_t reference = U32(CatalogRecord(id)->value.data() + 44);
+            uint32_t directory = kind == 2 ? directoryMetadata : fileMetadata;
+            Check(reference && directory, "Broken HFS+ hard link: missing reference or metadata directory");
+            auto number = std::to_string(reference);
+            std::u16string name = kind == 2 ? u"dir_" : u"iNode";
+            name.append(number.begin(), number.end());
+            uint32_t target = Existing(directory, name);
+            Check(target, "Broken HFS+ hard link: backing inode not found");
+            auto &e = Get(target);
+            // A real backing inode is never another link. Explicitly diagnose
+            // cycles before rejecting other malformed link-to-link chains.
+            if (LinkKind(target)) {
+                Check(!seen.count(target), "Cyclic HFS+ hard-link reference");
+                throw Error("Invalid HFS+ hard-link backing inode");
+            }
+            Check(e.directory == (kind == 2), "HFS+ hard-link target has the wrong type");
+            return target;
+        }
+    }
+    Entry Presented(uint32_t id) {
+        auto visible = Get(id);
+        uint32_t target = Resolve(id);
+        Entry result = Get(target);
+        result.id = visible.id;
+        result.parent = visible.parent;
+        result.name = visible.name;
+        result.resolvedId = target;
+        result.hardLink = target != id;
+        result.protectedFile = visible.protectedFile || result.protectedFile || result.hardLink;
+        if (!result.directory && IsCompressed(target)) {
+            auto &c = Compressed(target);
+            result.compressed = true;
+            result.forks[0].size = c.Size();
+            if (c.UsesResource())
+                result.forks[1] = Fork{}; // compressed storage is not a user resource fork
+        }
+        return result;
     }
     void Parent(uint32_t id) {
         auto &e = Get(id);
@@ -986,7 +1164,7 @@ struct Volume::Impl {
         for (auto &e : entries)
             if (e.first != 2) {
                 ++counts[e.second.parent];
-                if (e.second.directory || !memcmp(e.second.finder.data(), "fdrpMACS", 8))
+                if (e.second.directory || LinkKind(e.first) == 2)
                     ++folderCounts[e.second.parent];
             }
         for (auto &record : catalogRecords)
@@ -1069,26 +1247,47 @@ std::u16string Volume::Name() const { return p_->entries.at(2).name; }
 uint64_t Volume::FreeBytes() const { return uint64_t(U32(p_->header.data() + 48)) * p_->bs; }
 std::vector<Entry> Volume::List(uint32_t parent) const {
     Check(p_->usable, "Reopen HFS+ image after error");
+    uint32_t target = p_->Resolve(parent);
+    Check(p_->Get(target).directory, "Not an HFS+ folder");
+    Check(parent != p_->fileMetadata && parent != p_->directoryMetadata,
+          "Private HFS+ backing inodes are not browsable");
     std::vector<Entry> result;
     for (auto &pair : p_->entries)
-        if (pair.second.parent == parent && pair.first != 2)
-            result.push_back(pair.second);
+        if (pair.second.parent == target && pair.first != 2 && pair.first != p_->fileMetadata &&
+            pair.first != p_->directoryMetadata) {
+            Entry e;
+            try {
+                e = p_->Presented(pair.first);
+            } catch (const Error &error) {
+                e = pair.second;
+                e.hardLink = p_->LinkKind(e.id) != 0;
+                e.readError = error.what();
+            }
+            e.parent = parent;
+            result.push_back(std::move(e));
+        }
     std::sort(result.begin(), result.end(), [&](const Entry &a, const Entry &b) {
         return CompareNames(a.name, b.name, p_->caseSensitive) < 0;
     });
     return result;
 }
-Entry Volume::Stat(uint32_t id) const { return p_->Get(id); }
+Entry Volume::Stat(uint32_t id) const {
+    Check(p_->usable, "Reopen HFS+ image after error");
+    return p_->Presented(id);
+}
 uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer, size_t n) {
     Check(p_->usable, "Reopen HFS+ image after error");
     Check(fork < 2, "Invalid HFS+ fork");
-    auto &e = p_->Get(id);
+    uint32_t target = p_->Resolve(id);
+    auto &e = p_->Get(target);
     Check(!e.directory, "Cannot read a folder fork");
-    auto record = p_->CatalogRecord(id);
-    Check(!(record->value[41] & 0x20),
-          "Compressed HFS+ files require decompression, which is not implemented yet");
-    Check(memcmp(e.finder.data(), "hlnkhfs+", 8) && memcmp(e.finder.data(), "fdrpMACS", 8),
-          "HFS+ hard-link resolution is not implemented yet");
+    if (p_->IsCompressed(target)) {
+        auto &compressed = p_->Compressed(target);
+        if (!fork)
+            return compressed.Read(offset, buffer, n);
+        if (compressed.UsesResource())
+            return 0;
+    }
     if (offset >= e.forks[fork].size)
         return 0;
     size_t count = size_t((std::min)(uint64_t(n), e.forks[fork].size - offset));

@@ -32,12 +32,16 @@ if($Test -or $TestHfsPlus) {
  New-Item -ItemType Directory -Path $hfsPlusDirectory | Out-Null
  & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" (Join-Path $hfsPlusDirectory 'formatted.dsk')
  if($LASTEXITCODE){throw "HFS+ core tests failed; retained $hfsPlusDirectory"}
+ & "$PSScriptRoot\tests\test-hfsplus-compression.ps1" -Directory (Join-Path $hfsPlusDirectory 'native-compression')
+ if($LASTEXITCODE){throw 'Native compressed-file tests failed.'}
  & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large (Join-Path $hfsPlusDirectory 'large.dsk')
  if($LASTEXITCODE){throw "HFS+ large-fork tests failed; retained $hfsPlusDirectory"}
  & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large-hfsx (Join-Path $hfsPlusDirectory 'large-hfsx.dsk')
  if($LASTEXITCODE){throw "HFSX large-fork tests failed; retained $hfsPlusDirectory"}
  & $msbuild "$PSScriptRoot\src\HFVExplorer-x64.vcxproj" /p:Configuration=Test /p:Platform=x64 /m /nologo /v:minimal
  if($LASTEXITCODE){throw 'HFS+ hidden UI test build failed.'}
+ & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --feature-fixture (Join-Path $hfsPlusDirectory 'feature-links.dsk')
+ if($LASTEXITCODE){throw 'HFS+ feature UI fixture failed.'}
  $hfsPlusUi=Join-Path $hfsPlusDirectory 'ui'
  $hfsPlusTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-hfsplus-ui',('"'+$hfsPlusUi+'"')) -WindowStyle Hidden -PassThru
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}

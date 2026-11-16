@@ -29,10 +29,18 @@ Current filesystem support
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
   Physical HFS+ / HFSX CD/floppy access, GPT images, compressed DMG containers and
   external journals are not implemented.
-- Ordinary files and both forks are supported. Compressed files and hard-link
-  resolution are rejected explicitly. Existing extended attributes are kept;
-  modifying an entry with attributes/ACLs is refused. Encryption and expanded
-  timestamps are unsupported.
+- Compressed-file reads decode decmpfs stored data (1/9/10), zlib (3/4), LZVN
+  (7/8) and LZFSE (11/12), from attributes or resource-fork blocks. Listings show
+  logical sizes; exports produce decompressed data. Compression storage is hidden
+  from user resource-fork exports; genuine user resource forks are preserved.
+  LZBITMAP (13/14) and other unrecognized methods are refused explicitly.
+- File and directory hard links resolve for browsing/export, including compressed
+  backing files. Private inode directories are hidden. Broken links are marked
+  unreadable; directory navigation returns to the visible parent. Creating,
+  deleting or editing hard links/backing inodes remains unsupported.
+- Writing compressed files, creating compression and modifying entries with
+  extended attributes/ACLs remain unsupported. Existing attributes are preserved
+  during unrelated edits. Encryption and expanded timestamps are unsupported.
 - Catalog and extents B-trees are updated incrementally, including node splits,
   merges and linked allocation maps. There is no fixed catalog-record or
   single-header-map ceiling. Catalog entries are still loaded into memory.
@@ -51,7 +59,10 @@ older Windows execution tests remain pending. No custom storage driver is used.
 HFS+ implementation reference: Apple's HFS Plus Volume Format (TN1150),
 https://developer.apple.com/library/archive/technotes/tn/tn1150.html
 Unicode normalization uses Unicode 3.2 data; see licenses/Unicode-DFS.txt.
-No third-party filesystem engine is included.
+No third-party filesystem engine is included. The static compression decoders
+are zlib 1.4 and Apple's BSD-licensed LZFSE/LZVN sources; see src/compression
+and licenses for provenance. Compression tests include retained macOS-written
+fixtures and compare exports against macOS readback hashes.
 
 HFV/DSK Explorer v. 1.3.0 -- a tool for vMac and Executor(DOS/Win32) users.
 Experimental freeware software.
