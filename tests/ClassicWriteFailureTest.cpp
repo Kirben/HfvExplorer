@@ -30,7 +30,13 @@ int mutate(hfsvol* volume,unsigned operation) {
  char file[]="Rollback:Folder:File",renamed[]="Rollback:Folder:Renamed",folder[]="Rollback:Folder",moved[]="Rollback:Destination:Moved";
  if(operation==0)return hfs_delete(volume,file);
  if(operation==1)return hfs_rename(volume,file,renamed);
- return hfs_rename(volume,folder,moved);
+ if(operation==2)return hfs_rename(volume,folder,moved);
+ char created[]="Rollback:Created",empty[]="Rollback:Empty",type[]="TEXT",creator[]="TEST";
+ if(operation==3)return hfs_mkdir(volume,created);
+ if(operation==4)return hfs_create(volume,created,type,creator);
+ if(operation==5)return hfs_rmdir(volume,empty);
+ hfsdirent properties;if(hfs_stat(volume,file,&properties)<0)return -1;
+ properties.fdflags^=HFS_FNDR_ISINVISIBLE;return hfs_setattr(volume,file,&properties);
 }
 void verify(hfsvol* volume) {
  char name[]="Rollback:Folder:File";hfsfile* file=hfs_open(volume,name);require(file!=nullptr,"rollback lost file catalog record");
@@ -44,11 +50,12 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  char label[]="Rollback",folder[]="Rollback:Folder",destination[]="Rollback:Destination",name[]="Rollback:Folder:File",type[]="TEXT",creator[]="TEST";
  require(hfs_format(seedPath.GetBuffer(),0,label)==0,"format rollback seed");seedPath.ReleaseBuffer();
  hfsvol* volume=hfs_mount(seedPath.GetBuffer(),0,O_RDWR);seedPath.ReleaseBuffer();require(volume!=nullptr,"mount rollback seed");
- require(hfs_mkdir(volume,folder)==0&&hfs_mkdir(volume,destination)==0&&hfs_create(volume,name,type,creator)==0,"create rollback fixture tree");
+ char empty[]="Rollback:Empty";
+ require(hfs_mkdir(volume,folder)==0&&hfs_mkdir(volume,destination)==0&&hfs_mkdir(volume,empty)==0&&hfs_create(volume,name,type,creator)==0,"create rollback fixture tree");
  hfsfile* file=hfs_open(volume,name);std::vector<BYTE> data(4097,0x31),resource(3001,0x72);
  require(file&&hfs_write(file,data.data(),ULONG(data.size()))==data.size()&&hfs_setfork(file,1)==0&&hfs_write(file,resource.data(),ULONG(resource.size()))==resource.size()&&hfs_close(file)==0&&hfs_umount(volume)==0,"finish rollback fixture");
  auto seed=load(seedPath);originalWrite=fhook_write;
- for(int cache=0;cache<2;++cache)for(unsigned operation=0;operation<3;++operation) {
+ for(int cache=0;cache<2;++cache)for(unsigned operation=0;operation<7;++operation) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount measured operation");if(!cache)require(b_finish(volume)==0,"disable measured block cache");
   calls=0;failAt=~0u;fired=false;fhook_write=failingWrite;
   int result=mutate(volume,operation);if(!result)result=hfs_flush(volume);
@@ -64,6 +71,6 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
    volume=hfs_mount(path.GetBuffer(),0,O_RDONLY);path.ReleaseBuffer();require(volume!=nullptr,"reopen rolled-back image");verify(volume);require(hfs_umount(volume)==0,"close recovered image");
   }
  }
- fprintf(report,"PASS: classic HFS delete/file rename/folder move rolls back every injected write error and short write, restoring exact image bytes and both forks.\n");
+ fprintf(report,"PASS: classic HFS file/folder creation, deletion, rename and attribute changes roll back every injected write error and short write, restoring exact image bytes and both forks.\n");
 }
 #endif

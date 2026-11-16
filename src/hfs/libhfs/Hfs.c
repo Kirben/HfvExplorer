@@ -1504,7 +1504,7 @@ int hfs_fstat(hfsfile *file, hfsdirent *ent)
  * NAME:	hfs->setattr()
  * DESCRIPTION:	change a file's attributes
  */
-int hfs_setattr(hfsvol *vol, char *path, hfsdirent *ent)
+static int hfs_setattr_impl(hfsvol *vol, char *path, hfsdirent *ent)
 {
   CatDataRec data;
   node n;
@@ -1550,7 +1550,7 @@ int hfs_fsetattr(hfsfile *file, hfsdirent *ent)
  * NAME:	hfs->mkdir()
  * DESCRIPTION:	create a new directory
  */
-int hfs_mkdir(hfsvol *vol, char *path)
+static int hfs_mkdir_impl(hfsvol *vol, char *path)
 {
   CatDataRec data;
   long parid;
@@ -1591,7 +1591,7 @@ int hfs_mkdir(hfsvol *vol, char *path)
  * NAME:	hfs->rmdir()
  * DESCRIPTION:	delete an empty directory
  */
-int hfs_rmdir(hfsvol *vol, char *path)
+static int hfs_rmdir_impl(hfsvol *vol, char *path)
 {
   CatKeyRec key;
   CatDataRec data;
@@ -1651,7 +1651,7 @@ int hfs_rmdir(hfsvol *vol, char *path)
  * NAME:	hfs->create()
  * DESCRIPTION:	create a new file
  */
-int hfs_create(hfsvol *vol, char *path, char *type, char *creator)
+static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
 {
   CatKeyRec key;
   CatDataRec data;
@@ -2050,4 +2050,33 @@ int hfs_rename(hfsvol *vol,char *source,char *destination) {
  int result;
  if(mutation_source(&vol,source)<0||b_begin_mutation(vol)<0)return -1;
  result=hfs_rename_impl(vol,source,destination);return b_end_mutation(vol,result);
+}
+
+static int mutation_target(hfsvol **vol,char *path) {
+ CatDataRec data;long parent;int found;
+ if(v_getvol(vol)<0)return -1;
+ found=v_resolve(vol,path,&data,&parent,0,0);
+ if(found<0)return -1;
+ if(!parent){ERROR(ENOENT,"HFS parent directory not found");return -1;}
+ return 0;
+}
+int hfs_mkdir(hfsvol *vol,char *path) {
+ int result;
+ if(mutation_target(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ result=hfs_mkdir_impl(vol,path);return b_end_mutation(vol,result);
+}
+int hfs_create(hfsvol *vol,char *path,char *type,char *creator) {
+ int result;
+ if(mutation_target(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ result=hfs_create_impl(vol,path,type,creator);return b_end_mutation(vol,result);
+}
+int hfs_rmdir(hfsvol *vol,char *path) {
+ int result;
+ if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ result=hfs_rmdir_impl(vol,path);return b_end_mutation(vol,result);
+}
+int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
+ int result;
+ if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ result=hfs_setattr_impl(vol,path,entry);return b_end_mutation(vol,result);
 }
