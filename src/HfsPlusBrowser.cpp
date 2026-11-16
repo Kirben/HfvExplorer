@@ -141,6 +141,7 @@ class Browser : public CDialog {
     std::unique_ptr<HfsPlus::Volume> volume_;
     CListCtrl list_;
     uint32_t folder_ = 2;
+    std::vector<uint32_t> navigation_;
     bool broken_ = false;
 #ifdef HFV_TESTING
     unsigned lastJobTicks_ = 0;
@@ -210,7 +211,9 @@ class Browser : public CDialog {
             item.iItem = int(i);
             item.pszText = &name[0];
             SendMessageW(list_.m_hWnd, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item));
-            Cell(list_.m_hWnd, int(i), 1, e.directory ? L"Folder" : L"File");
+            Cell(list_.m_hWnd, int(i), 1, !e.readError.empty() ? L"Unreadable" :
+                 e.hardLink ? (e.directory ? L"Folder link" : L"Hard link") :
+                 e.compressed ? L"Compressed" : e.directory ? L"Folder" : L"File");
             Cell(list_.m_hWnd, int(i), 2, e.directory ? L"" : std::to_wstring(e.forks[0].size));
             Cell(list_.m_hWnd, int(i), 3, e.directory ? L"" : std::to_wstring(e.forks[1].size));
         }
@@ -275,6 +278,20 @@ class Browser : public CDialog {
 
   public:
 #ifdef HFV_TESTING
+    bool TestFeatureNavigation() {
+        int row = -1;
+        for (size_t i = 0; i < entries_.size(); ++i)
+            if (entries_[i].name == u"Linked folder") row = int(i);
+        if (row < 0) return false;
+        list_.SetItemState(row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        NMHDR notify{}; notify.idFrom = IDC_HPLUS_LIST; notify.code = NM_DBLCLK;
+        LRESULT result = 0;
+        OnNotify(0, reinterpret_cast<LPARAM>(&notify), &result);
+        bool entered = folder_ != 2 && navigation_.size() == 1 &&
+                       entries_.size() == 1 && entries_[0].name == u"Child";
+        OnCommand(IDC_HPLUS_UP, 0);
+        return entered && folder_ == 2 && navigation_.empty();
+    }
     bool TestFailedImportRecovery() {
         bool result = Run([&](Storage::Job &) {
             volume_->Put(2, u"Failed import", 100, 0, [](unsigned, uint64_t, void *, size_t) {
@@ -298,7 +315,7 @@ class Browser : public CDialog {
         list_.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
         list_.SendMessage(CCM_SETUNICODEFORMAT, TRUE);
         list_.InsertColumn(0, "Name", LVCFMT_LEFT, 330);
-        list_.InsertColumn(1, "Kind", LVCFMT_LEFT, 65);
+        list_.InsertColumn(1, "Kind", LVCFMT_LEFT, 95);
         list_.InsertColumn(2, "Data bytes", LVCFMT_RIGHT, 115);
         list_.InsertColumn(3, "Resource bytes", LVCFMT_RIGHT, 115);
         for (int id : {IDC_HPLUS_IMPORT, IDC_HPLUS_MKDIR, IDC_HPLUS_RENAME, IDC_HPLUS_DELETE,
@@ -312,8 +329,20 @@ class Browser : public CDialog {
         if (n->idFrom == IDC_HPLUS_LIST && n->code == NM_DBLCLK) {
             int i = Selected();
             if (i >= 0 && entries_[i].directory) {
-                folder_ = entries_[i].id;
-                Reload();
+                uint32_t next = entries_[i].id;
+                if (Run([&](Storage::Job &) {
+                    auto target = volume_->Stat(next).resolvedId;
+                    if (volume_->Stat(folder_).resolvedId == target)
+                        throw HfsPlus::Error("Cyclic directory hard link");
+                    for (auto previous : navigation_)
+                        if (volume_->Stat(previous).resolvedId == target)
+                            throw HfsPlus::Error("Cyclic directory hard link");
+                    volume_->List(next); // validate before changing the navigation path
+                })) {
+                    navigation_.push_back(folder_);
+                    folder_ = next;
+                    Reload();
+                }
             }
             *result = 0;
             return TRUE;
@@ -326,7 +355,12 @@ class Browser : public CDialog {
             return TRUE;
         if (command == IDC_HPLUS_UP) {
             if (folder_ != 2) {
-                folder_ = volume_->Stat(folder_).parent;
+                if (!navigation_.empty()) {
+                    folder_ = navigation_.back();
+                    navigation_.pop_back();
+                } else {
+                    folder_ = 2;
+                }
                 Reload();
             }
             return TRUE;
@@ -584,6 +618,19 @@ int RunHfsPlusUiTest(const char *directory) {
             require(owner.IsWindowEnabled() && browser.IsWindowEnabled() && AfxGetApp()->m_pMainWnd == &owner,
                     "Owner was not restored after failed import and recovery");
             browser.DestroyWindow();
+        }
+        {
+            auto feature = WidePath((std::string(directory) + "\\..\\feature-links.dsk").c_str());
+            if (GetFileAttributesW(feature.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                auto source = HfsPlus::OpenImage(feature.c_str(), false);
+                auto volume = std::unique_ptr<HfsPlus::Volume>(new HfsPlus::Volume(*source));
+                Browser browser(std::move(source), std::move(volume), &owner);
+                require(browser.Create(IDD_HPLUS_BROWSER, &owner) != FALSE, "Hard-link browser creation");
+                require(browser.TestFeatureNavigation(), "Directory hard-link navigation did not return to visible parent");
+                require(owner.IsWindowEnabled() && browser.IsWindowEnabled(), "Hard-link browser owner not restored");
+                browser.DestroyWindow();
+                fprintf(report, "PASS: directory hard-link navigation and Up return to visible parent.\n");
+            }
         }
         {
             auto source = HfsPlus::OpenImage(path.c_str(), false);

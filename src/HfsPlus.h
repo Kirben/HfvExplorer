@@ -37,6 +37,11 @@ struct Entry {
     uint32_t id = 0, parent = 0;
     std::u16string name;
     bool directory = false, protectedFile = false;
+    // Stat/List expose logical fork sizes and resolved content, while retaining
+    // the visible link's catalog ID, name and parent. Mutations use raw records.
+    bool compressed = false, hardLink = false;
+    uint32_t resolvedId = 0;
+    std::string readError; // List can report a broken item without hiding its siblings.
     Fork forks[2];
     std::array<uint8_t, 32> finder{};
     uint32_t created = 0, modified = 0;

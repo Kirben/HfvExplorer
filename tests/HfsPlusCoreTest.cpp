@@ -3,6 +3,8 @@
 #include <cstdio>
 using namespace HfsPlus;
 void RunIncrementalBTreeTests();
+void RunHfsPlusCompressionTests();
+void CreateHfsPlusFeatureFixture(const wchar_t *);
 void must(bool ok, const char *text) {
     if (!ok)
         throw Error(text);
@@ -799,6 +801,42 @@ int wmain(int argc, wchar_t **argv) {
             out->Write(0, memory.bytes.data(), memory.bytes.size());
             out->Flush();
         };
+        if (argc == 3 && !wcscmp(argv[1], L"--feature-fixture")) {
+            CreateHfsPlusFeatureFixture(argv[2]);
+            return 0;
+        }
+        if (argc == 5 && !wcscmp(argv[1], L"--export-hfsplus")) {
+            auto source = OpenImage(argv[2], false);
+            Volume volume(*source);
+            std::wstring path = argv[3];
+            uint32_t id = 2;
+            size_t start = 0;
+            while (start < path.size()) {
+                size_t end = path.find(L'/', start);
+                if (end == std::wstring::npos) end = path.size();
+                std::u16string name(path.begin() + start, path.begin() + end);
+                uint32_t found = 0;
+                for (const auto &entry : volume.List(id))
+                    if (entry.name == name) found = entry.id;
+                must(found != 0, "Export fixture path not found");
+                id = found; start = end + 1;
+            }
+            auto entry = volume.Stat(id);
+            volume.Read(id, 0, 0, nullptr, 0);
+            FILE *file = nullptr;
+            must(_wfopen_s(&file, argv[4], L"wb") == 0 && file, "Cannot create fixture export");
+            try {
+                Bytes buffer(65536);
+                for (uint64_t offset = 0; offset < entry.forks[0].size;) {
+                    size_t n = size_t((std::min)(uint64_t(buffer.size()), entry.forks[0].size - offset));
+                    must(volume.Read(id, 0, offset, buffer.data(), n) == n, "Short fixture export read");
+                    must(fwrite(buffer.data(), 1, n, file) == n, "Fixture export write failed");
+                    offset += n;
+                }
+                fclose(file);
+            } catch (...) { fclose(file); throw; }
+            return 0;
+        }
         if (argc == 3 && !wcscmp(argv[1], L"--incremental-large-catalog")) {
             auto memory = largeCatalog();
             saveMemory(memory, argv[2]);
@@ -928,6 +966,7 @@ int wmain(int argc, wchar_t **argv) {
             puts("PASS: retained committed journal without applying home blocks");
             return 0;
         }
+        RunHfsPlusCompressionTests();
         RunIncrementalBTreeTests();
         journalResizeTests();
         resizeIoErrors();
