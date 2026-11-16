@@ -25,6 +25,8 @@
 #include "HFVExplorer.h"
 
 #include <direct.h>
+#include <vector>
+#include <set>
 
 int exists( CString &name )
 {
@@ -411,31 +413,44 @@ int DeleteFATDir(CString &dir)
  return delete_host_tree(CString(path),0);
 }
 
-void open_file_type::Delete()
+int DeleteHostSelection(const CString& path,bool directory)
 {
-	if(m_path == "") return;
-	if(m_file_system == SystemHFS) {
-		ASSERT(0);
-	} else { // FAT
-		Close();
-		if(m_isdir) {
-			if(!DeleteFATDir(m_path)) {AfxMessageBox("Could not completely delete folder "+m_path+". Remaining files were retained.");return;}
-			if(modify_companion_name()) {
-				if(exists(m_path)) {
-					// This is not a dir!
-					// DeleteFATDir(m_path);
-					silent_delete( m_path );
-				}
-			}
-		} else {
-			silent_delete( m_path );
-			if(modify_companion_name()) {
-				if(exists(m_path)) {
-					silent_delete( m_path );
-				}
-			}
-		}
-	}
+ if(path.IsEmpty()){SetLastError(ERROR_INVALID_NAME);return 0;}
+ if(!(directory?DeleteFATDir(const_cast<CString&>(path)):DeleteFileA(path)))return 0;
+ int slash=path.ReverseFind('\\');CString name=path.Mid(slash+1);
+ // Selecting a metadata file never authorizes deleting the associated data file.
+ if(name.IsEmpty()||name[0]=='%')return 1;
+ CString companion=path.Left(slash+1)+"%"+name;
+ DeleteHandle file;
+ file.value=CreateFileA(companion,GENERIC_READ|DELETE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+   FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+ if(file.value==INVALID_HANDLE_VALUE)return 1; // Unverified entries are retained.
+ BY_HANDLE_FILE_INFORMATION info;LARGE_INTEGER size;BYTE header[26];DWORD got;
+ if(!GetFileInformationByHandle(file.value,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
+    !GetFileSizeEx(file.value,&size)||size.QuadPart<26||!ReadFile(file.value,header,sizeof(header),&got,nullptr)||got!=sizeof(header))return 1;
+ auto word=[](const BYTE* p){return unsigned(p[0])*256+p[1];};
+ auto number=[&](const BYTE* p){return DWORD(word(p))*65536+word(p+2);};
+ if(number(header)!=0x00051607||number(header+4)!=0x00020000)return 1;
+ unsigned count=word(header+24);ULONGLONG table=26ULL+count*12ULL;
+ if(!count||table>ULONGLONG(size.QuadPart))return 1;
+ bool metadata=false;std::set<DWORD> ids;
+ std::vector<BYTE> entries(count*12);
+ if(!ReadFile(file.value,entries.data(),DWORD(entries.size()),&got,nullptr)||got!=entries.size())return 1;
+ for(unsigned i=0;i<count;++i) {
+  const BYTE* entry=entries.data()+i*12;
+  DWORD id=number(entry),offset=number(entry+4),length=number(entry+8);
+  if(!id||!ids.insert(id).second||offset<table||offset>ULONGLONG(size.QuadPart)||length>ULONGLONG(size.QuadPart)-offset)return 1;
+  if(id==2||(id==9&&length>=32))metadata=true;
+ }
+ if(!metadata)return 1;
+ FILE_DISPOSITION_INFO removeVerified={TRUE};
+ return SetFileInformationByHandle(file.value,FileDispositionInfo,&removeVerified,sizeof(removeVerified))!=FALSE;
+}
+BOOL open_file_type::Delete()
+{
+ if(m_path.IsEmpty()||m_file_system==SystemHFS)return FALSE;
+ Close();
+ return DeleteHostSelection(m_path,m_isdir!=0)!=0;
 }
 
 CString open_file_type::GetPath()
