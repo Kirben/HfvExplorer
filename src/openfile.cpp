@@ -361,56 +361,54 @@ int open_file_type::get_companion_file()
 	return(ok);
 }
 
+namespace {
+struct DeleteHandle {
+ HANDLE value=INVALID_HANDLE_VALUE;
+ ~DeleteHandle(){DWORD error=GetLastError();if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);SetLastError(error);}
+ void close(){if(value!=INVALID_HANDLE_VALUE){CloseHandle(value);value=INVALID_HANDLE_VALUE;}}
+};
+int delete_host_tree(const CString& path,unsigned depth) {
+ if(depth>128||path.GetLength()>=MAX_PATH-3){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
+ DeleteHandle directory;
+ // Pin the actual entry without following a junction, and prevent replacement
+ // or reparse-point changes while enumerating its children.
+ directory.value=CreateFileA(path,0,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+   FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+ if(directory.value==INVALID_HANDLE_VALUE)return 0;
+ BY_HANDLE_FILE_INFORMATION info;
+ if(!GetFileInformationByHandle(directory.value,&info))return 0;
+ if(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)){SetLastError(ERROR_DIRECTORY);return 0;}
+ if(!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {
+  WIN32_FIND_DATAA entry;HANDLE search=FindFirstFileA(path+"\\*",&entry);
+  if(search==INVALID_HANDLE_VALUE) {if(GetLastError()!=ERROR_FILE_NOT_FOUND)return 0;}
+  else {
+   int ok=1;DWORD error=ERROR_SUCCESS;
+   do {
+    if(!strcmp(entry.cFileName,".")||!strcmp(entry.cFileName,".."))continue;
+    CString child=path+"\\"+entry.cFileName;
+    if(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ok=delete_host_tree(child,depth+1);
+    else ok=DeleteFileA(child)!=FALSE;
+    if(!ok){error=GetLastError();break;}
+   }while(FindNextFileA(search,&entry));
+   if(ok&&GetLastError()!=ERROR_NO_MORE_FILES){ok=0;error=GetLastError();}
+   FindClose(search);if(!ok){SetLastError(error);return 0;}
+  }
+ }
+ directory.close();
+ return RemoveDirectoryA(path)!=FALSE; // A reparse point itself, never its target.
+}
+}
 int DeleteFATDir(CString &dir)
 {
-	HANDLE fh;
-	WIN32_FIND_DATA FindFileData;
-	int ok = 1, looping = 0;
-	CString wd, name;
-
-	wd = dir;
-	trim_right( &wd, fat_char );
-	fh = FindFirstFile( wd + "*.*", &FindFileData );
-	looping = (fh != INVALID_HANDLE_VALUE);
-	while (looping) {
-		if( *FindFileData.cFileName != '.') {
-			name = wd + CString( FindFileData.cFileName );
-			if(FindFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-				if(!DeleteFATDir(name)) {
-					ok = 0;
-				}
-			} else {
-				TRY {
-					CFile::Remove( name );
-				} CATCH( CFileException, e ) {
-					AfxMessageBox( "Could not delete file " + name + "." );
-					ok = 0;
-				}
-				END_CATCH
-			}
-
-			// NEW: since we deleted from the volume, the Windows iteration
-			// structures are not in sync anymore. Must close and reopen.
-			FindClose( fh );
-			fh = FindFirstFile( wd + "*.*", &FindFileData );
-			ok = (fh != INVALID_HANDLE_VALUE);
-
-		}
-		if(ok) 
-			looping = FindNextFile( fh, &FindFileData );
-		else
-			looping = 0;
-	}
-	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
-	if(ok) {
-		char *lpstr = dir.GetBuffer(MAX_PATH);
-		if(RemoveDirectory(lpstr) == 0) {
-			AfxMessageBox( "Could not delete directory " + dir + "." );
-			ok = 0;
-		}
-		dir.ReleaseBuffer();
-	}
-	return(ok);
+ char path[MAX_PATH];DWORD length=GetFullPathNameA(dir,sizeof(path),path,nullptr);
+ if(!length||length>=sizeof(path)||!strncmp(path,"\\\\?\\",4)||!strncmp(path,"\\\\.\\",4)) {SetLastError(ERROR_INVALID_NAME);return 0;}
+ while(length>3&&path[length-1]=='\\')path[--length]=0;
+ if(length==3&&path[1]==':'&&path[2]=='\\'){SetLastError(ERROR_ACCESS_DENIED);return 0;}
+ if(path[0]=='\\'&&path[1]=='\\') {
+  char* server=strchr(path+2,'\\');char* share=server?strchr(server+1,'\\'):nullptr;
+  if(!share){SetLastError(ERROR_ACCESS_DENIED);return 0;}
+ }
+ return delete_host_tree(CString(path),0);
 }
 
 void open_file_type::Delete()
@@ -421,7 +419,7 @@ void open_file_type::Delete()
 	} else { // FAT
 		Close();
 		if(m_isdir) {
-			DeleteFATDir(m_path);
+			if(!DeleteFATDir(m_path)) {AfxMessageBox("Could not completely delete folder "+m_path+". Remaining files were retained.");return;}
 			if(modify_companion_name()) {
 				if(exists(m_path)) {
 					// This is not a dir!
