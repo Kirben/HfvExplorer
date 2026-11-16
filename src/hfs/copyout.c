@@ -135,6 +135,61 @@ void copyout_get_last_open_file( char *path, int maxpath )
 
 /* Copy Routines =========================================================== */
 
+#ifdef WIN32
+/* Windows-to-Windows copies use the same publication rules as HFS exports. */
+int copyout_host_copy(const char *source,const char *destination) {
+ HANDLE input,existing;BY_HANDLE_FILE_INFORMATION from,to;
+ DWORD attributes,error,copiedAttributes;int fd=-1,result=-1,decision=1;char absolute[_MAX_PATH];
+ unsigned long long length;
+ copyout_skipped=0;copyout_opened=0;
+ input=CreateFileA(source,GENERIC_READ,FILE_SHARE_READ,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
+ if(input==INVALID_HANDLE_VALUE){cpo_error="Cannot open Windows source";return 1;}
+ if(!GetFileInformationByHandle(input,&from)||(from.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))goto done;
+ length=((unsigned long long)from.nFileSizeHigh<<32)|from.nFileSizeLow;
+ existing=CreateFileA(destination,0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,0,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,0);
+ if(existing!=INVALID_HANDLE_VALUE) {
+  int same=GetFileInformationByHandle(existing,&to)&&from.dwVolumeSerialNumber==to.dwVolumeSerialNumber&&
+   from.nFileIndexHigh==to.nFileIndexHigh&&from.nFileIndexLow==to.nFileIndexLow;
+  CloseHandle(existing);
+  if(same){cpo_error="Source and destination are the same Windows file";goto done;}
+ }
+ attributes=GetFileAttributesA(destination);error=GetLastError();
+ if(attributes==INVALID_FILE_ATTRIBUTES&&error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)goto done;
+ if(copyout_observer)copyout_observer(source,0,length,0,copyout_context);
+ if(attributes!=INVALID_FILE_ATTRIBUTES&&copyout_overwrite) {
+  DWORD n=GetFullPathNameA(destination,sizeof(absolute),absolute,0);
+  if(!n||n>=sizeof(absolute))goto done;
+  decision=copyout_overwrite(absolute,copyout_overwrite_context);
+ }
+ if(decision==2){copyout_skipped=1;result=0;goto done;}
+ if(decision<=0){cpo_error="Copy cancelled";goto done;}
+ fd=stage_output(destination,attributes!=INVALID_FILE_ATTRIBUTES);
+ if(fd<0){cpo_error="Cannot stage Windows output";goto done;}
+ cpo_error="Windows copy read/write failed";
+ {int closing=fd;fd=-1;if(close(closing)<0)goto done;}
+ /* CopyFile preserves alternate data streams, attributes and timestamps. */
+ if(copyout_fault==1||!CopyFileA(source,copyout_temporary,FALSE))goto done;
+ copiedAttributes=GetFileAttributesA(copyout_temporary);
+ if(copiedAttributes==INVALID_FILE_ATTRIBUTES||!SetFileAttributesA(copyout_temporary,copiedAttributes&~FILE_ATTRIBUTE_READONLY))goto done;
+ {HANDLE output=CreateFileA(copyout_temporary,GENERIC_WRITE,0,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
+  if(output==INVALID_HANDLE_VALUE)goto done;
+  fd=_open_osfhandle((intptr_t)output,O_BINARY|O_WRONLY);
+  if(fd<0){CloseHandle(output);goto done;}
+ }
+ if(copyout_fault==2||_commit(fd)<0)goto done;
+ {int closing=fd;fd=-1;if(close(closing)<0)goto done;}
+ if(!SetFileAttributesA(copyout_temporary,copiedAttributes))goto done;
+ if(copyout_fault==3||!MoveFileExA(copyout_temporary,copyout_destination,
+    MOVEFILE_WRITE_THROUGH|(copyout_replace?MOVEFILE_REPLACE_EXISTING:0)))goto done;
+ *copyout_temporary=0;result=0;
+ if(copyout_observer)copyout_observer(source,0,length,1,copyout_context);
+ done:
+ if(fd>=0)close(fd);
+ if(*copyout_temporary){SetFileAttributesA(copyout_temporary,FILE_ATTRIBUTE_NORMAL);DeleteFileA(copyout_temporary);*copyout_temporary=0;}
+ CloseHandle(input);return result==0?0:1;
+}
+#endif
+
 /*
  * NAME:	do_macb()
  * DESCRIPTION:	perform copy using MacBinary I/II translation

@@ -240,6 +240,22 @@ int RunCopyProgressTest(const char* directory) {
   }
   tmap_final();
   fprintf(out,"PASS: raw extension mapping checks the final output conflict; skip/cancel preserves it and replacement preserves unrelated files.\n");
+  CString hostDirectory=root+"\\HostCopy",hostSource=root+"\\HostFile",hostDestination=hostDirectory+"\\HostFile";
+  check(CreateDirectoryA(hostDirectory,nullptr)!=FALSE,"create Windows copy target");
+  {CFile f;check(f.Open(hostSource,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows source");f.Write("NEW",3);f.Close();}
+  {CFile f;check(f.Open(hostSource+":Finder",CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows alternate stream");f.Write("FORK",4);f.Close();}
+  for(int fault : {1,2,3,0}) {
+   {CFile f;check(f.Open(hostDestination,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows destination");f.Write("OLD",3);f.Close();}
+   copyout_test_fault(fault);
+   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)hostDirectory,0,0,'a'));
+   while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}copyout_test_fault(0);
+   check((job->result().code!=0)==(fault!=0),"Windows staged copy result");
+   check(load(hostDestination)==(fault?std::vector<BYTE>({'O','L','D'}):std::vector<BYTE>({'N','E','W'})),"Windows copy failure preserves previous destination");
+  }
+  check(load(hostDestination+":Finder")==std::vector<BYTE>({'F','O','R','K'}),"Windows staging preserves alternate streams");
+  auto sameHost=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)root,0,1,'a'));
+  sameHost->wait();check(sameHost->result().code!=0&&load(hostSource)==std::vector<BYTE>({'N','E','W'}),"Windows self-move preserves original file");
+  fprintf(out,"PASS: Windows copies stage replacements and preserve existing output on write/flush/publication failures; self-move retains source.\n");
   auto failed=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Missing",(LPCSTR)root,(LPCSTR)root,0,0,'a'));
   failed->wait();check(failed->result().code!=0,"source scan errors reach completion");
   auto hostFailure=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)(root+"\\DoesNotExist"),(LPCSTR)root,(LPCSTR)(root+"\\NoOutput"),0,0,'a'));
