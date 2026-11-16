@@ -48,6 +48,11 @@
 extern int crlf_translation;
 
 char *cpi_error = "no error";
+#include "Replacement.h"
+static HfsReplacement cpi_replacement;
+#ifdef HFV_TESTING
+int hfv_replacement_fault;
+#endif
 static int copyin_opened = 0;
 int copyin_destination_opened(void) { return copyin_opened; }
 
@@ -437,28 +442,13 @@ hfsfile *opendst(hfsvol *vol, char *dstname, char *hint,
       dstname = hint;
     }
 
-  hfs_delete(vol, dstname);
-  if (hfs_create(vol, dstname, type, creator) < 0)
-    {
-      cpi_error = hfs_error;
-
-      if (dstname == hint)
-	hfs_setcwd(vol, cwd);
-
-      return 0;
-    }
-
-  copyin_opened = 1;
-  file = hfs_open(vol, dstname);
-  if (file == 0)
-    {
-      cpi_error = hfs_error;
-
-      if (dstname == hint)
-	hfs_setcwd(vol, cwd);
-
-      return 0;
-    }
+  file = replacement_open(&cpi_replacement, vol, dstname, type, creator);
+  copyin_opened = file && !cpi_replacement.active;
+  if(!file) {
+   cpi_error = hfs_error;
+   if(dstname == hint)hfs_setcwd(vol,cwd);
+   return 0;
+  }
 
   if (dstname == hint)
     {
@@ -491,6 +481,7 @@ void closefiles(int ifile, hfsfile *ofile, int *result)
       cpi_error = "error closing source file";
       *result = -1;
     }
+  if(ofile)replacement_finish(&cpi_replacement,result,&cpi_error);
 }
 
 /* Interface Routines ====================================================== */
@@ -940,8 +931,8 @@ int cpi_double( char *fdata, char *fres, hfsvol *vol, char *dstname )
 		result = -1;
   }
 
-  closefiles(ifile0, ofile, &result);
   closefiles(ifile1, NULL, &result);
+  closefiles(ifile0, ofile, &result);
 
   return result;
 }

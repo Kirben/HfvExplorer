@@ -26,6 +26,7 @@ extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
 #include "hfs/copyout.h"
+extern int hfv_replacement_fault;
 }
 void import_map(CString& path);
 extern "C" int tmap_final(void);
@@ -112,6 +113,18 @@ int RunCopyProgressTest(const char* directory) {
   preservedFork.resize(resource.size());check(hfs_setfork(file,1)==0&&hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==resource,"failed preflight preserves destination resource fork");
   check(hfs_close(file)==0&&hfs_umount(volume)==0,"close preflight preservation check");
   fprintf(out,"PASS: missing HFS source cannot delete an existing destination during failure cleanup.\n");
+  // Replacement needs space for the new forks without freeing the old file first.
+  CString replacementInput=root+"\\Game";
+  {CFile f;check(f.Open(replacementInput,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacementInput replacement");f.SetLength(5*1024*1024);f.Close();}
+  auto fullReplacement=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)replacementInput,(LPCSTR)image,"CopyTest:Folder:Nested:",0,1,'r'));
+  fullReplacement->wait();check(fullReplacement->result().code!=0&&GetFileAttributesA(replacementInput)!=INVALID_FILE_ATTRIBUTES,"disk-full replacement fails and retains move source");
+  volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen full destination");
+  file=hfs_open(volume,binary);check(file!=nullptr,"disk-full replacement retained previous HFS entry");
+  preservedFork.resize(data.size());check(hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==data,"disk-full preserves previous HFS data fork");
+  preservedFork.resize(resource.size());check(hfs_setfork(file,1)==0&&hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==resource,"disk-full preserves previous HFS resource fork");
+  check(hfs_close(file)==0&&hfs_umount(volume)==0,"close full destination");
+  DeleteFileA(replacementInput);
+  fprintf(out,"PASS: disk-full HFS replacement preserves the previous entry, both forks and host move source.\n");
   Progress progress;copyout_set_progress(observe,&progress);int moved=0;
   CString target=root;char source[100]="CopyTest:Folder";HFSIFACE_set_modeout(0);
   check(HFSIFACE_copy(image.GetBuffer(),source,target.GetBuffer(),target.GetBuffer(),1,0,&moved)==0,"recursive automatic export");
@@ -126,6 +139,18 @@ int RunCopyProgressTest(const char* directory) {
   auto legacy=load(legacyPath);check(legacy.size()==macbinary.size(),"legacy fork alignment under worker");
   for(unsigned i=99;i<128;++i)check(legacy[i]==0,"worker selected MacBinary I header");
   check(!memcmp(legacy.data()+128,data.data(),data.size()) && !memcmp(legacy.data()+128+16512,resource.data(),resource.size()),"legacy worker export both forks");
+  for(int fault : {2,0}) {
+   hfv_replacement_fault=fault;
+   auto replacement=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,binary,0,0,'a'));
+   replacement->wait();hfv_replacement_fault=0;
+   check((replacement->result().code!=0)==(fault!=0),"HFS replacement publication result");
+   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen published/rolled-back replacement");
+   file=hfs_open(volume,binary);check(file!=nullptr,"publication rollback preserves original name");
+   std::vector<BYTE> bytes(data.size());check(hfs_read(file,bytes.data(),(unsigned long)bytes.size())==bytes.size()&&bytes==data,"HFS replacement/rollback preserves data");
+   bytes.resize(resource.size());check(hfs_setfork(file,1)==0&&hfs_read(file,bytes.data(),(unsigned long)bytes.size())==bytes.size()&&bytes==resource,"HFS replacement/rollback preserves resource");
+   check(hfs_close(file)==0&&hfs_umount(volume)==0,"close replacement check");
+  }
+  fprintf(out,"PASS: staged HFS replacement publishes both forks and restores the original after a publication failure.\n");
   CString damagedLegacy=root+"\\damaged.bin";
   {CFile f;check(f.Open(damagedLegacy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create damaged import");f.Write(legacy.data(),(UINT)legacy.size()-200);f.Close();}
   HFSIFACE_set_modein(0,0);
