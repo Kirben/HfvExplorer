@@ -36,7 +36,11 @@ int mutate(hfsvol* volume,unsigned operation) {
  if(operation==4)return hfs_create(volume,created,type,creator);
  if(operation==5)return hfs_rmdir(volume,empty);
  hfsdirent properties;if(hfs_stat(volume,file,&properties)<0)return -1;
- properties.fdflags^=HFS_FNDR_ISINVISIBLE;return hfs_setattr(volume,file,&properties);
+ if(operation==6){properties.fdflags^=HFS_FNDR_ISINVISIBLE;return hfs_setattr(volume,file,&properties);}
+ hfsfile* opened=hfs_open(volume,file);if(!opened)return -1;
+ int result=hfs_setfork(opened,operation==8?1:0);
+ if(!result)result=hfs_truncate(opened,1);
+ int closed=hfs_close(opened);return result?result:closed;
 }
 void verify(hfsvol* volume) {
  char name[]="Rollback:Folder:File";hfsfile* file=hfs_open(volume,name);require(file!=nullptr,"rollback lost file catalog record");
@@ -52,10 +56,20 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  hfsvol* volume=hfs_mount(seedPath.GetBuffer(),0,O_RDWR);seedPath.ReleaseBuffer();require(volume!=nullptr,"mount rollback seed");
  char empty[]="Rollback:Empty";
  require(hfs_mkdir(volume,folder)==0&&hfs_mkdir(volume,destination)==0&&hfs_mkdir(volume,empty)==0&&hfs_create(volume,name,type,creator)==0,"create rollback fixture tree");
- hfsfile* file=hfs_open(volume,name);std::vector<BYTE> data(4097,0x31),resource(3001,0x72);
- require(file&&hfs_write(file,data.data(),ULONG(data.size()))==data.size()&&hfs_setfork(file,1)==0&&hfs_write(file,resource.data(),ULONG(resource.size()))==resource.size()&&hfs_close(file)==0&&hfs_umount(volume)==0,"finish rollback fixture");
+ char blockerName[]="Rollback:Blocker";require(hfs_create(volume,blockerName,type,creator)==0,"create fragmentation blocker");
+ hfsfile* file=hfs_open(volume,name);hfsfile* blocker=hfs_open(volume,blockerName);
+ require(file&&blocker,"open fragmented fork fixture");file->clump=blocker->clump=volume->mdb.drAlBlkSiz;
+ for(unsigned fork=0;fork<2;++fork) {
+  require(hfs_setfork(file,fork)==0,"select fragmented fork");
+  unsigned length=fork?3001:4097;
+  for(unsigned offset=0;offset<length;) {
+   unsigned count=(std::min)(512u,length-offset);std::vector<BYTE> part(count,fork?0x72:0x31),block(512,0x55);
+   require(hfs_write(file,part.data(),count)==count&&hfs_write(blocker,block.data(),512)==512,"write fragmented fork extent");offset+=count;
+  }
+ }
+ require(hfs_close(file)==0&&hfs_close(blocker)==0&&hfs_umount(volume)==0,"finish fragmented rollback fixture");
  auto seed=load(seedPath);originalWrite=fhook_write;
- for(int cache=0;cache<2;++cache)for(unsigned operation=0;operation<7;++operation) {
+ for(int cache=0;cache<2;++cache)for(unsigned operation=0;operation<9;++operation) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount measured operation");if(!cache)require(b_finish(volume)==0,"disable measured block cache");
   calls=0;failAt=~0u;fired=false;fhook_write=failingWrite;
   int result=mutate(volume,operation);if(!result)result=hfs_flush(volume);
@@ -82,6 +96,6 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  file=hfs_open(volume,name);char appended[6];require(file&&hfs_lseek(file,4097,SEEK_SET)==4097&&hfs_read(file,appended,6)==6&&!memcmp(appended,"APPEND",6),"rollback lost earlier pending data");
  require(hfs_close(file)==0&&hfs_umount(volume)==0,"close pending-update verification");
  fprintf(report,"PASS: rollback preserves earlier pending file data and open-file positions across pre-operation flush failures.\n");
- fprintf(report,"PASS: classic HFS file/folder creation, deletion, rename and attribute changes roll back every injected write error and short write, restoring exact image bytes and both forks.\n");
+ fprintf(report,"PASS: classic HFS file/folder creation, deletion, rename, attributes and fragmented-fork truncation roll back every injected write error and short write, restoring exact image bytes and both forks.\n");
 }
 #endif
