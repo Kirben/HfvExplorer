@@ -19,3 +19,7 @@ can also be read offline by opening start.html in a web browser.
 To regenerate the section pages/navigation from HFVExplorerHelp.html, install
 Python packages beautifulsoup4 and html5lib, then run split-help.py. The script
 checks local links, anchors, images and image maps. Recompile afterwards.
+
+All maintained help sources and historical manual assets are kept in this
+folder. The former manual/ folder was removed after verifying that all 74
+files were byte-for-byte duplicates of files preserved here.
