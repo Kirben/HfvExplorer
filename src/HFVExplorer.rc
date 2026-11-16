@@ -112,6 +112,10 @@ BEGIN
         MENUITEM "Format &new volume...",       ID_FILE_NEWVOLUME
         MENUITEM "Format HFS+ / HFSX image...", ID_FILE_NEWHFSPLUS
         MENUITEM "&Open volume...\tCtrl+O",     ID_FILE_OPEN
+        MENUITEM "Import file...", ID_FILE_MAC_IMPORT
+        MENUITEM "Replace resource fork...", ID_FILE_MAC_IMPORT_RESOURCE
+        MENUITEM "Export data fork...", ID_FILE_MAC_EXPORT_DATA
+        MENUITEM "Export resource fork...", ID_FILE_MAC_EXPORT_RESOURCE
         MENUITEM SEPARATOR
         MENUITEM "&Write volume to floppy...",  ID_FILE_VOLUMETOFLOPPY
         MENUITEM "&Read volume from floppy...", ID_FILE_VOLUMEFROMFLOPPY

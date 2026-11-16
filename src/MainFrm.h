@@ -89,6 +89,9 @@ public:
 	void SaveWindowPosition(void);
 	void OnCdEjectEjectReload( int reload );
  MediaControlTarget SelectedMediaControlTarget() const;
+ BOOL OnCommand(WPARAM,LPARAM) override;
+ afx_msg void OnUpdateMacTransfer(CCmdUI*);
+ afx_msg void OnUpdateMacEdit(CCmdUI*);
 
 protected:  // control bar embedded members
 	CStatusBar  m_wndStatusBar;

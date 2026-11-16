@@ -25,7 +25,8 @@ enum {
 	LIST_UNKNOWN = 0,
 	LIST_SPEC,
 	LIST_HFS,
-	LIST_FAT
+	LIST_FAT,
+ LIST_MAC
 };
 
 #endif

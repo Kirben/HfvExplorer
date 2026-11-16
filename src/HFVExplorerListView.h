@@ -53,6 +53,7 @@ typedef struct {
 
 class CHFVExplorerListView : public CListView
 {
+ friend class MainMacBrowser;
 protected:
 	CHFVExplorerListView();           // protected constructor used by dynamic creation
 	DECLARE_DYNCREATE(CHFVExplorerListView)
@@ -97,6 +98,7 @@ protected:
 
 // Attributes
 public:
+    bool IsDragging() const { return m_dragging!=0; }
 	void on_properties( int inx );
 	void on_volume_changed( int volinx );
 	void _OnPaletteChanged(CWnd* pFocusWnd);
@@ -161,7 +163,8 @@ public:
 		LPPOINT ppoint,
 		BOOL is_inited,
 		int finder_view_mode,
-		int finder_color
+		int finder_color,
+        int storageType = LIST_HFS, int *insertedRow = nullptr
 	);
 	int list_fat_insert(
 			LPSTR name, 

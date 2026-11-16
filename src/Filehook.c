@@ -18,6 +18,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <windows.h>
 #include <sys/types.h>
 #include <io.h>
 #include <stdio.h>
@@ -52,6 +53,21 @@ ftype_read  fhook_read  = read;
 ftype_write fhook_write = write;
 ftype_lseek fhook_lseek = _lseeki64;
 
+/* CRT st_ino is not a unique Windows file ID. In particular, junction paths
+ * can also report a different st_dev than the open descriptor. */
+static ftype_identity identity_hook=0;
+void fhook_init_identity(ftype_identity hook){identity_hook=hook;}
+int fhook_same_file(int fd,const char* path){
+ HANDLE a,b;BY_HANDLE_FILE_INFORMATION x,y;int result=0;
+ if(identity_hook){int answer=identity_hook(fd,path);if(answer>=0)return answer;}
+ if(fd<0||fd>=0x10000000)return 0; /* Never pass virtual descriptors to the CRT. */
+ a=(HANDLE)_get_osfhandle(fd);if(a==INVALID_HANDLE_VALUE)return 0;
+ b=CreateFileA(path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,0,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,0);
+ if(b==INVALID_HANDLE_VALUE)return 0;
+ if(GetFileInformationByHandle(a,&x)&&GetFileInformationByHandle(b,&y))
+  result=x.dwVolumeSerialNumber==y.dwVolumeSerialNumber&&x.nFileIndexHigh==y.nFileIndexHigh&&x.nFileIndexLow==y.nFileIndexLow;
+ CloseHandle(b);return result;
+}
 static ftype_stat  fake_stat = 0;
 static ftype_open  fake_open = 0;
 static ftype_close fake_close = 0;

@@ -96,6 +96,18 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
 
   /* see if the volume is already mounted */
 
+#ifdef WIN32
+  {
+    hfsvol *check;
+    for(check=hfs_mounts;check;check=check->next) {
+      if(fhook_same_file(check->fd,path) && (check->pnum==0||check->pnum==pnum) &&
+         (((check->flags&HFS_READONLY)&&!(flags&(O_WRONLY|O_RDWR))) ||
+          (!(check->flags&HFS_READONLY)&&(flags&(O_WRONLY|O_RDWR))))) {
+        vol=check;break;
+      }
+    }
+  }
+#else
   if (fhook_stat(path, &dev) >= 0)
 	// if (stat(path, &dev) >= 0)
 
@@ -123,6 +135,8 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
 	    }
 	}
     }
+
+#endif
 
   if (vol == 0)
     {
@@ -937,7 +951,6 @@ hfsdir *hfs_opendir(hfsvol *vol, char *path)
       return 0;
     }
 
-  dir->vol = vol;
 
   if (*path == 0)
     {
@@ -974,6 +987,9 @@ hfsdir *hfs_opendir(hfsvol *vol, char *path)
 	}
     }
 
+  /* Path resolution may select another mounted volume. Link and close the
+     directory through that resolved volume, not the caller's original one. */
+  dir->vol = vol;
   dir->prev = 0;
   dir->next = vol->dirs;
 

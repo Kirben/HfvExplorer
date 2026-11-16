@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "FindFiles.h"
+#include "MacBrowserModel.h"
+#include "BrowserPresentation.h"
 #include "charset.h"
 #include <fcntl.h>
 #include <set>
@@ -20,7 +22,7 @@ public:
  void progress(const std::string& path,bool force=false){
   if(job_.cancelled())throw Storage::Cancelled();
   DWORD now=GetTickCount();if(!force&&now-last_<100)return;last_=now;
-  Storage::Progress p;p.phase="Finding files";p.path=path;p.detail=std::to_string(output_.checked)+" entries checked; "+std::to_string(output_.hits.size())+" matches";job_.progress(p);
+  Storage::Progress p;p.utf8=bool(request_.location.native);p.phase="Finding files";p.path=path;p.detail=std::to_string(output_.checked)+" entries checked; "+std::to_string(output_.hits.size())+" matches";job_.progress(p);
  }
  bool hit(const std::string& name,const std::string& parent,const std::string& full,bool folder,unsigned long long bytes){
   ++output_.checked;progress(parent);
@@ -56,6 +58,29 @@ public:
    }
   }
  }
+ void native(){
+  auto volume=request_.location.native;output_.utf8=true;
+  struct NativeFolder {uint32_t id;std::string path;std::vector<uint32_t> route;std::set<uint32_t> ancestors;};
+  auto entry=volume->Stat(request_.location.nativeFolder);
+  auto route=request_.location.nativePath;if(route.empty())route.push_back(request_.location.nativeFolder);
+  std::vector<NativeFolder> pending={{entry.id,request_.location.directory,route,{entry.resolvedId?entry.resolvedId:entry.id}}};
+  while(!pending.empty()){
+   auto folder=std::move(pending.back());pending.pop_back();progress(folder.path,true);
+   for(auto& item:volume->List(folder.id)){
+    if(job_.cancelled())throw Storage::Cancelled();++output_.checked;
+    auto name=BrowserPresentation::Utf8(item.name),path=folder.path+":"+name;auto nodes=folder.route;nodes.push_back(item.id);
+    if((!item.directory||request_.includeFolders)&&FindNameMatches(MacBrowser::Wide(item.name),BrowserPresentation::FromUtf8(request_.pattern),request_.caseSensitive)){
+     if(output_.hits.size()>=request_.limit){output_.truncated=true;return;}
+     output_.hits.push_back({name,folder.path,path,item.directory?0:item.forks[0].size+item.forks[1].size,item.directory,nodes});
+    }
+    if(item.directory&&request_.recursive){auto resolved=item.resolvedId?item.resolvedId:item.id;
+     if(!item.readError.empty()||folder.ancestors.count(resolved)){++output_.unreadable;continue;}
+     if(nodes.size()>128||pending.size()>=100000)throw std::runtime_error("Search folder limit reached");
+     auto ancestors=folder.ancestors;ancestors.insert(resolved);pending.push_back({item.id,path,nodes,std::move(ancestors)});
+    }
+   }
+  }
+ }
  void windows(){
   const std::string root=request_.location.directory;DWORD attributes=GetFileAttributesA(root.c_str());
   if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The selected search location is not an accessible Windows folder");
@@ -85,6 +110,19 @@ public:
  }
 };
 }
+bool FindNameMatches(std::wstring name,std::wstring pattern,bool sensitive){
+ if(pattern.empty())return false;
+ if(!sensitive){if(!name.empty())CharUpperBuffW(&name[0],DWORD(name.size()));CharUpperBuffW(&pattern[0],DWORD(pattern.size()));}
+ if(pattern==L"*.*")pattern=L"*";
+ if(pattern.find_first_of(L"*?")==std::wstring::npos)return name.find(pattern)!=std::wstring::npos;
+ size_t n=0,p=0,star=std::wstring::npos,retry=0;
+ while(n<name.size()){
+  if(p<pattern.size()&&(pattern[p]==L'?'||pattern[p]==name[n])){++n;++p;}
+  else if(p<pattern.size()&&pattern[p]==L'*'){star=p++;retry=n;}
+  else if(star!=std::wstring::npos){p=star+1;n=++retry;}else return false;
+ }
+ while(p<pattern.size()&&pattern[p]==L'*')++p;return p==pattern.size();
+}
 bool FindNameMatches(std::string name,std::string pattern,bool caseSensitive){
  if(pattern.empty())return false;
  if(!caseSensitive){if(!name.empty())CharUpperBuffA(&name[0],DWORD(name.size()));CharUpperBuffA(&pattern[0],DWORD(pattern.size()));}
@@ -101,10 +139,10 @@ bool FindNameMatches(std::string name,std::string pattern,bool caseSensitive){
 }
 std::function<Storage::Result(Storage::Job&)> MakeFindFilesJob(FindRequest request,std::shared_ptr<FindResults> results){
  return [=](Storage::Job& job)->Storage::Result {
-  if(!results||request.pattern.empty()||request.pattern.size()>255||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
+  if(!results||request.pattern.empty()||request.pattern.size()>(request.location.native?1020:255)||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
   if(job.cancelled())throw Storage::Cancelled();
   *results={};Search search(request,*results,job);
-  try{if(request.location.mac)search.mac();else search.windows();}
+  try{if(request.location.native)search.native();else if(request.location.mac)search.mac();else search.windows();}
   catch(const Storage::Cancelled&){throw;}
   catch(const std::exception& error){return {1,ERROR_READ_FAULT,error.what()};}
   std::sort(results->hits.begin(),results->hits.end(),[](const FindHit& a,const FindHit& b){int compared=_stricmp(a.name.c_str(),b.name.c_str());return compared?compared<0:a.path<b.path;});

@@ -66,9 +66,11 @@ class Volume {
     // Streaming, copy-on-write replacement. Source callback must return exact bytes.
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
-                 const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false);
+                 const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
+                 const std::array<uint32_t,2> *dates = nullptr);
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);
     void Remove(uint32_t id);
+    void ValidateRemoval(uint32_t id) const;
     bool Journaled() const;
     bool IsHfsX() const;
     bool CaseSensitive() const;
