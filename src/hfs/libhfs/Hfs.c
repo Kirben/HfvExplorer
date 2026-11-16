@@ -1770,6 +1770,17 @@ int hfs_delete(hfsvol *vol, char *path)
       return -1;
     }
 
+  /* There is no orphan-inode mechanism: freeing an open fork would let
+     later I/O overwrite blocks already reassigned to another file. */
+  {
+    hfsfile *opened;
+    for (opened = vol->files; opened; opened = opened->next)
+      if (opened->cat.u.fil.filFlNum == file.cat.u.fil.filFlNum) {
+        ERROR(EBUSY, "file is open; close it before deleting");
+        return -1;
+      }
+  }
+
   /* free disk blocks */
 
   file.vol   = vol;
@@ -1928,6 +1939,17 @@ int hfs_rename(hfsvol *vol, char *srcpath, char *dstpath)
       ERROR(EROFS, 0);
       return -1;
     }
+
+  /* Open handles retain their catalog key. Do not orphan pending updates
+     by changing that key underneath an active file. */
+  if (!isdir) {
+    hfsfile *opened;
+    for (opened = vol->files; opened; opened = opened->next)
+      if (opened->cat.u.fil.filFlNum == src.u.fil.filFlNum) {
+        ERROR(EBUSY, "file is open; close it before renaming");
+        return -1;
+      }
+  }
 
   /* change volume name */
 
