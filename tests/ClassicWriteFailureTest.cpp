@@ -71,6 +71,17 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
    volume=hfs_mount(path.GetBuffer(),0,O_RDONLY);path.ReleaseBuffer();require(volume!=nullptr,"reopen rolled-back image");verify(volume);require(hfs_umount(volume)==0,"close recovered image");
   }
  }
+ // A failed pre-operation flush must preserve older dirty open-file views.
+ save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount pending-write fixture");
+ file=hfs_open(volume,name);require(file&&hfs_lseek(file,0,SEEK_END)>=0&&hfs_write(file,const_cast<char*>("APPEND"),6)==6,"prepare pending file update");
+ auto pendingPosition=file->pos;calls=0;failAt=0;mode=1;fired=false;fhook_write=failingWrite;
+ char unrelated[]="Rollback:Pending directory";int pendingResult=hfs_mkdir(volume,unrelated);fhook_write=originalWrite;
+ require(pendingResult<0&&fired&&!(volume->flags&HFS_WRITE_FAILED)&&file->pos==pendingPosition,"failed pending flush poisoned/lost an open-file view");
+ require(hfs_close(file)==0&&hfs_umount(volume)==0,"retry pending file metadata after rollback");
+ volume=hfs_mount(path.GetBuffer(),0,O_RDONLY);path.ReleaseBuffer();require(volume!=nullptr,"reopen pending-update image");
+ file=hfs_open(volume,name);char appended[6];require(file&&hfs_lseek(file,4097,SEEK_SET)==4097&&hfs_read(file,appended,6)==6&&!memcmp(appended,"APPEND",6),"rollback lost earlier pending data");
+ require(hfs_close(file)==0&&hfs_umount(volume)==0,"close pending-update verification");
+ fprintf(report,"PASS: rollback preserves earlier pending file data and open-file positions across pre-operation flush failures.\n");
  fprintf(report,"PASS: classic HFS file/folder creation, deletion, rename and attribute changes roll back every injected write error and short write, restoring exact image bytes and both forks.\n");
 }
 #endif

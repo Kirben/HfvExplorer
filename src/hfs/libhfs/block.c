@@ -211,6 +211,7 @@ int getblock(hfsvol *vol, unsigned long bnum, block *bp)
 #define UNDO_BUCKETS 2048
 #define UNDO_MAX_BLOCKS 65536
 struct undo_block { unsigned long sector; unsigned next; block before; };
+struct file_view { hfsfile *file; hfsfile saved; };
 struct mutation {
  hfsvol *volume;
  hfsvol saved;
@@ -218,23 +219,23 @@ struct mutation {
  char *extmap,*catmap;
  bcache *cache;
  struct undo_block *blocks;
- unsigned used,capacity,buckets[UNDO_BUCKETS];
+ struct file_view *files;
+ unsigned file_count,used,capacity,buckets[UNDO_BUCKETS];
 };
 static struct mutation *active_mutation;
 static int putblock(hfsvol *, unsigned long, block *);
 static void free_mutation(struct mutation *m) {
- FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->blocks);FREE(m);
+ FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->files);FREE(m->blocks);FREE(m);
 }
 static void *save_memory(const void *p,size_t size) {
  void *copy;if(!p||!size)return 0;
  copy=malloc(size);if(copy)memcpy(copy,p,size);return copy;
 }
 int b_begin_mutation(hfsvol *vol) {
- struct mutation *m;size_t bitmap_size;
+ struct mutation *m;size_t bitmap_size;hfsfile *file;unsigned i;
  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes disabled after rollback failure");return -1;}
  if(vol->flags&HFS_READONLY){ERROR(EROFS,"Volume is read-only");return -1;}
  if(active_mutation){ERROR(EBUSY,"Nested classic HFS mutation");return -1;}
- if(hfs_flush(vol)<0){vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;return -1;}
  m=(struct mutation*)calloc(1,sizeof(*m));
  if(!m){ERROR(ENOMEM,"Cannot allocate HFS undo state");return -1;}
  m->volume=vol;m->saved=*vol;
@@ -246,7 +247,18 @@ int b_begin_mutation(hfsvol *vol) {
  if((vol->vbm&&!m->bitmap)||(vol->ext.map&&!m->extmap)||(vol->cat.map&&!m->catmap)||(vol->cache&&!m->cache)) {
   free_mutation(m);ERROR(ENOMEM,"Cannot snapshot HFS metadata");return -1;
  }
- active_mutation=m;return 0;
+ for(file=vol->files;file;file=file->next) {
+  if(++m->file_count>65536){free_mutation(m);ERROR(ENOMEM,"Too many open HFS file views");return -1;}
+ }
+ if(m->file_count) {
+  m->files=ALLOC(struct file_view,m->file_count);
+  if(!m->files){free_mutation(m);ERROR(ENOMEM,"Cannot snapshot open HFS file views");return -1;}
+  for(file=vol->files,i=0;file;file=file->next,++i){m->files[i].file=file;m->files[i].saved=*file;}
+ }
+ active_mutation=m;
+ /* Earlier pending writes also need undo coverage before they reach disk. */
+ if(hfs_flush(vol)<0){b_end_mutation(vol,-1);return -1;}
+ return 0;
 }
 static int remember_block(hfsvol *vol,unsigned long sector) {
  struct mutation *m=active_mutation;unsigned bucket,index;
@@ -281,6 +293,7 @@ int b_end_mutation(hfsvol *vol,int result) {
   *vol=m->saved;vol->ext.map=m->extmap;vol->cat.map=m->catmap;m->extmap=m->catmap=0;
   if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,(vol->mdb.drNmAlBlks+4095)/4096));
   if(m->cache)memcpy(vol->cache,m->cache,sizeof(bcache));
+  for(i=0;i<m->file_count;++i)*m->files[i].file=m->files[i].saved;
   if(rollback)vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
  }
  free_mutation(m);
