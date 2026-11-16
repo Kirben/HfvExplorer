@@ -93,7 +93,7 @@ int RunCopyProgressTest(const char* directory) {
   for(const char* destination : {"CopyTest:Folder:Nested:Game", "copytest:folder:nested:game", "CopyTest:Folder:Nested:"}) {
    for(int move : {0,1}) {
     auto same=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)image,destination,0,move,'a'));
-    same->wait();check(same->result().code!=0,"reject copy/move onto the same HFS catalog entry");
+    same->wait();check(same->result().code!=0&&same->result().message.find("same HFS file")!=std::string::npos,"reject copy/move onto the same HFS catalog entry before mutation");
     volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after self-copy rejection");
     file=hfs_open(volume,binary);check(file!=nullptr,"self-copy preserved source entry");
     std::vector<BYTE> verify(data.size());check(hfs_read(file,verify.data(),(unsigned long)verify.size())==verify.size()&&verify==data,"self-copy preserved data fork");
