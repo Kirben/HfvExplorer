@@ -34,8 +34,15 @@ typedef struct {
 	char path[MAX_PATH];
 } lparam_struct;
 
+class BrowserSession;
 class HFVExplorerTreeView : public CTreeView
 {
+ BrowserSession* m_browserSession=nullptr;
+public:
+ BrowserSession& GetBrowserSession()const;
+ BrowserSession* BrowserBinding()const{return m_browserSession;}
+ void BindBrowserSession(BrowserSession* session){m_browserSession=session;}
+
  friend class MainMacBrowser;
 protected:
 	HFVExplorerTreeView();           // protected constructor used by dynamic creation

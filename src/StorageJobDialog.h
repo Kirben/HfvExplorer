@@ -11,8 +11,8 @@ public:
  StorageAction(const StorageAction&)=delete;
  StorageAction& operator=(const StorageAction&)=delete;
 };
-Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> work,const char* title="Working",bool hidden=false,bool singleFile=false,bool cancellable=false);
-Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)> work,bool hidden=false);
+Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> work,const char* title="Working",bool hidden=false,bool singleFile=false,bool cancellable=false,CWnd* owner=nullptr);
+Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)> work,bool hidden=false,CWnd* owner=nullptr);
 #ifdef HFV_TESTING
 struct StorageUiTestState {bool disabledDuring=false,enabledAfter=false,dialogClosed=false,ownerRestoredBeforeClose=false;unsigned timerTicks=0,dialogCreations=0,copyBarCount=0;bool hiddenNative=false,simpleStorageLayout=false,cancelOnTimer=false;DWORD explanationDelayMs=5000;unsigned explanationShows=0,spinnerTicks=0;std::string storageMessage;Storage::ConflictChoice answer=Storage::ConflictChoice::None;};
 extern StorageUiTestState storageUiTest;

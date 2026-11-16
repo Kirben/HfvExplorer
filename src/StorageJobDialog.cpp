@@ -257,10 +257,10 @@ public:
 };
 unsigned actionDepth=0;
 std::unique_ptr<NativeSession> nativeSession;
-void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool retainNative=true) {
+void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool retainNative=true,CWnd* explicitOwner=nullptr) {
  INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_PROGRESS_CLASS};InitCommonControlsEx(&controls);
  ActiveUiJob active;
- CWnd* owner=AfxGetMainWnd();
+ CWnd* owner=explicitOwner?explicitOwner:AfxGetMainWnd();
  if(actionDepth&&storageOnly&&retainNative){
   if(!nativeSession)nativeSession.reset(new NativeSession(job,title,hidden,owner));
   nativeSession->wait(job);return;
@@ -291,13 +291,13 @@ StorageAction::~StorageAction(){
  if(active_&&--actionDepth==0){ActiveUiJob closing;nativeSession.reset();}
 }
 void InitializeStorageUi(){StorageUi::initialize(waitNative);}
-Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> work,const char* title,bool hidden,bool singleFile,bool cancellable) {
+Storage::Result ShowStorageJob(std::function<Storage::Result(Storage::Job&)> work,const char* title,bool hidden,bool singleFile,bool cancellable,CWnd* owner) {
  if(StorageUi::busy())return {1,ERROR_BUSY,"Another storage operation is active"};
- auto job=Storage::worker().submit(std::move(work));wait(job,title,hidden,false,singleFile,cancellable);return job->result();
+ auto job=Storage::worker().submit(std::move(work));wait(job,title,hidden,false,singleFile,cancellable,true,owner);return job->result();
 }
-Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)> work,bool hidden) {
+Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)> work,bool hidden,CWnd* owner) {
  if(StorageUi::busy())return {1,ERROR_BUSY,"Another storage operation is active"};
- auto job=Storage::worker().submit(std::move(work));wait(job,"Waiting for storage",hidden,true,false,false,false);return job->result();
+ auto job=Storage::worker().submit(std::move(work));wait(job,"Waiting for storage",hidden,true,false,false,false,owner);return job->result();
 }
 void ShutdownStorageUi(){
  nativeSession.reset();StorageUi::state().wait=nullptr;StorageUi::state().thread=0;

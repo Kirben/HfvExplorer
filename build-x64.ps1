@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $sessions=Join-Path $hfsPlusDirectory 'browser-sessions'
+ $sessionTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-browser-sessions',('"'+$sessions+'"')) -WindowStyle Hidden -PassThru
+ if(!$sessionTest.WaitForExit(60000)){$sessionTest.Kill();throw 'Browser session tests timed out.'}
+ Get-Content (Join-Path $sessions 'browser-session-report.txt')
+ if($sessionTest.ExitCode -ne 0){throw "Browser session tests failed; retained $sessions"}
  $shared=Join-Path $hfsPlusDirectory 'shared-browser'
  $sharedTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-shared-browser',('"'+$shared+'"')) -WindowStyle Hidden -PassThru
  if(!$sharedTest.WaitForExit(60000)){$sharedTest.Kill();throw 'Shared browser tests timed out.'}

@@ -25,6 +25,7 @@
 #include "itemtype.h"
 #include "BrowserDirectory.h"
 #include "bndl.h"
+#include "BrowserSession.h"
 
 // #define USE_FILE_MAPPING
 
@@ -46,6 +47,12 @@
 class CHFVExplorerDoc : public CDocument
 {
  friend class MainMacBrowser;
+ std::unique_ptr<BrowserSession> m_browserSession;
+ type_creator_link_t* hash_table[ICONTABLESIZE]{};
+ int icons_in_cache=0,hash_file_ok=0,hash_file_impossible=0;
+ bool hash_file_writable=false;
+ CFile hash_file;
+ CHFVFile* speed_fp=nullptr;
 protected: // create from serialization only
 	CPointerWordArray *m_icon_array;
 	CHFVExplorerDoc(bool discover = true);
@@ -224,6 +231,7 @@ protected: // create from serialization only
 
 // Attributes
 public:
+ BrowserSession& GetBrowserSession()const{return *m_browserSession;}
 	CHFVVolume m_volumes[MAX_HFS_VOLUMES];
 	CFATVolume m_fats[MAX_FAT_VOLUMES];
 	int m_hfs_count;

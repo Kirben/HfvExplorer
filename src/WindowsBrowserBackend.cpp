@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "BrowserSession.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
@@ -81,7 +82,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int v
  return snapshot;
 }
 void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& snapshot,bool listing){
- auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());auto tree=app.m_tree;auto list=app.m_list;
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());auto tree=GetBrowserSession().Tree();auto list=GetBrowserSession().List();
  BrowserPresentation::Batch treeBatch(tree->GetTreeCtrl().m_hWnd),listBatch(list->GetListCtrl().m_hWnd,true);
  if(listing&&snapshot.capabilitiesKnown)list->SetBrowserCapabilities(snapshot.capabilities);
  HTREEITEM root=tree->GetTreeCtrl().GetSelectedItem();

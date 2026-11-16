@@ -339,6 +339,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunBrowserSessionTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-browser-sessions"))ExitProcess(RunBrowserSessionTest(__argv[2]));
  extern int RunSharedBrowserTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-shared-browser"))ExitProcess(RunSharedBrowserTest(__argv[2]));
  extern int RunExclusiveAccessTest(const char*);

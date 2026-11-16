@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "BrowserSession.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
@@ -43,7 +44,7 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     BrowserPresentation::Cell(m_cl->m_hWnd,index,FIELD_CREATOR,MacBrowser::Wide(BrowserDirectory::FromAnsi(creator)));
     BrowserPresentation::Cell(m_cl->m_hWnd,index,FIELD_LABEL,MacBrowser::Wide(BrowserDirectory::FromAnsi(get_label_text(BrowserDirectory::Label(e)))));
     auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
-    if(app.m_mac_window_mode&&row.storageType==LIST_HFS&&
+    if(GetBrowserSession().finderLayout&&row.storageType==LIST_HFS&&
        (row.initialized||is_inside_magic(row.point.x,row.point.y))&&!(row.point.x==-1&&row.point.y==-1))
         m_cl->SetItemPosition(index,CPoint(unmagic(row.point.x)-m_mac_origo.x,unmagic(row.point.y)-m_mac_origo.y));
     if(app.m_show_labels&&BrowserDirectory::Label(e))m_cl->SetItemState(index,INDEXTOOVERLAYMASK(BrowserDirectory::Label(e)),LVIS_OVERLAYMASK);

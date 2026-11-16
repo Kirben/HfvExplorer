@@ -41,12 +41,7 @@
 
 enum { HASH_SIZE = ICONTABLESIZE };
 
-static int icons_in_cache = 0;
-static int hash_file_ok = 0;
-static int hash_file_impossible = 0;
-static CFile hash_file;
-
-type_creator_link_t *hash_table[HASH_SIZE];
+// Icon tables and file handles are owned by CHFVExplorerDoc.
 
 void dump_data( unsigned char *fname, unsigned char *p, int count )
 {
@@ -82,13 +77,14 @@ void CHFVExplorerDoc::init_hash_table()
 	}
 
 	get_icons_file_name( ini_name );
-	if(ini_name != "") {
-		if(do_open_readwrite( fp, ini_name )) {
-			hash_file_ok = 1;
-		} else if(do_create_file( fp, ini_name )) {
-			hash_file_ok = 1;
-		}
-	}
+    hash_file_writable=false;
+    if(ini_name!=""){
+        CFileException error;
+        if(fp->Open(ini_name,CFile::modeReadWrite|CFile::shareDenyWrite,&error))hash_file_ok=hash_file_writable=true;
+        else if(GetFileAttributesA(ini_name)==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND){
+            if(fp->Open(ini_name,CFile::modeCreate|CFile::modeNoTruncate|CFile::modeReadWrite|CFile::shareDenyWrite,&error))hash_file_ok=hash_file_writable=true;
+        }else if(fp->Open(ini_name,CFile::modeRead|CFile::shareDenyNone,&error))hash_file_ok=1;
+    }
 
 	memset( hash_table, 0, sizeof(type_creator_link_t *) * HASH_SIZE );
 	icons_in_cache = 0;
@@ -291,7 +287,7 @@ void CHFVExplorerDoc::save_hash_table(
 	char *buf;
 	long old_length;
 
-	if(!hash_file_ok) return;
+	if(!hash_file_ok || !hash_file_writable) return;
 
 	fp = &hash_file;
 
