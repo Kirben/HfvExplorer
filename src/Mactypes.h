@@ -445,7 +445,6 @@ public:
 	int m_drive;
 	HANDLE m_hfloppy;
 	HANDLE m_hcd;
-	HANDLE m_hd;
 	hfv_offset_t m_seek;
 };
 

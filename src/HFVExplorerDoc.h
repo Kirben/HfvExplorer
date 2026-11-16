@@ -52,7 +52,6 @@ protected: // create from serialization only
 	void OnCleanDocument();
 	void enum_floppies( void );
 	void enum_cds(void);
-	void enum_hds(void);
 	void set_floppy_volume_dirty( char *path );
 	void CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL check_hds );
 	void CheckNewFloppy( int index );

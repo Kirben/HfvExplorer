@@ -47,9 +47,6 @@ typedef struct {
 enum { FLTYPE_FLOPPY=0, FLTYPE_CD, FLTYPE_HD };
 extern flcd_device_type flcds[MAX_DEVICES];
 
-void cd_log_enable( int enable, char *path );
-void cd_log_restore_enable( int enable, char *path );
-
 void floppy_final( int drive );
 HANDLE floppy_init( int drive, BOOL check_geometry );
 int floppy_read( HANDLE hFloppy, int drive, ULONG LBA, int count, char *buf );
@@ -70,10 +67,7 @@ int get_floppy_max_size( int drive );
 int is_any_floppy_present( int drive );
 int is_hfs_floppy_present( int drive );
 
-void clear_cache_by_drive_index( int drive );
-
 int exists( const char *path );
-
 
 int is_hfs_cd_present( int drive );
 HANDLE cd_init( int drive, BOOL check_geometry );
@@ -83,28 +77,6 @@ int cd_read( HANDLE hcd, int drive, ULONG LBA, int count, char *buf, BOOL is_cd 
 long get_cd_size( HANDLE m_hfloppy, int drive );
 void get_cd_volume_file_name( int drive, char *name );
 int try_mount_cd( HANDLE hcd, int drive );
-
-int is_hfs_hd_present( int drive );
-HANDLE hd_init( int drive, BOOL check_geometry );
-void hd_final( int drive );
-long get_hd_size( HANDLE h, int drive );
-// int hd_read( HANDLE h, int drive, ULONG LBA, int count, char *buf );
-int hd_write( HANDLE h, int drive, ULONG LBA, int count, char *buf );
-void get_hd_volume_file_name( int drive, char *name );
-int try_mount_hd( HANDLE h, int drive );
-
-void set_patch_option( int patch );
-
-void dump_first_cd( 
-	char *path,
-	ULONG start,
-	long blocks );
-
-int eject_media( char letter, int reload );
-
-BOOL writeback_flush_all(void);
-
-int silencer( int shutup );
 
 #ifdef __cplusplus
 } // extern "C"

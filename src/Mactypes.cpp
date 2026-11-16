@@ -444,7 +444,6 @@ CDSKFile::CDSKFile()
 	m_drive = IS_NO_FLOPPY;
 	m_hfloppy = 0;
 	m_hcd = 0;
-	m_hd = 0;
 	m_seek = 0;
 }
 
@@ -487,20 +486,6 @@ BOOL CDSKFile::Open(
 			return(m_hcd != 0);
 		}
 	}
-	for(i=2; i<MAX_DEVICES; i++) {
-		get_hd_volume_file_name( i, name );
-		if(stricmp(name,lpszFileName) == 0) {
-			m_drive = i;
-			m_hd = hd_init( i, TRUE );
-			m_seek = 0;
-			if(!try_mount_hd( m_hd, m_drive )) {
-				hd_final( m_drive );
-				m_hd = 0;
-				m_seek = 0;
-			}
-			return(m_hd != 0);
-		}
-	}
 	m_drive = IS_NO_FLOPPY;
 	return(CFile::Open(lpszFileName,nOpenFlags,pError));
 }
@@ -508,7 +493,6 @@ BOOL CDSKFile::Open(
 void CDSKFile::Close()
 {
 	if(m_drive != IS_NO_FLOPPY) {
-		writeback_flush_all();
 		if(m_hfloppy) {
 			floppy_final( m_drive );
 			m_hfloppy = 0;
@@ -516,10 +500,6 @@ void CDSKFile::Close()
 		} else if(m_hcd) {
 			cd_final( m_drive );
 			m_hcd = 0;
-			m_seek = 0;
-		} else if(m_hd) {
-			hd_final( m_drive );
-			m_hd = 0;
 			m_seek = 0;
 		}
 		return;
@@ -530,7 +510,7 @@ void CDSKFile::Close()
 BOOL CDSKFile::GetStatus(CFileStatus& rStatus)
 {
 	if(m_drive != IS_NO_FLOPPY) {
-		if(m_hfloppy || m_hcd || m_hd) {
+		if(m_hfloppy || m_hcd) {
 			// struct, not a class...
 			memset( &rStatus, 0, sizeof(CFileStatus) );
 			return(1);
@@ -544,7 +524,7 @@ BOOL CDSKFile::GetStatus(CFileStatus& rStatus)
 ULONGLONG CDSKFile::Seek(LONGLONG offset,UINT origin)
 {
  if(m_drive!=IS_NO_FLOPPY) {
-  if(!m_hfloppy && !m_hcd && !m_hd) return ULONGLONG(-1);
+  if(!m_hfloppy && !m_hcd) return ULONGLONG(-1);
   LONGLONG size=(LONGLONG)GetLength();
   LONGLONG base=origin==begin?0:origin==current?m_seek:origin==end?size:-1;
   if(size<0 || base<0 || offset < -base || offset > size-base) return ULONGLONG(-1);
@@ -572,9 +552,6 @@ UINT CDSKFile::Read(void* lpBuf, UINT nCount)
 		if(m_hfloppy) {
 			got = floppy_read( m_hfloppy, m_drive, (ULONG)m_seek, nCount, (char *)lpBuf );
 			if(got > 0) m_seek += got;
-		} else if(m_hd) {
-			got = cd_read( m_hd, m_drive, (ULONG)m_seek, nCount, (char *)lpBuf, FALSE );
-			if(got > 0) m_seek += got;
 		} else if(m_hcd) {
 			got = cd_read( m_hcd, m_drive, (ULONG)m_seek, nCount, (char *)lpBuf, TRUE );
 			if(got > 0) m_seek += got;
@@ -590,8 +567,6 @@ ULONGLONG CDSKFile::GetLength() const
 	if(m_drive != IS_NO_FLOPPY) {
 		if(m_hfloppy) {
 			return(get_floppy_size(m_hfloppy,m_drive));
-		} else if(m_hd) {
-			return(get_hd_size(m_hd,m_drive));
 		} else if(m_hcd) {
 			return(get_cd_size(m_hcd,m_drive));
 		} else {
