@@ -10,6 +10,10 @@
 #include "FloppyWriteDialog.h"
 #include "FloppyWriter.h"
 #include "FakeFloppy.h"
+extern "C" {
+#include "hfs/libhfs/hfs.h"
+#include "hfs/interface.h"
+}
 #include <stdexcept>
 namespace {
 void require(bool value,const char* text){if(!value)throw std::runtime_error(text);}
@@ -41,6 +45,19 @@ int RunFloppyMenuTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;
  std::string root=directory;FILE* report=nullptr;fopen_s(&report,(root+"\\floppy-menu-report.txt").c_str(),"w");if(!report)return 2;
  try {
+  const std::string preserved=root+"\\existing.dsk",fresh=root+"\\fresh.dsk";
+  {CFile f;require(f.Open(preserved.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create format preservation fixture");f.Write("DO NOT FORMAT",13);f.Close();}
+  char label[]="SafeFormat",bad[]="Invalid:Name";
+  int oldSilent=HFSIFACE_silencer(1);
+  for(char* name : {bad,label}) {
+   require(HFSIFACE_format(const_cast<char*>(preserved.c_str()),name,1474560,TRUE)!=0,"new-volume format replaced an existing file");
+   CFile f;require(f.Open(preserved.c_str(),CFile::modeRead)!=FALSE&&f.GetLength()==13,"format changed existing image length");char bytes[13];require(f.Read(bytes,13)==13&&!memcmp(bytes,"DO NOT FORMAT",13),"format changed existing bytes");f.Close();
+  }
+  require(HFSIFACE_format(const_cast<char*>(fresh.c_str()),bad,1474560,TRUE)!=0&&GetFileAttributesA(fresh.c_str())==INVALID_FILE_ATTRIBUTES,"invalid format name created an image");
+  require(HFSIFACE_format(const_cast<char*>(fresh.c_str()),label,12345,TRUE)!=0&&GetFileAttributesA(fresh.c_str())==INVALID_FILE_ATTRIBUTES,"invalid format size created an image");
+  require(HFSIFACE_format(const_cast<char*>(fresh.c_str()),label,1474560,TRUE)==0,"valid new classic HFS image format");
+  HFSIFACE_silencer(oldSilent);
+  fprintf(report,"PASS: new classic HFS formatting validates names/sizes before creation and preserves existing files.\n");
   FakeFloppy sourceDisk(std::vector<BYTE>(1474560));
   auto sameDrive=Storage::worker().submit(MakeFloppyImageJob(0,"A:\\unsafe.dsk",&sourceDisk));sameDrive->wait();
   require(sameDrive->result().code!=0&&sourceDisk.opens==0,"source drive accepted as image destination");
