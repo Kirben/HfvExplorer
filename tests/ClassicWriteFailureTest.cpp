@@ -14,10 +14,10 @@ extern "C" {
 namespace {
 ftype_write originalWrite;
 ftype_sync originalSync;
-unsigned syncCalls, syncFailures;
+unsigned syncCalls, syncFailures, syncFailAt=1;
 int failingSync(int fd) {
  ++syncCalls;
- if(syncFailures){--syncFailures;errno=EIO;return -1;}
+ if(syncFailures&&syncCalls>=syncFailAt){--syncFailures;errno=EIO;return -1;}
  return originalSync(fd);
 }
 ftype_read originalRead;
@@ -35,7 +35,7 @@ int failingWrite(int fd,const void* data,unsigned count) {
  }
  return originalWrite(fd,data,count);
 }
-std::vector<BYTE> load(const CString& path){CFile f;require(f.Open(path,CFile::modeRead)!=FALSE,"open rollback image");std::vector<BYTE> b(size_t(f.GetLength()));require(f.Read(b.data(),UINT(b.size()))==b.size(),"read rollback image");return b;}
+std::vector<BYTE> load(const CString& path){CFile f;require(f.Open(path,CFile::modeRead|CFile::shareDenyNone)!=FALSE,"open rollback image");std::vector<BYTE> b(size_t(f.GetLength()));require(f.Read(b.data(),UINT(b.size()))==b.size(),"read rollback image");return b;}
 void save(const CString& path,const std::vector<BYTE>& b){CFile f;require(f.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create rollback image");f.Write(b.data(),UINT(b.size()));}
 int mutate(hfsvol* volume,unsigned operation) {
  char file[]="Rollback:Folder:File",renamed[]="Rollback:Folder:Renamed",folder[]="Rollback:Folder",moved[]="Rollback:Destination:Moved";
@@ -118,6 +118,18 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
   verify(volume);require(hfs_umount(volume)==0&&load(path)==seed,"commit flush failure left changed image");
  }
  fprintf(report,"PASS: commit flush failures restore and flush original sectors in both cache modes.\n");
+ // Final clean-unmount marker must also roll back a failed storage flush.
+ for(int cache=0;cache<2;++cache) {
+  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount clean-marker fixture");
+  if(!cache)require(b_finish(volume)==0,"disable clean-marker cache");
+  require(hfs_mkdir(volume,unrelated)==0,"dirty clean-marker fixture");
+  auto dirty=load(path);syncCalls=0;syncFailures=1;syncFailAt=1;fhook_sync=failingSync;
+  int unmounted=hfs_umount(volume);fhook_sync=originalSync;
+  require(unmounted<0&&syncCalls==2&&load(path)==dirty,"failed clean-marker flush was published or retried without undo");
+  volume=hfs_mount(path.GetBuffer(),0,O_RDONLY);path.ReleaseBuffer();require(volume!=nullptr,"reopen marker rollback");
+  verify(volume);require(hfs_umount(volume)==0,"close marker verification");
+ }
+ fprintf(report,"PASS: final clean-unmount marker flush failures restore exact pre-unmount image bytes.\n");
  // Failed close preserves its pending file view for explicit retry or unmount.
  for(int cache=0;cache<2;++cache)for(int retry=0;retry<2;++retry) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount close-retry fixture");

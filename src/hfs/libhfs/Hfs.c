@@ -356,21 +356,23 @@ int hfs_umount(hfsvol *vol)
   if((vol->flags&HFS_WRITE_FAILED)&&vol->failure_message){saved_errno=EIO;saved_error=vol->failure_message;result=-1;}
   while (vol->dirs) hfs_closedir(vol->dirs);
 
-  /* Flush dirty metadata/data before publishing the clean-unmount marker. */
-  if ((v_flush(vol, 0) < 0 || b_flush(vol) < 0) && result == 0) {
-    result = -1; saved_errno = errno; saved_error = hfs_error;
+  /* Commit pending sectors before publishing the clean-unmount marker.
+     Keep the marker itself under undo and require its storage flush too. */
+  if(result==0 && !(vol->flags&HFS_READONLY)) {
+    if(hfs_flush(vol)<0) {
+      result=-1;saved_errno=errno;saved_error=hfs_error;
+    } else if(b_begin_mutation(vol)<0) {
+      result=-1;saved_errno=errno;saved_error=hfs_error;
+    } else {
+      int marked=v_flush(vol,1);
+      if(b_end_mutation(vol,marked)<0) {
+        result=-1;saved_errno=errno;saved_error=hfs_error;
+      }
+    }
   }
-  if (result == 0 && v_flush(vol, 1) < 0) {
-    result = -1; saved_errno = errno; saved_error = hfs_error;
-  }
-  if (result == 0 && b_flush(vol) < 0) {
-    result = -1; saved_errno = errno; saved_error = hfs_error;
-  }
-  if (result != 0 && !(vol->flags & HFS_READONLY)) {
-    vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
-    vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB;
-    (void)v_flush(vol, 0); /* Best effort: retain a dirty marker on failure. */
-  }
+  /* A failed finalization must not be retried outside undo by b_finish.
+     Successful rollback has already restored and flushed the old sectors. */
+  if(result!=0){FREE(vol->cache);vol->cache=0;}
   /* Always release the block cache, even after a metadata flush error. */
   if (b_finish(vol) < 0 && result == 0) {
     result = -1; saved_errno = errno; saved_error = hfs_error;

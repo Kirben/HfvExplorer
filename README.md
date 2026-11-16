@@ -11,8 +11,13 @@ Current filesystem support
 - Classic HFS: logical forks up to 2 GiB minus one byte, and image volumes up
   to 2 TiB minus 512 bytes. Host image offsets remain 64-bit. Larger forks
   belong on HFS+; oversized classic imports are rejected before creation.
-- Classic HFS metadata operations and fork shrinking have runtime undo for reported
-  write/short-write failures. If rollback also fails, further writes are disabled
+- Classic HFS metadata operations, fork shrinking, file close, explicit flush and
+  clean-unmount markers have runtime undo for reported write/short-write and
+  storage-flush failures. Failed file closes retain pending views for retry.
+  Undo is bounded to 32 MiB of original sectors per operation; an operation that
+  needs more is rejected before overwriting uncaptured sectors. Whole copies and
+  ordinary in-place file data writes are not atomic.
+  If rollback also fails, further writes are disabled
   and original sectors are saved in an HFSUNDO1 recovery file in the Windows temp
   folder when possible; the error gives its path. These files require manual
   source/media verification before recovery and are not automatically applied.
