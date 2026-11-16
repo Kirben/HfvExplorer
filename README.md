@@ -18,8 +18,8 @@ icon tables are independent too. Storage-backed directory jobs receive their
 owning frame explicitly, including during startup before MFC sets `m_pMainWnd`.
 
 This prepares the browser for multiple windows. The application still exposes
-one main frame: independent operation jobs, cross-window refresh/clipboard
-coordination, legacy launcher services and the multi-window commands are later
+one main frame: cross-window refresh/clipboard coordination, legacy launcher
+services and the multi-window commands are later
 steps. The classic HFS engine and storage worker remain serialized.
 
 `--verify-browser-sessions NEW_DIRECTORY` in the Test build exercises two hidden
@@ -27,6 +27,40 @@ sessions with conflicting application aliases, native navigation and clipboard,
 Windows folders, same-named classic images, slow reads, error recovery, pane
 ownership and teardown. It also creates a real hidden frame and splitters before
 the application main-window pointer is assigned. No physical devices are used.
+
+Independent file-operation jobs
+-------------------------------
+
+Copy, rename and delete commands submit value-based `FileOperations::Request`
+objects to the serialized worker. Requests own their paths, IDs, conversion
+settings and backend references; they do not retain browser/window/control
+pointers. Closing a submitting session cannot invalidate queued work. Progress,
+overwrite decisions and cancellation belong to the job; a progress dialog only
+observes it. An application-wide pending registry allows another consumer to
+find jobs/conflicts, and application shutdown cancels pending jobs.
+
+Classic MacBinary/BinHex/text/AppleDouble converters remain active, with import
+and export settings captured per request and restored after execution. Native
+fork import/export, safe host deletion and classic HFS mutations use the same
+submission path. Cut sources are removed after successful destination
+finalization and revalidation; skipped copies retain their sources. Completion
+records distinguish incomplete work and include potentially changed resources
+without keeping completed jobs' volume handles alive. Classic HFS rows carry
+captured full paths so operations do not reconstruct paths from a later tree
+selection.
+
+The GUI still waits for operations through its progress dialog. Background
+operation UI, cross-window volume coordination/refresh, and multiple-window
+commands are separate steps; this change does not enable concurrent writers.
+New-folder creation and formatting keep their existing worker paths.
+
+Run the Test build with `--verify-file-operations NEW_DIRECTORY` for detached
+session lifetime, queued values/settings, slow/error reads, conflicts, sticky
+cancellation, stale rename rejection, successful/skipped moves, partial deletes,
+real journaled HFS+/HFSX, classic HFS and Windows operations. Tests include hidden
+progress/owner restoration and classic recursive-delete cancellation, with no
+physical media access. `--verify-shared-browser` also exercises actual classic
+HFS and Windows view rename/delete adapters with unrelated tree selection.
 
 Storage ownership
 -----------------

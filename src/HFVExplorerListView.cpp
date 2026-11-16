@@ -25,6 +25,8 @@
 #include "RenameName.h"
 #include "DeviceWait.h"
 #include "CopyProgress.h"
+#include "FileOperations.h"
+#include "StorageJobDialog.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerListView.h"
 #include "HFVExplorerDoc.h"
@@ -62,6 +64,16 @@ static char THIS_FILE[] = __FILE__;
 enum { ACTION_ASK, ACTION_COPY, ACTION_MOVE };
 
 IMPLEMENT_DYNCREATE(CHFVExplorerListView, CListView)
+namespace {
+bool HiddenOperationProgress(CWnd* owner){
+#ifdef HFV_TESTING
+ return owner&&!owner->IsWindowVisible();
+#else
+ (void)owner;return false;
+#endif
+}
+}
+
 
 #define NCOLUMNS 6
 
@@ -834,6 +846,7 @@ int CHFVExplorerListView::get_path( int inx, CString &doc_name )
 		if(!get_lparam_path(dat,fullpath,MAX_PATH-1)) return(0);
 		doc_name += CString( fullpath );
 	} else { // LIST_HFS
+        auto row=BrowserRowAt(inx);if(row&&!row->path.empty()){doc_name=row->path.c_str();return 1;}
 		int dummy;
 		doc_name += ((CHFVExplorerDoc*)m_pDocument)->get_directory(0,&dummy) +
 							CString(":") + m_cl->GetItemText( inx, 0 );
@@ -1197,7 +1210,7 @@ int CHFVExplorerListView::copy_item_to_dir(
 		destname,
 		isdir,
 		(action == ACTION_MOVE),
-		&was_moved )) 
+		&was_moved, GetBrowserSession().Owner() ))
 	{
 		update_floppy_view(destvolpath);
 		update_floppy_view(srcvolpath);
@@ -1235,55 +1248,28 @@ int CHFVExplorerListView::do_rename(
 	DWORD_PTR ds = m_cl->GetItemData( item );
 	char volpath[_MAX_PATH];
 	char old_path[_MAX_PATH];
-	char new_path[_MAX_PATH];
 	int result = 0;
-	int ismac, len;
-	char tlet[2];
 
 	if(!ds || get_lparam_type(ds) == LIST_SPEC) return(0);
 	bool macRename=get_lparam_type(ds)==LIST_HFS;
 	if(!HfvValidRenameLeaf(old_name,macRename)||!HfvValidRenameLeaf(new_name,macRename))return 0;
 
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	HTREEITEM hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem();
-	if(!hItem) return(0);
+ CString cs;if(!get_path(item,cs)||cs.GetLength()>=sizeof(old_path))return 0;
+ strcpy(old_path,(LPCSTR)cs);
+ FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.checkNameLock=check_lock!=0;
+ FileOperations::Location source;source.type=get_lparam_type(ds);source.directory=get_lparam_isdir(ds)!=0;
+ if(source.type==LIST_HFS){inx2volname(item,volpath,_MAX_PATH);source.classicImage=volpath;source.classicPath=old_path;source.expectedCatalogId=uint32_t(get_lparam_id(ds));}
+ else{int n=MultiByteToWideChar(CP_ACP,0,old_path,-1,nullptr,0);source.windowsPath.resize(n);MultiByteToWideChar(CP_ACP,0,old_path,-1,&source.windowsPath[0],n);source.windowsPath.resize(n-1);}
+ request.sources={source};request.name=BrowserDirectory::FromAnsi(new_name);
+ auto operation=FileOperations::Submit(std::move(request));auto outcome=ShowSubmittedStorageJob(operation.Job(),"Renaming",HiddenOperationProgress(GetBrowserSession().Owner()),true,true,GetBrowserSession().Owner());
+ result=outcome.code==0;if(outcome.code&&outcome.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(outcome.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
+ if(result){std::string changed=old_path;auto pos=changed.find_last_of(source.type==LIST_HFS?':':'\\');if(pos!=std::string::npos)changed.resize(pos+1);changed+=new_name;
+  auto found=m_browser_rows.find(LPARAM(ds));if(found!=m_browser_rows.end()){found->second.path=changed;found->second.entry.name=BrowserDirectory::FromAnsi(new_name);}
+  auto binding=reinterpret_cast<list_lparam_struct*>(ds);if(changed.size()<sizeof(binding->path))strcpy(binding->path,changed.c_str());
+ }
 
-	CString cs = ((CHFVExplorerDoc*)m_pDocument)->get_directory( hItem, &ismac );
-	if(cs.GetLength()+strlen(old_name)+2>sizeof(old_path)||cs.GetLength()+strlen(new_name)+2>sizeof(new_path))return 0;
-	lstrcpy( old_path, cs.GetBuffer( _MAX_PATH ) );
-	lstrcpy( new_path, cs.GetBuffer( _MAX_PATH ) );
+ if(source.type==LIST_HFS)update_floppy_view(volpath);
 
-	tlet[0] = (get_lparam_type(ds) == LIST_HFS) ? ':' : '\\';
-	tlet[1] = 0;
-
-	len = lstrlen(old_path);
-	if(len && old_path[len-1] != *tlet) lstrcat(old_path,tlet);
-
-	len = lstrlen(new_path);
-	if(len && new_path[len-1] != *tlet) lstrcat(new_path,tlet);
-
-	lstrcat( old_path, old_name );
-	lstrcat( new_path, new_name );
-
-	if(get_lparam_type(ds) == LIST_HFS) {
-		inx2volname( item, volpath, _MAX_PATH );
-		if(check_lock) {
-			hfsdirent ent;
-			if(0 == HFSIFACE_get_properties( volpath, old_path, &ent )) {
-				if((ent.fdflags & HFS_FNDR_NAMELOCKED) != 0) {
-					AfxMessageBox( 
-						"You must remove namelock before you can rename this item. "
-						"Click with right mouse button, select Properties and uncheck \"Is name-locked\"."
-					);
-					return(0);
-				}
-			}
-		}
-		result = (0 == HFSIFACE_rename( volpath, old_path, new_path ));
-		if(result) update_floppy_view(volpath);
-	} else {
-		result = fat_rename( old_path, new_path );
-	}
 	return(result);
 }
 
@@ -1341,7 +1327,7 @@ int CHFVExplorerListView::do_file_to_folder(
 		destname,
 		isdir,
 		(action == ACTION_MOVE),
-		&was_moved )) 
+		&was_moved, GetBrowserSession().Owner() ))
 	{
 		update_floppy_view(destvolpath);
 		update_floppy_view(srcvolpath);
@@ -2161,7 +2147,7 @@ void CHFVExplorerListView::update_callback(
 			destname,
 			FALSE,
 			FALSE,
-			&was_moved
+			&was_moved, GetBrowserSession().Owner()
 		);
 		if( copyret != 0 ) {
 			do_delete = FALSE;
@@ -2238,7 +2224,7 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
 		doc_win_name,
 		FALSE,
 		FALSE,
-		&was_moved
+		&was_moved, GetBrowserSession().Owner()
 	);
 	if( copyret != 0 ) {
 		AfxMessageBox( "Failed to copy the file." );
@@ -3093,71 +3079,26 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 		nam.Format( "Really delete selected %d items?", count );
 	}
 	if(confirm) {
-		if(AfxMessageBox( nam, MB_YESNO ) == IDNO ) 
+		if(GetBrowserSession().Owner()->MessageBox(nam,"HFVExplorer",MB_YESNO)==IDNO)
 		{
 			return;
 		}
 	}
 
-	BOOL prevTimer = pApp->EnableTimer( FALSE );
-	// GetBrowserSession().Tree()->enable_selchange(0);
+ FileOperations::Request request;request.kind=FileOperations::Kind::Delete;
+ for(int row=-1;(row=m_cl->GetNextItem(row,LVNI_SELECTED))>=0;){
+  auto binding=reinterpret_cast<list_lparam_struct*>(m_cl->GetItemData(row));if(!binding||binding->type==LIST_SPEC)continue;
+  CString path;get_path(row,path);FileOperations::Location source;source.type=binding->type;source.directory=binding->isdir!=0;
+  if(source.type==LIST_HFS){char image[MAX_PATH];inx2volname(row,image,MAX_PATH);source.classicImage=image;source.classicPath=(LPCSTR)path;source.expectedCatalogId=uint32_t(binding->id);}
+  else{int n=MultiByteToWideChar(CP_ACP,0,path,-1,nullptr,0);source.windowsPath.resize(n);MultiByteToWideChar(CP_ACP,0,path,-1,&source.windowsPath[0],n);source.windowsPath.resize(n-1);}
+  request.sources.push_back(std::move(source));
+ }
+ if(request.sources.empty())return;auto selected=request.sources;auto operation=FileOperations::Submit(std::move(request));
+ auto result=ShowSubmittedStorageJob(operation.Job(),"Deleting files",HiddenOperationProgress(GetBrowserSession().Owner()),false,true,GetBrowserSession().Owner());
+ if(result.code&&result.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
+ bool host=false;for(auto& source:selected){if(source.type==LIST_HFS)update_floppy_view(const_cast<char*>(source.classicImage.c_str()));else host=true;}
+ if(host)update_current_view();
 
-	int fat_changed = 0;
-	
-	inx = -1; count = 0;
-	while( (inx = m_cl->GetNextItem(inx,LVNI_SELECTED)) >= 0 ) {
-		items.Add(inx);
-		count++;
-	}
-	
-	int i;
-	for(i=0; i<count; i++) {
-		inx = items[i];
-		stype = get_inx_type(inx);
-		isdir = get_inx_isdir(inx);
-		if(stype == LIST_SPEC) continue;
-		get_path( inx, fullpath );
-	
-		if(inx >= 0) {
-			if(stype == LIST_FAT) {
-				open_file_type s_fp( open_file_type::SystemFAT, inx );
-				fat_changed = 1;
-				if(!s_fp.Delete()) {AfxMessageBox("Failed to completely delete the selected item. Remaining files were retained.");break;}
-				/*
-				if(isdir) {
-					char *path = fullpath.GetBuffer( _MAX_PATH );
-					do_delete_fat_directory(path);
-				} else {
-					open_file_type s_fp( open_file_type::SystemFAT, inx );
-					s_fp.Delete();
-				}
-				*/
-			} else {
-				int ret;
-				char volpath[_MAX_PATH];
-
-				inx2volname( inx, volpath, _MAX_PATH );
-				char *path = fullpath.GetBuffer( _MAX_PATH );
-				if(isdir) {
-					ret = HFSIFACE_rmdir( volpath, path );
-				} else {
-					ret = HFSIFACE_delete( volpath, path );
-				}
-				fullpath.ReleaseBuffer();
-				if(0 != ret) {
-					AfxMessageBox( "Failed to delete from HFV volume" );
-					break;
-				} else {
-					update_floppy_view(volpath);
-					// Timer will take care.
-					// update_current_view();
-				}
-			}
-		}
-	}
-	if(fat_changed) update_current_view();
-	pApp->EnableTimer( prevTimer );
-	// GetBrowserSession().Tree()->enable_selchange(1);
 }
 #pragma optimize("",on)
 

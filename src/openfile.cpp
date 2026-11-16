@@ -22,6 +22,7 @@
 #include "mactypes.h"
 #include "openfile.h"
 #include "utils.h"
+#include "StorageWorker.h"
 #include "HFVExplorer.h"
 
 #include <direct.h>
@@ -369,7 +370,8 @@ struct DeleteHandle {
  ~DeleteHandle(){DWORD error=GetLastError();if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);SetLastError(error);}
  void close(){if(value!=INVALID_HANDLE_VALUE){CloseHandle(value);value=INVALID_HANDLE_VALUE;}}
 };
-int delete_host_tree(const CString& path,unsigned depth) {
+int delete_host_tree(const CString& path,unsigned depth,Storage::Job* job) {
+ if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(depth>128||path.GetLength()>=MAX_PATH-3){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
  DeleteHandle directory;
  // Pin the actual entry without following a junction, and prevent replacement
@@ -387,8 +389,9 @@ int delete_host_tree(const CString& path,unsigned depth) {
    int ok=1;DWORD error=ERROR_SUCCESS;
    do {
     if(!strcmp(entry.cFileName,".")||!strcmp(entry.cFileName,".."))continue;
+    if(job&&job->cancelled()){ok=0;error=ERROR_CANCELLED;break;}
     CString child=path+"\\"+entry.cFileName;
-    if(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ok=delete_host_tree(child,depth+1);
+    if(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ok=delete_host_tree(child,depth+1,job);
     else ok=DeleteFileA(child)!=FALSE;
     if(!ok){error=GetLastError();break;}
    }while(FindNextFileA(search,&entry));
@@ -400,7 +403,7 @@ int delete_host_tree(const CString& path,unsigned depth) {
  return RemoveDirectoryA(path)!=FALSE; // A reparse point itself, never its target.
 }
 }
-int DeleteFATDir(CString &dir)
+int DeleteFATDirJob(CString &dir,Storage::Job* job)
 {
  char path[MAX_PATH];DWORD length=GetFullPathNameA(dir,sizeof(path),path,nullptr);
  if(!length||length>=sizeof(path)||!strncmp(path,"\\\\?\\",4)||!strncmp(path,"\\\\.\\",4)) {SetLastError(ERROR_INVALID_NAME);return 0;}
@@ -410,13 +413,15 @@ int DeleteFATDir(CString &dir)
   char* server=strchr(path+2,'\\');char* share=server?strchr(server+1,'\\'):nullptr;
   if(!share){SetLastError(ERROR_ACCESS_DENIED);return 0;}
  }
- return delete_host_tree(CString(path),0);
+ return delete_host_tree(CString(path),0,job);
 }
 
-int DeleteHostSelection(const CString& path,bool directory)
+int DeleteFATDir(CString& dir){return DeleteFATDirJob(dir,nullptr);}
+int DeleteHostSelectionJob(const CString& path,bool directory,Storage::Job* job)
 {
+ if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(path.IsEmpty()){SetLastError(ERROR_INVALID_NAME);return 0;}
- if(!(directory?DeleteFATDir(const_cast<CString&>(path)):DeleteFileA(path)))return 0;
+ if(!(directory?DeleteFATDirJob(const_cast<CString&>(path),job):DeleteFileA(path)))return 0;
  int slash=path.ReverseFind('\\');CString name=path.Mid(slash+1);
  // Selecting a metadata file never authorizes deleting the associated data file.
  if(name.IsEmpty()||name[0]=='%')return 1;
@@ -446,6 +451,7 @@ int DeleteHostSelection(const CString& path,bool directory)
  FILE_DISPOSITION_INFO removeVerified={TRUE};
  return SetFileInformationByHandle(file.value,FileDispositionInfo,&removeVerified,sizeof(removeVerified))!=FALSE;
 }
+int DeleteHostSelection(const CString& path,bool directory){return DeleteHostSelectionJob(path,directory,nullptr);}
 BOOL open_file_type::Delete()
 {
  if(m_path.IsEmpty()||m_file_system==SystemHFS)return FALSE;

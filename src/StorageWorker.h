@@ -38,7 +38,7 @@ public:
  std::string conflict()const{std::lock_guard<std::mutex> lock(mutex_);return conflict_;}
  bool cancelled()const{std::lock_guard<std::mutex> lock(mutex_);return cancelled_;}
  void cancel(){ {std::lock_guard<std::mutex> lock(mutex_);cancelled_=true;choice_=ConflictChoice::Cancel;}condition_.notify_all();}
- void resolve(ConflictChoice choice){ {std::lock_guard<std::mutex> lock(mutex_);choice_=choice;}condition_.notify_all();}
+ void resolve(ConflictChoice choice){ {std::lock_guard<std::mutex> lock(mutex_);choice_=cancelled_?ConflictChoice::Cancel:choice;}condition_.notify_all();}
  ConflictChoice replace(const std::string& path) {
   std::unique_lock<std::mutex> lock(mutex_);
   if(cancelled_)return ConflictChoice::Cancel;

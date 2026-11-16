@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $operations=Join-Path $hfsPlusDirectory 'file-operations'
+ $operationTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-file-operations',('"'+$operations+'"')) -WindowStyle Hidden -PassThru
+ if(!$operationTest.WaitForExit(60000)){$operationTest.Kill();throw 'Independent file-operation tests timed out.'}
+ Get-Content (Join-Path $operations 'file-operations-report.txt')
+ if($operationTest.ExitCode -ne 0){throw "Independent file-operation tests failed; retained $operations"}
  $sessions=Join-Path $hfsPlusDirectory 'browser-sessions'
  $sessionTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-browser-sessions',('"'+$sessions+'"')) -WindowStyle Hidden -PassThru
  if(!$sessionTest.WaitForExit(60000)){$sessionTest.Kill();throw 'Browser session tests timed out.'}

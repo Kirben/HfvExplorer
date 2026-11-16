@@ -274,7 +274,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
 	while (ret == 0) {
 		mac_to_pc_charset( item.catkeyrec.ckrCName );
 		BrowserDirectory::ObserveRead((char*)item.catkeyrec.ckrCName);
-		BrowserDirectory::Row row;if(prepare_classic_browser_row(&item,finder_view_mode,row))snapshot.rows.push_back(std::move(row));
+		BrowserDirectory::Row row;if(prepare_classic_browser_row(&item,finder_view_mode,row)){row.path=directory+(directory.empty()||directory.back()!=':'?":":"")+(char*)item.catkeyrec.ckrCName;snapshot.rows.push_back(std::move(row));}
 		ret = HFSIFACE_get_dir_next( &item );
 	}
 

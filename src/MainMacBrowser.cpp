@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "MainMacBrowser.h"
+#include "FileOperations.h"
 #include "BrowserSession.h"
 #include "BrowserPresentation.h"
 #include "BrowserDirectory.h"
@@ -51,26 +52,13 @@ bool Run(BrowserSession& session_,std::function<void(Storage::Job&)> work,bool c
     if(result.code&&result.error!=ERROR_CANCELLED&&!Hidden(session_))AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
     return result.code==0;
 }
-struct Location {
-    int type=0,index=-1;uint32_t id=2;bool cut=false,directory=false;
-    std::shared_ptr<Volume> volume;std::wstring windowsPath;std::string classicImage,classicPath;
-};
-std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mutate=false) {
-    if(value.volume)return {value.volume,value.id};
-    std::shared_ptr<Volume> volume;std::u16string name;
-    if(value.type==LIST_FAT){auto pos=value.windowsPath.find_last_of(L"\\/");
-        auto parent=value.windowsPath.substr(0,pos);if(parent.size()==2&&parent[1]==L':')parent+=L'\\';
-        volume=MacBrowser::OpenWindows(parent);name=U16(value.windowsPath.substr(pos+1));
-    }else{auto pos=value.classicPath.find_last_of(':');volume=OpenClassic(value.classicImage,value.classicPath.substr(0,pos+1),mutate);
-        std::string text=value.classicPath.substr(pos+1);name=U16(FromAnsi(text));}
-    for(auto& entry:volume->List())if(HfsPlus::CompareNames(entry.name,name,volume->CaseSensitive())==0)return {volume,entry.id};
-    throw HfsPlus::Error("The copied source no longer exists");
+bool RunOperation(BrowserSession& session,FileOperations::Request request,bool copy=false,bool single=false){
+ auto operation=FileOperations::Submit(std::move(request));auto result=ShowSubmittedStorageJob(operation.Job(),copy?"Copying files":"Updating files",Hidden(session),single,true,session.Owner());
+ if(result.code&&result.error!=ERROR_CANCELLED&&!Hidden(session))session.Owner()->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
+ return !result.code&&operation.Snapshot().complete;
 }
-std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value) {
-    if(value.volume)return {value.volume,value.id};
-    if(value.type==LIST_FAT)return {MacBrowser::OpenWindows(value.windowsPath),2};
-    return {OpenClassic(value.classicImage,value.classicPath,true),2};
-}
+using Location=FileOperations::Location;
+
 }
 struct MainMacBrowser::State {
     BrowserSession& session_;
@@ -104,6 +92,8 @@ struct MainMacBrowser::State {
         else {CString path;lv->get_path(row,path);
             if(p->type==LIST_FAT)out.windowsPath=FromAnsi((LPCSTR)path);
             else{out.classicImage=session_.Document()->m_volumes[p->volinx].m_file_name;out.classicPath=(LPCSTR)path;}}
+        if(p->type==LIST_MAC)for(const auto& e:shown)if(e.id==out.id){out.expectedIdentity=e.identity;out.expectedName=e.name;out.expectedParent=e.parent;break;}
+        if(p->type==LIST_HFS)out.expectedCatalogId=uint32_t(p->id);
         return out;
     }
     HTREEITEM Insert(int index,uint32_t id,HTREEITEM parent,const std::wstring& name,bool root=false) {
@@ -154,40 +144,14 @@ struct MainMacBrowser::State {
         return true;
     }
     bool Transfer(const std::vector<Location>& sources,const Location& target) {
-        // Existing classic GUI readers must relinquish stale cached sectors before a write.
         if(target.type==LIST_HFS)session_.Document()->m_volumes[target.index].close();
-        bool complete=true;
-        bool ok=Run(session_,[&](Storage::Job& job){
-            HFSIFACE_get_dir_flush();
-            std::unique_ptr<DirectFloppy> disk;
-            int drive=target.type==LIST_HFS?physical_floppy_path(target.classicImage.c_str()):-1;
-            if(drive>=0){physical_floppy_suspend(drive);
-#ifdef HFV_FLOPPY_TESTING
-                auto api=dynamic_cast<FloppyWriteApi*>(physical_floppy_test_api(drive));
-                if(!api)throw HfsPlus::Error("No simulated writable floppy is attached");
-                disk.reset(new DirectFloppy(api));
-#else
-                disk.reset(new DirectFloppy);
-#endif
-                if(!disk->Open(drive))throw HfsPlus::Error("Cannot open and lock the destination floppy");
-            }
-            auto destination=Destination(target);
-            std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;std::vector<std::string> snapshots;
-            for(auto& item:sources){auto source=Source(item);if(item.cut&&item.volume&&!source.first->Writable())throw HfsPlus::Error("A cut source is read-only");snapshots.push_back(item.cut?MacBrowser::Snapshot(*source.first,source.second,job,bool(item.volume)):std::string());opened.push_back(source);}
-            complete=MacBrowser::CopyMany(opened,*destination.first,destination.second,job);
-            if(!target.volume)destination.first->Close();
-            if(disk&&!disk->Finish())throw HfsPlus::Error("Floppy flush failed; source items were retained");
-            for(size_t i=0;i<sources.size();++i)if(!sources[i].volume)opened[i].first->Close();
-            // Cut is applied only after all destination writes and finalization succeed.
-            if(complete)for(size_t i=0;i<sources.size();++i)if(sources[i].cut){
-                auto fresh=sources[i].volume?opened[i]:Source(sources[i],true);
-                if(MacBrowser::Snapshot(*fresh.first,fresh.second,job)!=snapshots[i])throw HfsPlus::Error("Source changed during the copy; source items were retained");
-                RemoveTree(*fresh.first,fresh.second,job);if(!sources[i].volume)fresh.first->Close();
-            }
-        },true,sources.size()==1&&!sources[0].directory);
-        if(target.type==LIST_HFS)session_.Document()->OnOpenDocument("");
-        else if(target.type==LIST_MAC)session_.MacBrowser().Refresh();else session_.List()->update_current_view();
-        return ok&&complete;
+        FileOperations::Request request;request.kind=FileOperations::Kind::Copy;request.sources=sources;request.target=target;
+        bool complete=RunOperation(session_,std::move(request),true,sources.size()==1&&!sources[0].directory);
+        if(session_.Tree()&&session_.List()){
+            if(target.type==LIST_HFS)session_.Document()->OnOpenDocument("");
+            else if(target.type==LIST_MAC)session_.MacBrowser().Refresh();else session_.List()->update_current_view();
+        }
+        return complete;
     }
 };
 MainMacBrowser::MainMacBrowser(BrowserSession& session):session_(session),state_(new State(session)){}
@@ -270,11 +234,13 @@ bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())
     auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
     auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(p->type!=LIST_MAC)return true;auto volume=state_->mounts[p->volinx].volume;uint32_t id=uint32_t(p->id);
     Entry e;if(!Run(session_,[&](Storage::Job&){e=volume->Stat(id);}))return true;auto name=Wide(e.name);
-    if(EditHfsPlusName(session_.Owner(),name,volume->CaseSensitive())){Run(session_,[&](Storage::Job&){volume->Rename(id,state_->folder,U16(name));});Refresh();}return true;}
+    if(EditHfsPlusName(session_.Owner(),name,volume->CaseSensitive())){
+        FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.sources={state_->Item(row,false)};request.target.volume=volume;request.target.id=state_->folder;request.name=U16(name);
+        RunOperation(session_,std::move(request));Refresh();}return true;}
 bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!SelectionWritable())return true;
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(i));if(p->type==LIST_MAC)selected.push_back(state_->Item(i,false));}
-    if(selected.empty()||(confirm&&AfxMessageBox("Delete the selected files and folders?",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
-    Run(session_,[&](Storage::Job& job){for(auto& item:selected)RemoveTree(*item.volume,item.id,job);});Refresh();return true;}
+    if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
+    FileOperations::Request request;request.kind=FileOperations::Kind::Delete;request.sources=std::move(selected);RunOperation(session_,std::move(request));Refresh();return true;}
 bool MainMacBrowser::Properties(int row){auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));if(!p||p->type!=LIST_MAC)return false;
     auto volume=state_->mounts[p->volinx].volume;Entry e;if(!Run(session_,[&](Storage::Job&){e=volume->Stat(uint32_t(p->id));}))return true;
     std::wstring text=Wide(e.name)+L"\n"+FromAnsi(volume->Description())+(volume->Writable()?L"":L" (read-only)")+L"\nData fork: "+std::to_wstring(e.forks[0].size)+L" bytes\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";
@@ -340,27 +306,15 @@ void MainMacBrowser::ImportResource(){
     auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(!p||p->type!=LIST_MAC||p->isdir)return;
     auto volume=state_->mounts[p->volinx].volume;uint32_t id=uint32_t(p->id),parent=state_->folder;
     std::wstring path;if(!FileDialog(session_,path,false))return;Location input;input.type=LIST_FAT;input.windowsPath=path;
-    Run(session_,[&](Storage::Job& job){auto from=Source(input);auto original=volume->Stat(id),replacement=original;
-        replacement.forks[1].size=from.first->Stat(from.second).forks[0].size;replacement.modified=uint32_t(time(nullptr)+2082844800LL);
-        Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;
-        progress.path=BrowserPresentation::Utf8(original.name);progress.totalBytes=progress.fileTotal=replacement.forks[0].size+replacement.forks[1].size;
-        volume->Put(parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){
-            if(job.cancelled())throw Storage::Cancelled();
-            if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);
-            progress.bytes+=n;progress.fileBytes+=n;job.progress(progress);
-        },true);
-    },true,true);Refresh();
+    FileOperations::Request request;request.kind=FileOperations::Kind::ReplaceResource;request.sources={input};request.target=state_->Item(row,false);
+    RunOperation(session_,std::move(request),true,true);Refresh();
 }
 void MainMacBrowser::Export(unsigned fork){if(!Active())return;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return;
     auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(!p||p->type!=LIST_MAC||p->isdir)return;auto volume=state_->mounts[p->volinx].volume;uint32_t id=uint32_t(p->id);Entry entry;
     if(!Run(session_,[&](Storage::Job&){entry=volume->Stat(id);}))return;auto path=Wide(entry.name)+(fork?L".rsrc":L"");if(!FileDialog(session_,path,true))return;path=BrowserPresentation::WindowsPath(path);
-    Run(session_,[&](Storage::Job& job){volume->Read(id,fork,0,nullptr,0);HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-        if(file==INVALID_HANDLE_VALUE)throw HfsPlus::Error("Cannot create output; choose a new filename");
-        try{std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.path=BrowserPresentation::Utf8(entry.name);progress.scanning=false;progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
-            for(uint64_t at=0;at<entry.forks[fork].size;){if(job.cancelled())throw Storage::Cancelled();size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));
-                volume->Read(id,fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw HfsPlus::Error("Export write failed");at+=n;progress.bytes=progress.fileBytes=at;job.progress(progress);}
-            if(!FlushFileBuffers(file))throw HfsPlus::Error("Export flush failed");CloseHandle(file);
-        }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}},true,true);}
+    FileOperations::Request request;request.kind=FileOperations::Kind::ExportFork;request.sources={state_->Item(row,false)};request.target.type=LIST_FAT;request.target.windowsPath=path;request.fork=fork;
+    RunOperation(session_,std::move(request),true,true);}
+
 void MainMacBrowser::Sort(int column,bool ascending){
 if(Active())session_.List()->SortBrowserRows(column,ascending);
 }

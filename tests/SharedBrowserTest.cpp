@@ -26,7 +26,7 @@ struct Tree : HFVExplorerTreeView {
  HTREEITEM Windows(const CString& path){CString label="Windows",copy=path;return initialize_fat_volume(0,&label,DRIVE_FIXED,&copy,FALSE);}
  void PostNcDestroy()override{}
 };
-struct List : CHFVExplorerListView {void Bind(CDocument* doc){m_pDocument=doc;}void PostNcDestroy()override{};};
+struct List : CHFVExplorerListView {int RenameForTest(int row,char* from,char* to){return do_rename(row,from,to,1);}void DeleteForTest(){try_delete_selected_items(FALSE);}void Bind(CDocument* doc){m_pDocument=doc;}void PostNcDestroy()override{};};
 std::wstring text(CListCtrl& list,int row){wchar_t name[1024]{};LVITEMW value{};value.pszText=name;value.cchTextMax=ARRAYSIZE(name);
  SendMessageW(list.m_hWnd,LVM_GETITEMTEXTW,row,reinterpret_cast<LPARAM>(&value));return name;}
 int find(CListCtrl& list,const wchar_t* name){for(int row=0;row<list.GetItemCount();++row)if(text(list,row)==name)return row;return -1;}
@@ -102,12 +102,21 @@ int RunSharedBrowserTest(const char* directory){
   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();BrowserDirectory::testObserveRead={};
   check(control.GetItemCount()==1&&list.BrowserRowAt(0)==nullptr&&!list.BrowserDirectoryWritable()&&owner.IsWindowEnabled(),"failed Windows snapshot published partial rows");
   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();check(control.GetItemCount()==6,"Windows listing retry");
+  {int selected=find(control,L"A newer");char from[]="A newer",to[]="Job renamed";
+   check(selected>=0&&list.RenameForTest(selected,from,to),"Windows rename view did not submit a job");
+   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();selected=find(control,L"Job renamed");check(selected>=0,"Windows rename listing refresh");
+   control.SetItemState(-1,0,LVIS_SELECTED);control.SetItemState(selected,LVIS_SELECTED,LVIS_SELECTED);list.DeleteForTest();check(GetFileAttributesA(windows+"\\Job renamed")==INVALID_FILE_ATTRIBUTES&&owner.IsWindowEnabled(),"Windows deletion view did not complete its independent job");
+  }
   // Exercise the retained conversion backend using a path produced by the common view.
   auto copied=Storage::worker().submit(MakeCopyJob((LPCSTR)image,(LPCSTR)source,(LPCSTR)windows,(LPCSTR)(windows+"\\typed.bin"),0,0,'5'));
   copied->wait();check(!copied->result().code&&GetFileAttributesA(windows+"\\typed.bin")!=INVALID_FILE_ATTRIBUTES,"classic MacBinary conversion route was lost");
   auto imported=Storage::worker().submit(MakeCopyJob((LPCSTR)windows,(LPCSTR)(windows+"\\typed.bin"),(LPCSTR)image,"Shared:Imported",0,0,'a'));
   imported->wait();check(!imported->result().code,"classic Automatic import route was lost");
   doc.open_sub_directory(0,2,"Shared");check(find(control,L"Imported")>=0,"classic catalog refresh after converted import");
+  {int selected=find(control,L"Imported");char from[]="Imported",to[]="Job imported";check(selected>=0&&list.RenameForTest(selected,from,to),"classic HFS rename view job");
+   doc.open_sub_directory(0,2,"Shared");selected=find(control,L"Job imported");check(selected>=0,"classic HFS rename listing");control.SetItemState(-1,0,LVIS_SELECTED);control.SetItemState(selected,LVIS_SELECTED,LVIS_SELECTED);list.DeleteForTest();
+   doc.open_sub_directory(0,2,"Shared");check(control.GetItemCount()==3&&owner.IsWindowEnabled(),"classic HFS deletion view job");
+  }
   BrowserDirectory::Row a,b;a.entry.name=u"A";b.entry.name=u"Z";a.entry.forks[0].size=UINT64_MAX;b.entry.forks[0].size=UINT64_MAX-1;
   check(BrowserDirectory::Compare(a,b,FIELD_SIZE,true)>0&&BrowserDirectory::Bytes(a.entry)==UINT64_MAX,"64-bit typed sort overflow");
   a.entry.name=u"README";b.entry.name=u"Readme";check(BrowserDirectory::Compare(a,b,FIELD_NAME,true)!=0,"case-distinct deterministic ordering");

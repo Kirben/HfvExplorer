@@ -69,6 +69,8 @@ char HFSIFACE_copy_mode(void){return HFSIFACE_copyout_mode;}
 char HFSIFACE_exchange_copy_mode(char mode){char old=HFSIFACE_copyout_mode;HFSIFACE_copyout_mode=mode;return old;}
 static char HFSIFACE_copyin_mode = 'a';
 static char HFSIFACE_copyout_ad = 1;
+void HFSIFACE_copy_settings(char* out,char* in,int* ad){*out=HFSIFACE_copyout_mode;*in=HFSIFACE_copyin_mode;*ad=HFSIFACE_copyout_ad;}
+void HFSIFACE_restore_copy_settings(char out,char in,int ad){HFSIFACE_copyout_mode=out;HFSIFACE_copyin_mode=in;HFSIFACE_copyout_ad=(char)ad;}
 
 /*
 static char *dir_hack( char *path )
@@ -392,9 +394,14 @@ int HFSIFACE_mkdir( char *volpath, char *path )
 	return( result );
 }
 
+static int (*mutation_cancel)(void*)=NULL;
+static void* mutation_cancel_context=NULL;
+void HFSIFACE_delete_cancel(int (*callback)(void*),void* context){mutation_cancel=callback;mutation_cancel_context=context;}
+static int deletion_cancelled(void){if(mutation_cancel&&mutation_cancel(mutation_cancel_context)){errno=EINTR;hfs_error="Deletion cancelled";return 1;}return 0;}
 int do_delete_directory( hfsvol *vol, char *path )
 {
   hfsdir *dir;
+ if(deletion_cancelled())return -1;
 	hfsdirent ent;
 	char new_source[_MAX_PATH];
 
@@ -409,6 +416,7 @@ int do_delete_directory( hfsvol *vol, char *path )
 		return(-1);
 	} else {
 		while (hfs_readdir(dir, &ent) >= 0) {
+            if(deletion_cancelled()){hfs_closedir(dir);return -1;}
 			if(strlen(path)+strlen(ent.name)+2 > sizeof(new_source)) {
 				hfs_closedir(dir);hfs_error="HFS delete path is too long";errno=ENAMETOOLONG;return -1;
 			}
@@ -436,7 +444,8 @@ int do_delete_directory( hfsvol *vol, char *path )
 		}
 		hfs_closedir(dir);
 	}
-	return(hfs_rmdir(vol, path));
+	if(deletion_cancelled())return -1;
+ return(hfs_rmdir(vol, path));
 }
 
 int HFSIFACE_rmdir( char *volpath, char *path )
