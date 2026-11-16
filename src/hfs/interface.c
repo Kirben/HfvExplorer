@@ -723,7 +723,7 @@ int HFSIFACE_copy_one_file(
 			// HFS -> HFS
 			result = do_copyhfshfs( vol1, tvol, source, target );
 			if(result != 0) {
-				if(0 == build_target_dir_name( 
+				if(copyhfs_destination_opened() && 0 == build_target_dir_name(
 					1, 1, new_source, source, target ))
 				{
 					hfs_delete(tvol, new_source);
@@ -785,7 +785,7 @@ int HFSIFACE_copy_one_file(
 			}
 			if(result != 0) {
 				// new_source REUSED!
-				if((mode == '&' || copyin_destination_opened()) &&
+				if(copyin_destination_opened() &&
            0 == build_target_dir_name( 0, 1, new_source, source, tmp ))
 				{
 					hfs_delete(vol2, new_source);

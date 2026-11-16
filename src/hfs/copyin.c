@@ -883,6 +883,8 @@ int cpi_double( char *fdata, char *fres, hfsvol *vol, char *dstname )
 	unsigned long rstart, rlength;
   hfsdirent ent;
 
+  copyin_opened = 0;
+
 	if(!get_apple_double_type_creator( 
 		fres, typestr, creatorstr, &rstart, &rlength ))
 	{
