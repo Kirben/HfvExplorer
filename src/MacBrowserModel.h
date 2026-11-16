@@ -61,6 +61,7 @@ std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> med
 std::shared_ptr<Volume> OpenCdRoot(const char *root,
     std::function<UINT(const char *)> driveType = {},
     std::function<std::shared_ptr<Volume>(int)> open = {});
+Entry DescribeWindowsFile(const std::wstring &path);
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.

@@ -23,6 +23,7 @@
 
 #include "MacTypes.h"
 #include "itemtype.h"
+#include "BrowserDirectory.h"
 #include "bndl.h"
 
 // #define USE_FILE_MAPPING
@@ -38,7 +39,6 @@
 #define SEARCH_TYPE_FOLDERS 2
 #define SEARCH_TYPE_ALL			3
 #define SEARCH_TYPE_THISFOLDER	4
-#define SEARCH_TYPE_ID_CALLBACK	5
 #define SEARCH_TYPE_FIND_NAME		6
 
 #define ID_GOTO_PARENT 0x12345678
@@ -48,7 +48,7 @@ class CHFVExplorerDoc : public CDocument
  friend class MainMacBrowser;
 protected: // create from serialization only
 	CPointerWordArray *m_icon_array;
-	CHFVExplorerDoc();
+	CHFVExplorerDoc(bool discover = true);
 	DECLARE_DYNCREATE(CHFVExplorerDoc)
 	void OnCleanDocument();
 	void enum_floppies( void );
@@ -83,7 +83,6 @@ protected: // create from serialization only
 	void new_hfs_walk( int volinx, long id, CString searchname );
 
 	BOOL hfs_find_item( LongInt node_index, hfs_item_type *pitem );
-	void hfs_walk_callback( hfs_item_type *pitem, int finder_view_mode );
 	BOOL hfs_find_first( 
 		int volinx,
 		long id, 
@@ -93,7 +92,10 @@ protected: // create from serialization only
 		int stype );
 	BOOL hfs_find_next( hfs_item_type *pitem );
 
-	void hfs_walk( int volinx, long id, CString searchname );
+    bool prepare_classic_browser_row(hfs_item_type*,int,BrowserDirectory::Row&);
+    BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long);
+    BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&);
+    void apply_browser_directory(const BrowserDirectory::Snapshot&,bool);
 	void fat_walk( int volinx, LPSTR path, int list );
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );

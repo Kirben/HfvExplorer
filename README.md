@@ -23,6 +23,25 @@ Storage ownership
   the exclusivity test never opens a physical floppy. Run the standalone GUI test
   build with --verify-storage-exclusive NEW_OUTPUT_DIRECTORY, or build-x64.ps1 -Test.
 
+Shared browser presentation
+---------------------------
+- Classic HFS, Windows, HFS+, HFSX and MFS listings use the same typed row model,
+  renderer and sorter. Sorting uses exact fork sizes and FILETIME precision,
+  rather than parsing rounded KB strings. Dates share a local-time display format.
+- Classic HFS and Windows directory backends prepare snapshots on the serialized
+  storage worker; failed reads do not publish a partial list. Classic HFS browsing
+  uses read-only enumeration. Windows folders no longer open every child directory
+  just to count its entries. Validated Windows AppleDouble fork/Finder metadata
+  uses the same descriptor as cross-format transfers.
+- Backend bindings preserve classic Finder icons/layouts, MacBinary/BinHex copy
+  modes, legacy properties and emulator launching. These operations retain their
+  existing format-specific rules. Read-only directory/entry capabilities are
+  supplied by backends and checked by the shared view and edit-menu policy.
+- --verify-shared-browser in the test build exercises real hidden tree/list
+  controls, classic HFS and sparse 6 GiB Windows files, exact size/date sorting,
+  read-only browsing, slow/error snapshots, owner restoration and classic
+  conversion round trips, without discovery scans or physical media access.
+
 Current filesystem support
 --------------------------
 - Classic HFS: logical forks up to 2 GiB minus one byte, and image volumes up

@@ -1387,5 +1387,8 @@ void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
  ui->Enable(enabled);
 }
 void CMainFrame::OnUpdateMacEdit(CCmdUI* ui){
- auto& browser=MainMacBrowser::Get();ui->Enable(!StorageUi::busy()&&(!browser.Active()||(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable())));
+ auto& browser=MainMacBrowser::Get();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+ bool allowed=browser.Active()?(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable()):
+     app->m_list&&(ui->m_nID==ID_EDIT_CUT?app->m_list->BrowserSelectionAllows(false):app->m_list->BrowserDirectoryWritable());
+ ui->Enable(!StorageUi::busy()&&allowed);
 }

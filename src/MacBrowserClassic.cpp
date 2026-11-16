@@ -53,7 +53,7 @@ public:
         imageIdentity_=image;HANDLE identity=CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
         if(identity!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(identity,&info))imageIdentity_=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);CloseHandle(identity);}
         std::vector<char> converted(root.begin(),root.end());converted.push_back(0);pc_to_mac_charset((unsigned char*)converted.data());root=converted.data();
-        volume_=hfs_mount(const_cast<char*>(image.c_str()),0,write?O_RDWR:O_RDONLY);Check(volume_!=nullptr);
+        volume_=hfs_mount(const_cast<char*>(image.c_str()),1,write?O_RDWR:O_RDONLY);Check(volume_!=nullptr);
         auto colon=root.find(':');root=colon==root.npos?":":root.substr(colon);
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}

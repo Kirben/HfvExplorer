@@ -23,6 +23,8 @@
 //#include "afx.h"
 #include "stdafx.h"
 #include "MainMacBrowser.h"
+#include "BrowserDirectory.h"
+#include "BrowserPresentation.h"
 #include "RefreshStorage.h"
 #include "StorageJobDialog.h"
 #include "HostFileSizes.h"
@@ -474,16 +476,16 @@ int get_apple_double_type_creator(
 }
 } // extern "C"
 
-HICON get_dos_icon( CHFVExplorerApp *pApp, char *p )
+HICON get_dos_icon( CHFVExplorerApp *pApp, char *p, int iconMode )
 {
 	char executable[MAX_PATH];
 	HICON hicon;
 
 	// pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	if(pApp->m_dosicons == DI_NO_ICONS) return(0);
+	if(iconMode == DI_NO_ICONS) return(0);
 
-	if(pApp->m_dosicons == DI_PREFER_INDIVIDUAL_ICONS) {
+	if(iconMode == DI_PREFER_INDIVIDUAL_ICONS) {
 		hicon = ::ExtractIcon( pApp->m_hInstance, p, 0 );
 		if(hicon && hicon != (HICON)1) {
 			// dump_icon( hicon );
@@ -498,7 +500,7 @@ HICON get_dos_icon( CHFVExplorerApp *pApp, char *p )
 		hicon = ::ExtractIcon( pApp->m_hInstance, executable, 0 );
 		if(hicon && hicon != (HICON)1) return( hicon );
 	}
-	if(pApp->m_dosicons == DI_PREFER_INDIVIDUAL_ICONS) {
+	if(iconMode == DI_PREFER_INDIVIDUAL_ICONS) {
 		// we already know that there is no icon
 		return(0);
 	}
@@ -639,246 +641,15 @@ int CHFVExplorerDoc::get_afp(
 	return(ok);
 }
 
-int get_fat_dir_count( char *path, BOOL ignore_resource_files )
-{
-	HANDLE fh;
-	WIN32_FIND_DATA FindFileData;
-	CString mask;
-	int ok, count = 0;
 
-	mask = CString(path);
-	if(mask.Right(1) != "\\") mask += "\\";
 
-	fh = FindFirstFile( mask + "*.*", &FindFileData );
-	ok = fh != INVALID_HANDLE_VALUE;
-	while(ok) {
-		UPDATE_TIME_CONSUMING(1);
-		if(!ignore_resource_files || *FindFileData.cFileName != '%') {
-			if(*FindFileData.cFileName != '.') {
-				count++;
-			}
-		}
-		ok = FindNextFile( fh, &FindFileData );
-	}
-	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
-	return( count );
+void CHFVExplorerDoc::fat_walk(int volinx,LPSTR path,int list){
+ auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());BrowserDirectory::Snapshot snapshot;std::string directory=path;
+ auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,directory.c_str(),list!=0,job);return Storage::Result{};},!app->m_pMainWnd->IsWindowVisible());
+ if(result.code){app->m_list->SetBrowserCapabilities({});if(app->m_pMainWnd->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ apply_browser_directory(snapshot,list!=0);if(list)app->m_list->do_report_sort();
 }
 
-void CHFVExplorerDoc::fat_walk( int volinx, LPSTR path, int list )
-{
-	HANDLE fh;
-	WIN32_FIND_DATA FindFileData;
-	int ok, isdir;
-	CString mask, fpath;
-	CHFVExplorerApp	*pApp;
-	HTREEITEM root;
-	HICON hicon16 = 0;
-	HICON hicon32 = 0;
-	LPSTR p;
-	HTREEITEM htree;
-	int do_show;
-	int is_afp_dir = 0;
-	char pure_name[_MAX_PATH];
-	char mac_type[20], mac_creator[20];
-
-	dbdb( "fat_walk" );
-
-	/*
-	if(finder_dat_walk( volinx, path, list )) {
-		return;
-	}
-	*/
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	mask = CString(path);
-	if(mask.Right(1) != "\\") mask += "\\";
-
-	root = pApp->m_tree->GetTreeCtrl().GetSelectedItem();
-
-	START_TIME_CONSUMING(1000);
-
-	is_afp_dir = is_afp_directory(path);
-
-	// scan AppleDouble files first
-	CObArray ignore_array;
-	fh = FindFirstFile( mask + "%*.*", &FindFileData );
-	ok = fh != INVALID_HANDLE_VALUE;
-	while(ok) {
-		UPDATE_TIME_CONSUMING(1);
-		if( get_apple_double( 
-						mask,
-						FindFileData.cFileName,
-						&hicon16,
-						&hicon32,
-						pure_name,
-						mac_type,
-						mac_creator,
-						&do_show
-		)) {
-			p = pure_name;
-			fpath = mask + CString(pure_name);
-
-			// add %<name>
-			CString resource_name = CString("%") + CString(pure_name);
-			CString *save_name = new CString( resource_name );
-			ignore_array.Add( (CObject*)save_name);
-			// add <name>
-			save_name = new CString( pure_name );
-			ignore_array.Add( (CObject*)save_name);
-			if(do_show) {
-				// wrong - should check name without %
-				// isdir = (FindFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-				isdir = isdirectory( fpath );
-				p = fpath.GetBuffer(MAX_PATH);
-				remove_ardi_special_chars( (unsigned char *)pure_name );
-				mac_to_pc_charset( (unsigned char *)pure_name );
-				if(isdir) {
-					htree = pApp->m_tree->tree_fat_insert( 
-						root, volinx, pure_name, p );
-					FindFileData.nFileSizeLow = get_fat_dir_count( p, TRUE );
-				} else {
-					htree = 0;
-					FindFileData.nFileSizeLow = 0;
-				}
-
-				if(list) {
-					pApp->m_list->list_fat_insert( 
-						pure_name,
-						isdir,
-						HostDirectoryEntrySize(FindFileData),
-						&FindFileData.ftCreationTime,
-						&FindFileData.ftLastWriteTime,
-						hicon16,
-						hicon32,
-						mac_type,
-						mac_creator,
-						p,
-						htree,
-						volinx
-						);
-				} else {
-					if(hicon16) DestroyIcon(hicon16);
-					if(hicon32) DestroyIcon(hicon32);
-				}
-				fpath.ReleaseBuffer(MAX_PATH);
-			}
-		}
-		ok = FindNextFile( fh, &FindFileData );
-	}
-	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
-
-	// scan dirs next
-	fh = FindFirstFile( mask + "*.*", &FindFileData );
-	ok = fh != INVALID_HANDLE_VALUE;
-	while(ok) {
-		UPDATE_TIME_CONSUMING(1);
-		isdir = (FindFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-		if(isdir && *FindFileData.cFileName != '.') {
-			if(!ignore_this( &ignore_array, &FindFileData )) {
-				dos_lfn_fdata( &FindFileData );
-				fpath = mask + CString(FindFileData.cFileName);
-				p = fpath.GetBuffer(MAX_PATH);
-				htree = pApp->m_tree->tree_fat_insert( 
-					root, volinx, 
-					FindFileData.cFileName, p );
-				if(list) {
-					FindFileData.nFileSizeLow = get_fat_dir_count( p, FALSE );
-					pApp->m_list->list_fat_insert( 
-						(LPSTR)FindFileData.cFileName,
-						isdir,
-						HostDirectoryEntrySize(FindFileData),
-						&FindFileData.ftCreationTime,
-						&FindFileData.ftLastWriteTime,
-						0, 0, "", "",
-						p, htree, volinx
-						);
-				}
-				fpath.ReleaseBuffer(MAX_PATH);
-			}
-		}
-		ok = FindNextFile( fh, &FindFileData );
-	}
-	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
-
-	DWORD icon_stop_time = 0;
-	int save_m_dosicons	= pApp->m_dosicons;
-	if(pApp->m_dosicons != DI_NO_ICONS && pApp->m_fat_icon_time_limit > 0) {
-		icon_stop_time = GetTickCount() + (DWORD)pApp->m_fat_icon_time_limit*1000;
-	}
-
-	// scan normal files next
-	fh = FindFirstFile( mask + "*.*", &FindFileData );
-	ok = fh != INVALID_HANDLE_VALUE;
-	while(ok) {
-		UPDATE_TIME_CONSUMING(1);
-		isdir = (FindFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-		if(!isdir) {
-			if(!ignore_this( &ignore_array, &FindFileData )) {
-				dos_lfn_fdata( &FindFileData );
-				fpath = mask + CString(FindFileData.cFileName);
-				p = fpath.GetBuffer(MAX_PATH);
-				if(list) {
-					if(icon_stop_time != 0 && GetTickCount() >= icon_stop_time) {
-						pApp->m_dosicons = DI_NO_ICONS;
-						icon_stop_time = 0;
-					}
-					*mac_type = *mac_creator = 0;
-					hicon16 = hicon32 = 0;
-					if(is_afp_dir) {
-						if( !get_afp( 
-										mask,
-										FindFileData.cFileName,
-										&hicon16,
-										&hicon32,
-										pure_name,
-										mac_type,
-										mac_creator,
-										&do_show ) )
-						{
-							// hicon16 = hicon32 = 0;
-						}
-					}
-					if(!hicon32) {
-						hicon16 = get_dos_icon( pApp, p );
-						hicon32 = hicon16;
-					}
-					pApp->m_list->list_fat_insert( 
-						(LPSTR)FindFileData.cFileName,
-						isdir,
-						HostDirectoryEntrySize(FindFileData),
-						&FindFileData.ftCreationTime,
-						&FindFileData.ftLastWriteTime,
-						hicon16, hicon32,
-						mac_type, mac_creator,
-						p, 0, volinx
-					);
-				}
-				fpath.ReleaseBuffer(MAX_PATH);
-			}
-		}
-		ok = FindNextFile( fh, &FindFileData );
-	}
-	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
-
-	pApp->m_dosicons = save_m_dosicons;
-
-	int i, count = ignore_array.GetSize();
-	for(i=0; i<count; i++) {
-		CString *s = (CString*)ignore_array.GetAt( i );
-		if(s) {
-			delete s;
-		}
-	}
-	ignore_array.RemoveAll();
-
-	pApp->m_list->do_report_sort();
-
-	END_TIME_CONSUMING;
-
-	dbdb( "fat_walk END" );
-
-}
 #pragma optimize("",on)
 
 int CHFVExplorerDoc::insert_fat_volume( char letter, UINT type )
@@ -922,7 +693,7 @@ void CHFVExplorerDoc::update_invisible_attributes()
 	m_pc_show_invisibles = pApp->m_show_invisible_fat;
 }
 
-CHFVExplorerDoc::CHFVExplorerDoc()
+CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
@@ -937,7 +708,7 @@ CHFVExplorerDoc::CHFVExplorerDoc()
 	m_hfs_count = 0;
 	m_fat_count = 0;
 
-	// enum_hfs_volumes("");
+	if(discover){
 	char dir[_MAX_PATH+1];
 	char *cuthere;
 	::GetModuleFileName( pApp->m_hInstance, dir, _MAX_PATH );
@@ -951,6 +722,7 @@ CHFVExplorerDoc::CHFVExplorerDoc()
 	);
 
 	enum_fat_volumes();
+ }
 
 	HDC dc = GetDC(0);
 	if(dc) {
@@ -963,6 +735,7 @@ CHFVExplorerDoc::CHFVExplorerDoc()
 
 CHFVExplorerDoc::~CHFVExplorerDoc()
 {
+ clear_hash_table();
 	destroy_icon_cache();
 	delete m_icon_array;
 }
@@ -1077,8 +850,7 @@ BOOL CHFVExplorerDoc::hfs_find_item( LongInt node_index, hfs_item_type *pitem )
 								}
 								break;
 							case SEARCH_TYPE_ID:
-							case SEARCH_TYPE_ID_CALLBACK:
-								if(catkeyrec.ckrParID == pitem->id) {
+									if(catkeyrec.ckrParID == pitem->id) {
 									found = 1;
 								}
 								break;
@@ -1109,17 +881,10 @@ BOOL CHFVExplorerDoc::hfs_find_item( LongInt node_index, hfs_item_type *pitem )
 					if( found ) {
 						pitem->index_found++;
 						if( pitem->index_to_found == pitem->index_found ||
-							  pitem->search_type == SEARCH_TYPE_ID_CALLBACK ||
 								pitem->search_type == SEARCH_TYPE_FILES ) {
 							memcpy( &pitem->catkeyrec, &catkeyrec, key_length );
 							memcpy( &pitem->catdatarec, &catdatarec, sizeof(CatDataRec) );
-							if( pitem->search_type == SEARCH_TYPE_ID_CALLBACK ) {
-								// fast looping, this is O(n)
-								hfs_walk_callback(pitem,FINDER_VIEW_MODE_ICON);
-							} else {
-								// this shit is O(n2/2)!!!
-								return(1);
-							}
+                            return(1);
 						}
 					}
 				}
@@ -1498,191 +1263,11 @@ HICON CHFVExplorerDoc::mac_load_icon( int volinx, CatDataRec *pCDR, int small )
 	return(hicon);
 }
 
-void CHFVExplorerDoc::hfs_walk_callback( hfs_item_type *pitem, int finder_view_mode )
-{
-	int isdir;
-	hfv_size_t size_in_bytes;
-	unsigned long creation_date;
-	unsigned long modification_date;
-	char stype[100];
-	char screator[100];
-	unsigned long id;
-	HICON hicon16, hicon32;
-	HTREEITEM htree;
-	// hfs_point point;
-	POINT p;
-	int is_inited = 0;
-	int finder_color = FINDER_COLOR_NONE;
 
-	// Special handling for folder icon. Some folks don't
-	// put the invisible flag properly on.
-	if(!m_mac_show_invisibles) {
-		if(strcmp((char *)pitem->catkeyrec.ckrCName,"Icon\x00D") == 0) {
-		 	return;
-		}		
-	}
 
-	p.x = -100;
-	p.y = -100;
-
-	if(*pitem->catkeyrec.ckrCName) {
-		id = 0;
-		isdir = 0;
-		size_in_bytes = 0;
-		creation_date = 0;
-		modification_date = 0;
-		*stype = 0;
-		*screator = 0;
-		hicon16 = hicon32 = 0;
-
-		if(pitem->catdatarec.cdrType == cdrDirRec) isdir = 1;
-		if(pitem->catdatarec.cdrType == cdrThdRec) isdir = 1;
-		if(isdir) {
-			strcpy( stype, "Folder" );
-			if(pitem->catdatarec.cdrType == cdrDirRec) {
-				if((pitem->catdatarec.u.d.dirUsrInfo.frFlags & fInvisible) && !m_mac_show_invisibles) {
-					return;
-				}
-				finder_color = (pitem->catdatarec.u.d.dirUsrInfo.frFlags & kColorMask) >> 1;
-				is_inited = (pitem->catdatarec.u.d.dirUsrInfo.frFlags & kHasBeenInited) != 0;
-				size_in_bytes = pitem->catdatarec.u.d.dirVal;
-				creation_date = pitem->catdatarec.u.d.dirCrDat;
-				modification_date = pitem->catdatarec.u.d.dirMdDat;
-				id = pitem->catdatarec.u.d.dirDirID;
-
-				// Try to load folder custom icon
-				CatDataRec *pIcon13catdatarec;
-				pIcon13catdatarec = HFSIFACE_get_last_Icon13();
-				if(pIcon13catdatarec) {
-#ifndef ZAPPER
-					load_custom_icons( 
-							pitem->volinx,
-							pIcon13catdatarec,
-							&hicon16, 
-							&hicon32 );
-#endif
-				}
-				p.x = (int)(signed short)pitem->catdatarec.u.d.dirUsrInfo.frLocation.h;
-				p.y = (int)(signed short)pitem->catdatarec.u.d.dirUsrInfo.frLocation.v;
-			}
-
-		} else {
-			if((pitem->catdatarec.u.f.filUsrWds.fdFlags & fInvisible) && !m_mac_show_invisibles) {
-				return;
-			}
-
-			finder_color = (pitem->catdatarec.u.f.filUsrWds.fdFlags & kColorMask) >> 1;
-			
-			is_inited = (pitem->catdatarec.u.f.filUsrWds.fdFlags & kHasBeenInited) != 0;
-			OSType fdType = pitem->catdatarec.u.f.filUsrWds.fdType;
-			OSType fdCreator = pitem->catdatarec.u.f.filUsrWds.fdCreator;
-			if(pitem->catdatarec.cdrType == cdrFilRec) {
-				size_in_bytes = (hfv_size_t)pitem->catdatarec.u.f.filLgLen +
-												pitem->catdatarec.u.f.filRLgLen;
-				creation_date = pitem->catdatarec.u.f.filCrDat;
-				modification_date = pitem->catdatarec.u.f.filMdDat;
-				long_to_string( fdType,(unsigned char *)stype );
-				long_to_string( fdCreator,(unsigned char *)screator );
-
-				// First try to find custom icons
-#ifndef ZAPPER
-				if(pitem->catdatarec.u.f.filUsrWds.fdFlags & kHasCustomIcon) {
-					load_custom_icons( 
-							pitem->volinx,
-							&pitem->catdatarec,
-							&hicon16, 
-							&hicon32 );
-				}
-#endif
-
-				// Try to load from cache
-				if(!hicon32) hicon32 = map_type_and_creator ( fdType, fdCreator, 0 );
-				if(!hicon16) hicon16 = map_type_and_creator ( fdType, fdCreator, 1 );
-
-				// Check if it has a bundle...
-				if(!hicon16 || !hicon32) {
-					process_bundle(
-						pitem->volinx,
-						&pitem->catdatarec,
-						fdCreator
-					);
-					// ... and perhaps the icon is in cache now?
-					if(!hicon32) hicon32 = map_type_and_creator ( fdType, fdCreator, 0 );
-					if(!hicon16) hicon16 = map_type_and_creator ( fdType, fdCreator, 1 );
-				}
-
-				// File aliases
-				if(!hicon32 && fdType == 'adrp')
-					hicon32 = map_type_and_creator ( 'APPL', fdCreator, 0 );
-				if(!hicon16 && fdType == 'adrp')
-					hicon16 = map_type_and_creator ( 'APPL', fdCreator, 1 );
-
-				// Folder aliases .. this is not correct
-				if(!hicon32 && fdType == 'fdrp')
-					hicon32 = map_type_and_creator ( 'APPL', fdCreator, 0 );
-				if(!hicon16 && fdType == 'fdrp')
-					hicon16 = map_type_and_creator ( 'APPL', fdCreator, 1 );
-
-				p.x = (int)(signed short)pitem->catdatarec.u.f.filUsrWds.fdLocation.h;
-				p.y = (int)(signed short)pitem->catdatarec.u.f.filUsrWds.fdLocation.v;
-			}
-		}
-
-		CHFVExplorerApp	*pApp;
-		pApp = (CHFVExplorerApp *)AfxGetApp();
-		if(isdir) {
-			htree = pApp->m_tree->tree_insert( 
-				m_volumes[pitem->volinx].m_rootitem,
-				pitem->volinx,
-				(LPSTR)pitem->catkeyrec.ckrCName, 
-				id, pitem->id );
-		} else {
-			htree = 0;
-		}
-
-		// This would be an alternate way to implement label colors.
-		/*
-		if(finder_color != FINDER_COLOR_NONE) {
-			if(hicon32) {
-				HICON old_hicon32 = hicon32;
-				hicon32 = make_finder_colored_icon( hicon32, finder_color );
-				if(hicon32 != 0 && hicon32 != old_hicon32) {
-					add_to_icon_cache( hicon32 );
-				}
-			}
-		}
-		*/
-
-		pApp->m_list->list_insert( 
-			(LPSTR)pitem->catkeyrec.ckrCName,
-			isdir,
-			size_in_bytes,
-			creation_date,
-			modification_date,
-			stype,
-			screator,
-			id,
-			hicon32,
-			hicon16,
-			htree,
-			pitem->volinx,
-			&p,
-			is_inited,
-			finder_view_mode,
-			finder_color
-		);
-	}
-}
 
 // not used any more
-void CHFVExplorerDoc::hfs_walk( int volinx, long id, CString searchname )
-{
-	hfs_item_type item;
-	// TRACE( "hfs_walk\n" );
-	START_TIME_CONSUMING(1000);
-	(void)hfs_find_first( volinx, id, 0, searchname, &item, SEARCH_TYPE_ID_CALLBACK );
-	END_TIME_CONSUMING;
-}
+
 
 void CHFVExplorerDoc::set_current_hitem( HTREEITEM hItem )
 {
@@ -1774,60 +1359,15 @@ CString CHFVExplorerDoc::get_directory (
 	return("");
 }
 
-void CHFVExplorerDoc::new_hfs_walk( int volinx, long id, CString searchname )
-{
-	hfs_item_type item;
-	int ret;
-	char *volpath, *path;
-	int finder_view_mode = FINDER_VIEW_MODE_ICON;
-
-	// TRACE( "new_hfs_walk\n" );
-	START_TIME_CONSUMING(1000);
-
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	CString doc_name;
-
-	if(searchname == "") {
-		doc_name =
-			pApp->m_tree->get_directory_name( m_volumes[volinx].m_rootitem, volinx, id ) +
-			CString(":");
-	} else {
-		doc_name = searchname + CString(":");
-	}
-	
-	volpath = m_volumes[volinx].m_file_name.GetBuffer( _MAX_PATH );
-	path = doc_name.GetBuffer( _MAX_PATH );
-
-	// Find out original Mac view mode
-	if(pApp->m_mac_window_mode) {
-		char parent_dir[_MAX_PATH], this_name[_MAX_PATH], *ptmp;
-		strcpy( parent_dir, path );
-		ptmp = strrchr( parent_dir, ':' );
-		if(ptmp) { // always
-			*ptmp = 0;
-			ptmp = strrchr( parent_dir, ':' );
-			if(ptmp) {
-				ptmp++;
-				strcpy( this_name, ptmp );
-				*ptmp = 0;
-				memset( &item, 0, sizeof(item) );
-				item.volinx = volinx;
-				item.id = pApp->m_tree->get_parent_id( m_volumes[volinx].m_rootitem, volinx, id );
-				ret = HFSIFACE_get_dir_first( volpath, parent_dir, &item );
-				if (ret == 0) {
-					while (ret == 0) {
-						mac_to_pc_charset( item.catkeyrec.ckrCName );
-						if(strcmp((char*)item.catkeyrec.ckrCName,this_name) == 0) {
-							finder_view_mode = get_finder_view_mode( item.catdatarec.u.d.dirUsrInfo.frView );
-							break;
-						}
-						ret = HFSIFACE_get_dir_next( &item );
-					}
-					HFSIFACE_get_dir_flush();
-				}
-			}
-		}
+void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
+ auto pApp=static_cast<CHFVExplorerApp*>(AfxGetApp());
+ CString path=searchname.IsEmpty()?pApp->m_tree->get_directory_name(m_volumes[volinx].m_rootitem,volinx,id):searchname;path+=":";
+ long parent=pApp->m_tree->get_parent_id(m_volumes[volinx].m_rootitem,volinx,id);
+ BrowserDirectory::Snapshot snapshot;
+ auto result=ShowStorageWaitJob([&](Storage::Job&){snapshot=read_classic_browser_directory(volinx,id,path,pApp->m_mac_window_mode!=0,parent);return Storage::Result{};},!pApp->m_pMainWnd->IsWindowVisible());
+ if(result.code){pApp->m_list->SetBrowserCapabilities({});if(pApp->m_pMainWnd->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ int finder_view_mode=snapshot.finderMode;
+ if(pApp->m_mac_window_mode){
 		switch(finder_view_mode) {
 			case FINDER_VIEW_MODE_ICON:
 			case FINDER_VIEW_MODE_ICON_BUTTON:
@@ -1876,75 +1416,11 @@ void CHFVExplorerDoc::new_hfs_walk( int volinx, long id, CString searchname )
 				}
 				break;
 		}
-	}
-
-	// Find out max/min scroll bounds
-#define OUTOFBOUNDS 10000
-	int widow_style = (GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK);
-	if(pApp->m_mac_window_mode != 0 && (widow_style == LVS_ICON || widow_style == LVS_SMALLICON)) {
-		int x = OUTOFBOUNDS, y = OUTOFBOUNDS, px, py;
-		int is_inited = 0, is_invisible = 0;
-		memset( &item, 0, sizeof(item) );
-		item.volinx = volinx;
-		item.id = id;
-		ret = HFSIFACE_get_dir_first( volpath, path, &item );
-		while (ret == 0) {
-			if(item.catdatarec.cdrType == cdrDirRec) {
-				is_inited = (item.catdatarec.u.d.dirUsrInfo.frFlags & kHasBeenInited) != 0;
-				is_invisible = (item.catdatarec.u.d.dirUsrInfo.frFlags & fInvisible);
-				px = (int)(signed short)item.catdatarec.u.d.dirUsrInfo.frLocation.h;
-				py = (int)(signed short)item.catdatarec.u.d.dirUsrInfo.frLocation.v;
-				if(px == -1 && py == -1) is_inited = 0;
-				if(is_invisible == 0 || m_mac_show_invisibles) {
-					if(is_inited || is_inside_magic(px,py)) {
-						px = unmagic(px);
-						py = unmagic(py);
-						if(px < x) x = px;
-						if(py < y) y = py;
-					}
-				}
-			} else if(item.catdatarec.cdrType == cdrFilRec) {
-				is_inited = (item.catdatarec.u.f.filUsrWds.fdFlags & kHasBeenInited) != 0;
-				is_invisible = (item.catdatarec.u.f.filUsrWds.fdFlags & fInvisible);
-				if(strcmp((char *)item.catkeyrec.ckrCName,"Icon\x00D") == 0) is_invisible = 1;
-				px = (int)(signed short)item.catdatarec.u.f.filUsrWds.fdLocation.h;
-				py = (int)(signed short)item.catdatarec.u.f.filUsrWds.fdLocation.v;
-				if(px == -1 && py == -1) is_inited = 0;
-				if(is_invisible == 0 || m_mac_show_invisibles) {
-					if(is_inited || is_inside_magic(px,py)) {
-						px = unmagic(px);
-						py = unmagic(py);
-						if(px < x) x = px;
-						if(py < y) y = py;
-					}
-				}
-			}
-			ret = HFSIFACE_get_dir_next( &item );
-		}
-		if(x == OUTOFBOUNDS) x = 0;
-		if(y == OUTOFBOUNDS) y = 0;
-		pApp->m_list->set_origo(x,y);
-	}
-#undef OUTOFBOUNDS
-
-	// enumerate items into list view
-	memset( &item, 0, sizeof(item) );
-	item.volinx = volinx;
-	item.id = id;
-
-	ret = HFSIFACE_get_dir_first( volpath, path, &item );
-
-	while (ret == 0) {
-		mac_to_pc_charset( item.catkeyrec.ckrCName );
-		hfs_walk_callback( &item, finder_view_mode );
-		ret = HFSIFACE_get_dir_next( &item );
-	}
-
-	doc_name.ReleaseBuffer();
-	m_volumes[volinx].m_file_name.ReleaseBuffer();
-	pApp->m_list->do_report_sort();
-	END_TIME_CONSUMING;
+  pApp->m_list->set_origo(snapshot.originX,snapshot.originY);
+ }
+ apply_browser_directory(snapshot,true);pApp->m_list->do_report_sort();
 }
+
 
 void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString partial_name )
 {

@@ -37,6 +37,7 @@ typedef struct {
 extern "C" {
 #endif
 
+int HFSIFACE_get_dir_first_readonly(char*,char*,hfs_item_type*);
 int HFSIFACE_get_dir_first( char *volpath, char *path, hfs_item_type *pitem );
 int HFSIFACE_get_dir_next( hfs_item_type *pitem );
 // This must be called if breaking out of the get loop before completion

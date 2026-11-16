@@ -117,6 +117,7 @@ public:
         while(root.size()>7&&(root.back()==L'\\'||root.back()==L'/'))root.pop_back();
         paths_[2] = root; Check(Describe(2).directory, "Destination is not a folder");
     }
+    Entry DescribeFile(const std::wstring& path){return Describe(Id(BrowserPresentation::WindowsPath(path)));}
     std::u16string Name() const override { return U16(paths_.at(2)); }
     const char *Kind() const override { return "Windows"; }
     bool Writable() const override { return true; }
@@ -222,6 +223,10 @@ public:
             if(companion)Check(DeleteFileW(Companion(path).c_str())!=FALSE,"Cannot remove source resource companion"); }
     }
 };
+}
+Entry DescribeWindowsFile(const std::wstring& path){
+    auto parent=path.substr(0,path.find_last_of(L"\\/"));if(parent.size()==2&&parent.back()==L':')parent+=L'\\';
+    Windows volume(parent);return volume.DescribeFile(path);
 }
 std::shared_ptr<Volume> OpenWindows(const std::wstring &path) { return std::make_shared<Windows>(path); }
 }

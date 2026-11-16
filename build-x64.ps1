@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $shared=Join-Path $hfsPlusDirectory 'shared-browser'
+ $sharedTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-shared-browser',('"'+$shared+'"')) -WindowStyle Hidden -PassThru
+ if(!$sharedTest.WaitForExit(60000)){$sharedTest.Kill();throw 'Shared browser tests timed out.'}
+ Get-Content (Join-Path $shared 'shared-browser-report.txt')
+ if($sharedTest.ExitCode -ne 0){throw "Shared browser tests failed; retained $shared"}
  $exclusive=Join-Path $hfsPlusDirectory 'storage-exclusive'
  $exclusiveTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-storage-exclusive',('"'+$exclusive+'"')) -WindowStyle Hidden -PassThru
  if(!$exclusiveTest.WaitForExit(60000)){$exclusiveTest.Kill();throw 'Exclusive access tests timed out.'}
