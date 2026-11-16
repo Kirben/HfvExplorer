@@ -125,6 +125,11 @@ int RunCopyProgressTest(const char* directory) {
   check(hfs_close(file)==0&&hfs_umount(volume)==0,"close full destination");
   DeleteFileA(replacementInput);
   fprintf(out,"PASS: disk-full HFS replacement preserves the previous entry, both forks and host move source.\n");
+  for(const char* destination : {"CopyTest:Folder:","CopyTest:Folder:Nested:"}) {
+   auto recursive=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)image,destination,1,0,'a'));
+   recursive->wait();check(recursive->result().code!=0&&recursive->result().message.find("descendant")!=std::string::npos,"reject recursive HFS self-copy before creating children");
+  }
+  fprintf(out,"PASS: folder copies into themselves or descendants are rejected before recursive mutation.\n");
   Progress progress;copyout_set_progress(observe,&progress);int moved=0;
   CString target=root;char source[100]="CopyTest:Folder";HFSIFACE_set_modeout(0);
   check(HFSIFACE_copy(image.GetBuffer(),source,target.GetBuffer(),target.GetBuffer(),1,0,&moved)==0,"recursive automatic export");
