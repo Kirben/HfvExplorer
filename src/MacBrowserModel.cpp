@@ -145,14 +145,14 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if (found) {
         auto choice = job.replace(BrowserPresentation::Utf8(entry.name));
         if (choice == Storage::ConflictChoice::Cancel) throw Storage::Cancelled();
-        if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped; return false; }
+        if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped;progress.processed+=entry.forks[0].size+entry.forks[1].size;job.progress(progress);return false; }
     }
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
     dst.Put(parent, entry, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
         if (job.cancelled()) throw Storage::Cancelled();
         src.Read(entry.id, fork, offset, p, n);
-        progress.fileBytes += n; progress.bytes += n; job.progress(progress);
+        progress.fileBytes += n; progress.bytes += n;progress.processed+=n;job.progress(progress);
     }, found);
     ++progress.files; job.progress(progress); return true;
 }

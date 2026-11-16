@@ -73,6 +73,9 @@ extern "C" {
 #endif
 int HFSIFACE_copy_options(int merge);
 char HFSIFACE_copy_mode(void);
+void HFSIFACE_delete_cancel(int (*callback)(void*),void* context);
+void HFSIFACE_copy_settings(char* out,char* in,int* appledouble);
+void HFSIFACE_restore_copy_settings(char out,char in,int appledouble);
 #ifdef __cplusplus
 }
 #endif

@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
+#include "FileOperations.h"
 #include "BrowserPresentation.h"
 #include <shobjidl.h>
 #include <cmath>
@@ -130,14 +131,14 @@ class JobDialog : public CDialog {
 public:
  void BeforeClose(std::function<void(HWND)> callback){beforeClose_=std::move(callback);}
  void PrepareToClose(){if(beforeClose_)beforeClose_(GetSafeHwnd());}
- JobDialog(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,CWnd* owner,bool keepWindow=false,bool storageOnly=false,bool singleFile=false,bool cancellable=false)
-  :CDialog(storageOnly?IDD_STORAGE_WAIT:cancellable?IDD_CD_IMAGE_PROGRESS:singleFile?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,owner),job_(job),title_(title),hidden_(hidden),keepWindow_(keepWindow),storageOnly_(storageOnly),cancellable_(cancellable),owner_(owner?owner->GetSafeHwnd():nullptr) {
+ JobDialog(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,CWnd* owner,bool keepWindow=false,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool fileLayout=false)
+  :CDialog(storageOnly?IDD_STORAGE_WAIT:(cancellable&&!fileLayout)?IDD_CD_IMAGE_PROGRESS:singleFile?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,owner),job_(job),title_(title),hidden_(hidden),keepWindow_(keepWindow),storageOnly_(storageOnly),cancellable_(cancellable),owner_(owner?owner->GetSafeHwnd():nullptr) {
   if(!hidden_){HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);uninitialize_=SUCCEEDED(init);
    if((SUCCEEDED(init)||init==RPC_E_CHANGED_MODE)&&SUCCEEDED(CoCreateInstance(CLSID_TaskbarList,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&taskbar_)))&&FAILED(taskbar_->HrInit())){taskbar_->Release();taskbar_=nullptr;}}
  }
  ~JobDialog(){state(TBPF_NOPROGRESS);if(taskbar_)taskbar_->Release();if(uninitialize_)CoUninitialize();}
  BOOL OnInitDialog() override {
-  CDialog::OnInitDialog();SetWindowText(title_);
+  CDialog::OnInitDialog();SetWindowText(title_);if(!cancellable_){if(auto cancel=GetDlgItem(IDCANCEL))cancel->ShowWindow(SW_HIDE);}
   if(storageOnly_){spinner_.SubclassDlgItem(IDC_SW_SPINNER,this);spinner_.Start();}
 #ifdef HFV_TESTING
   extern void ProbeStorageSpinner(CWnd*);
@@ -257,7 +258,7 @@ public:
 };
 unsigned actionDepth=0;
 std::unique_ptr<NativeSession> nativeSession;
-void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool retainNative=true,CWnd* explicitOwner=nullptr) {
+void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool storageOnly=false,bool singleFile=false,bool cancellable=false,bool retainNative=true,CWnd* explicitOwner=nullptr,bool fileLayout=false) {
  INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_PROGRESS_CLASS};InitCommonControlsEx(&controls);
  ActiveUiJob active;
  CWnd* owner=explicitOwner?explicitOwner:AfxGetMainWnd();
@@ -271,7 +272,7 @@ void wait(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden
   std::shared_ptr<Storage::Job> job;
   ~Lifetime(){if(!job->done()){job->cancel();job->wait();}}
  } lifetime={job};
- JobDialog dialog(job,title,hidden,owner,false,storageOnly,singleFile,cancellable);
+ JobDialog dialog(job,title,hidden,owner,false,storageOnly,singleFile,cancellable,fileLayout);
  dialog.BeforeClose([&restore](HWND window){restore.restore(window);});
  if(dialog.DoModal()!=IDOK){job->cancel();job->wait();}
  job->wait();
@@ -299,7 +300,14 @@ Storage::Result ShowStorageWaitJob(std::function<Storage::Result(Storage::Job&)>
  if(StorageUi::busy())return {1,ERROR_BUSY,"Another storage operation is active"};
  auto job=Storage::worker().submit(std::move(work));wait(job,"Waiting for storage",hidden,true,false,false,false,owner);return job->result();
 }
+Storage::Result ShowSubmittedStorageJob(const std::shared_ptr<Storage::Job>& job,const char* title,bool hidden,bool singleFile,bool cancellable,CWnd* owner){
+ if(!job)return {1,ERROR_INVALID_PARAMETER,"No operation was submitted"};
+ // Never leave a conflict-waiting job orphaned if presentation is refused.
+ if(StorageUi::busy()){job->cancel();return {1,ERROR_BUSY,"Another storage dialog is active"};}
+ wait(job,title,hidden,false,singleFile,cancellable,true,owner,true);return job->result();
+}
 void ShutdownStorageUi(){
+ FileOperations::CancelPending();
  nativeSession.reset();StorageUi::state().wait=nullptr;StorageUi::state().thread=0;
  Storage::worker().shutdown();
 }

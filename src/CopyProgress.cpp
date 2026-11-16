@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "resource.h"
 #include "CopyProgress.h"
+#include "FileOperations.h"
 #include "StorageJobDialog.h"
 #include "charset.h"
 #include "FloppyWriter.h"
@@ -93,8 +94,17 @@ std::vector<char> buffer(const std::string& text) {
  std::vector<char> value(MAX_PATH);memcpy(value.data(),text.c_str(),text.size()+1);return value;
 }
 }
-std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolume,std::string source,std::string targetVolume,std::string target,int directory,int move,char mode) {
+LegacyCopyOptions CaptureLegacyCopyOptions(char output){LegacyCopyOptions options;int ad;HFSIFACE_copy_settings(&options.output,&options.input,&ad);options.output=output;options.appledouble=ad!=0;return options;}
+std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sv,std::string source,std::string tv,std::string target,int directory,int move,char mode){
+ return MakeCopyJob(std::move(sv),std::move(source),std::move(tv),std::move(target),directory,move,CaptureLegacyCopyOptions(mode));
+}
+std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolume,std::string source,std::string targetVolume,std::string target,int directory,int move,LegacyCopyOptions options) {
  return [=](Storage::Job& job)->Storage::Result {
+  if(job.cancelled())throw Storage::Cancelled();
+  char mode=options.output,oldOut,oldIn;int oldAd;HFSIFACE_copy_settings(&oldOut,&oldIn,&oldAd);
+  struct Settings{char out,in;int ad;~Settings(){HFSIFACE_restore_copy_settings(out,in,ad);}}settings{oldOut,oldIn,oldAd};
+  HFSIFACE_restore_copy_settings(options.output,options.input,options.appledouble);
+
   if(!macVolume(sourceVolume)&&GetFileAttributesA(source.c_str())==INVALID_FILE_ATTRIBUTES){
    DWORD error=GetLastError();char message[160];sprintf_s(message,"Could not access the source file or folder (Windows error %lu).",error);
    return {1,error,message};
@@ -126,13 +136,13 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
   return outcome;
  };
 }
-int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved) {
-
- *moved=0;
- auto result=ShowStorageJob(MakeCopyJob(sourcevol,source,targetvol,target,directory,move,HFSIFACE_copy_mode()),macVolume(sourcevol)?"Copying from Macintosh":"Copying files",false,directory==0);
- if(result.code && result.error!=ERROR_CANCELLED)AfxMessageBox(result.message.empty()?"The copy failed.":result.message.c_str(),MB_OK|MB_ICONERROR);
- // A failed physical write can have changed the disk too. Discard the old
- // directory view rather than presenting its cached contents as current.
- if(result.code&&physical_floppy_path(targetvol)>=0&&AfxGetMainWnd())AfxGetMainWnd()->PostMessage(WM_COMMAND,ID_VIEW_REFRESH);
+int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved,CWnd* owner) {
+ *moved=0;FileOperations::Request request;request.kind=FileOperations::Kind::LegacyCopy;
+ request.sourceVolume=sourcevol;request.sourcePath=source;request.targetVolume=targetvol;request.targetPath=target;
+ request.directory=directory!=0;request.move=move!=0;request.conversion=CaptureLegacyCopyOptions(HFSIFACE_copy_mode());
+ auto operation=FileOperations::Submit(std::move(request));
+ auto result=ShowSubmittedStorageJob(operation.Job(),macVolume(sourcevol)?"Copying from Macintosh":"Copying files",false,directory==0,true,owner);
+ if(result.code&&result.error!=ERROR_CANCELLED){const char* text=result.message.empty()?"The copy failed.":result.message.c_str();if(owner)owner->MessageBox(text,"HFVExplorer",MB_OK|MB_ICONERROR);else AfxMessageBox(text,MB_OK|MB_ICONERROR);}
+ if(result.code&&physical_floppy_path(targetvol)>=0&&owner)owner->PostMessage(WM_COMMAND,ID_VIEW_REFRESH);
  *moved=result.moved?1:0;return result.code;
 }
