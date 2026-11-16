@@ -30,10 +30,10 @@ Current filesystem support
   Physical HFS+ / HFSX CD/floppy access, GPT images, compressed DMG containers and
   external journals are not implemented.
 - Compressed-file reads decode decmpfs stored data (1/9/10), zlib (3/4), LZVN
-  (7/8) and LZFSE (11/12), from attributes or resource-fork blocks. Listings show
+  (7/8), LZFSE (11/12) and LZBITMAP (13/14), from attributes or resource-fork blocks. Listings show
   logical sizes; exports produce decompressed data. Compression storage is hidden
   from user resource-fork exports; genuine user resource forks are preserved.
-  LZBITMAP (13/14) and other unrecognized methods are refused explicitly.
+  Other unrecognized compression methods are refused explicitly.
 - File and directory hard links resolve for browsing/export, including compressed
   backing files. Private inode directories are hidden. Broken links are marked
   unreadable; directory navigation returns to the visible parent. Creating,
@@ -60,7 +60,8 @@ HFS+ implementation reference: Apple's HFS Plus Volume Format (TN1150),
 https://developer.apple.com/library/archive/technotes/tn/tn1150.html
 Unicode normalization uses Unicode 3.2 data; see licenses/Unicode-DFS.txt.
 No third-party filesystem engine is included. The static compression decoders
-are zlib 1.4 and Apple's BSD-licensed LZFSE/LZVN sources; see src/compression
+are zlib 1.4, Apple's BSD-licensed LZFSE/LZVN sources and MIT-licensed
+libzbitmap; see src/compression
 and licenses for provenance. Compression tests include retained macOS-written
 fixtures and compare exports against macOS readback hashes.
 

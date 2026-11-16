@@ -11,5 +11,6 @@
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_decode_base.c" />
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_fse.c" />
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzvn_decode_base.c" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\libzbitmap\libzbitmap.c"><PreprocessorDefinitions>ZBM_DECODE_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 </ItemGroup>
 </Project>

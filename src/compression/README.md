@@ -11,6 +11,15 @@ or Windows API requirement. We do not build encoders or gzip/file APIs.
   Source: https://github.com/lzfse/lzfse.
   License: lzfse/LICENSE and ../../licenses/LZFSE-BSD.txt.
 
+- `libzbitmap/`: MIT-licensed Corellium LZBITMAP decoder, upstream commit
+  `d12d6c346daf41f770f6516bcb14f0a8c7441e31`.
+  Source: https://github.com/eafer/libzbitmap.
+  License: libzbitmap/LICENSE and ../../licenses/LZBITMAP-MIT.txt.
+  Local changes: a ZBM_DECODE_ONLY guard excludes the encoder from the build;
+  bitmap repetition stops when the declared chunk output is complete. Our
+  decmpfs wrapper additionally checks all chunk lengths, total output, the
+  terminator and consumed input before invoking the decoder.
+
 Compressed-file output is limited to the declared logical length and one
 64 KiB compression unit at a time. Exact output length and decoder status are checked. Native type-4 zlib units
 may finish at a sync-flush boundary; resource-based LZVN units may contain

@@ -10,6 +10,7 @@
 #include "compression/zlib/zlib.h"
 extern "C" {
 #include "compression/lzfse/lzvn_decode_base.h"
+#include "compression/libzbitmap/libzbitmap.h"
 }
 #include <cstdlib>
 namespace HfsPlus {
@@ -25,7 +26,7 @@ Bytes Expand(const Bytes &input, size_t expected, uint32_t type) {
     Check(input.size() && input.size() <= 131072, "Invalid decmpfs compressed unit size");
     bool raw = type == 1 || type == 9 || type == 10 || ((type == 3 || type == 4) && (input[0] & 15) == 15) ||
                ((type == 7 || type == 8) && input[0] == 6) ||
-               ((type == 11 || type == 12) && input[0] == 0xff);
+               ((type == 11 || type == 12 || type == 13 || type == 14) && input[0] == 0xff);
     if (raw) {
         size_t skip = type == 1 ? 0 : 1;
         if (type == 9 || type == 10)
@@ -73,6 +74,35 @@ Bytes Expand(const Bytes &input, size_t expected, uint32_t type) {
         Check(lzfse_decode(s.get()) == LZFSE_STATUS_OK && s->end_of_stream && s->src == s->src_end &&
                   size_t(s->dst - output.data()) == expected,
               "Invalid or truncated decmpfs LZFSE stream");
+    } else if (type == 13 || type == 14) {
+        // The reference API permits trailing data and a sizing-only decode.
+        // Preflight all 24-bit chunk lengths ourselves: no missing terminator,
+        // ignored trailing bytes or output beyond this decmpfs unit is allowed.
+        Check(input.size() >= 10 && !memcmp(input.data(), "ZBM\x09", 4), "Invalid LZBITMAP stream magic");
+        size_t offset = 4, declared = 0;
+        bool ended = false;
+        auto u24 = [](const uint8_t *p) {
+            return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16;
+        };
+        while (offset < input.size()) {
+            Check(input.size() - offset >= 6, "Truncated LZBITMAP chunk header");
+            uint32_t length = u24(input.data() + offset), decoded = u24(input.data() + offset + 3);
+            Check(length >= 6 && length <= input.size() - offset && decoded <= 32768 &&
+                      decoded <= expected - declared,
+                  "Invalid LZBITMAP chunk length");
+            declared += decoded;
+            offset += length;
+            if (!decoded) {
+                Check(length == 6 && offset == input.size(), "Invalid LZBITMAP end marker or trailing data");
+                ended = true;
+                break;
+            }
+        }
+        Check(ended && declared == expected, "Incomplete LZBITMAP stream");
+        size_t decoded = 0;
+        Check(zbm_decompress(output.data(), output.size(), input.data(), input.size(), &decoded) == 0 &&
+                  decoded == expected,
+              "Invalid LZBITMAP compressed data");
     } else {
         throw Error("Unsupported decmpfs compression type " + std::to_string(type));
     }
@@ -88,13 +118,15 @@ Compression::Compression(Bytes attribute, uint64_t resourceSize, Reader resource
     size_ = LE64(attribute_.data() + 8);
     Check(size_ <= INT64_MAX, "decmpfs logical file size exceeds Apple limit");
     Check(type_ == 1 || type_ == 3 || type_ == 4 || type_ == 7 || type_ == 8 || type_ == 9 || type_ == 10 ||
-              type_ == 11 || type_ == 12,
+              type_ == 11 || type_ == 12 || type_ == 13 || type_ == 14,
           ("Unsupported decmpfs compression type " + std::to_string(type_)).c_str());
     Check(UsesResource() || size_ <= 65536, "Oversized inline decmpfs file");
     if (UsesResource())
         Check(attribute_.size() == 16, "Unexpected inline data in resource-based decmpfs header");
 }
-bool Compression::UsesResource() const { return type_ == 4 || type_ == 8 || type_ == 10 || type_ == 12; }
+bool Compression::UsesResource() const {
+    return type_ == 4 || type_ == 8 || type_ == 10 || type_ == 12 || type_ == 14;
+}
 Bytes Compression::Resource(uint64_t offset, size_t n) {
     Check(Range(offset, n, resourceSize_), "decmpfs resource offset outside fork");
     Bytes b(n);

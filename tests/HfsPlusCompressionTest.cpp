@@ -3,6 +3,7 @@
 #include "HfsPlusCompression.h"
 #include "HfsPlusCompressionFixtures.h"
 #include <cstdio>
+#include <random>
 using namespace HfsPlus;
 using namespace HfsPlus::Disk;
 namespace {
@@ -30,6 +31,8 @@ Bytes Encoded(uint32_t type, unsigned n) {
             return Vector(fixture_z_8197);
         if (type == 7)
             return Vector(fixture_vn_8197);
+        if (type == 13)
+            return Vector(fixture_zbm_8197);
         return Vector(fixture_fse_8197);
     }
     if (n == 65536) {
@@ -37,6 +40,8 @@ Bytes Encoded(uint32_t type, unsigned n) {
             return Vector(fixture_z_65536);
         if (type == 8)
             return Vector(fixture_vn_65536);
+        if (type == 14)
+            return Vector(fixture_zbm_65536);
         return Vector(fixture_fse_65536);
     }
     Check(n == 12345, "Fixture size");
@@ -44,6 +49,8 @@ Bytes Encoded(uint32_t type, unsigned n) {
         return Vector(fixture_z_12345);
     if (type == 8)
         return Vector(fixture_vn_12345);
+    if (type == 14)
+        return Vector(fixture_zbm_12345);
     return Vector(fixture_fse_12345);
 }
 Bytes Header(uint32_t type, uint64_t size, const Bytes &payload = {}) {
@@ -98,7 +105,7 @@ template <class F> void Reject(F action, const char *message) {
     throw Error(message);
 }
 void Codecs() {
-    for (uint32_t type : {1u, 3u, 7u, 9u, 11u, 4u, 8u, 10u, 12u}) {
+    for (uint32_t type : {1u, 3u, 7u, 9u, 11u, 13u, 4u, 8u, 10u, 12u, 14u}) {
         bool resource = type % 2 == 0;
         Bytes expected = Plain(resource ? 65536 : 8197);
         if (resource) {
@@ -140,7 +147,7 @@ void Codecs() {
             Check(actual == expected, "Compressed export bytes");
         }
     }
-    for (uint32_t type : {3u, 7u, 11u}) {
+    for (uint32_t type : {3u, 7u, 11u, 13u}) {
         auto stored = Plain(8197);
         stored.insert(stored.begin(), type == 7 ? 6 : 0xff);
         Compression c(Header(type, 8197, stored), 0, {});
@@ -156,7 +163,7 @@ void Codecs() {
         Check(c.Read(0, out.data(), out.size()) == out.size() && out == expected,
               "Native flush-delimited zlib / padded LZVN resource framing");
     }
-    for (uint32_t type : {3u, 7u, 11u}) {
+    for (uint32_t type : {3u, 7u, 11u, 13u}) {
         auto bytes = Encoded(type, 8197);
         for (unsigned cut : {1u, 2u, 8u}) {
             Bytes truncated(bytes.begin(), bytes.end() - cut);
@@ -171,11 +178,11 @@ void Codecs() {
         Compression wrong(Header(type, 8196, Encoded(type, 8197)), 0, {});
         Reject([&] { wrong.Read(0, out.data(), out.size()); }, "Oversized codec output accepted");
     }
-    for (uint32_t type : {0u, 2u, 5u, 13u, 14u, UINT32_MAX})
+    for (uint32_t type : {0u, 2u, 5u, 15u, UINT32_MAX})
         Reject([&] { Compression c(Header(type, 100), 0, {}); }, "Unknown compression type accepted");
     Reject([&] { Compression c(Bytes(15), 0, {}); }, "Truncated decmpfs header accepted");
     Reject([&] { Compression c(Header(3, UINT64_MAX), 0, {}); }, "Oversized decoded length accepted");
-    for (uint32_t type : {4u, 8u, 10u, 12u}) {
+    for (uint32_t type : {4u, 8u, 10u, 12u, 14u}) {
         auto b = Resource(type);
         if (type == 4)
             Little(b.data() + 264, 0);
@@ -208,6 +215,97 @@ void Codecs() {
     Check(large.Read(uint64_t(1) << 31, out.data(), out.size()) == out.size() &&
               !memcmp(out.data(), Plain(100).data(), out.size()) && reads == 3,
           "Large compressed seek");
+}
+// Directly construct a ZBM stream with a raw chunk followed by a bitmap
+// back-reference chunk. History spans the 32 KiB ZBM chunks within a decmpfs
+// unit, but must never read before the beginning of that unit.
+void LzBitmapEdges() {
+    auto append24 = [](Bytes &b, uint32_t n) {
+        for (unsigned i = 0; i < 3; ++i)
+            b.push_back(uint8_t(n >> (i * 8)));
+    };
+    Bytes raw{'Z', 'B', 'M', 9};
+    auto plain = Plain(65536);
+    for (unsigned i = 0; i < 2; ++i) {
+        append24(raw, 32774);
+        append24(raw, 32768);
+        raw.insert(raw.end(), plain.begin() + i * 32768, plain.begin() + (i + 1) * 32768);
+    }
+    raw.insert(raw.end(), {6, 0, 0, 0, 0, 0});
+    Compression stored(Header(13, 65536, raw), 0, {});
+    Bytes out(65536);
+    Check(stored.Read(0, out.data(), out.size()) == out.size() && out == plain,
+          "Raw multichunk LZBITMAP stream");
+    Bytes chunk;
+    append24(chunk, 33);
+    append24(chunk, 16);
+    for (unsigned i = 0; i < 3; ++i)
+        append24(chunk, 15);
+    chunk.push_back(0x33);
+    chunk.resize(33, 0);
+    Bytes history{'Z', 'B', 'M', 9, 14, 0, 0, 8, 0, 0, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};
+    history.insert(history.end(), chunk.begin(), chunk.end());
+    history.insert(history.end(), {6, 0, 0, 0, 0, 0});
+    Compression repeated(Header(13, 24, history), 0, {});
+    out.resize(24);
+    Check(repeated.Read(0, out.data(), out.size()) == 24 &&
+              std::string(out.begin(), out.end()) == "abcdefghabcdefghabcdefgh",
+          "LZBITMAP cross-chunk history");
+    Bytes noHistory{'Z', 'B', 'M', 9};
+    noHistory.insert(noHistory.end(), chunk.begin(), chunk.end());
+    noHistory.insert(noHistory.end(), {6, 0, 0, 0, 0, 0});
+    Compression invalid(Header(13, 16, noHistory), 0, {});
+    Reject([&] { invalid.Read(0, out.data(), out.size()); }, "LZBITMAP back-reference before unit accepted");
+    auto vector = Encoded(13, 8197);
+    for (unsigned kind = 0; kind < 7; ++kind) {
+        auto b = vector;
+        switch (kind) {
+        case 0:
+            b[0] = 0;
+            break;
+        case 1:
+            b[4] = b[5] = b[6] = 0;
+            break;
+        case 2:
+            b[4] = b[5] = b[6] = 255;
+            break;
+        case 3:
+            b[7] = 1;
+            b[8] = 128;
+            b[9] = 0;
+            break; // 32769 decoded bytes
+        case 4:
+            b.resize(b.size() - 6);
+            break;
+        case 5:
+            b.insert(b.end(), 1, 0);
+            break;
+        case 6:
+            b[b.size() - 6] = 7;
+            break;
+        }
+        Compression bad(Header(13, 8197, b), 0, {});
+        out.resize(8197);
+        Reject([&] { bad.Read(0, out.data(), out.size()); }, "Malformed LZBITMAP frame accepted");
+    }
+    // Exercise decoder metadata as well as the outer framing. Successful
+    // mutations need not match the original: this format has no checksum.
+    std::mt19937 random(33061);
+    unsigned refused = 0;
+    for (unsigned i = 0; i < 2048; ++i) {
+        auto b = vector;
+        size_t offset = 10 + random() % (b.size() - 16);
+        b[offset] ^= uint8_t(1u << (random() % 8));
+        Compression c(Header(13, 8197, b), 0, {});
+        Bytes destination(8199, 0xa5);
+        try {
+            Check(c.Read(0, destination.data() + 1, 8197) == 8197, "LZBITMAP mutated output length");
+        } catch (const Error &) {
+            ++refused;
+        }
+        Check(destination.front() == 0xa5 && destination.back() == 0xa5, "LZBITMAP output canary changed");
+    }
+    Check(refused > 100, "LZBITMAP corruption paths were not exercised");
 }
 struct Image : Source {
     Bytes data;
@@ -329,7 +427,7 @@ Bytes Inline(const Bytes &attribute) {
     memcpy(b.data() + 16, attribute.data(), attribute.size());
     return b;
 }
-Image Filesystem(Volume::FormatKind kind) {
+Image Filesystem(Volume::FormatKind kind, bool bitmap = false) {
     Image disk;
     Volume::Format(disk, u"Compressed links", true, kind);
     uint32_t data = 0, inlineFile = 0, link = 0, alias = 0, broken = 0, folder = 0, child = 0, carrier = 0,
@@ -338,7 +436,7 @@ Image Filesystem(Volume::FormatKind kind) {
         Volume v(disk, true);
         metadata = v.MakeDirectory(2, std::u16string(4, 0x2400) + u"HFS+ Private Data");
         dirMetadata = v.MakeDirectory(2, u".HFS+ Private Directory Data\r");
-        data = Put(v, metadata, u"iNode7000", {}, Resource(4, true));
+        data = Put(v, metadata, u"iNode7000", {}, Resource(bitmap ? 14 : 4, true));
         inlineFile = Put(v, 2, u"Inline", {}, Bytes{1, 2, 3});
         link = Put(v, 2, u"Linked", {}, {}, "hlnkhfs+");
         Put(v, 2, u"Linked again", {}, {}, "hlnkhfs+");
@@ -364,9 +462,10 @@ Image Filesystem(Volume::FormatKind kind) {
             }
     }
     P16(disk.Value(alias) + 2, U16(disk.Value(alias) + 2) | 0x20);
-    Attributes(disk, carrier,
-               {{AttrKey(data), Inline(Header(4, 77881))},
-                {AttrKey(inlineFile), Inline(Header(7, 8197, Encoded(7, 8197)))}});
+    Attributes(
+        disk, carrier,
+        {{AttrKey(data), Inline(Header(bitmap ? 14 : 4, 77881))},
+         {AttrKey(inlineFile), Inline(Header(bitmap ? 13 : 7, 8197, Encoded(bitmap ? 13 : 7, 8197)))}});
     unsigned before = disk.writes;
     {
         Volume v(disk);
@@ -490,10 +589,13 @@ Image Filesystem(Volume::FormatKind kind) {
 } // namespace
 void RunHfsPlusCompressionTests() {
     Codecs();
+    LzBitmapEdges();
     for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
                       Volume::FormatKind::HfsXCaseInsensitive})
-        Filesystem(kind);
-    puts("PASS: decmpfs stored/zlib/LZVN/LZFSE inline and resource decoding, random reads above 2 GiB, "
+        for (bool bitmap : {false, true})
+            Filesystem(kind, bitmap);
+    puts("PASS: decmpfs stored/zlib/LZVN/LZFSE/LZBITMAP inline and resource decoding, random reads above 2 "
+         "GiB, "
          "corruption rejection, logical fork sizes, file/directory hard-link resolution, shared compressed "
          "inodes, dangling links, private inode protection and unrelated writes in HFS+ and both HFSX modes");
 }
