@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "RenameName.h"
 #include "DeviceWait.h"
 #include "CopyProgress.h"
 #include "HFVExplorer.h"
@@ -1421,6 +1422,9 @@ int CHFVExplorerListView::copy_item_to_dir(
 
 int fat_rename( char *pOldName, char *pNewName )
 {
+	// Never let a global working-directory change select an unrelated entry.
+	auto absolute=[](const char* p) {return p&&strlen(p)>=3&&((isalpha((unsigned char)p[0])&&p[1]==':'&&p[2]=='\\')||(p[0]=='\\'&&p[1]=='\\'));};
+	if(!absolute(pOldName)||!absolute(pNewName))return 0;
 	int result = 0;
 	TRY
 	{
@@ -1451,12 +1455,15 @@ int CHFVExplorerListView::do_rename(
 	char tlet[2];
 
 	if(!ds || get_lparam_type(ds) == LIST_SPEC) return(0);
+	bool macRename=get_lparam_type(ds)==LIST_HFS;
+	if(!HfvValidRenameLeaf(old_name,macRename)||!HfvValidRenameLeaf(new_name,macRename))return 0;
 
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	HTREEITEM hItem = pApp->m_tree->GetTreeCtrl().GetSelectedItem();
 	if(!hItem) return(0);
 
 	CString cs = ((CHFVExplorerDoc*)m_pDocument)->get_directory( hItem, &ismac );
+	if(cs.GetLength()+strlen(old_name)+2>sizeof(old_path)||cs.GetLength()+strlen(new_name)+2>sizeof(new_path))return 0;
 	lstrcpy( old_path, cs.GetBuffer( _MAX_PATH ) );
 	lstrcpy( new_path, cs.GetBuffer( _MAX_PATH ) );
 
@@ -1489,7 +1496,7 @@ int CHFVExplorerListView::do_rename(
 		result = (0 == HFSIFACE_rename( volpath, old_path, new_path ));
 		if(result) update_floppy_view(volpath);
 	} else {
-		result = fat_rename( old_name, new_name );
+		result = fat_rename( old_path, new_path );
 	}
 	return(result);
 }
