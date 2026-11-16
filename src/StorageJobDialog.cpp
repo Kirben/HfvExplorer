@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "HFVExplorer.h"
 #include "resource.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
@@ -207,11 +208,19 @@ public:
 };
 class OwnerRecovery {
  HWND window_,focus_;bool enabled_,restored_=false;
+ std::vector<HWND> otherBrowsers_;
 public:
- explicit OwnerRecovery(CWnd* owner):window_(owner?owner->GetSafeHwnd():nullptr),focus_(GetFocus()),enabled_(window_&&IsWindowEnabled(window_)){}
+ explicit OwnerRecovery(CWnd* owner):window_(owner?owner->GetSafeHwnd():nullptr),focus_(GetFocus()),enabled_(window_&&IsWindowEnabled(window_)){
+  // Storage is still serialized. Disable the other real browser frames too:
+  // otherwise a tree control could move its highlight while its read is busy.
+  auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+  for(auto frame:app->m_browsers){auto window=frame->GetSafeHwnd();if(window!=window_&&IsWindowEnabled(window))otherBrowsers_.push_back(window);}
+  for(auto window:otherBrowsers_)EnableWindow(window,FALSE);
+ }
  void disable(){if(enabled_&&IsWindow(window_))EnableWindow(window_,FALSE);}
  void restore(HWND dialog=nullptr){
   if(restored_)return;restored_=true;
+  for(auto window:otherBrowsers_)if(IsWindow(window))EnableWindow(window,TRUE);
   if(window_&&IsWindow(window_)){
    bool activate=StorageOwnerShouldActivate(enabled_,window_,dialog,GetForegroundWindow());
    if((IsWindowEnabled(window_)!=FALSE)!=enabled_)EnableWindow(window_,enabled_?TRUE:FALSE);

@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $windows=Join-Path $hfsPlusDirectory 'browser-windows'
+ $windowsTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-browser-windows',('"'+$windows+'"')) -WindowStyle Hidden -PassThru
+ if(!$windowsTest.WaitForExit(60000)){$windowsTest.Kill();throw 'Independent browser window tests timed out.'}
+ Get-Content (Join-Path $windows 'browser-windows-report.txt')
+ if($windowsTest.ExitCode -ne 0){throw "Independent browser window tests failed; retained $windows"}
  $coordination=Join-Path $hfsPlusDirectory 'volume-coordination'
  $coordinationTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-volume-coordination',('"'+$coordination+'"')) -WindowStyle Hidden -PassThru
  if(!$coordinationTest.WaitForExit(60000)){$coordinationTest.Kill();throw 'Volume coordination tests timed out.'}

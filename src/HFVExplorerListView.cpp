@@ -1377,7 +1377,7 @@ int CHFVExplorerListView::new_bowser_on( CString start_dir )
 
 	GetModuleFileName( pApp->m_hInstance, modulex, MAX_PATH-1 );
 	p = start_dir.GetBuffer(MAX_PATH);
-	wsprintf( params, "\"@!%Iu %s\"", (UINT_PTR)pApp->m_main->m_hWnd, p );
+	wsprintf( params, "\"@!%Iu %s\"", (UINT_PTR)static_cast<CMainFrame*>(GetBrowserSession().Owner())->m_hWnd, p );
 	start_dir.ReleaseBuffer();
 	hi = ShellExecute( this->m_hWnd, "open", modulex, params, dir, SW_SHOW );
 	if( hi <= (HINSTANCE)32 ) {
@@ -2115,7 +2115,7 @@ int CHFVExplorerListView::do_make_shortcut_e_win32( int doc_inx, CString applica
 		);
 		retval = (hinst > (HINSTANCE)31);
 		if(retval) {
-			pApp->m_main->WaitEmulator( "Exewin32", "exec_win32" );
+			static_cast<CMainFrame*>(GetBrowserSession().Owner())->WaitEmulator( "Exewin32", "exec_win32" );
 		}
 	}
 	CmdLine.ReleaseBuffer();
@@ -2283,7 +2283,7 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
 
 		return(FALSE);
 	} else {
-		pApp->m_main->WaitEmulator2( sh.hProcess, doc_win_name, srcvolpath, document );
+		static_cast<CMainFrame*>(GetBrowserSession().Owner())->WaitEmulator2( sh.hProcess, doc_win_name, srcvolpath, document );
 	}
 
 	return(retval);
@@ -2369,7 +2369,7 @@ int CHFVExplorerListView::do_make_shortcut_vmac( int doc_inx, CString applicatio
 
 		retval = (hinst > (HINSTANCE)31);
 		if(retval) {
-			pApp->m_main->WaitEmulator( "vMac", "vMac Win32" );
+			static_cast<CMainFrame*>(GetBrowserSession().Owner())->WaitEmulator( "vMac", "vMac Win32" );
 		}
 		/*
 		if(retval) {
@@ -2378,7 +2378,7 @@ int CHFVExplorerListView::do_make_shortcut_vmac( int doc_inx, CString applicatio
 				CString cs = "For your safety, HFVExplorer will now quit.";
 				AfxMessageBox( cs );
 			}
-			PostQuitMessage(0);
+			GetBrowserSession().Owner()->PostMessage(WM_CLOSE);
 		}
 		*/
 	}
@@ -2467,7 +2467,7 @@ int CHFVExplorerListView::do_make_shortcut_ss( int doc_inx, CString application,
 
 		retval = (hinst > (HINSTANCE)31);
 		if(retval) {
-			// pApp->m_main->WaitEmulator( "", "" );
+			// static_cast<CMainFrame*>(GetBrowserSession().Owner())->WaitEmulator( "", "" );
 		}
 	}
 	CmdLine.ReleaseBuffer();
@@ -2554,7 +2554,7 @@ int CHFVExplorerListView::do_make_shortcut_fusion( int doc_inx, CString applicat
 		);
 		retval = (hinst > (HINSTANCE)31);
 		if(retval) {
-			// pApp->m_main->WaitEmulator( "", "" );
+			// static_cast<CMainFrame*>(GetBrowserSession().Owner())->WaitEmulator( "", "" );
 		}
 	}
 	CmdLine.ReleaseBuffer();
@@ -3645,7 +3645,7 @@ BOOL CHFVExplorerListView::OnCommand(WPARAM wParam, LPARAM lParam)
 		case ID_OWN_PROGRAM_OPTIONS:
 			{
 			CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-			((CMainFrame *)pApp->m_pMainWnd)->OnProgramProperties();
+			static_cast<CMainFrame*>(GetBrowserSession().Owner())->OnProgramProperties();
 		  // ((CHFVExplorerDoc*)m_pDocument)->open_sub_directory( id, name );
 			}
 			break;

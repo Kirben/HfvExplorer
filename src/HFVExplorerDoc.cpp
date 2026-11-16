@@ -1798,7 +1798,7 @@ void CHFVExplorerDoc::OnCleanDocument()
 	int i;
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	GetBrowserSession().List()->list_clear();
+	if(GetBrowserSession().List())GetBrowserSession().List()->list_clear();
 
 	if(GetBrowserSession().Tree()) {
 		GetBrowserSession().Tree()->enable_selchange(0);
@@ -1842,7 +1842,7 @@ void CHFVExplorerDoc::check_hfv_file_times( int ask )
 		GetBrowserSession().Tree()->on_volume_changed( item_updated );
 		GetBrowserSession().List()->on_volume_changed( item_updated );
 	} else if(updated_count > 0) {
-		GetBrowserSession().List()->list_clear();
+		if(GetBrowserSession().List())GetBrowserSession().List()->list_clear();
 		if(GetBrowserSession().Tree()) {
 			GetBrowserSession().Tree()->tree_clear();
 		}

@@ -17,10 +17,19 @@ and sort settings stay with their document and views; Finder layout and classic
 icon tables are independent too. Storage-backed directory jobs receive their
 owning frame explicitly, including during startup before MFC sets `m_pMainWnd`.
 
-This prepares the browser for multiple windows. The application still exposes
-one main frame: cross-window clipboard coordination, legacy launcher services
-and the multi-window commands are later
-steps. The classic HFS engine and storage worker remain serialized.
+Tools > New browser (Ctrl+Enter, also Ctrl+N) creates an independent top-level
+window with its own document and panes. Menus, accelerators, file/image opening,
+launchers, folder navigation and view commands target the receiving window.
+Closing a browser closes only that window; closing the first window transfers
+application ownership to a surviving frame. File > Exit closes all windows.
+The classic HFS engine and storage worker remain serialized. Progress dialogs
+still wait for operations and block storage commands in other windows; this
+does not enable background copying. Per-window internal clipboards remain
+independent; sharing copy/cut selections between windows is a separate feature.
+
+`--verify-browser-windows NEW_DIRECTORY` tests actual hidden frames, documents,
+menus/accelerators, explicit command routing, failed startup, busy guards,
+closing the first/main frame, surviving-window commands and final shutdown.
 
 `--verify-browser-sessions NEW_DIRECTORY` in the Test build exercises two hidden
 sessions with conflicting application aliases, native navigation and clipboard,
@@ -91,7 +100,7 @@ legacy roots discard stale child paths and refill when selected; read errors
 clear the affected listing and retry on a subsequent change.
 
 This is an in-process operation/refresh service, not an external filesystem
-watcher. The application still exposes one main window. Test with
+watcher. Independent browser windows use this service. Test with
 `--verify-volume-coordination NEW_DIRECTORY`; the suite covers access conflicts,
 shared aliases, coalescing, busy deferral, late subscriptions, partial failures,
 folder rename/deletion, Windows/classic refresh and closed sessions with queued

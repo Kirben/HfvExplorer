@@ -49,7 +49,11 @@ BEGIN_MESSAGE_MAP(CHFVExplorerApp, CWinApp)
 	ON_COMMAND(ID_FILE_OPEN, OnFileOpen)
 	//}}AFX_MSG_MAP
 	// Standard file based document commands
-	ON_COMMAND(ID_FILE_NEW, CWinApp::OnFileNew)
+ ON_COMMAND(ID_FILE_NEW, OnNewBrowser)
+ ON_COMMAND(ID_TOOLS_NEW_BROWSER, OnNewBrowser)
+ ON_UPDATE_COMMAND_UI(ID_TOOLS_NEW_BROWSER, OnUpdateNewBrowser)
+ ON_UPDATE_COMMAND_UI(ID_FILE_NEW, OnUpdateNewBrowser)
+ ON_COMMAND(ID_APP_EXIT, OnExitBrowsers)
 END_MESSAGE_MAP()
 
 	// ON_COMMAND(ID_FILE_OPEN, CWinApp::OnFileOpen)
@@ -81,6 +85,7 @@ void CHFVExplorerApp::set_font( char *name, int ps )
 CHFVExplorerApp::CHFVExplorerApp()
 {
 	m_pStatusBar = 0;
+ m_main=nullptr;m_doc=nullptr;m_tree=nullptr;m_list=nullptr;m_pre=nullptr;m_wndSplitter=nullptr;m_wndSplitter2=nullptr;
 	m_opendir = "";
 	is_desktop_application = 1;
 	m_parent_hwnd = 0;
@@ -339,6 +344,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunBrowserWindowsTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-browser-windows"))ExitProcess(RunBrowserWindowsTest(__argv[2]));
  extern int RunVolumeCoordinationTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-volume-coordination"))ExitProcess(RunVolumeCoordinationTest(__argv[2]));
  extern int RunFileOperationsTest(const char*);
@@ -414,13 +421,7 @@ BOOL CHFVExplorerApp::InitInstance()
 
 	LoadStdProfileSettings(10);
 
-	CSingleDocTemplate* pDocTemplate;
-	pDocTemplate = new CSingleDocTemplate(
-		IDR_MAINFRAME,
-		RUNTIME_CLASS(CHFVExplorerDoc),
-		RUNTIME_CLASS(CMainFrame),
-		RUNTIME_CLASS(CHFVExplorerView));
-	AddDocTemplate(pDocTemplate);
+ InstallBrowserTemplate();
 
 	EnableShellOpen();
 	// File associations are deliberately not registered by this portable build.
@@ -578,13 +579,14 @@ void CHFVExplorerApp::kill_childs()
 void CHFVExplorerApp::OnFileOpen() 
 {
 	CString name = "";
+ auto owner=m_main;
 
 	CFileDialog dlg( TRUE, _T("DSK"), name,
 				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
-				_T("Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||") );
+				_T("Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||"), owner );
 	if(dlg.DoModal() == IDOK) {
 		name = dlg.GetPathName();
-		OpenDocumentFile(name);
+		if(owner)owner->GetBrowserSession().Document()->OnOpenDocument(name);else OpenDocumentFile(name);
 	}
 }
 

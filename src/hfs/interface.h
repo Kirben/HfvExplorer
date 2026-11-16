@@ -30,6 +30,7 @@ extern "C" {
 void hfs_tester(void);
 
 void HFSIFACE_init( HWND hwnd );
+void HFSIFACE_set_error_window( HWND hwnd );
 
 int HFSIFACE_delete( char *volpath, char *path );
 int HFSIFACE_copy( 
