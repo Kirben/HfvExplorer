@@ -5,12 +5,25 @@
 #include <fcntl.h>
 #include <vector>
 #include <stdexcept>
+#include <winioctl.h>
+extern int DeleteFATDir(CString&);
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
 int do_delete_directory(hfsvol*,char*);
 }
 namespace {
+bool junction(const CString& link,const CString& target) {
+ if(!CreateDirectoryA(link,nullptr))return false;
+ HANDLE handle=CreateFileA(link,GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+ if(handle==INVALID_HANDLE_VALUE)return false;
+ CStringW wide(target);std::wstring print(wide.GetString());std::wstring substitute=L"\\??\\"+print;
+ struct Buffer {DWORD tag;WORD length,reserved,subOffset,subLength,printOffset,printLength;wchar_t path[1024];} data={};
+ data.tag=IO_REPARSE_TAG_MOUNT_POINT;data.subLength=WORD(substitute.size()*2);data.printOffset=WORD(data.subLength+2);data.printLength=WORD(print.size()*2);
+ memcpy(data.path,substitute.c_str(),data.subLength+2);memcpy(reinterpret_cast<BYTE*>(data.path)+data.printOffset,print.c_str(),data.printLength+2);
+ data.length=WORD(8+data.printOffset+data.printLength+2);DWORD returned;
+ bool ok=DeviceIoControl(handle,FSCTL_SET_REPARSE_POINT,&data,data.length+8,nullptr,0,&returned,nullptr)!=FALSE;CloseHandle(handle);return ok;
+}
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 std::vector<BYTE> load(const CString& path){CFile f;check(f.Open(path,CFile::modeRead)!=FALSE,"open fixture");std::vector<BYTE> b(size_t(f.GetLength()));check(f.Read(b.data(),UINT(b.size()))==b.size(),"read fixture");return b;}
 void save(const CString& path,const char* bytes){CFile f;check(f.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create fixture");f.Write(bytes,UINT(strlen(bytes)));}
@@ -40,6 +53,18 @@ int RunFileMutationTest(const char* directory) {
   check(do_delete_directory(volume,volumeRoot)!=0&&hfs_error&&strstr(hfs_error,"volume root"),"root delete must fail before traversal");
   check(hfs_umount(volume)==0,"close root-delete fixture");
   check(load(image)==before,"rejected HFS root deletion changed volume contents");
+  CString external=root+"\\Outside",selected=root+"\\Selected",link=selected+"\\Junction";
+  check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
+  save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");
+  check(junction(link,external),"create unprivileged directory junction fixture");
+  check(DeleteFATDir(selected)!=0,"delete selected tree containing a junction");
+  check(GetFileAttributesA(selected)==INVALID_FILE_ATTRIBUTES&&load(external+"\\Keep")==std::vector<BYTE>({'O','U','T','S','I','D','E'}),"recursive Windows deletion followed a junction outside its target");
+  CString protectedDirectory=root+"\\Locked";check(CreateDirectoryA(protectedDirectory,nullptr)!=FALSE,"create locked deletion fixture");
+  save(protectedDirectory+"\\Keep","LOCKED");check(SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_READONLY)!=FALSE,"protect deletion fixture");
+  check(!DeleteFATDir(protectedDirectory)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");
+  SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_NORMAL);
+  CString driveRoot=root.Left(3);check(!DeleteFATDir(driveRoot),"drive-root deletion accepted");
+  fprintf(report,"PASS: Windows recursive deletion removes junctions without following them, handles dotfiles and stops on errors.\n");
   fprintf(report,"PASS: recursive HFS root deletion is rejected before any child mutation.\n");
  }catch(const std::exception& error){HFSIFACE_silencer(silent);fprintf(report,"FAIL: %s\n",error.what());fclose(report);return 1;}
  HFSIFACE_silencer(silent);fclose(report);return 0;
