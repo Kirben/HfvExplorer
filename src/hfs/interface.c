@@ -691,6 +691,19 @@ int HFSIFACE_copy_one_file(
 
 	if(vol2 == 0) tvol = vol1; else tvol = vol2;
 
+	/* Resolve the final catalog entry before rename/delete/create: different
+	 * spellings and a destination folder can still identify the source itself. */
+	if(is_source_hfs && is_target_hfs && vol1 == tvol) {
+		hfsdirent from, to;
+		if(hfs_stat(vol1, source, &from) >= 0 &&
+		   build_target_dir_name(1, 1, new_source, source, target) == 0 &&
+		   hfs_stat(tvol, new_source, &to) >= 0 && from.cnid == to.cnid) {
+			hfs_error = "Source and destination are the same HFS file";
+			hfs_perror(source);
+			return 1;
+		}
+	}
+
 	if(is_source_hfs && is_target_hfs && vol1 == tvol && move_if_possible) {
 		if(0 == build_target_dir_name( 
 			is_source_hfs, is_target_hfs,
