@@ -37,7 +37,6 @@
 #include "hfs\interface.h"
 #include "AskNewVolume.h"
 #include "MainFrm.h"
-#include "HfsPlusBrowser.h"
 #include "floppy.h"
 #include "adouble.h"
 #include "aspecial.h"

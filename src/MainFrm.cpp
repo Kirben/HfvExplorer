@@ -20,7 +20,7 @@
 
 #include "stdafx.h"
 #include "MainMacBrowser.h"
-#include "HfsPlusBrowser.h"
+#include "HfsPlusDialogs.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"

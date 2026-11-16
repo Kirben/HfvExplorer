@@ -179,6 +179,16 @@ std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> me
     try { return FromHfsPlus(std::move(source), false); }
     catch (const std::exception &e) { throw DetectedVolumeError(e.what()); }
 }
+std::shared_ptr<Volume> OpenCdRoot(const char *root,
+    std::function<UINT(const char *)> driveType,
+    std::function<std::shared_ptr<Volume>(int)> open) {
+    int drive=HfsPlus::CdDriveFromRoot(root); if(drive<0)return {};
+    char path[]={char('A'+drive),':',char(92),0};
+    if((driveType?driveType(path):GetDriveTypeA(path))!=DRIVE_CDROM)return {};
+    try { return open?open(drive):OpenCd(drive); }
+    catch(const DetectedVolumeError&){throw;}
+    catch(const std::exception&){return {};}
+}
 void RemoveTree(Volume &v, uint32_t id, Storage::Job &job) {
     Check(id != 2 && v.Writable(), "Cannot delete the volume root or a read-only item");
     std::set<uint32_t> parents; Storage::Progress p; auto plan = Scan(v, id, job, p, parents, 0);

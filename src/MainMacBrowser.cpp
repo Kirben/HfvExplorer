@@ -4,7 +4,7 @@
 #include "MainMacBrowser.h"
 #include "BrowserPresentation.h"
 #include "FindFilesDialog.h"
-#include "HfsPlusBrowser.h"
+#include "HfsPlusDialogs.h"
 #include "HfsPlusCd.h"
 #include "StorageJobDialog.h"
 #include "own_ids.h"
@@ -218,9 +218,9 @@ int MainMacBrowser::OpenImage(const std::wstring& path) {
     if(!lost&&n)App().AddToRecentFileList(ansi.c_str());return 1;
 }
 int MainMacBrowser::OpenCd(const char* root) {
-    int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;char driveRoot[]={char('A'+drive),':',char(92),0};if(GetDriveTypeA(driveRoot)!=DRIVE_CDROM)return 0;
+    int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;
     for(auto& mount:state_->mounts)if(mount.drive==drive&&mount.root)return 0; // Windows side stays selectable.
-    bool detected=false;std::shared_ptr<Volume> volume;auto result=ShowStorageWaitJob([&](Storage::Job&){try{volume=MacBrowser::OpenCd(drive);}catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};},Hidden());
+    bool detected=false;std::shared_ptr<Volume> volume;auto result=ShowStorageWaitJob([&](Storage::Job&){try{volume=MacBrowser::OpenCdRoot(root);}catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};},Hidden());
     if(result.code){if(detected){if(!Hidden())AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return -1;}return 0;}if(!volume)return 0;state_->mounts.push_back({volume,FromAnsi(root),nullptr,drive});int i=int(state_->mounts.size()-1);
     state_->Root(i);state_->Show(i,2,state_->mounts[i].root);return 1;
 }
