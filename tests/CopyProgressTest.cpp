@@ -89,6 +89,19 @@ int RunCopyProgressTest(const char* directory) {
    hfs_write(file,resource.data(),(unsigned long)resource.size())==resource.size() && hfs_close(file)==0,"write both forks");
   strcpy_s(type,"TEXT");check(hfs_create(volume,text,type,creator)==0,"create text entry");file=hfs_open(volume,text);check(file!=nullptr,"create text");
   check(hfs_write(file,"HELLO\n",6)==6 && hfs_close(file)==0 && hfs_umount(volume)==0,"finish fixture");
+  // An explicit path, case alias and containing folder must never replace the source.
+  for(const char* destination : {"CopyTest:Folder:Nested:Game", "copytest:folder:nested:game", "CopyTest:Folder:Nested:"}) {
+   for(int move : {0,1}) {
+    auto same=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)image,destination,0,move,'a'));
+    same->wait();check(same->result().code!=0,"reject copy/move onto the same HFS catalog entry");
+    volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after self-copy rejection");
+    file=hfs_open(volume,binary);check(file!=nullptr,"self-copy preserved source entry");
+    std::vector<BYTE> verify(data.size());check(hfs_read(file,verify.data(),(unsigned long)verify.size())==verify.size()&&verify==data,"self-copy preserved data fork");
+    verify.resize(resource.size());check(hfs_setfork(file,1)==0&&hfs_read(file,verify.data(),(unsigned long)verify.size())==verify.size()&&verify==resource,"self-copy preserved resource fork");
+    check(hfs_close(file)==0&&hfs_umount(volume)==0,"close self-copy check");
+   }
+  }
+  fprintf(out,"PASS: self-copy/self-move rejects exact paths, case aliases and containing folders, preserving both forks.\n");
   Progress progress;copyout_set_progress(observe,&progress);int moved=0;
   CString target=root;char source[100]="CopyTest:Folder";HFSIFACE_set_modeout(0);
   check(HFSIFACE_copy(image.GetBuffer(),source,target.GetBuffer(),target.GetBuffer(),1,0,&moved)==0,"recursive automatic export");
