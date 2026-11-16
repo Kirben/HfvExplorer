@@ -87,6 +87,14 @@ int RunFileMutationTest(const char* directory) {
   }
   check(rejected>0,"catalog exhaustion regression did not exercise a failed rename");
   fprintf(report,"PASS: failed catalog-space renames preserve the source entry.\n");
+  CString missingImage=root+"\\missing.dsk";
+  check(HFSIFACE_delete(missingImage.GetBuffer(),fileName)!=0,"missing-volume delete reported success");missingImage.ReleaseBuffer();
+  check(HFSIFACE_rmdir(missingImage.GetBuffer(),folder)!=0,"missing-volume folder delete reported success");missingImage.ReleaseBuffer();
+  check(HFSIFACE_rename(missingImage.GetBuffer(),fileName,renamed)!=0,"missing-volume rename reported success");missingImage.ReleaseBuffer();
+  std::string oversizedPath(400,'x');
+  check(HFSIFACE_delete(image.GetBuffer(),const_cast<char*>(oversizedPath.c_str()))!=0,"oversized delete path accepted");image.ReleaseBuffer();
+  check(HFSIFACE_rename(image.GetBuffer(),fileName,const_cast<char*>(oversizedPath.c_str()))!=0,"oversized rename path accepted");image.ReleaseBuffer();
+  fprintf(report,"PASS: mutation wrappers reject missing volumes and oversized paths instead of reporting success.\n");
   CString external=root+"\\Outside",selected=root+"\\Selected",link=selected+"\\Junction";
   check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
   save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");
