@@ -46,6 +46,8 @@
 #endif
 
 char *cph_error = "no error";
+#include "Replacement.h"
+static HfsReplacement cph_replacement;
 static int cph_opened;
 int copyhfs_destination_opened(void) { return cph_opened; }
 
@@ -134,28 +136,13 @@ hfsfile *opendst(hfsvol *vol, char *dstname, char *hint,
       dstname = hint;
     }
 
-  hfs_delete(vol, dstname);
-  if (hfs_create(vol, dstname, type, creator) < 0)
-    {
-      cph_error = hfs_error;
-
-      if (dstname == hint)
-	hfs_setcwd(vol, cwd);
-
-      return 0;
-    }
-
-  cph_opened = 1;
-  file = hfs_open(vol, dstname);
-  if (file == 0)
-    {
-      cph_error = hfs_error;
-
-      if (dstname == hint)
-	hfs_setcwd(vol, cwd);
-
-      return 0;
-    }
+  file = replacement_open(&cph_replacement, vol, dstname, type, creator);
+  cph_opened = file && !cph_replacement.active;
+  if(!file) {
+   cph_error = hfs_error;
+   if(dstname == hint)hfs_setcwd(vol,cwd);
+   return 0;
+  }
 
   if (dstname == hint)
     {
@@ -188,6 +175,7 @@ void closefiles(hfsfile *ifile, hfsfile *ofile, int *result)
       cph_error = hfs_error;
       *result = -1;
     }
+  if(ofile)replacement_finish(&cph_replacement,result,&cph_error);
 }
 
 /* Interface Routines ====================================================== */
