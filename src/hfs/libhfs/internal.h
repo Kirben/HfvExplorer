@@ -359,6 +359,7 @@ struct _hfsvol_ {
   int fd;		/* volume's open file descriptor */
   int flags;		/* bit flags */
 
+  char *failure_message; /* Owned rollback failure detail, or NULL. */
   int pnum;		/* ordinal HFS partition number */
   unsigned long vstart;	/* logical block offset to start of volume */
   unsigned long vlen;	/* number of logical blocks in volume */

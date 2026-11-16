@@ -17,9 +17,10 @@ unsigned calls,failAt;int mode;bool fired;
 void require(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 int failingWrite(int fd,const void* data,unsigned count) {
  unsigned at=calls++;
+ if(mode==2&&fired){errno=EIO;return -1;}
  if(!fired&&at==failAt) {
   fired=true;errno=EIO;
-  if(mode==1)return originalWrite(fd,data,count/2);
+  if(mode==1||mode==2)return originalWrite(fd,data,count/2);
   return -1;
  }
  return originalWrite(fd,data,count);
@@ -96,6 +97,24 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  file=hfs_open(volume,name);char appended[6];require(file&&hfs_lseek(file,4097,SEEK_SET)==4097&&hfs_read(file,appended,6)==6&&!memcmp(appended,"APPEND",6),"rollback lost earlier pending data");
  require(hfs_close(file)==0&&hfs_umount(volume)==0,"close pending-update verification");
  fprintf(report,"PASS: rollback preserves earlier pending file data and open-file positions across pre-operation flush failures.\n");
+ // A device that also rejects undo writes must be fenced, not retried as clean.
+ save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount unrecoverable-write fixture");
+ hfsfile* held=hfs_open(volume,blockerName);require(held!=nullptr,"hold unrelated file during rollback failure");
+ calls=0;failAt=0;mode=2;fired=false;fhook_write=failingWrite;
+ int permanent=mutate(volume,0);require(permanent<0&&(volume->flags&HFS_WRITE_FAILED)&&(volume->flags&HFS_READONLY),"failed rollback left volume writable");
+ std::string message=hfs_error?hfs_error:"";size_t first=message.find('"'),last=message.find('"',first+1);
+ require(first!=std::string::npos&&last!=std::string::npos,"failed rollback did not retain original sector evidence");
+ CString undoPath(message.substr(first+1,last-first-1).c_str());auto undo=load(undoPath);
+ auto little32=[](const BYTE* p){return DWORD(p[0])|(DWORD(p[1])<<8)|(DWORD(p[2])<<16)|(DWORD(p[3])<<24);};
+ require(undo.size()>=512&&!memcmp(undo.data(),"HFSUNDO1",8),"undo evidence header");unsigned records=little32(undo.data()+32);
+ require(records&&undo.size()==512+records*528ULL,"undo evidence truncated");
+ for(unsigned i=0;i<records;++i){auto record=undo.data()+512+i*528;ULONGLONG offset=little32(record)|(ULONGLONG(little32(record+4))<<32);require(offset<=seed.size()-512&&little32(record+12)==512&&!memcmp(record+16,seed.data()+size_t(offset),512),"undo evidence lost original image sectors");}
+ auto writesAfterFailure=calls;
+ require(hfs_write(held,const_cast<char*>("NO"),2)<0&&hfs_flush(volume)<0&&hfs_mkdir(volume,unrelated)<0,"poisoned volume accepted further writes");
+ hfs_close(held);require(hfs_umount(volume)<0&&calls==writesAfterFailure,"poisoned cleanup attempted more device writes or reported clean close");
+ fhook_write=originalWrite;
+ require(GetFileAttributesA(undoPath)!=INVALID_FILE_ATTRIBUTES&&hfs_error&&strstr(hfs_error,"Undo records saved"),"close discarded rollback recovery details");
+ fprintf(report,"PASS: rollback-write failures disable all further writes, preserve exact sector undo evidence and report an unclean close. Undo fixture: %s\n",(LPCSTR)undoPath);
  fprintf(report,"PASS: classic HFS file/folder creation, deletion, rename, attributes and fragmented-fork truncation roll back every injected write error and short write, restoring exact image bytes and both forks.\n");
 }
 #endif
