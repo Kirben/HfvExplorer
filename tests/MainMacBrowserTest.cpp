@@ -84,7 +84,7 @@ bool TestHfsPlusMainCdBrowser(std::unique_ptr<HfsPlus::Source> source,CWnd* owne
                              std::function<void()> changeMedia) {
     auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());Tree tree;List list;
     app.m_tree=&tree;app.m_list=&list;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;
-    auto& browser=MainMacBrowser::Get();bool valid=false;
+    BrowserSession session;session.Attach(owner,&tree,&list);auto& browser=session.MacBrowser();bool valid=false;
     try {
         CMenu menu;Check(menu.LoadMenu(IDR_MAINFRAME)&&menu.GetMenuState(32902,MF_BYCOMMAND)==UINT(-1),"obsolete CD menu returned");
         Check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),owner,100,nullptr)!=FALSE,"create CD tree");
@@ -150,7 +150,7 @@ int RunMainMacBrowserTest(const char* directory){
         fprintf(report,"PASS: shared adapters preserve long Unicode names, both forks and Finder metadata across HFS+/HFSX, Windows AppleDouble and classic HFS; recursive totals, self/descendant rejection, cancellation and failed-replacement preservation.\n");
         auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());CWnd owner;Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden unified browser",WS_OVERLAPPED,0,0,700,400,nullptr,0)!=FALSE,"create hidden owner");
         app.m_pMainWnd=&owner;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;InitializeStorageUi();
-        Tree tree;List list;app.m_tree=&tree;app.m_list=&list;
+        Tree tree;List list;BrowserSession session;session.Attach(&owner,&tree,&list);app.m_tree=&tree;app.m_list=&list;
         Check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),&owner,100,nullptr)!=FALSE,"create real tree view");
         Check(list.Create(nullptr,nullptr,WS_CHILD|LVS_REPORT,CRect(200,0,700,400),&owner,101,nullptr)!=FALSE,"create real list view");tree.Init();list.Initialize();
         storageUiTest={};auto failed=ShowStorageWaitJob([&](Storage::Job&){
@@ -159,7 +159,7 @@ int RunMainMacBrowserTest(const char* directory){
         },true);
         Check(failed.code&&storageUiTest.timerTicks>0&&source->Writable()&&owner.IsWindowEnabled()&&app.m_pMainWnd==&owner,"slow failed import preserves responsive writable adapter and owner");
         Reject([&]{Find(*source,2,u"Slow failed import");},"failed import left a catalog entry");
-        auto& browser=MainMacBrowser::Get();int index=browser.AttachTestVolume(source,"source");Check(browser.ShowTestFolder(index,2),"show source root in main panes");
+        auto& browser=session.MacBrowser();int index=browser.AttachTestVolume(source,"source");Check(browser.ShowTestFolder(index,2),"show source root in main panes");
         auto& lc=list.GetListCtrl();int folderRow=-1;for(int i=0;i<lc.GetItemCount();++i)if(Text(lc,i)==L"Folder")folderRow=i;
         Check(folderRow>=0&&browser.Activate(folderRow),"main list folder activation");bool found=false;for(int i=0;i<lc.GetItemCount();++i)found|=Text(lc,i)==Wide(unicode);
         Check(found&&browser.Active()&&browser.Writable(),"main list retained full Unicode filename and writable state");

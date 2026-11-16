@@ -2,13 +2,15 @@
 #pragma once
 #include "MacBrowserModel.h"
 class CHFVExplorerListView;
+class BrowserSession;
 class MainMacBrowser {
+    BrowserSession& session_;
     struct State;
     std::unique_ptr<State> state_;
-    MainMacBrowser();
 public:
     ~MainMacBrowser();
-    static MainMacBrowser &Get();
+    explicit MainMacBrowser(BrowserSession&);
+    void ForgetTree();
     int OpenImage(const char *path);
     int OpenImage(const std::wstring &path);
     int OpenCd(const char *root);
@@ -41,6 +43,7 @@ public:
     void ReleaseCd(int drive);
     void Sort(int column, bool ascending);
 #ifdef HFV_TESTING
+    size_t TestClipboardCount()const;
     int AttachTestVolume(std::shared_ptr<MacBrowser::Volume>, const char *key);
     bool ShowTestFolder(int index, uint32_t id);
 #endif

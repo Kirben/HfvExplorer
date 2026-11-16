@@ -6,6 +6,28 @@ Build and run checks with build-x64.ps1. Older Windows versions still await
 VM execution tests. The original readme
 below describes the historical release and its obsolete drivers.
 
+Per-window browser sessions
+---------------------------
+
+Each browser document owns a `BrowserSession`, its native HFS+/HFSX/MFS
+controller, mounts, folder navigation and clipboard. Tree, list, preview and
+status updates resolve through the receiving session rather than the
+application's current-pane pointers. Classic HFS/Windows locations, selection
+and sort settings stay with their document and views; Finder layout and classic
+icon tables are independent too. Storage-backed directory jobs receive their
+owning frame explicitly, including during startup before MFC sets `m_pMainWnd`.
+
+This prepares the browser for multiple windows. The application still exposes
+one main frame: independent operation jobs, cross-window refresh/clipboard
+coordination, legacy launcher services and the multi-window commands are later
+steps. The classic HFS engine and storage worker remain serialized.
+
+`--verify-browser-sessions NEW_DIRECTORY` in the Test build exercises two hidden
+sessions with conflicting application aliases, native navigation and clipboard,
+Windows folders, same-named classic images, slow reads, error recovery, pane
+ownership and teardown. It also creates a real hidden frame and splitters before
+the application main-window pointer is assigned. No physical devices are used.
+
 Storage ownership
 -----------------
 - Writable HFS+/HFSX image handles and classic HFS image sessions deny other

@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "HfsPlusDialogs.h"
 #include "DeviceWait.h"
@@ -149,6 +150,7 @@ CMainFrame::CMainFrame()
 
 CMainFrame::~CMainFrame()
 {
+ auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());if(app->m_main==this)app->m_main=nullptr;
 }
 
 int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
@@ -258,13 +260,12 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	pApp->m_list = (CHFVExplorerListView *)m_wndSplitter.GetPane( 0, PANE_LIST );
-	pApp->m_list->Initialize();
-	pApp->m_list->set_style( LVS_ICON );
-	pApp->m_list->FillList();
-
-	pApp->m_tree = (HFVExplorerTreeView *)m_wndSplitter.GetPane( 0, PANE_TREE );
-	pApp->m_tree->Initialize();
+ auto tree=(HFVExplorerTreeView*)m_wndSplitter.GetPane(0,PANE_TREE);
+ auto list=(CHFVExplorerListView*)m_wndSplitter.GetPane(0,PANE_LIST);
+ m_browserSession=&static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc)->GetBrowserSession();
+ m_browserSession->Attach(this,tree,list,nullptr,&m_wndStatusBar);
+ pApp->m_doc=static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc);pApp->m_tree=tree;pApp->m_list=list; // Single-frame compatibility for launchers/timers.
+ tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();
 
 	m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 
@@ -313,16 +314,13 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	pApp->m_tree = (HFVExplorerTreeView *)m_wndSplitter.GetPane( 0, 0 );
-	pApp->m_tree->Initialize();
-
-	pApp->m_list = (CHFVExplorerListView *)m_wndSplitter2.GetPane( 0, 0 );
-	pApp->m_list->Initialize();
-	pApp->m_list->set_style( LVS_ICON );
-	pApp->m_list->FillList();
-
-	pApp->m_pre = (CHFVPreviewView *)m_wndSplitter2.GetPane( 1, 0 );
-	pApp->m_pre->Initialize();
+ auto tree=(HFVExplorerTreeView*)m_wndSplitter.GetPane(0,0);
+ auto list=(CHFVExplorerListView*)m_wndSplitter2.GetPane(0,0);
+ auto preview=(CHFVPreviewView*)m_wndSplitter2.GetPane(1,0);
+ m_browserSession=&static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc)->GetBrowserSession();
+ m_browserSession->Attach(this,tree,list,preview,&m_wndStatusBar);
+ pApp->m_doc=static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc);pApp->m_tree=tree;pApp->m_list=list;pApp->m_pre=preview; // Legacy single-frame services only.
+ tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();preview->Initialize();
 
 	m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 
@@ -334,46 +332,46 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 void CMainFrame::OnViewDetails() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int changed_mode = (pApp->m_mac_window_mode == TRUE);
-	pApp->m_mac_window_mode = FALSE;
-	pApp->m_list->set_style( LVS_REPORT );
-	if(changed_mode) pApp->m_tree->mode_changed();
+	int changed_mode = (GetBrowserSession().finderLayout == TRUE);
+	GetBrowserSession().finderLayout = FALSE;pApp->m_mac_window_mode=FALSE; // Default for future sessions.
+	GetBrowserSession().List()->set_style( LVS_REPORT );
+	if(changed_mode) GetBrowserSession().Tree()->mode_changed();
 }
 
 void CMainFrame::OnViewLargeicons() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int changed_mode = (pApp->m_mac_window_mode == TRUE);
-	pApp->m_mac_window_mode = FALSE;
-	pApp->m_list->set_style( LVS_ICON );
-	if(changed_mode) pApp->m_tree->mode_changed();
+	int changed_mode = (GetBrowserSession().finderLayout == TRUE);
+	GetBrowserSession().finderLayout = FALSE;pApp->m_mac_window_mode=FALSE; // Default for future sessions.
+	GetBrowserSession().List()->set_style( LVS_ICON );
+	if(changed_mode) GetBrowserSession().Tree()->mode_changed();
 }
 
 void CMainFrame::OnViewList() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int changed_mode = (pApp->m_mac_window_mode == TRUE);
-	pApp->m_mac_window_mode = FALSE;
-	pApp->m_list->set_style( LVS_LIST );
-	if(changed_mode) pApp->m_tree->mode_changed();
+	int changed_mode = (GetBrowserSession().finderLayout == TRUE);
+	GetBrowserSession().finderLayout = FALSE;pApp->m_mac_window_mode=FALSE; // Default for future sessions.
+	GetBrowserSession().List()->set_style( LVS_LIST );
+	if(changed_mode) GetBrowserSession().Tree()->mode_changed();
 }
 
 void CMainFrame::OnViewSmallicons() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int changed_mode = (pApp->m_mac_window_mode == TRUE);
-	pApp->m_mac_window_mode = FALSE;
-	pApp->m_list->set_style( LVS_SMALLICON );
-	if(changed_mode) pApp->m_tree->mode_changed();
+	int changed_mode = (GetBrowserSession().finderLayout == TRUE);
+	GetBrowserSession().finderLayout = FALSE;pApp->m_mac_window_mode=FALSE; // Default for future sessions.
+	GetBrowserSession().List()->set_style( LVS_SMALLICON );
+	if(changed_mode) GetBrowserSession().Tree()->mode_changed();
 }
 
 void CMainFrame::OnViewMacWindow() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int changed_mode = (pApp->m_mac_window_mode == FALSE);
-	pApp->m_mac_window_mode = TRUE;
-	pApp->m_list->set_style( LVS_ICON );
-	if(changed_mode) pApp->m_tree->mode_changed();
+	int changed_mode = (GetBrowserSession().finderLayout == FALSE);
+	GetBrowserSession().finderLayout = TRUE;pApp->m_mac_window_mode=TRUE; // Default for future sessions.
+	GetBrowserSession().List()->set_style( LVS_ICON );
+	if(changed_mode) GetBrowserSession().Tree()->mode_changed();
 }
 
 void CMainFrame::OnProgramProperties() 
@@ -490,7 +488,7 @@ void CMainFrame::OnProgramProperties()
 			pApp->m_copyin_appledouble
 		);
 
-		pApp->m_doc->update_invisible_attributes();
+		GetBrowserSession().Document()->update_invisible_attributes();
 
 		if(save_point_size != point_size || stricmp(font_name,save_font_name) != 0 || save_is_font_sjis != is_font_sjis) { /* noda */
 			AfxMessageBox( "You need to restart the program for the font change to take effect." );
@@ -515,7 +513,7 @@ void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 		// check HFV files for changes
 		CHFVExplorerApp	*pApp;
 		pApp = (CHFVExplorerApp *)AfxGetApp();
-		pApp->m_doc->check_hfv_file_times( 0 );
+		GetBrowserSession().Document()->check_hfv_file_times( 0 );
 		// if(!m_timer) m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 		m_volcheck_enabled = TRUE;
 	} else {
@@ -633,7 +631,7 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 								if(answer == IDYES) do_update = TRUE;
 							}
 						}
-						pApp->m_list->update_callback( 
+						GetBrowserSession().List()->update_callback(
 							w->m_waiting_doc_win_name,
 							w->m_waiting_srcvolpath,
 							w->m_waiting_srcname,
@@ -680,11 +678,11 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 	}
 
 	if(pApp->m_timer_enabled && m_volcheck_enabled) {
-		if(pApp->m_doc && pApp->m_list && pApp->m_tree) {
+		if(GetBrowserSession().Document() && GetBrowserSession().List() && GetBrowserSession().Tree()) {
 			// if(m_timer) KillTimer(m_timer);
 			// m_timer = 0;
 			m_volcheck_enabled = FALSE;
-			pApp->m_doc->check_hfv_file_times( 0 );
+			GetBrowserSession().Document()->check_hfv_file_times( 0 );
 			m_volcheck_enabled = TRUE;
 			// if(!m_timer) m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 		}
@@ -754,13 +752,13 @@ void CMainFrame::OnPaletteChanged(CWnd* pFocusWnd)
 	CFrameWnd::OnPaletteChanged(pFocusWnd);
 	
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->_OnPaletteChanged(pFocusWnd);
+	GetBrowserSession().List()->_OnPaletteChanged(pFocusWnd);
 }
 
 BOOL CMainFrame::OnQueryNewPalette() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	return(pApp->m_list->_OnQueryNewPalette());
+	return(GetBrowserSession().List()->_OnQueryNewPalette());
 	// return CFrameWnd::OnQueryNewPalette();
 }
 
@@ -780,15 +778,15 @@ void CMainFrame::OnDropFiles(HDROP hDropInfo)
 		if(DragQueryFile( hDropInfo, i, name, MAX_PATH-1 ) > 0) {
 		  DragQueryPoint( hDropInfo, &p );
 			if(is_extension( name, ".HF*" ) || is_extension( name, ".DSK" )) {
-				int save = pApp->m_doc->m_hfs_count;
-				pApp->m_doc->OnOpenDocument(name);
-				if(save < pApp->m_doc->m_hfs_count) {
-					currdir = pApp->m_doc->m_volumes[pApp->m_doc->m_hfs_count-1].m_volume_name + ":";
+				int save = GetBrowserSession().Document()->m_hfs_count;
+				GetBrowserSession().Document()->OnOpenDocument(name);
+				if(save < GetBrowserSession().Document()->m_hfs_count) {
+					currdir = GetBrowserSession().Document()->m_volumes[GetBrowserSession().Document()->m_hfs_count-1].m_volume_name + ":";
 				}
 			}
 		}
 	}
-	if(currdir != "") pApp->m_doc->my_chdir( currdir, 1 );
+	if(currdir != "") GetBrowserSession().Document()->my_chdir( currdir, 1 );
 
 	DragFinish(hDropInfo);
 	handled = 1;
@@ -837,7 +835,7 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
 			if(p->dbch_devicetype == DBT_DEVTYP_VOLUME) {
 				// AfxMessageBox( "DBT_DEVTYP_VOLUME" );
 				CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-				pApp->m_doc->CheckNewMedia( FALSE, TRUE, TRUE );
+				GetBrowserSession().Document()->CheckNewMedia( FALSE, TRUE, TRUE );
 			}
 		} else if( wParam == DBT_DEVICEARRIVAL ) {
 			DEV_BROADCAST_HDR *p;
@@ -846,7 +844,7 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
 			if(p->dbch_devicetype == DBT_DEVTYP_VOLUME) {
 				// AfxMessageBox( "DBT_DEVTYP_VOLUME" );
 				CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-				pApp->m_doc->CheckNewMedia( FALSE, TRUE, TRUE );
+				GetBrowserSession().Document()->CheckNewMedia( FALSE, TRUE, TRUE );
 			}
 		}
 	}
@@ -990,7 +988,7 @@ int read_floppy( int drive, char *path )
 
 static void ReleaseFloppyForWrite(int drive,void* context);
 
-void CMainFrame::OnFileNewHfsPlus() {FormatHfsPlusImage(this);}
+void CMainFrame::OnFileNewHfsPlus() {FormatHfsPlusImage(this,GetBrowserSession());}
 
 void CMainFrame::OnFileNewvolume() 
 {
@@ -1010,7 +1008,7 @@ void CMainFrame::OnFileNewvolume()
   std::vector<BYTE> image;std::string error;
   pc_to_mac_charset((unsigned char*)vname);
   if(!PrepareFloppyHfs(vname,image,error)){AfxMessageBox(error.c_str());return;}
-  WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume",ReleaseFloppyForWrite,pApp->m_doc);
+  WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume",ReleaseFloppyForWrite,GetBrowserSession().Document());
   SendMessage(WM_COMMAND,ID_VIEW_REFRESH);return;
  }
 
@@ -1018,13 +1016,13 @@ void CMainFrame::OnFileNewvolume()
 		return;
 	}
 
-	int save = pApp->m_doc->m_hfs_count;
-	pApp->m_doc->OnOpenDocument(volpath);
-	if(save < pApp->m_doc->m_hfs_count) {
-		currdir = pApp->m_doc->m_volumes[pApp->m_doc->m_hfs_count-1].m_volume_name + ":";
+	int save = GetBrowserSession().Document()->m_hfs_count;
+	GetBrowserSession().Document()->OnOpenDocument(volpath);
+	if(save < GetBrowserSession().Document()->m_hfs_count) {
+		currdir = GetBrowserSession().Document()->m_volumes[GetBrowserSession().Document()->m_hfs_count-1].m_volume_name + ":";
 	}
 
-	if(currdir != "") pApp->m_doc->my_chdir( currdir, 1 );
+	if(currdir != "") GetBrowserSession().Document()->my_chdir( currdir, 1 );
 }
 
 hfv_size_t get_file_size( const char *volpath )
@@ -1133,12 +1131,12 @@ void CMainFrame::MountPath(char *name)
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	int save = pApp->m_doc->m_hfs_count;
-	pApp->m_doc->OnOpenDocument(name);
-	if(save < pApp->m_doc->m_hfs_count) {
-		currdir = pApp->m_doc->m_volumes[pApp->m_doc->m_hfs_count-1].m_volume_name + ":";
+	int save = GetBrowserSession().Document()->m_hfs_count;
+	GetBrowserSession().Document()->OnOpenDocument(name);
+	if(save < GetBrowserSession().Document()->m_hfs_count) {
+		currdir = GetBrowserSession().Document()->m_volumes[GetBrowserSession().Document()->m_hfs_count-1].m_volume_name + ":";
 	}
-	if(currdir != "") pApp->m_doc->my_chdir( currdir, 1 );
+	if(currdir != "") GetBrowserSession().Document()->my_chdir( currdir, 1 );
 }
 
 void CMainFrame::OnFileVolumefromfloppy()
@@ -1156,19 +1154,19 @@ void CMainFrame::OnToolsDumpcddebug()
 
 MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
 {
- auto app=(CHFVExplorerApp*)AfxGetApp();if(!app||!app->m_doc||!app->m_tree)return {};
- auto tree=app->m_tree;HTREEITEM item=tree->m_ct->GetSelectedItem();if(!item)return {};
+ auto app=(CHFVExplorerApp*)AfxGetApp();if(!app||!GetBrowserSession().Document()||!GetBrowserSession().Tree())return {};
+ auto tree=GetBrowserSession().Tree();HTREEITEM item=tree->m_ct->GetSelectedItem();if(!item)return {};
  DWORD_PTR data=tree->m_ct->GetItemData(item);int type=tree->get_lparam_type(data),index=tree->get_lparam_volinx(data);
- if(type==LIST_MAC){int drive=MainMacBrowser::Get().SelectedCdDrive();if(drive>=0)return {drive,DRIVE_CDROM};}
- if(type==LIST_HFS&&index>=0&&index<app->m_doc->m_hfs_count)return MacMediaControlTarget(app->m_doc->m_volumes[index].m_file_name);
- if(type==LIST_FAT&&index>=0&&index<app->m_doc->m_fat_count){auto& volume=app->m_doc->m_fats[index];return {toupper((unsigned char)volume.m_letter)-'A',volume.m_type};}
+ if(type==LIST_MAC){int drive=GetBrowserSession().MacBrowser().SelectedCdDrive();if(drive>=0)return {drive,DRIVE_CDROM};}
+ if(type==LIST_HFS&&index>=0&&index<GetBrowserSession().Document()->m_hfs_count)return MacMediaControlTarget(GetBrowserSession().Document()->m_volumes[index].m_file_name);
+ if(type==LIST_FAT&&index>=0&&index<GetBrowserSession().Document()->m_fat_count){auto& volume=GetBrowserSession().Document()->m_fats[index];return {toupper((unsigned char)volume.m_letter)-'A',volume.m_type};}
  return {};
 }
 void CMainFrame::OnCdEjectEjectReload(int reload)
 {
  auto target=SelectedMediaControlTarget();if(!CanControlMedia(target))return;
- if(MainMacBrowser::Get().SelectedCdDrive()==target.drive)MainMacBrowser::Get().ReleaseCd(target.drive);
- auto app=(CHFVExplorerApp*)AfxGetApp();auto document=app->m_doc;
+ if(GetBrowserSession().MacBrowser().SelectedCdDrive()==target.drive)GetBrowserSession().MacBrowser().ReleaseCd(target.drive);
+ auto app=(CHFVExplorerApp*)AfxGetApp();auto document=GetBrowserSession().Document();
  auto result=ShowStorageWaitJob(MakeMediaControlJob(target,reload!=0,nullptr,[=]{
   HFSIFACE_get_dir_flush();
   for(int i=0;i<document->m_hfs_count;++i){auto mounted=MacMediaControlTarget(document->m_volumes[i].m_file_name);if(mounted.drive==target.drive)document->m_volumes[i].close();}
@@ -1238,37 +1236,37 @@ void CMainFrame::LoadWindowPosition(void)
 void CMainFrame::OnEditCopy() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->edit_copy();
+	GetBrowserSession().List()->edit_copy();
 }
 
 void CMainFrame::OnEditCut() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->edit_cut();
+	GetBrowserSession().List()->edit_cut();
 }
 
 void CMainFrame::OnEditPaste() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->edit_paste();
+	GetBrowserSession().List()->edit_paste();
 }
 
 void CMainFrame::OnEditCopyAppend() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->edit_copy_append();
+	GetBrowserSession().List()->edit_copy_append();
 }
 
 void CMainFrame::OnEditCutAppend() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->edit_cut_append();
+	GetBrowserSession().List()->edit_cut_append();
 }
 
 void CMainFrame::OnEditSelectAll() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->edit_select_all();
+	GetBrowserSession().List()->edit_select_all();
 }
 
 BOOL CMainFrame::OnQueryOpen() 
@@ -1310,12 +1308,12 @@ void CMainFrame::OnToolsBurn()
 {
  CString initial;
  CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
- if(app->m_tree&&app->m_doc){
-  HTREEITEM item=app->m_tree->m_ct->GetSelectedItem();
-  if(item){DWORD_PTR data=app->m_tree->m_ct->GetItemData(item);
-   if(app->m_tree->get_lparam_type(data)==LIST_HFS){
-    int index=app->m_tree->get_lparam_volinx(data);
-    if(index>=0&&index<app->m_doc->m_hfs_count){auto& volume=app->m_doc->m_volumes[index];
+ if(GetBrowserSession().Tree()&&GetBrowserSession().Document()){
+  HTREEITEM item=GetBrowserSession().Tree()->m_ct->GetSelectedItem();
+  if(item){DWORD_PTR data=GetBrowserSession().Tree()->m_ct->GetItemData(item);
+   if(GetBrowserSession().Tree()->get_lparam_type(data)==LIST_HFS){
+    int index=GetBrowserSession().Tree()->get_lparam_volinx(data);
+    if(index>=0&&index<GetBrowserSession().Document()->m_hfs_count){auto& volume=GetBrowserSession().Document()->m_volumes[index];
      if(!volume.m_is_floppy&&!volume.m_is_cd&&!volume.m_is_hd&&!volume.m_is_removable)initial=volume.m_file_name;
     }
    }
@@ -1340,29 +1338,29 @@ void CMainFrame::OnFileVolumetofloppy()
  if(dialog.DoModal()!=IDOK)return;
  std::vector<BYTE> image;std::string error;
  if(!LoadFloppyHfs(dialog.m_volname,image,error)){AfxMessageBox(error.c_str());return;}
- WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname,ReleaseFloppyForWrite,app->m_doc);
+ WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname,ReleaseFloppyForWrite,GetBrowserSession().Document());
  SendMessage(WM_COMMAND,ID_VIEW_REFRESH);
 }
 
 void CMainFrame::OnToolsFind()
 {
- if(MainMacBrowser::Get().Find())return;
+ if(GetBrowserSession().MacBrowser().Find())return;
  CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
- if(!app->m_doc||!app->m_tree)return;
- HTREEITEM item=app->m_tree->m_ct->GetSelectedItem();
+ if(!GetBrowserSession().Document()||!GetBrowserSession().Tree())return;
+ HTREEITEM item=GetBrowserSession().Tree()->m_ct->GetSelectedItem();
  if(!item){AfxMessageBox("Select a folder or volume to search first.");return;}
- DWORD_PTR data=app->m_tree->m_ct->GetItemData(item);int type=app->m_tree->get_lparam_type(data),index=app->m_tree->get_lparam_volinx(data);
- int mac=0;CString path=app->m_doc->get_directory(item,&mac);FindLocation location;
+ DWORD_PTR data=GetBrowserSession().Tree()->m_ct->GetItemData(item);int type=GetBrowserSession().Tree()->get_lparam_type(data),index=GetBrowserSession().Tree()->get_lparam_volinx(data);
+ int mac=0;CString path=GetBrowserSession().Document()->get_directory(item,&mac);FindLocation location;
  location.mac=mac!=0;location.directory=(LPCSTR)path;location.volumeIndex=index;
  if(path.IsEmpty()){AfxMessageBox("Select a folder or volume to search first.");return;}
- if(type==LIST_HFS&&index>=0&&index<app->m_doc->m_hfs_count){location.volume=(LPCSTR)app->m_doc->m_volumes[index].m_file_name;location.root=(LPCSTR)(app->m_doc->m_volumes[index].m_volume_name+":");}
- else if(type==LIST_FAT&&index>=0&&index<app->m_doc->m_fat_count){location.root=std::string(1,app->m_doc->m_fats[index].m_letter)+":\\";}
+ if(type==LIST_HFS&&index>=0&&index<GetBrowserSession().Document()->m_hfs_count){location.volume=(LPCSTR)GetBrowserSession().Document()->m_volumes[index].m_file_name;location.root=(LPCSTR)(GetBrowserSession().Document()->m_volumes[index].m_volume_name+":");}
+ else if(type==LIST_FAT&&index>=0&&index<GetBrowserSession().Document()->m_fat_count){location.root=std::string(1,GetBrowserSession().Document()->m_fats[index].m_letter)+":\\";}
  else {AfxMessageBox("Select a folder or volume to search first.");return;}
  FindHit selected;if(!ShowFindFilesDialog(this,location,selected))return;
- app->m_doc->my_chdir(selected.parent.c_str(),location.mac,location.mac?index:-1);
- if(app->m_list){auto& list=app->m_list->GetListCtrl();
+ GetBrowserSession().Document()->my_chdir(selected.parent.c_str(),location.mac,location.mac?index:-1);
+ if(GetBrowserSession().List()){auto& list=GetBrowserSession().List()->GetListCtrl();
   for(int row=0;row<list.GetItemCount();++row)if(list.GetItemText(row,0).CompareNoCase(selected.name.c_str())==0){
-   list.SetItemState(-1,0,LVIS_SELECTED|LVIS_FOCUSED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);list.EnsureVisible(row,FALSE);app->m_list->SetFocus();return;
+   list.SetItemState(-1,0,LVIS_SELECTED|LVIS_FOCUSED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);list.EnsureVisible(row,FALSE);GetBrowserSession().List()->SetFocus();return;
   }
  }
  AfxMessageBox("The folder was opened, but the item is not visible. It may have changed or be hidden by the current view settings.");
@@ -1370,15 +1368,15 @@ void CMainFrame::OnToolsFind()
 
 BOOL CMainFrame::OnCommand(WPARAM w,LPARAM l){
  switch(LOWORD(w)){
- case ID_FILE_MAC_IMPORT:MainMacBrowser::Get().Import();return TRUE;
- case ID_FILE_MAC_IMPORT_RESOURCE:MainMacBrowser::Get().ImportResource();return TRUE;
- case ID_FILE_MAC_EXPORT_DATA:MainMacBrowser::Get().Export(0);return TRUE;
- case ID_FILE_MAC_EXPORT_RESOURCE:MainMacBrowser::Get().Export(1);return TRUE;
+ case ID_FILE_MAC_IMPORT:GetBrowserSession().MacBrowser().Import();return TRUE;
+ case ID_FILE_MAC_IMPORT_RESOURCE:GetBrowserSession().MacBrowser().ImportResource();return TRUE;
+ case ID_FILE_MAC_EXPORT_DATA:GetBrowserSession().MacBrowser().Export(0);return TRUE;
+ case ID_FILE_MAC_EXPORT_RESOURCE:GetBrowserSession().MacBrowser().Export(1);return TRUE;
  }
  return CFrameWnd::OnCommand(w,l);
 }
 void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
- auto& browser=MainMacBrowser::Get();bool enabled=false;
+ auto& browser=GetBrowserSession().MacBrowser();bool enabled=false;
  if(!StorageUi::busy()){
   if(ui->m_nID==ID_FILE_MAC_IMPORT)enabled=browser.Writable();
   else if(ui->m_nID==ID_FILE_MAC_IMPORT_RESOURCE)enabled=browser.CanExport()&&browser.SelectionWritable();
@@ -1387,8 +1385,8 @@ void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
  ui->Enable(enabled);
 }
 void CMainFrame::OnUpdateMacEdit(CCmdUI* ui){
- auto& browser=MainMacBrowser::Get();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+ auto& browser=GetBrowserSession().MacBrowser();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
  bool allowed=browser.Active()?(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable()):
-     app->m_list&&(ui->m_nID==ID_EDIT_CUT?app->m_list->BrowserSelectionAllows(false):app->m_list->BrowserDirectoryWritable());
+     GetBrowserSession().List()&&(ui->m_nID==ID_EDIT_CUT?GetBrowserSession().List()->BrowserSelectionAllows(false):GetBrowserSession().List()->BrowserDirectoryWritable());
  ui->Enable(!StorageUi::busy()&&allowed);
 }

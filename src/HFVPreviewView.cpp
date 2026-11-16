@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "BrowserSession.h"
 #include "HFVExplorer.h"
 #include "HFVPreviewView.h"
 #include "special.h"
@@ -45,6 +46,8 @@ CHFVPreviewView::CHFVPreviewView()
 
 CHFVPreviewView::~CHFVPreviewView()
 {
+ if(m_browserSession)m_browserSession->Detach(this);
+ auto application=static_cast<CHFVExplorerApp*>(AfxGetApp());if(application->m_pre==this)application->m_pre=nullptr;
 	if(m_hfont) {
 		DeleteObject( m_hfont );
 		m_hfont = 0;
@@ -62,69 +65,17 @@ void CHFVPreviewView::Initialize()
 	}
 }
 
-void CHFVPreviewView::set_pane( int inx )
-{
-	CHFVExplorerApp	*pApp;
-	// int row, col;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	switch( inx ) {
-		case PANE_TREE:
-			pApp->m_wndSplitter->GetPane( 0, 0 )->SetFocus();
-			break;
-		case PANE_LIST:
-			pApp->m_wndSplitter2->GetPane( 0, 0 )->SetFocus();
-			break;
-		case PANE_PREVIEW:
-			pApp->m_wndSplitter2->GetPane( 1, 0 )->SetFocus();
-			break;
-	}
+void CHFVPreviewView::set_pane(int index){
+ auto& session=GetBrowserSession();CWnd* pane=index==PANE_TREE?static_cast<CWnd*>(session.Tree()):index==PANE_LIST?static_cast<CWnd*>(session.List()):this;
+ if(pane&&IsWindow(pane->GetSafeHwnd()))pane->SetFocus();
 }
-
-int CHFVPreviewView::get_pane_index( void )
-{
-	CHFVExplorerApp	*pApp;
-	int row, col, val = 0;
-
-	ASSERT(0);
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_wndSplitter->GetActivePane( &row, &col );
-	if(col == 0) {
-		val = PANE_TREE;
-	} else {
-		pApp->m_wndSplitter2->GetActivePane( &row, &col );
-		if(row == 0) 
-			val = PANE_LIST;
-		else
-			val = PANE_PREVIEW;
-	}
-	TRACE1( "get_pane_index = %d\n", val );
-	return(val);
+int CHFVPreviewView::get_pane_index(){
+ auto& session=GetBrowserSession();HWND focus=::GetFocus();
+ if(session.Tree()&&(focus==session.Tree()->GetSafeHwnd()||::IsChild(session.Tree()->GetSafeHwnd(),focus)))return PANE_TREE;
+ if(session.List()&&(focus==session.List()->GetSafeHwnd()||::IsChild(session.List()->GetSafeHwnd(),focus)))return PANE_LIST;
+ return PANE_PREVIEW;
 }
-
-void CHFVPreviewView::set_pane_index( int inx )
-{
-	CHFVExplorerApp	*pApp;
-	int row, col;
-
-	ASSERT(0);
-
-	TRACE1( "set_pane_index = %d\n", inx );
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	if(inx == PANE_TREE) {
-		row = col = 0;
-		pApp->m_wndSplitter->SetActivePane( row, col );
-	} else {
-		row = 0;
-		col = 1;
-		pApp->m_wndSplitter->SetActivePane( row, col );
-		row = inx == PANE_LIST ? 0 : 1; // else PANE_PREVIEW
-		col = 0;
-		pApp->m_wndSplitter2->SetActivePane( row, col );
-	}
-}
+void CHFVPreviewView::set_pane_index(int index){set_pane(index);}
 
 BEGIN_MESSAGE_MAP(CHFVPreviewView, CView)
 	//{{AFX_MSG_MAP(CHFVPreviewView)

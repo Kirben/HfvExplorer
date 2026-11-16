@@ -43,7 +43,7 @@ int RunSharedBrowserTest(const char* directory){
   app.m_pMainWnd=&owner;app.m_tree=&tree;app.m_list=&list;InitializeStorageUi();
   check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),&owner,100,nullptr)!=FALSE,"create tree");
   check(list.Create(nullptr,nullptr,WS_CHILD|LVS_REPORT,CRect(200,0,700,400),&owner,101,nullptr)!=FALSE,"create list");
-  tree.Init();list.Initialize();tree.Bind(&doc);list.Bind(&doc);
+  doc.GetBrowserSession().Attach(&owner,&tree,&list);tree.Init();list.Initialize();tree.Bind(&doc);list.Bind(&doc);
   CString image=root+"\\classic.dsk";{CFile file;check(file.Open(image,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create classic image");file.SetLength(4*1024*1024);}
   char volumeName[]="Shared",type[]="TEXT",creator[]="TEST";
   check(hfs_format(image.GetBuffer(),0,volumeName)==0,"format classic fixture");image.ReleaseBuffer();
@@ -90,7 +90,9 @@ int RunSharedBrowserTest(const char* directory){
    target->Put(2,e,[](unsigned,uint64_t,void* data,size_t n){memset(data,0,n);},false);target->Close();}
   doc.m_fat_count=1;doc.m_fats[0].m_letter=windows[0];doc.m_fats[0].m_type=DRIVE_FIXED;doc.m_fats[0].m_rootitem=tree.Windows(windows);tree.GetTreeCtrl().SelectItem(doc.m_fats[0].m_rootitem);
   BrowserDirectory::testObserveRead=[&](const char*){wrongThread|=GetCurrentThreadId()==ui;Sleep(80);};storageUiTest={};
+  app.m_pMainWnd=nullptr;
   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();BrowserDirectory::testObserveRead={};
+  app.m_pMainWnd=&owner;
   check(control.GetItemCount()==6&&!wrongThread&&storageUiTest.timerTicks>0&&owner.IsWindowEnabled(),"Windows snapshot worker and parent entry");
   int large=find(control,L"Large");check(large>=0&&list.BrowserRowAt(large)->entry.forks[0].size==6ULL*1024*1024*1024,"Windows backend lost high file-size bits");
   int forked=find(control,L"Forked");check(forked>=0&&list.BrowserRowAt(forked)->entry.forks[0].size==17&&list.BrowserRowAt(forked)->entry.forks[1].size==32,"Windows companion metadata does not use shared model");

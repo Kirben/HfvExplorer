@@ -29,8 +29,15 @@
 #define PANE_LIST			1
 #define PANE_PREVIEW	2
 
+class BrowserSession;
 class CHFVPreviewView : public CView
 {
+ BrowserSession* m_browserSession=nullptr;
+public:
+ BrowserSession& GetBrowserSession()const;
+ BrowserSession* BrowserBinding()const{return m_browserSession;}
+ void BindBrowserSession(BrowserSession* session){m_browserSession=session;}
+
 protected:
 	CHFVPreviewView();           // protected constructor used by dynamic creation
 	DECLARE_DYNCREATE(CHFVPreviewView)

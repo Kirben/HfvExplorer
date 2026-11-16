@@ -38,9 +38,11 @@ typedef struct {
 } wait_item_struct;
 
 struct MediaControlTarget;
+class BrowserSession;
 
 class CMainFrame : public CFrameWnd
 {
+ BrowserSession* m_browserSession=nullptr;
 protected: // create from serialization only
 	CSplitterWnd m_wndSplitter;
 	CSplitterWnd m_wndSplitter2;
@@ -50,6 +52,7 @@ protected: // create from serialization only
 
 // Attributes
 public:
+ BrowserSession& GetBrowserSession()const;
 	void OnChildRegistration(WPARAM wParam, LPARAM lParam);
 
 // Operations
@@ -85,8 +88,8 @@ public:
 		LPCSTR srcname
 	);
 	HWND FindEmuWindow( void );
-	void LoadWindowPosition(void);
-	void SaveWindowPosition(void);
+	virtual void LoadWindowPosition(void);
+	virtual void SaveWindowPosition(void);
 	void OnCdEjectEjectReload( int reload );
  MediaControlTarget SelectedMediaControlTarget() const;
  BOOL OnCommand(WPARAM,LPARAM) override;

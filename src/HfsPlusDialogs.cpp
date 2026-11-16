@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MainMacBrowser.h"
+#include "BrowserSession.h"
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
@@ -122,7 +123,7 @@ bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
  NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
 }
-void FormatHfsPlusImage(CWnd *parent) {
+void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
     FormatDialog options(parent);
     if (options.DoModal() != IDOK)
         return;
@@ -136,12 +137,12 @@ void FormatHfsPlusImage(CWnd *parent) {
             HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
             return Storage::Result{};
         },
-        "Format Mac image");
+        "Format Mac image",false,false,false,parent);
     if (result.code) {
         AfxMessageBox(result.message.c_str());
         return;
     }
-    MainMacBrowser::Get().OpenImage(path);
+    session.MacBrowser().OpenImage(path);
 }
 #ifdef HFV_TESTING
 int RunHfsPlusUiTest(const char *directory) {

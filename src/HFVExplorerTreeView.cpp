@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
@@ -556,6 +557,8 @@ HFVExplorerTreeView::HFVExplorerTreeView()
 
 HFVExplorerTreeView::~HFVExplorerTreeView()
 {
+ if(m_browserSession)m_browserSession->Detach(this);
+ auto application=static_cast<CHFVExplorerApp*>(AfxGetApp());if(application->m_tree==this)application->m_tree=nullptr;
 	destroy_pointers();
 	m_selchange_enabled = 0;
 	if(m_pimagelistSmall) {
@@ -565,7 +568,7 @@ HFVExplorerTreeView::~HFVExplorerTreeView()
 
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_tree = 0;
+
 }
 
 BEGIN_MESSAGE_MAP(HFVExplorerTreeView, CTreeView)
@@ -602,7 +605,7 @@ void HFVExplorerTreeView::OnDeleteItem(NMHDR* header,LRESULT* result){
 }
 void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult) 
 {
- if(((CHFVExplorerApp*)AfxGetApp())->m_list && ((CHFVExplorerApp*)AfxGetApp())->m_list->IsDragging()){*pResult=0;return;}
+ if(GetBrowserSession().List() && GetBrowserSession().List()->IsDragging()){*pResult=0;return;}
  if(StorageUi::busy()){*pResult=0;return;}
 	HTREEITEM hItem;
 	unsigned long id = 0;
@@ -623,7 +626,7 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 		if(dw) {
 			type = get_lparam_type( dw );
 			switch(type) {
-    case LIST_MAC: MainMacBrowser::Get().Select(dw); break;
+    case LIST_MAC: GetBrowserSession().MacBrowser().Select(dw); break;
 				case LIST_HFS:
 				case LIST_SPEC:
 					id = get_lparam_id( dw );
@@ -672,8 +675,8 @@ void HFVExplorerTreeView::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags)
 	} else if( nChar == VK_TAB ) {
 		CHFVExplorerApp	*pApp;
 		pApp = (CHFVExplorerApp *)AfxGetApp();
-		// pApp->m_pre->set_pane_index( PANE_LIST );
-		pApp->m_pre->set_pane( PANE_LIST );
+		// GetBrowserSession().Preview()->set_pane_index( PANE_LIST );
+		GetBrowserSession().Preview()->set_pane( PANE_LIST );
 		ok = 1;
 	}
 	if(!ok)	CTreeView::OnChar(nChar, nRepCnt, nFlags);
@@ -689,7 +692,7 @@ BOOL HFVExplorerTreeView::is_cd_item( HTREEITEM hItem )
 	dw = m_ct->GetItemData( hItem );
 	if(dw) {
 		switch(get_lparam_type( dw )) {
-   case LIST_MAC: return MainMacBrowser::Get().SelectedCdDrive()>=0;
+   case LIST_MAC: return GetBrowserSession().MacBrowser().SelectedCdDrive()>=0;
 			case LIST_HFS:
 				volinx = get_lparam_volinx( dw );
 				if(((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_is_cd) result = TRUE;
@@ -740,9 +743,9 @@ void HFVExplorerTreeView::on_volume_changed( int volinx )
 
 	root = ((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_rootitem;
 	currdir = ((CHFVExplorerDoc*)m_pDocument)->get_directory( 0, &mac );
-	pApp->m_tree->enable_selchange(0);
+	GetBrowserSession().Tree()->enable_selchange(0);
 	delete_subdir_contents( root );
-	pApp->m_tree->enable_selchange(1);
+	GetBrowserSession().Tree()->enable_selchange(1);
 	if(currdir != "") {
 		((CHFVExplorerDoc*)m_pDocument)->my_chdir( currdir, mac );
 	}

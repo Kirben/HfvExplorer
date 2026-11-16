@@ -52,8 +52,15 @@ typedef struct {
 /////////////////////////////////////////////////////////////////////////////
 // CHFVExplorerListView view
 
+class BrowserSession;
 class CHFVExplorerListView : public CListView
 {
+ BrowserSession* m_browserSession=nullptr;
+public:
+ BrowserSession& GetBrowserSession()const;
+ BrowserSession* BrowserBinding()const{return m_browserSession;}
+ void BindBrowserSession(BrowserSession* session){m_browserSession=session;}
+
  friend class MainMacBrowser;
  std::map<LPARAM,BrowserDirectory::Row> m_browser_rows;
  MacBrowser::Capabilities m_directory_capabilities;

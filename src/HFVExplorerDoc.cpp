@@ -22,6 +22,7 @@
 
 //#include "afx.h"
 #include "stdafx.h"
+#include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
@@ -645,9 +646,9 @@ int CHFVExplorerDoc::get_afp(
 
 void CHFVExplorerDoc::fat_walk(int volinx,LPSTR path,int list){
  auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());BrowserDirectory::Snapshot snapshot;std::string directory=path;
- auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,directory.c_str(),list!=0,job);return Storage::Result{};},!app->m_pMainWnd->IsWindowVisible());
- if(result.code){app->m_list->SetBrowserCapabilities({});if(app->m_pMainWnd->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
- apply_browser_directory(snapshot,list!=0);if(list)app->m_list->do_report_sort();
+ auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,directory.c_str(),list!=0,job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
+ if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ apply_browser_directory(snapshot,list!=0);if(list)GetBrowserSession().List()->do_report_sort();
 }
 
 #pragma optimize("",on)
@@ -693,11 +694,11 @@ void CHFVExplorerDoc::update_invisible_attributes()
 	m_pc_show_invisibles = pApp->m_show_invisible_fat;
 }
 
-CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
+CHFVExplorerDoc::CHFVExplorerDoc(bool discover):m_browserSession(new BrowserSession(this))
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	pApp->m_doc = this;
+	// Pane/frame creation registers the legacy single-frame alias.
 
 	// m_mac_show_invisibles = 1;
 	// m_pc_show_invisibles = 1;
@@ -735,6 +736,8 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
 
 CHFVExplorerDoc::~CHFVExplorerDoc()
 {
+ m_browserSession.reset();
+ auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());if(app->m_doc==this)app->m_doc=nullptr;
  clear_hash_table();
 	destroy_icon_cache();
 	delete m_icon_array;
@@ -774,7 +777,7 @@ void CHFVExplorerDoc::Dump(CDumpContext& dc) const
 }
 #endif //_DEBUG
 
-CHFVFile *speed_fp = 0;
+// Catalog lookup cursor belongs to this document/session.
 
 BOOL CHFVExplorerDoc::hfs_find_item( LongInt node_index, hfs_item_type *pitem )
 {
@@ -1275,8 +1278,8 @@ void CHFVExplorerDoc::set_current_hitem( HTREEITEM hItem )
 
 	if(hItem) {
 		pApp = (CHFVExplorerApp *)AfxGetApp();
-		pApp->m_tree->GetTreeCtrl().EnsureVisible( hItem );
-		pApp->m_tree->GetTreeCtrl().SelectItem( hItem );
+		GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( hItem );
+		GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( hItem );
 	}
 }
 
@@ -1284,7 +1287,7 @@ HTREEITEM CHFVExplorerDoc::get_current_hitem()
 {
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	return( pApp->m_tree->GetTreeCtrl().GetSelectedItem() );
+	return( GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem() );
 }
 
 /*
@@ -1295,25 +1298,25 @@ void CHFVExplorerDoc::open_parent_directory(unsigned long id)
 
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	hItem = pApp->m_tree->GetTreeCtrl().GetSelectedItem();
+	hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem();
 	if(hItem) {
 		if( id == ID_GOTO_PARENT ) {
-			hItem = pApp->m_tree->GetTreeCtrl().GetParentItem( hItem );
+			hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetParentItem( hItem );
 			if(hItem) {
-				pApp->m_tree->GetTreeCtrl().SelectItem( hItem );
+				GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( hItem );
 			}
 		} else {
 			DWORD_PTR dat;
-			dat = pApp->m_tree->GetTreeCtrl().GetItemData( hItem );
-			volinx = pApp->m_tree->get_lparam_volinx(dat);
-			if(pApp->m_tree->get_lparam_type(dat) == TREE_FAT) {
-				hItem = pApp->m_list->get_lparam_htree(dat);
+			dat = GetBrowserSession().Tree()->GetTreeCtrl().GetItemData( hItem );
+			volinx = GetBrowserSession().Tree()->get_lparam_volinx(dat);
+			if(GetBrowserSession().Tree()->get_lparam_type(dat) == TREE_FAT) {
+				hItem = GetBrowserSession().List()->get_lparam_htree(dat);
 				if(hItem) {
-					pApp->m_tree->GetTreeCtrl().SelectItem( hItem );
+					GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( hItem );
 					// open_fat_directory( volinx, dir );
 				}
 			} else {
-				pApp->m_tree->select_by_id( m_volumes[volinx].m_rootitem, volinx, id );
+				GetBrowserSession().Tree()->select_by_id( m_volumes[volinx].m_rootitem, volinx, id );
 				open_sub_directory( volinx, id, "" );
 			}
 		}
@@ -1332,25 +1335,25 @@ CString CHFVExplorerDoc::get_directory (
 
 	*pmac = 0;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	if(!hItem) hItem = pApp->m_tree->GetTreeCtrl().GetSelectedItem();
+	if(!hItem) hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem();
 	if(hItem) {
 		DWORD_PTR dat;
-		dat = pApp->m_tree->GetTreeCtrl().GetItemData( hItem );
-		switch(pApp->m_tree->get_lparam_type(dat)) {
+		dat = GetBrowserSession().Tree()->GetTreeCtrl().GetItemData( hItem );
+		switch(GetBrowserSession().Tree()->get_lparam_type(dat)) {
 			case LIST_UNKNOWN:
 			case LIST_SPEC:
 				return("");
 			case LIST_HFS:
 				*pmac = 1;
-				volinx = pApp->m_tree->get_lparam_volinx(dat);
-				id = pApp->m_tree->get_lparam_id(dat);
-				return( pApp->m_tree->get_directory_name( 
+				volinx = GetBrowserSession().Tree()->get_lparam_volinx(dat);
+				id = GetBrowserSession().Tree()->get_lparam_id(dat);
+				return( GetBrowserSession().Tree()->get_directory_name(
 					m_volumes[volinx].m_rootitem, 
 					volinx, id ) );
 				break;
 			case LIST_FAT:
 				char path[MAX_PATH];
-				if(pApp->m_tree->get_lparam_path(dat,path,MAX_PATH)) {
+				if(GetBrowserSession().Tree()->get_lparam_path(dat,path,MAX_PATH)) {
 					return(CString(path));
 				}
 				break;
@@ -1361,64 +1364,64 @@ CString CHFVExplorerDoc::get_directory (
 
 void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
  auto pApp=static_cast<CHFVExplorerApp*>(AfxGetApp());
- CString path=searchname.IsEmpty()?pApp->m_tree->get_directory_name(m_volumes[volinx].m_rootitem,volinx,id):searchname;path+=":";
- long parent=pApp->m_tree->get_parent_id(m_volumes[volinx].m_rootitem,volinx,id);
+ CString path=searchname.IsEmpty()?GetBrowserSession().Tree()->get_directory_name(m_volumes[volinx].m_rootitem,volinx,id):searchname;path+=":";
+ long parent=GetBrowserSession().Tree()->get_parent_id(m_volumes[volinx].m_rootitem,volinx,id);
  BrowserDirectory::Snapshot snapshot;
- auto result=ShowStorageWaitJob([&](Storage::Job&){snapshot=read_classic_browser_directory(volinx,id,path,pApp->m_mac_window_mode!=0,parent);return Storage::Result{};},!pApp->m_pMainWnd->IsWindowVisible());
- if(result.code){pApp->m_list->SetBrowserCapabilities({});if(pApp->m_pMainWnd->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ auto result=ShowStorageWaitJob([&](Storage::Job&){snapshot=read_classic_browser_directory(volinx,id,path,GetBrowserSession().finderLayout!=0,parent);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
+ if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
  int finder_view_mode=snapshot.finderMode;
- if(pApp->m_mac_window_mode){
+ if(GetBrowserSession().finderLayout){
 		switch(finder_view_mode) {
 			case FINDER_VIEW_MODE_ICON:
 			case FINDER_VIEW_MODE_ICON_BUTTON:
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_ICON) {
-					pApp->m_list->set_style( LVS_ICON );
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_ICON) {
+					GetBrowserSession().List()->set_style( LVS_ICON );
 				}
 				break;
 			case FINDER_VIEW_MODE_ICON_SMALL:
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_SMALLICON) {
-					pApp->m_list->set_style( LVS_SMALLICON );
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_SMALLICON) {
+					GetBrowserSession().List()->set_style( LVS_SMALLICON );
 				}
 				break;
 			case FINDER_VIEW_MODE_ICON_NAME:
-				pApp->m_list->m_sorted_by_column = FIELD_NAME;
-				pApp->m_list->m_sort_is_ascending = 1;
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
-					pApp->m_list->set_style( LVS_REPORT );
+				GetBrowserSession().List()->m_sorted_by_column = FIELD_NAME;
+				GetBrowserSession().List()->m_sort_is_ascending = 1;
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
+					GetBrowserSession().List()->set_style( LVS_REPORT );
 				}
 				break;
 			case FINDER_VIEW_MODE_ICON_DATE:
-				pApp->m_list->m_sorted_by_column = FIELD_MODIFIED;
-				pApp->m_list->m_sort_is_ascending = 1;
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
-					pApp->m_list->set_style( LVS_REPORT );
+				GetBrowserSession().List()->m_sorted_by_column = FIELD_MODIFIED;
+				GetBrowserSession().List()->m_sort_is_ascending = 1;
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
+					GetBrowserSession().List()->set_style( LVS_REPORT );
 				}
 				break;
 			case FINDER_VIEW_MODE_ICON_SIZE:
-				pApp->m_list->m_sorted_by_column = FIELD_SIZE;
-				pApp->m_list->m_sort_is_ascending = 1;
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
-					pApp->m_list->set_style( LVS_REPORT );
+				GetBrowserSession().List()->m_sorted_by_column = FIELD_SIZE;
+				GetBrowserSession().List()->m_sort_is_ascending = 1;
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
+					GetBrowserSession().List()->set_style( LVS_REPORT );
 				}
 				break;
 			case FINDER_VIEW_MODE_ICON_KIND:
-				pApp->m_list->m_sorted_by_column = FIELD_TYPE;
-				pApp->m_list->m_sort_is_ascending = 1;
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
-					pApp->m_list->set_style( LVS_REPORT );
+				GetBrowserSession().List()->m_sorted_by_column = FIELD_TYPE;
+				GetBrowserSession().List()->m_sort_is_ascending = 1;
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
+					GetBrowserSession().List()->set_style( LVS_REPORT );
 				}
 				break;
 			case FINDER_VIEW_MODE_ICON_LABEL:
-				pApp->m_list->m_sorted_by_column = FIELD_CREATOR;
-				pApp->m_list->m_sort_is_ascending = 1;
-				if((GetWindowLong(pApp->m_list->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
-					pApp->m_list->set_style( LVS_REPORT );
+				GetBrowserSession().List()->m_sorted_by_column = FIELD_CREATOR;
+				GetBrowserSession().List()->m_sort_is_ascending = 1;
+				if((GetWindowLong(GetBrowserSession().List()->m_cl->m_hWnd,GWL_STYLE) & LVS_TYPEMASK) != LVS_REPORT) {
+					GetBrowserSession().List()->set_style( LVS_REPORT );
 				}
 				break;
 		}
-  pApp->m_list->set_origo(snapshot.originX,snapshot.originY);
+  GetBrowserSession().List()->set_origo(snapshot.originX,snapshot.originY);
  }
- apply_browser_directory(snapshot,true);pApp->m_list->do_report_sort();
+ apply_browser_directory(snapshot,true);GetBrowserSession().List()->do_report_sort();
 }
 
 
@@ -1431,22 +1434,22 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 	CString dirname;
 
 	if(id == configurations_id) {
-		pApp->m_list->initialize_volume( "", 0 );
+		GetBrowserSession().List()->initialize_volume( "", 0 );
 	} else {
 		int i;
 		if(!m_volumes[volinx].m_opened) return;
-		parent_link_id = pApp->m_tree->get_parent_id( m_volumes[volinx].m_rootitem, volinx, id );
+		parent_link_id = GetBrowserSession().Tree()->get_parent_id( m_volumes[volinx].m_rootitem, volinx, id );
 
 		for(i=1; i<=2; i++) {
 			int old_icon_count = get_icon_cache_count();
 			if(parent_link_id) {
-				pApp->m_tree->expand_dir( m_volumes[volinx].m_rootitem,
+				GetBrowserSession().Tree()->expand_dir( m_volumes[volinx].m_rootitem,
 									volinx, parent_link_id );
-				pApp->m_list->initialize_volume( 
-					pApp->m_tree->get_directory_name( m_volumes[volinx].m_rootitem, volinx, parent_link_id ),
+				GetBrowserSession().List()->initialize_volume(
+					GetBrowserSession().Tree()->get_directory_name( m_volumes[volinx].m_rootitem, volinx, parent_link_id ),
 					ID_GOTO_PARENT );
 			} else {
-				pApp->m_list->initialize_volume( "", 0 );
+				GetBrowserSession().List()->initialize_volume( "", 0 );
 			}
 			new_hfs_walk( volinx, id, partial_name );
 			if( old_icon_count == get_icon_cache_count()) break;
@@ -1455,10 +1458,10 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 		if(partial_name != "") 
 			dirname = partial_name;
 		else
-			dirname = pApp->m_tree->get_directory_name( m_volumes[volinx].m_rootitem, volinx, id );
+			dirname = GetBrowserSession().Tree()->get_directory_name( m_volumes[volinx].m_rootitem, volinx, id );
 	}
 
-	if(pApp->m_pStatusBar) {
+	if(GetBrowserSession().Status()) {
 		CString msg;
 		if(id == configurations_id) {
 			msg = "Exploring Configurations";
@@ -1468,7 +1471,7 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 				dirname, 
 				(hfv_size_t)m_volumes[volinx].m_MDB.drFreeBks * m_volumes[volinx].m_MDB.drAlBlkSiz / 1024 );
 		}
-		pApp->m_pStatusBar->SetPaneText( 0, msg );
+		GetBrowserSession().Status()->SetPaneText( 0, msg );
 	}
 }
 
@@ -1482,8 +1485,8 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 	dbdb("open_fat_directory");
 	if(list) {
 		if(is_fat_root_directory(path)) {
-			pApp->m_list->initialize_volume( "", 0 );
-			// pApp->m_list->initialize_volume( "", ID_GOTO_PARENT );
+			GetBrowserSession().List()->initialize_volume( "", 0 );
+			// GetBrowserSession().List()->initialize_volume( "", ID_GOTO_PARENT );
 		} else {
 			// Remove the last subdir
 			char buf[_MAX_PATH], *p;
@@ -1493,11 +1496,11 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 				if( p[-1] == ':' ) p++;
 				*p = 0;
 			}
-			pApp->m_list->initialize_volume( buf, ID_GOTO_PARENT );
+			GetBrowserSession().List()->initialize_volume( buf, ID_GOTO_PARENT );
 		}
 	}
 	// After the read-only Mac browser closes, keep the Windows side of hybrids available.
-	if(list && MainMacBrowser::Get().OpenCd(path) != 0) return;
+	if(list && GetBrowserSession().MacBrowser().OpenCd(path) != 0) return;
 	fat_walk( volinx, path, list );
 	dbdb("open_fat_directory END");
 }
@@ -1555,7 +1558,7 @@ CString CHFVExplorerDoc::hfs_find_match(
 
 BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName) 
 {
-	int native=MainMacBrowser::Get().OpenImage(lpszPathName);
+	int native=GetBrowserSession().MacBrowser().OpenImage(lpszPathName);
  if(native)return native>0;
  StorageAction storageAction;
 
@@ -1566,7 +1569,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	pApp->m_tree->enable_selchange(0);
+	GetBrowserSession().Tree()->enable_selchange(0);
 
 	OnCleanDocument();
 	// if (!CDocument::OnOpenDocument(lpszPathName)) return FALSE;
@@ -1582,7 +1585,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		if(i >= 0) {
 			if(m_volumes[i].open()) {
 				m_volumes[i].m_rootitem = 
-					pApp->m_tree->initialize_volume( 
+					GetBrowserSession().Tree()->initialize_volume(
 						i, m_volumes[i].m_volume_name, 
 						CNID_ROOT_ID, 
 						m_volumes[i].m_is_floppy,
@@ -1603,13 +1606,13 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		}
 	} 
 
-	pApp->m_tree->initialize_tree();
+	GetBrowserSession().Tree()->initialize_tree();
 
 	for( i=0; i<m_hfs_count; i++) {
 		m_volumes[i].m_rootitem = 0;
 		if(!m_volumes[i].m_free && m_volumes[i].open()) {
 			m_volumes[i].m_rootitem = 
-				pApp->m_tree->initialize_volume( 
+				GetBrowserSession().Tree()->initialize_volume(
 					i, m_volumes[i].m_volume_name, 
 					CNID_ROOT_ID, 
 					m_volumes[i].m_is_floppy,
@@ -1629,7 +1632,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 
 	for( i=0; i<m_fat_count; i++) {
 		m_fats[i].m_rootitem = 
-			pApp->m_tree->initialize_fat_volume( 
+			GetBrowserSession().Tree()->initialize_fat_volume(
 				i, 
 				&m_fats[i].m_volume_name, 
 				m_fats[i].m_type,
@@ -1641,13 +1644,13 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		open_sub_directory( showme, CNID_ROOT_ID, m_volumes[showme].m_volume_name );
 	}
 
-	pApp->m_tree->enable_selchange(1);
+	GetBrowserSession().Tree()->enable_selchange(1);
 	// if(m_hfs_count && m_volumes[0].m_rootitem) {
 	if(showme >= 0) {
 		set_current_hitem( m_volumes[showme].m_rootitem );
 	}
 	
- MainMacBrowser::Get().RebuildTree();
+ GetBrowserSession().MacBrowser().RebuildTree();
 	return(1);
 }
 
@@ -1695,18 +1698,18 @@ void CHFVExplorerDoc::build_pc_tree( int volinx, CString path )
 		first = 0;
 		subpath[i] = 0;
 		open_fat_directory( volinx, subpath, 1 ); // ZAPZAP 0
-		htree = pApp->m_tree->tree_find_fat( htree, subpath );
+		htree = GetBrowserSession().Tree()->tree_find_fat( htree, subpath );
 		if(htree) {
-			pApp->m_tree->GetTreeCtrl().EnsureVisible( htree );
-			pApp->m_tree->GetTreeCtrl().SelectItem( htree );
+			GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( htree );
+			GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( htree );
 		}
 		p = strchr( p+1, '\\' );
 	}
-	pApp->m_tree->enable_selchange(1);
-	htree = pApp->m_tree->tree_find_fat( htree, start );
+	GetBrowserSession().Tree()->enable_selchange(1);
+	htree = GetBrowserSession().Tree()->tree_find_fat( htree, start );
 	if(htree) {
-		pApp->m_tree->GetTreeCtrl().EnsureVisible( htree );
-		pApp->m_tree->GetTreeCtrl().SelectItem( htree );
+		GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( htree );
+		GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( htree );
 	}
 	path.ReleaseBuffer();
 	dbdb( "build_pc_tree END");
@@ -1723,7 +1726,7 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 	if(path == "") return;
 
-	if(!pApp->m_tree) return;
+	if(!GetBrowserSession().Tree()) return;
 
 	if(!mac) {
 		int i, volinx = -1;
@@ -1733,20 +1736,20 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 		for( i=0; i<m_fat_count; i++) {
 			HTREEITEM htree;
 			LPSTR r = path.GetBuffer(MAX_PATH);
-			htree = pApp->m_tree->tree_find_fat(m_fats[i].m_rootitem,r);
+			htree = GetBrowserSession().Tree()->tree_find_fat(m_fats[i].m_rootitem,r);
 			path.ReleaseBuffer();
 			if(htree) {
-				pApp->m_tree->enable_selchange(1);
-				pApp->m_tree->GetTreeCtrl().EnsureVisible( htree );
+				GetBrowserSession().Tree()->enable_selchange(1);
+				GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( htree );
 				pApp->m_dosicons = save_view_dos_icons;
-				pApp->m_tree->GetTreeCtrl().SelectItem( htree );
+				GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( htree );
 				return;
 			}
 			if(toupper(*path) == toupper(m_fats[i].m_letter)) volinx = i;
 		}
 		pApp->m_dosicons = save_view_dos_icons;
 		if(volinx >= 0) {
-			pApp->m_tree->GetTreeCtrl().SelectItem( m_fats[volinx].m_rootitem );
+			GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( m_fats[volinx].m_rootitem );
 			build_pc_tree( volinx, path );
 		}
 		return;
@@ -1754,7 +1757,7 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 
 	if(my_split_path( path, volname, &volinx, dir, mac )) {
   if(preferredVolume>=0&&preferredVolume<m_hfs_count&&volname.CompareNoCase(m_volumes[preferredVolume].m_volume_name)==0)volinx=preferredVolume;
-		pApp->m_tree->enable_selchange(1);
+		GetBrowserSession().Tree()->enable_selchange(1);
 		set_current_hitem( m_volumes[volinx].m_rootitem );
 		open_sub_directory( volinx, CNID_ROOT_ID, m_volumes[volinx].m_volume_name );
 		set_current_hitem( m_volumes[volinx].m_rootitem );
@@ -1772,7 +1775,7 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 			id = item.catdatarec.u.d.dirDirID;
 			if(id) {
 				open_sub_directory( volinx, id, "" );
-				pApp->m_tree->select_by_id( m_volumes[volinx].m_rootitem, volinx, id );
+				GetBrowserSession().Tree()->select_by_id( m_volumes[volinx].m_rootitem, volinx, id );
 			}
 			dir = rest;
 		}
@@ -1782,16 +1785,16 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 
 void CHFVExplorerDoc::OnCleanDocument()
 {
- MainMacBrowser::Get().DetachTree();
+ GetBrowserSession().MacBrowser().DetachTree();
 	CHFVExplorerApp	*pApp;
 	int i;
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->m_list->list_clear();
+	GetBrowserSession().List()->list_clear();
 
-	if(pApp->m_tree) {
-		pApp->m_tree->enable_selchange(0);
-		pApp->m_tree->tree_clear();
+	if(GetBrowserSession().Tree()) {
+		GetBrowserSession().Tree()->enable_selchange(0);
+		GetBrowserSession().Tree()->tree_clear();
 	}
 	for( i=0; i<m_hfs_count; i++) {
 		m_volumes[i].close();
@@ -1802,12 +1805,12 @@ void CHFVExplorerDoc::OnCloseDocument()
 {
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-	if(pApp->m_tree) {
-		pApp->m_tree->enable_selchange(0);
-		pApp->m_tree->tree_delete_images();
+	if(GetBrowserSession().Tree()) {
+		GetBrowserSession().Tree()->enable_selchange(0);
+		GetBrowserSession().Tree()->tree_delete_images();
 	}
 	OnCleanDocument();
- MainMacBrowser::Get().Clear();
+ GetBrowserSession().MacBrowser().Clear();
 	CDocument::OnCloseDocument();
 }
 
@@ -1828,12 +1831,12 @@ void CHFVExplorerDoc::check_hfv_file_times( int ask )
 	}
 
 	if(updated_count == 1) {
-		pApp->m_tree->on_volume_changed( item_updated );
-		pApp->m_list->on_volume_changed( item_updated );
+		GetBrowserSession().Tree()->on_volume_changed( item_updated );
+		GetBrowserSession().List()->on_volume_changed( item_updated );
 	} else if(updated_count > 0) {
-		pApp->m_list->list_clear();
-		if(pApp->m_tree) {
-			pApp->m_tree->tree_clear();
+		GetBrowserSession().List()->list_clear();
+		if(GetBrowserSession().Tree()) {
+			GetBrowserSession().Tree()->tree_clear();
 		}
 		OnOpenDocument("") ;
 
@@ -1875,7 +1878,7 @@ void CHFVExplorerDoc::CheckNewFloppy( int index )
 
 void CHFVExplorerDoc::OnViewRefresh() 
 {
- if(MainMacBrowser::Get().Refresh())return;
+ if(GetBrowserSession().MacBrowser().Refresh())return;
 	CheckNewMedia( TRUE, TRUE, TRUE);
 
 	/*
