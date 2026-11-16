@@ -2021,6 +2021,8 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 			pApp->m_list->initialize_volume( buf, ID_GOTO_PARENT );
 		}
 	}
+	// After the read-only Mac browser closes, keep the Windows side of hybrids available.
+	if(list && TryOpenHfsPlusCdBrowser(path, AfxGetMainWnd()) < 0) return;
 	fat_walk( volinx, path, list );
 	dbdb("open_fat_directory END");
 }
