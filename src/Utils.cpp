@@ -53,24 +53,6 @@ int systemiconsize = 32;
 // #define ENOUGH 1500
 #define ENOUGH 5000
 
-// Ridiculous? Yup.
-static int isWin95 = 1;
-static void init_is_Win95(void)
-{
-	OSVERSIONINFO osv;
-	osv.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
-	if(GetVersionEx( &osv )) {
-		switch( osv.dwPlatformId ) {
-			case VER_PLATFORM_WIN32_WINDOWS:
-			case VER_PLATFORM_WIN32s:
-				isWin95 = 1;
-				break;
-			case VER_PLATFORM_WIN32_NT:
-				isWin95 = 0;
-				break;
-		}
-	}
-}
 void rotate_buffer( unsigned char *p, int bytes, int small )
 {
 	int y, w, w2;
@@ -732,7 +714,6 @@ void init_map_palette()
 		exact_mac256[i].rgbBlue = (BYTE) (w_exact_mac256[i].rgbRed >> 8);
 	}
 	map_palette_inited = 1;
-	init_is_Win95();
 }
 
 int myGetNearestPaletteIndex( 
@@ -912,7 +893,6 @@ void make_mask(
 			}
 			mask_bits[output++] = byt;
 		}
-		// if(isWin95 == 0 && nbyt == 2) output += 2;
 	}
 }
 
@@ -987,24 +967,14 @@ HICON map_colors( unsigned char *p, int small, int count, unsigned char **cim )
   bmi_mask.bmiHeader.biClrUsed = 2;
   bmi_mask.bmiHeader.biClrImportant = 2;
 
-	if(isWin95) {
-		bmi_mask.bmiColors[0].rgbRed = 255;
-		bmi_mask.bmiColors[0].rgbGreen = 255;
-		bmi_mask.bmiColors[0].rgbBlue = 255;
-		bmi_mask.bmiColors[1].rgbRed = 0;
-		bmi_mask.bmiColors[1].rgbGreen = 0;
-		bmi_mask.bmiColors[1].rgbBlue = 0;
-	  bmi_mask.bmiHeader.biSizeImage = count >> 3;
-	} else {
-		bmi_mask.bmiColors[0].rgbRed = 0;
-		bmi_mask.bmiColors[0].rgbGreen = 0;
-		bmi_mask.bmiColors[0].rgbBlue = 0;
-		bmi_mask.bmiColors[1].rgbRed = 255;
-		bmi_mask.bmiColors[1].rgbGreen = 255;
-		bmi_mask.bmiColors[1].rgbBlue = 255;
+	bmi_mask.bmiColors[0].rgbRed = 0;
+	bmi_mask.bmiColors[0].rgbGreen = 0;
+	bmi_mask.bmiColors[0].rgbBlue = 0;
+	bmi_mask.bmiColors[1].rgbRed = 255;
+	bmi_mask.bmiColors[1].rgbGreen = 255;
+	bmi_mask.bmiColors[1].rgbBlue = 255;
 	  bmi_mask.bmiHeader.biSizeImage = 0;
 	  bmi_mask.bmiHeader.biSizeImage = count >> 2;
-	}
 	
 	if(!*cim) {
 		if(icon_mask_type != ICON_NO_MASK) {
@@ -1021,37 +991,26 @@ HICON map_colors( unsigned char *p, int small, int count, unsigned char **cim )
 			*cim = mask_bits;
 		}
 
-		if(isWin95) {
-			bmp_mask = CreateDIBitmap( hDC,
-				(BITMAPINFOHEADER*)&bmi_mask,
-				0, // we cannot use CBM_INIT & mask_bits here because of 
-				0, // bug in CreateDIBitmap
-				(BITMAPINFO*)&bmi_mask,
-				DIB_RGB_COLORS
-			 );
-			LONG result = SetBitmapBits( bmp_mask, count, mask_bits );
-		} else {
-			if(small) {
-				aligned_mask = (unsigned char *)malloc( ENOUGH );
-				if(aligned_mask) {
-					przuksis( mask_bits, aligned_mask );
-					bmp_mask = CreateDIBitmap( hDC,
-						(BITMAPINFOHEADER*)&bmi_mask,
-						CBM_INIT,
-						aligned_mask,
-						(BITMAPINFO*)&bmi_mask,
-						DIB_RGB_COLORS
-				  );
-				}
-			} else {
+		if(small) {
+			aligned_mask = (unsigned char *)malloc( ENOUGH );
+			if(aligned_mask) {
+				przuksis( mask_bits, aligned_mask );
 				bmp_mask = CreateDIBitmap( hDC,
 					(BITMAPINFOHEADER*)&bmi_mask,
 					CBM_INIT,
-					mask_bits,
+					aligned_mask,
 					(BITMAPINFO*)&bmi_mask,
 					DIB_RGB_COLORS
-				);
+			  );
 			}
+		} else {
+			bmp_mask = CreateDIBitmap( hDC,
+				(BITMAPINFOHEADER*)&bmi_mask,
+				CBM_INIT,
+				mask_bits,
+				(BITMAPINFO*)&bmi_mask,
+				DIB_RGB_COLORS
+			);
 		}
 		pico.hbmMask = bmp_mask;
 	} else {

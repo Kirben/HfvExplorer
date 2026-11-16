@@ -147,8 +147,6 @@ CHFVExplorerApp::~CHFVExplorerApp()
 	kill_childs();
 	floppy_module_global_final();
 	SaveSettings();
-	cd_log_enable( FALSE, "" );
-	cd_log_restore_enable( FALSE, "" );
 	if(m_hfont) {
 		DeleteObject( m_hfont );
 		m_hfont = 0;
@@ -390,17 +388,6 @@ BOOL CHFVExplorerApp::InitInstance()
 	HFSIFACE_set_copy_modes( m_copyout_mode, m_copyin_mode, m_copyin_appledouble );
 
 	floppy_module_global_init();
-
-	CString log_name;
-	log_name = GetProfileString( "Setup","LogFile",NULL );
-	if(log_name != "") {
-		cd_log_enable( TRUE, log_name.GetBuffer(_MAX_PATH ) );
-	} else {
-		log_name = GetProfileString( "Setup","RestoreFromFile",NULL );
-		if(log_name != "") {
-			cd_log_restore_enable( TRUE, log_name.GetBuffer(_MAX_PATH ) );
-		}
-	}
 
 #ifdef _AFXDLL
 	Enable3dControls();

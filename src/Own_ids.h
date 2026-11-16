@@ -52,4 +52,3 @@
 #define ID_OWN_SHORTCUT_WINDOWS					(OWN_BASE + 126)
 
 // tree view
-#define ID_OWN_EJECT_MEDIA				(OWN_BASE + 200)

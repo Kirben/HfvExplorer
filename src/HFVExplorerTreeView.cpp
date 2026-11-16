@@ -694,65 +694,12 @@ BOOL HFVExplorerTreeView::is_cd_item( HTREEITEM hItem )
 
 void HFVExplorerTreeView::OnContextMenu(CWnd* pWnd, CPoint point) 
 {
-	// long id, dat;
-	CMenu cm, cpop;
-	HTREEITEM hItem;
-	int items_inserted = 0;
-
-	return;
-
-	hItem = m_ct->GetSelectedItem();
-	if(cm.CreatePopupMenu()) {
-		if( is_cd_item(hItem) ) {
-			cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_EJECT_MEDIA, "&Eject CD" );
-			items_inserted++;
-		}
-		if(items_inserted) {
-			// cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
-			if(cm.TrackPopupMenu( TPM_LEFTALIGN, point.x, point.y, this )) {
-			}
-		}
-		cm.DestroyMenu();
-	}
+	// No tree context menu is currently provided.
 }
 
 BOOL HFVExplorerTreeView::OnCommand(WPARAM wParam, LPARAM lParam) 
 {
-	int handled = 1;
-	UINT cmd = LOWORD(wParam);
-	int volinx, type;
-	CString *pcs;
-	HTREEITEM hItem;
-	DWORD_PTR dw;
-
-	switch( cmd ) {
-		// NOT USED
-		case ID_OWN_EJECT_MEDIA:
-			hItem = m_ct->GetSelectedItem();
-			if( is_cd_item(hItem) ) {
-				dw = m_ct->GetItemData( hItem );
-				if(dw) {
-					type = get_lparam_type( dw );
-					volinx = get_lparam_volinx( dw );
-					if(type==LIST_HFS) {
-						pcs = &((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_file_name;
-					} else {
-						pcs = &((CHFVExplorerDoc*)m_pDocument)->m_fats[volinx].m_volume_name;
-					}
-					if(*pcs != "") {
-						eject_media( pcs->GetAt(0), 0 );
-						handled = 1;
-					}
-				}
-			}
-			break;
-		default:
-			handled = 0;
-	}
-	if(handled) 
-		return(1);
-	else
-		return CTreeView::OnCommand(wParam, lParam);
+	return CTreeView::OnCommand(wParam, lParam);
 }
 
 void HFVExplorerTreeView::delete_subdir_contents( HTREEITEM root )

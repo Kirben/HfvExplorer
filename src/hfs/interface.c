@@ -137,7 +137,6 @@ void hfs_pinfo(hfsvolent *ent)
 {
 	char buf[500];
 	char line[200];
-
 	return;
 
 	*buf = 0;
@@ -355,11 +354,6 @@ int HFSIFACE_delete( char *volpath, char *path )
 		}
 	}
 
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
-	}
-
 	return( result );
 }
 
@@ -390,11 +384,6 @@ int HFSIFACE_mkdir( char *volpath, char *path )
 			if(0 == HFSIFACE_umount( volpath )) {
 			}
 		}
-	}
-
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
 	}
 
 	return( result );
@@ -467,11 +456,6 @@ int HFSIFACE_rmdir( char *volpath, char *path )
 		}
 	}
 
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
-	}
-
 	return( result );
 }
 
@@ -505,11 +489,6 @@ int HFSIFACE_rename( char *volpath, char *oldname, char *newname )
 			if(0 == HFSIFACE_umount( volpath )) {
 			}
 		}
-	}
-
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
 	}
 
 	return( result );
@@ -827,11 +806,6 @@ int HFSIFACE_copy_one_file(
 		}
 	}
 
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
-	}
-
 	return(result);
 }
 
@@ -965,11 +939,6 @@ go_get_next:
 		}
 	}
 
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
-	}
-
 	return(result);
 }
 
@@ -1099,11 +1068,6 @@ int HFSIFACE_copy(
 	}
 	if(is_target_hfs) {
 		mac_to_pc_charset(target);
-	}
-
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
 	}
 
 	return( result );
@@ -1275,10 +1239,6 @@ int HFSIFACE_format(
 		END_TIME_CONSUMING;
 		hfs_perror("Could not format volume");
 	}
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
-	}
 	return( result );
 }
 
@@ -1420,10 +1380,6 @@ int HFSIFACE_set_properties( char *volpath, char *path, hfsdirent *pent )
 			if(0 == HFSIFACE_umount( volpath )) {
 			}
 		}
-	}
-	if(!writeback_flush_all()) {
-		hfs_perror("Error writing to HFS volume");
-		result = 1;
 	}
 	return( result );
 }
@@ -1579,6 +1535,5 @@ BOOL HFSIFACE_exists_split( int volinx, char *volpath, char *dir_name, char *nam
 		ret = HFSIFACE_get_dir_next( &item );
 	}
 	HFSIFACE_get_dir_flush();
-
 	return(retval);
 }

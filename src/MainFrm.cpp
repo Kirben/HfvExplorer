@@ -915,7 +915,7 @@ int write_floppy( int drive, char *path )
 			// free(buf);
 			VirtualFree( buf, 0, MEM_RELEASE  ); 
 		}
-		writeback_flush_all();
+
 		floppy_final(drive);
 	} else {
 		AfxMessageBox( "Could not access floppy drive." );
@@ -973,7 +973,7 @@ int read_floppy( int drive, char *path )
 			// free(buf);
 			VirtualFree( buf, 0, MEM_RELEASE  ); 
 		}
-		writeback_flush_all();
+
 		floppy_final(drive);
 	} else {
 		AfxMessageBox( "Could not access floppy drive." );
@@ -1150,37 +1150,6 @@ void CMainFrame::OnToolsDumpcddebug()
 {
  ShowCdImageDialog(this);
 }
-
-#if 0
-void CMainFrame::OnCdEjectReload() 
-{
-	char rootdir[20], letter;
-	int type;
-
-	for( letter = 'C'; letter <= 'Z'; letter++ ) {
-		wsprintf( rootdir, "%c:\\", letter );
-		type = GetDriveType( rootdir );
-		if(type == DRIVE_CDROM /*|| type == DRIVE_REMOVABLE */) {
-			eject_media( letter, 1 );
-		}
-	}
-}
-
-void CMainFrame::OnCdEjectEject() 
-{
-	char rootdir[20], letter;
-	int type;
-
-
-	for( letter = 'C'; letter <= 'Z'; letter++ ) {
-		wsprintf( rootdir, "%c:\\", letter );
-		type = GetDriveType( rootdir );
-		if(type == DRIVE_CDROM /*|| type == DRIVE_REMOVABLE */) {
-			eject_media( letter, 0 );
-		}
-	}
-}
-#endif
 
 MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
 {

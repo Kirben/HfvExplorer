@@ -68,14 +68,6 @@ void dbdb(char *s)
 	OutputDebugString( "\r\n" );
 }
 
-void clear_all_caches(void) 
-{
-	int drive;
-	for(drive=0; drive<MAX_DEVICES; drive++) {
-		clear_cache_by_drive_index( drive );
-	}
-}
-
 void CHFVExplorerDoc::init_mac_icons()
 {
 	m_icon_array = new CPointerWordArray;
@@ -122,7 +114,6 @@ void CHFVExplorerDoc::set_floppy_volume_dirty( char *path )
 		if(is_floppy_by_index(drive)) {
 			get_floppy_volume_file_name( drive, name );
 			if(stricmp( name, path ) == 0) {
-				// clear_cache_by_drive_index( drive );
 				inx = get_volume_index_by_filename( CString(path) );
 				if(inx >= 0) {
 					m_volumes[inx].m_floppy_update_needed = TRUE;
@@ -131,17 +122,7 @@ void CHFVExplorerDoc::set_floppy_volume_dirty( char *path )
 			}
 		}
 	}
-	for(drive=2; drive<MAX_DEVICES; drive++) {
-		get_hd_volume_file_name( drive, name );
-		if(stricmp( name, path ) == 0) {
-			// clear_cache_by_drive_index( drive );
-			inx = get_volume_index_by_filename( CString(path) );
-			if(inx >= 0) {
-				m_volumes[inx].m_floppy_update_needed = TRUE;
-			}
-			break;
-		}
-	}
+
 }
 
 int CHFVExplorerDoc::get_volume_index_by_volumename( CString name )
@@ -267,45 +248,12 @@ void CHFVExplorerDoc::enum_cds(void)
   if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),0,1,0,0);
  }
 }
-void CHFVExplorerDoc::enum_hds(void)
-{
-#if defined(HFV_IMAGE_ONLY) || defined(HFV_READONLY_CD)
- return;
-#endif
-	char name[_MAX_PATH];
-	char rootdir[20], letter;
-	int i, type;
-	CHFVExplorerApp *pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	for( letter = 'C'; letter <= 'Z'; letter++ ) {
-
-		// if(letter != 'J') continue;
-
-		i = (int)( letter - 'A' );
-		wsprintf( rootdir, "%c:\\", letter );
-		type = GetDriveType( rootdir );
-		// if(type == DRIVE_REMOVABLE || type == DRIVE_FIXED) {
-		if( type == DRIVE_REMOVABLE || 
-			 (type == DRIVE_FIXED && pApp->m_do_harddisks) )
-		{
-			if(is_hfs_hd_present(i)) {
-				get_hd_volume_file_name( i, name );
-				if(get_volume_index_by_filename( CString(name) ) < 0 ) {
-					insert_volume( CString(name), 0, 0, 1, type==DRIVE_REMOVABLE );
-				}
-			}
-		}
-	}
-}
-
 void CHFVExplorerDoc::enum_hfs_volumes( 
 	LPSTR mask, BOOL floppies, BOOL cds, BOOL hds
 )
 {
-	clear_all_caches();
 	if(floppies) enum_floppies();
 	if(cds) enum_cds();
-	if(hds) enum_hds();
 
 	// I don't want to say *.HF* here ...
 
@@ -603,15 +551,6 @@ int is_afp_directory( char *path )
 	int len, result = 0;
 	char _path[_MAX_PATH];
 	HANDLE hStream;
-	OSVERSIONINFO osv;
-
-	osv.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
-	if( !GetVersionEx(&osv) ||
-			osv.dwPlatformId != VER_PLATFORM_WIN32_NT )
-	{
-		return(0);
-	}
-
 	strcpy( _path, path );
 	len = strlen( _path );
 	if( len > 3 && _path[len-1] == '\\' ) _path[len-1] = 0;
@@ -2431,23 +2370,16 @@ void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL c
  StorageAction storageAction;
 	int mac;
 
-	clear_all_caches();
-
-	int prev_silence = silencer( 1 );
-
 	CString currdir = get_directory( 0, &mac );
 	for(const auto& media:ScanPhysicalMedia(check_floppies!=FALSE,check_cds!=FALSE)) {
   char path[MAX_PATH];if(media.floppy)get_floppy_volume_file_name(media.drive,path);else get_cd_volume_file_name(media.drive,path);
   if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),media.floppy,!media.floppy,0,0);
  }
-	if(check_hds) enum_hds();
 
 
 	OnOpenDocument("") ;
 
 	if(currdir != "") my_chdir( currdir, mac );
-
-	silencer( prev_silence );
 }
 
 void CHFVExplorerDoc::CheckNewFloppy( int index )
@@ -2456,7 +2388,6 @@ void CHFVExplorerDoc::CheckNewFloppy( int index )
 	char name[_MAX_PATH];
 
 	if(is_floppy_by_index(index)) {
-		clear_all_caches();
 		enum_floppies();
 		OnOpenDocument("");
 		get_floppy_volume_file_name( index, name );
