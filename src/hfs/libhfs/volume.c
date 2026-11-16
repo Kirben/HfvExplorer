@@ -474,6 +474,7 @@ int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
  */
 void v_destruct(hfsvol *vol)
 {
+  FREE(vol->failure_message);
   FREE(vol->vbm);
 
   FREE(vol->ext.map);

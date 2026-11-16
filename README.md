@@ -11,6 +11,12 @@ Current filesystem support
 - Classic HFS: logical forks up to 2 GiB minus one byte, and image volumes up
   to 2 TiB minus 512 bytes. Host image offsets remain 64-bit. Larger forks
   belong on HFS+; oversized classic imports are rejected before creation.
+- Classic HFS metadata operations and fork shrinking have runtime undo for reported
+  write/short-write failures. If rollback also fails, further writes are disabled
+  and original sectors are saved in an HFSUNDO1 recovery file in the Windows temp
+  folder when possible; the error gives its path. These files require manual
+  source/media verification before recovery and are not automatically applied.
+  Runtime undo is not a persistent journal and does not protect against power loss.
 - HFS+ disk images: format, browse, import/export data and resource forks,
   overwrite files, create folders, rename entries and delete files or
   empty folders. File > Format HFS+ / HFSX image creates a new image (8 MiB minimum),

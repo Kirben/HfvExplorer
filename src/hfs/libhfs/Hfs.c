@@ -134,6 +134,7 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
 	}
 
       vol->flags  = 0;
+      vol->failure_message = 0;
       vol->pnum   = pnum;
       vol->vstart = 0;
       vol->vlen   = 0;
@@ -336,7 +337,7 @@ int hfs_umount(hfsvol *vol)
   char *saved_error = 0;
   if (v_getvol(&vol) < 0) return -1;
   if(vol->flags&HFS_WRITE_FAILED) {
-    result=-1;saved_errno=EIO;saved_error="Classic HFS rollback failed; volume was not cleanly closed";
+    result=-1;saved_errno=EIO;saved_error=vol->failure_message?vol->failure_message:"Classic HFS rollback failed; volume was not cleanly closed";
   }
   if (--vol->refs) return hfs_flush(vol);
 
@@ -374,6 +375,11 @@ int hfs_umount(hfsvol *vol)
   if (vol->next) vol->next->prev = vol->prev;
   if (vol == hfs_mounts) hfs_mounts = vol->next;
   if (vol == hfs_curvol) hfs_curvol = 0;
+  if(saved_error && saved_error==vol->failure_message) {
+    static char failure_after_close[512];
+    strncpy(failure_after_close,saved_error,sizeof(failure_after_close)-1);
+    failure_after_close[sizeof(failure_after_close)-1]=0;saved_error=failure_after_close;
+  }
   v_destruct(vol);
   if (result) { errno = saved_errno; hfs_error = saved_error; }
   return result;
@@ -475,6 +481,7 @@ int hfs_format(char *path, int pnum, char *vname)
     }
 
   vol.flags  = 0;
+  vol.failure_message = 0;
   vol.pnum   = pnum;
   vol.vstart = 0;
   vol.vlen   = 0;
