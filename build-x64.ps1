@@ -176,6 +176,11 @@ if($Test -or $TestFloppy) {
  $mediaReport=Join-Path $mediaDirectory 'media-control-report.txt'
  if(Test-Path -LiteralPath $mediaReport) {Get-Content -LiteralPath $mediaReport}
  if($mediaTest.ExitCode -ne 0) {throw "Media control tests failed; retained $mediaDirectory"}
+ $mutationDirectory=Join-Path $floppyDirectory 'file-mutations'
+ $mutationTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-file-mutations',('"'+$mutationDirectory+'"')) -WindowStyle Hidden -PassThru
+ if(!$mutationTest.WaitForExit(60000)){$mutationTest.Kill();throw 'File mutation tests timed out.'}
+ if($mutationTest.ExitCode -ne 0){throw "File mutation tests failed; retained $mutationDirectory"}
+ Get-Content (Join-Path $mutationDirectory 'file-mutations-report.txt')
  Write-Host "Simulated floppy fixtures retained at $floppyDirectory; no physical devices opened."
 }
 if($Test) {
