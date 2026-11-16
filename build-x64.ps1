@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $exclusive=Join-Path $hfsPlusDirectory 'storage-exclusive'
+ $exclusiveTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-storage-exclusive',('"'+$exclusive+'"')) -WindowStyle Hidden -PassThru
+ if(!$exclusiveTest.WaitForExit(60000)){$exclusiveTest.Kill();throw 'Exclusive access tests timed out.'}
+ Get-Content (Join-Path $exclusive 'exclusive-access-report.txt')
+ if($exclusiveTest.ExitCode -ne 0){throw "Exclusive access tests failed; retained $exclusive"}
  $mainMac=Join-Path $hfsPlusDirectory 'main-browser'
  $mainMacTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-main-mac-browser',('"'+$mainMac+'"')) -WindowStyle Hidden -PassThru
  if(!$mainMacTest.WaitForExit(60000)){$mainMacTest.Kill();throw 'Unified main-browser tests timed out.'}

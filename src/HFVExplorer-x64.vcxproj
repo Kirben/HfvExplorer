@@ -80,7 +80,7 @@
     <ClCompile Include="ImageOnly.cpp" />
     <ClCompile Include="ReadOnlyCd.cpp" />
     <ClCompile Include="MfsImage.cpp" />
-    <ClCompile Include="..\tests\MainMacBrowserTest.cpp" /><ClCompile Include="MainMacBrowser.cpp" /><ClCompile Include="MacBrowserModel.cpp" /><ClCompile Include="MacBrowserWindows.cpp" /><ClCompile Include="MacBrowserClassic.cpp" />
+    <ClCompile Include="..\tests\ExclusiveAccessTest.cpp" /><ClCompile Include="..\tests\MainMacBrowserTest.cpp" /><ClCompile Include="MainMacBrowser.cpp" /><ClCompile Include="MacBrowserModel.cpp" /><ClCompile Include="MacBrowserWindows.cpp" /><ClCompile Include="MacBrowserClassic.cpp" />
     <ClCompile Include="HfsPlus.cpp" />
     <ClCompile Include="HfsPlusFile.cpp" /><ClCompile Include="HfsPlusCd.cpp" /><ClCompile Include="..\tests\HfsPlusCdTest.cpp" />
     <ClCompile Include="HfsPlusUnicode.cpp" />

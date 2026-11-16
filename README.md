@@ -6,6 +6,23 @@ Build and run checks with build-x64.ps1. Older Windows versions still await
 VM execution tests. The original readme
 below describes the historical release and its obsolete drivers.
 
+Storage ownership
+-----------------
+- Writable HFS+/HFSX image handles and classic HFS image sessions deny other
+  writers through Windows file sharing, including alternate paths and hard links.
+  Conflicting HFVExplorer image sessions fail as busy; they are not silently
+  downgraded into a stale read-only view. Read-only image sessions can share with
+  other readers. Classic HFS operations retain their lock for the mounted session;
+  the classic GUI's separate preview/listing handle is not a writable session.
+- Ordinary floppy writes, formatting and full-image writes share a cross-process
+  guard keyed by the resolved device, acquired before probing/opening a writer.
+  The native Windows volume lock remains mandatory before dismount or writes.
+  Another HFVExplorer writer fails without touching media; locks release on close
+  or process termination. This does not make interrupted writes crash-atomic.
+- Tests include actual child-process image conflicts and simulated floppy APIs;
+  the exclusivity test never opens a physical floppy. Run the standalone GUI test
+  build with --verify-storage-exclusive NEW_OUTPUT_DIRECTORY, or build-x64.ps1 -Test.
+
 Current filesystem support
 --------------------------
 - Classic HFS: logical forks up to 2 GiB minus one byte, and image volumes up

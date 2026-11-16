@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "FloppyWriter.h"
+#include "FloppyWriteLease.h"
 // Scoped to the serialized copy worker. Browsing remains read-only.
 class DirectFloppy {
+ FloppyWriteLease lease_;
  FloppyWriteApi* api_;HANDLE handle_=INVALID_HANDLE_VALUE;int drive_=-1;
  BYTE* scratch_=nullptr;BYTE* pending_=nullptr;DWORD generation_=0,error_=0,pendingOffset_=0,pendingCount_=0;
  cachetype cache_={};bool locked_=false,writes_=false;

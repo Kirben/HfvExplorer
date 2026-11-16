@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "FloppyWriter.h"
+#include "FloppyWriteLease.h"
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -62,6 +63,9 @@ void FloppyWriter::Report(bool ok,int drive) {
 bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks,FloppyProgress progress,void* context,const std::vector<BYTE>* expectedOriginal) {
     error_=flushError_=0;writesStarted_=false;writtenTracks_=verifiedTracks_=0;plannedTracks_=160;diagnostics_.clear();Mark("Validate source image");
     if(drive<0 || drive>25 || !ValidateFloppyHfs(image) || (expectedOriginal && (formatTracks || expectedOriginal->size()!=kImage))) {error_=ERROR_INVALID_PARAMETER;Report(false,drive);return false;}
+    Mark("Acquire exclusive floppy access");
+    FloppyWriteLease lease;
+    if(!lease.Acquire(drive)){error_=GetLastError();Report(false,drive);return false;}
     std::vector<DWORD> tracks;
     for(DWORD offset=0;offset<kImage;offset+=kTrack)
         if(!expectedOriginal || memcmp(image.data()+offset,expectedOriginal->data()+offset,kTrack))tracks.push_back(offset);

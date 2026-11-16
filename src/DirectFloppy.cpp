@@ -28,13 +28,21 @@ DirectFloppy::~DirectFloppy(){
  if(scratch_)VirtualFree(scratch_,0,MEM_RELEASE);if(pending_)VirtualFree(pending_,0,MEM_RELEASE);cache_final(&cache_);
 }
 DirectFloppy* DirectFloppy::Current(int drive){return current&&current->drive_==drive?current:nullptr;}
-bool DirectFloppy::fail(DWORD error){if(!error_)error_=error?error:ERROR_IO_DEVICE;cache_clear(&cache_);SetLastError(error_);return false;}
+bool DirectFloppy::fail(DWORD error){
+ if(!error_)error_=error?error:ERROR_IO_DEVICE;cache_clear(&cache_);
+ if(current!=this){
+  if(handle_!=INVALID_HANDLE_VALUE){if(locked_)api_->Unlock(handle_);api_->Close(handle_);handle_=INVALID_HANDLE_VALUE;locked_=false;}
+  lease_.Release();
+ }
+ SetLastError(error_);return false;
+}
 bool DirectFloppy::verify(){DWORD n=0;if(error_)return fail(error_);if(!api_->Verify(handle_,n))return fail(GetLastError());return n==generation_?true:fail(ERROR_MEDIA_CHANGED);}
 bool DirectFloppy::Open(int drive){
 #ifdef HFV_FLOPPY_TESTING
  if(api_==&native)return fail(ERROR_NOT_SUPPORTED);
 #endif
  if(current||drive<0||drive>25)return fail(ERROR_INVALID_PARAMETER);
+ if(!lease_.Acquire(drive))return fail(GetLastError());
  ReadOnlyFloppy probe(api_);if(!probe.OpenDrive(drive)||!probe.FindHfs())return fail(probe.Error());
  if(probe.MediaSize()!=kSize)return fail(ERROR_NOT_SUPPORTED);
  if(!api_->Verify(probe.Handle(),generation_))return fail(GetLastError());probe.Close();

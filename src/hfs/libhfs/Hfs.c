@@ -101,8 +101,7 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
     hfsvol *check;
     for(check=hfs_mounts;check;check=check->next) {
       if(fhook_same_file(check->fd,path) && (check->pnum==0||check->pnum==pnum) &&
-         (((check->flags&HFS_READONLY)&&!(flags&(O_WRONLY|O_RDWR))) ||
-          (!(check->flags&HFS_READONLY)&&(flags&(O_WRONLY|O_RDWR))))) {
+         (!(check->flags&HFS_READONLY) || !(flags&(O_WRONLY|O_RDWR)))) {
         vol=check;break;
       }
     }
@@ -213,7 +212,7 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
       if (vol->fd < 0)
 	{
 	  if (vol->fd != -2)
-	    ERROR(errno, "error opening device");
+	    ERROR(errno, errno==EBUSY ? "image is in use by another storage session" : "error opening device");
 
 	  v_destruct(vol);
 
