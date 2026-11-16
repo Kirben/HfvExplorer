@@ -95,6 +95,17 @@ int RunFileMutationTest(const char* directory) {
   check(HFSIFACE_delete(image.GetBuffer(),const_cast<char*>(oversizedPath.c_str()))!=0,"oversized delete path accepted");image.ReleaseBuffer();
   check(HFSIFACE_rename(image.GetBuffer(),fileName,const_cast<char*>(oversizedPath.c_str()))!=0,"oversized rename path accepted");image.ReleaseBuffer();
   fprintf(report,"PASS: mutation wrappers reject missing volumes and oversized paths instead of reporting success.\n");
+  volume=hfs_mount(image.GetBuffer(),0,O_RDWR);image.ReleaseBuffer();check(volume!=nullptr,"mount rename-collision fixture");
+  char destinationFolder[]="MutationTest:Destination",folderBefore[]="MutationTest:FolderBefore",folderAfter[]="MutationTest:FolderAfter",folderChild[]="MutationTest:FolderBefore:Child";
+  check(hfs_mkdir(volume,destinationFolder)==0&&hfs_mkdir(volume,folderBefore)==0&&hfs_create(volume,folderChild,type,creator)==0&&hfs_umount(volume)==0,"create folder rename fixtures");
+  check(HFSIFACE_rename(image.GetBuffer(),fileName,destinationFolder)!=0,"label rename moved a file inside an existing folder");image.ReleaseBuffer();
+  char upperName[]="MutationTest:KEEP";
+  check(HFSIFACE_rename(image.GetBuffer(),fileName,upperName)==0,"case-only HFS rename rejected");image.ReleaseBuffer();
+  check(HFSIFACE_rename(image.GetBuffer(),upperName,fileName)==0,"case-only HFS rename restoration rejected");image.ReleaseBuffer();
+  check(HFSIFACE_rename(image.GetBuffer(),folderBefore,folderAfter)==0,"populated HFS folder rename failed");image.ReleaseBuffer();
+  volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen renamed folder");
+  char movedChild[]="MutationTest:FolderAfter:Child";hfsdirent renamedEntry;check(hfs_stat(volume,movedChild,&renamedEntry)==0&&hfs_stat(volume,fileName,&renamedEntry)==0,"folder rename detached children or collision moved source");check(hfs_umount(volume)==0,"close renamed folder");
+  fprintf(report,"PASS: label renames reject existing folders as destinations; case-only and populated-folder renames preserve entries.\n");
   CString external=root+"\\Outside",selected=root+"\\Selected",link=selected+"\\Junction";
   check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
   save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");

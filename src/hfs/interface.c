@@ -495,10 +495,15 @@ int HFSIFACE_rename( char *volpath, char *oldname, char *newname )
 		if(volinx	>= 0) {
 			vol = hfs_remount(hcwd_getvol(volinx), mount_flags(volpath));
 			if (vol != 0) {
-				if (hfs_rename(vol, mac_oldname, mac_newname) < 0) {
-					hfs_perror(mac_oldname);
-					result = 1;
-				} else result = 0;
+				hfsdirent source, destination;
+				if(hfs_stat(vol, mac_oldname, &source) >= 0) {
+					int found = hfs_stat(vol, mac_newname, &destination);
+					if(found >= 0 && destination.cnid != source.cnid) {
+						hfs_error="Rename destination already exists";errno=EEXIST;
+					} else if((found >= 0 || errno == ENOENT) && hfs_rename(vol, mac_oldname, mac_newname) >= 0)
+						result = 0;
+				}
+				if(result)hfs_perror(mac_oldname);
 				if (hfs_umount(vol) < 0 && result == 0) {
 					hfs_perror("Error closing HFS volume");
 					result = 1;
