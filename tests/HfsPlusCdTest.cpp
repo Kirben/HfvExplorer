@@ -165,7 +165,7 @@ Bytes load(const std::string &path) {
 }
 } // namespace
 extern bool TestAutomaticCdSelection(std::function<std::unique_ptr<Source>(int)>, CWnd *, int);
-extern bool TestHfsPlusCdBrowser(std::unique_ptr<Source>, CWnd *, std::function<void()>);
+extern bool TestHfsPlusMainCdBrowser(std::unique_ptr<Source>, CWnd *, std::function<void()>);
 int RunHfsPlusCdTest(const char *directory) {
     if (!CreateDirectoryA(directory, nullptr))
         return 2;
@@ -337,7 +337,7 @@ int RunHfsPlusCdTest(const char *directory) {
             media->delay = 30;
             storageUiTest = {};
             auto source = OpenCd(3, media); media->workerOnly = true;
-            check(TestHfsPlusCdBrowser(std::move(source), &owner, [&] { ++media->generation; }) && !media->wrongThread,
+            check(TestHfsPlusMainCdBrowser(std::move(source), &owner, [&] { ++media->generation; }) && !media->wrongThread,
                   "CD browser controls/media-loss invalidation/owner restoration");
         }
         owner.DestroyWindow();

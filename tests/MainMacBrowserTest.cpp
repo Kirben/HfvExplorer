@@ -60,6 +60,45 @@ struct List : CHFVExplorerListView {void PostNcDestroy()override{};};
 std::wstring Text(CListCtrl& list,int row){wchar_t text[1024]{};LVITEMW item{};item.iSubItem=0;item.pszText=text;item.cchTextMax=ARRAYSIZE(text);
     SendMessageW(list.m_hWnd,LVM_GETITEMTEXTW,row,reinterpret_cast<LPARAM>(&item));return text;}
 }
+
+bool TestAutomaticCdSelection(std::function<std::unique_ptr<HfsPlus::Source>(int)> open,
+                              CWnd *owner,int expected) {
+    unsigned opens=0;std::shared_ptr<MacBrowser::Volume> mounted;
+    auto factory=[&](int drive){++opens;auto source=open(drive);
+        if(!HfsPlus::Volume::Recognizes(*source))return std::shared_ptr<MacBrowser::Volume>();
+        try{return MacBrowser::FromHfsPlus(std::move(source),false);}
+        catch(const std::exception& e){throw MacBrowser::DetectedVolumeError(e.what());}};
+    auto cd=[](const char*)->UINT{return DRIVE_CDROM;};
+    for(const char* path:{"D:\\folder","image.dsk",""})
+        if(MacBrowser::OpenCdRoot(path,cd,factory))return false;
+    if(MacBrowser::OpenCdRoot("D:\\",[](const char*)->UINT{return DRIVE_FIXED;},factory)||opens)return false;
+    bool detected=false;auto result=ShowStorageWaitJob([&](Storage::Job&){
+        try{mounted=MacBrowser::OpenCdRoot("d:",cd,factory);}
+        catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};
+    },true);
+    int actual=result.code?(detected?-1:0):(mounted?1:0);
+    return actual==expected&&opens==1&&owner->IsWindowEnabled()&&
+        (!mounted||!mounted->Writable());
+}
+bool TestHfsPlusMainCdBrowser(std::unique_ptr<HfsPlus::Source> source,CWnd* owner,
+                             std::function<void()> changeMedia) {
+    auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());Tree tree;List list;
+    app.m_tree=&tree;app.m_list=&list;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;
+    auto& browser=MainMacBrowser::Get();bool valid=false;
+    try {
+        CMenu menu;Check(menu.LoadMenu(IDR_MAINFRAME)&&menu.GetMenuState(32902,MF_BYCOMMAND)==UINT(-1),"obsolete CD menu returned");
+        Check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),owner,100,nullptr)!=FALSE,"create CD tree");
+        Check(list.Create(nullptr,nullptr,WS_CHILD|LVS_REPORT,CRect(200,0,700,400),owner,101,nullptr)!=FALSE,"create CD list");
+        tree.Init();list.Initialize();std::shared_ptr<MacBrowser::Volume> volume;
+        auto mounted=ShowStorageWaitJob([&](Storage::Job&){volume=MacBrowser::FromHfsPlus(std::move(source),false);return Storage::Result{};},true);
+        Check(!mounted.code,"mount CD for main browser");int index=browser.AttachTestVolume(volume,"cd-main-test");
+        Check(browser.ShowTestFolder(index,2)&&!browser.Writable()&&owner->IsWindowEnabled(),"read-only main CD controls");
+        changeMedia();valid=!browser.ShowTestFolder(index,2)&&list.GetListCtrl().GetItemCount()==0&&owner->IsWindowEnabled();
+    }catch(const std::exception&){valid=false;}
+    browser.Clear();if(list.m_hWnd)list.DestroyWindow();if(tree.m_hWnd)tree.DestroyWindow();app.m_tree=nullptr;app.m_list=nullptr;
+    return valid;
+}
+
 int RunMainMacBrowserTest(const char* directory){
     if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;FILE* report=fopen((root+"\\main-mac-browser-report.txt").c_str(),"w");if(!report)return 2;
     try{
@@ -114,6 +153,12 @@ int RunMainMacBrowserTest(const char* directory){
         Tree tree;List list;app.m_tree=&tree;app.m_list=&list;
         Check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),&owner,100,nullptr)!=FALSE,"create real tree view");
         Check(list.Create(nullptr,nullptr,WS_CHILD|LVS_REPORT,CRect(200,0,700,400),&owner,101,nullptr)!=FALSE,"create real list view");tree.Init();list.Initialize();
+        storageUiTest={};auto failed=ShowStorageWaitJob([&](Storage::Job&){
+            source->Put(2,File(u"Slow failed import"),[](unsigned,uint64_t,void*,size_t){Sleep(250);throw HfsPlus::Error("injected slow read failure");},false);
+            return Storage::Result{};
+        },true);
+        Check(failed.code&&storageUiTest.timerTicks>0&&source->Writable()&&owner.IsWindowEnabled()&&app.m_pMainWnd==&owner,"slow failed import preserves responsive writable adapter and owner");
+        Reject([&]{Find(*source,2,u"Slow failed import");},"failed import left a catalog entry");
         auto& browser=MainMacBrowser::Get();int index=browser.AttachTestVolume(source,"source");Check(browser.ShowTestFolder(index,2),"show source root in main panes");
         auto& lc=list.GetListCtrl();int folderRow=-1;for(int i=0;i<lc.GetItemCount();++i)if(Text(lc,i)==L"Folder")folderRow=i;
         Check(folderRow>=0&&browser.Activate(folderRow),"main list folder activation");bool found=false;for(int i=0;i<lc.GetItemCount();++i)found|=Text(lc,i)==Wide(unicode);
@@ -137,7 +182,10 @@ int RunMainMacBrowserTest(const char* directory){
         for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Clipboard"){browser.Activate(row);break;}
         list.edit_paste();Reject([&]{source->Stat(moved);},"cut source was not removed after committed copy");Verify(*target,Find(*target,clipboardFolder,u"Move me"));
         fprintf(report,"PASS: existing main-list Copy, Paste and Delete commands use the shared adapter and restore the owner.\n");
+        target->Put(2,File(u"Readme"),Payload(),false);target->Put(2,File(u"README"),Payload(),false);
         int xIndex=browser.AttachTestVolume(target,"hfsx");Check(browser.ShowTestFolder(xIndex,2)&&browser.Writable(),"HFSX in main panes");
+        bool mixed=false,upper=false;for(int row=0;row<lc.GetItemCount();++row){mixed|=Text(lc,row)==L"Readme";upper|=Text(lc,row)==L"README";}
+        Check(mixed&&upper,"main browser retains case-distinct HFSX entries");
         int ciIndex=browser.AttachTestVolume(insensitive,"hfsx-ci");Check(browser.ShowTestFolder(ciIndex,2)&&browser.Writable(),"case-insensitive HFSX in main panes");
         auto large=std::make_shared<LargeDisplay>();int largeIndex=browser.AttachTestVolume(large,"large");Check(browser.ShowTestFolder(largeIndex,2)&&lc.GetItemCount()==1,"large-fork display");
         wchar_t sizeText[100]{};LVITEMW sizeItem{};sizeItem.iSubItem=FIELD_SIZE;sizeItem.pszText=sizeText;sizeItem.cchTextMax=ARRAYSIZE(sizeText);SendMessageW(lc.m_hWnd,LVM_GETITEMTEXTW,0,reinterpret_cast<LPARAM>(&sizeItem));
@@ -147,6 +195,20 @@ int RunMainMacBrowserTest(const char* directory){
         Check(browser.ShowTestFolder(cdIndex,2)&&!browser.Writable()&&storageUiTest.timerTicks>=2&&owner.IsWindowEnabled()&&!media->wrongThread,"slow CD metadata stays on worker and restores main owner");
         ++media->generation;Check(!browser.ShowTestFolder(cdIndex,2)&&lc.GetItemCount()==0&&owner.IsWindowEnabled()&&media->bytes==unchanged,"changed CD invalidates main list without writes");
         fprintf(report,"PASS: both HFSX comparison modes, 64-bit fork-size presentation, full-width catalog IDs, slow read-only CD metadata, media-change invalidation and owner restoration in main panes.\n");
+        auto featurePath=W(root+"\\..\\feature-links.dsk");
+        if(GetFileAttributesW(featurePath.c_str())!=INVALID_FILE_ATTRIBUTES){
+            auto feature=MacBrowser::OpenImage(featurePath);int featureIndex=browser.AttachTestVolume(feature,"links");
+            Check(browser.ShowTestFolder(featureIndex,2),"show link fixture");int linkRow=-1;
+            for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Linked folder")linkRow=row;
+            Check(linkRow>=0&&browser.Activate(linkRow),"open directory hard link in main browser");bool child=false;
+            for(int row=0;row<lc.GetItemCount();++row)child|=Text(lc,row)==L"Child";
+            Check(child&&!browser.Writable(),"linked folder contents and mutation restrictions");
+            auto selected=tree.GetTreeCtrl().GetSelectedItem();auto parent=tree.GetTreeCtrl().GetParentItem(selected);
+            tree.GetTreeCtrl().SelectItem(parent);browser.Select(tree.GetTreeCtrl().GetItemData(parent));
+            bool returned=false;for(int row=0;row<lc.GetItemCount();++row)returned|=Text(lc,row)==L"Linked folder";
+            Check(returned,"directory hard-link navigation returns to visible parent");
+            fprintf(report,"PASS: main-browser directory hard-link navigation returns to visible parent.\n");
+        }
         browser.Clear();list.DestroyWindow();tree.DestroyWindow();app.m_list=nullptr;app.m_tree=nullptr;owner.DestroyWindow();app.m_pMainWnd=nullptr;
         fprintf(report,"PASS: real main tree/list controls show Unicode names, open folders, refresh and restore the owner; no standalone browser or physical media used.\n");
     }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());fclose(report);return 1;}catch(CException* e){char message[512];e->GetErrorMessage(message,sizeof(message));e->Delete();fprintf(report,"FAIL: %s\n",message);fclose(report);return 1;}

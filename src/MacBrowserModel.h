@@ -57,6 +57,10 @@ public:
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable);
 std::shared_ptr<Volume> OpenImage(const std::wstring &path); // null = unrecognized
 std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = not HFS+/HFSX
+// Drive roots only; unrecognized/unreadable media falls back, recognized mount errors propagate.
+std::shared_ptr<Volume> OpenCdRoot(const char *root,
+    std::function<UINT(const char *)> driveType = {},
+    std::function<std::shared_ptr<Volume>(int)> open = {});
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.
