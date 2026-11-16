@@ -106,10 +106,10 @@ void copyout_get_last_open_file( char *path, int maxpath )
 
 /*
  * NAME:	do_macb()
- * DESCRIPTION:	perform copy using MacBinary II translation
+ * DESCRIPTION:	perform copy using MacBinary I/II translation
  */
 static
-int do_macb(hfsfile *ifile, int ofile)
+int do_macb(hfsfile *ifile, int ofile, int legacy)
 {
   hfsdirent ent;
   unsigned char buf[HFS_BLOCKSZ * 4];
@@ -140,10 +140,14 @@ int do_macb(hfsfile *ifile, int ofile)
   d_putl(&buf[91], d_tomtime(ent.crdate));
   d_putl(&buf[95], d_tomtime(ent.mddate));
 
-  buf[101] = ent.fdflags & 0xff;
-  buf[122] = buf[123] = 129;
-
-  d_putw(&buf[124], crc_macb(buf, 124, 0x0000));
+  d_putw(buf + 75, ent.fdlocation.v);
+  d_putw(buf + 77, ent.fdlocation.h);
+  buf[81] = (ent.flags & HFS_ISLOCKED) ? 1 : 0;
+  if (!legacy) {
+    buf[101] = ent.fdflags & 0xff;
+    buf[122] = buf[123] = 129;
+    d_putw(&buf[124], crc_macb(buf, 124, 0x0000));
+  }
 
   if (write(ofile, buf, MACB_BLOCKSZ) < MACB_BLOCKSZ)
     return -1;
@@ -714,7 +718,7 @@ void closefiles(hfsfile *ifile, int ofile, int *result)
  * NAME:	cpo->macb()
  * DESCRIPTION:	copy an HFS file to a UNIX file using MacBinary II translation
  */
-int cpo_macb(hfsvol *vol, char *srcname, char *dstname)
+static int cpo_macbinary(hfsvol *vol, char *srcname, char *dstname, int legacy)
 {
   hfsfile *ifile;
   int ofile, result = 0;
@@ -724,10 +728,18 @@ int cpo_macb(hfsvol *vol, char *srcname, char *dstname)
     return -1;
   if(!ifile)return 0;
 
-  result = do_macb(ifile, ofile);
+  result = do_macb(ifile, ofile, legacy);
   closefiles(ifile, ofile, &result);
 
   return result;
+}
+
+/* Both formats use .bin and identical 128-byte fork alignment. */
+int cpo_macb(hfsvol *vol, char *srcname, char *dstname) {
+  return cpo_macbinary(vol, srcname, dstname, 0);
+}
+int cpo_macb1(hfsvol *vol, char *srcname, char *dstname) {
+  return cpo_macbinary(vol, srcname, dstname, 1);
 }
 
 /*

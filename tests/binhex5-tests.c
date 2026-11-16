@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <io.h>
+#undef ERROR
+#include "hfs/libhfs/hfs.h"
+#include "hfs/libhfs/data.h"
+#include "hfs/copyin.h"
+#include "hfs/copyout.h"
+#include "hfs/crc.h"
+static void must(int ok,const char* action){if(!ok){fprintf(stderr,"FAIL: BinHex 5: %s (%s; %s; %s)\n",action,hfs_error?hfs_error:"",cpi_error,cpo_error);exit(1);}}
+static void save(const char* path,const unsigned char* bytes,unsigned size){HANDLE f=CreateFileA(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,0,NULL);DWORD wrote=0;must(f!=INVALID_HANDLE_VALUE,"create host fixture");must(WriteFile(f,bytes,size,&wrote,NULL)&&wrote==size,"write host fixture");CloseHandle(f);}
+static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}
+static unsigned char value(unsigned i,unsigned fork){return (unsigned char)((i*37)^(i>>3)^(fork*91));}
+static void verify(hfsvol*v,char*name,unsigned d,unsigned r){hfsfile*f=hfs_open(v,name);unsigned fork;unsigned char b[5000];must(f!=NULL,"open imported forks");for(fork=0;fork<2;fork++){unsigned n=fork?r:d,i;must(hfs_setfork(f,fork)==0,"choose fork");must(hfs_read(f,b,n)==n,"read imported fork");for(i=0;i<n;i++)must(b[i]==value(i,fork),"fork byte fidelity");must(hfs_read(f,b,1)==0,"fork EOF");}must(hfs_close(f)==0,"close imported forks");}
+int main(int argc,char**argv){
+ char image[1024],path[1024],badpath[1024],source[]="BH5:Source",target[]="BH5:Imported",label[]="BH5";
+ HANDLE host;LARGE_INTEGER length;hfsvol*v;unsigned cases[][2]={{0,0},{1,0},{0,1},{127,129},{128,128},{129,127},{4097,3073}};unsigned k,fork;
+ must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
+ sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
+ host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
+ must(hfs_format(image,0,label)==0,"format image");v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
+ for(k=0;k<sizeof(cases)/sizeof(cases[0]);k++){
+  hfsfile*f;hfsdirent original,restored;unsigned char bytes[5000],*exported;unsigned size,i;unsigned d=cases[k][0],r=cases[k][1];
+  if(k)must(hfs_delete(v,source)==0,"remove previous source");
+  must(hfs_create(v,source,"APPL","TEST")==0,"create source");f=hfs_open(v,source);must(f!=NULL,"open source");
+  for(fork=0;fork<2;fork++){unsigned n=fork?r:d;for(i=0;i<n;i++)bytes[i]=value(i,fork);must(hfs_setfork(f,fork)==0&&hfs_write(f,bytes,n)==n,"write source fork");}
+  must(hfs_fstat(f,&original)==0,"source metadata");original.fdflags=HFS_FNDR_ISINVISIBLE|HFS_FNDR_HASBUNDLE|HFS_FNDR_COLOR;original.fdlocation.v=-11;original.fdlocation.h=37;original.crdate=1600000000;original.mddate=1600000010;must(hfs_fsetattr(f,&original)==0&&hfs_close(f)==0,"set source metadata");
+  must(cpo_macb1(v,source,path)==0,"BinHex 5 export");exported=load(path,&size);
+  must(size==128+((d+127)&~127u)+((r+127)&~127u),"MacBinary I aligned file length");
+  must(exported[0]==0&&exported[74]==0&&exported[82]==0,"legacy header zero bytes");for(i=99;i<128;i++)must(exported[i]==0,"MacBinary I reserved tail zero");
+  must(!memcmp(exported+65,"APPLTEST",8)&&exported[73]==(unsigned char)(original.fdflags>>8),"type creator high Finder flags");
+  must((unsigned long)d_getl(exported+83)==d&&(unsigned long)d_getl(exported+87)==r,"unsigned fork lengths");
+  must(cpi_macb(path,v,target)==0,"MacBinary I import");verify(v,target,d,r);must(hfs_stat(v,target,&restored)==0,"imported metadata");
+  must(restored.fdflags==(original.fdflags&0xff00)&&restored.fdlocation.v==-11&&restored.fdlocation.h==37&&restored.crdate==original.crdate&&restored.mddate==original.mddate,"legacy metadata and low-flag limitation");
+  // A final fork need not carry transport padding. Inter-fork padding remains.
+  if(d||r){unsigned minimum=128+(r?((d+127)&~127u)+r:d);save(badpath,exported,minimum);must(cpi_macb(badpath,v,target)==0,"unpadded final fork import");verify(v,target,d,r);}
+  // Structural errors must be rejected before overwriting an existing target.
+  if(d||r){unsigned minimum=128+(r?((d+127)&~127u)+r:d);save(badpath,exported,minimum-1);must(cpi_macb(badpath,v,target)==-1&&strstr(cpi_error,"truncated"),"truncated source preflight");verify(v,target,d,r);}
+  exported[110]=1;save(badpath,exported,size);must(cpi_macb(badpath,v,target)==-1,"invalid legacy reserved tail");verify(v,target,d,r);free(exported);
+  must(cpo_macb(v,source,path)==0,"existing MacBinary II export");exported=load(path,&size);
+  must(exported[122]==129&&exported[123]==129&&(unsigned short)d_getw(exported+124)==crc_macb(exported,124,0),"MacBinary II version and CRC unchanged");
+  must(cpi_macb(path,v,target)==0,"MacBinary II import");verify(v,target,d,r);
+  exported[65]^=1;save(badpath,exported,size);must(cpi_macb(badpath,v,target)==-1&&strstr(cpi_error,"CRC"),"corrupt II must not downgrade to I");verify(v,target,d,r);free(exported);
+ }
+ {
+  unsigned char* b;unsigned size;hfsdirent e;unsigned i;
+  must(cpo_macb1(v,source,path)==0,"prepare legacy header edge tests");b=load(path,&size);
+  b[1]=63;memset(b+2,'A',63);save(badpath,b,size);must(cpi_macb(badpath,v,target)==0,"Pascal 63-byte name without terminator");verify(v,target,4097,3073);
+  b[1]=0;save(badpath,b,size);must(cpi_macb(badpath,v,target)==-1,"empty header name rejected");
+  b[1]=4;memcpy(b+2,"X:Y!",4);save(badpath,b,size);must(cpi_macb(badpath,v,target)==-1,"colon in name rejected");
+  b[1]=4;memcpy(b+2,"Name",4);b[81]=1;save(badpath,b,size);must(cpi_macb(badpath,v,target)==0&&hfs_stat(v,target,&e)==0&&(e.flags&HFS_ISLOCKED),"protected flag restored");
+  must(cpo_macb1(v,target,path)==0,"protected file export");free(b);b=load(path,&size);must(b[81]==1,"protected flag exported");free(b);
+  // Versioned files may have a secondary header; its rounded size is honored.
+  must(cpo_macb(v,source,path)==0,"secondary header fixture");b=load(path,&size);b=realloc(b,size+128);must(b!=NULL,"secondary header allocation");memmove(b+256,b+128,size-128);memset(b+128,0x5a,128);d_putw(b+120,3);d_putw(b+124,crc_macb(b,124,0));save(badpath,b,size+128);
+  {char other[]="BH5:Secondary";must(cpi_macb(badpath,v,other)==0,"MacBinary II secondary header skip");verify(v,other,4097,3073);}
+  // No silent signed-length overflow on either legacy fork.
+  for(i=0;i<2;i++){memset(b,0,128);b[1]=1;b[2]='X';b[83+4*i]=0x80;save(badpath,b,128);{char absent[]="BH5:TooLarge";must(cpi_macb(badpath,v,absent)==-1&&strstr(cpi_error,"bad file length")&&hfs_stat(v,absent,&e)==-1,"legacy fork limit preflight");}}
+  free(b);
+ }
+ must(hfs_umount(v)==0,"persist image");v=hfs_mount(image,0,O_RDONLY);must(v!=NULL,"reopen image");verify(v,target,4097,3073);must(hfs_umount(v)==0,"close image");
+ puts("PASS: BinHex 5/MacBinary I import/export, empty and aligned/unaligned forks, metadata/protected flag, Pascal names, unpadded final fork, preflight preservation, II CRC downgrade protection, secondary headers and Apple fork limits; synthetic files only");return 0;
+}

@@ -29,3 +29,6 @@ int cpi_double( char *, char *, hfsvol *, char * );
 int cpi_raw_resource( char *, hfsvol *, char * );
 
 void copyin_set_raw_param( char *type, char *creator, int strip );
+
+/* True only after this import has created/modified its destination. */
+int copyin_destination_opened(void);

@@ -47,11 +47,18 @@ Current filesystem support
   Internal journals grow automatically when a metadata transaction needs more
   space; growth requires a suitable contiguous free region on the image.
   The extents-overflow file retains the format's eight-inline-extent requirement.
+- Classic-HFS copy options include BinHex 5.0 (MacBinary I), exporting .bin
+  files with both forks, type/creator, dates, icon position, protection and the
+  original high-byte Finder flags. Automatic .bin imports accept I and II.
+  BinHex 4.0 (.hqx) and MacBinary II remain separate options; version I has no
+  header CRC or low-byte Finder flags. Legacy headers require zero reserved
+  bytes, and declared fork lengths are checked before replacing a destination.
+  The separate HFS+/HFSX browser still transfers raw forks only.
 - MFS remains read-only. Existing classic HFS CD/floppy support is unchanged.
 
 Tests: .\build-x64.ps1 -Test runs the full suite, including real HFS+ reads and
 writes beyond 2 GiB in both forks of HFS+ and HFSX images. -TestHfsPlus runs
-only the HFS+ / HFSX checks.
+only the HFS+ / HFSX checks. -TestBinHex runs the small BinHex 5 suite.
 Optional independent checks use tests\test-hfsplus-interop.ps1 with WSL and
 hfsprogs installed; neither is needed to run HFVExplorer. Tested on Windows 11;
 older Windows execution tests remain pending. No custom storage driver is used.

@@ -1,4 +1,4 @@
-param([switch]$Test,[switch]$TestFloppy,[switch]$TestCd,[switch]$TestHfsPlus)
+param([switch]$Test,[switch]$TestFloppy,[switch]$TestCd,[switch]$TestHfsPlus,[switch]$TestBinHex)
 $ErrorActionPreference='Stop'
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $instances=(& $vswhere -all -products '*' -format json | ConvertFrom-Json)
@@ -61,6 +61,13 @@ if($TestCd) {
  & "$PSScriptRoot\bin\x64\cd-readonly.exe" $cdCacheImage $cdCacheDirectory
  if($LASTEXITCODE){throw "CD cache tests failed; retained $cdCacheDirectory"}
  Write-Host "CD cache fixtures retained at $cdCacheDirectory; source image $cdCacheImage. No physical drives opened."
+}
+if($Test -or $TestBinHex) {
+ & $msbuild "$PSScriptRoot\tests\binhex5-tests.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
+ if($LASTEXITCODE){throw 'BinHex 5 test build failed.'}
+ $binhexDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-BinHex5-'+[Guid]::NewGuid().ToString('N'))
+ & "$PSScriptRoot\bin\x64\binhex5-tests.exe" $binhexDirectory
+ if($LASTEXITCODE){throw 'BinHex 5 tests failed.'}
 }
 if($Test) {
  & $msbuild "$PSScriptRoot\tests\fork-limits.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal

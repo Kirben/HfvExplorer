@@ -20,6 +20,7 @@
 extern char *cpo_error;
 
 int cpo_macb(hfsvol *, char *, char *);
+int cpo_macb1(hfsvol *, char *, char *); /* BinHex 5.0 / MacBinary I */
 int cpo_binh(hfsvol *, char *, char *);
 int cpo_text(hfsvol *, char *, char *);
 int cpo_raw(hfsvol *, char *, char *);

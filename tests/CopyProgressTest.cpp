@@ -5,6 +5,9 @@
 #include <fcntl.h>
 #include <vector>
 #include "CopyProgress.h"
+#include "resource.h"
+#include "DynCopyModeSelect.h"
+#include "OptionsPage2.h"
 #include "HostFileSizes.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
@@ -94,6 +97,22 @@ int RunCopyProgressTest(const char* directory) {
   auto macbinary=load(root+"\\Folder\\Nested\\Game.bin");
   check(macbinary.size()>=128+16512+resource.size() && !memcmp(macbinary.data()+128,data.data(),data.size()) &&
    !memcmp(macbinary.data()+128+16512,resource.data(),resource.size()),"MacBinary preserves both forks under progress");
+  CString legacyPath=root+"\\binhex5.bin";
+  auto legacyJob=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)root,(LPCSTR)legacyPath,0,0,'5'));
+  legacyJob->wait();check(legacyJob->result().code==0,"BinHex 5 worker export");
+  auto legacy=load(legacyPath);check(legacy.size()==macbinary.size(),"legacy fork alignment under worker");
+  for(unsigned i=99;i<128;++i)check(legacy[i]==0,"worker selected MacBinary I header");
+  check(!memcmp(legacy.data()+128,data.data(),data.size()) && !memcmp(legacy.data()+128+16512,resource.data(),resource.size()),"legacy worker export both forks");
+  CString damagedLegacy=root+"\\damaged.bin";
+  {CFile f;check(f.Open(damagedLegacy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create damaged import");f.Write(legacy.data(),(UINT)legacy.size()-200);f.Close();}
+  HFSIFACE_set_modein(0,0);
+  auto damagedJob=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)damagedLegacy,(LPCSTR)image,"CopyTest:Folder:Nested:Game",0,0,'a'));
+  damagedJob->wait();check(damagedJob->result().code!=0,"truncated MacBinary worker import rejected");
+  volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after rejected import");
+  {char game[]="CopyTest:Folder:Nested:Game";auto f=hfs_open(volume,game);std::vector<BYTE> d(data.size()),r(resource.size());check(f&&hfs_read(f,d.data(),(unsigned long)d.size())==d.size()&&hfs_setfork(f,1)==0&&hfs_read(f,r.data(),(unsigned long)r.size())==r.size()&&hfs_close(f)==0&&d==data&&r==resource,"preflight rejection preserves existing destination through interface cleanup");}
+  check(hfs_umount(volume)==0,"close preserved destination");
+  auto legacyImport=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,"CopyTest:Legacy imported",0,0,'a'));
+  legacyImport->wait();check(legacyImport->result().code==0,"automatic .bin worker import recognizes BinHex 5");
   auto exportedText=load(root+"\\Folder\\Text.txt");
   check(exportedText.size()==7 && !memcmp(exportedText.data(),"HELLO\r\n",7),"automatic text conversion unchanged");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen fixture");
@@ -213,6 +232,16 @@ int RunCopyProgressTest(const char* directory) {
   CWnd owner;CString ownerClass=AfxRegisterWndClass(0);
   check(owner.CreateEx(0,ownerClass,"Hidden copy owner",WS_OVERLAPPED,0,0,100,100,nullptr,0)!=FALSE,"create hidden copy owner");
   AfxGetApp()->m_pMainWnd=&owner;InitializeStorageUi();storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;
+  {
+   CDynCopyModeSelect dialog;dialog.m_outcopy=1;dialog.m_copy_mode=7;
+   check(dialog.Create(IDD_DYNAMIC_COPYMODE_SELECT,&owner)!=FALSE,"create copy mode dialog");
+   check(dialog.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCOUNT)==7 && dialog.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCURSEL)==6,"BinHex 5 dynamic selection mapping");
+   check(dialog.UpdateData(TRUE)&&dialog.m_copy_mode==7,"BinHex 5 saved mode mapping");dialog.DestroyWindow();
+   COptionsPage2 options;options.m_copyout_mode=7;options.m_copyin_mode=7;
+   check(options.Create(IDD_OPTIONS_PAGE_2,&owner)!=FALSE,"create transfer options");
+   check(options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCOUNT)==8&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCOUNT)==8&&options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCURSEL)==7&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCURSEL)==7,"persistent BinHex 5 choices preserve ask index");
+   options.DestroyWindow();HFSIFACE_set_modeout(7);check(HFSIFACE_copy_mode()=='5',"BinHex 5 mode dispatch");HFSIFACE_set_modeout(0);
+  }
   auto uiCopy=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden copy integration",true);
   check(uiCopy.code==0 && storageUiTest.disabledDuring && storageUiTest.enabledAfter && storageUiTest.dialogClosed && owner.IsWindowEnabled()&&storageUiTest.copyBarCount==2,"folder copy retains both bars and restores main window");
   storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;
@@ -230,7 +259,7 @@ int RunCopyProgressTest(const char* directory) {
   auto uiCancel=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden cancelled copy",true);
   check(uiCancel.error==ERROR_CANCELLED && storageUiTest.enabledAfter && owner.IsWindowEnabled(),"cancelled copy/conflict completion restores main window");
   owner.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;
-  fprintf(out,"PASS: recursive Automatic export, nested folders, both forks, text conversion, exact source byte/file progress and failure accounting, worker execution, directory totals, overwrite/skip/cancel/replace-all and source errors, hidden copy/conflict completion restoration, one bar for single files and two for folders (including one-file folders), one dialog across physical-copy phases; no physical devices.\n");
+  fprintf(out,"PASS: BinHex 5 worker import/export and preflight preservation, copy/options mode mapping; recursive Automatic export, nested folders, both forks, text conversion, exact source byte/file progress and failure accounting, worker execution, directory totals, overwrite/skip/cancel/replace-all and source errors, hidden copy/conflict completion restoration, one bar for single files and two for folders (including one-file folders), one dialog across physical-copy phases; no physical devices.\n");
  } catch(const std::exception& error) {copyout_set_progress(nullptr,nullptr);fprintf(out,"FAIL: %s\n",error.what());fclose(out);return 1;} catch(const char* error) {copyout_set_progress(nullptr,nullptr);fprintf(out,"FAIL: %s (HFS: %s)\n",error,hfs_error?hfs_error:"");fclose(out);return 1;}
  fclose(out);return 0;
 }

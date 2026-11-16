@@ -792,7 +792,8 @@ int HFSIFACE_copy_one_file(
 			}
 			if(result != 0) {
 				// new_source REUSED!
-				if(0 == build_target_dir_name( 0, 1, new_source, source, tmp ))
+				if((mode == '&' || copyin_destination_opened()) &&
+           0 == build_target_dir_name( 0, 1, new_source, source, tmp ))
 				{
 					hfs_delete(vol2, new_source);
 				}
@@ -1309,6 +1310,9 @@ void HFSIFACE_set_modeout( int outmode )
 		case 5:
 			HFSIFACE_copyout_mode = 'R';
 			break;
+		case 7:
+			HFSIFACE_copyout_mode = '5';
+			break;
 		case 6:
 			HFSIFACE_copyout_mode = 'x';
 			break;
@@ -1338,6 +1342,9 @@ void HFSIFACE_set_modein( int inmode, int appledouble )
 			break;
 		case 5:
 			HFSIFACE_copyin_mode = 'R';
+			break;
+		case 7:
+			HFSIFACE_copyin_mode = '5';
 			break;
 		case 6:
 			HFSIFACE_copyin_mode = 'x';

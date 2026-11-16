@@ -22,6 +22,8 @@ foreach($test in @('copy-progress','cd-image','cd-burn','find-files','floppy-men
  Run-Hidden $app @(('--verify-'+$test),(Join-Path $OutputDirectory $test))
 }
 Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--self-test')
+$binhex=Join-Path $here 'binhex5-tests.exe'
+if(Test-Path -LiteralPath $binhex){Run-Hidden $binhex @((Join-Path $OutputDirectory 'binhex5'))}
 $compression=Join-Path $here 'test-hfsplus-compression.ps1'
 if(Test-Path -LiteralPath $compression){& $compression -Directory (Join-Path $OutputDirectory 'native-compression')}
 'PASS: prerequisite policy, real release startup, simulated storage/copy/media/UI regressions.' | Set-Content (Join-Path $OutputDirectory 'summary.txt')
