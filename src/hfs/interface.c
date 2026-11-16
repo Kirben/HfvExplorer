@@ -695,8 +695,10 @@ int HFSIFACE_copy_one_file(
 	 * spellings and a destination folder can still identify the source itself. */
 	if(is_source_hfs && is_target_hfs && vol1 == tvol) {
 		hfsdirent from, to;
+		strcpy(new_source, target);
+		if(hfs_stat(tvol, target, &to) >= 0 && (to.flags & HFS_ISDIR))
+			build_target_dir_name(1, 1, new_source, source, target);
 		if(hfs_stat(vol1, source, &from) >= 0 &&
-		   build_target_dir_name(1, 1, new_source, source, target) == 0 &&
 		   hfs_stat(tvol, new_source, &to) >= 0 && from.cnid == to.cnid) {
 			hfs_error = "Source and destination are the same HFS file";
 			hfs_perror(source);
