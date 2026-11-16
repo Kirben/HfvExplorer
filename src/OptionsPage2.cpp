@@ -81,3 +81,12 @@ void COptionsPage2::OnCopyMap()
 	}
 	tmap_init();
 }
+
+BOOL COptionsPage2::OnInitDialog() {
+    CPropertyPage::OnInitDialog();
+    SendDlgItemMessage(IDC_COPYOUT_MODE, CB_ADDSTRING, 0, (LPARAM)"BinHex 5.0 (MacBinary I)");
+    SendDlgItemMessage(IDC_COPYIN_MODE, CB_ADDSTRING, 0, (LPARAM)"BinHex 5.0 (MacBinary I)");
+    SendDlgItemMessage(IDC_COPYOUT_MODE, CB_SETCURSEL, m_copyout_mode, 0);
+    SendDlgItemMessage(IDC_COPYIN_MODE, CB_SETCURSEL, m_copyin_mode, 0);
+    return TRUE;
+}

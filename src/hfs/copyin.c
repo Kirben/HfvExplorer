@@ -48,6 +48,8 @@
 extern int crlf_translation;
 
 char *cpi_error = "no error";
+static int copyin_opened = 0;
+int copyin_destination_opened(void) { return copyin_opened; }
 
 #define MACB_BLOCKSZ	128
 
@@ -80,7 +82,7 @@ void copyin_set_raw_param( char *type, char *creator, int strip )
 
 /*
  * NAME:	do_macb()
- * DESCRIPTION:	perform copy using MacBinary II translation
+ * DESCRIPTION:	perform copy using MacBinary I/II translation
  */
 static
 int do_macb(int ifile, hfsfile *ofile, unsigned long dsize, unsigned long rsize)
@@ -95,7 +97,7 @@ int do_macb(int ifile, hfsfile *ofile, unsigned long dsize, unsigned long rsize)
   while (dsize)
     {
       if (dsize < sizeof(buf))
-	chunk = (dsize + (MACB_BLOCKSZ - 1)) & ~(MACB_BLOCKSZ - 1);
+	chunk = rsize ? (dsize + (MACB_BLOCKSZ - 1)) & ~(MACB_BLOCKSZ - 1) : dsize;
       else
 	chunk = sizeof(buf);
 
@@ -128,7 +130,7 @@ int do_macb(int ifile, hfsfile *ofile, unsigned long dsize, unsigned long rsize)
   while (rsize)
     {
       if (rsize < sizeof(buf))
-	chunk = (rsize + (MACB_BLOCKSZ - 1)) & ~(MACB_BLOCKSZ - 1);
+	chunk = rsize;
       else
 	chunk = sizeof(buf);
 
@@ -314,6 +316,7 @@ int opensrc(char *srcname, char **dsthint, char *ext)
   int fd, len;
   static char name[HFS_MAX_FLEN + 1], *ptr;
 
+  copyin_opened = 0;
   if (strcmp(srcname, "-") == 0)
     {
       fd = dup(STDIN_FILENO);
@@ -445,6 +448,7 @@ hfsfile *opendst(hfsvol *vol, char *dstname, char *hint,
       return 0;
     }
 
+  copyin_opened = 1;
   file = hfs_open(vol, dstname);
   if (file == 0)
     {
@@ -493,7 +497,7 @@ void closefiles(int ifile, hfsfile *ofile, int *result)
 
 /*
  * NAME:	cpi->macb()
- * DESCRIPTION:	copy a UNIX file to an HFS file using MacBinary II translation
+ * DESCRIPTION:	copy a UNIX file to an HFS file using MacBinary I/II translation
  */
 int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
 {
@@ -504,6 +508,9 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
   unsigned char buf[MACB_BLOCKSZ];
   unsigned short crc;
   unsigned long dsize, rsize;
+  int legacy, i;
+  char macname[64];
+  unsigned secondary;
 
   ifile = opensrc(srcname, &dsthint, ".bin");
   if (ifile < 0)
@@ -516,47 +523,71 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
       return -1;
     }
 
-  if (buf[0] != 0 || buf[74] != 0)
+  if (buf[0] != 0 || buf[74] != 0 || buf[82] != 0)
     {
       cpi_error = "invalid MacBinary file header";
       close(ifile);
       return -1;
     }
 
+  /* BinHex 5.0 produces MacBinary I: no version fields or header CRC.
+     Require its reserved tail to be zero so a corrupt version-II header
+     cannot silently be accepted as version I. */
+  legacy = 1;
+  for (i = 99; i < MACB_BLOCKSZ; ++i)
+    if (buf[i]) legacy = 0;
   crc = d_getw(&buf[124]);
-
-  if (crc_macb(buf, 124, 0x0000) != crc)
+  if (!legacy && crc_macb(buf, 124, 0x0000) != crc)
     {
-      /* (buf[82] == 0) => MacBinary I? */
-
-      cpi_error = "unknown, unsupported, or corrupt MacBinary file";
-
+      cpi_error = "corrupt MacBinary II header (bad CRC)";
       close(ifile);
       return -1;
     }
-
-  if (buf[123] > 129)
+  if (!legacy && buf[123] > 129)
     {
       cpi_error = "unsupported MacBinary file version";
       close(ifile);
       return -1;
     }
-
-  if (buf[1] < 1 || buf[1] > 63 ||
-      buf[2 + buf[1]] != 0)
+  /* The name is Pascal text; a 63-byte name has no terminating byte in
+     the header. Do not interpret type bytes as part of a C string. */
+  if (buf[1] < 1 || buf[1] > 63 || memchr(buf + 2, 0, buf[1]) || memchr(buf + 2, ':', buf[1]))
     {
       cpi_error = "invalid MacBinary file header (bad file name)";
       close(ifile);
       return -1;
     }
-
+  memcpy(macname, buf + 2, buf[1]);
+  macname[buf[1]] = 0;
   dsize = d_getl(&buf[83]);
   rsize = d_getl(&buf[87]);
   if (dsize > HFS_MAX_FORK_SIZE || rsize > HFS_MAX_FORK_SIZE) {
     cpi_error = "bad file length: classic HFS maximum is 2 GiB minus one per fork"; close(ifile); return -1;
   }
 
-  dsthint = (char *) &buf[2];
+  secondary = legacy ? 0 : ((unsigned short)d_getw(buf + 120) + 127u) & ~127u;
+#ifdef WIN32
+  {
+    __int64 length = _filelengthi64(ifile);
+    hfv_size_t minimum = 128 + (hfv_size_t)secondary +
+      (rsize ? (((hfv_size_t)dsize + 127) & ~(hfv_size_t)127) : dsize) + rsize;
+    if ((length < 0 && strcmp(srcname, "-")) || (length >= 0 && (hfv_size_t)length < minimum)) {
+      cpi_error = "truncated MacBinary file: declared forks exceed source length";
+      close(ifile);
+      return -1;
+    }
+  }
+#endif
+  /* Secondary headers belong to II/III, never to unversioned BinHex 5. */
+  for (i = 0; (unsigned)i < secondary; i += MACB_BLOCKSZ) {
+    unsigned char skip[MACB_BLOCKSZ];
+    if (read(ifile, skip, sizeof(skip)) != sizeof(skip)) {
+      cpi_error = "truncated MacBinary secondary header";
+      close(ifile);
+      return -1;
+    }
+  }
+  dsthint = macname;
 
   memcpy(type,    &buf[65], 4);
   memcpy(creator, &buf[69], 4);
@@ -577,11 +608,18 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
       result = -1;
     }
 
-  ent.fdflags = (buf[73] << 8 | buf[101]) &
+  if (result == 0) {
+  ent.fdflags = (buf[73] << 8 | (legacy ? 0 : buf[101])) &
     ~(HFS_FNDR_ISONDESK | HFS_FNDR_HASBEENINITED | HFS_FNDR_RESERVED);
 
+  if (buf[81] & 1) ent.flags |= HFS_ISLOCKED;
+  else ent.flags &= ~HFS_ISLOCKED;
+  ent.fdlocation.v = d_getw(buf + 75);
+  ent.fdlocation.h = d_getw(buf + 77);
   ent.crdate = d_toutime(d_getl(&buf[91]));
   ent.mddate = d_toutime(d_getl(&buf[95]));
+
+  }
 
   if (result == 0 && hfs_fsetattr(ofile, &ent) < 0)
     {
