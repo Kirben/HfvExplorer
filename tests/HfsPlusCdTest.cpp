@@ -164,6 +164,7 @@ Bytes load(const std::string &path) {
     return b;
 }
 } // namespace
+extern bool TestAutomaticCdSelection(std::function<std::unique_ptr<Source>(int)>, CWnd *, int);
 extern bool TestHfsPlusCdBrowser(std::unique_ptr<Source>, CWnd *, std::function<void()>);
 int RunHfsPlusCdTest(const char *directory) {
     if (!CreateDirectoryA(directory, nullptr))
@@ -294,6 +295,43 @@ int RunHfsPlusCdTest(const char *directory) {
               "hidden CD owner");
         AfxGetApp()->m_pMainWnd = &owner;
         InitializeStorageUi();
+        check(CdDriveFromRoot("D:\\") == 3 && CdDriveFromRoot("d:") == 3 &&
+              CdDriveFromRoot("Z:/") == 25, "CD drive-root routing");
+        for (auto path : {"", "D:\\folder", "disc.img", "1:\\", "\\\\server\\share"})
+            check(CdDriveFromRoot(path) == -1, "non-root path triggered CD detection");
+        check(CdDriveFromRoot(nullptr) == -1, "null path triggered CD detection");
+        for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
+                          Volume::FormatKind::HfsXCaseInsensitive}) {
+            for (bool partitioned : {false, true}) {
+                auto media = std::make_shared<Disc>(fixture(kind, partitioned, false));
+                media->workerOnly = true;
+                check(TestAutomaticCdSelection([=](int drive) { return OpenCd(drive, media); }, &owner, 1)
+                      && !media->wrongThread, "automatic CD drive selection/browser routing");
+            }
+        }
+        for (int kind = 0; kind < 3; ++kind) {
+            Bytes bytes(1024 * 1024);
+            if (kind == 1) Disk::P16(bytes.data() + 1024, 0x4244); // classic HFS
+            if (kind == 2) { bytes[32768] = 1; memcpy(bytes.data() + 32769, "CD001", 5); }
+            auto media = std::make_shared<Disc>(bytes); media->workerOnly = true;
+            check(TestAutomaticCdSelection([=](int drive) { return OpenCd(drive, media); }, &owner, 0)
+                  && !media->wrongThread && bytes == media->bytes,
+                  "non-HFS+ CD did not fall back to normal drive browsing");
+        }
+        for (bool noMedia : {false, true}) {
+            auto media = std::make_shared<Disc>(pristine);
+            if (noMedia) media->openError = ERROR_NOT_READY;
+            else media->readError = ERROR_CRC;
+            check(TestAutomaticCdSelection([=](int drive) { return OpenCd(drive, media); }, &owner, 0),
+                  "empty/unreadable disc did not fall back to normal drive browsing");
+        }
+        {
+            auto bytes = pristine;
+            Disk::P32(bytes.data() + 1024 + 40, 0); // Invalid allocation-block size after signature detection.
+            auto media = std::make_shared<Disc>(std::move(bytes));
+            check(TestAutomaticCdSelection([=](int drive) { return OpenCd(drive, media); }, &owner, -1),
+                  "recognized damaged HFS+ disc did not report a mount error");
+        }
         {
             auto media = std::make_shared<Disc>(pristine);
             media->delay = 30;
@@ -308,7 +346,8 @@ int RunHfsPlusCdTest(const char *directory) {
                 "PASS: raw and Apple-partitioned/hybrid HFS+ and both HFSX modes on read-only CD sources, "
                 "both-fork export, exact full-track dump/reopen, mutation rejection, media checks for cached "
                 "catalogs and in-flight reads, latched errors, bounds/short/truncated reads, read-only "
-                "journal replay, responsive browser controls and owner restoration; simulated CDs only.\n");
+                "journal replay, automatic drive-root routing for HFS+ and both HFSX modes, classic/ISO/empty/error "
+                "fallback, damaged-volume errors, removed CD chooser, responsive browser controls and owner restoration; simulated CDs only.\n");
     } catch (const std::exception &e) {
         fprintf(report, "FAIL: %s\n", e.what());
         if (owner.m_hWnd)

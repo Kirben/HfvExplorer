@@ -513,34 +513,6 @@ class Browser : public CDialog {
         return CDialog::OnCommand(w, l);
     }
 };
-class CdDialog : public CDialog {
-  public:
-    int drive = -1;
-    std::function<bool(int)> available;
-    explicit CdDialog(CWnd *owner, std::function<bool(int)> probe = {})
-        : CDialog(IDD_HPLUS_CD, owner), available(std::move(probe)) {}
-    BOOL OnInitDialog() override {
-        CDialog::OnInitDialog(); auto combo = static_cast<CComboBox *>(GetDlgItem(IDC_CDI_DRIVE));
-        for (int n = 0; n < 26; ++n) {
-            char root[] = "A:\\"; root[0] += char(n);
-            if (available ? available(n) : GetDriveTypeA(root) == DRIVE_CDROM) {
-                int row = combo->AddString(root); combo->SetItemData(row, n);
-            }
-        }
-        if (combo->GetCount()) combo->SetCurSel(0);
-        GetDlgItem(IDOK)->EnableWindow(combo->GetCount() != 0);
-        return TRUE;
-    }
-    bool ReadDrive() {
-        auto combo = static_cast<CComboBox *>(GetDlgItem(IDC_CDI_DRIVE)); int row = combo->GetCurSel();
-        if (row == CB_ERR) return false;
-        drive = int(combo->GetItemData(row)); return true;
-    }
-    void OnOK() override {
-        if (!ReadDrive()) { AfxMessageBox("Select a CD drive."); return; }
-        CDialog::OnOK();
-    }
-};
 } // namespace
 int TryOpenHfsPlusBrowser(const char *path, CWnd *parent) {
     if (!path || !*path)
@@ -582,19 +554,38 @@ int TryOpenHfsPlusBrowser(const char *path, CWnd *parent) {
     Browser browser(std::move(source), std::move(volume), parent);
     return browser.DoModal() == -1 ? -1 : 1;
 }
-void OpenHfsPlusCdBrowser(CWnd *parent) {
-    CdDialog options(parent); if (options.DoModal() != IDOK) return;
+static int OpenSelectedCd(const char *path,
+    std::function<UINT(const char *)> driveType,
+    std::function<std::unique_ptr<HfsPlus::Source>(int)> open,
+    std::function<int(std::unique_ptr<HfsPlus::Source>, std::unique_ptr<HfsPlus::Volume>)> display,
+    std::function<void(const std::string &)> reportError, bool hidden = false) {
+    int drive = HfsPlus::CdDriveFromRoot(path);
+    if (drive < 0) return 0;
+    char root[] = "A:\\"; root[0] += char(drive);
+    if (driveType(root) != DRIVE_CDROM) return 0;
     std::unique_ptr<HfsPlus::Source> source;
     std::unique_ptr<HfsPlus::Volume> volume;
+    bool recognized = false;
     auto result = ShowStorageWaitJob([&](Storage::Job &) {
-        source = HfsPlus::OpenCd(options.drive);
-        if (!HfsPlus::Volume::Recognizes(*source))
-            throw HfsPlus::Error("No HFS+ or HFSX volume found. Classic HFS CDs use the main browser.");
-        volume.reset(new HfsPlus::Volume(*source, false));
+        source = open(drive);
+        recognized = HfsPlus::Volume::Recognizes(*source);
+        if (recognized) volume.reset(new HfsPlus::Volume(*source, false));
         return Storage::Result{};
-    });
-    if (result.code) { AfxMessageBox(result.message.c_str(), MB_OK | MB_ICONERROR); return; }
-    Browser browser(std::move(source), std::move(volume), parent, true); browser.DoModal();
+    }, hidden);
+    // Empty, classic HFS, ISO and unreadable discs retain the existing drive path.
+    if (!recognized) return 0;
+    if (result.code) {
+        reportError("Cannot open HFS+ / HFSX CD: " + result.message); return -1;
+    }
+    return display(std::move(source), std::move(volume));
+}
+int TryOpenHfsPlusCdBrowser(const char *path, CWnd *parent) {
+    return OpenSelectedCd(path, [](const char *root) { return GetDriveTypeA(root); },
+        [](int drive) { return HfsPlus::OpenCd(drive); },
+        [=](std::unique_ptr<HfsPlus::Source> source, std::unique_ptr<HfsPlus::Volume> volume) {
+            Browser browser(std::move(source), std::move(volume), parent, true);
+            return browser.DoModal() == -1 ? -1 : 1;
+        }, [](const std::string &message) { AfxMessageBox(message.c_str(), MB_OK | MB_ICONERROR); });
 }
 void FormatHfsPlusImage(CWnd *parent) {
     FormatDialog options(parent);
@@ -630,23 +621,34 @@ void FormatHfsPlusImage(CWnd *parent) {
     browser.DoModal();
 }
 #ifdef HFV_TESTING
+bool TestAutomaticCdSelection(std::function<std::unique_ptr<HfsPlus::Source>(int)> open,
+                              CWnd *owner, int expected) {
+    bool displayed = false, reported = false; unsigned opens = 0;
+    auto factory = [&](int drive) { ++opens; return open(drive); };
+    auto display = [&](std::unique_ptr<HfsPlus::Source> source, std::unique_ptr<HfsPlus::Volume> volume) {
+        auto result = ShowStorageWaitJob([&](Storage::Job &) {
+            displayed = !source->Writable() && !volume->Writable() && !volume->List().empty();
+            return Storage::Result{};
+        }, true);
+        return result.code ? -1 : 1;
+    };
+    auto cd = [](const char *) -> UINT { return DRIVE_CDROM; };
+    auto error = [&](const std::string &message) { reported = !message.empty(); };
+    for (const char *path : {"D:\\folder", "image.dsk", ""})
+        if (OpenSelectedCd(path, cd, factory, display, error, true) != 0) return false;
+    if (OpenSelectedCd("D:\\", [](const char *) -> UINT { return DRIVE_FIXED; },
+                       factory, display, error, true) != 0 || opens) return false;
+    int result = OpenSelectedCd("d:\\", cd, factory, display, error, true);
+    return result == expected && displayed == (expected == 1) && reported == (expected < 0) &&
+           opens == 1 && owner->IsWindowEnabled();
+}
 bool TestHfsPlusCdBrowser(std::unique_ptr<HfsPlus::Source> source, CWnd *owner,
                           std::function<void()> changeMedia) {
     struct Hidden { bool old = hiddenHfsPlusTest; Hidden() { hiddenHfsPlusTest = true; }
         ~Hidden() { hiddenHfsPlusTest = old; } } hidden;
     {
         CMenu menu; if (!menu.LoadMenu(IDR_MAINFRAME) ||
-            menu.GetMenuState(ID_FILE_OPENHFSPLUSCD, MF_BYCOMMAND) == UINT(-1)) return false;
-        CdDialog chooser(owner, [](int n) { return n == 3 || n == 4; });
-        if (!chooser.Create(IDD_HPLUS_CD, owner)) return false;
-        bool choices = chooser.SendDlgItemMessage(IDC_CDI_DRIVE, CB_GETCOUNT) == 2;
-        chooser.SendDlgItemMessage(IDC_CDI_DRIVE, CB_SETCURSEL, 1);
-        choices = choices && chooser.ReadDrive() && chooser.drive == 4;
-        chooser.DestroyWindow(); if (!choices) return false;
-        CdDialog empty(owner, [](int) { return false; });
-        if (!empty.Create(IDD_HPLUS_CD, owner)) return false;
-        bool disabled = !empty.GetDlgItem(IDOK)->IsWindowEnabled(); empty.DestroyWindow();
-        if (!disabled) return false;
+            menu.GetMenuState(32902, MF_BYCOMMAND) != UINT(-1)) return false;
     }
     std::unique_ptr<HfsPlus::Volume> volume;
     auto result = ShowStorageWaitJob([&](Storage::Job &) {

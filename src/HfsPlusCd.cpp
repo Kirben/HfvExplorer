@@ -4,6 +4,13 @@
 #include "HfsPlusDisk.h"
 #include "CdImage.h"
 namespace HfsPlus {
+int CdDriveFromRoot(const char *path) {
+    if (!path || !path[0] || path[1] != ':' ||
+        (path[2] && !((path[2] == '\\' || path[2] == '/') && !path[3]))) return -1;
+    char c = path[0]; if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+    return c >= 'A' && c <= 'Z' ? c - 'A' : -1;
+}
+
 namespace {
 class Cd final : public Source {
     std::shared_ptr<MediaImageSource> media_;

@@ -37,8 +37,9 @@ Current filesystem support
 - HFS+ and HFSX internal journals support read/write transactions and replay. A read-only
   open replays into memory without changing the image. Non-journaled writes
   are supported but cannot provide journaled recovery after interruption.
-- File > Open HFS+ / HFSX CD opens physical single-track data CDs read-only in
-  the Unicode browser, including Apple-partitioned/hybrid discs. Both forks,
+- Selecting a CD drive automatically detects HFS+ / HFSX and opens supported
+  single-track data CDs read-only in the Unicode browser, including Apple-partitioned
+  hybrids. After closing that browser, the Windows side remains available. Both forks,
   compressed files and hard links use the same readers as disk images. Media
   changes invalidate cached listings and require closing/reopening the browser.
   Internal journal replay stays in memory; no device write is issued.
