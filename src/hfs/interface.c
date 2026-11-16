@@ -1119,40 +1119,24 @@ int fill_with_nulls( HANDLE hf, long size )
 
 int init_format( char *volpath, hfv_size_t size )
 {
-	HANDLE hf;
-	int result = 0;
-
-	if(exists(volpath)) {
-		(void)DeleteFile( volpath );
-	}
-	if(!exists(volpath)) {
-		hf = CreateFile( 
-			volpath,
-			GENERIC_READ | GENERIC_WRITE,
-			0, // not shared now
-			NULL,
-			CREATE_NEW,
-			FILE_ATTRIBUTE_NORMAL,
-			NULL );
-		if(hf != INVALID_HANDLE_VALUE) {
-			DWORD ignored;
-			// Mark this new image sparse when its host filesystem supports it.
-			DeviceIoControl(hf,FSCTL_SET_SPARSE,NULL,0,NULL,0,&ignored,NULL);
-			/*
-			if(fill_with_nulls( hf, size )) {
-				result = 1;
-			}
-			*/
-			CloseHandle( hf );
-			result = set_file_size( volpath, size );
-
-			if(result == 0 && exists(volpath)) {
-				hfs_error = "No room.";
-				(void)DeleteFile( volpath );
-			}
-		}
-	}
-	return(result);
+ HANDLE file;LARGE_INTEGER end;DWORD ignored;int ok;
+ if(size < 800*1024 || size % 512 || size > 0xffffffffULL*512) {
+  hfs_error="Invalid classic HFS image size";return 0;
+ }
+ file=CreateFileA(volpath,GENERIC_READ|GENERIC_WRITE|DELETE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+ if(file==INVALID_HANDLE_VALUE) {
+  hfs_error="Cannot create a new image; choose an unused filename";return 0;
+ }
+ DeviceIoControl(file,FSCTL_SET_SPARSE,NULL,0,NULL,0,&ignored,NULL);
+ end.QuadPart=size;
+ ok=SetFilePointerEx(file,end,NULL,FILE_BEGIN)&&SetEndOfFile(file)&&FlushFileBuffers(file);
+ if(!ok) {
+  FILE_DISPOSITION_INFO removeCreated={TRUE};
+  hfs_error="Could not size or flush the new image";
+  /* Delete only the file we opened, never a replacement at the same pathname. */
+  SetFileInformationByHandle(file,FileDispositionInfo,&removeCreated,sizeof(removeCreated));
+ }
+ CloseHandle(file);return ok;
 }
 
 unsigned char desktopData[384] = {
@@ -1244,6 +1228,10 @@ int HFSIFACE_format(
 	int partno = 0;
 	char mac_vname[_MAX_PATH];
 	
+	if(!volpath || !vname || !*vname || strlen(vname)>HFS_MAX_VLEN || strchr(vname, ':')) {
+		hfs_error="Use an HFS volume name of 1 to 27 bytes without a colon";
+		return 1;
+	}
 	HFSIFACE_internal_init();
 	strcpy( mac_vname, vname );
 	pc_to_mac_charset(mac_vname);
