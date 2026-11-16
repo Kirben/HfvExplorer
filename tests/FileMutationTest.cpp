@@ -11,7 +11,8 @@ extern int fat_rename(char*,char*);
 extern int DeleteFATDir(CString&);
 extern int DeleteHostSelection(const CString&,bool);
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#undef ERROR
+#include "hfs/libhfs/internal.h"
 #include "hfs/interface.h"
 int do_delete_directory(hfsvol*,char*);
 }
@@ -66,6 +67,26 @@ int RunFileMutationTest(const char* directory) {
   file=hfs_open(volume,fileName);char data[8];check(file&&hfs_read(file,data,4)==4&&!memcmp(data,"DATA",4)&&hfs_setfork(file,1)==0&&hfs_read(file,data,8)==8&&!memcmp(data,"RESOURCE",8),"open-file mutation changed fork data");
   check(hfs_close(file)==0&&hfs_umount(volume)==0,"finish open-file mutation test");
   fprintf(report,"PASS: HFS delete/rename rejects open files and preserves both forks; rename succeeds after close.\n");
+  // A long replacement key can split a leaf after the source key was deleted.
+  CString fullImage=root+"\\full-rename.dsk";
+  {CFile f;check(f.Open(fullImage,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create full catalog fixture");f.SetLength(4*1024*1024);}
+  check(hfs_format(fullImage.GetBuffer(),0,label)==0,"format full catalog fixture");fullImage.ReleaseBuffer();
+  volume=hfs_mount(fullImage.GetBuffer(),0,O_RDWR);fullImage.ReleaseBuffer();check(volume!=nullptr,"mount full catalog fixture");
+  for(int i=0;i<64;++i){char name[64];sprintf_s(name,"MutationTest:File%08d",i);check(hfs_create(volume,name,type,creator)==0,"fill catalog leaves");}
+  check(hfs_umount(volume)==0,"close populated catalog");auto snapshot=load(fullImage);unsigned rejected=0;
+  for(int i=0;i<64;++i) {
+   {CFile f;check(f.Open(fullImage,CFile::modeCreate|CFile::modeWrite)!=FALSE,"reset full catalog fixture");f.Write(snapshot.data(),UINT(snapshot.size()));}
+   volume=hfs_mount(fullImage.GetBuffer(),0,O_RDWR);fullImage.ReleaseBuffer();check(volume!=nullptr,"mount catalog failure case");
+   auto freeNodes=volume->cat.hdr.bthFree;auto freeBlocks=volume->mdb.drFreeBks;
+   volume->cat.hdr.bthFree=0;volume->mdb.drFreeBks=0; // Inject exhausted catalog reserve/allocator.
+   char source[64],destination[80];sprintf_s(source,"MutationTest:File%08d",i);sprintf_s(destination,"MutationTest:File%08dabcdefghijklmnopqrs",i);
+   int result=hfs_rename(volume,source,destination);hfsdirent entry;bool retained=hfs_stat(volume,source,&entry)==0;
+   volume->cat.hdr.bthFree=freeNodes;volume->mdb.drFreeBks=freeBlocks;
+   check(hfs_umount(volume)==0,"close catalog failure case");
+   if(result<0){++rejected;check(retained,"failed rename removed its original catalog entry");}
+  }
+  check(rejected>0,"catalog exhaustion regression did not exercise a failed rename");
+  fprintf(report,"PASS: failed catalog-space renames preserve the source entry.\n");
   CString external=root+"\\Outside",selected=root+"\\Selected",link=selected+"\\Junction";
   check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
   save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");
