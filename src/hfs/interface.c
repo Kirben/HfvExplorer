@@ -840,6 +840,23 @@ int HFSIFACE_dir_copy(
 	char tmp[_MAX_PATH];
 	char tmp2[_MAX_PATH];
 
+	/* Reject copying a folder into itself or a descendant before creating it. */
+	if(is_source_hfs && is_target_hfs && (!vol2 || vol1 == vol2)) {
+		hfsdirent from, destination;
+		if(hfs_stat(vol1, source, &from) < 0 || hfs_stat(vol1, target, &destination) < 0) return 1;
+		if(destination.flags & HFS_ISDIR) {
+			long ancestor = destination.cnid;
+			unsigned depth = 0;
+			while(ancestor > 1) {
+				if(ancestor == from.cnid) {
+					hfs_error = "Cannot copy an HFS folder into itself or a descendant";
+					hfs_perror(source);return 1;
+				}
+				if(++depth > 1024 || hfs_dirinfo(vol1, &ancestor, 0) < 0) return 1;
+			}
+		}
+	}
+
 	result = build_target_dir_name( 
 		is_source_hfs, is_target_hfs, tdir, source, target );
 
