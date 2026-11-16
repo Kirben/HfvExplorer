@@ -47,8 +47,8 @@ int hookedStat(const char* path, struct _stat64* st) {
 int hookedOpen(const char* path, int flags, ...) {
     int drive = pathDrive(path);
     if (drive < 0) {
-        if (flags & _O_CREAT) { va_list ap; va_start(ap, flags); int mode = va_arg(ap,int); va_end(ap); return _open(path,flags,mode); }
-        return _open(path, flags);
+        if (flags & _O_CREAT) { va_list ap; va_start(ap, flags); int mode = va_arg(ap,int); va_end(ap); return fhook_open_image(path,flags,mode); }
+        return fhook_open_image(path, flags);
     }
     bool direct=physical_floppy_path(path)>=0 && DirectFloppy::Current(drive);
     if((flags&(_O_CREAT|_O_TRUNC|_O_APPEND))||(!direct&&(flags&(_O_WRONLY|_O_RDWR)))){errno=EROFS;return -1;}

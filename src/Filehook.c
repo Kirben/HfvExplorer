@@ -26,6 +26,8 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <share.h>
+#include <stdarg.h>
 
 #define _FHOOK_INTERNAL_
 #include "filehook.h"
@@ -45,8 +47,21 @@
 		Just make sure to give file name which does not exist.
 */
 
+// Native sharing is enforced by file identity, including hard links and path aliases.
+// Read handles share with readers; writers deny every other write-capable open.
+// A read-only libhfs session also denies a later writer while its caches are alive.
+int fhook_open_image(const char* path,int flags,...) {
+ int fd=-1,mode=0;errno_t result;
+ if(flags&_O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
+ result=_sopen_s(&fd,path,flags|_O_NOINHERIT,_SH_DENYWR,mode);
+ if(result){unsigned long error=0;_get_doserrno(&error);
+  errno=(error==ERROR_SHARING_VIOLATION||error==ERROR_LOCK_VIOLATION)?EBUSY:result;
+  return -1;}
+ return fd;
+}
+
 ftype_stat  fhook_stat  = _stat64;
-ftype_open  fhook_open  = open;
+ftype_open  fhook_open  = fhook_open_image;
 ftype_close fhook_close = close;
 ftype_sync fhook_sync = _commit;
 ftype_read  fhook_read  = read;
@@ -85,7 +100,7 @@ static void fhook_init_fsystem( void )
 void fhook_set_real_funcs( void )
 {
 	fhook_stat =  _stat64;
-	fhook_open =  open;
+	fhook_open =  fhook_open_image;
 	fhook_close = close;
 	fhook_sync = _commit;
 	fhook_read =  read;
