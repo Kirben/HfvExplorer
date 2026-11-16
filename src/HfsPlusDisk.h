@@ -262,11 +262,14 @@ struct Journal {
             remaining -= used;
         }
         Check(pos == end, "Journal replay did not reach end");
-        view.patches = std::move(recovered);
+        // Later journals override earlier sectors while preserving earlier replay
+        // patches not repeated after a journal relocation.
+        for (auto &patch : recovered)
+            view.patches[patch.first] = std::move(patch.second);
+        sequence = last ? last : sequence;
         if (writable) {
             view.Apply();
             start = end;
-            sequence = last ? last : sequence;
             StoreHeader();
         }
     }
