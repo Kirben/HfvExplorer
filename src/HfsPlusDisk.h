@@ -93,6 +93,12 @@ struct View {
         source.Write(base + offset, p, n);
     }
     void Apply() {
+        // A recovered volume header may change length after patches were staged.
+        // Validate the entire batch before the first home-block write.
+        Check(Range(base, length, source.Size()), "Invalid HFS+ view range");
+        for (const auto &p : patches)
+            Check(p.first <= UINT64_MAX / 512 && Range(p.first * 512, 512, length),
+                  "Staged metadata outside HFS+ volume");
         for (auto &p : patches)
             Write(p.first * 512, p.second.data(), 512);
         source.Flush();
