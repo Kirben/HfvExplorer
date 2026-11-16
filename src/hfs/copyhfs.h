@@ -20,3 +20,5 @@
 int do_copyhfshfs( hfsvol *vol1, hfsvol *vol2, char *source, char *dest );
 int do_copyindouble( hfsvol *vol, char *fdata, char *fres, char *dest );
 int cpi_double( char *fdata, char *fres, hfsvol *vol, char *dstname );
+
+int copyhfs_destination_opened(void);

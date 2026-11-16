@@ -104,6 +104,14 @@ int RunCopyProgressTest(const char* directory) {
    }
   }
   fprintf(out,"PASS: self-copy/self-move rejects exact paths, case aliases and containing folders, preserving both forks.\n");
+  auto missingHfs=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Missing:Game",(LPCSTR)image,"CopyTest:Folder:Nested:",0,0,'a'));
+  missingHfs->wait();check(missingHfs->result().code!=0,"missing HFS source fails");
+  volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after failed preflight");
+  file=hfs_open(volume,binary);check(file!=nullptr,"failed HFS source preflight preserves existing destination");
+  std::vector<BYTE> preservedFork(data.size());check(hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==data,"failed preflight preserves destination data");
+  preservedFork.resize(resource.size());check(hfs_setfork(file,1)==0&&hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==resource,"failed preflight preserves destination resource fork");
+  check(hfs_close(file)==0&&hfs_umount(volume)==0,"close preflight preservation check");
+  fprintf(out,"PASS: missing HFS source cannot delete an existing destination during failure cleanup.\n");
   Progress progress;copyout_set_progress(observe,&progress);int moved=0;
   CString target=root;char source[100]="CopyTest:Folder";HFSIFACE_set_modeout(0);
   check(HFSIFACE_copy(image.GetBuffer(),source,target.GetBuffer(),target.GetBuffer(),1,0,&moved)==0,"recursive automatic export");

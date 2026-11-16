@@ -46,6 +46,8 @@
 #endif
 
 char *cph_error = "no error";
+static int cph_opened;
+int copyhfs_destination_opened(void) { return cph_opened; }
 
 extern void hfs_perrorp(char *path);
 
@@ -143,6 +145,7 @@ hfsfile *opendst(hfsvol *vol, char *dstname, char *hint,
       return 0;
     }
 
+  cph_opened = 1;
   file = hfs_open(vol, dstname);
   if (file == 0)
     {
@@ -252,6 +255,7 @@ int do_copyhfshfs( hfsvol *vol1, hfsvol *vol2, char *source, char *dest )
   hfsdirent ent;
   int result = 0;
 
+  cph_opened = 0;
 	// Destination must be a directory
   if ( (hfs_stat(vol2, dest, &ent) < 0 || !(ent.flags & HFS_ISDIR))) {
     ERROR(ENOTDIR, 0);
