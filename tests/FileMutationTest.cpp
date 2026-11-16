@@ -56,6 +56,16 @@ int RunFileMutationTest(const char* directory) {
   check(do_delete_directory(volume,volumeRoot)!=0&&hfs_error&&strstr(hfs_error,"volume root"),"root delete must fail before traversal");
   check(hfs_umount(volume)==0,"close root-delete fixture");
   check(load(image)==before,"rejected HFS root deletion changed volume contents");
+  volume=hfs_mount(image.GetBuffer(),0,O_RDWR);image.ReleaseBuffer();check(volume!=nullptr,"mount open-file mutation fixture");
+  file=hfs_open(volume,fileName);check(file!=nullptr,"hold an HFS file open");
+  char renamed[]="MutationTest:Renamed";
+  check(hfs_delete(volume,fileName)<0,"deleting an open HFS file was accepted");
+  check(hfs_rename(volume,fileName,renamed)<0,"renaming an open HFS file was accepted");
+  check(hfs_close(file)==0,"close preserved HFS file");
+  check(hfs_rename(volume,fileName,renamed)==0&&hfs_rename(volume,renamed,fileName)==0,"closed HFS file cannot be renamed");
+  file=hfs_open(volume,fileName);char data[8];check(file&&hfs_read(file,data,4)==4&&!memcmp(data,"DATA",4)&&hfs_setfork(file,1)==0&&hfs_read(file,data,8)==8&&!memcmp(data,"RESOURCE",8),"open-file mutation changed fork data");
+  check(hfs_close(file)==0&&hfs_umount(volume)==0,"finish open-file mutation test");
+  fprintf(report,"PASS: HFS delete/rename rejects open files and preserves both forks; rename succeeds after close.\n");
   CString external=root+"\\Outside",selected=root+"\\Selected",link=selected+"\\Junction";
   check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
   save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");
