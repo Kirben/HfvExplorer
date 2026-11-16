@@ -25,6 +25,7 @@
 
 #include "ftypes.h"
 #include "HostOffsets.h"
+#include "BrowserDirectory.h"
 
 typedef struct {
 	int type;
@@ -54,6 +55,9 @@ typedef struct {
 class CHFVExplorerListView : public CListView
 {
  friend class MainMacBrowser;
+ std::map<LPARAM,BrowserDirectory::Row> m_browser_rows;
+ MacBrowser::Capabilities m_directory_capabilities;
+ bool m_directory_capabilities_known=false;
 protected:
 	CHFVExplorerListView();           // protected constructor used by dynamic creation
 	DECLARE_DYNCREATE(CHFVExplorerListView)
@@ -147,6 +151,12 @@ public:
 	int m_item_count;
 	int list_clear();
 	int initialize_volume( CString root_name, unsigned long id );
+    void SetBrowserCapabilities(MacBrowser::Capabilities caps){m_directory_capabilities=caps;m_directory_capabilities_known=true;}
+    bool BrowserDirectoryWritable()const{return !m_directory_capabilities_known||m_directory_capabilities.create;}
+    bool BrowserSelectionAllows(bool rename)const;
+    int InsertBrowserRow(const BrowserDirectory::Row&,HTREEITEM);
+    void SortBrowserRows(int column,bool ascending);
+    const BrowserDirectory::Row* BrowserRowAt(int row) const;
 	int list_insert( 
 		LPSTR name, 
 		int isdir, 

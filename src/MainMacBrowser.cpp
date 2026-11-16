@@ -3,6 +3,7 @@
 #include "HFVExplorer.h"
 #include "MainMacBrowser.h"
 #include "BrowserPresentation.h"
+#include "BrowserDirectory.h"
 #include "FindFilesDialog.h"
 #include "HfsPlusDialogs.h"
 #include "HfsPlusCd.h"
@@ -29,7 +30,7 @@ void TreeText(HTREEITEM item,const std::wstring& text) {
     TVITEMW value{};value.mask=TVIF_TEXT;value.hItem=item;value.pszText=const_cast<wchar_t*>(text.c_str());
     SendMessageW(App().m_tree->m_ct->m_hWnd,TVM_SETITEMW,0,reinterpret_cast<LPARAM>(&value));
 }
-void Cell(int row,int column,const std::wstring& text){BrowserPresentation::Cell(App().m_list->GetListCtrl().m_hWnd,row,column,text);}
+
 bool FileDialog(std::wstring& path,bool save) {
     wchar_t buffer[32768]{};wcsncpy_s(buffer,path.c_str(),_TRUNCATE);OPENFILENAMEW ofn{};
     ofn.lStructSize=sizeof(ofn);ofn.hwndOwner=AfxGetMainWnd()->m_hWnd;ofn.lpstrFile=buffer;ofn.nMaxFile=ARRAYSIZE(buffer);
@@ -130,7 +131,7 @@ struct MainMacBrowser::State {
             auto tree=App().m_tree;bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
             auto root=mounts[index].root;for(auto child=tree->m_ct->GetChildItem(root);child;){auto next=tree->m_ct->GetNextSiblingItem(child);tree->m_ct->DeleteItem(child);child=next;}
             tree->m_ct->SelectItem(root);tree->enable_selchange(enabled);
-            App().m_list->initialize_volume("",0);shown.clear();current=index;folder=2;return false;}
+            App().m_list->initialize_volume("",0);shown.clear();current=index;folder=2;folderMutable=false;return false;}
         entries.erase(std::remove_if(entries.begin(),entries.end(),[](const Entry& e){return !App().m_show_invisible_mac&&((uint16_t(e.finder[8])<<8|e.finder[9])&0x4000);}),entries.end());
         auto tree=App().m_tree;auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(App().m_list->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         // Replace only this directory's child nodes, never unrelated volumes.
@@ -138,12 +139,11 @@ struct MainMacBrowser::State {
         std::map<uint32_t,HTREEITEM> children;
         for(auto& e:entries)if(e.directory)children[e.id]=Insert(index,e.id,item,Wide(e.name));
         auto list=App().m_list;auto& lc=list->GetListCtrl();list->list_clear();list->destroy_pointers();list->initialize_volume("",id==2?0:ID_GOTO_PARENT);
-        for(const auto& e:entries){int row=-1;char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);POINT point{-1,-1};
-            int color=((unsigned(e.finder[8])<<8|e.finder[9])>>1)&7;
-            list->list_insert("",e.directory,e.directory?0:e.forks[0].size+e.forks[1].size,e.created,e.modified,type,creator,e.id,nullptr,nullptr,
-                e.directory?children[e.id]:nullptr,index,&point,FALSE,0,color,LIST_MAC,&row);
-            if(row>=0){Cell(row,FIELD_NAME,Wide(e.name)+(e.version?L" [version "+std::to_wstring(e.version)+L"]":L""));if(e.directory)Cell(row,FIELD_SIZE,L"Folder");
-                if(!e.readError.empty())Cell(row,FIELD_SIZE,L"Unreadable");}
+        auto capabilities=volume->Supports();if(!mutableFolder)capabilities.create=capabilities.rename=capabilities.remove=false;
+        list->SetBrowserCapabilities(capabilities);
+        for(const auto& e:entries){
+            auto row=BrowserDirectory::FromMac(e,index,volume->Supports());
+            list->InsertBrowserRow(row,e.directory?children[e.id]:nullptr);
         }
         shown=std::move(entries);current=index;folder=id;folderMutable=mutableFolder;control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);MainMacBrowser::Get().Sort(FIELD_NAME,true);
         if(App().m_pStatusBar){CString status;status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
@@ -359,21 +359,7 @@ void MainMacBrowser::Export(unsigned fork){if(!Active())return;auto& list=App().
             if(!FlushFileBuffers(file))throw HfsPlus::Error("Export flush failed");CloseHandle(file);
         }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}},true,true);}
 void MainMacBrowser::Sort(int column,bool ascending){
-    if(!Active())return;
-    struct SortContext {int column;bool ascending;std::map<uint32_t,Entry> entries;} context{column,ascending,{}};
-    for(const auto& e:state_->shown)context.entries[e.id]=e;
-    auto compare=[](LPARAM left,LPARAM right,LPARAM raw)->int {
-        auto& c=*reinterpret_cast<SortContext*>(raw);auto a=reinterpret_cast<list_lparam_struct*>(left),b=reinterpret_cast<list_lparam_struct*>(right);
-        if(a->type==LIST_SPEC||b->type==LIST_SPEC)return a->type==b->type?0:a->type==LIST_SPEC?-1:1;
-        auto ia=c.entries.find(uint32_t(a->id)),ib=c.entries.find(uint32_t(b->id));if(ia==c.entries.end()||ib==c.entries.end())return 0;
-        auto& x=ia->second;auto& y=ib->second;if(x.directory!=y.directory)return x.directory?-1:1;int result=0;
-        if(c.column==FIELD_SIZE){auto xs=x.forks[0].size+x.forks[1].size,ys=y.forks[0].size+y.forks[1].size;result=xs<ys?-1:xs>ys?1:0;}
-        else if(c.column==FIELD_CREATED||c.column==FIELD_MODIFIED){uint32_t xs=c.column==FIELD_CREATED?x.created:x.modified,ys=c.column==FIELD_CREATED?y.created:y.modified;result=xs<ys?-1:xs>ys?1:0;}
-        else if(c.column==FIELD_TYPE||c.column==FIELD_CREATOR){unsigned at=c.column==FIELD_TYPE?0:4;result=memcmp(x.finder.data()+at,y.finder.data()+at,4);}
-        if(!result)result=CompareStringOrdinal(reinterpret_cast<const wchar_t*>(x.name.data()),int(x.name.size()),reinterpret_cast<const wchar_t*>(y.name.data()),int(y.name.size()),TRUE)-CSTR_EQUAL;
-        return c.ascending?result:-result;
-    };
-    App().m_list->GetListCtrl().SortItems(compare,reinterpret_cast<DWORD_PTR>(&context));
+if(Active())App().m_list->SortBrowserRows(column,ascending);
 }
 bool MainMacBrowser::ContextMenu(CPoint point){
     if(!Active())return false;auto& list=App().m_list->GetListCtrl();

@@ -207,6 +207,7 @@ int CHFVExplorerListView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl 
 
 void CHFVExplorerListView::destroy_pointers()
 {
+ m_browser_rows.clear();
 	int i, count = m_pointer_array->GetSize();
 	DWORD_PTR dw;
 	list_lparam_struct *p;
@@ -327,7 +328,6 @@ CHFVExplorerListView::~CHFVExplorerListView()
 		delete m_pimagelistSmall;
 		m_pimagelistSmall = 0;
 	}
-	((CHFVExplorerDoc*)m_pDocument)->clear_hash_table();
 	destroy_pointers();
 	delete m_pointer_array;
 }
@@ -524,7 +524,10 @@ int CHFVExplorerListView::initialize_list()
 
 int CHFVExplorerListView::list_clear()
 {
+    auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+    if(app->m_pre&&IsWindow(app->m_pre->GetSafeHwnd()))app->m_pre->set_file(nullptr);
 	m_cl->DeleteAllItems();
+ destroy_pointers();m_directory_capabilities_known=false;
 	m_item_count = 0;
 	return(1);
 }
@@ -557,146 +560,16 @@ int CHFVExplorerListView::list_insert(
 		int finder_color, int storageType, int *insertedRow
 )
 {
-	LV_ITEM	lvitem;
-	int image, iActualItem;
-	char buf[200];
-
-	// add_to_icon_cache( hicon32 );
-	// add_to_icon_cache( hicon16 );
-
-	if(isdir) {
-		image = 0;
-	} else if(strcmp(stype,"|!@$") == 0) {
-		image = 8;
-	} else if(strcmp(stype,"APPL") == 0) {
-		image = 4;
-	} else if(strcmp(stype,"FFIL") == 0 ||
-				strcmp(stype,"ffil") == 0 ||
-				strcmp(stype,"tfil") == 0) {
-		image = 6;
-	} else if(strcmp(stype,"DFIL") == 0 ||
-				strcmp(stype,"dfil") == 0) {
-		image = 10;
-	} else if(strcmp(stype,"TEXT") == 0 ||
-				strcmp(stype,"PICT") == 0 ||
-				strcmp(stype,"ttxt") == 0 ||
-				strcmp(stype,"ttro") == 0) {
-		image = 11;
-	} else if(strcmp(stype,"ZSYS") == 0 ||
-				strcmp(stype,"CLIP") == 0 ||
-				strcmp(stype,"FNDR") == 0) {
-		image = 7;
-	} else if(strcmp(stype,"PREF") == 0 ||
-				strcmp(stype,"pref") == 0) {
-		image = 9;
-	} else if(strcmp(stype,"fdrp") == 0) {
-		// Folder alias
-		image = 0;
-	} else {
-		// image = 1;
-		image = 8;
-	}
-
-	if(hicon32 || hicon16) {
-		image = m_pimagelist->GetImageCount();
-		m_pimagelist->Add(hicon32 ? hicon32 : hicon16);
-		m_pimagelistSmall->Add(hicon16 ? hicon16 : hicon32);
-	}
-
-	lvitem.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
-	lvitem.iItem = m_item_count;
-	lvitem.iSubItem = FIELD_NAME;
-	lvitem.pszText = name;
-	lvitem.iImage = image;
-	lvitem.lParam = make_lparam( storageType, volinx, id, "", isdir, htree,
-		hicon32 ? hicon32 : hicon16, hicon16 ? hicon16 : hicon32,
-		creation_date, 0, modification_date, 0, finder_color );
-
-	lvitem.state = 0;
-	lvitem.stateMask = 0;
-
-	if(m_cl->GetItemCount() == 0) {
-		lvitem.mask |= LVIF_STATE;
-		lvitem.state = LVIS_FOCUSED | LVIS_SELECTED;
-		lvitem.stateMask = LVIS_FOCUSED | LVIS_SELECTED;
-	}
-
-	iActualItem = m_cl->InsertItem(&lvitem);
-    if(insertedRow)*insertedRow=iActualItem;
-
-	if(isdir) {
-		sprintf( buf, "%I64u items", (hfv_size_t)size_in_bytes );
-	} else {
-		sprintf( buf, "%I64u KB", ((hfv_size_t)size_in_bytes + 1023) / 1024 );
-	}
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_SIZE;
-	lvitem.pszText = buf;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	mac_date_to_string( creation_date, buf );
-	// wsprintf( buf, "%08x", creation_date );
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_CREATED;
-	lvitem.pszText = buf;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	mac_date_to_string( modification_date, buf );
-	// wsprintf( buf, "%08x", modification_date );
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_MODIFIED;
-	lvitem.pszText = buf;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_TYPE;
-	lvitem.pszText = stype;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_CREATOR;
-	lvitem.pszText = screator;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_LABEL;
-	lvitem.pszText = get_label_text( finder_color );
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	// not so simple
-	if(((CHFVExplorerApp *)AfxGetApp())->m_mac_window_mode) {
-		POINT p;
-		if(ppoint->x == -1 && ppoint->y == -1) is_inited = 0;
-		// 0,0 is quite difficult in practice...
-		if(is_inited || is_inside_magic(ppoint->x,ppoint->y)) {
-			p.x = unmagic(ppoint->x) - m_mac_origo.x;
-			p.y = unmagic(ppoint->y) - m_mac_origo.y;
-			// p.y = (int)( (float)p.y * 1.20 );
-			m_cl->SetItemPosition(iActualItem, p);
-		}
-	}
-
-	m_item_count++;
-
-	if(((CHFVExplorerApp *)AfxGetApp())->m_show_labels && finder_color) {
-		m_cl->SetItemState( iActualItem, INDEXTOOVERLAYMASK(finder_color), LVIS_OVERLAYMASK );
-	}
-
-	// UpdateWindow();
-
-	return(1);
+BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=uint32_t(id);
+ row.entry.id=row.id;row.entry.name=BrowserDirectory::FromAnsi(name);row.entry.directory=isdir!=0;
+ row.entry.created=creation_date;row.entry.modified=modification_date;row.entry.datesValid=true;
+ row.created=BrowserDirectory::MacTime(creation_date);row.modified=BrowserDirectory::MacTime(modification_date);
+ if(isdir){row.countKnown=true;row.directoryItems=size_in_bytes;}else row.entry.forks[0].size=size_in_bytes;
+ memcpy(row.entry.finder.data(),stype,(std::min)(size_t(4),strlen(stype)));
+ memcpy(row.entry.finder.data()+4,screator,(std::min)(size_t(4),strlen(screator)));
+ row.entry.finder[9]=BYTE(finder_color<<1);row.icon16=hicon16;row.icon32=hicon32;
+ if(ppoint)row.point=*ppoint;row.initialized=is_inited!=FALSE;row.finderMode=finder_view_mode;
+ int result=InsertBrowserRow(row,htree);if(insertedRow)*insertedRow=result;return result>=0;
 }
 
 // Use magic square to tell Finder where to put the item.
@@ -727,20 +600,7 @@ void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
 	}
 }
 
-void pc_date_to_string( FILETIME *time, char *buf )
-{
-	SYSTEMTIME sys;
-	FileTimeToSystemTime( time, &sys );
-	wsprintf( 
-		buf, "%04d-%02d-%02d %02d:%02d:%02d", 
-		sys.wYear,
-		sys.wMonth,
-		sys.wDay,
-		sys.wHour,
-		sys.wMinute,
-		sys.wSecond
-		);
-}
+
 
 int CHFVExplorerListView::list_fat_insert(
 		LPSTR name, 
@@ -757,95 +617,13 @@ int CHFVExplorerListView::list_fat_insert(
 		int volinx
 )
 {
-	LV_ITEM	lvitem;
-	int image, iActualItem;
-	char buf[200];
-
-	// add_to_icon_cache( hicon32 );
-	// add_to_icon_cache( hicon16 );
-
-	if(isdir) {
-		image = 12; // 0;
-	} else {
-		image = 1;
-	}
-
-	if(hicon16 || hicon32) {
-		image = m_pimagelistSmall->GetImageCount();
-		m_pimagelistSmall->Add(hicon16 ? hicon16 : hicon32);
-		m_pimagelist->Add(hicon32 ? hicon32 : hicon16);
-	}
-
-	lvitem.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
-	lvitem.iItem = m_item_count;
-	lvitem.iSubItem = FIELD_NAME;
-	lvitem.pszText = name;
-	lvitem.iImage = image;
-	lvitem.lParam = make_lparam( LIST_FAT, volinx, 0, fullpath, isdir, htree,
-				hicon32 ? hicon32 : hicon16, hicon16 ? hicon16 : hicon32,
-				creation_date->dwLowDateTime, creation_date->dwHighDateTime,
-				modification_date->dwLowDateTime, modification_date->dwHighDateTime,
-				FINDER_COLOR_NONE
-	);
-	if(m_cl->GetItemCount() == 0) {
-		lvitem.mask |= LVIF_STATE;
-		lvitem.state = LVIS_FOCUSED | LVIS_SELECTED;
-		lvitem.stateMask = LVIS_FOCUSED | LVIS_SELECTED;
-	}
-	
-	iActualItem = m_cl->InsertItem(&lvitem);
-
-	if(isdir) {
-		sprintf( buf, "%I64u items", (hfv_size_t)size_in_bytes );
-	} else {
-		sprintf( buf, "%I64u KB", ((hfv_size_t)size_in_bytes + 1023) / 1024 );
-	}
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_SIZE;
-	lvitem.pszText = buf;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	pc_date_to_string( creation_date, buf );
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_CREATED;
-	lvitem.pszText = buf;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	pc_date_to_string( modification_date, buf );
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_MODIFIED;
-	lvitem.pszText = buf;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_TYPE;
-	lvitem.pszText = stype;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_CREATOR;
-	lvitem.pszText = screator;
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-
-	lvitem.mask = LVIF_TEXT;
-	lvitem.iItem = iActualItem;
-	lvitem.iSubItem = FIELD_LABEL;
-	lvitem.pszText = get_label_text( FINDER_COLOR_NONE );
-	lvitem.iImage = 0; // don't care
-	m_cl->SetItem(&lvitem);
-	
-	m_item_count++;
-	return(1);
+BrowserDirectory::Row row;row.storageType=LIST_FAT;row.volume=volinx;row.path=fullpath;
+ row.entry.name=BrowserDirectory::FromAnsi(name);row.entry.directory=isdir!=0;
+ row.created=BrowserDirectory::Ticks(*creation_date);row.modified=BrowserDirectory::Ticks(*modification_date);
+ if(isdir){row.countKnown=true;row.directoryItems=size_in_bytes;}else row.entry.forks[0].size=size_in_bytes;
+ memcpy(row.entry.finder.data(),stype,(std::min)(size_t(4),strlen(stype)));
+ memcpy(row.entry.finder.data()+4,screator,(std::min)(size_t(4),strlen(screator)));
+ row.icon16=hicon16;row.icon32=hicon32;return InsertBrowserRow(row,htree)>=0;
 }
 
 int CHFVExplorerListView::FillList()
@@ -1133,6 +911,7 @@ int ask_dir( char *new_name )
 BOOL CHFVExplorerListView::new_folder(void)
 {
  if(MainMacBrowser::Get().NewFolder())return TRUE;
+ if(!BrowserDirectoryWritable())return FALSE;
 	CHFVExplorerApp	*pApp;
 	CTreeCtrl *tc;
 	HFVExplorerTreeView *tv;
@@ -3284,6 +3063,7 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 {
  if(MainMacBrowser::Get().Delete(confirm!=FALSE))return;
+ if(!BrowserSelectionAllows(false))return;
 	int inx = -1, count = 0;
 	int stype, isdir;
 	CString nam, fullpath;
@@ -4781,7 +4561,7 @@ void CHFVExplorerListView::OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult)
 
 void CHFVExplorerListView::OnBeginlabeledit(NMHDR* pNMHDR, LRESULT* pResult) 
 {
- if(MainMacBrowser::Get().Active()){*pResult=1;return;}
+ if(MainMacBrowser::Get().Active()||!BrowserSelectionAllows(true)){*pResult=1;return;}
 	LV_DISPINFO* pDispInfo = (LV_DISPINFO*)pNMHDR;
 
 	m_editing_item = pDispInfo->item.iItem;
@@ -4857,127 +4637,10 @@ DWORD CHFVExplorerListView::stupid_get_date( int inx, int whichone )
 }
 */
 
-typedef struct {
-	CString *cs;
-	DWORD_PTR save_data;
-} SortString;
-
-int CALLBACK clCompareFunc(
-	LPARAM lParam1, 
-	LPARAM lParam2, 
-  LPARAM lParamSort
-)
-{
-	BOOL is_ascending = (lParamSort);
-
-	if(!is_ascending) {
-		LPARAM temp = lParam1;
-		lParam1 = lParam2;
-		lParam2 = temp;
-	}
-	// Sort strings
-	if(lParam1 == 0 && lParam2 == 0) return(0);
-	if(lParam1 == 0) return(-1);
-	if(lParam2 == 0) return(1);
-	// Compiler optimizes the variables away.
-	SortString *s1 = (SortString *)lParam1, *s2 = (SortString *)lParam2;
-	return( s1->cs->CompareNoCase(*(s2->cs)) );
+void CHFVExplorerListView::do_report_sort(void) {
+ SortBrowserRows(m_sorted_by_column,m_sort_is_ascending!=FALSE);
 }
 
-// This one does NOT need to be fast, the sort callback above NEEDS to be fast,
-// since this is O(n) but the callback is probably O(n*log(n))
-void CHFVExplorerListView::do_report_sort(void) 
-{
- if(MainMacBrowser::Get().Active()){MainMacBrowser::Get().Sort(m_sorted_by_column,m_sort_is_ascending!=FALSE);return;}
-	int i, count, isdir, space_inx;
-	CString *cs, zeroes;
-	SortString *ss;
-
-	if( (GetWindowLong(m_cl->m_hWnd,GWL_STYLE) & LVS_REPORT) == 0 ) return;
-
-	zeroes = "000000000000000";
-
-	count = m_cl->GetItemCount();
-
-	for(i=0; i<count; i++) {
-		ss = new SortString;
-		ss->cs = cs = new CString;
-		if(get_inx_type(i) == LIST_SPEC) {
-			if(m_sort_is_ascending) {
-				*cs = "";
-			} else {
-				*cs = "~~~~~";
-			}
-		} else {
-			isdir = get_inx_isdir(i);
-			*cs = m_cl->GetItemText(i,m_sorted_by_column);
-			switch( m_sorted_by_column ) {
-				case FIELD_NAME:
-				case FIELD_TYPE:
-				case FIELD_CREATOR:
-				case FIELD_LABEL:
-					break;
-				case FIELD_SIZE:
-					space_inx = cs->Find(' ');
-					if(space_inx >= 0) {
-						// "KB 0000000123"
-						*cs = cs->Mid(space_inx+1) + zeroes.Left(10-space_inx) + cs->Left(space_inx);
-					}
-					break;
-				case FIELD_CREATED:
-				case FIELD_MODIFIED:
-					// Kicked out.
-					/*
-					if(cs->GetLength() > 0) {
-						if( isalpha(*cs[0]) ) {
-							// Mac date
-							DWORD date_long;
-							// oh wow, what a waste of cpu cycles!
-							date_long = stupid_get_date( i, m_sorted_by_column );
-							cs->Format( "%09uld", date_long );
-						}
-					}
-					*/
-					DWORD_PTR dat; DWORD lo = 0, hi = 0;
-					dat = m_cl->GetItemData(i);
-					if(dat) {
-						if(m_sorted_by_column == FIELD_CREATED) {
-							get_lparam_creation( dat, &lo, &hi );
-						} else {
-							get_lparam_modification( dat, &lo, &hi );
-						}
-					}
-					cs->Format( "%16u%16u", hi, lo );
-					break;
-			}
-
-			if(m_sorted_by_column != FIELD_NAME) {
-				// Add second sort criteria.
-				*cs += m_cl->GetItemText(i,FIELD_NAME);
-			}
-
-			if(isdir == m_sort_is_ascending) {
-				// force directories at start of the list
-				*cs = "A" + *cs;
-			} else {
-				*cs = "B" + *cs;
-			}
-		}
-		ss->save_data = m_cl->GetItemData(i);
-		m_cl->SetItemData(i,(DWORD_PTR)ss);
-	}
-
-	m_cl->SortItems( clCompareFunc, m_sort_is_ascending );
-
-	for(i=0; i<count; i++) {
-		ss = (SortString *)m_cl->GetItemData(i);
-		if(ss) {
-			m_cl->SetItemData(i,ss->save_data);
-			if(ss->cs) delete ss->cs;
-			delete ss;
-		}
-	}
-}
 
 void CHFVExplorerListView::OnColumnclick(NMHDR* pNMHDR, LRESULT* pResult) 
 {
@@ -4997,6 +4660,7 @@ void CHFVExplorerListView::OnColumnclick(NMHDR* pNMHDR, LRESULT* pResult)
 void CHFVExplorerListView::OnEditLabel() 
 {
  if(MainMacBrowser::Get().Rename())return;
+ if(!BrowserSelectionAllows(true))return;
 	int nItem;
 	nItem = m_cl->GetNextItem(-1,LVNI_SELECTED);
 	if(nItem >= 0) {
@@ -5079,6 +4743,7 @@ BOOL in_string_list( LPCSTR path, CStringArray & arr )
 
 void CHFVExplorerListView::edit_cut_copy( BOOL cutting, BOOL append )
 {
+ if(cutting&&!BrowserSelectionAllows(false))return;
  if(MainMacBrowser::Get().Capture(cutting!=FALSE,append!=FALSE))return;
 	int inx = -1, count = 0, isdir, type, volinx;
 	CString fullpath;

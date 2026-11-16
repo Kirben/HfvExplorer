@@ -1504,7 +1504,7 @@ int HFSIFACE_get_dir_next( hfs_item_type *pitem )
 		}
 	}
 
-	if(result != 0) ff_cleanup();
+	if(result != 0) {int failure=errno;char* message=hfs_error;ff_cleanup();errno=failure;hfs_error=message;}
 	return( result );
 }
 
@@ -1513,6 +1513,22 @@ void HFSIFACE_get_dir_flush( void )
 	ff_cleanup();
 }
 
+int HFSIFACE_get_dir_first_readonly(char* volpath,char* path,hfs_item_type* pitem)
+{
+ int result=-1;char* colon;
+ if(ff_dir){errno=EBUSY;hfs_error="A directory enumeration is already active";return -1;}
+ HFSIFACE_internal_init();
+ if(strlen(volpath)>=sizeof(ff_path)||strlen(path)>=sizeof(ff_mac_path)){errno=ENAMETOOLONG;hfs_error="Classic HFS path is too long";return -1;}
+ strcpy(ff_path,volpath);strcpy(ff_mac_path,path);pc_to_mac_charset(ff_mac_path);
+ /* Root-relative paths cannot resolve to a different mounted volume of the same name. */
+ colon=strchr(ff_mac_path,':');if(colon)memmove(ff_mac_path,colon,strlen(colon)+1);
+ ff_vol=hfs_mount(ff_path,1,O_RDONLY);
+ if(ff_vol){ff_mounted2=1;ff_dir=hfs_opendir(ff_vol,ff_mac_path);
+  if(ff_dir)result=HFSIFACE_get_dir_next(pitem);else result=-1;
+ }
+ if(result!=0){int failure=errno;char* message=hfs_error;ff_cleanup();errno=failure;hfs_error=message;}
+ return result;
+}
 int HFSIFACE_get_dir_first( char *volpath, char *path, hfs_item_type *pitem )
 {
 	int volinx, result = 1;
@@ -1542,7 +1558,7 @@ int HFSIFACE_get_dir_first( char *volpath, char *path, hfs_item_type *pitem )
 			}
 		}
 	}
-	if(result != 0) ff_cleanup();
+	if(result != 0) {int failure=errno;char* message=hfs_error;ff_cleanup();errno=failure;hfs_error=message;}
 	return( result );
 }
 
