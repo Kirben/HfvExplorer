@@ -3322,8 +3322,8 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 		if(inx >= 0) {
 			if(stype == LIST_FAT) {
 				open_file_type s_fp( open_file_type::SystemFAT, inx );
-				s_fp.Delete();
 				fat_changed = 1;
+				if(!s_fp.Delete()) {AfxMessageBox("Failed to completely delete the selected item. Remaining files were retained.");break;}
 				/*
 				if(isdir) {
 					char *path = fullpath.GetBuffer( _MAX_PATH );

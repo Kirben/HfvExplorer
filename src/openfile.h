@@ -45,7 +45,7 @@ public:
 	int LastError();
 	void ErrorAlert();
 	void Close();
-	void Delete();
+	BOOL Delete();
 	CString GetPath();
 
 protected:

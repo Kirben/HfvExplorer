@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <winioctl.h>
 extern int DeleteFATDir(CString&);
+extern int DeleteHostSelection(const CString&,bool);
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
@@ -64,6 +65,19 @@ int RunFileMutationTest(const char* directory) {
   check(!DeleteFATDir(protectedDirectory)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");
   SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_NORMAL);
   CString driveRoot=root.Left(3);check(!DeleteFATDir(driveRoot),"drive-root deletion accepted");
+  CString ordinary=root+"\\Ordinary",unrelated=root+"\\%Ordinary";
+  save(ordinary,"SELECTED");save(unrelated,"UNRELATED");check(DeleteHostSelection(ordinary,false)!=0,"delete ordinary file");
+  check(load(unrelated)==std::vector<BYTE>({'U','N','R','E','L','A','T','E','D'}),"deletion removed an unrelated percent-prefixed file");
+  CString reverse=root+"\\Reverse",reverseMetadata=root+"\\%Reverse";save(reverse,"KEEP");save(reverseMetadata,"SELECTED");
+  check(DeleteHostSelection(reverseMetadata,false)!=0&&load(reverse)==std::vector<BYTE>({'K','E','E','P'}),"metadata selection removed unselected data file");
+  std::vector<BYTE> appleDouble(70,0);appleDouble[1]=5;appleDouble[2]=0x16;appleDouble[3]=7;appleDouble[5]=2;appleDouble[25]=1;appleDouble[29]=9;appleDouble[33]=38;appleDouble[37]=32;
+  CString paired=root+"\\Paired",sidecar=root+"\\%Paired";save(paired,"DATA");
+  {CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create genuine AppleDouble");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
+  check(DeleteHostSelection(paired,false)!=0&&GetFileAttributesA(sidecar)==INVALID_FILE_ATTRIBUTES,"verified AppleDouble companion not deleted");
+  save(paired,"KEEP");{CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create protected pair");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
+  check(SetFileAttributesA(paired,FILE_ATTRIBUTE_READONLY)!=FALSE,"protect selected data file");
+  check(!DeleteHostSelection(paired,false)&&load(sidecar)==appleDouble,"failed data deletion removed its companion");SetFileAttributesA(paired,FILE_ATTRIBUTE_NORMAL);
+  fprintf(report,"PASS: companion deletion requires validated AppleDouble metadata and successful primary deletion; unrelated files are preserved.\n");
   fprintf(report,"PASS: Windows recursive deletion removes junctions without following them, handles dotfiles and stops on errors.\n");
   fprintf(report,"PASS: recursive HFS root deletion is rejected before any child mutation.\n");
  }catch(const std::exception& error){HFSIFACE_silencer(silent);fprintf(report,"FAIL: %s\n",error.what());fclose(report);return 1;}
