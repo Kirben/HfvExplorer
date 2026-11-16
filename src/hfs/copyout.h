@@ -42,3 +42,5 @@ int copyout_destination_opened(void);
 /* Failure injection for host-output preservation tests: write, flush, publish. */
 void copyout_test_fault(int stage);
 #endif
+
+int copyout_host_copy(const char *source,const char *destination);

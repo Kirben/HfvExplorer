@@ -517,7 +517,7 @@ int fat_copy( char *source, char *target )
 			return(1);
 		}
 		// should check existence here
-		return( CopyFile( source, ttarget, FALSE ) == 0 );
+		return copyout_host_copy(source, ttarget);
 	}
 }
 
@@ -806,13 +806,7 @@ int HFSIFACE_copy_one_file(
 				make_companion_name( tmp, source, fork );
 				if(exists(tmp)) {
 					result = fat_copy( tmp, target );
-					if(result != 0) {
-						if(0 == build_target_dir_name( 
-							0, 0, new_source, tmp, target ))
-						{
-							DeleteFile(new_source);
-						}
-					} else if(move_if_possible) {
+					if(result == 0 && move_if_possible && !copyout_was_skipped()) {
 						if(DeleteFile(tmp)) *pwas_moved = 1;
 					}
 				}
