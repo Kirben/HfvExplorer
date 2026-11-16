@@ -1951,6 +1951,11 @@ int hfs_rename(hfsvol *vol, char *srcpath, char *dstpath)
       }
   }
 
+  /* A longer key can split the destination leaf (and its ancestors).
+     Reserve those nodes before removing the only catalog link to the forks. */
+  if (bt_space(&vol->cat, 1) < 0)
+    return -1;
+
   /* change volume name */
 
   if (dstid == HFS_CNID_ROOTPAR)
