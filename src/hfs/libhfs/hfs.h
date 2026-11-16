@@ -144,6 +144,8 @@ long hfs_read(hfsfile *, void *, unsigned long);
 long hfs_write(hfsfile *, void *, unsigned long);
 int hfs_truncate(hfsfile *, unsigned long);
 hfv_offset_t hfs_lseek(hfsfile *, hfv_offset_t, int);
+/* A rolled-back writable close retains the file view for retry.
+   hfs_umount retries and releases any remaining volume-owned views. */
 int hfs_close(hfsfile *);
 
 int hfs_stat(hfsvol *, char *, hfsdirent *);

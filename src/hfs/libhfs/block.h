@@ -29,3 +29,6 @@ int b_writeab(hfsvol *, unsigned int, unsigned int, block *);
 
 int b_begin_mutation(hfsvol *);
 int b_end_mutation(hfsvol *, int);
+
+int hfs_flush_raw(hfsvol *);
+void b_quarantine_volume(hfsvol *, const char *);
