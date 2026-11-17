@@ -73,8 +73,24 @@ readers in every browser, including backends retained by the application clipboa
 other listings remain intact. Released clipboard sources must be selected again.
 File pickers preserve the process working directory. Name/file selection and
 legacy device/format wait dialogs retain their existing modal behavior; this does
-not make every storage command a non-modal job. Windows-file reservations remain
-at host-volume granularity, so two paths on one Windows volume can still conflict.
+not make every storage command a non-modal job.
+
+Windows-file reservations cover affected files and directory subtrees rather
+than their entire drive. Independent files and folders can run concurrently,
+including known-name copies into the same folder. Parent rename/deletion,
+resource companions and temporary publication files remain protected. Canonical
+paths, file IDs, hard links and junction aliases share reservations; mounted
+images also conflict with raw access to their image file or containing folder.
+Directory browsing can refresh sibling changes during an active copy. Path
+identification runs on workers, and command checks use cached browser identities.
+Legacy conversions with unresolved output names reserve their output folder;
+unresolvable identities fall back to conservative host/device reservations.
+Mac filesystems and physical media retain volume/device-level coordination.
+
+`--verify-windows-path-coordination NEW_DIRECTORY` checks same-drive parallel
+copies and mutations, parent/child exclusion, aliases, publication and staging
+protection, targeted refresh, slow path identification, failure and cancellation.
+It uses hidden synthetic browser windows and files, without physical media.
 
 `--verify-per-volume-commands NEW_DIRECTORY` tests real multi-window command and
 menu-update routing during a gated copy, late source/destination conflicts,

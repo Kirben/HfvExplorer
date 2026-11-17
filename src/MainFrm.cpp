@@ -1048,7 +1048,7 @@ void CMainFrame::OnFileNewvolume()
   SendMessage(WM_COMMAND,ID_VIEW_REFRESH);return;
  }
 
- auto wide=VolumeCoord::Wide(volpath);auto formatted=ShowStorageJob(CommandStorage::Guard(CommandStorage::ImageWrite(wide),[=](Storage::Job&){LegacyEngine::Scope engine;return HFSIFACE_format(const_cast<char*>(volpath),const_cast<char*>(vname),size,init)==0?Storage::Result{}:Storage::Result{1,ERROR_WRITE_FAULT,"Could not format the selected image"};},{VolumeCoord::ImageKey(wide),VolumeCoord::HostKey(wide)}),"Format HFS image",false,false,false,this);
+ auto wide=VolumeCoord::Wide(volpath);auto formatted=ShowStorageJob(CommandStorage::Guard(CommandStorage::ImageWrite(wide),[=](Storage::Job&){LegacyEngine::Scope engine;return HFSIFACE_format(const_cast<char*>(volpath),const_cast<char*>(vname),size,init)==0?Storage::Result{}:Storage::Result{1,ERROR_WRITE_FAULT,"Could not format the selected image"};},{VolumeCoord::ImageKey(wide),VolumeCoord::PathKey(wide)}),"Format HFS image",false,false,false,this);
  if(formatted.code){AfxMessageBox(formatted.message.c_str());return;}
 
 	int save = GetBrowserSession().Document()->m_hfs_count;

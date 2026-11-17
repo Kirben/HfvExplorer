@@ -2833,7 +2833,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 	}
 
 	if(entry_type == LIST_UNKNOWN || entry_type == LIST_SPEC) return;
- if(!VolumeCoord::Available({{GetBrowserSession().MacBrowser().SelectedResourceKey(),VolumeCoord::Mode::Read}}))return;
+ if(entry_type==LIST_FAT){auto row=BrowserRowAt(inx);if(!row||!VolumeCoord::Readable(row->accessKey))return;}else if(!VolumeCoord::Readable(GetBrowserSession().MacBrowser().SelectedResourceKey()))return;
 
 	type = m_cl->GetItemText( inx, FIELD_TYPE );
 

@@ -117,7 +117,7 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   file.temporary[0]=0;p.phase=medium+" image saved";job.progress(p);return {};
  };
  if(drive<0||drive>25)return work;
- auto wide=VolumeCoord::Wide(output);auto changed=VolumeCoord::HostKey(wide);
+ auto wide=VolumeCoord::Wide(output);auto changed=VolumeCoord::PathKey(wide);
  return CommandStorage::Guard({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read},{changed,VolumeCoord::Mode::Write},{VolumeCoord::ImageKey(wide),VolumeCoord::Mode::Write}},work,{changed});
 }
 

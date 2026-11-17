@@ -12,5 +12,5 @@ inline std::function<Storage::Result(Storage::Job&)> Guard(std::vector<VolumeCoo
   }catch(const VolumeCoord::Busy&){return Busy();}
  };
 }
-inline std::vector<VolumeCoord::Access> ImageWrite(const std::wstring& path){return {{VolumeCoord::ImageKey(path),VolumeCoord::Mode::Write},{VolumeCoord::HostKey(path),VolumeCoord::Mode::Write}};}
+inline std::vector<VolumeCoord::Access> ImageWrite(const std::wstring& path){return {{VolumeCoord::ImageKey(path),VolumeCoord::Mode::Write},{VolumeCoord::PathKey(path),VolumeCoord::Mode::Write}};}
 }

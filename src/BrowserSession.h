@@ -53,6 +53,7 @@ public:
     void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={});
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
+    std::string ObservedWindowsKey(const std::string& path)const;
  void SetLocationTitle(std::wstring);
  std::wstring WindowTitle()const;
  void UpdateWindowTitle()const;

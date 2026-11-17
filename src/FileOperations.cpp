@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <set>
 #include <fcntl.h>
+#include <atomic>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
@@ -30,7 +31,12 @@ using namespace MacBrowser;
 struct Failure:std::runtime_error {DWORD error;Failure(DWORD e,const std::string& text):std::runtime_error(text),error(e?e:ERROR_WRITE_FAULT){}};
 void Check(bool ok,const char* text){if(!ok)throw HfsPlus::Error(text);}
 std::string ClassicError(const char* fallback){return hfs_error&&*hfs_error&&_stricmp(hfs_error,"no error")?hfs_error:fallback;}
-void Mark(Completion& c,const Location& item){Change value;value.type=item.type;value.volume=item.volume;value.windowsPath=item.windowsPath;value.classicImage=item.classicImage;value.classicPath=item.classicPath;c.affected.push_back(std::move(value));}
+std::wstring HostPath(const Location& item){if(item.volume)return item.volume->HostPath(item.id);return item.type==LIST_FAT?item.windowsPath:std::wstring();}
+std::wstring ChildPath(std::wstring root,const std::u16string& name){if(!root.empty()&&root.back()!=L'\\')root+=L'\\';return root+MacBrowser::Wide(name);}
+std::wstring CompanionPath(const std::wstring& path){auto at=path.find_last_of(L"\\/");return path.substr(0,at+1)+L"%"+path.substr(at+1);}
+std::string FolderIdentity(std::string);
+void Mark(Completion& c,const Location& item){Change value;value.type=item.type;value.volume=item.volume;value.windowsPath=item.windowsPath;value.classicImage=item.classicImage;value.classicPath=item.classicPath;auto path=HostPath(item);if(!path.empty()){value.type=LIST_FAT;value.windowsPath=path;value.volume.reset();}c.affected.push_back(std::move(value));}
+void MarkChild(Completion& c,const Location& folder,const std::u16string& name){auto path=HostPath(folder);if(path.empty()){Mark(c,folder);return;}Location child;child.type=LIST_FAT;child.windowsPath=ChildPath(path,name);Mark(c,child);}
 int CancelClassic(void* job){return static_cast<Storage::Job*>(job)->cancelled()?1:0;}
 void Cancel(Storage::Job& job){if(job.cancelled())throw Storage::Cancelled();}
 std::u16string Ansi(const std::string& s){int n=MultiByteToWideChar(CP_ACP,0,s.data(),int(s.size()),nullptr,0);std::wstring w(n,0);if(n)MultiByteToWideChar(CP_ACP,0,s.data(),int(s.size()),&w[0],n);return U16(w);}
@@ -62,7 +68,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mu
 }
 std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  if(value.volume)return {value.volume,value.id};
- if(value.type==LIST_FAT){Check(Absolute(value.windowsPath),"Use an absolute Windows destination path");return {OpenWindows(value.windowsPath),2};}
+ if(value.type==LIST_FAT){Check(Absolute(value.windowsPath),"Use an absolute Windows destination path");auto volume=OpenWindows(value.windowsPath);if(!value.expectedIdentity.empty())Check(FolderIdentity(volume->Stat(2).identity)==FolderIdentity(value.expectedIdentity),"The destination folder was replaced");return {volume,2};}
  return {OpenClassic(value.classicImage,value.classicPath,true),2};
 }
 std::unique_ptr<DirectFloppy> WritableFloppy(const Location& target,bool verify=false){
@@ -108,7 +114,7 @@ Storage::Result CopyRequest(const Request& request,Storage::Job& job,Completion&
  auto destination=Destination(request.target);Check(destination.first->Supports().create,"The destination does not support file creation");
  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;std::vector<std::string> snapshots;
  for(auto& item:request.sources){Cancel(job);auto source=Source(item);if(item.cut&&item.volume)Check(source.first->Writable(),"A cut source is read-only");opened.push_back(source);}
- Mark(completion,request.target);
+ for(size_t i=0;i<opened.size();++i)MarkChild(completion,request.target,opened[i].first->Stat(opened[i].second).name);
  if(MoveInPlace(request,opened,*destination.first,destination.second,job,completion)){
   if(!request.target.volume)destination.first->Close();for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].volume)opened[i].first->Close();Finish(disk);completion.complete=true;completion.completed=unsigned(opened.size());Storage::Result result;result.moved=true;return result;
  }
@@ -127,14 +133,14 @@ Storage::Result Mutate(const Request& request,Storage::Job& job,Completion& comp
  HFSIFACE_get_dir_flush();int silent=HFSIFACE_silencer(1);HFSIFACE_delete_cancel(CancelClassic,&job);struct Silent{int previous;~Silent(){HFSIFACE_delete_cancel(nullptr,nullptr);HFSIFACE_silencer(previous);}}scope{silent};
  for(auto& item:request.sources){Cancel(job);progress.path=item.volume?Utf8(item.expectedName):item.type==LIST_FAT?Utf8(U16(item.windowsPath)):Utf8(Ansi(item.classicPath));job.progress(progress);
   if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.id!=2,"Cannot rename or delete a volume root");
-   if(request.kind==Kind::Rename){Check(!request.target.volume||request.target.volume==source.first,"Rename must stay within the same volume");Check(source.first->Supports().rename&&!e.protectedFile&&!e.hardLink&&!e.compressed,"The selected entry cannot be renamed");Mark(completion,item);source.first->Rename(source.second,request.target.id,request.name);}
+   if(request.kind==Kind::Rename){Check(!request.target.volume||request.target.volume==source.first,"Rename must stay within the same volume");Check(source.first->Supports().rename&&!e.protectedFile&&!e.hardLink&&!e.compressed,"The selected entry cannot be renamed");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.type=LIST_FAT;parent.windowsPath=path.substr(0,path.find_last_of(L"\\/"));MarkChild(completion,parent,request.name);}source.first->Rename(source.second,request.target.id,request.name);}
    else{Check(source.first->Supports().remove,"The selected entry cannot be deleted");Mark(completion,item);RemoveTree(*source.first,source.second,job,true);}
   }else if(item.type==LIST_FAT){
    auto source=Source(item,true);Cancel(job);source.first->Close();
    std::string path; // ANSI legacy path is retained verbatim.
    int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.windowsPath.c_str(),-1,nullptr,0,nullptr,nullptr);std::vector<char> converted(n);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.windowsPath.c_str(),-1,converted.data(),n,nullptr,&lost);Check(n&&!lost,"Windows path cannot be represented by the legacy backend");path=converted.data();Check(Absolute(path),"Use an absolute Windows path");
    Mark(completion,item);
-   if(request.kind==Kind::Rename){auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,request.name);
+   if(request.kind==Kind::Rename){Location parent;parent.type=LIST_FAT;parent.windowsPath=item.windowsPath.substr(0,item.windowsPath.find_last_of(L"\\/"));MarkChild(completion,parent,request.name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,request.name);
    }else if(!DeleteHostSelectionJob(CString(path.c_str()),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }else{
    Check(item.type==LIST_HFS&&!item.classicImage.empty(),"Invalid classic HFS source");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.classicImage)==item.expectedResource,"The selected source image was replaced");auto disk=WritableFloppy(item);auto image=item.classicImage,path=item.classicPath;hfsdirent entry{};
@@ -179,9 +185,9 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
  Storage::Progress p;p.phase=request.kind==Kind::Inspect?"Reading properties":request.kind==Kind::CreateFolder?"Creating folder":"Updating properties";p.utf8=true;p.path=Utf8(request.name);job.progress(p);
  if(request.kind==Kind::CreateFolder){
   const auto& item=request.target;Check(!request.name.empty(),"Enter a folder name");
-  if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&!e.hardLink&&(e.id==2||!e.protectedFile),"Cannot create a folder here");Mark(completion,item);source.first->MakeDirectory(source.second,request.name);}
-  else if(item.type==LIST_FAT){auto volume=OpenWindows(item.windowsPath);auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);Mark(completion,item);volume->MakeDirectory(2,request.name);volume->Close();}
-  else{Check(item.type==LIST_HFS,"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.classicImage)==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.classicImage,item.classicPath,true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");Mark(completion,item);volume->MakeDirectory(2,request.name);volume->Close();Finish(disk);}
+  if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&!e.hardLink&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,request.name);source.first->MakeDirectory(source.second,request.name);}
+  else if(item.type==LIST_FAT){auto volume=OpenWindows(item.windowsPath);auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();}
+  else{Check(item.type==LIST_HFS,"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.classicImage)==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.classicImage,item.classicPath,true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();Finish(disk);}
  }else{
   Check(request.sources.size()==1,"Select one item");const auto& item=request.sources.front();auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();Cancel(job);
   if(item.type==LIST_HFS&&!item.volume){source.first->Close();auto image=item.classicImage,path=item.classicPath;Check(HFSIFACE_get_properties(&image[0],&path[0],&completion.properties)==0,"Cannot read classic HFS properties");completion.classicProperties=true;completion.writable=physical_floppy_path(item.classicImage.c_str())>=0?true:!readonly_media_path(item.classicImage.c_str())&&(GetFileAttributesA(item.classicImage.c_str())&FILE_ATTRIBUTE_READONLY)==0;Cancel(job);}
@@ -205,13 +211,24 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
  }
  completion.complete=true;completion.completed=1;return {};
 }
-std::string Resource(const Location& item){if(item.volume)return item.volume->ResourceKey();if(item.type==LIST_FAT)return VolumeCoord::HostKey(item.windowsPath);return VolumeCoord::ImageKey(item.classicImage);}
+std::string Resource(const Location& item){auto path=HostPath(item);if(!path.empty())return VolumeCoord::PathKey(path);if(item.volume)return item.volume->ResourceKey();return VolumeCoord::ImageKey(item.classicImage);}
+void AddPath(std::vector<VolumeCoord::Access>& access,const std::wstring& path,VolumeCoord::Mode mode,bool companion=true){access.push_back({VolumeCoord::PathKey(path),mode});if(companion)access.push_back({VolumeCoord::PathKey(CompanionPath(path)),mode});}
+std::u16string SourceName(const Location& item){if(!item.expectedName.empty())return item.expectedName;auto path=HostPath(item);if(!path.empty())return U16(path.substr(path.find_last_of(L"\\/")+1));if(!item.classicPath.empty())return Ansi(item.classicPath.substr(item.classicPath.find_last_of(':')+1));return {};}
 std::vector<VolumeCoord::Access> Resources(const Request& request){
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
- if(request.kind==Kind::LegacyCopy){auto key=[](const std::string& volume,const std::string& path){return Absolute(path)?VolumeCoord::HostKey(VolumeCoord::Wide(path)):VolumeCoord::ImageKey(volume);};access.push_back({key(request.sourceVolume,request.sourcePath),(request.move||(request.background&&!Absolute(request.sourcePath)))?Mode::Write:Mode::Read});access.push_back({key(request.targetVolume,request.targetPath),Mode::Write});return access;}
- for(auto& source:request.sources)access.push_back({Resource(source),(request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||source.cut||(request.background&&source.type!=LIST_FAT))?Mode::Write:Mode::Read});
- if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork||request.kind==Kind::CreateFolder)access.push_back({Resource(request.target),Mode::Write});return access;
+ if(request.kind==Kind::LegacyCopy){
+  if(Absolute(request.sourcePath))AddPath(access,VolumeCoord::Wide(request.sourcePath),request.move?Mode::Write:Mode::Read);else access.push_back({VolumeCoord::ImageKey(request.sourceVolume),(request.move||request.background)?Mode::Write:Mode::Read});
+  if(Absolute(request.targetPath))access.push_back({VolumeCoord::LegacyOutputKey(VolumeCoord::Wide(request.targetPath)),Mode::Write});else access.push_back({VolumeCoord::ImageKey(request.targetVolume),Mode::Write});return access;
+ }
+ for(const auto& item:request.sources){auto mode=request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||item.cut||(request.background&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
+   // Explicit Windows adapters are still file readers when a copy is not a move.
+   if(request.kind!=Kind::Rename&&request.kind!=Kind::Delete&&request.kind!=Kind::SetProperties&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
+   if(request.kind==Kind::Rename){auto parent=path.substr(0,path.find_last_of(L"\\/"));AddPath(access,ChildPath(parent,request.name),Mode::Write);}
+  }}
+ if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork||request.kind==Kind::CreateFolder){auto path=HostPath(request.target);if(path.empty())access.push_back({Resource(request.target),Mode::Write});else if(request.kind==Kind::CreateFolder)AddPath(access,ChildPath(path,request.name),Mode::Write,false);else if(request.kind==Kind::Copy){bool known=true;for(const auto& source:request.sources){auto name=SourceName(source);if(name.empty()){known=false;break;}AddPath(access,ChildPath(path,name),Mode::Write);}if(!known)AddPath(access,path,Mode::Write,false);}else AddPath(access,path,Mode::Write,request.kind!=Kind::ExportFork);
+ }return access;
 }
+
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
  Cancel(job);
  if(request.kind==Kind::CreateFolder||request.kind==Kind::Inspect||request.kind==Kind::SetProperties)return Metadata(request,job,completion);
@@ -245,21 +262,24 @@ Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->m
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
  auto& queue=values->background?Storage::copyWorker():Storage::worker();
- auto access=std::make_shared<std::unique_ptr<VolumeCoord::Lease>>();auto resources=Resources(*values);
- auto job=queue.submit([state,values,access](Storage::Job& job){Completion completion;Storage::Result result;
-  try{Cancel(job);if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
-   result=Execute(*values,job,completion);
+ auto access=std::make_shared<std::unique_ptr<VolumeCoord::Lease>>();
+ struct Plan {std::atomic<bool> ready{false};std::vector<VolumeCoord::Access> resources;Storage::Result error;};auto plan=std::make_shared<Plan>();
+ auto planning=queue.submit([plan,values](Storage::Job& job){try{if(job.cancelled())throw Storage::Cancelled();plan->resources=Resources(*values);}catch(const Storage::Cancelled&){plan->error={1,ERROR_CANCELLED,"Cancelled while identifying Windows paths"};}catch(const std::exception& error){plan->error={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}catch(...){plan->error={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected path planning failure"};}plan->ready.store(true,std::memory_order_release);return Storage::Result{};});
+ auto job=queue.submit([state,values,access,plan](Storage::Job& job){Completion completion;Storage::Result result;
+  try{Cancel(job);if(plan->error.code){result=plan->error;}else{if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
+   VolumeCoord::OperationLease currentPaths(Resources(*values));result=Execute(*values,job,completion);}
   }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
   std::vector<std::string> changed;
-  for(auto& item:completion.affected){try{if(auto volume=item.volume.lock())changed.push_back(volume->ResourceKey());else if(item.type==LIST_FAT)changed.push_back(VolumeCoord::HostKey(item.windowsPath));else if(!item.classicImage.empty())changed.push_back(VolumeCoord::ImageKey(item.classicImage));}catch(...){/* Keep the operation result if a removed path cannot be identified. */}}
+  for(auto& item:completion.affected){try{if(auto volume=item.volume.lock())changed.push_back(volume->ResourceKey());else if(item.type==LIST_FAT)changed.push_back(VolumeCoord::PathKey(item.windowsPath));else if(!item.classicImage.empty())changed.push_back(VolumeCoord::ImageKey(item.classicImage));}catch(...){/* Keep the operation result if a removed path cannot be identified. */}}
   access->reset();VolumeCoord::Changed(changed);
   {std::lock_guard<std::mutex> lock(state->mutex);state->completion=std::move(completion);}return result;
- },[access,resources,values](const std::shared_ptr<Storage::Job>& job){
-  if(job->cancelled())return true;
-  try{access->reset(new VolumeCoord::Lease(resources));return true;}catch(const VolumeCoord::Busy&){return !values->background;}
+ },[access,plan,values](const std::shared_ptr<Storage::Job>& job){
+  if(!plan->ready.load(std::memory_order_acquire))return false;
+  if(job->cancelled()||plan->error.code)return true;
+  try{access->reset(new VolumeCoord::Lease(plan->resources));return true;}catch(const VolumeCoord::Busy&){return !values->background;}
  });
  {auto& registry=Registry::Get();std::lock_guard<std::mutex> lock(registry.mutex);
   registry.entries.erase(std::remove_if(registry.entries.begin(),registry.entries.end(),[](const Registry::Entry& e){auto job=e.job.lock();return !job||job->done();}),registry.entries.end());

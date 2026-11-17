@@ -55,7 +55,11 @@ const BrowserDirectory::Row* CHFVExplorerListView::BrowserRowAt(int row)const{
  auto key=LPARAM(GetListCtrl().GetItemData(row));auto found=m_browser_rows.find(key);
  return found==m_browser_rows.end()?nullptr:&found->second;
 }
-bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();return key.empty()||VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}});}
+bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{
+ auto& list=GetListCtrl();bool selected=false;for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=BrowserRowAt(row);if(!p)continue;selected=true;if(p->storageType==LIST_FAT){if(!VolumeCoord::Available({{p->accessKey,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;}else{auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();if(!VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;}}
+ if(selected)return true;auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();return key.empty()||VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Browse}});
+}
+
 bool CHFVExplorerListView::BrowserSelectionAllows(bool rename)const{
  bool selected=false;auto& list=GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){

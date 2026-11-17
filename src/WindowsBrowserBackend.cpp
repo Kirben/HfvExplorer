@@ -26,7 +26,7 @@ std::string key(std::string name){if(!name.empty())CharUpperBuffA(&name[0],DWORD
 BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int volume,const char* directory,bool listing,Storage::Job& job){
  BrowserDirectory::ObserveRead(directory);
  if(BackgroundCopies::Active()){
-  BrowserDirectory::Snapshot out;out.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));out.revision=VolumeCoord::Revision(out.resourceKey);out.capabilitiesKnown=true;
+  BrowserDirectory::Snapshot out;out.resourceKey=VolumeCoord::PathKey(VolumeCoord::Wide(directory));out.revision=VolumeCoord::Revision(out.resourceKey);out.capabilitiesKnown=true;
   out.folderPath=VolumeCoord::Wide(directory);try{out.folderIdentity=MacBrowser::DescribeWindowsFile(out.folderPath).identity;}catch(const std::exception&){}
   char root[]={directory[0],':','\\',0};out.capabilities.create=out.capabilities.rename=out.capabilities.remove=GetDriveTypeA(root)!=DRIVE_CDROM;
   std::string prefix=directory;if(!prefix.empty()&&prefix.back()!='\\')prefix+='\\';
@@ -39,13 +39,14 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int v
    row.entry.name=BrowserDirectory::FromAnsi(info.cFileName);row.entry.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;row.entry.forks[0].size=row.entry.directory?0:HostDirectoryEntrySize(info);
    row.created=BrowserDirectory::Ticks(info.ftCreationTime);row.modified=BrowserDirectory::Ticks(info.ftLastWriteTime);
    try{row.entry=MacBrowser::DescribeWindowsFile(VolumeCoord::Wide(row.path));}catch(const std::exception&){/* Staged replacements may be briefly locked; keep OS metadata. */}
+   row.accessKey=VolumeCoord::ObservedPathKey(out.resourceKey,VolumeCoord::Wide(info.cFileName),row.entry.identity,row.entry.directory);
    out.rows.push_back(std::move(row));
   }while(FindNextFileA(find.handle,&info));
   if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
 return out;
  }
  LegacyEngine::Scope engine;
- BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::PathKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
  snapshot.folderPath=VolumeCoord::Wide(directory);try{snapshot.folderIdentity=MacBrowser::DescribeWindowsFile(snapshot.folderPath).identity;}catch(const std::exception&){}
  std::string prefix=directory;if(prefix.empty())throw std::runtime_error("Select a Windows folder");if(prefix.back()!='\\')prefix+='\\';
  bool afp=is_afp_directory(const_cast<char*>(directory))!=0;
@@ -67,6 +68,7 @@ return out;
   if(row.entry.identity.empty()){try{row.entry.identity=MacBrowser::DescribeWindowsFile(VolumeCoord::Wide(path)).identity;}catch(const std::exception&){/* Unidentifiable entries are revalidated before a mutation is queued. */}}
   row.icon16=small;row.icon32=large;
   if(own&&(small||large)){row.ownedIcons=std::make_shared<BrowserDirectory::OwnedIcons>();row.ownedIcons->small=small;row.ownedIcons->large=large;}row.capabilities.create=row.capabilities.rename=row.capabilities.remove=writable;
+  auto leaf=path.substr(path.find_last_of("\\/")+1);row.accessKey=VolumeCoord::ObservedPathKey(snapshot.resourceKey,VolumeCoord::Wide(leaf),row.entry.identity,row.entry.directory);
   snapshot.rows.push_back(std::move(row));
  };
  // Keep the classic AppleDouble/AFP icon and filename conventions in this backend.
