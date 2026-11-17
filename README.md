@@ -61,8 +61,13 @@ active job progress per browser, so completing one job does not clear another.
 Options, emulator launchers, formatting/ejecting/burning media, image opening
 and full mount rebuilds retain their existing UI safety restrictions during
 transfers. Windows browsing uses independent metadata readers and generic icons
-during copying. Closing a frame still waits for safe job cleanup; closing the
-last browser cancels outstanding copies before exiting. Legacy emulator
+during copying. Browser windows can close independently while copies continue;
+progress/taskbar ownership moves to a surviving browser. Physical-reader
+resources that could block on active I/O are retained without a window until
+the copies are idle, then released on the UI thread. Every main browser X/Alt+F4 close asks for confirmation. Closing the last browser
+while copying asks before cancelling outstanding copies and waits for safe
+cleanup before exiting. File > Exit still cancels all copies and closes every
+browser after cleanup. Legacy emulator
 temporary-file helpers remain synchronous because their callers need completed
 files immediately. Copy jobs do not hold browser/document pointers, and Cut is
 cleared only after successful completion.
@@ -96,6 +101,25 @@ folder enumeration, even when startup floppy detection is disabled.
 
 This clipboard and cross-window drag support are internal to HFVExplorer; they
 do not add Windows Explorer/OLE clipboard interchange.
+
+X/Alt+F4 confirmation is limited to file-operation progress/copy-mode dialogs
+and every main browser window, defaulting to No. About, Options and other
+ordinary dialogs close normally. Completed progress windows also close without
+confirmation. Confirming an active progress X requests cancellation and keeps
+progress open until cleanup finishes. Copy-mode X confirms cancellation before
+I/O begins. Explicit OK/Cancel buttons keep their existing behavior, and
+non-cancellable waits keep their X disabled. Internal shutdown cleanup does not
+open additional confirmation questions.
+
+`--verify-background-window-close NEW_DIRECTORY` tests immediate first/main and
+successive browser closure during a stalled clipboard Cut, command routing,
+progress/taskbar migration, cancellation/overwrite/error handling after closure,
+copy-mode lifetime, physical-reader retirement while a device read is blocked,
+and final-window cancellation of running, queued and mode-pending work. It also
+checks Yes/No title-bar close decisions on idle/non-last/last browsers and active
+copy progress/mode dialogs, plus normal closure without confirmation on
+About/General/Options property-sheet and completed progress windows. No physical devices or
+computer control are used.
 
 `--verify-independent-storage NEW_DIRECTORY` interleaves real classic raw and
 MacBinary converters, BinHex encoders, classic undo contexts, browser navigation

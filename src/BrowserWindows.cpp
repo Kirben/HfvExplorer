@@ -4,6 +4,7 @@
 #include "HFVExplorer.h"
 #include "HFVExplorerView.h"
 #include "BrowserSession.h"
+#include "BrowserLifetime.h"
 #include "DeviceWait.h"
 #include <algorithm>
 extern "C" {
@@ -28,6 +29,18 @@ public:
   return doc;
  }
 };
+}
+namespace BrowserLifetime {
+namespace {std::vector<std::unique_ptr<CHFVExplorerDoc>> retired;}
+void Collect(){
+ if(BackgroundCopies::Active())return;
+ auto closing=std::move(retired);retired.clear();
+ for(auto& document:closing)document->FinishBackgroundClose();
+}
+void Retire(CHFVExplorerDoc* document){retired.emplace_back(document);Collect();}
+#ifdef HFV_TESTING
+unsigned RetiredCount(){return unsigned(retired.size());}
+#endif
 }
 void CHFVExplorerApp::InstallBrowserTemplate(CRuntimeClass* doc,CRuntimeClass* frame){
  if(m_browserTemplate)return;
@@ -54,6 +67,7 @@ void CHFVExplorerApp::ActivateBrowser(CMainFrame* frame){
 void CHFVExplorerApp::ForgetBrowser(CMainFrame* frame){
  auto found=std::find(m_browsers.begin(),m_browsers.end(),frame);if(found==m_browsers.end())return;
  m_browsers.erase(found);
+ BackgroundCopies::TransferOwner(frame->GetSafeHwnd(),m_browsers.empty()?nullptr:m_browsers.back()->GetSafeHwnd());
  if(m_main!=frame&&m_pMainWnd!=frame)return;
  if(!m_browsers.empty()){ActivateBrowser(m_browsers.back());return;}
  m_main=nullptr;m_doc=nullptr;m_tree=nullptr;m_list=nullptr;m_pre=nullptr;m_pStatusBar=nullptr;m_wndSplitter=nullptr;m_wndSplitter2=nullptr;

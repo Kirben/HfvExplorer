@@ -41,6 +41,7 @@ public:
     void Detach(CHFVExplorerListView*);
     void Detach(CHFVPreviewView*);
     void DetachPanes();
+    void StopNotifications();
     CHFVExplorerDoc* Document()const{return document_;}
     HFVExplorerTreeView* Tree()const{return tree_;}
     CHFVExplorerListView* List()const{return list_;}

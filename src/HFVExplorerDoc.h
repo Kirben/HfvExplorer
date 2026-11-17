@@ -253,6 +253,7 @@ public:
 	virtual void Serialize(CArchive& ar);
 	virtual BOOL OnOpenDocument(LPCTSTR lpszPathName);
 	virtual void OnCloseDocument();
+ void FinishBackgroundClose();
 	//}}AFX_VIRTUAL
 
 // Implementation

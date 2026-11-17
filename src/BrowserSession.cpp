@@ -76,6 +76,10 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
     DetachPanes();if(!notifications_)notifications_.reset(new Notifications(*this));subscription_.Bind(notifications_->GetSafeHwnd());owner_=owner;tree_=tree;list_=list;preview_=preview;status_=status;
     tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
+void BrowserSession::StopNotifications(){
+ subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
+ if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);}
+}
 void BrowserSession::DetachPanes(){
     ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
     browser_->ForgetTree();

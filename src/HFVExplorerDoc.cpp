@@ -23,12 +23,13 @@
 //#include "afx.h"
 #include "stdafx.h"
 #include "LegacyEngine.h"
+#include "BackgroundCopies.h"
+#include "BrowserLifetime.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
 #include "RefreshStorage.h"
-#include "BackgroundCopies.h"
 #include "StorageJobDialog.h"
 #include "HostFileSizes.h"
 #include "HFVExplorer.h"
@@ -1847,8 +1848,21 @@ void CHFVExplorerDoc::OnCleanDocument()
 	}
 }
 
-void CHFVExplorerDoc::OnCloseDocument() 
+void CHFVExplorerDoc::FinishBackgroundClose(){
+ for(int i=0;i<m_hfs_count;++i)m_volumes[i].close();
+ GetBrowserSession().MacBrowser().Clear();
+}
+void CHFVExplorerDoc::OnCloseDocument()
 {
+ bool physical=false;for(int i=0;i<m_hfs_count;++i)if(m_volumes[i].m_opened&&(m_volumes[i].m_is_cd||m_volumes[i].m_is_floppy)){physical=true;break;}
+ if(physical&&BackgroundCopies::Active()){
+  // A device reader's final release can wait behind another thread's slow
+  // read. Destroy the UI now, retaining only this viewless document for cleanup.
+  GetBrowserSession().StopNotifications();m_bAutoDelete=FALSE;
+  CDocument::OnCloseDocument();GetBrowserSession().DetachPanes();
+  BrowserLifetime::Retire(this);return;
+ }
+ BrowserLifetime::Collect();
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 	if(GetBrowserSession().Tree()) {

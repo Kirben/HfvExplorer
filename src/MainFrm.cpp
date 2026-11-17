@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "DialogClose.h"
 #include "BackgroundCopies.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
@@ -592,7 +593,7 @@ static HANDLE get_top_window_phandle( void )
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
  if(nIDEvent==9202){if(!BackgroundCopies::Active()){auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());for(auto frame:app->m_browsers)frame->KillTimer(9202);app->OnExitBrowsers();}return;}
- if(nIDEvent==9201){if(!BackgroundCopies::Active()){KillTimer(9201);PostMessage(WM_CLOSE);}return;}
+ if(nIDEvent==9201){if(!BackgroundCopies::Active()||static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()>1){KillTimer(9201);PostMessage(WM_CLOSE);}return;}
  if(BackgroundCopies::Active()||HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
  if(m_deviceChangeDeferred)PostMessage(WM_APP+91);
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -832,6 +833,11 @@ void CMainFrame::OnChildRegistration(WPARAM wParam, LPARAM lParam)
 LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) 
 {
  if((message==WM_COMMAND||message==WM_CLOSE)&&(StorageUi::busy()||StorageUi::state().sessionOpen))return 0;
+ if(message==WM_SYSCOMMAND&&(wParam&0xfff0)==SC_CLOSE){
+  if(StorageUi::busy()||StorageUi::state().sessionOpen)return 0;
+  auto kind=!BackgroundCopies::Active()?DialogClose::Kind::Browser:static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()<=1?DialogClose::Kind::LastBrowser:DialogClose::Kind::BackgroundBrowser;
+  if(!DialogClose::Confirm(m_hWnd,kind))return 0;
+ }
  if(message==WM_COMMAND&&!StorageUi::busy()){
   StorageAction storageAction;
   return CFrameWnd::WindowProc(message,wParam,lParam);
@@ -1308,8 +1314,8 @@ BOOL CMainFrame::OnQueryOpen()
 
 void CMainFrame::OnClose() 
 {
- if(BackgroundCopies::Active()){
-  if(static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()==1)BackgroundCopies::CancelAll();
+ if(BackgroundCopies::Active()&&static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()<=1){
+  BackgroundCopies::CancelAll();
   SetTimer(9201,100,nullptr);if(GetBrowserSession().Status())GetBrowserSession().Status()->SetPaneText(0,"Closing after copy cleanup finishes...");return;
  }
 

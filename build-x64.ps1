@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $windowClose=Join-Path $hfsPlusDirectory 'background-window-close'
+ $windowCloseTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-background-window-close',('"'+$windowClose+'"')) -WindowStyle Hidden -PassThru
+ if(!$windowCloseTest.WaitForExit(60000)){$windowCloseTest.Kill();throw 'Background window-close tests timed out.'}
+ Get-Content (Join-Path $windowClose 'background-window-close-report.txt')
+ if($windowCloseTest.ExitCode -ne 0){throw "Background window-close tests failed; retained $windowClose"}
  $independent=Join-Path $hfsPlusDirectory 'independent-storage'
  $independentTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-independent-storage',('"'+$independent+'"')) -WindowStyle Hidden -PassThru
  if(!$independentTest.WaitForExit(60000)){$independentTest.Kill();throw 'Independent storage tests timed out.'}
