@@ -1,5 +1,5 @@
-Current unofficial x64 build
-----------------------------
+HFVExplorer 2.0.0
+-----------------
 Target: Windows 7 SP1 with KB2533623 or a superseding update; Windows 8/8.1,
 10 and 11 x64. Build with pinned v143 14.44 tools and matching static MFC/CRT.
 Build and run checks with build-x64.ps1. Older Windows versions still await
@@ -22,9 +22,35 @@ window with its own document and panes. Menus, accelerators, file/image opening,
 launchers, folder navigation and view commands target the receiving window.
 Closing a browser closes only that window; closing the first window transfers
 application ownership to a surviving frame. File > Exit closes all windows.
-The classic HFS engine and storage worker remain serialized. Progress dialogs
-still wait for operations and block storage commands in other windows; this
-does not enable background copying.
+Window titles show the current Windows folder path or Mac disk/folder followed
+by HFVExplorer, independently in each browser window, including Unicode names.
+Ordinary Copy/Paste and folder drops now run on a separate copy queue with a
+non-modal progress window. The conversion-mode picker is also non-modal; it
+owns captured source/destination requests and supports OK to all without
+changing an active job's conversion settings. Closed classic/floppy readers
+reopen when their Macintosh entry is selected after copying. Windows folders and unrelated mounted HFS+/HFSX/MFS
+images remain browsable in the same window. Navigation on a reserved Mac volume
+shows a stable status message and resumes after the transfer; navigating elsewhere
+cancels that pending navigation. Directory copies retain overall/file progress,
+and single-file copies retain one progress bar. Overwrite decisions affect the
+copy window while browser windows remain enabled.
+
+Volume reservations cover writes, finalization and move-source cleanup.
+Ordinary floppy copies retain the original fast path. A floppy Cut/move reads
+back changed sectors before removing its source, then finalizes any source-floppy
+deletion separately. All classic adapters close before destination finalization.
+Non-conflicting same-volume HFS/HFS+/HFSX moves rename catalog entries in place,
+preserving their IDs and avoiding a data copy; overwrite/merge handling is retained.
+Queued browser requests retain the selected floppy's media-change counter, so
+a reported media swap during conversion questions rejects the old request. The classic engine/converters still have shared state: classic HFS and
+physical-media navigation waits until copying is idle. Commands that change
+legacy settings, launch emulators, format/eject media or rebuild browser mounts
+are unavailable during transfers. Windows browsing uses independent metadata
+readers and generic icons during copying. Closing a frame waits for safe job
+cleanup; closing the last browser cancels outstanding copies before exiting.
+Legacy emulator temporary-file helpers remain synchronous because their callers
+need the completed files immediately. Copy jobs do not hold browser/document
+pointers, and Cut is cleared only after successful completion.
 
 Copy/Cut/Paste and their Append commands share an application clipboard between
 HFVExplorer windows. Captured locations own their backend references or absolute
@@ -37,7 +63,8 @@ folder, list folder or list background. Dropping defaults to moving on the same
 volume and copying across volumes; Ctrl forces copy and Shift forces move.
 Read-only sources can be copied, and read-only destinations reject drops. Escape
 or capture loss cancels a drag without changing the clipboard. Existing local
-icon positioning and local drag behavior remain available. Drop highlights do
+icon positioning remains available when copying is idle; folder drops use the
+same captured background jobs. Drop highlights do
 not navigate the destination, and are removed on release/cancellation.
 
 Transfers use the existing independent jobs, overwrite prompts, fork/metadata
@@ -46,11 +73,28 @@ import/export conversion preferences remain active; same-format transfers use
 the coordinated adapters, including classic volumes with identical labels.
 Converted PC-to-HFS imports also ask before replacing the resolved Mac filename,
 including embedded MacBinary/BinHex names. Skip/Cancel retain the old file.
+Windows source lookup resolves only the selected entry, so unrelated junctions
+in its parent folder cannot prevent copying or overwrite prompts. Selected
+reparse points remain rejected; those errors now identify the offending path.
 Selecting a removable drive explicitly probes for classic HFS before Windows
 folder enumeration, even when startup floppy detection is disabled.
 
 This clipboard and cross-window drag support are internal to HFVExplorer; they
 do not add Windows Explorer/OLE clipboard interchange.
+
+`--verify-floppy-copy-regressions NEW_DIRECTORY` uses real hidden browser
+clipboard commands and injected floppy APIs. It covers lock/write/short-write/
+flush/readback failures, reported media changes, source/Cut retention, Cancel
+during readback, native and same-floppy folder moves (including resource forks),
+physical-source move cleanup, per-file mode cancellation and closing the last
+browser while a conversion question is pending. No physical drives are opened.
+
+`--verify-background-copies NEW_DIRECTORY` exercises a gated slow read while
+browsing Windows/unrelated images in the same window; busy-volume deferral and
+stale-navigation cancellation; overwrite and Cut completion; read errors,
+replacement rollback, queued cancellation, safe frame close; and simulated
+physical floppy write/readback/unlock. Tests use hidden synthetic windows and
+image fixtures, without physical drives or computer control.
 
 `--verify-browser-transfers NEW_DIRECTORY` covers shared clipboard routing,
 mixed-format append, overwrite decisions, source-window closure, native forks

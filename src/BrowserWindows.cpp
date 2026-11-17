@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "BackgroundCopies.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerView.h"
 #include "BrowserSession.h"
@@ -34,6 +35,7 @@ void CHFVExplorerApp::InstallBrowserTemplate(CRuntimeClass* doc,CRuntimeClass* f
  AddDocTemplate(m_browserTemplate);
 }
 CMainFrame* CHFVExplorerApp::CreateBrowser(BOOL visible){
+ if(BackgroundCopies::Active())return nullptr;
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return nullptr;
  InstallBrowserTemplate();
  auto doc=static_cast<CHFVExplorerDoc*>(m_browserTemplate->OpenDocumentFile(nullptr,visible));
@@ -48,7 +50,7 @@ void CHFVExplorerApp::ActivateBrowser(CMainFrame* frame){
  auto& session=frame->GetBrowserSession();
  m_pMainWnd=m_main=frame;m_doc=session.Document();m_tree=session.Tree();m_list=session.List();m_pre=session.Preview();m_pStatusBar=session.Status();
  // Kept only for old launcher utilities. Browser operations use their session.
- HFSIFACE_set_error_window(frame->GetSafeHwnd());
+ if(!BackgroundCopies::Active())HFSIFACE_set_error_window(frame->GetSafeHwnd());
 }
 void CHFVExplorerApp::ForgetBrowser(CMainFrame* frame){
  auto found=std::find(m_browsers.begin(),m_browsers.end(),frame);if(found==m_browsers.end())return;
@@ -56,17 +58,18 @@ void CHFVExplorerApp::ForgetBrowser(CMainFrame* frame){
  if(m_main!=frame&&m_pMainWnd!=frame)return;
  if(!m_browsers.empty()){ActivateBrowser(m_browsers.back());return;}
  m_main=nullptr;m_doc=nullptr;m_tree=nullptr;m_list=nullptr;m_pre=nullptr;m_pStatusBar=nullptr;m_wndSplitter=nullptr;m_wndSplitter2=nullptr;
- HFSIFACE_set_error_window(nullptr);
+ if(!BackgroundCopies::Active())HFSIFACE_set_error_window(nullptr);
  // Leave m_pMainWnd until WM_NCDESTROY: MFC posts WM_QUIT for the last frame.
 }
 void CHFVExplorerApp::OnNewBrowser(){CreateBrowser();}
-void CHFVExplorerApp::OnUpdateNewBrowser(CCmdUI* ui){ui->Enable(!StorageUi::busy()&&!StorageUi::state().sessionOpen);}
+void CHFVExplorerApp::OnUpdateNewBrowser(CCmdUI* ui){ui->Enable(!BackgroundCopies::Active()&&!StorageUi::busy()&&!StorageUi::state().sessionOpen);}
 CDocument* CHFVExplorerApp::OpenDocumentFile(LPCTSTR path){
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return nullptr;
  if(m_main){auto doc=m_main->GetBrowserSession().Document();return doc->OnOpenDocument(path)?doc:nullptr;}
  InstallBrowserTemplate();return m_browserTemplate->OpenDocumentFile(path);
 }
 void CHFVExplorerApp::OnExitBrowsers(){
+ if(BackgroundCopies::Active()){BackgroundCopies::CancelAll();for(auto frame:m_browsers)frame->SetTimer(9202,100,nullptr);return;}
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return;
  while(!m_browsers.empty()){
   auto frame=m_browsers.back();HWND window=frame->GetSafeHwnd();frame->SendMessage(WM_CLOSE);

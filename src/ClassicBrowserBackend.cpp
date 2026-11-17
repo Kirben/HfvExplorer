@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "FileOperations.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
@@ -173,7 +174,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, int fin
 
 BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId)
 {
- BrowserDirectory::ObserveRead("classic-directory");
+ FileOperations::LegacyGuard engine;BrowserDirectory::ObserveRead("classic-directory");
  BrowserDirectory::Snapshot snapshot;snapshot.capabilitiesKnown=true;
  snapshot.resourceKey=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
  if(m_classicRevision[volinx]!=snapshot.revision){m_volumes[volinx].close();if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reload changed classic HFS metadata");m_classicRevision[volinx]=snapshot.revision;}

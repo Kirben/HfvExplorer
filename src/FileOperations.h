@@ -11,6 +11,8 @@ struct Location {
  std::wstring windowsPath;
  std::string classicImage,classicPath;
  uint32_t expectedCatalogId=0,expectedParent=0;
+ // Bound to the selected media before asynchronous conversion questions.
+ bool mediaGenerationKnown=false;DWORD mediaGeneration=0;
  std::string expectedIdentity,expectedResource;
  std::u16string expectedName;
 };
@@ -21,6 +23,8 @@ struct Request {
  Location target;
  std::u16string name;
  bool checkNameLock=true;
+ bool background=false;
+ bool askMode=false;
  unsigned fork=0;
  // Retain the original MacBinary/BinHex/text/AppleDouble conversion route.
  std::string sourceVolume,sourcePath,targetVolume,targetPath;
@@ -56,4 +60,5 @@ public:
 Operation Submit(Request);
 std::vector<Operation> Pending();
 void CancelPending();
+class LegacyGuard {std::unique_lock<std::mutex> lock_;public:LegacyGuard();};
 }

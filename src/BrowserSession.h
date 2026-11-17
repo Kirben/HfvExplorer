@@ -7,8 +7,8 @@ class HFVExplorerTreeView;
 class CHFVExplorerListView;
 class CHFVPreviewView;
 class MainMacBrowser;
-// One session per browser document/window. Preferences and the serialized
-// storage worker remain application-wide; navigation and pane bindings do not.
+// One session per browser document/window. Preferences and storage queues
+// remain application-wide; navigation and pane bindings do not.
 class BrowserSession {
  struct Notifications;
  std::unique_ptr<Notifications> notifications_;
@@ -19,6 +19,8 @@ class BrowserSession {
  Context current_;
  std::map<std::string,uint64_t> seen_,dirty_;
  bool refreshing_=false;
+ std::wstring locationTitle_;
+ std::function<void()> deferred_;std::string deferredKey_;bool deferredClassic_=false;
  void ProcessChanges();
  void RefreshLegacy(const Context&);
 
@@ -49,7 +51,11 @@ public:
     void Watch(const std::string&);
     void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={});
     bool Refreshing()const{return refreshing_;}
-    void ClearCurrent(){current_=Context{};}
+    void ClearCurrent();
+ void SetLocationTitle(std::wstring);
+ std::wstring WindowTitle()const;
+ void UpdateWindowTitle()const;
+ bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false);
 #ifdef HFV_TESTING
     unsigned notificationRefreshes=0,notificationErrors=0;
 #endif

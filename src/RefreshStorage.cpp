@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "BackgroundCopies.h"
 #include "RefreshStorage.h"
 #include "StorageJobDialog.h"
 extern "C" {
@@ -19,6 +20,7 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaScanJob(bool floppies,boo
  };
 }
 std::vector<PhysicalVolume> ScanPhysicalMedia(bool floppies,bool cds) {
+ if(BackgroundCopies::Active())return {};
  auto output=std::make_shared<std::vector<PhysicalVolume>>();
  auto result=ShowStorageWaitJob(MakeMediaScanJob(floppies,cds,output,[](int drive,bool floppy) {
   char path[]="A:\\";path[0]+=char(drive);

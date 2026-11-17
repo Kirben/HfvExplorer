@@ -31,7 +31,7 @@ std::string copyError() {
  return errno?std::string("Copy failed: ")+strerror(errno):"The copy failed; no further error information was supplied.";
 }
 Storage::Result copyToFloppy(Storage::Job& job,int drive,const std::string& sourceVolume,const std::string& source,
- const std::string& targetVolume,const std::string& target,int directory,int move,char mode) {
+ const std::string& targetVolume,const std::string& target,int directory,int move,LegacyCopyOptions options) {
  FloppyWriteApi* api=nullptr;
 #ifdef HFV_FLOPPY_TESTING
  api=dynamic_cast<FloppyWriteApi*>(physical_floppy_test_api(drive));
@@ -39,13 +39,14 @@ Storage::Result copyToFloppy(Storage::Job& job,int drive,const std::string& sour
 #endif
  HFSIFACE_get_dir_flush();physical_floppy_suspend(drive);
  DirectFloppy disk(api);
- if(!disk.Open(drive))return {1,disk.Error(),"Could not open and lock the destination HFS floppy (Windows error "+std::to_string(disk.Error())+")."};
+ if(!disk.Open(drive,options.verifyFloppy))return {1,disk.Error(),"Could not open and lock the destination HFS floppy (Windows error "+std::to_string(disk.Error())+")."};
+ if(options.targetGenerationKnown&&disk.Generation()!=options.targetGeneration)return {1,ERROR_MEDIA_CHANGED,"Floppy media changed after selection; select the volume again"};
  bool sameVolume=!_stricmp(sourceVolume.c_str(),targetVolume.c_str());
  Storage::Result result;
- try {result=MakeCopyJob(sourceVolume,source,targetVolume,target,directory,sameVolume?move:0,mode)(job);}
+ try {result=MakeCopyJob(sourceVolume,source,targetVolume,target,directory,sameVolume?move:0,options)(job);}
  catch(...){HFSIFACE_get_dir_flush();disk.Finish();throw;}
  HFSIFACE_get_dir_flush();
- auto p=job.progress();p.phase="Flushing floppy";job.progress(p);
+ auto p=job.progress();p.phase=options.verifyFloppy?"Verifying floppy":"Flushing floppy";job.progress(p);
  if(!disk.Finish())return {1,disk.Error(),"Floppy copy failed while writing/flushing buffered data (Windows error "+std::to_string(disk.Error())+"). "+(sameVolume&&move?"The floppy may be incomplete; the move may have been partly applied.":"The destination may be incomplete; source files were retained.")};
  if(result.code){result.moved=false;if(disk.WritesStarted())result.message+=" The destination may contain partial files.";}
  return result;
@@ -110,7 +111,7 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
    return {1,error,message};
   }
   int floppy=physical_floppy_path(targetVolume.c_str());
-  if(floppy>=0&&!DirectFloppy::Current(floppy))return copyToFloppy(job,floppy,sourceVolume,source,targetVolume,target,directory,move,mode);
+  if(floppy>=0&&!DirectFloppy::Current(floppy))return copyToFloppy(job,floppy,sourceVolume,source,targetVolume,target,directory,move,options);
   auto sv=buffer(sourceVolume),s=buffer(source),tv=buffer(targetVolume),t=buffer(target);
   ExportJobContext context={job,{}};context.progress.path=source;context.progress.fileCopy=true;context.progress.phase="Scanning selected files";job.progress(context.progress);
   if(macVolume(sourceVolume)&&!macVolume(targetVolume)) {

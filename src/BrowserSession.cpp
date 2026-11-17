@@ -3,6 +3,7 @@
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
+#include "BackgroundCopies.h"
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "BrowserPresentation.h"
@@ -19,9 +20,14 @@ struct BrowserSession::Notifications:public CWnd {
  explicit Notifications(BrowserSession& value):session(value){if(!CreateEx(0,AfxRegisterWndClass(0),"HFV volume notifications",0,0,0,0,0,HWND_MESSAGE,nullptr))throw std::runtime_error("Cannot create volume notification mailbox");}
  ~Notifications(){if(GetSafeHwnd())DestroyWindow();}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l)override{
+  if(message==WM_TIMER&&w==2){
+   if(!session.owner_||!session.tree_||!session.list_){session.deferred_={};KillTimer(2);return 0;}
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||(session.deferredClassic_&&BackgroundCopies::Active())||!VolumeCoord::Readable(session.deferredKey_))return 0;
+   KillTimer(2);auto next=std::move(session.deferred_);session.deferred_={};if(next)next();return 0;
+  }
   if((message==VolumeCoord::Notification&&w==session.subscription_.Id())||(message==WM_TIMER&&w==1)){
    auto list=session.List();bool editing=list&&IsWindow(list->GetSafeHwnd())&&(list->GetListCtrl().GetEditControl()||list->IsDragging());
-   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(!session.current_.key.empty()&&!VolumeCoord::Readable(session.current_.key))){SetTimer(1,75,nullptr);return 0;}
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(BackgroundCopies::Active()&&session.current_.type==LIST_HFS)||(!session.current_.key.empty()&&!VolumeCoord::Readable(session.current_.key))){SetTimer(1,75,nullptr);return 0;}
    KillTimer(1);session.ProcessChanges();return 0;
   }
   return CWnd::WindowProc(message,w,l);
@@ -30,6 +36,37 @@ struct BrowserSession::Notifications:public CWnd {
 BrowserSession::BrowserSession(CHFVExplorerDoc* doc):document_(doc),browser_(new MainMacBrowser(*this)){
     finderLayout=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_mac_window_mode!=FALSE;
 }
+namespace {
+const wchar_t* CaptionProcedure=L"HFVExplorer.UnicodeCaption";
+LRESULT CALLBACK UnicodeCaption(HWND window,UINT message,WPARAM w,LPARAM l){
+ auto previous=reinterpret_cast<WNDPROC>(GetPropW(window,CaptionProcedure));
+ // Keep the legacy MFC command/view plumbing ANSI, but handle caption strings
+ // with the Unicode default procedure so Mac names survive unchanged.
+ if(message==WM_SETTEXT||message==WM_GETTEXT||message==WM_GETTEXTLENGTH)return DefWindowProcW(window,message,w,l);
+ if(message==WM_NCDESTROY)RemovePropW(window,CaptionProcedure);
+ return previous?CallWindowProcA(previous,window,message,w,l):DefWindowProcW(window,message,w,l);
+}
+}
+void BrowserSession::UpdateWindowTitle()const{
+ if(!owner_||!IsWindow(owner_->GetSafeHwnd()))return;HWND window=owner_->GetSafeHwnd();
+ if(!IsWindowUnicode(window)&&!GetPropW(window,CaptionProcedure)){
+  auto previous=reinterpret_cast<WNDPROC>(GetWindowLongPtrA(window,GWLP_WNDPROC));
+  if(SetPropW(window,CaptionProcedure,reinterpret_cast<HANDLE>(previous))){SetLastError(0);if(!SetWindowLongPtrW(window,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(UnicodeCaption))&&GetLastError())RemovePropW(window,CaptionProcedure);}
+ }
+ auto caption=WindowTitle();if(BrowserPresentation::Text(window)!=caption)::SetWindowTextW(window,caption.c_str());
+}
+std::wstring BrowserSession::WindowTitle()const{return locationTitle_.empty()?L"HFVExplorer":locationTitle_+L" \u2014 HFVExplorer";}
+void BrowserSession::SetLocationTitle(std::wstring title){
+ locationTitle_=std::move(title);UpdateWindowTitle();
+}
+void BrowserSession::ClearCurrent(){current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
+bool BrowserSession::Defer(const std::string& key,bool classic,std::function<void()> next,bool force){
+ if(!force&&(!classic||!BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
+ ClearCurrent();deferredKey_=key;deferredClassic_=classic;deferred_=std::move(next);
+ if(list_){list_->list_clear();list_->SetBrowserCapabilities({});}
+ if(status_)status_->SetPaneText(0,"Waiting for this volume to finish copying...");
+ if(notifications_)notifications_->SetTimer(2,100,nullptr);return true;
+}
 BrowserSession::~BrowserSession(){DetachPanes();notifications_.reset();}
 void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerListView* list,CHFVPreviewView* preview,CStatusBar* status){
     if(!owner||!tree||!list)throw std::logic_error("Browser session requires an owner and both browser panes");
@@ -37,10 +74,10 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
         throw std::logic_error("A browser pane already belongs to another session");
     if((tree_&&tree_!=tree)||(list_&&list_!=list))throw std::logic_error("Detach the existing browser panes before rebinding a session");
     DetachPanes();if(!notifications_)notifications_.reset(new Notifications(*this));subscription_.Bind(notifications_->GetSafeHwnd());owner_=owner;tree_=tree;list_=list;preview_=preview;status_=status;
-    tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);
+    tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
 void BrowserSession::DetachPanes(){
-    subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
+    ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
     browser_->ForgetTree();
     if(tree_)tree_->BindBrowserSession(nullptr);if(list_)list_->BindBrowserSession(nullptr);if(preview_)preview_->BindBrowserSession(nullptr);
     tree_=nullptr;list_=nullptr;preview_=nullptr;owner_=nullptr;status_=nullptr;
@@ -76,7 +113,9 @@ void BrowserSession::Observe(std::string key,uint64_t revision,int type,int inde
   std::string origin=type==LIST_FAT?(LPCSTR)document_->m_fats[index].m_volume_name:(LPCSTR)document_->m_volumes[index].m_file_name;
   if(found==known.end())known.push_back({type,index,origin});else found->origin=origin;
  }
- current_={key,std::move(path),revision,type,index,folder};Watch(key);seen_[key]=(std::max)(seen_[key],revision);
+ current_={key,std::move(path),revision,type,index,folder};
+ if(type==LIST_FAT||type==LIST_HFS){auto title=VolumeCoord::Wide(current_.path);if(type==LIST_HFS&&!title.empty()&&title.back()==L':')title.pop_back();SetLocationTitle(std::move(title));}
+ Watch(key);seen_[key]=(std::max)(seen_[key],revision);
  if(dirty_[key]<=revision)dirty_.erase(key);
  // Close the subscribe-after-read race without acknowledging a newer write.
  auto latest=VolumeCoord::Revision(key);if(latest>revision){dirty_[key]=latest;if(notifications_)notifications_->PostMessage(VolumeCoord::Notification,WPARAM(subscription_.Id()),0);}

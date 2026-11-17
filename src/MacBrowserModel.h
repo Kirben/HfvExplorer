@@ -27,8 +27,9 @@ struct Capabilities {
     bool unicodeNames = true, resourceForks = true;
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
-// All methods run on the serialized storage worker. GUI code holds IDs and
-// copies of entries, never classic catalog records or shortened names.
+// File operations and browsing have separate queues. Native backends guard
+// calls and leases; callers reserve volumes before a multi-call transaction.
+// GUI code holds IDs and copied entries, never filesystem catalog records.
 class Volume {
 public:
     virtual ~Volume() = default;
@@ -45,10 +46,13 @@ public:
     virtual void Reload() {}
     virtual void Close() {}
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
+    virtual bool CanMoveFrom(const Volume&)const{return false;}
+    virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
     virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive()); }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;
     virtual Entry Stat(uint32_t id) = 0;
+    virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
     virtual uint32_t MakeDirectory(uint32_t parent, const std::u16string &) = 0;
     virtual uint32_t Put(uint32_t parent, const Entry &, Reader, bool replace) = 0;
@@ -63,6 +67,8 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
     std::function<UINT(const char *)> driveType = {},
     std::function<std::shared_ptr<Volume>(int)> open = {});
 Entry DescribeWindowsFile(const std::wstring &path);
+std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring &path);
+bool WindowsResourceCompanion(const std::wstring &path);
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.

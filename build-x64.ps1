@@ -47,6 +47,16 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $floppyCopies=Join-Path $hfsPlusDirectory 'floppy-copy-regressions'
+ $floppyCopiesTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-floppy-copy-regressions',('"'+$floppyCopies+'"')) -WindowStyle Hidden -PassThru
+ if(!$floppyCopiesTest.WaitForExit(60000)){$floppyCopiesTest.Kill();throw 'Floppy copy regression tests timed out.'}
+ Get-Content (Join-Path $floppyCopies 'floppy-copy-regressions-report.txt')
+ if($floppyCopiesTest.ExitCode -ne 0){throw "Floppy copy regressions failed; retained $floppyCopies"}
+ $background=Join-Path $hfsPlusDirectory 'background-copies'
+ $backgroundTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-background-copies',('"'+$background+'"')) -WindowStyle Hidden -PassThru
+ if(!$backgroundTest.WaitForExit(60000)){$backgroundTest.Kill();throw 'Background copy tests timed out.'}
+ Get-Content (Join-Path $background 'background-copy-report.txt')
+ if($backgroundTest.ExitCode -ne 0){throw "Background copy tests failed; retained $background"}
  $transfers=Join-Path $hfsPlusDirectory 'browser-transfers'
  $transfersTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-browser-transfers',('"'+$transfers+'"')) -WindowStyle Hidden -PassThru
  if(!$transfersTest.WaitForExit(60000)){$transfersTest.Kill();throw 'Cross-window transfer tests timed out.'}

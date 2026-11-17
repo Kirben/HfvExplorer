@@ -31,7 +31,7 @@ public:
     bool Paste();
     BrowserTransfers::Selection SelectedItems(bool cut);
     FileOperations::Location TargetFolder(HTREEITEM item=nullptr);
-    bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&);
+    bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&,std::function<void(bool)> completed={});
     int Drop(int row, HTREEITEM target, int action);
     bool DropSelection(HTREEITEM target,int action);
     bool Command(UINT);

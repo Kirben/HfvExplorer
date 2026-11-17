@@ -27,6 +27,11 @@ public:
  Lease(const Lease&)=delete;Lease& operator=(const Lease&)=delete;
 };
 bool Readable(const std::string&);
+// A backend call takes a read lease, or runs under its thread's existing writer.
+class BackendRead {
+ std::unique_ptr<Lease> lease_;
+public:explicit BackendRead(const std::string&);
+};
 uint64_t Revision(const std::string&);
 void Changed(const std::vector<std::string>&);
 std::shared_ptr<MacBrowser::Volume> SharedImage(const std::string&,std::function<std::shared_ptr<MacBrowser::Volume>()>);

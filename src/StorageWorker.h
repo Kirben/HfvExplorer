@@ -79,4 +79,5 @@ public:
  }
 };
 inline Worker& worker(){static Worker value;return value;}
+inline Worker& copyWorker(){static Worker value;return value;}
 }

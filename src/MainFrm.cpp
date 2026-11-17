@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "BackgroundCopies.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "HfsPlusDialogs.h"
@@ -204,8 +205,12 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 	return 0;
 }
 
+void CMainFrame::OnUpdateFrameTitle(BOOL){
+ if(m_browserSession)m_browserSession->UpdateWindowTitle();else if(IsWindow(m_hWnd))::SetWindowTextW(m_hWnd,L"HFVExplorer");
+}
 BOOL CMainFrame::PreCreateWindow(CREATESTRUCT& cs)
 {
+ cs.style&=~FWS_ADDTOTITLE; // Session captions replace MFC's Untitled document name.
 	// TODO: Modify the Window class or styles here by modifying
 	//  the CREATESTRUCT cs
 
@@ -508,6 +513,14 @@ void CMainFrame::OnActivate(UINT state,CWnd* other,BOOL minimized){
  if(state!=WA_INACTIVE)static_cast<CHFVExplorerApp*>(AfxGetApp())->ActivateBrowser(this);
 }
 BOOL CMainFrame::OnCmdMsg(UINT id,int code,void* extra,AFX_CMDHANDLERINFO* info){
+ if(BackgroundCopies::Active()){
+  // These legacy commands change global converter settings or take raw device
+  // handles. Defer them until jobs have completed their flush/verification.
+  bool unsafe=id==ID_FILE_OPEN||id==ID_TOOLS_NEW_BROWSER||id==ID_FILE_NEW||id==ID_VIEW_OPTIONS||id==ID_FILE_NEWVOLUME||id==ID_FILE_NEWHFSPLUS||id==ID_FILE_VOLUMETOFLOPPY||id==ID_FILE_VOLUMEFROMFLOPPY||id==ID_FILE_EJECT||id==ID_FILE_RELOAD||id==ID_TOOLS_BURN||id==ID_TOOLS_DUMPCDDEBUG||id==ID_EDIT_LABEL||id==ID_FILE_MAC_IMPORT_RESOURCE||id==ID_VIEW_MAC_WINDOW;
+  if(GetBrowserSession().Document()&&GetBrowserSession().List()&&!GetBrowserSession().MacBrowser().Active())unsafe=unsafe||(id!=ID_EDIT_COPY&&id!=ID_EDIT_CUT&&id!=ID_EDIT_PASTE&&id!=ID_EDIT_COPY_APPEND&&id!=ID_EDIT_CUT_APPEND&&id!=ID_EDIT_SELECT_ALL&&id!=ID_VIEW_REFRESH&&id!=ID_TOOLS_NEW_BROWSER&&id!=ID_FILE_NEW&&id!=ID_APP_EXIT&&id!=ID_APP_ABOUT&&id!=ID_VIEW_LARGEICONS&&id!=ID_VIEW_SMALLICONS&&id!=ID_HFV_VIEW_LIST&&id!=ID_HFV_VIEW_DETAILS&&id!=ID_VIEW_TOOLBAR&&id!=ID_VIEW_STATUS_BAR&&id!=ID_NEXT_PANE&&id!=ID_PREV_PANE);
+  if(unsafe&&!info){if(code==CN_UPDATE_COMMAND_UI)static_cast<CCmdUI*>(extra)->Enable(FALSE);return TRUE;}
+ }
+
  // Commands and update-UI queries may target an inactive frame explicitly.
  // The view/document chain remains the frame's own; old app-only commands
  // receive the same owner, including during accelerator dispatch.
@@ -518,7 +531,7 @@ void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 {
 	CFrameWnd::OnActivateApp(bActive, hTask);
 	
-	if(bActive && m_browserSession && GetBrowserSession().Document() && !StorageUi::busy() && !StorageUi::state().sessionOpen) {
+	if(bActive && !BackgroundCopies::Active() && m_browserSession && GetBrowserSession().Document() && !StorageUi::busy() && !StorageUi::state().sessionOpen) {
 		// check HFV files for changes
 		CHFVExplorerApp	*pApp;
 		pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -578,7 +591,10 @@ static HANDLE get_top_window_phandle( void )
 
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
- if(HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
+ if(nIDEvent==9202){if(!BackgroundCopies::Active()){auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());for(auto frame:app->m_browsers)frame->KillTimer(9202);app->OnExitBrowsers();}return;}
+ if(nIDEvent==9201){if(!BackgroundCopies::Active()){KillTimer(9201);PostMessage(WM_CLOSE);}return;}
+ if(BackgroundCopies::Active()||HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
+ if(m_deviceChangeDeferred)PostMessage(WM_APP+91);
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	int i, count;
 	wait_item_struct *w;
@@ -820,7 +836,7 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
   StorageAction storageAction;
   return CFrameWnd::WindowProc(message,wParam,lParam);
  }
- if(message==WM_DEVICECHANGE&&StorageUi::state().sessionOpen){
+ if(message==WM_DEVICECHANGE&&(BackgroundCopies::Active()||StorageUi::state().sessionOpen)){
   if((wParam==DBT_DEVICEARRIVAL||wParam==DBT_DEVICEREMOVECOMPLETE)&&lParam&&
      reinterpret_cast<DEV_BROADCAST_HDR*>(lParam)->dbch_devicetype==DBT_DEVTYP_VOLUME)m_deviceChangeDeferred=true;
   return TRUE;
@@ -834,6 +850,7 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
   if(message==WM_COMMAND || message==WM_CLOSE)return 0;
  }
  if(message==WM_APP+91 && m_deviceChangeDeferred) {
+  if(BackgroundCopies::Active())return 0;
   m_deviceChangeDeferred=false;PostMessage(WM_COMMAND,ID_VIEW_REFRESH);return 0;
  }
 	if(message == our_child_registration) {
@@ -1291,6 +1308,11 @@ BOOL CMainFrame::OnQueryOpen()
 
 void CMainFrame::OnClose() 
 {
+ if(BackgroundCopies::Active()){
+  if(static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()==1)BackgroundCopies::CancelAll();
+  SetTimer(9201,100,nullptr);if(GetBrowserSession().Status())GetBrowserSession().Status()->SetPaneText(0,"Closing after copy cleanup finishes...");return;
+ }
+
 	BOOL do_close = TRUE;
 	int count = m_wait_items.GetSize();
 	if(count != 0) {

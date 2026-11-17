@@ -28,6 +28,7 @@ public:
     bool ReadVolume(ULONGLONG offset,DWORD count,void* bytes);
     HANDLE Handle() const {return handle_;}
     DWORD Error() const {return error_;}
+    DWORD Generation() const {return changeCount_;}
     DWORD MediaSize() const {return size_;}
     DWORD VolumeSize() const {return hfs_?size_:0;}
     const DISK_GEOMETRY& MediaGeometry() const {return geometry_;}

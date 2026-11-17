@@ -345,6 +345,10 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunFloppyCopyRegressionsTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-floppy-copy-regressions"))ExitProcess(RunFloppyCopyRegressionsTest(__argv[2]));
+ extern int RunBackgroundCopiesTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-background-copies"))ExitProcess(RunBackgroundCopiesTest(__argv[2]));
  extern int RunBrowserTransfersTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-browser-transfers"))ExitProcess(RunBrowserTransfersTest(__argv[2]));
  extern int RunBrowserWindowsTest(const char*);
@@ -406,8 +410,8 @@ BOOL CHFVExplorerApp::InitInstance()
 	m_prevVersion = m_version;
  m_startup_hds = m_do_harddisks = FALSE;
 
-	if(m_version != "1.2.5") {
-		m_version = "1.2.5";
+	if(m_version != "2.0.0") {
+		m_version = "2.0.0";
 		WriteProfileString("Setup","Version",m_version);
 	}
 	SaveSettings();

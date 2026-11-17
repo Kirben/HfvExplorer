@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#ifdef HFV_TESTING
+#include "stdafx.h"
+#include "HFVExplorer.h"
+#include "BrowserSession.h"
+#include "BrowserPresentation.h"
+#include "BackgroundCopies.h"
+#include "MainMacBrowser.h"
+#include "StorageJobDialog.h"
+#include "HfsPlusDisk.h"
+#include "DeviceWait.h"
+#include "utils.h"
+#include "FloppyWriter.h"
+#include "DirectFloppy.h"
+extern "C" {
+#include "hfs/libhfs/hfs.h"
+#include "hfs/interface.h"
+}
+#include "FakeFloppy.h"
+#include "ReadOnlyCdBackend.h"
+#include "floppy.h"
+#include <fcntl.h>
+#include <cstdio>
+namespace {
+CString host;
+const char* testStage="initial";
+bool Junction(const CString& link,const CString& target){
+ if(!CreateDirectoryA(link,nullptr))return false;HANDLE h=CreateFileA(link,GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);if(h==INVALID_HANDLE_VALUE)return false;
+ CStringW wide(target);std::wstring print(wide.GetString()),substitute=L"\\??\\"+print;
+ struct Buffer{DWORD tag;WORD length,reserved,subOffset,subLength,printOffset,printLength;wchar_t path[1024];}data{};
+ data.tag=IO_REPARSE_TAG_MOUNT_POINT;data.subLength=WORD(substitute.size()*2);data.printOffset=WORD(data.subLength+2);data.printLength=WORD(print.size()*2);
+ memcpy(data.path,substitute.c_str(),data.subLength+2);memcpy(reinterpret_cast<BYTE*>(data.path)+data.printOffset,print.c_str(),data.printLength+2);data.length=WORD(8+data.printOffset+data.printLength+2);DWORD returned;
+ bool ok=DeviceIoControl(h,FSCTL_SET_REPARSE_POINT,&data,data.length+8,nullptr,0,&returned,nullptr)!=FALSE;CloseHandle(h);return ok;
+}
+void Check(bool ok,const char* text){if(!ok)throw HfsPlus::Error(text);}
+void Pump(){MSG m;while(PeekMessage(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_QUIT){TranslateMessage(&m);DispatchMessage(&m);}}
+template<class F>void Until(F ready){DWORD end=GetTickCount()+15000;while(!ready()&&LONG(end-GetTickCount())>0){Pump();Sleep(5);}Pump();Check(ready(),(std::string("background copy timed out: ")+testStage).c_str());}
+class CopyDoc:public CHFVExplorerDoc{
+ DECLARE_DYNCREATE(CopyDoc)
+public:CopyDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=host[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=host;}
+};
+IMPLEMENT_DYNCREATE(CopyDoc,CHFVExplorerDoc)
+class CopyFrame:public CMainFrame{
+ DECLARE_DYNCREATE(CopyFrame)
+public:void LoadWindowPosition()override{}void SaveWindowPosition()override{}void ActivateFrame(int)override{}
+};
+IMPLEMENT_DYNCREATE(CopyFrame,CMainFrame)
+int Row(BrowserSession& s,const wchar_t* name){auto& l=s.List()->GetListCtrl();for(int i=0;i<l.GetItemCount();++i){wchar_t text[512]{};LVITEMW v{};v.pszText=text;v.cchTextMax=ARRAYSIZE(text);SendMessageW(l.m_hWnd,LVM_GETITEMTEXTW,i,reinterpret_cast<LPARAM>(&v));if(!wcscmp(text,name))return i;}return -1;}
+void Select(BrowserSession& s,const wchar_t* name){int row=Row(s,name);Check(row>=0,"copy fixture row missing");auto& l=s.List()->GetListCtrl();l.SetItemState(-1,0,LVIS_SELECTED);l.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);}
+std::shared_ptr<MacBrowser::Volume> Image(const CString& path){auto w=VolumeCoord::Wide((LPCSTR)path);auto disk=HfsPlus::CreateImage(w.c_str(),8*1024*1024);HfsPlus::Volume::Format(*disk,u"Background",true,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);disk.reset();return MacBrowser::OpenImage(w);}
+uint32_t Put(MacBrowser::Volume& v,const std::u16string& name){MacBrowser::Entry e;e.name=name;e.forks[0].size=8192;e.forks[1].size=31;e.finder[0]='T';return v.Put(2,e,[](unsigned f,uint64_t at,void* p,size_t n){for(size_t i=0;i<n;++i)static_cast<BYTE*>(p)[i]=BYTE(f+at+i);},false);}
+uint32_t Find(MacBrowser::Volume& v,const std::u16string& name){for(auto& e:v.List())if(e.name==name)return e.id;return 0;}
+struct Gate {
+ HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);bool fail=false;
+ ~Gate(){SetEvent(release);CloseHandle(entered);CloseHandle(release);}
+ void Reset(){ResetEvent(entered);ResetEvent(release);fail=false;}
+};
+class Slow:public MacBrowser::Volume{
+ std::shared_ptr<MacBrowser::Volume> base_;Gate& gate_;
+public:Slow(std::shared_ptr<MacBrowser::Volume> base,Gate& gate):base_(base),gate_(gate){}
+ std::string ResourceKey()const override{return base_->ResourceKey();}std::u16string Name()const override{return base_->Name();}const char* Kind()const override{return base_->Kind();}bool Writable()const override{return base_->Writable();}bool CaseSensitive()const override{return base_->CaseSensitive();}uint64_t FreeBytes()const override{return base_->FreeBytes();}
+ MacBrowser::Entry Stat(uint32_t id)override{return base_->Stat(id);}std::vector<MacBrowser::Entry> List(uint32_t id)override{return base_->List(id);}void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{if(n){SetEvent(gate_.entered);Check(WaitForSingleObject(gate_.release,30000)==WAIT_OBJECT_0,"slow read was never released");if(gate_.fail)throw HfsPlus::Error("Injected slow-read failure");}base_->Read(id,f,at,p,n);}
+ uint32_t MakeDirectory(uint32_t id,const std::u16string& n)override{return base_->MakeDirectory(id,n);}uint32_t Put(uint32_t id,const MacBrowser::Entry& e,MacBrowser::Reader r,bool replace)override{return base_->Put(id,e,r,replace);}void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{base_->Rename(id,parent,name);}void Remove(uint32_t id)override{base_->Remove(id);}void ValidateRemoval(uint32_t id)override{base_->ValidateRemoval(id);}
+};
+#ifdef HFV_FLOPPY_TESTING
+class TestFloppy:public FloppyWriteApi {
+public:FakeFloppy disk;bool locked=false;unsigned writes=0;
+ explicit TestFloppy(std::vector<BYTE> bytes):disk(bytes){}
+ UINT DriveType(int d)override{return disk.DriveType(d);}HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{return disk.Open(p,a,s,f);}
+ bool Geometry(HANDLE h,DISK_GEOMETRY& g)override{return disk.Geometry(h,g);}bool Verify(HANDLE h,DWORD& n)override{return disk.Verify(h,n);}bool Read(HANDLE h,ULONGLONG at,DWORD n,void* p,DWORD& got)override{return disk.Read(h,at,n,p,got);}void Close(HANDLE h)override{disk.Close(h);}
+ bool Lock(HANDLE)override{locked=true;return true;}bool Dismount(HANDLE)override{return locked;}bool Unlock(HANDLE)override{locked=false;return true;}
+ bool FormatTracks1440(HANDLE)override{throw HfsPlus::Error("Copy must not format floppy");}
+ bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{Check(locked&&at<=disk.media.size()&&n<=disk.media.size()-at,"unsafe floppy write");memcpy(disk.media.data()+size_t(at),p,n);got=n;++writes;return true;}
+ bool Flush(HANDLE)override{SetLastError(ERROR_INVALID_FUNCTION);return false;}
+};
+#endif
+void Host(BrowserSession& s,const CString& path){auto tree=s.Tree();bool enabled=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(s.Document()->m_fats[0].m_rootitem);tree->enable_selchange(enabled);s.Document()->open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);}
+}
+int RunBackgroundCopiesTest(const char* directory){
+ if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\background-copy-report.txt","w");if(!report)return 2;int result=0;
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;app.m_copyin_mode=app.m_copyout_mode=0;
+ Gate gate;
+ try{
+  auto longFolder=VolumeCoord::Wide(std::string((LPCSTR)host));for(int level=0;level<3;++level){longFolder+=L"\\"+std::wstring(80,wchar_t(L'a'+level));auto full=BrowserPresentation::WindowsPath(longFolder);Check(CreateDirectoryW(full.c_str(),nullptr)!=FALSE,"create long source folder");}
+  auto longFile=BrowserPresentation::WindowsPath(longFolder+L"\\StoredCase.txt");HANDLE file=CreateFileW(longFile.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);Check(file!=INVALID_HANDLE_VALUE,"create long source file");DWORD written;Check(WriteFile(file,"LONG",4,&written,nullptr)&&written==4,"write long source");CloseHandle(file);
+  auto resolved=MacBrowser::ResolveWindowsFile(longFolder+L"\\storedcase.txt");Check(resolved.first->Stat(resolved.second).name==u"StoredCase.txt","direct long source lookup lost stored filename case");char longBytes[4]{};resolved.first->Read(resolved.second,0,0,longBytes,4);Check(!memcmp(longBytes,"LONG",4),"long source lookup read different data");resolved.first->Close();
+  auto source=Image(host+"\\source.dsk"),target=Image(host+"\\target.dsk"),other=Image(host+"\\other.dsk");Put(*source,u"Payload");Put(*other,u"Unrelated");
+  CString folder=host+"\\browse";Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create browse folder");{CFile f;Check(f.Open(folder+"\\visible.txt",CFile::modeCreate|CFile::modeWrite),"create browse file");f.Write("browse",6);}
+  app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);Check(a&&b,"create copy browsers");auto& s=a->GetBrowserSession();auto& second=b->GetBrowserSession();
+  auto slow=std::make_shared<Slow>(source,gate);int src=s.MacBrowser().AttachTestVolume(slow,"slow-source"),dst=s.MacBrowser().AttachTestVolume(target,"target"),unrelated=s.MacBrowser().AttachTestVolume(other,"other");
+  Check(s.MacBrowser().ShowTestFolder(src,2),"show copy source");Select(s,L"Payload");a->SendMessage(WM_COMMAND,ID_EDIT_COPY);Check(s.MacBrowser().ShowTestFolder(dst,2),"show destination");
+  testStage="first slow copy";BackgroundCopies::enabled=true;storageUiTest={};a->SendMessage(WM_COMMAND,ID_EDIT_PASTE);
+  Check(BackgroundCopies::Active()&&a->IsWindowEnabled()&&!StorageUi::busy()&&!StorageUi::state().sessionOpen,"Paste blocked or disabled its browser");
+  Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(!VolumeCoord::Readable(source->ResourceKey())&&!VolumeCoord::Readable(target->ResourceKey()),"copy did not reserve source and destination");
+  bool busy=false;try{target->List();}catch(const VolumeCoord::Busy&){busy=true;}Check(busy,"unguarded backend read raced a writer");
+  auto pending=FileOperations::Pending();Check(pending.size()==1,"background operation not retained");
+  Check(s.MacBrowser().ShowTestFolder(dst,2)&&s.List()->GetListCtrl().GetItemCount()==0,"busy navigation was not deferred");
+  Check(s.MacBrowser().ShowTestFolder(unrelated,2)&&Row(s,L"Unrelated")>=0,"unrelated image could not be browsed during copying");
+  Host(s,folder);Check(Row(s,L"visible.txt")>=0&&a->IsWindowEnabled()&&!pending.front().Job()->done(),"same-window host browsing waited for the copy");
+  SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Check(pending.front().Snapshot().complete&&Find(*target,u"Payload"),"background copy failed");
+  Check(Row(s,L"visible.txt")>=0,"stale deferred navigation replaced the newly selected folder");Check(BrowserTransfers::Any(),"Copy consumed its clipboard");
+  auto copied=target->Stat(Find(*target,u"Payload"));Check(copied.forks[0].size==8192&&copied.forks[1].size==31&&copied.finder[0]=='T',"background copy lost fork metadata");BYTE bytes[31]{};target->Read(copied.id,1,0,bytes,sizeof(bytes));for(unsigned i=0;i<sizeof(bytes);++i)Check(bytes[i]==BYTE(i+1),"resource fork differs");
+  // Pending replacement must not disable browsing; Skip retains Cut and source.
+  testStage="overwrite skip";gate.Reset();Check(s.MacBrowser().ShowTestFolder(src,2),"show Cut source");Select(s,L"Payload");a->SendMessage(WM_COMMAND,ID_EDIT_CUT);Check(s.MacBrowser().ShowTestFolder(dst,2),"show replacement destination");storageUiTest={};a->SendMessage(WM_COMMAND,ID_EDIT_PASTE);
+  Until([]{auto p=FileOperations::Pending();return !p.empty()&&!p.front().Job()->conflict().empty();});Check(a->IsWindowEnabled()&&BackgroundCopies::DialogWindow(),"overwrite disabled browser or lost progress window");
+  Host(s,folder);Check(Row(s,L"visible.txt")>=0,"overwrite prevented browsing");storageUiTest.answer=Storage::ConflictChoice::Skip;Until([]{return !BackgroundCopies::Active();});Check(Find(*source,u"Payload")&&BrowserTransfers::Snapshot().items.front().cut,"Skip deleted source or consumed Cut");
+  // Successful replacement clears Cut only on completion; busy folder reload resumes.
+  testStage="overwrite replace";gate.Reset();Check(s.MacBrowser().ShowTestFolder(dst,2),"show replace target");storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Replace;a->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(BrowserTransfers::Any(),"Cut was cleared before commit");Check(s.MacBrowser().ShowTestFolder(dst,2),"defer destination view");SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Until([&]{return Row(s,L"Payload")>=0;});Check(!Find(*source,u"Payload")&&!BrowserTransfers::Any(),"successful Cut did not finalize source/clipboard");
+  // Injected write-source read failure retains the old destination and moved source.
+  testStage="read error";Put(*source,u"Failure");Put(*target,u"Failure");gate.Reset();gate.fail=true;Check(s.MacBrowser().ShowTestFolder(src,2),"show failing source");Select(s,L"Failure");a->SendMessage(WM_COMMAND,ID_EDIT_CUT);Check(s.MacBrowser().ShowTestFolder(dst,2),"show failing target");storageUiTest.answer=Storage::ConflictChoice::Replace;a->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Check(Find(*source,u"Failure")&&Find(*target,u"Failure")&&BrowserTransfers::Any(),"failure lost source, old destination or Cut");Check(a->IsWindowEnabled(),"failure left browser disabled");
+  // Cancellation, safe close and backend cleanup: a closing frame stays alive
+  // until the job releases its volumes, rather than unmounting mid-write.
+  testStage="cancel close";Put(*source,u"Cancel");gate.Reset();gate.fail=false;Check(s.MacBrowser().ShowTestFolder(src,2),"show cancel source");Select(s,L"Cancel");a->SendMessage(WM_COMMAND,ID_EDIT_CUT);Check(s.MacBrowser().ShowTestFolder(dst,2),"show cancel target");storageUiTest={};a->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});HWND closing=a->GetSafeHwnd();a->SendMessage(WM_CLOSE);Check(IsWindow(closing)&&b->IsWindowEnabled(),"window unmounted active copy or disabled another browser");BackgroundCopies::CancelAll();SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Until([&]{return !IsWindow(closing);});Check(Find(*source,u"Cancel")&&!Find(*target,u"Cancel"),"cancel lost source or published partial file");Check(VolumeCoord::Readable(source->ResourceKey())&&VolumeCoord::Readable(target->ResourceKey()),"cancel leaked volume reservation");
+  Check(b->IsWindowEnabled(),"surviving browser disabled after close");
+  // A second queued copy is independently owned and cancellable before it starts.
+  auto enqueue=[&](uint32_t id){FileOperations::Request request;FileOperations::Location from,to;from.type=LIST_MAC;from.volume=slow;from.id=id;to.type=LIST_MAC;to.volume=target;request.sources={from};request.target=to;return BackgroundCopies::Start({std::move(request)},b,true);};
+  testStage="queue";auto firstId=Put(*source,u"QueuedOne"),secondId=Put(*source,u"QueuedTwo");gate.Reset();Check(enqueue(firstId),"start queued first");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});
+  Check(enqueue(secondId)&&FileOperations::Pending().size()==2,"second job not queued independently");auto queue=FileOperations::Pending();queue.back().Job()->cancel();SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Check(Find(*target,u"QueuedOne")&&!Find(*target,u"QueuedTwo"),"queued cancellation wrote the canceled file");
+#ifdef HFV_FLOPPY_TESTING
+  {CString image=host+"\\floppy.dsk";{CFile file;Check(file.Open(image,CFile::modeCreate|CFile::modeWrite),"create fake floppy image");file.SetLength(1474560);}char label[]="TestFloppy";Check(hfs_format(const_cast<char*>((LPCSTR)image),0,label)==0,"format fake floppy image");std::vector<BYTE> bytes(1474560);{CFile file;Check(file.Open(image,CFile::modeRead),"load fake floppy");Check(file.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"short fake floppy load");}
+   TestFloppy disk(std::move(bytes));readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach fake floppy");struct Detach{~Detach(){readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}}detach;
+   testStage="physical copy";char physical[MAX_PATH];get_floppy_volume_file_name(25,physical);auto doc=second.Document();int index=doc->insert_volume(physical,1,0,0,0);Check(index>=0&&doc->m_volumes[index].open(),"mount fake floppy browser");auto& mounted=doc->m_volumes[index];
+   auto tree=second.Tree();mounted.m_rootitem=tree->initialize_volume(index,mounted.m_volume_name,2,1,0,0,0);auto root=mounted.m_rootitem;bool notifications=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(root);tree->enable_selchange(notifications);doc->open_sub_directory(index,2,mounted.m_volume_name);
+   auto copyFloppy=[&](const std::u16string& name){auto id=Put(*source,name);gate.Reset();FileOperations::Location from,to;from.type=LIST_MAC;from.volume=slow;from.id=id;to.type=LIST_HFS;to.index=index;to.classicImage=physical;to.classicPath="TestFloppy:";return second.MacBrowser().TransferSelection({from},to);};
+   Check(copyFloppy(u"FloppyCopy"),"start fake floppy browser copy");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(disk.locked&&!mounted.m_opened&&!VolumeCoord::Readable(VolumeCoord::DeviceKey(25)),"floppy was not closed, locked and reserved");
+   SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Until([&]{return Row(second,L"FloppyCopy")>=0;});Check(mounted.m_opened&&!disk.locked&&disk.writes>0,"floppy browser did not automatically reopen/update");
+   Check(copyFloppy(u"FloppyClick"),"start deferred floppy browser copy");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});doc->open_sub_directory(index,2,"");Check(second.List()->GetListCtrl().GetItemCount()==0,"Mac floppy entry was not deferred during copying");
+   SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Until([&]{return Row(second,L"FloppyClick")>=0;});Check(mounted.m_opened,"deferred Macintosh entry did not reopen its reader");Check(second.WindowTitle()==L"TestFloppy \u2014 HFVExplorer","classic floppy title did not follow resumed navigation");
+   mounted.close();Host(second,folder);tree->GetTreeCtrl().SelectItem(root);Check(mounted.m_opened&&Row(second,L"FloppyCopy")>=0,"clicking Macintosh failed to reopen a closed reader without selecting drive root");
+   // Conversion prompts own captured requests; navigation cannot retarget them.
+   testStage="mode export";auto exportRequest=[&](const char* leaf){FileOperations::Request r;r.kind=FileOperations::Kind::LegacyCopy;r.askMode=true;r.sourceVolume=physical;r.sourcePath=std::string("TestFloppy:")+leaf;r.targetVolume=(LPCSTR)folder;r.targetPath=(LPCSTR)folder;r.target.type=LIST_FAT;return r;};
+   Check(BackgroundCopies::Start({exportRequest("FloppyCopy"),exportRequest("FloppyClick")},b,true),"start modeless mode batch");Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});Check(b->IsWindowEnabled()&&FileOperations::Pending().empty(),"mode picker disabled browsing or started copying before selection");Host(second,host);Check(Row(second,L"browse")>=0,"cannot browse while choosing copy mode");
+   auto mode=BackgroundCopies::ModeWindow();SendDlgItemMessage(mode,IDC_COPY_MODE,CB_SETCURSEL,4,0);SendMessage(mode,WM_COMMAND,IDOKALL,0);Until([]{return !BackgroundCopies::Active();});
+   for(const char* leaf:{"FloppyCopy","FloppyClick"}){CFile exported;Check(exported.Open(folder+"\\"+leaf,CFile::modeRead)&&exported.GetLength()==8192,"modeless OK to all lost mode or captured destination");}
+   auto cancelled=exportRequest("FloppyCopy");cancelled.targetPath=(LPCSTR)(host+"\\must-not-exist");bool accepted=true;Check(BackgroundCopies::Start({cancelled},b,true,[&](bool ok){accepted=ok;}),"start cancel-mode prompt");Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});SendMessage(BackgroundCopies::ModeWindow(),WM_CLOSE,0,0);Until([]{return !BackgroundCopies::Active();});Check(!accepted&&GetFileAttributesA(host+"\\must-not-exist")==INVALID_FILE_ATTRIBUTES,"canceling copy mode wrote files or reported completion");
+   // The ordinary browser transfer captures an Ask-mode import without
+   // running its old modal picker or changing the chosen Mac destination.
+   Check(Junction(folder+"\\UnrelatedLink",host),"create unrelated sibling junction");bool refused=false;try{MacBrowser::ResolveWindowsFile(VolumeCoord::Wide(std::string((LPCSTR)(folder+"\\UnrelatedLink"))));}catch(const HfsPlus::Error&){refused=true;}Check(refused,"selected junction was followed");
+   testStage="mode import";app.m_copyin_mode=6;FileOperations::Location input,destination;input.type=LIST_FAT;input.windowsPath=VolumeCoord::Wide(std::string((LPCSTR)(folder+"\\visible.txt")));destination.type=LIST_HFS;destination.index=index;destination.classicImage=physical;destination.classicPath="TestFloppy:";
+   Check(second.MacBrowser().TransferSelection({input},destination),"start browser Ask-mode import");Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});Check(FileOperations::Pending().empty()&&b->IsWindowEnabled(),"browser Ask mode did not separate planning from copying");Host(second,folder);mode=BackgroundCopies::ModeWindow();SendDlgItemMessage(mode,IDC_COPY_MODE,CB_SETCURSEL,4,0);SendMessage(mode,WM_COMMAND,IDOK,0);Until([]{return !BackgroundCopies::Active();});tree->GetTreeCtrl().SelectItem(root);Check(Row(second,L"visible.txt")>=0,"browser Ask-mode import used navigation instead of captured Mac destination");app.m_copyin_mode=0;
+   FileOperations::Location exportedFile,windowsTarget;exportedFile.type=LIST_MAC;exportedFile.volume=source;exportedFile.id=Put(*source,u"TargetLookup");windowsTarget.type=LIST_FAT;windowsTarget.windowsPath=VolumeCoord::Wide(std::string((LPCSTR)folder));Check(second.MacBrowser().TransferSelection({exportedFile},windowsTarget),"start export beside destination junction");Until([]{return !BackgroundCopies::Active();});Check(!BackgroundCopies::LastResult().code&&MacBrowser::DescribeWindowsFile(windowsTarget.windowsPath+L"\\TargetLookup").forks[1].size==31,"unrelated destination junction blocked generic export or lost resource fork");
+   // Repeat the ordinary PC import against an existing floppy file. The
+   // overwrite request must be presented before any replacement bytes are written.
+   testStage="duplicate import";auto duplicate=[&](){app.m_copyin_mode=6;storageUiTest={};Check(second.MacBrowser().TransferSelection({input},destination),"start duplicate floppy import");Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});auto picker=BackgroundCopies::ModeWindow();SendDlgItemMessage(picker,IDC_COPY_MODE,CB_SETCURSEL,4,0);SendMessage(picker,WM_COMMAND,IDOK,0);
+    Until([]{auto pending=FileOperations::Pending();return !BackgroundCopies::Active()||(!pending.empty()&&!pending.front().Job()->conflict().empty());});auto pending=FileOperations::Pending();Check(!pending.empty()&&!pending.front().Job()->conflict().empty(),("duplicate floppy import failed before overwrite prompt: "+BackgroundCopies::LastResult().message).c_str());Check(b->IsWindowEnabled(),"floppy overwrite disabled the browser");return pending.front().Job();};
+   auto unchanged=disk.disk.media;auto writes=disk.writes;auto duplicateJob=duplicate();duplicateJob->resolve(Storage::ConflictChoice::Skip);Until([]{return !BackgroundCopies::Active();});Check(disk.disk.media==unchanged&&disk.writes==writes,"Skip changed floppy sectors");
+   duplicateJob=duplicate();duplicateJob->resolve(Storage::ConflictChoice::Cancel);Until([]{return !BackgroundCopies::Active();});Check(disk.disk.media==unchanged&&disk.writes==writes,"Cancel changed floppy sectors");
+   {CFile file;Check(file.Open(folder+"\\visible.txt",CFile::modeCreate|CFile::modeWrite),"change replacement source");file.Write("NEW CONTENT",11);}
+   duplicateJob=duplicate();duplicateJob->resolve(Storage::ConflictChoice::Replace);Until([]{return !BackgroundCopies::Active();});Check(!duplicateJob->result().code&&disk.writes>writes,"Replace failed to write verified floppy changes");app.m_copyin_mode=0;
+
+   physical_floppy_suspend(25);auto verify=MacBrowser::OpenClassic(physical,"TestFloppy:",false);auto file=Find(*verify,u"FloppyCopy");Check(file&&verify->Stat(file).forks[1].size==31,"fake floppy copy/fork verification failed");auto replaced=Find(*verify,u"visible.txt");char replacement[11]{};Check(replaced&&verify->Stat(replaced).forks[0].size==11,"replacement floppy length differs");verify->Read(replaced,0,0,replacement,sizeof(replacement));Check(!memcmp(replacement,"NEW CONTENT",11),"replacement floppy bytes differ");verify->Close();
+   mounted.close();notifications=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().DeleteItem(root);tree->enable_selchange(notifications);mounted.m_rootitem=nullptr;mounted.m_free=1;mounted.m_file_name="";
+
+  }
+#endif
+  // File > Exit cancels every queued job and closes all frames after cleanup.
+  testStage="shutdown";auto extra=app.CreateBrowser(FALSE);Check(extra!=nullptr,"create shutdown browser");Put(*source,u"Shutdown");gate.Reset();Check(enqueue(Find(*source,u"Shutdown")),"start shutdown copy");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});app.OnExitBrowsers();Check(app.m_browsers.size()==2,"Exit destroyed a browser during an active write");SetEvent(gate.release);Until([&]{return app.m_browsers.empty();});Check(!BackgroundCopies::Active()&&Find(*source,u"Shutdown")&&!Find(*target,u"Shutdown"),"Exit failed to cancel safely or close all browsers");
+  fprintf(report,"PASS: non-modal Paste; same-window Windows and unrelated HFSX browsing during a gated slow read; source/destination reservations and guarded backend access; latest-navigation wins; deferred busy-volume reload; fork/Finder preservation; overwrite Skip/Replace while browsing; Cut finalization; injected read failure and replacement rollback; cancellation and safe frame close/lease release; independent queued cancellation; simulated floppy write/readback/unlock, automatic browser refresh, deferred Macintosh-entry selection and closed-reader reopening; modeless mode selection, captured destinations, OK to all and cancel; floppy overwrite Skip/Cancel/Replace with an unrelated sibling junction and rejection of selected links; multi-window Exit waits for canceled-job cleanup. Hidden synthetic windows and image fixtures only; no physical media or computer control.\n");
+ }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());result=1;}
+ SetEvent(gate.release);BackgroundCopies::CancelAll();FileOperations::CancelPending();ShutdownStorageUi();BackgroundCopies::enabled=false;BrowserTransfers::Clear();while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
+}
+#endif
+// SPDX-License-Identifier: GPL-2.0-or-later
+#ifdef HFV_TESTING
+// This suite intentionally uses the same real hidden frames and clipboard
+// commands as the background-copy suite, but injects failures at the device.
+int RunFloppyCopyRegressionsTest(const char* directory){
+ if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\floppy-copy-regressions-report.txt","w");if(!report)return 2;
+ class FaultFloppy:public FloppyWriteApi {
+ public:FakeFloppy disk;bool locked=false,denyLock=false,writeProtect=false,writeFail=false,shortWrite=false,flushed=false,badRead=false,shortRead=false,readFail=false,swapOnFlush=false,gateRead=false;DWORD flushError=ERROR_INVALID_FUNCTION;unsigned writes=0,readbacks=0,flushes=0;
+ HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+ explicit FaultFloppy(const std::vector<BYTE>& bytes):disk(bytes){}~FaultFloppy(){SetEvent(release);CloseHandle(entered);CloseHandle(release);}
+ UINT DriveType(int n)override{return disk.DriveType(n);}HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{if(writeProtect&&(a&GENERIC_WRITE)){SetLastError(ERROR_WRITE_PROTECT);return INVALID_HANDLE_VALUE;}return disk.Open(p,a,s,f);}bool Geometry(HANDLE h,DISK_GEOMETRY& g)override{return disk.Geometry(h,g);}bool Verify(HANDLE h,DWORD& n)override{return disk.Verify(h,n);}void Close(HANDLE h)override{disk.Close(h);}
+ bool Read(HANDLE h,ULONGLONG at,DWORD n,void* p,DWORD& got)override{
+  bool checking=DirectFloppy::Current(25)&&flushed&&writes;if(checking){++readbacks;if(gateRead){SetEvent(entered);if(WaitForSingleObject(release,30000)!=WAIT_OBJECT_0){SetLastError(ERROR_TIMEOUT);return false;}}if(readFail){SetLastError(ERROR_READ_FAULT);return false;}}
+  bool ok=disk.Read(h,at,n,p,got);if(ok&&checking){if(shortRead)--got;if(badRead&&got)static_cast<BYTE*>(p)[0]^=1;}return ok;
+ }
+ bool Lock(HANDLE)override{if(denyLock){SetLastError(ERROR_ACCESS_DENIED);return false;}locked=true;return true;}bool Dismount(HANDLE)override{return locked;}bool Unlock(HANDLE)override{locked=false;return true;}
+ bool FormatTracks1440(HANDLE)override{throw HfsPlus::Error("File copy attempted to format floppy");}
+ bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{Check(locked&&at<=disk.media.size()&&n<=disk.media.size()-at,"write outside locked simulated floppy");if(writeFail){SetLastError(ERROR_WRITE_FAULT);return false;}got=shortWrite?n-1:n;memcpy(disk.media.data()+size_t(at),p,got);++writes;return true;}
+ bool Flush(HANDLE)override{++flushes;flushed=true;if(swapOnFlush)++disk.changeCount;if(flushError){SetLastError(flushError);return false;}return true;}
+ void Reset(const std::vector<BYTE>& bytes){disk.media=bytes;++disk.changeCount;denyLock=writeProtect=writeFail=shortWrite=flushed=badRead=shortRead=readFail=swapOnFlush=gateRead=false;flushError=ERROR_INVALID_FUNCTION;writes=readbacks=flushes=0;ResetEvent(entered);ResetEvent(release);}
+ };
+ std::unique_ptr<FaultFloppy> device;bool attached=false;int result=0;auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();BackgroundCopies::enabled=true;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_copyin_mode=app.m_copyout_mode=4;
+ try{
+  std::vector<BYTE> blank;std::string reason;Check(PrepareFloppyHfs("AuditFloppy",blank,reason),"format simulated audit disk");device.reset(new FaultFloppy(blank));readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,device.get()),"attach audit floppy");attached=true;
+  HFSIFACE_set_copy_modes(4,4,0);app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto frame=app.CreateBrowser(FALSE);Check(frame!=nullptr,"create audit browser");auto& session=frame->GetBrowserSession();auto doc=session.Document();char physical[MAX_PATH];get_floppy_volume_file_name(25,physical);int index=doc->insert_volume(physical,1,0,0,0);Check(index>=0,"insert audit floppy");auto& mounted=doc->m_volumes[index];Check(mounted.open(),"mount audit floppy");auto tree=session.Tree();mounted.m_rootitem=tree->initialize_volume(index,mounted.m_volume_name,2,1,0,0,0);auto root=mounted.m_rootitem;
+  CString source=host+"\\Payload";auto reset=[&]{mounted.close();physical_floppy_suspend(25);device->Reset(blank);Check(mounted.open(),"reopen reset audit floppy");bool notify=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(root);tree->delete_subdir_contents(root);tree->enable_selchange(notify);doc->open_sub_directory(index,2,mounted.m_volume_name);{CFile file;Check(file.Open(source,CFile::modeCreate|CFile::modeWrite),"create audit source");std::vector<BYTE> bytes(8192,0x42);file.Write(bytes.data(),UINT(bytes.size()));}storageUiTest={};};
+  auto paste=[&](bool cut){FileOperations::Location from;from.type=LIST_FAT;from.windowsPath=VolumeCoord::Wide(std::string((LPCSTR)source));from.cut=cut;from.expectedIdentity=MacBrowser::DescribeWindowsFile(from.windowsPath).identity;BrowserTransfers::Publish({{from},true},false);frame->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Check(BackgroundCopies::Active()&&frame->IsWindowEnabled(),"floppy Paste blocked or lost background job");};
+  auto done=[&]{Until([]{return !BackgroundCopies::Active();});Check(device->disk.aligned&&!device->locked&&VolumeCoord::Readable(VolumeCoord::DeviceKey(25))&&FileOperations::Pending().empty(),"operation leaked floppy access or used unaligned I/O");};
+  auto present=[&]{return GetFileAttributesA(source)!=INVALID_FILE_ATTRIBUTES;};
+  auto readFile=[&](const std::u16string& name){physical_floppy_suspend(25);auto volume=MacBrowser::OpenClassic(physical,"AuditFloppy:",false);auto id=Find(*volume,name);Check(id!=0,"floppy destination missing");std::vector<BYTE> bytes(size_t(volume->Stat(id).forks[0].size));volume->Read(id,0,0,bytes.data(),bytes.size());volume->Close();return bytes;};
+  reset();paste(false);done();Check(!BackgroundCopies::LastResult().code&&present()&&readFile(u"Payload")==std::vector<BYTE>(8192,0x42),"ordinary original-style copy regressed");
+  for(DWORD flush:{DWORD(0),DWORD(ERROR_INVALID_FUNCTION),DWORD(ERROR_NOT_SUPPORTED)}){reset();device->flushError=flush;paste(true);done();Check(!BackgroundCopies::LastResult().code&&!present()&&!BrowserTransfers::Any()&&device->readbacks>0&&readFile(u"Payload")==std::vector<BYTE>(8192,0x42),"verified converted Cut did not remove source and consume clipboard");}
+  const char* cases[]={"lock refusal","failed write","short write","failed flush","readback mismatch","short readback","failed readback","media changed on flush","write protection"};
+  for(unsigned fault=0;fault<ARRAYSIZE(cases);++fault){reset();switch(fault){case 0:device->denyLock=true;break;case 1:device->writeFail=true;break;case 2:device->shortWrite=true;break;case 3:device->flushError=ERROR_NOT_READY;break;case 4:device->badRead=true;break;case 5:device->shortRead=true;break;case 6:device->readFail=true;break;case 7:device->swapOnFlush=true;break;case 8:device->writeProtect=true;break;}
+   paste(true);done();Check(BackgroundCopies::LastResult().code&&present()&&BrowserTransfers::Any()&&BrowserTransfers::Snapshot().items.front().cut,(std::string("failed Cut lost source/clipboard: ")+cases[fault]).c_str());if(fault==0||fault==8)Check(device->writes==0&&device->disk.media==blank,"denied lock changed media");fprintf(report,"PASS: %s retained source/Cut and released floppy access.\n",cases[fault]);
+  }
+  reset();device->gateRead=true;paste(true);Until([&]{return WaitForSingleObject(device->entered,0)==WAIT_OBJECT_0;});Check(BackgroundCopies::Active()&&present()&&BrowserTransfers::Any()&&frame->IsWindowEnabled(),"source removed, job timed out or browser disabled before readback completed");SendMessage(BackgroundCopies::DialogWindow(),WM_COMMAND,IDCANCEL,0);SetEvent(device->release);done();Check(present()&&BrowserTransfers::Any()&&BackgroundCopies::LastResult().error==ERROR_CANCELLED,"cancel during verification removed source or lost Cancel result");
+  // A mode question can outlive its selected disk. A replacement disk in
+  // the same drive must never inherit that queued write request.
+  reset();app.m_copyin_mode=6;paste(true);Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});++device->disk.changeCount;auto picker=BackgroundCopies::ModeWindow();SendDlgItemMessage(picker,IDC_COPY_MODE,CB_SETCURSEL,4,0);SendMessage(picker,WM_COMMAND,IDOK,0);done();Check(BackgroundCopies::LastResult().code&&present()&&device->writes==0&&device->disk.media==blank,"queued copy wrote replacement media selected after mode prompt");app.m_copyin_mode=4;
+  // Native folder Cut to a floppy, then a second Cut within that same floppy.
+  reset();auto native=Image(host+"\\native-source.dsk");auto branch=native->MakeDirectory(2,u"Tree");MacBrowser::Entry entry;entry.name=u"Item";entry.forks[0].size=123;entry.forks[1].size=17;entry.finder[0]='T';native->Put(branch,entry,[](unsigned fork,uint64_t at,void* data,size_t n){for(size_t i=0;i<n;++i)static_cast<BYTE*>(data)[i]=BYTE(fork+at+i);},false);
+  FileOperations::Location nativeFolder;nativeFolder.type=LIST_MAC;nativeFolder.volume=native;nativeFolder.id=branch;nativeFolder.cut=true;nativeFolder.directory=true;device->badRead=true;BrowserTransfers::Publish({{nativeFolder},true},false);frame->SendMessage(WM_COMMAND,ID_EDIT_PASTE);done();Check(BackgroundCopies::LastResult().error==ERROR_CRC&&Find(*native,u"Tree")&&BrowserTransfers::Any(),"generic native Cut lost source/Cut or hardware error after bad floppy readback");reset();BrowserTransfers::Publish({{nativeFolder},true},false);frame->SendMessage(WM_COMMAND,ID_EDIT_PASTE);done();Check(!BackgroundCopies::LastResult().code&&!Find(*native,u"Tree")&&!BrowserTransfers::Any(),"native folder Cut to floppy failed or retained source");
+  auto destinationId=native->MakeDirectory(2,u"Destination");nativeFolder.id=destinationId;nativeFolder.cut=false;BrowserTransfers::Publish({{nativeFolder},true},false);frame->SendMessage(WM_COMMAND,ID_EDIT_PASTE);done();Until([&]{return Row(session,L"Destination")>=0&&Row(session,L"Tree")>=0;});Select(session,L"Tree");frame->SendMessage(WM_COMMAND,ID_EDIT_CUT);auto oldCatalogId=BrowserTransfers::Snapshot().items.front().expectedCatalogId;auto binding=reinterpret_cast<list_lparam_struct*>(session.List()->GetListCtrl().GetItemData(Row(session,L"Destination")));Check(binding&&binding->htree,"same-floppy destination binding missing");tree->GetTreeCtrl().SelectItem(binding->htree);frame->SendMessage(WM_COMMAND,ID_EDIT_PASTE);done();Check(!BackgroundCopies::LastResult().code&&!BrowserTransfers::Any(),"same-floppy folder Cut did not finish");
+  physical_floppy_suspend(25);{auto volume=MacBrowser::OpenClassic(physical,"AuditFloppy:",false);Check(!Find(*volume,u"Tree"),"same-floppy move did not persist source deletion");auto dest=Find(*volume,u"Destination");uint32_t treeId=0,itemId=0;for(auto& e:volume->List(dest))if(e.name==u"Tree")treeId=e.id;Check(treeId!=0&&volume->Stat(treeId).resolvedId==oldCatalogId,"same-floppy move lost its tree or changed catalog identity");for(auto& e:volume->List(treeId))if(e.name==u"Item")itemId=e.id;Check(itemId&&volume->Stat(itemId).forks[1].size==17,"same-floppy move lost resource fork");BYTE data[17]{};volume->Read(itemId,1,0,data,sizeof(data));for(unsigned i=0;i<sizeof(data);++i)Check(data[i]==BYTE(i+1),"same-floppy resource bytes differ");volume->Close();}
+  // Same-volume native moves must use catalog rename, preserving identity
+  // without decoding/copying file data at all.
+  auto nativeFile=Put(*native,u"Identity");Gate noRead;noRead.fail=true;SetEvent(noRead.release);auto guarded=std::make_shared<Slow>(native,noRead);FileOperations::Request renameMove;FileOperations::Location nativeFrom,nativeTo;nativeFrom.type=LIST_MAC;nativeFrom.volume=guarded;nativeFrom.id=nativeFile;nativeFrom.cut=true;nativeTo.type=LIST_MAC;nativeTo.volume=native;nativeTo.id=destinationId;renameMove.sources={nativeFrom};renameMove.target=nativeTo;Check(BackgroundCopies::Start({renameMove},frame,true),"start native in-place move");done();Check(!BackgroundCopies::LastResult().code&&native->Stat(nativeFile).parent==destinationId&&WaitForSingleObject(noRead.entered,0)==WAIT_TIMEOUT,"native same-volume move copied data or changed catalog identity");
+  // Skip a duplicate, then cancel the following per-file mode question. No
+  // invisible completed progress dialog may be left behind.
+  reset();paste(false);done();CString secondPath=host+"\\Second";{CFile file;Check(file.Open(secondPath,CFile::modeCreate|CFile::modeWrite),"create second planning source");file.Write("SECOND",6);}
+  auto planned=[&](const CString& path){FileOperations::Request r;r.kind=FileOperations::Kind::LegacyCopy;r.askMode=true;r.target=session.MacBrowser().TargetFolder();r.sourceVolume=(LPCSTR)host;r.sourcePath=(LPCSTR)path;r.targetVolume=physical;r.targetPath="AuditFloppy:";r.conversion.input=r.conversion.output='r';r.conversion.appledouble=false;FileOperations::Location from;from.type=LIST_FAT;from.windowsPath=VolumeCoord::Wide(std::string((LPCSTR)path));r.sources={from};return r;};
+  unsigned before=BackgroundCopies::DialogCount();bool plannedComplete=true;auto originalMedia=device->disk.media;Check(BackgroundCopies::Start({planned(source),planned(secondPath)},frame,false,[&](bool ok){plannedComplete=ok;}),"start per-file mode batch");Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});picker=BackgroundCopies::ModeWindow();SendDlgItemMessage(picker,IDC_COPY_MODE,CB_SETCURSEL,4,0);SendMessage(picker,WM_COMMAND,IDOK,0);Until([]{auto jobs=FileOperations::Pending();return !jobs.empty()&&!jobs.front().Job()->conflict().empty();});FileOperations::Pending().front().Job()->resolve(Storage::ConflictChoice::Skip);Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});SendMessage(BackgroundCopies::ModeWindow(),WM_CLOSE,0,0);done();Check(!plannedComplete&&present()&&GetFileAttributesA(secondPath)!=INVALID_FILE_ATTRIBUTES&&device->disk.media==originalMedia&&BackgroundCopies::DialogCount()==before,"mode cancel after Skip leaked progress or changed media/source");
+  // Export a physical floppy Cut, then finalize deletion through a separate
+  // verified source writer after the host destination has completed.
+  reset();paste(false);done();FileOperations::Location from,to;from.type=LIST_HFS;from.classicImage=physical;from.classicPath="AuditFloppy:Payload";from.cut=true;to.type=LIST_FAT;to.windowsPath=VolumeCoord::Wide(std::string((LPCSTR)host));
+  Check(DeleteFileA(source),"remove original host file before export");Host(session,host);Check(session.MacBrowser().TransferSelection({from},to),"start physical-source Cut export");done();Check(!BackgroundCopies::LastResult().code&&present(),"physical-source Cut export failed");physical_floppy_suspend(25);{auto volume=MacBrowser::OpenClassic(physical,"AuditFloppy:",false);Check(!Find(*volume,u"Payload"),"physical-source Cut deletion was not finalized");volume->Close();}
+  reset();app.m_copyin_mode=6;paste(true);Until([]{return BackgroundCopies::ModeWindow()!=nullptr;});frame->SendMessage(WM_CLOSE);Until([&]{return app.m_browsers.empty();});Check(!BackgroundCopies::Active()&&present()&&device->writes==0,"closing last browser during mode selection wrote media or lost source");
+  fprintf(report,"PASS: real hidden browser clipboard Paste, original fast copy, verified Cut with supported/unsupported flush, device readback before source deletion, cancellation during verification, queued-media replacement rejection, generic native Cut failure retention, native and same-floppy folder moves with resource forks, mode-cancel-after-Skip cleanup, last-window close during mode selection, physical-source export/delete finalization, source/Cut retention across nine injected device faults, unlock/lease cleanup. Simulated media only; no hardware or computer control.\n");
+ }catch(const std::exception& e){fprintf(report,"FAIL: %s; last result: %s\n",e.what(),BackgroundCopies::LastResult().message.c_str());result=1;}
+ if(device)SetEvent(device->release);BackgroundCopies::CancelAll();FileOperations::CancelPending();ShutdownStorageUi();BackgroundCopies::enabled=false;BrowserTransfers::Clear();while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);if(attached){readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}device.reset();fclose(report);return result;
+}
+#endif

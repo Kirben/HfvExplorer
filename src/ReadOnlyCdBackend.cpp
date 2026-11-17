@@ -209,6 +209,12 @@ int is_any_floppy_present(int drive) {
 #endif
     return device.OpenDrive(drive)?1:0;
 }
+int physical_floppy_generation(int drive,unsigned long* generation){
+ if(drive<0||drive>=MAX_DEVICES||!generation)return 0;
+ if(auto writer=DirectFloppy::Current(drive)){*generation=writer->Generation();return 1;}
+ if(!floppies[drive]||floppies[drive]->Handle()==INVALID_HANDLE_VALUE)return 0;
+ *generation=floppies[drive]->Generation();return 1;
+}
 int get_floppy_max_size(int drive) {return drive>=0 && drive<MAX_DEVICES && floppies[drive]?(int)floppies[drive]->MediaSize():0;}
 void floppy_get_geometry(int drive,int* c,int* h,int* s,int* bytes) {
     *c=*h=*s=*bytes=0;

@@ -11,7 +11,7 @@ namespace VolumeCoord {
 namespace {
 std::string Utf8(const std::wstring& w){int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);std::string s(n,0);if(n)WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),&s[0],n,nullptr,nullptr);return s;}
 std::wstring Upper(std::wstring w){if(!w.empty())CharUpperBuffW(&w[0],DWORD(w.size()));return w;}
-struct Resource {unsigned readers=0;bool writer=false;uint64_t revision=0;};
+struct Resource {unsigned readers=0;bool writer=false;DWORD writerThread=0;uint64_t revision=0;};
 struct Bus {std::mutex mutex;std::map<std::string,Resource> resources;std::map<std::string,std::string> hosts;std::vector<std::weak_ptr<Subscription::State>> subscribers;};
 }
 struct Subscription::State {
@@ -43,9 +43,13 @@ Lease::Lease(std::vector<Access> values){
  for(auto& a:unique)access_.push_back({a.first,a.second});
  auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);
  for(auto& a:unique){auto& resource=bus.resources[a.first];if(resource.writer||(a.second==Mode::Write&&resource.readers))throw Busy();}
- for(auto& a:unique){auto& resource=bus.resources[a.first];if(a.second==Mode::Write)resource.writer=true;else ++resource.readers;}
+ for(auto& a:unique){auto& resource=bus.resources[a.first];if(a.second==Mode::Write){resource.writer=true;resource.writerThread=GetCurrentThreadId();}else ++resource.readers;}
 }
 Lease::~Lease(){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(auto& a:access_){auto& resource=bus.resources[a.key];if(a.mode==Mode::Write)resource.writer=false;else --resource.readers;}}
+BackendRead::BackendRead(const std::string& key){
+ {auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);auto it=bus.resources.find(key);if(it!=bus.resources.end()&&it->second.writer&&it->second.writerThread==GetCurrentThreadId())return;}
+ lease_.reset(new Lease({{key,Mode::Read}}));
+}
 bool Readable(const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);auto found=bus.resources.find(key);return found==bus.resources.end()||!found->second.writer;}
 uint64_t Revision(const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);return bus.resources[key].revision;}
 void Changed(const std::vector<std::string>& keys){
