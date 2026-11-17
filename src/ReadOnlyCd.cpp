@@ -49,7 +49,7 @@ void ReadOnlyCd::Close() {
     test=TestState{};
 #endif
     handle_ = scsiHandle_ = INVALID_HANDLE_VALUE; scratch_ = NULL;
-    mediaSize_ = volumeOffset_ = 0; volumeSize_ = 0; error_ = 0;
+    mediaSize_ = volumeOffset_ = readBegin_ = readEnd_ = 0;tracks_.clear(); volumeSize_ = 0; error_ = 0;
     declaredVolumeSize_ = 0;
     lengthSize_ = tocSize_ = scsiSize_ = 0; scsiCapacityError_ = 0;
     fixture_ = passThroughUsed_ = false; devicePath_[0] = 0;
@@ -77,6 +77,7 @@ void ReadOnlyCd::SelectCapacity() {
     // The volume/disk-length IOCTL may describe only the mounted data extent.
     // Prefer whole-medium capacity from the CD TOC or READ CAPACITY instead.
     mediaSize_ = scsiSize_ ? scsiSize_ : (tocSize_ ? tocSize_ : lengthSize_);
+    if(readEnd_>mediaSize_)readEnd_=mediaSize_;
 }
 bool ReadOnlyCd::ScsiRead(DWORD sector, WORD sectors, void* buffer) {
     if (!EnsureScsiHandle()) return false;
@@ -101,21 +102,25 @@ bool ReadOnlyCd::OpenDrive(int drive) {
     DWORD returned = 0; GET_LENGTH_INFORMATION length = {};
     if (HfvMediaControl(handle_, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &length, sizeof(length), &returned, NULL)
         && length.Length.QuadPart > 0) lengthSize_ = (ULONGLONG)length.Length.QuadPart;
-    {
-        CDROM_READ_TOC_EX query = {}; query.Format = CDROM_READ_TOC_EX_FORMAT_TOC; query.Msf = 0;
-        CDROM_TOC toc = {};
-        if (HfvMediaControl(handle_, IOCTL_CDROM_READ_TOC_EX, &query, sizeof(query),
-                            &toc, sizeof(toc), &returned, NULL) && returned >= 12) {
-            unsigned tracks = (returned - FIELD_OFFSET(CDROM_TOC, TrackData)) / sizeof(TRACK_DATA);
-            for (unsigned n = 0; n < tracks && n < ARRAYSIZE(toc.TrackData); ++n)
-                if (toc.TrackData[n].TrackNumber == 0xAA)
-                    tocSize_ = (ULONGLONG)be32(toc.TrackData[n].Address) * kSector;
-        }
-    }
+    if(!CheckIdentity()){DWORD saved=error_;Close();error_=saved;return false;}
+    if(!LoadTracks()){DWORD saved=error_;Close();error_=saved?saved:ERROR_BAD_FORMAT;return false;}
+    if(!CheckIdentity()){DWORD saved=error_;Close();error_=saved;return false;}
     SelectCapacity();
     if (!mediaSize_ && !ScsiCapacity()) { error_ = GetLastError(); return false; }
+    readBegin_=0;readEnd_=mediaSize_;
     error_ = ERROR_SUCCESS; return true;
 }
+
+bool ReadOnlyCd::LoadTracks(){
+ std::string reason;auto query=[&](CDROM_READ_TOC_EX& request,void* output,DWORD size,DWORD& returned,DWORD& error){if(!HfvMediaControl(handle_,IOCTL_CDROM_READ_TOC_EX,&request,sizeof(request),output,size,&returned,nullptr)){error=GetLastError();return false;}error=0;return true;};
+ if(!CdMedia::ReadLayout(query,tracks_,error_,reason))return false;
+ tocSize_=0;for(auto& t:tracks_)tocSize_=(std::max)(tocSize_,ULONGLONG(t.start+t.sectors)*2048);return !tracks_.empty();
+}
+bool ReadOnlyCd::SetReadRange(ULONGLONG begin,ULONGLONG size){
+ if(invalid_||begin%2048||size%2048||!size||begin>mediaSize_||size>mediaSize_-begin){error_=ERROR_INVALID_PARAMETER;return false;}
+ readBegin_=begin;readEnd_=begin+size;cache_clear(&cache_);return true;
+}
+bool ReadOnlyCd::SelectDataTrack(unsigned number){for(auto& t:tracks_)if(t.number==number&&t.data)return SetReadRange(t.start*2048,t.sectors*2048);error_=ERROR_NOT_SUPPORTED;return false;}
 #ifdef HFV_CD_TESTING
 bool ReadOnlyCd::OpenFixture(const char* path, ULONGLONG reportedLength) {
     Close(); fixture_ = true;
@@ -128,12 +133,13 @@ bool ReadOnlyCd::OpenFixture(const char* path, ULONGLONG reportedLength) {
     SelectCapacity();
     scratch_ = (BYTE*)VirtualAlloc(NULL, kTransfer, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!scratch_) { error_ = ERROR_NOT_ENOUGH_MEMORY; return false; }
-    return true;
+    readBegin_=0;readEnd_=mediaSize_;CdMedia::Track t;t.sectors=mediaSize_/2048;tracks_={t};return true;
 }
+bool ReadOnlyCd::SetFixtureTracks(const std::vector<CdMedia::Track>& tracks){tracks_=tracks;return !tracks.empty();}
 #endif
 bool ReadOnlyCd::ReadSectors(ULONGLONG offset, DWORD count, void* buffer) {
 #ifdef HFV_CD_TESTING
-    if(fixture_){++test.reads;test.bytes+=count;if(test.changeAfterRead==test.reads)++test.generation;
+    if(fixture_){++test.reads;test.bytes+=count;test.minOffset=(std::min)(test.minOffset,offset);test.maxEnd=(std::max)(test.maxEnd,offset+count);if(test.changeAfterRead==test.reads)++test.generation;
         if(test.readError||test.shortRead||(test.failAbove&&count>test.failAbove)){error_=test.readError?test.readError:test.shortRead?ERROR_READ_FAULT:ERROR_CRC;return false;}}
 #endif
     LARGE_INTEGER pos; pos.QuadPart = offset;
@@ -167,7 +173,7 @@ bool ReadOnlyCd::CheckIdentity(){
 bool ReadOnlyCd::ReadBytes(ULONGLONG offset,DWORD count,void* buffer){
     if(handle_==INVALID_HANDLE_VALUE||!scratch_||(!buffer&&count)){error_=ERROR_INVALID_HANDLE;return false;}
     if(invalid_)return false;
-    if(offset>mediaSize_||count>mediaSize_-offset){error_=ERROR_HANDLE_EOF;return false;}
+    if(offset<readBegin_||offset>readEnd_||count>readEnd_-offset){error_=ERROR_HANDLE_EOF;return false;}
     if(!count)return true;if(!CheckIdentity())return false;
     BYTE* out=(BYTE*)buffer;BYTE sector[kSector];
     while(count){
@@ -178,9 +184,9 @@ bool ReadOnlyCd::ReadBytes(ULONGLONG offset,DWORD count,void* buffer){
             DWORD n=min(count,kSector-skip);memcpy(out,sector+skip,n);out+=n;offset+=n;count-=n;continue;
         }
         DWORD required=(skip+chunk+kSector-1)&~(kSector-1);
-        if(required>mediaSize_-aligned){error_=ERROR_HANDLE_EOF;return false;}
+        if(required>readEnd_-aligned){error_=ERROR_HANDLE_EOF;return false;}
         // Original CD_READ_AHEAD_SECTORS=32. Clip speculation at real media EOF.
-        DWORD transfer=cached?DWORD(min(ULONGLONG(kTransfer),(mediaSize_-aligned)&~ULONGLONG(kSector-1))):required;
+        DWORD transfer=cached?DWORD(min(ULONGLONG(kTransfer),(readEnd_-aligned)&~ULONGLONG(kSector-1))):required;
         if(!ReadSectors(aligned,transfer,scratch_)){
             DWORD error=error_;if(!CheckIdentity())return false;
             if(transfer==required||!ReadSectors(aligned,required,scratch_))return ReadFailure(transfer==required?error:error_);
@@ -194,10 +200,10 @@ bool ReadOnlyCd::ReadBytes(ULONGLONG offset,DWORD count,void* buffer){
 }
 bool ReadOnlyCd::CheckVolume(ULONGLONG offset, ULONGLONG length, bool allowShortened) {
     BYTE mdb[512];
-    if (length < 1536 || length > LONG_MAX || offset > mediaSize_ || mediaSize_ - offset < 1536 ||
-        (!allowShortened && length > mediaSize_ - offset) ||
+    if (length < 1536 || length > LONG_MAX || offset < readBegin_ || offset > readEnd_ || readEnd_ - offset < 1536 ||
+        (!allowShortened && length > readEnd_ - offset) ||
         !ReadBytes(offset + 1024, sizeof(mdb), mdb)) return false;
-    ULONGLONG available = min(length, mediaSize_ - offset);
+    ULONGLONG available = min(length, readEnd_ - offset);
     DWORD allocation = be32(mdb + 20); WORD blocks = be16(mdb + 18), first = be16(mdb + 28);
     if (be16(mdb) != 0x4244 || !blocks || allocation < 512 || allocation % 512 ||
         mdb[36] == 0 || mdb[36] > 27 || (ULONGLONG)first * 512 + (ULONGLONG)blocks * allocation > length)
@@ -221,40 +227,46 @@ bool ReadOnlyCd::CheckVolume(ULONGLONG offset, ULONGLONG length, bool allowShort
     volumeOffset_ = offset; volumeSize_ = (DWORD)available; declaredVolumeSize_ = (DWORD)length; return true;
 }
 bool ReadOnlyCd::FindHfs() {
+ volumeOffset_=0;volumeSize_=declaredVolumeSize_=0;
+ for(auto i=tracks_.rbegin();i!=tracks_.rend();++i)if(i->data){if(!SelectDataTrack(i->number))return false;if(FindHfsRange())return true;if(invalid_)return false;}
+ error_=ERROR_UNRECOGNIZED_VOLUME;return false;
+}
+bool ReadOnlyCd::FindHfsRange() {
     volumeOffset_ = 0; volumeSize_ = declaredVolumeSize_ = 0;
     BYTE block[512];
-    if (CheckVolume(0, mediaSize_)) return true;
-    if (!ReadBytes(0, sizeof(block), block)) return false;
+    if (CheckVolume(readBegin_, readEnd_-readBegin_)) return true;
+    if (!ReadBytes(readBegin_, sizeof(block), block)) return false;
     DWORD mapBlock = be16(block) == 0x4552 ? be16(block + 2) : 512;
-    if (!fixture_ && be16(block) == 0x4552 && (mapBlock == 512 || mapBlock == 2048) &&
+    if (!fixture_ && be16(block) == 0x4552 && (mapBlock == 512 || mapBlock == 2048 || mapBlock == 4096) &&
         (ULONGLONG)be32(block + 4) * mapBlock > mediaSize_ && !scsiSize_)
         ScsiCapacity(); // Cross-check a short Windows extent; never trust disk metadata as capacity.
-    if (mapBlock == 512 || mapBlock == 2048) {
-        if (ReadBytes(mapBlock, sizeof(block), block) && be16(block) == 0x504D) {
+    if (mapBlock == 512 || mapBlock == 2048 || mapBlock == 4096) {
+        if (ReadBytes(readBegin_+mapBlock, sizeof(block), block) && be16(block) == 0x504D) {
             DWORD entries = be32(block + 4);
-            if (entries > 4096 || (ULONGLONG)(entries + 1) * mapBlock > mediaSize_) {
+            if (entries > 4096 || (ULONGLONG)(entries + 1) * mapBlock > readEnd_-readBegin_) {
                 error_ = ERROR_BAD_FORMAT; return false;
             }
             for (DWORD n = 1; n <= entries; ++n) {
-                if (!ReadBytes((ULONGLONG)n * mapBlock, sizeof(block), block) || be16(block) != 0x504D) break;
-                if (!memcmp(block + 48, "Apple_HFS", 9) && block[57] == 0 &&
-                    CheckVolume((ULONGLONG)be32(block + 8) * mapBlock, (ULONGLONG)be32(block + 12) * mapBlock, true))
-                    return true;
+                if (!ReadBytes(readBegin_+(ULONGLONG)n * mapBlock, sizeof(block), block) || be16(block) != 0x504D) break;
+                if (!memcmp(block + 48,"Apple_HFS",9)&&block[57]==0){
+                    ULONGLONG start=ULONGLONG(be32(block+8))*mapBlock,length=ULONGLONG(be32(block+12))*mapBlock;
+                    if(CheckVolume(readBegin_+start,length,true)||(readBegin_&&CheckVolume(start,length,true)))return true;
+                }
             }
             error_ = ERROR_UNRECOGNIZED_VOLUME; return false;
         }
     }
     // Some historical hybrid CDs omit a usable map. Match the legacy search,
     // but validate MDB allocation geometry before accepting a candidate.
-    ULONGLONG end = min(mediaSize_, (ULONGLONG)1024 * 1024);
+    ULONGLONG end = min(readEnd_,readBegin_+(ULONGLONG)1024 * 1024);
     BYTE scan[32768];
-    for (ULONGLONG base = 0; base < end; base += sizeof(scan)) {
+    for (ULONGLONG base = readBegin_; base < end; base += sizeof(scan)) {
         DWORD bytes = (DWORD)min((ULONGLONG)sizeof(scan), end - base);
         if (!ReadBytes(base, bytes, scan)) return false;
         for (DWORD n = 0; n + 512 <= bytes; n += 512) {
             ULONGLONG mdb = base + n;
-            if (mdb >= 1024 && be16(scan + n) == 0x4244 &&
-                CheckVolume(mdb - 1024, mediaSize_ - (mdb - 1024))) return true;
+            if (mdb >= readBegin_+1024 && be16(scan + n) == 0x4244 &&
+                CheckVolume(mdb - 1024, readEnd_ - (mdb - 1024))) return true;
         }
     }
     error_ = ERROR_UNRECOGNIZED_VOLUME; return false;

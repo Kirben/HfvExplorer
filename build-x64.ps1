@@ -57,6 +57,11 @@ if($Test -or $TestHfsPlus) {
  if(!$commandsTest.WaitForExit(60000)){$commandsTest.Kill();throw 'Per-volume command tests timed out.'}
  Get-Content (Join-Path $commands 'per-volume-commands-report.txt')
  if($commandsTest.ExitCode -ne 0){throw "Per-volume command tests failed; retained $commands"}
+ $optical=Join-Path $hfsPlusDirectory 'optical-data-tracks'
+ $opticalTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-optical-data-tracks',('"'+$optical+'"')) -WindowStyle Hidden -PassThru
+ $opticalTest.WaitForExit()
+ Get-Content (Join-Path $optical 'optical-data-tracks-report.txt')
+ if($opticalTest.ExitCode -ne 0){throw 'Optical data-track tests failed'}
  $mfsBrowser=Join-Path $hfsPlusDirectory 'mfs-write-browser'
  $mfsBrowserTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-mfs-write-browser',('"'+$mfsBrowser+'"')) -WindowStyle Hidden -PassThru
  $mfsBrowserTest.WaitForExit()

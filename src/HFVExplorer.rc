@@ -1389,7 +1389,7 @@ BEGIN
  LTEXT "Image file:",IDC_STATIC,10,40,55,12
  EDITTEXT IDC_CDI_PATH,70,38,190,14,ES_AUTOHSCROLL
  PUSHBUTTON "Browse...",IDC_CDI_BROWSE,270,37,60,16
- LTEXT "Single-track data CDs only. Audio, mixed-mode and multisession CDs are not supported.",IDC_STATIC,10,65,320,24
+ LTEXT "Saves a selected data track, including on mixed-mode or multisession discs. Audio tracks are excluded.",IDC_STATIC,10,65,320,24
  DEFPUSHBUTTON "Save image",IDOK,180,98,70,18
  PUSHBUTTON "Cancel",IDCANCEL,260,98,70,18
 END
@@ -1525,4 +1525,18 @@ BEGIN
  EDITTEXT IDC_MFS_FINDER,10,122,310,14,ES_AUTOHSCROLL
  DEFPUSHBUTTON "Apply",IDOK,210,151,52,18
  PUSHBUTTON "Close",IDCANCEL,268,151,52,18
+END
+
+IDD_CD_DATA_TRACK DIALOGEX 0,0,350,145
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Choose CD data track"
+FONT 9,"Segoe UI"
+BEGIN
+ LTEXT "Data track:",IDC_STATIC,10,12,65,12
+ COMBOBOX IDC_CDI_TRACK,80,10,260,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ CONTROL "Save Mac volume only (omit other partitions)",IDC_CDI_MAC_ONLY,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,40,330,15
+ LTEXT "A data-track image preserves its data sectors. A Mac-volume image contains only the Mac filesystem and is easier to reopen independently.",IDC_STATIC,10,65,330,31
+ LTEXT "Audio, lead-in/lead-out and session gaps are not included.",IDC_STATIC,10,100,330,12
+ DEFPUSHBUTTON "Save image",IDOK,190,120,70,18
+ PUSHBUTTON "Cancel",IDCANCEL,270,120,70,18
 END

@@ -99,15 +99,29 @@ static void exercise(const std::string& path,const std::vector<BYTE>& original,D
     readonly_cd_backend_final();
     printf("PASS: %s\n",path.c_str());
 }
+
+static void opticalTracks(const std::string& root,const std::vector<BYTE>& raw){
+ DWORD prefix=64*2048;std::vector<BYTE> disc(prefix+raw.size()+64*2048,0xcc);memcpy(disc.data()+prefix,raw.data(),raw.size());
+ auto path=root+"mixed-nonzero.iso";save(path,disc);ReadOnlyCd cd;check(cd.OpenFixture(path.c_str()),"open mixed-mode fixture");CdMedia::Track audio;audio.number=1;audio.data=false;audio.start=0;audio.sectors=64;CdMedia::Track data;data.number=2;data.start=64;data.sectors=raw.size()/2048;CdMedia::Track trailing=audio;trailing.number=3;trailing.start=data.start+data.sectors;
+ check(cd.SetFixtureTracks({audio,data,trailing})&&cd.FindHfs()&&cd.VolumeOffset()==prefix&&cd.VolumeSize()==raw.size(),"classic HFS on a nonzero mixed-mode data track");BYTE tail[2048];check(cd.ReadVolume(raw.size()-sizeof(tail),sizeof(tail),tail)&&!memcmp(tail,raw.data()+raw.size()-sizeof(tail),sizeof(tail)),"classic data-track tail");check(cd.test.minOffset>=prefix&&cd.test.maxEnd<=prefix+raw.size(),"classic read-ahead crossed into audio");check(!cd.ReadBytes(prefix-1,1,tail)&&!cd.ReadBytes(prefix+raw.size(),1,tail),"selected data-track bounds ignored");
+ // Multiple data sessions, with a real gap that must never be included.
+ auto first=data;first.number=1;first.session=1;first.start=0;auto last=data;last.number=2;last.session=2;last.start=first.sectors+1000;std::vector<BYTE> sessions(size_t((last.start+last.sectors)*2048),0xee);memcpy(sessions.data(),raw.data(),raw.size());memcpy(sessions.data()+size_t(last.start*2048),raw.data(),raw.size());sessions[size_t(last.start*2048)]='N';auto sessionPath=root+"multisession.iso";save(sessionPath,sessions);
+ check(cd.OpenFixture(sessionPath.c_str())&&cd.SetFixtureTracks({first,last})&&cd.FindHfs()&&cd.VolumeOffset()==last.start*2048,"classic newest data session selection");BYTE marker=0;check(cd.ReadVolume(0,1,&marker)&&marker=='N'&&cd.test.minOffset>=last.start*2048,"older session or gap read for newest classic volume");
+ // APM addresses can be absolute to the disc, rather than the selected track.
+ DWORD volumeBase=65536;std::vector<BYTE> partitioned(prefix+volumeBase+raw.size(),0);memcpy(partitioned.data()+prefix+volumeBase,raw.data(),raw.size());be16(partitioned.data()+prefix,0x4552);be16(partitioned.data()+prefix+2,512);BYTE* map=partitioned.data()+prefix+512;be16(map,0x504d);be32(map+4,1);be32(map+8,(prefix+volumeBase)/512);be32(map+12,DWORD(raw.size()/512));memcpy(map+48,"Apple_HFS",9);auto absolutePath=root+"absolute-apm.iso";save(absolutePath,partitioned);data.sectors=(volumeBase+raw.size())/2048;
+ check(cd.OpenFixture(absolutePath.c_str())&&cd.SetFixtureTracks({audio,data})&&cd.FindHfs()&&cd.VolumeOffset()==prefix+volumeBase,"classic disc-absolute APM origin");check(cd.ReadVolume(0,1,&marker)&&marker==raw[0],"absolute APM classic data changed");check(load(absolutePath.c_str())==partitioned,"optical probing wrote fixture");
+ puts("PASS: classic HFS mixed-mode/nonzero data tracks, newest multisession track, absolute APM addressing, audio/gap exclusion and read-ahead clipping; fixture files only");
+}
 int main(int argc,char** argv) {
     if(argc!=3) { puts("Usage: cd-readonly.exe POPULATED_HFS_IMAGE NEW_FIXTURE_DIRECTORY"); return 2; }
     check(CreateDirectoryA(argv[2],NULL)!=0,"exclusive test directory creation");
     std::vector<BYTE> raw=load(argv[1]);
     std::string root=std::string(argv[2])+"\\";
     originalCache(root);
+    opticalTracks(root,raw);
     std::string plain=root+"plain.iso"; save(plain,raw); exercise(plain,raw,0,(DWORD)raw.size());
     check(load(plain.c_str())==raw,"plain fixture unchanged");
-    for(DWORD blockSize=512;blockSize<=2048;blockSize*=4) {
+    for(DWORD blockSize : {DWORD(512),DWORD(2048),DWORD(4096)}) {
         DWORD start=65536;
         std::vector<BYTE> hybrid(raw.size()+start,0);
         memcpy(hybrid.data()+start,raw.data(),raw.size());
@@ -115,7 +129,7 @@ int main(int argc,char** argv) {
         BYTE* map=hybrid.data()+blockSize;
         be16(map,0x504d); be32(map+4,1); be32(map+8,start/blockSize); be32(map+12,(DWORD)raw.size()/blockSize);
         memcpy(map+48,"Apple_HFS",9);
-        std::string path=root+(blockSize==512?"hybrid512.iso":"hybrid2048.iso");
+        std::string path=root+("hybrid"+std::to_string(blockSize)+".iso");
         save(path,hybrid); exercise(path,raw,start,(DWORD)raw.size());
         {
             ReadOnlyCd shortExtent;
