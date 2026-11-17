@@ -18,7 +18,7 @@ Run-Hidden $release @('--compatibility-report',(Join-Path $OutputDirectory 'rele
 $app=Join-Path $here 'HFVExplorer-tests.exe'
 Run-Hidden $app @('--verify-device-wait',(Join-Path $OutputDirectory 'device-wait.txt'))
 Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--feature-fixture',(Join-Path $OutputDirectory 'feature-links.dsk'))
-foreach($test in @('other-hfsplus','compression-write','optical-data-tracks','mfs-write-browser','extended-attributes','windows-path-coordination','per-volume-commands','background-metadata','background-mutations','background-window-close','independent-storage','floppy-copy-regressions','background-copies','browser-transfers','browser-windows','volume-coordination','file-operations','browser-sessions','shared-browser','storage-exclusive','main-mac-browser','file-mutations','copy-progress','cd-image','cd-burn','find-files','floppy-menu','media-control','hfsplus-ui','hfsplus-cd')){
+foreach($test in @('folder-metadata','other-hfsplus','compression-write','optical-data-tracks','mfs-write-browser','extended-attributes','windows-path-coordination','per-volume-commands','background-metadata','background-mutations','background-window-close','independent-storage','floppy-copy-regressions','background-copies','browser-transfers','browser-windows','volume-coordination','file-operations','browser-sessions','shared-browser','storage-exclusive','main-mac-browser','file-mutations','copy-progress','cd-image','cd-burn','find-files','floppy-menu','media-control','hfsplus-ui','hfsplus-cd')){
  Run-Hidden $app @(('--verify-'+$test),(Join-Path $OutputDirectory $test))
 }
 Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--self-test')

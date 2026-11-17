@@ -50,7 +50,7 @@ class Classic final : public Volume {
         e.created=uint32_t(int64_t(in.crdate)+2082844800LL);e.modified=uint32_t(int64_t(in.mddate)+2082844800LL);e.datesValid=true;
         if(!e.directory){e.forks[0].size=in.u.file.dsize;e.forks[1].size=in.u.file.rsize;
             memcpy(e.finder.data(),in.u.file.type,4);memcpy(e.finder.data()+4,in.u.file.creator,4);}
-        HfsPlus::Disk::P16(e.finder.data()+8, uint16_t(in.fdflags));return e;
+        Check(hfs_getfinderinfo(volume_,const_cast<char*>(path.c_str()),e.finder.data())==0);return e;
     }
 public:
     Classic(const std::string &image, std::string root, bool write) : write_(write),image_(image) {
@@ -112,6 +112,11 @@ public:
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override {LegacyEngine::Scope engine(context_);
         if(!write_)throw HfsPlus::Error("Classic source is read-only");RootScope scope(volume_);auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(hfs_mkdir(volume_,const_cast<char*>(path.c_str()))==0);return Id(path);
     }
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);
+        if(!Writable())throw HfsPlus::Error("Classic destination is read-only");if(!merge)ValidateEntry(desired);auto path=Path(id);
+        time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),time_t(int64_t(desired.modified)-2082844800LL)};
+        Check(hfs_setdirmetadata(volume_,const_cast<char*>(path.c_str()),long(expected.resolvedId),merge?nullptr:desired.finder.data(),desired.datesValid?dates:nullptr)==0);
+    }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {LegacyEngine::Scope engine(context_);
         if(!write_)throw HfsPlus::Error("Classic source is read-only");ValidateEntry(e);RootScope scope(volume_);
         if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
@@ -127,7 +132,7 @@ public:
                     read(fork,at,bytes.data(),n);Check(hfs_write(file,bytes.data(),(unsigned long)n)==n);at+=n;}}
             hfsdirent meta;Check(hfs_fstat(file,&meta)==0);meta.fdflags=HfsPlus::Disk::U16(e.finder.data()+8);
             if(e.datesValid){meta.crdate=time_t(int64_t(e.created)-2082844800LL);meta.mddate=time_t(int64_t(e.modified)-2082844800LL);}
-            Check(hfs_fsetattr(file,&meta)==0);
+            Check(hfs_fsetattr(file,&meta)==0);Check(hfs_fsetfinderinfo(file,e.finder.data())==0);
         }catch(...){result=-1;failure=std::current_exception();}
         if(hfs_close(file)<0){result=-1;error=hfs_error;}
         replacement_finish(&state,&result,&error);

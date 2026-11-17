@@ -935,6 +935,22 @@ void large(const wchar_t *path, Volume::FormatKind kind = Volume::FormatKind::Hf
              ? "PASS: native image writes and persisted reads beyond 2 GiB in both HFS+ forks"
              : "PASS: native image writes and persisted reads beyond 2 GiB in both HFSX forks");
 }
+
+void directoryMetadata(){
+ for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive}){
+  Memory baseline(16*1024*1024);Volume::Format(baseline,u"Folder metadata",true,kind,true);uint32_t folder,file;
+  std::array<uint8_t,32> oldFinder{},newFinder{};for(unsigned i=0;i<32;++i){oldFinder[i]=uint8_t(i+1);newFinder[i]=uint8_t(100+i);}oldFinder[8]=newFinder[8]=0;oldFinder[9]=newFinder[9]=0;
+  std::array<uint64_t,2> oldDates{3000000000,3000000123},newDates{2082844800ULL,6377812095ULL};
+  Attributes oldAttrs{{u"user.keep",Bytes(8003,0x31)}},newAttrs{{u"user.keep",Bytes(9007,0x72)},{u"user.empty",{}}};
+  {Volume v(baseline,true);folder=v.MakeDirectory(2,u"Folder");file=v.Put(folder,u"Child",5003,723,pattern);v.SetDirectoryMetadata(folder,&oldFinder,&oldDates,&oldAttrs);}
+  auto check=[&](Memory& disk){auto writes=disk.writes;Volume v(disk,false);auto e=v.Stat(folder);auto a=v.GetAttributes(folder);bool old=e.finder==oldFinder&&e.created==oldDates[0]&&e.modified==oldDates[1]&&a==oldAttrs;bool fresh=e.finder==newFinder&&e.created==newDates[0]&&e.modified==newDates[1]&&a==newAttrs;must(old||fresh,"Folder metadata recovered a mixed transaction");verify(v,file,0,5003);verify(v,file,1,723);must(disk.writes==writes,"Read-only folder metadata replay wrote source");};
+  for(const char* phase:{"data-flushed","journal-data-flushed","journal-committed","home-flushed","journal-cleared"}){Memory failed=baseline;{Volume v(failed,true);v.fault=[&](const char* at){if(!strcmp(at,phase))throw Error("Folder metadata crash");};fails([&]{v.SetDirectoryMetadata(folder,&newFinder,&newDates,&newAttrs);},"Missing folder metadata crash phase");}check(failed);}
+  for(bool flush:{false,true}){Memory success=baseline;auto start=flush?success.flushes:success.writes;{Volume v(success,true);v.SetDirectoryMetadata(folder,&newFinder,&newDates,&newAttrs);}unsigned count=(flush?success.flushes:success.writes)-start;must(count>1,"Folder metadata fault coverage");std::set<unsigned> steps{0,1,count/2,count-1};for(auto step:steps){Memory failed=baseline;if(flush)failed.failFlush=int(failed.flushes+step);else failed.failWrite=int(failed.writes+step);{Volume v(failed,true);fails([&]{v.SetDirectoryMetadata(folder,&newFinder,&newDates,&newAttrs);},"Folder metadata I/O fault ignored");}failed.failFlush=failed.failWrite=-1;check(failed);}}
+  {Volume v(baseline,true);v.SetDirectoryMetadata(folder,nullptr,&newDates,nullptr);auto e=v.Stat(folder);must(e.finder==oldFinder&&v.GetAttributes(folder)==oldAttrs&&e.modified==newDates[1],"Date-only merge finalization replaced Finder info or attributes");fails([&]{v.SetDirectoryMetadata(file,&newFinder,&oldDates,nullptr);},"File accepted as folder");fails([&]{v.SetDirectoryMetadata(2,&newFinder,&oldDates,nullptr);},"Volume root metadata accepted");}
+  baseline.writable=false;{Volume v(baseline);fails([&]{v.SetDirectoryMetadata(folder,&newFinder,&newDates,&newAttrs);},"Read-only folder metadata edit accepted");}
+ }
+ puts("PASS: folder Finder/date/attribute transactions, 64-bit dates, date-only merge finalization, child fork preservation, read-only refusal and journal/write/flush recovery in HFS+ and both HFSX modes");
+}
 int wmain(int argc, wchar_t **argv) {
     try {
         if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
@@ -1111,6 +1127,7 @@ int wmain(int argc, wchar_t **argv) {
         }
         attributeTests();
         stagedRangeValidation();
+        directoryMetadata();
         RunHfsPlusCompressionTests();
         RunIncrementalBTreeTests();
         journalResizeTests();

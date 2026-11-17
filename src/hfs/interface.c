@@ -56,6 +56,9 @@
 
 int set_file_size( char *path, hfv_size_t new_size );
 
+static HFV_THREAD_LOCAL HfvDirectoryCopyHook directory_copy_hook=0;
+static HFV_THREAD_LOCAL void* directory_copy_context=0;
+void HFSIFACE_directory_copy_hook(HfvDirectoryCopyHook hook,void* context){directory_copy_hook=hook;directory_copy_context=context;}
 static HFV_THREAD_LOCAL int HFSIFACE_merge=0;
 int HFSIFACE_copy_options(int merge){int previous=HFSIFACE_merge;HFSIFACE_merge=merge;return previous;}
 static int copy_directory_create(const char* path) {
@@ -864,11 +867,14 @@ int HFSIFACE_dir_copy(
 )
 {
 	int isdir, result = 0;
+ void* metadata=0;
 	char tdir[_MAX_PATH];
 	char new_source[_MAX_PATH];
 	char tmp[_MAX_PATH];
 	char tmp2[_MAX_PATH];
 
+ /* The legacy single-volume route passes a null destination to mean vol1. */
+ if(is_target_hfs&&!vol2)vol2=vol1;
 	/* Reject copying a folder into itself or a descendant before creating it. */
 	if(is_source_hfs && is_target_hfs && (!vol2 || vol1 == vol2)) {
 		hfsdirent from, destination;
@@ -894,8 +900,10 @@ int HFSIFACE_dir_copy(
 		return(result);
 	}
 
+ if(directory_copy_hook && directory_copy_hook(0,is_source_hfs?vol1:0,is_target_hfs?vol2:0,source,tdir,&metadata,directory_copy_context))return 1;
 	if(is_target_hfs) {
-		if (hfs_mkdir(vol2, tdir) < 0) {
+  hfsdirent existing;int merge=HFSIFACE_merge&&hfs_stat(vol2,tdir,&existing)==0&&(existing.flags&HFS_ISDIR);
+		if (!merge && hfs_mkdir(vol2, tdir) < 0) {
 			hfs_perror(tdir);
 			result = 1;
 		}
@@ -911,6 +919,7 @@ int HFSIFACE_dir_copy(
 			result = 1;
 		}
 	}
+ if(result==0 && directory_copy_hook && directory_copy_hook(1,is_source_hfs?vol1:0,is_target_hfs?vol2:0,source,tdir,&metadata,directory_copy_context))result=1;
 	if(result == 0) {
 		if(is_source_hfs) {
       hfsdir *dir;
@@ -985,6 +994,7 @@ go_get_next:
 		}
 	}
 
+ if(directory_copy_hook && directory_copy_hook(result?3:2,is_source_hfs?vol1:0,is_target_hfs?vol2:0,source,tdir,&metadata,directory_copy_context))result=1;
 	if(result == 0 && move_if_possible != 0) {
 		// Oh. What a bug.
 		// if(is_target_hfs) {

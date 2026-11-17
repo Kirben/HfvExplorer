@@ -1495,6 +1495,18 @@ void Volume::SetCompression(uint32_t id,bool compressed,std::function<void(uint6
     uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint64_t,2> dates{e.created,e.modified};
     Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed,&dates);
 }
+void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,const std::array<uint64_t,2>* dates,const Attributes* attributes){
+ auto& p=*p_;p.Guard();auto e=p.Get(id);Check(e.directory,"Select a folder for directory metadata");p.Mutable(e);if(attributes)ValidateAttributes(*attributes);
+ auto record=p.CatalogRecord(id);bool expanded=(U16(record->value.data()+2)&0x1000)!=0,convert=false;
+ if(dates){if(!expanded&&((*dates)[0]>UINT32_MAX||(*dates)[1]>UINT32_MAX)){Check(ExpandedTimes(),"This folder requires expanded timestamps");expanded=convert=true;}for(auto date:*dates)(void)Time::Encode(date,expanded);
+  if(convert)for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);if(raw)(void)Time::Encode(raw,true);}}
+ try{
+  if(convert){for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);P32(record->value.data()+at,raw?Time::Encode(raw,true):0);}P16(record->value.data()+2,U16(record->value.data()+2)|0x1000);}
+  if(finder){e.finder=*finder;memcpy(record->value.data()+48,e.finder.data(),32);}
+  if(dates){e.created=(*dates)[0];e.modified=(*dates)[1];P32(record->value.data()+12,Time::Encode(e.created,expanded));P32(record->value.data()+16,Time::Encode(e.modified,expanded));}
+  p.entries[id]=e;if(attributes)p.ReplaceAttributes(id,*attributes);p.Commit(fault);
+ }catch(...){p.usable=false;throw;}
+}
 Attributes Volume::GetAttributes(uint32_t id) const {
     p_->source.CheckMedia();Check(p_->usable,"Reopen HFS+ image after error");return p_->GetAttributes(p_->Resolve(id));
 }

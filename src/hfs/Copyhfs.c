@@ -203,10 +203,12 @@ int cphfs_raw( hfsvol *vol1, hfsvol *vol2, char *srcname, char *dstname )
 	unsigned long type, creator;
 	char typestr[5], creatorstr[5];
   hfsdirent ent;
+  unsigned char finder[32];
 
 	ifile = opensrc( vol1, srcname, &dsthint, 0 );
   if (ifile == 0)
     return -1;
+  if(hfs_getfinderinfo(vol1,srcname,finder)<0){cph_error=hfs_error;hfs_close(ifile);return -1;}
 
 
 	type = ifile->cat.u.fil.filUsrWds.fdType;
@@ -239,14 +241,12 @@ int cphfs_raw( hfsvol *vol1, hfsvol *vol2, char *srcname, char *dstname )
     result = -1;
   }
 
-  ent.fdflags &= 
-    ~(HFS_FNDR_ISONDESK | HFS_FNDR_HASBEENINITED | HFS_FNDR_ISINVISIBLE);
-
   if (result == 0 && hfs_fsetattr(ofile, &ent) < 0) {
 		cph_error = hfs_error;
 		result = -1;
   }
 
+  if(result==0&&hfs_fsetfinderinfo(ofile,finder)<0){cph_error=hfs_error;result=-1;}
   closefiles(ifile, ofile, &result);
 
   return result;

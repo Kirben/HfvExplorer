@@ -42,14 +42,15 @@ int Find(List& list,const wchar_t* name){for(int row=0;row<list.GetListCtrl().Ge
 class Fixture:public MacBrowser::Volume {
  std::u16string name_;
 public:
- bool fail=false,slow=false,wrongThread=false,ownerOnly=false;CWnd* owner=nullptr;CWnd* other=nullptr;
+ bool fail=false,slow=false,wrongThread=false,ownerOnly=false;CWnd* owner=nullptr;CWnd* other=nullptr;HANDLE gate=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+ ~Fixture(){CloseHandle(gate);}
  explicit Fixture(const std::u16string& name):name_(name){}
  std::u16string Name()const override{return name_;}
  const char* Kind()const override{return "Session fixture";}bool Writable()const override{return false;}bool CaseSensitive()const override{return true;}uint64_t FreeBytes()const override{return 0;}
  MacBrowser::Entry Stat(uint32_t id)override{MacBrowser::Entry e;e.id=id;e.parent=id==2?1:id==5?3:2;e.name=id==2?name_:id==3?u"Folder":id==4?name_+u" file":name_+u" child";e.directory=id==2||id==3;return e;}
  std::vector<MacBrowser::Entry> List(uint32_t id)override{
   wrongThread|=GetCurrentThreadId()==StorageUi::state().thread;
-  if(slow){ownerOnly=owner&&!owner->IsWindowEnabled()&&other&&other->IsWindowEnabled();Sleep(180);}
+  if(slow){Check(WaitForSingleObject(gate,10000)==WAIT_OBJECT_0,"Session read was not released by UI timers");ownerOnly=owner&&!owner->IsWindowEnabled()&&other&&other->IsWindowEnabled();}
   if(fail)throw HfsPlus::Error("Injected session read failure");return id==2?std::vector<MacBrowser::Entry>{Stat(3),Stat(4)}:std::vector<MacBrowser::Entry>{Stat(5)};
  }
  void Read(uint32_t,unsigned,uint64_t,void*,size_t)override{throw HfsPlus::Error("Not a content test");}
@@ -89,7 +90,7 @@ int RunBrowserSessionTest(const char* directory){
   app.m_doc=&b.doc;app.m_tree=&b.tree;app.m_list=&b.list;app.m_pMainWnd=&b.owner;
   auto va=std::make_shared<Fixture>(u"First"),vb=std::make_shared<Fixture>(u"Second");va->owner=&a.owner;va->other=&b.owner;va->slow=true;
   int ia=a.Session().MacBrowser().AttachTestVolume(va,"same-key"),ib=b.Session().MacBrowser().AttachTestVolume(vb,"same-key");
-  storageUiTest={};Check(a.Session().MacBrowser().ShowTestFolder(ia,2)&&va->ownerOnly&&!va->wrongThread&&storageUiTest.timerTicks>0,"session A worker/owner routing used global window B");
+  storageUiTest={};storageUiTest.releaseAfterTwoTimers=va->gate;Check(a.Session().MacBrowser().ShowTestFolder(ia,2)&&va->ownerOnly&&!va->wrongThread&&storageUiTest.timerTicks>0,"session A worker/owner routing used global window B");storageUiTest.releaseAfterTwoTimers=nullptr;va->slow=false;
   Check(b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(a.list,L"First file")>=0&&Find(b.list,L"Second file")>=0,"native mount/row state leaked between sessions");
   auto selected=b.tree.GetTreeCtrl().GetSelectedItem();int row=Find(a.list,L"Folder");Check(a.Session().MacBrowser().Activate(row)&&Find(a.list,L"First child")>=0,"independent folder activation");
   Check(b.tree.GetTreeCtrl().GetSelectedItem()==selected&&Find(b.list,L"Second file")>=0,"navigation changed another window");
@@ -138,6 +139,6 @@ startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
   fprintf(report,"PASS: two hidden browser sessions with independent mounts, navigation, selection, sort/layout, native clipboard and classic Finder icon tables; Windows folders and same-named classic HFS images; explicit slow-read owner routing, errors/retry, pre-main-window startup, real hidden frame creation/commands/teardown, pane ownership and closing one session while the other stays usable. No physical devices or computer control.\n");
   fprintf(report,"PASS: with floppy detection disabled and an unavailable removable root listed first, startup chooses a fixed root without probing removable media.\n");
  }catch(const std::exception& e){BrowserDirectory::testObserveRead={};fprintf(report,"FAIL: %s\n",e.what());result=1;}
- app.m_doc=nullptr;app.m_tree=nullptr;app.m_list=nullptr;app.m_pMainWnd=nullptr;fclose(report);return result;
+ storageUiTest.releaseAfterTwoTimers=nullptr;app.m_doc=nullptr;app.m_tree=nullptr;app.m_list=nullptr;app.m_pMainWnd=nullptr;fclose(report);return result;
 }
 #endif

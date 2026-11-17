@@ -6,6 +6,9 @@
 #include "BrowserPresentation.h"
 #include <set>
 namespace MacBrowser {
+#ifdef HFV_TESTING
+std::function<void(const char*)> directoryMetadataFault;
+#endif
 namespace {
 using namespace HfsPlus::Disk;
 void Check(bool ok, const char *text) { if (!ok) throw HfsPlus::Error(text); }
@@ -137,9 +140,10 @@ class Windows final : public Volume {
             e.created=a-9561628800ULL;e.modified=b-9561628800ULL;e.datesValid=true;
         }
         if(id==2)e.parent=1;else{auto parent=p.substr(0,p.find_last_of(L"\\/"));if((parent.size()==2||parent.size()==6)&&parent.back()==L':')parent+=L'\\';e.parent=Id(parent);}
-        if (!e.directory) {
-            e.forks[0].size = (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-            Double d; if (AppleDouble(Companion(p), d)) { e.forks[1].size = d.size; e.finder = d.finder;e.identity+="/"+identity(Companion(p)); }
+        if(!e.directory)e.forks[0].size=(uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
+        Double d;if(AppleDouble(Companion(p),d)){
+            Check(!e.directory||!d.size,"Directory companion contains unexpected resource data; it was preserved");
+            if(!e.directory)e.forks[1].size=d.size;e.finder=d.finder;e.identity+="/"+identity(Companion(p));
         }
         return e;
     }
@@ -158,19 +162,58 @@ public:
     bool Writable() const override { return true; }
     bool SupportsAttributes()const override{return true;}
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Double d;auto path=Companion(Path(id));return AppleDouble(path,d)?DoubleAttributes(path,d):HfsPlus::Attributes{};}
-    void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{
-        auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
+    void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={}){
+        auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
         Double old;bool exists=GetFileAttributesW(companion.c_str())!=INVALID_FILE_ATTRIBUTES;Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
         std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
         try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);output.Write(header.data(),header.size());if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.Write(buffer.data(),n);at+=n;}}output.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
             if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;}
-            Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;
+            Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;if(finish)finish();
         }catch(...){bool restored=true;if(published&&!DeleteFileW(companion.c_str()))restored=false;if(backed&&!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());Check(restored,"Metadata rollback failed; preserve the HFV temporary backup");throw;}
         if(!backup.empty())DeleteFileW(backup.c_str());
     }
+    void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;PublishMetadata(id,e);}
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
-        ValidateEntry(e);auto path=Child(Path(parent),Wide(e.name));Check(GetFileAttributesW(Companion(path).c_str())==INVALID_FILE_ATTRIBUTES,"An unrelated companion blocks folder creation");auto id=MakeDirectory(parent,e.name);try{if(!e.attributes.empty())SetAttributes(id,e.attributes);}catch(...){RemoveDirectoryW(path.c_str());throw;}return id;
+        ValidateEntry(e);auto path=Child(Path(parent),Wide(e.name));Check(GetFileAttributesW(Companion(path).c_str())==INVALID_FILE_ATTRIBUTES,"An unrelated companion blocks folder creation");return MakeDirectory(parent,e.name);
+    }
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+#ifdef HFV_TESTING
+        if(directoryMetadataFault)directoryMetadataFault("before-directory-metadata");
+#endif
+        auto path=Path(id);HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        Check(h!=INVALID_HANDLE_VALUE,"Cannot open destination folder for metadata");struct Close{HANDLE h;~Close(){CloseHandle(h);}}close{h};BY_HANDLE_FILE_INFORMATION info{};
+        Check(GetFileInformationByHandle(h,&info)&&(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT),"Destination folder is unavailable or became a directory link");
+        auto prefix=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow)+":";
+        Check(expected.directory&&expected.identity.compare(0,prefix.size(),prefix)==0,"Destination folder was replaced during copying");auto now=Describe(id);
+        auto companionIdentity=[](const Entry& e){auto at=e.identity.find('/');return at==e.identity.npos?std::string{}:e.identity.substr(at);};
+        Check(merge||companionIdentity(now)==companionIdentity(expected),"Destination folder metadata changed during copying; companion retained");
+        FILETIME created=info.ftCreationTime,modified=info.ftLastWriteTime,rollbackCreated=created,rollbackModified=modified;
+        if(desired.datesValid){ULARGE_INTEGER a,b;a.QuadPart=(desired.created+9561628800ULL)*10000000ULL;b.QuadPart=(desired.modified+9561628800ULL)*10000000ULL;created={a.LowPart,a.HighPart};modified={b.LowPart,b.HighPart};if(merge){rollbackCreated=created;rollbackModified=modified;}}
+        auto finish=[&]{
+#ifdef HFV_TESTING
+            if(directoryMetadataFault)directoryMetadataFault("directory-companion-published");
+#endif
+            if(desired.datesValid)Check(SetFileTime(h,&created,nullptr,&modified)!=FALSE,"Cannot preserve destination folder timestamps");
+#ifdef HFV_TESTING
+            if(directoryMetadataFault)directoryMetadataFault("directory-dates-written");
+#endif
+        };
+        try{
+            if(merge)finish();else{auto metadata=now;metadata.finder=desired.finder;metadata.attributes=desired.attributes;metadata.attributesKnown=true;
+                bool companion=std::any_of(metadata.finder.begin(),metadata.finder.end(),[](uint8_t b){return b!=0;})||!metadata.attributes.empty();
+                if(companion)PublishMetadata(id,metadata,finish);else finish();}
+        }catch(...){auto failure=std::current_exception();Check(SetFileTime(h,&rollbackCreated,nullptr,&rollbackModified)!=FALSE,"Folder timestamp rollback failed; source retained");std::rethrow_exception(failure);}
+    }
+    void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool parentExists)override{
+        std::vector<std::wstring> names,reserved;
+        for(const auto& e:entries){Leaf(e.name);auto name=Wide(e.name);for(const auto& other:names)Check(_wcsicmp(name.c_str(),other.c_str())!=0,"Source names collide on the Windows destination; rename them before copying");names.push_back(name);
+            bool companion=!e.directory||!e.attributes.empty()||std::any_of(e.finder.begin(),e.finder.end(),[](uint8_t b){return b!=0;});
+            if(parentExists){auto path=Child(Path(parent),name);auto leaf=path.substr(path.find_last_of(L"\\/")+1);if(leaf.size()>1&&leaf[0]==L'%'){auto owner=Child(Path(parent),leaf.substr(1));Double d;Check(GetFileAttributesW(owner.c_str())==INVALID_FILE_ATTRIBUTES||!AppleDouble(path,d),"The destination file is another item's metadata companion; it was preserved");}
+                Entry existing;if(e.directory&&FindChild(parent,e.name,existing)&&existing.directory){Double d;companion=AppleDouble(Companion(path),d);}}
+            if(companion)reserved.push_back(L"%"+name);
+        }
+        for(const auto& name:names)for(const auto& companion:reserved)Check(_wcsicmp(name.c_str(),companion.c_str())!=0,"Source names collide with required Windows metadata companions; rename them before copying");
     }
     bool CaseSensitive() const override { return false; }
     void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
@@ -232,6 +275,7 @@ public:
     uint32_t Put(uint32_t parent, const Entry &e, Reader read, bool replace) override {
         Leaf(e.name);Leaf(u"%"+e.name); Check(e.forks[1].size <= UINT32_MAX - 82, "Resource fork is too large for AppleDouble export; export the raw fork instead");
         auto root = Path(parent), path = Child(root,Wide(e.name)), companion = Companion(path);
+        if(!e.name.empty()&&e.name[0]==u'%'&&e.name.size()>1){Double owned;auto owner=Child(root,Wide(e.name.substr(1)));Check(GetFileAttributesW(owner.c_str())==INVALID_FILE_ATTRIBUTES||!AppleDouble(path,owned),"The destination is another item's metadata companion; it was preserved");}
         bool existed = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
         bool sidecar = GetFileAttributesW(companion.c_str()) != INVALID_FILE_ATTRIBUTES; Double old;
         Check(!existed || replace, "Destination already exists");

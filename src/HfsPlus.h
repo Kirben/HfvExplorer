@@ -77,6 +77,8 @@ class Volume {
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
                  const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr);
+    void SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,
+                              const std::array<uint64_t,2>* dates,const Attributes* attributes);
     Attributes GetAttributes(uint32_t id) const;
     void SetAttributes(uint32_t id, const Attributes &);
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);

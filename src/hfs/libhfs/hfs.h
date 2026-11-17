@@ -157,6 +157,10 @@ int hfs_setattr(hfsvol *, char *, hfsdirent *);
 /* Rename and edit attributes under one runtime undo transaction. */
 int hfs_editattrs(hfsvol *, char *, char *, hfsdirent *);
 int hfs_fsetattr(hfsfile *, hfsdirent *);
+/* Full on-disk Finder information, including extended folder/file fields. */
+int hfs_getfinderinfo(hfsvol *, char *, unsigned char *);
+int hfs_fsetfinderinfo(hfsfile *, const unsigned char *);
+int hfs_setdirmetadata(hfsvol *,char *,long,const unsigned char *,const time_t *);
 
 int hfs_mkdir(hfsvol *, char *);
 int hfs_rmdir(hfsvol *, char *);
