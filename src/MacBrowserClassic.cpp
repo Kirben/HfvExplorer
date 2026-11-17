@@ -71,7 +71,7 @@ public:
     bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&HFS_READONLY);}
     bool CaseSensitive()const override{return false;}
     void ValidateEntry(const Entry& e)const override{
-        Volume::ValidateEntry(e);Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
+        Volume::ValidateEntry(e);if(e.datesValid&&(e.created>UINT32_MAX||e.modified>UINT32_MAX))throw HfsPlus::Error("Classic HFS cannot preserve dates after February 2040");Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
     }
     uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
@@ -113,7 +113,7 @@ public:
         if(!write_)throw HfsPlus::Error("Classic source is read-only");RootScope scope(volume_);auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(hfs_mkdir(volume_,const_cast<char*>(path.c_str()))==0);return Id(path);
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {LegacyEngine::Scope engine(context_);
-        if(!write_)throw HfsPlus::Error("Classic source is read-only");RootScope scope(volume_);
+        if(!write_)throw HfsPlus::Error("Classic source is read-only");ValidateEntry(e);RootScope scope(volume_);
         if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
         auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(e.name);hfsdirent old;bool exists=hfs_stat(volume_,const_cast<char*>(path.c_str()),&old)==0;
         if(exists&&!replace)throw HfsPlus::Error("Destination already exists");

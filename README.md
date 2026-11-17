@@ -368,6 +368,29 @@ Current filesystem support
 - HFS+ and HFSX internal journals support read/write transactions and replay. A read-only
   open replays into memory without changing the image. Non-journaled writes
   are supported but cannot provide journaled recovery after interruption.
+- External HFS+/HFSX journals support read/write transactions and read-only
+  replay from a separate GPT journal disk image. Normal Open volume asks for
+  the matching disk image when required; the journal partition type and unique
+  UUID must match the journal info block. Both GPT copies, table/header CRCs,
+  partition bounds and overlaps are validated before journal access. A missing,
+  mismatched or corrupt journal is refused; it is never silently ignored.
+  Format Mac image can create a separate external journal image (64 MiB sparse
+  GPT disk image). Keep the filesystem image and journal image together when
+  backing up or moving them; close the volume first. Each image has exclusive writable access, and
+  background operations coordinate both files. Journal enlargement uses a
+  disjoint region in that dedicated partition and a durable JIB switch; it
+  fails safely if there is insufficient room. External journal selection
+  currently requires a whole GPT disk image with the native journal UUID;
+  raw journal-only files and older signature-only devices are not supported.
+- Expanded timestamps support reading/writing existing volumes and the optional
+  "Expanded timestamps (1970-2106)" formatting choice. The native unsigned Unix
+  epoch is distinguished from legacy 1904-based fields per catalog record;
+  mixed-record volumes are supported. Browser display, sorting, compression
+  conversion and Windows/native file copies keep canonical 64-bit dates. Out-of-range
+  dates are rejected before writes rather than wrapping. Classic HFS/MFS and
+  legacy-timestamp HFS+ destinations reject unrepresentable dates before moving
+  or copying data. The expanded mode is intended for systems supporting Apple's
+  non-classic timestamp extension, not older classic Mac OS compatibility.
 - Selecting a CD drive automatically detects classic HFS, HFS+ and HFSX data
   tracks in the main tree/list, including Apple-partitioned hybrids, mixed-mode
   discs and completed multisession discs. Detection chooses the newest supported
@@ -388,8 +411,8 @@ Current filesystem support
   cooked 2048-byte data sectors. Tests use injected layouts/sources and fixture
   files; physical mixed-mode/multisession hardware testing remains outstanding.
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
-  Physical HFS+ / HFSX floppy access, GPT images, compressed DMG containers and
-  external journals are not implemented.
+  Physical HFS+ / HFSX floppy access, GPT filesystem images and compressed DMG
+  containers are not implemented. GPT support below is for external journals only.
 - Compressed-file reads decode decmpfs stored data (1/9/10), zlib (3/4), LZVN
   (7/8), LZFSE (11/12) and LZBITMAP (13/14), from attributes or resource-fork blocks. Listings show
   logical sizes; exports produce decompressed data. Compression storage is hidden
@@ -434,7 +457,7 @@ Current filesystem support
   when necessary to retain both forks. Conversion uses copy-on-write allocation
   and the existing journal commit/replay path. It requires temporary free space;
   type-4 compressed resource offsets remain limited to 32 bits. No other new
-  compression encoders are included. Encryption and expanded timestamps remain
+  compression encoders are included. Encryption remains
   unsupported; private compression/encryption/link attributes cannot be created
   through the ordinary attribute editor.
 - Catalog and extents B-trees are updated incrementally, including node splits,

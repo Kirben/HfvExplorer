@@ -45,7 +45,7 @@ inline void ObserveRead(const char* path){
 }
 inline uint64_t Ticks(FILETIME t) { return uint64_t(t.dwHighDateTime)<<32 | t.dwLowDateTime; }
 inline FILETIME FileTime(uint64_t t) { return {DWORD(t), DWORD(t>>32)}; }
-inline uint64_t MacTime(uint32_t t) { return (uint64_t(t)+9561628800ULL)*10000000ULL; }
+inline uint64_t MacTime(uint64_t t) { return (uint64_t(t)+9561628800ULL)*10000000ULL; }
 inline std::u16string FromAnsi(const char* text) {
     int n=MultiByteToWideChar(CP_ACP,0,text,-1,nullptr,0);std::wstring out(n,0);
     if(n)MultiByteToWideChar(CP_ACP,0,text,-1,&out[0],n);

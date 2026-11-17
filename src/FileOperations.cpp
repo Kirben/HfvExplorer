@@ -168,7 +168,7 @@ Storage::Result ExportFork(const Request& request,Storage::Job& job,Completion& 
 }
 Storage::Result ReplaceResource(const Request& request,Storage::Job& job,Completion& completion){
  Check(request.sources.size()==1&&bool(request.target.volume),"Invalid resource import request");auto from=Source(request.sources[0]),target=Source(request.target);auto volume=target.first;uint32_t id=target.second;auto original=volume->Stat(id),replacement=original;Check(!original.directory,"Select a file for resource import");
- replacement.forks[1].size=from.first->Stat(from.second).forks[0].size;replacement.modified=uint32_t(time(nullptr)+2082844800LL);Cancel(job);
+ replacement.forks[1].size=from.first->Stat(from.second).forks[0].size;replacement.modified=uint64_t(time(nullptr))+2082844800ULL;Cancel(job);
  Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Importing resource fork";progress.totalFiles=1;progress.path=Utf8(original.name);progress.totalBytes=progress.fileTotal=replacement.forks[0].size+replacement.forks[1].size;
  uint64_t readThrough[2]={};Mark(completion,request.target);
  volume->Put(original.parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){Cancel(job);if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);Cancel(job);auto end=at+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.bytes+=added;progress.fileBytes+=added;progress.processed+=added;job.progress(progress);},true);
@@ -263,7 +263,7 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
   std::function<void(uint32_t,unsigned)> walk=[&](uint32_t id,unsigned depth){
    Cancel(job);Check(depth<=128&&ancestors.insert(id).second,"Recursive conversion source");
    Check(volume.GetAttributes(id).empty(),"Legacy conversion cannot preserve extended attributes or Mac ACLs; use an HFS+/HFSX or Windows both-fork copy");
-   auto entry=volume.Stat(id);if(entry.directory)for(auto& child:volume.List(id))walk(child.id,depth+1);
+   auto entry=volume.Stat(id);Check(request.target.type!=LIST_HFS||!entry.datesValid||(entry.created<=UINT32_MAX&&entry.modified<=UINT32_MAX),"Classic HFS conversion cannot preserve dates after February 2040; source retained");if(entry.directory)for(auto& child:volume.List(id))walk(child.id,depth+1);
    ancestors.erase(id);
   };
   walk(root,0);

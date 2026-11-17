@@ -59,6 +59,15 @@ if($Test -or $TestHfsPlus) {
  if($commandsTest.ExitCode -ne 0){throw "Per-volume command tests failed; retained $commands"}
  & python "$PSScriptRoot\tests\test-compression-write.py" "$PSScriptRoot\bin\x64\hfsplus-tests.exe" (Join-Path $hfsPlusDirectory 'compression-encoding')
  if($LASTEXITCODE){throw 'Independent compression output validation failed'}
+ & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --other-features (Join-Path $hfsPlusDirectory 'other-features')
+ if($LASTEXITCODE){throw 'Other HFS+ features tests failed'}
+ & python "$PSScriptRoot\tests\test-other-hfsplus.py" (Join-Path $hfsPlusDirectory 'other-features')
+ if($LASTEXITCODE){throw 'Independent GPT/timestamp validation failed'}
+ $other=Join-Path $hfsPlusDirectory 'other-browser'
+ $otherTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-other-hfsplus',('"'+$other+'"')) -WindowStyle Hidden -PassThru
+ if(!$otherTest.WaitForExit(60000)){$otherTest.Kill();throw 'Other HFS+ browser tests timed out'}
+ Get-Content (Join-Path $other 'other-hfsplus-browser-report.txt')
+ if($otherTest.ExitCode -ne 0){throw 'Other HFS+ browser tests failed'}
  $compressed=Join-Path $hfsPlusDirectory 'compression-write'
  $compressedTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-compression-write',('"'+$compressed+'"')) -WindowStyle Hidden -PassThru
  if(!$compressedTest.WaitForExit(60000)){$compressedTest.Kill();throw 'Compression write tests timed out'}

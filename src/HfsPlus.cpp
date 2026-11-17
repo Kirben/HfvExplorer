@@ -4,11 +4,12 @@
 #include "HfsPlusDisk.h"
 #include "HfsPlusBTree.h"
 #include "HfsPlusCompression.h"
+#include "HfsPlusTime.h"
 #include <ctime>
 namespace HfsPlus {
 namespace {
 using namespace Disk;
-uint32_t Now() { return uint32_t(uint64_t(time(nullptr)) + 2082844800ULL); }
+uint64_t Now() { return uint64_t(time(nullptr)) + Time::Epoch; }
 using Record = TreeRecord;
 std::u16string String(const uint8_t *p, size_t available) {
     Check(available >= 2, "Truncated Unicode name");
@@ -339,6 +340,7 @@ struct Volume::Impl {
                 break;
             Check(journalLocations.insert(journal.offset).second, "Cyclic relocated journal chain");
         }
+        if(w&&journal.External())Check(journal.device->Writable(),"The external journal must be writable for writable recovery");
         LoadHeader();
         // Read extents first; the extents file itself must bootstrap from its inline extents.
         allocation = DecodeFork(header.data() + 112);
@@ -403,7 +405,7 @@ struct Volume::Impl {
             Check(!(attributes & 0xc080), "HFS+ volume is locked or inconsistent");
             Check((attributes & 0x2000) || (attributes & 0x100),
                   "Non-journaled HFS+ volume was not cleanly unmounted; repair it before writing");
-            Check(!(attributes & 0x60000000), "Encrypted or expanded-timestamp HFS+ volumes are unsupported");
+            Check(!(attributes & 0x40000000), "Content-protected HFS+ volumes are unsupported");
         }
     }
     void Validate(const Fork &f) const {
@@ -478,8 +480,8 @@ struct Volume::Impl {
             e.directory = type == 1;
             e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
-            e.created = U32(r.value.data() + 12);
-            e.modified = U32(r.value.data() + 16);
+            e.created = Time::Decode(U32(r.value.data() + 12),(U16(r.value.data()+2)&0x1000)!=0);
+            e.modified = Time::Decode(U32(r.value.data() + 16),(U16(r.value.data()+2)&0x1000)!=0);
             memcpy(e.finder.data(), r.value.data() + 48, 32);
             e.protectedFile =
                 e.id < 16 ||
@@ -812,7 +814,7 @@ struct Volume::Impl {
                         return true;
                 return false;
             };
-            Check(covered(journal.offset, journal.size) &&
+            Check((journal.External()||covered(journal.offset, journal.size)) &&
                       covered(uint64_t(U32(header.data() + 12)) * bs, bs),
                   "Journal allocation is not represented by protected files");
         }
@@ -910,7 +912,7 @@ struct Volume::Impl {
     void UpdateEntry(const Entry &e) {
         auto r = CatalogRecord(e.id);
         r->key = Key(e.parent, e.name);
-        P32(r->value.data() + 16, Now());
+        auto modified=Now();P32(r->value.data() + 16, Time::Encode(modified,(U16(r->value.data()+2)&0x1000)!=0));entries[e.id].modified=modified;
         memcpy(r->value.data() + 48, e.finder.data(), 32);
         if (!e.directory) {
             EncodeFork(r->value.data() + 88, e.forks[0], bs);
@@ -947,10 +949,10 @@ struct Volume::Impl {
         r.key = Key(e.parent, e.name);
         r.value.assign(e.directory ? 88 : 248, 0);
         P16(r.value.data(), e.directory ? 1 : 2);
-        P16(r.value.data() + 2, e.directory ? (U16(header.data()) == 0x4858 ? 0x10 : 0) : 2);
+        P16(r.value.data() + 2, (e.directory ? (U16(header.data()) == 0x4858 ? 0x10 : 0) : 2)|((U32(header.data()+4)&0x20000000)?0x1000:0));
         P32(r.value.data() + 8, id);
         for (unsigned i = 12; i <= 28; i += 4)
-            P32(r.value.data() + i, e.created);
+            P32(r.value.data() + i, Time::Encode(e.created,(U16(r.value.data()+2)&0x1000)!=0));
         P16(r.value.data() + 42, e.directory ? 0040755 : 0100644);
         catalogRecords.push_back(std::move(r));
         entries[id] = e;
@@ -1227,7 +1229,7 @@ struct Volume::Impl {
                 uint32_t count = counts[id];
                 if (U32(r->value.data() + 4) != count) {
                     P32(r->value.data() + 4, count);
-                    P32(r->value.data() + 16, Now());
+                    auto modified=Now();P32(r->value.data() + 16, Time::Encode(modified,(U16(r->value.data()+2)&0x1000)!=0));entries[id].modified=modified;
                 }
                 if (U16(header.data()) == 0x4858 && (U16(r->value.data() + 2) & 0x10))
                     P32(r->value.data() + 84, folderCounts[id]);
@@ -1270,7 +1272,7 @@ struct Volume::Impl {
         P32(header.data() + 32, files);
         P32(header.data() + 36, folders);
         P32(header.data() + 48, free);
-        P32(header.data() + 20, Now());
+        P32(header.data() + 20, Time::Encode(Now(),(U32(header.data()+4)&0x20000000)!=0));
         P32(header.data() + 68, U32(header.data() + 68) + 1);
         P32(header.data() + 8, journal.enabled ? 0x4846534a : 0x48465658);
         P32(header.data() + 4, U32(header.data() + 4) | 0x100);
@@ -1285,6 +1287,13 @@ struct Volume::Impl {
         else if (!journal.Fits()) {
             Check(allowGrow, "Journal cannot bootstrap enlargement");
             auto needed = journal.RequiredBytes();
+            if(journal.External()){
+                Check(journal.size<INT64_MAX/2&&needed<INT64_MAX/2,"External journal enlargement exceeds image limits");
+                auto target=(std::max)(journal.size*2,needed*2+journal.headerSize+journal.listSize+1024*1024);target=(target+511)/512*512;
+                uint64_t where=journal.offset+journal.size;
+                if(!Range(where,target,journal.device->Size())){Check(target<=journal.offset,"External journal partition has insufficient space for safe enlargement");where=0;}
+                Journal replacement(view);replacement.EmptyAt(where,target,journal);auto info=view.Read(journal.infoOffset,journal.headerSize);P64(info.data()+36,where);P64(info.data()+44,target);view.Stage(journal.infoOffset,info.data(),info.size());journal.CommitReplacement(replacement,fault);compressedReaders.clear();Snapshot();return;
+            }
             GrowJournal(needed, fault);
             Commit(fault);
             return;
@@ -1300,6 +1309,21 @@ bool Volume::Recognizes(Source &s) {
 }
 Volume::Volume(Source &s, bool w) : p_(new Impl(s, w)) {}
 Volume::~Volume() = default;
+void Volume::UseExternalJournal(const std::string& uuid){
+ auto& p=*p_;p.Guard();Check(p.journal.enabled&&!p.journal.External()&&p.journal.start==p.journal.end,"External journal conversion requires an empty internal journal");Check(uuid.size()==36,"Invalid external journal UUID");
+ auto info=p.view.Read(p.journal.infoOffset,p.journal.headerSize);P32(info.data(),2);memset(info.data()+4,0,32);memcpy(info.data()+52,uuid.c_str(),37);P64(info.data()+36,0);
+ auto device=p.source.OpenJournal(info);Check(device&&device->Writable()&&device->Size()>=p.journal.size,"External journal is unavailable, read-only or too small");
+ Journal replacement(p.view);replacement.EmptyAt(0,p.journal.size,p.journal);replacement.device=device;P64(info.data()+44,replacement.size);
+ try{
+  // Reclaim only the unique old journal file; the replacement log is already
+  // outside this filesystem. Committed blocks remain excluded from allocation.
+  uint32_t old=0;for(auto& pair:p.entries){auto& f=pair.second.forks[0];if(!pair.second.directory&&f.extents.size()==1&&uint64_t(f.extents[0].start)*p.bs==p.journal.offset&&f.size>=p.journal.size){Check(!old,"Ambiguous old journal file");old=pair.first;}}
+  Check(old>=16,"Cannot identify the old internal journal file");auto entry=p.Get(old);for(unsigned f=0;f<2;++f){p.Free(entry.forks[f]);p.Overflow(old,f,Fork{});}p.ReplaceAttributes(old,{});p.entries.erase(old);p.catalogRecords.erase(std::remove_if(p.catalogRecords.begin(),p.catalogRecords.end(),[&](const Record& r){return (U16(r.value.data())<=2&&U32(r.value.data()+8)==old)||(U16(r.value.data())>=3&&U32(r.key.data()+2)==old);}),p.catalogRecords.end());
+  p.view.Stage(p.journal.infoOffset,info.data(),info.size());p.Commit(fault,&replacement);
+ }catch(...){p.usable=false;throw;}
+}
+bool Volume::ExternalJournal()const{return p_->journal.External();}
+bool Volume::ExpandedTimes() const {return (U32(p_->header.data()+4)&0x20000000)!=0;}
 bool Volume::Journaled() const { return p_->journal.enabled; }
 bool Volume::IsHfsX() const { return U16(p_->header.data()) == 0x4858; }
 bool Volume::CaseSensitive() const { return p_->caseSensitive; }
@@ -1380,7 +1404,7 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name, cons
 }
 uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
-                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes, CompressionMode compression) {
+                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates) {
     auto &p = *p_;
     p.Guard();
     p.Parent(parent);
@@ -1399,6 +1423,12 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
         old[0] = e.forks[0];
         old[1] = e.forks[1];
     }
+    std::array<uint64_t,2> desiredDates{existing?e.created:Now(),Now()};
+    if(dates)desiredDates={(*dates)[0],(*dates)[1]};if(wideDates)desiredDates=*wideDates;
+    bool expanded=existing?(U16(p.CatalogRecord(e.id)->value.data()+2)&0x1000)!=0:ExpandedTimes();
+    bool convertTimes=false;if(!expanded&&(desiredDates[0]>UINT32_MAX||desiredDates[1]>UINT32_MAX)){Check(ExpandedTimes(),"Format this image with expanded timestamps to store dates after February 2040");expanded=convertTimes=true;}
+    for(auto date:desiredDates)(void)Time::Encode(date,expanded);
+    if(convertTimes)for(unsigned at=12;at<=28;at+=4){auto raw=U32(p.CatalogRecord(e.id)->value.data()+at);if(raw)(void)Time::Encode(raw,true);}
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
     std::unique_ptr<ZlibCompression> encoded;
@@ -1442,11 +1472,10 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
             p.UpdateEntry(e);
         } else
             p.New(e);
-        if (dates) {
-            e.created=(*dates)[0];e.modified=(*dates)[1];
-            auto record=p.CatalogRecord(e.id);P32(record->value.data()+12,e.created);P32(record->value.data()+16,e.modified);
-            p.entries[e.id]=e;
-        }
+        auto timeRecord=p.CatalogRecord(e.id);
+        if(convertTimes){for(unsigned at=12;at<=28;at+=4){auto raw=U32(timeRecord->value.data()+at);P32(timeRecord->value.data()+at,raw?Time::Encode(raw,true):0);}P16(timeRecord->value.data()+2,U16(timeRecord->value.data()+2)|0x1000);}
+        e.created=desiredDates[0];e.modified=desiredDates[1];
+        P32(timeRecord->value.data()+12,Time::Encode(e.created,expanded));P32(timeRecord->value.data()+16,Time::Encode(e.modified,expanded));
         e.compressed=bool(encoded);p.entries[e.id]=e;
         auto flags=p.CatalogRecord(e.id);flags->value[41]=uint8_t((flags->value[41]&~0x20)|(encoded?0x20:0));
         p.ReplaceAttributes(e.id,desired,true);
@@ -1463,8 +1492,8 @@ void Volume::SetCompression(uint32_t id,bool compressed,std::function<void(uint6
     auto& p=*p_;p.Guard();auto raw=p.Get(id);p.Mutable(raw);Check(!raw.directory,"Select an ordinary file for compression");
     auto e=Stat(id);Check(e.readError.empty(),"Cannot convert an unreadable compressed file");
     if(compressed==e.compressed)return;
-    uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint32_t,2> dates{e.created,e.modified};
-    Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,&dates,nullptr,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed);
+    uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint64_t,2> dates{e.created,e.modified};
+    Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed,&dates);
 }
 Attributes Volume::GetAttributes(uint32_t id) const {
     p_->source.CheckMedia();Check(p_->usable,"Reopen HFS+ image after error");return p_->GetAttributes(p_->Resolve(id));
@@ -1539,7 +1568,7 @@ void Volume::Remove(uint32_t id) {
         throw;
     }
 }
-void Volume::Format(Source &source, const std::u16string &name, bool journaled, FormatKind kind) {
+void Volume::Format(Source &source, const std::u16string &name, bool journaled, FormatKind kind, bool expandedTimes) {
     Check(source.Writable(), "Cannot format a read-only image");
     Check(kind == FormatKind::HfsPlus || kind == FormatKind::HfsXCaseSensitive ||
               kind == FormatKind::HfsXCaseInsensitive,
@@ -1560,10 +1589,10 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled, 
     Bytes vh(512, 0);
     P16(vh.data(), hfsx ? 0x4858 : 0x482b);
     P16(vh.data() + 2, hfsx ? 5 : 4);
-    P32(vh.data() + 4, 0x100 | (journaled ? 0x2000 : 0));
+    P32(vh.data() + 4, 0x100 | (journaled ? 0x2000 : 0) | (expandedTimes?0x20000000:0));
     P32(vh.data() + 8, journaled ? 0x4846534a : 0x48465658);
     for (unsigned i = 16; i <= 28; i += 4)
-        P32(vh.data() + i, Now());
+        P32(vh.data() + i, Time::Encode(Now(),expandedTimes));
     P32(vh.data() + 40, bs);
     P32(vh.data() + 44, total);
     P32(vh.data() + 56, bs);
@@ -1599,10 +1628,10 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled, 
         r.key = Key(parent, nm);
         r.value.assign(folder ? 88 : 248, 0);
         P16(r.value.data(), folder ? 1 : 2);
-        P16(r.value.data() + 2, folder ? (hfsx ? 0x10 : 0) : 2);
+        P16(r.value.data() + 2, (folder ? (hfsx ? 0x10 : 0) : 2)|(expandedTimes?0x1000:0));
         P32(r.value.data() + 8, id);
         for (unsigned i = 12; i <= 28; i += 4)
-            P32(r.value.data() + i, Now());
+            P32(r.value.data() + i, Time::Encode(Now(),expandedTimes));
         P16(r.value.data() + 42, folder ? 0040755 : 0100600);
         if (!folder) {
             EncodeFork(r.value.data() + 88, f, bs);

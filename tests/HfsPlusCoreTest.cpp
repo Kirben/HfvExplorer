@@ -4,6 +4,7 @@
 using namespace HfsPlus;
 void RunIncrementalBTreeTests();
 void RunHfsPlusCompressionTests();
+int RunHfsPlusOtherFeaturesTests(const wchar_t*);
 void CreateHfsPlusFeatureFixture(const wchar_t *);
 void CreateHfsPlusCompressionEncodingFixture(const wchar_t*);
 void must(bool ok, const char *text) {
@@ -936,6 +937,7 @@ void large(const wchar_t *path, Volume::FormatKind kind = Volume::FormatKind::Hf
 }
 int wmain(int argc, wchar_t **argv) {
     try {
+        if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
         auto saveMemory = [](Memory &memory, const wchar_t *path) {
             auto out = CreateImage(path, memory.Size());
             out->Write(0, memory.bytes.data(), memory.bytes.size());

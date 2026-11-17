@@ -4,6 +4,7 @@
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "BrowserPresentation.h"
+#include "HfsPlusTime.h"
 #include <set>
 #include <atomic>
 #include <algorithm>
@@ -17,10 +18,10 @@ class Plus final : public Volume {
     std::unique_ptr<HfsPlus::Source> source_;
     std::unique_ptr<HfsPlus::Volume> volume_;
     bool writable_;std::atomic<bool> usable_{true};
-    std::u16string name_;bool caseSensitive_=false,hfsx_=false,journaled_=false,canWrite_=false;
+    std::u16string name_;bool caseSensitive_=false,hfsx_=false,journaled_=false,external_=false,expanded_=false,canWrite_=false;
     mutable std::recursive_mutex mutex_;
     struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Plus& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
-    std::string resourceKey_;
+    std::string resourceKey_;std::unique_ptr<VolumeCoord::ImageDependency> journalDependency_;
     template<class F> auto Mutate(F work) -> decltype(work()) {
         Call call(*this);if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access");
         try { return work(); }
@@ -42,14 +43,14 @@ class Plus final : public Volume {
         for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;return e;
     }
 public:
-    Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key)
-        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();canWrite_=volume_->Writable();}
+    Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key,std::wstring externalJournal)
+        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();external_=volume_->ExternalJournal();expanded_=volume_->ExpandedTimes();canWrite_=volume_->Writable();if(!externalJournal.empty()&&volume_->ExternalJournal())journalDependency_.reset(new VolumeCoord::ImageDependency(ResourceKey(),externalJournal));}
     std::string ResourceKey()const override{return resourceKey_.empty()?Volume::ResourceKey():resourceKey_;}
     std::u16string Name() const override { return name_; }
     const char *Kind() const override { return hfsx_ ? "HFSX" : "HFS+"; }
     std::string Description()const override {
         return std::string(Kind())+(CaseSensitive()?" (case-sensitive)":" (case-insensitive)")+
-            (journaled_?", journaled":", non-journaled");
+            (journaled_?(external_?", external journal":", internal journal"):", non-journaled")+(expanded_?", expanded timestamps":"");
     }
     bool Writable() const override { return usable_ && canWrite_; }
     void ReleaseMedia()override{std::unique_lock<std::recursive_mutex> lock(mutex_,std::try_to_lock);if(!lock.owns_lock())throw VolumeCoord::Busy();Check(!writable_,"Only read-only physical media can be released this way");usable_=false;volume_.reset();source_.reset();}
@@ -62,7 +63,7 @@ public:
     bool SupportsAttributes()const override{return true;}
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
-    void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);HfsPlus::ValidateAttributes(e.attributes);}
+    void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}HfsPlus::ValidateAttributes(e.attributes);}
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name,e.attributesKnown?&e.attributes:nullptr);});}
     bool CaseSensitive() const override { return caseSensitive_; }
     uint64_t FreeBytes() const override { Call call(*this);if(!usable_)throw HfsPlus::Error("Media was released; select the drive again");return volume_->FreeBytes(); }
@@ -77,8 +78,8 @@ public:
         return Mutate([&] { return volume_->MakeDirectory(p, s); });
     }
     uint32_t Put(uint32_t p, const Entry &e, Reader read, bool replace) override {
-        std::array<uint32_t,2> dates{e.created,e.modified};
-        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,e.datesValid?&dates:nullptr,e.attributesKnown?&e.attributes:nullptr); });
+        std::array<uint64_t,2> dates{e.created,e.modified};
+        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,nullptr,e.attributesKnown?&e.attributes:nullptr,HfsPlus::Volume::CompressionMode::Preserve,e.datesValid?&dates:nullptr); });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
         Mutate([&] { volume_->Rename(id, p, s); });
@@ -136,20 +137,20 @@ public:
     bool FindTransferChild(uint32_t parent,const Entry& source,Entry& found)override{Call call(*this);Ready();Check(parent==2,"MFS has no subdirectories");auto encoded=Encode(source.name);for(auto& p:entries_){auto& e=image_.Entries()[p.second];if(e.version==source.version&&MfsImage::EqualNames(e.name,encoded)){found=EntryAt(p.second);return true;}}return false;}
     void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override{Call call(*this);Ready();size_t got=0;if(!image_.ReadFork(entries_.at(id),fork,at,p,n,got))throw HfsPlus::Error(image_.Error());Check(got==n,"Short MFS fork read");}
     void ValidateEntry(const Entry& e)const override{
-        Check(!e.directory,"MFS is flat and cannot store folders");Check(e.attributes.empty(),"MFS cannot preserve extended attributes or ACLs");Encode(e.name);Check(e.version<=255,"Invalid MFS file version");
+        Check(!e.datesValid||(e.created<=UINT32_MAX&&e.modified<=UINT32_MAX),"MFS cannot preserve dates after February 2040");Check(!e.directory,"MFS is flat and cannot store folders");Check(e.attributes.empty(),"MFS cannot preserve extended attributes or ACLs");Encode(e.name);Check(e.version<=255,"Invalid MFS file version");
         Check(e.forks[0].size<=20*1024*1024&&e.forks[1].size<=20*1024*1024,"File exceeds the MFS 20 MiB volume limit");
         Check(std::all_of(e.finder.begin()+16,e.finder.end(),[](uint8_t b){return b==0;}),"MFS can store only the first 16 bytes of Finder information");
     }
     void ValidateRemoval(uint32_t id)override{auto e=Stat(id);Check(Writable()&&id!=2&&!e.protectedFile,"MFS file is locked or read-only");}
     uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw HfsPlus::Error("MFS is flat and has no subdirectories");}
     uint32_t Put(uint32_t parent,const Entry& e,Reader reader,bool overwrite)override{
-        Check(parent==2,"MFS has no subdirectories");ValidateEntry(e);MfsEntry raw;raw.name=Encode(e.name);raw.version=BYTE(e.version);raw.flags=BYTE(0x80|(e.protectedFile?1:0));raw.created=e.created;raw.modified=e.modified;raw.datesValid=e.datesValid;memcpy(raw.finderInfo,e.finder.data(),16);for(unsigned f=0;f<2;++f)raw.forks[f].length=uint32_t(e.forks[f].size);uint32_t id=0;
+        Check(parent==2,"MFS has no subdirectories");ValidateEntry(e);MfsEntry raw;raw.name=Encode(e.name);raw.version=BYTE(e.version);raw.flags=BYTE(0x80|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);raw.datesValid=e.datesValid;memcpy(raw.finderInfo,e.finder.data(),16);for(unsigned f=0;f<2;++f)raw.forks[f].length=uint32_t(e.forks[f].size);uint32_t id=0;
         Mutate([&]{return image_.Put(raw,reader,overwrite,id);});Call call(*this);return uiIds_.at(id);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{Check(parent==2&&id!=2,"MFS files remain in the volume root");auto encoded=Encode(name);Mutate([&]{return image_.Rename(image_.Entries().at(entries_.at(id)).id,encoded);});}
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     bool SupportsBasicMetadata()const override{return true;}
-    void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=Encode(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=e.created;raw.modified=e.modified;memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
+    void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=Encode(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
 struct Planned { Entry entry; std::vector<Planned> children; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
@@ -201,17 +202,17 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     ++progress.files; job.progress(progress); return true;
 }
 }
-std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key) {
-    return std::make_shared<Plus>(std::move(s), write,std::move(key));
+std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
+    return std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal));
 }
-std::shared_ptr<Volume> OpenImage(const std::wstring &path) {
+std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     auto source = HfsPlus::OpenImage(path.c_str(), false);
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
-        try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true), true,key); }
-        catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false), false,key); }
+        try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true,externalJournal.empty()?nullptr:externalJournal.c_str()), true,key,externalJournal); }
+        catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false,externalJournal.empty()?nullptr:externalJournal.c_str()), false,key,externalJournal); }
     }
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);

@@ -17,7 +17,7 @@ struct Entry {
     std::string readError;
     Fork forks[2];
     std::array<uint8_t,32> finder{};
-    uint32_t created = 0, modified = 0;
+    uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
     bool datesValid = false;
     HfsPlus::Attributes attributes;
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
@@ -72,8 +72,8 @@ public:
     virtual void Rename(uint32_t id, uint32_t parent, const std::u16string &) = 0;
     virtual void Remove(uint32_t id) = 0;
 };
-std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {});
-std::shared_ptr<Volume> OpenImage(const std::wstring &path); // null = unrecognized
+std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {},std::wstring externalJournal = {});
+std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal = {}); // null = unrecognized
 std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = not HFS+/HFSX
 // Drive roots only; unrecognized/unreadable media falls back, recognized mount errors propagate.
 std::shared_ptr<Volume> OpenCdRoot(const char *root,
