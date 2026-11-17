@@ -27,6 +27,7 @@
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
 #include "RefreshStorage.h"
+#include "BackgroundCopies.h"
 #include "StorageJobDialog.h"
 #include "HostFileSizes.h"
 #include "HFVExplorer.h"
@@ -1427,6 +1428,9 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
 
 void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString partial_name )
 {
+ if(id==configurations_id)GetBrowserSession().SetLocationTitle(L"Configurations");
+ else if(volinx>=0&&volinx<m_hfs_count){CString path=GetBrowserSession().Tree()->get_directory_name(m_volumes[volinx].m_rootitem,volinx,id);if(path.IsEmpty())path=m_volumes[volinx].m_volume_name;GetBrowserSession().SetLocationTitle(VolumeCoord::Wide(std::string((LPCSTR)path)));}
+ if(volinx>=0&&volinx<m_hfs_count&&GetBrowserSession().Defer(VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name)),true,[this,volinx,id,partial_name]{open_sub_directory(volinx,id,partial_name);}))return;
  GetBrowserSession().ClearCurrent();
  StorageAction storageAction;
 	unsigned long parent_link_id = 0;
@@ -1438,7 +1442,11 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 		GetBrowserSession().List()->initialize_volume( "", 0 );
 	} else {
 		int i;
-		if(!m_volumes[volinx].m_opened) return;
+  if(!m_volumes[volinx].m_opened){
+   auto key=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name));auto owner=GetBrowserSession().Owner();
+   auto result=ShowStorageWaitJob([&](Storage::Job&){FileOperations::LegacyGuard engine;VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reopen the selected Mac volume");return Storage::Result{};},!owner->IsWindowVisible(),owner);
+   if(result.code){GetBrowserSession().List()->list_clear();GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Status())GetBrowserSession().Status()->SetPaneText(0,result.message.c_str());return;}
+  }
 		parent_link_id = GetBrowserSession().Tree()->get_parent_id( m_volumes[volinx].m_rootitem, volinx, id );
 
 		for(i=1; i<=2; i++) {
@@ -1479,6 +1487,10 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 #pragma optimize("",off)
 void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 {
+ if(list&&path)GetBrowserSession().SetLocationTitle(VolumeCoord::Wide(std::string(path)));
+ if(list&&volinx>=0&&volinx<m_fat_count){std::string saved=path;auto type=m_fats[volinx].m_type;
+  if((type==DRIVE_REMOVABLE||type==DRIVE_CDROM)&&GetBrowserSession().Defer(VolumeCoord::DeviceKey(toupper((unsigned char)path[0])-'A'),true,[this,volinx,saved,list]{open_fat_directory(volinx,const_cast<char*>(saved.c_str()),list);}))return;
+ }
  if(list)GetBrowserSession().ClearCurrent();
  StorageAction storageAction;
  // Startup discovery is optional; explicit drive selection must identify Mac
@@ -1581,6 +1593,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 {
 	int native=GetBrowserSession().MacBrowser().OpenImage(lpszPathName);
  if(native)return native>0;
+ if(BackgroundCopies::Active()){std::string path=lpszPathName?lpszPathName:"";GetBrowserSession().Defer("",true,[this,path]{OnOpenDocument(path.c_str());});return TRUE;}
  StorageAction storageAction;
 
 	int i;
@@ -1906,6 +1919,11 @@ void CHFVExplorerDoc::CheckNewFloppy( int index )
 void CHFVExplorerDoc::OnViewRefresh() 
 {
  if(GetBrowserSession().MacBrowser().Refresh())return;
+ if(BackgroundCopies::Active()){
+  auto tree=GetBrowserSession().Tree();auto item=tree->GetTreeCtrl().GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->GetTreeCtrl().GetItemData(item)):nullptr;
+  if(p&&p->type==LIST_FAT){std::string path=p->path;open_fat_directory(p->volinx,const_cast<char*>(path.c_str()),1);}
+  else if(p&&p->type==LIST_HFS)open_sub_directory(p->volinx,p->id,"");return;
+ }
 	CheckNewMedia( TRUE, TRUE, TRUE);
 
 	/*

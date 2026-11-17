@@ -279,9 +279,11 @@ int RunCopyProgressTest(const char* directory) {
    check(direct.Read(512,sizeof(readBack),readBack)&&!memcmp(changed,readBack,sizeof(changed))&&buffered.writes==0&&buffered.disk.reads==reads,"read-your-writes uses coherent sector cache before flush");
    bool protectedOtherThread=false;std::thread other([&]{protectedOtherThread=readonly_media_path(floppyPath)&&fhook_open(floppyPath,O_RDWR)<0&&errno==EROFS;});other.join();
    check(protectedOtherThread,"write permission is scoped to the copy worker thread");
-   check(direct.Finish()&&buffered.writes==1&&!memcmp(buffered.disk.media.data()+512,changed,sizeof(changed)),"one contiguous buffered write, no readback pass, unsupported flush accepted with write-through I/O");
+   check(direct.Finish()&&buffered.writes==1&&buffered.disk.reads==reads&&!memcmp(buffered.disk.media.data()+512,changed,sizeof(changed)),"one contiguous buffered write, no readback pass, unsupported flush accepted with write-through I/O");
   }
   check(readonly_media_path(floppyPath)&&!DirectFloppy::Current(25),"read-only browsing restored after direct scope");
+  {CopyFloppy verified(blank);DirectFloppy direct(&verified);BYTE sector[512];memset(sector,0x6b,sizeof(sector));check(direct.Open(25,true)&&direct.Write(512,sizeof(sector),sector),"prepare verified direct write");auto bytes=verified.disk.requestedReadBytes;check(direct.Finish()&&verified.disk.requestedReadBytes==bytes+sizeof(sector),"verified move must read only changed sectors from the device");}
+  {CopyFloppy failedReadback(blank);DirectFloppy direct(&failedReadback);BYTE sector[512]{};check(direct.Open(25,true)&&direct.Write(512,sizeof(sector),sector),"prepare failing verified write");failedReadback.failure=4;check(!direct.Finish()&&direct.Error()==ERROR_CRC,"cached read-your-writes masked a failed device readback");}
   {
    CopyFloppy swapped(blank);DirectFloppy direct(&swapped);BYTE sector[512]={};check(direct.Open(25)&&direct.Write(0,sizeof(sector),sector),"buffer before media swap");++swapped.disk.changeCount;
    check(!direct.Finish()&&direct.Error()==ERROR_MEDIA_CHANGED&&swapped.writes==0,"media change prevents buffered writes from reaching replacement disk");

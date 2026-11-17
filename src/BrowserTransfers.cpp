@@ -60,8 +60,9 @@ bool Any(){return !clipboard.items.empty();}
 bool Paste(BrowserSession& session){
  if(!Any()||StorageUi::busy()||StorageUi::state().sessionOpen)return true;
  auto items=clipboard.items;auto token=revision;
- bool complete=session.MacBrowser().TransferSelection(items,session.MacBrowser().TargetFolder());
+ session.MacBrowser().TransferSelection(items,session.MacBrowser().TargetFolder(),[token](bool complete){
  if(complete&&revision==token){clipboard.items.erase(std::remove_if(clipboard.items.begin(),clipboard.items.end(),[](const FileOperations::Location& p){return p.cut;}),clipboard.items.end());++revision;}
+ });
  return true;
 }
 Effect Choose(const Selection& selection,const FileOperations::Location& target,bool writable,UINT keys){

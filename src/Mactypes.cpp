@@ -21,6 +21,7 @@
 #include "stdafx.h"
 #include "mactypes.h"
 #include "floppy.h"
+#include "ReadOnlyCdBackend.h"
 #include "hfs\libhfs\hfs.h"
 #include "hfs\interface.h"
 #define _FHOOK_INTERNAL_
@@ -821,6 +822,7 @@ void CHFVVolume::update_time_stamp()
 
 int CHFVVolume::open()
 {
+ m_mediaGenerationKnown=false;
 	if(m_opened) close();
 	
 	if(m_file_name == "") return(0);
@@ -841,6 +843,7 @@ int CHFVVolume::open()
 				if(!m_extents_file.open_special(this,CHFVFile::OpenExtents) ||
 				   !m_catalog_file.open_special(this,CHFVFile::OpenCatalog)) { close(); return 0; }
 				m_volume_name = CString(m_MDB.drVN);
+                if(m_is_floppy)m_mediaGenerationKnown=physical_floppy_generation(physical_floppy_path(m_file_name),&m_mediaGeneration)!=0;
 			} else {
 				close();
 			}

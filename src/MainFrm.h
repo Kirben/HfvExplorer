@@ -66,6 +66,7 @@ public:
 	public:
 	virtual BOOL PreCreateWindow(CREATESTRUCT& cs);
  void ActivateFrame(int show=-1) override;
+ void OnUpdateFrameTitle(BOOL addToTitle) override;
 	virtual BOOL DestroyWindow();
 	protected:
 	virtual BOOL OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext);

@@ -37,7 +37,8 @@ bool DirectFloppy::fail(DWORD error){
  SetLastError(error_);return false;
 }
 bool DirectFloppy::verify(){DWORD n=0;if(error_)return fail(error_);if(!api_->Verify(handle_,n))return fail(GetLastError());return n==generation_?true:fail(ERROR_MEDIA_CHANGED);}
-bool DirectFloppy::Open(int drive){
+bool DirectFloppy::Open(int drive,bool verifyWrites){
+ verifyWrites_=verifyWrites;if(verifyWrites_){expected_.assign(kSize,0);dirty_.assign(kSize/kSector,0);}
 #ifdef HFV_FLOPPY_TESTING
  if(api_==&native)return fail(ERROR_NOT_SUPPORTED);
 #endif
@@ -65,6 +66,7 @@ bool DirectFloppy::flushWrites(){
  if(got!=pendingCount_)return fail(ERROR_WRITE_FAULT);
  pendingCount_=0;return verify();
 }
+
 bool DirectFloppy::Read(ULONGLONG offset,DWORD count,void* buffer){
  if(current!=this||handle_==INVALID_HANDLE_VALUE)return fail(ERROR_INVALID_HANDLE);
  if(error_)return fail(error_);if(offset>kSize||count>kSize-offset||(!buffer&&count))return fail(ERROR_INVALID_PARAMETER);
@@ -91,6 +93,7 @@ bool DirectFloppy::Write(ULONGLONG offset,DWORD count,const void* buffer){
   if(pendingCount_&&(pendingOffset_+pendingCount_!=offset||pendingCount_==kBuffer))if(!flushWrites())return false;
   if(!pendingCount_)pendingOffset_=DWORD(offset);
   DWORD n=min(count,kBuffer-pendingCount_);memcpy(pending_+pendingCount_,source,n);pendingCount_+=n;
+  if(verifyWrites_){memcpy(expected_.data()+size_t(offset),source,n);memset(dirty_.data()+size_t(offset/kSector),1,n/kSector);}
   for(DWORD i=0;i<n/kSector;++i)cache_put(&cache_,int(offset/kSector+i),(char*)source+i*kSector,kSector);
   source+=n;offset+=n;count-=n;
  }
@@ -100,5 +103,18 @@ bool DirectFloppy::Finish(){
  if(current!=this||handle_==INVALID_HANDLE_VALUE)return fail(ERROR_INVALID_HANDLE);
  if(!flushWrites()||!verify())return false;
  if(!api_->Flush(handle_)){DWORD e=GetLastError();if(e!=ERROR_INVALID_FUNCTION&&e!=ERROR_NOT_SUPPORTED)return fail(e);}
+ if(!verify())return false;
+ if(verifyWrites_){
+  for(DWORD sector=0;sector<kSize/kSector;){
+   if(!dirty_[sector]){++sector;continue;}
+   DWORD end=sector;while(end<kSize/kSector&&dirty_[end]&&end-sector<kBuffer/kSector)++end;
+   DWORD count=(end-sector)*kSector,got=0;if(!verify())return false;
+   // Bypass the write cache: only device reads can confirm persisted bytes.
+   if(!api_->Read(handle_,ULONGLONG(sector)*kSector,count,scratch_,got))return fail(GetLastError());
+   if(got!=count)return fail(ERROR_READ_FAULT);if(!verify())return false;
+   if(memcmp(scratch_,expected_.data()+size_t(sector)*kSector,count))return fail(ERROR_CRC);
+   memset(dirty_.data()+sector,0,end-sector);sector=end;
+  }
+ }
  return verify();
 }

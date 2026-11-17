@@ -132,6 +132,12 @@ public:
         if(result){if(!exists)hfs_delete(volume_,const_cast<char*>(path.c_str()));if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
         Check(hfs_flush(volume_)==0);return Id(path);
     }
+    bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}
+    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{
+        auto from=dynamic_cast<Classic*>(&source);Check(from&&CanMoveFrom(source)&&write_);RootScope scope(volume_);
+        auto old=from->Path(id),path=Path(parent);if(path.back()!=':')path+=':';path+=Encode(entry.name);
+        Check(hfs_rename(volume_,const_cast<char*>(old.c_str()),const_cast<char*>(path.c_str()))==0);
+    }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
         RootScope scope(volume_);auto from=Path(id),to=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(write_&&hfs_rename(volume_,const_cast<char*>(from.c_str()),const_cast<char*>(to.c_str()))==0);paths_[id]=to;
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "FileOperations.h"
+#include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
 #include "DirectFloppy.h"
 #include "ReadOnlyCdBackend.h"
@@ -15,6 +16,8 @@ void HFSIFACE_get_dir_flush(void);
 }
 extern int DeleteHostSelectionJob(const CString&,bool,Storage::Job*);
 namespace FileOperations {
+namespace {std::mutex legacyEngine;}
+LegacyGuard::LegacyGuard():lock_(legacyEngine,std::try_to_lock){if(!lock_.owns_lock())throw VolumeCoord::Busy();}
 struct Operation::State {mutable std::mutex mutex;Completion completion;};
 struct Registry {
  struct Entry{std::weak_ptr<Operation::State> state;std::weak_ptr<Storage::Job> job;};
@@ -33,6 +36,10 @@ std::u16string Ansi(const std::string& s){int n=MultiByteToWideChar(CP_ACP,0,s.d
 std::string Utf8(const std::u16string& text){auto w=Wide(text);int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);std::string out(n,0);if(n)WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),&out[0],n,nullptr,nullptr);return out;}
 bool Absolute(const std::string& p){return p.size()>=3&&((isalpha((unsigned char)p[0])&&p[1]==':'&&p[2]=='\\')||(p[0]=='\\'&&p[1]=='\\'));}
 bool Absolute(const std::wstring& p){return p.size()>=3&&((iswalpha(p[0])&&p[1]==L':'&&(p[2]==L'\\'||p[2]==L'/'))||(p[0]==L'\\'&&p[1]==L'\\'));}
+void CheckMedia(const Location& item){
+ if(!item.mediaGenerationKnown)return;DWORD generation=0;
+ if(!physical_floppy_generation(physical_floppy_path(item.classicImage.c_str()),&generation)||generation!=item.mediaGeneration)throw Failure(ERROR_MEDIA_CHANGED,"Floppy media changed after selection; select the volume again");
+}
 std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mutate=false){
  if(!value.expectedResource.empty())Check(VolumeCoord::ImageKey(value.classicImage)==value.expectedResource,"The selected source image was replaced");
  if(value.volume){auto e=value.volume->Stat(value.id);
@@ -41,8 +48,14 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mu
   if(value.expectedParent)Check(e.parent==value.expectedParent,"The selected entry was moved before the operation started");
   return {value.volume,value.id};}
  std::shared_ptr<Volume> volume;std::u16string name;
- if(value.type==LIST_FAT){Check(Absolute(value.windowsPath),"Use an absolute Windows source path");auto pos=value.windowsPath.find_last_of(L"\\/");Check(pos!=std::wstring::npos,"Use an absolute Windows source path");auto parent=value.windowsPath.substr(0,pos);if(parent.size()==2&&parent[1]==L':')parent+=L'\\';volume=OpenWindows(parent);name=U16(value.windowsPath.substr(pos+1));}
- else{auto pos=value.classicPath.find_last_of(':');Check(pos!=std::string::npos,"Use an absolute classic HFS path");volume=OpenClassic(value.classicImage,value.classicPath.substr(0,pos+1),mutate);name=Ansi(value.classicPath.substr(pos+1));}
+ if(value.type==LIST_FAT){
+  Check(Absolute(value.windowsPath),"Use an absolute Windows source path");
+  // Resolve only the captured entry. Enumerating its parent also examines
+  // unrelated junctions (for example Documents' legacy library links).
+  auto source=ResolveWindowsFile(value.windowsPath);auto entry=source.first->Stat(source.second);
+  if(!value.expectedIdentity.empty())Check(entry.identity==value.expectedIdentity,"The selected source was replaced or changed");return source;
+ }
+ else{auto pos=value.classicPath.find_last_of(':');Check(pos!=std::string::npos,"Use an absolute classic HFS path");volume=OpenClassic(value.classicImage,value.classicPath.substr(0,pos+1),mutate);CheckMedia(value);name=Ansi(value.classicPath.substr(pos+1));}
  for(auto& e:volume->List())if(HfsPlus::CompareNames(e.name,name,volume->CaseSensitive())==0){if(value.expectedCatalogId)Check(e.resolvedId==value.expectedCatalogId,"The selected classic HFS entry was replaced");if(!value.expectedIdentity.empty())Check(e.identity==value.expectedIdentity,"The selected source was replaced or changed");return {volume,e.id};}
  throw HfsPlus::Error("The selected source no longer exists");
 }
@@ -51,7 +64,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  if(value.type==LIST_FAT){Check(Absolute(value.windowsPath),"Use an absolute Windows destination path");return {OpenWindows(value.windowsPath),2};}
  return {OpenClassic(value.classicImage,value.classicPath,true),2};
 }
-std::unique_ptr<DirectFloppy> WritableFloppy(const Location& target){
+std::unique_ptr<DirectFloppy> WritableFloppy(const Location& target,bool verify=false){
  int drive=target.type==LIST_HFS?physical_floppy_path(target.classicImage.c_str()):-1;if(drive<0)return {};
  physical_floppy_suspend(drive);std::unique_ptr<DirectFloppy> disk;
 #ifdef HFV_FLOPPY_TESTING
@@ -59,24 +72,51 @@ std::unique_ptr<DirectFloppy> WritableFloppy(const Location& target){
 #else
  disk.reset(new DirectFloppy);
 #endif
- if(!disk->Open(drive))throw Failure(disk->Error(),"Cannot open and lock the destination floppy");return disk;
+ if(!disk->Open(drive,verify))throw Failure(disk->Error(),"Cannot open and lock the floppy");CheckMedia(target);return disk;
 }
-void Finish(std::unique_ptr<DirectFloppy>& disk){HFSIFACE_get_dir_flush();if(disk&&!disk->Finish())throw Failure(disk->Error(),"Floppy flush failed; the disk may be incomplete and source items were retained");}
+void Finish(std::unique_ptr<DirectFloppy>& disk){HFSIFACE_get_dir_flush();if(disk&&!disk->Finish())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");}
+void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,Storage::Job& job,Completion& completion){
+ std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> fresh(sources.size());
+ for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);bool physical=sources[i].type==LIST_HFS&&physical_floppy_path(sources[i].classicImage.c_str())>=0;
+  fresh[i]=Source(sources[i],!physical);Check(MacBrowser::Snapshot(*fresh[i].first,fresh[i].second,job)==snapshots[i],"Source changed during the copy; source items were retained");if(physical)fresh[i].first->Close();
+ }
+ for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);auto disk=WritableFloppy(sources[i],true);
+  if(disk){fresh[i]=Source(sources[i],true);Check(MacBrowser::Snapshot(*fresh[i].first,fresh[i].second,job)==snapshots[i],"Source floppy changed before move cleanup; source items were retained");}
+  Mark(completion,sources[i]);RemoveTree(*fresh[i].first,fresh[i].second,job);if(!sources[i].volume)fresh[i].first->Close();Finish(disk);
+ }
+}
+bool MoveInPlace(const Request& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
+ if(!target.Supports().rename)return false;
+ for(size_t i=0;i<sources.size();++i)if(!request.sources[i].cut||!target.CanMoveFrom(*sources[i].first))return false;
+ auto existing=target.List(parent);std::vector<Entry> entries;
+ for(size_t i=0;i<sources.size();++i){auto& source=*sources[i].first;auto id=sources[i].second;Check(id!=2,"Select files or folders rather than a volume root");source.ValidateCopyTo(id,target,parent);auto entry=source.Stat(id);
+  for(auto& e:existing)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
+  for(auto& e:entries)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
+  if(request.sources[i].volume&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
+  Check(!entry.protectedFile&&!entry.hardLink&&!entry.compressed&&entry.readError.empty()&&!(HfsPlus::Disk::U16(entry.finder.data()+8)&HFS_FNDR_NAMELOCKED),"The selected entry cannot be moved");entries.push_back(entry);
+ }
+ // Classic adapters use root-relative paths. Avoid invalidating a later
+ // captured descendant path by renaming its selected ancestor first.
+ for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&!request.sources[i].volume){auto a=request.sources[i].classicPath,b=request.sources[j].classicPath;if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}
+ Storage::Progress progress;progress.phase="Moving";progress.scanning=false;progress.fileCopy=progress.utf8=true;progress.totalFiles=unsigned(sources.size());job.progress(progress);
+ for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);++progress.files;job.progress(progress);}
+ return true;
+}
 Storage::Result CopyRequest(const Request& request,Storage::Job& job,Completion& completion){
- Check(!request.sources.empty(),"Select a source file or folder");HFSIFACE_get_dir_flush();auto disk=WritableFloppy(request.target);
+ Check(!request.sources.empty(),"Select a source file or folder");HFSIFACE_get_dir_flush();auto disk=WritableFloppy(request.target,std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;}));
  auto destination=Destination(request.target);Check(destination.first->Supports().create,"The destination does not support file creation");
  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;std::vector<std::string> snapshots;
- for(auto& item:request.sources){Cancel(job);auto source=Source(item);if(item.cut&&item.volume)Check(source.first->Writable(),"A cut source is read-only");snapshots.push_back(item.cut?MacBrowser::Snapshot(*source.first,source.second,job,bool(item.volume)):std::string());opened.push_back(source);}
+ for(auto& item:request.sources){Cancel(job);auto source=Source(item);if(item.cut&&item.volume)Check(source.first->Writable(),"A cut source is read-only");opened.push_back(source);}
  Mark(completion,request.target);
- bool complete=CopyMany(opened,*destination.first,destination.second,job);
- if(!request.target.volume)destination.first->Close();Finish(disk);
- for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].volume)opened[i].first->Close();
- // Revalidate every moved source before deleting any, after destination finalization.
- if(complete){
-  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> fresh(request.sources.size());
-  for(size_t i=0;i<request.sources.size();++i)if(request.sources[i].cut){Cancel(job);fresh[i]=request.sources[i].volume?opened[i]:Source(request.sources[i],true);Check(MacBrowser::Snapshot(*fresh[i].first,fresh[i].second,job)==snapshots[i],"Source changed during the copy; source items were retained");}
-  for(size_t i=0;i<request.sources.size();++i)if(request.sources[i].cut){Mark(completion,request.sources[i]);RemoveTree(*fresh[i].first,fresh[i].second,job);if(!request.sources[i].volume)fresh[i].first->Close();}
+ if(MoveInPlace(request,opened,*destination.first,destination.second,job,completion)){
+  if(!request.target.volume)destination.first->Close();for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].volume)opened[i].first->Close();Finish(disk);completion.complete=true;completion.completed=unsigned(opened.size());Storage::Result result;result.moved=true;return result;
  }
+ for(size_t i=0;i<request.sources.size();++i)snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].volume)):std::string());
+ bool complete;try{complete=CopyMany(opened,*destination.first,destination.second,job);}catch(...){if(disk&&disk->Error())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");throw;}
+ if(!request.target.volume)destination.first->Close();
+ for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].volume)opened[i].first->Close();
+ Finish(disk);disk.reset(); // Includes all final unmount writes; never delete sources before this.
+ if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
  completion.complete=complete;completion.completed=job.progress().files;
  Storage::Result result;result.moved=complete&&std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;});return result;
 }
@@ -130,8 +170,8 @@ Storage::Result ReplaceResource(const Request& request,Storage::Job& job,Complet
 std::string Resource(const Location& item){if(item.volume)return item.volume->ResourceKey();if(item.type==LIST_FAT)return VolumeCoord::HostKey(item.windowsPath);return VolumeCoord::ImageKey(item.classicImage);}
 std::vector<VolumeCoord::Access> Resources(const Request& request){
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
- if(request.kind==Kind::LegacyCopy){auto key=[](const std::string& volume,const std::string& path){return Absolute(path)?VolumeCoord::HostKey(VolumeCoord::Wide(path)):VolumeCoord::ImageKey(volume);};access.push_back({key(request.sourceVolume,request.sourcePath),request.move?Mode::Write:Mode::Read});access.push_back({key(request.targetVolume,request.targetPath),Mode::Write});return access;}
- for(auto& source:request.sources)access.push_back({Resource(source),(request.kind==Kind::Rename||request.kind==Kind::Delete||source.cut)?Mode::Write:Mode::Read});
+ if(request.kind==Kind::LegacyCopy){auto key=[](const std::string& volume,const std::string& path){return Absolute(path)?VolumeCoord::HostKey(VolumeCoord::Wide(path)):VolumeCoord::ImageKey(volume);};access.push_back({key(request.sourceVolume,request.sourcePath),(request.move||request.background)?Mode::Write:Mode::Read});access.push_back({key(request.targetVolume,request.targetPath),Mode::Write});return access;}
+ for(auto& source:request.sources)access.push_back({Resource(source),(request.kind==Kind::Rename||request.kind==Kind::Delete||source.cut||(request.background&&source.type!=LIST_FAT))?Mode::Write:Mode::Read});
  if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork)access.push_back({Resource(request.target),Mode::Write});return access;
 }
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
@@ -145,13 +185,19 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
   // window's volume indexes. Validate before invoking the old converters.
   auto source=Source(request.sources.front());
   auto target=request.target.type==LIST_FAT?OpenWindows(request.target.windowsPath):OpenClassic(request.target.classicImage,request.target.classicPath,false);
-  source.first->ValidateCopyTo(source.second,*target,2);
+  CheckMedia(request.target);source.first->ValidateCopyTo(source.second,*target,2);
   source.first->Close();target->Close();
  }
   auto describe=[](const std::string& volume,const std::string& path){Location out;out.type=Absolute(path)?LIST_FAT:LIST_HFS;if(out.type==LIST_FAT)out.windowsPath=Wide(Ansi(path));else{out.classicImage=volume;out.classicPath=path;}return out;};
  Mark(completion,describe(request.targetVolume,request.targetPath));if(request.move)Mark(completion,describe(request.sourceVolume,request.sourcePath));
- auto result=MakeCopyJob(request.sourceVolume,request.sourcePath,request.targetVolume,request.targetPath,request.directory,request.move,request.conversion)(job);
- completion.completed=job.progress().files;completion.complete=!result.code&&!job.progress().skipped;
+ auto sourceLocation=request.sources.empty()?describe(request.sourceVolume,request.sourcePath):request.sources.front();sourceLocation.cut=request.move;
+ bool physicalMove=request.move&&((sourceLocation.type==LIST_HFS&&physical_floppy_path(sourceLocation.classicImage.c_str())>=0)||physical_floppy_path(request.targetVolume.c_str())>=0);
+ std::vector<std::string> snapshots;auto options=request.conversion;options.targetGenerationKnown=request.target.mediaGenerationKnown;options.targetGeneration=request.target.mediaGeneration;
+ if(physicalMove){auto source=Source(sourceLocation);snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job));if(!sourceLocation.volume)source.first->Close();options.verifyFloppy=true;}
+ auto result=MakeCopyJob(request.sourceVolume,request.sourcePath,request.targetVolume,request.targetPath,request.directory,physicalMove?0:request.move,options)(job);
+ completion.completed=job.progress().files;bool copied=!result.code&&!job.progress().skipped;
+ if(physicalMove&&copied){DeleteMovedSources({sourceLocation},snapshots,job,completion);result.moved=true;}
+ completion.complete=copied;
  return result;
 }
 }
@@ -159,8 +205,14 @@ Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> 
 Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->mutex);return state_->completion;}
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
- auto job=Storage::worker().submit([state,values](Storage::Job& job){Completion completion;Storage::Result result;
-  try{Cancel(job);VolumeCoord::Lease access(Resources(*values));result=Execute(*values,job,completion); }
+ auto& queue=values->background?Storage::copyWorker():Storage::worker();
+ auto job=queue.submit([state,values](Storage::Job& job){Completion completion;Storage::Result result;
+  try{Cancel(job);std::unique_lock<std::mutex> engine(legacyEngine,std::defer_lock);
+   if(values->background){while(!engine.try_lock()){Cancel(job);Sleep(10);}}else if(!engine.try_lock())throw VolumeCoord::Busy();
+   std::unique_ptr<VolumeCoord::Lease> access;
+   for(;;){Cancel(job);try{access.reset(new VolumeCoord::Lease(Resources(*values)));break;}catch(const VolumeCoord::Busy&){if(!values->background)throw;Sleep(10);}}
+   result=Execute(*values,job,completion);
+  }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}

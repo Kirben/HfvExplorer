@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "BackgroundCopies.h"
 #include "BrowserSession.h"
 #include "BrowserTransfers.h"
 #include "MainMacBrowser.h"
@@ -593,6 +594,7 @@ BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=u
 // Makes sure that inited flag is cleared
 void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
 {
+ if(BackgroundCopies::Active())return;
 	if(get_inx_type(inx) == LIST_HFS) {
 		CString fullpath;
 		char volpath[_MAX_PATH];
@@ -931,6 +933,7 @@ int ask_dir( char *new_name )
 BOOL CHFVExplorerListView::new_folder(void)
 {
  if(GetBrowserSession().MacBrowser().NewFolder())return TRUE;
+ if(BackgroundCopies::Active())return FALSE;
  if(!BrowserDirectoryWritable())return FALSE;
 	CHFVExplorerApp	*pApp;
 	CTreeCtrl *tc;
@@ -2811,6 +2814,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 	}
 
 	if(entry_type == LIST_UNKNOWN || entry_type == LIST_SPEC) return;
+ if(BackgroundCopies::Active())return; // Launchers use synchronous legacy converter globals.
 
 	type = m_cl->GetItemText( inx, FIELD_TYPE );
 
@@ -2992,6 +2996,7 @@ int do_delete_fat_directory( char *path )
 
 BOOL CHFVExplorerListView::map_selected_item( void )
 {
+ if(BackgroundCopies::Active())return FALSE;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	CFileTypeMapping dlg;
 	int inx, count;
@@ -3055,6 +3060,7 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 #pragma optimize("g",off)
 void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 {
+ if(BackgroundCopies::Active())return;
  if(GetBrowserSession().MacBrowser().Delete(confirm!=FALSE))return;
  if(!BrowserSelectionAllows(false))return;
 	int inx = -1, count = 0;
@@ -3128,6 +3134,7 @@ void CHFVExplorerListView::toggle_label_colors( void )
 
 void CHFVExplorerListView::set_label_color( int finder_color ) 
 {
+ if(BackgroundCopies::Active())return;
 	int inx, color;
 	LV_ITEM	lvitem;
 	DWORD_PTR dat;
@@ -3180,6 +3187,13 @@ void CHFVExplorerListView::set_label_color( int finder_color )
 void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point) 
 {
  if(GetBrowserSession().MacBrowser().ContextMenu(point))return;
+ if(BackgroundCopies::Active()){
+  if(point.x<0){CRect rect;m_cl->GetWindowRect(rect);point=rect.CenterPoint();}
+  CMenu menu;menu.CreatePopupMenu();bool selected=m_cl->GetNextItem(-1,LVNI_SELECTED)>=0;
+  menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"Copy");menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_EDIT_CUT,"Cut");
+  menu.AppendMenu(MF_STRING|(BrowserTransfers::Any()&&BrowserDirectoryWritable()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"Paste");
+  auto command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,GetBrowserSession().Owner());if(command)GetBrowserSession().Owner()->SendMessage(WM_COMMAND,command);return;
+ }
 	CMenu cm, cpop, cpop2, cpop3;
 	int inx, hit = 0;
 	int pop_created = 0;
@@ -3335,6 +3349,7 @@ void CHFVExplorerListView::OnSysKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags )
 void CHFVExplorerListView::on_properties( int inx ) 
 {
  if(GetBrowserSession().MacBrowser().Properties(inx))return;
+ if(BackgroundCopies::Active())return;
 	CString fullpath;
 	int stype = get_inx_type(inx);
 	// int isdir = get_inx_isdir(inx);
@@ -4356,6 +4371,7 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
         if(nativeTarget&&GetBrowserSession().MacBrowser().DropSelection(nativeTarget,action)){m_TreeiItemDrop=0;m_iItemDrop=-1;GetBrowserSession().Tree()->enable_selchange(1);pApp->EnableTimer(prevTimer);return;}
 
 
+		if(BackgroundCopies::Active()){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
 		if(m_iItemDrop >= 0) {
 			DWORD_PTR dw_drag, dw_drop;
 			int drag_is_dir, drop_is_dir;
@@ -4449,7 +4465,7 @@ void CHFVExplorerListView::OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult)
 				CHFVExplorerApp	*pApp;
 				pApp = (CHFVExplorerApp *)AfxGetApp();
 				if(pApp && GetBrowserSession().Preview()) {
-					GetBrowserSession().Preview()->set_file( get_lparam_type(dat)==LIST_MAC ? nullptr : (list_lparam_struct *)dat );
+					GetBrowserSession().Preview()->set_file( (BackgroundCopies::Active()||get_lparam_type(dat)==LIST_MAC) ? nullptr : (list_lparam_struct *)dat );
 				}
 			}
 		}
@@ -4514,6 +4530,7 @@ void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
 void CHFVExplorerListView::OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult) 
 {
+ if(BackgroundCopies::Active()){*pResult=0;return;}
 	LV_DISPINFO* pDispInfo = (LV_DISPINFO*)pNMHDR;
 
 	*pResult = 0;
@@ -4542,7 +4559,7 @@ void CHFVExplorerListView::OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult)
 
 void CHFVExplorerListView::OnBeginlabeledit(NMHDR* pNMHDR, LRESULT* pResult) 
 {
- if(GetBrowserSession().MacBrowser().Active()||!BrowserSelectionAllows(true)){*pResult=1;return;}
+ if(BackgroundCopies::Active()||GetBrowserSession().MacBrowser().Active()||!BrowserSelectionAllows(true)){*pResult=1;return;}
 	LV_DISPINFO* pDispInfo = (LV_DISPINFO*)pNMHDR;
 
 	m_editing_item = pDispInfo->item.iItem;

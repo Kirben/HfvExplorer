@@ -474,6 +474,8 @@ public:
 	HTREEITEM m_rootitem;
 	int m_free;
 	int m_is_floppy;
+ // Retained across close so queued requests can identify their selected disk.
+ bool m_mediaGenerationKnown=false;DWORD m_mediaGeneration=0;
 	int m_is_cd;
 	int m_is_hd;
 	int m_is_removable;

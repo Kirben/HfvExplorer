@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "BrowserSession.h"
+#include "BackgroundCopies.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
@@ -23,6 +24,25 @@ std::string key(std::string name){if(!name.empty())CharUpperBuffA(&name[0],DWORD
 }
 BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int volume,const char* directory,bool listing,Storage::Job& job){
  BrowserDirectory::ObserveRead(directory);
+ if(BackgroundCopies::Active()){
+  BrowserDirectory::Snapshot out;out.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));out.revision=VolumeCoord::Revision(out.resourceKey);out.capabilitiesKnown=true;
+  char root[]={directory[0],':','\\',0};out.capabilities.create=out.capabilities.rename=out.capabilities.remove=GetDriveTypeA(root)!=DRIVE_CDROM;
+  std::string prefix=directory;if(!prefix.empty()&&prefix.back()!='\\')prefix+='\\';
+  Find find;WIN32_FIND_DATAA info{};find.handle=FindFirstFileA((prefix+"*.*").c_str(),&info);
+  if(find.handle==INVALID_HANDLE_VALUE){if(GetLastError()==ERROR_FILE_NOT_FOUND)return out;throw std::runtime_error("Cannot enumerate Windows folder");}
+  do{
+   if(job.cancelled())throw Storage::Cancelled();if(!strcmp(info.cFileName,".")||!strcmp(info.cFileName,"..")||(!m_pc_show_invisibles&&(info.dwFileAttributes&FILE_ATTRIBUTE_HIDDEN)))continue;
+   if(info.cFileName[0]=='%'&&GetFileAttributesA((prefix+(info.cFileName+1)).c_str())!=INVALID_FILE_ATTRIBUTES){try{if(MacBrowser::WindowsResourceCompanion(VolumeCoord::Wide(prefix+info.cFileName)))continue;}catch(const std::exception&){}}
+   BrowserDirectory::Row row;row.storageType=LIST_FAT;row.volume=volume;row.capabilities=out.capabilities;row.path=prefix+info.cFileName;
+   row.entry.name=BrowserDirectory::FromAnsi(info.cFileName);row.entry.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;row.entry.forks[0].size=row.entry.directory?0:HostDirectoryEntrySize(info);
+   row.created=BrowserDirectory::Ticks(info.ftCreationTime);row.modified=BrowserDirectory::Ticks(info.ftLastWriteTime);
+   try{row.entry=MacBrowser::DescribeWindowsFile(VolumeCoord::Wide(row.path));}catch(const std::exception&){/* Staged replacements may be briefly locked; keep OS metadata. */}
+   out.rows.push_back(std::move(row));
+  }while(FindNextFileA(find.handle,&info));
+  if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
+return out;
+ }
+ FileOperations::LegacyGuard engine;
  BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
  std::string prefix=directory;if(prefix.empty())throw std::runtime_error("Select a Windows folder");if(prefix.back()!='\\')prefix+='\\';
  bool afp=is_afp_directory(const_cast<char*>(directory))!=0;

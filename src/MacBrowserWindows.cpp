@@ -92,7 +92,7 @@ class Windows final : public Volume {
     Entry Describe(uint32_t id) {
         auto p = Path(id); WIN32_FILE_ATTRIBUTE_DATA info;
         Check(GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &info) != FALSE, "Windows file no longer exists");
-        Check(!(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "Directory links and reparse points are not followed");
+        if(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)throw HfsPlus::Error("Directory links and reparse points are not followed: "+BrowserPresentation::Utf8(U16(p)));
         Entry e; e.id = id; e.directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         e.name = U16(p.substr(p.find_last_of(L"\\/") + 1));
         auto identity=[](const std::wstring& path){
@@ -132,6 +132,11 @@ public:
     }
     uint64_t FreeBytes() const override { ULARGE_INTEGER free{}; GetDiskFreeSpaceExW(paths_.at(2).c_str(), &free, nullptr, nullptr); return free.QuadPart; }
     Entry Stat(uint32_t id) override { return Describe(id); }
+    bool FindChild(uint32_t parent,const std::u16string& name,Entry& entry)override{
+        Leaf(name);Check(Describe(parent).directory,"Destination is not a Windows folder");auto root=Path(parent),path=Child(root,Wide(name));WIN32_FIND_DATAW data{};HANDLE find=FindFirstFileW(path.c_str(),&data);
+        if(find==INVALID_HANDLE_VALUE){DWORD error=GetLastError();if(error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND)return false;throw HfsPlus::Error("Cannot inspect Windows destination (Windows error "+std::to_string(error)+")");}
+        FindClose(find);entry=Describe(Id(Child(root,data.cFileName)));entry.parent=parent;return true;
+    }
     void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent)override {
         auto dst=dynamic_cast<Windows*>(&target);if(!dst)return;
         auto canonical=[](const std::wstring& path){
@@ -227,6 +232,17 @@ public:
             if(companion)Check(DeleteFileW(Companion(path).c_str())!=FALSE,"Cannot remove source resource companion"); }
     }
 };
+}
+bool WindowsResourceCompanion(const std::wstring& path){Double data;return AppleDouble(path,data);}
+std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring& path){
+    auto slash=path.find_last_of(L"\\/");Check(slash!=path.npos,"Use an absolute Windows source path");
+    auto leaf=path.substr(slash+1);Check(!leaf.empty()&&leaf!=L"."&&leaf!=L".."&&leaf.find_first_of(L"*?")==leaf.npos,"Select a Windows file or folder");
+    WIN32_FIND_DATAW data{};auto exact=BrowserPresentation::WindowsPath(path);HANDLE find=FindFirstFileW(exact.c_str(),&data);Check(find!=INVALID_HANDLE_VALUE,"The selected Windows source no longer exists");FindClose(find);
+    // FindFirstFile on the exact path preserves the stored spelling, whereas
+    // the legacy Windows view may capitalize display paths for presentation.
+    auto parent=path.substr(0,slash);if(parent.size()==2&&parent.back()==L':')parent+=L'\\';
+    auto actual=parent+(parent.back()==L'\\'?L"":L"\\")+data.cFileName;
+    auto volume=std::make_shared<Windows>(parent);auto entry=volume->DescribeFile(actual);return {volume,entry.id};
 }
 Entry DescribeWindowsFile(const std::wstring& path){
     auto parent=path.substr(0,path.find_last_of(L"\\/"));if(parent.size()==2&&parent.back()==L':')parent+=L'\\';

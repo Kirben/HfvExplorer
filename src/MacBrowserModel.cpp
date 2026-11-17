@@ -5,6 +5,7 @@
 #include "HfsPlusCd.h"
 #include "BrowserPresentation.h"
 #include <set>
+#include <atomic>
 #include <algorithm>
 
 namespace MacBrowser {
@@ -15,10 +16,13 @@ void Check(bool ok, const char *message) { if (!ok) throw HfsPlus::Error(message
 class Plus final : public Volume {
     std::unique_ptr<HfsPlus::Source> source_;
     std::unique_ptr<HfsPlus::Volume> volume_;
-    bool writable_, usable_ = true;
+    bool writable_;std::atomic<bool> usable_{true};
+    std::u16string name_;bool caseSensitive_=false,hfsx_=false,journaled_=false,canWrite_=false;
+    mutable std::recursive_mutex mutex_;
+    struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Plus& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
     std::string resourceKey_;
     template<class F> auto Mutate(F work) -> decltype(work()) {
-        if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access");
+        Call call(*this);if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access");
         try { return work(); }
         catch (...) {
             auto failure = std::current_exception();
@@ -39,27 +43,27 @@ class Plus final : public Volume {
     }
 public:
     Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key)
-        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)) {}
+        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();canWrite_=volume_->Writable();}
     std::string ResourceKey()const override{return resourceKey_.empty()?Volume::ResourceKey():resourceKey_;}
-    std::u16string Name() const override { return volume_->Name(); }
-    const char *Kind() const override { return volume_->IsHfsX() ? "HFSX" : "HFS+"; }
+    std::u16string Name() const override { return name_; }
+    const char *Kind() const override { return hfsx_ ? "HFSX" : "HFS+"; }
     std::string Description()const override {
         return std::string(Kind())+(CaseSensitive()?" (case-sensitive)":" (case-insensitive)")+
-            (volume_->Journaled()?", journaled":", non-journaled");
+            (journaled_?", journaled":", non-journaled");
     }
-    bool Writable() const override { return usable_ && volume_->Writable(); }
+    bool Writable() const override { return usable_ && canWrite_; }
     void Reload() override {
-        try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
+        Call call(*this);try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
         catch (...) { usable_=false; throw; }
     }
-    bool CaseSensitive() const override { return volume_->CaseSensitive(); }
-    uint64_t FreeBytes() const override { return volume_->FreeBytes(); }
+    bool CaseSensitive() const override { return caseSensitive_; }
+    uint64_t FreeBytes() const override { Call call(*this);return volume_->FreeBytes(); }
     std::vector<Entry> List(uint32_t id) override {
-        Ready();std::vector<Entry> out;for(const auto& e:volume_->List(id))out.push_back(Describe(e));return out;
+        Call call(*this);Ready();std::vector<Entry> out;for(const auto& e:volume_->List(id))out.push_back(Describe(e));return out;
     }
-    Entry Stat(uint32_t id) override { Ready(); return Describe(volume_->Stat(id)); }
+    Entry Stat(uint32_t id) override { Call call(*this);Ready(); return Describe(volume_->Stat(id)); }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
-        Ready(); Check(volume_->Read(id, fork, offset, p, n) == n, "Short Macintosh fork read");
+        Call call(*this);Ready(); Check(volume_->Read(id, fork, offset, p, n) == n, "Short Macintosh fork read");
     }
     uint32_t MakeDirectory(uint32_t p, const std::u16string &s) override {
         return Mutate([&] { return volume_->MakeDirectory(p, s); });
@@ -72,11 +76,14 @@ public:
         Mutate([&] { volume_->Rename(id, p, s); });
     }
     void Remove(uint32_t id) override { Mutate([&] { volume_->Remove(id); }); }
-    void ValidateRemoval(uint32_t id)override{Ready();volume_->ValidateRemoval(id);}
+    void ValidateRemoval(uint32_t id)override{Call call(*this);Ready();volume_->ValidateRemoval(id);}
+    bool CanMoveFrom(const Volume& source)const override{return source.ResourceKey()==ResourceKey();}
+    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{Check(CanMoveFrom(source),"Move must stay on the same volume");Rename(id,parent,entry.name);}
 };
 class Mfs final : public Volume {
     std::unique_ptr<MfsImageSource> source_;
     MfsImage image_;
+    std::mutex readMutex_;
     std::string resourceKey_;
     std::map<uint32_t, size_t> entries_;
     Entry EntryAt(size_t i) {
@@ -109,16 +116,13 @@ public:
         return EntryAt(entries_.at(id));
     }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
-        size_t got = 0; if (!image_.ReadFork(entries_.at(id), fork, offset, p, n, got)) throw HfsPlus::Error(image_.Error()); Check(got == n, "Short MFS fork read");
+        VolumeCoord::BackendRead lease(ResourceKey());std::lock_guard<std::mutex> lock(readMutex_);size_t got = 0; if (!image_.ReadFork(entries_.at(id), fork, offset, p, n, got)) throw HfsPlus::Error(image_.Error()); Check(got == n, "Short MFS fork read");
     }
     uint32_t MakeDirectory(uint32_t, const std::u16string &) override { Refuse(); return 0; }
     uint32_t Put(uint32_t, const Entry &, Reader, bool) override { Refuse(); return 0; }
     void Rename(uint32_t, uint32_t, const std::u16string &) override { Refuse(); }
     void Remove(uint32_t) override { Refuse(); }
 };
-bool Equal(Volume &v, const std::u16string &a, const std::u16string &b) {
-    return HfsPlus::CompareNames(a, b, v.CaseSensitive()) == 0;
-}
 struct Planned { Entry entry; std::vector<Planned> children; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth) {
@@ -138,7 +142,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
               Storage::Job &job, Storage::Progress &progress) {
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
-    for (auto &e : dst.List(parent)) if (Equal(dst, e.name, entry.name)) { existing = e; found = true; break; }
+    found=dst.FindChild(parent,entry.name,existing);
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectory(parent, entry.name);
