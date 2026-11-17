@@ -79,15 +79,17 @@ std::wstring Temp(const std::wstring &directory) {
     throw HfsPlus::Error("Cannot reserve a staging filename");
 }
 class Windows final : public Volume {
+    mutable std::recursive_mutex mutex_;
     std::map<uint32_t,std::wstring> paths_;
     std::string resourceKey_;
     std::map<uint32_t,std::shared_ptr<File>> dataReaders_,resourceReaders_;
     uint32_t next_ = 3;
     uint32_t Id(const std::wstring &p) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         for (auto &e : paths_) if (!_wcsicmp(e.second.c_str(), p.c_str())) return e.first;
         Check(next_ != UINT32_MAX, "Too many Windows entries"); paths_[next_] = p; return next_++;
     }
-    std::wstring Path(uint32_t id) { return paths_.at(id); }
+    std::wstring Path(uint32_t id)const { std::lock_guard<std::recursive_mutex> lock(mutex_);return paths_.at(id); }
     std::wstring Companion(const std::wstring &p) { auto at = p.find_last_of(L"\\/"); return p.substr(0,at+1) + L"%" + p.substr(at+1); }
     Entry Describe(uint32_t id) {
         auto p = Path(id); WIN32_FILE_ATTRIBUTE_DATA info;
@@ -121,16 +123,17 @@ public:
         paths_[2] = root; Check(Describe(2).directory, "Destination is not a folder");
     }
     Entry DescribeFile(const std::wstring& path){return Describe(Id(BrowserPresentation::WindowsPath(path)));}
+    std::wstring HostPath(uint32_t id)const override{return Path(id);}
     std::string ResourceKey()const override{return resourceKey_;}
-    std::u16string Name() const override { return U16(paths_.at(2)); }
+    std::u16string Name() const override { return U16(Path(2)); }
     const char *Kind() const override { return "Windows"; }
     bool Writable() const override { return true; }
     bool CaseSensitive() const override { return false; }
-    void Close()override{dataReaders_.clear();resourceReaders_.clear();}
+    void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
     void ValidateEntry(const Entry& e)const override {
         Leaf(e.name);Leaf(u"%"+e.name);Check(e.forks[1].size<=UINT32_MAX-82,"Resource fork is too large for AppleDouble export; use raw fork export");
     }
-    uint64_t FreeBytes() const override { ULARGE_INTEGER free{}; GetDiskFreeSpaceExW(paths_.at(2).c_str(), &free, nullptr, nullptr); return free.QuadPart; }
+    uint64_t FreeBytes() const override { ULARGE_INTEGER free{}; GetDiskFreeSpaceExW(Path(2).c_str(), &free, nullptr, nullptr); return free.QuadPart; }
     Entry Stat(uint32_t id) override { return Describe(id); }
     bool FindChild(uint32_t parent,const std::u16string& name,Entry& entry)override{
         Leaf(name);Check(Describe(parent).directory,"Destination is not a Windows folder");auto root=Path(parent),path=Child(root,Wide(name));WIN32_FIND_DATAW data{};HANDLE find=FindFirstFileW(path.c_str(),&data);
@@ -170,6 +173,7 @@ public:
         Check(GetLastError() == ERROR_NO_MORE_FILES, "Windows folder enumeration failed"); return out;
     }
     void Read(uint32_t id, unsigned fork, uint64_t at, void *p, size_t n) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto path = Path(id); uint64_t size, offset = 0;
         if (fork) { Double d; Check(AppleDouble(Companion(path), d), "Resource fork companion is missing or invalid"); offset = d.offset; size = d.size; path = Companion(path); }
         else { File f(path, GENERIC_READ, OPEN_EXISTING); size = f.Size(); }
@@ -190,8 +194,10 @@ public:
         Check(!sidecar || (existed && AppleDouble(companion, old)), "An unrelated companion file blocks export; it was preserved");
         std::wstring staged, resource, backup, backupResource;
         bool published = false, publishedResource = false, backed = false, backedResource = false;
+        std::vector<std::unique_ptr<VolumeCoord::OperationLease>> staging;
+        auto reserve=[&](const std::wstring& name){staging.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(name),VolumeCoord::Mode::Write}}));};
         try {
-            staged = Temp(root); resource = Temp(root);
+            staged = Temp(root);reserve(staged);resource = Temp(root);reserve(resource);
             {
                 File data(staged, GENERIC_WRITE, TRUNCATE_EXISTING), rsrc(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
                 uint8_t header[82]{}; P32(header, 0x00051607); P32(header+4, 0x00020000); P16(header+24, 2);
@@ -205,9 +211,9 @@ public:
                 }
                 data.Dates(e);rsrc.Dates(e);data.Flush(); rsrc.Flush();
             }
-            for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}
-            if (existed) { backup=Temp(root); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true; }
-            if (sidecar) { backupResource=Temp(root); Check(MoveFileExW(companion.c_str(),backupResource.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old resource fork"); backedResource=true; }
+            {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
+            if (existed) { backup=Temp(root);reserve(backup); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true; }
+            if (sidecar) { backupResource=Temp(root);reserve(backupResource); Check(MoveFileExW(companion.c_str(),backupResource.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old resource fork"); backedResource=true; }
             Check(MoveFileExW(staged.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported data"); staged.clear(); published=true;
             Check(MoveFileExW(resource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported resource fork"); resource.clear(); publishedResource=true;
         } catch (...) {
@@ -223,6 +229,7 @@ public:
         if(!backup.empty())DeleteFileW(backup.c_str()); if(!backupResource.empty())DeleteFileW(backupResource.c_str()); return Id(path);
     }
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Check(id!=2,"Cannot rename a volume root");Leaf(name);auto entry=Describe(id);
         Check(parent==entry.parent,"Rename must stay in the same Windows folder");
         auto path=Path(id),target=Child(Path(parent),Wide(name));if(path==target)return;
@@ -239,6 +246,7 @@ public:
         paths_[id]=target;
     }
     void Remove(uint32_t id) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Check(id!=2,"Cannot remove a volume root"); auto path=Path(id); auto e=Describe(id);
         dataReaders_.erase(id);resourceReaders_.erase(id);
         if(e.directory)Check(RemoveDirectoryW(path.c_str())!=FALSE,"Cannot remove Windows folder");

@@ -14,13 +14,22 @@ std::wstring Wide(const std::string&);
 std::string ImageKey(const std::wstring&);
 inline std::string ImageKey(const std::string& path){return ImageKey(Wide(path));}
 std::string HostKey(const std::wstring&);
+// File/folder reservations overlap their descendants and filesystem aliases.
+std::string PathKey(const std::wstring&);
+std::string ObservedPathKey(const std::string& parent,const std::wstring& leaf,const std::string& identity,bool directory);
+#ifdef HFV_TESTING
+void SetPathLookupObserver(std::function<void(const std::wstring&)>);
+#endif
+std::string LegacyOutputKey(const std::wstring&);
 std::string DeviceKey(int drive);
-enum class Mode {Read,Write};
+enum class Mode {Read,Write,Browse}; // Browse reads directory metadata without locking child contents.
 struct Access {std::string key;Mode mode=Mode::Read;};
 class Busy:public std::runtime_error {public:Busy():std::runtime_error("This volume is already in use by another storage operation"){};};
 // Atomic acquisition of all resources: no partial acquisition or lock ordering deadlocks.
 class Lease {
  std::vector<Access> access_;
+ Lease(std::vector<Access>,bool reuseWriter);
+ friend class OperationLease;friend class BackendRead;
 public:
  explicit Lease(std::vector<Access>);
  ~Lease();

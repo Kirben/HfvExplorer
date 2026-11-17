@@ -209,7 +209,7 @@ struct MainMacBrowser::State {
 MainMacBrowser::MainMacBrowser(BrowserSession& session):session_(session),state_(new State(session)){}
 MainMacBrowser::~MainMacBrowser()=default;
 void MainMacBrowser::ForgetTree(){state_->restore.clear();for(auto& mount:state_->mounts)mount.root=nullptr;}
-std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->m_ct->GetItemData(item)):nullptr;if(!p)return {};if(p->type==LIST_HFS&&p->volinx>=0&&p->volinx<doc->m_hfs_count)return doc->m_volumes[p->volinx].m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->m_volumes[p->volinx].m_file_name));if(p->type==LIST_FAT)return VolumeCoord::HostKey(VolumeCoord::Wide(p->path));return {};}
+std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->m_ct->GetItemData(item)):nullptr;if(!p)return {};if(p->type==LIST_HFS&&p->volinx>=0&&p->volinx<doc->m_hfs_count)return doc->m_volumes[p->volinx].m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->m_volumes[p->volinx].m_file_name));if(p->type==LIST_FAT)return session_.ObservedWindowsKey(p->path);return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::Writable()const{int i;uint32_t id;return state_->Selected(i,id)&&state_->folderMutable&&state_->mounts[i].volume->Supports().create;}
 bool MainMacBrowser::SelectionWritable()const{
@@ -297,7 +297,7 @@ bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!Writable())return
 FileOperations::Location MainMacBrowser::CaptureItem(int row){
  auto item=state_->Item(row,false);
  if(item.type==LIST_FAT&&item.expectedIdentity.empty()){
-  if(!Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{VolumeCoord::HostKey(item.windowsPath),VolumeCoord::Mode::Read}});item.expectedIdentity=DescribeWindowsFile(item.windowsPath).identity;}))throw HfsPlus::Error("Cannot identify the selected Windows entry");
+  if(!Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{VolumeCoord::PathKey(item.windowsPath),VolumeCoord::Mode::Read}});item.expectedIdentity=DescribeWindowsFile(item.windowsPath).identity;}))throw HfsPlus::Error("Cannot identify the selected Windows entry");
   if(item.expectedIdentity.empty())throw HfsPlus::Error("Cannot safely identify the selected Windows entry");
  }
  return item;
@@ -327,7 +327,7 @@ BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
  auto& list=session_.List()->GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(p&&p->type!=LIST_SPEC)out.items.push_back(state_->Item(row,cut));}
  bool missing=false;for(auto& item:out.items)missing|=item.type==LIST_FAT&&item.expectedIdentity.empty();
- if(missing&&!Run(session_,[&](Storage::Job&){for(auto& item:out.items)if(item.type==LIST_FAT&&item.expectedIdentity.empty()){VolumeCoord::Lease read({{VolumeCoord::HostKey(item.windowsPath),VolumeCoord::Mode::Read}});item.expectedIdentity=MacBrowser::DescribeWindowsFile(item.windowsPath).identity;}}))out.items.clear();
+ if(missing&&!Run(session_,[&](Storage::Job&){for(auto& item:out.items)if(item.type==LIST_FAT&&item.expectedIdentity.empty()){VolumeCoord::Lease read({{VolumeCoord::PathKey(item.windowsPath),VolumeCoord::Mode::Read}});item.expectedIdentity=MacBrowser::DescribeWindowsFile(item.windowsPath).identity;}}))out.items.clear();
  return out;
 }
 FileOperations::Location MainMacBrowser::TargetFolder(HTREEITEM item){return state_->Target(item);}

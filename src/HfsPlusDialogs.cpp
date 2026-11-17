@@ -137,7 +137,7 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
             auto source = HfsPlus::CreateImage(path.c_str(), options.size);
             HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
             return Storage::Result{};
-        },{VolumeCoord::ImageKey(path),VolumeCoord::HostKey(path)}),
+        },{VolumeCoord::ImageKey(path),VolumeCoord::PathKey(path)}),
         "Format Mac image",false,false,false,parent);
     if (result.code) {
         AfxMessageBox(result.message.c_str());

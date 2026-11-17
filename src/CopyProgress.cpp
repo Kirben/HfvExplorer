@@ -136,9 +136,10 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
   else if(result)outcome.message=copyError();
   return outcome;
  };
- auto resource=[](const std::string& volume,const std::string& path){return macVolume(volume)?VolumeCoord::ImageKey(volume):VolumeCoord::HostKey(VolumeCoord::Wide(path));};
- auto from=resource(sourceVolume,source),to=resource(targetVolume,target);
- return CommandStorage::Guard({{from,move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read},{to,VolumeCoord::Mode::Write}},work,{to});
+ auto resource=[](const std::string& volume,const std::string& path){return macVolume(volume)?VolumeCoord::ImageKey(volume):VolumeCoord::PathKey(VolumeCoord::Wide(path));};
+ auto from=resource(sourceVolume,source),to=macVolume(targetVolume)?resource(targetVolume,target):VolumeCoord::LegacyOutputKey(VolumeCoord::Wide(target));
+ std::vector<VolumeCoord::Access> access{{from,move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read},{to,VolumeCoord::Mode::Write}};if(!macVolume(sourceVolume)){auto path=VolumeCoord::Wide(source);auto at=path.find_last_of(L"\\/");auto companion=path.substr(0,at+1)+L"%"+path.substr(at+1);access.push_back({VolumeCoord::PathKey(companion),move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read});}
+ return CommandStorage::Guard(access,work,{to});
 }
 int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved,CWnd* owner) {
  *moved=0;FileOperations::Request request;request.kind=FileOperations::Kind::LegacyCopy;

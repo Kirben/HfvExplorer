@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $paths=Join-Path $hfsPlusDirectory 'windows-path-coordination'
+ $pathsTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-windows-path-coordination',('"'+$paths+'"')) -WindowStyle Hidden -PassThru
+ if(!$pathsTest.WaitForExit(60000)){$pathsTest.Kill();throw 'Windows path coordination tests timed out.'}
+ Get-Content (Join-Path $paths 'windows-path-coordination-report.txt')
+ if($pathsTest.ExitCode -ne 0){throw "Windows path coordination tests failed; retained $paths"}
  $commands=Join-Path $hfsPlusDirectory 'per-volume-commands'
  $commandsTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-per-volume-commands',('"'+$commands+'"')) -WindowStyle Hidden -PassThru
  if(!$commandsTest.WaitForExit(60000)){$commandsTest.Kill();throw 'Per-volume command tests timed out.'}

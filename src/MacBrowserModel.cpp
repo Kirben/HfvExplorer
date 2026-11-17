@@ -162,6 +162,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     dst.Put(parent, entry, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
         if (job.cancelled()) throw Storage::Cancelled();
         src.Read(entry.id, fork, offset, p, n);
+        if(job.cancelled())throw Storage::Cancelled();
         progress.fileBytes += n; progress.bytes += n;progress.processed+=n;job.progress(progress);
     }, found);
     ++progress.files; job.progress(progress); return true;

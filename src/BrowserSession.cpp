@@ -27,7 +27,7 @@ struct BrowserSession::Notifications:public CWnd {
   }
   if((message==VolumeCoord::Notification&&w==session.subscription_.Id())||(message==WM_TIMER&&w==1)){
    auto list=session.List();bool editing=list&&IsWindow(list->GetSafeHwnd())&&(list->GetListCtrl().GetEditControl()||list->IsDragging());
-   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(!session.current_.key.empty()&&!VolumeCoord::Readable(session.current_.key))){SetTimer(1,75,nullptr);return 0;}
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(!session.current_.key.empty()&&!VolumeCoord::Available({{session.current_.key,session.current_.type==LIST_FAT?VolumeCoord::Mode::Browse:VolumeCoord::Mode::Read}}))){SetTimer(1,75,nullptr);return 0;}
    KillTimer(1);session.ProcessChanges();return 0;
   }
   return CWnd::WindowProc(message,w,l);
@@ -59,6 +59,7 @@ std::wstring BrowserSession::WindowTitle()const{return locationTitle_.empty()?L"
 void BrowserSession::SetLocationTitle(std::wstring title){
  locationTitle_=std::move(title);UpdateWindowTitle();
 }
+std::string BrowserSession::ObservedWindowsKey(const std::string& path)const{return current_.type==LIST_FAT&&!_stricmp(current_.path.c_str(),path.c_str())?current_.key:std::string();}
 void BrowserSession::ClearCurrent(){current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::Defer(const std::string& key,bool classic,std::function<void()> next,bool force){
  if(!force&&!(classic&&key.empty()&&BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
@@ -160,7 +161,7 @@ void BrowserSession::RefreshLegacy(const Context& context){
  if(!document_)return;
  if(context.index<0||(context.type==LIST_FAT?context.index>=document_->m_fat_count:context.index>=document_->m_hfs_count))throw std::runtime_error("The volume is no longer attached");
  if(context.type==LIST_FAT){
-  std::string path=context.path;auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Read}});for(;;){DWORD a=GetFileAttributesA(path.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_DIRECTORY))break;DWORD error=GetLastError();if(error!=ERROR_PATH_NOT_FOUND&&error!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("The Windows folder is unavailable");auto slash=path.find_last_of('\\');if(slash==2&&path[1]==':'){path.resize(3);continue;}if(slash==path.npos||slash<3)throw std::runtime_error("The Windows folder no longer exists");path.resize(slash);}return Storage::Result{};},!owner_->IsWindowVisible(),owner_);
+  std::string path=context.path;auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Browse}});for(;;){DWORD a=GetFileAttributesA(path.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_DIRECTORY))break;DWORD error=GetLastError();if(error!=ERROR_PATH_NOT_FOUND&&error!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("The Windows folder is unavailable");auto slash=path.find_last_of('\\');if(slash==2&&path[1]==':'){path.resize(3);continue;}if(slash==path.npos||slash<3)throw std::runtime_error("The Windows folder no longer exists");path.resize(slash);}return Storage::Result{};},!owner_->IsWindowVisible(),owner_);
   if(result.code)throw std::runtime_error(result.message);
   auto item=tree_->tree_find_fat(document_->m_fats[context.index].m_rootitem,const_cast<char*>(path.c_str()));if(!item)item=document_->m_fats[context.index].m_rootitem;
   bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);tree_->GetTreeCtrl().SelectItem(item);tree_->delete_subdir_contents(item);tree_->enable_selchange(enabled);
