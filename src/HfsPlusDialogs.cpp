@@ -38,11 +38,11 @@ void UnicodeEdit(HWND parent, int id) {
     SendMessage(control, WM_SETFONT, font, TRUE);
     SetWindowPos(control, previous, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
-bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter, const wchar_t *extension) {
+bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter, const wchar_t *extension,const wchar_t* title=nullptr) {
     wchar_t buffer[32768] = {};
     wcsncpy_s(buffer, path.c_str(), _TRUNCATE);
     OPENFILENAMEW ofn = {sizeof(ofn)};
-    ofn.hwndOwner = owner;
+    ofn.hwndOwner = owner;ofn.lpstrTitle=title;
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = 32768;
     ofn.lpstrFilter = filter;
@@ -79,7 +79,7 @@ class FormatDialog : public CDialog {
   public:
     std::u16string name;
     uint64_t size = 0;
-    bool journaled = true,mfs=false,dc42=false;
+    bool journaled = true,mfs=false,dc42=false,expanded=false,external=false;
     HfsPlus::Volume::FormatKind kind = HfsPlus::Volume::FormatKind::HfsPlus;
     explicit FormatDialog(CWnd *p) : CDialog(IDD_HPLUS_FORMAT, p) {}
     HfsPlus::Volume::FormatKind SelectedKind() {
@@ -102,7 +102,8 @@ class FormatDialog : public CDialog {
     }
     BOOL OnCommand(WPARAM wp,LPARAM lp)override{
         if(LOWORD(wp)==IDC_HPLUS_FORMAT_KIND&&HIWORD(wp)==CBN_SELCHANGE){int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));bool nowMfs=selected>=3;
-            GetDlgItem(IDC_HPLUS_JOURNAL)->EnableWindow(!nowMfs);if(nowMfs&&!mfs)SetDlgItemText(IDC_HPLUS_SIZE,"400 KiB");if(!nowMfs&&mfs)SetDlgItemText(IDC_HPLUS_SIZE,"128 MiB");mfs=nowMfs;return TRUE;}
+            GetDlgItem(IDC_HPLUS_JOURNAL)->EnableWindow(!nowMfs);GetDlgItem(IDC_HPLUS_EXPANDED)->EnableWindow(!nowMfs);GetDlgItem(IDC_HPLUS_EXTERNAL)->EnableWindow(!nowMfs);if(nowMfs&&!mfs)SetDlgItemText(IDC_HPLUS_SIZE,"400 KiB");if(!nowMfs&&mfs)SetDlgItemText(IDC_HPLUS_SIZE,"128 MiB");mfs=nowMfs;return TRUE;}
+        if(LOWORD(wp)==IDC_HPLUS_EXTERNAL&&IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_CHECKED)CheckDlgButton(IDC_HPLUS_JOURNAL,BST_CHECKED);
         return CDialog::OnCommand(wp,lp);
     }
     void OnOK() override {
@@ -120,7 +121,7 @@ class FormatDialog : public CDialog {
             size = parsed;
             if(mfs){if(size<128*1024||size>20*1024*1024||size%512)throw HfsPlus::Error("MFS requires 128 KiB-20 MiB and a 512-byte multiple.");if(dc42&&size!=400*1024&&size!=800*1024&&size!=720*1024&&size!=1440*1024)throw HfsPlus::Error("Disk Copy requires 400, 800, 720 or 1440 KiB.");}
             else if (size < 8 * 1024 * 1024 || size % 4096)throw HfsPlus::Error("Use at least 8 MiB and a multiple of 4096 bytes.");
-            journaled = !mfs&&IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED;
+            journaled = !mfs&&IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED;expanded=!mfs&&IsDlgButtonChecked(IDC_HPLUS_EXPANDED)==BST_CHECKED;external=!mfs&&IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_CHECKED;if(external&&!journaled)throw HfsPlus::Error("Enable journaling to use an external journal");
             CDialog::OnOK();
         } catch (const std::exception &e) {
             AfxMessageBox(e.what());
@@ -128,6 +129,7 @@ class FormatDialog : public CDialog {
     }
 };
 } // namespace
+bool SelectHfsPlusExternalJournal(CWnd* owner,std::wstring& path,const std::string& prompt){auto title=std::wstring(prompt.begin(),prompt.end());return FileDialog(owner->m_hWnd,path,false,L"External journal disk images\0*.img;*.dsk\0All files\0*.*\0\0",L"img",title.c_str());}
 void HfvUnicodeNameEdit(HWND parent,int id){UnicodeEdit(parent,id);}
 bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
  NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
@@ -141,22 +143,28 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
     if (!FileDialog(parent->m_hWnd, path, true, L"Mac disk images\0*.dsk;*.hfs;*.img\0All files\0*.*\0\0",
                     L"dsk"))
         return;
+    std::wstring externalPath;
+    if(options.external&&!FileDialog(parent->m_hWnd,externalPath,true,L"External journal disk image\0*.img\0All files\0*.*\0\0",L"img"))return;
+    auto access=CommandStorage::ImageWrite(path);if(options.external){auto other=CommandStorage::ImageWrite(externalPath);access.insert(access.end(),other.begin(),other.end());}
+    std::vector<std::string> changed{VolumeCoord::ImageKey(path),VolumeCoord::PathKey(path)};if(options.external){changed.push_back(VolumeCoord::ImageKey(externalPath));changed.push_back(VolumeCoord::PathKey(externalPath));}
     auto result = ShowStorageJob(
-        CommandStorage::Guard(CommandStorage::ImageWrite(path),[&](Storage::Job &) {
+        CommandStorage::Guard(access,[&](Storage::Job &) {
+            bool homeCreated=false,journalCreated=false,complete=false;
+            struct Cleanup{std::wstring home,journal;bool& h;bool& j;bool& complete;~Cleanup(){if(!complete){if(h)DeleteFileW(home.c_str());if(j)DeleteFileW(journal.c_str());}}}cleanup{path,externalPath,homeCreated,journalCreated,complete};
             auto bytes=options.size+(options.dc42?84+((options.size==400*1024||options.size==800*1024)?options.size/512*12:0):0);
-            auto source = HfsPlus::CreateImage(path.c_str(),bytes);
+            auto source = HfsPlus::CreateImage(path.c_str(),bytes,options.external?externalPath.c_str():nullptr);homeCreated=true;
             if(options.mfs){
                 struct WritableMfs:MfsSource{HfsPlus::Source& s;explicit WritableMfs(HfsPlus::Source& v):s(v){}uint64_t Length()const override{return s.Size();}bool Writable()const override{return s.Writable();}bool ReadAt(uint64_t at,void* p,size_t n)override{try{s.Read(at,p,n);return true;}catch(...){return false;}}bool WriteAt(uint64_t at,const void* p,size_t n)override{try{s.Write(at,p,n);return true;}catch(...){return false;}}bool Flush()override{try{s.Flush();return true;}catch(...){return false;}}}mfs(*source);
                 std::string name,error;if(!MfsImage::EncodeName(MacBrowser::Wide(options.name),name,error,27)||!MfsImage::Format(mfs,name,options.size,options.dc42,error))throw HfsPlus::Error(error);
-            }else HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
-            return Storage::Result{};
-        },{VolumeCoord::ImageKey(path),VolumeCoord::PathKey(path)}),
+            }else {HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind, options.expanded);if(options.external){auto uuid=HfsPlus::CreateExternalJournalImage(externalPath.c_str());journalCreated=true;HfsPlus::Volume volume(*source,true);volume.UseExternalJournal(uuid);}}
+            complete=true;return Storage::Result{};
+        },changed),
         "Format Mac image",false,false,false,parent);
     if (result.code) {
         AfxMessageBox(result.message.c_str());
         return;
     }
-    session.MacBrowser().OpenImage(path);
+    session.MacBrowser().OpenImage(path,externalPath);
 }
 #ifdef HFV_TESTING
 int RunHfsPlusUiTest(const char *directory) {
@@ -188,13 +196,15 @@ int RunHfsPlusUiTest(const char *directory) {
         require(IsWindowUnicode(::GetDlgItem(format.m_hWnd, IDC_HPLUS_NAME)) &&
                     format.IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED,
                 "Unicode format defaults");
+        require(format.IsDlgButtonChecked(IDC_HPLUS_EXPANDED)==BST_UNCHECKED&&format.IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_UNCHECKED,"Advanced format defaults");
+        format.CheckDlgButton(IDC_HPLUS_JOURNAL,BST_UNCHECKED);format.CheckDlgButton(IDC_HPLUS_EXTERNAL,BST_CHECKED);format.SendMessage(WM_COMMAND,IDC_HPLUS_EXTERNAL,0);require(format.IsDlgButtonChecked(IDC_HPLUS_JOURNAL)==BST_CHECKED,"External format did not require journaling");
         require(format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCOUNT) == 5,
                 "HFSX format choices missing");
         for (int choice = 0; choice < 3; ++choice) {
             format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, choice);
             require(static_cast<int>(format.SelectedKind()) == choice, "Format choice not applied");
         }
-        for(int choice=3;choice<5;++choice){format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,choice);format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);require(!format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"400 KiB","MFS formatter defaults/journal state");}
+        for(int choice=3;choice<5;++choice){format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,choice);format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);require(!format.GetDlgItem(IDC_HPLUS_EXTERNAL)->IsWindowEnabled()&&!format.GetDlgItem(IDC_HPLUS_EXPANDED)->IsWindowEnabled()&&!format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"400 KiB","MFS formatter defaults/journal state");}
         format.DestroyWindow();
         fprintf(report, "PASS: active Unicode name and formatter dialogs; all HFS+/HFSX/MFS format choices, "
                         "journal default and owner restoration. Main-browser regressions run separately. "

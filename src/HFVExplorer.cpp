@@ -349,6 +349,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3&&!strcmp(__argv[1],"--verify-windows-path-coordination"))ExitProcess(RunWindowsPathCoordinationTest(__argv[2]));
  extern int RunPerVolumeCommandsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-per-volume-commands"))ExitProcess(RunPerVolumeCommandsTest(__argv[2]));
+ extern int RunOtherHfsPlusBrowserTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-other-hfsplus"))ExitProcess(RunOtherHfsPlusBrowserTest(__argv[2]));
  extern int RunCompressionWriteBrowserTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-compression-write"))ExitProcess(RunCompressionWriteBrowserTest(__argv[2]));
  extern int RunOpticalDataTrackTest(const char*);

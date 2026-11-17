@@ -133,8 +133,8 @@ class Windows final : public Volume {
         ULARGE_INTEGER created,modified;created.LowPart=info.ftCreationTime.dwLowDateTime;created.HighPart=info.ftCreationTime.dwHighDateTime;
         modified.LowPart=info.ftLastWriteTime.dwLowDateTime;modified.HighPart=info.ftLastWriteTime.dwHighDateTime;
         uint64_t a=created.QuadPart/10000000,b=modified.QuadPart/10000000;
-        if(a>=9561628800ULL&&b>=9561628800ULL&&a-9561628800ULL<=UINT32_MAX&&b-9561628800ULL<=UINT32_MAX){
-            e.created=uint32_t(a-9561628800ULL);e.modified=uint32_t(b-9561628800ULL);e.datesValid=true;
+        if(a>=9561628800ULL&&b>=9561628800ULL){
+            e.created=a-9561628800ULL;e.modified=b-9561628800ULL;e.datesValid=true;
         }
         if(id==2)e.parent=1;else{auto parent=p.substr(0,p.find_last_of(L"\\/"));if((parent.size()==2||parent.size()==6)&&parent.back()==L':')parent+=L'\\';e.parent=Id(parent);}
         if (!e.directory) {
@@ -175,7 +175,7 @@ public:
     bool CaseSensitive() const override { return false; }
     void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
     void ValidateEntry(const Entry& e)const override {
-        Volume::ValidateEntry(e);DoubleHeader(e);Leaf(e.name);Leaf(u"%"+e.name);Check(e.forks[1].size<=UINT32_MAX-82,"Resource fork is too large for AppleDouble export; use raw fork export");
+        Volume::ValidateEntry(e);Check(!e.datesValid||(e.created<=UINT64_MAX/10000000ULL-9561628800ULL&&e.modified<=UINT64_MAX/10000000ULL-9561628800ULL),"Dates exceed the Windows FILETIME range");DoubleHeader(e);Leaf(e.name);Leaf(u"%"+e.name);Check(e.forks[1].size<=UINT32_MAX-82,"Resource fork is too large for AppleDouble export; use raw fork export");
     }
     uint64_t FreeBytes() const override { ULARGE_INTEGER free{}; GetDiskFreeSpaceExW(Path(2).c_str(), &free, nullptr, nullptr); return free.QuadPart; }
     Entry Stat(uint32_t id) override { return Describe(id); }

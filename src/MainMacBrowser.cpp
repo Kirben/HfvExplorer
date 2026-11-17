@@ -227,12 +227,17 @@ int MainMacBrowser::SelectedCdDrive()const{int i;uint32_t id;return state_->Sele
 int MainMacBrowser::OpenImage(const char* path) {
     if(!path||!*path)return 0;return OpenImage(FromAnsi(path));
 }
-int MainMacBrowser::OpenImage(const std::wstring& path) {
+int MainMacBrowser::OpenImage(const std::wstring& path,const std::wstring& externalJournal) {
     auto wide=path;wchar_t full[32768];if(GetFullPathNameW(wide.c_str(),ARRAYSIZE(full),full,nullptr))wide=full;
     for(size_t i=0;i<state_->mounts.size();++i)if(!_wcsicmp(wide.c_str(),state_->mounts[i].key.c_str())){
         if(!state_->mounts[i].root)state_->Root(int(i));state_->Show(int(i),2,state_->mounts[i].root);return 1;}
-    auto key=VolumeCoord::ImageKey(wide);if(session_.Defer(key,false,[this,wide]{OpenImage(wide);}))return 1;
-    std::shared_ptr<Volume> volume;bool ok=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});volume=MacBrowser::OpenImage(wide);});
+    auto key=VolumeCoord::ImageKey(wide);if(session_.Defer(key,false,[this,wide,externalJournal]{OpenImage(wide,externalJournal);}))return 1;
+    std::shared_ptr<Volume> volume;std::string journalPrompt;bool ok=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});try{volume=MacBrowser::OpenImage(wide,externalJournal);}catch(const HfsPlus::ExternalJournalRequired& e){journalPrompt=e.what();}});
+    if(ok&&!journalPrompt.empty()){
+        if(Hidden(session_))return -1;
+        std::wstring external;if(!SelectHfsPlusExternalJournal(session_.Owner(),external,journalPrompt))return -1;
+        ok=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read},{VolumeCoord::ImageKey(external),VolumeCoord::Mode::Read}});volume=MacBrowser::OpenImage(wide,external);});
+    }
     if(!ok)return -1;if(!volume)return 0;
     for(size_t n=0;n<state_->mounts.size();++n)if(state_->mounts[n].volume&&state_->mounts[n].volume->ResourceKey()==volume->ResourceKey()){state_->Show(int(n),2,state_->mounts[n].root);return 1;}
     state_->mounts.push_back({volume,wide,nullptr,-1});int i=int(state_->mounts.size()-1);state_->Root(i);state_->Show(i,2,state_->mounts[i].root);

@@ -13,6 +13,11 @@ namespace VolumeCoord {
 std::wstring Wide(const std::string&);
 std::string ImageKey(const std::wstring&);
 inline std::string ImageKey(const std::string& path){return ImageKey(Wide(path));}
+// Mounted filesystems also reserve their external journal image's paths.
+class ImageDependency {
+ std::string image_,path_;
+public:ImageDependency(const std::string&,const std::wstring&);~ImageDependency();
+};
 std::string HostKey(const std::wstring&);
 // File/folder reservations overlap their descendants and filesystem aliases.
 std::string PathKey(const std::wstring&);

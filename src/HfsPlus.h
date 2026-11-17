@@ -10,6 +10,7 @@
 #include <vector>
 namespace HfsPlus {
 using Bytes = std::vector<uint8_t>;
+struct ExternalJournalRequired : std::runtime_error {using std::runtime_error::runtime_error;};
 struct Error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
@@ -24,9 +25,11 @@ class Source {
     virtual void Flush() = 0;
     // Removable read-only sources validate media even for cached catalog reads.
     virtual void CheckMedia() {}
+    virtual std::shared_ptr<Source> OpenJournal(const Bytes&){throw ExternalJournalRequired("Select the matching external journal disk image");}
 };
-std::unique_ptr<Source> OpenImage(const wchar_t *, bool write);
-std::unique_ptr<Source> CreateImage(const wchar_t *, uint64_t size);
+std::unique_ptr<Source> OpenImage(const wchar_t *, bool write, const wchar_t *externalJournal = nullptr);
+std::unique_ptr<Source> CreateImage(const wchar_t *, uint64_t size, const wchar_t *externalJournal = nullptr);
+std::string CreateExternalJournalImage(const wchar_t*,uint64_t size = 64ULL*1024*1024);
 struct Extent {
     uint32_t start = 0, count = 0;
 };
@@ -50,7 +53,7 @@ struct Entry {
     std::string readError; // List can report a broken item without hiding its siblings.
     Fork forks[2];
     std::array<uint8_t, 32> finder{};
-    uint32_t created = 0, modified = 0;
+    uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
 };
 // Unicode 3.2 canonical decomposition, with the exclusions required by TN1150.
 std::u16string Normalize(const std::u16string &, bool caseSensitive = false);
@@ -60,7 +63,7 @@ class Volume {
     enum class FormatKind { HfsPlus, HfsXCaseSensitive, HfsXCaseInsensitive };
     static bool Recognizes(Source &);
     static void Format(Source &, const std::u16string &name, bool journaled = true,
-                       FormatKind kind = FormatKind::HfsPlus);
+                       FormatKind kind = FormatKind::HfsPlus, bool expandedTimes = false);
     explicit Volume(Source &, bool write = false);
     ~Volume();
     std::vector<Entry> List(uint32_t parent = 2) const;
@@ -73,12 +76,15 @@ class Volume {
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
-                 const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve);
+                 const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr);
     Attributes GetAttributes(uint32_t id) const;
     void SetAttributes(uint32_t id, const Attributes &);
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);
     void Remove(uint32_t id);
     void ValidateRemoval(uint32_t id) const;
+    void UseExternalJournal(const std::string &uuid);
+    bool ExternalJournal() const;
+    bool ExpandedTimes() const;
     bool Journaled() const;
     bool IsHfsX() const;
     bool CaseSensitive() const;

@@ -107,6 +107,7 @@ struct View {
 };
 struct Journal {
     View &view;
+    std::shared_ptr<Source> device; // UUID-validated external journal partition, when present
     uint64_t offset = 0, size = 0, start = 0, end = 0, infoOffset = 0;
     uint32_t headerSize = 0, listSize = 0, sequence = 0;
     bool little = false, enabled = false, needsInit = false;
@@ -136,6 +137,10 @@ struct Journal {
         } else
             P64(p, n);
     }
+    bool External()const{return bool(device);}
+    Bytes LogRead(uint64_t at,size_t n){if(!device)return view.Read(offset+at,n);Check(Range(offset+at,n,device->Size()),"External journal read range");Bytes data(n);device->Read(offset+at,data.data(),n);return data;}
+    void LogWrite(uint64_t at,const void* p,size_t n){if(device){Check(device->Writable(),"External journal is read-only");device->Write(offset+at,p,n);}else view.Write(offset+at,p,n);}
+    void FlushLog(){if(device)device->Flush();else view.source.Flush();}
     uint64_t Advance(uint64_t pos, uint64_t n) const {
         return headerSize + (pos - headerSize + n) % (size - headerSize);
     }
@@ -144,7 +149,7 @@ struct Journal {
         auto p = static_cast<uint8_t *>(buffer);
         while (n) {
             size_t part = size_t((std::min)(uint64_t(n), size - pos));
-            view.source.Read(view.base + offset + pos, p, part);
+            auto bytes=LogRead(pos,part);memcpy(p,bytes.data(),part);
             pos = Advance(pos, part);
             n -= part;
             p += part;
@@ -154,21 +159,21 @@ struct Journal {
         auto p = static_cast<const uint8_t *>(buffer);
         while (n) {
             size_t part = size_t((std::min)(uint64_t(n), size - pos));
-            view.Write(offset + pos, p, part);
+            LogWrite(pos, p, part);
             pos = Advance(pos, part);
             n -= part;
             p += part;
         }
     }
-    bool Overlaps(uint64_t o, uint64_t n) const { return o < offset + size && offset < o + n; }
+    bool Overlaps(uint64_t o, uint64_t n) const { return !External() && o < offset + size && offset < o + n; }
     void StoreHeader() {
         W64(header.data() + 8, start);
         W64(header.data() + 16, end);
         W32(header.data() + 44, sequence);
         W32(header.data() + 36, 0);
         W32(header.data() + 36, Sum(header.data(), 44));
-        view.Write(offset, header.data(), header.size());
-        view.source.Flush();
+        LogWrite(0, header.data(), header.size());
+        FlushLog();
     }
     void Open(const Bytes &vh, bool writable) {
         if (!(U32(vh.data() + 4) & 0x2000))
@@ -179,12 +184,14 @@ struct Journal {
         Check(jib && uint64_t(jib) * bs < view.length, "Invalid journal info block");
         auto info = view.Read(uint64_t(jib) * bs, 180);
         uint32_t flags = U32(info.data());
-        Check((flags & 3) == 1, "External HFS+ journals are unsupported");
+        Check((flags&3)==1||(flags&3)==2,"Invalid journal device flags");
+        if((flags&3)==2)device=view.source.OpenJournal(info);else device.reset();
+        Check((flags&3)!=2||bool(device),"External journal resolver returned no device");
         offset = U64(info.data() + 36);
         size = U64(info.data() + 44);
-        Check(offset % 512 == 0 && size >= 8192 && size % 512 == 0 && Range(offset, size, view.length),
+        Check(offset % 512 == 0 && size >= 8192 && size % 512 == 0 && Range(offset, size, External()?device->Size():view.length),
               "Invalid journal range");
-        Check(!Range(uint64_t(jib) * bs - offset, 180, size) && !(offset <= 1024 && 1024 < offset + size),
+        Check(External()||(!Range(uint64_t(jib) * bs - offset, 180, size) && !(offset <= 1024 && 1024 < offset + size)),
               "Journal overlaps volume metadata");
         if (flags & 4) {
             needsInit = true;
@@ -200,7 +207,7 @@ struct Journal {
             W32(header.data() + 40, headerSize);
             return;
         }
-        header = view.Read(offset, 512);
+        header = LogRead(0, 512);
         little = U32(header.data() + 4) == 0x78563412;
         Check(R32(header.data()) == 0x4a4e4c78 && R32(header.data() + 4) == 0x12345678,
               "Invalid journal signature");
@@ -220,7 +227,7 @@ struct Journal {
         Check(start >= headerSize && start < size && end >= headerSize && end < size &&
                   start % headerSize == 0 && end % headerSize == 0,
               "Invalid journal cursors");
-        header = view.Read(offset, headerSize);
+        header = LogRead(0, headerSize);
         if (start == end)
             return;
         // Validate the entire active log before touching any home block. A damaged log
@@ -280,6 +287,7 @@ struct Journal {
         }
     }
     void Adopt(const Journal &j) {
+        device=j.device;
         offset = j.offset;
         size = j.size;
         start = j.start;
@@ -384,7 +392,7 @@ struct Journal {
             for (auto j = first; j != i; ++j)
                 RingWrite(pos, j->second.data(), j->second.size());
         }
-        view.source.Flush();
+        FlushLog();
         if (fault)
             fault("journal-data-flushed");
         end = pos;

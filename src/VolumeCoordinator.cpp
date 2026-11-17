@@ -13,7 +13,7 @@ namespace {
 std::string Utf8(const std::wstring& w){int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);std::string s(n,0);if(n)WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),&s[0],n,nullptr,nullptr);return s;}
 std::wstring Upper(std::wstring w){if(!w.empty())CharUpperBuffW(&w[0],DWORD(w.size()));return w;}
 struct Resource {unsigned readers=0,browsers=0;bool writer=false;DWORD writerThread=0;uint64_t revision=0;};
-struct Bus {std::mutex mutex;std::map<std::string,Resource> resources;std::map<std::string,std::string> hosts;std::map<std::string,std::set<std::string>> imagePaths;std::map<std::string,Detail::PathIdentity> paths;std::map<std::string,std::string> pathKeys;uint64_t nextPath=1;std::vector<std::weak_ptr<Subscription::State>> subscribers;};
+struct Bus {std::mutex mutex;std::map<std::string,Resource> resources;std::map<std::string,std::string> hosts;std::map<std::string,std::set<std::string>> imagePaths;std::map<std::pair<std::string,std::string>,unsigned> dependencies;std::map<std::string,Detail::PathIdentity> paths;std::map<std::string,std::string> pathKeys;uint64_t nextPath=1;std::vector<std::weak_ptr<Subscription::State>> subscribers;};
 }
 struct Subscription::State {
  std::mutex mutex;HWND window=nullptr;uintptr_t id=0;bool closed=false,posted=false;
@@ -75,6 +75,8 @@ std::string ImageKey(const std::wstring& path){
  if(key.empty()){wchar_t full[32768]{};DWORD n=GetFullPathNameW(path.c_str(),ARRAYSIZE(full),full,nullptr);if(!n||n>=ARRAYSIZE(full))throw std::runtime_error("Cannot identify image path");key="image-path:"+Utf8(Upper(full));}
  auto host=HostKey(path),file=PathKey(path);auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);bus.hosts[key]=host;bus.imagePaths[key].insert(file);return key;
 }
+ImageDependency::ImageDependency(const std::string& image,const std::wstring& path):image_(image),path_(PathKey(path)){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);++bus.dependencies[{image_,path_}];bus.imagePaths[image_].insert(path_);}
+ImageDependency::~ImageDependency(){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);auto i=bus.dependencies.find({image_,path_});if(i!=bus.dependencies.end()&&!--i->second){bus.dependencies.erase(i);bus.imagePaths[image_].erase(path_);}}
 Lease::Lease(std::vector<Access> values):Lease(std::move(values),false){}
 Lease::Lease(std::vector<Access> values,bool reuseWriter){
  std::map<std::string,Mode> unique;for(auto& a:values)if(!a.key.empty()){auto found=unique.find(a.key);if(found==unique.end()||a.mode==Mode::Write||(a.mode==Mode::Read&&found->second==Mode::Browse))unique[a.key]=a.mode;}

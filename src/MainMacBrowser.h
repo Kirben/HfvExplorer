@@ -13,7 +13,7 @@ public:
     explicit MainMacBrowser(BrowserSession&);
     void ForgetTree();
     int OpenImage(const char *path);
-    int OpenImage(const std::wstring &path);
+    int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});
     int OpenCd(const char *root);
     void DetachTree();
     void RebuildTree();
