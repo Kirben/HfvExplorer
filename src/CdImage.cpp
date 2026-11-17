@@ -5,30 +5,30 @@
 #include "DeviceWait.h"
 #include "ReadOnlyCd.h"
 #include "CdImageToc.h"
+#include "CdMacProbe.h"
 #include <vector>
 namespace {
 class NativeCdImageSource : public CdImageSource {
  ReadOnlyCd cd_;DWORD error_=0,identity_=0;bool ready_=false;unsigned long long size_=0;
 public:
  bool Open(int drive,std::string& reason) override {
-  ready_=false;size_=0;
+  ready_=false;size_=0;error_=0;
   if(!cd_.OpenDrive(drive)){error_=cd_.Error();reason="Could not open the data CD";return false;}
   DWORD before=0,after=0;
   if(!Verify(before)){reason="Could not establish CD media identity";return false;}
-  CDROM_READ_TOC_EX query={};query.Format=CDROM_READ_TOC_EX_FORMAT_TOC;query.Msf=0;
-  CDROM_TOC toc={};DWORD returned=0;
-  if(!HfvMediaControl(cd_.Handle(),IOCTL_CDROM_READ_TOC_EX,&query,sizeof(query),&toc,sizeof(toc),&returned,nullptr)){
-   error_=GetLastError();reason="Could not read the CD table of contents";return false;
-  }
-  if(!CdImageSupportedToc(toc,returned)){
-   error_=ERROR_NOT_SUPPORTED;reason="Only single-track data CDs starting at sector zero are supported. Audio, mixed-mode and multisession CDs need a different image format.";return false;
-  }
+  auto tracks=DataTracks();if(tracks.empty()){error_=ERROR_NOT_SUPPORTED;reason="The disc has no supported data tracks. Audio extraction is not included.";return false;}
+  if(!SelectTrack(tracks.back().number,reason))return false;
   if(!Verify(after)){reason="CD media check failed while reading the table of contents";return false;}
   if(before!=after){error_=ERROR_MEDIA_CHANGED;reason="CD media changed while opening";return false;}
-  size_=CdImageTocBytes(toc);identity_=before;ready_=true;
+  identity_=before;ready_=true;
   return true;
  }
  void Close()override{ready_=false;cd_.Close();}
+ std::vector<CdMedia::Track> DataTracks()const override{return CdMedia::DataTracks(cd_.Tracks());}
+ bool SelectTrack(unsigned number,std::string& reason)override{
+  if(!cd_.SelectDataTrack(number)){error_=cd_.Error();reason="Cannot select the requested CD data track";return false;}
+  size_=cd_.ReadEnd()-cd_.ReadBegin();return true;
+ }
  unsigned long long Size() const override{return size_;}
  bool Verify(DWORD& generation) override {
   DWORD returned=0;generation=0;
@@ -37,9 +37,35 @@ public:
   if(ready_&&generation!=identity_){error_=ERROR_MEDIA_CHANGED;return false;}return true;
  }
  bool Read(unsigned long long offset,DWORD count,void* buffer,DWORD& got) override {
-  got=0;if(!cd_.ReadBytes(offset,count,buffer)){error_=cd_.Error();return false;}got=count;return true;
+  got=0;if(offset>size_||count>size_-offset){error_=ERROR_HANDLE_EOF;return false;}if(!cd_.ReadBytes(cd_.ReadBegin()+offset,count,buffer)){error_=cd_.Error();return false;}got=count;return true;
  }
  DWORD Error() const override{return error_;}
+};
+
+class SelectedCdImageSource:public CdImageSource{
+ std::shared_ptr<CdImageSource> source_;CdImageSelection selection_;DWORD error_=0;ULONGLONG base_=0,size_=0;
+public:
+ SelectedCdImageSource(std::shared_ptr<CdImageSource> s,CdImageSelection selection):source_(std::move(s)),selection_(selection){}
+ bool Open(int drive,std::string& reason)override{
+  if(!source_->Open(drive,reason)){error_=source_->Error();return false;}
+  if(selection_.identityKnown){DWORD generation;if(!source_->Verify(generation)||generation!=selection_.generation){error_=ERROR_MEDIA_CHANGED;reason="CD media changed after track selection";return false;}}
+  if(selection_.track){auto tracks=source_->DataTracks();auto found=std::find_if(tracks.begin(),tracks.end(),[&](const CdMedia::Track& t){return t.number==selection_.track;});
+   if(found==tracks.end()||(selection_.identityKnown&&!(*found==selection_.expected))){error_=selection_.identityKnown?ERROR_MEDIA_CHANGED:ERROR_NOT_SUPPORTED;reason="The selected data track or session layout changed";return false;}
+   if(!source_->SelectTrack(selection_.track,reason)){error_=source_->Error();return false;}}
+  if(selection_.identityKnown){DWORD generation=0;if(!source_->Verify(generation)||generation!=selection_.generation){error_=ERROR_MEDIA_CHANGED;reason="CD media changed while selecting the data track";return false;}}
+  base_=0;size_=source_->Size();if(!size_||size_%2048){error_=ERROR_INVALID_DATA;reason="Invalid CD data-track length";return false;}
+  if(selection_.macVolumeOnly){auto tracks=source_->DataTracks();auto chosen=std::find_if(tracks.begin(),tracks.end(),[&](const CdMedia::Track& t){return t.number==selection_.track;});auto origin=chosen==tracks.end()?0:chosen->start*2048;
+   DWORD identity=0;if(!source_->Verify(identity)){error_=source_->Error();reason="Cannot verify the Mac-volume source";return false;}
+   CdMedia::MacVolume volume;bool ioFailure=false;auto read=[&](ULONGLONG at,DWORD n,void* p){if(ioFailure)return false;DWORD before=0,after=0,got=0;if(!source_->Verify(before)||before!=identity){error_=ERROR_MEDIA_CHANGED;ioFailure=true;return false;}if(!source_->Read(at,n,p,got)||got!=n){error_=source_->Error()?source_->Error():ERROR_READ_FAULT;ioFailure=true;return false;}if(!source_->Verify(after)||after!=identity){error_=ERROR_MEDIA_CHANGED;ioFailure=true;return false;}return true;};
+   if(!CdMedia::ProbeMac(size_,origin,read,volume)||ioFailure){if(!error_)error_=ERROR_UNRECOGNIZED_VOLUME;reason="No readable Mac filesystem was found in the selected data track";return false;}base_=volume.offset;size_=volume.bytes;
+  }
+  return true;
+ }
+ void Close()override{source_->Close();}
+ unsigned long long Size()const override{return size_;}
+ bool Verify(DWORD& value)override{if(!source_->Verify(value)){error_=source_->Error();return false;}return true;}
+ bool Read(unsigned long long at,DWORD n,void* p,DWORD& got)override{if(at>size_||n>size_-at){error_=ERROR_HANDLE_EOF;got=0;return false;}if(!source_->Read(base_+at,n,p,got)){error_=source_->Error();return false;}return true;}
+ DWORD Error()const override{return error_?error_:source_->Error();}
 };
 struct Output {
  char temporary[MAX_PATH]={};HANDLE handle=INVALID_HANDLE_VALUE;
@@ -82,7 +108,7 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   std::string reason;
   if(!source->Open(drive,reason))return failure(source->Error(),reason);
   auto size=source->Size();
-  if(!size||size%2048||size>0x7fffffffffffffffULL)return failure(ERROR_INVALID_DATA,"The drive reported an invalid data-image length");
+  if(!size||size%512||size>0x7fffffffffffffffULL)return failure(ERROR_INVALID_DATA,"The drive reported an invalid data-image length");
   DWORD generation=0,current=0;
   if(!source->Verify(generation))return failure(source->Error(),"Could not establish "+medium+" media identity");
   char directory[MAX_PATH];strcpy_s(directory,destination);char* slash=strrchr(directory,'\\');
@@ -124,6 +150,15 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
 std::shared_ptr<CdImageSource> MakeNativeCdImageSource() {
  return std::make_shared<NativeCdImageSource>();
 }
-std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::string output,std::shared_ptr<CdImageSource> source) {
- return MakeMediaImageJob(drive,std::move(output),source?source:MakeNativeCdImageSource(),"CD");
+std::function<Storage::Result(Storage::Job&)> MakeCdImageJob(int drive,std::string output,std::shared_ptr<CdImageSource> source,CdImageSelection selection) {
+ auto selected=std::make_shared<SelectedCdImageSource>(source?source:MakeNativeCdImageSource(),selection);
+ return MakeMediaImageJob(drive,std::move(output),selected,selection.macVolumeOnly?"Mac volume":"CD data track");
+}
+
+std::function<Storage::Result(Storage::Job&)> MakeCdTrackInspectionJob(int drive,std::shared_ptr<CdImageSource> source,std::shared_ptr<std::vector<CdMedia::Track>> tracks,std::shared_ptr<DWORD> generation){
+ return CommandStorage::Guard({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}},[=](Storage::Job& job){
+  struct Close{CdImageSource* p;~Close(){p->Close();}}close{source.get()};if(job.cancelled())throw Storage::Cancelled();std::string reason;
+  if(!source->Open(drive,reason))return failure(source->Error(),reason);*tracks=source->DataTracks();if(tracks->empty())return failure(ERROR_NOT_SUPPORTED,"No data tracks are available; audio tracks are excluded");
+  if(!source->Verify(*generation))return failure(source->Error(),"Cannot establish data-track media identity");return Storage::Result{};
+ });
 }

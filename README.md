@@ -368,16 +368,25 @@ Current filesystem support
 - HFS+ and HFSX internal journals support read/write transactions and replay. A read-only
   open replays into memory without changing the image. Non-journaled writes
   are supported but cannot provide journaled recovery after interruption.
-- Selecting a CD drive automatically detects HFS+ / HFSX and opens supported
-  single-track data CDs read-only in the main tree/list, including Apple-partitioned
-  hybrids. The Windows drive entry remains available separately. Both forks,
+- Selecting a CD drive automatically detects classic HFS, HFS+ and HFSX data
+  tracks in the main tree/list, including Apple-partitioned hybrids, mixed-mode
+  discs and completed multisession discs. Detection chooses the newest supported
+  Mac data track, falling back to an older one if newer tracks contain only other
+  filesystems. The Windows drive entry remains available separately. Both forks,
   compressed files and hard links use the same readers as disk images. Media
-  changes invalidate cached listings; Refresh reopens the disc and starts at its root.
+  changes invalidate cached listings; Refresh reopens the disc at its root.
   Internal journal replay stays in memory; no device write is issued.
-  Tools > Dump CD to file saves the complete data track, including its partition
-  map and Windows side of a hybrid, and the result can be reopened as an image.
-  Audio, mixed-mode, multisession and nonzero-start data tracks remain unsupported
-  by this HFS+ CD path and raw-image dump.
+  Tools > Dump CD to file offers a session/data-track picker. The default saves
+  that track's exact 2048-byte sectors, including its partition map and hybrid
+  contents. "Save Mac volume only" extracts the filesystem as a portable raw
+  image, useful when a later session's partition map uses disc-absolute offsets.
+  Track reads and cache read-ahead stop at track/session boundaries, excluding
+  audio tracks and inter-session gaps. If the drive cannot supply the full
+  session table, only safely bounded tracks in the latest session are exposed;
+  ambiguous layouts are rejected. Audio extraction, BIN/CUE, raw 2352/2324-byte
+  sectors and native ISO/UDF browsing are not implemented. The drive must expose
+  cooked 2048-byte data sectors. Tests use injected layouts/sources and fixture
+  files; physical mixed-mode/multisession hardware testing remains outstanding.
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
   Physical HFS+ / HFSX floppy access, GPT images, compressed DMG containers and
   external journals are not implemented.

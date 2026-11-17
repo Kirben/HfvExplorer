@@ -3,6 +3,7 @@
 #include "HfsPlusCd.h"
 #include "HfsPlusDisk.h"
 #include "CdImage.h"
+#include "CdMacProbe.h"
 namespace HfsPlus {
 int CdDriveFromRoot(const char *path) {
     if (!path || !path[0] || path[1] != ':' ||
@@ -14,7 +15,7 @@ int CdDriveFromRoot(const char *path) {
 namespace {
 class Cd final : public Source {
     std::shared_ptr<MediaImageSource> media_;
-    uint64_t size_ = 0;
+    uint64_t size_ = 0,base_ = 0;
     DWORD generation_ = 0;
     bool valid_ = true;
     std::string failure_;
@@ -37,6 +38,18 @@ class Cd final : public Source {
         Disk::Check(size_ && size_ % 2048 == 0 && size_ <= INT64_MAX, "Invalid CD data-track length");
         if (!media_->Verify(generation_))
             Fail("Cannot establish CD media identity", media_->Error());
+        auto tracks=media_->DataTracks();Disk::Check(!tracks.empty(),"The disc has no data tracks");
+        auto latest=tracks.back();bool matched=false;
+        for(auto it=tracks.rbegin();it!=tracks.rend();++it){
+            if(!media_->SelectTrack(it->number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;
+            Disk::Check(size_&&size_%2048==0&&size_<=INT64_MAX,"Invalid CD data-track length");
+            CdMedia::MacVolume volume;if(CdMedia::ProbeMac(size_,it->start*2048,[&](ULONGLONG at,DWORD n,void* p){Read(at,p,n);return true;},volume)){
+                // An absolute APM is a property of the disc, not of the HFS+
+                // filesystem. Expose its bounded raw volume to the engine.
+                if(volume.discAddressed){base_=volume.offset;size_=volume.bytes;}matched=true;break;
+            }
+        }
+        if(!matched){if(!media_->SelectTrack(latest.number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;}
     }
     uint64_t Size() const override { return size_; }
     bool Writable() const override { return false; }
@@ -55,7 +68,7 @@ class Cd final : public Source {
         auto p = static_cast<uint8_t *>(buffer);
         while (length) {
             DWORD count = DWORD((std::min)(length, size_t(65536))), got = 0;
-            if (!media_->Read(offset, count, p, got))
+            if (!media_->Read(base_+offset, count, p, got))
                 Fail("CD sector read failed", media_->Error());
             if (got != count)
                 Fail("Short CD sector read", ERROR_READ_FAULT);
