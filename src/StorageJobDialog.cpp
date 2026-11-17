@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "MetadataDialogs.h"
 #include "HFVExplorer.h"
 #include "resource.h"
 #include "DeviceWait.h"
@@ -148,7 +149,7 @@ class JobDialog : public CDialog {
  }
  DWORD started_=GetTickCount();
 public:
- void Operation(const char* operation){operation_=operation;mutation_=operation_!="Copy";}
+ void Operation(const char* operation){operation_=operation;mutation_=operation_!="Copy"&&operation_!="Resource import";}
  void Planning(){job_=std::make_shared<Storage::Job>();Storage::Progress p;p.phase="Choose a copy mode";job_->progress(p);job_->finish({});}
  HWND ProgressOwner()const{return owner_;}
  void ProgressOwner(HWND window){
@@ -381,6 +382,7 @@ struct Batch {
  std::unique_ptr<FileOperations::Operation> operation;
  std::unique_ptr<JobDialog> dialog;std::unique_ptr<ModeDialog> mode;
  std::function<void(bool)> completed;
+ std::function<void(const FileOperations::Completion&)> observed;FileOperations::Completion snapshot;
  bool complete=true,finished=false,cancelled=false,hidden=false;
  bool all[2]={false,false};LegacyCopyOptions choices[2];
  bool Advance(){
@@ -388,7 +390,7 @@ struct Batch {
 #ifdef HFV_TESTING
    lastResult=result;
 #endif
-   cancelled=cancelled||operation->Job()->cancelled();complete=complete&&!result.code&&operation->Snapshot().complete;if(result.code)cancelled=true;operation.reset();}
+   snapshot=operation->Snapshot();cancelled=cancelled||operation->Job()->cancelled();complete=complete&&!result.code&&operation->Snapshot().complete;if(result.code)cancelled=true;operation.reset();}
   if(mode){
    if(!mode->ready)return true;
    if(!mode->accepted)cancelled=true;
@@ -410,7 +412,7 @@ struct Batch {
   operation.reset(new FileOperations::Operation(FileOperations::Submit(std::move(request))));
   dialog->Next(operation->Job());if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);return true;
  }
- void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();BrowserLifetime::Collect();if(completed)completed(complete);}
+ void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();BrowserLifetime::Collect();if(completed)completed(complete);if(complete&&observed)observed(snapshot);observed={};snapshot={};}
 };
 std::vector<std::unique_ptr<Batch>> batches;
 }
@@ -422,13 +424,13 @@ bool Enabled(){
 #endif
 }
 bool Active(){return active.load()!=0;}
-bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single,std::function<void(bool)> completed){
+bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single,std::function<void(bool)> completed,std::function<void(const FileOperations::Completion&)> observed){
  if(requests.empty())return false;
  batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->finished&&!b->dialog->GetSafeHwnd();}),batches.end());
- auto batch=std::unique_ptr<Batch>(new Batch);auto ptr=batch.get();batch->requests=std::move(requests);batch->completed=std::move(completed);
- auto kind=batch->requests.front().kind;bool mutation=kind==FileOperations::Kind::Rename||kind==FileOperations::Kind::Delete;
- const char* title=kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":"Copying files";
- const char* operation=kind==FileOperations::Kind::Rename?"Rename":kind==FileOperations::Kind::Delete?"Delete":"Copy";
+ auto batch=std::unique_ptr<Batch>(new Batch);auto ptr=batch.get();batch->requests=std::move(requests);batch->completed=std::move(completed);batch->observed=std::move(observed);
+ auto kind=batch->requests.front().kind;bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
+ const char* title=kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":kind==FileOperations::Kind::CreateFolder?"Creating folder":kind==FileOperations::Kind::Inspect?"Reading properties":kind==FileOperations::Kind::SetProperties?"Updating properties":kind==FileOperations::Kind::ReplaceResource?"Importing resource fork":"Copying files";
+ const char* operation=kind==FileOperations::Kind::Rename?"Rename":kind==FileOperations::Kind::Delete?"Delete":kind==FileOperations::Kind::CreateFolder?"Folder creation":kind==FileOperations::Kind::Inspect?"Properties read":kind==FileOperations::Kind::SetProperties?"Properties update":kind==FileOperations::Kind::ReplaceResource?"Resource import":"Copy";
  if(mutation)single=true;
  ++active;
  try{
@@ -483,7 +485,7 @@ Storage::Result ShowSubmittedStorageJob(const std::shared_ptr<Storage::Job>& job
  wait(job,title,hidden,false,singleFile,cancellable,true,owner,true);return job->result();
 }
 void ShutdownStorageUi(){
- FileOperations::CancelPending();BackgroundCopies::Shutdown();
+ FileOperations::CancelPending();BackgroundCopies::Shutdown();MetadataDialogs::Shutdown();
  nativeSession.reset();StorageUi::state().wait=nullptr;StorageUi::state().thread=0;
  Storage::worker().shutdown();
 }

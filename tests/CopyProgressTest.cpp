@@ -241,6 +241,7 @@ int RunCopyProgressTest(const char* directory) {
    while(!job->done()) {
     auto conflict=job->conflict();if(!conflict.empty()&&conflict!=pending){pending=conflict;++conflicts;check(conflict==(LPCSTR)mapped,"conflict names mapped destination");job->resolve(choice);}Sleep(1);
    }
+   if(conflicts!=1){fprintf(out,"Mapped export diagnostic: conflicts=%u code=%d error=%lu message=%s\n",conflicts,job->result().code,job->result().error,job->result().message.c_str());fflush(out);}
    check(conflicts==1,"mapped export asks before replacing final output");
    check(load(unmapped)==std::vector<BYTE>({'K','E','E','P'}),"raw mapping does not alter intermediate filename");
    if(choice==Storage::ConflictChoice::ReplaceAll)check(job->result().code==0&&load(mapped)==data,"mapped replacement publishes exact data fork");

@@ -594,6 +594,9 @@ BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=u
 // Makes sure that inited flag is cleared
 void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
 {
+ if(BackgroundCopies::Enabled()){
+  if(get_inx_type(inx)!=LIST_HFS)return;FileOperations::Request request;request.kind=FileOperations::Kind::SetProperties;request.sources={GetBrowserSession().MacBrowser().CaptureItem(inx)};request.patch=FileOperations::MetadataPatch::Position;request.x=short(p.x-FINDER_MAGIC_OFFSET+m_mac_origo.x);request.y=short(p.y-FINDER_MAGIC_OFFSET+m_mac_origo.y);BackgroundCopies::Start({request},GetBrowserSession().Owner(),true);return;
+ }
  if(BackgroundCopies::Active())return;
 	if(get_inx_type(inx) == LIST_HFS) {
 		CString fullpath;
@@ -933,6 +936,11 @@ int ask_dir( char *new_name )
 BOOL CHFVExplorerListView::new_folder(void)
 {
  if(GetBrowserSession().MacBrowser().NewFolder())return TRUE;
+ if(BackgroundCopies::Enabled()){
+  if(!BrowserDirectoryWritable())return FALSE;auto target=GetBrowserSession().MacBrowser().TargetFolder();char name[_MAX_PATH]="New Folder";
+  for(int attempt=1;attempt<50;++attempt){bool exists=false;for(int row=0;row<m_cl->GetItemCount();++row)exists|=m_cl->GetItemText(row,0).CompareNoCase(name)==0;if(!exists)break;wsprintf(name,"New Folder (%d)",attempt+1);}
+  if(!ask_dir(name))return FALSE;return GetBrowserSession().MacBrowser().CreateFolder(target,BrowserDirectory::FromAnsi(name));
+ }
  if(BackgroundCopies::Active())return FALSE;
  if(!BrowserDirectoryWritable())return FALSE;
 	CHFVExplorerApp	*pApp;
@@ -3014,6 +3022,8 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 	inx = -1; count = 0;
 	while( (inx = m_cl->GetNextItem(inx,LVNI_SELECTED)) >= 0 ) {
 		if(get_inx_type(inx) == LIST_HFS) {
+   if(BackgroundCopies::Enabled()){auto row=BrowserRowAt(inx);if(row&&!row->entry.directory){char type[5]{},creator[5]{};memcpy(type,row->entry.finder.data(),4);memcpy(creator,row->entry.finder.data()+4,4);dlg.m_input_types.Add(CString(type));dlg.m_input_creators.Add(CString(creator));dlg.m_input_dos.Add(CString("???"));++count;}continue;}
+
 			CString fullpath;
 			char volpath[_MAX_PATH];
 			hfsdirent ent;
@@ -3141,8 +3151,12 @@ void CHFVExplorerListView::toggle_label_colors( void )
 	}
 }
 
-void CHFVExplorerListView::set_label_color( int finder_color ) 
+void CHFVExplorerListView::set_label_color( int finder_color )
 {
+ if(BackgroundCopies::Enabled()){
+  FileOperations::Request request;request.kind=FileOperations::Kind::SetProperties;request.patch=FileOperations::MetadataPatch::Label;request.label=finder_color;auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);for(auto& item:selection.items)if(item.type==LIST_HFS)request.sources.push_back(item);
+  std::vector<FileOperations::Request> requests;for(auto& item:request.sources){auto one=request;one.sources={item};requests.push_back(std::move(one));}if(!requests.empty())BackgroundCopies::Start(std::move(requests),GetBrowserSession().Owner(),true);return;
+ }
  if(BackgroundCopies::Active())return;
 	int inx, color;
 	LV_ITEM	lvitem;
@@ -3202,8 +3216,10 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
   menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"Copy");menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_EDIT_CUT,"Cut");
   menu.AppendMenu(MF_STRING|(BrowserTransfers::Any()&&BrowserDirectoryWritable()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"Paste");
   menu.AppendMenu(MF_STRING|(selected&&m_cl->GetSelectedCount()==1&&BrowserSelectionAllows(true)?MF_ENABLED:MF_GRAYED),ID_EDIT_LABEL,"Rename");
+  menu.AppendMenu(MF_STRING|(BrowserDirectoryWritable()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New Folder...");
+  menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"Properties...");
   menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_OWN_DELETE,"Delete");
-  auto command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,GetBrowserSession().Owner());if(command==ID_OWN_DELETE)try_delete_selected_items(TRUE);else if(command)GetBrowserSession().Owner()->SendMessage(WM_COMMAND,command);return;
+  auto command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,GetBrowserSession().Owner());if(command==ID_OWN_DELETE)try_delete_selected_items(TRUE);else if(command==ID_OWN_NEW_FOLDER)new_folder();else if(command==ID_OWN_FILE_PROPERTIES){int row=m_cl->GetNextItem(-1,LVNI_SELECTED);if(row>=0)on_properties(row);}else if(command)GetBrowserSession().Owner()->SendMessage(WM_COMMAND,command);return;
  }
 	CMenu cm, cpop, cpop2, cpop3;
 	int inx, hit = 0;

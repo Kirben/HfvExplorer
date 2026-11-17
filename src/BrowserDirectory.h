@@ -27,6 +27,7 @@ struct Row {
 };
 struct Snapshot {
     std::string resourceKey;uint64_t revision=0;
+    std::wstring folderPath;std::string folderIdentity;
     std::vector<Row> rows;
     MacBrowser::Capabilities capabilities;
     bool capabilitiesKnown=false;

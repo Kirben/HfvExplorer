@@ -49,7 +49,7 @@ executing thread. Captured classic adapters retain their contexts across worker
 migration. Exports use absolute destination paths without changing the process
 working directory. CD/floppy caches and descriptors have per-device locks.
 
-Up to four copy jobs can execute concurrently on unrelated resources. Requests
+Up to four file-operation jobs can execute concurrently on unrelated resources. Requests
 that conflict with a reserved volume remain queued without occupying a worker;
 all participating resources are acquired together. Classic HFS/physical-media
 navigation defers only for the selected busy volume. Windows directories and
@@ -162,7 +162,7 @@ Independent file-operation jobs
 -------------------------------
 
 Copy, rename and delete commands submit value-based `FileOperations::Request`
-objects to the serialized worker. Requests own their paths, IDs, conversion
+objects to independent coordinated workers. Requests own their paths, IDs, conversion
 settings and backend references; they do not retain browser/window/control
 pointers. Closing a submitting session cannot invalidate queued work. Progress,
 overwrite decisions and cancellation belong to the job; a progress dialog only
@@ -190,7 +190,20 @@ failures and partial deletion, owner closure, volume exclusion, refresh, capture
 Windows paths/identities, long names/resource companions and classic HFS commands.
 Same-volume writers remain mutually exclusive; this does not enable concurrent
 uncoordinated access to one filesystem.
-New-folder creation and formatting keep their existing worker paths.
+Folder creation, Properties reads, classic Finder-property edits, label/icon-position
+updates and native resource-fork imports also use independent background jobs.
+Properties windows are modeless and can outlive the submitting browser. Native
+formats retain their existing read-only Properties display; classic HFS retains
+its editable property fields. Applying an editor rejects stale metadata and
+combines a name change and attribute edits in one runtime undo transaction.
+Label and icon-position jobs patch only their own fields. Folder creation keeps
+its captured parent path/catalog identity and rejects replaced Windows parents;
+directory timestamp changes alone do not invalidate the parent. Folder-name/file
+selection prompts still precede submission. Formatting keeps its existing path.
+`--verify-background-metadata NEW_DIRECTORY` covers slow/error/canceled operations,
+modeless result lifetime, stale editors/destinations, resource-fork preservation,
+classic transaction collisions, simulated floppy finalization and last-window
+cancellation. Device calls already in progress still need to return before cleanup.
 
 Run the Test build with `--verify-file-operations NEW_DIRECTORY` for detached
 session lifetime, queued values/settings, slow/error reads, conflicts, sticky

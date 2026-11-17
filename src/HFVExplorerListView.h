@@ -166,6 +166,7 @@ public:
 	int list_clear();
 	int initialize_volume( CString root_name, unsigned long id );
     void SetBrowserCapabilities(MacBrowser::Capabilities caps){m_directory_capabilities=caps;m_directory_capabilities_known=true;}
+    std::wstring m_browser_folder_path;std::string m_browser_folder_identity;
     bool BrowserDirectoryWritable()const{return !m_directory_capabilities_known||m_directory_capabilities.create;}
     bool BrowserSelectionAllows(bool rename)const;
     int InsertBrowserRow(const BrowserDirectory::Row&,HTREEITEM);
