@@ -6,6 +6,8 @@
 #include "StorageJobDialog.h"
 #include "FileOperations.h"
 #include "BackgroundCopies.h"
+#include "BrowserLifetime.h"
+#include "DialogClose.h"
 #include "DynCopyModeSelect.h"
 #include <atomic>
 #include <map>
@@ -146,7 +148,13 @@ class JobDialog : public CDialog {
  DWORD started_=GetTickCount();
 public:
  void Planning(){job_=std::make_shared<Storage::Job>();Storage::Progress p;p.phase="Choose a copy mode";job_->progress(p);job_->finish({});}
- void ProgressOwner(HWND window){owner_=window;}
+ HWND ProgressOwner()const{return owner_;}
+ void ProgressOwner(HWND window){
+  if(owner_==window)return;
+  auto found=taskbarEntries.find(this);bool tracked=found!=taskbarEntries.end();bool waiting=tracked&&found->second.progress.waiting;
+  if(tracked)state(TBPF_NOPROGRESS); // Clear only this job's old taskbar contribution.
+  owner_=window;if(tracked)state(waiting?TBPF_INDETERMINATE:TBPF_NORMAL);
+ }
  void Background(std::function<bool()> next,std::function<void()> finished,std::function<void()> cancel){modeless_=true;advance_=std::move(next);finished_=std::move(finished);cancelled_=std::move(cancel);}
  void Next(const std::shared_ptr<Storage::Job>& job){job_=job;started_=GetTickCount();waiting_=true;GetDlgItem(IDC_CP_BAR)->SendMessage(PBM_SETMARQUEE,TRUE,40);update();}
  void BeforeClose(std::function<void(HWND)> callback){beforeClose_=std::move(callback);}
@@ -170,7 +178,8 @@ public:
    storageUiTest.simpleStorageLayout=children==3&&GetDlgItem(IDC_CP_PHASE)&&GetDlgItem(IDC_SW_SPINNER)&&GetDlgItem(IDC_SW_EXPLANATION)&&!GetDlgItem(IDC_CP_BAR)&&!GetDlgItem(IDC_CP_FILE)&&!GetDlgItem(IDC_CP_FILE_BAR)&&!GetDlgItem(IDC_CP_STATUS);
   }
 #endif
-  auto menu=GetSystemMenu(FALSE);if(menu)menu->EnableMenuItem(SC_CLOSE,MF_BYCOMMAND|MF_GRAYED);
+  DialogClose::SetKind(m_hWnd,cancellable_?DialogClose::Kind::Copy:DialogClose::Kind::Dialog);
+  auto menu=GetSystemMenu(FALSE);if(menu)menu->EnableMenuItem(SC_CLOSE,MF_BYCOMMAND|((modeless_||cancellable_)?MF_ENABLED:MF_GRAYED));
   if(modeless_){
    for(HWND child=::GetWindow(m_hWnd,GW_CHILD);child;child=::GetWindow(child,GW_HWNDNEXT)){
     char text[128]{};::GetWindowTextA(child,text,ARRAYSIZE(text));if(!strcmp(text,"Please wait until the operation finishes."))::SetWindowTextA(child,"You can keep browsing while files are copied.");
@@ -188,7 +197,7 @@ public:
  void OnOK() override {}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l) override {
   if(message==WM_DESTROY)PrepareToClose();
-  if(message==WM_CLOSE){if(modeless_)OnCancel();return 0;}
+  if(message==WM_CLOSE){if(modeless_||cancellable_)OnCancel();return 0;}
   if(message==WM_APP+94){
    if(keepWindow_&&job_->done()){KillTimer(1);EndModalLoop(IDOK);}
    return 0;
@@ -222,7 +231,7 @@ public:
    if(job_->done()){
     if(modeless_){
      try{if(advance_&&advance_())return 0;}catch(const std::exception& error){if(cancelled_)cancelled_();job_=std::make_shared<Storage::Job>();job_->finish({1,ERROR_UNHANDLED_EXCEPTION,error.what()});}
-     KillTimer(1);state(TBPF_NOPROGRESS);completed_=true;if(finished_)finished_();
+     KillTimer(1);state(TBPF_NOPROGRESS);completed_=true;DialogClose::SetKind(m_hWnd,DialogClose::Kind::Dialog);if(finished_)finished_();
      auto result=job_->result();auto p=job_->progress();
      if(!result.code&&!p.skipped){DestroyWindow();return 0;}
      SetDlgItemText(IDC_CP_PHASE,result.error==ERROR_CANCELLED?"Copy cancelled":result.code?"Copy failed":"Copy finished with skipped files");
@@ -352,6 +361,7 @@ class ModeDialog:public CDynCopyModeSelect {
  bool hidden_;
 public:
  bool ready=false,accepted=false;
+ BOOL OnInitDialog()override{BOOL result=CDynCopyModeSelect::OnInitDialog();DialogClose::SetKind(m_hWnd,DialogClose::Kind::CopyMode);return result;}
  ModeDialog(bool hidden):CDynCopyModeSelect(CWnd::GetDesktopWindow()),hidden_(hidden){}
  void OnOK()override{if(!UpdateData(TRUE))return;accepted=ready=true;DestroyWindow();}
  void OnCancel()override{ready=true;DestroyWindow();}
@@ -359,6 +369,7 @@ public:
 #ifdef HFV_TESTING
   if(hidden_&&message==WM_WINDOWPOSCHANGING)reinterpret_cast<WINDOWPOS*>(l)->flags&=~SWP_SHOWWINDOW;
 #endif
+  if(message==WM_CLOSE){OnCancel();return 0;}
   return CDynCopyModeSelect::WindowProc(message,w,l);
  }
 };
@@ -397,7 +408,7 @@ struct Batch {
   operation.reset(new FileOperations::Operation(FileOperations::Submit(std::move(request))));
   dialog->Next(operation->Job());if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);return true;
  }
- void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();if(completed)completed(complete);}
+ void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();BrowserLifetime::Collect();if(completed)completed(complete);}
 };
 std::vector<std::unique_ptr<Batch>> batches;
 }
@@ -428,9 +439,14 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
   batches.push_back(std::move(batch));return true;
  }catch(...){if(batch&&batch->operation){auto job=batch->operation->Job();job->cancel();ShowSubmittedStorageJob(job,"Cancelling copy",true,true,true,owner);}--active;throw;}
 }
-void CancelAll(){for(auto& b:batches)if(!b->finished){b->cancelled=true;if(b->operation)b->operation->Job()->cancel();if(b->mode&&b->mode->GetSafeHwnd())b->mode->SendMessage(WM_CLOSE);}}
-void Shutdown(){CancelAll();Storage::copyWorker().shutdown();for(auto& b:batches){if(!b->finished)b->Finish();if(b->dialog->GetSafeHwnd())b->dialog->DestroyWindow();}batches.clear();}
+void TransferOwner(HWND closing,HWND replacement){
+ for(auto& batch:batches)if(batch->dialog->ProgressOwner()==closing)batch->dialog->ProgressOwner(replacement);
+}
+void CancelAll(){for(auto& b:batches)if(!b->finished){b->cancelled=true;if(b->operation)b->operation->Job()->cancel();if(b->mode&&b->mode->GetSafeHwnd())b->mode->OnCancel();}}
+void Shutdown(){CancelAll();Storage::copyWorker().shutdown();for(auto& b:batches){if(!b->finished)b->Finish();if(b->dialog->GetSafeHwnd())b->dialog->DestroyWindow();}batches.clear();BrowserLifetime::Collect();}
 #ifdef HFV_TESTING
+unsigned ProgressOwners(HWND owner){unsigned n=0;for(auto& b:batches)if(!b->finished&&b->dialog->ProgressOwner()==owner)++n;return n;}
+unsigned TaskbarJobs(HWND owner){unsigned n=0;for(auto& item:taskbarEntries)if(item.second.owner==owner)++n;return n;}
 unsigned DialogCount(){unsigned n=0;for(auto& b:batches)if(b->dialog->GetSafeHwnd())++n;return n;}
 HWND ModeWindow(){for(auto& b:batches)if(b->mode)return b->mode->GetSafeHwnd();return nullptr;}
 HWND DialogWindow(){for(auto& b:batches)if(!b->finished)return b->dialog->GetSafeHwnd();return nullptr;}

@@ -9,7 +9,7 @@
   <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><VCToolsVersion>14.44.35207</VCToolsVersion><UseOfMfc>Static</UseOfMfc><CharacterSet>MultiByte</CharacterSet></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <Import Project="..\WindowsCompatibility.props" />
-  <PropertyGroup><OutDir>$(ProjectDir)..\bin\x64\</OutDir><IntDir>$(ProjectDir)..\obj\x64\</IntDir><TargetName>HFVExplorer</TargetName></PropertyGroup>
+  <PropertyGroup><OutDir>$(ProjectDir)..\bin\x64\</OutDir><IntDir>$(ProjectDir)..\obj\x64\</IntDir><TargetName>HFVExplorer</TargetName><LinkIncremental>false</LinkIncremental></PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Test'"><OutDir>$(ProjectDir)..\bin\tests\</OutDir><IntDir>$(ProjectDir)..\obj\gui-tests\</IntDir><HFVTestDefinitions>HFV_TESTING;HFV_FLOPPY_TESTING;</HFVTestDefinitions></PropertyGroup>
   <ItemDefinitionGroup>
     <!-- The original UI uses fixed 96-DPI pixels. Let Windows scale it. -->
@@ -80,7 +80,8 @@
     <ClCompile Include="ImageOnly.cpp" />
     <ClCompile Include="ReadOnlyCd.cpp" />
     <ClCompile Include="MfsImage.cpp" />
-    <ClCompile Include="..\tests\ExclusiveAccessTest.cpp" /><ClCompile Include="..\tests\SharedBrowserTest.cpp" /><ClCompile Include="..\tests\BrowserSessionTest.cpp" /><ClCompile Include="..\tests\MainMacBrowserTest.cpp" /><ClCompile Include="ClassicBrowserBackend.cpp" /><ClCompile Include="WindowsBrowserBackend.cpp" /><ClCompile Include="BrowserDirectoryView.cpp" /><ClCompile Include="BrowserSession.cpp" /><ClCompile Include="BrowserWindows.cpp" /><ClCompile Include="BrowserTransfers.cpp" /><ClCompile Include="..\tests\BackgroundCopiesTest.cpp" /><ClCompile Include="..\tests\BrowserTransfersTest.cpp" /><ClCompile Include="..\tests\BrowserWindowsTest.cpp" /><ClCompile Include="VolumeCoordinator.cpp" /><ClCompile Include="..\tests\VolumeCoordinationTest.cpp" /><ClCompile Include="FileOperations.cpp" /><ClCompile Include="..\tests\FileOperationsTest.cpp" /><ClCompile Include="MainMacBrowser.cpp" /><ClCompile Include="MacBrowserModel.cpp" /><ClCompile Include="MacBrowserWindows.cpp" /><ClCompile Include="MacBrowserClassic.cpp" />
+    <ClCompile Include="..\tests\ExclusiveAccessTest.cpp" /><ClCompile Include="..\tests\SharedBrowserTest.cpp" /><ClCompile Include="..\tests\BrowserSessionTest.cpp" /><ClCompile Include="..\tests\MainMacBrowserTest.cpp" /><ClCompile Include="ClassicBrowserBackend.cpp" /><ClCompile Include="WindowsBrowserBackend.cpp" /><ClCompile Include="BrowserDirectoryView.cpp" /><ClCompile Include="BrowserSession.cpp" /><ClCompile Include="BrowserWindows.cpp" />
+    <ClCompile Include="DialogClose.cpp" /><ClCompile Include="BrowserTransfers.cpp" /><ClCompile Include="..\tests\BackgroundCopiesTest.cpp" /><ClCompile Include="..\tests\BrowserTransfersTest.cpp" /><ClCompile Include="..\tests\BrowserWindowsTest.cpp" /><ClCompile Include="VolumeCoordinator.cpp" /><ClCompile Include="..\tests\VolumeCoordinationTest.cpp" /><ClCompile Include="FileOperations.cpp" /><ClCompile Include="..\tests\FileOperationsTest.cpp" /><ClCompile Include="MainMacBrowser.cpp" /><ClCompile Include="MacBrowserModel.cpp" /><ClCompile Include="MacBrowserWindows.cpp" /><ClCompile Include="MacBrowserClassic.cpp" />
     <ClCompile Include="HfsPlus.cpp" />
     <ClCompile Include="HfsPlusFile.cpp" /><ClCompile Include="HfsPlusCd.cpp" /><ClCompile Include="..\tests\HfsPlusCdTest.cpp" />
     <ClCompile Include="HfsPlusUnicode.cpp" />
