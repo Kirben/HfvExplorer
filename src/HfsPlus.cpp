@@ -304,15 +304,16 @@ struct Volume::Impl {
     Bytes header, bitmap;
     uint32_t bs = 0, total = 0;
     bool write = false, usable = true, caseSensitive = false;
-    Fork allocation, extents, catalog;
+    Fork allocation, extents, catalog, attributes;
     std::vector<Record> catalogRecords, overflow;
-    std::vector<Record> committedCatalog, committedOverflow;
+    std::vector<Record> committedCatalog, committedOverflow, committedAttributes;
     Bytes committedBitmap;
-    Fork committedCatalogFork, committedExtentsFork;
+    Fork committedCatalogFork, committedExtentsFork, committedAttributesFork;
     const Bytes *allocationExclusions = nullptr;
     std::map<uint32_t, Entry> entries;
     std::vector<Record> attributeRecords;
-    bool attributesLoaded = false;
+    bool attributesLoaded = false, attributesDirty = false, attributeIndexValid = false;
+    std::map<std::pair<uint32_t,std::u16string>,std::map<uint32_t,size_t>> attributeIndex;
     std::map<uint32_t, std::unique_ptr<Compression>> compressedReaders;
     uint32_t fileMetadata = 0, directoryMetadata = 0;
     explicit Impl(Source &s, bool w) : source(s), view(s), journal(view), write(w) {
@@ -363,6 +364,7 @@ struct Volume::Impl {
         Check(U16(header.data()) == 0x4858 || !caseSensitive,
               "Binary filename comparison requires an HFSX volume");
         LoadEntries();
+        LoadAttributes();
         AuditAllocation();
         if (w && replayPending) {
             view.Apply();
@@ -379,6 +381,9 @@ struct Volume::Impl {
         committedBitmap = bitmap;
         committedCatalogFork = catalog;
         committedExtentsFork = extents;
+        committedAttributes = attributeRecords;
+        attributesDirty=false;
+        committedAttributesFork = attributes;
     }
     void LoadHeader() {
         header = view.Read(1024, 512);
@@ -452,6 +457,7 @@ struct Volume::Impl {
     void LoadEntries() {
         compressedReaders.clear();
         attributeRecords.clear();
+        attributeIndex.clear();attributeIndexValid=false;
         attributesLoaded = false;
         fileMetadata = directoryMetadata = 0;
         entries.clear();
@@ -538,7 +544,8 @@ struct Volume::Impl {
     void LoadAttributes() {
         if (attributesLoaded)
             return;
-        Fork f = DecodeFork(header.data() + 352);
+        attributes = DecodeFork(header.data() + 352);
+        Fork &f = attributes;
         if (f.size) {
             Complete(f, 8, 0);
             Validate(f);
@@ -547,57 +554,89 @@ struct Volume::Impl {
                 Check(r.key.size() >= 14 && 14 + uint64_t(U16(r.key.data() + 12)) * 2 == r.key.size() &&
                           U16(r.key.data() + 12) <= 255 && r.value.size() >= 4,
                       "Invalid HFS+ attribute record");
+            const Record *previous = nullptr;
+            for (const auto &r : records) {
+                Check(!previous || AttributeOrder(*previous, r) < 0, "Unordered HFS+ attribute keys");
+                previous = &r;
+            }
             attributeRecords = std::move(records);
         }
         attributesLoaded = true;
+        IndexAttributes();
+        for(const auto& group:attributeIndex){auto id=group.first.first;Check(entries.count(id)||id==1,"Orphan HFS+ attribute owner");
+            Check(!group.first.second.empty(),"Empty HFS+ attribute name");auto storage=AttributeStorage(id,group.first.second);(void)storage;}
+
     }
-    Bytes Attribute(uint32_t id, const std::u16string &name) {
-        LoadAttributes();
-        std::map<uint32_t, const Record *> parts;
-        for (const auto &r : attributeRecords)
-            if (U32(r.key.data() + 4) == id && String(r.key.data() + 12, r.key.size() - 12) == name)
-                Check(parts.emplace(U32(r.key.data() + 8), &r).second, "Duplicate HFS+ attribute extent");
-        Check(parts.count(0), "Compressed file has no com.apple.decmpfs attribute");
-        auto &v = parts.at(0)->value;
-        if (U32(v.data()) == 0x10) {
-            Check(parts.size() == 1 && v.size() >= 16 && U32(v.data() + 12) <= v.size() - 16 &&
-                      v.size() - 16 - U32(v.data() + 12) <= 1,
-                  "Invalid inline HFS+ attribute size");
-            return Bytes(v.begin() + 16, v.begin() + 16 + U32(v.data() + 12));
+    static std::u16string AttributeName(const Record &r) { return String(r.key.data()+12, r.key.size()-12); }
+    static int AttributeOrder(const Record &a, const Record &b) {
+        auto x=U32(a.key.data()+4),y=U32(b.key.data()+4);
+        if(x!=y)return x<y?-1:1;
+        auto an=AttributeName(a),bn=AttributeName(b);
+        if(an!=bn)return an<bn?-1:1;
+        x=U32(a.key.data()+8);y=U32(b.key.data()+8);return x==y?0:x<y?-1:1;
+    }
+    static Bytes AttributeKey(uint32_t id,const std::u16string& name,uint32_t block=0) {
+        Bytes key(14+name.size()*2,0);P16(key.data(),uint16_t(key.size()-2));P32(key.data()+4,id);
+        P32(key.data()+8,block);P16(key.data()+12,uint16_t(name.size()));
+        for(size_t i=0;i<name.size();++i)P16(key.data()+14+2*i,name[i]);return key;
+    }
+    void IndexAttributes() {
+        if(attributeIndexValid)return;attributeIndex.clear();
+        for(size_t i=0;i<attributeRecords.size();++i){auto& r=attributeRecords[i];Check(attributeIndex[{U32(r.key.data()+4),AttributeName(r)}].emplace(U32(r.key.data()+8),i).second,"Duplicate HFS+ attribute extent");}
+        attributeIndexValid=true;
+    }
+    struct AttributeValue {const Bytes *inlineValue=nullptr;Fork fork;};
+    AttributeValue AttributeStorage(uint32_t id,const std::u16string& name) {
+        LoadAttributes();IndexAttributes();auto found=attributeIndex.find({id,name});Check(found!=attributeIndex.end(),"Missing HFS+ attribute");auto& parts=found->second;
+        Check(parts.count(0),"Missing HFS+ attribute base record");const auto& v=attributeRecords[parts.at(0)].value;AttributeValue result;
+        if(U32(v.data())==0x10){
+            Check(parts.size()==1&&v.size()>=16&&U32(v.data()+12)<=v.size()-16&&v.size()-16-U32(v.data()+12)<=1,"Invalid inline HFS+ attribute size");
+            result.inlineValue=&v;return result;
         }
-        Check(U32(v.data()) == 0x20 && v.size() == 88, "Unknown HFS+ attribute storage type");
-        Fork f = DecodeFork(v.data() + 8);
-        uint64_t have = 0;
-        for (auto e : f.extents)
-            have += e.count;
-        size_t used = 1;
-        while (have < f.blocks) {
-            auto i = parts.find(uint32_t(have));
-            Check(i != parts.end() && i->second->value.size() == 72 && U32(i->second->value.data()) == 0x30,
-                  "Missing HFS+ attribute overflow extents");
-            uint64_t previous = have;
-            for (unsigned n = 0; n < 8; ++n) {
-                auto p = i->second->value.data() + 8 + n * 8;
-                Extent e{U32(p), U32(p + 4)};
-                if (e.count) {
-                    f.extents.push_back(e);
-                    have += e.count;
-                }
-            }
-            Check(have > previous && have <= f.blocks, "Invalid HFS+ attribute overflow extents");
-            ++used;
+        Check(U32(v.data())==0x20&&v.size()==88,"Unknown HFS+ attribute storage type");auto& f=result.fork;f=DecodeFork(v.data()+8);
+        uint64_t have=0;for(auto e:f.extents)have+=e.count;size_t used=1;
+        while(have<f.blocks){auto i=parts.find(uint32_t(have));Check(i!=parts.end()&&attributeRecords[i->second].value.size()==72&&U32(attributeRecords[i->second].value.data())==0x30,"Missing HFS+ attribute overflow extents");
+            auto before=have;for(unsigned n=0;n<8;++n){auto p=attributeRecords[i->second].value.data()+8+n*8;Extent e{U32(p),U32(p+4)};if(e.count){f.extents.push_back(e);have+=e.count;}}
+            Check(have>before&&have<=f.blocks,"Invalid HFS+ attribute overflow extents");++used;
         }
-        Check(parts.size() == used, "Unexpected HFS+ attribute extents");
-        Validate(f);
-        // decmpfs's inline payload is one compression unit, not an unbounded
-        // allocation requested by untrusted attribute metadata.
-        Check(f.size <= 131088, "Oversized com.apple.decmpfs attribute");
-        for (auto e : f.extents)
-            for (uint32_t n = 0; n < e.count; ++n)
-                Check(Used(e.start + n), "Attribute refers to unallocated blocks");
-        Bytes out(size_t(f.size));
-        ForkRead(view, f, bs, 0, out.data(), out.size());
+        Check(parts.size()==used,"Unexpected HFS+ attribute extents");Validate(f);return result;
+    }
+    Bytes Attribute(uint32_t id,const std::u16string& name) {
+        auto value=AttributeStorage(id,name);
+        if(value.inlineValue){auto& v=*value.inlineValue;return Bytes(v.begin()+16,v.begin()+16+U32(v.data()+12));}
+        auto& f=value.fork;Check(f.size<=64*1024*1024,"Extended attribute exceeds the 64 MiB read limit");
+        if(name==u"com.apple.decmpfs")Check(f.size<=131088,"Oversized com.apple.decmpfs attribute");
+        Bytes out(size_t(f.size));ForkRead(view,f,bs,0,out.data(),out.size());return out;
+    }
+    Attributes GetAttributes(uint32_t id) {
+        LoadAttributes();IndexAttributes();Attributes out;uint64_t bytes=0;
+        for(auto i=attributeIndex.lower_bound({id,{}});i!=attributeIndex.end()&&i->first.first==id;++i){auto name=i->first.second;auto data=Attribute(id,name);
+            bytes+=data.size();Check(bytes<=128*1024*1024,"Extended attributes exceed the 128 MiB per-entry limit");out.emplace(std::move(name),std::move(data));}
         return out;
+    }
+    void AttributeFlags(uint32_t id) {
+        bool any=false,security=false;for(const auto& r:attributeRecords)if(U32(r.key.data()+4)==id){any=true;security|=AttributeName(r)==u"com.apple.system.Security";}
+        auto record=CatalogRecord(id);auto flags=U16(record->value.data()+2);P16(record->value.data()+2,uint16_t((flags&~12u)|(any?4:0)|(security?8:0)));
+    }
+    void ReplaceAttributes(uint32_t id,const Attributes& desired) {
+        ValidateAttributes(desired);LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
+        std::vector<Fork> freed;
+        for(const auto& value:old){auto now=desired.find(value.first);if(now!=desired.end()&&now->second==value.second)continue;
+            auto storage=AttributeStorage(id,value.first);if(!storage.inlineValue)freed.push_back(storage.fork);}
+        // Allocate payloads before freeing old blocks. Existing on-disk values must
+        // survive an interrupted transaction and never become scratch space.
+        std::vector<Record> added;
+        for(const auto& value:desired){auto was=old.find(value.first);if(was!=old.end()&&was->second==value.second)continue;
+            Record record;record.key=AttributeKey(id,value.first);
+            if(value.second.size()<=1024){record.value.assign(16+value.second.size()+(value.second.size()&1),0);P32(record.value.data(),0x10);P32(record.value.data()+12,uint32_t(value.second.size()));std::copy(value.second.begin(),value.second.end(),record.value.begin()+16);added.push_back(std::move(record));}
+            else{auto f=Allocate(value.second.size(),false,true);uint64_t logical=0;Bytes buffer(65536,0);
+                for(auto e:f.extents){uint64_t at=uint64_t(e.start)*bs,remaining=uint64_t(e.count)*bs;while(remaining){size_t n=size_t((std::min)(remaining,uint64_t(buffer.size()))),actual=size_t((std::min)(uint64_t(n),f.size-logical));std::fill(buffer.begin(),buffer.begin()+n,0);std::copy_n(value.second.data()+logical,actual,buffer.data());view.Write(at,buffer.data(),n);logical+=actual;at+=n;remaining-=n;}}
+                record.value.assign(88,0);P32(record.value.data(),0x20);EncodeFork(record.value.data()+8,f,bs);added.push_back(std::move(record));
+                uint32_t block=0;for(size_t i=0;i<f.extents.size();){if(i<8){block+=f.extents[i++].count;continue;}Record continuation;continuation.key=AttributeKey(id,value.first,block);continuation.value.assign(72,0);P32(continuation.value.data(),0x30);for(unsigned n=0;n<8&&i<f.extents.size();++n,++i){P32(continuation.value.data()+8+n*8,f.extents[i].start);P32(continuation.value.data()+12+n*8,f.extents[i].count);block+=f.extents[i].count;}added.push_back(std::move(continuation));}
+            }
+        }
+        attributeRecords.erase(std::remove_if(attributeRecords.begin(),attributeRecords.end(),[&](const Record& r){if(U32(r.key.data()+4)!=id)return false;auto name=AttributeName(r);auto was=old.find(name);auto now=desired.find(name);return now==desired.end()||was==old.end()||was->second!=now->second;}),attributeRecords.end());
+        attributeRecords.insert(attributeRecords.end(),added.begin(),added.end());attributeIndexValid=false;for(auto& f:freed)Free(f);AttributeFlags(id);
     }
     bool IsCompressed(uint32_t id) { return Get(id).compressed; }
     Compression &Compressed(uint32_t id) {
@@ -724,6 +763,8 @@ struct Volume::Impl {
                 claim(f);
             }
         }
+        LoadAttributes();
+        for(const auto& r:attributeRecords)if(U32(r.key.data()+8)==0){auto storage=AttributeStorage(U32(r.key.data()+4),AttributeName(r));if(!storage.inlineValue)claim(storage.fork);}
         uint32_t first = (1536 + bs - 1) / bs, last = (1024 + bs - 1) / bs;
         claims.push_back({0, first});
         claims.push_back({total - last, last});
@@ -930,16 +971,11 @@ struct Volume::Impl {
             Check((U16(r->value.data() + 42) & 0170000) == 0100000,
                   "Only ordinary HFS+ files can be modified");
         }
-        // A catalog-only writer must not discard compression, ACLs or extended
-        // attributes whose semantics affect the fork being replaced/deleted.
-        Fork attrs = DecodeFork(header.data() + 352);
-        if (attrs.size) {
-            Complete(attrs, 8, 0);
-            auto records = ReadTree(view, attrs, bs, 522);
-            for (auto &a : records)
-                if (a.key.size() >= 8 && U32(a.key.data() + 4) == e.id)
-                    throw Error("Entry has extended attributes; modification is not supported yet");
-        }
+        // Compression, encryption and hard-link metadata still require their
+        // dedicated writers. Ordinary attributes and ACLs are preserved by ID.
+        LoadAttributes();
+        for(const auto& a:attributeRecords)if(U32(a.key.data()+4)==e.id){auto name=AttributeName(a);
+            Check(name!=u"com.apple.decmpfs"&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink","Entry uses unsupported compression/encryption/link metadata");}
     }
     uint64_t GrowMetadata(Fork &f, uint64_t minimum, uint32_t id) {
         uint64_t target = ((minimum + bs - 1) / bs) * bs;
@@ -1016,7 +1052,7 @@ struct Volume::Impl {
     void UpdateTree(Fork &f, uint32_t id, const std::vector<Record> &old,
                     const std::vector<Record> &records) {
         auto order = [&](const Record &a, const Record &b) {
-            return id == 4 ? Order(a, b) : ExtentOrder(a, b);
+            return id == 4 ? Order(a, b) : id == 8 ? AttributeOrder(a,b) : ExtentOrder(a, b);
         };
         BTree tree([&](uint64_t o, void *p, size_t n) { ForkRead(view, f, bs, o, p, n); },
                    [&](uint64_t o, const void *p, size_t n) { StageForkRange(f, o, p, n); },
@@ -1075,10 +1111,11 @@ struct Volume::Impl {
         auto catalogChanges = Changes(committedCatalog, catalogRecords,
                                       [&](const Record &a, const Record &b) { return Order(a, b); });
         auto overflowChanges = Changes(committedOverflow, overflow, ExtentOrder);
+        auto attributeChanges = Changes(committedAttributes, attributeRecords, AttributeOrder);
         overflowChanges.erase(std::remove_if(overflowChanges.begin(), overflowChanges.end(),
                                              [](const Change &c) {
                                                  auto id = U32(c.record.key.data() + 4);
-                                                 return id == 3 || id == 4;
+                                                 return id == 3 || id == 4 || id == 8;
                                              }),
                               overflowChanges.end());
         Bytes desiredBitmap = bitmap;
@@ -1100,6 +1137,7 @@ struct Volume::Impl {
         };
         discardGrowth(catalog, committedCatalogFork);
         discardGrowth(extents, committedExtentsFork);
+        discardGrowth(attributes, committedAttributesFork);
         uint32_t nextId = U32(header.data() + 64);
         {
             Impl preparation(source, true);
@@ -1148,6 +1186,7 @@ struct Volume::Impl {
         catalogRecords = Merge(fresh.catalogRecords, catalogChanges,
                                [&](const Record &a, const Record &b) { return Order(a, b); });
         overflow = Merge(fresh.overflow, overflowChanges, ExtentOrder);
+        auto desiredAttributes = Merge(fresh.attributeRecords, attributeChanges, AttributeOrder);
         for (size_t i = 0; i < bitmap.size(); ++i) {
             uint8_t mask = committedBitmap[i] ^ desiredBitmap[i];
             fresh.bitmap[i] = uint8_t((fresh.bitmap[i] & ~mask) | (desiredBitmap[i] & mask));
@@ -1158,13 +1197,17 @@ struct Volume::Impl {
         allocation = fresh.allocation;
         catalog = fresh.catalog;
         extents = fresh.extents;
+        attributes = fresh.attributes;
         journal.Adopt(fresh.journal);
         committedCatalog = std::move(fresh.committedCatalog);
         committedOverflow = std::move(fresh.committedOverflow);
         committedBitmap = std::move(fresh.committedBitmap);
         committedCatalogFork = fresh.committedCatalogFork;
         committedExtentsFork = fresh.committedExtentsFork;
+        committedAttributes = fresh.committedAttributes;
+        committedAttributesFork = fresh.committedAttributesFork;
         LoadEntries();
+        attributeRecords=std::move(desiredAttributes);attributesLoaded=true;attributeIndexValid=false;
         AuditAllocation();
     }
     void Commit(const std::function<void(const char *)> &fault, Journal *mirror = nullptr,
@@ -1191,6 +1234,12 @@ struct Volume::Impl {
             }
         std::sort(catalogRecords.begin(), catalogRecords.end(),
                   [&](const Record &a, const Record &b) { return Order(a, b) < 0; });
+        if(attributesDirty) {
+            if(!attributes.size){auto tree=BuildInitialTree({},false,65536,bs);P16(tree.data()+14+20,266);P32(tree.data()+14+38,6);
+                attributes=Allocate(tree.size(),false,true);uint64_t logical=0;for(auto e:attributes.extents){auto n=size_t(uint64_t(e.count)*bs);view.Write(uint64_t(e.start)*bs,tree.data()+logical,n);logical+=n;}Overflow(8,0,attributes);}
+            std::sort(attributeRecords.begin(),attributeRecords.end(),[](const Record& a,const Record& b){return AttributeOrder(a,b)<0;});
+            attributeIndexValid=false;UpdateTree(attributes,8,committedAttributes,attributeRecords);
+        }
         UpdateTree(catalog, 4, committedCatalog, catalogRecords);
         std::sort(overflow.begin(), overflow.end(), [](const Record &a, const Record &b) {
             uint32_t ai = U32(a.key.data() + 4), bi = U32(b.key.data() + 4);
@@ -1228,6 +1277,7 @@ struct Volume::Impl {
         EncodeFork(header.data() + 112, allocation, bs);
         EncodeFork(header.data() + 192, extents, 65536);
         EncodeFork(header.data() + 272, catalog, 65536);
+        EncodeFork(header.data() + 352, attributes, 65536);
         view.Stage(1024, header.data(), 512);
         view.Stage(view.length - 1024, header.data(), 512);
         if (mirror)
@@ -1307,10 +1357,11 @@ uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer,
     ForkRead(p_->view, e.forks[fork], p_->bs, offset, buffer, count);
     return count;
 }
-uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name) {
+uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes) {
     auto &p = *p_;
     p.Guard();
     p.Parent(parent);
+    if(attributes)ValidateAttributes(*attributes);
     Entry e;
     e.parent = parent;
     e.name = Normalize(name, p.caseSensitive);
@@ -1318,6 +1369,7 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name) {
     Check(!p.Existing(parent, e.name), "HFS+ name already exists");
     try {
         p.New(e);
+        if(attributes)p.ReplaceAttributes(e.id,*attributes);
         p.Commit(fault);
         return e.id;
     } catch (...) {
@@ -1327,10 +1379,11 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name) {
 }
 uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
-                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates) {
+                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes) {
     auto &p = *p_;
     p.Guard();
     p.Parent(parent);
+    if(attributes)ValidateAttributes(*attributes);
     Entry e;
     e.parent = parent;
     e.name = Normalize(name, p.caseSensitive);
@@ -1380,6 +1433,7 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
             auto record=p.CatalogRecord(e.id);P32(record->value.data()+12,e.created);P32(record->value.data()+16,e.modified);
             p.entries[e.id]=e;
         }
+        if(attributes)p.ReplaceAttributes(e.id,*attributes);
         p.Overflow(e.id, 0, e.forks[0]);
         p.Overflow(e.id, 1, e.forks[1]);
         p.Commit(fault);
@@ -1387,6 +1441,23 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     } catch (...) {
         p.usable = false;
         throw;
+    }
+}
+Attributes Volume::GetAttributes(uint32_t id) const {
+    p_->source.CheckMedia();Check(p_->usable,"Reopen HFS+ image after error");return p_->GetAttributes(p_->Resolve(id));
+}
+void Volume::SetAttributes(uint32_t id,const Attributes& attributes) {
+    auto& p=*p_;p.Guard();p.Mutable(p.Get(id));ValidateAttributes(attributes);
+    try{p.ReplaceAttributes(id,attributes);p.Commit(fault);}catch(...){p.usable=false;throw;}
+}
+void ValidateAttributes(const Attributes& attributes) {
+    uint64_t total=0;
+    for(const auto& item:attributes){const auto& name=item.first;Check(!name.empty()&&name.size()<=127,"HFS+ attribute names must have 1-127 UTF-16 units");
+        for(size_t i=0;i<name.size();++i){auto c=name[i];Check(c!=0,"NUL in extended attribute name");if(c>=0xd800&&c<=0xdbff){Check(++i<name.size()&&name[i]>=0xdc00&&name[i]<=0xdfff,"Invalid attribute Unicode");}else Check(c<0xdc00||c>0xdfff,"Invalid attribute Unicode");}
+        Check(name!=u"com.apple.FinderInfo"&&name!=u"com.apple.ResourceFork","Finder information and resource forks use their dedicated fields");
+        Check(name!=u"com.apple.decmpfs"&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink"&&name!=u"system.xattrextents","Compression/encryption/link attributes cannot be written by the ordinary attribute editor");
+        Check(item.second.size()<=64*1024*1024,"Extended attribute exceeds the 64 MiB limit");total+=item.second.size();Check(total<=128*1024*1024,"Extended attributes exceed the 128 MiB per-entry limit");
+        if(name==u"com.apple.system.Security"){const auto& b=item.second;Check(b.size()>=44&&U32(b.data())==0x012cc16d,"Invalid Mac ACL header (expected disk byte order)");auto count=U32(b.data()+36);Check(count==0xffffffff||count<=128,"Mac ACL has too many entries");Check(b.size()==44ULL+(count==0xffffffff?0:24ULL*count),"Mac ACL entry count/length mismatch");}
     }
 }
 void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
@@ -1430,6 +1501,7 @@ void Volume::Remove(uint32_t id) {
                 p.Free(e.forks[f]);
                 p.Overflow(id, f, Fork{});
             }
+        p.ReplaceAttributes(id,{});
         p.entries.erase(id);
         p.catalogRecords.erase(
             std::remove_if(p.catalogRecords.begin(), p.catalogRecords.end(),

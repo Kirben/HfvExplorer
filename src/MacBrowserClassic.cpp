@@ -71,7 +71,7 @@ public:
     bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&HFS_READONLY);}
     bool CaseSensitive()const override{return false;}
     void ValidateEntry(const Entry& e)const override{
-        Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
+        Volume::ValidateEntry(e);Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
     }
     uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}

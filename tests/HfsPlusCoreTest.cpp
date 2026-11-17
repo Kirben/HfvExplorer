@@ -60,6 +60,63 @@ void verify(Volume &v, uint32_t id, unsigned fork, uint64_t size) {
     }
     must(v.Read(id, fork, size, actual.data(), 1) == 0, "EOF");
 }
+
+uint8_t *catalogValue(Memory &,uint32_t);
+Bytes security(unsigned count=2) {
+    Bytes b(44+count*24,0);Disk::P32(b.data(),0x012cc16d);Disk::P32(b.data()+36,count);Disk::P32(b.data()+40,0x20000);
+    for(unsigned i=0;i<32;++i)b[4+i]=uint8_t(i+1);
+    for(unsigned i=0;i<count;++i){for(unsigned j=0;j<16;++j)b[44+i*24+j]=uint8_t(i+j+7);Disk::P32(b.data()+60+i*24,(i%2?2:1)|0x60);Disk::P32(b.data()+64+i*24,0x100083);}
+    return b;
+}
+void attributeTests() {
+    for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive})for(bool journal:{false,true}){
+        Memory disk(32*1024*1024);Volume::Format(disk,u"Attributes",journal,kind);
+        uint32_t file,folder;Attributes original{{u"user.Empty",{}},{u"user.Case",{1,0,2,3}},{u"user.case",Bytes(64003,0x83)},{u"user.\u00e9",{0xff,0,0xfe}},{u"com.apple.system.Security",security()}};
+        {Volume v(disk,true);file=v.Put(2,u"File",1003,779,pattern);folder=v.MakeDirectory(2,u"Folder");v.SetAttributes(file,original);v.SetAttributes(folder,original);must(v.GetAttributes(file)==original,"Attribute write roundtrip");must((Disk::U16(catalogValue(disk,file)+2)&12)==12&&(Disk::U16(catalogValue(disk,folder)+2)&12)==12,"Catalog attribute/ACL flags missing");}
+        {Volume v(disk,true);must(v.GetAttributes(folder)==original,"Directory ACL reopen");v.Rename(file,folder,u"Renamed");v.Put(folder,u"Renamed",53,61,pattern,nullptr,true);must(v.GetAttributes(file)==original,"Rename/overwrite discarded attributes");verify(v,file,0,53);verify(v,file,1,61);auto changed=original;changed.erase(u"user.Case");changed[u"user.case"]={4,5,0,6};v.SetAttributes(file,changed);must(v.GetAttributes(file)==changed&&v.GetAttributes(folder)==original,"Attribute replacement affected another inode");v.SetAttributes(file,{});must(v.GetAttributes(file).empty()&&!(Disk::U16(catalogValue(disk,file)+2)&12),"Remove all attributes or clear catalog flags");v.SetAttributes(file,original);}
+        {disk.writable=false;Volume v(disk,false);must(v.GetAttributes(file)==original,"Read-only attributes");fails([&]{v.SetAttributes(file,{});},"Read-only attribute write");disk.writable=true;}
+        {Volume v(disk,true);auto before=v.FreeBytes();v.Remove(file);must(v.FreeBytes()>before,"Fork-backed attributes leaked blocks on deletion");v.Remove(folder);}
+        {Volume v(disk,true);for(auto& e:v.List())must(e.id!=file&&e.id!=folder,"Attributed directory removal left catalog entries");}
+        Attributes invalid{{u"com.apple.system.Security",security()}};invalid.begin()->second.pop_back();fails([&]{ValidateAttributes(invalid);},"Truncated ACL accepted");
+        invalid={{u"com.apple.system.Security",security(0)}};Disk::P32(invalid.begin()->second.data()+36,0xffffffff);ValidateAttributes(invalid); // absent ACL differs from an empty ACL
+        invalid={{std::u16string(128,u'a'),{1}}};fails([&]{ValidateAttributes(invalid);},"Overlong attribute name accepted");
+        invalid={{u"com.apple.decmpfs",{1}}};fails([&]{ValidateAttributes(invalid);},"Compression metadata writable through ordinary attributes");
+    }
+    Memory base(32*1024*1024);Volume::Format(base,u"Recovery",true);uint32_t id;Attributes old{{u"user.Value",Bytes(6000,0x17)},{u"com.apple.system.Security",security()}};
+    {Volume v(base,true);id=v.Put(2,u"File",5003,723,pattern);v.SetAttributes(id,old);}
+    Attributes next{{u"user.Value",Bytes(79003,0x82)},{u"user.New",{1,2,0,4}},{u"com.apple.system.Security",security(1)}};
+    for(unsigned operation=0;operation<3;++operation)for(const char* phase:{"data-flushed","journal-data-flushed","journal-committed","home-flushed","journal-cleared"}){
+        Memory disk=base;{Volume v(disk,true);v.fault=[&](const char* at){if(!strcmp(at,phase))throw Error("Attribute interruption");};fails([&]{if(operation==0)v.SetAttributes(id,next);else if(operation==1)v.Remove(id);else v.Put(2,u"File",81,37,pattern,nullptr,true,nullptr,&next);},"Missing attribute fault boundary");}
+        auto unchanged=disk.bytes;Volume replay(disk,false);bool committed=strcmp(phase,"data-flushed")&&strcmp(phase,"journal-data-flushed");
+        if(operation==1&&committed){for(auto& e:replay.List())must(e.id!=id,"Committed attribute deletion not replayed");}
+        else{must(replay.GetAttributes(id)==(committed?next:old),"Attribute transaction recovered mixed state");verify(replay,id,0,operation==2&&committed?81:5003);verify(replay,id,1,operation==2&&committed?37:723);}
+        must(disk.bytes==unchanged,"Read-only attribute replay wrote image");
+    }
+    // Every reported payload/metadata write and flush failure must recover an
+    // entire old or new attribute set; ordinary forks must remain unchanged.
+    {Memory probe=base;unsigned writes=probe.writes,flushes=probe.flushes;{Volume v(probe,true);v.SetAttributes(id,next);}unsigned writeCount=probe.writes-writes,flushCount=probe.flushes-flushes;
+        for(bool flush:{false,true})for(unsigned step=0;step<(flush?flushCount:writeCount);++step){Memory disk=base;if(flush)disk.failFlush=int(flushes+step);else disk.failWrite=int(writes+step);
+            {Volume v(disk,true);fails([&]{v.SetAttributes(id,next);},"Injected attribute I/O fault was ignored");}disk.failWrite=disk.failFlush=-1;Volume recovered(disk,false);auto result=recovered.GetAttributes(id);must(result==old||result==next,"Attribute I/O failure recovered mixed metadata");verify(recovered,id,0,5003);verify(recovered,id,1,723);}}
+    // Incremental splits/merges and catalog flags, with two case-distinct names.
+    {Memory disk(64*1024*1024);Volume::Format(disk,u"Many attributes",true);Volume v(disk,true);auto id=v.Put(2,u"Many",1,0,pattern);Attributes a;
+        for(unsigned i=0;i<900;++i){auto name=u"user."+std::u16string(1,char16_t(0x100+i))+std::u16string(110,u'z');a[name]=Bytes(63,uint8_t(i));}v.SetAttributes(id,a);must(v.GetAttributes(id)==a,"Attribute B-tree splits lost records");
+        for(auto it=a.begin();it!=a.end();)if(uint16_t(it->first[5])%3)it=a.erase(it);else ++it;v.SetAttributes(id,a);Volume reopened(disk,true);must(reopened.GetAttributes(id)==a,"Attribute B-tree merges lost records");}
+    // Grow the attributes tree and the journal in one pending user transaction.
+    {Memory disk(32*1024*1024);Volume::Format(disk,u"Attribute journal growth",true);auto journalBytes=[&]{return Disk::U64(disk.bytes.data()+uint64_t(Disk::U32(disk.bytes.data()+1036))*4096+44);};auto initialJournal=journalBytes();uint32_t file;Attributes a;
+        for(unsigned i=0;i<1300;++i)a[u"user."+std::u16string(1,char16_t(0x100+i))+std::u16string(80,u'x')]=Bytes(1000,uint8_t(i));
+        {Volume v(disk,true);file=v.Put(2,u"File",21,13,pattern);v.SetAttributes(file,a);}
+        Volume v(disk,false);must(v.GetAttributes(file)==a&&journalBytes()>initialJournal,"Journal growth lost pending attributes or was not exercised");verify(v,file,0,21);verify(v,file,1,13);}
+    // Force more than eight payload extents, using first-fit holes in a full image.
+    {Memory disk(8*1024*1024);Volume::Format(disk,u"Fragmented attributes",false);uint32_t file;Attributes desired{{u"user.Fragmented",Bytes(70003,0x75)}};
+        {Volume v(disk,true);file=v.Put(2,u"File",0,0,pattern);v.SetAttributes(file,{{u"user.Small",{1}}});std::vector<uint32_t> holes;
+            for(unsigned i=0;i<40;++i)holes.push_back(v.Put(2,u"Block"+std::u16string(1,char16_t(0xe000+i)),4096,0,pattern));
+            v.Put(2,u"Filler",v.FreeBytes()-4*4096,0,pattern);for(unsigned i=0;i<holes.size();i+=2)v.Remove(holes[i]);
+            auto before=v.FreeBytes();v.SetAttributes(file,desired);must(v.GetAttributes(file)==desired,"Fragmented attribute write");v.SetAttributes(file,{});must(v.FreeBytes()==before,"Fragmented attribute deletion leaked extents");v.SetAttributes(file,desired);}
+        Volume v(disk,false);must(v.GetAttributes(file)==desired,"Fragmented attribute overflow extents failed after reopen");}
+    // Failure while writing new fork data must leave the committed old attributes.
+    {Memory disk=base;auto saved=disk.bytes;disk.failWrite=int(disk.writes);{Volume v(disk,true);fails([&]{v.SetAttributes(id,next);},"Attribute payload write error ignored");}disk.failWrite=-1;Volume v(disk,false);must(v.GetAttributes(id)==old,"Failed payload write lost old attributes");}
+    puts("PASS: HFS+/HFSX inline/fork attributes and Mac ACLs, case-sensitive keys, folders, overwrite preservation, deletion reclamation, split/merge, read-only access and journal crash recovery");
+}
 void stagedRangeValidation() {
     Memory disk(4096);
     Disk::View view(disk);
@@ -1048,6 +1105,7 @@ int wmain(int argc, wchar_t **argv) {
             puts("PASS: retained committed journal without applying home blocks");
             return 0;
         }
+        attributeTests();
         stagedRangeValidation();
         RunHfsPlusCompressionTests();
         RunIncrementalBTreeTests();

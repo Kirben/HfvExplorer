@@ -230,8 +230,8 @@ Same-volume writers remain mutually exclusive; this does not enable concurrent
 uncoordinated access to one filesystem.
 Folder creation, Properties reads, classic Finder-property edits, label/icon-position
 updates and native resource-fork imports also use independent background jobs.
-Properties windows are modeless and can outlive the submitting browser. Native
-formats retain their existing read-only Properties display; classic HFS retains
+Properties windows are modeless and can outlive the submitting browser. HFS+/HFSX
+and Windows Properties expose extended attributes and Mac ACL metadata; classic HFS retains
 its editable property fields. Applying an editor rejects stale metadata and
 combines a name change and attribute edits in one runtime undo transaction.
 Label and icon-position jobs patch only their own fields. Folder creation keeps
@@ -390,9 +390,31 @@ Current filesystem support
   backing files. Private inode directories are hidden. Broken links are marked
   unreadable; directory navigation returns to the visible parent. Creating,
   deleting or editing hard links/backing inodes remains unsupported.
-- Writing compressed files, creating compression and modifying entries with
-  extended attributes/ACLs remain unsupported. Existing attributes are preserved
-  during unrelated edits. Encryption and expanded timestamps are unsupported.
+- HFS+/HFSX extended attributes and Mac ACLs support reading, creation, replacement
+  and removal on ordinary files and folders. Rename and fork-only overwrite retain
+  existing metadata. Deletion reclaims fork-backed attributes. Attributes use binary,
+  case-sensitive keys even on case-insensitive volumes, with incremental B-tree
+  updates and the same internal journal/recovery path as other metadata.
+  Properties > Extended attributes lists named values; small values can be edited
+  as hexadecimal bytes, and Import/Export value handles larger binary values.
+  Set value stages an edit; Apply saves all staged changes. The editor rejects stale
+  snapshots and malformed com.apple.system.Security ACL records. Owner/group UUIDs,
+  ACE order, rights and inheritance flags are retained as Mac metadata; they are not
+  translated to or enforced as Windows permissions. ACL editing uses binary values,
+  not a Windows-style permissions or account-name editor.
+  Copies between HFS+/HFSX and Windows preserve attributes/ACLs in validated AppleDouble
+  ATTR extensions, including directory companions. New copied directories receive
+  source attributes; merging into an existing directory retains that directory's
+  attributes. Transfers to classic HFS or other destinations unable to preserve
+  attributes fail before copying/removing sources. Logical compressed-file exports
+  omit compression storage attributes; hard-link exports omit private link topology.
+  Limits: 64 MiB per attribute and 128 MiB per entry; HFS+ attribute names have at most
+  127 UTF-16 units. AppleDouble export also requires names within 127 UTF-8 bytes and
+  its attribute directory within 64 KiB. Existing larger attributes cannot be edited
+  through this implementation. Raw fork exports intentionally contain only that fork.
+- Writing compressed files, creating compression, encryption and expanded timestamps
+  remain unsupported. Private compression/encryption/link attributes cannot be
+  created through the ordinary attribute editor.
 - Catalog and extents B-trees are updated incrementally, including node splits,
   merges and linked allocation maps. There is no fixed catalog-record or
   single-header-map ceiling. Catalog entries are still loaded into memory.
@@ -409,6 +431,12 @@ Current filesystem support
 - MFS remains read-only in the common main browser. Its original MacRoman names
   (up to 255 bytes), file versions and both forks remain readable. Classic HFS
   CD/floppy access remains native and retains its existing media restrictions.
+
+`--verify-extended-attributes NEW_DIRECTORY` checks native/Windows metadata and
+ACL roundtrips, directory companions, unsupported destination rejection, actual
+modeless Properties editing, stale snapshots and binary value import/export. Core
+HFS+ tests cover inline/fork-backed values, fragmented attribute overflow extents,
+B-tree split/merge, journal enlargement and recovery at each commit boundary.
 
 Tests: .\build-x64.ps1 -Test runs the full suite, including real HFS+ reads and
 writes beyond 2 GiB in both forks of HFS+ and HFSX images. -TestHfsPlus runs
