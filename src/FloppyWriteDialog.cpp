@@ -26,8 +26,8 @@ void progress(const char* phase,unsigned completed,unsigned total,void* context)
  job.progress(p);
 }
 }
-std::function<Storage::Result(Storage::Job&)> MakeFloppyWriteJob(int drive,std::vector<BYTE> image,FloppyWriteApi* api){
- return [drive,image=std::move(image),api](Storage::Job& job)->Storage::Result {
+std::function<Storage::Result(Storage::Job&)> MakeFloppyWriteJob(int drive,std::vector<BYTE> image,FloppyWriteApi* api,CommandStorage::Reservation held){
+ auto work=[drive,image=std::move(image),api](Storage::Job& job)->Storage::Result {
 #ifdef HFV_TESTING
   if(!api)return {1,ERROR_NOT_SUPPORTED,"No simulated floppy writer was supplied."};
 #endif
@@ -42,12 +42,14 @@ std::function<Storage::Result(Storage::Job&)> MakeFloppyWriteJob(int drive,std::
   }
   Storage::Progress p;p.phase="Complete: all sectors written and verified";p.byteTransfer=true;p.scanning=false;p.bytes=p.processed=p.totalBytes=image.size();job.progress(p);return {};
  };
+ if(drive<0||drive>25)return work;auto key=VolumeCoord::DeviceKey(drive);return CommandStorage::Guard({{key,VolumeCoord::Mode::Write}},work,{key},held);
 }
 void WriteFloppyImage(CWnd* owner,int drive,const std::vector<BYTE>& image,const char* description,void(*release)(int,void*),void* context){
  if(!ValidateFloppyHfs(image)){AfxMessageBox("A validated 1.44 MB HFS image is required.");return;}
  CString question;question.Format("ERASE ALL DATA on floppy drive %c:?\r\n\r\n%s\r\n\r\nAll 1,474,560 bytes will be written and read back for verification.",'A'+drive,description);
  if(owner->MessageBox(question,"HFVExplorer",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
+ CommandStorage::Reservation held;try{held=std::make_shared<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Write}});}catch(const VolumeCoord::Busy&){owner->MessageBox(CommandStorage::Busy().message.c_str(),"HFVExplorer",MB_OK|MB_ICONINFORMATION);return;}
  if(release)release(drive,context);
- auto result=ShowStorageJob(MakeFloppyWriteJob(drive,image),"Writing floppy",false,true,false);
+ auto result=ShowStorageJob(MakeFloppyWriteJob(drive,image,nullptr,held),"Writing floppy",false,true,false);
  if(result.code)owner->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
 }

@@ -87,7 +87,7 @@ void COptionsPage7::OnCopt7BrowseVmacPath()
 {
   GetDlgItemText( IDC_COPT7_VMAC_PATH, m_vmac_path );
   CFileDialog dlg( TRUE, _T("EXE"), m_vmac_path,
-        OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+        OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
         _T("Program Files|*.exe|All Files|*.*||") );
   if(dlg.DoModal() == IDOK) {
     m_vmac_path = dlg.GetPathName();
@@ -99,7 +99,7 @@ void COptionsPage7::OnCopt7BrowseVmacSystemFilePath()
 {
   GetDlgItemText( IDC_COPT7_VMAC_SYSTEM_FILE_PATH, m_vmac_system_file_path );
   CFileDialog dlg( TRUE, _T("DSK"), m_vmac_system_file_path,
-        OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+        OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
         _T("HFS volume files|*.dsk;*.hf*|All Files|*.*||") );
   if(dlg.DoModal() == IDOK) {
     m_vmac_system_file_path = dlg.GetPathName();

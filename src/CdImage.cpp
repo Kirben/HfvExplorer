@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "CommandStorage.h"
 #include "CdImage.h"
 #include "DeviceWait.h"
 #include "ReadOnlyCd.h"
@@ -27,6 +28,7 @@ public:
   size_=CdImageTocBytes(toc);identity_=before;ready_=true;
   return true;
  }
+ void Close()override{ready_=false;cd_.Close();}
  unsigned long long Size() const override{return size_;}
  bool Verify(DWORD& generation) override {
   DWORD returned=0;generation=0;
@@ -49,7 +51,7 @@ Storage::Result failure(DWORD error,const std::string& reason,unsigned long long
 }
 }
 std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::string output,std::shared_ptr<MediaImageSource> source,std::string medium) {
- return [=](Storage::Job& job)->Storage::Result {
+ auto work=[=](Storage::Job& job)->Storage::Result {
   if(drive<0||drive>25)return failure(ERROR_INVALID_PARAMETER,"Invalid source drive");
   char destination[MAX_PATH];DWORD length=GetFullPathNameA(output.c_str(),MAX_PATH,destination,nullptr);
   if(!length||length>=MAX_PATH)return failure(ERROR_FILENAME_EXCED_RANGE,"The output path is too long or invalid");
@@ -75,6 +77,7 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   }
   if(job.cancelled())throw Storage::Cancelled();
   if(!source)return failure(ERROR_INVALID_PARAMETER,"No image source was supplied");
+  struct CloseSource{MediaImageSource* source;~CloseSource(){source->Close();}}close{source.get()};
   Storage::Progress p;p.path=destination;p.phase="Opening "+medium;p.byteTransfer=true;job.progress(p);
   std::string reason;
   if(!source->Open(drive,reason))return failure(source->Error(),reason);
@@ -113,6 +116,9 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   if(!MoveFileExA(file.temporary,destination,MOVEFILE_WRITE_THROUGH|(replace?MOVEFILE_REPLACE_EXISTING:0)))return failure(GetLastError(),"Could not publish the completed image",size);
   file.temporary[0]=0;p.phase=medium+" image saved";job.progress(p);return {};
  };
+ if(drive<0||drive>25)return work;
+ auto wide=VolumeCoord::Wide(output);auto changed=VolumeCoord::HostKey(wide);
+ return CommandStorage::Guard({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read},{changed,VolumeCoord::Mode::Write},{VolumeCoord::ImageKey(wide),VolumeCoord::Mode::Write}},work,{changed});
 }
 
 std::shared_ptr<CdImageSource> MakeNativeCdImageSource() {

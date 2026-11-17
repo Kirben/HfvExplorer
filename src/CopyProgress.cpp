@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "CommandStorage.h"
 #include "resource.h"
 #include "CopyProgress.h"
 #include "FileOperations.h"
@@ -99,7 +100,7 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sv,std::st
  return MakeCopyJob(std::move(sv),std::move(source),std::move(tv),std::move(target),directory,move,CaptureLegacyCopyOptions(mode));
 }
 std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolume,std::string source,std::string targetVolume,std::string target,int directory,int move,LegacyCopyOptions options) {
- return [=](Storage::Job& job)->Storage::Result {
+ auto work=[=](Storage::Job& job)->Storage::Result {
   if(job.cancelled())throw Storage::Cancelled();
   char mode=options.output,oldOut,oldIn;int oldAd;HFSIFACE_copy_settings(&oldOut,&oldIn,&oldAd);
   struct Settings{char out,in;int ad;~Settings(){HFSIFACE_restore_copy_settings(out,in,ad);}}settings{oldOut,oldIn,oldAd};
@@ -135,6 +136,9 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
   else if(result)outcome.message=copyError();
   return outcome;
  };
+ auto resource=[](const std::string& volume,const std::string& path){return macVolume(volume)?VolumeCoord::ImageKey(volume):VolumeCoord::HostKey(VolumeCoord::Wide(path));};
+ auto from=resource(sourceVolume,source),to=resource(targetVolume,target);
+ return CommandStorage::Guard({{from,move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read},{to,VolumeCoord::Mode::Write}},work,{to});
 }
 int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved,CWnd* owner) {
  *moved=0;FileOperations::Request request;request.kind=FileOperations::Kind::LegacyCopy;

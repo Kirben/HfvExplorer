@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "CommandStorage.h"
 #include "MainMacBrowser.h"
 #include "BrowserSession.h"
 #include "resource.h"
@@ -132,11 +133,11 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
                     L"dsk"))
         return;
     auto result = ShowStorageJob(
-        [&](Storage::Job &) {
+        CommandStorage::Guard(CommandStorage::ImageWrite(path),[&](Storage::Job &) {
             auto source = HfsPlus::CreateImage(path.c_str(), options.size);
             HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
             return Storage::Result{};
-        },
+        },{VolumeCoord::ImageKey(path),VolumeCoord::HostKey(path)}),
         "Format Mac image",false,false,false,parent);
     if (result.code) {
         AfxMessageBox(result.message.c_str());

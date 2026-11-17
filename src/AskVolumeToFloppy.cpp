@@ -69,7 +69,7 @@ void CAskVolumeToFloppy::OnVolnameBrowse()
 {
 	GetDlgItemText( IDC_VOLPATH, m_volname );
 	CFileDialog dlg( to_floppy, _T("DSK"), m_volname,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("DSK, HFV and HFx Files|*.dsk;*.hf*|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_volname = dlg.GetPathName();

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "CommandStorage.h"
 #include "CdBurn.h"
 #include <atlbase.h>
 #include <atlconv.h>
@@ -10,6 +11,7 @@
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"oleaut32.lib")
 #pragma comment(lib,"shlwapi.lib")
+std::vector<std::string> CdBurnBackend::Resources(const std::wstring& recorder){int n=WideCharToMultiByte(CP_UTF8,0,recorder.data(),int(recorder.size()),nullptr,0,nullptr,nullptr);std::string id(n,0);if(n)WideCharToMultiByte(CP_UTF8,0,recorder.data(),int(recorder.size()),&id[0],n,nullptr,nullptr);return {"recorder:"+id};}
 namespace {
 struct Apartment {HRESULT result=CoInitializeEx(nullptr,COINIT_MULTITHREADED);~Apartment(){if(SUCCEEDED(result))CoUninitialize();}};
 Storage::Result error(HRESULT hr,const char* phase,bool recording=false){
@@ -71,7 +73,13 @@ class NativeBurn : public CdBurnBackend {
  CComPtr<IDiscRecorder2> recorder_;CComPtr<IDiscFormat2Data> writer_;
  bool exclusive_=false;
 public:
- ~NativeBurn(){if(exclusive_)recorder_->ReleaseExclusiveAccess();}
+ ~NativeBurn(){Close();}
+ void Close()override{if(exclusive_){recorder_->ReleaseExclusiveAccess();exclusive_=false;}writer_.Release();recorder_.Release();}
+ std::vector<std::string> Resources(const std::wstring& id)override{
+  auto keys=CdBurnBackend::Resources(id);CComPtr<IDiscRecorder2> recorder;HRESULT hr=recorder.CoCreateInstance(__uuidof(MsftDiscRecorder2));if(FAILED(hr))throw std::runtime_error("Cannot identify recorder resources");hr=recorder->InitializeDiscRecorder(CComBSTR(id.c_str()));if(FAILED(hr))throw std::runtime_error("Cannot identify recorder resources");SAFEARRAY* paths=nullptr;hr=recorder->get_VolumePathNames(&paths);if(FAILED(hr))throw std::runtime_error("Cannot identify recorder volume paths");
+  if(paths){LONG first=0,last=-1;SafeArrayGetLBound(paths,1,&first);SafeArrayGetUBound(paths,1,&last);for(LONG i=first;i<=last;++i){CComVariant path;if(SUCCEEDED(SafeArrayGetElement(paths,&i,&path))&&path.vt==VT_BSTR&&path.bstrVal&&wcslen(path.bstrVal)>=2&&path.bstrVal[1]==L':')keys.push_back(VolumeCoord::DeviceKey(towupper(path.bstrVal[0])-L'A'));}SafeArrayDestroy(paths);}return keys;
+ }
+
  HRESULT Open(const std::wstring& id) override {
   HRESULT hr=recorder_.CoCreateInstance(__uuidof(MsftDiscRecorder2));if(FAILED(hr))return hr;
   hr=recorder_->InitializeDiscRecorder(CComBSTR(id.c_str()));if(FAILED(hr))return hr;
@@ -170,10 +178,11 @@ std::function<Storage::Result(Storage::Job&)> PrepareCdBurn(std::string image,st
  return [=](Storage::Job& job)->Storage::Result {
   Apartment com;if(FAILED(com.result))return error(com.result,"Initializing Windows recording");
   if(job.cancelled())throw Storage::Cancelled();
+  auto burner=backend(injected);if(!burner)return error(E_NOTIMPL,"Missing simulated recorder");auto resources=burner->Resources(recorder);std::vector<VolumeCoord::Access> accesses{{VolumeCoord::ImageKey(image),VolumeCoord::Mode::Read}};for(const auto& key:resources)accesses.push_back({key,VolumeCoord::Mode::Write});std::unique_ptr<VolumeCoord::OperationLease> reservation;try{reservation.reset(new VolumeCoord::OperationLease(accesses));}catch(const VolumeCoord::Busy&){return CommandStorage::Busy();}
+  struct CloseBurner{CdBurnBackend* backend;~CloseBurner(){backend->Close();}}close{burner.get()};
   Image file;HRESULT hr=file.Open(image);if(FAILED(hr))return error(hr,"Opening image (use a nonempty raw image, a multiple of 2048 bytes, closed to other writers)");
-  auto burner=backend(injected);if(!burner)return error(E_NOTIMPL,"Missing simulated recorder");
   auto result=validate(*burner,recorder,file.bytes);if(result.code)return result;
-  *output={image,recorder,file.bytes,file.identity};return {};
+  *output={image,recorder,file.bytes,file.identity,resources};return {};
  };
 }
 std::function<Storage::Result(Storage::Job&)> MakeCdBurnJob(CdBurnPlan plan,std::shared_ptr<CdBurnBackend> injected){
@@ -181,9 +190,10 @@ std::function<Storage::Result(Storage::Job&)> MakeCdBurnJob(CdBurnPlan plan,std:
   Apartment com;if(FAILED(com.result))return error(com.result,"Initializing Windows recording");
   if(job.cancelled())throw Storage::Cancelled();publish(job,"Checking source image");
   auto progress=job.progress();progress.path=plan.image;job.progress(progress);
+  auto burner=backend(injected);if(!burner)return error(E_NOTIMPL,"Missing simulated recorder");auto resources=burner->Resources(plan.recorder);if(!plan.resources.empty()&&resources!=plan.resources)return {1,ERROR_MEDIA_CHANGED,"Recorder volume paths changed after preparation. Select the recorder again."};std::vector<VolumeCoord::Access> accesses{{VolumeCoord::ImageKey(plan.image),VolumeCoord::Mode::Read}};for(const auto& key:resources)accesses.push_back({key,VolumeCoord::Mode::Write});std::unique_ptr<VolumeCoord::OperationLease> reservation;try{reservation.reset(new VolumeCoord::OperationLease(accesses));}catch(const VolumeCoord::Busy&){return CommandStorage::Busy();}
+  struct CloseBurner{CdBurnBackend* backend;~CloseBurner(){backend->Close();}}close{burner.get()};
   Image file;HRESULT hr=file.Open(plan.image);if(FAILED(hr))return error(hr,"Locking source image");
   if(file.bytes!=plan.bytes||!same(file.identity,plan.identity))return {1,ERROR_FILE_INVALID,"The source image changed after preparation. Select it again before burning."};
-  auto burner=backend(injected);if(!burner)return error(E_NOTIMPL,"Missing simulated recorder");
   publish(job,"Checking blank disc");auto result=validate(*burner,plan.recorder,file.bytes);if(result.code)return result;
   hr=burner->ConfigureVerifiedFinalizedWrite();if(FAILED(hr))return error(hr,"Enabling finalization and full burn verification");
   if(job.cancelled())throw Storage::Cancelled();publish(job,"Preparing to burn");

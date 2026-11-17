@@ -45,6 +45,7 @@ public:
     virtual uint64_t FreeBytes() const = 0;
     virtual void Reload() {}
     virtual void Close() {}
+    virtual void ReleaseMedia() {} // Explicit physical-media release, including idle clipboard references.
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}

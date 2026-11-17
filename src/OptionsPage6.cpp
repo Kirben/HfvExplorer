@@ -80,7 +80,7 @@ void COptionsPage6::OnCopt6BrowseExecutorWin32Path()
 		rest = "";
 	}
 	CFileDialog dlg( TRUE, _T("EXE"), s,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("Program Files|*.exe|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_executor_win32_path = dlg.GetPathName() + rest;

@@ -81,7 +81,7 @@ void COptionsPage5::OnCopt5BrowseExecutorDosPath()
 		rest = "";
 	}
 	CFileDialog dlg( TRUE, _T("EXE"), s,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("Program Files|*.exe|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_executor_dos_path = dlg.GetPathName() + rest;

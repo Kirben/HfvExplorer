@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "BrowserSession.h"
+#include "MainMacBrowser.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
@@ -54,6 +55,7 @@ const BrowserDirectory::Row* CHFVExplorerListView::BrowserRowAt(int row)const{
  auto key=LPARAM(GetListCtrl().GetItemData(row));auto found=m_browser_rows.find(key);
  return found==m_browser_rows.end()?nullptr:&found->second;
 }
+bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();return key.empty()||VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}});}
 bool CHFVExplorerListView::BrowserSelectionAllows(bool rename)const{
  bool selected=false;auto& list=GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){

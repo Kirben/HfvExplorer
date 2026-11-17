@@ -345,6 +345,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunPerVolumeCommandsTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-per-volume-commands"))ExitProcess(RunPerVolumeCommandsTest(__argv[2]));
  extern int RunBackgroundMetadataTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-background-metadata"))ExitProcess(RunBackgroundMetadataTest(__argv[2]));
  extern int RunBackgroundMutationsTest(const char*);
@@ -597,7 +599,7 @@ void CHFVExplorerApp::OnFileOpen()
  auto owner=m_main;
 
 	CFileDialog dlg( TRUE, _T("DSK"), name,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||"), owner );
 	if(dlg.DoModal() == IDOK) {
 		name = dlg.GetPathName();

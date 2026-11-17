@@ -169,6 +169,7 @@ public:
     std::wstring m_browser_folder_path;std::string m_browser_folder_identity;
     bool BrowserDirectoryWritable()const{return !m_directory_capabilities_known||m_directory_capabilities.create;}
     bool BrowserSelectionAllows(bool rename)const;
+    bool StorageSelectionAvailable(bool exclusive=false)const;
     int InsertBrowserRow(const BrowserDirectory::Row&,HTREEITEM);
     void SortBrowserRows(int column,bool ascending);
     const BrowserDirectory::Row* BrowserRowAt(int row) const;

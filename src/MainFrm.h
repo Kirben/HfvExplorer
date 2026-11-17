@@ -54,6 +54,7 @@ protected: // create from serialization only
 // Attributes
 public:
  BrowserSession& GetBrowserSession()const;
+ bool CommandAllowed(UINT)const;
 	void OnChildRegistration(WPARAM wParam, LPARAM lParam);
 
 // Operations

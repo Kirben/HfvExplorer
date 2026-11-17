@@ -28,8 +28,8 @@ MediaControlTarget MacMediaControlTarget(const char* path){
  if(!readonly_media_path(path))return {};
  int floppy=physical_floppy_path(path);return {floppy>=0?floppy:toupper((unsigned char)path[0])-'A',UINT(floppy>=0?DRIVE_REMOVABLE:DRIVE_CDROM)};
 }
-std::function<Storage::Result(Storage::Job&)> MakeMediaControlJob(MediaControlTarget target,bool reload,MediaControlApi* api,std::function<void()> release){
- return [=](Storage::Job& job)->Storage::Result {
+std::function<Storage::Result(Storage::Job&)> MakeMediaControlJob(MediaControlTarget target,bool reload,MediaControlApi* api,std::function<void()> release,CommandStorage::Reservation held){
+ auto work=[=](Storage::Job& job)->Storage::Result {
   if(!CanControlMedia(target))return failure(ERROR_BAD_DEVICE,"drive selection",reload);
 #ifdef HFV_TESTING
   if(!api)return failure(ERROR_NOT_SUPPORTED,"missing simulated device",reload);
@@ -61,4 +61,5 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaControlJob(MediaControlTa
   if(!os->Close(handle))return failure(GetLastError(),"closing the drive after the request completed",reload);
   return {};
  };
+ if(!CanControlMedia(target))return work;auto key=VolumeCoord::DeviceKey(target.drive);return CommandStorage::Guard({{key,VolumeCoord::Mode::Write}},work,{key},held);
 }

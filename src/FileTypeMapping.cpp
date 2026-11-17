@@ -455,7 +455,7 @@ CString CFileTypeMapping::ask_save_fname( void )
 {
 	CString path, s;
 	CFileDialog dlg( FALSE, _T("FTM"), s,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("File type mappings (*.ftm)|*.ftm|All Files|*.*||") );
 	if (dlg.DoModal() == IDOK) {
 		path = dlg.GetPathName();
@@ -467,7 +467,7 @@ CString CFileTypeMapping::ask_open_fname( void )
 {
 	CString path, s;
 	CFileDialog dlg( TRUE, _T("FTM"), s,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("File type mappings (*.ftm)|*.ftm|All Files|*.*||") );
 	if (dlg.DoModal() == IDOK) {
 		path = dlg.GetPathName();

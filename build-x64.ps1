@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $commands=Join-Path $hfsPlusDirectory 'per-volume-commands'
+ $commandsTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-per-volume-commands',('"'+$commands+'"')) -WindowStyle Hidden -PassThru
+ if(!$commandsTest.WaitForExit(60000)){$commandsTest.Kill();throw 'Per-volume command tests timed out.'}
+ Get-Content (Join-Path $commands 'per-volume-commands-report.txt')
+ if($commandsTest.ExitCode -ne 0){throw "Per-volume command tests failed; retained $commands"}
  $metadata=Join-Path $hfsPlusDirectory 'background-metadata'
  $metadataTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-background-metadata',('"'+$metadata+'"')) -WindowStyle Hidden -PassThru
  if(!$metadataTest.WaitForExit(60000)){$metadataTest.Kill();throw 'Background metadata tests timed out.'}
