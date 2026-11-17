@@ -179,8 +179,15 @@ without keeping completed jobs' volume handles alive. Classic HFS rows carry
 captured full paths so operations do not reconstruct paths from a later tree
 selection.
 
-Ordinary copying uses the non-modal copy pool described above. Rename, delete
-and other synchronous storage commands retain their existing progress/wait UI.
+Copying, renaming and deleting use non-modal background jobs. Browsing unrelated
+volumes and Windows folders remains available while they run. Rename/delete
+progress has one activity bar, a Cancel button and operation-specific errors.
+Displayed entries refresh from the filesystem after completion, including partial
+deletions. Cancel stops before the next mutation; completed deletions are not undone
+and an atomic rename already in progress may finish.
+`--verify-background-mutations NEW_DIRECTORY` tests slow rename/delete, cancellation,
+failures and partial deletion, owner closure, volume exclusion, refresh, captured
+Windows paths/identities, long names/resource companions and classic HFS commands.
 Same-volume writers remain mutually exclusive; this does not enable concurrent
 uncoordinated access to one filesystem.
 New-folder creation and formatting keep their existing worker paths.

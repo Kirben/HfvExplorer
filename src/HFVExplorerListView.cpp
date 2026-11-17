@@ -1260,6 +1260,12 @@ int CHFVExplorerListView::do_rename(
 	if(!ds || get_lparam_type(ds) == LIST_SPEC) return(0);
 	bool macRename=get_lparam_type(ds)==LIST_HFS;
 	if(!HfvValidRenameLeaf(old_name,macRename)||!HfvValidRenameLeaf(new_name,macRename))return 0;
+ if(BackgroundCopies::Enabled()){
+  if(m_cl->GetItemText(item,0)!=old_name)return 0;
+  try{return GetBrowserSession().MacBrowser().RenameItem(item,BrowserDirectory::FromAnsi(new_name))?1:0;}
+  catch(const std::exception& error){if(!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return 0;}
+ }
+
 
  CString cs;if(!get_path(item,cs)||cs.GetLength()>=sizeof(old_path))return 0;
  strcpy(old_path,(LPCSTR)cs);
@@ -3060,7 +3066,6 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 #pragma optimize("g",off)
 void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 {
- if(BackgroundCopies::Active())return;
  if(GetBrowserSession().MacBrowser().Delete(confirm!=FALSE))return;
  if(!BrowserSelectionAllows(false))return;
 	int inx = -1, count = 0;
@@ -3095,6 +3100,10 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 		}
 	}
 
+ if(BackgroundCopies::Enabled()){
+  auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);if(selection.items.empty())return;
+  FileOperations::Request request;request.kind=FileOperations::Kind::Delete;request.sources=std::move(selection.items);BackgroundCopies::Start({std::move(request)},GetBrowserSession().Owner(),true);return;
+ }
  FileOperations::Request request;request.kind=FileOperations::Kind::Delete;
  for(int row=-1;(row=m_cl->GetNextItem(row,LVNI_SELECTED))>=0;){
   auto binding=reinterpret_cast<list_lparam_struct*>(m_cl->GetItemData(row));if(!binding||binding->type==LIST_SPEC)continue;
@@ -3192,7 +3201,9 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
   CMenu menu;menu.CreatePopupMenu();bool selected=m_cl->GetNextItem(-1,LVNI_SELECTED)>=0;
   menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"Copy");menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_EDIT_CUT,"Cut");
   menu.AppendMenu(MF_STRING|(BrowserTransfers::Any()&&BrowserDirectoryWritable()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"Paste");
-  auto command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,GetBrowserSession().Owner());if(command)GetBrowserSession().Owner()->SendMessage(WM_COMMAND,command);return;
+  menu.AppendMenu(MF_STRING|(selected&&m_cl->GetSelectedCount()==1&&BrowserSelectionAllows(true)?MF_ENABLED:MF_GRAYED),ID_EDIT_LABEL,"Rename");
+  menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_OWN_DELETE,"Delete");
+  auto command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,GetBrowserSession().Owner());if(command==ID_OWN_DELETE)try_delete_selected_items(TRUE);else if(command)GetBrowserSession().Owner()->SendMessage(WM_COMMAND,command);return;
  }
 	CMenu cm, cpop, cpop2, cpop3;
 	int inx, hit = 0;
@@ -4530,26 +4541,24 @@ void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 
 void CHFVExplorerListView::OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult) 
 {
- if(BackgroundCopies::Active()){*pResult=0;return;}
 	LV_DISPINFO* pDispInfo = (LV_DISPINFO*)pNMHDR;
 
 	*pResult = 0;
 
-	if(m_editing_item == pDispInfo->item.iItem) {
+	int editing=m_editing_item;m_editing_item=-1;
+	if(editing == pDispInfo->item.iItem) {
 		if(pDispInfo->item.pszText) {
 			if(!*pDispInfo->item.pszText) {
 				strcpy(pDispInfo->item.pszText,m_editing_item_name);
 			} else {
 				if(strcmp(m_editing_item_name,pDispInfo->item.pszText) != 0) {
-					char lname[50];
-					strncpy(lname,pDispInfo->item.pszText,HFS_MAX_FLEN);
-					lname[HFS_MAX_FLEN] = 0;
+
 					if(do_rename( 
-						m_editing_item, 
+						editing,
 						m_editing_item_name,
-						lname, 1))
+						pDispInfo->item.pszText, 1))
 					{
-						*pResult = 1;
+						*pResult = BackgroundCopies::Enabled()?0:1;
 					}
 				}
 			}
@@ -4559,7 +4568,7 @@ void CHFVExplorerListView::OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult)
 
 void CHFVExplorerListView::OnBeginlabeledit(NMHDR* pNMHDR, LRESULT* pResult) 
 {
- if(BackgroundCopies::Active()||GetBrowserSession().MacBrowser().Active()||!BrowserSelectionAllows(true)){*pResult=1;return;}
+ if(GetBrowserSession().MacBrowser().Active()||!BrowserSelectionAllows(true)){*pResult=1;return;}
 	LV_DISPINFO* pDispInfo = (LV_DISPINFO*)pNMHDR;
 
 	m_editing_item = pDispInfo->item.iItem;

@@ -76,7 +76,7 @@ std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string 
 bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage::Job &, bool move = false);
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> &,
               Volume &target,uint32_t parent,Storage::Job &);
-void RemoveTree(Volume &, uint32_t id, Storage::Job &);
+void RemoveTree(Volume &, uint32_t id, Storage::Job &,bool deletionProgress=false);
 std::string Snapshot(Volume &,uint32_t id,Storage::Job &,bool requireRemovable=false);
 std::wstring Wide(const std::u16string &);
 std::u16string U16(const std::wstring &);

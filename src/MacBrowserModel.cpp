@@ -200,17 +200,20 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
     catch(const DetectedVolumeError&){throw;}
     catch(const std::exception&){return {};}
 }
-void RemoveTree(Volume &v, uint32_t id, Storage::Job &job) {
+void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress) {
     Check(id != 2 && v.Writable(), "Cannot delete the volume root or a read-only item");
-    std::set<uint32_t> parents; Storage::Progress p; auto plan = Scan(v, id, job, p, parents, 0);
+    std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0);
     std::function<void(const Planned &)> remove = [&](const Planned &n) {
         if (job.cancelled()) throw Storage::Cancelled();
         // A directory hard link is a link, not ownership of its backing children.
         Check(!n.entry.hardLink, "Deleting hard links is not supported");
         for (const auto &c : n.children) remove(c);
+        if(job.cancelled())throw Storage::Cancelled();
+        if(deletionProgress){p.path=BrowserPresentation::Utf8(n.entry.name);p.scanning=false;job.progress(p);}
         v.Remove(n.entry.id);
+        if(deletionProgress){++p.files;job.progress(p);}
     };
-    std::function<void(const Planned &)> validate=[&](const Planned& n){v.ValidateRemoval(n.entry.id);for(const auto& c:n.children)validate(c);};
+    std::function<void(const Planned &)> validate=[&](const Planned& n){if(job.cancelled())throw Storage::Cancelled();v.ValidateRemoval(n.entry.id);for(const auto& c:n.children)validate(c);};
     validate(plan);
     remove(plan);
 }

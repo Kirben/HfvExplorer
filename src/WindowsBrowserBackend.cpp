@@ -62,6 +62,7 @@ return out;
   if(companions&&!folder){auto normalized=MacBrowser::DescribeWindowsFile(MacBrowser::Wide(BrowserDirectory::FromAnsi(path.c_str())));
    normalized.name=row.entry.name;row.entry=std::move(normalized);
   }
+  if(row.entry.identity.empty()){try{row.entry.identity=MacBrowser::DescribeWindowsFile(VolumeCoord::Wide(path)).identity;}catch(const std::exception&){/* Unidentifiable entries are revalidated before a mutation is queued. */}}
   row.icon16=small;row.icon32=large;
   if(own&&(small||large)){row.ownedIcons=std::make_shared<BrowserDirectory::OwnedIcons>();row.ownedIcons->small=small;row.ownedIcons->large=large;}row.capabilities.create=row.capabilities.rename=row.capabilities.remove=writable;
   snapshot.rows.push_back(std::move(row));

@@ -82,7 +82,8 @@ struct TaskbarEntry{HWND owner;TaskbarProgress::Value progress;};
 std::map<const void*,TaskbarEntry> taskbarEntries; // UI thread only.
 class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
- bool modeless_=false,completed_=false;
+ bool modeless_=false,completed_=false,mutation_=false;
+ std::string operation_="Copy";
  std::function<bool()> advance_;
  std::function<void()> finished_,cancelled_;
  CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false,cancellable_=false;
@@ -128,7 +129,7 @@ class JobDialog : public CDialog {
   else{GetDlgItemText(IDC_CP_FILE,old);if(old!=path)SetDlgItemText(IDC_CP_FILE,path);}
   GetDlgItemText(IDC_CP_STATUS,old);if(old!=status)SetDlgItemText(IDC_CP_STATUS,status);
   GetDlgItemText(IDC_CP_PHASE,old);if(old!=progress.phase.c_str())SetDlgItemText(IDC_CP_PHASE,progress.phase.c_str());
-  bool waiting=progress.scanning || (!progress.totalBytes&&!progress.totalFiles);
+  bool waiting=mutation_||progress.scanning || (!progress.totalBytes&&!progress.totalFiles);
   CProgressCtrl* overall=(CProgressCtrl*)GetDlgItem(IDC_CP_BAR);
   if(waiting!=waiting_){
    if(waiting){overall->ModifyStyle(0,PBS_MARQUEE);overall->SendMessage(PBM_SETMARQUEE,TRUE,40);}
@@ -147,6 +148,7 @@ class JobDialog : public CDialog {
  }
  DWORD started_=GetTickCount();
 public:
+ void Operation(const char* operation){operation_=operation;mutation_=operation_!="Copy";}
  void Planning(){job_=std::make_shared<Storage::Job>();Storage::Progress p;p.phase="Choose a copy mode";job_->progress(p);job_->finish({});}
  HWND ProgressOwner()const{return owner_;}
  void ProgressOwner(HWND window){
@@ -182,7 +184,7 @@ public:
   auto menu=GetSystemMenu(FALSE);if(menu)menu->EnableMenuItem(SC_CLOSE,MF_BYCOMMAND|((modeless_||cancellable_)?MF_ENABLED:MF_GRAYED));
   if(modeless_){
    for(HWND child=::GetWindow(m_hWnd,GW_CHILD);child;child=::GetWindow(child,GW_HWNDNEXT)){
-    char text[128]{};::GetWindowTextA(child,text,ARRAYSIZE(text));if(!strcmp(text,"Please wait until the operation finishes."))::SetWindowTextA(child,"You can keep browsing while files are copied.");
+    char text[128]{};::GetWindowTextA(child,text,ARRAYSIZE(text));if(!strcmp(text,"Please wait until the operation finishes."))::SetWindowTextA(child,mutation_?"You can keep browsing while this operation runs.":"You can keep browsing while files are copied.");
    }
   }
   if(!storageOnly_)GetDlgItem(IDC_CP_BAR)->SendMessage(PBM_SETMARQUEE,TRUE,40);
@@ -234,7 +236,7 @@ public:
      KillTimer(1);state(TBPF_NOPROGRESS);completed_=true;DialogClose::SetKind(m_hWnd,DialogClose::Kind::Dialog);if(finished_)finished_();
      auto result=job_->result();auto p=job_->progress();
      if(!result.code&&!p.skipped){DestroyWindow();return 0;}
-     SetDlgItemText(IDC_CP_PHASE,result.error==ERROR_CANCELLED?"Copy cancelled":result.code?"Copy failed":"Copy finished with skipped files");
+     auto status=operation_+(result.error==ERROR_CANCELLED?" cancelled":result.code?" failed":" finished with skipped files");SetDlgItemText(IDC_CP_PHASE,status.c_str());
      auto text=BrowserPresentation::FromUtf8(result.message);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,text.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
     }
     KillTimer(1);if(keepWindow_)EndModalLoop(IDOK);else{state(TBPF_NOPROGRESS);PrepareToClose();EndDialog(IDOK);}}
@@ -424,6 +426,10 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
  if(requests.empty())return false;
  batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->finished&&!b->dialog->GetSafeHwnd();}),batches.end());
  auto batch=std::unique_ptr<Batch>(new Batch);auto ptr=batch.get();batch->requests=std::move(requests);batch->completed=std::move(completed);
+ auto kind=batch->requests.front().kind;bool mutation=kind==FileOperations::Kind::Rename||kind==FileOperations::Kind::Delete;
+ const char* title=kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":"Copying files";
+ const char* operation=kind==FileOperations::Kind::Rename?"Rename":kind==FileOperations::Kind::Delete?"Delete":"Copy";
+ if(mutation)single=true;
  ++active;
  try{
   bool hidden=false;
@@ -431,7 +437,8 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
   hidden=owner&&!owner->IsWindowVisible();
 #endif
   // Desktop owner: never disables or binds the lifetime to a browser frame.
-  batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),"Copying files",hidden,CWnd::GetDesktopWindow(),false,false,single,true,true));
+  batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),title,hidden,CWnd::GetDesktopWindow(),false,false,single,true,true));
+  batch->dialog->Operation(operation);
   batch->dialog->ProgressOwner(owner?owner->GetSafeHwnd():nullptr);
   batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{ptr->Finish();},[ptr]{ptr->cancelled=true;});
   if(!batch->dialog->Create(single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background copy progress");

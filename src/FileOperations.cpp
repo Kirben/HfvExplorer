@@ -121,23 +121,23 @@ Storage::Result CopyRequest(const Request& request,Storage::Job& job,Completion&
 }
 Storage::Result Mutate(const Request& request,Storage::Job& job,Completion& completion){
  Check(!request.sources.empty(),"Select a file or folder");if(request.kind==Kind::Rename)Check(request.sources.size()==1,"Rename requires one selected entry");
- Storage::Progress progress;progress.phase=request.kind==Kind::Rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(request.sources.size());progress.utf8=true;job.progress(progress);
+ Storage::Progress progress;progress.fileCopy=false;progress.phase=request.kind==Kind::Rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(request.sources.size());progress.utf8=true;job.progress(progress);
  HFSIFACE_get_dir_flush();int silent=HFSIFACE_silencer(1);HFSIFACE_delete_cancel(CancelClassic,&job);struct Silent{int previous;~Silent(){HFSIFACE_delete_cancel(nullptr,nullptr);HFSIFACE_silencer(previous);}}scope{silent};
- for(auto& item:request.sources){Cancel(job);
-  if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Check(e.id!=2,"Cannot rename or delete a volume root");
+ for(auto& item:request.sources){Cancel(job);progress.path=item.volume?Utf8(item.expectedName):item.type==LIST_FAT?Utf8(U16(item.windowsPath)):Utf8(Ansi(item.classicPath));job.progress(progress);
+  if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.id!=2,"Cannot rename or delete a volume root");
    if(request.kind==Kind::Rename){Check(!request.target.volume||request.target.volume==source.first,"Rename must stay within the same volume");Check(source.first->Supports().rename&&!e.protectedFile&&!e.hardLink&&!e.compressed,"The selected entry cannot be renamed");Mark(completion,item);source.first->Rename(source.second,request.target.id,request.name);}
-   else{Check(source.first->Supports().remove,"The selected entry cannot be deleted");Mark(completion,item);RemoveTree(*source.first,source.second,job);}
+   else{Check(source.first->Supports().remove,"The selected entry cannot be deleted");Mark(completion,item);RemoveTree(*source.first,source.second,job,true);}
   }else if(item.type==LIST_FAT){
+   auto source=Source(item,true);Cancel(job);source.first->Close();
    std::string path; // ANSI legacy path is retained verbatim.
    int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.windowsPath.c_str(),-1,nullptr,0,nullptr,nullptr);std::vector<char> converted(n);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.windowsPath.c_str(),-1,converted.data(),n,nullptr,&lost);Check(n&&!lost,"Windows path cannot be represented by the legacy backend");path=converted.data();Check(Absolute(path),"Use an absolute Windows path");
    Mark(completion,item);
-   if(request.kind==Kind::Rename){auto slash=path.find_last_of('\\');auto leaf=Wide(request.name);BOOL bad=FALSE;char name[MAX_PATH];int count=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,leaf.c_str(),-1,name,ARRAYSIZE(name),nullptr,&bad);Check(count&&!bad&&HfvValidRenameLeaf(name,false),"Invalid Windows filename");auto target=path.substr(0,slash+1)+name;
-    if(!MoveFileExA(path.c_str(),target.c_str(),0))throw Failure(GetLastError(),"Cannot rename the selected Windows entry");
+   if(request.kind==Kind::Rename){auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,request.name);
    }else if(!DeleteHostSelectionJob(CString(path.c_str()),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }else{
-   Check(item.type==LIST_HFS&&!item.classicImage.empty(),"Invalid classic HFS source");auto disk=WritableFloppy(item);auto image=item.classicImage,path=item.classicPath;hfsdirent entry{};
+   Check(item.type==LIST_HFS&&!item.classicImage.empty(),"Invalid classic HFS source");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.classicImage)==item.expectedResource,"The selected source image was replaced");auto disk=WritableFloppy(item);auto image=item.classicImage,path=item.classicPath;hfsdirent entry{};
    if(HFSIFACE_get_properties(&image[0],&path[0],&entry))throw HfsPlus::Error(ClassicError("Cannot read the selected HFS entry"));
-   if(item.expectedCatalogId)Check(uint32_t(entry.cnid)==item.expectedCatalogId,"The selected classic HFS entry was replaced");Check(entry.cnid!=2,"Cannot rename or delete a volume root");
+   Cancel(job);if(item.expectedCatalogId)Check(uint32_t(entry.cnid)==item.expectedCatalogId,"The selected classic HFS entry was replaced");Check(entry.cnid!=2,"Cannot rename or delete a volume root");
    Mark(completion,item);int code;
    if(request.kind==Kind::Rename){Check(!request.checkNameLock||!(entry.fdflags&HFS_FNDR_NAMELOCKED),"Remove the Finder name lock before renaming this entry");auto wide=Wide(request.name);char leaf[32];BOOL lost=FALSE;int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,wide.c_str(),-1,leaf,ARRAYSIZE(leaf),nullptr,&lost);Check(n&&!lost&&HfvValidRenameLeaf(leaf,true),"Invalid classic HFS filename");auto to=path.substr(0,path.find_last_of(':')+1)+leaf;code=HFSIFACE_rename(&image[0],&path[0],&to[0]);}
    else code=item.directory?HFSIFACE_rmdir(&image[0],&path[0]):HFSIFACE_delete(&image[0],&path[0]);

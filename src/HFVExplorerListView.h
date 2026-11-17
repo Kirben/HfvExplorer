@@ -325,6 +325,13 @@ protected:
 	afx_msg void OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
 	afx_msg void OnEndlabeledit(NMHDR* pNMHDR, LRESULT* pResult);
+#ifdef HFV_TESTING
+public:
+ void TestDeleteSelection(){try_delete_selected_items(FALSE);}
+ LRESULT TestCommitLabel(int row,const char* name){LV_DISPINFO edit{};edit.item.iItem=row;LRESULT result=0;OnBeginlabeledit(&edit.hdr,&result);if(result)return -1;edit.item.pszText=const_cast<char*>(name);OnEndlabeledit(&edit.hdr,&result);return result;}
+protected:
+#endif
+
 	afx_msg void OnBeginlabeledit(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags);
 	afx_msg void OnColumnclick(NMHDR* pNMHDR, LRESULT* pResult);
