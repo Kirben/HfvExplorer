@@ -345,6 +345,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunBackgroundMetadataTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-background-metadata"))ExitProcess(RunBackgroundMetadataTest(__argv[2]));
  extern int RunBackgroundMutationsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-background-mutations"))ExitProcess(RunBackgroundMutationsTest(__argv[2]));
  extern int RunBackgroundWindowCloseTest(const char*);

@@ -24,6 +24,7 @@ public:
     bool Refresh();
     bool RefreshForChange(const std::string&);
     bool NewFolder();
+    bool CreateFolder(const FileOperations::Location&,const std::u16string&);
     bool Rename();
     bool RenameItem(int row,const std::u16string& name);
     FileOperations::Location CaptureItem(int row);

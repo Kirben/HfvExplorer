@@ -64,7 +64,7 @@ int RunDeviceWaitGuiTest(const char* report) {
    check(storageUiTest.enabledAfter && storageUiTest.dialogClosed && storageUiTest.ownerRestoredBeforeClose && IsWindowEnabled(owner.GetSafeHwnd())&&!StorageUi::busy(),"Owner must be restored before modal dialog closes");
    check((failure==0)==(result.code==0),"Error not delivered");
   }
-  storageUiTest={};storageUiTest.hiddenNative=true;storageUiTest.explanationDelayMs=150;
+  storageUiTest={};storageUiTest.hiddenNative=true;storageUiTest.explanationDelayMs=60000; // Keep initialization/scheduling delays out of the short-wait assertion.
   {
    StorageAction action;
    check(HfvDeviceWait::invoke([]{Sleep(100);return TRUE;})!=FALSE,"First session read failed");
@@ -73,6 +73,7 @@ int RunDeviceWaitGuiTest(const char* report) {
    fprintf(out,"Spinner rendering: style=%08lX visible=%d painted_pixels=%u size=%dx%d frames_changed=%d\n",spinnerStyle,spinnerVisible,spinnerPixels,spinnerWidth,spinnerHeight,spinnerFrameChanged);fflush(out);
    check(spinnerVisible&&spinnerPixels>=8&&spinnerFrameChanged,"Storage spinner must paint visible pixels and change rendered frames");
    check(storageUiTest.explanationShows==0&&storageUiTest.storageMessage=="Waiting for storage...","Short wait must retain fixed status without explanation");
+   storageUiTest.explanationDelayMs=0; // Exercise the elapsed-delay branch on the next timer tick.
    {
     StorageAction nested;
     BOOL read=HfvDeviceWait::invoke([]{Sleep(240);SetLastError(ERROR_NOT_READY);return FALSE;});
@@ -84,6 +85,7 @@ int RunDeviceWaitGuiTest(const char* report) {
    check(storageUiTest.dialogCreations==1&&!owner.IsWindowEnabled(),"Repeated reads opened multiple wait windows");
   }
   check(storageUiTest.dialogCreations==1&&owner.IsWindowEnabled()&&storageUiTest.dialogClosed&&storageUiTest.ownerRestoredBeforeClose&&!StorageUi::state().sessionOpen&&!StorageUi::busy(),"Single wait window must restore owner before closing at action completion");
+  storageUiTest.explanationDelayMs=60000;
   {
    StorageAction action;
    check(HfvDeviceWait::invoke([]{Sleep(80);return TRUE;})!=FALSE,"Next action read failed");

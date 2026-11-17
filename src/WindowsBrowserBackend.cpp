@@ -27,6 +27,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int v
  BrowserDirectory::ObserveRead(directory);
  if(BackgroundCopies::Active()){
   BrowserDirectory::Snapshot out;out.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));out.revision=VolumeCoord::Revision(out.resourceKey);out.capabilitiesKnown=true;
+  out.folderPath=VolumeCoord::Wide(directory);try{out.folderIdentity=MacBrowser::DescribeWindowsFile(out.folderPath).identity;}catch(const std::exception&){}
   char root[]={directory[0],':','\\',0};out.capabilities.create=out.capabilities.rename=out.capabilities.remove=GetDriveTypeA(root)!=DRIVE_CDROM;
   std::string prefix=directory;if(!prefix.empty()&&prefix.back()!='\\')prefix+='\\';
   Find find;WIN32_FIND_DATAA info{};find.handle=FindFirstFileA((prefix+"*.*").c_str(),&info);
@@ -45,6 +46,7 @@ return out;
  }
  LegacyEngine::Scope engine;
  BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ snapshot.folderPath=VolumeCoord::Wide(directory);try{snapshot.folderIdentity=MacBrowser::DescribeWindowsFile(snapshot.folderPath).identity;}catch(const std::exception&){}
  std::string prefix=directory;if(prefix.empty())throw std::runtime_error("Select a Windows folder");if(prefix.back()!='\\')prefix+='\\';
  bool afp=is_afp_directory(const_cast<char*>(directory))!=0;
  char root[]={directory[0],':',char(92),0};bool writable=GetDriveTypeA(root)!=DRIVE_CDROM;
@@ -106,6 +108,7 @@ return out;
 void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& snapshot,bool listing){
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());auto tree=GetBrowserSession().Tree();auto list=GetBrowserSession().List();
  BrowserPresentation::Batch treeBatch(tree->GetTreeCtrl().m_hWnd),listBatch(list->GetListCtrl().m_hWnd,true);
+ if(listing){list->m_browser_folder_path=snapshot.folderPath;list->m_browser_folder_identity=snapshot.folderIdentity;}
  if(listing&&snapshot.capabilitiesKnown)list->SetBrowserCapabilities(snapshot.capabilities);
  HTREEITEM root=tree->GetTreeCtrl().GetSelectedItem();
  for(const auto& row:snapshot.rows){

@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $metadata=Join-Path $hfsPlusDirectory 'background-metadata'
+ $metadataTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-background-metadata',('"'+$metadata+'"')) -WindowStyle Hidden -PassThru
+ if(!$metadataTest.WaitForExit(60000)){$metadataTest.Kill();throw 'Background metadata tests timed out.'}
+ Get-Content (Join-Path $metadata 'background-metadata-report.txt')
+ if($metadataTest.ExitCode -ne 0){throw "Background metadata tests failed; retained $metadata"}
  $mutations=Join-Path $hfsPlusDirectory 'background-mutations'
  $mutationsTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-background-mutations',('"'+$mutations+'"')) -WindowStyle Hidden -PassThru
  if(!$mutationsTest.WaitForExit(60000)){$mutationsTest.Kill();throw 'Background rename/delete tests timed out.'}

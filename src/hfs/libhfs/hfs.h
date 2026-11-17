@@ -1,3 +1,5 @@
+#ifndef HFV_LIBHFS_PUBLIC_H
+#define HFV_LIBHFS_PUBLIC_H
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -152,6 +154,8 @@ int hfs_close(hfsfile *);
 int hfs_stat(hfsvol *, char *, hfsdirent *);
 int hfs_fstat(hfsfile *, hfsdirent *);
 int hfs_setattr(hfsvol *, char *, hfsdirent *);
+/* Rename and edit attributes under one runtime undo transaction. */
+int hfs_editattrs(hfsvol *, char *, char *, hfsdirent *);
 int hfs_fsetattr(hfsfile *, hfsdirent *);
 
 int hfs_mkdir(hfsvol *, char *);
@@ -161,3 +165,5 @@ int hfs_create(hfsvol *, char *, char *, char *);
 int hfs_delete(hfsvol *, char *);
 
 int hfs_rename(hfsvol *, char *, char *);
+
+#endif /* HFV_LIBHFS_PUBLIC_H */

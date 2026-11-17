@@ -2115,6 +2115,18 @@ int hfs_rmdir(hfsvol *vol,char *path) {
  if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
  result=hfs_rmdir_impl(vol,path);return b_end_mutation(vol,result);
 }
+int hfs_editattrs(hfsvol *vol,char *path,char *destination,hfsdirent *entry) {
+ int result;hfsdirent source,target;
+ if(mutation_source(&vol,path)<0)return -1;
+ if(hfs_stat(vol,path,&source)<0)return -1;
+ /* This is a leaf rename, never an implicit move into an existing folder. */
+ if(strcmp(path,destination)&&hfs_stat(vol,destination,&target)==0&&target.cnid!=source.cnid){ERROR(EEXIST,"Properties rename destination already exists");return -1;}
+ if(b_begin_mutation(vol)<0)return -1;
+ result=strcmp(path,destination)?hfs_rename_impl(vol,path,destination):0;
+ if(result==0)result=hfs_setattr_impl(vol,destination,entry);
+ return b_end_mutation(vol,result);
+}
+
 int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
  int result;
  if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;

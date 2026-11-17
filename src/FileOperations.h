@@ -3,6 +3,9 @@
 #include "MacBrowserModel.h"
 #include "CopyProgress.h"
 #include "ftypes.h"
+extern "C" {
+#include "hfs/libhfs/hfs.h"
+}
 namespace FileOperations {
 // Owning backend references or absolute paths; no window, document, row or tree handles.
 struct Location {
@@ -16,12 +19,16 @@ struct Location {
  std::string expectedIdentity,expectedResource;
  std::u16string expectedName;
 };
-enum class Kind {Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource};
+enum class Kind {Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties};
+enum class MetadataPatch {All,Label,Position};
 struct Request {
  Kind kind=Kind::Copy;
  std::vector<Location> sources;
  Location target;
  std::u16string name;
+ MetadataPatch patch=MetadataPatch::All;
+ hfsdirent originalProperties{},properties{};
+ int label=0;short x=0,y=0;
  bool checkNameLock=true;
  bool background=false;
  bool askMode=false;
@@ -40,6 +47,7 @@ struct Change {
 struct Completion {
  bool complete=false;
  unsigned completed=0;
+ MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false,writable=false;std::string description;
  // Conservatively includes resources that may have changed on a partial failure.
  std::vector<Change> affected;
 };
