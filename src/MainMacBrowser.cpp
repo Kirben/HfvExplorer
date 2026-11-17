@@ -216,7 +216,7 @@ bool MainMacBrowser::CanCreateFolder()const{int i;uint32_t id;return Writable()&
 bool MainMacBrowser::SelectionWritable()const{
     if(!Writable())return false;auto& list=session_.List()->GetListCtrl();bool selected=false;
     for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));
-        if(!p||p->type!=LIST_MAC)continue;selected=true;for(auto& e:state_->shown)if(e.id==uint32_t(p->id)&&(e.protectedFile||e.compressed||e.hardLink||!e.readError.empty()))return false;}
+        if(!p||p->type!=LIST_MAC)continue;selected=true;for(auto& e:state_->shown)if(e.id==uint32_t(p->id)&&(e.protectedFile||e.hardLink||!e.readError.empty()))return false;}
     return selected;
 }
 bool MainMacBrowser::CanExport()const{

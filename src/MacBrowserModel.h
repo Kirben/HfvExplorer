@@ -52,6 +52,8 @@ public:
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
+    virtual bool SupportsCompression()const{return false;}
+    virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}
     virtual bool SupportsAttributes()const{return false;}
     virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
     virtual void SetAttributes(uint32_t,const HfsPlus::Attributes&){throw HfsPlus::Error("This format cannot store extended attributes or Mac ACLs");}

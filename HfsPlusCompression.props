@@ -4,6 +4,8 @@
 <ClCompile Include="$(MSBuildThisFileDirectory)src\HfsPlusCompression.cpp" />
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\adler32.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\crc32.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\deflate.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\trees.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inflate.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inffast.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inftrees.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>

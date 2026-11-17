@@ -110,6 +110,43 @@ Bytes Expand(const Bytes &input, size_t expected, uint32_t type) {
     return output;
 }
 } // namespace
+namespace {
+void PutLittle(uint8_t* p,uint64_t n,unsigned bytes=4){for(unsigned i=0;i<bytes;++i)p[i]=uint8_t(n>>(8*i));}
+Bytes DeflateUnit(const Bytes& input){
+ z_stream stream{};stream.zalloc=ZAlloc;stream.zfree=ZFree;
+ Check(deflateInit(&stream,6)==Z_OK,"Cannot initialize zlib encoder");
+ struct End{z_stream* p;~End(){deflateEnd(p);}}end{&stream};
+ Bytes output(131072);stream.next_in=const_cast<Bytef*>(input.data());stream.avail_in=uInt(input.size());stream.next_out=output.data();stream.avail_out=uInt(output.size());
+ Check(deflate(&stream,Z_FINISH)==Z_STREAM_END&&stream.total_in==input.size(),"Incomplete zlib encoding");output.resize(size_t(stream.total_out));
+ if(output.size()>=input.size()+1){output=input;output.insert(output.begin(),0xff);}return output;
+}
+uint32_t UnitChecksum(const Bytes& bytes){return uint32_t(crc32(0,bytes.data(),uInt(bytes.size())));}
+}
+Bytes ZlibCompression::Encode(uint64_t index){Bytes plain(size_t((std::min)(uint64_t(65536),size_-index*65536)));if(!plain.empty())reader_(index*65536,plain.data(),plain.size());return DeflateUnit(plain);}
+ZlibCompression::ZlibCompression(uint64_t size,Reader reader):reader_(std::move(reader)),size_(size){
+ Check(size<=INT64_MAX,"Compressed logical size exceeds Apple limit");
+ attribute_.resize(16);PutLittle(attribute_.data(),0x636d7066);PutLittle(attribute_.data()+8,size,8);
+ auto count=size/65536+(size%65536!=0);Bytes first=Encode(0);
+ // Apple's on-disk decmpfs xattr limit includes the 16-byte header.
+ if(size<=65536&&first.size()+16<=3802){PutLittle(attribute_.data()+4,3);attribute_.insert(attribute_.end(),first.begin(),first.end());return;}
+ Check(count&&(count<=(UINT32_MAX-310ULL)/8),"Compressed resource block table exceeds the format limit");
+ uint64_t offset=264+count*8;
+ for(uint64_t i=0;i<count;++i){auto payload=i?Encode(i):std::move(first);Check(offset+payload.size()+50<=UINT32_MAX,"Compressed resource fork exceeds its 32-bit offset limit");units_.push_back({uint32_t(offset),uint32_t(payload.size()),UnitChecksum(payload)});offset+=payload.size();}
+ PutLittle(attribute_.data()+4,4);resourceSize_=offset+50;prefix_.resize(size_t(264+count*8),0);
+ Disk::P32(prefix_.data(),256);Disk::P32(prefix_.data()+4,uint32_t(offset));Disk::P32(prefix_.data()+8,uint32_t(offset-256));Disk::P32(prefix_.data()+12,50);Disk::P32(prefix_.data()+256,uint32_t(offset-260));PutLittle(prefix_.data()+260,count);
+ for(size_t i=0;i<units_.size();++i){PutLittle(prefix_.data()+264+i*8,units_[i].offset-260);PutLittle(prefix_.data()+268+i*8,units_[i].length);}
+ // One unnamed 'cmpf' resource (ID 1); data offset is relative to the data area.
+ footer_.resize(50,0);Disk::P16(footer_.data()+24,28);Disk::P16(footer_.data()+26,50);memcpy(footer_.data()+30,"cmpf",4);Disk::P16(footer_.data()+36,10);Disk::P16(footer_.data()+38,1);Disk::P16(footer_.data()+40,0xffff);
+}
+void ZlibCompression::ReadResource(uint64_t at,void* output,size_t n){
+ Disk::Check(Disk::Range(at,n,resourceSize_),"Read beyond encoded compressed resource");auto p=static_cast<uint8_t*>(output);
+ while(n){const Bytes* data=nullptr;size_t skip=0;
+  if(at<prefix_.size()){data=&prefix_;skip=size_t(at);}
+  else if(at>=resourceSize_-footer_.size()){data=&footer_;skip=size_t(at-(resourceSize_-footer_.size()));}
+  else{auto i=std::upper_bound(units_.begin(),units_.end(),at,[](uint64_t offset,const Unit& u){return offset<u.offset;});Disk::Check(i!=units_.begin(),"Missing encoded unit");--i;auto index=uint64_t(i-units_.begin());if(cachedIndex_!=index){auto bytes=Encode(index);Disk::Check(bytes.size()==i->length&&UnitChecksum(bytes)==i->checksum,"Compression input changed while encoding");cached_=std::move(bytes);cachedIndex_=index;}data=&cached_;skip=size_t(at-i->offset);}
+  Disk::Check(skip<data->size(),"Invalid encoded unit range");auto part=(std::min)(n,data->size()-skip);memcpy(p,data->data()+skip,part);p+=part;at+=part;n-=part;
+ }
+}
 Compression::Compression(Bytes attribute, uint64_t resourceSize, Reader resource)
     : attribute_(std::move(attribute)), resource_(std::move(resource)), resourceSize_(resourceSize) {
     Check(attribute_.size() >= 16 && LE32(attribute_.data()) == 0x636d7066,

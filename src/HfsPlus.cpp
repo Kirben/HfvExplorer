@@ -618,8 +618,8 @@ struct Volume::Impl {
         bool any=false,security=false;for(const auto& r:attributeRecords)if(U32(r.key.data()+4)==id){any=true;security|=AttributeName(r)==u"com.apple.system.Security";}
         auto record=CatalogRecord(id);auto flags=U16(record->value.data()+2);P16(record->value.data()+2,uint16_t((flags&~12u)|(any?4:0)|(security?8:0)));
     }
-    void ReplaceAttributes(uint32_t id,const Attributes& desired) {
-        ValidateAttributes(desired);LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
+    void ReplaceAttributes(uint32_t id,const Attributes& desired,bool compressionWriter=false) {
+        auto ordinary=desired;if(compressionWriter){auto i=ordinary.find(u"com.apple.decmpfs");if(i!=ordinary.end()){Check(i->second.size()<=131088,"Oversized decmpfs attribute");ordinary.erase(i);}}ValidateAttributes(ordinary);uint64_t attributeBytes=0;for(const auto& a:desired){attributeBytes+=a.second.size();Check(attributeBytes<=128*1024*1024,"Extended attributes including compression exceed the per-entry limit");}LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
         std::vector<Fork> freed;
         for(const auto& value:old){auto now=desired.find(value.first);if(now!=desired.end()&&now->second==value.second)continue;
             auto storage=AttributeStorage(id,value.first);if(!storage.inlineValue)freed.push_back(storage.fork);}
@@ -962,7 +962,6 @@ struct Volume::Impl {
         auto r = CatalogRecord(e.id);
         Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & 6) && !(r->value[41] & 6),
               "HFS+ entry is locked");
-        Check(!(r->value[41] & 0x20), "Compressed HFS+ files cannot be modified");
         Check(!e.directory || !(U16(r->value.data() + 2) & 0x60),
               "Directory hard-link topology cannot be modified");
         if (!e.directory) {
@@ -971,11 +970,12 @@ struct Volume::Impl {
             Check((U16(r->value.data() + 42) & 0170000) == 0100000,
                   "Only ordinary HFS+ files can be modified");
         }
-        // Compression, encryption and hard-link metadata still require their
+        if(e.compressed)(void)Compressed(e.id); // Reject missing/malformed compression metadata before mutation.
+        // Encryption and hard-link metadata still require their
         // dedicated writers. Ordinary attributes and ACLs are preserved by ID.
         LoadAttributes();
         for(const auto& a:attributeRecords)if(U32(a.key.data()+4)==e.id){auto name=AttributeName(a);
-            Check(name!=u"com.apple.decmpfs"&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink","Entry uses unsupported compression/encryption/link metadata");}
+            Check((name!=u"com.apple.decmpfs"||e.compressed)&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink","Entry uses unsupported compression/encryption/link metadata");}
     }
     uint64_t GrowMetadata(Fork &f, uint64_t minimum, uint32_t id) {
         uint64_t target = ((minimum + bs - 1) / bs) * bs;
@@ -1290,6 +1290,7 @@ struct Volume::Impl {
             return;
         } else
             journal.Commit(fault);
+        compressedReaders.clear();
         Snapshot();
     }
 };
@@ -1379,7 +1380,7 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name, cons
 }
 uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
-                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes) {
+                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes, CompressionMode compression) {
     auto &p = *p_;
     p.Guard();
     p.Parent(parent);
@@ -1398,10 +1399,21 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
         old[0] = e.forks[0];
         old[1] = e.forks[1];
     }
+    auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
+    if(attributes)desired=*attributes;
+    std::unique_ptr<ZlibCompression> encoded;
+    if(compression==CompressionMode::Zlib||(compression==CompressionMode::Preserve&&e.compressed)){
+        encoded.reset(new ZlibCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);}));
+        if(resourceSize&&encoded->UsesResource()){
+            Check(compression!=CompressionMode::Zlib,"Compression needs the resource fork; this file has a genuine resource fork. Decompress it or retain it uncompressed.");
+            encoded.reset(); // A normal overwrite must preserve both incoming forks.
+        }
+    }
+    if(encoded)desired[u"com.apple.decmpfs"]=encoded->Attribute();
     if (finder)
         e.finder = *finder;
     try {
-        uint64_t sizes[] = {dataSize, resourceSize};
+        uint64_t sizes[] = {encoded?0:dataSize, encoded&&encoded->UsesResource()?encoded->ResourceSize():resourceSize};
         Bytes buffer(1024 * 1024, 0);
         for (unsigned f = 0; f < 2; ++f) {
             e.forks[f] = p.Allocate(sizes[f]);
@@ -1412,8 +1424,10 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                     size_t n = size_t((std::min)(bytes, uint64_t(buffer.size()))),
                            actual = size_t((std::min)(uint64_t(n), sizes[f] - logical));
                     memset(buffer.data(), 0, n);
-                    if (actual)
-                        read(f, logical, buffer.data(), actual);
+                    if (actual){
+                        if(encoded&&encoded->UsesResource())encoded->ReadResource(logical,buffer.data(),actual);
+                        else read(f, logical, buffer.data(), actual);
+                    }
                     p.view.Write(physical, buffer.data(), n);
                     physical += n;
                     bytes -= n;
@@ -1433,7 +1447,9 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
             auto record=p.CatalogRecord(e.id);P32(record->value.data()+12,e.created);P32(record->value.data()+16,e.modified);
             p.entries[e.id]=e;
         }
-        if(attributes)p.ReplaceAttributes(e.id,*attributes);
+        e.compressed=bool(encoded);p.entries[e.id]=e;
+        auto flags=p.CatalogRecord(e.id);flags->value[41]=uint8_t((flags->value[41]&~0x20)|(encoded?0x20:0));
+        p.ReplaceAttributes(e.id,desired,true);
         p.Overflow(e.id, 0, e.forks[0]);
         p.Overflow(e.id, 1, e.forks[1]);
         p.Commit(fault);
@@ -1443,12 +1459,19 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
         throw;
     }
 }
+void Volume::SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress){
+    auto& p=*p_;p.Guard();auto raw=p.Get(id);p.Mutable(raw);Check(!raw.directory,"Select an ordinary file for compression");
+    auto e=Stat(id);Check(e.readError.empty(),"Cannot convert an unreadable compressed file");
+    if(compressed==e.compressed)return;
+    uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint32_t,2> dates{e.created,e.modified};
+    Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,&dates,nullptr,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed);
+}
 Attributes Volume::GetAttributes(uint32_t id) const {
     p_->source.CheckMedia();Check(p_->usable,"Reopen HFS+ image after error");return p_->GetAttributes(p_->Resolve(id));
 }
 void Volume::SetAttributes(uint32_t id,const Attributes& attributes) {
     auto& p=*p_;p.Guard();p.Mutable(p.Get(id));ValidateAttributes(attributes);
-    try{p.ReplaceAttributes(id,attributes);p.Commit(fault);}catch(...){p.usable=false;throw;}
+    try{auto desired=attributes;if(p.Get(id).compressed)desired[u"com.apple.decmpfs"]=p.Attribute(id,u"com.apple.decmpfs");p.ReplaceAttributes(id,desired,true);p.Commit(fault);}catch(...){p.usable=false;throw;}
 }
 void ValidateAttributes(const Attributes& attributes) {
     uint64_t total=0;

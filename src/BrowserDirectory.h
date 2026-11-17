@@ -57,7 +57,7 @@ inline uint64_t Bytes(const MacBrowser::Entry& e) {
 inline unsigned Label(const MacBrowser::Entry& e) { return ((unsigned(e.finder[8])<<8|e.finder[9])>>1)&7; }
 inline Row FromMac(const MacBrowser::Entry& e,int volume,MacBrowser::Capabilities caps) {
     Row row;row.entry=e;row.volume=volume;row.id=e.id;row.parent=e.parent;row.capabilities=caps;
-    if(e.protectedFile||e.compressed||e.hardLink||!e.readError.empty())row.capabilities.create=row.capabilities.rename=row.capabilities.remove=false;
+    if(e.protectedFile||e.hardLink||!e.readError.empty())row.capabilities.create=row.capabilities.rename=row.capabilities.remove=false;
     if(e.datesValid){row.created=MacTime(e.created);row.modified=MacTime(e.modified);}return row;
 }
 // All formats sort typed metadata, never formatted sizes or date strings.

@@ -421,9 +421,22 @@ Current filesystem support
   127 UTF-16 units. AppleDouble export also requires names within 127 UTF-8 bytes and
   its attribute directory within 64 KiB. Existing larger attributes cannot be edited
   through this implementation. Raw fork exports intentionally contain only that fork.
-- Writing compressed files, creating compression, encryption and expanded timestamps
-  remain unsupported. Private compression/encryption/link attributes cannot be
-  created through the ordinary attribute editor.
+- HFS+/HFSX compressed files can be overwritten, renamed, deleted and have their
+  ordinary attributes/ACLs edited. Overwrites re-encode logical contents as zlib
+  decmpfs, regardless of the original supported compression method. Properties
+  offers background Compress/Decompress actions on writable ordinary files.
+  New compression uses type 3 inline data (3802-byte attribute limit) or type 4
+  resource storage with independently encoded 64 KiB units. Incompressible units
+  use the stored-data marker; compression is not guaranteed to save space.
+  Finder information, dates and ordinary attributes/ACLs survive conversion.
+  A genuine resource fork is preserved: explicit compression is refused if it
+  needs that fork, while an ordinary overwrite/import uses uncompressed storage
+  when necessary to retain both forks. Conversion uses copy-on-write allocation
+  and the existing journal commit/replay path. It requires temporary free space;
+  type-4 compressed resource offsets remain limited to 32 bits. No other new
+  compression encoders are included. Encryption and expanded timestamps remain
+  unsupported; private compression/encryption/link attributes cannot be created
+  through the ordinary attribute editor.
 - Catalog and extents B-trees are updated incrementally, including node splits,
   merges and linked allocation maps. There is no fixed catalog-record or
   single-header-map ceiling. Catalog entries are still loaded into memory.
@@ -484,8 +497,8 @@ older Windows execution tests remain pending. No custom storage driver is used.
 HFS+ implementation reference: Apple's HFS Plus Volume Format (TN1150),
 https://developer.apple.com/library/archive/technotes/tn/tn1150.html
 Unicode normalization uses Unicode 3.2 data; see licenses/Unicode-DFS.txt.
-No third-party filesystem engine is included. The static compression decoders
-are zlib 1.4, Apple's BSD-licensed LZFSE/LZVN sources and MIT-licensed
+No third-party filesystem engine is included. The static compression codecs
+are zlib 1.4 (inflate/deflate), Apple's BSD-licensed LZFSE/LZVN sources and MIT-licensed
 libzbitmap; see src/compression
 and licenses for provenance. Compression tests include retained macOS-written
 fixtures and compare exports against macOS readback hashes.

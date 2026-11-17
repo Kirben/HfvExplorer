@@ -1,8 +1,8 @@
 These are codec sources only; the HFS+/HFSX filesystem implementation remains
-HFVExplorer's own code. All decoders are linked statically, without a new DLL
-or Windows API requirement. We do not build encoders or gzip/file APIs.
+HFVExplorer's own code. All codecs are linked statically, without a new DLL
+or Windows API requirement. The zlib deflate encoder is also built for decmpfs creation; gzip/file APIs are excluded.
 
-- `zlib/`: the inflate subset of zlib 1.4, upstream commit
+- `zlib/`: the inflate/deflate subset of zlib 1.4, upstream commit
   `99623ef7097352da7993ba614161fd6a311e046e`. Source: https://github.com/madler/zlib/tree/v1.4.
   Built with Z_SOLO and Z_PREFIX; the caller supplies bounded allocation.
   License: zlib/LICENSE and ../../licenses/zlib.txt.
@@ -25,3 +25,11 @@ Compressed-file output is limited to the declared logical length and one
 may finish at a sync-flush boundary; resource-based LZVN units may contain
 padding after their end-of-stream opcode. Inline streams require completion
 and exhausted input. Unsupported decmpfs methods are reported explicitly.
+
+HFVExplorer independently constructs type-3/type-4 decmpfs output. Inline values
+respect the 3802-byte header-inclusive limit. Type-4 output has 64 KiB zlib units
+(or 0xFF stored units), mixed-endian block tables and a single unnamed cmpf
+resource map. A planning pass bounds the 32-bit resource offsets; a second pass
+checks each encoded unit's length and checksum before publication. No APSL
+implementation was incorporated; the existing GPL-compatible zlib license
+covers the additional unmodified encoder files from the same pinned commit.
