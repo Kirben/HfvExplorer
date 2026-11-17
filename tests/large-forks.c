@@ -15,7 +15,7 @@
 
 // Transfers link the production translation modules. These services belong to
 // the GUI and are unused by the raw/MacBinary paths exercised in this target.
-int crlf_translation=0;
+HFV_THREAD_LOCAL int crlf_translation=0;
 void mac_to_pc_charset(unsigned char* s) {(void)s;}
 void pc_to_mac_charset(unsigned char* s) {(void)s;}
 int get_apple_double_type_creator(char* n,char* t,char* c,unsigned long* o,unsigned long* l) {

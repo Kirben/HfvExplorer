@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "FileOperations.h"
+#include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
 #include "DirectFloppy.h"
@@ -16,8 +17,6 @@ void HFSIFACE_get_dir_flush(void);
 }
 extern int DeleteHostSelectionJob(const CString&,bool,Storage::Job*);
 namespace FileOperations {
-namespace {std::mutex legacyEngine;}
-LegacyGuard::LegacyGuard():lock_(legacyEngine,std::try_to_lock){if(!lock_.owns_lock())throw VolumeCoord::Busy();}
 struct Operation::State {mutable std::mutex mutex;Completion completion;};
 struct Registry {
  struct Entry{std::weak_ptr<Operation::State> state;std::weak_ptr<Storage::Job> job;};
@@ -170,7 +169,7 @@ Storage::Result ReplaceResource(const Request& request,Storage::Job& job,Complet
 std::string Resource(const Location& item){if(item.volume)return item.volume->ResourceKey();if(item.type==LIST_FAT)return VolumeCoord::HostKey(item.windowsPath);return VolumeCoord::ImageKey(item.classicImage);}
 std::vector<VolumeCoord::Access> Resources(const Request& request){
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
- if(request.kind==Kind::LegacyCopy){auto key=[](const std::string& volume,const std::string& path){return Absolute(path)?VolumeCoord::HostKey(VolumeCoord::Wide(path)):VolumeCoord::ImageKey(volume);};access.push_back({key(request.sourceVolume,request.sourcePath),(request.move||request.background)?Mode::Write:Mode::Read});access.push_back({key(request.targetVolume,request.targetPath),Mode::Write});return access;}
+ if(request.kind==Kind::LegacyCopy){auto key=[](const std::string& volume,const std::string& path){return Absolute(path)?VolumeCoord::HostKey(VolumeCoord::Wide(path)):VolumeCoord::ImageKey(volume);};access.push_back({key(request.sourceVolume,request.sourcePath),(request.move||(request.background&&!Absolute(request.sourcePath)))?Mode::Write:Mode::Read});access.push_back({key(request.targetVolume,request.targetPath),Mode::Write});return access;}
  for(auto& source:request.sources)access.push_back({Resource(source),(request.kind==Kind::Rename||request.kind==Kind::Delete||source.cut||(request.background&&source.type!=LIST_FAT))?Mode::Write:Mode::Read});
  if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork)access.push_back({Resource(request.target),Mode::Write});return access;
 }
@@ -206,11 +205,9 @@ Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->m
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
  auto& queue=values->background?Storage::copyWorker():Storage::worker();
- auto job=queue.submit([state,values](Storage::Job& job){Completion completion;Storage::Result result;
-  try{Cancel(job);std::unique_lock<std::mutex> engine(legacyEngine,std::defer_lock);
-   if(values->background){while(!engine.try_lock()){Cancel(job);Sleep(10);}}else if(!engine.try_lock())throw VolumeCoord::Busy();
-   std::unique_ptr<VolumeCoord::Lease> access;
-   for(;;){Cancel(job);try{access.reset(new VolumeCoord::Lease(Resources(*values)));break;}catch(const VolumeCoord::Busy&){if(!values->background)throw;Sleep(10);}}
+ auto access=std::make_shared<std::unique_ptr<VolumeCoord::Lease>>();auto resources=Resources(*values);
+ auto job=queue.submit([state,values,access](Storage::Job& job){Completion completion;Storage::Result result;
+  try{Cancel(job);if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
    result=Execute(*values,job,completion);
   }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
@@ -218,8 +215,11 @@ Operation Submit(Request request){
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
   std::vector<std::string> changed;
   for(auto& item:completion.affected){try{if(auto volume=item.volume.lock())changed.push_back(volume->ResourceKey());else if(item.type==LIST_FAT)changed.push_back(VolumeCoord::HostKey(item.windowsPath));else if(!item.classicImage.empty())changed.push_back(VolumeCoord::ImageKey(item.classicImage));}catch(...){/* Keep the operation result if a removed path cannot be identified. */}}
-  VolumeCoord::Changed(changed);
+  access->reset();VolumeCoord::Changed(changed);
   {std::lock_guard<std::mutex> lock(state->mutex);state->completion=std::move(completion);}return result;
+ },[access,resources,values](const std::shared_ptr<Storage::Job>& job){
+  if(job->cancelled())return true;
+  try{access->reset(new VolumeCoord::Lease(resources));return true;}catch(const VolumeCoord::Busy&){return !values->background;}
  });
  {auto& registry=Registry::Get();std::lock_guard<std::mutex> lock(registry.mutex);
   registry.entries.erase(std::remove_if(registry.entries.begin(),registry.entries.end(),[](const Registry::Entry& e){auto job=e.job.lock();return !job||job->done();}),registry.entries.end());

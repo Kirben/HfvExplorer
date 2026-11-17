@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $independent=Join-Path $hfsPlusDirectory 'independent-storage'
+ $independentTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-independent-storage',('"'+$independent+'"')) -WindowStyle Hidden -PassThru
+ if(!$independentTest.WaitForExit(60000)){$independentTest.Kill();throw 'Independent storage tests timed out.'}
+ Get-Content (Join-Path $independent 'independent-storage-report.txt')
+ if($independentTest.ExitCode -ne 0){throw "Independent storage tests failed; retained $independent"}
  $floppyCopies=Join-Path $hfsPlusDirectory 'floppy-copy-regressions'
  $floppyCopiesTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-floppy-copy-regressions',('"'+$floppyCopies+'"')) -WindowStyle Hidden -PassThru
  if(!$floppyCopiesTest.WaitForExit(60000)){$floppyCopiesTest.Kill();throw 'Floppy copy regression tests timed out.'}

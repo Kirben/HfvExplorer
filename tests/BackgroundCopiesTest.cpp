@@ -12,17 +12,25 @@
 #include "utils.h"
 #include "FloppyWriter.h"
 #include "DirectFloppy.h"
+#include "CopyProgress.h"
+#include "LegacyEngine.h"
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
+#include "hfs/binhex.h"
+int b_begin_mutation(hfsvol*);
+int b_end_mutation(hfsvol*,int);
 }
 #include "FakeFloppy.h"
 #include "ReadOnlyCdBackend.h"
 #include "floppy.h"
 #include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#include "TaskbarProgress.h"
 #include <cstdio>
 namespace {
-CString host;
+CString host,startupImage;
 const char* testStage="initial";
 bool Junction(const CString& link,const CString& target){
  if(!CreateDirectoryA(link,nullptr))return false;HANDLE h=CreateFileA(link,GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);if(h==INVALID_HANDLE_VALUE)return false;
@@ -37,7 +45,7 @@ void Pump(){MSG m;while(PeekMessage(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_Q
 template<class F>void Until(F ready){DWORD end=GetTickCount()+15000;while(!ready()&&LONG(end-GetTickCount())>0){Pump();Sleep(5);}Pump();Check(ready(),(std::string("background copy timed out: ")+testStage).c_str());}
 class CopyDoc:public CHFVExplorerDoc{
  DECLARE_DYNCREATE(CopyDoc)
-public:CopyDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=host[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=host;}
+public:CopyDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=host[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=host;if(!startupImage.IsEmpty())insert_volume(startupImage,0,0,0,0);}
 };
 IMPLEMENT_DYNCREATE(CopyDoc,CHFVExplorerDoc)
 class CopyFrame:public CMainFrame{
@@ -221,5 +229,76 @@ int RunFloppyCopyRegressionsTest(const char* directory){
   fprintf(report,"PASS: real hidden browser clipboard Paste, original fast copy, verified Cut with supported/unsupported flush, device readback before source deletion, cancellation during verification, queued-media replacement rejection, generic native Cut failure retention, native and same-floppy folder moves with resource forks, mode-cancel-after-Skip cleanup, last-window close during mode selection, physical-source export/delete finalization, source/Cut retention across nine injected device faults, unlock/lease cleanup. Simulated media only; no hardware or computer control.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s; last result: %s\n",e.what(),BackgroundCopies::LastResult().message.c_str());result=1;}
  if(device)SetEvent(device->release);BackgroundCopies::CancelAll();FileOperations::CancelPending();ShutdownStorageUi();BackgroundCopies::enabled=false;BrowserTransfers::Clear();while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);if(attached){readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}device.reset();fclose(report);return result;
+}
+
+int RunIndependentStorageTest(const char* directory){
+ if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\independent-storage-report.txt","w");if(!report)return 2;int result=0;
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;
+ BackgroundCopies::enabled=true;Gate stalled;std::vector<FileOperations::Operation> jobs;
+ try{
+  auto summary=TaskbarProgress::Combine({{false,1,4},{false,3,4}});Check(summary.active&&!summary.waiting&&summary.done*2==summary.total,"parallel taskbar progress must combine jobs");summary=TaskbarProgress::Combine({{false,3,4},{true,0,0}});Check(summary.active&&summary.waiting,"queued/scanning job must keep taskbar progress active");summary=TaskbarProgress::Combine({{false,3,4}});Check(summary.active&&summary.done*4==summary.total*3,"finishing one job must not clear another's taskbar progress");Check(!TaskbarProgress::Combine({}).active,"last taskbar job must clear progress");
+  auto classic=[&](const char* leaf){CString path=host+"\\"+leaf;{CFile f;Check(f.Open(path,CFile::modeCreate|CFile::modeWrite),"create classic concurrency fixture");f.SetLength(8*1024*1024);}char label[]="SameLabel";Check(hfs_format(const_cast<char*>((LPCSTR)path),0,label)==0,"format classic concurrency fixture");return path;};
+  auto aPath=classic("a.hfv"),bPath=classic("b.hfv"),cPath=classic("c.hfv");
+  {auto a=MacBrowser::OpenClassic((LPCSTR)aPath,"SameLabel:",true);Put(*a,u"Input");a->Close();auto b=MacBrowser::OpenClassic((LPCSTR)bPath,"SameLabel:",true);Put(*b,u"Embedded");b->Close();}
+  // Build a real converter fixture; concurrent raw and MacBinary imports must
+  // retain distinct settings, callbacks, replacement paths and mount tables.
+  CString binary=host+"\\fixture.bin";Storage::Job fixture;auto outcome=MakeCopyJob((LPCSTR)bPath,"SameLabel:Embedded",(LPCSTR)host,(LPCSTR)binary,0,0,'m')(fixture);Check(!outcome.code,"build MacBinary concurrency fixture");
+  CString input=host+"\\Input";{CFile f;Check(f.Open(input,CFile::modeCreate|CFile::modeWrite),"create raw import fixture");f.Write("RAW CONTENT",11);}
+  auto request=[&](const CString& path,const CString& source,char mode){FileOperations::Request r;r.kind=FileOperations::Kind::LegacyCopy;r.background=true;r.sourceVolume=(LPCSTR)host;r.sourcePath=(LPCSTR)source;r.targetVolume=(LPCSTR)path;r.targetPath="SameLabel:";r.conversion.input=mode;r.conversion.output='r';r.conversion.appledouble=false;return r;};
+  jobs.push_back(FileOperations::Submit(request(aPath,input,'r')));Until([&]{return !jobs.front().Job()->conflict().empty();});
+  // More conflicting requests than worker slots must not starve a later
+  // independent volume. Cancel them while queued, without touching that media.
+  for(int n=0;n<7;++n)jobs.push_back(FileOperations::Submit(request(aPath,input,'r')));
+  jobs.push_back(FileOperations::Submit(request(cPath,binary,'m')));auto independent=jobs.back().Job();Until([&]{return independent->done();});Check(!independent->result().code&&!jobs.front().Job()->done()&&jobs.front().Job()->conflict().find("Input")!=std::string::npos,"unrelated converter blocked or overwrote another job's callback");
+  {auto c=MacBrowser::OpenClassic((LPCSTR)cPath,"SameLabel:",false);auto id=Find(*c,u"Embedded");Check(id&&c->Stat(id).forks[1].size==31&&!Find(*c,u"Input"),"concurrent converter settings/mounts leaked");BYTE bytes[31]{};c->Read(id,1,0,bytes,sizeof(bytes));for(unsigned n=0;n<sizeof(bytes);++n)Check(bytes[n]==BYTE(n+1),"concurrent converter corrupted resource fork");c->Close();}
+  for(size_t n=1;n+1<jobs.size();++n)jobs[n].Job()->cancel();for(size_t n=1;n+1<jobs.size();++n)Until([&]{return jobs[n].Job()->done();});
+  Check(!jobs.front().Job()->done()&&!VolumeCoord::Readable(VolumeCoord::ImageKey((LPCSTR)aPath)),"canceling queued copies released active writer");
+  // An ordinary classic browser must read a different classic image while
+  // the first converter still waits inside its overwrite callback.
+  app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto frame=app.CreateBrowser(FALSE);Check(frame!=nullptr,"create concurrency browser");auto& session=frame->GetBrowserSession();auto doc=session.Document();int index=doc->insert_volume((LPCSTR)bPath,0,0,0,0);Check(index>=0&&doc->m_volumes[index].open(),"mount independent classic browser");auto& mounted=doc->m_volumes[index];mounted.m_rootitem=session.Tree()->initialize_volume(index,mounted.m_volume_name,2,0,0,0,0);doc->open_sub_directory(index,2,mounted.m_volume_name);Check(Row(session,L"Embedded")>=0&&!jobs.front().Job()->done(),"classic browsing waited on unrelated converter");
+  jobs.front().Job()->resolve(Storage::ConflictChoice::Replace);Until([&]{return jobs.front().Job()->done();});Check(!jobs.front().Job()->result().code,"raw converter failed after independent work");{auto a=MacBrowser::OpenClassic((LPCSTR)aPath,"SameLabel:",false);auto id=Find(*a,u"Input");char bytes[11]{};Check(id&&a->Stat(id).forks[0].size==11,"raw import inherited MacBinary mode");a->Read(id,0,0,bytes,11);Check(!memcmp(bytes,"RAW CONTENT",11),"raw import data changed");a->Close();}
+  fprintf(report,"PASS: simultaneous real classic raw/MacBinary converters, same-label mount isolation, per-job callbacks/settings/resource forks, seven queued conflicts without worker starvation, independent classic browser navigation, queued cancellation and writer exclusion.\n");
+
+  Gate mutationGate;auto undo=Storage::copyWorker().submit([&](Storage::Job&){LegacyEngine::Scope engine;auto v=hfs_mount(const_cast<char*>((LPCSTR)aPath),0,O_RDWR);Check(v&&b_begin_mutation(v)==0,"begin isolated undo");SetEvent(mutationGate.entered);bool released=WaitForSingleObject(mutationGate.release,15000)==WAIT_OBJECT_0;int rolled=b_end_mutation(v,-1);int closed=hfs_umount(v);Check(released&&rolled<0&&closed==0,"isolated undo cleanup");return Storage::Result{};});
+  struct ReleaseUndo{Gate& gate;std::shared_ptr<Storage::Job> job;~ReleaseUndo(){SetEvent(gate.release);job->wait();}}releaseUndo{mutationGate,undo};Until([&]{return WaitForSingleObject(mutationGate.entered,0)==WAIT_OBJECT_0;});
+  auto mutate=Storage::copyWorker().submit([&](Storage::Job&){LegacyEngine::Scope engine;auto v=hfs_mount(const_cast<char*>((LPCSTR)bPath),0,O_RDWR);Check(v!=nullptr,"mount independent undo volume");char name[]=":Concurrent";int changed=hfs_mkdir(v,name);int closed=hfs_umount(v);Check(changed==0&&closed==0,"unrelated mutation inherited another volume's undo state");return Storage::Result{};});Until([&]{return mutate->done();});Check(!mutate->result().code&&!undo->done(),"independent undo operations serialized or failed");SetEvent(mutationGate.release);Until([&]{return undo->done();});Check(!undo->result().code,"first undo lost its state");
+  fprintf(report,"PASS: classic mutation/rollback contexts run simultaneously on different volumes without sharing active undo state.\n");
+  // Export overwrite questions must not leave the process cwd changed.
+  CString exportDir=host+"\\exports";Check(CreateDirectoryA(exportDir,nullptr)!=FALSE,"create concurrent export directory");{CFile file;Check(file.Open(exportDir+"\\Embedded",CFile::modeCreate|CFile::modeWrite),"create export conflict");file.Write("KEEP",4);}
+  char cwdBefore[MAX_PATH]{},cwdDuring[MAX_PATH]{};Check(GetCurrentDirectoryA(MAX_PATH,cwdBefore)>0,"capture cwd");FileOperations::Request exportRequest;exportRequest.kind=FileOperations::Kind::LegacyCopy;exportRequest.background=true;exportRequest.sourceVolume=(LPCSTR)bPath;exportRequest.sourcePath="SameLabel:Embedded";exportRequest.targetVolume=(LPCSTR)host;exportRequest.targetPath=(LPCSTR)exportDir;exportRequest.conversion.output='r';exportRequest.conversion.appledouble=false;auto exportJob=FileOperations::Submit(exportRequest);jobs.push_back(exportJob);Until([&]{return !exportJob.Job()->conflict().empty();});Check(GetCurrentDirectoryA(MAX_PATH,cwdDuring)>0&&!strcmp(cwdBefore,cwdDuring),"converter changed the process working directory while awaiting overwrite");exportJob.Job()->resolve(Storage::ConflictChoice::Cancel);Until([&]{return exportJob.Job()->done();});Check(exportJob.Job()->result().error==ERROR_CANCELLED,"cancel export conflict");
+  // Interleave two encoders with the first paused after partial data and CRC
+  // state have been accumulated. File/buffer/CRC/RLE state must stay private.
+  Gate encoderGate;std::vector<BYTE> payloadA(1025,0x90),payloadB(2049,0x41);payloadA[500]=0;payloadB[1000]=0x90;CString hqxA=host+"\\one.hqx",hqxB=host+"\\two.hqx";
+  auto encode=[&](const CString& path,std::vector<BYTE>& payload,Gate* gate){return Storage::copyWorker().submit([path,&payload,gate](Storage::Job&){int fd=_open(path,_O_CREAT|_O_EXCL|_O_WRONLY|_O_BINARY,_S_IREAD|_S_IWRITE);Check(fd>=0&&bh_start(fd)==0,"open isolated BinHex encoder");Check(bh_insert(payload.data(),500)==0,"encode isolated first chunk");if(gate){SetEvent(gate->entered);Check(WaitForSingleObject(gate->release,15000)==WAIT_OBJECT_0,"BinHex encoder gate");}Check(bh_insert(payload.data()+500,int(payload.size()-500))==0&&bh_insertcrc()==0&&bh_end()==0,"finish isolated BinHex encoder");_close(fd);return Storage::Result{};});};
+  auto encoderOne=encode(hqxA,payloadA,&encoderGate);struct ReleaseEncoder{Gate& gate;std::shared_ptr<Storage::Job> job;~ReleaseEncoder(){SetEvent(gate.release);job->wait();}}releaseEncoder{encoderGate,encoderOne};Until([&]{return WaitForSingleObject(encoderGate.entered,0)==WAIT_OBJECT_0;});auto encoderTwo=encode(hqxB,payloadB,nullptr);Until([&]{return encoderTwo->done();});Check(!encoderTwo->result().code&&!encoderOne->done(),"BinHex encoder state was serialized or corrupted");SetEvent(encoderGate.release);Until([&]{return encoderOne->done();});Check(!encoderOne->result().code,"first BinHex encoder lost state");
+  auto decode=[&](const CString& path,const std::vector<BYTE>& expected){int fd=_open(path,_O_RDONLY|_O_BINARY);Check(fd>=0&&bh_open(fd)==0,"open isolated BinHex output");std::vector<BYTE> decoded(expected.size());Check(bh_read(decoded.data(),int(decoded.size()))==decoded.size()&&bh_readcrc()==0&&bh_close()==0,"isolated BinHex CRC failed");_close(fd);Check(decoded==expected,"interleaved BinHex bytes changed");};decode(hqxA,payloadA);decode(hqxB,payloadB);
+  // A captured classic adapter retains its mount context across worker migration.
+  {auto first=MacBrowser::OpenClassic((LPCSTR)bPath,"SameLabel:",true);auto alias=MacBrowser::OpenClassic((LPCSTR)bPath,"SameLabel:",true);Check(Find(*first,u"Embedded")&&Find(*alias,u"Embedded"),"same-volume classic adapters did not share their mount context");alias->Close();Check(Find(*first,u"Embedded")!=0,"closing an alias discarded the surviving classic mount");first->Close();}
+  auto migrated=MacBrowser::OpenClassic((LPCSTR)bPath,"SameLabel:",false);auto migrateRead=Storage::copyWorker().submit([migrated](Storage::Job&){Check(Find(*migrated,u"Embedded")!=0,"classic adapter lost its context on another worker");return Storage::Result{};});Until([&]{return migrateRead->done();});Check(!migrateRead->result().code,"classic adapter migration failed");migrated->Close();
+  fprintf(report,"PASS: process cwd remains stable during export overwrite; interleaved BinHex encoding preserves files, CRC and RLE state; classic adapter context survives worker migration.\n");
+  // Separate real browser copy batches: a gated slow native read must not
+  // serialize an unrelated classic copy, and canceling one must not cancel the other.
+  auto source=Image(host+"\\source.dsk"),target=Image(host+"\\target.dsk");auto id=Put(*source,u"Slow");auto slow=std::make_shared<Slow>(source,stalled);FileOperations::Request r;FileOperations::Location from,to;from.type=LIST_MAC;from.volume=slow;from.id=id;to.type=LIST_MAC;to.volume=target;r.sources={from};r.target=to;
+  Check(BackgroundCopies::Start({r},frame,true),"start slow independent batch");Until([&]{return WaitForSingleObject(stalled.entered,0)==WAIT_OBJECT_0;});
+  auto reservedImage=std::make_unique<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{VolumeCoord::ImageKey((LPCSTR)bPath),VolumeCoord::Mode::Write}});startupImage=bPath;auto extraBrowser=app.CreateBrowser(FALSE);startupImage="";Check(extraBrowser&&app.m_browsers.size()==2&&BackgroundCopies::Active(),"New browser still blocked by an unrelated copy");auto& extraSession=extraBrowser->GetBrowserSession();auto extraDoc=extraSession.Document();Check(extraDoc->m_hfs_count==1&&!extraDoc->m_volumes[0].m_free&&!extraDoc->m_volumes[0].m_opened&&extraDoc->m_volumes[0].m_rootitem,"new browser opened or discarded a reserved startup image");Host(extraSession,host);reservedImage.reset();extraDoc->open_sub_directory(0,2,"");Check(Row(extraSession,L"Embedded")>=0&&extraDoc->m_volumes[0].m_opened&&extraBrowser->IsWindowEnabled(),"new browser could not load an unrelated image after its reservation ended");
+  auto other=FileOperations::Submit(request(cPath,input,'r'));jobs.push_back(other);Until([&]{return other.Job()->done();});Check(!other.Job()->result().code&&BackgroundCopies::Active(),"slow batch serialized unrelated classic copy");doc->open_sub_directory(index,2,mounted.m_volume_name);Check(Row(session,L"Embedded")>=0,"slow native copy blocked classic browser");
+  BackgroundCopies::CancelAll();SetEvent(stalled.release);Until([]{return !BackgroundCopies::Active();});Check(BackgroundCopies::LastResult().error==ERROR_CANCELLED&&!Find(*target,u"Slow")&&Find(*source,u"Slow"),"independent cancellation lost source or published partial target");
+  fprintf(report,"PASS: slow native read allows unrelated classic copy and browser navigation; cancellation retains source, removes partial target and releases reservations.\n");
+#ifdef HFV_FLOPPY_TESTING
+  // Two physical-device adapters must have independent locks, caches,
+  // descriptors and thread-local DirectFloppy writers. No hardware is opened.
+  CString floppyPath=host+"\\floppy.dsk";{CFile f;Check(f.Open(floppyPath,CFile::modeCreate|CFile::modeWrite),"create concurrent floppy fixture");f.SetLength(1474560);}char label[]="Floppy";Check(hfs_format(const_cast<char*>((LPCSTR)floppyPath),0,label)==0,"format concurrent floppy fixture");std::vector<BYTE> bytes(1474560);{CFile f;Check(f.Open(floppyPath,CFile::modeRead)&&f.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"load concurrent floppy fixture");}
+  struct GatedDisk:TestFloppy{Gate& gate;GatedDisk(const std::vector<BYTE>& b,Gate& g):TestFloppy(b),gate(g){}bool Write(HANDLE h,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{SetEvent(gate.entered);if(WaitForSingleObject(gate.release,30000)!=WAIT_OBJECT_0){SetLastError(ERROR_TIMEOUT);return false;}return TestFloppy::Write(h,at,n,p,got);}};
+  Gate deviceGate;GatedDisk diskA(bytes,deviceGate);TestFloppy diskB(bytes);readonly_cd_backend_init();Check(readonly_floppy_attach_api(24,&diskA)&&readonly_floppy_attach_api(25,&diskB),"attach independent floppy devices");
+  struct Devices{Gate& gate;~Devices(){SetEvent(gate.release);FileOperations::CancelPending();for(auto& op:FileOperations::Pending())op.Job()->wait();readonly_floppy_attach_api(24,nullptr);readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}}devices{deviceGate};
+  char physicalA[MAX_PATH],physicalB[MAX_PATH];get_floppy_volume_file_name(24,physicalA);get_floppy_volume_file_name(25,physicalB);
+  auto physicalRequest=[&](const char* path){auto r=request(path,input,'r');r.targetPath="Floppy:";r.conversion.verifyFloppy=true;return r;};
+  auto physicalOne=FileOperations::Submit(physicalRequest(physicalA));jobs.push_back(physicalOne);Until([&]{return WaitForSingleObject(deviceGate.entered,0)==WAIT_OBJECT_0;});auto physicalTwo=FileOperations::Submit(physicalRequest(physicalB));jobs.push_back(physicalTwo);Until([&]{return physicalTwo.Job()->done();});Check(!physicalTwo.Job()->result().code&&!physicalOne.Job()->done()&&diskA.locked&&!diskB.locked,"one floppy serialized or unlocked a different drive");SetEvent(deviceGate.release);Until([&]{return physicalOne.Job()->done();});Check(!physicalOne.Job()->result().code&&!diskA.locked&&diskA.writes&&diskB.writes&&diskA.disk.aligned&&diskB.disk.aligned,"parallel physical writes failed or leaked locks");
+  for(const char* path:{physicalA,physicalB}){auto disk=MacBrowser::OpenClassic(path,"Floppy:",false);auto id=Find(*disk,u"Input");char data[11]{};Check(id!=0,"parallel floppy import missing");disk->Read(id,0,0,data,11);Check(!memcmp(data,"RAW CONTENT",11),"parallel floppy data mixed");disk->Close();}
+  fprintf(report,"PASS: independent simulated physical floppies write/verify concurrently while one device stalls; descriptor, cache, alignment and lock cleanup checks. No physical drives opened.\n");
+#endif
+
+ }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}
+ startupImage="";SetEvent(stalled.release);BackgroundCopies::CancelAll();for(auto& job:jobs)job.Job()->cancel();for(auto& job:jobs)job.Job()->wait();Until([]{return !BackgroundCopies::Active();});ShutdownStorageUi();BackgroundCopies::enabled=false;while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
 }
 #endif

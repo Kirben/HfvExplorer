@@ -8,6 +8,8 @@
 #include "BackgroundCopies.h"
 #include "DynCopyModeSelect.h"
 #include <atomic>
+#include <map>
+#include "TaskbarProgress.h"
 #include "VolumeCoordinator.h"
 #include "BrowserPresentation.h"
 #include <shobjidl.h>
@@ -74,18 +76,23 @@ public:
   return CStatic::WindowProc(message,w,l);
  }
 };
+struct TaskbarEntry{HWND owner;TaskbarProgress::Value progress;};
+std::map<const void*,TaskbarEntry> taskbarEntries; // UI thread only.
 class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
  bool modeless_=false,completed_=false;
  std::function<bool()> advance_;
  std::function<void()> finished_,cancelled_;
  CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false,cancellable_=false;
- ITaskbarList3* taskbar_=nullptr;bool uninitialize_=false;TBPFLAG taskbarState_=TBPF_NOPROGRESS;
+ ITaskbarList3* taskbar_=nullptr;bool uninitialize_=false;uint64_t taskbarDone_=0,taskbarTotal_=0;
  HWND owner_;
  std::function<void(HWND)> beforeClose_;
  StorageSpinner spinner_;bool explanationShown_=false;
  void state(TBPFLAG value) {
-  if(taskbar_&&value!=taskbarState_){taskbar_->SetProgressState(owner_,value);taskbarState_=value;}
+  if(value==TBPF_NOPROGRESS)taskbarEntries.erase(this);else taskbarEntries[this]={owner_,{value==TBPF_INDETERMINATE,taskbarDone_,taskbarTotal_}};
+  std::vector<TaskbarProgress::Value> values;for(auto& item:taskbarEntries)if(item.second.owner==owner_)values.push_back(item.second.progress);
+  auto summary=TaskbarProgress::Combine(values);
+  if(taskbar_&&owner_&&IsWindow(owner_)){taskbar_->SetProgressState(owner_,!summary.active?TBPF_NOPROGRESS:summary.waiting?TBPF_INDETERMINATE:TBPF_NORMAL);if(summary.active&&!summary.waiting)taskbar_->SetProgressValue(owner_,summary.done,summary.total);}
  }
  void update() {
   auto progress=job_->progress();
@@ -130,8 +137,7 @@ class JobDialog : public CDialog {
   else{
    auto total=progress.totalBytes?progress.totalBytes:progress.totalFiles;
    auto value=progress.totalBytes?progress.processed:progress.files+progress.skipped;
-   value=min(value,total);int position=int(value*1000/total);if(overall->GetPos()!=position)overall->SetPos(position);state(TBPF_NORMAL);
-   if(taskbar_)taskbar_->SetProgressValue(owner_,value,total);
+   value=min(value,total);int position=int(value*1000/total);if(overall->GetPos()!=position)overall->SetPos(position);taskbarDone_=value;taskbarTotal_=total;state(TBPF_NORMAL);
   }
   auto file=(CProgressCtrl*)GetDlgItem(IDC_CP_FILE_BAR);
   int position=progress.fileTotal?int(min(progress.fileBytes,progress.fileTotal)*1000/progress.fileTotal):0;
@@ -196,6 +202,7 @@ public:
 #endif
 #ifdef HFV_TESTING
    ++storageUiTest.timerTicks;
+   if(storageUiTest.releaseAfterTwoTimers&&storageUiTest.timerTicks>=2)SetEvent(storageUiTest.releaseAfterTwoTimers);
    if(owner_&&!::IsWindowEnabled(owner_))storageUiTest.disabledDuring=true;
 #endif
    update();

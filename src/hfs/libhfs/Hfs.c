@@ -61,10 +61,15 @@
 
 #include "..\..\filehook.h"
 
-char *hfs_error = "no error";	/* static error string */
-
-hfsvol *hfs_mounts;		/* linked list of mounted volumes */
-hfsvol *hfs_curvol;		/* current volume */
+/* Explicit mount/error contexts survive adapter migration between workers. */
+static HFV_THREAD_LOCAL struct hfs_engine_context fallback_context;
+static HFV_THREAD_LOCAL struct hfs_engine_context *active_context;
+struct hfs_engine_context *hfs_context_get(void) {
+ return active_context ? active_context : &fallback_context;
+}
+struct hfs_engine_context *hfs_context_use(struct hfs_engine_context *context) {
+ struct hfs_engine_context *previous=active_context;active_context=context;return previous;
+}
 
 /* High-Level Volume Routines ============================================== */
 
@@ -398,9 +403,9 @@ int hfs_umount(hfsvol *vol)
   if (vol == hfs_mounts) hfs_mounts = vol->next;
   if (vol == hfs_curvol) hfs_curvol = 0;
   if(saved_error && saved_error==vol->failure_message) {
-    static char failure_after_close[512];
-    strncpy(failure_after_close,saved_error,sizeof(failure_after_close)-1);
-    failure_after_close[sizeof(failure_after_close)-1]=0;saved_error=failure_after_close;
+    char *failure_after_close=hfs_context_get()->failure_after_close;
+    strncpy(failure_after_close,saved_error,511);
+    failure_after_close[511]=0;saved_error=failure_after_close;
   }
   v_destruct(vol);
   if (result) { errno = saved_errno; hfs_error = saved_error; }

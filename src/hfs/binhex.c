@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -32,15 +33,15 @@
 # include "binhex.h"
 # include "crc.h"
 
-char *bh_error = "no error";
+HFV_THREAD_LOCAL char *bh_error = "no error";
 
-static FILE *file;			/* input/output file */
-static char line[67];			/* ASCII line buffer */
-static int lptr;			/* next char in line buffer */
-static int state86;			/* 8->6 encoding state */
-static unsigned char lastch;		/* last encoded data byte */
-static int runlen;			/* runlength of last data byte */
-static unsigned short crc;		/* incremental CRC word */
+static HFV_THREAD_LOCAL FILE *file;			/* input/output file */
+static HFV_THREAD_LOCAL char line[67];			/* ASCII line buffer */
+static HFV_THREAD_LOCAL int lptr;			/* next char in line buffer */
+static HFV_THREAD_LOCAL int state86;			/* 8->6 encoding state */
+static HFV_THREAD_LOCAL unsigned char lastch;		/* last encoded data byte */
+static HFV_THREAD_LOCAL int runlen;			/* runlength of last data byte */
+static HFV_THREAD_LOCAL unsigned short crc;		/* incremental CRC word */
 
 static
 unsigned char zero[2] = { 0, 0 };

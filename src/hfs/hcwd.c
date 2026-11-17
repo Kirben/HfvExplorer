@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -46,10 +47,10 @@
 #endif
 # define TABCHUNKSZ  8
 
-static FILE *statef = 0;
-static mountent *mounts = 0;
-static int mtabsz = 0, nmounts = 0;
-static int curvol = -1, dirty = 0;
+static HFV_THREAD_LOCAL FILE *statef = 0;
+static HFV_THREAD_LOCAL mountent *mounts = 0;
+static HFV_THREAD_LOCAL int mtabsz = 0, nmounts = 0;
+static HFV_THREAD_LOCAL int curvol = -1, dirty = 0;
 
 /*
  * NAME:	addent()

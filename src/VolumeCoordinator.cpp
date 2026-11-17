@@ -61,8 +61,10 @@ void Changed(const std::vector<std::string>& keys){
  }
 }
 std::shared_ptr<MacBrowser::Volume> SharedImage(const std::string& key,std::function<std::shared_ptr<MacBrowser::Volume>()> open){
- static std::mutex mutex;static std::map<std::string,std::weak_ptr<MacBrowser::Volume>> images;
- std::lock_guard<std::mutex> lock(mutex);auto existing=images[key].lock();if(existing)return existing;auto volume=open();if(volume)images[key]=volume;return volume;
+ struct Slot{std::mutex mutex;std::weak_ptr<MacBrowser::Volume> volume;};
+ static std::mutex mutex;static std::map<std::string,std::shared_ptr<Slot>> images;std::shared_ptr<Slot> slot;
+ {std::lock_guard<std::mutex> lock(mutex);auto& value=images[key];if(!value)value=std::make_shared<Slot>();slot=value;}
+ std::lock_guard<std::mutex> lock(slot->mutex);auto existing=slot->volume.lock();if(existing)return existing;auto volume=open();if(volume)slot->volume=volume;return volume;
 }
 Subscription::Subscription():state_(new State){state_->id=nextId++;auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);bus.subscribers.push_back(state_);}
 Subscription::~Subscription(){Close();}

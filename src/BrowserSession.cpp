@@ -22,12 +22,12 @@ struct BrowserSession::Notifications:public CWnd {
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l)override{
   if(message==WM_TIMER&&w==2){
    if(!session.owner_||!session.tree_||!session.list_){session.deferred_={};KillTimer(2);return 0;}
-   if(StorageUi::busy()||StorageUi::state().sessionOpen||(session.deferredClassic_&&BackgroundCopies::Active())||!VolumeCoord::Readable(session.deferredKey_))return 0;
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||(session.deferredClassic_&&session.deferredKey_.empty()&&BackgroundCopies::Active())||!VolumeCoord::Readable(session.deferredKey_))return 0;
    KillTimer(2);auto next=std::move(session.deferred_);session.deferred_={};if(next)next();return 0;
   }
   if((message==VolumeCoord::Notification&&w==session.subscription_.Id())||(message==WM_TIMER&&w==1)){
    auto list=session.List();bool editing=list&&IsWindow(list->GetSafeHwnd())&&(list->GetListCtrl().GetEditControl()||list->IsDragging());
-   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(BackgroundCopies::Active()&&session.current_.type==LIST_HFS)||(!session.current_.key.empty()&&!VolumeCoord::Readable(session.current_.key))){SetTimer(1,75,nullptr);return 0;}
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(!session.current_.key.empty()&&!VolumeCoord::Readable(session.current_.key))){SetTimer(1,75,nullptr);return 0;}
    KillTimer(1);session.ProcessChanges();return 0;
   }
   return CWnd::WindowProc(message,w,l);
@@ -61,7 +61,7 @@ void BrowserSession::SetLocationTitle(std::wstring title){
 }
 void BrowserSession::ClearCurrent(){current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::Defer(const std::string& key,bool classic,std::function<void()> next,bool force){
- if(!force&&(!classic||!BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
+ if(!force&&!(classic&&key.empty()&&BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
  ClearCurrent();deferredKey_=key;deferredClassic_=classic;deferred_=std::move(next);
  if(list_){list_->list_clear();list_->SetBrowserCapabilities({});}
  if(status_)status_->SetPaneText(0,"Waiting for this volume to finish copying...");

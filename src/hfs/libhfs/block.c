@@ -224,7 +224,7 @@ struct mutation {
  struct file_view *files;
  unsigned file_count,used,capacity,buckets[UNDO_BUCKETS];
 };
-static struct mutation *active_mutation;
+#define active_mutation (hfs_context_get()->mutation)
 static int putblock(hfsvol *, unsigned long, block *);
 static void free_mutation(struct mutation *m) {
  FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->files);FREE(m->blocks);FREE(m);

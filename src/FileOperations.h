@@ -60,5 +60,5 @@ public:
 Operation Submit(Request);
 std::vector<Operation> Pending();
 void CancelPending();
-class LegacyGuard {std::unique_lock<std::mutex> lock_;public:LegacyGuard();};
+
 }

@@ -17,7 +17,6 @@ extern "C" {
 #include "hfs/copyout.h"
 #include "hfs/copyin.h"
 #include "hfs/Copyhfs.h"
-extern char* cph_error;
 void HFSIFACE_get_dir_flush(void);
 }
 namespace {

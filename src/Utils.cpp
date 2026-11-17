@@ -1164,8 +1164,8 @@ void make_mask2(
 extern "C" {
 #endif
 
-DWORD __Ttim = 0;
-HCURSOR __TScurs = 0;
+HFV_THREAD_LOCAL DWORD __Ttim = 0;
+HFV_THREAD_LOCAL HCURSOR __TScurs = 0;
 
 void _end_time_consuming( HCURSOR hcursor )
 {
@@ -1176,6 +1176,7 @@ void _end_time_consuming( HCURSOR hcursor )
 
 HCURSOR _start_time_consuming(int update)
 {
+ if(GetCurrentThreadId()!=AfxGetApp()->m_nThreadID)return nullptr;
 	HCURSOR cu;
 	cu = ::LoadCursor( 0, IDC_WAIT );
 	if(cu) {

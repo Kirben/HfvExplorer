@@ -5,6 +5,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <deque>
+#include <vector>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -52,32 +54,45 @@ public:
  }
 };
 class Worker {
- struct Entry {std::shared_ptr<Job> job;std::function<Result(Job&)> work;};
+ struct Entry {std::shared_ptr<Job> job;std::function<Result(Job&)> work;std::function<bool(const std::shared_ptr<Job>&)> ready;};
  std::mutex mutex_;std::condition_variable condition_;std::deque<Entry> queue_;bool stopping_=false;
- std::thread thread_;
+ std::vector<std::thread> threads_;
  void loop() {
   for(;;) {
    Entry entry;
-   {std::unique_lock<std::mutex> lock(mutex_);condition_.wait(lock,[&]{return stopping_||!queue_.empty();});
-    if(queue_.empty()&&stopping_)return;entry=std::move(queue_.front());queue_.pop_front();}
+   {
+    std::unique_lock<std::mutex> lock(mutex_);
+    for(;;){
+     if(queue_.empty()&&stopping_)return;
+     auto found=queue_.end();
+     for(auto it=queue_.begin();it!=queue_.end();++it){
+      try{if(!it->ready||it->ready(it->job)){found=it;break;}}
+      catch(const std::exception& error){it->job->finish({1,ERROR_UNHANDLED_EXCEPTION,error.what()});found=it;break;}
+     }
+     if(found!=queue_.end()){entry=std::move(*found);queue_.erase(found);break;}
+     // Conflicting requests do not occupy workers or hold a partial lease.
+     condition_.wait_for(lock,std::chrono::milliseconds(10));
+    }
+   }
+   if(entry.job->done())continue;
    Result result;
    try {result=entry.work(*entry.job);}
    catch(const Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
-   catch(const std::exception& error){result.code=1;result.error=ERROR_UNHANDLED_EXCEPTION;result.message=error.what();}
-   catch(...){result.code=1;result.error=ERROR_UNHANDLED_EXCEPTION;result.message="Unexpected storage error";}
-   entry.job->finish(std::move(result));
+   catch(const std::exception& error){result={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}
+   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected storage error"};}
+   entry.job->finish(std::move(result));condition_.notify_all();
   }
  }
 public:
- Worker():thread_([this]{loop();}){}
- void shutdown(){ {std::lock_guard<std::mutex> lock(mutex_);stopping_=true;}condition_.notify_all();if(thread_.joinable())thread_.join();}
+ explicit Worker(unsigned count=1){try{for(unsigned i=0;i<count;++i)threads_.emplace_back([this]{loop();});}catch(...){shutdown();throw;}}
+ void shutdown(){ {std::lock_guard<std::mutex> lock(mutex_);stopping_=true;for(auto& e:queue_)e.job->cancel();}condition_.notify_all();for(auto& thread:threads_)if(thread.joinable())thread.join();}
  ~Worker(){shutdown();}
- std::shared_ptr<Job> submit(std::function<Result(Job&)> work) {
+ std::shared_ptr<Job> submit(std::function<Result(Job&)> work,std::function<bool(const std::shared_ptr<Job>&)> ready={}) {
   auto job=std::make_shared<Job>();
-  {std::lock_guard<std::mutex> lock(mutex_);if(stopping_)throw std::runtime_error("Storage worker is shutting down");queue_.push_back({job,std::move(work)});}
-  condition_.notify_one();return job;
+  {std::lock_guard<std::mutex> lock(mutex_);if(stopping_)throw std::runtime_error("Storage worker is shutting down");queue_.push_back({job,std::move(work),std::move(ready)});}
+  condition_.notify_all();return job;
  }
 };
 inline Worker& worker(){static Worker value;return value;}
-inline Worker& copyWorker(){static Worker value;return value;}
+inline Worker& copyWorker(){static Worker value(4);return value;}
 }

@@ -516,7 +516,7 @@ BOOL CMainFrame::OnCmdMsg(UINT id,int code,void* extra,AFX_CMDHANDLERINFO* info)
  if(BackgroundCopies::Active()){
   // These legacy commands change global converter settings or take raw device
   // handles. Defer them until jobs have completed their flush/verification.
-  bool unsafe=id==ID_FILE_OPEN||id==ID_TOOLS_NEW_BROWSER||id==ID_FILE_NEW||id==ID_VIEW_OPTIONS||id==ID_FILE_NEWVOLUME||id==ID_FILE_NEWHFSPLUS||id==ID_FILE_VOLUMETOFLOPPY||id==ID_FILE_VOLUMEFROMFLOPPY||id==ID_FILE_EJECT||id==ID_FILE_RELOAD||id==ID_TOOLS_BURN||id==ID_TOOLS_DUMPCDDEBUG||id==ID_EDIT_LABEL||id==ID_FILE_MAC_IMPORT_RESOURCE||id==ID_VIEW_MAC_WINDOW;
+  bool unsafe=id==ID_FILE_OPEN||id==ID_VIEW_OPTIONS||id==ID_FILE_NEWVOLUME||id==ID_FILE_NEWHFSPLUS||id==ID_FILE_VOLUMETOFLOPPY||id==ID_FILE_VOLUMEFROMFLOPPY||id==ID_FILE_EJECT||id==ID_FILE_RELOAD||id==ID_TOOLS_BURN||id==ID_TOOLS_DUMPCDDEBUG||id==ID_EDIT_LABEL||id==ID_FILE_MAC_IMPORT_RESOURCE||id==ID_VIEW_MAC_WINDOW;
   if(GetBrowserSession().Document()&&GetBrowserSession().List()&&!GetBrowserSession().MacBrowser().Active())unsafe=unsafe||(id!=ID_EDIT_COPY&&id!=ID_EDIT_CUT&&id!=ID_EDIT_PASTE&&id!=ID_EDIT_COPY_APPEND&&id!=ID_EDIT_CUT_APPEND&&id!=ID_EDIT_SELECT_ALL&&id!=ID_VIEW_REFRESH&&id!=ID_TOOLS_NEW_BROWSER&&id!=ID_FILE_NEW&&id!=ID_APP_EXIT&&id!=ID_APP_ABOUT&&id!=ID_VIEW_LARGEICONS&&id!=ID_VIEW_SMALLICONS&&id!=ID_HFV_VIEW_LIST&&id!=ID_HFV_VIEW_DETAILS&&id!=ID_VIEW_TOOLBAR&&id!=ID_VIEW_STATUS_BAR&&id!=ID_NEXT_PANE&&id!=ID_PREV_PANE);
   if(unsafe&&!info){if(code==CN_UPDATE_COMMAND_UI)static_cast<CCmdUI*>(extra)->Enable(FALSE);return TRUE;}
  }

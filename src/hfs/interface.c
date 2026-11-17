@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * HFVExplorer
  * Copyright (C) 1997-1998 by Anygraaf Oy
@@ -55,7 +56,7 @@
 
 int set_file_size( char *path, hfv_size_t new_size );
 
-static int HFSIFACE_merge=0;
+static HFV_THREAD_LOCAL int HFSIFACE_merge=0;
 int HFSIFACE_copy_options(int merge){int previous=HFSIFACE_merge;HFSIFACE_merge=merge;return previous;}
 static int copy_directory_create(const char* path) {
  DWORD attributes;
@@ -64,11 +65,11 @@ static int copy_directory_create(const char* path) {
  attributes=GetFileAttributesA(path);
  return attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_DIRECTORY);
 }
-static char HFSIFACE_copyout_mode = 'a';
+static HFV_THREAD_LOCAL char HFSIFACE_copyout_mode = 'a';
 char HFSIFACE_copy_mode(void){return HFSIFACE_copyout_mode;}
 char HFSIFACE_exchange_copy_mode(char mode){char old=HFSIFACE_copyout_mode;HFSIFACE_copyout_mode=mode;return old;}
-static char HFSIFACE_copyin_mode = 'a';
-static char HFSIFACE_copyout_ad = 1;
+static HFV_THREAD_LOCAL char HFSIFACE_copyin_mode = 'a';
+static HFV_THREAD_LOCAL char HFSIFACE_copyout_ad = 1;
 void HFSIFACE_copy_settings(char* out,char* in,int* ad){*out=HFSIFACE_copyout_mode;*in=HFSIFACE_copyin_mode;*ad=HFSIFACE_copyout_ad;}
 void HFSIFACE_restore_copy_settings(char out,char in,int ad){HFSIFACE_copyout_mode=out;HFSIFACE_copyin_mode=in;HFSIFACE_copyout_ad=(char)ad;}
 
@@ -95,11 +96,11 @@ int hfs_readdir2(
   CatDataRec *pdata
 );
 
-static int HFSIFACE_m_silent = 0;
-static HWND error_hwnd = 0;
+static HFV_THREAD_LOCAL int HFSIFACE_m_silent = 0;
+static HFV_THREAD_LOCAL HWND error_hwnd = 0;
 char *argv0 = "HFVExplorer";
 
-int crlf_translation = 1;
+HFV_THREAD_LOCAL int crlf_translation = 1;
 
 int mount_flags( char *path )
 {
@@ -396,8 +397,8 @@ int HFSIFACE_mkdir( char *volpath, char *path )
 	return( result );
 }
 
-static int (*mutation_cancel)(void*)=NULL;
-static void* mutation_cancel_context=NULL;
+static HFV_THREAD_LOCAL int (*mutation_cancel)(void*)=NULL;
+static HFV_THREAD_LOCAL void* mutation_cancel_context=NULL;
 void HFSIFACE_delete_cancel(int (*callback)(void*),void* context){mutation_cancel=callback;mutation_cancel_context=context;}
 static int deletion_cancelled(void){if(mutation_cancel&&mutation_cancel(mutation_cancel_context)){errno=EINTR;hfs_error="Deletion cancelled";return 1;}return 0;}
 int do_delete_directory( hfsvol *vol, char *path )
@@ -1200,7 +1201,7 @@ unsigned char desktopData[384] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	} ;
 
-static char *desktopname = "Desktop";
+static HFV_THREAD_LOCAL char *desktopname = "Desktop";
 void make_desktop( char *volpath )
 {
 	int volinx, result = 0;
@@ -1432,15 +1433,15 @@ int HFSIFACE_set_properties( char *volpath, char *path, hfsdirent *pent )
 }
 
 // Speedup. This family is NOT reentrant!!!!
-static hfsvol *ff_vol = 0;
-static int ff_mounted = 0;
-static int ff_mounted2 = 0;
-static char ff_path[_MAX_PATH];
-static char ff_mac_path[_MAX_PATH];
-static hfsdir *ff_dir = 0;
+static HFV_THREAD_LOCAL hfsvol *ff_vol = 0;
+static HFV_THREAD_LOCAL int ff_mounted = 0;
+static HFV_THREAD_LOCAL int ff_mounted2 = 0;
+static HFV_THREAD_LOCAL char ff_path[_MAX_PATH];
+static HFV_THREAD_LOCAL char ff_mac_path[_MAX_PATH];
+static HFV_THREAD_LOCAL hfsdir *ff_dir = 0;
 
-static int pIcon13catdatarecValid = 0;
-static CatDataRec Icon13catdatarec;
+static HFV_THREAD_LOCAL int pIcon13catdatarecValid = 0;
+static HFV_THREAD_LOCAL CatDataRec Icon13catdatarec;
 
 void ff_cleanup( void )
 {
