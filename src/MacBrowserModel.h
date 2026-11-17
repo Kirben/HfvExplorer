@@ -11,7 +11,7 @@ struct Fork { uint64_t size = 0; };
 // Presentation and transfer data: deliberately independent of catalog layouts,
 // allocation extents, filesystem encodings and journal structures.
 struct Entry {
-    uint32_t id = 0, parent = 0, resolvedId = 0;
+    uint32_t id = 0, parent = 0, resolvedId = 0, linkCount = 1;
     std::u16string name;
     bool directory = false, protectedFile = false, compressed = false, hardLink = false;
     std::string readError;
@@ -52,6 +52,8 @@ public:
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
+    virtual bool SupportsHardLinks()const{return false;}
+    virtual uint32_t MakeHardLink(uint32_t,uint32_t,const std::u16string&,bool=false){throw HfsPlus::Error("This format cannot create hard links");}
     virtual bool SupportsCompression()const{return false;}
     virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}
     virtual bool SupportsAttributes()const{return false;}

@@ -83,6 +83,11 @@ if($Test -or $TestHfsPlus) {
  $mfsBrowserTest.WaitForExit()
  Get-Content (Join-Path $mfsBrowser 'mfs-write-browser-report.txt')
  if($mfsBrowserTest.ExitCode -ne 0){throw 'MFS browser write tests failed'}
+ $links=Join-Path $hfsPlusDirectory 'hard-links'
+ $linksTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-hard-links',('"'+$links+'"')) -WindowStyle Hidden -PassThru
+ if(!$linksTest.WaitForExit(60000)){$linksTest.Kill();throw 'Hard-link tests timed out'}
+ Get-Content (Join-Path $links 'hard-links-report.txt')
+ if($linksTest.ExitCode -ne 0){throw 'Hard-link tests failed'}
  $folders=Join-Path $hfsPlusDirectory 'folder-metadata'
  $foldersTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-folder-metadata',('"'+$folders+'"')) -WindowStyle Hidden -PassThru
  if(!$foldersTest.WaitForExit(60000)){$foldersTest.Kill();throw 'Folder metadata tests timed out'}

@@ -115,6 +115,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_EDIT_COPY, OnEditCopy)
 	ON_COMMAND(ID_EDIT_CUT, OnEditCut)
 	ON_COMMAND(ID_EDIT_PASTE, OnEditPaste)
+ ON_COMMAND(ID_EDIT_PASTE_HARD_LINK,OnPasteHardLink)
+ ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE_HARD_LINK,OnUpdatePasteHardLink)
 	ON_COMMAND(ID_EDIT_COPY_APPEND, OnEditCopyAppend)
 	ON_COMMAND(ID_EDIT_CUT_APPEND, OnEditCutAppend)
 	ON_COMMAND(ID_EDIT_SELECT_ALL, OnEditSelectAll)
@@ -1284,6 +1286,8 @@ void CMainFrame::OnEditCut()
 	GetBrowserSession().List()->edit_cut();
 }
 
+void CMainFrame::OnPasteHardLink(){GetBrowserSession().MacBrowser().PasteHardLink();}
+void CMainFrame::OnUpdatePasteHardLink(CCmdUI* ui){ui->Enable(!StorageUi::busy()&&GetBrowserSession().MacBrowser().CanPasteHardLink());}
 void CMainFrame::OnEditPaste() 
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();

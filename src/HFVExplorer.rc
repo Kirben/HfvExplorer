@@ -134,6 +134,7 @@ BEGIN
         MENUITEM "Cu&t\tCtrl+X",                ID_EDIT_CUT
         MENUITEM "&Copy\tCtrl+C",               ID_EDIT_COPY
         MENUITEM "&Paste\tCtrl+V",              ID_EDIT_PASTE
+        MENUITEM "Paste hard &link...",            ID_EDIT_PASTE_HARD_LINK
         MENUITEM SEPARATOR
         MENUITEM "Cut Append\tCtrl+Shift+X",    ID_EDIT_CUT_APPEND
         MENUITEM "Copy Append\tCtrl+Shift+C",   ID_EDIT_COPY_APPEND

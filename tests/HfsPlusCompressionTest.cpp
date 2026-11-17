@@ -510,7 +510,7 @@ Image Filesystem(Volume::FormatKind kind, bool bitmap = false) {
     Check(disk.writes == before, "Reading compressed/link content wrote image");
     {
         Volume v(disk, true);
-        Reject([&] { v.Remove(link); }, "Hard link removed without link accounting");
+        Image unlinked=disk;{Volume edit(unlinked,true);edit.Remove(link);for(auto& e:edit.List())if(e.name==u"Linked again")Check(e.hardLink&&e.linkCount==1&&e.forks[0].size==77881,"Legacy unlink lost shared inode");}
         Reject([&] { v.Rename(data, 2, u"Unsafe"); }, "Backing inode moved");
         Image editable=disk;Volume edit(editable,true);edit.Put(2,u"Inline",0,0,[](unsigned,uint64_t,void*,size_t){},nullptr,true);Check(edit.Stat(inlineFile).compressed&&!edit.Stat(inlineFile).forks[0].size,"Compressed overwrite failed");
         Reject([&] { v.MakeDirectory(alias, u"Unsafe"); }, "Directory hard-link write allowed");
