@@ -26,7 +26,7 @@ struct Entry {
 };
 struct Capabilities {
     bool read = true, create = false, rename = false, remove = false;
-    bool unicodeNames = true, resourceForks = true;
+    bool unicodeNames = true, resourceForks = true, createFolders = true;
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
 // File operations and browsing have separate queues. Native backends guard
@@ -62,6 +62,9 @@ public:
     virtual Entry Stat(uint32_t id) = 0;
     virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
+    virtual bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found){return FindChild(parent,entry.name,found);}
+    virtual bool SupportsBasicMetadata()const{return false;}
+    virtual void SetBasicMetadata(uint32_t,const Entry&){throw HfsPlus::Error("This format has no basic metadata editor");}
     virtual uint32_t MakeDirectory(uint32_t parent, const std::u16string &) = 0;
     virtual uint32_t Put(uint32_t parent, const Entry &, Reader, bool replace) = 0;
     virtual void Rename(uint32_t id, uint32_t parent, const std::u16string &) = 0;

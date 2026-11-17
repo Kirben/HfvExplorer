@@ -346,7 +346,7 @@ Current filesystem support
   overwrite files, create folders, rename entries and delete files or
   folder trees. File > Format HFS+ / HFSX image creates a new image (8 MiB minimum),
   with journaling enabled by default. File > Open volume mounts HFS+ / HFSX and
-  read-only MFS images in the main tree and list alongside classic HFS and Windows
+  writable MFS images in the main tree and list alongside classic HFS and Windows
   folders. Unicode names, 64-bit fork sizes and filesystem capabilities use a
   shared presentation/transfer model; ordinary navigation, Copy/Paste/Cut, folder
   creation, rename, delete, search, sorting and properties use the main interface.
@@ -428,9 +428,36 @@ Current filesystem support
   header CRC or low-byte Finder flags. Legacy headers require zero reserved
   bytes, and declared fork lengths are checked before replacing a destination.
   HFS+/HFSX main-browser transfers use both-fork copies or explicit raw fork export.
-- MFS remains read-only in the common main browser. Its original MacRoman names
-  (up to 255 bytes), file versions and both forks remain readable. Classic HFS
-  CD/floppy access remains native and retains its existing media restrictions.
+- MFS images support formatting, read/write of both forks, overwrite, rename,
+  deletion, file versions and Finder metadata in the common main browser. File >
+  Format Mac image offers raw MFS and Disk Copy 4.2 choices alongside HFS+/HFSX.
+  Raw formatting supports 128 KiB-20 MiB in 512-byte increments; DC42 formatting
+  uses standard 400/800/720/1440 KiB sizes. MacRoman file names retain up to 255
+  bytes; volume names retain 27. Same-name files with different versions are
+  separate entries, displayed with version labels, with version-specific overwrite
+  checks. Properties edits name, version, lock state, UTC dates and the original
+  16-byte Finder information. Non-MacRoman names, folders, extended attributes and
+  extended Finder fields that MFS cannot represent are rejected before transfer.
+  MFS is flat: importing files is enabled, while New folder remains disabled.
+  Native MFS-to-MFS transfers preserve file versions; other filesystems do not
+  acquire MFS version semantics. Physical MFS media access is not implemented.
+  Native classic HFS CD/floppy access retains its existing media restrictions.
+- MFS mutations snapshot the bounded image and validate the proposed directory/map
+  before writing. Reported write/short-write/flush errors restore touched bytes.
+  If rollback fails, further access is disabled and an original complete image is
+  saved in a Windows temporary recovery file when possible. The error gives its
+  path; verify the source before manual recovery. This runtime rollback is not a
+  persistent journal and does not protect against power loss. A full data area or
+  fixed directory rejects the operation before writing. Inconsistent allocation
+  counts, unowned blocks, locked volumes and invalid DC42 checksums stay read-only.
+  DC42 data/tag checksums are updated; scavenger hints for changed sectors are
+  cleared rather than retaining stale file identities. Unchanged tags survive.
+
+`--verify-mfs-write-browser NEW_DIRECTORY` checks background import, versioned
+copy/overwrite, modeless Properties editing, stable identities, deletion, two-window
+refresh, exclusive handles and rejection of unrepresentable input. The retained
+`mfs-readonly.exe` test helper also runs formatter/writer, directory-reservation,
+highest block-ID, full-disk, checksum, failure rollback and recovery-backup tests.
 
 `--verify-extended-attributes NEW_DIRECTORY` checks native/Windows metadata and
 ACL roundtrips, directory companions, unsupported destination rejection, actual

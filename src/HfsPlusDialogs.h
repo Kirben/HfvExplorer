@@ -3,4 +3,5 @@
 #include <string>
 class BrowserSession;
 void FormatHfsPlusImage(CWnd *parent,BrowserSession& session);
+void HfvUnicodeNameEdit(HWND,int);
 bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive);

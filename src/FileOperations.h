@@ -19,13 +19,14 @@ struct Location {
  std::string expectedIdentity,expectedResource;
  std::u16string expectedName;
 };
-enum class Kind {Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute};
+enum class Kind {Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute,SetBasicMetadata};
 enum class MetadataPatch {All,Label,Position};
 struct Request {
  Kind kind=Kind::Copy;
  std::vector<Location> sources;
  Location target;
  std::u16string name;
+ MacBrowser::Entry metadata,originalMetadata;
  HfsPlus::Attributes attributes,originalAttributes;
  MetadataPatch patch=MetadataPatch::All;
  hfsdirent originalProperties{},properties{};
@@ -48,7 +49,7 @@ struct Change {
 struct Completion {
  bool complete=false;
  unsigned completed=0;
- HfsPlus::Attributes attributes;bool supportsAttributes=false;
+ HfsPlus::Attributes attributes;bool supportsAttributes=false,basicMetadata=false;
  MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false,writable=false;std::string description;
  // Conservatively includes resources that may have changed on a partial failure.
  std::vector<Change> affected;

@@ -57,6 +57,11 @@ if($Test -or $TestHfsPlus) {
  if(!$commandsTest.WaitForExit(60000)){$commandsTest.Kill();throw 'Per-volume command tests timed out.'}
  Get-Content (Join-Path $commands 'per-volume-commands-report.txt')
  if($commandsTest.ExitCode -ne 0){throw "Per-volume command tests failed; retained $commands"}
+ $mfsBrowser=Join-Path $hfsPlusDirectory 'mfs-write-browser'
+ $mfsBrowserTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-mfs-write-browser',('"'+$mfsBrowser+'"')) -WindowStyle Hidden -PassThru
+ $mfsBrowserTest.WaitForExit()
+ Get-Content (Join-Path $mfsBrowser 'mfs-write-browser-report.txt')
+ if($mfsBrowserTest.ExitCode -ne 0){throw 'MFS browser write tests failed'}
  $attributes=Join-Path $hfsPlusDirectory 'extended-attributes'
  $attributesTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-extended-attributes',('"'+$attributes+'"')) -WindowStyle Hidden -PassThru
  $attributesTest.WaitForExit()
@@ -195,10 +200,10 @@ if($Test) {
  if($headless.ExitCode -ne 0) { throw "Headless image tests failed; retained $largeDirectory" }
  Write-Host "Large-image tests retained at $largeDirectory (includes approximately 10 GiB of large-fork fixtures)."
  & $msbuild "$PSScriptRoot\tests\mfs-readonly.vcxproj" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal
- if($LASTEXITCODE) { throw 'Read-only MFS test build failed.' }
+ if($LASTEXITCODE) { throw 'MFS test build failed.' }
  $mfsDirectory=Join-Path ([IO.Path]::GetTempPath()) ('HFVExplorer-MFS-'+[Guid]::NewGuid().ToString('N'))
  & "$PSScriptRoot\bin\x64\mfs-readonly.exe" $mfsDirectory
- if($LASTEXITCODE) { throw "Read-only MFS tests failed; retained $mfsDirectory" }
+ if($LASTEXITCODE) { throw "MFS tests failed; retained $mfsDirectory" }
  Write-Host "MFS fixtures and exports retained at $mfsDirectory"
 }
 
