@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -50,14 +51,14 @@
 
 void mac_to_pc_charset( unsigned char *s );
 
-extern int crlf_translation;
+extern HFV_THREAD_LOCAL int crlf_translation;
 
 #ifdef WIN32
 /* Stage output next to its destination. Never truncate the previous copy. */
-static char copyout_temporary[_MAX_PATH], copyout_destination[_MAX_PATH];
-static int copyout_replace;
+static HFV_THREAD_LOCAL char copyout_temporary[_MAX_PATH], copyout_destination[_MAX_PATH];
+static HFV_THREAD_LOCAL int copyout_replace;
 #ifdef HFV_TESTING
-static int copyout_fault;
+static HFV_THREAD_LOCAL int copyout_fault;
 void copyout_test_fault(int stage) { copyout_fault=stage; }
 #else
 #define copyout_fault 0
@@ -83,12 +84,12 @@ static int checked_output_write(int fd,const void* data,unsigned count) {
 #define write checked_output_write
 #endif
 
-static int copyout_opened=0;
+static HFV_THREAD_LOCAL int copyout_opened=0;
 int copyout_destination_opened(void){return copyout_opened;}
-static int copyout_skipped=0;
+static HFV_THREAD_LOCAL int copyout_skipped=0;
 int copyout_was_skipped(void){return copyout_skipped;}
-static copyout_overwrite_fn copyout_overwrite=0;
-static void* copyout_overwrite_context=0;
+static HFV_THREAD_LOCAL copyout_overwrite_fn copyout_overwrite=0;
+static HFV_THREAD_LOCAL void* copyout_overwrite_context=0;
 void copyout_set_overwrite(copyout_overwrite_fn observer,void* context) {copyout_overwrite=observer;copyout_overwrite_context=context;}
 int copyout_hfs_overwrite(const char *name,int exists) {
  int decision=1;char display[1024];
@@ -101,11 +102,11 @@ int copyout_hfs_overwrite(const char *name,int exists) {
  if(decision==2)copyout_skipped=1;
  return decision;
 }
-static copyout_progress_fn copyout_observer = 0;
-static void *copyout_context = 0;
-static char copyout_source[_MAX_PATH];
-static unsigned copyout_forks=3;
-static unsigned long long copyout_expected=0;
+static HFV_THREAD_LOCAL copyout_progress_fn copyout_observer = 0;
+static HFV_THREAD_LOCAL void *copyout_context = 0;
+static HFV_THREAD_LOCAL char copyout_source[_MAX_PATH];
+static HFV_THREAD_LOCAL unsigned copyout_forks=3;
+static HFV_THREAD_LOCAL unsigned long long copyout_expected=0;
 void copyout_set_progress(copyout_progress_fn observer,void *context) {
  copyout_observer=observer;copyout_context=context;
 }
@@ -115,9 +116,9 @@ static long copyout_read(hfsfile *file,void *buffer,unsigned long length) {
  return result;
 }
 #define hfs_read copyout_read
-char *cpo_error = "no error";
+HFV_THREAD_LOCAL char *cpo_error = "no error";
 
-static char m_last_opened_file[_MAX_PATH];
+static HFV_THREAD_LOCAL char m_last_opened_file[_MAX_PATH];
 
 void copyout_set_last_open_file( const char *path )
 {
@@ -574,7 +575,7 @@ hfsfile *opensrc(hfsvol *vol, char *srcname, char **dsthint, char *ext)
 {
   hfsfile *file;
   hfsdirent ent;
-  static char name[36], *ptr;
+  static HFV_THREAD_LOCAL char name[36], *ptr;
 
   file = hfs_open(vol, srcname);
   if (file == 0)
@@ -635,6 +636,26 @@ hfsfile *opensrc(hfsvol *vol, char *srcname, char **dsthint, char *ext)
 static
 int opendst(char *dstname, char *hint)
 {
+#ifdef WIN32
+ char resolved[_MAX_PATH],absolute[_MAX_PATH];DWORD attributes,error;int existing,decision=1;
+ attributes=GetFileAttributesA(dstname);
+ if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY)){
+  size_t length=strlen(dstname);int separator=length&&dstname[length-1]!='\\'&&dstname[length-1]!='/';
+  if(length+separator+strlen(hint)>=sizeof(resolved)){cpo_error="Destination path is too long";return -1;}
+  strcpy(resolved,dstname);if(separator)strcat(resolved,"\\");strcat(resolved,hint);dstname=resolved;
+ }
+ copyout_set_last_open_file(dstname);
+ attributes=GetFileAttributesA(dstname);error=GetLastError();existing=attributes!=INVALID_FILE_ATTRIBUTES;
+ if(!existing&&error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)decision=-1;
+ else if(existing&&copyout_overwrite){
+  DWORD length=GetFullPathNameA(dstname,sizeof(absolute),absolute,0);
+  if(!length||length>=sizeof(absolute))decision=-1;else decision=copyout_overwrite(absolute,copyout_overwrite_context);
+ }
+ if(decision==2)return -2;
+ if(decision<=0){cpo_error=decision==0?"Copy cancelled":"Could not check the destination";return -1;}
+ return stage_output(dstname,existing);
+#else
+
   struct stat sbuf;
 #ifdef WIN32
 	char curdirbuffer[_MAX_PATH];
@@ -762,6 +783,7 @@ int opendst(char *dstname, char *hint)
   if(fd>=0)copyout_opened=1;
 #endif /* Windows staged output owns its cleanup; callers must not delete the destination. */
   return fd;
+#endif
 }
 
 /*

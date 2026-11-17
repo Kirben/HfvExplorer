@@ -42,15 +42,30 @@ deletion separately. All classic adapters close before destination finalization.
 Non-conflicting same-volume HFS/HFS+/HFSX moves rename catalog entries in place,
 preserving their IDs and avoiding a data copy; overwrite/merge handling is retained.
 Queued browser requests retain the selected floppy's media-change counter, so
-a reported media swap during conversion questions rejects the old request. The classic engine/converters still have shared state: classic HFS and
-physical-media navigation waits until copying is idle. Commands that change
-legacy settings, launch emulators, format/eject media or rebuild browser mounts
-are unavailable during transfers. Windows browsing uses independent metadata
-readers and generic icons during copying. Closing a frame waits for safe job
-cleanup; closing the last browser cancels outstanding copies before exiting.
-Legacy emulator temporary-file helpers remain synchronous because their callers
-need the completed files immediately. Copy jobs do not hold browser/document
-pointers, and Cut is cleared only after successful completion.
+a reported media swap during conversion questions rejects the old request.
+Classic HFS uses explicit mount/error/undo contexts, and converters keep their
+mutable settings, callbacks, CRC state and temporary filenames private to each
+executing thread. Captured classic adapters retain their contexts across worker
+migration. Exports use absolute destination paths without changing the process
+working directory. CD/floppy caches and descriptors have per-device locks.
+
+Up to four copy jobs can execute concurrently on unrelated resources. Requests
+that conflict with a reserved volume remain queued without occupying a worker;
+all participating resources are acquired together. Classic HFS/physical-media
+navigation defers only for the selected busy volume. Windows directories and
+unrelated classic/HFS+/HFSX/MFS images remain browsable. New browser is available
+during transfers; its initial tree retains busy images without opening them.
+Each copy keeps its own progress/overwrite/cancellation UI. The taskbar combines
+active job progress per browser, so completing one job does not clear another.
+
+Options, emulator launchers, formatting/ejecting/burning media, image opening
+and full mount rebuilds retain their existing UI safety restrictions during
+transfers. Windows browsing uses independent metadata readers and generic icons
+during copying. Closing a frame still waits for safe job cleanup; closing the
+last browser cancels outstanding copies before exiting. Legacy emulator
+temporary-file helpers remain synchronous because their callers need completed
+files immediately. Copy jobs do not hold browser/document pointers, and Cut is
+cleared only after successful completion.
 
 Copy/Cut/Paste and their Append commands share an application clipboard between
 HFVExplorer windows. Captured locations own their backend references or absolute
@@ -81,6 +96,14 @@ folder enumeration, even when startup floppy detection is disabled.
 
 This clipboard and cross-window drag support are internal to HFVExplorer; they
 do not add Windows Explorer/OLE clipboard interchange.
+
+`--verify-independent-storage NEW_DIRECTORY` interleaves real classic raw and
+MacBinary converters, BinHex encoders, classic undo contexts, browser navigation
+and simulated physical drives. It tests distinct mount/settings/callback/CRC
+state, resource forks, stable process paths, adapter migration, same-volume
+exclusion, seven conflicting queued jobs without worker starvation, independent
+cancellation, New browser during copying and aggregate taskbar progress. Tests
+use hidden synthetic windows and injected devices; no physical media is opened.
 
 `--verify-floppy-copy-regressions NEW_DIRECTORY` uses real hidden browser
 clipboard commands and injected floppy APIs. It covers lock/write/short-write/
@@ -132,8 +155,10 @@ without keeping completed jobs' volume handles alive. Classic HFS rows carry
 captured full paths so operations do not reconstruct paths from a later tree
 selection.
 
-The GUI still waits for operations through its progress dialog. Background
-operation UI and multiple-window commands are separate steps; this change does not enable concurrent writers.
+Ordinary copying uses the non-modal copy pool described above. Rename, delete
+and other synchronous storage commands retain their existing progress/wait UI.
+Same-volume writers remain mutually exclusive; this does not enable concurrent
+uncoordinated access to one filesystem.
 New-folder creation and formatting keep their existing worker paths.
 
 Run the Test build with `--verify-file-operations NEW_DIRECTORY` for detached
@@ -150,8 +175,9 @@ Volume coordination and session refresh
 File-operation requests acquire all participating volumes together: sources are
 read resources, destinations/moved sources are write resources, and duplicate
 resources merge to the stronger access mode. Conflicts fail as busy before any
-mutation. The storage worker still serializes filesystem execution; this does
-not introduce parallel access to the legacy HFS engine.
+mutation. The copy scheduler runs unrelated volumes concurrently, while same-resource
+requests wait for atomic reservations. General synchronous storage work retains
+its separate worker.
 
 Images use Windows file identity, including case/path and hard-link aliases.
 Windows folders use their host-volume identity; physical media use the device

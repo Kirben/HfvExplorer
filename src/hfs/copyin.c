@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -46,15 +47,15 @@
 
 #include "..\adouble.h"
 
-extern int crlf_translation;
+extern HFV_THREAD_LOCAL int crlf_translation;
 
-char *cpi_error = "no error";
+HFV_THREAD_LOCAL char *cpi_error = "no error";
 #include "Replacement.h"
-static HfsReplacement cpi_replacement;
+static HFV_THREAD_LOCAL HfsReplacement cpi_replacement;
 #ifdef HFV_TESTING
 int hfv_replacement_fault;
 #endif
-static int copyin_opened = 0;
+static HFV_THREAD_LOCAL int copyin_opened = 0;
 int copyin_destination_opened(void) { return copyin_opened; }
 
 #define MACB_BLOCKSZ	128
@@ -67,9 +68,9 @@ int copyin_destination_opened(void) { return copyin_opened; }
 
 void pc_to_mac_charset( unsigned char *s );
 
-static char raw_type[100];
-static char raw_crea[100];
-static int strip_extension = 0;
+static HFV_THREAD_LOCAL char raw_type[100];
+static HFV_THREAD_LOCAL char raw_crea[100];
+static HFV_THREAD_LOCAL int strip_extension = 0;
 
 void copyin_set_raw_param( char *type, char *creator, int strip )
 {
@@ -320,7 +321,7 @@ static
 int opensrc(char *srcname, char **dsthint, char *ext)
 {
   int fd, len;
-  static char name[HFS_MAX_FLEN + 1], *ptr;
+  static HFV_THREAD_LOCAL char name[HFS_MAX_FLEN + 1], *ptr;
 
   copyin_opened = 0;
   if (strcmp(srcname, "-") == 0)

@@ -29,7 +29,7 @@
 # include "record.h"
 # include "volume.h"
 
-static int m_invalid_cd_hack = 0;
+static HFV_THREAD_LOCAL int m_invalid_cd_hack = 0;
 
 void set_invalid_cd_hack( int onoff )
 {

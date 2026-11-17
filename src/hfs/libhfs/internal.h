@@ -388,5 +388,5 @@ struct _hfsvol_ {
 # define HFS_UPDATE_ALTMDB	0x20
 # define HFS_UPDATE_VBM		0x40
 
-extern hfsvol *hfs_mounts;
-extern hfsvol *hfs_curvol;
+#define hfs_mounts (hfs_context_get()->mounts)
+#define hfs_curvol (hfs_context_get()->current)

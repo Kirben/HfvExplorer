@@ -112,7 +112,8 @@ typedef struct {
 # define HFS_FNDR_ISINVISIBLE		(1 << 14)
 # define HFS_FNDR_ISALIAS		(1 << 15)
 
-extern char *hfs_error;
+#include "../EngineContext.h"
+#define hfs_error (hfs_context_get()->error)
 extern unsigned char hfs_charorder[];
 
 hfsvol *hfs_mount(char *, int, int);

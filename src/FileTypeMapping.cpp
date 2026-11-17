@@ -19,6 +19,8 @@
  */
 
 #include "stdafx.h"
+#include <mutex>
+namespace {std::recursive_mutex mappingMutex;}
 #include "HFVExplorer.h"
 #include "FileTypeMapping.h"
 #include "tmap.h"
@@ -743,6 +745,7 @@ void CFileTypeMapping::export_mappings( const CString & path, BOOL selected_item
 
 void import_map( CString & path ) 
 {
+ std::lock_guard<std::recursive_mutex> mapping(mappingMutex);
 	CFile f;
 	char *buf;
 	DWORD sz;
@@ -808,6 +811,7 @@ extern "C" {
 
 int tmap_init( void )
 {
+ std::lock_guard<std::recursive_mutex> mapping(mappingMutex);
 	tmap_final();
 	import_map( make_default_fname() );
 	return(1);
@@ -815,6 +819,7 @@ int tmap_init( void )
 
 int tmap_final( void )
 {
+ std::lock_guard<std::recursive_mutex> mapping(mappingMutex);
 	map_hfs2fat.RemoveAll();
 	map_fat2hfs.RemoveAll();
 	return(1);
@@ -822,6 +827,7 @@ int tmap_final( void )
 
 int tmap_hfs2fat( const char *type, const char *creator, char *extension )
 {
+ std::lock_guard<std::recursive_mutex> mapping(mappingMutex);
   int retval = 0;
 	CString key;
 	CString rValue;
@@ -836,6 +842,7 @@ int tmap_hfs2fat( const char *type, const char *creator, char *extension )
 
 int tmap_fat2hfs( char *extension, char *type, char *creator, int *strip )
 {
+ std::lock_guard<std::recursive_mutex> mapping(mappingMutex);
   int retval = 0;
 	CString rValue;
 	char *buf, ext_upper[100];

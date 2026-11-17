@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -46,10 +47,10 @@
 # include "io.h"
 #endif
 
-char *cph_error = "no error";
+HFV_THREAD_LOCAL char *cph_error = "no error";
 #include "Replacement.h"
-static HfsReplacement cph_replacement;
-static int cph_opened;
+static HFV_THREAD_LOCAL HfsReplacement cph_replacement;
+static HFV_THREAD_LOCAL int cph_opened;
 int copyhfs_destination_opened(void) { return cph_opened; }
 
 extern void hfs_perrorp(char *path);
@@ -88,7 +89,7 @@ hfsfile *opensrc(hfsvol *vol, char *srcname, char **dsthint, char *ext)
   hfsdirent ent;
   // static char name[36];
 	// LAURI
-	static char name[100];
+	static HFV_THREAD_LOCAL char name[100];
 
   file = hfs_open(vol, srcname);
   if (file == 0) {

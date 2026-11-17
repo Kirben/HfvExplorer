@@ -176,7 +176,6 @@ struct MainMacBrowser::State {
         return true;
     }
     bool Transfer(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed={}) {
-        if(BackgroundCopies::Active()&&(target.type==LIST_HFS||std::any_of(sources.begin(),sources.end(),[](const Location& p){return p.type==LIST_HFS;}))){if(session_.Status())session_.Status()->SetPaneText(0,"Wait for the current transfer before copying to classic HFS.");return false;}
         if(target.type==LIST_HFS)session_.Document()->m_volumes[target.index].close();
         auto convertible=[](const Location& p){if(p.type!=LIST_HFS)return true;auto n=p.classicImage.size();return n>=4&&p.classicImage[n-4]=='.'&&(!_stricmp(p.classicImage.c_str()+n-3,"DSK")||!_strnicmp(p.classicImage.c_str()+n-3,"HF",2));};
         bool legacy=!target.volume&&convertible(target)&&std::all_of(sources.begin(),sources.end(),[&](const Location& p){return !p.volume&&convertible(p);})&&std::any_of(sources.begin(),sources.end(),[&](const Location& p){return p.type!=target.type;});

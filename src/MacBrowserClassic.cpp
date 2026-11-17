@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
+#include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "charset.h"
 #include <fcntl.h>
@@ -31,6 +32,7 @@ struct RootScope {
  ~RootScope(){hfs_setcwd(volume,previous);}
 };
 class Classic final : public Volume {
+    std::shared_ptr<LegacyEngine::Context> context_;
     hfsvol *volume_ = nullptr;
     std::string image_;
     std::string resourceKey_;
@@ -52,7 +54,7 @@ class Classic final : public Volume {
     }
 public:
     Classic(const std::string &image, std::string root, bool write) : write_(write),image_(image) {
-        resourceKey_=VolumeCoord::ImageKey(image);
+        resourceKey_=VolumeCoord::ImageKey(image);context_=LegacyEngine::ForVolume(resourceKey_);LegacyEngine::Scope engine(context_);
         imageIdentity_=image;HANDLE identity=CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
         if(identity!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(identity,&info))imageIdentity_=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);CloseHandle(identity);}
         std::vector<char> converted(root.begin(),root.end());converted.push_back(0);pc_to_mac_charset((unsigned char*)converted.data());root=converted.data();
@@ -61,20 +63,20 @@ public:
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
-    ~Classic(){if(volume_)hfs_umount(volume_);}
-    void Close()override{if(volume_){auto v=volume_;volume_=nullptr;Check(hfs_umount(v)==0);}}
+    ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
+    void Close()override{LegacyEngine::Scope engine(context_);if(volume_){auto v=volume_;volume_=nullptr;Check(hfs_umount(v)==0);}}
     std::string ResourceKey()const override{return resourceKey_;}
-    std::u16string Name()const override{return Decode(paths_.at(2));}
+    std::u16string Name()const override{LegacyEngine::Scope engine(context_);return Decode(paths_.at(2));}
     const char *Kind()const override{return "HFS";}
-    bool Writable()const override{return write_&&volume_&&!(volume_->flags&HFS_READONLY);}
+    bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&HFS_READONLY);}
     bool CaseSensitive()const override{return false;}
     void ValidateEntry(const Entry& e)const override{
         Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
     }
-    uint64_t FreeBytes()const override{hfsvolent e;Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
-    Entry Stat(uint32_t id)override{return Describe(Path(id),id);}
-    void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent)override {
+    uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
+    Entry Stat(uint32_t id)override{LegacyEngine::Scope engine(context_);return Describe(Path(id),id);}
+    void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent)override {LegacyEngine::Scope engine(context_);
         auto dst=dynamic_cast<Classic*>(&target);if(!dst)return;RootScope sourceScope(volume_),targetScope(dst->volume_);
         bool same=!_stricmp(image_.c_str(),dst->image_.c_str());
         if(!same){
@@ -96,21 +98,21 @@ public:
         if(hfs_stat(dst->volume_,const_cast<char*>(name.c_str()),&to)==0&&from.cnid==to.cnid)
             throw HfsPlus::Error("Source and destination are the same classic HFS entry");
     }
-    std::vector<Entry> List(uint32_t parent)override {
+    std::vector<Entry> List(uint32_t parent)override {LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);auto path=Path(parent);if(path.back()!=':')path+=":";hfsdir* dir=hfs_opendir(volume_,const_cast<char*>(path.c_str()));Check(dir!=nullptr);
         struct Close{hfsdir* p;~Close(){hfs_closedir(p);}}close{dir};hfsdirent e;std::vector<Entry> out;
         while(hfs_readdir(dir,&e)==0){auto p=path+e.name;auto item=Describe(p,Id(p));item.parent=parent;out.push_back(item);}
         if(errno!=ENOENT)Check(false);return out;
     }
-    void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override {
+    void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override {LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);auto path=Path(id);hfsfile* f=hfs_open(volume_,const_cast<char*>(path.c_str()));Check(f!=nullptr);
         struct Close{hfsfile* p;~Close(){hfs_close(p);}}close{f};Check(hfs_setfork(f,fork)==0&&hfs_lseek(f,at,SEEK_SET)==at);
         Check(n<=LONG_MAX&&hfs_read(f,p,(unsigned long)n)==n);
     }
-    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override {
+    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override {LegacyEngine::Scope engine(context_);
         if(!write_)throw HfsPlus::Error("Classic source is read-only");RootScope scope(volume_);auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(hfs_mkdir(volume_,const_cast<char*>(path.c_str()))==0);return Id(path);
     }
-    uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {
+    uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {LegacyEngine::Scope engine(context_);
         if(!write_)throw HfsPlus::Error("Classic source is read-only");RootScope scope(volume_);
         if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
         auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(e.name);hfsdirent old;bool exists=hfs_stat(volume_,const_cast<char*>(path.c_str()),&old)==0;
@@ -133,15 +135,15 @@ public:
         Check(hfs_flush(volume_)==0);return Id(path);
     }
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}
-    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{
+    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{LegacyEngine::Scope engine(context_);
         auto from=dynamic_cast<Classic*>(&source);Check(from&&CanMoveFrom(source)&&write_);RootScope scope(volume_);
         auto old=from->Path(id),path=Path(parent);if(path.back()!=':')path+=':';path+=Encode(entry.name);
         Check(hfs_rename(volume_,const_cast<char*>(old.c_str()),const_cast<char*>(path.c_str()))==0);
     }
-    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
+    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);auto from=Path(id),to=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(write_&&hfs_rename(volume_,const_cast<char*>(from.c_str()),const_cast<char*>(to.c_str()))==0);paths_[id]=to;
     }
-    void Remove(uint32_t id)override{RootScope scope(volume_);auto path=Path(id);Check(write_&&id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
+    void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);auto path=Path(id);Check(write_&&id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
 };
 }
 std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return std::make_shared<Classic>(image,path,write);}

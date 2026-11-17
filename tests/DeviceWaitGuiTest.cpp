@@ -51,13 +51,15 @@ int RunDeviceWaitGuiTest(const char* report) {
   check(StorageOwnerShouldActivate(true,ownerWindow,fakeDialog,fakeDialog)&&StorageOwnerShouldActivate(true,ownerWindow,fakeDialog,ownerWindow),"Active storage dialog must return activation to its owner");
   check(!StorageOwnerShouldActivate(true,ownerWindow,fakeDialog,otherWindow)&&!StorageOwnerShouldActivate(false,ownerWindow,fakeDialog,fakeDialog)&&!StorageOwnerShouldActivate(true,ownerWindow,fakeDialog,nullptr),"Completion must not steal activation from another application or activate disabled owners");
   for(int failure=0;failure<3;++failure) {
-   storageUiTest={};unsigned beforePaint=owner.paints;
+   storageUiTest={};unsigned beforePaint=owner.paints;HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);check(release!=nullptr,"Create responsiveness gate");storageUiTest.releaseAfterTwoTimers=release;
    auto result=ShowStorageJob([&](Storage::Job& job)->Storage::Result {
-    check(GetCurrentThreadId()!=ui,"Work stayed on UI thread");PostMessage(ownerWindow,WM_PAINT,0,0);Sleep(350);
+    check(GetCurrentThreadId()!=ui,"Work stayed on UI thread");PostMessage(ownerWindow,WM_PAINT,0,0);check(WaitForSingleObject(release,15000)==WAIT_OBJECT_0,"Modal UI did not release the simulated read");
     if(failure==2)throw std::runtime_error("Injected error");
     if(failure==1)return {1,ERROR_NOT_READY,"Injected read error"};
     Storage::Progress progress;progress.phase="Complete";job.progress(progress);return {};
    },"Synthetic slow storage",true);
+   CloseHandle(release);storageUiTest.releaseAfterTwoTimers=nullptr;
+   fprintf(out,"Modal wait %d: paints=%u before=%u ticks=%u disabled=%d result=%d\n",failure,owner.paints,beforePaint,storageUiTest.timerTicks,storageUiTest.disabledDuring,result.code);fflush(out);
    check(owner.paints>beforePaint&&storageUiTest.timerTicks>=2 && storageUiTest.disabledDuring,"Normal modal timers did not run during slow read");
    check(storageUiTest.enabledAfter && storageUiTest.dialogClosed && storageUiTest.ownerRestoredBeforeClose && IsWindowEnabled(owner.GetSafeHwnd())&&!StorageUi::busy(),"Owner must be restored before modal dialog closes");
    check((failure==0)==(result.code==0),"Error not delivered");

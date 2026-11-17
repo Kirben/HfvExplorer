@@ -27,7 +27,7 @@
 # define MUTDIFF  2082844800L
 
 static
-unsigned long tzdiff = -1;
+HFV_THREAD_LOCAL unsigned long tzdiff = -1;
 
 unsigned char hfs_charorder[256] = {
   0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,

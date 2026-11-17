@@ -218,8 +218,8 @@ int RunCopyProgressTest(const char* directory) {
   CString safePath=root+"\\preserved.bin";
   for(int fault : {1,2,3}) {
    {CFile f;check(f.Open(safePath,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create previous output");f.Write("ORIGINAL",8);f.Close();}
-   copyout_test_fault(fault);
-   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)safePath,0,1,'a'));
+   auto work=MakeCopyJob((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)safePath,0,1,'a');
+   auto job=Storage::worker().submit([work,fault](Storage::Job& job){copyout_test_fault(fault);struct Reset{~Reset(){copyout_test_fault(0);}}reset;return work(job);});
    while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}
    copyout_test_fault(0);
    check(job->result().code!=0&&load(safePath)==std::vector<BYTE>({'O','R','I','G','I','N','A','L'}),"failed write/flush/publish preserves previous Windows output");
@@ -254,8 +254,8 @@ int RunCopyProgressTest(const char* directory) {
   {CFile f;check(f.Open(hostSource+":Finder",CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows alternate stream");f.Write("FORK",4);f.Close();}
   for(int fault : {1,2,3,0}) {
    {CFile f;check(f.Open(hostDestination,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows destination");f.Write("OLD",3);f.Close();}
-   copyout_test_fault(fault);
-   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)hostDirectory,0,0,'a'));
+   auto work=MakeCopyJob((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)hostDirectory,0,0,'a');
+   auto job=Storage::worker().submit([work,fault](Storage::Job& job){copyout_test_fault(fault);struct Reset{~Reset(){copyout_test_fault(0);}}reset;return work(job);});
    while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}copyout_test_fault(0);
    check((job->result().code!=0)==(fault!=0),"Windows staged copy result");
    check(load(hostDestination)==(fault?std::vector<BYTE>({'O','L','D'}):std::vector<BYTE>({'N','E','W'})),"Windows copy failure preserves previous destination");

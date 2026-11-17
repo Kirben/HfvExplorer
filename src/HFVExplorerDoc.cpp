@@ -22,6 +22,7 @@
 
 //#include "afx.h"
 #include "stdafx.h"
+#include "LegacyEngine.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "BrowserDirectory.h"
@@ -1444,8 +1445,9 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 		int i;
   if(!m_volumes[volinx].m_opened){
    auto key=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name));auto owner=GetBrowserSession().Owner();
-   auto result=ShowStorageWaitJob([&](Storage::Job&){FileOperations::LegacyGuard engine;VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reopen the selected Mac volume");return Storage::Result{};},!owner->IsWindowVisible(),owner);
+   auto result=ShowStorageWaitJob([&](Storage::Job&){LegacyEngine::Scope engine;VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reopen the selected Mac volume");return Storage::Result{};},!owner->IsWindowVisible(),owner);
    if(result.code){GetBrowserSession().List()->list_clear();GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Status())GetBrowserSession().Status()->SetPaneText(0,result.message.c_str());return;}
+   if(m_volumes[volinx].m_rootitem)GetBrowserSession().Tree()->m_ct->SetItemText(m_volumes[volinx].m_rootitem,m_volumes[volinx].m_volume_name);
   }
 		parent_link_id = GetBrowserSession().Tree()->get_parent_id( m_volumes[volinx].m_rootitem, volinx, id );
 
@@ -1593,7 +1595,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 {
 	int native=GetBrowserSession().MacBrowser().OpenImage(lpszPathName);
  if(native)return native>0;
- if(BackgroundCopies::Active()){std::string path=lpszPathName?lpszPathName:"";GetBrowserSession().Defer("",true,[this,path]{OnOpenDocument(path.c_str());});return TRUE;}
+ if(BackgroundCopies::Active()&&GetBrowserSession().Tree()->m_ct->GetRootItem()){std::string path=lpszPathName?lpszPathName:"";GetBrowserSession().Defer("",true,[this,path]{OnOpenDocument(path.c_str());});return TRUE;}
  StorageAction storageAction;
 
 	int i;
@@ -1644,6 +1646,10 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 
 	for( i=0; i<m_hfs_count; i++) {
 		m_volumes[i].m_rootitem = 0;
+        if(!m_volumes[i].m_free&&!VolumeCoord::Readable(VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[i].m_file_name)))){
+            CString label=m_volumes[i].m_volume_name;if(label.IsEmpty())label=m_volumes[i].m_file_name;
+            m_volumes[i].m_rootitem=GetBrowserSession().Tree()->initialize_volume(i,label,CNID_ROOT_ID,m_volumes[i].m_is_floppy,m_volumes[i].m_is_cd,m_volumes[i].m_is_hd,m_volumes[i].m_is_removable);continue;
+        }
 		if(!m_volumes[i].m_free && m_volumes[i].open()) {
 			m_volumes[i].m_rootitem = 
 				GetBrowserSession().Tree()->initialize_volume(

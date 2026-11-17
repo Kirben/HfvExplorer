@@ -1,3 +1,4 @@
+#include "EngineContext.h"
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -17,7 +18,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-extern char *cpo_error;
+extern HFV_THREAD_LOCAL char *cpo_error;
 
 int cpo_macb(hfsvol *, char *, char *);
 int cpo_macb1(hfsvol *, char *, char *); /* BinHex 5.0 / MacBinary I */

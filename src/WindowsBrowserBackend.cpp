@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "LegacyEngine.h"
 #include "BrowserSession.h"
 #include "BackgroundCopies.h"
 #include "HFVExplorer.h"
@@ -42,7 +43,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int v
   if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
 return out;
  }
- FileOperations::LegacyGuard engine;
+ LegacyEngine::Scope engine;
  BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::HostKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
  std::string prefix=directory;if(prefix.empty())throw std::runtime_error("Select a Windows folder");if(prefix.back()!='\\')prefix+='\\';
  bool afp=is_afp_directory(const_cast<char*>(directory))!=0;

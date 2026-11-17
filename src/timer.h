@@ -22,8 +22,9 @@
 extern "C" {
 #endif
 
-extern DWORD __Ttim;
-extern HCURSOR __TScurs;
+#include "hfs/EngineContext.h"
+extern HFV_THREAD_LOCAL DWORD __Ttim;
+extern HFV_THREAD_LOCAL HCURSOR __TScurs;
 #define START_TIME_CONSUMING(ticks) __Ttim = GetTickCount()+ticks; __TScurs = 0;
 #define END_TIME_CONSUMING if(__TScurs) _end_time_consuming(__TScurs)
 #define UPDATE_TIME_CONSUMING(update) if(!__TScurs && (GetTickCount() > __Ttim)) { __TScurs = _start_time_consuming(update); __Ttim = 0x7FFFFFFF; }
