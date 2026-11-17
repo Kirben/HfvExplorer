@@ -130,7 +130,7 @@ int RunMainMacBrowserTest(const char* directory){
         auto classicAgain=OpenClassic(classicPath,"Classic:",true);Reject([&]{Storage::Job job;Copy(*classic,classic->List()[0].id,*classicAgain,2,job,true);},"same classic destination accepted across adapters");
         MainMfsFixture::Fixture mfsFixture;std::string mfsPath=root+"\\mfs.dsk";
         {CFile f;Check(f.Open(mfsPath.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"write MFS browser fixture");f.Write(mfsFixture.bytes.data(),UINT(mfsFixture.bytes.size()));}
-        auto mfs=MacBrowser::OpenImage(W(mfsPath));Check(mfs&&std::string(mfs->Kind())=="MFS"&&!mfs->Supports().create,"MFS read-only capabilities");
+        auto mfs=MacBrowser::OpenImage(W(mfsPath));Check(mfs&&std::string(mfs->Kind())=="MFS"&&mfs->Supports().create&&!mfs->Supports().createFolders,"MFS writable flat capabilities");
         auto mfsEntries=mfs->List();Check(mfsEntries.size()==4&&mfsEntries[2].name.size()==255&&mfsEntries[2].name.back()==0xe9,"MFS long MacRoman names converted without shortening");
         Reject([&]{Storage::Job job;RemoveTree(*mfs,mfsEntries[0].id,job);},"MFS deletion was enabled");
         Storage::Job mfsCopy;Check(Copy(*mfs,mfsEntries[0].id,*target,2,mfsCopy),"MFS both-fork copy into shared writable adapter");
@@ -146,7 +146,7 @@ int RunMainMacBrowserTest(const char* directory){
         auto sensitive=target->CaseSensitive();Check(sensitive,"HFSX case-sensitive adapter");
         auto insensitive=Formatted(W(root+"\\insensitive.dsk"),HfsPlus::Volume::FormatKind::HfsXCaseInsensitive);
         Check(!insensitive->CaseSensitive()&&std::string(insensitive->Kind())=="HFSX","case-insensitive HFSX adapter");
-        fprintf(report,"PASS: MFS read-only listing/copy with 255-byte MacRoman names; shared Unicode search routes; self-copy guards across separate Windows/classic adapters.\n");
+        fprintf(report,"PASS: MFS flat listing/copy and locked-file protection with 255-byte MacRoman names; shared Unicode search routes; self-copy guards across separate Windows/classic adapters.\n");
         fprintf(report,"PASS: shared adapters preserve long Unicode names, both forks and Finder metadata across HFS+/HFSX, Windows AppleDouble and classic HFS; recursive totals, self/descendant rejection, cancellation and failed-replacement preservation.\n");
         auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());CWnd owner;Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden unified browser",WS_OVERLAPPED,0,0,700,400,nullptr,0)!=FALSE,"create hidden owner");
         app.m_pMainWnd=&owner;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;InitializeStorageUi();
@@ -164,7 +164,7 @@ int RunMainMacBrowserTest(const char* directory){
         Check(folderRow>=0&&browser.Activate(folderRow),"main list folder activation");bool found=false;for(int i=0;i<lc.GetItemCount();++i)found|=Text(lc,i)==Wide(unicode);
         Check(found&&browser.Active()&&browser.Writable(),"main list retained full Unicode filename and writable state");
         Check(browser.Refresh()&&owner.IsWindowEnabled(),"main browser refresh and owner restoration");
-        app.m_show_invisible_mac=1;int mfsIndex=browser.AttachTestVolume(mfs,"mfs");Check(browser.ShowTestFolder(mfsIndex,2)&&!browser.Writable(),"MFS uses the same main panes with read-only actions");
+        app.m_show_invisible_mac=1;int mfsIndex=browser.AttachTestVolume(mfs,"mfs");Check(browser.ShowTestFolder(mfsIndex,2)&&browser.Writable()&&!browser.CanCreateFolder(),"MFS uses the main panes with writable flat actions");
         bool longMfs=false;for(int row=0;row<lc.GetItemCount();++row)longMfs|=Text(lc,row).size()==255;Check(longMfs,"long MFS name in main list");
         // Exercise the actual existing Copy/Paste and Delete command entry points.
         Check(browser.ShowTestFolder(index,2),"return to source root");int copyRow=-1;

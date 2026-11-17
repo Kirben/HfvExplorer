@@ -45,6 +45,7 @@ public:
     void ImportResource();
     void Export(unsigned fork);
     bool Writable() const;
+    bool CanCreateFolder()const;
     bool SelectionWritable() const;
     bool CanExport() const;
     int SelectedCdDrive() const;

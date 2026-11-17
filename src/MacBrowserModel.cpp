@@ -86,48 +86,68 @@ public:
     bool CanMoveFrom(const Volume& source)const override{return source.ResourceKey()==ResourceKey();}
     void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{Check(CanMoveFrom(source),"Move must stay on the same volume");Rename(id,parent,entry.name);}
 };
+
 class Mfs final : public Volume {
     std::unique_ptr<MfsImageSource> source_;
     MfsImage image_;
-    std::mutex readMutex_;
+    mutable std::recursive_mutex mutex_;
+    struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Mfs& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
     std::string resourceKey_;
-    std::map<uint32_t, size_t> entries_;
-    Entry EntryAt(size_t i) {
-        const auto &e = image_.Entries().at(i); Entry out;
-        out.id = uint32_t(i + 3); out.parent = 2; out.name = U16(MfsDisplayName(e.name));
-        out.version=e.version;
-        out.created = e.created; out.modified = e.modified;out.datesValid=true; out.protectedFile = (e.flags & 1) != 0;
-        memcpy(out.finder.data(), e.finderInfo, 16);
-        for (unsigned f = 0; f < 2; ++f) out.forks[f].size = e.forks[f].length;
-        return out;
+    std::map<uint32_t,size_t> entries_;
+    std::map<uint32_t,uint32_t> uiIds_;
+    uint32_t nextUi_=3;
+    std::atomic<bool> usable_{true},writable_{false};
+    std::atomic<uint64_t> free_{0};
+    std::shared_ptr<const std::u16string> name_;
+    void Sync(){
+        entries_.clear();for(size_t i=0;i<image_.Entries().size();++i){auto id=image_.Entries()[i].id;auto found=uiIds_.find(id);if(found==uiIds_.end()){Check(nextUi_!=UINT32_MAX,"MFS browser IDs exhausted");found=uiIds_.emplace(id,nextUi_++).first;}entries_[found->second]=i;}
+        std::atomic_store(&name_,std::make_shared<const std::u16string>(U16(MfsDisplayName(image_.VolumeName()))));free_=image_.FreeBytes();writable_=image_.Writable();
     }
-    void Refuse() { throw HfsPlus::Error("MFS disk images are read-only"); }
+    Entry EntryAt(size_t i){
+        const auto& in=image_.Entries().at(i);Entry e;e.id=uiIds_.at(in.id);e.resolvedId=in.id;e.parent=2;e.name=U16(MfsDisplayName(in.name));e.version=in.version;e.protectedFile=(in.flags&1)!=0;
+        e.created=in.created;e.modified=in.modified;e.datesValid=true;memcpy(e.finder.data(),in.finderInfo,16);for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].length;
+        e.identity=std::to_string(in.id)+":"+std::to_string(in.created)+":"+std::to_string(in.version);return e;
+    }
+    void Ready()const{Check(usable_,"Reopen the MFS image after a failed operation");}
+    void Mutate(std::function<bool()> work){
+        Call call(*this);Ready();Check(writable_,"MFS image is read-only");
+        try{if(!work())throw HfsPlus::Error(image_.Error());Sync();}
+        catch(...){auto failure=std::current_exception();if(image_.RecoveryRequired())usable_=false;else{try{if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}catch(...){usable_=false;}}std::rethrow_exception(failure);}
+    }
+    static std::string Encode(const std::u16string& name,unsigned maximum=255){std::string encoded,error;if(!MfsImage::EncodeName(Wide(name),encoded,error,maximum))throw HfsPlus::Error(error);return encoded;}
 public:
-    explicit Mfs(std::unique_ptr<MfsImageSource> source,std::string key) : source_(std::move(source)),resourceKey_(std::move(key)) {
-        if (!image_.Open(*source_)) throw HfsPlus::Error(image_.Error());
-        for (size_t i = 0; i < image_.Entries().size(); ++i) entries_[uint32_t(i + 3)] = i;
-    }
+    explicit Mfs(std::unique_ptr<MfsImageSource> source,std::string key):source_(std::move(source)),resourceKey_(std::move(key)){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
     std::string ResourceKey()const override{return resourceKey_;}
-    std::u16string Name() const override { return U16(MfsDisplayName(image_.VolumeName())); }
-    const char *Kind() const override { return "MFS"; }
-    bool Writable() const override { return false; }
-    bool CaseSensitive() const override { return false; }
-    uint64_t FreeBytes() const override { return image_.FreeBytes(); }
-    std::vector<Entry> List(uint32_t parent) override {
-        Check(parent == 2, "MFS has no subdirectories"); std::vector<Entry> out;
-        for (const auto &e : entries_) out.push_back(EntryAt(e.second)); return out;
+    std::u16string Name()const override{return *std::atomic_load(&name_);}
+    const char* Kind()const override{return "MFS";}
+    bool Writable()const override{return usable_&&writable_;}
+    Capabilities Supports()const override{Capabilities c;c.create=c.rename=c.remove=Writable();c.unicodeNames=false;c.createFolders=false;return c;}
+    bool CaseSensitive()const override{return false;}
+    uint64_t FreeBytes()const override{return free_;}
+    void Reload()override{Call call(*this);Ready();try{if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}catch(...){usable_=false;throw;}}
+    std::vector<Entry> List(uint32_t parent)override{Call call(*this);Ready();Check(parent==2,"MFS has no subdirectories");std::vector<Entry> out;for(auto& pair:entries_)out.push_back(EntryAt(pair.second));return out;}
+    Entry Stat(uint32_t id)override{Call call(*this);Ready();if(id==2){Entry e;e.id=2;e.parent=1;e.directory=true;e.name=Name();return e;}return EntryAt(entries_.at(id));}
+    bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override{
+        Call call(*this);Ready();Check(parent==2,"MFS has no subdirectories");auto encoded=Encode(name);bool exists=false;
+        for(auto& p:entries_)if(MfsImage::EqualNames(image_.Entries()[p.second].name,encoded)){Check(!exists,"Several MFS versions have this name; select a specific version");found=EntryAt(p.second);exists=true;}return exists;
     }
-    Entry Stat(uint32_t id) override {
-        if (id == 2) { Entry e; e.id = 2; e.parent = 1; e.directory = true; e.name = Name(); return e; }
-        return EntryAt(entries_.at(id));
+    bool FindTransferChild(uint32_t parent,const Entry& source,Entry& found)override{Call call(*this);Ready();Check(parent==2,"MFS has no subdirectories");auto encoded=Encode(source.name);for(auto& p:entries_){auto& e=image_.Entries()[p.second];if(e.version==source.version&&MfsImage::EqualNames(e.name,encoded)){found=EntryAt(p.second);return true;}}return false;}
+    void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override{Call call(*this);Ready();size_t got=0;if(!image_.ReadFork(entries_.at(id),fork,at,p,n,got))throw HfsPlus::Error(image_.Error());Check(got==n,"Short MFS fork read");}
+    void ValidateEntry(const Entry& e)const override{
+        Check(!e.directory,"MFS is flat and cannot store folders");Check(e.attributes.empty(),"MFS cannot preserve extended attributes or ACLs");Encode(e.name);Check(e.version<=255,"Invalid MFS file version");
+        Check(e.forks[0].size<=20*1024*1024&&e.forks[1].size<=20*1024*1024,"File exceeds the MFS 20 MiB volume limit");
+        Check(std::all_of(e.finder.begin()+16,e.finder.end(),[](uint8_t b){return b==0;}),"MFS can store only the first 16 bytes of Finder information");
     }
-    void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
-        VolumeCoord::BackendRead lease(ResourceKey());std::lock_guard<std::mutex> lock(readMutex_);size_t got = 0; if (!image_.ReadFork(entries_.at(id), fork, offset, p, n, got)) throw HfsPlus::Error(image_.Error()); Check(got == n, "Short MFS fork read");
+    void ValidateRemoval(uint32_t id)override{auto e=Stat(id);Check(Writable()&&id!=2&&!e.protectedFile,"MFS file is locked or read-only");}
+    uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw HfsPlus::Error("MFS is flat and has no subdirectories");}
+    uint32_t Put(uint32_t parent,const Entry& e,Reader reader,bool overwrite)override{
+        Check(parent==2,"MFS has no subdirectories");ValidateEntry(e);MfsEntry raw;raw.name=Encode(e.name);raw.version=BYTE(e.version);raw.flags=BYTE(0x80|(e.protectedFile?1:0));raw.created=e.created;raw.modified=e.modified;raw.datesValid=e.datesValid;memcpy(raw.finderInfo,e.finder.data(),16);for(unsigned f=0;f<2;++f)raw.forks[f].length=uint32_t(e.forks[f].size);uint32_t id=0;
+        Mutate([&]{return image_.Put(raw,reader,overwrite,id);});Call call(*this);return uiIds_.at(id);
     }
-    uint32_t MakeDirectory(uint32_t, const std::u16string &) override { Refuse(); return 0; }
-    uint32_t Put(uint32_t, const Entry &, Reader, bool) override { Refuse(); return 0; }
-    void Rename(uint32_t, uint32_t, const std::u16string &) override { Refuse(); }
-    void Remove(uint32_t) override { Refuse(); }
+    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{Check(parent==2&&id!=2,"MFS files remain in the volume root");auto encoded=Encode(name);Mutate([&]{return image_.Rename(image_.Entries().at(entries_.at(id)).id,encoded);});}
+    void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
+    bool SupportsBasicMetadata()const override{return true;}
+    void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=Encode(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=e.created;raw.modified=e.modified;memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
 struct Planned { Entry entry; std::vector<Planned> children; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
@@ -153,7 +173,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
               Storage::Job &job, Storage::Progress &progress) {
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
-    found=dst.FindChild(parent,entry.name,existing);
+    found=dst.FindTransferChild(parent,entry,existing);
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
@@ -193,6 +213,8 @@ std::shared_ptr<Volume> OpenImage(const std::wstring &path) {
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);
     if (!MfsImage::Recognizes(*mfs)) return {};
+    mfs.reset(new MfsImageSource);
+    if(!mfs->Open(path.c_str(),error,true)){mfs.reset(new MfsImageSource);if(!mfs->Open(path.c_str(),error))throw HfsPlus::Error(error);}
     return std::make_shared<Mfs>(std::move(mfs),key);
     });
 }

@@ -212,6 +212,7 @@ void MainMacBrowser::ForgetTree(){state_->restore.clear();for(auto& mount:state_
 std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->m_ct->GetItemData(item)):nullptr;if(!p)return {};if(p->type==LIST_HFS&&p->volinx>=0&&p->volinx<doc->m_hfs_count)return doc->m_volumes[p->volinx].m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->m_volumes[p->volinx].m_file_name));if(p->type==LIST_FAT)return session_.ObservedWindowsKey(p->path);return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::Writable()const{int i;uint32_t id;return state_->Selected(i,id)&&state_->folderMutable&&state_->mounts[i].volume->Supports().create;}
+bool MainMacBrowser::CanCreateFolder()const{int i;uint32_t id;return Writable()&&state_->Selected(i,id)&&state_->mounts[i].volume->Supports().createFolders;}
 bool MainMacBrowser::SelectionWritable()const{
     if(!Writable())return false;auto& list=session_.List()->GetListCtrl();bool selected=false;
     for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));
@@ -291,7 +292,7 @@ bool MainMacBrowser::Activate(int row){auto p=reinterpret_cast<list_lparam_struc
 bool MainMacBrowser::CreateFolder(const FileOperations::Location& target,const std::u16string& name){
  FileOperations::Request request;request.kind=FileOperations::Kind::CreateFolder;request.target=target;request.name=name;return RunOperation(session_,std::move(request),false,true);
 }
-bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!Writable())return true;
+bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!CanCreateFolder())return true;
  auto target=state_->Target();std::wstring name=L"New Folder";
  if(EditHfsPlusName(session_.Owner(),name,target.volume->CaseSensitive())){CreateFolder(target,U16(name));if(!BackgroundCopies::Enabled())Refresh();}return true;}
 FileOperations::Location MainMacBrowser::CaptureItem(int row){
@@ -394,7 +395,7 @@ bool MainMacBrowser::ContextMenu(CPoint point){
     CMenu menu;menu.CreatePopupMenu();menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_OPEN,"&Open");
     menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"&Copy");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_CUT,"Cu&t");
     menu.AppendMenu(MF_STRING|(Writable()&&BrowserTransfers::Any()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_SEPARATOR);
-    menu.AppendMenu(MF_STRING|write,ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
+    menu.AppendMenu(MF_STRING|(CanCreateFolder()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
     menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_OWN_DELETE,"&Delete");
     menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"P&roperties...");
     UINT command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,session_.Owner());

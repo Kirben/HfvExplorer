@@ -8,6 +8,7 @@
 #include "HfsPlusDialogs.h"
 #include "StorageJobDialog.h"
 #include "ImageSize.h"
+#include "MfsImage.h"
 #include <commdlg.h>
 namespace {
 std::u16string U16(const std::wstring &s) { return std::u16string(s.begin(), s.end()); }
@@ -78,7 +79,7 @@ class FormatDialog : public CDialog {
   public:
     std::u16string name;
     uint64_t size = 0;
-    bool journaled = true;
+    bool journaled = true,mfs=false,dc42=false;
     HfsPlus::Volume::FormatKind kind = HfsPlus::Volume::FormatKind::HfsPlus;
     explicit FormatDialog(CWnd *p) : CDialog(IDD_HPLUS_FORMAT, p) {}
     HfsPlus::Volume::FormatKind SelectedKind() {
@@ -94,25 +95,32 @@ class FormatDialog : public CDialog {
         SetDlgItemText(IDC_HPLUS_SIZE, "128 MiB");
         CheckDlgButton(IDC_HPLUS_JOURNAL, BST_CHECKED);
         for (const char *label :
-             {"HFS+ (case-insensitive)", "HFSX (case-sensitive)", "HFSX (case-insensitive)"})
+             {"HFS+ (case-insensitive)", "HFSX (case-sensitive)", "HFSX (case-insensitive)", "MFS (raw image)", "MFS (Disk Copy 4.2)"})
             SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, 0);
         return TRUE;
     }
+    BOOL OnCommand(WPARAM wp,LPARAM lp)override{
+        if(LOWORD(wp)==IDC_HPLUS_FORMAT_KIND&&HIWORD(wp)==CBN_SELCHANGE){int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));bool nowMfs=selected>=3;
+            GetDlgItem(IDC_HPLUS_JOURNAL)->EnableWindow(!nowMfs);if(nowMfs&&!mfs)SetDlgItemText(IDC_HPLUS_SIZE,"400 KiB");if(!nowMfs&&mfs)SetDlgItemText(IDC_HPLUS_SIZE,"128 MiB");mfs=nowMfs;return TRUE;}
+        return CDialog::OnCommand(wp,lp);
+    }
     void OnOK() override {
         try {
-            kind = SelectedKind();
+            int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));mfs=selected>=3;dc42=selected==4;
+            if(mfs){std::string encoded,error;auto text=Text(m_hWnd,IDC_HPLUS_NAME);if(!MfsImage::EncodeName(text,encoded,error,27))throw HfsPlus::Error(error);name=U16(text);}
+            else {kind = SelectedKind();
             name = HfsPlus::Normalize(U16(Text(m_hWnd, IDC_HPLUS_NAME)),
-                                      kind == HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+                                      kind == HfsPlus::Volume::FormatKind::HfsXCaseSensitive);}
             CString text;
             GetDlgItemText(IDC_HPLUS_SIZE, text);
             hfv_size_t parsed = 0;
             if (!ParseImageSize(text, &parsed, INT64_MAX))
                 throw HfsPlus::Error("Enter an image size such as 128 MiB or 4 GiB.");
             size = parsed;
-            if (size < 8 * 1024 * 1024 || size % 4096)
-                throw HfsPlus::Error("Use at least 8 MiB and a multiple of 4096 bytes.");
-            journaled = IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED;
+            if(mfs){if(size<128*1024||size>20*1024*1024||size%512)throw HfsPlus::Error("MFS requires 128 KiB-20 MiB and a 512-byte multiple.");if(dc42&&size!=400*1024&&size!=800*1024&&size!=720*1024&&size!=1440*1024)throw HfsPlus::Error("Disk Copy requires 400, 800, 720 or 1440 KiB.");}
+            else if (size < 8 * 1024 * 1024 || size % 4096)throw HfsPlus::Error("Use at least 8 MiB and a multiple of 4096 bytes.");
+            journaled = !mfs&&IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED;
             CDialog::OnOK();
         } catch (const std::exception &e) {
             AfxMessageBox(e.what());
@@ -120,6 +128,7 @@ class FormatDialog : public CDialog {
     }
 };
 } // namespace
+void HfvUnicodeNameEdit(HWND parent,int id){UnicodeEdit(parent,id);}
 bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
  NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
@@ -134,8 +143,12 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
         return;
     auto result = ShowStorageJob(
         CommandStorage::Guard(CommandStorage::ImageWrite(path),[&](Storage::Job &) {
-            auto source = HfsPlus::CreateImage(path.c_str(), options.size);
-            HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
+            auto bytes=options.size+(options.dc42?84+((options.size==400*1024||options.size==800*1024)?options.size/512*12:0):0);
+            auto source = HfsPlus::CreateImage(path.c_str(),bytes);
+            if(options.mfs){
+                struct WritableMfs:MfsSource{HfsPlus::Source& s;explicit WritableMfs(HfsPlus::Source& v):s(v){}uint64_t Length()const override{return s.Size();}bool Writable()const override{return s.Writable();}bool ReadAt(uint64_t at,void* p,size_t n)override{try{s.Read(at,p,n);return true;}catch(...){return false;}}bool WriteAt(uint64_t at,const void* p,size_t n)override{try{s.Write(at,p,n);return true;}catch(...){return false;}}bool Flush()override{try{s.Flush();return true;}catch(...){return false;}}}mfs(*source);
+                std::string name,error;if(!MfsImage::EncodeName(MacBrowser::Wide(options.name),name,error,27)||!MfsImage::Format(mfs,name,options.size,options.dc42,error))throw HfsPlus::Error(error);
+            }else HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind);
             return Storage::Result{};
         },{VolumeCoord::ImageKey(path),VolumeCoord::PathKey(path)}),
         "Format Mac image",false,false,false,parent);
@@ -175,14 +188,15 @@ int RunHfsPlusUiTest(const char *directory) {
         require(IsWindowUnicode(::GetDlgItem(format.m_hWnd, IDC_HPLUS_NAME)) &&
                     format.IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED,
                 "Unicode format defaults");
-        require(format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCOUNT) == 3,
+        require(format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCOUNT) == 5,
                 "HFSX format choices missing");
         for (int choice = 0; choice < 3; ++choice) {
             format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, choice);
             require(static_cast<int>(format.SelectedKind()) == choice, "Format choice not applied");
         }
+        for(int choice=3;choice<5;++choice){format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,choice);format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);require(!format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"400 KiB","MFS formatter defaults/journal state");}
         format.DestroyWindow();
-        fprintf(report, "PASS: active Unicode name and formatter dialogs; all three format choices, "
+        fprintf(report, "PASS: active Unicode name and formatter dialogs; all HFS+/HFSX/MFS format choices, "
                         "journal default and owner restoration. Main-browser regressions run separately. "
                         "No computer control or physical devices used.\n");
     } catch (const std::exception &e) {
