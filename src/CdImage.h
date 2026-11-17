@@ -5,6 +5,7 @@ class MediaImageSource {
 public:
  virtual ~MediaImageSource(){}
  virtual bool Open(int drive,std::string& reason)=0;
+ virtual void Close(){}
  virtual unsigned long long Size() const=0;
  virtual bool Verify(DWORD& generation)=0;
  virtual bool Read(unsigned long long offset,DWORD count,void* buffer,DWORD& got)=0;

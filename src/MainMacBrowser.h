@@ -20,6 +20,7 @@ public:
     void Clear();
     bool Select(LPARAM treeData);
     bool Active() const;
+    std::string SelectedResourceKey()const;
     bool Activate(int row);
     bool Refresh();
     bool RefreshForChange(const std::string&);
@@ -51,7 +52,7 @@ public:
     void Sort(int column, bool ascending);
 #ifdef HFV_TESTING
     size_t TestClipboardCount()const;
-    int AttachTestVolume(std::shared_ptr<MacBrowser::Volume>, const char *key);
+    int AttachTestVolume(std::shared_ptr<MacBrowser::Volume>, const char *key,int drive=-1);
     bool ShowTestFolder(int index, uint32_t id);
 #endif
 };

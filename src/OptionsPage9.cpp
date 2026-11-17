@@ -82,7 +82,7 @@ void COptionsPage9::OnCopt9BrowseFusionSystemFilePath()
 {
 	GetDlgItemText( IDC_COPT9_FUSION_SYSTEM_FILE_PATH, m_fusion_system_file_path );
 	CFileDialog dlg( TRUE, _T("HFV"), m_fusion_system_file_path,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("HFS volume files|*.dsk;*.hf*|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_fusion_system_file_path = dlg.GetPathName();
@@ -107,7 +107,7 @@ void COptionsPage9::OnCopt9BrowseFusionBatchPath()
 		rest = "";
 	}
 	CFileDialog dlg( TRUE, _T("BAT"), s,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("Batch Files|*.bat|Program Files|*.exe|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_fusion_batch_path = dlg.GetPathName() + rest;

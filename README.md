@@ -58,9 +58,31 @@ during transfers; its initial tree retains busy images without opening them.
 Each copy keeps its own progress/overwrite/cancellation UI. The taskbar combines
 active job progress per browser, so completing one job does not clear another.
 
-Options, emulator launchers, formatting/ejecting/burning media, image opening
-and full mount rebuilds retain their existing UI safety restrictions during
-transfers. Windows browsing uses independent metadata readers and generic icons
+Command availability now follows the selected or chosen volume rather than
+whether any background job exists. Options and source/destination pickers remain
+available. Eject/reload require the selected device to have no active readers or
+writer; imaging, formatting, legacy converter helpers and CD recording acquire
+atomic source/destination reservations before accessing their media. Recorder
+aliases use the same drive identity as browsing and eject/reload. Each operation
+rechecks at execution, including conflicts that arise while a dialog is open.
+
+Unrelated image opening extends the existing tree while work is active. Refresh
+and media scans leave busy mounts intact and skip only busy drives. Legacy
+association searches also skip reserved images. Releasing a CD closes idle native
+readers in every browser, including backends retained by the application clipboard;
+other listings remain intact. Released clipboard sources must be selected again.
+File pickers preserve the process working directory. Name/file selection and
+legacy device/format wait dialogs retain their existing modal behavior; this does
+not make every storage command a non-modal job. Windows-file reservations remain
+at host-volume granularity, so two paths on one Windows volume can still conflict.
+
+`--verify-per-volume-commands NEW_DIRECTORY` tests real multi-window command and
+menu-update routing during a gated copy, late source/destination conflicts,
+recorder aliases, simulated eject/imaging/floppy writes, resource cleanup, idle CD
+reader release, skipped busy scan targets and incremental image opening. Test
+builds use only injected probes and never scan physical user drives.
+
+Windows browsing uses independent metadata readers and generic icons
 during copying. Browser windows can close independently while copies continue;
 progress/taskbar ownership moves to a surviving browser. Physical-reader
 resources that could block on active I/O are retained without a window until

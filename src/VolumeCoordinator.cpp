@@ -51,6 +51,11 @@ BackendRead::BackendRead(const std::string& key){
  lease_.reset(new Lease({{key,Mode::Read}}));
 }
 bool Readable(const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);auto found=bus.resources.find(key);return found==bus.resources.end()||!found->second.writer;}
+bool Available(const std::vector<Access>& access){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(const auto& a:access){auto found=bus.resources.find(a.key);if(found!=bus.resources.end()&&(found->second.writer||(a.mode==Mode::Write&&found->second.readers)))return false;}return true;}
+OperationLease::OperationLease(std::vector<Access> access){
+ {auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);access.erase(std::remove_if(access.begin(),access.end(),[&](const Access& a){auto found=bus.resources.find(a.key);return found!=bus.resources.end()&&found->second.writer&&found->second.writerThread==GetCurrentThreadId();}),access.end());}
+ lease_.reset(new Lease(std::move(access)));
+}
 uint64_t Revision(const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);return bus.resources[key].revision;}
 void Changed(const std::vector<std::string>& keys){
  auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);std::set<std::string> all(keys.begin(),keys.end());for(auto& key:keys){auto host=bus.hosts.find(key);if(host!=bus.hosts.end())all.insert(host->second);}

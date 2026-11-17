@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "CommandStorage.h"
 #include "BackgroundCopies.h"
 #include "BrowserSession.h"
 #include "BrowserTransfers.h"
@@ -65,6 +66,10 @@ static char THIS_FILE[] = __FILE__;
 
 enum { ACTION_ASK, ACTION_COPY, ACTION_MOVE };
 
+namespace {
+int ReadClassicMetadata(char* image,char* path,hfsdirent* entry){try{VolumeCoord::OperationLease lease({{VolumeCoord::ImageKey(std::string(image)),VolumeCoord::Mode::Read}});return HFSIFACE_get_properties(image,path,entry);}catch(const VolumeCoord::Busy&){SetLastError(ERROR_BUSY);return 1;}}
+int WriteClassicMetadata(char* image,char* path,hfsdirent* entry){try{VolumeCoord::OperationLease lease({{VolumeCoord::ImageKey(std::string(image)),VolumeCoord::Mode::Write}});int result=HFSIFACE_set_properties(image,path,entry);VolumeCoord::Changed({VolumeCoord::ImageKey(std::string(image))});return result;}catch(const VolumeCoord::Busy&){SetLastError(ERROR_BUSY);return 1;}}
+}
 IMPLEMENT_DYNCREATE(CHFVExplorerListView, CListView)
 namespace {
 bool HiddenOperationProgress(CWnd* owner){
@@ -607,11 +612,11 @@ void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
 		inx2volname( inx, volpath, _MAX_PATH );
 		char *path = fullpath.GetBuffer( _MAX_PATH );
 
-		if(0 == HFSIFACE_get_properties( volpath, path, &ent )) {
+		if(0 == ReadClassicMetadata( volpath, path, &ent )) {
 			ent.fdlocation.h = (signed short)( p.x - FINDER_MAGIC_OFFSET + m_mac_origo.x );
 			ent.fdlocation.v = (signed short)( p.y - FINDER_MAGIC_OFFSET + m_mac_origo.y );
 			ent.fdflags &= ~HFS_FNDR_HASBEENINITED;
-			if(0 == HFSIFACE_set_properties( volpath, path, &ent )) {
+			if(0 == WriteClassicMetadata( volpath, path, &ent )) {
 				((CHFVExplorerDoc*)m_pDocument)->set_hfs_volume_clean( volpath );
 				// update_floppy_view(volpath);
 			} else {
@@ -2157,7 +2162,7 @@ void CHFVExplorerListView::update_callback(
 	hfsdirent ent, ent2;
 
 	if(copy_back) {
-		if(0 != HFSIFACE_get_properties( destvolpath, destname, &ent )) {
+		if(0 != ReadClassicMetadata( destvolpath, destname, &ent )) {
 			do_update_finder = FALSE;
 		}
 		HFSIFACE_set_modein( 4, pApp->m_copyin_appledouble );
@@ -2174,14 +2179,14 @@ void CHFVExplorerListView::update_callback(
 			do_delete = FALSE;
 			AfxMessageBox( "Failed to copy the file back. If you need the changes, the temporary file \"" + CString(doc_win_name) + "\" is still available." );
 		} else if(do_update_finder) {
-			if(0 == HFSIFACE_get_properties( destvolpath, destname, &ent2 )) {
+			if(0 == ReadClassicMetadata( destvolpath, destname, &ent2 )) {
 				ent2.fdlocation.h = (signed short)( unmagic(ent.fdlocation.h) - FINDER_MAGIC_OFFSET );
 				ent2.fdlocation.v = (signed short)( unmagic(ent.fdlocation.v) - FINDER_MAGIC_OFFSET );
 				memcpy( &ent2.u.file.type, ent.u.file.type, 5 );
 				memcpy( &ent2.u.file.creator, ent.u.file.creator, 5 );
 				ent2.crdate = ent.crdate;
 				ent2.fdflags &= ~HFS_FNDR_HASBEENINITED;
-				HFSIFACE_set_properties( destvolpath, destname, &ent2 );
+				WriteClassicMetadata( destvolpath, destname, &ent2 );
 			}
 			update_floppy_view(destvolpath);
 		}
@@ -2828,7 +2833,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 	}
 
 	if(entry_type == LIST_UNKNOWN || entry_type == LIST_SPEC) return;
- if(BackgroundCopies::Active())return; // Launchers use synchronous legacy converter globals.
+ if(!VolumeCoord::Available({{GetBrowserSession().MacBrowser().SelectedResourceKey(),VolumeCoord::Mode::Read}}))return;
 
 	type = m_cl->GetItemText( inx, FIELD_TYPE );
 
@@ -3010,7 +3015,6 @@ int do_delete_fat_directory( char *path )
 
 BOOL CHFVExplorerListView::map_selected_item( void )
 {
- if(BackgroundCopies::Active())return FALSE;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	CFileTypeMapping dlg;
 	int inx, count;
@@ -3032,7 +3036,7 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 			inx2volname( inx, volpath, _MAX_PATH );
 			char *path = fullpath.GetBuffer( _MAX_PATH );
 
-			if(0 == HFSIFACE_get_properties( volpath, path, &ent )) {
+			if(0 == ReadClassicMetadata( volpath, path, &ent )) {
 				if( (ent.flags & HFS_ISDIR) == 0 ) {
 					ent.u.file.creator[4] = 0;
 					ent.u.file.type[4] = 0;
@@ -3191,10 +3195,10 @@ void CHFVExplorerListView::set_label_color( int finder_color )
 			inx2volname( inx, volpath, _MAX_PATH );
 			char *path = fullpath.GetBuffer( _MAX_PATH );
 
-			if(0 == HFSIFACE_get_properties( volpath, path, &ent )) {
+			if(0 == ReadClassicMetadata( volpath, path, &ent )) {
 				ent.fdflags &= ~kColorMask;
 				ent.fdflags |= ((finder_color << 1) & kColorMask);
-				if(0 == HFSIFACE_set_properties( volpath, path, &ent )) {
+				if(0 == WriteClassicMetadata( volpath, path, &ent )) {
 					((CHFVExplorerDoc*)m_pDocument)->set_hfs_volume_clean( volpath );
 				}
 			}
@@ -3210,7 +3214,7 @@ void CHFVExplorerListView::set_label_color( int finder_color )
 void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point) 
 {
  if(GetBrowserSession().MacBrowser().ContextMenu(point))return;
- if(BackgroundCopies::Active()){
+ if(!StorageSelectionAvailable()){
   if(point.x<0){CRect rect;m_cl->GetWindowRect(rect);point=rect.CenterPoint();}
   CMenu menu;menu.CreatePopupMenu();bool selected=m_cl->GetNextItem(-1,LVNI_SELECTED)>=0;
   menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"Copy");menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_EDIT_CUT,"Cut");
@@ -3397,7 +3401,7 @@ void CHFVExplorerListView::on_properties( int inx )
 			char *path = fullpath.GetBuffer( _MAX_PATH );
 
 			CAskProperties dlg;
-			if(0 == HFSIFACE_get_properties( volpath, path, &ent )) {
+			if(0 == ReadClassicMetadata( volpath, path, &ent )) {
 
 				// flags
 				dlg.m_isdir    =	(ent.flags & HFS_ISDIR) != 0;
@@ -3580,7 +3584,7 @@ void CHFVExplorerListView::on_properties( int inx )
 					}
 
 					// HFSIFACE_set_properties: takes PC path
-					if(0 == HFSIFACE_set_properties( volpath, path, &ent )) {
+					if(0 == WriteClassicMetadata( volpath, path, &ent )) {
 						update_floppy_view(volpath);
 					} else {
 						AfxMessageBox( "Failed to set item properties" );
@@ -4398,7 +4402,7 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
         if(nativeTarget&&GetBrowserSession().MacBrowser().DropSelection(nativeTarget,action)){m_TreeiItemDrop=0;m_iItemDrop=-1;GetBrowserSession().Tree()->enable_selchange(1);pApp->EnableTimer(prevTimer);return;}
 
 
-		if(BackgroundCopies::Active()){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
+		if(!VolumeCoord::Available({{GetBrowserSession().MacBrowser().SelectedResourceKey(),VolumeCoord::Mode::Read}})){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
 		if(m_iItemDrop >= 0) {
 			DWORD_PTR dw_drag, dw_drop;
 			int drag_is_dir, drop_is_dir;
@@ -4492,7 +4496,7 @@ void CHFVExplorerListView::OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult)
 				CHFVExplorerApp	*pApp;
 				pApp = (CHFVExplorerApp *)AfxGetApp();
 				if(pApp && GetBrowserSession().Preview()) {
-					GetBrowserSession().Preview()->set_file( (BackgroundCopies::Active()||get_lparam_type(dat)==LIST_MAC) ? nullptr : (list_lparam_struct *)dat );
+					GetBrowserSession().Preview()->set_file( (!VolumeCoord::Readable(GetBrowserSession().MacBrowser().SelectedResourceKey())||get_lparam_type(dat)==LIST_MAC) ? nullptr : (list_lparam_struct *)dat );
 				}
 			}
 		}
@@ -4647,7 +4651,7 @@ DWORD CHFVExplorerListView::stupid_get_date( int inx, int whichone )
 		get_path( inx, fullpath );
 		inx2volname( inx, volpath, _MAX_PATH );
 		path = fullpath.GetBuffer( _MAX_PATH );
-		if(0 == HFSIFACE_get_properties( volpath, path, &ent )) {
+		if(0 == ReadClassicMetadata( volpath, path, &ent )) {
 			if(whichone == FIELD_CREATED) {
 				result = ent.crdate;
 			} else {

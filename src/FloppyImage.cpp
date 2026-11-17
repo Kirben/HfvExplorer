@@ -15,6 +15,7 @@ public:
   if(!api_){error_=ERROR_NOT_SUPPORTED;reason="No simulated floppy was attached";return false;}
   if(!reader_.OpenDrive(drive)){error_=reader_.Error();reason="Could not open a supported sector-formatted floppy";return false;}return true;
  }
+ void Close()override{reader_.Close();}
  unsigned long long Size() const override{return reader_.MediaSize();}
  bool Verify(DWORD& generation) override {if(!api_->Verify(reader_.Handle(),generation)){error_=GetLastError();return false;}return true;}
  bool Read(unsigned long long offset,DWORD count,void* bytes,DWORD& got) override {

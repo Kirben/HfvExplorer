@@ -98,7 +98,7 @@ void COptionsPage8::OnCopt8BrowseShapeshifterPath()
 		rest = "";
 	}
 	CFileDialog dlg( TRUE, _T("BAT"), s,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("Batch Files (*.bat)|*.bat|Program Files (*.exe)|*.exe|WinUAE configuration files (*.uae)|*.uae|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_shapeshifter_path = dlg.GetPathName() + rest;
@@ -110,7 +110,7 @@ void COptionsPage8::OnCopt8BrowseShapeshifterPreferencesFilePath()
 {
 	GetDlgItemText( IDC_COPT8_SHAPESHIFTER_PREFERENCES_FILE_PATH, m_shapeshifter_preferences_file_path );
 	CFileDialog dlg( TRUE, _T(""), m_shapeshifter_preferences_file_path,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("ShapeShifter Prefs|ShapeShifter Prefs|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_shapeshifter_preferences_file_path = dlg.GetPathName();
@@ -127,7 +127,7 @@ void COptionsPage8::OnCopt8BrowseShapeshifterSystemFilePath()
 {
 	GetDlgItemText( IDC_COPT8_SHAPESHIFTER_SYSTEM_FILE_PATH, m_shapeshifter_system_file_path );
 	CFileDialog dlg( TRUE, _T("HFV"), m_shapeshifter_system_file_path,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
 				_T("HFS volume files|*.dsk;*.hf*|All Files|*.*||") );
 	if(dlg.DoModal() == IDOK) {
 		m_shapeshifter_system_file_path = dlg.GetPathName();

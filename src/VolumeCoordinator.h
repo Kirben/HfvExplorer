@@ -27,6 +27,13 @@ public:
  Lease(const Lease&)=delete;Lease& operator=(const Lease&)=delete;
 };
 bool Readable(const std::string&);
+// Advisory command eligibility; workers must still acquire an atomic reservation.
+bool Available(const std::vector<Access>&);
+// Scoped command work may reuse a writer already owned by this worker thread.
+class OperationLease {
+ std::unique_ptr<Lease> lease_;
+public:explicit OperationLease(std::vector<Access>);
+};
 // A backend call takes a read lease, or runs under its thread's existing writer.
 class BackendRead {
  std::unique_ptr<Lease> lease_;

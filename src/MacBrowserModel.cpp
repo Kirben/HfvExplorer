@@ -52,12 +52,13 @@ public:
             (journaled_?", journaled":", non-journaled");
     }
     bool Writable() const override { return usable_ && canWrite_; }
+    void ReleaseMedia()override{std::unique_lock<std::recursive_mutex> lock(mutex_,std::try_to_lock);if(!lock.owns_lock())throw VolumeCoord::Busy();Check(!writable_,"Only read-only physical media can be released this way");usable_=false;volume_.reset();source_.reset();}
     void Reload() override {
-        Call call(*this);try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
+        Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
         catch (...) { usable_=false; throw; }
     }
     bool CaseSensitive() const override { return caseSensitive_; }
-    uint64_t FreeBytes() const override { Call call(*this);return volume_->FreeBytes(); }
+    uint64_t FreeBytes() const override { Call call(*this);if(!usable_)throw HfsPlus::Error("Media was released; select the drive again");return volume_->FreeBytes(); }
     std::vector<Entry> List(uint32_t id) override {
         Call call(*this);Ready();std::vector<Entry> out;for(const auto& e:volume_->List(id))out.push_back(Describe(e));return out;
     }
