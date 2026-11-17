@@ -64,7 +64,10 @@ public:
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
     void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}HfsPlus::ValidateAttributes(e.attributes);}
-    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name,e.attributesKnown?&e.attributes:nullptr);});}
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name);});}
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+        Mutate([&]{auto now=volume_->Stat(id);Check(now.directory&&now.id==expected.id&&now.parent==expected.parent&&now.name==expected.name,"Destination folder changed during copying");std::array<uint64_t,2> dates{desired.created,desired.modified};volume_->SetDirectoryMetadata(id,merge?nullptr:&desired.finder,desired.datesValid?&dates:nullptr,!merge&&desired.attributesKnown?&desired.attributes:nullptr);});
+    }
     bool CaseSensitive() const override { return caseSensitive_; }
     uint64_t FreeBytes() const override { Call call(*this);if(!usable_)throw HfsPlus::Error("Media was released; select the drive again");return volume_->FreeBytes(); }
     std::vector<Entry> List(uint32_t id) override {
@@ -180,9 +183,13 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
-        bool complete = true;
-        for (const auto &child : plan.children) if (!Transfer(src, child, dst, id, job, progress)) complete = false;
-        return complete;
+        auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
+        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress))complete=false;}catch(...){failure=std::current_exception();}
+        // Existing directory metadata belongs to the destination. In particular,
+        // child creates/renames can change its dates even on Skip/cancellation.
+        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
+        catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
+        if(failure)std::rethrow_exception(failure);return complete;
     }
     Check(!found || !existing.directory, "A folder blocks the destination file");
     if (found) {
@@ -280,13 +287,20 @@ void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
         Check(p!=id&&visited.insert(p).second,"Cannot copy a folder into itself or its descendants");p=dst.Stat(p).parent;}
         Check(src.Stat(id).parent!=parent,"Source and destination are the same folder");}
 }
-void ValidatePlan(Volume& dst,const Planned& plan){dst.ValidateEntry(plan.entry);for(const auto& child:plan.children)ValidatePlan(dst,child);}
+void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
+ std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
+ for(const auto& plan:plans){Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
+  if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.hardLink&&!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
+  else {dst.ValidateEntry(plan.entry);if(plan.entry.directory)ValidatePlans(dst,plan.children,0,false);}
+ }
+}
 }
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job){
     Check(dst.Writable(),"The destination is read-only");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
-        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0));ValidatePlan(dst,plans.back());}
+        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0));}
+    ValidatePlans(dst,plans,parent,true);
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     for(size_t i=0;i<plans.size();++i)if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress))complete=false;
     return complete;

@@ -57,6 +57,8 @@ public:
     virtual bool SupportsAttributes()const{return false;}
     virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
     virtual void SetAttributes(uint32_t,const HfsPlus::Attributes&){throw HfsPlus::Error("This format cannot store extended attributes or Mac ACLs");}
+    virtual void ValidateCopyNames(uint32_t,const std::vector<Entry>&,bool) {}
+    virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool) {}
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
     virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive());if(!e.attributes.empty()&&!SupportsAttributes())throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
@@ -94,3 +96,7 @@ std::string Snapshot(Volume &,uint32_t id,Storage::Job &,bool requireRemovable=f
 std::wstring Wide(const std::u16string &);
 std::u16string U16(const std::wstring &);
 }
+
+#ifdef HFV_TESTING
+namespace MacBrowser {extern std::function<void(const char*)> directoryMetadataFault;}
+#endif

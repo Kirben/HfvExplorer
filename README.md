@@ -6,6 +6,25 @@ Build and run checks with build-x64.ps1. Older Windows versions still await
 VM execution tests. The original readme
 below describes the historical release and its obsolete drivers.
 
+Folder copies and metadata
+--------------------------
+
+Recursive copies apply supported source folder metadata after copying children,
+including empty folders: Finder information, creation/modification dates and,
+where supported, extended attributes and Mac ACL data. Existing destination
+folders are merged without replacing their own metadata; their saved dates are
+restored after child operations, including skipped, cancelled or failed copies.
+Windows exports retain folder Finder/attribute data in AppleDouble companions.
+Companion-name and Windows case collisions are rejected before shared copies
+write output. Classic HFS retains the full 32-byte Finder information.
+
+Legacy conversion copies also restore folder metadata after their children.
+Converted folder moves keep the complete source until conversion and metadata
+finalization succeed; skipped children retain the source. A failed copy can leave
+a partial destination tree and is reported as failed. Folder trees are not one
+atomic transaction. Windows companion/date publication has rollback protection;
+HFS+/HFSX folder metadata uses the filesystem's existing journal/COW machinery.
+
 Per-window browser sessions
 ---------------------------
 

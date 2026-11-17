@@ -83,6 +83,11 @@ if($Test -or $TestHfsPlus) {
  $mfsBrowserTest.WaitForExit()
  Get-Content (Join-Path $mfsBrowser 'mfs-write-browser-report.txt')
  if($mfsBrowserTest.ExitCode -ne 0){throw 'MFS browser write tests failed'}
+ $folders=Join-Path $hfsPlusDirectory 'folder-metadata'
+ $foldersTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-folder-metadata',('"'+$folders+'"')) -WindowStyle Hidden -PassThru
+ if(!$foldersTest.WaitForExit(60000)){$foldersTest.Kill();throw 'Folder metadata tests timed out'}
+ Get-Content (Join-Path $folders 'folder-metadata-report.txt')
+ if($foldersTest.ExitCode -ne 0){throw 'Folder metadata tests failed'}
  $attributes=Join-Path $hfsPlusDirectory 'extended-attributes'
  $attributesTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-extended-attributes',('"'+$attributes+'"')) -WindowStyle Hidden -PassThru
  $attributesTest.WaitForExit()

@@ -2133,6 +2133,31 @@ int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
  result=hfs_setattr_impl(vol,path,entry);return b_end_mutation(vol,result);
 }
 
+int hfs_getfinderinfo(hfsvol *vol,char *path,unsigned char *finder) {
+ CatDataRec data;unsigned char raw[102];int length=0;
+ if(!finder||v_getvol(&vol)<0||v_resolve(&vol,path,&data,0,0,0)<=0)return -1;
+ if(data.cdrType!=cdrDirRec&&data.cdrType!=cdrFilRec){ERROR(EINVAL,"Finder information requires a file or folder");return -1;}
+ r_packcatdata(&data,raw,&length);
+ if(data.cdrType==cdrDirRec)memcpy(finder,raw+22,32);
+ else {memcpy(finder,raw+4,16);memcpy(finder+16,raw+56,16);}return 0;
+}
+int hfs_fsetfinderinfo(hfsfile *file,const unsigned char *finder) {
+ unsigned char raw[102];int length=0;
+ if(!file||!finder||file->cat.cdrType!=cdrFilRec){ERROR(EINVAL,"Missing file Finder information");return -1;}
+ if(file->vol->flags&HFS_READONLY){ERROR(EROFS,0);return -1;}
+ r_packcatdata(&file->cat,raw,&length);memcpy(raw+4,finder,16);memcpy(raw+56,finder+16,16);r_unpackcatdata(raw,&file->cat);file->flags|=HFS_UPDATE_CATREC;return 0;
+}
+int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char *finder,const time_t *dates) {
+ CatDataRec data;node n;unsigned char raw[70];int length=0,result=-1;
+ if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ if(v_resolve(&vol,path,&data,0,0,&n)<=0)goto done;
+ if(data.cdrType!=cdrDirRec||data.u.dir.dirDirID!=expected){ERROR(EINVAL,"Destination folder changed during copying");goto done;}
+ if(finder){r_packcatdata(&data,raw,&length);memcpy(raw+22,finder,32);r_unpackcatdata(raw,&data);}
+ if(dates){data.u.dir.dirCrDat=d_tomtime(dates[0]);data.u.dir.dirMdDat=d_tomtime(dates[1]);}
+ result=v_putcatrec(&data,&n);
+ done:return b_end_mutation(vol,result);
+}
+
 int hfs_truncate(hfsfile *file,unsigned long length) {
  unsigned long *logical;int result;hfsvol *vol;
  /* Preserve the public range check before touching a caller-supplied file. */

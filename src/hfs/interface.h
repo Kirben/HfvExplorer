@@ -27,6 +27,8 @@ extern "C" {
 // #include "libhfs\hfs.h"
 // #endif
 
+typedef int (*HfvDirectoryCopyHook)(int action,hfsvol*,hfsvol*,const char*,const char*,void**,void*);
+void HFSIFACE_directory_copy_hook(HfvDirectoryCopyHook,void*);
 void hfs_tester(void);
 
 void HFSIFACE_init( HWND hwnd );
