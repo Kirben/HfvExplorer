@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "MacBrowserModel.h"
+#include "BrowserTransfers.h"
 class CHFVExplorerListView;
 class BrowserSession;
 class MainMacBrowser {
@@ -28,7 +29,9 @@ public:
     bool Properties(int row);
     bool Capture(bool cut, bool append);
     bool Paste();
-    void LegacyClipboardChanged();
+    BrowserTransfers::Selection SelectedItems(bool cut);
+    FileOperations::Location TargetFolder(HTREEITEM item=nullptr);
+    bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&);
     int Drop(int row, HTREEITEM target, int action);
     bool DropSelection(HTREEITEM target,int action);
     bool Command(UINT);

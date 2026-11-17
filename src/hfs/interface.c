@@ -762,7 +762,7 @@ int HFSIFACE_copy_one_file(
 				{
 					hfs_delete(tvol, new_source);
 				}
-			} else if(move_if_possible) {
+			} else if(move_if_possible && !copyout_was_skipped()) {
 				if(hfs_delete(vol1, source) == 0) *pwas_moved = 1;
 			}
 		} else {
@@ -824,7 +824,7 @@ int HFSIFACE_copy_one_file(
 				{
 					hfs_delete(vol2, new_source);
 				}
-			} else if(move_if_possible) {
+			} else if(move_if_possible && !copyout_was_skipped()) {
 				if(mode == '&') {
 					for(fork=0; fork<2; fork++) {
 						make_companion_name( tmp, source, fork );

@@ -36,6 +36,8 @@ void copyout_set_progress(copyout_progress_fn,void*);
 typedef int (*copyout_overwrite_fn)(const char*,void*);
 void copyout_set_overwrite(copyout_overwrite_fn,void*);
 int copyout_was_skipped(void);
+/* Shared confirmation for converted imports and classic-HFS copies. */
+int copyout_hfs_overwrite(const char *name, int exists);
 int copyout_destination_opened(void);
 
 #ifdef HFV_TESTING

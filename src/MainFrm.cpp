@@ -1384,6 +1384,10 @@ void CMainFrame::OnToolsFind()
  AfxMessageBox("The folder was opened, but the item is not visible. It may have changed or be hidden by the current view settings.");
 }
 
+BOOL CMainFrame::PreTranslateMessage(MSG* message){
+ if(message->message==WM_KEYDOWN&&message->wParam==VK_ESCAPE&&m_browserSession){auto list=GetBrowserSession().List();if(list&&list->IsDragging()){list->SendMessage(WM_CANCELMODE);return TRUE;}}
+ return CFrameWnd::PreTranslateMessage(message);
+}
 BOOL CMainFrame::OnCommand(WPARAM w,LPARAM l){
  switch(LOWORD(w)){
  case ID_FILE_MAC_IMPORT:GetBrowserSession().MacBrowser().Import();return TRUE;
@@ -1406,5 +1410,5 @@ void CMainFrame::OnUpdateMacEdit(CCmdUI* ui){
  auto& browser=GetBrowserSession().MacBrowser();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
  bool allowed=browser.Active()?(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable()):
      GetBrowserSession().List()&&(ui->m_nID==ID_EDIT_CUT?GetBrowserSession().List()->BrowserSelectionAllows(false):GetBrowserSession().List()->BrowserDirectoryWritable());
- ui->Enable(!StorageUi::busy()&&allowed);
+ ui->Enable(!StorageUi::busy()&&allowed&&(ui->m_nID!=ID_EDIT_PASTE||BrowserTransfers::Any()));
 }

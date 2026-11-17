@@ -53,9 +53,15 @@ typedef struct {
 // CHFVExplorerListView view
 
 class BrowserSession;
+namespace BrowserTransfers {class Drag;}
 class CHFVExplorerListView : public CListView
 {
  BrowserSession* m_browserSession=nullptr;
+ std::unique_ptr<BrowserTransfers::Drag> m_browserDrag;
+ void CancelBrowserDrag();
+ afx_msg void OnCaptureChanged(CWnd*);
+ afx_msg void OnCancelMode();
+ BOOL PreTranslateMessage(MSG*) override;
 public:
  BrowserSession& GetBrowserSession()const;
  BrowserSession* BrowserBinding()const{return m_browserSession;}

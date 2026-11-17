@@ -23,6 +23,7 @@
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
+#include "BrowserTransfers.h"
 
 #include "MainFrm.h"
 #include "HFVExplorerDoc.h"
@@ -332,7 +333,7 @@ void CHFVExplorerApp::CheckDefaultSettings(void)
 	}
 }
 
-int CHFVExplorerApp::ExitInstance(){ShutdownStorageUi();return CWinApp::ExitInstance();}
+int CHFVExplorerApp::ExitInstance(){BrowserTransfers::Clear();ShutdownStorageUi();return CWinApp::ExitInstance();}
 
 BOOL CHFVExplorerApp::InitInstance()
 {
@@ -344,6 +345,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunBrowserTransfersTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-browser-transfers"))ExitProcess(RunBrowserTransfersTest(__argv[2]));
  extern int RunBrowserWindowsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-browser-windows"))ExitProcess(RunBrowserWindowsTest(__argv[2]));
  extern int RunVolumeCoordinationTest(const char*);

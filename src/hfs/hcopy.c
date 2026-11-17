@@ -139,10 +139,11 @@ int do_copyin(hfsvol *vol, int argc, char *argv[], char *dest, int mode)
 
   for (i = 0; i < argc; ++i)
     {
+      copyout_hfs_overwrite("",0);
       if (mode == 'a')
 	copyfile = ufs_automode(argv[i]);
 
-      if (copyfile(argv[i], vol, dest) < 0)
+      if (copyfile(argv[i], vol, dest) < 0 && !copyout_was_skipped())
 	{
 	  ERROR(0, cpi_error);
 	  hfs_perrorp(argv[i]);

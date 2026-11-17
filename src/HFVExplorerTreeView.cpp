@@ -642,13 +642,7 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 						volinx = get_lparam_volinx( dw );
 						if(volinx >= 0) {
 							((CHFVExplorerDoc*)m_pDocument)->open_fat_directory( volinx, path, 1 );
-							if(pApp->m_disable_autofloppy == 0) {
-								if(is_floppy_by_char(*path)) {
-									if(is_hfs_floppy_present(toupper(*path) - 'A')) {
-										((CHFVExplorerDoc*)m_pDocument)->CheckNewFloppy( toupper(*path) - 'A' );
-									}
-								}
-							}
+
 						}
 					}
 					break;

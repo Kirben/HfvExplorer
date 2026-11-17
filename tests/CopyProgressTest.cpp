@@ -69,6 +69,14 @@ void observe(const char* path,unsigned long bytes,unsigned long long total,int c
  ++progress.events;progress.named=progress.named && path && *path;
 }
 void check(bool ok,const char* message) {if(!ok)throw message;}
+unsigned confirmReplacement(const std::shared_ptr<Storage::Job>& job){
+ DWORD deadline=GetTickCount()+15000;unsigned conflicts=0;std::string previous;
+ while(!job->done()){
+  auto conflict=job->conflict();if(!conflict.empty()&&conflict!=previous){++conflicts;previous=conflict;job->resolve(Storage::ConflictChoice::ReplaceAll);}
+  if(LONG(deadline-GetTickCount())<=0){job->cancel();job->wait();throw std::runtime_error("Confirmed replacement timed out");}Sleep(1);
+ }
+ return conflicts;
+}
 std::vector<BYTE> load(const CString& path) {
  CFile file;check(file.Open(path,CFile::modeRead|CFile::shareDenyWrite)!=FALSE,"open exported file");
  std::vector<BYTE> bytes((size_t)file.GetLength());check(file.Read(bytes.data(),(UINT)bytes.size())==bytes.size(),"read exported bytes");return bytes;
@@ -117,7 +125,7 @@ int RunCopyProgressTest(const char* directory) {
   CString replacementInput=root+"\\Game";
   {CFile f;check(f.Open(replacementInput,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacementInput replacement");f.SetLength(5*1024*1024);f.Close();}
   auto fullReplacement=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)replacementInput,(LPCSTR)image,"CopyTest:Folder:Nested:",0,1,'r'));
-  fullReplacement->wait();check(fullReplacement->result().code!=0&&GetFileAttributesA(replacementInput)!=INVALID_FILE_ATTRIBUTES,"disk-full replacement fails and retains move source");
+  check(confirmReplacement(fullReplacement)==1,"HFS replacement must ask before staging a conflicting file");check(fullReplacement->result().code!=0&&GetFileAttributesA(replacementInput)!=INVALID_FILE_ATTRIBUTES,"disk-full replacement fails and retains move source");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen full destination");
   file=hfs_open(volume,binary);check(file!=nullptr,"disk-full replacement retained previous HFS entry");
   preservedFork.resize(data.size());check(hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==data,"disk-full preserves previous HFS data fork");
@@ -147,7 +155,7 @@ int RunCopyProgressTest(const char* directory) {
   for(int fault : {2,0}) {
    hfv_replacement_fault=fault;
    auto replacement=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,binary,0,0,'a'));
-   replacement->wait();hfv_replacement_fault=0;
+   confirmReplacement(replacement);hfv_replacement_fault=0;
    check((replacement->result().code!=0)==(fault!=0),"HFS replacement publication result");
    volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen published/rolled-back replacement");
    file=hfs_open(volume,binary);check(file!=nullptr,"publication rollback preserves original name");
@@ -160,12 +168,12 @@ int RunCopyProgressTest(const char* directory) {
   {CFile f;check(f.Open(damagedLegacy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create damaged import");f.Write(legacy.data(),(UINT)legacy.size()-200);f.Close();}
   HFSIFACE_set_modein(0,0);
   auto damagedJob=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)damagedLegacy,(LPCSTR)image,"CopyTest:Folder:Nested:Game",0,0,'a'));
-  damagedJob->wait();check(damagedJob->result().code!=0,"truncated MacBinary worker import rejected");
+  confirmReplacement(damagedJob);check(damagedJob->result().code!=0,"truncated MacBinary worker import rejected");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after rejected import");
   {char game[]="CopyTest:Folder:Nested:Game";auto f=hfs_open(volume,game);std::vector<BYTE> d(data.size()),r(resource.size());check(f&&hfs_read(f,d.data(),(unsigned long)d.size())==d.size()&&hfs_setfork(f,1)==0&&hfs_read(f,r.data(),(unsigned long)r.size())==r.size()&&hfs_close(f)==0&&d==data&&r==resource,"preflight rejection preserves existing destination through interface cleanup");}
   check(hfs_umount(volume)==0,"close preserved destination");
   auto legacyImport=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,"CopyTest:Legacy imported",0,0,'a'));
-  legacyImport->wait();check(legacyImport->result().code==0,"automatic .bin worker import recognizes BinHex 5");
+  confirmReplacement(legacyImport);check(legacyImport->result().code==0,"automatic .bin worker import recognizes BinHex 5");
   auto exportedText=load(root+"\\Folder\\Text.txt");
   check(exportedText.size()==7 && !memcmp(exportedText.data(),"HELLO\r\n",7),"automatic text conversion unchanged");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen fixture");

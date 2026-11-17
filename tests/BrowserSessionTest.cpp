@@ -9,6 +9,9 @@
 #include "DeviceWait.h"
 #include "utils.h"
 #include "HFVExplorerView.h"
+#include "FloppyWriter.h"
+#include "ReadOnlyCdBackend.h"
+#include "FakeFloppy.h"
 #include <cstdio>
 #include <fcntl.h>
 extern "C" {
@@ -92,7 +95,7 @@ int RunBrowserSessionTest(const char* directory){
   Check(b.tree.GetTreeCtrl().GetSelectedItem()==selected&&Find(b.list,L"Second file")>=0,"navigation changed another window");
   a.list.m_sorted_by_column=FIELD_SIZE;a.list.m_sort_is_ascending=false;a.Session().finderLayout=true;Check(b.list.m_sorted_by_column==FIELD_NAME&&b.list.m_sort_is_ascending&&!b.Session().finderLayout,"sort/layout state shared between windows");a.Session().finderLayout=false;
   a.list.GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);a.list.GetListCtrl().SetItemState(Find(a.list,L"First child"),LVIS_SELECTED,LVIS_SELECTED);
-  Check(a.Session().MacBrowser().Capture(false,false),"capture session A selection");Check(a.Session().MacBrowser().TestClipboardCount()==1&&b.Session().MacBrowser().TestClipboardCount()==0&&a.list.m_clipboard.GetSize()==0&&b.list.m_clipboard.GetSize()==0,"native clipboard overwrote legacy clipboard");
+  Check(a.Session().MacBrowser().Capture(false,false),"capture session A selection");Check(a.Session().MacBrowser().TestClipboardCount()==1&&b.Session().MacBrowser().TestClipboardCount()==1&&a.list.m_clipboard.GetSize()==0&&b.list.m_clipboard.GetSize()==0,"native clipboard overwrote legacy clipboard");
   va->fail=true;Check(!a.Session().MacBrowser().ShowTestFolder(ia,2)&&!a.list.BrowserDirectoryWritable()&&Find(b.list,L"Second file")>=0&&a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled(),"session failure affected another window or owner");va->fail=false;
   Check(a.Session().MacBrowser().ShowTestFolder(ia,2),"session error retry");
   a.doc.AddIcon('AAAA');b.doc.AddIcon('BBBB');Check(a.doc.HasIcon('AAAA')&&!a.doc.HasIcon('BBBB')&&b.doc.HasIcon('BBBB'),"classic Finder icon tables are shared");
@@ -117,6 +120,16 @@ int RunBrowserSessionTest(const char* directory){
    Check(!probedRemovable&&startup.GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_fats[1].m_rootitem,"startup selected/probed an empty floppy with detection disabled");
 startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
    Check(startup.GetBrowserSession().List()->GetListCtrl().GetItemCount()==2,"real startup directory listing");
+#ifdef HFV_FLOPPY_TESTING
+   {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
+    auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
+    FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){for(int i=0;i<doc.m_hfs_count;++i)doc.m_volumes[i].close();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
+    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.m_fats[0].m_rootitem);BrowserDirectory::testObserveRead={};
+    auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
+    Check(disk.opens>0&&!windowsProbe&&found&&startup.m_hfs_count==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_volumes[0].m_rootitem,"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
+    fprintf(report,"PASS: selecting a simulated Mac floppy with startup/automatic detection disabled mounts HFS and lists its file without attempting Windows folder enumeration.\n");
+   }
+#endif
    frame.SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);Check(!startup.GetBrowserSession().finderLayout,"frame command routing");
    frame.DestroyWindow();Check(startup.GetBrowserSession().Tree()==nullptr&&startup.GetBrowserSession().List()==nullptr&&startup.GetBrowserSession().Owner()==nullptr,"frame pane lifetime detachment");
   }

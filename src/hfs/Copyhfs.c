@@ -41,6 +41,7 @@
 // # include "libhfs\hfs.h"
 # include "libhfs\data.h"
 # include "copyhfs.h"
+# include "copyout.h"
 #ifdef __EMX__
 # include "io.h"
 #endif
@@ -136,6 +137,18 @@ hfsfile *opendst(hfsvol *vol, char *dstname, char *hint,
       dstname = hint;
     }
 
+  /* Resolve the converted destination name before asking: raw mappings,
+     MacBinary/BinHex names and resource imports can differ from the PC name. */
+  {
+   hfsdirent previous;int exists=hfs_stat(vol,dstname,&previous)==0;
+   if(!exists&&errno!=ENOENT){if(dstname==hint)hfs_setcwd(vol,cwd);return 0;}
+   int decision=copyout_hfs_overwrite(dstname,exists);
+   if(decision!=1){
+    cph_error=decision==2?"Copy skipped":"Copy cancelled";
+    if(dstname==hint)hfs_setcwd(vol,cwd);
+    return 0;
+   }
+  }
   file = replacement_open(&cph_replacement, vol, dstname, type, creator);
   cph_opened = file && !cph_replacement.active;
   if(!file) {
@@ -244,6 +257,7 @@ int do_copyhfshfs( hfsvol *vol1, hfsvol *vol2, char *source, char *dest )
   int result = 0;
 
   cph_opened = 0;
+  copyout_hfs_overwrite("",0);
 	// Destination must be a directory
   if ( (hfs_stat(vol2, dest, &ent) < 0 || !(ent.flags & HFS_ISDIR))) {
     ERROR(ENOTDIR, 0);
@@ -258,7 +272,7 @@ int do_copyhfshfs( hfsvol *vol1, hfsvol *vol2, char *source, char *dest )
     return 1;
   }
 
-  if (cphfs_raw(vol1, vol2, source, dest) < 0) {
+  if (cphfs_raw(vol1, vol2, source, dest) < 0 && !copyout_was_skipped()) {
 	  ERROR(0, cph_error);
 	  hfs_perrorp(source);
 	  result = 1;
@@ -280,7 +294,8 @@ int do_copyindouble( hfsvol *vol, char *fdata, char *fres, char *dest )
     return 1;
   }
 
-  if (cpi_double( fdata, fres, vol, dest) < 0) {
+  copyout_hfs_overwrite("",0);
+  if (cpi_double( fdata, fres, vol, dest) < 0 && !copyout_was_skipped()) {
 	  ERROR(0, cph_error);
 	  hfs_perrorp(fdata);
 	  result = 1;

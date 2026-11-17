@@ -95,6 +95,7 @@ public:
 	void OnCdEjectEjectReload( int reload );
  MediaControlTarget SelectedMediaControlTarget() const;
  BOOL OnCommand(WPARAM,LPARAM) override;
+ BOOL PreTranslateMessage(MSG*) override;
  BOOL OnCmdMsg(UINT,int,void*,AFX_CMDHANDLERINFO*) override;
  afx_msg void OnActivate(UINT,CWnd*,BOOL);
  afx_msg void OnUpdateMacTransfer(CCmdUI*);

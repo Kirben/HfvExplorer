@@ -101,6 +101,7 @@ protected:
 	void tree_delete_images();
 	void select_by_id( HTREEITEM root_item, int volinx, unsigned long id );
 	void enable_selchange(int onoff);
+ bool SelectionNotificationsEnabled()const{return m_selchange_enabled!=0;}
 	void destroy_pointers();
 	void mode_changed( void );
 

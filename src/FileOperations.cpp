@@ -34,6 +34,7 @@ std::string Utf8(const std::u16string& text){auto w=Wide(text);int n=WideCharToM
 bool Absolute(const std::string& p){return p.size()>=3&&((isalpha((unsigned char)p[0])&&p[1]==':'&&p[2]=='\\')||(p[0]=='\\'&&p[1]=='\\'));}
 bool Absolute(const std::wstring& p){return p.size()>=3&&((iswalpha(p[0])&&p[1]==L':'&&(p[2]==L'\\'||p[2]==L'/'))||(p[0]==L'\\'&&p[1]==L'\\'));}
 std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mutate=false){
+ if(!value.expectedResource.empty())Check(VolumeCoord::ImageKey(value.classicImage)==value.expectedResource,"The selected source image was replaced");
  if(value.volume){auto e=value.volume->Stat(value.id);
   if(!value.expectedIdentity.empty())Check(e.identity==value.expectedIdentity,"The selected entry was replaced before the operation started");
   if(!value.expectedName.empty())Check(e.name==value.expectedName,"The selected entry was renamed before the operation started");
@@ -42,7 +43,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mu
  std::shared_ptr<Volume> volume;std::u16string name;
  if(value.type==LIST_FAT){Check(Absolute(value.windowsPath),"Use an absolute Windows source path");auto pos=value.windowsPath.find_last_of(L"\\/");Check(pos!=std::wstring::npos,"Use an absolute Windows source path");auto parent=value.windowsPath.substr(0,pos);if(parent.size()==2&&parent[1]==L':')parent+=L'\\';volume=OpenWindows(parent);name=U16(value.windowsPath.substr(pos+1));}
  else{auto pos=value.classicPath.find_last_of(':');Check(pos!=std::string::npos,"Use an absolute classic HFS path");volume=OpenClassic(value.classicImage,value.classicPath.substr(0,pos+1),mutate);name=Ansi(value.classicPath.substr(pos+1));}
- for(auto& e:volume->List())if(HfsPlus::CompareNames(e.name,name,volume->CaseSensitive())==0){if(value.expectedCatalogId)Check(e.resolvedId==value.expectedCatalogId,"The selected classic HFS entry was replaced");return {volume,e.id};}
+ for(auto& e:volume->List())if(HfsPlus::CompareNames(e.name,name,volume->CaseSensitive())==0){if(value.expectedCatalogId)Check(e.resolvedId==value.expectedCatalogId,"The selected classic HFS entry was replaced");if(!value.expectedIdentity.empty())Check(e.identity==value.expectedIdentity,"The selected source was replaced or changed");return {volume,e.id};}
  throw HfsPlus::Error("The selected source no longer exists");
 }
 std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
@@ -139,6 +140,14 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
  if(request.kind==Kind::ExportFork)return ExportFork(request,job,completion);
  if(request.kind==Kind::ReplaceResource)return ReplaceResource(request,job,completion);
  if(request.kind!=Kind::LegacyCopy)return Mutate(request,job,completion);
+ if(!request.sources.empty()){
+  // Shared browser selections use captured paths/identities, never another
+  // window's volume indexes. Validate before invoking the old converters.
+  auto source=Source(request.sources.front());
+  auto target=request.target.type==LIST_FAT?OpenWindows(request.target.windowsPath):OpenClassic(request.target.classicImage,request.target.classicPath,false);
+  source.first->ValidateCopyTo(source.second,*target,2);
+  source.first->Close();target->Close();
+ }
   auto describe=[](const std::string& volume,const std::string& path){Location out;out.type=Absolute(path)?LIST_FAT:LIST_HFS;if(out.type==LIST_FAT)out.windowsPath=Wide(Ansi(path));else{out.classicImage=volume;out.classicPath=path;}return out;};
  Mark(completion,describe(request.targetVolume,request.targetPath));if(request.move)Mark(completion,describe(request.sourceVolume,request.sourcePath));
  auto result=MakeCopyJob(request.sourceVolume,request.sourcePath,request.targetVolume,request.targetPath,request.directory,request.move,request.conversion)(job);
