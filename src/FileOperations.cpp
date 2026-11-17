@@ -100,7 +100,7 @@ bool MoveInPlace(const Request& request,const std::vector<std::pair<std::shared_
   for(auto& e:existing)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   for(auto& e:entries)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   if(request.sources[i].volume&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
-  Check(!entry.protectedFile&&!entry.hardLink&&!entry.compressed&&entry.readError.empty()&&!(HfsPlus::Disk::U16(entry.finder.data()+8)&HFS_FNDR_NAMELOCKED),"The selected entry cannot be moved");entries.push_back(entry);
+  Check(!entry.protectedFile&&!entry.hardLink&&entry.readError.empty()&&!(HfsPlus::Disk::U16(entry.finder.data()+8)&HFS_FNDR_NAMELOCKED),"The selected entry cannot be moved");entries.push_back(entry);
  }
  // Classic adapters use root-relative paths. Avoid invalidating a later
  // captured descendant path by renaming its selected ancestor first.
@@ -133,7 +133,7 @@ Storage::Result Mutate(const Request& request,Storage::Job& job,Completion& comp
  HFSIFACE_get_dir_flush();int silent=HFSIFACE_silencer(1);HFSIFACE_delete_cancel(CancelClassic,&job);struct Silent{int previous;~Silent(){HFSIFACE_delete_cancel(nullptr,nullptr);HFSIFACE_silencer(previous);}}scope{silent};
  for(auto& item:request.sources){Cancel(job);progress.path=item.volume?Utf8(item.expectedName):item.type==LIST_FAT?Utf8(U16(item.windowsPath)):Utf8(Ansi(item.classicPath));job.progress(progress);
   if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.id!=2,"Cannot rename or delete a volume root");
-   if(request.kind==Kind::Rename){Check(!request.target.volume||request.target.volume==source.first,"Rename must stay within the same volume");Check(source.first->Supports().rename&&!e.protectedFile&&!e.hardLink&&!e.compressed,"The selected entry cannot be renamed");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.type=LIST_FAT;parent.windowsPath=path.substr(0,path.find_last_of(L"\\/"));MarkChild(completion,parent,request.name);}source.first->Rename(source.second,request.target.id,request.name);}
+   if(request.kind==Kind::Rename){Check(!request.target.volume||request.target.volume==source.first,"Rename must stay within the same volume");Check(source.first->Supports().rename&&!e.protectedFile&&!e.hardLink,"The selected entry cannot be renamed");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.type=LIST_FAT;parent.windowsPath=path.substr(0,path.find_last_of(L"\\/"));MarkChild(completion,parent,request.name);}source.first->Rename(source.second,request.target.id,request.name);}
    else{Check(source.first->Supports().remove,"The selected entry cannot be deleted");Mark(completion,item);RemoveTree(*source.first,source.second,job,true);}
   }else if(item.type==LIST_FAT){
    auto source=Source(item,true);Cancel(job);source.first->Close();
@@ -170,8 +170,8 @@ Storage::Result ReplaceResource(const Request& request,Storage::Job& job,Complet
  Check(request.sources.size()==1&&bool(request.target.volume),"Invalid resource import request");auto from=Source(request.sources[0]),target=Source(request.target);auto volume=target.first;uint32_t id=target.second;auto original=volume->Stat(id),replacement=original;Check(!original.directory,"Select a file for resource import");
  replacement.forks[1].size=from.first->Stat(from.second).forks[0].size;replacement.modified=uint32_t(time(nullptr)+2082844800LL);Cancel(job);
  Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Importing resource fork";progress.totalFiles=1;progress.path=Utf8(original.name);progress.totalBytes=progress.fileTotal=replacement.forks[0].size+replacement.forks[1].size;
- Mark(completion,request.target);
- volume->Put(original.parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){Cancel(job);if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);Cancel(job);progress.bytes+=n;progress.fileBytes+=n;progress.processed+=n;job.progress(progress);},true);
+ uint64_t readThrough[2]={};Mark(completion,request.target);
+ volume->Put(original.parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){Cancel(job);if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);Cancel(job);auto end=at+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.bytes+=added;progress.fileBytes+=added;progress.processed+=added;job.progress(progress);},true);
  if(!request.sources[0].volume)from.first->Close();completion.complete=true;completion.completed=1;return {};
 }
 
@@ -195,8 +195,14 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
   else if(item.type==LIST_FAT){auto volume=OpenWindows(item.windowsPath);auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();}
   else{Check(item.type==LIST_HFS,"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.classicImage)==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.classicImage,item.classicPath,true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();Finish(disk);}
  }else{
-  Check(request.sources.size()==1,"Select one item");const auto& item=request.sources.front();auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();completion.basicMetadata=source.first->SupportsBasicMetadata();
+  Check(request.sources.size()==1,"Select one item");const auto& item=request.sources.front();auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();completion.basicMetadata=source.first->SupportsBasicMetadata();completion.supportsCompression=source.first->SupportsCompression();
   if(completion.supportsAttributes)completion.attributes=source.first->GetAttributes(source.second);Cancel(job);
+  if(request.kind==Kind::SetCompression){
+   Check(completion.supportsCompression&&completion.writable,"This volume cannot change compression");auto& now=completion.entry;auto& old=request.originalMetadata;
+   Check(now.id==old.id&&now.parent==old.parent&&now.name==old.name&&now.modified==old.modified&&now.created==old.created&&now.finder==old.finder&&now.compressed==old.compressed&&now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size&&completion.attributes==request.originalAttributes,"The file changed while Properties was open; reopen Properties");
+   Cancel(job);Mark(completion,item);p.phase=request.compressed?"Compressing file":"Decompressing file";p.path=Utf8(now.name);p.byteTransfer=true;p.scanning=false;p.totalBytes=now.forks[0].size+now.forks[1].size;
+   source.first->SetCompression(source.second,request.compressed,[&](uint64_t done,uint64_t total){Cancel(job);p.processed=p.bytes=done;p.totalBytes=total;job.progress(p);});completion.entry=source.first->Stat(source.second);
+  }
   if(request.kind==Kind::SetBasicMetadata){
    Check(completion.basicMetadata&&completion.writable,"This format has no writable basic metadata editor");auto& now=completion.entry;auto& old=request.originalMetadata;
    Check(now.id==old.id&&now.name==old.name&&now.version==old.version&&now.finder==old.finder&&now.created==old.created&&now.modified==old.modified&&now.protectedFile==old.protectedFile&&now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size,"Properties changed while the editor was open; reopen Properties");Cancel(job);Mark(completion,item);source.first->SetBasicMetadata(source.second,request.metadata);completion.entry=request.metadata;
@@ -233,9 +239,9 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
   if(Absolute(request.sourcePath))AddPath(access,VolumeCoord::Wide(request.sourcePath),request.move?Mode::Write:Mode::Read);else access.push_back({VolumeCoord::ImageKey(request.sourceVolume),(request.move||request.background)?Mode::Write:Mode::Read});
   if(Absolute(request.targetPath))access.push_back({VolumeCoord::LegacyOutputKey(VolumeCoord::Wide(request.targetPath)),Mode::Write});else access.push_back({VolumeCoord::ImageKey(request.targetVolume),Mode::Write});return access;
  }
- for(const auto& item:request.sources){auto mode=request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::SetBasicMetadata||item.cut||(request.background&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
+ for(const auto& item:request.sources){auto mode=request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::SetBasicMetadata||request.kind==Kind::SetCompression||item.cut||(request.background&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
    // Explicit Windows adapters are still file readers when a copy is not a move.
-   if(request.kind!=Kind::Rename&&request.kind!=Kind::Delete&&request.kind!=Kind::SetProperties&&request.kind!=Kind::SetAttributes&&request.kind!=Kind::SetBasicMetadata&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
+   if(request.kind!=Kind::Rename&&request.kind!=Kind::Delete&&request.kind!=Kind::SetProperties&&request.kind!=Kind::SetAttributes&&request.kind!=Kind::SetBasicMetadata&&request.kind!=Kind::SetCompression&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
    if(request.kind==Kind::Rename){auto parent=path.substr(0,path.find_last_of(L"\\/"));AddPath(access,ChildPath(parent,request.name),Mode::Write);}
   }}
  if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork||request.kind==Kind::ExportAttribute||request.kind==Kind::CreateFolder){auto path=HostPath(request.target);if(path.empty())access.push_back({Resource(request.target),Mode::Write});else if(request.kind==Kind::CreateFolder)AddPath(access,ChildPath(path,request.name),Mode::Write,false);else if(request.kind==Kind::Copy){bool known=true;for(const auto& source:request.sources){auto name=SourceName(source);if(name.empty()){known=false;break;}AddPath(access,ChildPath(path,name),Mode::Write);}if(!known)AddPath(access,path,Mode::Write,false);}else AddPath(access,path,Mode::Write,request.kind!=Kind::ExportFork&&request.kind!=Kind::ExportAttribute);
@@ -244,7 +250,7 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
 
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
  Cancel(job);
- if(request.kind==Kind::CreateFolder||request.kind==Kind::Inspect||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::ReadAttributeFile||request.kind==Kind::ExportAttribute||request.kind==Kind::SetBasicMetadata)return Metadata(request,job,completion);
+ if(request.kind==Kind::CreateFolder||request.kind==Kind::Inspect||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::ReadAttributeFile||request.kind==Kind::ExportAttribute||request.kind==Kind::SetBasicMetadata||request.kind==Kind::SetCompression)return Metadata(request,job,completion);
  if(request.kind==Kind::Copy)return CopyRequest(request,job,completion);
  if(request.kind==Kind::ExportFork)return ExportFork(request,job,completion);
  if(request.kind==Kind::ReplaceResource)return ReplaceResource(request,job,completion);

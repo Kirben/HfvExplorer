@@ -17,7 +17,7 @@ struct AttributeState {FileOperations::Location source;HfsPlus::Attributes origi
 std::wstring Text(HWND window,int id){auto control=GetDlgItem(window,id);int n=GetWindowTextLengthW(control);std::wstring text(n+1,0);GetWindowTextW(control,&text[0],n+1);text.resize(n);return text;}
 struct AttributesDialog:CDialog {
  std::shared_ptr<AttributeState> state=std::make_shared<AttributeState>();bool hidden,hexEditable=true;
- AttributesDialog(FileOperations::Location source,const FileOperations::Completion& value,bool h):CDialog(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()),hidden(h){state->source=std::move(source);state->desired=state->original=value.attributes;state->writable=value.writable&&!value.entry.protectedFile&&!value.entry.hardLink&&!value.entry.compressed&&value.entry.id!=2;}
+ AttributesDialog(FileOperations::Location source,const FileOperations::Completion& value,bool h):CDialog(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()),hidden(h){state->source=std::move(source);state->desired=state->original=value.attributes;state->writable=value.writable&&!value.entry.protectedFile&&!value.entry.hardLink&&value.entry.id!=2;}
  std::u16string Name(){return MacBrowser::U16(Text(m_hWnd,IDC_ATTR_NAME));}
  void Refresh(){SendDlgItemMessage(IDC_ATTR_LIST,LB_RESETCONTENT);for(const auto& a:state->desired){auto text=MacBrowser::Wide(a.first)+L"  ("+std::to_wstring(a.second.size())+L" bytes)";SendDlgItemMessageW(m_hWnd,IDC_ATTR_LIST,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(text.c_str()));}}
  void Clear(){SetDlgItemTextW(m_hWnd,IDC_ATTR_NAME,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_VALUE,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,L"Set value stages a change. Apply saves all staged changes.");hexEditable=true;SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETREADONLY,!state->writable);}
@@ -52,8 +52,10 @@ struct Summary:CDialog {
  Summary(FileOperations::Location s,const FileOperations::Completion& v,bool h):CDialog(IDD_METADATA_SUMMARY,CWnd::GetDesktopWindow()),value(v),source(std::move(s)),hidden(h){}
  BOOL OnInitDialog()override{CDialog::OnInitDialog();auto e=value.entry;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,MacBrowser::Wide(e.name).c_str());
  auto description=BrowserPresentation::FromUtf8(value.description)+(value.writable?L"":L" (read-only)");SetDlgItemTextW(m_hWnd,IDC_CP_FILE,description.c_str());
- auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow(value.supportsAttributes?SW_SHOW:SW_HIDE);return TRUE;}
- BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_ATTR_OPEN){PresentAttributes(source,value,hidden);return TRUE;}return CDialog::OnCommand(wp,lp);}
+ auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow(value.supportsAttributes?SW_SHOW:SW_HIDE);
+ bool compression=value.supportsCompression&&!e.directory;GetDlgItem(IDC_FILE_COMPRESSION)->ShowWindow(compression?SW_SHOW:SW_HIDE);GetDlgItem(IDC_FILE_COMPRESSION)->EnableWindow(compression&&value.writable&&!e.hardLink&&!e.protectedFile&&e.readError.empty());SetDlgItemText(IDC_FILE_COMPRESSION,e.compressed?"Decompress":"Compress");return TRUE;}
+ BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_ATTR_OPEN){PresentAttributes(source,value,hidden);return TRUE;}
+ if(LOWORD(wp)==IDC_FILE_COMPRESSION){FileOperations::Request request;request.kind=FileOperations::Kind::SetCompression;request.sources={source};request.originalMetadata=value.entry;request.originalAttributes=value.attributes;request.compressed=!value.entry.compressed;if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();return TRUE;}return CDialog::OnCommand(wp,lp);}
  void OnOK()override{DestroyWindow();}void OnCancel()override{DestroyWindow();}
 };
 

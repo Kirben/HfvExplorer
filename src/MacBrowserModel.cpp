@@ -57,8 +57,10 @@ public:
         Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
         catch (...) { usable_=false; throw; }
     }
+    bool SupportsCompression()const override{return true;}
+    void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,compressed,progress);});}
     bool SupportsAttributes()const override{return true;}
-    HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();return volume_->GetAttributes(id);}
+    HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
     void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);HfsPlus::ValidateAttributes(e.attributes);}
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name,e.attributesKnown?&e.attributes:nullptr);});}
@@ -189,11 +191,12 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     }
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
+    uint64_t readThrough[2]={};
     dst.Put(parent, entry, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
         if (job.cancelled()) throw Storage::Cancelled();
         src.Read(entry.id, fork, offset, p, n);
         if(job.cancelled())throw Storage::Cancelled();
-        progress.fileBytes += n; progress.bytes += n;progress.processed+=n;job.progress(progress);
+        auto end=offset+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.fileBytes += added; progress.bytes += added;progress.processed+=added;job.progress(progress);
     }, found);
     ++progress.files; job.progress(progress); return true;
 }

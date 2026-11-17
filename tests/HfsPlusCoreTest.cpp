@@ -5,6 +5,7 @@ using namespace HfsPlus;
 void RunIncrementalBTreeTests();
 void RunHfsPlusCompressionTests();
 void CreateHfsPlusFeatureFixture(const wchar_t *);
+void CreateHfsPlusCompressionEncodingFixture(const wchar_t*);
 void must(bool ok, const char *text) {
     if (!ok)
         throw Error(text);
@@ -940,6 +941,7 @@ int wmain(int argc, wchar_t **argv) {
             out->Write(0, memory.bytes.data(), memory.bytes.size());
             out->Flush();
         };
+        if(argc==3&&!wcscmp(argv[1],L"--compression-encoding-fixture")){CreateHfsPlusCompressionEncodingFixture(argv[2]);return 0;}
         if (argc == 3 && !wcscmp(argv[1], L"--feature-fixture")) {
             CreateHfsPlusFeatureFixture(argv[2]);
             return 0;

@@ -57,6 +57,13 @@ if($Test -or $TestHfsPlus) {
  if(!$commandsTest.WaitForExit(60000)){$commandsTest.Kill();throw 'Per-volume command tests timed out.'}
  Get-Content (Join-Path $commands 'per-volume-commands-report.txt')
  if($commandsTest.ExitCode -ne 0){throw "Per-volume command tests failed; retained $commands"}
+ & python "$PSScriptRoot\tests\test-compression-write.py" "$PSScriptRoot\bin\x64\hfsplus-tests.exe" (Join-Path $hfsPlusDirectory 'compression-encoding')
+ if($LASTEXITCODE){throw 'Independent compression output validation failed'}
+ $compressed=Join-Path $hfsPlusDirectory 'compression-write'
+ $compressedTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-compression-write',('"'+$compressed+'"')) -WindowStyle Hidden -PassThru
+ if(!$compressedTest.WaitForExit(60000)){$compressedTest.Kill();throw 'Compression write tests timed out'}
+ Get-Content (Join-Path $compressed 'compression-write-report.txt')
+ if($compressedTest.ExitCode -ne 0){throw 'Compression write tests failed'}
  $optical=Join-Path $hfsPlusDirectory 'optical-data-tracks'
  $opticalTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-optical-data-tracks',('"'+$optical+'"')) -WindowStyle Hidden -PassThru
  $opticalTest.WaitForExit()
