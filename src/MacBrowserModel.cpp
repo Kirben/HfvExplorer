@@ -38,7 +38,7 @@ class Plus final : public Volume {
     static Entry Describe(const HfsPlus::Entry &in) {
         Entry e; e.id=in.id; e.parent=in.parent; e.resolvedId=in.resolvedId;
         e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile;
-        e.compressed=in.compressed; e.hardLink=in.hardLink; e.readError=in.readError;
+        e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
         e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=std::to_string(in.id);
         for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;return e;
     }
@@ -58,10 +58,12 @@ public:
         Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
         catch (...) { usable_=false; throw; }
     }
+    bool SupportsHardLinks()const override{return true;}
+    uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false)override{return Mutate([&]{return volume_->MakeHardLink(source,parent,name,replace);});}
     bool SupportsCompression()const override{return true;}
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,compressed,progress);});}
     bool SupportsAttributes()const override{return true;}
-    HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
+    HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);attributes.erase(u"com.apple.system.hfs.firstlink");if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
     void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}HfsPlus::ValidateAttributes(e.attributes);}
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name);});}
@@ -88,6 +90,7 @@ public:
         Mutate([&] { volume_->Rename(id, p, s); });
     }
     void Remove(uint32_t id) override { Mutate([&] { volume_->Remove(id); }); }
+    void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent)override{if(target.ResourceKey()!=ResourceKey())return;Call call(*this);Ready();volume_->ValidateCopyTo(id,parent);}
     void ValidateRemoval(uint32_t id)override{Call call(*this);Ready();volume_->ValidateRemoval(id);}
     bool CanMoveFrom(const Volume& source)const override{return source.ResourceKey()==ResourceKey();}
     void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{Check(CanMoveFrom(source),"Move must stay on the same volume");Rename(id,parent,entry.name);}
@@ -157,48 +160,53 @@ public:
 };
 struct Planned { Entry entry; std::vector<Planned> children; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
-             std::set<uint32_t> &ancestors, unsigned depth) {
+             std::set<uint32_t> &ancestors, unsigned depth,bool removal=false) {
     if (job.cancelled()) throw Storage::Cancelled();
-    Check(depth <= 128 && ancestors.insert(id).second, "Recursive folder link or excessive folder depth");
-    Planned out; out.entry = v.Stat(id);
+    Planned out; out.entry = v.Stat(id);auto identity=out.entry.resolvedId?out.entry.resolvedId:id;
+    Check(depth <= 128 && ancestors.insert(identity).second, "Recursive folder link or excessive folder depth");
     Check(out.entry.readError.empty(), out.entry.readError.c_str());
     out.entry.attributes=v.GetAttributes(id);out.entry.attributesKnown=true;
     // Logical exports decode compression and resolve links rather than cloning
     // their private backing topology or compressed resource-fork storage.
     if(out.entry.compressed)out.entry.attributes.erase(u"com.apple.decmpfs");
     if(out.entry.hardLink)out.entry.attributes.erase(u"com.apple.system.hfs.firstlink");
-    if (out.entry.directory) for (auto &child : v.List(id)) out.children.push_back(Scan(v, child.id, job, p, ancestors, depth + 1));
-    else { v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);
+    if (out.entry.directory){if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal));}
+    else { if(!removal){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
         ++p.totalFiles; Check(UINT64_MAX - p.totalBytes >= out.entry.forks[0].size,
         "Copy size overflow"); p.totalBytes += out.entry.forks[0].size;
         Check(UINT64_MAX - p.totalBytes >= out.entry.forks[1].size, "Copy size overflow");
         p.totalBytes += out.entry.forks[1].size; }
-    ancestors.erase(id); job.progress(p); return out;
+    ancestors.erase(identity); job.progress(p); return out;
 }
+using CopiedLinks=std::map<std::pair<std::string,uint32_t>,std::pair<uint32_t,std::u16string>>;
+void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
-              Storage::Job &job, Storage::Progress &progress) {
+              Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies) {
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
     found=dst.FindTransferChild(parent,entry,existing);
+    bool track=entry.hardLink&&entry.linkCount>1&&dst.SupportsHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
+    if(track&&prior!=copies.end()&&entry.directory&&!found){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name);LinkedProgress(plan,progress);job.progress(progress);return true;}
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
         auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
-        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress))complete=false;}catch(...){failure=std::current_exception();}
+        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
         // child creates/renames can change its dates even on Skip/cancellation.
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
-        if(failure)std::rethrow_exception(failure);return complete;
+        if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,std::make_pair(parent,entry.name));return complete;
     }
     Check(!found || !existing.directory, "A folder blocks the destination file");
     if (found) {
-        auto choice = job.replace(BrowserPresentation::Utf8(entry.name));
+        auto choice = job.replace(BrowserPresentation::Utf8(entry.name)+(existing.hardLink?" (shared by "+std::to_string(existing.linkCount)+" hard links)":""));
         if (choice == Storage::ConflictChoice::Cancel) throw Storage::Cancelled();
         if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped;progress.processed+=entry.forks[0].size+entry.forks[1].size;job.progress(progress);return false; }
     }
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
+    if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name,found);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     dst.Put(parent, entry, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
         if (job.cancelled()) throw Storage::Cancelled();
@@ -206,7 +214,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(job.cancelled())throw Storage::Cancelled();
         auto end=offset+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.fileBytes += added; progress.bytes += added;progress.processed+=added;job.progress(progress);
     }, found);
-    ++progress.files; job.progress(progress); return true;
+    if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }
 }
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
@@ -247,11 +255,12 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
 }
 void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress) {
     Check(id != 2 && v.Writable(), "Cannot delete the volume root or a read-only item");
-    std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0);
+    std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0,true);
     std::function<void(const Planned &)> remove = [&](const Planned &n) {
         if (job.cancelled()) throw Storage::Cancelled();
         // A directory hard link is a link, not ownership of its backing children.
-        Check(!n.entry.hardLink, "Deleting hard links is not supported");
+        Check(!n.entry.hardLink||v.SupportsHardLinks(), "Deleting hard links is not supported by this backend");
+        if(n.entry.directory&&n.entry.hardLink&&n.children.empty()&&v.Stat(n.entry.id).linkCount==1&&!v.List(n.entry.id).empty()){RemoveTree(v,n.entry.id,job,deletionProgress);return;}
         for (const auto &c : n.children) remove(c);
         if(job.cancelled())throw Storage::Cancelled();
         if(deletionProgress){p.path=BrowserPresentation::Utf8(n.entry.name);p.scanning=false;job.progress(p);}
@@ -290,7 +299,7 @@ void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
-  if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.hardLink&&!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
+  if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
   else {dst.ValidateEntry(plan.entry);if(plan.entry.directory)ValidatePlans(dst,plan.children,0,false);}
  }
 }
@@ -302,7 +311,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0));}
     ValidatePlans(dst,plans,parent,true);
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
-    for(size_t i=0;i<plans.size();++i)if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress))complete=false;
+    CopiedLinks copies;for(size_t i=0;i<plans.size();++i)if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies))complete=false;
     return complete;
 }
 bool Copy(Volume &src,uint32_t id,Volume &dst,uint32_t parent,Storage::Job& job,bool move){

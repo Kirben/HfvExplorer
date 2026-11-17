@@ -49,7 +49,7 @@ struct Entry {
     // Stat/List expose logical fork sizes and resolved content, while retaining
     // the visible link's catalog ID, name and parent. Mutations use raw records.
     bool compressed = false, hardLink = false;
-    uint32_t resolvedId = 0;
+    uint32_t resolvedId = 0, linkCount = 1;
     std::string readError; // List can report a broken item without hiding its siblings.
     Fork forks[2];
     std::array<uint8_t, 32> finder{};
@@ -81,9 +81,11 @@ class Volume {
                               const std::array<uint64_t,2>* dates,const Attributes* attributes);
     Attributes GetAttributes(uint32_t id) const;
     void SetAttributes(uint32_t id, const Attributes &);
+    uint32_t MakeHardLink(uint32_t source, uint32_t parent, const std::u16string &name,bool replace=false);
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);
     void Remove(uint32_t id);
     void ValidateRemoval(uint32_t id) const;
+    void ValidateCopyTo(uint32_t id,uint32_t parent)const;
     void UseExternalJournal(const std::string &uuid);
     bool ExternalJournal() const;
     bool ExpandedTimes() const;

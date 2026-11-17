@@ -33,6 +33,8 @@ public:
     bool Properties(int row);
     bool Capture(bool cut, bool append);
     bool Paste();
+    bool CanPasteHardLink()const;
+    bool PasteHardLink();
     BrowserTransfers::Selection SelectedItems(bool cut);
     FileOperations::Location TargetFolder(HTREEITEM item=nullptr);
     bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&,std::function<void(bool)> completed={});

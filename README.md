@@ -6,6 +6,30 @@ Build and run checks with build-x64.ps1. Older Windows versions still await
 VM execution tests. The original readme
 below describes the historical release and its obsolete drivers.
 
+HFS+/HFSX hard links
+--------------------
+
+File and directory hard links support creation, rename/move, shared content and
+attribute changes, compression changes, unlinking and final-inode reclamation.
+Copy one HFS+/HFSX item, select a folder on the same volume, then use Edit >
+Paste hard link to choose its new name. Properties shows the link count. Changes
+to contents or attributes through any link affect all names sharing that inode;
+the overwrite prompt identifies shared files. Deleting a directory alias keeps
+its children while another alias remains. Removing the final alias recursively
+removes its remaining contents through the ordinary Delete operation.
+
+Shared copies preserve link groups within a selection when the destination is
+HFS+/HFSX. Existing folder merges retain their destination topology and metadata.
+Exports to formats without Mac hard links materialize independent contents.
+Directory cycles, volume-root links, cross-volume links and corrupt link chains
+are rejected. Native compatibility limits creation to 32767 links per inode.
+Old unchained file links remain supported; malformed chains stay readable where
+possible but cannot be modified. Hidden inode directories stay out of browsing.
+Journaled link operations use the existing transaction/replay machinery. Tests
+cover failed/torn writes and flushes, complete-state recovery and two-window
+refresh after converting a folder to linked backing storage. Native macOS
+interoperability still awaits validation on Apple hardware.
+
 Folder copies and metadata
 --------------------------
 

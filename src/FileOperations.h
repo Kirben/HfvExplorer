@@ -19,7 +19,7 @@ struct Location {
  std::string expectedIdentity,expectedResource;
  std::u16string expectedName;
 };
-enum class Kind {Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute,SetBasicMetadata,SetCompression};
+enum class Kind {CreateHardLink,Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute,SetBasicMetadata,SetCompression};
 enum class MetadataPatch {All,Label,Position};
 struct Request {
  Kind kind=Kind::Copy;

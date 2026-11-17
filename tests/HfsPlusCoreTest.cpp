@@ -766,10 +766,9 @@ void hfsx(bool journaled, bool sensitive) {
     unsigned writes = disk.writes;
     {
         Volume v(disk, true);
-        fails([&] { v.Rename(folder, 2, u"Linked subtree"); },
-              "Unsupported directory hard-link topology was changed");
+        v.Rename(folder, 2, u"Linked subtree");must(v.Stat(folder).name==u"Linked subtree","Child-link hint prevented ordinary folder rename");
     }
-    must(disk.writes == writes, "Rejected hard-link topology edit changed the image");
+    must(disk.writes > writes, "Ordinary folder rename did not commit");
 }
 void permissions() {
     Memory disk(16 * 1024 * 1024);
@@ -936,6 +935,58 @@ void large(const wchar_t *path, Volume::FormatKind kind = Volume::FormatKind::Hf
              : "PASS: native image writes and persisted reads beyond 2 GiB in both HFSX forks");
 }
 
+uint32_t named(Volume& v,uint32_t parent,const std::u16string& name){for(auto& e:v.List(parent))if(e.name==name)return e.id;throw Error("Missing named hard-link fixture");}
+std::string linkState(Volume& v){
+ std::string out;std::set<uint32_t> active;std::function<void(uint32_t)> walk=[&](uint32_t parent){for(auto& e:v.List(parent)){if(e.protectedFile&&!e.hardLink)continue;must(!e.hardLink||!e.protectedFile,"Recovered hard-link chain is not writable");must(e.readError.empty(),"Recovered link is unreadable");out+="[";for(auto c:e.name)out+=std::to_string(unsigned(c))+",";out+=":"+std::to_string(e.id)+":"+std::to_string(e.resolvedId)+":"+std::to_string(e.linkCount);
+  for(auto& a:v.GetAttributes(e.id)){for(auto c:a.first)out+=std::to_string(unsigned(c))+",";for(auto c:a.second)out+=std::to_string(c)+",";}
+  if(e.directory){must(active.insert(e.resolvedId).second,"Recovered directory cycle");walk(e.id);active.erase(e.resolvedId);}else for(unsigned f=0;f<2;++f){Bytes bytes(size_t(e.forks[f].size));must(v.Read(e.id,f,0,bytes.data(),bytes.size())==bytes.size(),"Recovered fork read");uint64_t hash=14695981039346656037ULL;for(auto b:bytes){hash^=b;hash*=1099511628211ULL;}out+=":"+std::to_string(bytes.size())+":"+std::to_string(hash);}out+="]";}};walk(2);return out;
+}
+struct TornLinkMemory:Memory{int torn=-1;explicit TornLinkMemory(const Memory& value):Memory(value){}void Write(uint64_t at,const void* p,size_t n)override{if(torn>=0&&writes==unsigned(torn)){Memory::Write(at,p,n/2);throw Error("Torn hard-link metadata write");}Memory::Write(at,p,n);}};
+void hardLinkFailures(){
+ for(unsigned action=0;action<10;++action){Memory baseline(16*1024*1024);Volume::Format(baseline,u"Link failures",true);bool directory=action==1||action==4||action==5||action==9;
+  {Volume v(baseline,true);auto a=directory?v.MakeDirectory(2,u"A"):v.Put(2,u"A",5003,723,pattern);if(directory&&action!=5)v.Put(a,u"Child",101,17,pattern);v.SetAttributes(a,{{u"user.keep",Bytes(5001,7)}});if(action!=0&&action!=1)v.MakeHardLink(a,2,u"B");if(action==3||action==5)v.Remove(named(v,2,u"A"));}
+  auto operation=[&](Volume& v){if(action==0||action==1)v.MakeHardLink(named(v,2,u"A"),2,u"B");else if(action>=2&&action<=5)v.Remove(named(v,2,(action==3||action==5)?u"B":u"A"));else if(action==6)v.Put(2,u"B",71,91,pattern,nullptr,true);else if(action==7)v.Rename(named(v,2,u"B"),2,u"Renamed");else if(action==8)v.SetAttributes(named(v,2,u"B"),{{u"user.new",Bytes(7003,9)}});else v.MakeDirectory(named(v,2,u"B"),u"Added");};
+  std::string oldState,newState;{Volume v(baseline);oldState=linkState(v);}Memory success=baseline;auto startWrites=success.writes,startFlushes=success.flushes;{Volume v(success,true);operation(v);newState=linkState(v);}auto writes=success.writes-startWrites,flushes=success.flushes-startFlushes;must(oldState!=newState&&writes&&flushes,"Hard-link failure test did not exercise a change");
+  auto check=[&](Memory& failed){failed.failWrite=failed.failFlush=-1;auto before=failed.writes;Volume v(failed,false);auto state=linkState(v);must(state==oldState||state==newState,"Hard-link failure recovered a mixed topology/content state");must(before==failed.writes,"Read-only link recovery wrote image");};
+  for(const char* phase:{"data-flushed","journal-data-flushed","journal-committed","home-flushed","journal-cleared"}){Memory failed=baseline;{Volume v(failed,true);v.fault=[&](const char* at){if(!strcmp(at,phase))throw Error("Link phase error");};fails([&]{operation(v);},"Hard-link phase fault missed");}check(failed);}
+  for(unsigned mode=0;mode<3;++mode){auto count=mode==1?flushes:writes;for(auto step:std::set<unsigned>{0,1,count/2,count-1}){if(mode==2){TornLinkMemory failed(baseline);failed.torn=int(failed.writes+step);{Volume v(failed,true);fails([&]{operation(v);},"Torn hard-link write fault missed");}failed.torn=-1;check(failed);}else{Memory failed=baseline;if(mode==1)failed.failFlush=int(failed.flushes+step);else failed.failWrite=int(failed.writes+step);{Volume v(failed,true);fails([&]{operation(v);},"Hard-link I/O fault missed");}check(failed);}}}
+ }
+ Memory valid(16*1024*1024);Volume::Format(valid,u"Corrupt links",true);uint32_t inode,a,b;{Volume v(valid,true);auto file=v.Put(2,u"A",101,17,pattern);b=v.MakeHardLink(file,2,u"B");a=named(v,2,u"A");inode=v.Stat(a).resolvedId;}
+ for(unsigned corruption=0;corruption<3;++corruption){Memory bad=valid;auto raw=catalogValue(bad,corruption==0?inode:a);if(corruption==0)Disk::P32(raw+44,3);else if(corruption==1)Disk::P32(raw+36,a);else Disk::P32(raw+32,b);auto before=bad.writes;{Volume v(bad,true);must(v.Stat(a).protectedFile,"Broken chain exposed as writable");fails([&]{v.Remove(a);},"Broken chain was unlinked");fails([&]{v.MakeHardLink(a,2,u"C");},"Broken chain was extended");verify(v,b,0,101);}must(bad.writes==before,"Rejected corrupt link operation wrote image");}
+ {Memory bad(16*1024*1024);Volume::Format(bad,u"Malformed directory ancestor",true);uint32_t sub,child,inode,nestedLink,outside;
+  {Volume v(bad,true);auto folder=v.MakeDirectory(2,u"Folder");sub=v.MakeDirectory(folder,u"Sub");child=v.Put(sub,u"Child",101,17,pattern);auto file=v.Put(2,u"Outside",101,17,pattern);nestedLink=v.MakeHardLink(file,sub,u"Nested link");outside=named(v,2,u"Outside");auto alias=v.MakeHardLink(folder,2,u"Alias");inode=v.Stat(alias).resolvedId;}
+  Disk::P32(catalogValue(bad,inode)+44,3);auto before=bad.writes;{Volume v(bad,true);must(v.Stat(child).protectedFile,"Child of a corrupt directory link is writable");fails([&]{v.MakeDirectory(sub,u"Unsafe");},"Corrupt linked ancestor accepted child create");fails([&]{v.Put(sub,u"Child",71,91,pattern,nullptr,true);},"Corrupt linked ancestor accepted child overwrite");fails([&]{v.SetAttributes(child,{});},"Corrupt linked ancestor accepted attribute edit");fails([&]{v.Remove(child);},"Corrupt linked ancestor accepted child delete");fails([&]{v.SetAttributes(nestedLink,{});},"Corrupt visible linked ancestor accepted shared attribute edit");must(!v.Stat(outside).protectedFile,"Corrupt alias ancestor protected an outside link");verify(v,child,0,101);}must(bad.writes==before,"Rejected corrupt-ancestor edits wrote image");}
+ puts("PASS: link conversion, shared overwrite/attributes, rename, file/directory unlink and child creation recover a complete old/new state after every journal boundary, write/flush faults and torn writes; malformed counts/chains rejected before writes");
+}
+void hardLinks(){
+ for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive})for(bool journal:{false,true}){
+  Memory disk(24*1024*1024);Volume::Format(disk,u"Links",journal,kind);uint32_t a,b,c,folder,alias,child,inode;
+  {Volume v(disk,true);auto file=v.Put(2,u"One",5003,723,pattern);Attributes attrs{{u"user.shared",Bytes(6001,9)}};v.SetAttributes(file,attrs);auto free=v.FreeBytes();b=v.MakeHardLink(file,2,u"Two");a=named(v,2,u"One");inode=v.Stat(a).resolvedId;
+   must(Disk::U32(catalogValue(disk,inode)+4)==a&&Disk::U32(catalogValue(disk,a)+36)==b&&Disk::U32(catalogValue(disk,b)+32)==a&&Disk::U32(catalogValue(disk,inode)+44)==2,"Independent raw link-chain fields");
+   must(a!=inode&&v.Stat(a).hardLink&&v.Stat(a).linkCount==2&&v.Stat(b).resolvedId==inode,"Created shared file links");must(v.GetAttributes(b)==attrs,"Linked attributes");verify(v,b,0,5003);verify(v,a,1,723);
+   c=v.MakeHardLink(a,2,u"Three");must(v.Stat(c).linkCount==3,"Third hard link");v.Rename(a,2,u"Renamed");must(v.Stat(a).name==u"Renamed"&&v.Stat(a).resolvedId==inode,"Rename changed shared inode");
+   v.Put(2,u"Two",71,91,pattern,nullptr,true);verify(v,a,0,71);verify(v,c,1,91);must(v.GetAttributes(a)==attrs,"Shared overwrite dropped attributes");v.SetAttributes(c,{{u"user.other",{1,2,3}}});must(v.GetAttributes(a)==v.GetAttributes(c),"Linked attributes not shared");
+   v.SetCompression(b,true);must(v.Stat(a).compressed,"Shared compression creation");v.SetCompression(a,false);verify(v,c,0,71);
+   v.Remove(b);must(v.Stat(a).linkCount==2,"Unlink count");verify(v,c,1,91);v.Remove(a);must(v.Stat(c).linkCount==1,"Last visible link count");v.Remove(c);must(v.FreeBytes()>=free,"Last unlink did not reclaim file/attribute blocks");fails([&]{v.Stat(inode);},"Last unlink retained backing inode");
+   folder=v.MakeDirectory(2,u"Folder");child=v.Put(folder,u"Child",101,17,pattern);alias=v.MakeHardLink(folder,2,u"Alias");folder=named(v,2,u"Folder");must(v.Stat(alias).directory&&v.Stat(alias).linkCount==2,"Directory link presentation");
+   {auto raw=catalogValue(disk,alias);auto fork=disk.bytes.data()+uint64_t(Disk::U32(raw+184))*Disk::U32(disk.bytes.data()+1064);auto map=Disk::U32(fork+4);auto data=Disk::U32(fork);must(Disk::U64(raw+168)==464&&data==256&&Disk::U32(fork+12)==50&&!memcmp(fork+map+30,"alis",4),"Directory alias Resource Manager layout");must(Disk::U16(fork+data+4+6)==2&&Disk::U32(fork+data+4+114)==v.Stat(alias).resolvedId,"Directory alias target CNID/version");}
+must(v.List(alias).size()==1&&v.List(alias)[0].id==child,"Directory link contents");auto added=v.MakeDirectory(alias,u"New folder");must(v.List(folder).size()==2,"Directory link child creation");
+   fails([&]{v.MakeHardLink(folder,alias,u"Cycle");},"Self directory hard link accepted");fails([&]{v.Rename(folder,added,u"Cycle");},"Directory alias move cycle accepted");
+   auto extra=v.MakeHardLink(alias,2,u"Third folder");v.Remove(folder);must(v.Stat(alias).linkCount==2&&v.List(extra).size()==2,"Non-last directory unlink deleted children");v.Rename(extra,2,u"Moved alias");v.Remove(extra);fails([&]{v.Remove(alias);},"Last nonempty directory link removed");v.Remove(child);v.Remove(added);v.Remove(alias);
+  }
+  {Volume v(disk);for(auto& e:v.List())must(!e.hardLink,"Removed links survived reopen");}
+ }
+ // Crash every durable boundary of conversion, insertion, shared overwrite and
+ // unlink. Reopen from disk, independently check pointer fields and content.
+ for(unsigned action=0;action<4;++action){Memory baseline(24*1024*1024);Volume::Format(baseline,u"Link crash",true);uint32_t original;
+  {Volume v(baseline,true);original=v.Put(2,u"A",5003,723,pattern);if(action)v.MakeHardLink(original,2,u"B");}
+  for(const char* phase:{"data-flushed","journal-data-flushed","journal-committed","home-flushed","journal-cleared"}){Memory failed=baseline;{Volume v(failed,true);v.fault=[&](const char* p){if(!strcmp(p,phase))throw Error("Link crash");};fails([&]{if(action==0)v.MakeHardLink(original,2,u"B");else if(action==1)v.MakeHardLink(named(v,2,u"A"),2,u"C");else if(action==2)v.Put(2,u"B",101,17,pattern,nullptr,true);else v.Remove(named(v,2,u"A"));},"Missing hard-link crash phase");}
+   Volume recovered(failed,false);auto listing=recovered.List();listing.erase(std::remove_if(listing.begin(),listing.end(),[](const Entry& e){return e.protectedFile&&!e.hardLink;}),listing.end());must(!listing.empty(),"Crash lost all links");uint32_t inode=0;unsigned links=0;for(auto& e:listing){must(e.readError.empty(),"Crash left broken link");if(e.hardLink){if(!inode)inode=e.resolvedId;must(e.resolvedId==inode,"Crash split shared inode");++links;}must(e.forks[0].size==5003||(action==2&&e.forks[0].size==101),"Crash fork size");verify(recovered,e.id,0,e.forks[0].size);verify(recovered,e.id,1,e.forks[1].size);}
+   for(auto& e:listing)if(e.hardLink)must(e.linkCount==links,"Crash link count");
+  }
+ }
+ puts("PASS: HFS+/both HFSX file and directory link creation, chained inode accounting, rename, shared forks/attributes/compression, child writes, cycle refusal, non-last unlink, final reclamation and journal crash recovery; journaled and non-journaled images");
+}
 void directoryMetadata(){
  for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive}){
   Memory baseline(16*1024*1024);Volume::Format(baseline,u"Folder metadata",true,kind,true);uint32_t folder,file;
@@ -953,7 +1004,8 @@ void directoryMetadata(){
 }
 int wmain(int argc, wchar_t **argv) {
     try {
-        if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
+        if(argc==2&&!wcscmp(argv[1],L"--hard-links")){hardLinks();hardLinkFailures();return 0;}
+          if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
         auto saveMemory = [](Memory &memory, const wchar_t *path) {
             auto out = CreateImage(path, memory.Size());
             out->Write(0, memory.bytes.data(), memory.bytes.size());
@@ -1127,7 +1179,7 @@ int wmain(int argc, wchar_t **argv) {
         }
         attributeTests();
         stagedRangeValidation();
-        directoryMetadata();
+        hardLinks();hardLinkFailures();directoryMetadata();
         RunHfsPlusCompressionTests();
         RunIncrementalBTreeTests();
         journalResizeTests();

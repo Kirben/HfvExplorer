@@ -523,7 +523,7 @@ struct Volume::Impl {
             uint32_t parent = e.id;
             std::set<uint32_t> seen;
             while (parent != 2 && seen.insert(parent).second) {
-                if (parent == fileMetadata || parent == directoryMetadata) {
+                if (e.id == fileMetadata || e.id == directoryMetadata || e.parent == fileMetadata || e.parent == directoryMetadata) {
                     e.protectedFile = true;
                     break;
                 }
@@ -620,8 +620,8 @@ struct Volume::Impl {
         bool any=false,security=false;for(const auto& r:attributeRecords)if(U32(r.key.data()+4)==id){any=true;security|=AttributeName(r)==u"com.apple.system.Security";}
         auto record=CatalogRecord(id);auto flags=U16(record->value.data()+2);P16(record->value.data()+2,uint16_t((flags&~12u)|(any?4:0)|(security?8:0)));
     }
-    void ReplaceAttributes(uint32_t id,const Attributes& desired,bool compressionWriter=false) {
-        auto ordinary=desired;if(compressionWriter){auto i=ordinary.find(u"com.apple.decmpfs");if(i!=ordinary.end()){Check(i->second.size()<=131088,"Oversized decmpfs attribute");ordinary.erase(i);}}ValidateAttributes(ordinary);uint64_t attributeBytes=0;for(const auto& a:desired){attributeBytes+=a.second.size();Check(attributeBytes<=128*1024*1024,"Extended attributes including compression exceed the per-entry limit");}LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
+    void ReplaceAttributes(uint32_t id,const Attributes& desired,bool compressionWriter=false,bool linkWriter=false) {
+        auto ordinary=desired;if(linkWriter)ordinary.erase(u"com.apple.system.hfs.firstlink");if(compressionWriter){auto i=ordinary.find(u"com.apple.decmpfs");if(i!=ordinary.end()){Check(i->second.size()<=131088,"Oversized decmpfs attribute");ordinary.erase(i);}}ValidateAttributes(ordinary);uint64_t attributeBytes=0;for(const auto& a:desired){attributeBytes+=a.second.size();Check(attributeBytes<=128*1024*1024,"Extended attributes including compression exceed the per-entry limit");}LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
         std::vector<Fork> freed;
         for(const auto& value:old){auto now=desired.find(value.first);if(now!=desired.end()&&now->second==value.second)continue;
             auto storage=AttributeStorage(id,value.first);if(!storage.inlineValue)freed.push_back(storage.fork);}
@@ -668,7 +668,8 @@ struct Volume::Impl {
             return 0;
         // Matching Finder signatures alone can also occur on ordinary files.
         // Apple additionally requires the root/private-directory creation date.
-        bool date = e.created == Get(2).created || (fileMetadata && e.created == Get(fileMetadata).created);
+        uint32_t metadata=folder?directoryMetadata:fileMetadata;
+        bool date = e.created == Get(2).created || (metadata && e.created == Get(metadata).created);
         return date ? (folder ? 2 : 1) : 0;
     }
     uint32_t Resolve(uint32_t id) {
@@ -697,6 +698,81 @@ struct Volume::Impl {
             return target;
         }
     }
+    // Independent on-disk implementation using TN1150 and the published
+    // HFS catalog field definitions. No Apple implementation code is included.
+    void ValidateLinkAncestors(uint32_t id){std::set<uint32_t> seen;for(uint32_t parent=Get(id).parent;parent!=1;parent=Get(parent).parent){Check(seen.insert(parent).second,"Cyclic hard-link inode ancestry");if(directoryMetadata&&Get(parent).parent==directoryMetadata)ValidateLinks(parent);}}
+    std::vector<uint32_t> Links(uint32_t inode) {
+        auto& e=Get(inode);uint32_t metadata=e.directory?directoryMetadata:fileMetadata;
+        Check(metadata&&e.parent==metadata,"Invalid hard-link inode location");
+        std::u16string prefix=e.directory?u"dir_":u"iNode";Check(e.name.size()>prefix.size()&&e.name.compare(0,prefix.size(),prefix)==0,"Invalid hard-link inode name");
+        uint64_t reference=0;for(size_t i=prefix.size();i<e.name.size();++i){Check(e.name[i]>=u'0'&&e.name[i]<=u'9',"Invalid hard-link reference");reference=reference*10+e.name[i]-u'0';Check(reference<=UINT32_MAX,"Hard-link reference overflow");}
+        Check(reference&&e.name[prefix.size()]!=u'0',"Invalid hard-link reference");
+        std::vector<uint32_t> links;
+        for(auto& item:entries)if(LinkKind(item.first)==(e.directory?2:1)&&U32(CatalogRecord(item.first)->value.data()+44)==reference){Check(Resolve(item.first)==inode,"Ambiguous hard-link inode");links.push_back(item.first);}
+        return links;
+    }
+    std::vector<uint32_t> ValidateLinks(uint32_t inode) {
+        auto links=Links(inode);Check(!links.empty(),"Orphan hard-link inode");auto& e=Get(inode);auto raw=CatalogRecord(inode);
+        bool chained=(U16(raw->value.data()+2)&0x20)!=0;
+        Check(!e.directory||chained,"Directory hard-link inode has no link chain");
+        if(chained){
+            Check(U32(raw->value.data()+44)==links.size(),"Hard-link count does not match catalog links");uint32_t head=0;
+            if(e.directory){auto a=GetAttributes(inode);auto i=a.find(u"com.apple.system.hfs.firstlink");Check(i!=a.end()&&!i->second.empty()&&i->second.back()==0,"Missing directory first-link attribute");uint64_t n=0;for(size_t j=0;j+1<i->second.size();++j){auto c=i->second[j];Check(c>='0'&&c<='9',"Invalid directory first-link attribute");n=n*10+c-'0';Check(n<=UINT32_MAX,"Directory first-link ID overflow");}head=uint32_t(n);}
+            else head=U32(raw->value.data()+4);
+            std::set<uint32_t> expected(links.begin(),links.end()),seen;uint32_t previous=0;
+            for(uint32_t id=head;id;){Check(expected.count(id)&&seen.insert(id).second,"Broken/cyclic hard-link chain");auto r=CatalogRecord(id);Check((U16(r->value.data()+2)&0x20)&&U32(r->value.data()+32)==previous,"Broken hard-link back pointer");previous=id;id=U32(r->value.data()+36);}
+            Check(seen==expected,"Incomplete hard-link chain");
+        }else for(auto id:links)Check(!(U16(CatalogRecord(id)->value.data()+2)&0x20),"Mixed legacy/chained hard links");
+        for(auto id:links){auto& link=Get(id);Check(!link.forks[0].size&&(!link.forks[1].size||e.directory),"Unexpected hard-link stub contents");Check(GetAttributes(id).empty(),"Unexpected hard-link stub attributes");}
+        return links;
+    }
+    bool DirectoryReaches(uint32_t start,uint32_t destination) {
+        std::set<uint32_t> active,done;std::function<bool(uint32_t)> walk=[&](uint32_t id){id=Resolve(id);if(id==destination)return true;if(done.count(id))return false;Check(active.insert(id).second,"Cyclic directory hard-link graph");
+            for(auto& child:entries)if(child.second.parent==id&&(child.second.directory||LinkKind(child.first)==2))if(walk(child.first))return true;
+            active.erase(id);done.insert(id);return false;};return walk(start);
+    }
+    uint32_t Content(uint32_t id) {
+        ValidateLinkAncestors(id);auto target=Resolve(id);if(target!=id){ValidateLinks(target);Mutable(Get(target),true);}else Mutable(Get(id));return target;
+    }
+    uint32_t WriteParent(uint32_t id,bool internal=false) {
+        ValidateLinkAncestors(id);auto target=Resolve(id);auto& e=Get(target);Check(e.directory,"Destination is not a folder");
+        if(target!=id||(internal&&target!=2&&e.parent==directoryMetadata)){ValidateLinks(target);Mutable(e,true);}
+        else Parent(target);return target;
+    }
+    void SyncLinks(uint32_t inode,const std::vector<uint32_t>& links,bool chained) {
+        auto raw=CatalogRecord(inode);P32(raw->value.data()+20,Time::Encode(Now(),(U16(raw->value.data()+2)&0x1000)!=0));P32(raw->value.data()+44,uint32_t(links.size()));
+        if(!chained)return;
+        P16(raw->value.data()+2,U16(raw->value.data()+2)|0x20);
+        if(Get(inode).directory){auto desired=GetAttributes(inode);auto number=std::to_string(links.empty()?0:links.front());desired[u"com.apple.system.hfs.firstlink"]=Bytes(number.begin(),number.end());desired[u"com.apple.system.hfs.firstlink"].push_back(0);ReplaceAttributes(inode,desired,true,true);}
+        else P32(raw->value.data()+4,links.empty()?0:links.front());
+        for(size_t i=0;i<links.size();++i){auto r=CatalogRecord(links[i]);P16(r->value.data()+2,U16(r->value.data()+2)|0x20);P32(r->value.data()+32,i?links[i-1]:0);P32(r->value.data()+36,i+1<links.size()?links[i+1]:0);}
+    }
+    void Erase(uint32_t id) {
+        auto e=Get(id);if(!e.directory)for(unsigned f=0;f<2;++f){Free(e.forks[f]);Overflow(id,f,Fork{});}ReplaceAttributes(id,{});entries.erase(id);
+        catalogRecords.erase(std::remove_if(catalogRecords.begin(),catalogRecords.end(),[&](const Record& r){return (U16(r.value.data())<=2&&U32(r.value.data()+8)==id)||(U16(r.value.data())>=3&&U32(r.key.data()+2)==id);}),catalogRecords.end());
+    }
+    void Unlink(uint32_t id){auto inode=Resolve(id);if(inode==id){Erase(id);return;}auto links=ValidateLinks(inode);bool chained=(U16(CatalogRecord(inode)->value.data()+2)&0x20)!=0;Erase(id);links.erase(std::remove(links.begin(),links.end(),id),links.end());if(links.empty())Erase(inode);else SyncLinks(inode,links,chained);}
+    uint32_t Private(bool directory) {
+        auto& id=directory?directoryMetadata:fileMetadata;if(id)return id;
+        Entry e;e.directory=true;e.parent=2;e.name=directory?u".HFS+ Private Directory Data\r":std::u16string(4,0x2400)+u"HFS+ Private Data";
+        Check(!Existing(2,e.name),"An existing private-directory name requires reopening the image");e.finder[8]=0x50;New(e);id=e.id;entries[id].protectedFile=true;return id;
+    }
+    Fork Alias(uint32_t inode) {
+        // Resource Manager map with one standard version-2 directory alias.
+        // Target CNID/parent and volume date identify the hidden backing folder.
+        Bytes alias(154,0);P16(alias.data()+4,uint16_t(alias.size()));P16(alias.data()+6,2);P16(alias.data()+8,1);
+        auto volume=Get(2).name;alias[10]=uint8_t((std::min)(size_t(27),volume.size()));for(unsigned i=0;i<alias[10];++i)alias[11+i]=volume[i]<128?uint8_t(volume[i]):'?';
+        P32(alias.data()+38,U32(header.data()+16));P16(alias.data()+42,0x482b);P16(alias.data()+44,5);P32(alias.data()+46,directoryMetadata);
+        auto name=Get(inode).name;alias[50]=uint8_t(name.size());for(unsigned i=0;i<alias[50];++i)alias[51+i]=uint8_t(name[i]);P32(alias.data()+114,inode);P32(alias.data()+118,U32(CatalogRecord(inode)->value.data()+12));P16(alias.data()+130,0xffff);P16(alias.data()+132,0xffff);P16(alias.data()+150,0xffff);
+        uint32_t map=256+4+uint32_t(alias.size());Bytes resource(map+50,0);P32(resource.data(),256);P32(resource.data()+4,map);P32(resource.data()+8,4+uint32_t(alias.size()));P32(resource.data()+12,50);P32(resource.data()+256,uint32_t(alias.size()));memcpy(resource.data()+260,alias.data(),alias.size());
+        auto m=resource.data()+map;memcpy(m,resource.data(),16);P16(m+24,28);P16(m+26,50);P16(m+28,0);memcpy(m+30,"alis",4);P16(m+34,0);P16(m+36,10);P16(m+38,0);P16(m+40,0xffff);
+        Fork f=Allocate(resource.size());size_t at=0;for(auto x:f.extents){Bytes block(size_t(x.count)*bs,0);auto n=(std::min)(block.size(),resource.size()-at);memcpy(block.data(),resource.data()+at,n);view.Write(uint64_t(x.start)*bs,block.data(),block.size());at+=n;}return f;
+    }
+    uint32_t Stub(uint32_t inode,uint32_t parent,const std::u16string& name,uint32_t reference,bool chained) {
+        bool directory=Get(inode).directory;Entry e;e.parent=parent;e.name=name;memcpy(e.finder.data(),directory?"fdrpMACS":"hlnkhfs+",8);P16(e.finder.data()+8,directory?0x8000:0x0100);if(directory)e.forks[1]=Alias(inode);New(e);
+        auto r=CatalogRecord(e.id);P16(r->value.data()+2,U16(r->value.data()+2)|((chained||directory)?0x20:0));r->value[41]|=2;P16(r->value.data()+42,0100444);P32(r->value.data()+44,reference);
+        auto metadata=directory?directoryMetadata:fileMetadata;entries[e.id].created=Get(metadata).created;P32(r->value.data()+12,Time::Encode(entries[e.id].created,(U16(r->value.data()+2)&0x1000)!=0));return e.id;
+    }
     Entry Presented(uint32_t id) {
         auto visible = Get(id);
         uint32_t target = Resolve(id);
@@ -706,7 +782,8 @@ struct Volume::Impl {
         result.name = visible.name;
         result.resolvedId = target;
         result.hardLink = target != id;
-        result.protectedFile = visible.protectedFile || result.protectedFile || result.hardLink;
+        result.protectedFile = result.hardLink ? false : visible.protectedFile;try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
+        if(result.hardLink){result.linkCount=uint32_t(Links(target).size());try{ValidateLinks(target);}catch(const Error&){result.protectedFile=true;}}
         if (!result.directory && IsCompressed(target)) {
             auto &c = Compressed(target);
             result.compressed = true;
@@ -717,9 +794,9 @@ struct Volume::Impl {
         return result;
     }
     void Parent(uint32_t id) {
-        auto &e = Get(id);
+        ValidateLinkAncestors(id);auto &e = Get(id);
         Check(e.directory, "Destination is not a folder");
-        Check(id == 2 || !e.protectedFile, "Cannot add children to protected HFS+ metadata");
+        Check(id == 2 || !e.protectedFile || (directoryMetadata&&e.parent==directoryMetadata&&!ValidateLinks(id).empty()), "Cannot add children to protected HFS+ metadata");
         auto r = CatalogRecord(id);
         Check(!(r->value[40] & 2) && !(r->value[41] & 2), "Destination folder is immutable");
     }
@@ -959,12 +1036,12 @@ struct Volume::Impl {
         UpdateEntry(e);
         Thread(e);
     }
-    void Mutable(const Entry &e) {
-        Check(!e.protectedFile && e.id >= 16, "Protected HFS+ metadata cannot be modified");
+    void Mutable(const Entry &e,bool inodeAccess=false) {
+        ValidateLinkAncestors(e.id);Check((!e.protectedFile||inodeAccess) && e.id >= 16, "Protected HFS+ metadata cannot be modified");
         auto r = CatalogRecord(e.id);
         Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & 6) && !(r->value[41] & 6),
               "HFS+ entry is locked");
-        Check(!e.directory || !(U16(r->value.data() + 2) & 0x60),
+        Check(!e.directory || inodeAccess || !(U16(r->value.data() + 2) & 0x20),
               "Directory hard-link topology cannot be modified");
         if (!e.directory) {
             Check(memcmp(e.finder.data(), "hlnkhfs+", 8) && memcmp(e.finder.data(), "fdrpMACS", 8),
@@ -977,7 +1054,7 @@ struct Volume::Impl {
         // dedicated writers. Ordinary attributes and ACLs are preserved by ID.
         LoadAttributes();
         for(const auto& a:attributeRecords)if(U32(a.key.data()+4)==e.id){auto name=AttributeName(a);
-            Check((name!=u"com.apple.decmpfs"||e.compressed)&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink","Entry uses unsupported compression/encryption/link metadata");}
+            Check((name!=u"com.apple.decmpfs"||e.compressed)&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&(name!=u"com.apple.system.hfs.firstlink"||inodeAccess),"Entry uses unsupported compression/encryption/link metadata");}
     }
     uint64_t GrowMetadata(Fork &f, uint64_t minimum, uint32_t id) {
         uint64_t target = ((minimum + bs - 1) / bs) * bs;
@@ -1222,10 +1299,15 @@ struct Volume::Impl {
                 if (e.second.directory || LinkKind(e.first) == 2)
                     ++folderCounts[e.second.parent];
             }
+        std::set<uint32_t> childLinks;
+        std::map<uint32_t,std::vector<uint32_t>> directoryParents;std::vector<uint32_t> pending;
+        for(auto& item:entries)if(LinkKind(item.first)==2){pending.push_back(item.second.parent);try{directoryParents[Resolve(item.first)].push_back(item.second.parent);}catch(const Error&){}}
+        while(!pending.empty()){auto parent=pending.back();pending.pop_back();if(parent==1||!childLinks.insert(parent).second)continue;pending.push_back(Get(parent).parent);for(auto visibleParent:directoryParents[parent])pending.push_back(visibleParent);}
         for (auto &record : catalogRecords)
             if (U16(record.value.data()) == 1) {
                 auto r = &record;
                 uint32_t id = U32(r->value.data() + 8);
+                P16(r->value.data()+2,uint16_t((U16(r->value.data()+2)&~0x40u)|(childLinks.count(id)?0x40:0)));
                 uint32_t count = counts[id];
                 if (U32(r->value.data() + 4) != count) {
                     P32(r->value.data() + 4, count);
@@ -1264,7 +1346,7 @@ struct Volume::Impl {
                 ++free;
         for (auto &p : entries)
             if (p.first != 2) {
-                if (p.second.directory)
+                if (p.second.directory||LinkKind(p.first)==2)
                     ++folders;
                 else
                     ++files;
@@ -1385,7 +1467,7 @@ uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer,
 uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes) {
     auto &p = *p_;
     p.Guard();
-    p.Parent(parent);
+    parent=p.WriteParent(parent);
     if(attributes)ValidateAttributes(*attributes);
     Entry e;
     e.parent = parent;
@@ -1407,18 +1489,17 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                      const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates) {
     auto &p = *p_;
     p.Guard();
-    p.Parent(parent);
+    parent=p.WriteParent(parent);
     if(attributes)ValidateAttributes(*attributes);
     Entry e;
     e.parent = parent;
     e.name = Normalize(name, p.caseSensitive);
     uint32_t existing = p.Existing(parent, e.name);
-    Fork old[2];
+    Fork old[2];uint32_t visible=existing;
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
-        e = p.Get(existing);
+        existing=p.Content(existing);e = p.Get(existing);
         Check(!e.directory, "Cannot overwrite an HFS+ directory");
-        p.Mutable(e);
         p.RemovalParent(parent);
         old[0] = e.forks[0];
         old[1] = e.forks[1];
@@ -1482,21 +1563,21 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
         p.Overflow(e.id, 0, e.forks[0]);
         p.Overflow(e.id, 1, e.forks[1]);
         p.Commit(fault);
-        return e.id;
+        return visible?visible:e.id;
     } catch (...) {
         p.usable = false;
         throw;
     }
 }
 void Volume::SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress){
-    auto& p=*p_;p.Guard();auto raw=p.Get(id);p.Mutable(raw);Check(!raw.directory,"Select an ordinary file for compression");
+    auto& p=*p_;p.Guard();auto raw=p.Get(p.Content(id));Check(!raw.directory,"Select an ordinary file for compression");
     auto e=Stat(id);Check(e.readError.empty(),"Cannot convert an unreadable compressed file");
     if(compressed==e.compressed)return;
     uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint64_t,2> dates{e.created,e.modified};
     Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed,&dates);
 }
 void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,const std::array<uint64_t,2>* dates,const Attributes* attributes){
- auto& p=*p_;p.Guard();auto e=p.Get(id);Check(e.directory,"Select a folder for directory metadata");p.Mutable(e);if(attributes)ValidateAttributes(*attributes);
+ auto& p=*p_;p.Guard();id=p.Content(id);auto e=p.Get(id);Check(e.directory,"Select a folder for directory metadata");if(attributes)ValidateAttributes(*attributes);
  auto record=p.CatalogRecord(id);bool expanded=(U16(record->value.data()+2)&0x1000)!=0,convert=false;
  if(dates){if(!expanded&&((*dates)[0]>UINT32_MAX||(*dates)[1]>UINT32_MAX)){Check(ExpandedTimes(),"This folder requires expanded timestamps");expanded=convert=true;}for(auto date:*dates)(void)Time::Encode(date,expanded);
   if(convert)for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);if(raw)(void)Time::Encode(raw,true);}}
@@ -1504,15 +1585,15 @@ void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* find
   if(convert){for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);P32(record->value.data()+at,raw?Time::Encode(raw,true):0);}P16(record->value.data()+2,U16(record->value.data()+2)|0x1000);}
   if(finder){e.finder=*finder;memcpy(record->value.data()+48,e.finder.data(),32);}
   if(dates){e.created=(*dates)[0];e.modified=(*dates)[1];P32(record->value.data()+12,Time::Encode(e.created,expanded));P32(record->value.data()+16,Time::Encode(e.modified,expanded));}
-  p.entries[id]=e;if(attributes)p.ReplaceAttributes(id,*attributes);p.Commit(fault);
+  p.entries[id]=e;if(attributes){auto desired=*attributes;auto old=p.GetAttributes(id);if(old.count(u"com.apple.system.hfs.firstlink"))desired[u"com.apple.system.hfs.firstlink"]=old.at(u"com.apple.system.hfs.firstlink");p.ReplaceAttributes(id,desired,true,true);}p.Commit(fault);
  }catch(...){p.usable=false;throw;}
 }
 Attributes Volume::GetAttributes(uint32_t id) const {
-    p_->source.CheckMedia();Check(p_->usable,"Reopen HFS+ image after error");return p_->GetAttributes(p_->Resolve(id));
+    p_->source.CheckMedia();Check(p_->usable,"Reopen HFS+ image after error");auto attributes=p_->GetAttributes(p_->Resolve(id));attributes.erase(u"com.apple.system.hfs.firstlink");return attributes;
 }
 void Volume::SetAttributes(uint32_t id,const Attributes& attributes) {
-    auto& p=*p_;p.Guard();p.Mutable(p.Get(id));ValidateAttributes(attributes);
-    try{auto desired=attributes;if(p.Get(id).compressed)desired[u"com.apple.decmpfs"]=p.Attribute(id,u"com.apple.decmpfs");p.ReplaceAttributes(id,desired,true);p.Commit(fault);}catch(...){p.usable=false;throw;}
+    auto& p=*p_;p.Guard();id=p.Content(id);ValidateAttributes(attributes);
+    try{auto desired=attributes;if(p.Get(id).compressed)desired[u"com.apple.decmpfs"]=p.Attribute(id,u"com.apple.decmpfs");auto old=p.GetAttributes(id);if(old.count(u"com.apple.system.hfs.firstlink"))desired[u"com.apple.system.hfs.firstlink"]=old.at(u"com.apple.system.hfs.firstlink");p.ReplaceAttributes(id,desired,true,true);p.Commit(fault);}catch(...){p.usable=false;throw;}
 }
 void ValidateAttributes(const Attributes& attributes) {
     uint64_t total=0;
@@ -1527,20 +1608,19 @@ void ValidateAttributes(const Attributes& attributes) {
 void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
     auto &p = *p_;
     p.Guard();
-    p.Parent(parent);
+    parent=p.WriteParent(parent);
     Entry e = p.Get(id);
-    p.Mutable(e);
-    p.RemovalParent(e.parent);
+    if(p.LinkKind(id))p.Content(id);else p.Mutable(e);
+    p.WriteParent(e.parent,true);p.RemovalParent(e.parent);
     auto normalized = Normalize(name, p.caseSensitive);
     uint32_t existing = p.Existing(parent, normalized);
     Check(!existing || existing == id, "HFS+ name already exists");
-    for (uint32_t i = parent; i != 1; i = p.Get(i).parent)
-        Check(i != id, "Cannot move a folder into itself");
+    if(p.Get(p.Resolve(id)).directory)Check(!p.DirectoryReaches(id,parent),"Cannot move a folder into itself or a directory hard-link descendant");
     try {
         e.name = normalized;
         e.parent = parent;
         p.entries[id] = e;
-        p.UpdateEntry(e);
+        if(p.LinkKind(id)){auto record=p.CatalogRecord(id);record->key=Key(e.parent,e.name);auto inode=p.CatalogRecord(p.Resolve(id));P32(inode->value.data()+20,Time::Encode(Now(),(U16(inode->value.data()+2)&0x1000)!=0));}else p.UpdateEntry(e);
         p.Thread(e);
         p.Commit(fault);
     } catch (...) {
@@ -1548,37 +1628,40 @@ void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
         throw;
     }
 }
+uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace) {
+    auto& p=*p_;p.Guard();parent=p.WriteParent(parent);auto normalized=Normalize(name,p.caseSensitive);auto existing=p.Existing(parent,normalized);Check(!existing||replace,"HFS+ name already exists");
+    auto visible=p.Get(source);uint32_t inode=p.Content(source);auto original=p.Get(inode);Check(inode!=2,"Cannot hard-link the volume root");
+    if(original.directory)Check(!p.DirectoryReaches(inode,parent),"Directory hard link would create a cycle");
+    if(existing){Check(!p.Get(p.Resolve(existing)).directory,"Cannot replace a folder with a hard link");p.Content(existing);p.RemovalParent(parent);if(p.Resolve(existing)==inode)return existing;}
+    bool linked=inode!=source;std::vector<uint32_t> links;if(linked)links=p.ValidateLinks(inode);
+    Check(!linked||links.size()<32767,"HFS+ supports at most 32767 hard links to an inode");
+    bool chained=!linked||(U16(p.CatalogRecord(inode)->value.data()+2)&0x20)!=0;
+    try{
+        if(existing)p.Unlink(existing);
+        uint32_t metadata=p.Private(original.directory);uint32_t reference=0;
+        if(linked)reference=U32(p.CatalogRecord(source)->value.data()+44);
+        else {
+            reference=original.directory?inode:(std::max)(100u,inode);auto prefix=original.directory?u"dir_":u"iNode";
+            for(;;){auto number=std::to_string(reference);std::u16string candidate=prefix;candidate.append(number.begin(),number.end());if(!p.Existing(metadata,candidate)){original.name=candidate;break;}Check(!original.directory&&reference<1073741923,"Hard-link inode name is unavailable");++reference;}
+            original.parent=metadata;original.protectedFile=true;p.entries[inode]=original;auto r=p.CatalogRecord(inode);r->key=Key(original.parent,original.name);p.Thread(original);
+            links.push_back(p.Stub(inode,visible.parent,visible.name,reference,true));
+        }
+        auto added=p.Stub(inode,parent,normalized,reference,chained);links.push_back(added);p.SyncLinks(inode,links,chained);p.Commit(fault);return added;
+    }catch(...){p.usable=false;throw;}
+}
+void Volume::ValidateCopyTo(uint32_t id,uint32_t parent)const{auto& p=*p_;p.source.CheckMedia();Check(p.usable,"Reopen HFS+ image after error");auto target=p.Resolve(parent);Check(p.Get(target).directory,"Copy destination is not a folder");if(p.Get(p.Resolve(id)).directory)Check(!p.DirectoryReaches(id,target),"Cannot copy a folder into itself or a directory hard-link descendant");}
 void Volume::ValidateRemoval(uint32_t id)const {
-    auto& p=*p_;p.Guard();auto entry=p.Get(id);p.Mutable(entry);p.RemovalParent(entry.parent);
+    auto& p=*p_;p.Guard();auto entry=p.Get(id);if(p.LinkKind(id))p.Content(id);else p.Mutable(entry);p.WriteParent(entry.parent,true);p.RemovalParent(entry.parent);
 }
 void Volume::Remove(uint32_t id) {
-    auto &p = *p_;
-    p.Guard();
-    Entry e = p.Get(id);
-    p.Mutable(e);
-    p.RemovalParent(e.parent);
-    for (auto &c : p.entries)
-        Check(c.second.parent != id, "HFS+ folder is not empty");
-    try {
-        if (!e.directory)
-            for (unsigned f = 0; f < 2; ++f) {
-                p.Free(e.forks[f]);
-                p.Overflow(id, f, Fork{});
-            }
-        p.ReplaceAttributes(id,{});
-        p.entries.erase(id);
-        p.catalogRecords.erase(
-            std::remove_if(p.catalogRecords.begin(), p.catalogRecords.end(),
-                           [&](const Record &r) {
-                               return (U16(r.value.data()) <= 2 && U32(r.value.data() + 8) == id) ||
-                                      (U16(r.value.data()) >= 3 && U32(r.key.data() + 2) == id);
-                           }),
-            p.catalogRecords.end());
+    auto& p=*p_;ValidateRemoval(id);auto e=p.Get(id);bool link=p.LinkKind(id)!=0;uint32_t inode=link?p.Resolve(id):id;auto target=p.Get(inode);std::vector<uint32_t> links;
+    if(link)links=p.ValidateLinks(inode);
+    if(!link||links.size()==1)for(auto& child:p.entries)Check(child.second.parent!=inode,"HFS+ folder is not empty");
+    try{
+        if(link){bool chained=(U16(p.CatalogRecord(inode)->value.data()+2)&0x20)!=0;p.Erase(id);links.erase(std::remove(links.begin(),links.end(),id),links.end());if(links.empty())p.Erase(inode);else p.SyncLinks(inode,links,chained);}
+        else p.Erase(id);
         p.Commit(fault);
-    } catch (...) {
-        p.usable = false;
-        throw;
-    }
+    }catch(...){p.usable=false;throw;}
 }
 void Volume::Format(Source &source, const std::u16string &name, bool journaled, FormatKind kind, bool expandedTimes) {
     Check(source.Writable(), "Cannot format a read-only image");
