@@ -64,7 +64,7 @@ bool BrowserSession::Defer(const std::string& key,bool classic,std::function<voi
  if(!force&&!(classic&&key.empty()&&BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
  ClearCurrent();deferredKey_=key;deferredClassic_=classic;deferred_=std::move(next);
  if(list_){list_->list_clear();list_->SetBrowserCapabilities({});}
- if(status_)status_->SetPaneText(0,"Waiting for this volume to finish copying...");
+ if(status_)status_->SetPaneText(0,"Waiting for this volume to finish its file operation...");
  if(notifications_)notifications_->SetTimer(2,100,nullptr);return true;
 }
 BrowserSession::~BrowserSession(){DetachPanes();notifications_.reset();}

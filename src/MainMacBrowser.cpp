@@ -60,7 +60,7 @@ bool Run(BrowserSession& session_,std::function<void(Storage::Job&)> work,bool c
     return result.code==0;
 }
 bool RunOperation(BrowserSession& session,FileOperations::Request request,bool copy=false,bool single=false){
- if(copy&&BackgroundCopies::Enabled()&&request.kind==FileOperations::Kind::ExportFork)return BackgroundCopies::Start({std::move(request)},session.Owner(),single);
+ if(BackgroundCopies::Enabled()&&(request.kind==FileOperations::Kind::Rename||request.kind==FileOperations::Kind::Delete||(copy&&request.kind==FileOperations::Kind::ExportFork)))return BackgroundCopies::Start({std::move(request)},session.Owner(),single);
  auto operation=FileOperations::Submit(std::move(request));auto result=ShowSubmittedStorageJob(operation.Job(),copy?"Copying files":"Updating files",Hidden(session),single,true,session.Owner());
 #ifdef HFV_TESTING
  browserTransferError=result.message;
@@ -288,17 +288,27 @@ bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!Writable())return
     int i;uint32_t id;state_->Selected(i,id);std::wstring name=L"New Folder";
     if(EditHfsPlusName(session_.Owner(),name,state_->mounts[i].volume->CaseSensitive())){
         Run(session_,[&](Storage::Job&){auto volume=state_->mounts[i].volume;{VolumeCoord::Lease write({{volume->ResourceKey(),VolumeCoord::Mode::Write}});volume->MakeDirectory(id,U16(name));}VolumeCoord::Changed({volume->ResourceKey()});});Refresh();}return true;}
+FileOperations::Location MainMacBrowser::CaptureItem(int row){
+ auto item=state_->Item(row,false);
+ if(item.type==LIST_FAT&&item.expectedIdentity.empty()){
+  if(!Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{VolumeCoord::HostKey(item.windowsPath),VolumeCoord::Mode::Read}});item.expectedIdentity=DescribeWindowsFile(item.windowsPath).identity;}))throw HfsPlus::Error("Cannot identify the selected Windows entry");
+  if(item.expectedIdentity.empty())throw HfsPlus::Error("Cannot safely identify the selected Windows entry");
+ }
+ return item;
+}
+bool MainMacBrowser::RenameItem(int row,const std::u16string& name){
+ auto item=CaptureItem(row);FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.sources={item};request.name=name;request.target.volume=item.volume;request.target.id=item.expectedParent?item.expectedParent:state_->folder;
+ bool result=RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled()&&Active())Refresh();return result;
+}
 bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())return true;
-    auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
-    auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(p->type!=LIST_MAC)return true;auto volume=state_->mounts[p->volinx].volume;uint32_t id=uint32_t(p->id);
-    Entry e;if(!Run(session_,[&](Storage::Job&){e=volume->Stat(id);}))return true;auto name=Wide(e.name);
-    if(EditHfsPlusName(session_.Owner(),name,volume->CaseSensitive())){
-        FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.sources={state_->Item(row,false)};request.target.volume=volume;request.target.id=state_->folder;request.name=U16(name);
-        RunOperation(session_,std::move(request));Refresh();}return true;}
+ auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
+ auto item=state_->Item(row,false);auto name=Wide(item.expectedName);
+ if(EditHfsPlusName(session_.Owner(),name,item.volume->CaseSensitive())){FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.sources={item};request.target.volume=item.volume;request.target.id=item.expectedParent;request.name=U16(name);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
+}
 bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!SelectionWritable())return true;
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(i));if(p->type==LIST_MAC)selected.push_back(state_->Item(i,false));}
     if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
-    FileOperations::Request request;request.kind=FileOperations::Kind::Delete;request.sources=std::move(selected);RunOperation(session_,std::move(request));Refresh();return true;}
+    FileOperations::Request request;request.kind=FileOperations::Kind::Delete;request.sources=std::move(selected);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
 bool MainMacBrowser::Properties(int row){auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));if(!p||p->type!=LIST_MAC)return false;
     auto volume=state_->mounts[p->volinx].volume;Entry e;if(!Run(session_,[&](Storage::Job&){e=volume->Stat(uint32_t(p->id));}))return true;
     std::wstring text=Wide(e.name)+L"\n"+FromAnsi(volume->Description())+(volume->Writable()?L"":L" (read-only)")+L"\nData fork: "+std::to_wstring(e.forks[0].size)+L" bytes\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";

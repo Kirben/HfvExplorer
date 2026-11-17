@@ -43,8 +43,8 @@ bool Confirm(HWND window,Kind kind){
  const wchar_t* text=kind==Kind::Copy?L"Cancel this operation? The window will remain open until it can stop and clean up safely.":
   kind==Kind::CopyMode?L"Cancel this copy operation before choosing a copy mode?":
   kind==Kind::Browser?L"Close this browser window?":
-  kind==Kind::BackgroundBrowser?L"Close this browser window? Background copies will continue in the remaining windows.":
-  kind==Kind::LastBrowser?L"Close the last browser and cancel all outstanding copies? HFVExplorer will wait for safe cleanup before exiting.":L"Close this dialog?";
+  kind==Kind::BackgroundBrowser?L"Close this browser window? Background file operations will continue in the remaining windows.":
+  kind==Kind::LastBrowser?L"Close the last browser and cancel all outstanding file operations? HFVExplorer will wait for safe cleanup before exiting.":L"Close this dialog?";
  confirming=true;int answer=MessageBoxW(window,text,L"Confirm close",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2);confirming=false;return answer==IDYES;
 }
 }

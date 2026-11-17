@@ -222,7 +222,22 @@ public:
         }
         if(!backup.empty())DeleteFileW(backup.c_str()); if(!backupResource.empty())DeleteFileW(backupResource.c_str()); return Id(path);
     }
-    void Rename(uint32_t, uint32_t, const std::u16string &) override { throw HfsPlus::Error("Use the ordinary Windows browser for Windows renames"); }
+    void Rename(uint32_t id, uint32_t parent, const std::u16string &name) override {
+        Check(id!=2,"Cannot rename a volume root");Leaf(name);auto entry=Describe(id);
+        Check(parent==entry.parent,"Rename must stay in the same Windows folder");
+        auto path=Path(id),target=Child(Path(parent),Wide(name));if(path==target)return;
+        auto oldResource=Companion(path),newResource=Companion(target);Double data;
+        bool resource=!entry.directory&&AppleDouble(oldResource,data);
+        Check(!_wcsicmp(path.c_str(),target.c_str())||GetFileAttributesW(target.c_str())==INVALID_FILE_ATTRIBUTES,"Destination already exists");
+        if(resource){Leaf(u"%"+name);Check(!_wcsicmp(oldResource.c_str(),newResource.c_str())||GetFileAttributesW(newResource.c_str())==INVALID_FILE_ATTRIBUTES,"An existing resource companion blocks rename; it was preserved");}
+        dataReaders_.erase(id);resourceReaders_.erase(id);
+        if(resource)Check(MoveFileExW(oldResource.c_str(),newResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot rename resource companion; source retained");
+        if(!MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)){
+            if(resource)Check(MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");
+            throw HfsPlus::Error("Cannot rename the selected Windows entry; source retained");
+        }
+        paths_[id]=target;
+    }
     void Remove(uint32_t id) override {
         Check(id!=2,"Cannot remove a volume root"); auto path=Path(id); auto e=Describe(id);
         dataReaders_.erase(id);resourceReaders_.erase(id);
