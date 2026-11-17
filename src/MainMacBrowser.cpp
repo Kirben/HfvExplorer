@@ -23,6 +23,9 @@ extern "C" {
 #include "hfs/interface.h"
 }
 using namespace MacBrowser;
+#ifdef HFV_TESTING
+std::string browserTransferError;
+#endif
 namespace {
 CHFVExplorerApp &App() { return *static_cast<CHFVExplorerApp*>(AfxGetApp()); }
 std::wstring FromAnsi(const std::string &s) {
@@ -55,6 +58,9 @@ bool Run(BrowserSession& session_,std::function<void(Storage::Job&)> work,bool c
 }
 bool RunOperation(BrowserSession& session,FileOperations::Request request,bool copy=false,bool single=false){
  auto operation=FileOperations::Submit(std::move(request));auto result=ShowSubmittedStorageJob(operation.Job(),copy?"Copying files":"Updating files",Hidden(session),single,true,session.Owner());
+#ifdef HFV_TESTING
+ browserTransferError=result.message;
+#endif
  if(result.code&&result.error!=ERROR_CANCELLED&&!Hidden(session))session.Owner()->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
  return !result.code&&operation.Snapshot().complete;
 }
@@ -66,7 +72,7 @@ struct MainMacBrowser::State {
     explicit State(BrowserSession& session):session_(session){}
     struct Mount {std::shared_ptr<Volume> volume;std::wstring key;HTREEITEM root=nullptr;int drive=-1;};
     std::vector<Mount> mounts;
-    std::vector<Location> clipboard;
+
     std::vector<Entry> shown;
     int current=-1;uint32_t folder=2;bool showing=false,folderMutable=true;
     std::vector<uint32_t> restore;
@@ -94,7 +100,8 @@ struct MainMacBrowser::State {
             if(p->type==LIST_FAT)out.windowsPath=FromAnsi((LPCSTR)path);
             else{out.classicImage=session_.Document()->m_volumes[p->volinx].m_file_name;out.classicPath=(LPCSTR)path;}}
         if(p->type==LIST_MAC)for(const auto& e:shown)if(e.id==out.id){out.expectedIdentity=e.identity;out.expectedName=e.name;out.expectedParent=e.parent;break;}
-        if(p->type==LIST_HFS)out.expectedCatalogId=uint32_t(p->id);
+        if(p->type==LIST_HFS){out.expectedCatalogId=uint32_t(p->id);out.expectedResource=VolumeCoord::ImageKey(out.classicImage);}
+        if(p->type==LIST_FAT){auto rowValue=lv->BrowserRowAt(row);if(rowValue)out.expectedIdentity=rowValue->entry.identity;}
         return out;
     }
     HTREEITEM Insert(int index,uint32_t id,HTREEITEM parent,const std::wstring& name,bool root=false) {
@@ -160,8 +167,24 @@ struct MainMacBrowser::State {
     }
     bool Transfer(const std::vector<Location>& sources,const Location& target) {
         if(target.type==LIST_HFS)session_.Document()->m_volumes[target.index].close();
-        FileOperations::Request request;request.kind=FileOperations::Kind::Copy;request.sources=sources;request.target=target;
-        bool complete=RunOperation(session_,std::move(request),true,sources.size()==1&&!sources[0].directory);
+        auto convertible=[](const Location& p){if(p.type!=LIST_HFS)return true;auto n=p.classicImage.size();return n>=4&&p.classicImage[n-4]=='.'&&(!_stricmp(p.classicImage.c_str()+n-3,"DSK")||!_strnicmp(p.classicImage.c_str()+n-3,"HF",2));};
+        bool legacy=!target.volume&&convertible(target)&&std::all_of(sources.begin(),sources.end(),[&](const Location& p){return !p.volume&&convertible(p);})&&std::any_of(sources.begin(),sources.end(),[&](const Location& p){return p.type!=target.type;});
+        bool complete=true;
+        if(legacy){
+         session_.List()->m_shutup_for_now=FALSE;
+         for(auto& source:sources){
+          CString sourcePath=source.type==LIST_HFS?CString(source.classicPath.c_str()):CString(source.windowsPath.c_str());
+          if(source.type!=target.type&&!Hidden(session_)&&!session_.List()->ask_set_copy_mode(source.type==LIST_HFS,sourcePath)){complete=false;break;}
+          FileOperations::Request request;request.kind=source.type==target.type?FileOperations::Kind::Copy:FileOperations::Kind::LegacyCopy;request.sources={source};request.target=target;
+          request.sourceVolume=source.classicImage;request.sourcePath=(LPCSTR)sourcePath;
+          request.targetVolume=target.classicImage;request.targetPath=target.type==LIST_HFS?target.classicPath:(LPCSTR)CString(target.windowsPath.c_str());
+          request.directory=source.directory;request.move=source.cut;request.conversion=CaptureLegacyCopyOptions(HFSIFACE_copy_mode());
+          if(!RunOperation(session_,std::move(request),true,!source.directory)){complete=false;break;}
+         }
+        }else{
+         FileOperations::Request request;request.kind=FileOperations::Kind::Copy;request.sources=sources;request.target=target;
+         complete=RunOperation(session_,std::move(request),true,sources.size()==1&&!sources[0].directory);
+        }
         if(session_.Tree()&&session_.List()){
             if(target.type==LIST_HFS)session_.Document()->OnOpenDocument("");
             else if(target.type==LIST_MAC)session_.MacBrowser().Refresh();else session_.List()->update_current_view();
@@ -228,7 +251,6 @@ void MainMacBrowser::ReleaseCd(int drive){
     auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
     for(auto& mount:state_->mounts)if(mount.drive==drive&&mount.volume){
         auto volume=mount.volume;
-        state_->clipboard.erase(std::remove_if(state_->clipboard.begin(),state_->clipboard.end(),[&](const Location& e){return e.volume==volume;}),state_->clipboard.end());
         if(mount.root)tree->m_ct->DeleteItem(mount.root);mount.root=nullptr;released.push_back(std::move(mount.volume));
     }
     tree->enable_selchange(enabled);session_.List()->initialize_volume("",0);
@@ -244,7 +266,7 @@ void MainMacBrowser::RebuildTree(){for(size_t i=0;i<state_->mounts.size();++i)st
             for(auto child=session_.Tree()->m_ct->GetChildItem(item);child;child=session_.Tree()->m_ct->GetNextSiblingItem(child)){
                 auto p=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(child));if(uint32_t(p->id)==*at){item=child;state_->Show(i,*at,item);break;}}}}
 }
-void MainMacBrowser::Clear(){state_->mounts.clear();state_->clipboard.clear();state_->shown.clear();state_->current=-1;}
+void MainMacBrowser::Clear(){state_->mounts.clear();state_->shown.clear();state_->current=-1;}
 bool MainMacBrowser::Activate(int row){auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));
     if(!p||p->type!=LIST_MAC)return false;if(p->isdir){auto item=p->htree;session_.Tree()->m_ct->SelectItem(item);Select(session_.Tree()->m_ct->GetItemData(item));}
     else{auto& list=session_.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);Export(0);}return true;}
@@ -267,27 +289,21 @@ bool MainMacBrowser::Properties(int row){auto p=reinterpret_cast<list_lparam_str
     auto volume=state_->mounts[p->volinx].volume;Entry e;if(!Run(session_,[&](Storage::Job&){e=volume->Stat(uint32_t(p->id));}))return true;
     std::wstring text=Wide(e.name)+L"\n"+FromAnsi(volume->Description())+(volume->Writable()?L"":L" (read-only)")+L"\nData fork: "+std::to_wstring(e.forks[0].size)+L" bytes\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";
     MessageBoxW(session_.Owner()->m_hWnd,text.c_str(),L"Properties",MB_OK);return true;}
-bool MainMacBrowser::Capture(bool cut,bool append){if(cut&&Active()&&!SelectionWritable()){if(!Hidden(session_))AfxMessageBox("The selected entries cannot be moved.");return true;}std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();
-    for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(p->type!=LIST_SPEC)selected.push_back(state_->Item(row,cut));}
-    if(cut)for(auto& item:selected)if(item.volume&&!item.volume->Writable()){AfxMessageBox("This volume is read-only.");return true;}
-    if(!selected.empty()){if(!append)state_->clipboard.clear();state_->clipboard.insert(state_->clipboard.end(),selected.begin(),selected.end());}
-    return Active();}
-void MainMacBrowser::LegacyClipboardChanged(){
-    auto list=session_.List();state_->clipboard.clear();
-    for(int i=0;i<list->m_clipboard.GetSize();++i){Location item;item.type=list->m_clipboard_type.GetAt(i);item.index=list->m_clipboard_volinx.GetAt(i);item.cut=list->m_clipboard_cutting.GetAt(i)!=0;item.directory=list->m_clipboard_isdir.GetAt(i)!=0;
-        if(item.type==LIST_FAT)item.windowsPath=FromAnsi((LPCSTR)list->m_clipboard.GetAt(i));else{item.classicPath=list->m_clipboard.GetAt(i);item.classicImage=list->m_clipboard_volpath.GetAt(i);}state_->clipboard.push_back(std::move(item));}
+BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
+ BrowserTransfers::Selection out;out.canMove=session_.List()->BrowserSelectionAllows(false);
+ if(cut&&!out.canMove)return out;
+ auto& list=session_.List()->GetListCtrl();
+ for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(p&&p->type!=LIST_SPEC)out.items.push_back(state_->Item(row,cut));}
+ bool missing=false;for(auto& item:out.items)missing|=item.type==LIST_FAT&&item.expectedIdentity.empty();
+ if(missing&&!Run(session_,[&](Storage::Job&){for(auto& item:out.items)if(item.type==LIST_FAT&&item.expectedIdentity.empty()){VolumeCoord::Lease read({{VolumeCoord::HostKey(item.windowsPath),VolumeCoord::Mode::Read}});item.expectedIdentity=MacBrowser::DescribeWindowsFile(item.windowsPath).identity;}}))out.items.clear();
+ return out;
 }
-bool MainMacBrowser::Paste(){bool relevant=Active();for(auto& item:state_->clipboard)relevant=relevant||bool(item.volume);if(!relevant)return false;
-    if(state_->clipboard.empty())return true;try{if(state_->Transfer(state_->clipboard,state_->Target()))state_->clipboard.erase(std::remove_if(state_->clipboard.begin(),state_->clipboard.end(),[](const Location& e){return e.cut;}),state_->clipboard.end());}
-    catch(const std::exception& e){AfxMessageBox(e.what());}
-    auto list=session_.List();list->empty_clipboard();
-    for(auto& item:state_->clipboard)if(!item.volume){
-        CString path=item.type==LIST_FAT?CString(item.windowsPath.c_str()):CString(item.classicPath.c_str());
-        list->m_clipboard.Add(path);list->m_clipboard_type.Add(item.type);list->m_clipboard_isdir.Add(item.directory);
-        list->m_clipboard_volpath.Add(item.classicImage.c_str());list->m_clipboard_cutting.Add(item.cut);list->m_clipboard_volinx.Add(item.index);
-    }
-    return true;
+FileOperations::Location MainMacBrowser::TargetFolder(HTREEITEM item){return state_->Target(item);}
+bool MainMacBrowser::TransferSelection(const std::vector<Location>& sources,const Location& target){
+ try{return !sources.empty()&&state_->Transfer(sources,target);}catch(const std::exception& e){if(!Hidden(session_))session_.Owner()->MessageBox(e.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return false;}
 }
+bool MainMacBrowser::Capture(bool cut,bool append){BrowserTransfers::Publish(SelectedItems(cut),append);return true;}
+bool MainMacBrowser::Paste(){try{return BrowserTransfers::Paste(session_);}catch(const std::exception& e){if(!Hidden(session_))session_.Owner()->MessageBox(e.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return true;}}
 int MainMacBrowser::Drop(int row,HTREEITEM target,int action){
     if(row<0||!target)return -1;auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));
     auto q=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(target));
@@ -347,7 +363,7 @@ bool MainMacBrowser::ContextMenu(CPoint point){
     bool selected=list.GetNextItem(-1,LVNI_SELECTED)>=0;UINT write=Writable()?MF_ENABLED:MF_GRAYED;UINT selectionWrite=SelectionWritable()?MF_ENABLED:MF_GRAYED;
     CMenu menu;menu.CreatePopupMenu();menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_OPEN,"&Open");
     menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"&Copy");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_CUT,"Cu&t");
-    menu.AppendMenu(MF_STRING|write,ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_SEPARATOR);
+    menu.AppendMenu(MF_STRING|(Writable()&&BrowserTransfers::Any()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING|write,ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
     menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_OWN_DELETE,"&Delete");
     menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"P&roperties...");
@@ -360,7 +376,7 @@ bool MainMacBrowser::ContextMenu(CPoint point){
 }
 
 #ifdef HFV_TESTING
-size_t MainMacBrowser::TestClipboardCount()const{return state_->clipboard.size();}
+size_t MainMacBrowser::TestClipboardCount()const{return BrowserTransfers::Snapshot().items.size();}
 int MainMacBrowser::AttachTestVolume(std::shared_ptr<Volume> volume,const char* key){state_->mounts.push_back({volume,FromAnsi(key),nullptr,-1});int i=int(state_->mounts.size()-1);state_->Root(i);return i;}
 bool MainMacBrowser::ShowTestFolder(int index,uint32_t id){return state_->Show(index,id,state_->mounts.at(index).root);}
 #endif

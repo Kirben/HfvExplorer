@@ -47,6 +47,11 @@ if($Test -or $TestHfsPlus) {
  if(!$hfsPlusTest.WaitForExit(30000)){$hfsPlusTest.Kill();throw 'HFS+ hidden UI test timed out.'}
  if($hfsPlusTest.ExitCode -ne 0){throw "HFS+ hidden UI test failed; retained $hfsPlusUi"}
  Get-Content (Join-Path $hfsPlusUi 'hfsplus-ui-report.txt')
+ $transfers=Join-Path $hfsPlusDirectory 'browser-transfers'
+ $transfersTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-browser-transfers',('"'+$transfers+'"')) -WindowStyle Hidden -PassThru
+ if(!$transfersTest.WaitForExit(60000)){$transfersTest.Kill();throw 'Cross-window transfer tests timed out.'}
+ Get-Content (Join-Path $transfers 'browser-transfers-report.txt')
+ if($transfersTest.ExitCode -ne 0){throw "Cross-window transfer tests failed; retained $transfers"}
  $windows=Join-Path $hfsPlusDirectory 'browser-windows'
  $windowsTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-browser-windows',('"'+$windows+'"')) -WindowStyle Hidden -PassThru
  if(!$windowsTest.WaitForExit(60000)){$windowsTest.Kill();throw 'Independent browser window tests timed out.'}

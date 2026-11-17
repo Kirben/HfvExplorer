@@ -21,6 +21,7 @@
 #include "afx.h"
 #include "stdafx.h"
 #include "BrowserSession.h"
+#include "BrowserTransfers.h"
 #include "MainMacBrowser.h"
 #include "RenameName.h"
 #include "DeviceWait.h"
@@ -328,11 +329,12 @@ CHFVExplorerListView::CHFVExplorerListView()
 
 	m_pOldPalette = NULL;
 
-	empty_clipboard();
+ // The shared clipboard outlives pane initialization.
 }
 
 CHFVExplorerListView::~CHFVExplorerListView()
 {
+ m_browserDrag.reset();
  if(m_browserSession)m_browserSession->Detach(this);
  auto application=static_cast<CHFVExplorerApp*>(AfxGetApp());if(application->m_list==this)application->m_list=nullptr;
 	if(m_pimagelist) {
@@ -661,6 +663,8 @@ BEGIN_MESSAGE_MAP(CHFVExplorerListView, CListView)
 	ON_WM_LBUTTONUP()
 	ON_NOTIFY_REFLECT(LVN_ITEMCHANGED, OnItemchanged)
 	ON_WM_KEYDOWN()
+ ON_WM_CAPTURECHANGED()
+ ON_WM_CANCELMODE()
 	ON_NOTIFY_REFLECT(LVN_ENDLABELEDIT, OnEndlabeledit)
 	ON_NOTIFY_REFLECT(LVN_BEGINLABELEDIT, OnBeginlabeledit)
 	ON_WM_KEYUP()
@@ -4069,6 +4073,9 @@ void CHFVExplorerListView::OnBegindrag(NMHDR* pNMHDR, LRESULT* pResult)
 	CPoint			ptItem, ptAction, ptImage;
 	NM_LISTVIEW		*pnmListView = (NM_LISTVIEW *)pNMHDR;
 
+ if(StorageUi::busy()||StorageUi::state().sessionOpen){*pResult=0;return;}
+ m_browserDrag.reset(new BrowserTransfers::Drag(GetBrowserSession()));
+ if(m_browserDrag->Empty()){m_browserDrag.reset();*pResult=0;return;}
 	ASSERT(!m_dragging);
 
 	m_move_type = 0;
@@ -4092,6 +4099,7 @@ void CHFVExplorerListView::OnBegindrag(NMHDR* pNMHDR, LRESULT* pResult)
 	m_ptHotSpot = ptAction - ptItem + m_ptOrigin;  // calculate hotspot for the cursor
 	// m_drag_list->SetDragCursorImage(0, m_ptHotSpot);  // define the hot spot for the new cursor image
 	// m_drag_list->DragShowNolock(TRUE);  // lock updates and show drag image
+ if(!m_drag_list){m_dragging=FALSE;GetBrowserSession().Tree()->enable_selchange(1);m_browserDrag.reset();*pResult=0;return;}
 	m_drag_list->BeginDrag(0, CPoint(0, 0));
 	ptAction -= m_sizeDelta;
 	m_cl->ClientToScreen(&ptAction);
@@ -4197,6 +4205,7 @@ void CHFVExplorerListView::check_move_type(
 	int control,
 	int shift
 ) {
+ if(m_browserDrag){CPoint screen;GetCursorPos(&screen);if(m_browserDrag->Hover(screen,(control?MK_CONTROL:0)|(shift?MK_SHIFT:0)))return;}
 	int is_copy;
 
 	// This is the Explorer-style determination.
@@ -4244,6 +4253,11 @@ void CHFVExplorerListView::OnMouseMove(UINT nFlags, CPoint point)
 		screenhitpoint = screenpoint;
 		screenpoint -= m_sizeDelta;
 		m_drag_list->DragMove(screenpoint);  // move the image
+        if(m_browserDrag&&m_browserDrag->Hover(screenhitpoint,nFlags)){
+         if(m_iItemDrop>=0){set_drop_target(m_iItemDrop,0);m_iItemDrop=-1;}
+         if(m_TreeiItemDrop){set_tree_drop_target(m_TreeiItemDrop,0);m_TreeiItemDrop=0;}
+         return;
+        }
 		if ((iItem = m_cl->HitTest(point)) != -1 && iItem != m_iItemDrag) {
 			if(iItem != m_iItemDrop) {
 				m_drag_list->DragLeave(0);
@@ -4314,6 +4328,8 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
 		long		lStyle;
 		CString		cstr;
 
+        // Capture loss must not cancel the selection we are about to submit.
+        m_dragging=FALSE;
 		::ReleaseCapture();
 		SetCursor( LoadCursor( 0, IDC_ARROW ) );
 
@@ -4321,6 +4337,7 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
 		m_dragging = FALSE;
 		m_drag_list->DragLeave(0);
 		m_drag_list->EndDrag();
+        delete m_drag_list;m_drag_list=nullptr;
 
 		if(m_iItemDrop >= 0) {
 			set_drop_target( m_iItemDrop, 0 );
@@ -4329,6 +4346,11 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
 			set_tree_drop_target( m_TreeiItemDrop, 0 );
 		}
 		ensure_pane(PANE_LIST);
+        GetBrowserSession().Tree()->enable_selchange(1);
+        CPoint release=point;m_cl->ClientToScreen(&release);
+        UINT keys=(GetKeyState(VK_CONTROL)&0x8000?MK_CONTROL:0)|(GetKeyState(VK_SHIFT)&0x8000?MK_SHIFT:0);
+        auto captured=std::move(m_browserDrag);
+        if(captured&&captured->Drop(release,keys)){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
         HTREEITEM nativeTarget=m_TreeiItemDrop;
         if(m_iItemDrop>=0){auto p=(list_lparam_struct*)m_cl->GetItemData(m_iItemDrop);if(p&&p->isdir)nativeTarget=p->htree;}
         if(nativeTarget&&GetBrowserSession().MacBrowser().DropSelection(nativeTarget,action)){m_TreeiItemDrop=0;m_iItemDrop=-1;GetBrowserSession().Tree()->enable_selchange(1);pApp->EnableTimer(prevTimer);return;}
@@ -4391,6 +4413,21 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
 	pApp->EnableTimer( prevTimer );
 }
 
+void CHFVExplorerListView::CancelBrowserDrag(){
+ if(!m_dragging)return;m_dragging=FALSE;
+ if(m_drag_list){m_drag_list->DragLeave(0);m_drag_list->EndDrag();delete m_drag_list;m_drag_list=nullptr;}
+ if(m_iItemDrop>=0&&IsWindow(GetSafeHwnd()))set_drop_target(m_iItemDrop,0);
+ if(m_TreeiItemDrop&&GetBrowserSession().Tree())set_tree_drop_target(m_TreeiItemDrop,0);
+ m_iItemDrop=-1;m_TreeiItemDrop=nullptr;m_browserDrag.reset();
+ if(GetBrowserSession().Tree())GetBrowserSession().Tree()->enable_selchange(1);
+ if(::GetCapture()==GetSafeHwnd())::ReleaseCapture();SetCursor(LoadCursor(nullptr,IDC_ARROW));
+}
+void CHFVExplorerListView::OnCancelMode(){CancelBrowserDrag();CListView::OnCancelMode();}
+void CHFVExplorerListView::OnCaptureChanged(CWnd* next){if(m_dragging)CancelBrowserDrag();CListView::OnCaptureChanged(next);}
+BOOL CHFVExplorerListView::PreTranslateMessage(MSG* message){
+ if(m_dragging&&message->message==WM_KEYDOWN&&message->wParam==VK_ESCAPE){CancelBrowserDrag();return TRUE;}
+ return CListView::PreTranslateMessage(message);
+}
 void CHFVExplorerListView::OnLButtonUp(UINT nFlags, CPoint point)
 {
 	OnButtonUp(point);
@@ -4666,6 +4703,7 @@ void CHFVExplorerListView::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 
 void CHFVExplorerListView::empty_clipboard( void )
 {
+ BrowserTransfers::Clear();
 	m_clipboard.RemoveAll();
 	m_clipboard_type.RemoveAll();
 	m_clipboard_isdir.RemoveAll();
@@ -4685,39 +4723,7 @@ BOOL in_string_list( LPCSTR path, CStringArray & arr )
 	return(FALSE);
 }
 
-void CHFVExplorerListView::edit_cut_copy( BOOL cutting, BOOL append )
-{
- if(cutting&&!BrowserSelectionAllows(false))return;
- if(GetBrowserSession().MacBrowser().Capture(cutting!=FALSE,append!=FALSE))return;
-	int inx = -1, count = 0, isdir, type, volinx;
-	CString fullpath;
-	char srcvolpath[_MAX_PATH];
-
-	while( (inx = m_cl->GetNextItem(inx,LVNI_SELECTED)) >= 0 ) count++;
-
-	if(count > 0) {
-		inx = -1;
-		if(!append) empty_clipboard();
-		while( (inx = m_cl->GetNextItem(inx,LVNI_SELECTED)) >= 0 ) {
-			type = get_inx_type(inx);
-			if(type != LIST_SPEC) {
-				if(get_path( inx, fullpath )) {
-					if(!in_string_list(fullpath,m_clipboard)) {
-						isdir = get_lparam_isdir(m_cl->GetItemData(inx));
-						inx2volname( inx, srcvolpath, _MAX_PATH );
-						volinx = get_lparam_volinx(m_cl->GetItemData(inx));
-						m_clipboard.Add(fullpath);
-						m_clipboard_type.Add(type);
-						m_clipboard_isdir.Add(isdir);
-						m_clipboard_volpath.Add(srcvolpath);
-						m_clipboard_cutting.Add(cutting);
-						m_clipboard_volinx.Add(volinx);
-					}
-				}
-			}
-		}
-	}
-}
+void CHFVExplorerListView::edit_cut_copy(BOOL cutting,BOOL append){GetBrowserSession().MacBrowser().Capture(cutting!=FALSE,append!=FALSE);}
 
 void CHFVExplorerListView::edit_copy(void)
 {
@@ -4739,147 +4745,7 @@ void CHFVExplorerListView::edit_cut_append(void)
 	edit_cut_copy( TRUE, TRUE );
 }
 
-void CHFVExplorerListView::edit_paste(void)
-{
- if(GetBrowserSession().MacBrowser().Paste())return;
-	int i, j, count, action, fat_changed = 0;
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	HTREEITEM hItem;
-	CString cs;
-	CTreeCtrl *tc;
-	HFVExplorerTreeView *tv;
-	BOOL keep_clipboard_content = FALSE;
-
-	m_shutup_for_now = FALSE;
-
-	hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem();
-	count = m_clipboard.GetSize();
-
-	if(hItem && count > 0) {
-		tv = GetBrowserSession().Tree();
-		tc = tv->m_ct;
-		BOOL prevTimer = pApp->EnableTimer( FALSE );
-
-		// Must clean up all user errors. This is important particularly for CUT
-
-		char destname[_MAX_PATH];
-		CString destdir;
-		int ismac;
-		DWORD_PTR dest_data; DWORD dest_volinx, dest_type;
-
-		dest_data = tc->GetItemData( hItem );
-		dest_volinx = tv->get_lparam_volinx( dest_data );
-		dest_type = tv->get_lparam_type( dest_data );
-
-		destdir = ((CHFVExplorerDoc*)m_pDocument)->get_directory( hItem, &ismac );
-		lstrcpy( destname, cs.GetBuffer( _MAX_PATH ) );
-		cs.ReleaseBuffer();
-
-		BOOL looping = TRUE;
-		int delete_me;
-		while(looping) {
-			count = m_clipboard.GetSize();
-			looping = FALSE;
-			delete_me = -1;
-			for(i=0; i<count; i++) {
-
-				// Target may not be a subfolder of any item. This is fatal.
-				if(dest_type == m_clipboard_type.GetAt(i) && dest_volinx == m_clipboard_volinx.GetAt(i)) {
-					if(m_clipboard_isdir.GetAt(i) &&
-						 is_subfolder( m_clipboard.ElementAt(i), destname ))
-					{
-						action = m_clipboard_cutting.GetAt(i) ? ACTION_MOVE : ACTION_COPY;
-						CString ActionString = action == ACTION_MOVE ? "move" : "copy";
-						AfxMessageBox( 
-							"Cannot " + ActionString + " \"" + m_clipboard.ElementAt(i) + "\" to folder \"" + CString(destname) + "\". The destination folder is a subfolder of the source folder."
-						);
-						// Gíve a chance to paste somewhere else.
-						keep_clipboard_content = TRUE;
-						goto fatal_exit;
-					}
-				}
-				
-				// There should not (Cutting: must not) be duplicates.
-				for(j=i+1; j<count; j++) {
-					if(m_clipboard_type.GetAt(i) == m_clipboard_type.GetAt(j) && m_clipboard_volinx.GetAt(i) == m_clipboard_volinx.GetAt(j)) {
-						if(m_clipboard_isdir.GetAt(i) &&
-							 is_subfolder( m_clipboard.ElementAt(i), m_clipboard.ElementAt(j) ))
-						{
-							delete_me = j;
-						} else if(m_clipboard_isdir.GetAt(j) &&
-							is_subfolder( m_clipboard.ElementAt(j), m_clipboard.ElementAt(i) ))
-						{
-							delete_me = i;
-						}
-						if(delete_me >= 0) {
-							m_clipboard.RemoveAt(i);
-							m_clipboard_isdir.RemoveAt(i);
-							m_clipboard_type.RemoveAt(i);
-							m_clipboard_volpath.RemoveAt(i);
-							m_clipboard_cutting.RemoveAt(i);
-							m_clipboard_volinx.RemoveAt(i);
-							looping = TRUE;
-							i = j = count;
-						}
-					}
-
-					// copy_item_to_dir() takes care of the rest of the checks.
-				}
-			}
-		}
-
-		count = m_clipboard.GetSize();
-		for(i=0; i<count; i++) {
-			cs = m_clipboard.GetAt(i);
-			action = m_clipboard_cutting.GetAt(i) ? ACTION_MOVE : ACTION_COPY;
-			if(copy_item_to_dir( 
-				-1, 
-				hItem, 
-				action, 
-				&cs, 
-				m_clipboard_isdir.GetAt(i), 
-				m_clipboard_type.GetAt(i), 
-				m_clipboard_volpath.GetAt(i),
-				m_clipboard_volinx.GetAt(i) ))
-			{
-				cs = m_clipboard_volpath.GetAt(i);
-				update_floppy_view(cs.GetBuffer(_MAX_PATH));
-				cs.ReleaseBuffer();
-			} else {
-				
-				// Should we break out...?
-				break;
-
-				/*
-				AfxMessageBox( 
-					"Could not copy or move file \"" + cs + ".",
-					MB_OK | MB_ICONSTOP
-				);
-				*/
-			}
-		}
-
-fatal_exit:
-		pApp->EnableTimer( prevTimer );
-		if(tv->get_lparam_type(tc->GetItemData(hItem)) == LIST_FAT) fat_changed = 1;
-
-		if(!keep_clipboard_content) {
-			for(i=m_clipboard.GetSize()-1; i>=0; i--) {
-				if(m_clipboard_cutting.GetAt(i)) {
-					m_clipboard.RemoveAt(i);
-					m_clipboard_isdir.RemoveAt(i);
-					m_clipboard_type.RemoveAt(i);
-					m_clipboard_volpath.RemoveAt(i);
-					m_clipboard_cutting.RemoveAt(i);
-					m_clipboard_volinx.RemoveAt(i);
-				}
-			}
-		}
-
-		if(fat_changed) update_current_view();
-	}
- GetBrowserSession().MacBrowser().LegacyClipboardChanged();
-}
+void CHFVExplorerListView::edit_paste(void){GetBrowserSession().MacBrowser().Paste();}
 
 void CHFVExplorerListView::edit_select_all(void)
 {

@@ -37,6 +37,7 @@
 # include "libhfs\hfs.h"
 # include "libhfs\data.h"
 # include "copyin.h"
+# include "copyout.h"
 # include "binhex.h"
 # include "crc.h"
 #ifdef __EMX__
@@ -442,6 +443,18 @@ hfsfile *opendst(hfsvol *vol, char *dstname, char *hint,
       dstname = hint;
     }
 
+  /* Resolve the converted destination name before asking: raw mappings,
+     MacBinary/BinHex names and resource imports can differ from the PC name. */
+  {
+   hfsdirent previous;int exists=hfs_stat(vol,dstname,&previous)==0;
+   if(!exists&&errno!=ENOENT){if(dstname==hint)hfs_setcwd(vol,cwd);return 0;}
+   int decision=copyout_hfs_overwrite(dstname,exists);
+   if(decision!=1){
+    cpi_error=decision==2?"Copy skipped":"Copy cancelled";
+    if(dstname==hint)hfs_setcwd(vol,cwd);
+    return 0;
+   }
+  }
   file = replacement_open(&cpi_replacement, vol, dstname, type, creator);
   copyin_opened = file && !cpi_replacement.active;
   if(!file) {

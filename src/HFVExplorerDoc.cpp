@@ -1481,6 +1481,25 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 {
  if(list)GetBrowserSession().ClearCurrent();
  StorageAction storageAction;
+ // Startup discovery is optional; explicit drive selection must identify Mac
+ // media before handing an unrecognized filesystem to Windows enumeration.
+ if(list&&volinx>=0&&volinx<m_fat_count&&m_fats[volinx].m_type==DRIVE_REMOVABLE&&is_fat_root_directory(path)){
+  int drive=toupper((unsigned char)path[0])-'A';bool present=false;
+  auto owner=GetBrowserSession().Owner();
+  auto probe=ShowStorageWaitJob([&](Storage::Job&){present=is_hfs_floppy_present(drive)!=0;return Storage::Result{};},!owner->IsWindowVisible(),owner);
+  if(!probe.code&&present){
+   char image[MAX_PATH];get_floppy_volume_file_name(drive,image);int index=get_volume_index_by_filename(CString(image));
+   if(index<0)index=insert_volume(CString(image),1,0,0,0);
+   bool opened=false;
+   if(index>=0){auto mounted=ShowStorageWaitJob([&](Storage::Job&){opened=m_volumes[index].open()!=0;return Storage::Result{};},!owner->IsWindowVisible(),owner);
+    if(!mounted.code&&opened){auto tree=GetBrowserSession().Tree();auto& volume=m_volumes[index];
+     if(!volume.m_rootitem)volume.m_rootitem=tree->initialize_volume(index,volume.m_volume_name,CNID_ROOT_ID,1,0,0,0);
+     bool enabled=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(volume.m_rootitem);tree->enable_selchange(enabled);
+     open_sub_directory(index,CNID_ROOT_ID,volume.m_volume_name);return;
+    }
+   }
+  }
+ }
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 

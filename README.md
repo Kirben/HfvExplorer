@@ -10,7 +10,7 @@ Per-window browser sessions
 ---------------------------
 
 Each browser document owns a `BrowserSession`, its native HFS+/HFSX/MFS
-controller, mounts, folder navigation and clipboard. Tree, list, preview and
+controller, mounts and folder navigation. Tree, list, preview and
 status updates resolve through the receiving session rather than the
 application's current-pane pointers. Classic HFS/Windows locations, selection
 and sort settings stay with their document and views; Finder layout and classic
@@ -24,8 +24,38 @@ Closing a browser closes only that window; closing the first window transfers
 application ownership to a surviving frame. File > Exit closes all windows.
 The classic HFS engine and storage worker remain serialized. Progress dialogs
 still wait for operations and block storage commands in other windows; this
-does not enable background copying. Per-window internal clipboards remain
-independent; sharing copy/cut selections between windows is a separate feature.
+does not enable background copying.
+
+Copy/Cut/Paste and their Append commands share an application clipboard between
+HFVExplorer windows. Captured locations own their backend references or absolute
+paths and source identity; closing/navigating the source window does not change
+the clipboard. Completed cuts are consumed only after successful transfer;
+cancelled, skipped and failed pastes retain them. Escape clears the clipboard.
+
+Drag selected files/folders from a list into another HFVExplorer window's tree
+folder, list folder or list background. Dropping defaults to moving on the same
+volume and copying across volumes; Ctrl forces copy and Shift forces move.
+Read-only sources can be copied, and read-only destinations reject drops. Escape
+or capture loss cancels a drag without changing the clipboard. Existing local
+icon positioning and local drag behavior remain available. Drop highlights do
+not navigate the destination, and are removed on release/cancellation.
+
+Transfers use the existing independent jobs, overwrite prompts, fork/metadata
+preservation, volume coordination and refresh notifications. Legacy HFS/Windows
+import/export conversion preferences remain active; same-format transfers use
+the coordinated adapters, including classic volumes with identical labels.
+Converted PC-to-HFS imports also ask before replacing the resolved Mac filename,
+including embedded MacBinary/BinHex names. Skip/Cancel retain the old file.
+Selecting a removable drive explicitly probes for classic HFS before Windows
+folder enumeration, even when startup floppy detection is disabled.
+
+This clipboard and cross-window drag support are internal to HFVExplorer; they
+do not add Windows Explorer/OLE clipboard interchange.
+
+`--verify-browser-transfers NEW_DIRECTORY` covers shared clipboard routing,
+mixed-format append, overwrite decisions, source-window closure, native forks
+and Finder metadata, tree/folder/background drops, same-volume moves, read-only
+volumes, stale selections, descendant rejection and replaced classic images.
 
 `--verify-browser-windows NEW_DIRECTORY` tests actual hidden frames, documents,
 menus/accelerators, explicit command routing, failed startup, busy guards,

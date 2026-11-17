@@ -11,7 +11,7 @@ struct Location {
  std::wstring windowsPath;
  std::string classicImage,classicPath;
  uint32_t expectedCatalogId=0,expectedParent=0;
- std::string expectedIdentity;
+ std::string expectedIdentity,expectedResource;
  std::u16string expectedName;
 };
 enum class Kind {Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource};

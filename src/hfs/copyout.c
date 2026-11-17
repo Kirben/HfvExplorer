@@ -90,6 +90,17 @@ int copyout_was_skipped(void){return copyout_skipped;}
 static copyout_overwrite_fn copyout_overwrite=0;
 static void* copyout_overwrite_context=0;
 void copyout_set_overwrite(copyout_overwrite_fn observer,void* context) {copyout_overwrite=observer;copyout_overwrite_context=context;}
+int copyout_hfs_overwrite(const char *name,int exists) {
+ int decision=1;char display[1024];
+ copyout_skipped=0;
+ if(exists&&copyout_overwrite) {
+  if(strlen(name)>=sizeof(display))return 0;
+  strcpy(display,name);mac_to_pc_charset((unsigned char*)display);
+  decision=copyout_overwrite(display,copyout_overwrite_context);
+ }
+ if(decision==2)copyout_skipped=1;
+ return decision;
+}
 static copyout_progress_fn copyout_observer = 0;
 static void *copyout_context = 0;
 static char copyout_source[_MAX_PATH];
