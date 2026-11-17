@@ -349,6 +349,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3&&!strcmp(__argv[1],"--verify-windows-path-coordination"))ExitProcess(RunWindowsPathCoordinationTest(__argv[2]));
  extern int RunPerVolumeCommandsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-per-volume-commands"))ExitProcess(RunPerVolumeCommandsTest(__argv[2]));
+ extern int RunExtendedAttributesTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-extended-attributes"))ExitProcess(RunExtendedAttributesTest(__argv[2]));
  extern int RunBackgroundMetadataTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-background-metadata"))ExitProcess(RunBackgroundMetadataTest(__argv[2]));
  extern int RunBackgroundMutationsTest(const char*);

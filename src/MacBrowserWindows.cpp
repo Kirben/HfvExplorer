@@ -36,7 +36,7 @@ struct File {
         Check(SetFileTime(h,&a,nullptr,&b)!=FALSE,"Cannot preserve Windows file timestamps");
     }
 };
-struct Double { uint64_t offset = 0, size = 0; std::array<uint8_t,32> finder{}; };
+struct Double { uint64_t offset = 0, size = 0, finderOffset=0, finderSize=0; std::array<uint8_t,32> finder{}; };
 bool AppleDouble(const std::wstring &path, Double &out) {
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
     File f(path, GENERIC_READ, OPEN_EXISTING); uint8_t header[26];
@@ -51,10 +51,38 @@ bool AppleDouble(const std::wstring &path, Double &out) {
         if (!ids.insert(id).second || at < 26 + count * 12 || !Range(at, n, f.Size())) return false;
         if(n)ranges.push_back({at,uint64_t(at)+n});
         if (id == 2) { out.offset = at; out.size = n; resource = true; }
-        if (id == 9 && n >= out.finder.size()) f.Read(at, out.finder.data(), out.finder.size());
+        if (id == 9 && n >= out.finder.size()){out.finderOffset=at;out.finderSize=n;f.Read(at, out.finder.data(), out.finder.size());}
     }
     std::sort(ranges.begin(),ranges.end());for(size_t i=1;i<ranges.size();++i)if(ranges[i].first<ranges[i-1].second)return false;
     return resource;
+}
+
+HfsPlus::Attributes DoubleAttributes(const std::wstring& path,const Double& d){
+    HfsPlus::Attributes out;if(d.finderSize<=34)return out;File file(path,GENERIC_READ,OPEN_EXISTING);
+    uint8_t header[36]{};Check(d.finderSize>=70,"Truncated AppleDouble attributes");file.Read(d.finderOffset+34,header,sizeof(header));
+    if(!U32(header))return out; // Some older companions contain only padded Finder info.
+    Check(U32(header)==0x41545452,"Unknown AppleDouble attribute extension; companion retained");
+    uint64_t total=U32(header+8),start=U32(header+12),length=U32(header+16),at=d.finderOffset+70;
+    Check(total<=d.finderOffset+d.finderSize&&total>=at&&start>=at&&Range(start,length,total),"Invalid AppleDouble attribute ranges");
+    uint64_t bytes=0;std::vector<std::pair<uint64_t,uint64_t>> ranges;
+    for(unsigned i=0;i<HfsPlus::Disk::U16(header+34);++i){uint8_t entry[11];Check(Range(at,11,start)&&at+11<=65536,"Truncated AppleDouble attribute entry");file.Read(at,entry,sizeof(entry));unsigned nameLength=entry[10];
+        uint64_t next=(at+11+nameLength+3)&~3ULL;Check(nameLength>1&&nameLength<=128&&next<=start&&next<=65536,"Invalid AppleDouble attribute name length");
+        std::string utf8(nameLength,0);file.Read(at+11,&utf8[0],nameLength);Check(utf8.back()==0&&utf8.find('\0')==utf8.size()-1,"Invalid AppleDouble attribute name");
+        utf8.pop_back();int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,utf8.data(),int(utf8.size()),nullptr,0);Check(n>0,"Invalid AppleDouble UTF-8 attribute name");std::wstring name(n,0);Check(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,utf8.data(),int(utf8.size()),&name[0],n)==n,"Invalid attribute name");
+        uint64_t offset=U32(entry),size=U32(entry+4);Check(offset>=start&&Range(offset,size,start+length)&&size<=64*1024*1024,"Invalid AppleDouble attribute data");bytes+=size;Check(bytes<=128*1024*1024,"AppleDouble attributes exceed the 128 MiB limit");
+        HfsPlus::Bytes value(size_t(size),0);if(size)file.Read(offset,value.data(),value.size());Check(out.emplace(U16(name),std::move(value)).second,"Duplicate AppleDouble attribute name");if(size)ranges.push_back({offset,offset+size});at=next;
+    }
+    std::sort(ranges.begin(),ranges.end());for(size_t i=1;i<ranges.size();++i)Check(ranges[i].first>=ranges[i-1].second,"Overlapping AppleDouble attributes");return out;
+}
+HfsPlus::Bytes DoubleHeader(const Entry& e){
+    HfsPlus::ValidateAttributes(e.attributes);std::vector<std::string> names;uint64_t headerSize=e.attributes.empty()?82:120,total=0;
+    for(const auto& item:e.attributes){auto name=BrowserPresentation::Utf8(item.first);Check(name.size()<128,"Attribute name exceeds AppleDouble's 127 UTF-8 byte limit");names.push_back(name);headerSize=(headerSize+12+name.size()+3)&~3ULL;total+=item.second.size();}
+    Check(headerSize<=65536&&e.attributes.size()<=65535,"AppleDouble attribute directory exceeds 64 KiB");
+    uint64_t resource=headerSize+total;Check(resource<=UINT32_MAX&&e.forks[1].size<=UINT32_MAX-resource,"Metadata/resource fork is too large for AppleDouble; use raw fork export");
+    HfsPlus::Bytes b(size_t(resource),0);P32(b.data(),0x00051607);P32(b.data()+4,0x00020000);P16(b.data()+24,2);P32(b.data()+26,9);P32(b.data()+30,50);P32(b.data()+34,uint32_t(resource-50));P32(b.data()+38,2);P32(b.data()+42,uint32_t(resource));P32(b.data()+46,uint32_t(e.forks[1].size));memcpy(b.data()+50,e.finder.data(),32);
+    if(!e.attributes.empty()){P32(b.data()+84,0x41545452);P32(b.data()+92,uint32_t(resource));P32(b.data()+96,uint32_t(headerSize));P32(b.data()+100,uint32_t(total));P16(b.data()+118,uint16_t(e.attributes.size()));size_t at=120,data=size_t(headerSize),i=0;
+        for(const auto& item:e.attributes){auto& name=names[i++];P32(b.data()+at,uint32_t(data));P32(b.data()+at+4,uint32_t(item.second.size()));b[at+10]=uint8_t(name.size()+1);memcpy(b.data()+at+11,name.c_str(),name.size()+1);at=(at+12+name.size()+3)&~size_t(3);if(!item.second.empty())memcpy(b.data()+data,item.second.data(),item.second.size());data+=item.second.size();}}
+    return b;
 }
 void Leaf(const std::u16string &s) {
     Check(!s.empty() && s.size()<=255 && s != u"." && s != u".." && s.back() != u'.' && s.back() != u' ', "Invalid Windows filename");
@@ -128,10 +156,26 @@ public:
     std::u16string Name() const override { return U16(Path(2)); }
     const char *Kind() const override { return "Windows"; }
     bool Writable() const override { return true; }
+    bool SupportsAttributes()const override{return true;}
+    HfsPlus::Attributes GetAttributes(uint32_t id)override{Double d;auto path=Companion(Path(id));return AppleDouble(path,d)?DoubleAttributes(path,d):HfsPlus::Attributes{};}
+    void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{
+        auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
+        Double old;bool exists=GetFileAttributesW(companion.c_str())!=INVALID_FILE_ATTRIBUTES;Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
+        std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
+        try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);output.Write(header.data(),header.size());if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.Write(buffer.data(),n);at+=n;}}output.Flush();}
+            {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
+            if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;}
+            Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;
+        }catch(...){bool restored=true;if(published&&!DeleteFileW(companion.c_str()))restored=false;if(backed&&!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());Check(restored,"Metadata rollback failed; preserve the HFV temporary backup");throw;}
+        if(!backup.empty())DeleteFileW(backup.c_str());
+    }
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
+        ValidateEntry(e);auto path=Child(Path(parent),Wide(e.name));Check(GetFileAttributesW(Companion(path).c_str())==INVALID_FILE_ATTRIBUTES,"An unrelated companion blocks folder creation");auto id=MakeDirectory(parent,e.name);try{if(!e.attributes.empty())SetAttributes(id,e.attributes);}catch(...){RemoveDirectoryW(path.c_str());throw;}return id;
+    }
     bool CaseSensitive() const override { return false; }
     void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
     void ValidateEntry(const Entry& e)const override {
-        Leaf(e.name);Leaf(u"%"+e.name);Check(e.forks[1].size<=UINT32_MAX-82,"Resource fork is too large for AppleDouble export; use raw fork export");
+        Volume::ValidateEntry(e);DoubleHeader(e);Leaf(e.name);Leaf(u"%"+e.name);Check(e.forks[1].size<=UINT32_MAX-82,"Resource fork is too large for AppleDouble export; use raw fork export");
     }
     uint64_t FreeBytes() const override { ULARGE_INTEGER free{}; GetDiskFreeSpaceExW(Path(2).c_str(), &free, nullptr, nullptr); return free.QuadPart; }
     Entry Stat(uint32_t id) override { return Describe(id); }
@@ -192,6 +236,7 @@ public:
         bool sidecar = GetFileAttributesW(companion.c_str()) != INVALID_FILE_ATTRIBUTES; Double old;
         Check(!existed || replace, "Destination already exists");
         Check(!sidecar || (existed && AppleDouble(companion, old)), "An unrelated companion file blocks export; it was preserved");
+        auto outgoing=e;if(!e.attributesKnown&&sidecar)outgoing.attributes=DoubleAttributes(companion,old);auto header=DoubleHeader(outgoing);
         std::wstring staged, resource, backup, backupResource;
         bool published = false, publishedResource = false, backed = false, backedResource = false;
         std::vector<std::unique_ptr<VolumeCoord::OperationLease>> staging;
@@ -200,10 +245,7 @@ public:
             staged = Temp(root);reserve(staged);resource = Temp(root);reserve(resource);
             {
                 File data(staged, GENERIC_WRITE, TRUNCATE_EXISTING), rsrc(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
-                uint8_t header[82]{}; P32(header, 0x00051607); P32(header+4, 0x00020000); P16(header+24, 2);
-                P32(header+26, 9); P32(header+30, 50); P32(header+34, 32);
-                P32(header+38, 2); P32(header+42, 82); P32(header+46, uint32_t(e.forks[1].size));
-                memcpy(header+50, e.finder.data(), 32); rsrc.Write(header, sizeof(header));
+                rsrc.Write(header.data(),header.size());
                 std::vector<uint8_t> buffer(1024*1024);
                 for (unsigned f=0; f<2; ++f) for (uint64_t at=0; at<e.forks[f].size;) {
                     size_t n=size_t((std::min)(uint64_t(buffer.size()),e.forks[f].size-at));
@@ -234,22 +276,25 @@ public:
         Check(parent==entry.parent,"Rename must stay in the same Windows folder");
         auto path=Path(id),target=Child(Path(parent),Wide(name));if(path==target)return;
         auto oldResource=Companion(path),newResource=Companion(target);Double data;
-        bool resource=!entry.directory&&AppleDouble(oldResource,data);
+        bool resource=AppleDouble(oldResource,data);
         Check(!_wcsicmp(path.c_str(),target.c_str())||GetFileAttributesW(target.c_str())==INVALID_FILE_ATTRIBUTES,"Destination already exists");
         if(resource){Leaf(u"%"+name);Check(!_wcsicmp(oldResource.c_str(),newResource.c_str())||GetFileAttributesW(newResource.c_str())==INVALID_FILE_ATTRIBUTES,"An existing resource companion blocks rename; it was preserved");}
-        dataReaders_.erase(id);resourceReaders_.erase(id);
+        // A copied directory can retain cached child readers. Its subtree lease
+        // excludes other users, so release only those handles before renaming.
+        auto descendant=[&](const std::wstring& child){return !_wcsicmp(child.c_str(),path.c_str())||(entry.directory&&child.size()>path.size()&&child[path.size()]==L'\\'&&!_wcsnicmp(child.c_str(),path.c_str(),path.size()));};
+        for(const auto& item:paths_)if(descendant(item.second)){dataReaders_.erase(item.first);resourceReaders_.erase(item.first);}
         if(resource)Check(MoveFileExW(oldResource.c_str(),newResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot rename resource companion; source retained");
         if(!MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)){
             if(resource)Check(MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");
             throw HfsPlus::Error("Cannot rename the selected Windows entry; source retained");
         }
-        paths_[id]=target;
+        for(auto& item:paths_)if(descendant(item.second))item.second=target+item.second.substr(path.size());
     }
     void Remove(uint32_t id) override {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         Check(id!=2,"Cannot remove a volume root"); auto path=Path(id); auto e=Describe(id);
         dataReaders_.erase(id);resourceReaders_.erase(id);
-        if(e.directory)Check(RemoveDirectoryW(path.c_str())!=FALSE,"Cannot remove Windows folder");
+        if(e.directory){Double d;bool companion=AppleDouble(Companion(path),d);Check(RemoveDirectoryW(path.c_str())!=FALSE,"Cannot remove Windows folder");if(companion)Check(DeleteFileW(Companion(path).c_str())!=FALSE,"Cannot remove folder metadata companion");}
         else { Double d; bool companion=AppleDouble(Companion(path),d);
             Check(DeleteFileW(path.c_str())!=FALSE,"Cannot remove source Windows file");
             if(companion)Check(DeleteFileW(Companion(path).c_str())!=FALSE,"Cannot remove source resource companion"); }

@@ -183,13 +183,22 @@ bool SameProperties(const hfsdirent& a,const hfsdirent& b){
 std::string FolderIdentity(std::string value){for(int n=0;n<2;++n){auto at=value.find_last_of(':');if(at==value.npos)return {};value.resize(at);}return value;}
 Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& completion){
  Storage::Progress p;p.phase=request.kind==Kind::Inspect?"Reading properties":request.kind==Kind::CreateFolder?"Creating folder":"Updating properties";p.utf8=true;p.path=Utf8(request.name);job.progress(p);
- if(request.kind==Kind::CreateFolder){
+ if(request.kind==Kind::ReadAttributeFile){
+  Check(request.sources.size()==1,"Select one binary attribute value file");auto source=Source(request.sources[0]);auto e=source.first->Stat(source.second);Check(!e.directory&&e.forks[0].size<=64*1024*1024,"Attribute value must be a file no larger than 64 MiB");HfsPlus::Bytes bytes(size_t(e.forks[0].size),0);
+  for(size_t at=0;at<bytes.size();){Cancel(job);auto n=(std::min)(size_t(65536),bytes.size()-at);source.first->Read(source.second,0,at,bytes.data()+at,n);at+=n;}Cancel(job);completion.attributes[request.name]=std::move(bytes);
+ }else if(request.kind==Kind::ExportAttribute){
+  Check(Absolute(request.target.windowsPath)&&request.attributes.count(request.name),"Choose an attribute and a new output filename");auto& bytes=request.attributes.at(request.name);auto& path=request.target.windowsPath;HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create attribute output; choose a new filename");Mark(completion,request.target);
+  try{for(size_t at=0;at<bytes.size();){Cancel(job);auto n=(std::min)(size_t(65536),bytes.size()-at);DWORD written=0;if(!WriteFile(file,bytes.data()+at,DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Attribute export write failed");at+=n;}Cancel(job);if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");CloseHandle(file);}catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
+ }else if(request.kind==Kind::CreateFolder){
   const auto& item=request.target;Check(!request.name.empty(),"Enter a folder name");
   if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&!e.hardLink&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,request.name);source.first->MakeDirectory(source.second,request.name);}
   else if(item.type==LIST_FAT){auto volume=OpenWindows(item.windowsPath);auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();}
   else{Check(item.type==LIST_HFS,"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.classicImage)==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.classicImage,item.classicPath,true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();Finish(disk);}
  }else{
-  Check(request.sources.size()==1,"Select one item");const auto& item=request.sources.front();auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();Cancel(job);
+  Check(request.sources.size()==1,"Select one item");const auto& item=request.sources.front();auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();
+  if(completion.supportsAttributes)completion.attributes=source.first->GetAttributes(source.second);Cancel(job);
+  if(request.kind==Kind::SetAttributes){Check(completion.supportsAttributes&&completion.writable,"This item cannot store extended attributes");Check(completion.attributes==request.originalAttributes,"Attributes changed while Properties was open; reopen Properties before saving");Cancel(job);Mark(completion,item);source.first->SetAttributes(source.second,request.attributes);completion.attributes=request.attributes;}
+
   if(item.type==LIST_HFS&&!item.volume){source.first->Close();auto image=item.classicImage,path=item.classicPath;Check(HFSIFACE_get_properties(&image[0],&path[0],&completion.properties)==0,"Cannot read classic HFS properties");completion.classicProperties=true;completion.writable=physical_floppy_path(item.classicImage.c_str())>=0?true:!readonly_media_path(item.classicImage.c_str())&&(GetFileAttributesA(item.classicImage.c_str())&FILE_ATTRIBUTE_READONLY)==0;Cancel(job);}
   if(request.kind==Kind::SetProperties){
    Check(completion.classicProperties,"This format does not expose editable classic Finder properties");auto disk=WritableFloppy(item);auto image=item.classicImage,path=item.classicPath;
@@ -220,26 +229,42 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
   if(Absolute(request.sourcePath))AddPath(access,VolumeCoord::Wide(request.sourcePath),request.move?Mode::Write:Mode::Read);else access.push_back({VolumeCoord::ImageKey(request.sourceVolume),(request.move||request.background)?Mode::Write:Mode::Read});
   if(Absolute(request.targetPath))access.push_back({VolumeCoord::LegacyOutputKey(VolumeCoord::Wide(request.targetPath)),Mode::Write});else access.push_back({VolumeCoord::ImageKey(request.targetVolume),Mode::Write});return access;
  }
- for(const auto& item:request.sources){auto mode=request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||item.cut||(request.background&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
+ for(const auto& item:request.sources){auto mode=request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||item.cut||(request.background&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
    // Explicit Windows adapters are still file readers when a copy is not a move.
-   if(request.kind!=Kind::Rename&&request.kind!=Kind::Delete&&request.kind!=Kind::SetProperties&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
+   if(request.kind!=Kind::Rename&&request.kind!=Kind::Delete&&request.kind!=Kind::SetProperties&&request.kind!=Kind::SetAttributes&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
    if(request.kind==Kind::Rename){auto parent=path.substr(0,path.find_last_of(L"\\/"));AddPath(access,ChildPath(parent,request.name),Mode::Write);}
   }}
- if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork||request.kind==Kind::CreateFolder){auto path=HostPath(request.target);if(path.empty())access.push_back({Resource(request.target),Mode::Write});else if(request.kind==Kind::CreateFolder)AddPath(access,ChildPath(path,request.name),Mode::Write,false);else if(request.kind==Kind::Copy){bool known=true;for(const auto& source:request.sources){auto name=SourceName(source);if(name.empty()){known=false;break;}AddPath(access,ChildPath(path,name),Mode::Write);}if(!known)AddPath(access,path,Mode::Write,false);}else AddPath(access,path,Mode::Write,request.kind!=Kind::ExportFork);
+ if(request.kind==Kind::Copy||request.kind==Kind::ReplaceResource||request.kind==Kind::ExportFork||request.kind==Kind::ExportAttribute||request.kind==Kind::CreateFolder){auto path=HostPath(request.target);if(path.empty())access.push_back({Resource(request.target),Mode::Write});else if(request.kind==Kind::CreateFolder)AddPath(access,ChildPath(path,request.name),Mode::Write,false);else if(request.kind==Kind::Copy){bool known=true;for(const auto& source:request.sources){auto name=SourceName(source);if(name.empty()){known=false;break;}AddPath(access,ChildPath(path,name),Mode::Write);}if(!known)AddPath(access,path,Mode::Write,false);}else AddPath(access,path,Mode::Write,request.kind!=Kind::ExportFork&&request.kind!=Kind::ExportAttribute);
  }return access;
 }
 
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
  Cancel(job);
- if(request.kind==Kind::CreateFolder||request.kind==Kind::Inspect||request.kind==Kind::SetProperties)return Metadata(request,job,completion);
+ if(request.kind==Kind::CreateFolder||request.kind==Kind::Inspect||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::ReadAttributeFile||request.kind==Kind::ExportAttribute)return Metadata(request,job,completion);
  if(request.kind==Kind::Copy)return CopyRequest(request,job,completion);
  if(request.kind==Kind::ExportFork)return ExportFork(request,job,completion);
  if(request.kind==Kind::ReplaceResource)return ReplaceResource(request,job,completion);
  if(request.kind!=Kind::LegacyCopy)return Mutate(request,job,completion);
+ // Legacy containers cannot carry arbitrary attributes/ACLs. Preflight the
+ // complete selection before converters can create partial output.
+ auto noLostMetadata=[&](MacBrowser::Volume& volume,uint32_t root){
+  if(!volume.SupportsAttributes())return;
+  std::set<uint32_t> ancestors;
+  std::function<void(uint32_t,unsigned)> walk=[&](uint32_t id,unsigned depth){
+   Cancel(job);Check(depth<=128&&ancestors.insert(id).second,"Recursive conversion source");
+   Check(volume.GetAttributes(id).empty(),"Legacy conversion cannot preserve extended attributes or Mac ACLs; use an HFS+/HFSX or Windows both-fork copy");
+   auto entry=volume.Stat(id);if(entry.directory)for(auto& child:volume.List(id))walk(child.id,depth+1);
+   ancestors.erase(id);
+  };
+  walk(root,0);
+ };
+ if(request.sources.empty()&&Absolute(request.sourcePath)){
+  auto source=MacBrowser::ResolveWindowsFile(VolumeCoord::Wide(request.sourcePath));
+  noLostMetadata(*source.first,source.second);source.first->Close();
+ }
  if(!request.sources.empty()){
-  // Shared browser selections use captured paths/identities, never another
-  // window's volume indexes. Validate before invoking the old converters.
-  auto source=Source(request.sources.front());
+  // Captured paths/identities never depend on another window's volume indexes.
+  auto source=Source(request.sources.front());noLostMetadata(*source.first,source.second);
   auto target=request.target.type==LIST_FAT?OpenWindows(request.target.windowsPath):OpenClassic(request.target.classicImage,request.target.classicPath,false);
   CheckMedia(request.target);source.first->ValidateCopyTo(source.second,*target,2);
   source.first->Close();target->Close();

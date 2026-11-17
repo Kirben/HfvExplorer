@@ -57,6 +57,11 @@ public:
         Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
         catch (...) { usable_=false; throw; }
     }
+    bool SupportsAttributes()const override{return true;}
+    HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();return volume_->GetAttributes(id);}
+    void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
+    void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);HfsPlus::ValidateAttributes(e.attributes);}
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name,e.attributesKnown?&e.attributes:nullptr);});}
     bool CaseSensitive() const override { return caseSensitive_; }
     uint64_t FreeBytes() const override { Call call(*this);if(!usable_)throw HfsPlus::Error("Media was released; select the drive again");return volume_->FreeBytes(); }
     std::vector<Entry> List(uint32_t id) override {
@@ -71,7 +76,7 @@ public:
     }
     uint32_t Put(uint32_t p, const Entry &e, Reader read, bool replace) override {
         std::array<uint32_t,2> dates{e.created,e.modified};
-        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,e.datesValid?&dates:nullptr); });
+        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,e.datesValid?&dates:nullptr,e.attributesKnown?&e.attributes:nullptr); });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
         Mutate([&] { volume_->Rename(id, p, s); });
@@ -131,6 +136,11 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     Check(depth <= 128 && ancestors.insert(id).second, "Recursive folder link or excessive folder depth");
     Planned out; out.entry = v.Stat(id);
     Check(out.entry.readError.empty(), out.entry.readError.c_str());
+    out.entry.attributes=v.GetAttributes(id);out.entry.attributesKnown=true;
+    // Logical exports decode compression and resolve links rather than cloning
+    // their private backing topology or compressed resource-fork storage.
+    if(out.entry.compressed)out.entry.attributes.erase(u"com.apple.decmpfs");
+    if(out.entry.hardLink)out.entry.attributes.erase(u"com.apple.system.hfs.firstlink");
     if (out.entry.directory) for (auto &child : v.List(id)) out.children.push_back(Scan(v, child.id, job, p, ancestors, depth + 1));
     else { v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);
         ++p.totalFiles; Check(UINT64_MAX - p.totalBytes >= out.entry.forks[0].size,
@@ -146,7 +156,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     found=dst.FindChild(parent,entry.name,existing);
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
-        uint32_t id = found ? existing.id : dst.MakeDirectory(parent, entry.name);
+        uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
         bool complete = true;
         for (const auto &child : plan.children) if (!Transfer(src, child, dst, id, job, progress)) complete = false;
         return complete;
@@ -226,6 +236,7 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
         if(job.cancelled())throw Storage::Cancelled();Check(depth<=128&&ancestors.insert(at).second,"Cyclic source folder");
         auto e=v.Stat(at);Check(!e.identity.empty(),"Cannot verify source identity; source items were retained");++count;
         if(requireRemovable)v.ValidateRemoval(at);
+        auto attributes=v.GetAttributes(at);for(const auto& a:attributes){auto size=a.second.size();bytes(a.first.data(),a.first.size()*2);bytes(&size,sizeof(size));bytes(a.second.data(),a.second.size());}
         bytes(e.identity.data(),e.identity.size());bytes(e.name.data(),e.name.size()*2);
         bytes(&e.created,sizeof(e.created));bytes(&e.modified,sizeof(e.modified));bytes(e.finder.data(),e.finder.size());
         bytes(&e.forks[0].size,sizeof(uint64_t));bytes(&e.forks[1].size,sizeof(uint64_t));

@@ -57,6 +57,11 @@ if($Test -or $TestHfsPlus) {
  if(!$commandsTest.WaitForExit(60000)){$commandsTest.Kill();throw 'Per-volume command tests timed out.'}
  Get-Content (Join-Path $commands 'per-volume-commands-report.txt')
  if($commandsTest.ExitCode -ne 0){throw "Per-volume command tests failed; retained $commands"}
+ $attributes=Join-Path $hfsPlusDirectory 'extended-attributes'
+ $attributesTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-extended-attributes',('"'+$attributes+'"')) -WindowStyle Hidden -PassThru
+ $attributesTest.WaitForExit()
+ Get-Content (Join-Path $attributes 'extended-attributes-report.txt')
+ if($attributesTest.ExitCode -ne 0){throw 'Extended attributes tests failed'}
  $metadata=Join-Path $hfsPlusDirectory 'background-metadata'
  $metadataTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-background-metadata',('"'+$metadata+'"')) -WindowStyle Hidden -PassThru
  if(!$metadataTest.WaitForExit(60000)){$metadataTest.Kill();throw 'Background metadata tests timed out.'}

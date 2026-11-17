@@ -35,6 +35,10 @@ struct Fork {
     uint32_t blocks = 0;
     std::vector<Extent> extents;
 };
+using Attributes = std::map<std::u16string, Bytes>;
+// On-disk Mac ACLs retain owner/group UUIDs, ACE order, rights and inheritance flags.
+// These are filesystem metadata, not Windows access-control enforcement.
+void ValidateAttributes(const Attributes &);
 struct Entry {
     uint32_t id = 0, parent = 0;
     std::u16string name;
@@ -62,12 +66,14 @@ class Volume {
     std::vector<Entry> List(uint32_t parent = 2) const;
     Entry Stat(uint32_t id) const;
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
-    uint32_t MakeDirectory(uint32_t parent, const std::u16string &name);
+    uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
     // Streaming, copy-on-write replacement. Source callback must return exact bytes.
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
-                 const std::array<uint32_t,2> *dates = nullptr);
+                 const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr);
+    Attributes GetAttributes(uint32_t id) const;
+    void SetAttributes(uint32_t id, const Attributes &);
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);
     void Remove(uint32_t id);
     void ValidateRemoval(uint32_t id) const;

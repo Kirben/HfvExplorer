@@ -19,6 +19,8 @@ struct Entry {
     std::array<uint8_t,32> finder{};
     uint32_t created = 0, modified = 0;
     bool datesValid = false;
+    HfsPlus::Attributes attributes;
+    bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
     unsigned version = 0; // optional legacy file version, not part of its identity
     std::string identity; // backend object/version identity for move revalidation
 };
@@ -50,7 +52,11 @@ public:
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
-    virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive()); }
+    virtual bool SupportsAttributes()const{return false;}
+    virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
+    virtual void SetAttributes(uint32_t,const HfsPlus::Attributes&){throw HfsPlus::Error("This format cannot store extended attributes or Mac ACLs");}
+    virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
+    virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive());if(!e.attributes.empty()&&!SupportsAttributes())throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;
     virtual Entry Stat(uint32_t id) = 0;

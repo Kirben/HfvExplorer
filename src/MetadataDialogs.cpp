@@ -6,16 +6,53 @@
 #include "BackgroundCopies.h"
 #include "BrowserPresentation.h"
 #include "charset.h"
+#include "HfsPlusDisk.h"
 #include <algorithm>
 namespace MetadataDialogs {
 namespace {
 std::vector<std::unique_ptr<CDialog>> windows;
+
+struct AttributeState {FileOperations::Location source;HfsPlus::Attributes original,desired;HWND window=nullptr;bool writable=false;};
+std::wstring Text(HWND window,int id){auto control=GetDlgItem(window,id);int n=GetWindowTextLengthW(control);std::wstring text(n+1,0);GetWindowTextW(control,&text[0],n+1);text.resize(n);return text;}
+struct AttributesDialog:CDialog {
+ std::shared_ptr<AttributeState> state=std::make_shared<AttributeState>();bool hidden,hexEditable=true;
+ AttributesDialog(FileOperations::Location source,const FileOperations::Completion& value,bool h):CDialog(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()),hidden(h){state->source=std::move(source);state->desired=state->original=value.attributes;state->writable=value.writable&&!value.entry.protectedFile&&!value.entry.hardLink&&!value.entry.compressed&&value.entry.id!=2;}
+ std::u16string Name(){return MacBrowser::U16(Text(m_hWnd,IDC_ATTR_NAME));}
+ void Refresh(){SendDlgItemMessage(IDC_ATTR_LIST,LB_RESETCONTENT);for(const auto& a:state->desired){auto text=MacBrowser::Wide(a.first)+L"  ("+std::to_wstring(a.second.size())+L" bytes)";SendDlgItemMessageW(m_hWnd,IDC_ATTR_LIST,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(text.c_str()));}}
+ void Clear(){SetDlgItemTextW(m_hWnd,IDC_ATTR_NAME,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_VALUE,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,L"Set value stages a change. Apply saves all staged changes.");hexEditable=true;SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETREADONLY,!state->writable);}
+ void Selected(){int selected=int(SendDlgItemMessage(IDC_ATTR_LIST,LB_GETCURSEL));if(selected<0||size_t(selected)>=state->desired.size())return;auto it=state->desired.begin();std::advance(it,selected);SetDlgItemTextW(m_hWnd,IDC_ATTR_NAME,MacBrowser::Wide(it->first).c_str());hexEditable=it->second.size()<=65536;std::wstring hex;
+  if(hexEditable){const wchar_t* digits=L"0123456789ABCDEF";for(size_t i=0;i<it->second.size();++i){auto b=it->second[i];hex+=digits[b>>4];hex+=digits[b&15];hex+=(i%16==15?L"\r\n":L" ");}}else hex=L"Value exceeds the text editor limit. Use Import value or Export value for binary data.";
+  SetDlgItemTextW(m_hWnd,IDC_ATTR_VALUE,hex.c_str());SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETREADONLY,!state->writable||!hexEditable);
+  std::wstring detail=L"Set value stages a change. Apply saves all staged changes.";
+  if(it->first==u"com.apple.system.Security"){try{HfsPlus::ValidateAttributes({*it});auto count=HfsPlus::Disk::U32(it->second.data()+36);detail=count==0xffffffff?L"Mac security: owner/group UUIDs; no ACL (distinct from an empty ACL).":L"Mac ACL: "+std::to_wstring(count)+L" ordered entries; disk byte order. Import/export preserves UUIDs, rights and flags.";}catch(const std::exception&){detail=L"Malformed Mac ACL. Export it for inspection; replace or remove it before Apply.";}}
+  SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,detail.c_str());
+ }
+ BOOL OnInitDialog()override{CDialog::OnInitDialog();state->window=m_hWnd;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,state->writable?L"Named attributes and com.apple.system.Security (Mac ACL)":L"Read-only attributes and Mac ACL");SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETLIMITTEXT,262144);for(int id:{IDC_ATTR_SET,IDC_ATTR_REMOVE,IDC_ATTR_IMPORT,IDC_ATTR_NEW,IDOK})GetDlgItem(id)->EnableWindow(state->writable);Refresh();Clear();return TRUE;}
+ void PostNcDestroy()override{state->window=nullptr;CDialog::PostNcDestroy();}
+ BOOL OnCommand(WPARAM wp,LPARAM lp)override{
+  int id=LOWORD(wp);try{
+   if(id==IDC_ATTR_REFRESH){Refresh();Clear();return TRUE;}
+   if(id==IDC_ATTR_LIST&&HIWORD(wp)==LBN_SELCHANGE){Selected();return TRUE;}
+   if(id==IDC_ATTR_NEW){Clear();return TRUE;}
+   if(id==IDC_ATTR_SET&&state->writable){if(!hexEditable)throw HfsPlus::Error("Use Import value to replace a large binary attribute");auto text=Text(m_hWnd,IDC_ATTR_VALUE);HfsPlus::Bytes bytes;int half=-1;for(auto c:text){if(iswspace(c))continue;int n=c>=L'0'&&c<=L'9'?c-L'0':c>=L'a'&&c<=L'f'?c-L'a'+10:c>=L'A'&&c<=L'F'?c-L'A'+10:-1;if(n<0)throw HfsPlus::Error("Enter hexadecimal byte pairs (00 through FF)");if(half<0)half=n;else{bytes.push_back(uint8_t(half*16+n));half=-1;}}if(half>=0)throw HfsPlus::Error("A hexadecimal byte needs two digits");auto next=state->desired;next[Name()]=std::move(bytes);HfsPlus::ValidateAttributes(next);state->desired=std::move(next);Refresh();return TRUE;}
+   if(id==IDC_ATTR_REMOVE&&state->writable){state->desired.erase(Name());Refresh();Clear();return TRUE;}
+   if(id==IDC_ATTR_IMPORT&&state->writable){auto name=Name();if(name.empty())throw HfsPlus::Error("Enter the attribute name first");CFileDialog picker(TRUE,nullptr,nullptr,OFN_FILEMUSTEXIST|OFN_HIDEREADONLY|OFN_NOCHANGEDIR,"Binary files (*.*)|*.*||",this);if(picker.DoModal()!=IDOK)return TRUE;FileOperations::Request request;request.kind=FileOperations::Kind::ReadAttributeFile;request.name=name;FileOperations::Location file;file.type=LIST_FAT;file.windowsPath=VolumeCoord::Wide((LPCSTR)picker.GetPathName());request.sources={file};auto model=state;
+    BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true,{},[model](const FileOperations::Completion& value){if(!model->window)return;try{auto next=model->desired;for(auto& a:value.attributes)next[a.first]=a.second;HfsPlus::ValidateAttributes(next);model->desired=std::move(next);::SendMessage(model->window,WM_COMMAND,IDC_ATTR_REFRESH,0);}catch(const std::exception& e){::MessageBoxA(model->window,e.what(),"Invalid attribute value",MB_OK|MB_ICONERROR);}});return TRUE;}
+   if(id==IDC_ATTR_EXPORT){auto name=Name();if(!state->desired.count(name))throw HfsPlus::Error("Select an attribute first");CFileDialog picker(FALSE,"bin",nullptr,OFN_HIDEREADONLY|OFN_NOCHANGEDIR,"Binary files (*.bin)|*.bin|All files (*.*)|*.*||",this);if(picker.DoModal()!=IDOK)return TRUE;FileOperations::Request request;request.kind=FileOperations::Kind::ExportAttribute;request.name=name;request.attributes={{name,state->desired.at(name)}};request.target.type=LIST_FAT;request.target.windowsPath=VolumeCoord::Wide((LPCSTR)picker.GetPathName());BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true);return TRUE;}
+  }catch(const std::exception& error){::MessageBoxA(m_hWnd,error.what(),"Extended attributes",MB_OK|MB_ICONERROR);return TRUE;}
+  return CDialog::OnCommand(wp,lp);
+ }
+ void OnOK()override{if(!state->writable)return;FileOperations::Request request;request.kind=FileOperations::Kind::SetAttributes;request.sources={state->source};request.originalAttributes=state->original;request.attributes=state->desired;if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();}
+ void OnCancel()override{DestroyWindow();}
+};
+void PresentAttributes(FileOperations::Location source,const FileOperations::Completion& value,bool hidden){auto dialog=std::make_unique<AttributesDialog>(std::move(source),value,hidden);if(!dialog->Create(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create attribute editor");if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));}
 struct Summary:CDialog {
- FileOperations::Completion value;bool hidden;
- Summary(const FileOperations::Completion& v,bool h):CDialog(IDD_METADATA_SUMMARY,CWnd::GetDesktopWindow()),value(v),hidden(h){}
+ FileOperations::Completion value;FileOperations::Location source;bool hidden;
+ Summary(FileOperations::Location s,const FileOperations::Completion& v,bool h):CDialog(IDD_METADATA_SUMMARY,CWnd::GetDesktopWindow()),value(v),source(std::move(s)),hidden(h){}
  BOOL OnInitDialog()override{CDialog::OnInitDialog();auto e=value.entry;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,MacBrowser::Wide(e.name).c_str());
  auto description=BrowserPresentation::FromUtf8(value.description)+(value.writable?L"":L" (read-only)");SetDlgItemTextW(m_hWnd,IDC_CP_FILE,description.c_str());
- auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());return TRUE;}
+ auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow(value.supportsAttributes?SW_SHOW:SW_HIDE);return TRUE;}
+ BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_ATTR_OPEN){PresentAttributes(source,value,hidden);return TRUE;}return CDialog::OnCommand(wp,lp);}
  void OnOK()override{DestroyWindow();}void OnCancel()override{DestroyWindow();}
 };
 struct Editor:CAskProperties {
@@ -199,7 +236,7 @@ struct Editor:CAskProperties {
 void Present(FileOperations::Location source,const FileOperations::Completion& value,bool hidden){
  windows.erase(std::remove_if(windows.begin(),windows.end(),[](const std::unique_ptr<CDialog>& window){return !IsWindow(window->GetSafeHwnd());}),windows.end());
  std::unique_ptr<CDialog> dialog;
- if(value.classicProperties&&value.writable)dialog.reset(new Editor(std::move(source),value,hidden));else dialog.reset(new Summary(value,hidden));
+ if(value.classicProperties&&value.writable)dialog.reset(new Editor(std::move(source),value,hidden));else dialog.reset(new Summary(std::move(source),value,hidden));
  UINT resource=value.classicProperties&&value.writable?IDD_HFS_ITEM_PROPERTIES:IDD_METADATA_SUMMARY;
  if(!dialog->Create(resource,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create Properties window");if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));
 }
