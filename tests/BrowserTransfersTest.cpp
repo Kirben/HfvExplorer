@@ -2,104 +2,507 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "HFVExplorer.h"
+#include "BackgroundCopies.h"
 #include "BrowserSession.h"
+#include "BrowserPresentation.h"
 #include "BrowserTransfers.h"
 #include "MainMacBrowser.h"
 #include "HfsPlusDisk.h"
 #include "StorageJobDialog.h"
-#include "DeviceWait.h"
+#include "VolumeSession.h"
 #include "utils.h"
 #include <cstdio>
-#include <fcntl.h>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
 }
-extern std::string browserTransferError;
+
 namespace {
+using Choice=Storage::ConflictChoice;
 CString host;
-void Check(bool ok,const char* text){if(!ok)throw HfsPlus::Error(text);}
-class TransferDoc:public CHFVExplorerDoc{
+
+void Check(bool ok,const std::string& message)
+{
+ if(!ok)throw HfsPlus::Error(message.c_str());
+}
+
+class TransferDoc:public CHFVExplorerDoc {
  DECLARE_DYNCREATE(TransferDoc)
-public:TransferDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=host[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=host;}
+public:
+ TransferDoc():CHFVExplorerDoc(false)
+ {
+  m_fat_count=1;
+  m_fats[0].m_letter=host[0];
+  m_fats[0].m_type=DRIVE_FIXED;
+  m_fats[0].m_volume_name=host;
+ }
 };
 IMPLEMENT_DYNCREATE(TransferDoc,CHFVExplorerDoc)
-class TransferFrame:public CMainFrame{
+
+class TransferFrame:public CMainFrame {
  DECLARE_DYNCREATE(TransferFrame)
-public:void LoadWindowPosition()override{}void SaveWindowPosition()override{}void ActivateFrame(int)override{}
+public:
+ void LoadWindowPosition()override{}
+ void SaveWindowPosition()override{}
+ void ActivateFrame(int)override{}
 };
 IMPLEMENT_DYNCREATE(TransferFrame,CMainFrame)
-std::wstring Wide(const CString& path){return MacBrowser::Wide(BrowserDirectory::FromAnsi(path));}
-int Row(BrowserSession& session,const wchar_t* name){auto& list=session.List()->GetListCtrl();for(int i=0;i<list.GetItemCount();++i){wchar_t text[512]{};LVITEMW item{};item.pszText=text;item.cchTextMax=ARRAYSIZE(text);SendMessageW(list.m_hWnd,LVM_GETITEMTEXTW,i,reinterpret_cast<LPARAM>(&item));if(!wcscmp(text,name))return i;}return -1;}
-void Select(BrowserSession& session,const wchar_t* name){int row=Row(session,name);Check(row>=0,"selection fixture is absent");auto& list=session.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);}
-uint32_t Find(MacBrowser::Volume& volume,uint32_t parent,const std::u16string& name){for(auto& e:volume.List(parent))if(e.name==name)return e.id;return 0;}
-uint32_t Put(MacBrowser::Volume& volume,uint32_t parent,const std::u16string& name,unsigned seed=17){MacBrowser::Entry e;e.name=name;e.forks[0].size=29;e.forks[1].size=13;e.finder[0]='T';e.finder[4]='X';return volume.Put(parent,e,[seed](unsigned fork,uint64_t at,void* p,size_t n){for(size_t i=0;i<n;++i)static_cast<unsigned char*>(p)[i]=BYTE(seed+fork+at+i);},false);}
-void Verify(MacBrowser::Volume& volume,uint32_t parent,const std::u16string& name,unsigned seed=17){auto id=Find(volume,parent,name);Check(id!=0,("copied entry is missing: "+std::string(name.begin(),name.end())+" at "+std::to_string(parent)).c_str());auto e=volume.Stat(id);Check(e.forks[0].size==29&&e.forks[1].size==13&&e.finder[0]=='T'&&e.finder[4]=='X',"fork sizes or Finder metadata were lost");for(unsigned f=0;f<2;++f){unsigned char bytes[29]{};volume.Read(id,f,0,bytes,size_t(e.forks[f].size));for(size_t i=0;i<e.forks[f].size;++i)Check(bytes[i]==BYTE(seed+f+i),("copied fork bytes differ: "+std::string(name.begin(),name.end())+" fork "+std::to_string(f)+" byte "+std::to_string(i)+" expected "+std::to_string(BYTE(seed+f+i))+" actual "+std::to_string(bytes[i])).c_str());}}
-std::shared_ptr<MacBrowser::Volume> Image(const CString& path){auto w=Wide(path);auto disk=HfsPlus::CreateImage(w.c_str(),8*1024*1024);HfsPlus::Volume::Format(*disk,u"Transfer",true,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);disk.reset();return MacBrowser::OpenImage(w);}
-void Classic(const CString& path,unsigned seed){CFile file;Check(file.Open(path,CFile::modeCreate|CFile::modeWrite),"create classic fixture");file.SetLength(2*1024*1024);file.Close();char label[]="Legacy";Check(hfs_format(const_cast<char*>((LPCSTR)path),0,label)==0,"format classic fixture");auto volume=MacBrowser::OpenClassic((LPCSTR)path,"Legacy:",true);Put(*volume,2,u"LegacyFile",seed);volume->Close();}
-class ReadOnly:public MacBrowser::Volume{
- std::shared_ptr<MacBrowser::Volume> base_;
-public:explicit ReadOnly(std::shared_ptr<MacBrowser::Volume> base):base_(base){}
- std::string ResourceKey()const override{return base_->ResourceKey();}std::u16string Name()const override{return u"Read-only fixture";}const char* Kind()const override{return "Read-only fixture";}bool Writable()const override{return false;}bool CaseSensitive()const override{return true;}uint64_t FreeBytes()const override{return 0;}
- MacBrowser::Entry Stat(uint32_t id)override{return base_->Stat(id);}std::vector<MacBrowser::Entry> List(uint32_t id)override{return base_->List(id);}void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{base_->Read(id,f,at,p,n);}
- uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw HfsPlus::Error("Read-only mutation");}uint32_t Put(uint32_t,const MacBrowser::Entry&,MacBrowser::Reader,bool)override{throw HfsPlus::Error("Read-only mutation");}void Rename(uint32_t,uint32_t,const std::u16string&)override{throw HfsPlus::Error("Read-only mutation");}void Remove(uint32_t)override{throw HfsPlus::Error("Read-only mutation");}
-};
-void Refresh(CMainFrame* frame){frame->GetBrowserSession().MacBrowser().Refresh();}
-void Host(BrowserSession& session,const CString& path){session.Document()->m_fats[0].m_volume_name=path;session.Document()->OnOpenDocument("");session.Tree()->GetTreeCtrl().SelectItem(session.Document()->m_fats[0].m_rootitem);session.Document()->open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);}
-void Pump(){DWORD end=GetTickCount()+180;while(LONG(end-GetTickCount())>0){MSG m;while(PeekMessage(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_QUIT){TranslateMessage(&m);DispatchMessage(&m);}Sleep(5);}}
+
+std::wstring Wide(const CString& path){return VolumeCoord::Wide((LPCSTR)path);}
+
+int Row(BrowserSession& session,const wchar_t* name)
+{
+ auto& list=session.List()->GetListCtrl();
+ for(int i=0;i<list.GetItemCount();++i){
+  const auto row=session.List()->BrowserRowAt(i);
+  if(!row)continue;
+  const auto leaf=MacBrowser::Wide(row->entry.name);
+  if(row->location.IsWindows()?!_wcsicmp(leaf.c_str(),name):leaf==name)return i;
+ }
+ return -1;
 }
-int RunBrowserTransfersTest(const char* directory){
- if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\browser-transfers-report.txt","w");if(!report)return 2;
- auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;app.m_copyin_mode=app.m_copyout_mode=0;
- BrowserTransfers::Clear();int result=0;
+
+void Select(BrowserSession& session,const wchar_t* name)
+{
+ const auto index=Row(session,name);
+ auto& list=session.List()->GetListCtrl();
+ if(index<0){
+  std::string visible;
+  for(int i=0;i<list.GetItemCount();++i)
+   if(const auto row=session.List()->BrowserRowAt(i))
+    visible+=" ["+BrowserPresentation::Utf8(row->entry.name)+"]";
+  throw HfsPlus::Error(("selection fixture is absent: "+BrowserPresentation::Utf8(MacBrowser::U16(name))+
+       "; visible rows:"+visible).c_str());
+ }
+ list.SetItemState(-1,0,LVIS_SELECTED);
+ list.SetItemState(index,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
+}
+
+uint32_t Find(MacBrowser::Volume& volume,uint32_t parent,const std::u16string& name)
+{
+ for(const auto& e:volume.List(parent))if(e.name==name)return e.id;
+ return 0;
+}
+
+uint32_t Put(MacBrowser::Volume& volume,uint32_t parent,const std::u16string& name,unsigned seed=17)
+{
+ MacBrowser::Entry e;
+ e.name=name;
+ e.forks[0].size=29;
+ e.forks[1].size=13;
+ e.finder[0]='T';
+ e.finder[4]='X';
+ return volume.Put(parent,e,[seed](unsigned fork,uint64_t at,void* p,size_t n){
+  for(size_t i=0;i<n;++i)static_cast<unsigned char*>(p)[i]=BYTE(seed+fork+at+i);
+ },false);
+}
+
+void Verify(MacBrowser::Volume& volume,uint32_t parent,const std::u16string& name,unsigned seed=17)
+{
+ const auto label=BrowserPresentation::Utf8(name);
+ const auto id=Find(volume,parent,name);
+ Check(id!=0,"copied entry is missing: "+label);
+ const auto e=volume.Stat(id);
+ Check(e.forks[0].size==29&&e.forks[1].size==13&&e.finder[0]=='T'&&e.finder[4]=='X',
+       "fork sizes or Finder metadata were lost: "+label);
+ for(unsigned fork=0;fork<2;++fork){
+  unsigned char bytes[29]{};
+  volume.Read(id,fork,0,bytes,size_t(e.forks[fork].size));
+  for(unsigned i=0;i<e.forks[fork].size;++i)
+   Check(bytes[i]==BYTE(seed+fork+i),"copied fork bytes differ: "+label);
+ }
+}
+
+void FormatImage(const CString& path)
+{
+ const auto wide=Wide(path);
+ auto disk=HfsPlus::CreateImage(wide.c_str(),8*1024*1024);
+ HfsPlus::Volume::Format(*disk,u"Transfer",true,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+}
+
+void FormatClassic(const CString& path)
+{
+ CFile file;
+ Check(file.Open(path,CFile::modeCreate|CFile::modeWrite),"create classic fixture");
+ file.SetLength(2*1024*1024);
+ file.Close();
+ char label[]="Legacy";
+ Check(hfs_format(const_cast<char*>((LPCSTR)path),0,label)==0,"format classic fixture");
+}
+
+std::shared_ptr<MacBrowser::Volume> Mount(BrowserSession& session,const CString& path)
+{
+ Check(session.MacBrowser().OpenImage(Wide(path))==1,"open browser image fixture");
+ auto volume=session.MacBrowser().TargetFolder().Volume();
+ Check(volume&&volume->HasPersistentWorker(),"browser image is not owned by a persistent worker");
+ return volume;
+}
+
+void Refresh(BrowserSession& session)
+{
+ Check(session.MacBrowser().Refresh(),"refresh mounted browser fixture");
+}
+
+void Host(BrowserSession& session,const CString& path)
+{
+ auto doc=session.Document();
+ doc->m_fats[0].m_volume_name=path;
+ Check(doc->OnOpenDocument(""),"rebuild browser host tree");
+ session.Tree()->GetTreeCtrl().SelectItem(doc->m_fats[0].m_rootitem);
+ doc->open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);
+}
+
+template<class Predicate>
+void Until(Predicate ready,const char* failure)
+{
+ const DWORD start=GetTickCount();
+ while(!ready()){
+  Check(GetTickCount()-start<10000,failure);
+  MSG message;
+  while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){
+   if(message.message!=WM_QUIT){TranslateMessage(&message);DispatchMessage(&message);}
+  }
+  Sleep(5);
+ }
+}
+
+template<class Start>
+Storage::Result Transfer(Start start,Choice choice=Choice::None)
+{
+ Check(!BackgroundCopies::Active(),"previous transfer still active");
+ storageUiTest={};
+ Check(start()&&BackgroundCopies::Active(),"browser did not queue the transfer");
+ if(choice!=Choice::None){
+  std::shared_ptr<Storage::Job> conflict;
+  Until([&]{
+   for(const auto& pending:FileOperations::Pending())
+    if(!pending.Job()->conflict().empty()){conflict=pending.Job();return true;}
+   return !BackgroundCopies::Active();
+  },"timed out waiting for an overwrite conflict");
+  Check(bool(conflict),"transfer finished before presenting an overwrite conflict");
+  storageUiTest.answer=choice;
+ }
+ Until([]{return !BackgroundCopies::Active();},"background transfer did not finish");
+ return BackgroundCopies::LastResult();
+}
+
+Storage::Result Paste(CMainFrame& frame,Choice choice=Choice::None)
+{
+ return Transfer([&]{frame.SendMessage(WM_COMMAND,ID_EDIT_PASTE);return true;},choice);
+}
+
+void Success(const Storage::Result& result)
+{
+ Check(!result.code,result.message.empty()?"transfer failed":result.message);
+}
+
+class ReadOnly:public MacBrowser::Volume {
+ std::shared_ptr<MacBrowser::Volume> base_;
+public:
+ explicit ReadOnly(std::shared_ptr<MacBrowser::Volume> base):base_(std::move(base)){}
+ std::string ResourceKey()const override{return base_->ResourceKey();}
+ std::u16string Name()const override{return u"Read-only fixture";}
+ const char* Kind()const override{return "Read-only fixture";}
+ bool Writable()const override{return false;}
+ bool CaseSensitive()const override{return true;}
+ uint64_t FreeBytes()const override{return 0;}
+ MacBrowser::Entry Stat(uint32_t id)override{return base_->Stat(id);}
+ std::vector<MacBrowser::Entry> List(uint32_t id)override{return base_->List(id);}
+ void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{base_->Read(id,f,at,p,n);}
+ uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw HfsPlus::Error("Read-only mutation");}
+ uint32_t Put(uint32_t,const MacBrowser::Entry&,MacBrowser::Reader,bool)override{throw HfsPlus::Error("Read-only mutation");}
+ void Rename(uint32_t,uint32_t,const std::u16string&)override{throw HfsPlus::Error("Read-only mutation");}
+ void Remove(uint32_t)override{throw HfsPlus::Error("Read-only mutation");}
+};
+}
+
+int RunBrowserTransfersTest(const char* directory)
+{
+ if(!CreateDirectoryA(directory,nullptr))return 2;
+ host=directory;
+ FILE* report=fopen(host+"\\browser-transfers-report.txt","w");
+ if(!report)return 2;
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ InitializeStorageUi();
+ app.m_dosicons=DI_NO_ICONS;
+ app.m_mac_window_mode=FALSE;
+ app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;
+ app.m_copyin_mode=app.m_copyout_mode=0;
+ BrowserTransfers::Clear();
+ BackgroundCopies::enabled=true;
+ int result=0;
+ const char* stage="mount browser fixtures";
  try{
-  auto ap=host+"\\a.dsk",bp=host+"\\b.dsk";auto av=Image(ap),bv=Image(bp);Put(*av,2,u"Payload");auto folder=bv->MakeDirectory(2,u"Destination");
-  app.InstallBrowserTemplate(RUNTIME_CLASS(TransferDoc),RUNTIME_CLASS(TransferFrame));auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);Check(a&&b,"create transfer frames");auto& sa=a->GetBrowserSession();auto& sb=b->GetBrowserSession();
-  Check(sa.MacBrowser().OpenImage((LPCSTR)ap)>0&&sb.MacBrowser().OpenImage((LPCSTR)bp)>0,"open transfer images");
-  Select(sa,L"Payload");a->SendMessage(WM_COMMAND,ID_EDIT_COPY);Check(BrowserTransfers::Snapshot().items.size()==1,"Copy did not publish a shared selection");
-  b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Verify(*bv,2,u"Payload");Check(Find(*av,2,u"Payload")&&BrowserTransfers::Any(),"copy removed its source or clipboard");
-  storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Verify(*bv,2,u"Payload");Check(BrowserTransfers::Any(),"Skip consumed copied clipboard");
-  Put(*av,2,u"Move",33);Put(*bv,2,u"Move",99);Refresh(a);Select(sa,L"Move");a->SendMessage(WM_COMMAND,ID_EDIT_CUT);
-  storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Cancel;b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Verify(*av,2,u"Move",33);Verify(*bv,2,u"Move",99);Check(BrowserTransfers::Snapshot().items.front().cut,"cancelled paste consumed Cut");
-  storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Check(Find(*av,2,u"Move")&&BrowserTransfers::Any(),"skipped Cut deleted its source");
-  storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Replace;b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Verify(*bv,2,u"Move",33);Check(!Find(*av,2,u"Move")&&!BrowserTransfers::Any(),"completed Cut was not removed from source/clipboard");
-  Refresh(a);Select(sa,L"Payload");a->SendMessage(WM_COMMAND,ID_EDIT_COPY);a->SendMessage(WM_COMMAND,ID_EDIT_COPY_APPEND);Check(BrowserTransfers::Snapshot().items.size()==1,"Copy append duplicated the same entry");
-  // Drag snapshots must not overwrite the copy/cut clipboard.
-  Put(*av,2,u"Dragged",45);Refresh(a);Select(sa,L"Dragged");BrowserTransfers::Drag drag(sa);
-  auto saved=BrowserTransfers::Snapshot().items.front().Id();
-  Check(drag.TestDrop(sb,false,nullptr,Row(sb,L"Destination"),MK_CONTROL),"folder-row drop failed");Verify(*bv,folder,u"Dragged",45);Check(Find(*av,2,u"Dragged")&&BrowserTransfers::Snapshot().items.front().Id()==saved,"copy drag moved source or changed clipboard");
-  Put(*av,2,u"Tree move",50);Refresh(a);Select(sa,L"Tree move");BrowserTransfers::Drag treeDrag(sa);auto binding=reinterpret_cast<list_lparam_struct*>(sb.List()->GetListCtrl().GetItemData(Row(sb,L"Destination")));Check(binding&&treeDrag.TestDrop(sb,true,binding->htree,-1,MK_SHIFT),"tree-folder move drop failed");Verify(*bv,folder,u"Tree move",50);Check(!Find(*av,2,u"Tree move"),"Shift drop did not move source");
-  Refresh(a);Select(sa,L"Payload");BrowserTransfers::Drag policy(sa);auto target=sb.MacBrowser().TargetFolder();auto selection=sa.MacBrowser().SelectedItems(false);
-  Check(BrowserTransfers::Choose(selection,target,true,0)==BrowserTransfers::Effect::Copy,"different images with equal mount indexes defaulted to move");
-  Check(BrowserTransfers::Choose(selection,sa.MacBrowser().TargetFolder(),true,0)==BrowserTransfers::Effect::Move&&BrowserTransfers::Choose(selection,target,true,MK_CONTROL)==BrowserTransfers::Effect::Copy,"same-volume/modifier policy");
-  selection.canMove=false;Check(BrowserTransfers::Choose(selection,target,true,MK_SHIFT)==BrowserTransfers::Effect::None&&BrowserTransfers::Choose(selection,target,true,0)==BrowserTransfers::Effect::Copy&&BrowserTransfers::Choose(selection,target,false,MK_CONTROL)==BrowserTransfers::Effect::None,"read-only move/target policy");
-  Check(!policy.TestDrop(sb,false,nullptr,Row(sb,L"Payload"),MK_CONTROL),"regular file accepted a folder drop");
-  Put(*av,2,u"Stale",51);Refresh(a);Select(sa,L"Stale");BrowserTransfers::Drag stale(sa);av->Rename(Find(*av,2,u"Stale"),2,u"Renamed");Check(!stale.TestDrop(sb,false,nullptr,-1,MK_CONTROL)&&!Find(*bv,2,u"Stale"),"stale drag copied a renamed/replaced source");
-  auto outer=av->MakeDirectory(2,u"Outer"),inner=av->MakeDirectory(outer,u"Inner");Refresh(a);Select(sa,L"Outer");BrowserTransfers::Drag descendant(sa);
-  Check(sb.MacBrowser().OpenImage((LPCSTR)ap)>0&&sb.MacBrowser().Activate(Row(sb,L"Outer")),"open same image in another browser");auto innerRow=Row(sb,L"Inner");Check(innerRow>=0&&!descendant.TestDrop(sb,false,nullptr,innerRow,MK_CONTROL),"cross-window descendant copy was accepted");
-  Put(*av,2,u"Within",71);Refresh(a);Select(sa,L"Within");BrowserTransfers::Drag within(sa);Check(within.TestDrop(sb,false,nullptr,-1,0),"default same-volume drop failed");Verify(*av,outer,u"Within",71);Check(!Find(*av,2,u"Within"),"default same-volume drop copied instead of moving");
-  Check(sb.MacBrowser().ShowTestFolder(0,2),"restore destination browser");
-  // Window closure leaves the shared clipboard's owned source available, but
-  // a live drag is cancelled when its source HWND disappears.
-  Refresh(a);Select(sa,L"Payload");a->SendMessage(WM_COMMAND,ID_EDIT_COPY);BrowserTransfers::Drag closing(sa);a->SendMessage(WM_CLOSE);Check(!closing.TestDrop(sb,false,nullptr,-1,MK_CONTROL),"drag survived destruction of its source window");
-  auto after=bv->MakeDirectory(2,u"After close");Refresh(b);Check(sb.MacBrowser().Activate(Row(sb,L"After close")),"show post-close folder");b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Verify(*bv,after,u"Payload");
-  // Host paths are captured independently of the source window's drive index.
-  auto c=app.CreateBrowser(FALSE);auto& sc=c->GetBrowserSession();Check(BrowserTransfers::Any()&&BrowserTransfers::Snapshot().items.front().Volume()==av,"new browser erased the shared clipboard");CString source=host+"\\host-source",dest=host+"\\host-dest";Check(CreateDirectoryA(source,nullptr)&&CreateDirectoryA(dest,nullptr),"create host folders");{CFile f;Check(f.Open(source+"\\sample.txt",CFile::modeCreate|CFile::modeWrite),"create host file");f.Write("hello",5);}
-  Host(sc,source);Host(sb,dest);Select(sc,L"Sample.txt");c->SendMessage(WM_COMMAND,ID_EDIT_COPY_APPEND);Check(BrowserTransfers::Snapshot().items.size()==2,"mixed-format Copy append failed");b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Check(GetFileAttributesA(dest+"\\sample.txt")!=INVALID_FILE_ATTRIBUTES,"host cross-window paste failed");auto hostVolume=MacBrowser::OpenWindows(Wide(dest));Verify(*hostVolume,2,u"Payload");hostVolume.reset();
-  Check(sb.MacBrowser().ShowTestFolder(0,2),"show native import target");storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Replace;b->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Check(Find(*bv,2,u"sample.txt")!=0,"Windows-to-native shared paste failed");
-  Put(*av,2,u"ReadOnly",72);int ro=sc.MacBrowser().AttachTestVolume(std::make_shared<ReadOnly>(av),"read-only");Check(sc.MacBrowser().ShowTestFolder(ro,2),"show read-only fixture");Select(sc,L"ReadOnly");auto count=BrowserTransfers::Snapshot().items.size();c->SendMessage(WM_COMMAND,ID_EDIT_CUT);Check(BrowserTransfers::Snapshot().items.size()==count,"read-only Cut changed the clipboard");c->SendMessage(WM_COMMAND,ID_EDIT_COPY);BrowserTransfers::Drag readOnly(sc);Check(!readOnly.TestDrop(sb,false,nullptr,-1,MK_SHIFT)&&readOnly.TestDrop(sb,false,nullptr,-1,0),"read-only source Shift/default policy");Verify(*bv,2,u"ReadOnly",72);Check(!readOnly.TestDrop(sc,false,nullptr,-1,MK_CONTROL),"read-only destination accepted a drop");
-  auto ca=host+"\\classic-a.dsk",cb=host+"\\classic-b.dsk";Classic(ca,61);Classic(cb,99);auto d=app.CreateBrowser(FALSE),e=app.CreateBrowser(FALSE);auto& sd=d->GetBrowserSession();auto& se=e->GetBrowserSession();Check(sd.Document()->OnOpenDocument(ca)&&se.Document()->OnOpenDocument(cb),"open classic browser fixtures");Select(sd,L"LegacyFile");d->SendMessage(WM_COMMAND,ID_EDIT_COPY);storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Replace;browserTransferError.clear();e->SendMessage(WM_COMMAND,ID_EDIT_PASTE);Check(browserTransferError.empty(),browserTransferError.c_str());auto cv=MacBrowser::OpenClassic((LPCSTR)cb,"Legacy:",false);Verify(*cv,2,u"LegacyFile",61);cv->Close();cv.reset();
-  d->SendMessage(WM_CLOSE);HFSIFACE_get_dir_flush();Check(MoveFileA(ca,ca+".retired"),"retire closed classic source image");Classic(ca,88);e->SendMessage(WM_COMMAND,ID_EDIT_PASTE);cv=MacBrowser::OpenClassic((LPCSTR)cb,"Legacy:",false);Verify(*cv,2,u"LegacyFile",61);cv->Close();Check(BrowserTransfers::Any(),"replaced-image error consumed the clipboard");
-  // Explicit raw conversion settings must still be honored for old HFS/PC
-  // transfers, rather than silently changing them into AppleDouble exports.
-  char oldOut,oldIn;int oldAd;HFSIFACE_copy_settings(&oldOut,&oldIn,&oldAd);HFSIFACE_restore_copy_settings('r','r',0);
-  Select(se,L"LegacyFile");e->SendMessage(WM_COMMAND,ID_EDIT_COPY);Host(sc,source);c->SendMessage(WM_COMMAND,ID_EDIT_PASTE);
-  {CFile exported;Check(exported.Open(source+"\\LegacyFile",CFile::modeRead),"classic raw export was not created");unsigned char bytes[29]{};Check(exported.GetLength()==29&&exported.Read(bytes,29)==29&&bytes[0]==61&&GetFileAttributesA(source+"\\._LegacyFile")==INVALID_FILE_ATTRIBUTES,"classic raw export settings/data were lost");}
-  Select(sc,L"Sample.txt");c->SendMessage(WM_COMMAND,ID_EDIT_COPY);e->SendMessage(WM_COMMAND,ID_EDIT_PASTE);cv=MacBrowser::OpenClassic((LPCSTR)cb,"Legacy:",false);uint32_t imported=0;for(auto& entry:cv->List())if(HfsPlus::CompareNames(entry.name,u"sample.txt",false)==0)imported=entry.id;std::string importedNames;for(auto& entry:cv->List())importedNames+=std::string(entry.name.begin(),entry.name.end())+":"+std::to_string(entry.forks[0].size)+";";Check(imported&&cv->Stat(imported).forks[0].size==5,("Windows raw import was not created: "+importedNames).c_str());char importedBytes[5]{};cv->Read(imported,0,0,importedBytes,5);Check(!memcmp(importedBytes,"hello",5),"Windows raw import bytes differ");cv->Close();HFSIFACE_restore_copy_settings(oldOut,oldIn,oldAd);
-  storageUiTest={};BrowserTransfers::Clear();Pump();Check(app.m_browsers.size()==3,"unexpected browser collection");
-  fprintf(report,"PASS: real hidden browser Copy/Cut/Paste routing; shared/mixed append and deduplication; Cancel/Skip/Replace with source retention; native data/resource forks and Finder metadata; folder-row/tree/background drops; same-volume moves and read-only policies; stale/descendant rejection; independent drag snapshots; source-window closure and new-window clipboard lifetime; Windows/native imports; same-label classic volumes, replaced-image rejection and legacy raw conversion settings. No physical media or computer control.\n");
- }catch(const std::exception& e){fprintf(report,"FAIL: %s; last operation: %s\n",e.what(),browserTransferError.c_str());result=1;}
- catch(CException* e){char text[512]{};e->GetErrorMessage(text,ARRAYSIZE(text));fprintf(report,"FAIL: MFC exception: %s\n",text);e->Delete();result=1;}
- BrowserTransfers::Clear();fclose(report);return result;
+  const auto ap=host+"\\a.dsk",bp=host+"\\b.dsk";
+  FormatImage(ap);
+  FormatImage(bp);
+  app.InstallBrowserTemplate(RUNTIME_CLASS(TransferDoc),RUNTIME_CLASS(TransferFrame));
+  auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);
+  Check(a&&b&&!a->IsWindowVisible()&&!b->IsWindowVisible(),"create hidden transfer frames");
+  auto& sa=a->GetBrowserSession();
+  auto& sb=b->GetBrowserSession();
+  auto av=Mount(sa,ap),bv=Mount(sb,bp);
+  const auto aPid=VolumeSession::VolumeSessionPidForTest(av);
+  const auto bPid=VolumeSession::VolumeSessionPidForTest(bv);
+  Check(aPid&&bPid&&aPid!=GetCurrentProcessId()&&bPid!=aPid,"fixtures must use two browser worker processes");
+  Put(*av,2,u"Payload");
+  const auto folder=bv->MakeDirectory(2,u"Destination");
+  Refresh(sa);
+  Refresh(sb);
+
+  stage="shared copy and cut";
+  Select(sa,L"Payload");
+  a->SendMessage(WM_COMMAND,ID_EDIT_COPY);
+  auto clipboard=BrowserTransfers::Snapshot();
+  Check(clipboard.items.size()==1&&clipboard.items.front().Volume()==av,"Copy did not capture the browser mount");
+  Success(Paste(*b));
+  Verify(*bv,2,u"Payload");
+  Check(Find(*av,2,u"Payload")&&BrowserTransfers::Any(),"copy removed its source or clipboard");
+
+  Put(*av,2,u"Move",33);
+  Put(*bv,2,u"Move",99);
+  Refresh(sa);
+  Select(sa,L"Move");
+  a->SendMessage(WM_COMMAND,ID_EDIT_CUT);
+  const auto cancelled=Paste(*b,Choice::Cancel);
+  Check(cancelled.error==ERROR_CANCELLED,"overwrite cancel was not reported as cancellation");
+  Verify(*av,2,u"Move",33);
+  Verify(*bv,2,u"Move",99);
+  clipboard=BrowserTransfers::Snapshot();
+  Check(clipboard.items.size()==1&&clipboard.items.front().cut,"cancelled paste consumed Cut");
+  Paste(*b,Choice::Skip);
+  Verify(*av,2,u"Move",33);
+  Verify(*bv,2,u"Move",99);
+  Check(BrowserTransfers::Any(),"skipped Cut consumed the clipboard");
+  Success(Paste(*b,Choice::Replace));
+  Verify(*bv,2,u"Move",33);
+  Check(!Find(*av,2,u"Move")&&!BrowserTransfers::Any(),"completed Cut was not removed from source and clipboard");
+
+  stage="cross-window folder-row and tree drops";
+  Refresh(sa);
+  Select(sa,L"Payload");
+  a->SendMessage(WM_COMMAND,ID_EDIT_COPY);
+  a->SendMessage(WM_COMMAND,ID_EDIT_COPY_APPEND);
+  clipboard=BrowserTransfers::Snapshot();
+  Check(clipboard.items.size()==1,"Copy append duplicated an entry");
+  const auto saved=clipboard.items.front().Id();
+  Put(*av,2,u"Dragged",45);
+  Put(*bv,folder,u"Dragged",98);
+  Refresh(sa);
+  Select(sa,L"Dragged");
+  BrowserTransfers::Drag drag(sa);
+  auto dropOnRow=[&]{return drag.TestDrop(sb,false,nullptr,Row(sb,L"Destination"),MK_CONTROL);};
+  Check(Transfer(dropOnRow,Choice::Cancel).error==ERROR_CANCELLED,"drag overwrite cancel was not reported");
+  Verify(*bv,folder,u"Dragged",98);
+  Transfer(dropOnRow,Choice::Skip);
+  Verify(*bv,folder,u"Dragged",98);
+  Success(Transfer(dropOnRow,Choice::Replace));
+  Verify(*bv,folder,u"Dragged",45);
+  Verify(*av,2,u"Dragged",45);
+  clipboard=BrowserTransfers::Snapshot();
+  Check(clipboard.items.size()==1&&clipboard.items.front().Id()==saved,"drag changed the shared clipboard");
+
+  Put(*av,2,u"Tree move",50);
+  Refresh(sa);
+  Select(sa,L"Tree move");
+  BrowserTransfers::Drag treeDrag(sa);
+  const auto destinationRow=sb.List()->BrowserRowAt(Row(sb,L"Destination"));
+  Check(destinationRow&&destinationRow->treeItem,"missing typed tree-folder binding");
+  const auto treeItem=destinationRow->treeItem;
+  Success(Transfer([&]{return treeDrag.TestDrop(sb,true,treeItem,-1,MK_SHIFT);}));
+  Verify(*bv,folder,u"Tree move",50);
+  Check(!Find(*av,2,u"Tree move"),"Shift drop did not move source");
+
+  stage="stale selections and drop policy";
+  Refresh(sa);
+  Select(sa,L"Payload");
+  BrowserTransfers::Drag policy(sa);
+  Check(!policy.TestDrop(sb,false,nullptr,Row(sb,L"Payload"),MK_CONTROL)&&!BackgroundCopies::Active(),
+        "regular file accepted a folder drop");
+  auto selection=sa.MacBrowser().SelectedItems(false);
+  const auto target=sb.MacBrowser().TargetFolder();
+  Check(BrowserTransfers::Choose(selection,target,true,0)==BrowserTransfers::Effect::Copy&&
+        BrowserTransfers::Choose(selection,sa.MacBrowser().TargetFolder(),true,0)==BrowserTransfers::Effect::Move,
+        "incorrect default effect across distinct or shared mounts");
+  selection.canMove=false;
+  Check(BrowserTransfers::Choose(selection,target,true,MK_SHIFT)==BrowserTransfers::Effect::None&&
+        BrowserTransfers::Choose(selection,target,true,0)==BrowserTransfers::Effect::Copy&&
+        BrowserTransfers::Choose(selection,target,false,MK_CONTROL)==BrowserTransfers::Effect::None,
+        "read-only move or target policy");
+
+  const auto original=Put(*av,2,u"Stale",51);
+  Refresh(sa);
+  Select(sa,L"Stale");
+  BrowserTransfers::Drag stale(sa);
+  a->SendMessage(WM_COMMAND,ID_EDIT_CUT);
+  av->Rename(original,2,u"Renamed");
+  const auto replacement=Put(*av,2,u"Stale",87);
+  Check(original!=replacement,"replacement fixture reused the original catalog ID");
+  Check(Transfer([&]{return stale.TestDrop(sb,false,nullptr,-1,MK_CONTROL);}).code!=0,
+        "a stale drag was reported as successful");
+  Check(Paste(*b).code!=0,"a stale Cut was reported as successful");
+  Check(!Find(*bv,2,u"Stale")&&!Find(*bv,2,u"Renamed"),"stale transfer copied an entry");
+  Verify(*av,2,u"Renamed",51);
+  Verify(*av,2,u"Stale",87);
+  clipboard=BrowserTransfers::Snapshot();
+  Check(clipboard.items.size()==1&&clipboard.items.front().cut&&clipboard.items.front().Id()==original,
+        "rejected stale Cut consumed or rebound the clipboard");
+  fprintf(report,"PASS: cross-window folder-row and tree drops, Cancel/Skip/Replace, both forks and metadata, and stale drag and Cut after replacement.\n");
+
+  stage="shared mounted image and window lifetime";
+  const auto outer=av->MakeDirectory(2,u"Outer"),inner=av->MakeDirectory(outer,u"Inner");
+  Refresh(sa);
+  Select(sa,L"Outer");
+  BrowserTransfers::Drag descendant(sa);
+  Check(Mount(sb,ap)==av&&sb.MacBrowser().Activate(Row(sb,L"Outer")),"two browsers did not share the same image mount");
+  const auto innerRow=Row(sb,L"Inner");
+  Check(innerRow>=0&&Transfer([&]{return descendant.TestDrop(sb,false,nullptr,innerRow,MK_CONTROL);}).code,
+        "cross-window descendant copy was accepted");
+  Check(!Find(*av,inner,u"Outer"),"descendant rejection left an entry");
+  const auto withinId=Put(*av,2,u"Within",71);
+  Refresh(sa);
+  Select(sa,L"Within");
+  BrowserTransfers::Drag within(sa);
+  Success(Transfer([&]{return within.TestDrop(sb,false,nullptr,-1,0);}));
+  Verify(*av,outer,u"Within",71);
+  Check(!Find(*av,2,u"Within")&&Find(*av,outer,u"Within")==withinId,
+        "default same-volume drop did not move the original catalog entry");
+
+  stage="same-image overwrite move";
+  Put(*av,2,u"Collision",44);
+  Put(*av,outer,u"Collision",92);
+  Refresh(sa);
+  Select(sa,L"Collision");
+  BrowserTransfers::Drag collision(sa);
+  auto dropWithin=[&]{return collision.TestDrop(sb,false,nullptr,-1,0);};
+  Check(Transfer(dropWithin,Choice::Cancel).error==ERROR_CANCELLED,"same-image overwrite move did not cancel");
+  Verify(*av,2,u"Collision",44);
+  Verify(*av,outer,u"Collision",92);
+  Success(Transfer(dropWithin,Choice::Replace));
+  Verify(*av,outer,u"Collision",44);
+  Check(!Find(*av,2,u"Collision"),"same-image overwrite move retained the source after success");
+
+  stage="source window closure";
+  Check(Mount(sb,bp)==bv&&VolumeSession::VolumeSessionPidForTest(av)==aPid&&
+        VolumeSession::VolumeSessionPidForTest(bv)==bPid,"transfer replaced a mounted worker");
+
+  Select(sa,L"Payload");
+  a->SendMessage(WM_COMMAND,ID_EDIT_COPY);
+  BrowserTransfers::Drag closing(sa);
+  a->SendMessage(WM_CLOSE);
+  Check(!closing.TestDrop(sb,false,nullptr,-1,MK_CONTROL)&&!BackgroundCopies::Active(),
+        "drag survived destruction of its source window");
+  const auto after=bv->MakeDirectory(2,u"After close");
+  Refresh(sb);
+  Check(sb.MacBrowser().Activate(Row(sb,L"After close")),"show post-close folder");
+  Success(Paste(*b));
+  Verify(*bv,after,u"Payload");
+
+  stage="Windows targets and read-only source";
+  auto c=app.CreateBrowser(FALSE);
+  Check(c!=nullptr,"create third browser");
+  auto& sc=c->GetBrowserSession();
+  clipboard=BrowserTransfers::Snapshot();
+  Check(clipboard.items.size()==1&&clipboard.items.front().Volume()==av,"new browser erased the shared clipboard");
+  CString source=host+"\\host-source",dest=host+"\\host-dest";
+  Check(CreateDirectoryA(source,nullptr)&&CreateDirectoryA(dest,nullptr),"create host folders");
+  {
+   CFile file;
+   Check(file.Open(source+"\\sample.txt",CFile::modeCreate|CFile::modeWrite),"create host file");
+   file.Write("hello",5);
+  }
+  Host(sc,source);
+  Host(sb,dest);
+  Select(sc,L"Sample.txt");
+  c->SendMessage(WM_COMMAND,ID_EDIT_COPY_APPEND);
+  Check(BrowserTransfers::Snapshot().items.size()==2,"mixed-format Copy append failed");
+  Success(Paste(*b));
+  Check(GetFileAttributesA(dest+"\\sample.txt")!=INVALID_FILE_ATTRIBUTES,"host cross-window paste failed");
+  Verify(*MacBrowser::OpenWindows(Wide(dest)),2,u"Payload");
+  Check(Mount(sb,bp)==bv,"reselect native import target");
+  Success(Paste(*b,Choice::Replace));
+  Check(Find(*bv,2,u"sample.txt")!=0,"Windows-to-native shared paste failed");
+
+  Put(*av,2,u"ReadOnly",72);
+  const auto readOnlyIndex=sc.MacBrowser().AttachTestVolume(std::make_shared<ReadOnly>(av),"read-only");
+  Check(sc.MacBrowser().ShowTestFolder(readOnlyIndex,2),"show read-only fixture");
+  Select(sc,L"ReadOnly");
+  const auto count=BrowserTransfers::Snapshot().items.size();
+  c->SendMessage(WM_COMMAND,ID_EDIT_CUT);
+  Check(BrowserTransfers::Snapshot().items.size()==count,"read-only Cut changed the clipboard");
+  BrowserTransfers::Drag readOnly(sc);
+  Check(!readOnly.TestDrop(sb,false,nullptr,-1,MK_SHIFT)&&!BackgroundCopies::Active(),"read-only source accepted Shift drop");
+  Success(Transfer([&]{return readOnly.TestDrop(sb,false,nullptr,-1,0);}));
+  Verify(*bv,2,u"ReadOnly",72);
+  Check(!readOnly.TestDrop(sc,false,nullptr,-1,MK_CONTROL)&&!BackgroundCopies::Active(),"read-only destination accepted a drop");
+
+  stage="classic HFS mounts and legacy conversion";
+  const auto ca=host+"\\classic-a.dsk",cb=host+"\\classic-b.dsk";
+  FormatClassic(ca);
+  FormatClassic(cb);
+  auto d=app.CreateBrowser(FALSE),e=app.CreateBrowser(FALSE);
+  Check(d&&e,"create classic browser frames");
+  auto& sd=d->GetBrowserSession();
+  auto& se=e->GetBrowserSession();
+  auto classicSource=Mount(sd,ca),classicTarget=Mount(se,cb);
+  const auto classicId=Put(*classicSource,2,u"LegacyFile",61);
+  Put(*classicTarget,2,u"LegacyFile",99);
+  Refresh(sd);
+  Select(sd,L"LegacyFile");
+  d->SendMessage(WM_COMMAND,ID_EDIT_COPY);
+  Success(Paste(*e,Choice::Replace));
+  Verify(*classicTarget,2,u"LegacyFile",61);
+  classicSource->Remove(classicId);
+  Check(Put(*classicSource,2,u"LegacyFile",88)!=classicId,"classic replacement fixture reused the ID");
+  Check(Paste(*e).code!=0,"same-name classic replacement was copied using a stale selection");
+  Verify(*classicTarget,2,u"LegacyFile",61);
+  d->SendMessage(WM_CLOSE);
+
+  stage="mounted classic raw export";
+  char oldOut,oldIn;
+  int oldAd;
+  HFSIFACE_copy_settings(&oldOut,&oldIn,&oldAd);
+  struct RestoreMode {char out,in;int ad;~RestoreMode(){HFSIFACE_restore_copy_settings(out,in,ad);}} restore{oldOut,oldIn,oldAd};
+  HFSIFACE_restore_copy_settings('r','r',0);
+  Refresh(se);
+  Select(se,L"LegacyFile");
+  e->SendMessage(WM_COMMAND,ID_EDIT_COPY);
+  Host(sc,source);
+  Success(Paste(*c));
+  {
+   CFile exported;
+   Check(exported.Open(source+"\\LegacyFile",CFile::modeRead),"classic raw export was not created");
+   unsigned char bytes[29]{};
+   Check(exported.GetLength()==29&&exported.Read(bytes,29)==29&&bytes[0]==61&&
+         GetFileAttributesA(source+"\\._LegacyFile")==INVALID_FILE_ATTRIBUTES,"classic raw export settings or data were lost");
+  }
+  stage="mounted classic raw import";
+  Select(sc,L"sample.txt");
+  c->SendMessage(WM_COMMAND,ID_EDIT_COPY);
+  Success(Paste(*e));
+  const auto imported=Find(*classicTarget,2,u"sample.txt");
+  Check(imported&&classicTarget->Stat(imported).forks[0].size==5,"Windows raw import was not created");
+  char bytes[5]{};
+  classicTarget->Read(imported,0,0,bytes,5);
+  Check(!memcmp(bytes,"hello",5),"Windows raw import bytes differ");
+
+  Check(app.m_browsers.size()==3,"unexpected browser collection");
+  fprintf(report,"PASS: shared mounted workers, same-volume move and descendant rejection, clipboard lifetime, mixed paths, read-only policy, and same-label classic HFS with raw conversion. No physical media or desktop automation.\n");
+ }catch(const std::exception& error){
+  fprintf(report,"FAIL (%s): %s; last background result: %s\n",stage,error.what(),BackgroundCopies::LastResult().message.c_str());
+  result=1;
+ }catch(CException* error){
+  char message[512]{};
+  error->GetErrorMessage(message,ARRAYSIZE(message));
+  fprintf(report,"FAIL (%s): MFC exception: %s\n",stage,message);
+  error->Delete();
+  result=1;
+ }
+ BackgroundCopies::Shutdown();
+ BackgroundCopies::enabled=false;
+ storageUiTest={};
+ BrowserTransfers::Clear();
+ fclose(report);
+ return result;
 }
 #endif

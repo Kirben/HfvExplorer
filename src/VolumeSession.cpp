@@ -523,6 +523,13 @@ public:
         EncodeEntry(args, expected);
         Call(SessionCommandCode::FinalizeDirectory, std::move(args), true, [] {}, &desired.attributes);
     }
+    bool CanMoveFrom(const Volume& source) const override {
+        return &source == this && Writable() && !Mfs();
+    }
+    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry) override {
+        Check(CanMoveFrom(source), "Move must stay in the same mounted session");
+        Rename(id,parent,entry.name);
+    }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name) override {
         std::lock_guard<std::mutex> lock(mutex_);
         Data args; args.put(id); args.put(parent); args.u16(name);
@@ -925,7 +932,9 @@ bool CopiesWithinMountedImage(const OrdinaryCopy& copy) {
     if (!copy.destination.IsMounted() || copy.sources.empty() ||
         !dynamic_cast<PersistentVolume*>(copy.destination.Volume().get())) return false;
     return std::all_of(copy.sources.begin(), copy.sources.end(), [&](const Location& source) {
-        return source.IsMounted() && !source.cut && source.Volume() == copy.destination.Volume();
+        // An overwrite move also needs the in-worker copy route. Streaming
+        // from and to the same session would nest calls on one command pipe.
+        return source.IsMounted() && source.Volume() == copy.destination.Volume();
     });
 }
 bool CopyWithinMountedImage(Volume& volume, const std::vector<uint32_t>& ids, uint32_t parent, Storage::Job& job) {
