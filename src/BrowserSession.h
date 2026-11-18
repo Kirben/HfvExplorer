@@ -4,12 +4,14 @@
 #include <functional>
 namespace BrowserDirectory { struct Row; struct Snapshot; }
 #include "VolumeCoordinator.h"
+#include "BrowserNavigation.h"
 namespace Storage { class Job; struct Result; }
 class CHFVExplorerDoc;
 class HFVExplorerTreeView;
 class CHFVExplorerListView;
 class CHFVPreviewView;
 class MainMacBrowser;
+struct FindHit;
 // One session per browser document/window. Preferences and storage queues
 // remain application-wide; navigation and pane bindings do not.
 class BrowserSession {
@@ -25,6 +27,7 @@ class BrowserSession {
  std::wstring locationTitle_;
  std::function<void()> deferred_;std::string deferredKey_;bool deferredClassic_=false;
  std::shared_ptr<Storage::Job> navigation_;
+ int navigationMediaDrive_=-1;
  std::function<void(const Storage::Result&)> navigationReady_;
  void CompleteNavigation();
  void ProcessChanges();
@@ -63,8 +66,11 @@ public:
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
     void CancelNavigation();
-    void Navigate(std::function<Storage::Result(Storage::Job&)>,
-                  std::function<void(const Storage::Result&)>);
+    void NavigationMediaChanged(DWORD driveMask);
+    void Navigate(BrowserNavigation::Request, BrowserNavigation::Read,
+        BrowserNavigation::Publish, std::function<bool()> mountCurrent,
+        std::function<void()> retry);
+    bool RevealFindHit(const FindHit&,int legacyVolume=-1);
     bool UsesAsyncNavigation() const;
     bool Navigating() const { return bool(navigation_); }
     bool ListingAvailable() const { return !listingPending_; }
@@ -76,6 +82,7 @@ public:
  bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false,bool keepListing=false);
 #ifdef HFV_TESTING
     bool asyncNavigationForTest=false;
+    std::string navigationErrorForTest;
     unsigned notificationRefreshes=0,notificationErrors=0;
 #endif
     bool finderLayout=false;

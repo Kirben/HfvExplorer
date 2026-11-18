@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "FindFiles.h"
 #include "MacBrowserModel.h"
+#include "VolumeCoordinator.h"
 #include "BrowserPresentation.h"
 #include "charset.h"
 #include <fcntl.h>
@@ -17,6 +18,7 @@ std::string display(std::string text){auto b=pathBuffer(text);mac_to_pc_charset(
 struct Folder {std::string path;unsigned depth=0;long id=0;};
 class Search {
  const FindRequest& request_;FindResults& output_;Storage::Job& job_;DWORD last_=0;
+ std::optional<DWORD> windowsMediaSerial_;
 public:
  Search(const FindRequest& request,FindResults& output,Storage::Job& job):request_(request),output_(output),job_(job){}
  void progress(const std::string& path,bool force=false){
@@ -24,11 +26,34 @@ public:
   DWORD now=GetTickCount();if(!force&&now-last_<100)return;last_=now;
   Storage::Progress p;p.utf8=bool(request_.location.native);p.phase="Finding files";p.path=path;p.detail=std::to_string(output_.checked)+" entries checked; "+std::to_string(output_.hits.size())+" matches";job_.progress(p);
  }
- bool hit(const std::string& name,const std::string& parent,const std::string& full,bool folder,unsigned long long bytes){
+ bool hit(const std::string& name,const std::string& parent,const std::string& full,bool folder,unsigned long long bytes,uint32_t parentId=0,uint32_t id=0){
   ++output_.checked;progress(parent);
   if((!folder||request_.includeFolders)&&FindNameMatches(name,request_.pattern,request_.caseSensitive)){
    if(output_.hits.size()>=request_.limit){output_.truncated=true;return false;}
-   output_.hits.push_back({name,parent,full,bytes,folder});
+   FindHit result{name,parent,full,bytes,folder};
+   if(request_.location.mac){
+    auto origin=request_.location.origin.IsClassic()?request_.location.origin:
+        FileOperations::Location::Classic(request_.location.volume,parent);
+    result.destination=origin;
+    result.destination.SetClassic(origin.ClassicImage(),parent);
+    result.reveal=origin;
+    result.reveal.SetClassic(origin.ClassicImage(),full);
+    result.destination.expectedCatalogId=parentId;
+    result.reveal.expectedCatalogId=id;
+    if(origin.MediaGenerationKnown()){
+     result.destination.BindMediaGeneration(origin.MediaGeneration());
+     result.reveal.BindMediaGeneration(origin.MediaGeneration());
+    }
+   }else{
+    result.destination=FileOperations::Location::Windows(VolumeCoord::Wide(parent));
+    result.reveal=FileOperations::Location::Windows(VolumeCoord::Wide(full));
+    result.windowsMediaSerial=windowsMediaSerial_;
+    try{result.reveal.expectedIdentity=MacBrowser::DescribeWindowsFile(result.reveal.WindowsPath()).identity;}
+    catch(const std::exception&){++output_.unreadable;return true;}
+   }
+   result.destination.directory=true;
+   result.reveal.directory=folder;
+   output_.hits.push_back(std::move(result));
   }return true;
  }
  void queued(std::vector<Folder>& pending,Folder folder){
@@ -36,30 +61,31 @@ public:
   pending.push_back(std::move(folder));
  }
  void mac(){
-  auto volumePath=pathBuffer(request_.location.volume);hfsvol* volume=hfs_mount(volumePath.data(),0,O_RDONLY);
+  auto volumePath=pathBuffer(request_.location.volume);hfsvol* volume=hfs_mount(volumePath.data(),1,O_RDONLY);
   if(!volume)throw std::runtime_error(hfs_error?hfs_error:"Could not open the Macintosh volume");
   struct Close{hfsvol* value;~Close(){hfs_umount(value);}} close={volume};
   auto root=pathBuffer(request_.location.directory);pc_to_mac_charset(reinterpret_cast<unsigned char*>(root.data()));
   std::string start=root.data();if(start.find(':')==std::string::npos)start+=':';
-  auto startPath=pathBuffer(start);hfsdirent entry={};
+  auto startPath=pathBuffer(start.substr(start.find(':')));hfsdirent entry={};
   if(hfs_stat(volume,startPath.data(),&entry)<0||!(entry.flags&HFS_ISDIR))throw std::runtime_error("The selected search location is not an accessible Macintosh folder");
   std::vector<Folder> pending={{start,0,entry.cnid}};std::set<long> visited;
   while(!pending.empty()){
    Folder folder=std::move(pending.back());pending.pop_back();progress(display(folder.path),true);
    if(!visited.insert(folder.id).second)throw std::runtime_error("Search stopped because the Macintosh catalog repeats a folder ID");
-   auto path=pathBuffer(folder.path);hfsdir* directory=hfs_opendir(volume,path.data());
+   auto path=pathBuffer(folder.path.substr(folder.path.find(':')));hfsdir* directory=hfs_opendir(volume,path.data());
    if(!directory)throw std::runtime_error(hfs_error?hfs_error:"Could not read a Macintosh folder");
    struct CloseDir{hfsdir* value;~CloseDir(){hfs_closedir(value);}} closeDir={directory};
    for(;;){
     errno=0;if(hfs_readdir(directory,&entry)<0){if(errno==ENOENT)break;throw std::runtime_error(hfs_error?hfs_error:"Could not read the Macintosh catalog");}
     std::string full=folder.path+(folder.path.back()==':'?"":":")+entry.name;bool isDirectory=(entry.flags&HFS_ISDIR)!=0;
-    if(!hit(display(entry.name),display(folder.path),display(full),isDirectory,isDirectory?0:static_cast<unsigned long long>(entry.u.file.dsize)+entry.u.file.rsize))return;
+    if(!hit(display(entry.name),display(folder.path),display(full),isDirectory,isDirectory?0:static_cast<unsigned long long>(entry.u.file.dsize)+entry.u.file.rsize,uint32_t(folder.id),uint32_t(entry.cnid)))return;
     if(isDirectory&&request_.recursive)queued(pending,{full,folder.depth+1,entry.cnid});
    }
   }
  }
  void native(){
   auto volume=request_.location.native;output_.utf8=true;
+  volume->ValidateMedia();
   struct NativeFolder {uint32_t id;std::string path;std::vector<uint32_t> route;std::set<uint32_t> ancestors;};
   auto entry=volume->Stat(request_.location.nativeFolder);
   auto route=request_.location.nativePath;if(route.empty())route.push_back(request_.location.nativeFolder);
@@ -71,7 +97,14 @@ public:
     auto name=BrowserPresentation::Utf8(item.name),path=folder.path+":"+name;auto nodes=folder.route;nodes.push_back(item.id);
     if((!item.directory||request_.includeFolders)&&FindNameMatches(MacBrowser::Wide(item.name),BrowserPresentation::FromUtf8(request_.pattern),request_.caseSensitive)){
      if(output_.hits.size()>=request_.limit){output_.truncated=true;return;}
-     output_.hits.push_back({name,folder.path,path,item.directory?0:item.forks[0].size+item.forks[1].size,item.directory,nodes});
+     FindHit result{name,folder.path,path,item.directory?0:item.forks[0].size+item.forks[1].size,item.directory,nodes};
+     result.destination=FileOperations::Location::Mounted(volume,item.directory?item.id:folder.id);
+     result.destination.directory=true;
+     auto& selection=item.directory?result.destination:result.reveal;
+     if(!item.directory)selection=FileOperations::Location::Mounted(volume,item.id);
+     selection.expectedName=item.name;
+     selection.expectedParent=item.parent;
+     output_.hits.push_back(std::move(result));
     }
     if(item.directory&&request_.recursive){auto resolved=item.resolvedId?item.resolvedId:item.id;
      if(!item.readError.empty()||folder.ancestors.count(resolved)){++output_.unreadable;continue;}
@@ -82,7 +115,15 @@ public:
   }
  }
  void windows(){
-  const std::string root=request_.location.directory;DWORD attributes=GetFileAttributesA(root.c_str());
+  const std::string root=request_.location.directory;
+  if(request_.location.checkWindowsMedia){
+   const auto drive=root.substr(0,3);
+   DWORD serial=0;
+   if(!GetVolumeInformationA(drive.c_str(),nullptr,0,&serial,nullptr,nullptr,nullptr,0))
+    throw std::runtime_error("Cannot identify the Windows search media");
+   windowsMediaSerial_=serial;
+  }
+  DWORD attributes=GetFileAttributesA(root.c_str());
   if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The selected search location is not an accessible Windows folder");
   std::vector<Folder> pending={{root,0,0}};
   while(!pending.empty()){

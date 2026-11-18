@@ -6,6 +6,7 @@
 #include "CopyProgress.h"
 #include "BrowserDirectory.h"
 #include "MainMacBrowser.h"
+#include "FindFiles.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "utils.h"
@@ -109,6 +110,21 @@ void PumpUntil(Predicate ready,const char* message)
  }
 }
 
+FindHit SearchHit(FindLocation location,const char* pattern)
+{
+ Storage::Job job;
+ auto results=std::make_shared<FindResults>();
+ const auto status=MakeFindFilesJob({std::move(location),pattern},results)(job);
+ Check(!status.code&&results->hits.size()==1,"search fixture did not return one typed hit");
+ return results->hits.front();
+}
+
+bool Selected(CHFVExplorerListView& view,const wchar_t* name)
+{
+ auto row=Find(view,name);
+ return row>=0&&(view.GetListCtrl().GetItemState(row,LVIS_SELECTED)&LVIS_SELECTED);
+}
+
 void TestNavigation()
 {
  auto slow=std::make_shared<NavigationFixture>(u"Slow");
@@ -119,7 +135,7 @@ void TestNavigation()
  int second=browser.AttachTestVolume(other,"other");
  Check(browser.ShowTestFolder(second,2),"open other volume");
  auto quickRoot=first.tree.GetTreeCtrl().GetSelectedItem();
- int index=browser.AttachTestVolume(slow,"slow");
+ int index=browser.AttachTestVolume(slow,"slow",25);
  Check(browser.ShowTestFolder(index,2),"open slow volume");
  auto& tree=first.tree.GetTreeCtrl();
  auto slowRoot=tree.GetSelectedItem();
@@ -143,13 +159,51 @@ void TestNavigation()
  PumpUntil([&]{return !session.Navigating();},"return to slow root failed");
  ResetEvent(slow->gate);
  ResetEvent(slow->entered);
- tree.SelectItem(tree.GetChildItem(slowRoot));
+ FindHit hit;
+ hit.destination=FileOperations::Location::Mounted(slow,3);
+ hit.reveal=FileOperations::Location::Mounted(slow,5);
+ hit.reveal.expectedName=u"Slow child";
+ hit.reveal.expectedParent=3;
+ hit.nativePath={2,3,5};
+ Check(session.RevealFindHit(hit),"queue typed mounted Find result");
+ PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;},"mounted Find read never started");
+ tree.SelectItem(quickRoot);
+ PumpUntil([&]{return !session.Navigating();},"new folder did not supersede Find");
+ SetEvent(slow->gate);
+ PumpUntil([&]{return VolumeCoord::Readable(slow->ResourceKey())&&
+     VolumeCoord::Available({{slow->ResourceKey(),VolumeCoord::Mode::Write}});},"superseded Find retained its lease");
+ Check(Find(first.list,L"Other file")>=0&&Find(first.list,L"Slow child")<0,
+       "a superseded Find changed the newer listing");
+
+ tree.SelectItem(slowRoot);
+ PumpUntil([&]{return !session.Navigating();},"open root before Find media test");
+ ResetEvent(slow->gate);
+ ResetEvent(slow->entered);
+ Check(session.RevealFindHit(hit),"queue Find on mounted media");
  PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;},"media swap read never started");
  slow->changed=true;
  SetEvent(slow->gate);
  PumpUntil([&]{return !session.Navigating();},"media swap read did not finish");
  Check(!session.ListingAvailable()&&Find(first.list,L"Slow file")>=0&&Find(first.list,L"Slow child")<0,
-       "a listing from changed media was published or left actionable");
+       "a Find listing from changed media was published or left actionable");
+ slow->changed=false;
+ Check(session.RevealFindHit(hit),"retry Find on valid media");
+ PumpUntil([&]{return !session.Navigating();},"valid Find did not complete");
+ Check(session.ListingAvailable()&&Selected(first.list,L"Slow child"),
+       "mounted Find did not select the result after publication");
+ tree.SelectItem(slowRoot);
+ PumpUntil([&]{return !session.Navigating();},"open root before device notification");
+ ResetEvent(slow->gate);
+ ResetEvent(slow->entered);
+ Check(session.RevealFindHit(hit),"queue Find before device notification");
+ PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;},"notification read never started");
+ session.NavigationMediaChanged(1u<<24);
+ Check(session.Navigating(),"an unrelated media notification cancelled navigation");
+ session.NavigationMediaChanged(1u<<25);
+ SetEvent(slow->gate);
+ PumpUntil([&]{return VolumeCoord::Available({{slow->ResourceKey(),VolumeCoord::Mode::Write}});},"cancelled device navigation retained its lease");
+ Check(!session.Navigating()&&!session.ListingAvailable()&&Find(first.list,L"Slow file")>=0,
+       "a device notification did not invalidate the pending Find");
 
  auto closing=std::make_shared<NavigationFixture>(u"Closing");
  {
@@ -174,6 +228,7 @@ int RunBrowserSessionTest(const char* directory){
  int result=0;
  try{
   TestNavigation();
+  fprintf(report,"PASS: stale selection and Find results, worker media validation, per-drive media notifications, and closing during a read.\n");
   auto first=std::make_unique<Panes>();Panes second;auto& a=*first;auto& b=second;
   // Keep the MFC main-window pointer on B while issuing commands to A.
   app.m_pMainWnd=&b.owner;
@@ -210,6 +265,28 @@ int RunBrowserSessionTest(const char* directory){
    Check(Find(a.list,L"First.txt")>=0&&session.ListingAvailable(),"Windows refresh did not publish its listing");
    session.asyncNavigationForTest=false;
   }
+  {
+   auto nested=wa+"\\Nested\\Deep";
+   Check(CreateDirectoryA(wa+"\\Nested",nullptr)&&CreateDirectoryA(nested,nullptr),"create unexpanded Windows search folders");
+   auto filename=nested+"\\reveal.txt";
+   {CFile file;Check(file.Open(filename,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows search file");}
+   FindLocation scope;scope.directory=(LPCSTR)wa;
+   auto hit=SearchHit(scope,"reveal.txt");
+   auto& session=a.Session();
+   Check(session.RevealFindHit(hit,0),"queue Windows Find result");
+   PumpUntil([&]{return !session.Navigating();},"Windows Find did not complete");
+   Check(Selected(a.list,L"Reveal.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==hit.destination.WindowsPath(),
+       "Windows Find did not materialize its folder path and select its file");
+   auto copy=filename+".replacement";
+   {CFile file;Check(file.Open(copy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacement search file");}
+   Check(MoveFileExA(copy,filename,MOVEFILE_REPLACE_EXISTING)!=FALSE,"replace the Windows search result");
+   Check(session.RevealFindHit(hit,0),"queue stale Windows Find result");
+   PumpUntil([&]{return !session.Navigating();},"stale Windows Find did not complete");
+   Check(!session.ListingAvailable(),"a stale Windows Find result silently rebound to a replacement file");
+   a.tree.GetTreeCtrl().SelectItem(a.doc.m_fats[0].m_rootitem);
+   Check(DeleteFileA(filename)&&RemoveDirectoryA(nested)&&RemoveDirectoryA(wa+"\\\\Nested"),
+       "clean up the Windows Find fixture before the startup check");
+  }
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"First.txt")>=0,"startup before global main-window assignment");
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
@@ -220,7 +297,34 @@ int RunBrowserSessionTest(const char* directory){
   PumpUntil([&]{return !a.Session().Navigating();},"classic refresh did not finish");
   Check(Find(a.list,L"first classic")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==classicRoot,
         "classic asynchronous read changed selection or lost its listing");
+  {
+   const std::string image=(LPCSTR)a.doc.m_volumes[0].m_file_name;
+   auto volume=hfs_mount(const_cast<char*>(image.c_str()),0,O_RDWR);
+   char folder[]="Same:Nested",child[]="Same:Nested:found",type[]="TEXT",creator[]="TEST";
+   Check(volume&&hfs_mkdir(volume,folder)==0&&hfs_create(volume,child,type,creator)==0&&hfs_umount(volume)==0,
+       "create unexpanded classic Find fixture");
+   FindLocation scope;scope.mac=true;scope.directory="Same:";scope.volume=image;
+   scope.origin=a.Session().MacBrowser().TargetFolder();
+   auto hit=SearchHit(scope,"found");
+   Check(a.Session().RevealFindHit(hit,0),"queue classic Find result");
+   PumpUntil([&]{return !a.Session().Navigating();},"classic Find did not complete");
+   Check(Selected(a.list,L"found"),("classic Find did not select the result: "+
+       a.Session().navigationErrorForTest+" (listing available "+std::to_string(a.Session().ListingAvailable())+
+       ", rows "+std::to_string(a.list.GetListCtrl().GetItemCount())+")").c_str());
+   Check(a.Session().MacBrowser().CaptureItem(Find(a.list,L"found")).expectedCatalogId==hit.reveal.expectedCatalogId,
+       "classic file row lost the catalog ID supplied by Find");
+   volume=hfs_mount(const_cast<char*>(image.c_str()),0,O_RDWR);
+   Check(volume&&hfs_delete(volume,child)==0&&hfs_create(volume,child,type,creator)==0&&hfs_umount(volume)==0,
+       "replace classic Find fixture at the same path");
+   Check(a.Session().RevealFindHit(hit,0),"queue replaced classic Find result");
+   PumpUntil([&]{return !a.Session().Navigating();},"replaced classic Find did not complete");
+   Check(!a.Session().ListingAvailable()&&!a.Session().navigationErrorForTest.empty(),
+       "Find rebound the classic catalog ID to a replacement file");
+   a.tree.GetTreeCtrl().SelectItem(classicRoot);
+   PumpUntil([&]{return !a.Session().Navigating();},"return to classic root after Find");
+  }
   a.Session().asyncNavigationForTest=false;
+  fprintf(report,"PASS: typed Windows and classic HFS Find materialize an unexpanded folder, reveal the file, and reject a replacement at the same path.\n");
   auto launchA=a.Session().MacBrowser().CaptureItem(Find(a.list,L"first classic"));
   auto launchB=b.Session().MacBrowser().CaptureItem(Find(b.list,L"second classic"));
   auto verifyExport=[&](Panes& origin,const FileOperations::Location& selected,const char* leaf){
