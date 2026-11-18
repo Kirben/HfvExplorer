@@ -444,7 +444,7 @@ struct Process {
 
 enum class SessionCommandCode {
     Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
-    HardLink, ValidateRemoval, ValidateCopy, Compression, TestCrashRename
+    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, TestCrashRename
 };
 constexpr size_t sessionReadLimit = 256 * 1024;
 
@@ -751,8 +751,62 @@ public:
         });
         return id;
     }
-    uint32_t Put(uint32_t,const Entry&,Reader,bool) override {
-        throw HfsPlus::Error("Writing forks on this image requires a copy worker operation");
+    uint32_t Put(uint32_t parent, const Entry& entry, Reader reader, bool replace) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args;
+        args.put(parent); args.put(replace); args.put(entry.attributesKnown);
+        EncodeEntry(args, entry);
+        uint32_t id = 0;
+        std::exception_ptr sourceFailure;
+        try {
+            Call(SessionCommandCode::Put, std::move(args), true, [&] {
+                for (;;) {
+                    Data packet;
+                    auto message = Receive(worker_->output.value, packet);
+                    if (message == SessionResult) ReadResult(packet);
+                    if (message == SessionBytes) {
+                        const auto value = packet.get(); packet.end();
+                        Check(value && value <= UINT32_MAX, "Invalid copied entry ID");
+                        id = uint32_t(value);
+                        break;
+                    }
+                    Check(message == SessionReadRequest && !sourceFailure, "Unexpected fork transfer response");
+                    const auto fork = packet.get(), offset = packet.get(), size = packet.get();
+                    packet.end();
+                    Check(fork <= 1 && size && size <= sessionReadLimit, "Invalid fork transfer range");
+                    const auto length = fork ? entry.forks[1].size : entry.forks[0].size;
+                    Check(offset <= length && size <= length - offset, "Fork transfer exceeds source length");
+                    Data bytes;
+                    try {
+                        bytes.bytes.resize(size_t(size));
+                        reader(unsigned(fork), offset, bytes.bytes.data(), bytes.bytes.size());
+                    } catch (...) {
+                        sourceFailure = std::current_exception();
+                    }
+                    if (sourceFailure) Send(worker_->input.value, Cancel);
+                    else Send(worker_->input.value, SessionBytes, std::move(bytes));
+                }
+            }, &entry.attributes);
+        } catch (const SessionError&) {
+            if (sourceFailure) std::rethrow_exception(sourceFailure);
+            throw;
+        }
+        return id;
+    }
+    void ValidateEntry(const Entry& entry) const override {
+        auto& self = const_cast<PersistentVolume&>(*this);
+        std::lock_guard<std::mutex> lock(self.mutex_);
+        Data args;
+        EncodeEntry(args, entry);
+        self.Call(SessionCommandCode::ValidateEntry, std::move(args), false, [] {}, &entry.attributes);
+    }
+    void FinalizeDirectory(uint32_t id, const Entry& desired, const Entry& expected, bool merge) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args;
+        args.put(id); args.put(merge); args.put(desired.attributesKnown);
+        EncodeEntry(args, desired);
+        EncodeEntry(args, expected);
+        Call(SessionCommandCode::FinalizeDirectory, std::move(args), true, [] {}, &desired.attributes);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -820,11 +874,14 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
     #ifdef HFV_TESTING
         constexpr auto maximumCommand = SessionCommandCode::TestCrashRename;
 #else
-        constexpr auto maximumCommand = SessionCommandCode::Compression;
+        constexpr auto maximumCommand = SessionCommandCode::ValidateEntry;
 #endif
         Check(opcode <= uint64_t(maximumCommand), "Invalid volume session command");
         auto command = SessionCommandCode(opcode);
-        Check(attributes[0].has_value() == (command == SessionCommandCode::SetAttributes) && !attributes[1],
+        const bool carriesAttributes = command == SessionCommandCode::SetAttributes ||
+            command == SessionCommandCode::Put || command == SessionCommandCode::FinalizeDirectory ||
+            command == SessionCommandCode::ValidateEntry;
+        Check(attributes[0].has_value() == carriesAttributes && !attributes[1],
               "Unexpected volume session attributes");
         Storage::OutcomeEvidence evidence;
         try {
@@ -894,6 +951,45 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                     Check(decision == SessionContinue, "Invalid volume compression decision");
                 });
                 Send(output, SessionBytes);
+                break;
+            }
+            case SessionCommandCode::Put: {
+                const auto parent = number(packet);
+                const auto replace = packet.flag(), attributesKnown = packet.flag();
+                auto entry = DecodeEntry(packet); packet.end();
+                entry.attributesKnown = attributesKnown;
+                entry.attributes = std::move(*attributes[0]);
+                const auto id = volume.Put(parent, entry, [&](unsigned fork, uint64_t offset, void* out, size_t size) {
+                    auto* buffer = static_cast<uint8_t*>(out);
+                    while (size) {
+                        const auto count = (std::min)(size, sessionReadLimit);
+                        Data range; range.put(fork); range.put(offset); range.put(count);
+                        Send(output, SessionReadRequest, std::move(range));
+                        Data bytes;
+                        const auto reply = Receive(input, bytes);
+                        if (reply == Cancel) { bytes.end(); throw Storage::Cancelled(); }
+                        Check(reply == SessionBytes && bytes.bytes.size() == count, "Invalid fork transfer data");
+                        memcpy(buffer, bytes.bytes.data(), count);
+                        offset += count; buffer += count; size -= count;
+                    }
+                }, replace);
+                writeNumber(id);
+                break;
+            }
+            case SessionCommandCode::FinalizeDirectory: {
+                const auto id = number(packet);
+                const auto merge = packet.flag(), attributesKnown = packet.flag();
+                auto desired = DecodeEntry(packet);
+                auto expected = DecodeEntry(packet); packet.end();
+                desired.attributesKnown = attributesKnown;
+                desired.attributes = std::move(*attributes[0]);
+                volume.FinalizeDirectory(id, desired, expected, merge);
+                break;
+            }
+            case SessionCommandCode::ValidateEntry: {
+                auto entry = DecodeEntry(packet); packet.end();
+                entry.attributes = std::move(*attributes[0]);
+                volume.ValidateEntry(entry);
                 break;
             }
             case SessionCommandCode::ValidateRemoval: {
@@ -995,6 +1091,12 @@ bool UsesWorker(const Request &request) {
         return false;
 #endif
     auto persistent=[](const Location& item) { return item.IsMounted() && item.Volume()->HasPersistentWorker(); };
+    if (auto* copy = request.Get<OrdinaryCopy>(); copy && persistent(copy->destination) && !copy->sources.empty()) {
+        const auto destinationKey = copy->destination.Volume()->ResourceKey();
+        if (std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
+            return persistent(source) && source.Volume()->ResourceKey() != destinationKey;
+        })) return false;
+    }
     if(auto* rename=request.Rename(); rename&&persistent(rename->source)) return false;
     if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
         std::all_of(deletion->selection.begin(),deletion->selection.end(),persistent)) return false;

@@ -14,7 +14,7 @@ using FileOperations::ForkSelector;
 using MacBrowser::Entry;
 using MacBrowser::WorkerOrigin;
 
-constexpr uint64_t protocol = 8;
+constexpr uint64_t protocol = 9;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     RequestPacket = 1,
@@ -37,6 +37,7 @@ enum Message : DWORD {
     SessionResult,
     SessionProgress,
     SessionContinue,
+    SessionReadRequest,
     Finished
 };
 void Check(bool ok, const char *message);

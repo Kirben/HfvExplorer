@@ -38,7 +38,7 @@ std::shared_ptr<Volume> Image(const std::wstring &path,
     source.reset();
     return OpenImage(path);
 }
-uint32_t Put(Volume &v, uint32_t parent, const std::u16string &name, uint64_t size = 300000) {
+uint32_t Put(Volume &v, uint32_t parent, const std::u16string &name, uint64_t size = 300000, BYTE bias = 0) {
     Entry e;
     e.name = name;
     e.forks[0].size = size;
@@ -46,14 +46,14 @@ uint32_t Put(Volume &v, uint32_t parent, const std::u16string &name, uint64_t si
     e.finder[0] = 42;
     return v.Put(
         parent, e,
-        [](unsigned fork, uint64_t at, void *output, size_t n) {
+        [bias](unsigned fork, uint64_t at, void *output, size_t n) {
             auto p = static_cast<BYTE *>(output);
             for (size_t i = 0; i < n; ++i)
-                p[i] = BYTE((at + i) * 7 + fork * 13);
+                p[i] = BYTE((at + i) * 7 + fork * 13 + bias);
         },
         false);
 }
-void Verify(Volume &v, uint32_t id, uint64_t size = 300000) {
+void Verify(Volume &v, uint32_t id, uint64_t size = 300000, BYTE bias = 0) {
     auto e = v.Stat(id);
     Check(e.forks[0].size == size && e.forks[1].size == 173 && e.finder[0] == 42,
           "worker fork/metadata lengths");
@@ -63,10 +63,37 @@ void Verify(Volume &v, uint32_t id, uint64_t size = 300000) {
             auto n = size_t((std::min)(uint64_t(buffer.size()), e.forks[fork].size - at));
             v.Read(id, fork, at, buffer.data(), n);
             for (size_t i = 0; i < n; ++i)
-                Check(buffer[i] == BYTE((at + i) * 7 + fork * 13), "worker fork contents");
+                Check(buffer[i] == BYTE((at + i) * 7 + fork * 13 + bias), "worker fork contents");
             at += n;
         }
 }
+// Keep the real source session, but intercept fork reads to exercise failures
+// after the destination worker has already begun staging an overwrite.
+class InterruptedSource : public Volume {
+    std::shared_ptr<Volume> source_;
+    std::function<void()> interrupt_;
+    unsigned reads_ = 0;
+public:
+    InterruptedSource(std::shared_ptr<Volume> source, std::function<void()> interrupt)
+        : source_(std::move(source)), interrupt_(std::move(interrupt)) {}
+    bool HasPersistentWorker() const override { return source_->HasPersistentWorker(); }
+    std::string ResourceKey() const override { return source_->ResourceKey(); }
+    std::u16string Name() const override { return source_->Name(); }
+    const char* Kind() const override { return source_->Kind(); }
+    bool Writable() const override { return false; }
+    bool CaseSensitive() const override { return source_->CaseSensitive(); }
+    uint64_t FreeBytes() const override { return source_->FreeBytes(); }
+    std::vector<Entry> List(uint32_t parent) override { return source_->List(parent); }
+    Entry Stat(uint32_t id) override { return source_->Stat(id); }
+    void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t size) override {
+        if (size && ++reads_ == 2) interrupt_();
+        source_->Read(id, fork, offset, out, size);
+    }
+    uint32_t MakeDirectory(uint32_t, const std::u16string&) override { throw HfsPlus::Error("Read-only fixture"); }
+    uint32_t Put(uint32_t, const Entry&, Reader, bool) override { throw HfsPlus::Error("Read-only fixture"); }
+    void Rename(uint32_t, uint32_t, const std::u16string&) override { throw HfsPlus::Error("Read-only fixture"); }
+    void Remove(uint32_t) override { throw HfsPlus::Error("Read-only fixture"); }
+};
 void Wait(const Operation &op) {
     Check(WaitForSingleObject(op.Job()->event(), 30000) == WAIT_OBJECT_0, "copy process timed out");
 }
@@ -364,38 +391,111 @@ int RunCopyProcessTest(const char *directory) {
         {
             const auto fromPath = Wide(root + "\\persistent-source.dsk");
             const auto toPath = Wide(root + "\\persistent-target.dsk");
-            { auto seed = Image(fromPath); Put(*seed,2,u"Persistent payload",4096); }
-            Image(toPath, HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+            { auto seed = Image(fromPath); Put(*seed,2,u"Persistent payload"); }
+            {
+                auto seed = Image(toPath, HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+                Put(*seed,2,u"Persistent payload",4096,93);
+            }
             auto from = OpenBrowserImage(fromPath), to = OpenBrowserImage(toPath);
             Entry original, copied;
             Check(from->HasPersistentWorker() && to->HasPersistentWorker() &&
-                      from->FindChild(2,u"Persistent payload",original),
+                      from->FindChild(2,u"Persistent payload",original) &&
+                      to->FindChild(2,u"Persistent payload",copied),
                   "persistent copy fixture could not browse");
-            auto initialIdentity = original.identity;
-            auto fromPid = CopyProcess::VolumeSessionPidForTest(from);
-            auto toPid = CopyProcess::VolumeSessionPidForTest(to);
+            const auto existing = copied;
+            const auto freeBeforeFailure = to->FreeBytes();
+            const auto fromPid = CopyProcess::VolumeSessionPidForTest(from);
+            const auto toPid = CopyProcess::VolumeSessionPidForTest(to);
+            auto verifySessions = [&] {
+                Check(from->Stat(original.id).identity == original.identity &&
+                          CopyProcess::VolumeSessionPidForTest(from) == fromPid &&
+                          CopyProcess::VolumeSessionPidForTest(to) == toPid,
+                      "cross-volume copy restarted a persistent session");
+            };
+            struct Gate {
+                HANDLE entered = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+                HANDLE release = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+                ~Gate() { if (entered) CloseHandle(entered); if (release) CloseHandle(release); }
+            };
+            auto gate = std::make_shared<Gate>();
+            Check(gate->entered && gate->release, "persistent cancellation gate");
+            auto delayed = std::make_shared<InterruptedSource>(from, [gate] {
+                SetEvent(gate->entered);
+                Check(WaitForSingleObject(gate->release, 10000) == WAIT_OBJECT_0, "persistent read gate timed out");
+            });
+            auto cancel = Submit(OrdinaryCopy{{Native(delayed,original.id)},Native(to)});
+            Conflict(cancel);
+            cancel.Job()->resolve(Storage::ConflictChoice::Replace);
+            const auto entered = WaitForSingleObject(gate->entered, 10000);
+            cancel.Job()->cancel();
+            SetEvent(gate->release);
+            Wait(cancel);
+            Check(entered == WAIT_OBJECT_0 && cancel.Job()->result().error == ERROR_CANCELLED,
+                  "persistent overwrite did not cancel during fork transfer");
+            Verify(*to,existing.id,4096,93);
+            Check(to->FreeBytes() == freeBeforeFailure, "aborted overwrite leaked allocation blocks");
+            verifySessions();
+
+            auto faulty = std::make_shared<InterruptedSource>(from, [] {
+                throw HfsPlus::Error("Injected persistent source read failure");
+            });
+            auto failed = Submit(OrdinaryCopy{{Native(faulty,original.id)},Native(to)});
+            Conflict(failed);
+            failed.Job()->resolve(Storage::ConflictChoice::Replace);
+            Wait(failed);
+            Check(failed.Job()->result().code &&
+                      failed.Job()->result().message.find("Injected persistent source read failure") != std::string::npos &&
+                      to->Stat(existing.id).identity == existing.identity,
+                  "failed persistent overwrite did not preserve the original entry");
+            Verify(*to,existing.id,4096,93);
+            Check(to->FreeBytes() == freeBeforeFailure, "aborted overwrite leaked allocation blocks");
+            verifySessions();
+
             auto selected = Native(from,original.id);
             selected.expectedIdentity = original.identity;
-            Pass(Submit(OrdinaryCopy{{selected},Native(to)}));
-            Check(from->Stat(original.id).identity==initialIdentity &&
-                      to->FindChild(2,u"Persistent payload",copied) &&
-                      CopyProcess::VolumeSessionPidForTest(from)!=fromPid &&
-                      CopyProcess::VolumeSessionPidForTest(to)!=toPid,
-                  "cross-volume copy did not resume persistent sessions after handoff");
-            Verify(*to,copied.id,4096);
+            Request transfer = OrdinaryCopy{{selected},Native(to)};
+            transfer.background = true;
+            auto copy = Submit(std::move(transfer));
+            Conflict(copy);
+            copy.Job()->resolve(Storage::ConflictChoice::Replace);
+            Wait(copy);
+            Check(!copy.Job()->result().code && copy.Snapshot().complete &&
+                      to->FindChild(2,u"Persistent payload",copied),
+                  "persistent cross-volume copy failed");
+            verifySessions();
+            Verify(*to,copied.id);
+
+            const auto folder = from->MakeDirectory(2,u"Persistent folder");
+            Put(*from,folder,u"Nested forks",4096);
+            const HfsPlus::Attributes folderAttributes{{u"user.folder",{5,6,7}}};
+            from->SetAttributes(folder,folderAttributes);
+            const auto originalFolder = from->Stat(folder);
+            auto recursive = Submit(OrdinaryCopy{{Native(from,folder)},Native(to)});
+            Wait(recursive);
+            Entry copiedFolder, nested;
+            Check(!recursive.Job()->result().code && recursive.Snapshot().complete &&
+                      to->FindChild(2,u"Persistent folder",copiedFolder) &&
+                      to->FindChild(copiedFolder.id,u"Nested forks",nested) &&
+                      copiedFolder.modified == originalFolder.modified &&
+                      to->GetAttributes(copiedFolder.id) == folderAttributes,
+                  "persistent recursive copy did not preserve folder metadata");
+            Verify(*to,nested.id,4096);
+            verifySessions();
+
             auto stablePid=CopyProcess::VolumeSessionPidForTest(to);
             HfsPlus::Attributes edited{{u"user.session",{1,2,3,4}}};
             auto attrs=Submit(EditAttributes{Native(to,copied.id),{},edited});
             Wait(attrs);
             Check(!attrs.Job()->result().code&&to->GetAttributes(copied.id)==edited,
                   "persistent metadata write did not update the mounted volume");
-            auto compression=Submit(ChangeCompression{Native(to,copied.id),to->Stat(copied.id),edited,
+            const auto compressible = Put(*to,2,u"Compression fixture",4096);
+            auto compression=Submit(ChangeCompression{Native(to,compressible),to->Stat(compressible),{},
                 HfsPlus::Volume::CompressionMode::Zlib});
             Wait(compression);
-            Check(!compression.Job()->result().code&&to->Stat(copied.id).compressed&&
+            Check(!compression.Job()->result().code&&to->Stat(compressible).compressed&&
                       CopyProcess::VolumeSessionPidForTest(to)==stablePid,
                   "metadata writes restarted the volume session");
-            fprintf(report,"PASS: persistent HFS+/HFSX sessions retain metadata writes and resume after cross-volume copies\n");
+            fprintf(report,"PASS: persistent HFS+/HFSX sessions stay mounted through copy, cancellation, and aborted overwrite\n");
         }
         {
             const auto inputPath = Wide(root + "\\launch-source.dsk");
