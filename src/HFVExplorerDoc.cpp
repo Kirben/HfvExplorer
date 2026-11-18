@@ -651,7 +651,7 @@ void CHFVExplorerDoc::fat_walk(int volinx,LPSTR path,int list){
  auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());BrowserDirectory::Snapshot snapshot;std::string directory=path;
  auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,directory.c_str(),list!=0,job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
  if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
- apply_browser_directory(snapshot,list!=0);if(list){GetBrowserSession().List()->do_report_sort();GetBrowserSession().Observe(snapshot.resourceKey,snapshot.revision,LIST_FAT,volinx,2,directory);}
+ apply_browser_directory(snapshot, LIST_FAT, volinx, 2, directory, list != 0);
 }
 
 #pragma optimize("",on)
@@ -1424,7 +1424,7 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
 		}
   GetBrowserSession().List()->set_origo(snapshot.originX,snapshot.originY);
  }
- apply_browser_directory(snapshot,true);GetBrowserSession().List()->do_report_sort();GetBrowserSession().Observe(snapshot.resourceKey,snapshot.revision,LIST_HFS,volinx,uint32_t(id),(LPCSTR)path);
+ apply_browser_directory(snapshot, LIST_HFS, volinx, uint32_t(id), (LPCSTR)path, true);
 }
 
 

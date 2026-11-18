@@ -116,7 +116,6 @@ struct MainMacBrowser::State {
     struct Mount {std::shared_ptr<Volume> volume;std::wstring key;HTREEITEM root=nullptr;int drive=-1;std::wstring physicalPath,suffix;uint64_t physicalOffset=0;};
     std::vector<Mount> mounts;bool removableScanned=false;
 
-    std::vector<Entry> shown;
     int current=-1;uint32_t folder=2;bool showing=false,folderMutable=true;
     std::vector<uint32_t> restore;
     bool Selected(int& mount,uint32_t& id,HTREEITEM item=nullptr)const {
@@ -137,13 +136,23 @@ struct MainMacBrowser::State {
     Location Item(int row,bool cut) {
         auto lv=session_.List();auto p=reinterpret_cast<list_lparam_struct*>(lv->GetListCtrl().GetItemData(row));
         if(!p||p->type==LIST_SPEC)throw HfsPlus::Error("Select a file or folder");Location out;out.cut=cut;out.directory=p->isdir!=0;
-        if(p->type==LIST_MAC){out.SetMounted(mounts.at(p->volinx).volume,uint32_t(p->id));}
-        else {CString path;lv->get_path(row,path);
-            if(p->type==LIST_FAT)out.SetWindows(FromAnsi((LPCSTR)path));
-            else{out.SetClassic(std::string((LPCSTR)session_.Document()->m_volumes[p->volinx].m_file_name),(LPCSTR)path);}}
-        if(p->type==LIST_MAC)for(const auto& e:shown)if(e.id==out.Id()){out.expectedIdentity=e.identity;out.expectedName=e.name;out.expectedParent=e.parent;break;}
-        if(p->type==LIST_HFS){auto& v=session_.Document()->m_volumes[p->volinx];if(v.m_mediaGenerationKnown)out.BindMediaGeneration(v.m_mediaGeneration);out.expectedCatalogId=uint32_t(p->id);out.expectedResource=VolumeCoord::ImageKey(out.ClassicImage());}
-        if(p->type==LIST_FAT){auto rowValue=lv->BrowserRowAt(row);if(rowValue)out.expectedIdentity=rowValue->entry.identity;}
+        const auto model = lv->BrowserRowAt(row);
+        if (!model) throw HfsPlus::Error("The selected entry is no longer available");
+        out.expectedIdentity = model->entry.identity;
+        if (model->storageType == LIST_MAC) {
+            out.expectedName = model->entry.name;
+            out.expectedParent = model->entry.parent;
+            out.SetMounted(mounts.at(model->volume).volume, model->id);
+        } else if (model->storageType == LIST_FAT) {
+            out.SetWindows(FromAnsi(model->path));
+        } else {
+            auto& volume = session_.Document()->m_volumes[model->volume];
+            out.SetClassic(std::string((LPCSTR)volume.m_file_name), model->path);
+            out.expectedCatalogId = model->id;
+            out.expectedResource = VolumeCoord::ImageKey(out.ClassicImage());
+            if (volume.m_mediaGenerationKnown)
+                out.BindMediaGeneration(volume.m_mediaGeneration);
+        }
         return out;
     }
     HTREEITEM Insert(int index,uint32_t id,HTREEITEM parent,const std::wstring& name,bool root=false) {
@@ -209,7 +218,7 @@ struct MainMacBrowser::State {
                 auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
                 auto root=mounts[index].root;for(auto child=tree->m_ct->GetChildItem(root);child;){auto next=tree->m_ct->GetNextSiblingItem(child);tree->m_ct->DeleteItem(child);child=next;}
                 tree->m_ct->SelectItem(root);tree->enable_selchange(enabled);
-                session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});shown.clear();current=index;folder=2;folderMutable=false;return false;
+                session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});current=index;folder=2;folderMutable=false;return false;
             }
         }
         if(canCache&&!cached)RememberFolder({volume,revision,id,ancestors,folderTitle,entries,free});
@@ -223,19 +232,28 @@ struct MainMacBrowser::State {
         if(id!=2)TreeText(session_,item,folderTitle);
         // Replace only this directory's child nodes, never unrelated volumes.
         for(HTREEITEM child=control.GetChildItem(item);child;){auto next=control.GetNextSiblingItem(child);control.DeleteItem(child);child=next;}
-        std::map<uint32_t,HTREEITEM> children;
-        for(auto& e:entries)if(e.directory)children[e.id]=Insert(index,e.id,item,Wide(e.name));
-        auto list=session_.List();auto& lc=list->GetListCtrl();list->list_clear();list->destroy_pointers();list->initialize_volume("",id==2?0:ID_GOTO_PARENT);
-        const auto backendCapabilities=volume->Supports();
-        auto capabilities=backendCapabilities;
-        if(cached||!mutableFolder)capabilities.create=capabilities.rename=capabilities.remove=false;
-        list->SetBrowserCapabilities(capabilities);
-        for(const auto& e:entries){
-            auto row=BrowserDirectory::FromMac(e,index,backendCapabilities);
-            list->InsertBrowserRow(row,e.directory?children[e.id]:nullptr);
-        }
+        auto list = session_.List();
+        list->list_clear();
+        list->destroy_pointers();
+        list->initialize_volume("", id == 2 ? 0 : ID_GOTO_PARENT);
+        const auto backendCapabilities = volume->Supports();
+        BrowserDirectory::Snapshot snapshot;
+        snapshot.resourceKey = key;
+        snapshot.revision = revision;
+        snapshot.capabilities = backendCapabilities;
+        snapshot.capabilitiesKnown = true;
+        if (cached || !mutableFolder)
+            snapshot.capabilities.create = snapshot.capabilities.rename = snapshot.capabilities.remove = false;
+        snapshot.rows.reserve(entries.size());
+        for (const auto& entry : entries)
+            snapshot.rows.push_back(BrowserDirectory::FromMac(entry, index, backendCapabilities));
+        session_.PresentDirectory(snapshot, LIST_MAC, index, id, {}, true,
+            [&](const BrowserDirectory::Row& row) {
+                return Insert(index, row.id, item, Wide(row.entry.name));
+            });
         session_.SetLocationTitle(id==2?Wide(volume->Name()):Wide(volume->Name())+L":"+folderTitle);
-        session_.Observe(volume->ResourceKey(),revision,LIST_MAC,index,id);shown=std::move(entries);current=index;folder=id;folderMutable=!cached&&mutableFolder;control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);session_.MacBrowser().Sort(FIELD_NAME,true);
+        current=index;folder=id;folderMutable=!cached&&mutableFolder;
+        control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);
         if(session_.Status()){CString status;status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
             session_.Status()->SetPaneText(0,status);}
         if(cached)session_.Defer(key,false,[this,index,id]{
@@ -298,7 +316,7 @@ bool MainMacBrowser::CanCreateFolder()const{int i;uint32_t id;return Writable()&
 bool MainMacBrowser::SelectionWritable()const{
     if(!Writable())return false;auto& list=session_.List()->GetListCtrl();bool selected=false;
     for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));
-        if(!p||p->type!=LIST_MAC)continue;selected=true;for(auto& e:state_->shown)if(e.id==uint32_t(p->id)&&(e.protectedFile||!e.readError.empty()))return false;}
+        if(!p||p->type!=LIST_MAC)continue;selected=true;const auto entry=session_.List()->BrowserRowAt(row);if(!entry||entry->entry.protectedFile||!entry->entry.readError.empty())return false;}
     return selected;
 }
 bool MainMacBrowser::CanExport()const{
@@ -395,7 +413,7 @@ void MainMacBrowser::RebuildTree(){for(size_t i=0;i<state_->mounts.size();++i)st
             for(auto child=session_.Tree()->m_ct->GetChildItem(item);child;child=session_.Tree()->m_ct->GetNextSiblingItem(child)){
                 auto p=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(child));if(uint32_t(p->id)==*at){item=child;state_->Show(i,*at,item);break;}}}}
 }
-void MainMacBrowser::Clear(){state_->mounts.clear();state_->shown.clear();state_->current=-1;}
+void MainMacBrowser::Clear(){state_->mounts.clear();state_->current=-1;}
 bool MainMacBrowser::Activate(int row){auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));
     if(!p||p->type!=LIST_MAC)return false;if(p->isdir){auto item=p->htree;session_.Tree()->m_ct->SelectItem(item);Select(session_.Tree()->m_ct->GetItemData(item));}
     else{auto& list=session_.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);Export(0);}return true;}

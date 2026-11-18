@@ -3113,19 +3113,15 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 		}
 	}
 
- if(BackgroundCopies::Enabled()){
-  auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);if(selection.items.empty())return;
-  FileOperations::DeleteEntries request{std::move(selection.items)};BackgroundCopies::Start({std::move(request)},GetBrowserSession().Owner(),true);return;
+ auto selection = GetBrowserSession().MacBrowser().SelectedItems(false);
+ if (selection.items.empty())
+  return;
+ FileOperations::DeleteEntries request{std::move(selection.items)};
+ if (BackgroundCopies::Enabled()) {
+  BackgroundCopies::Start({std::move(request)}, GetBrowserSession().Owner(), true);
+  return;
  }
- FileOperations::DeleteEntries request;
- for(int row=-1;(row=m_cl->GetNextItem(row,LVNI_SELECTED))>=0;){
-  auto binding=reinterpret_cast<list_lparam_struct*>(m_cl->GetItemData(row));if(!binding||binding->type==LIST_SPEC)continue;
-  CString path;get_path(row,path);FileOperations::Location source;source.directory=binding->isdir!=0;
-  if(binding->type==LIST_HFS){char image[MAX_PATH];inx2volname(row,image,MAX_PATH);source.SetClassic(image,(LPCSTR)path);source.expectedCatalogId=uint32_t(binding->id);}
-  else source.SetWindows(VolumeCoord::Wide(std::string((LPCSTR)path)));
-  request.selection.push_back(std::move(source));
- }
- if(request.selection.empty())return;auto selected=request.selection;auto operation=FileOperations::Submit(std::move(request));
+ auto selected=request.selection;auto operation=FileOperations::Submit(std::move(request));
  auto result=ShowSubmittedStorageJob(operation.Job(),"Deleting files",HiddenOperationProgress(GetBrowserSession().Owner()),false,true,GetBrowserSession().Owner());
  if(result.code&&result.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
  bool host=false;for(auto& source:selected){if(source.LegacyType()==LIST_HFS)update_floppy_view(const_cast<char*>(source.ClassicImage().c_str()));else host=true;}

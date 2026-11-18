@@ -5,6 +5,7 @@
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
+#include "MainMacBrowser.h"
 #include "StorageJobDialog.h"
 #include "CopyProgress.h"
 #include "DeviceWait.h"
@@ -63,6 +64,9 @@ int RunSharedBrowserTest(const char* directory){
   int larger=find(control,L"A larger"),smaller=find(control,L"Z smaller");check(larger>=0&&smaller>=0,"classic rows in shared renderer");
   auto model=list.BrowserRowAt(larger);check(model&&model->storageType==LIST_HFS&&model->entry.forks[0].size==2600&&model->entry.finder[0]=='T',"classic normalized bytes/type/binding");
   CString source;check(list.get_path(larger,source)&&source=="Shared:A larger","classic conversion path binding");
+  auto classicItem = doc.GetBrowserSession().MacBrowser().CaptureItem(larger);
+  check(classicItem.IsClassic() && classicItem.ClassicPath()==(LPCSTR)source &&
+        classicItem.expectedCatalogId==model->id, "classic command did not use the published browser row");
   list.SortBrowserRows(FIELD_SIZE,true);check(text(control,0)==L"Folder"&&text(control,1)==L"Z smaller","exact classic byte sorting within identical displayed KB");
   check(load(image)==original,"browsing classic image modified source bytes");
   // The first HFS partition is numbered one; raw images remain supported too.
@@ -98,6 +102,10 @@ int RunSharedBrowserTest(const char* directory){
   int forked=find(control,L"Forked");check(forked>=0&&list.BrowserRowAt(forked)->entry.forks[0].size==17&&list.BrowserRowAt(forked)->entry.forks[1].size==32,"Windows companion metadata does not use shared model");
   list.SortBrowserRows(FIELD_MODIFIED,true);check(text(control,1)==L"Folder"&&text(control,3)==L"Z older"&&text(control,4)==L"A newer","Windows FILETIME precision sorting");
   CString path;int row=find(control,L"A newer");check(list.get_path(row,path)&&path==windows+"\\A newer","Windows backend operation path binding");
+  auto windowsItem = doc.GetBrowserSession().MacBrowser().CaptureItem(row);
+  check(windowsItem.IsWindows() && windowsItem.WindowsPath()==VolumeCoord::Wide(std::string((LPCSTR)path)) &&
+        windowsItem.expectedIdentity==list.BrowserRowAt(row)->entry.identity &&
+        !windowsItem.expectedIdentity.empty(), "Windows command lost the published file identity");
   calls=0;BrowserDirectory::testObserveRead=[&](const char*){if(++calls==3)throw std::runtime_error("injected Windows read error");};
   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();BrowserDirectory::testObserveRead={};
   check(control.GetItemCount()==1&&list.BrowserRowAt(0)==nullptr&&!list.BrowserDirectoryWritable()&&owner.IsWindowEnabled(),"failed Windows snapshot published partial rows");

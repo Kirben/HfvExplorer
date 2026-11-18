@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <memory>
+#include <functional>
+namespace BrowserDirectory { struct Row; struct Snapshot; }
 #include "VolumeCoordinator.h"
 class CHFVExplorerDoc;
 class HFVExplorerTreeView;
@@ -50,6 +52,9 @@ public:
     CStatusBar* Status()const{return status_;}
     MainMacBrowser& MacBrowser()const{return *browser_;}
     void Watch(const std::string&);
+    void PresentDirectory(const BrowserDirectory::Snapshot&, int type, int index,
+        uint32_t folder, const std::string& path, bool listing,
+        const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder);
     void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={});
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();

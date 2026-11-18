@@ -107,20 +107,17 @@ return out;
  if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
  return snapshot;
 }
-void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& snapshot,bool listing){
- auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());auto tree=GetBrowserSession().Tree();auto list=GetBrowserSession().List();
- BrowserPresentation::Batch treeBatch(tree->GetTreeCtrl().m_hWnd),listBatch(list->GetListCtrl().m_hWnd,true);
- if(listing){list->m_browser_folder_path=snapshot.folderPath;list->m_browser_folder_identity=snapshot.folderIdentity;}
- if(listing&&snapshot.capabilitiesKnown)list->SetBrowserCapabilities(snapshot.capabilities);
- HTREEITEM root=tree->GetTreeCtrl().GetSelectedItem();
- for(const auto& row:snapshot.rows){
+void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& snapshot,
+    int type, int index, uint32_t folder, const std::string& path, bool listing){
+ auto& session = GetBrowserSession();
+ auto tree = session.Tree();
+ HTREEITEM root = tree->GetTreeCtrl().GetSelectedItem();
+ session.PresentDirectory(snapshot, type, index, folder, path, listing,
+    [&](const BrowserDirectory::Row& row) {
   auto name=MacBrowser::Wide(row.entry.name);int n=WideCharToMultiByte(CP_ACP,0,name.c_str(),-1,nullptr,0,nullptr,nullptr);std::string ansi(n,0);
   if(n)WideCharToMultiByte(CP_ACP,0,name.c_str(),-1,&ansi[0],n,nullptr,nullptr);
-  HTREEITEM child=nullptr;
-  if(row.entry.directory){
-   if(row.storageType==LIST_HFS)child=tree->tree_insert(m_volumes[row.volume].m_rootitem,row.volume,const_cast<char*>(ansi.c_str()),row.id,row.parent);
-   else child=tree->tree_fat_insert(root,row.volume,const_cast<char*>(ansi.c_str()),const_cast<char*>(row.path.c_str()));
-  }
-  if(listing)list->InsertBrowserRow(row,child);
- }
+  if(row.storageType==LIST_HFS)
+   return tree->tree_insert(m_volumes[row.volume].m_rootitem,row.volume,const_cast<char*>(ansi.c_str()),row.id,row.parent);
+  return tree->tree_fat_insert(root,row.volume,const_cast<char*>(ansi.c_str()),const_cast<char*>(row.path.c_str()));
+ });
 }
