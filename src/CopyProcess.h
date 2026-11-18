@@ -18,6 +18,7 @@ int VolumeSessionChild(const char *input, const char *output);
 std::vector<uint8_t> EncodeLocationForTest(const FileOperations::Location &);
 FileOperations::Location DecodeLocationForTest(const std::vector<uint8_t> &);
 extern std::atomic<DWORD> lastProcess, lastExitCode;
+void PauseVolumeReadForTest(HANDLE entered, HANDLE release);
 DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>&);
 void CrashVolumeSessionOnRenameForTest(const std::shared_ptr<MacBrowser::Volume>&);
 void CrashVolumeSessionDuringPutForTest(const std::shared_ptr<MacBrowser::Volume>&);

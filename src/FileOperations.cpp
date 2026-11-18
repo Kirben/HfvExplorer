@@ -346,7 +346,11 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
   return access;
  }
  if(request.OperationKind()==Kind::LegacyCopy){
-  if(request.Legacy().source.IsWindows())AddPath(access,request.Legacy().source.WindowsPath(),request.Legacy().move?Mode::Write:Mode::Read);else access.push_back({request.Legacy().source.ResourceKey(),(request.Legacy().move||request.background||CopyProcess::UsesWorker(request))?Mode::Write:Mode::Read});
+  const auto& conversion=request.Legacy();
+  const bool handoff=CopyProcess::UsesWorker(request);
+  const bool sharedExport=CopyProcess::ConvertsWithMountedClassic(conversion) &&
+                          conversion.destination.IsWindows() && !handoff;
+  if(request.Legacy().source.IsWindows())AddPath(access,request.Legacy().source.WindowsPath(),request.Legacy().move?Mode::Write:Mode::Read);else access.push_back({sharedExport?conversion.selection->source.ResourceKey():conversion.source.ResourceKey(),(conversion.move||(!sharedExport&&(request.background||handoff)))?Mode::Write:Mode::Read});
   if(request.Legacy().destination.IsWindows())access.push_back({VolumeCoord::LegacyOutputKey(request.Legacy().destination.WindowsPath()),Mode::Write});else access.push_back({request.Legacy().destination.ResourceKey(),Mode::Write});return access;
  }
  if (const auto* metadata = request.Metadata()) {
@@ -369,14 +373,18 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
   if (path.empty()) access.push_back({Resource(parent), Mode::Write});
   else AddPath(access, ChildPath(path, name), Mode::Write, companions);
  };
- auto reserveCopySource = [&](const Location& source) {
-  const auto mode = source.cut || (HostPath(source).empty() &&
-      (request.background || CopyProcess::UsesWorker(request))) ? Mode::Write : Mode::Read;
+ const bool handoff=CopyProcess::UsesWorker(request);
+ auto reserveCopySource = [&](const Location& source, bool windowsExport = false) {
+  // Retain an image read lease for the full export, excluding writers
+  // while allowing the browser to use the mounted session.
+  const bool sharedExport=windowsExport && source.IsMounted() && source.Volume()->HasPersistentWorker() && !handoff;
+  const auto mode = source.cut || (HostPath(source).empty() && !sharedExport &&
+      (request.background || handoff)) ? Mode::Write : Mode::Read;
   reserve(source, mode);
  };
  if (const auto* copy = request.Get<OrdinaryCopy>()) {
-  for (const auto& source : copy->sources) reserveCopySource(source);
   auto path = HostPath(copy->destination);
+  for (const auto& source : copy->sources) reserveCopySource(source,!path.empty());
   if (path.empty()) access.push_back({Resource(copy->destination), Mode::Write});
   else for (const auto& source : copy->sources) {
    auto name = SourceName(source);
@@ -389,7 +397,7 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
   reserve(link->source, HostPath(link->source).empty() ? Mode::Write : Mode::Read);
   reserveChild(link->parent, link->name, true);
  } else if (const auto* exportFork = request.Get<ExportFileFork>()) {
-  reserveCopySource(exportFork->source);
+  reserveCopySource(exportFork->source,true);
   reserve(exportFork->output, Mode::Write, false);
  } else if (const auto* importFork = request.Get<ImportResourceFork>()) {
   reserveCopySource(importFork->input);
