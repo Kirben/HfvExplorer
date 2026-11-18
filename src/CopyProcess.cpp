@@ -31,14 +31,11 @@ std::atomic<HANDLE> ioGate{nullptr};
 namespace {
 using namespace FileOperations;
 using namespace MacBrowser;
-constexpr uint64_t protocol = 4;
+constexpr uint64_t protocol = 5;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
-    Settings = 1,
+    RequestPacket = 1,
     File,
-    SourceLocation,
-    TargetLocation,
-    Go,
     Progress,
     Conflict,
     Choice,
@@ -82,6 +79,11 @@ struct Data {
             out |= uint64_t(bytes[at++]) << (i * 8);
         return out;
     }
+    bool flag() {
+        auto value = get();
+        Check(value <= 1, "Invalid copy-worker boolean");
+        return value != 0;
+    }
     void put(const std::string &s) {
         put(uint64_t(s.size()));
         bytes.insert(bytes.end(), s.begin(), s.end());
@@ -119,8 +121,12 @@ void Exact(HANDLE pipe, void *data, DWORD n, bool write) {
         n -= done;
     }
 }
+DWORD FrameLimit(DWORD message) {
+    // A request holds the full selection; other messages remain small.
+    return message == RequestPacket ? 64 * maximumFrame : maximumFrame;
+}
 void Send(HANDLE pipe, Message message, Data data = {}) {
-    Check(data.bytes.size() <= maximumFrame, "Copy-worker packet exceeds the protocol frame size");
+    Check(data.bytes.size() <= FrameLimit(message), "Copy-worker packet exceeds the protocol frame size");
     DWORD header[] = {DWORD(protocol), DWORD(message), DWORD(data.bytes.size())};
     Exact(pipe, header, sizeof(header), true);
     if (!data.bytes.empty())
@@ -129,8 +135,8 @@ void Send(HANDLE pipe, Message message, Data data = {}) {
 Message Receive(HANDLE pipe, Data &data) {
     DWORD header[3];
     Exact(pipe, header, sizeof(header), false);
-    Check(header[0] == protocol && header[1] >= Settings && header[1] <= Finished &&
-              header[2] <= maximumFrame,
+    Check(header[0] == protocol && header[1] >= RequestPacket && header[1] <= Finished &&
+              header[2] <= FrameLimit(header[1]),
           "Invalid copy-worker protocol frame");
     data = Data();
     data.bytes.resize(header[2]);
@@ -201,11 +207,15 @@ WorkerOrigin DecodeOrigin(Data &d) {
     o.journal = d.wide();
     o.root = d.text();
     o.identity = d.text();
-    o.drive = int(d.get()) - 1;
+    auto drive = d.get();
+    Check(drive <= 26, "Invalid worker origin drive");
+    o.drive = int(drive) - 1;
     o.offset = d.get();
-    o.generation = DWORD(d.get());
-    o.generationKnown = d.get() != 0;
-    o.writable = d.get() != 0;
+    auto generation = d.get();
+    Check(generation <= UINT32_MAX, "Invalid worker origin generation");
+    o.generation = DWORD(generation);
+    o.generationKnown = d.flag();
+    o.writable = d.flag();
     return o;
 }
 struct Endpoint {
@@ -370,14 +380,23 @@ uint32_t CatalogNumber(Data &d) {
     Check(value <= UINT32_MAX, "Catalog identifier exceeds its field width");
     return uint32_t(value);
 }
-Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted = true) {
+struct WireEndpoint {
+    Location::Kind kind = Location::Kind::None;
+    Location location;
+    WorkerOrigin origin;
+    uint32_t selectedId = 0;
+    std::vector<Entry> path;
+};
+WireEndpoint ParseEndpoint(Data &d, bool allowMounted = true) {
     auto tag = d.get();
     Check(tag <= uint64_t(Location::Kind::ClassicMedia), "Invalid typed worker location");
     Check(allowMounted || tag != uint64_t(Location::Kind::Mounted),
           "Legacy conversion cannot carry a mounted backend");
-    Location l;
-    l.cut = d.get() != 0;
-    l.directory = d.get() != 0;
+    WireEndpoint endpoint;
+    endpoint.kind = Location::Kind(tag);
+    auto& l = endpoint.location;
+    l.cut = d.flag();
+    l.directory = d.flag();
     l.expectedCatalogId = CatalogNumber(d);
     l.expectedParent = CatalogNumber(d);
     l.expectedIdentity = d.text();
@@ -385,10 +404,10 @@ Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted = true)
     l.expectedName = d.u16();
     switch (Location::Kind(tag)) {
     case Location::Kind::None:
-        return l;
+        return endpoint;
     case Location::Kind::Windows:
         l.SetWindows(d.wide());
-        return l;
+        return endpoint;
     case Location::Kind::ClassicImage: {
         auto image = d.text(), path = d.text();
         l.SetImage(std::move(image), std::move(path));
@@ -411,58 +430,71 @@ Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted = true)
         l.expectedName = std::move(guard.expectedName);
         if (generation)
             l.BindMediaGeneration(CatalogNumber(d));
-        return l;
+        return endpoint;
     }
     case Location::Kind::Mounted: {
-        auto selectedId = CatalogNumber(d);
+        auto selectedId = endpoint.selectedId = CatalogNumber(d);
         Check(selectedId >= 2, "Invalid mounted catalog identifier");
-        auto origin = DecodeOrigin(d);
+        endpoint.origin = DecodeOrigin(d);
         auto count = d.get();
         Check(count <= 128, "Invalid worker path depth");
-        std::vector<Entry> path;
+        auto& path = endpoint.path;
         for (uint64_t i = 0; i < count; ++i) {
             Entry e;
             e.name = d.u16();
             e.resolvedId = CatalogNumber(d);
             e.version = CatalogNumber(d);
-            e.directory = d.get() != 0;
+            e.directory = d.flag();
             e.identity = d.text();
             path.push_back(std::move(e));
         }
-        Data key;
-        EncodeOrigin(key, origin);
-        auto found = mounts.volumes.find(key.bytes);
-        if (found == mounts.volumes.end())
-            found = mounts.volumes.emplace(key.bytes, OpenOrigin(origin)).first;
-        auto volume = found->second;
-        uint32_t id = 2;
-        bool stable = !strcmp(volume->Kind(), "HFS+") || !strcmp(volume->Kind(), "HFSX");
-        Check(!stable || count == 1, "Invalid stable catalog endpoint");
-        for (auto &segment : path) {
-            bool matched = false;
-            auto candidates = stable ? std::vector<Entry>{volume->Stat(selectedId)} : volume->List(id);
-            for (auto &e : candidates)
-                if (e.name == segment.name && e.version == segment.version &&
-                    e.directory == segment.directory &&
-                    (!segment.resolvedId || e.resolvedId == segment.resolvedId)) {
-                    Check(!matched, "Ambiguous worker source path");
-                    Check(origin.kind == WorkerOrigin::Removable || e.identity == segment.identity,
-                          "The selected entry changed before worker execution");
-                    id = e.id;
-                    matched = true;
-                }
-            Check(matched, "The selected entry is no longer present");
-        }
-        l.SetMounted(volume, id);
-        auto e = volume->Stat(id);
-        l.expectedIdentity = e.identity;
-        l.expectedParent = e.parent;
-        l.expectedName = e.name;
-        return l;
+        break;
     }
     }
-    return l;
+    return endpoint;
 }
+Location ResolveEndpoint(WireEndpoint endpoint, WorkerMounts &mounts) {
+    auto& l = endpoint.location;
+    if (endpoint.kind != Location::Kind::Mounted) return std::move(l);
+    const auto& origin = endpoint.origin;
+    const auto& path = endpoint.path;
+    auto selectedId = endpoint.selectedId;
+    Data key;
+    EncodeOrigin(key, origin);
+    auto found = mounts.volumes.find(key.bytes);
+    if (found == mounts.volumes.end())
+        found = mounts.volumes.emplace(key.bytes, OpenOrigin(origin)).first;
+    auto volume = found->second;
+    uint32_t id = 2;
+    bool stable = !strcmp(volume->Kind(), "HFS+") || !strcmp(volume->Kind(), "HFSX");
+    Check(!stable || path.size() == 1, "Invalid stable catalog endpoint");
+    for (auto &segment : path) {
+        bool matched = false;
+        auto candidates = stable ? std::vector<Entry>{volume->Stat(selectedId)} : volume->List(id);
+        for (auto &e : candidates)
+            if (e.name == segment.name && e.version == segment.version &&
+                e.directory == segment.directory &&
+                (!segment.resolvedId || e.resolvedId == segment.resolvedId)) {
+                Check(!matched, "Ambiguous worker source path");
+                Check(origin.kind == WorkerOrigin::Removable || e.identity == segment.identity,
+                      "The selected entry changed before worker execution");
+                id = e.id;
+                matched = true;
+            }
+        Check(matched, "The selected entry is no longer present");
+    }
+    l.SetMounted(volume, id);
+    auto e = volume->Stat(id);
+    l.expectedIdentity = e.identity;
+    l.expectedParent = e.parent;
+    l.expectedName = e.name;
+    return std::move(l);
+}
+#ifdef HFV_TESTING
+Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted) {
+    return ResolveEndpoint(ParseEndpoint(d, allowMounted), mounts);
+}
+#endif
 void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fault) {
     d.put(uint64_t(r.OperationKind()));
     if (auto* output = r.Get<ExportFileFork>()) d.put(uint64_t(output->fork));
@@ -481,36 +513,108 @@ void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fault) {
     d.put(uintptr_t(parent));
     d.put(fault);
 }
-void DecodeSettings(Data &d, Request &r, HANDLE &parent, unsigned &fault) {
+struct WireRequest {
+    Kind kind = Kind::Copy;
+    HANDLE parent = nullptr;
+    unsigned fault = 0;
+    std::optional<LegacyConversion> legacy;
+    ForkSelector fork = ForkSelector::Data;
+    std::vector<WireEndpoint> sources;
+    WireEndpoint target;
+};
+WireRequest DecodeRequest(Data &d) {
+    WireRequest wire;
     auto kind = d.get();
     Check(kind == uint64_t(Kind::Copy) || kind == uint64_t(Kind::LegacyCopy) ||
               kind == uint64_t(Kind::ExportFork) || kind == uint64_t(Kind::ReplaceResource),
           "Invalid worker operation");
-    if (kind == uint64_t(Kind::LegacyCopy)) {
-        WorkerMounts unused;
+    wire.kind = Kind(kind);
+    if (wire.kind == Kind::LegacyCopy) {
         LegacyConversion legacy;
-        legacy.source = DecodeEndpoint(d, unused, false);
-        legacy.destination = DecodeEndpoint(d, unused, false);
-        legacy.directory = d.get() != 0;
-        legacy.move = d.get() != 0;
-        legacy.options.output = char(d.get());
-        legacy.options.input = char(d.get());
-        legacy.options.appledouble = d.get() != 0;
-        legacy.options.verifyFloppy = d.get() != 0;
-        legacy.options.targetGenerationKnown = d.get() != 0;
-        legacy.options.targetGeneration = DWORD(d.get());
-        r = std::move(legacy);
-    } else if (kind == uint64_t(Kind::ExportFork)) {
+        legacy.source = ParseEndpoint(d, false).location;
+        legacy.destination = ParseEndpoint(d, false).location;
+        legacy.source.LegacyVolume();
+        legacy.source.LegacyPath();
+        legacy.destination.LegacyVolume();
+        legacy.destination.LegacyPath();
+        legacy.directory = d.flag();
+        legacy.move = d.flag();
+        auto output = d.get(), input = d.get();
+        Check(output <= UINT8_MAX && input <= UINT8_MAX, "Invalid conversion mode");
+        legacy.options.output = char(output);
+        legacy.options.input = char(input);
+        legacy.options.appledouble = d.flag();
+        legacy.options.verifyFloppy = d.flag();
+        legacy.options.targetGenerationKnown = d.flag();
+        legacy.options.targetGeneration = CatalogNumber(d);
+        wire.legacy = std::move(legacy);
+    } else if (wire.kind == Kind::ExportFork) {
         auto fork = d.get();
         Check(fork <= uint64_t(ForkSelector::Resource), "Invalid fork selector");
-        r = ExportFileFork{{}, {}, static_cast<ForkSelector>(fork)};
-    } else if (kind == uint64_t(Kind::ReplaceResource)) {
-        r = ImportResourceFork{};
-    } else {
-        r = OrdinaryCopy{};
+        wire.fork = static_cast<ForkSelector>(fork);
     }
-    parent = HANDLE(uintptr_t(d.get()));
-    fault = unsigned(d.get());
+    wire.parent = HANDLE(uintptr_t(d.get()));
+    Check(wire.parent && WaitForSingleObject(wire.parent, 0) == WAIT_TIMEOUT,
+          "Invalid or closed copy-worker parent");
+    wire.fault = CatalogNumber(d);
+    auto count = d.get();
+    if (wire.kind == Kind::Copy) Check(count > 0, "Copy requires a source");
+    else if (wire.kind == Kind::LegacyCopy) Check(count <= 1, "Invalid conversion source count");
+    else Check(count == 1, "Fork jobs require exactly one source");
+    // The smallest endpoint has eight 64-bit fields, and a target must follow.
+    Check(count < (d.bytes.size() - d.at) / 64, "Truncated copy-worker endpoints");
+    for (uint64_t i = 0; i < count; ++i) {
+        auto source = ParseEndpoint(d);
+        Check(source.kind != Location::Kind::None, "Missing copy-worker source");
+        wire.sources.push_back(std::move(source));
+    }
+    wire.target = ParseEndpoint(d);
+    d.end();
+    using Address = Location::Kind;
+    switch (wire.kind) {
+    case Kind::Copy:
+        Check(wire.target.kind != Address::None, "Missing copy destination");
+        break;
+    case Kind::LegacyCopy:
+        Check(count == 0 ? wire.target.kind == Address::None :
+              wire.target.kind == Address::Windows || wire.target.kind == Address::ClassicImage ||
+                  wire.target.kind == Address::ClassicMedia, "Invalid conversion selection");
+        break;
+    case Kind::ExportFork:
+        Check(wire.target.kind == Address::Windows, "Fork export requires a Windows output file");
+        break;
+    case Kind::ReplaceResource:
+        Check(wire.target.kind == Address::Mounted || wire.target.kind == Address::Windows,
+              "Resource import requires a mounted or Windows destination file");
+        break;
+    default: throw HfsPlus::Error("Invalid worker operation");
+    }
+    return wire;
+}
+Request ResolveRequest(WireRequest wire, WorkerMounts &mounts) {
+    auto target = ResolveEndpoint(std::move(wire.target), mounts);
+    if (wire.kind == Kind::Copy) {
+        std::vector<Location> sources;
+        sources.reserve(wire.sources.size());
+        for (auto& endpoint : wire.sources)
+            sources.push_back(ResolveEndpoint(std::move(endpoint), mounts));
+        return OrdinaryCopy{std::move(sources), std::move(target)};
+    }
+    if (wire.legacy) {
+        if (!wire.sources.empty())
+            wire.legacy->selection = ConversionSelection{
+                ResolveEndpoint(std::move(wire.sources.front()), mounts), std::move(target)};
+        return std::move(*wire.legacy);
+    }
+    auto source = ResolveEndpoint(std::move(wire.sources.front()), mounts);
+    if (wire.kind == Kind::ExportFork)
+        return ExportFileFork{std::move(source), std::move(target), wire.fork};
+    if (target.IsWindows()) {
+        auto endpoint = ResolveWindowsFile(target.WindowsPath());
+        target.SetMounted(endpoint.first, endpoint.second);
+        target.expectedParent = endpoint.first->Stat(endpoint.second).parent;
+    }
+    return ImportResourceFork{std::move(source), std::move(target)};
 }
 struct Handoff {
     std::vector<std::shared_ptr<Volume>> volumes, suspended;
@@ -726,10 +830,6 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
 #else
         unsigned testFault = 0;
 #endif
-        Data settings;
-        EncodeSettings(settings, execution, worker.parent.value, testFault);
-        Send(worker.input.value, Settings, std::move(settings));
-
 #ifdef HFV_TESTING
         if (worker.gate.value) {
             Data gate;
@@ -761,16 +861,21 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     Send(worker.input.value, Mapping, std::move(d));
                 }
         }
-        // Mount and resolve only after the child's complete inherited-file table exists.
-        for (auto &source : sources) {
-            Data d;
-            EncodeEndpoint(d, source);
-            Send(worker.input.value, SourceLocation, std::move(d));
-        }
-        Data destination;
-        EncodeEndpoint(destination, target);
-        Send(worker.input.value, TargetLocation, std::move(destination));
-        Send(worker.input.value, Go);
+        Data packet;
+        EncodeSettings(packet, execution, worker.parent.value, testFault < 8 ? testFault : 0);
+#ifdef HFV_TESTING
+        if (testFault == 9) packet.bytes[8] = 2; // Invalid fork selector.
+#endif
+        packet.put(testFault == 8 ? 0 : sources.size() + (testFault == 10 ? 1 : 0));
+        if (testFault != 8)
+            for (const auto& source : sources) EncodeEndpoint(packet, source);
+        if (testFault == 10) EncodeEndpoint(packet, sources.front());
+        if (testFault != 11) EncodeEndpoint(packet, target);
+#ifdef HFV_TESTING
+        if (testFault == 12) packet.bytes.pop_back();
+        if (testFault == 13) EncodeEndpoint(packet, target);
+#endif
+        Send(worker.input.value, RequestPacket, std::move(packet));
         bool cancelled = false, finished = false;
         while (!finished) {
             if (job.cancelled() && !cancelled) {
@@ -855,20 +960,14 @@ int Child(const char *inputText, const char *outputText) {
         std::wstring floppyPath;
         DWORD floppyGeneration = 7;
         TypeMappings::Snapshot mappings;
-        Request request;
-        HANDLE parent = nullptr;
-        unsigned testFault = 0;
+        std::optional<WireRequest> wire;
         std::vector<ImageHandleTransfer::File> files;
-        std::vector<Data> sourcePackets;
-        Data target;
-        bool settings = false, hasTarget = false;
         for (;;) {
             Data d;
             auto message = Receive(input, d);
-            if (message == Settings) {
-                Check(!settings, "Repeated worker settings");
-                DecodeSettings(d, request, parent, testFault);
-                settings = true;
+            if (message == RequestPacket) {
+                wire = DecodeRequest(d);
+                break;
             } else if (message == File) {
                 ImageHandleTransfer::File f;
                 f.path = d.wide();
@@ -895,22 +994,12 @@ int Child(const char *inputText, const char *outputText) {
                 auto key = d.text(), value = d.text();
                 (direction ? mappings.windowsToHfs : mappings.hfsToWindows)
                     .emplace_back(std::move(key), std::move(value));
-            } else if (message == SourceLocation) {
-                sourcePackets.push_back(std::move(d));
-                continue;
-            } else if (message == TargetLocation) {
-                Check(!hasTarget, "Repeated worker target");
-                target = std::move(d);
-                hasTarget = true;
-                continue;
-            } else if (message == Go) {
-                d.end();
-                break;
             } else
                 throw HfsPlus::Error("Invalid worker initialization");
             d.end();
         }
-        Check(settings && hasTarget && parent, "Incomplete worker initialization");
+        const auto parent = wire->parent;
+        const auto testFault = wire->fault;
 #ifdef HFV_TESTING
         if (testFault == 1)
             ExitProcess(71);
@@ -1013,34 +1102,7 @@ int Child(const char *inputText, const char *outputText) {
             } detach{bool(simulatedFloppy)};
 #endif
             try {
-                std::vector<Location> decoded;
-                for (auto &packet : sourcePackets) {
-                    decoded.push_back(DecodeEndpoint(packet, mounts));
-                    packet.end();
-                }
-                auto destination = DecodeEndpoint(target, mounts);
-                target.end();
-                if (auto* copy = request.Get<OrdinaryCopy>()) {
-                    *copy = OrdinaryCopy{std::move(decoded), std::move(destination)};
-                } else if (auto* legacy = request.Conversion()) {
-                    Check(decoded.size() == (destination.IsNone() ? 0 : 1), "Invalid conversion selection");
-                    if (!decoded.empty())
-                        legacy->selection = ConversionSelection{std::move(decoded.front()), std::move(destination)};
-                } else {
-                    Check(decoded.size() == 1, "Fork jobs require exactly one source");
-                    if (auto* output = request.Get<ExportFileFork>()) {
-                        output->source = std::move(decoded.front());
-                        output->output = std::move(destination);
-                    } else if (auto* input = request.Get<ImportResourceFork>()) {
-                        if (destination.IsWindows()) {
-                            auto endpoint = ResolveWindowsFile(destination.WindowsPath());
-                            destination.SetMounted(endpoint.first, endpoint.second);
-                            auto e = endpoint.first->Stat(endpoint.second);
-                            destination.expectedParent = e.parent;
-                        }
-                        *input = ImportResourceFork{std::move(decoded.front()), std::move(destination)};
-                    }
-                }
+                auto request = ResolveRequest(std::move(*wire), mounts);
 #ifdef HFV_TESTING
                 bool injected = false;
                 unsigned bulkReads = 0;
@@ -1084,7 +1146,6 @@ int Child(const char *inputText, const char *outputText) {
 #ifdef HFV_TESTING
             HfsPlus::workerIoFault = {};
 #endif
-            request = OrdinaryCopy{};
             mounts.volumes.clear();
         }
         if (!safe && !result.code)
