@@ -504,7 +504,7 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
 }
 Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> job):state_(std::move(state)),job_(std::move(job)){}
 Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->mutex);return state_->completion;}
-Storage::Result ExecuteCopyWorker(const Request& request,Storage::Job& job,Completion& completion){
+Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Completion& completion){
  try{ValidateRequest(request);LegacyEngine::Scope engine;VolumeCoord::Lease access(Resources(request));VolumeCoord::OperationLease current(Resources(request));return Execute(request,job,completion);}
  catch(const Storage::Cancelled&){return {1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
  catch(const Failure& e){return {1,e.error,e.what()};}

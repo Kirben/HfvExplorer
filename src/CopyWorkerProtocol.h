@@ -7,11 +7,14 @@ namespace CopyWorkerProtocol {
 using FileOperations::Location;
 using FileOperations::Kind;
 using FileOperations::LegacyConversion;
+using FileOperations::EditClassicProperties;
+using FileOperations::EditBasicMetadata;
+using FileOperations::ChangeCompression;
 using FileOperations::ForkSelector;
 using MacBrowser::Entry;
 using MacBrowser::WorkerOrigin;
 
-constexpr uint64_t protocol = 5;
+constexpr uint64_t protocol = 6;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     RequestPacket = 1,
@@ -23,6 +26,10 @@ enum Message : DWORD {
     Fixture,
     Mapping,
     IoGate,
+    AttributeSet,
+    AttributeHeader,
+    AttributeChunk,
+    AffectedStorage,
     Finished
 };
 void Check(bool ok, const char *message);
@@ -89,10 +96,16 @@ struct WireRequest {
     unsigned fault = 0;
     std::optional<LegacyConversion> legacy;
     ForkSelector fork = ForkSelector::Data;
+    std::u16string name;
+    bool checkNameLock = true;
+    std::optional<EditClassicProperties> classic;
+    std::optional<EditBasicMetadata> basic;
+    std::optional<ChangeCompression> compression;
     std::vector<WireEndpoint> sources;
     WireEndpoint target;
 };
 
+bool SupportsOperation(Kind kind);
 DWORD FrameLimit(DWORD message);
 Message ValidateFrame(const DWORD (&header)[3]);
 void EncodeProgress(Data &data, const Storage::Progress &progress);

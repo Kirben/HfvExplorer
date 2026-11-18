@@ -227,7 +227,76 @@ Location ResolveEndpoint(WireEndpoint endpoint, WorkerMounts &mounts) {
     l.expectedName = e.name;
     return std::move(l);
 }
-Request ResolveRequest(WireRequest wire, WorkerMounts &mounts) {
+using AttributeSets = std::array<std::optional<HfsPlus::Attributes>, 2>;
+constexpr size_t attributeChunk = 65536;
+
+void SendAttributes(HANDLE pipe, unsigned slot, const HfsPlus::Attributes& attributes,
+                    Storage::Job& job) {
+    Data set;
+    set.put(slot); set.put(attributes.size());
+    Send(pipe, AttributeSet, std::move(set));
+    std::vector<char> buffer(attributeChunk);
+    for (const auto& attribute : attributes) {
+        Data header;
+        header.u16(attribute.first); header.put(attribute.second.size());
+        Send(pipe, AttributeHeader, std::move(header));
+        for (uint64_t at = 0; at < attribute.second.size();) {
+            if (job.cancelled()) throw Storage::Cancelled();
+            const auto count = size_t((std::min)(uint64_t(buffer.size()), attribute.second.size() - at));
+            attribute.second.Read(at, buffer.data(), count);
+            Data chunk;
+            chunk.bytes.assign(buffer.data(), buffer.data() + count);
+            Send(pipe, AttributeChunk, std::move(chunk));
+            at += count;
+        }
+    }
+}
+
+void ReceiveAttributes(HANDLE pipe, Data& set, AttributeSets& sets) {
+    auto slot = set.get(), count = set.get();
+    set.end();
+    Check(slot < sets.size() && !sets[size_t(slot)], "Invalid worker attribute set");
+    HfsPlus::Attributes attributes;
+    for (uint64_t i = 0; i < count; ++i) {
+        Data header;
+        Check(Receive(pipe, header) == AttributeHeader, "Expected worker attribute header");
+        auto name = header.u16();
+        auto length = header.get();
+        header.end();
+        Check(!name.empty() && !attributes.count(name), "Invalid or duplicate worker attribute name");
+        auto value = HfsPlus::AttributeData::Snapshot(length, [&](uint64_t, void* bytes, size_t size) {
+            auto output = static_cast<uint8_t*>(bytes);
+            while (size) {
+                Data chunk;
+                Check(Receive(pipe, chunk) == AttributeChunk &&
+                      chunk.bytes.size() == (std::min)(size, attributeChunk),
+                      "Invalid worker attribute chunk");
+                memcpy(output, chunk.bytes.data(), chunk.bytes.size());
+                output += chunk.bytes.size();
+                size -= chunk.bytes.size();
+            }
+        });
+        attributes.emplace(std::move(name), std::move(value));
+    }
+    sets[size_t(slot)] = std::move(attributes);
+}
+
+bool ReportsAffectedStorage(Kind kind) {
+    switch (kind) {
+    case Kind::Rename: case Kind::Delete: case Kind::CreateFolder: case Kind::CreateHardLink:
+    case Kind::SetProperties: case Kind::SetBasicMetadata: case Kind::SetAttributes:
+    case Kind::SetCompression: return true;
+    default: return false;
+    }
+}
+
+void AddAffected(Completion& completion, const std::string& key) {
+    if (std::none_of(completion.affected.begin(), completion.affected.end(),
+        [&](const Change& entry) { return entry.resourceKey == key; }))
+        completion.affected.push_back({key});
+}
+
+Request ResolveRequest(WireRequest wire, WorkerMounts &mounts, AttributeSets& attributes) {
     auto target = ResolveEndpoint(std::move(wire.target), mounts);
     if (wire.kind == Kind::Copy) {
         std::vector<Location> sources;
@@ -242,7 +311,38 @@ Request ResolveRequest(WireRequest wire, WorkerMounts &mounts) {
                 ResolveEndpoint(std::move(wire.sources.front()), mounts), std::move(target)};
         return std::move(*wire.legacy);
     }
+    if (wire.kind == Kind::CreateFolder)
+        return CreateFolder{std::move(target), std::move(wire.name)};
+    if (wire.kind == Kind::Delete) {
+        DeleteEntries deletion;
+        for (auto& endpoint : wire.sources)
+            deletion.selection.push_back(ResolveEndpoint(std::move(endpoint), mounts));
+        return deletion;
+    }
+    if (wire.basic && wire.sources.front().kind == Location::Kind::Mounted)
+        Check(wire.basic->original.id == wire.sources.front().selectedId,
+              "The Properties selection changed");
     auto source = ResolveEndpoint(std::move(wire.sources.front()), mounts);
+    if (wire.kind == Kind::Rename)
+        return RenameEntry{std::move(source), std::move(wire.name), std::move(target), wire.checkNameLock};
+    if (wire.kind == Kind::CreateHardLink)
+        return FileOperations::CreateHardLink{std::move(source), std::move(target), std::move(wire.name)};
+    if (wire.classic) {
+        wire.classic->item = std::move(source);
+        return std::move(*wire.classic);
+    }
+    if (wire.basic) {
+        if (source.IsMounted()) wire.basic->original.id = source.Id();
+        wire.basic->item = std::move(source);
+        return std::move(*wire.basic);
+    }
+    if (wire.kind == Kind::SetAttributes)
+        return EditAttributes{std::move(source), std::move(*attributes[0]), std::move(*attributes[1])};
+    if (wire.compression) {
+        wire.compression->item = std::move(source);
+        wire.compression->originalAttributes = std::move(*attributes[0]);
+        return std::move(*wire.compression);
+    }
     if (wire.kind == Kind::ExportFork)
         return ExportFileFork{std::move(source), std::move(target), wire.fork};
     if (target.IsWindows()) {
@@ -361,8 +461,7 @@ bool UsesWorker(const Request &request) {
     if (!enabled)
         return false;
 #endif
-    return request.OperationKind() == Kind::Copy || request.OperationKind() == Kind::LegacyCopy ||
-           request.OperationKind() == Kind::ExportFork || request.OperationKind() == Kind::ReplaceResource;
+    return SupportsOperation(request.OperationKind());
 }
 Storage::Result Run(const Request &request, Storage::Job &job, Completion &completion,
                     const std::vector<std::string> &keys, const std::vector<std::string> &writes) {
@@ -382,6 +481,19 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
     } else if (auto* input = request.Get<ImportResourceFork>()) {
         sources.push_back(Capture(input->input));
         target = Capture(input->file);
+    } else if (auto* rename = request.Rename()) {
+        sources.push_back(Capture(rename->source));
+        target = Capture(rename->parent);
+    } else if (auto* deletion = request.Delete()) {
+        for (const auto& item : deletion->selection) sources.push_back(Capture(item));
+    } else if (auto* folder = request.Get<CreateFolder>()) {
+        target = Capture(folder->parent);
+    } else if (auto* link = request.Get<FileOperations::CreateHardLink>()) {
+        sources.push_back(Capture(link->source));
+        target = Capture(link->parent);
+    } else if (auto* metadata = request.Metadata()) {
+        sources.push_back(Capture(std::visit([](const auto& edit) -> const Location& { return edit.item; },
+                                            *metadata)));
     }
     auto execution = request;
     if (request.OperationKind() == Kind::LegacyCopy) {
@@ -390,12 +502,11 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
     }
     WorkerStorageHandoff handoff;
     Storage::Result result;
-    bool launched = false;
+    bool requestSent = false;
     try {
         handoff.Prepare(keys, writes);
         Process worker;
         worker.Launch(handoff.Files());
-        launched = true;
 #ifdef HFV_TESTING
         lastProcess = worker.pid;
         unsigned testFault = fault.load();
@@ -433,8 +544,16 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     Send(worker.input.value, Mapping, std::move(d));
                 }
         }
+        if (auto* metadata = execution.Metadata()) {
+            if (auto* edit = std::get_if<EditAttributes>(metadata)) {
+                SendAttributes(worker.input.value, 0, edit->original, job);
+                SendAttributes(worker.input.value, 1, edit->desired, job);
+            } else if (auto* compression = std::get_if<ChangeCompression>(metadata))
+                SendAttributes(worker.input.value, 0, compression->originalAttributes, job);
+        }
         Send(worker.input.value, RequestPacket,
              EncodeRequest(execution, worker.parent.value, testFault, sources, target));
+        requestSent = true;
         bool cancelled = false, finished = false;
         while (!finished) {
             if (job.cancelled() && !cancelled) {
@@ -462,6 +581,8 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     } catch (...) {
                         worker.input.reset();
                     }
+                } else if (message == AffectedStorage) {
+                    AddAffected(completion, d.text());
                 } else if (message == Finished) {
                     result.code = int(d.get());
                     result.error = DWORD(d.get());
@@ -489,7 +610,9 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         Check(GetExitCodeProcess(worker.process.value, &exit) && exit == 0,
               "Copy worker failed during cleanup; inspect the destination");
     } catch (...) {
-        handoff.RestoreAfterFailure(std::current_exception(), launched);
+        if (requestSent && ReportsAffectedStorage(request.OperationKind()))
+            for (const auto& key : writes) AddAffected(completion, key);
+        handoff.RestoreAfterFailure(std::current_exception(), requestSent);
     }
     handoff.Restore();
     return result;
@@ -505,13 +628,20 @@ int Child(const char *inputText, const char *outputText) {
         DWORD floppyGeneration = 7;
         TypeMappings::Snapshot mappings;
         std::optional<WireRequest> wire;
+        AttributeSets attributes;
         std::vector<ImageHandleTransfer::File> files;
         for (;;) {
             Data d;
             auto message = Receive(input, d);
             if (message == RequestPacket) {
                 wire = DecodeRequest(d);
+                Check(attributes[0].has_value() == (wire->kind == Kind::SetAttributes || wire->kind == Kind::SetCompression) &&
+                      attributes[1].has_value() == (wire->kind == Kind::SetAttributes),
+                      "Wrong attribute sets for worker operation");
                 break;
+            } else if (message == AttributeSet) {
+                ReceiveAttributes(input, d, attributes);
+                continue;
             } else if (message == File) {
                 ImageHandleTransfer::File f;
                 f.path = d.wide();
@@ -647,7 +777,7 @@ int Child(const char *inputText, const char *outputText) {
             } detach{bool(simulatedFloppy)};
 #endif
             try {
-                auto request = ResolveRequest(std::move(*wire), mounts);
+                auto request = ResolveRequest(std::move(*wire), mounts, attributes);
 #ifdef HFV_TESTING
                 bool injected = false;
                 unsigned bulkReads = 0;
@@ -678,7 +808,7 @@ int Child(const char *inputText, const char *outputText) {
                 for (auto &mounted : mounts.volumes)
                     if (mounted.second->Writable())
                         writableMounts.push_back(mounted.second);
-                result = FileOperations::ExecuteCopyWorker(request, job, completion);
+                result = FileOperations::ExecuteInWorker(request, job, completion);
                 for (auto &volume : writableMounts)
                     if (!volume->Writable())
                         safe = false;
@@ -698,6 +828,12 @@ int Child(const char *inputText, const char *outputText) {
                       "Worker storage recovery was incomplete; inspect the volume before further writes"};
         stop = true;
         control.join();
+        if (ReportsAffectedStorage(wire->kind))
+            for (const auto& change : completion.affected) {
+                Data affected;
+                affected.put(change.resourceKey);
+                Send(output, AffectedStorage, std::move(affected));
+            }
         Data final;
         final.put(uint64_t(result.code));
         final.put(result.error);

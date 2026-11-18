@@ -200,6 +200,71 @@ WireEndpoint ParseEndpoint(Data &d, bool allowMounted) {
     }
     return endpoint;
 }
+bool SupportsOperation(Kind kind) {
+    switch (kind) {
+    case Kind::Copy: case Kind::LegacyCopy: case Kind::ExportFork: case Kind::ReplaceResource:
+    case Kind::Rename: case Kind::Delete: case Kind::CreateFolder: case Kind::CreateHardLink:
+    case Kind::SetProperties: case Kind::SetBasicMetadata: case Kind::SetAttributes:
+    case Kind::SetCompression: return true;
+    default: return false;
+    }
+}
+
+static void EncodeEntry(Data& d, const Entry& e) {
+    d.put(e.id); d.put(e.parent); d.u16(e.name); d.put(e.version);
+    d.put(e.created); d.put(e.modified); d.put(e.datesValid);
+    d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
+    d.put(e.forks[0].size); d.put(e.forks[1].size);
+    d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
+}
+static Entry DecodeEntry(Data& d) {
+    Entry e;
+    e.id=CatalogNumber(d); e.parent=CatalogNumber(d); e.name=d.u16(); e.version=CatalogNumber(d);
+    e.created=d.get(); e.modified=d.get(); e.datesValid=d.flag();
+    e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
+    e.forks[0].size=d.get(); e.forks[1].size=d.get();
+    auto finder=d.text();
+    Check(finder.size()==e.finder.size(), "Invalid Finder metadata length");
+    memcpy(e.finder.data(),finder.data(),finder.size());
+    return e;
+}
+static void EncodeClassic(Data& d, const hfsdirent& e) {
+    d.put(std::string(e.name, strnlen_s(e.name,sizeof(e.name))));
+    d.put(uint32_t(e.flags)); d.put(uint32_t(e.cnid)); d.put(uint32_t(e.parid));
+    d.put(uint64_t(e.crdate)); d.put(uint64_t(e.mddate)); d.put(uint64_t(e.bkdate));
+    d.put(uint16_t(e.fdflags)); d.put(uint16_t(e.fdlocation.v)); d.put(uint16_t(e.fdlocation.h));
+    if(e.flags&HFS_ISDIR) {
+        d.put(e.u.dir.valence); d.put(uint16_t(e.u.dir.rect.top)); d.put(uint16_t(e.u.dir.rect.left));
+        d.put(uint16_t(e.u.dir.rect.bottom)); d.put(uint16_t(e.u.dir.rect.right));
+    } else {
+        d.put(e.u.file.dsize); d.put(e.u.file.rsize);
+        d.put(std::string(e.u.file.type,4)); d.put(std::string(e.u.file.creator,4));
+    }
+}
+static uint16_t Word(Data& d) {
+    auto value=d.get();
+    Check(value<=UINT16_MAX,"Invalid worker metadata field width");
+    return uint16_t(value);
+}
+static hfsdirent DecodeClassic(Data& d) {
+    hfsdirent e{};
+    auto name=d.text();
+    Check(name.size()<sizeof(e.name)&&name.find(char(0))==name.npos,"Invalid classic metadata name");
+    memcpy(e.name,name.data(),name.size());
+    e.flags=int(CatalogNumber(d)); e.cnid=long(CatalogNumber(d)); e.parid=long(CatalogNumber(d));
+    e.crdate=time_t(d.get()); e.mddate=time_t(d.get()); e.bkdate=time_t(d.get());
+    e.fdflags=short(Word(d)); e.fdlocation.v=short(Word(d)); e.fdlocation.h=short(Word(d));
+    if(e.flags&HFS_ISDIR) {
+        e.u.dir.valence=Word(d); e.u.dir.rect.top=short(Word(d)); e.u.dir.rect.left=short(Word(d));
+        e.u.dir.rect.bottom=short(Word(d)); e.u.dir.rect.right=short(Word(d));
+    } else {
+        e.u.file.dsize=CatalogNumber(d); e.u.file.rsize=CatalogNumber(d);
+        auto type=d.text(), creator=d.text();
+        Check(type.size()==4&&creator.size()==4,"Invalid classic type or creator");
+        memcpy(e.u.file.type,type.data(),4); memcpy(e.u.file.creator,creator.data(),4);
+    }
+    return e;
+}
 static void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fault) {
     d.put(uint64_t(r.OperationKind()));
     if (auto* output = r.Get<ExportFileFork>()) d.put(uint64_t(output->fork));
@@ -214,6 +279,25 @@ static void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fa
         d.put(legacy->options.verifyFloppy);
         d.put(legacy->options.targetGenerationKnown);
         d.put(legacy->options.targetGeneration);
+    }
+    if(auto* rename=r.Rename()) { d.u16(rename->name); d.put(rename->checkNameLock); }
+    if(auto* folder=r.Get<CreateFolder>()) d.u16(folder->name);
+    if(auto* link=r.Get<FileOperations::CreateHardLink>()) d.u16(link->name);
+    if(auto* metadata=r.Metadata()) {
+        if(auto* classic=std::get_if<EditClassicProperties>(metadata)) {
+            d.put(classic->change.index());
+            if(auto* edit=std::get_if<ClassicPropertyEdit>(&classic->change)) {
+                EncodeClassic(d,edit->original); EncodeClassic(d,edit->desired);
+            } else if(auto* label=std::get_if<FinderLabel>(&classic->change)) d.put(label->value);
+            else {
+                const auto& position=std::get<FinderPosition>(classic->change);
+                d.put(uint16_t(position.x)); d.put(uint16_t(position.y));
+            }
+        } else if(auto* edit=std::get_if<EditBasicMetadata>(metadata)) {
+            EncodeEntry(d,edit->original); EncodeEntry(d,edit->desired);
+        } else if(auto* edit=std::get_if<ChangeCompression>(metadata)) {
+            EncodeEntry(d,edit->original); d.put(uint64_t(edit->method));
+        }
     }
     d.put(uintptr_t(parent));
     d.put(fault);
@@ -239,8 +323,7 @@ Data EncodeRequest(const Request &request, HANDLE parent, unsigned testFault,
 WireRequest DecodeRequest(Data &d) {
     WireRequest wire;
     auto kind = d.get();
-    Check(kind == uint64_t(Kind::Copy) || kind == uint64_t(Kind::LegacyCopy) ||
-              kind == uint64_t(Kind::ExportFork) || kind == uint64_t(Kind::ReplaceResource),
+    Check(kind <= uint64_t(Kind::SetCompression) && SupportsOperation(Kind(kind)),
           "Invalid worker operation");
     wire.kind = Kind(kind);
     if (wire.kind == Kind::LegacyCopy) {
@@ -267,13 +350,47 @@ WireRequest DecodeRequest(Data &d) {
         Check(fork <= uint64_t(ForkSelector::Resource), "Invalid fork selector");
         wire.fork = static_cast<ForkSelector>(fork);
     }
+    switch(wire.kind) {
+    case Kind::Rename:
+        wire.name=d.u16(); wire.checkNameLock=d.flag(); break;
+    case Kind::CreateFolder: case Kind::CreateHardLink:
+        wire.name=d.u16(); break;
+    case Kind::SetProperties: {
+        auto tag=d.get();
+        EditClassicProperties edit{};
+        if(tag==0) edit.change=ClassicPropertyEdit{DecodeClassic(d),DecodeClassic(d)};
+        else if(tag==1) {
+            auto label=d.get(); Check(label<=7,"Invalid Finder label");
+            edit.change=FinderLabel{int(label)};
+        } else if(tag==2) edit.change=FinderPosition{short(Word(d)),short(Word(d))};
+        else throw HfsPlus::Error("Invalid classic Properties change");
+        wire.classic=std::move(edit);
+        break;
+    }
+    case Kind::SetBasicMetadata:
+        wire.basic=EditBasicMetadata{{},DecodeEntry(d),DecodeEntry(d)}; break;
+    case Kind::SetCompression: {
+        auto original=DecodeEntry(d); auto method=d.get();
+        using Mode=HfsPlus::Volume::CompressionMode;
+        Check(method<=uint64_t(Mode::StoredInline),"Invalid compression method");
+        wire.compression=ChangeCompression{{},std::move(original),{},Mode(method)};
+        break;
+    }
+    default: break;
+    }
+    if(wire.kind==Kind::Rename||wire.kind==Kind::CreateFolder||wire.kind==Kind::CreateHardLink)
+        Check(!wire.name.empty(),"Missing worker operation name");
     wire.parent = HANDLE(uintptr_t(d.get()));
     Check(wire.parent != nullptr, "Missing copy-worker parent");
     wire.fault = CatalogNumber(d);
     auto count = d.get();
     if (wire.kind == Kind::Copy) Check(count > 0, "Copy requires a source");
     else if (wire.kind == Kind::LegacyCopy) Check(count <= 1, "Invalid conversion source count");
-    else Check(count == 1, "Fork jobs require exactly one source");
+    else if (wire.kind == Kind::Delete) Check(count > 0, "Delete requires a selection");
+    else if (wire.kind == Kind::CreateFolder) Check(!count, "Folder creation has no source");
+    else Check(count == 1, wire.kind == Kind::ExportFork || wire.kind == Kind::ReplaceResource ?
+               "Fork jobs require exactly one source" : "Worker job requires exactly one source");
+
     // The smallest endpoint has eight 64-bit fields, and a target must follow.
     Check(count < (d.bytes.size() - d.at) / 64, "Truncated copy-worker endpoints");
     for (uint64_t i = 0; i < count; ++i) {
@@ -300,6 +417,14 @@ WireRequest DecodeRequest(Data &d) {
         Check(wire.target.kind == Address::Mounted || wire.target.kind == Address::Windows,
               "Resource import requires a mounted or Windows destination file");
         break;
+    case Kind::CreateFolder: case Kind::CreateHardLink:
+        Check(wire.target.kind!=Address::None,"Missing worker destination"); break;
+    case Kind::Rename:
+        Check(wire.target.kind==Address::None || wire.target.kind==Address::Mounted,
+              "Invalid rename parent"); break;
+    case Kind::Delete: case Kind::SetProperties: case Kind::SetBasicMetadata:
+    case Kind::SetAttributes: case Kind::SetCompression:
+        Check(wire.target.kind==Address::None,"Unexpected worker destination"); break;
     default: throw HfsPlus::Error("Invalid worker operation");
     }
     return wire;
