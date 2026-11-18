@@ -153,6 +153,81 @@ int RunBrowserWindowsTest(const char* directory){
    Check(sb.MacBrowser().ShowTestFolder(1,2),"restore second browser root");
    fprintf(report,"PASS: second hidden browser navigates the same mounted image during a paused export, with writers excluded and worker PID unchanged.\n");
   }
+  {
+   Check(sa.MacBrowser().Activate(Find(sa,L"One")) && Find(sa,L"Slow payload")>=0,
+         "first browser did not cache the import destination");
+   const auto directory=sharedPath.substr(0,sharedPath.find_last_of(L'\\'));
+   const auto filename=directory+L"\\Import payload";
+   auto seedWindows=[&](uint8_t byte,bool replace){
+    auto source=MacBrowser::OpenWindows(directory);
+    MacBrowser::Entry entry;entry.name=u"Import payload";entry.forks[0].size=512*1024;
+    source->Put(2,entry,[&](unsigned,uint64_t,void* out,size_t n){memset(out,byte,n);},replace);
+   };
+   seedWindows(0x31,false);
+   shared->MakeDirectory(2,u"Uncached");
+   auto status=[&]{CString text;sb.Status()->GetPaneText(0,text);return text;};
+   struct WritePause {
+    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    std::shared_ptr<Storage::Job> job;
+    ~WritePause(){
+     VolumeSession::PauseVolumeWriteForTest(nullptr,nullptr);
+     if(release)SetEvent(release);
+     if(job&&!job->done()){job->cancel();job->wait();}
+     if(entered)CloseHandle(entered);
+     if(release)CloseHandle(release);
+    }
+   };
+   for(bool cancel:{false,true}){
+    if(cancel)seedWindows(0x42,true);
+    Check(sb.MacBrowser().ShowTestFolder(1,2),"return the peer browser to the root");
+    WritePause pause;
+    Check(pause.entered&&pause.release,"create import pause");
+    VolumeSession::PauseVolumeWriteForTest(pause.entered,pause.release);
+    FileOperations::Request request=FileOperations::OrdinaryCopy{{FileOperations::Location::Windows(filename)},firstSelection};
+    request.background=true;
+    auto imported=FileOperations::Submit(std::move(request));
+    pause.job=imported.Job();
+    if(cancel){
+     const auto deadline=GetTickCount()+10000;
+     while(pause.job->conflict().empty()&&!pause.job->done()&&LONG(deadline-GetTickCount())>0)Sleep(1);
+     Check(!pause.job->conflict().empty(),"overwrite conflict missing");
+     pause.job->resolve(Storage::ConflictChoice::Replace);
+    }
+    Check(WaitForSingleObject(pause.entered,10000)==WAIT_OBJECT_0&&!VolumeCoord::Readable(shared->ResourceKey()),
+          "import did not pause with exclusive image access");
+    if(!cancel){
+     Check(sb.MacBrowser().Activate(Find(sb,L"Uncached"))&&status().Find("Waiting for")>=0&&!pause.job->done(),
+           "uncached folder did not wait for the import");
+     Check(sb.MacBrowser().ShowTestFolder(1,2),"cached root could not replace the deferred navigation");
+    }
+    const auto priorRefresh=sa.notificationRefreshes;
+    Check(sb.MacBrowser().Activate(Find(sb,L"One"))&&Find(sb,L"Slow payload")>=0&&
+              status().Find("Showing the last folder listing")>=0&&!sb.MacBrowser().Writable()&&
+              (Find(sb,L"Import payload")>=0)==cancel&&!pause.job->done(),
+          "peer did not display the other browser's committed listing during import");
+    if(cancel)pause.job->cancel();
+    VolumeSession::PauseVolumeWriteForTest(nullptr,nullptr);
+    SetEvent(pause.release);
+    Check(WaitForSingleObject(pause.job->event(),10000)==WAIT_OBJECT_0&&
+              (cancel?pause.job->result().error==ERROR_CANCELLED:!pause.job->result().code),
+          "paused import completed with an unexpected result");
+    const auto deadline=GetTickCount()+10000;
+    while((Find(sa,L"Import payload")<0||Find(sb,L"Import payload")<0||
+           sa.notificationRefreshes==priorRefresh||!sb.MacBrowser().Writable())&&LONG(deadline-GetTickCount())>0){
+     MSG message{};while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessage(&message);}
+     Sleep(1);
+    }
+    MacBrowser::Entry importedFile;
+    Check(Find(sa,L"Import payload")>=0&&Find(sb,L"Import payload")>=0&&
+              sa.notificationRefreshes>priorRefresh&&sb.MacBrowser().Writable()&&
+              shared->FindChild(firstSelection.Id(),u"Import payload",importedFile),"both cached views did not refresh");
+    uint8_t sample=0;shared->Read(importedFile.id,0,0,&sample,1);
+    Check(sample==0x31&&VolumeSession::VolumeSessionPidForTest(shared)==pid,
+          "cancelled overwrite changed the original or restarted the worker");
+   }
+   Check(sa.MacBrowser().ShowTestFolder(0,2)&&sb.MacBrowser().ShowTestFolder(1,2),"restore roots after import test");
+   fprintf(report,"PASS: shared cached listing during paused import and cancelled overwrite, with refresh in both browsers\n");
+  }
   auto renamed=FileOperations::Submit(FileOperations::RenameEntry{firstSelection,u"Renamed"});
   Check(WaitForSingleObject(renamed.Job()->event(),10000)==WAIT_OBJECT_0&&
         !renamed.Job()->result().code,"rename on persistent session failed");

@@ -57,7 +57,7 @@ public:
  void SetLocationTitle(std::wstring);
  std::wstring WindowTitle()const;
  void UpdateWindowTitle()const;
- bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false);
+ bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false,bool keepListing=false);
 #ifdef HFV_TESTING
     unsigned notificationRefreshes=0,notificationErrors=0;
 #endif
