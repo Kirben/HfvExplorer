@@ -21,7 +21,9 @@ bool MfsImageSource::Open(const wchar_t* path,std::string& error,bool write) {
     length_=0;writable_=false;
     // Regular images only. All readers/writers exclude competing write handles.
     if(!path || wcsncmp(path,L"\\\\.\\",4)==0 || wcsncmp(path,L"\\\\?\\",4)==0) {error="Choose a regular disk image file.";return false;}
-    path_=path;file_=ImageHandleTransfer::Open(path,write);
+    path_=path;
+    try { file_=ImageHandleTransfer::Open(path,write); }
+    catch(const std::exception& failure) { error=failure.what(); return false; }
     if(file_==INVALID_HANDLE_VALUE)file_=CreateFileW(path,GENERIC_READ|(write?GENERIC_WRITE:0),FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
     if(file_==INVALID_HANDLE_VALUE) {error="Could not open the image (it may be in use by another process).";return false;}
     LARGE_INTEGER size;
@@ -35,10 +37,17 @@ bool MfsImageSource::ReadAt(uint64_t offset,void* bytes,size_t length) {
     LARGE_INTEGER position;position.QuadPart=offset;DWORD got;
     return SetFilePointerEx(file_,position,NULL,FILE_BEGIN) && ReadFile(file_,bytes,DWORD(length),&got,NULL) && got==length;
 }
+#ifdef HFV_TESTING
+thread_local bool MfsImageSource::crashAfterSectorWrite=false;
+#endif
 bool MfsImageSource::WriteAt(uint64_t offset,const void* bytes,size_t length) {
     if(!writable_||file_==INVALID_HANDLE_VALUE||offset>length_||length>length_-offset||length>MAXDWORD)return false;
     LARGE_INTEGER position;position.QuadPart=offset;DWORD written=0;
-    return SetFilePointerEx(file_,position,NULL,FILE_BEGIN)&&WriteFile(file_,bytes,DWORD(length),&written,NULL)&&written==length;
+    const bool ok=SetFilePointerEx(file_,position,NULL,FILE_BEGIN)&&WriteFile(file_,bytes,DWORD(length),&written,NULL)&&written==length;
+#ifdef HFV_TESTING
+    if(ok && length==512 && crashAfterSectorWrite && FlushFileBuffers(file_))ExitProcess(81);
+#endif
+    return ok;
 }
 bool MfsImageSource::Flush(){return writable_&&FlushFileBuffers(file_)!=FALSE;}
 
@@ -58,7 +67,7 @@ std::string RecoveryFile(const std::vector<BYTE>& original){
 }
 bool Apply(MfsSource& source,const std::vector<BYTE>& original,const std::vector<BYTE>& desired,
            uint64_t metadataEnd,uint64_t directoryStart,uint64_t directoryEnd,uint64_t dataEnd,
-           std::string& error,bool& recoveryRequired){
+           std::string& error,bool& recoveryRequired,size_t lockOffset=SIZE_MAX){
  std::vector<std::pair<size_t,size_t>> payload,metadata,touched;
  for(size_t at=0;at<desired.size();at+=512){auto n=(std::min)(size_t(512),desired.size()-at);if(!memcmp(original.data()+at,desired.data()+at,n))continue;
   bool meta=at<metadataEnd||(at<directoryEnd&&at+n>directoryStart)||at+n>dataEnd;(meta?metadata:payload).push_back({at,n});}
@@ -76,7 +85,16 @@ bool Apply(MfsSource& source,const std::vector<BYTE>& original,const std::vector
  }
  if(!touched.empty())Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
  error="MFS write or flush failed; original bytes were restored.";
- if(!restored){recoveryRequired=true;source.DisableWrites();auto file=RecoveryFile(original);error="MFS rollback failed; further writes are disabled.";if(!file.empty())error+=" Original complete image saved at: "+file+". Verify the source before manual recovery.";else error+=" Could not save the original image; preserve the source for recovery.";}
+ if(!restored){
+  recoveryRequired=true;source.DisableWrites();
+  // The recovery copy preserves the pre-operation bytes and checksum.
+  auto backup=original;
+  if(lockOffset<backup.size())backup[lockOffset]&=0x7f;
+  auto file=RecoveryFile(backup);
+  error="MFS rollback failed; further writes are disabled.";
+  if(!file.empty())error+=" Original complete image saved at: "+file+". Verify the source before manual recovery.";
+  else error+=" Could not save the original image; preserve the source for recovery.";
+ }
  return false;
 }
 void PackedMap(std::vector<BYTE>& bytes,uint64_t base,const std::vector<uint16_t>& map){
@@ -129,9 +147,43 @@ bool MfsImage::Serialize(std::vector<BYTE>& bytes,const std::vector<MfsEntry>& e
  PackedMap(bytes,base_,map);unsigned free=0;for(auto v:map)free+=v==0;put16(bytes.data()+size_t(base_)+1036,unsigned(entries.size()));put16(bytes.data()+size_t(base_)+1058,free);put32(bytes.data()+size_t(base_)+1054,next);return true;
 }
 bool MfsImage::Commit(std::vector<BYTE>& desired){
- std::vector<BYTE> original;if(!Snapshot(original))return false;ContainerChecksums(desired,base_,length_,tagBytes_,&original);
- VectorSource verify(desired);MfsImage check;if(!check.Open(verify))return Fail("Internal MFS mutation produced an invalid filesystem.");
- if(!Apply(*source_,original,desired,base_+1088+(map_.size()*12+7)/8,base_+uint64_t(directoryStart_)*512,base_+uint64_t(directoryStart_+directoryBlocks_)*512,base_+length_,error_,recoveryRequired_)){usable_=false;return false;}
+ std::vector<BYTE> original;
+ if(!Snapshot(original))return false;
+ ContainerChecksums(desired,base_,length_,tagBytes_,&original);
+ VectorSource verify(desired);
+ MfsImage check;
+ if(!check.Open(verify))return Fail("Internal MFS mutation produced an invalid filesystem.");
+
+ const auto flags=size_t(base_)+1034;
+ const bool fileImage=dynamic_cast<MfsImageSource*>(source_)!=nullptr;
+ auto store=[&](const std::vector<BYTE>& bytes,size_t offset,size_t count){
+  return source_->WriteAt(offset,bytes.data()+offset,count)&&source_->Flush();
+ };
+ auto fence=[&](const char* error){
+  recoveryRequired_=true;usable_=false;source_->DisableWrites();
+  Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Failed);
+  return Fail(error);
+ };
+ if(fileImage){
+  // Keep the on-disk MFS software lock set throughout writes and rollback.
+  original[flags]|=0x80;
+  desired[flags]|=0x80;
+  if(!store(original,flags,2))return fence("Cannot flush the MFS write lock.");
+ }
+ const bool applied=Apply(*source_,original,desired,base_+1088+(map_.size()*12+7)/8,
+    base_+uint64_t(directoryStart_)*512,base_+uint64_t(directoryStart_+directoryBlocks_)*512,
+    base_+length_,error_,recoveryRequired_,fileImage?flags:SIZE_MAX);
+ if(fileImage&&!recoveryRequired_){
+  auto& finalBytes=applied?desired:original;
+  finalBytes[flags]&=0x7f;
+  // Apply has already flushed the checksum for the unlocked image.
+  // The transient mismatch while locked also fences Disk Copy writes.
+  if(!store(finalBytes,flags,2)){
+   if(applied)Storage::OutcomeEvidence::NoteRetainedChange();
+   return fence("Cannot confirm the MFS write lock was cleared.");
+  }
+ }
+ if(!applied){usable_=false;return false;}
  auto source=source_;return Open(*source);
 }
 bool MfsImage::Put(const MfsEntry& input,Reader read,bool overwrite,uint32_t& id){

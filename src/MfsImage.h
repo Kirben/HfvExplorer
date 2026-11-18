@@ -21,6 +21,9 @@ public:
 class MfsImageSource : public MfsSource {
 public:
     MfsImageSource();
+#ifdef HFV_TESTING
+    static thread_local bool crashAfterSectorWrite;
+#endif
     ~MfsImageSource();
     bool Open(const wchar_t* path,std::string& error,bool write=false);
     uint64_t Length() const override { return length_; }

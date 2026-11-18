@@ -243,6 +243,13 @@ std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::str
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
     return TrackWorkerVolume(std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal)));
 }
+std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable) {
+    auto source=std::make_unique<MfsImageSource>();
+    std::string error;
+    if(!source->Open(path.c_str(),error,writable) &&
+       (!writable || !source->Open(path.c_str(),error,false)))throw HfsPlus::Error(error);
+    return FromMfs(std::move(source),VolumeCoord::ImageKey(path));
+}
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
@@ -259,12 +266,12 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     if (!MfsImage::Recognizes(*mfs)) {
         mfs.reset();
         if (!externalJournal.empty() || !RecognizesClassicImage(path)) return {};
-        if (persistent) return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,{},true));
+        if (persistent) return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,{},CopyProcess::ImageFormat::Classic));
         return OpenClassicImage(path,true);
     }
-    mfs.reset(new MfsImageSource);
-    if(!mfs->Open(path.c_str(),error,true)){mfs.reset(new MfsImageSource);if(!mfs->Open(path.c_str(),error))throw HfsPlus::Error(error);}
-    return TrackWorkerVolume(std::make_shared<Mfs>(std::move(mfs),key));
+    mfs.reset();
+    if(persistent)return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,{},CopyProcess::ImageFormat::Mfs));
+    return OpenMfsImage(path,true);
     });
 }
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {

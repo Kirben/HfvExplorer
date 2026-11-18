@@ -10,8 +10,9 @@ bool CopyWithinMountedImage(MacBrowser::Volume&, const std::vector<uint32_t>&, u
 Storage::Result Run(const FileOperations::Request &, Storage::Job &, FileOperations::Completion &,
                     const std::vector<std::string> &, const std::vector<std::string> &);
 int Child(const char *, const char *);
+enum class ImageFormat { HfsPlus, Classic, Mfs };
 std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring &path, const std::string &key,
-                                                       const std::wstring& journal, bool classic = false);
+                                                       const std::wstring& journal, ImageFormat format = ImageFormat::HfsPlus);
 int VolumeSessionChild(const char *input, const char *output);
 #ifdef HFV_TESTING
 std::vector<uint8_t> EncodeLocationForTest(const FileOperations::Location &);

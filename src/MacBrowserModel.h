@@ -120,6 +120,7 @@ std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key);
 std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource>,const std::string& key);
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
+std::shared_ptr<Volume> OpenMfsImage(const std::wstring&, bool writable);
 bool RecognizesClassicImage(const std::wstring&);
 std::shared_ptr<Volume> OpenClassicImage(const std::wstring&, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.
