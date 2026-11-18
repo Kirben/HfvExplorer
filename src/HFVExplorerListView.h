@@ -38,7 +38,6 @@ typedef struct {
 	HICON icon32;
 	unsigned long creation_date_lo, creation_date_hi;
 	unsigned long modification_date_lo, modification_date_hi;
-	int finder_color;
 } list_lparam_struct;
 
 #define FIELD_NAME		0
@@ -58,6 +57,14 @@ class CHFVExplorerListView : public CListView
 {
  BrowserSession* m_browserSession=nullptr;
  std::unique_ptr<BrowserTransfers::Drag> m_browserDrag;
+ struct DragIcon {int index;FileOperations::Location location;CPoint position;};
+ std::vector<DragIcon> m_dragIcons;
+ CPoint m_dragStart;
+ LPARAM m_parentRowData=0;
+ void CaptureDragIcons();
+ void PlaceDraggedIcons(CSize);
+ void UpdateDragModifiers();
+ void FinishDragImage();
  void CancelBrowserDrag();
  afx_msg void OnCaptureChanged(CWnd*);
  afx_msg void OnCancelMode();
@@ -91,28 +98,16 @@ protected:
 	// COLORREF m_bkcolor;
 	CImageList* m_drag_list;
 	int m_dragging;
-	int m_iItemDrag, m_iItemDrop;
-	CPoint m_ptOrigin, m_ptHotSpot;
 	CSize m_sizeDelta;
-	HTREEITEM m_TreeiItemDrop, m_save_tree_selection;
 
 	int m_editing_item;
 	char m_editing_item_name[_MAX_PATH];
-	int m_move_type;
 
 	HCURSOR m_move_cursor, m_copy_cursor;
-	BOOL m_shutup_for_now;
 
 	int m_sorted_by_column;
 	BOOL m_sort_is_ascending;
 	POINT m_mac_origo;
-
-	CStringArray m_clipboard;
-	CDWordArray m_clipboard_type;
-	CDWordArray m_clipboard_isdir;
-	CStringArray m_clipboard_volpath;
-	CDWordArray m_clipboard_cutting;
-	CDWordArray m_clipboard_volinx;
 
 // Attributes
 public:
@@ -129,29 +124,11 @@ public:
 		int check_lock
 	);
 	BOOL new_folder(void);
-	void inx2volname( int inx, char *volpath, int size );
-	int copy_item_to_dir( 
-		int item, 
-		HTREEITEM htree, 
-		int action,
-		CString *input_path,
-		int input_isdir,
-		int input_type,
-		LPCSTR input_volpath,
-		int input_volinx
-	);
 	void set_cursor_by_type( int control );
-	void check_move_type( int control );
-	void check_move_type( int control, int shift );
 	void update_floppy_view( char *volpath );
 
 	int new_bowser_on( CString start_dir );
 	void update_current_view();
-	int drop_list_to_tree( int item, HTREEITEM htree, int action );
-	void set_drop_target( int iItem, int onoff );
-	int tree_view_hit_test( CPoint pt );
-	void set_tree_drop_target( HTREEITEM item, int onoff );
-	void ensure_pane( int request_col );
 	int get_inx_type(int inx);
 	int get_inx_isdir(int inx);
 	void try_delete_selected_items( BOOL confirm );
@@ -172,6 +149,11 @@ public:
     int InsertBrowserRow(const BrowserDirectory::Row&,HTREEITEM);
     void SortBrowserRows(int column,bool ascending);
     const BrowserDirectory::Row* BrowserRowAt(int row) const;
+    bool IsParentRow(int index)const;
+    bool OpenWithDrop(const FileOperations::Location& source,const FileOperations::Location& application,bool mac);
+#ifdef HFV_TESTING
+    void PlaceSelectedIconsForTest(CSize displacement);
+#endif
 	int list_insert( 
 		LPSTR name, 
 		int isdir, 
@@ -219,10 +201,8 @@ public:
 		unsigned long creation_date_lo, 
 		unsigned long creation_date_hi,
 		unsigned long modification_date_lo, 
-		unsigned long modification_date_hi,
-		int finder_color
+		unsigned long modification_date_hi
 		);
-	int get_lparam_finder_color( LPARAM lparam );
 	long get_lparam_id( LPARAM lparam );
 	int get_lparam_type( LPARAM lparam );
 	int get_lparam_isdir( LPARAM lparam );
@@ -235,15 +215,9 @@ public:
 	int get_lparam_creation( LPARAM lparam, DWORD *lo, DWORD *hi );
 
 	int get_path( int inx, CString &doc_name );
-	int do_open_with( CString document, CString application, int mac, CString creator );
 	int do_open_with( int document, CString app_name, int mac, CString creator );
-	int do_open_with( CString document, int application, CString creator );
-	int do_open_with( int document, int application, CString creator );
-	int do_file_to_folder( int source, int dest, int action );
 	int do_open_with_pc( CString document, CString application );
 	int do_open_with_mac( CString document, CString application, CString creator );
-	int is_mac_item( int inx );
-	int is_mac_application( int inx );
 	int write_text_file( LPSTR name, LPSTR txt );
 	void get_vmac_launcher_name( char *name );
 	void add_link_tail( char *lpszPathLink, char *id );
@@ -262,14 +236,11 @@ public:
 
 	void destroy_pointers();
 
-	BOOL ask_set_copy_mode( int outcopy, CString & name );
 	BOOL map_selected_item( void );
 
 	void do_report_sort(void);
-	DWORD stupid_get_date( int inx, int whichone );
 
 	void set_origo( int x, int y );
-	void update_finder_position( int inx, CPoint p );
 	void go_up( int control );
 
 	void save_icon_command( int inx );
@@ -314,7 +285,6 @@ protected:
 	afx_msg void OnSysKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
 	afx_msg BOOL OnQueryNewPalette();
 	afx_msg void OnPaletteChanged(CWnd* pFocusWnd);
-	afx_msg void OnBeginrdrag(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnBegindrag(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
 	afx_msg void OnLButtonUp(UINT nFlags, CPoint point);

@@ -17,42 +17,128 @@ bool Same(const FileOperations::Location& a,const FileOperations::Location& b){
  if(a.Volume()||b.Volume())return a.Volume()&&b.Volume()&&a.Id()==b.Id();
  return a.LegacyType()==LIST_FAT?!_wcsicmp(a.WindowsPath().c_str(),b.WindowsPath().c_str()):!_stricmp(a.ClassicPath().c_str(),b.ClassicPath().c_str());
 }
+enum class DropKind { None, Folder, IconCanvas, Application };
 struct Target {
- BrowserSession* session=nullptr;HWND control=nullptr;HTREEITEM item=nullptr;int row=-1;bool tree=false,writable=false;
- FileOperations::Location folder;
+ BrowserSession* session=nullptr;
+ HWND control=nullptr;
+ HTREEITEM item=nullptr;
+ int row=-1;
+ bool tree=false,writable=false,macApplication=false;
+ DropKind kind=DropKind::None;
+ FileOperations::Location location;
 };
-Target Resolve(BrowserSession& session,bool tree,HTREEITEM item,int row){
- Target out;out.session=&session;out.tree=tree;out.item=item;out.row=row;
- auto list=session.List();auto tv=session.Tree();if(!list||!tv)return {};
+
+Target Resolve(BrowserSession& session,bool tree,HTREEITEM item,int row,bool local){
+ Target out;
+ auto list=session.List();
+ auto tv=session.Tree();
+ if(!list||!tv)return out;
+ out.session=&session;
+ out.tree=tree;
+ out.item=item;
+ out.row=row;
  out.control=tree?tv->GetSafeHwnd():list->GetSafeHwnd();
  try{
-  if(!tree&&row>=0){
-   auto model=list->BrowserRowAt(row);
-   if(!session.ListingAvailable()||!model||!model->entry.directory||model->location.IsNone())return {};
-   out.folder=model->location;
-   out.writable=model->capabilities.create;
-  }else{
+  if(tree){
+   if(!item)return {};
    auto folder=session.MacBrowser().DescribeFolder(item);
-   out.folder=std::move(folder.location);
-   out.writable=tree?folder.writable:list->BrowserDirectoryWritable();
+   out.location=std::move(folder.location);
+   out.writable=folder.writable;
+  }else{
+   if(!session.ListingAvailable())return {};
+   if(row<0){
+    if(local){
+     const auto style=list->GetStyle()&LVS_TYPEMASK;
+     if(style!=LVS_ICON&&style!=LVS_SMALLICON)return {};
+     out.kind=DropKind::IconCanvas;
+     return out;
+    }
+    out.location=session.MacBrowser().TargetFolder();
+    out.writable=list->BrowserDirectoryWritable();
+   }else if(list->IsParentRow(row)){
+    auto& control=tv->GetTreeCtrl();
+    auto parent=control.GetParentItem(control.GetSelectedItem());
+    if(!parent)return {};
+    auto folder=session.MacBrowser().DescribeFolder(parent);
+    out.location=std::move(folder.location);
+    out.writable=folder.writable;
+   }else{
+    const auto model=list->BrowserRowAt(row);
+    if(!model||model->location.IsNone())return {};
+    out.location=model->location;
+    if(!model->entry.directory){
+     if(!local||!model->entry.readError.empty()||out.location.IsMounted())return {};
+     const auto& finder=model->entry.finder;
+     out.macApplication=!memcmp(finder.data(),"APPL",4);
+     if(!out.macApplication&&(out.location.IsClassic()||finder[0]))return {};
+     out.kind=DropKind::Application;
+     return out;
+    }
+    out.writable=model->capabilities.create;
+   }
   }
- }
- catch(const std::exception&){return {};}
+  out.kind=DropKind::Folder;
+ }catch(const std::exception&){return {};}
  return out;
 }
-Target Hit(CPoint screen){
- HWND window=WindowFromPoint(screen);auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
- for(auto frame:app->m_browsers){auto& session=frame->GetBrowserSession();auto tree=session.Tree();auto list=session.List();
-  if(tree&&window==tree->GetSafeHwnd()){CPoint p=screen;tree->ScreenToClient(&p);UINT flags=0;auto item=tree->GetTreeCtrl().HitTest(p,&flags);if(item&&(flags&(TVHT_ONITEM|TVHT_ONITEMRIGHT)))return Resolve(session,true,item,-1);return {};}
-  if(list&&window==list->GetSafeHwnd()){CPoint p=screen;list->ScreenToClient(&p);CRect bounds;list->GetClientRect(&bounds);if(bounds.PtInRect(p))return Resolve(session,false,nullptr,list->GetListCtrl().HitTest(p));}
+
+Target Hit(CPoint screen,HWND source){
+ const auto window=WindowFromPoint(screen);
+ const auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+ for(auto frame:app->m_browsers){
+  auto& session=frame->GetBrowserSession();
+  const bool local=frame->GetSafeHwnd()==source;
+  auto tree=session.Tree();
+  auto list=session.List();
+  if(tree&&window==tree->GetSafeHwnd()){
+   auto point=screen;
+   tree->ScreenToClient(&point);
+   UINT flags=0;
+   auto item=tree->GetTreeCtrl().HitTest(point,&flags);
+   if(item&&(flags&(TVHT_ONITEM|TVHT_ONITEMRIGHT)))return Resolve(session,true,item,-1,local);
+   return {};
+  }
+  if(list&&window==list->GetSafeHwnd()){
+   auto point=screen;
+   list->ScreenToClient(&point);
+   CRect bounds;
+   list->GetClientRect(&bounds);
+   if(bounds.PtInRect(point))return Resolve(session,false,nullptr,list->GetListCtrl().HitTest(point),local);
+  }
  }
  return {};
 }
-bool Transfer(const Selection& selection,Target& target,UINT keys){
- auto effect=Choose(selection,target.folder,target.session&&target.writable,keys);if(effect==Effect::None)return false;
- auto sources=selection.items;for(auto& item:sources)item.cut=effect==Effect::Move;
- return target.session->MacBrowser().TransferSelection(sources,target.folder);
+
+Effect DropEffect(const Selection& selection,const Target& target,UINT keys)
+{
+ if(target.kind==DropKind::Folder)return Choose(selection,target.location,target.writable,keys);
+ if(selection.items.empty()||StorageUi::busy()||StorageUi::state().sessionOpen)return Effect::None;
+ if(target.kind==DropKind::IconCanvas)return Effect::Move;
+ if(target.kind==DropKind::Application){
+  const auto& source=selection.items.front();
+  const auto& app=target.location;
+  if(source.IsWindows()&&app.IsWindows()&&!_wcsicmp(source.WindowsPath().c_str(),app.WindowsPath().c_str()))
+   return Effect::None;
+  if(source.IsClassic()&&app.IsClassic()&&!_stricmp(source.ClassicPath().c_str(),app.ClassicPath().c_str()))
+   return Effect::None;
+  if(target.macApplication&&(source.IsClassic()||source.IsWindows()))return Effect::Copy;
+  if(target.location.IsWindows()&&source.IsWindows())return Effect::Copy;
+ }
+ return Effect::None;
 }
+
+bool Transfer(const Selection& selection,const Target& target,UINT keys)
+{
+ const auto effect=DropEffect(selection,target,keys);
+ if(effect==Effect::None)return false;
+ if(target.kind==DropKind::Application)
+  return target.session->List()->OpenWithDrop(selection.items.front(),target.location,target.macApplication);
+ if(target.kind!=DropKind::Folder)return false;
+ auto sources=selection.items;
+ for(auto& item:sources)item.cut=effect==Effect::Move;
+ return target.session->MacBrowser().TransferSelection(sources,target.location);
+}
+
 }
 Selection Snapshot(){return clipboard;}
 void Publish(Selection value,bool append){
@@ -84,28 +170,47 @@ Effect Choose(const Selection& selection,const FileOperations::Location& target,
 Drag::Drag(BrowserSession& session):selection_(session.MacBrowser().SelectedItems(false)),source_(session.Owner()->GetSafeHwnd()){}
 Drag::~Drag(){ClearHighlight();}
 void Drag::ClearHighlight(){if(highlight_&&IsWindow(highlight_)){if(treeHighlight_)SendMessage(highlight_,TVM_SELECTITEM,TVGN_DROPHILITE,0);else{LVITEM item{};item.stateMask=LVIS_DROPHILITED;SendMessage(highlight_,LVM_SETITEMSTATE,WPARAM(-1),reinterpret_cast<LPARAM>(&item));}}highlight_=nullptr;highlightItem_=nullptr;highlightRow_=-1;}
-bool Drag::Hover(CPoint screen,UINT keys){
- if(!IsWindow(source_)){ClearHighlight();return true;}HWND window=WindowFromPoint(screen);if(window==source_||IsChild(source_,window)){ClearHighlight();return false;}
- auto target=Hit(screen);auto effect=Choose(selection_,target.folder,target.session&&target.writable,keys);
- if(effect==Effect::None)ClearHighlight();
- else if(highlight_!=target.control||treeHighlight_!=target.tree||highlightItem_!=target.item||highlightRow_!=target.row){ClearHighlight();highlight_=target.control;treeHighlight_=target.tree;highlightItem_=target.item;highlightRow_=target.row;if(target.tree)SendMessage(highlight_,TVM_SELECTITEM,TVGN_DROPHILITE,reinterpret_cast<LPARAM>(target.item));else if(target.row>=0){LVITEM item{};item.state=item.stateMask=LVIS_DROPHILITED;SendMessage(highlight_,LVM_SETITEMSTATE,target.row,reinterpret_cast<LPARAM>(&item));}}
+void Drag::Hover(CPoint screen,UINT keys)
+{
+ if(!IsWindow(source_)){ClearHighlight();return;}
+ const auto target=Hit(screen,source_);
+ const auto effect=DropEffect(selection_,target,keys);
+ if(effect==Effect::None || target.kind==DropKind::IconCanvas)ClearHighlight();
+ else if(highlight_!=target.control||treeHighlight_!=target.tree||highlightItem_!=target.item||highlightRow_!=target.row){
+  ClearHighlight();
+  highlight_=target.control;
+  treeHighlight_=target.tree;
+  highlightItem_=target.item;
+  highlightRow_=target.row;
+  if(target.tree)SendMessage(highlight_,TVM_SELECTITEM,TVGN_DROPHILITE,reinterpret_cast<LPARAM>(target.item));
+  else if(target.row>=0){
+   LVITEM item{};
+   item.state=item.stateMask=LVIS_DROPHILITED;
+   SendMessage(highlight_,LVM_SETITEMSTATE,target.row,reinterpret_cast<LPARAM>(&item));
+  }
+ }
  auto frame=DYNAMIC_DOWNCAST(CMainFrame,CWnd::FromHandlePermanent(source_));
  auto list=frame?frame->GetBrowserSession().List():nullptr;
- if(effect==Effect::None)SetCursor(LoadCursor(nullptr,IDC_NO));else if(list)list->set_cursor_by_type(effect==Effect::Copy);
- return true;
+ if(effect==Effect::None)SetCursor(LoadCursor(nullptr,IDC_NO));
+ else if(list)list->set_cursor_by_type(effect==Effect::Copy);
 }
-bool Drag::Drop(CPoint screen,UINT keys){
+
+bool Drag::Drop(CPoint screen,UINT keys)
+{
  ClearHighlight();
  if(!IsWindow(source_))return true;
- const auto window=WindowFromPoint(screen);
- const bool sameWindow=window==source_||IsChild(source_,window);
- auto target=Hit(screen);
- // The list view handles local icon placement and dropping onto applications.
- if(sameWindow&&(!target.session||(!target.tree&&target.row<0)))return false;
+ const auto target=Hit(screen,source_);
+ if(target.kind==DropKind::IconCanvas)
+  return DropEffect(selection_,target,keys)==Effect::None;
  Transfer(selection_,target,keys);
  return true;
 }
+
 #ifdef HFV_TESTING
-bool Drag::TestDrop(BrowserSession& session,bool tree,HTREEITEM item,int row,UINT keys){if(!IsWindow(source_))return false;auto target=Resolve(session,tree,item,row);return Transfer(selection_,target,keys);}
+bool Drag::TestDrop(BrowserSession& session,bool tree,HTREEITEM item,int row,UINT keys)
+{
+ if(!IsWindow(source_))return false;
+ return Transfer(selection_,Resolve(session,tree,item,row,session.Owner()->GetSafeHwnd()==source_),keys);
+}
 #endif
 }

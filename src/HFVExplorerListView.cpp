@@ -44,8 +44,6 @@
 #include "hfs\libhfs\hfs.h"
 #include "hfs\interface.h"
 #include "AskDir.h"
-#include "AskProperties.h"
-#include "DynCopyModeSelect.h"
 #include "icon.h"
 #include "floppy.h"
 #include "FileTypeMapping.h"
@@ -64,12 +62,6 @@ static char THIS_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////
 // CHFVExplorerListView
 
-enum { ACTION_ASK, ACTION_COPY, ACTION_MOVE };
-
-namespace {
-int ReadClassicMetadata(char* image,char* path,hfsdirent* entry){try{VolumeCoord::OperationLease lease({{VolumeCoord::ImageKey(std::string(image)),VolumeCoord::Mode::Read}});return HFSIFACE_get_properties(image,path,entry);}catch(const VolumeCoord::Busy&){SetLastError(ERROR_BUSY);return 1;}}
-int WriteClassicMetadata(char* image,char* path,hfsdirent* entry){try{VolumeCoord::OperationLease lease({{VolumeCoord::ImageKey(std::string(image)),VolumeCoord::Mode::Write}});int result=HFSIFACE_set_properties(image,path,entry);VolumeCoord::Changed({VolumeCoord::ImageKey(std::string(image))});return result;}catch(const VolumeCoord::Busy&){SetLastError(ERROR_BUSY);return 1;}}
-}
 IMPLEMENT_DYNCREATE(CHFVExplorerListView, CListView)
 namespace {
 bool HiddenOperationProgress(CWnd* owner){
@@ -96,8 +88,7 @@ LPARAM CHFVExplorerListView::make_lparam(
 	unsigned long creation_date_lo, 
 	unsigned long creation_date_hi,
 	unsigned long modification_date_lo, 
-	unsigned long modification_date_hi,
-	int finder_color )
+	unsigned long modification_date_hi )
 {
 	list_lparam_struct *p = new list_lparam_struct;
 	if(!p) return(0);
@@ -113,7 +104,6 @@ LPARAM CHFVExplorerListView::make_lparam(
 	p->creation_date_hi = creation_date_hi;
 	p->modification_date_lo = modification_date_lo;
 	p->modification_date_hi = modification_date_hi;
-	p->finder_color = finder_color;
 	if(path && *path) {
 		strncpy( p->path, path, MAX_PATH-1 );
 		p->path[MAX_PATH-1] = 0;
@@ -121,13 +111,6 @@ LPARAM CHFVExplorerListView::make_lparam(
 		p->path[0] = 0;
 	}
 	return( (LPARAM)p );
-}
-
-int CHFVExplorerListView::get_lparam_finder_color( LPARAM lparam )
-{
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(FINDER_COLOR_NONE);
-	return( p->finder_color );
 }
 
 HICON CHFVExplorerListView::get_lparam_icon16( LPARAM lparam )
@@ -253,7 +236,6 @@ CHFVExplorerListView::CHFVExplorerListView()
 	m_sorted_by_column = FIELD_NAME;
 	m_sort_is_ascending = TRUE;
 
-	m_shutup_for_now = FALSE;
 
 	m_move_cursor = pApp->LoadCursor( IDC_POINTER );
 	m_copy_cursor = pApp->LoadCursor( IDC_POINTER_COPY );
@@ -341,7 +323,7 @@ CHFVExplorerListView::CHFVExplorerListView()
 
 CHFVExplorerListView::~CHFVExplorerListView()
 {
- m_browserDrag.reset();
+ CancelBrowserDrag();
  if(m_browserSession)m_browserSession->Detach(this);
 	if(m_pimagelist) {
 		delete m_pimagelist;
@@ -528,10 +510,11 @@ int CHFVExplorerListView::initialize_volume( CString root_name, unsigned long id
 		lvitem.iSubItem = 0;
 		lvitem.pszText = buf;
 		lvitem.iImage = 2;
-		lvitem.lParam = (LPARAM)make_lparam( LIST_SPEC, 0, id, "", 1, 0, 0, 0, 0, 0, 0, 0, FINDER_COLOR_NONE );
+		lvitem.lParam = (LPARAM)make_lparam( LIST_SPEC, 0, id, "", 1, 0, 0, 0, 0, 0, 0, 0 );
 		lvitem.state = LVIS_FOCUSED | LVIS_SELECTED;
 		lvitem.stateMask = LVIS_FOCUSED | LVIS_SELECTED;
 		iActualItem = m_cl->InsertItem(&lvitem);
+        if(iActualItem>=0&&id==ID_GOTO_PARENT)m_parentRowData=lvitem.lParam;
 		m_item_count++;
 		root_name.ReleaseBuffer();
 	}
@@ -547,7 +530,8 @@ int CHFVExplorerListView::initialize_list()
 
 int CHFVExplorerListView::list_clear()
 {
-    auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+    CancelBrowserDrag();
+    m_parentRowData=0;
     if(GetBrowserSession().Preview()&&IsWindow(GetBrowserSession().Preview()->GetSafeHwnd()))GetBrowserSession().Preview()->set_file(nullptr);
 	m_cl->DeleteAllItems();
  destroy_pointers();m_directory_capabilities_known=false;
@@ -595,40 +579,6 @@ BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=u
  int result=InsertBrowserRow(row,htree);if(insertedRow)*insertedRow=result;return result>=0;
 }
 
-// Use magic square to tell Finder where to put the item.
-// Makes sure that inited flag is cleared
-void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
-{
- if(BackgroundCopies::Enabled()){
-  if(get_inx_type(inx)!=LIST_HFS)return;FileOperations::EditClassicProperties request{GetBrowserSession().MacBrowser().CaptureItem(inx),FileOperations::FinderPosition{short(p.x-FINDER_MAGIC_OFFSET+m_mac_origo.x),short(p.y-FINDER_MAGIC_OFFSET+m_mac_origo.y)}};BackgroundCopies::Start({request},GetBrowserSession().Owner(),true);return;
- }
- if(BackgroundCopies::Active())return;
-	if(get_inx_type(inx) == LIST_HFS) {
-		CString fullpath;
-		char volpath[_MAX_PATH];
-		hfsdirent ent;
-
-		get_path( inx, fullpath );
-		inx2volname( inx, volpath, _MAX_PATH );
-		char *path = fullpath.GetBuffer( _MAX_PATH );
-
-		if(0 == ReadClassicMetadata( volpath, path, &ent )) {
-			ent.fdlocation.h = (signed short)( p.x - FINDER_MAGIC_OFFSET + m_mac_origo.x );
-			ent.fdlocation.v = (signed short)( p.y - FINDER_MAGIC_OFFSET + m_mac_origo.y );
-			ent.fdflags &= ~HFS_FNDR_HASBEENINITED;
-			if(0 == WriteClassicMetadata( volpath, path, &ent )) {
-				((CHFVExplorerDoc*)m_pDocument)->set_hfs_volume_clean( volpath );
-				// update_floppy_view(volpath);
-			} else {
-				// AfxMessageBox( "Failed to set item properties" );
-			}
-		}
-		fullpath.ReleaseBuffer();
-	}
-}
-
-
-
 int CHFVExplorerListView::list_fat_insert(
 		LPSTR name, 
 		int isdir, 
@@ -667,7 +617,6 @@ BEGIN_MESSAGE_MAP(CHFVExplorerListView, CListView)
 	ON_WM_SYSKEYDOWN()
 	ON_WM_QUERYNEWPALETTE()
 	ON_WM_PALETTECHANGED()
-	ON_NOTIFY_REFLECT(LVN_BEGINRDRAG, OnBeginrdrag)
 	ON_NOTIFY_REFLECT(LVN_BEGINDRAG, OnBegindrag)
 	ON_WM_MOUSEMOVE()
 	ON_WM_LBUTTONUP()
@@ -957,221 +906,6 @@ BOOL CHFVExplorerListView::new_folder(void)
 	return(ok);
 }
 
-#define ASKCOPYMODE 6
-
-BOOL CHFVExplorerListView::ask_set_copy_mode( 
-	int outcopy, CString & name
-)
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	BOOL ret;
-	static int modein = 0, modeout = 0, ad = -1;
-
-	if( (outcopy && pApp->m_copyout_mode != ASKCOPYMODE) ||
-			(!outcopy && pApp->m_copyin_mode != ASKCOPYMODE) )
-	{
-		return(TRUE);
-	}
-
-	if(m_shutup_for_now) return(TRUE);
-
-	CDynCopyModeSelect d;
-
-	if(outcopy) {
-		d.m_copy_mode = modeout;
-	} else {
-		d.m_copy_mode = modein;
-	}
-	if(ad >= 0) 
-		d.m_appledouble = ad;
-	else
-		d.m_appledouble = pApp->m_copyin_appledouble;
-
-	d.m_copying_fname = name;
-	char *p = d.m_copying_fname.GetBuffer( _MAX_PATH );
-	// mac_to_pc_charset( (unsigned char *)p );
-	d.m_copying_fname.ReleaseBuffer();
-
-	d.m_outcopy = outcopy;
-
-	int answer = d.DoModal();
-	ret = (answer == IDOK);
-	if(ret) {
-		if(d.m_said_ok_all) m_shutup_for_now = TRUE;
-		if(outcopy) {
-			modeout = d.m_copy_mode;
-			HFSIFACE_set_modeout( modeout );
-		} else {
-			modein = d.m_copy_mode;
-			ad = d.m_appledouble;
-			HFSIFACE_set_modein( modein, ad );
-		}
-	}
-	return(ret);
-}
-
-// Temp:New Folder    Temp:New Folder
-BOOL is_same_folder( LPCSTR srcname, LPCSTR destname )
-{
-	BOOL result = stricmp(srcname,destname) == 0;
-	return(result);
-}
-
-// Temp:New Folder    Temp:New Folder:New Folder
-BOOL is_subfolder( LPCSTR srcname, LPCSTR destname )
-{
-	int len1 = strlen(srcname), len2 = strlen(destname);
-	BOOL result = FALSE;
-
-	if(len2 > len1) {
-		if(strnicmp(srcname,destname,len1) == 0) {
-			char ch = destname[len1];
-			if(ch == ':' || ch == '\\' || ch == 0) {
-				result = TRUE;
-			}
-		}
-	}
-
-	return(result);
-}
-
-// Temp:New Folder:xxx     Temp:New Folder
-BOOL is_original_folder( LPCSTR srcname, LPCSTR destname )
-{
-	int len1 = strlen(srcname), len2 = strlen(destname);
-	BOOL result = FALSE;
-
-	if(len2 < len1) {
-		if(strnicmp(srcname,destname,len2) == 0) {
-			char ch = srcname[len2];
-			if(ch == 0) {
-				result = TRUE; // not reached
-			} else if(ch == ':' && !strchr(&srcname[len2+1],':')) {
-				result = TRUE;
-			} else if(ch == '\\' && !strchr(&srcname[len2+1],'\\')) {
-				result = TRUE;
-			}
-		}
-	}
-
-	return(result);
-}
-
-int CHFVExplorerListView::copy_item_to_dir( 
-	int item, 
-	HTREEITEM htree, 
-	int action,
-	CString *input_path,
-	int input_isdir,
-	int input_type,
-	LPCSTR input_volpath,
-	int input_volinx
-)
-{
- int nativeDrop=GetBrowserSession().MacBrowser().Drop(item,htree,action);if(nativeDrop>=0)return nativeDrop;
-	CHFVExplorerApp	*pApp;
-	CTreeCtrl *tc;
-	HFVExplorerTreeView *tv;
-	// int dtype;
-	int ok=0, volinx, isdir, was_moved;
-	int hfs_source = 0, hfs_dest = 0;
-	DWORD_PTR data;
-
-	char srcvolpath[_MAX_PATH];
-	char destvolpath[_MAX_PATH];
-	char *srcname;
-	char destname[_MAX_PATH];
-	CString cs;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	tv = GetBrowserSession().Tree();
-	tc = tv->m_ct;
-	data = tc->GetItemData( htree );
-	volinx = tv->get_lparam_volinx( data );
-
-	// Say it's ok, for multi-selection user errors
-	if(tv->get_lparam_type(data) == LIST_SPEC) return(1);
-	if(item >= 0) {
-		input_type = get_lparam_type(m_cl->GetItemData(item));
-		if(input_type == LIST_SPEC) return(1);
-	} else {
-		if(input_type == LIST_SPEC) return(1);
-	}
-
-	if(get_lparam_type(data) == LIST_HFS) {
-		hfs_dest = 1;
-		cs = ((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_file_name;
-	} else {
-		hfs_dest = 0;
-		cs = ((CHFVExplorerDoc*)m_pDocument)->m_fats[volinx].m_volume_name;
-	}
-	lstrcpy( destvolpath, cs.GetBuffer( _MAX_PATH ) );
-
-	int ismac;
-	cs = ((CHFVExplorerDoc*)m_pDocument)->get_directory( htree, &ismac );
-	lstrcpy( destname, cs.GetBuffer( _MAX_PATH ) );
-
-	hfs_source = input_type == LIST_HFS;
-
-	if(item >= 0) {
-		get_path( item, cs );
-		isdir = get_lparam_isdir(m_cl->GetItemData(item));
-		inx2volname( item, srcvolpath, _MAX_PATH );
-		input_volinx = get_lparam_volinx(m_cl->GetItemData(item));
-	} else {
-		cs = *input_path;
-		isdir = input_isdir;
-		strcpy( srcvolpath, input_volpath );
-	}
-	srcname = cs.GetBuffer( _MAX_PATH );
-
-	CString ActionString = action == ACTION_MOVE ? "move" : "copy";
-
-	if(input_type == tv->get_lparam_type(data) && input_volinx == volinx) {
-		if(isdir) {
-			if(is_same_folder(srcname,destname)) {
-				AfxMessageBox( 
-					"Cannot " + ActionString + " \"" + CString(srcname) + "\" to folder \"" + CString(destname) + "\". The destination folder is the same as the source folder."
-				);
-				return(0);
-			}
-			if(is_subfolder(srcname,destname)) {
-				AfxMessageBox( 
-					"Cannot " + ActionString + " \"" + CString(srcname) + "\" to folder \"" + CString(destname) + "\". The destination folder is a subfolder of the source folder."
-				);
-				return(0);
-			}
-		}
-		if(is_original_folder(srcname,destname)) {
-			AfxMessageBox( 
-				"Cannot " + ActionString + " \"" + CString(srcname) + "\" to folder \"" + CString(destname) + "\". Duplication within same folder is not implemented."
-			);
-			return(0);
-		}
-	}
-
-	if(hfs_dest != hfs_source) {
-		if(!ask_set_copy_mode( hfs_source, cs )) {
-			return(0);
-		}
-	}
-
-	if( 0 == CopyWithProgress(
-		srcvolpath, 
-		srcname, 
-		destvolpath, 
-		destname,
-		isdir,
-		(action == ACTION_MOVE),
-		&was_moved, GetBrowserSession().Owner() ))
-	{
-		update_floppy_view(destvolpath);
-		update_floppy_view(srcvolpath);
-		ok = 1;
-	}
-	return(ok);
-}
-
 int fat_rename( char *pOldName, char *pNewName )
 {
 	// Never let a global working-directory change select an unrelated entry.
@@ -1234,97 +968,6 @@ int CHFVExplorerListView::do_rename(
 	return(result);
 }
 
-
-int CHFVExplorerListView::do_file_to_folder( 
-	int source, int dest, int action
-)
-{
- auto destination=(list_lparam_struct*)m_cl->GetItemData(dest);
- if(destination&&destination->type==LIST_MAC&&destination->isdir){int result=GetBrowserSession().MacBrowser().Drop(source,destination->htree,action);if(result>=0)return result;}
-	DWORD_PTR ds = m_cl->GetItemData( source );
-	DWORD_PTR dd = m_cl->GetItemData( dest );
-	char srcvolpath[_MAX_PATH];
-	char destvolpath[_MAX_PATH];
-	char *srcname;
-	char *destname;
-	CString cs, cd;
-	int isdir, was_moved;
-
-	if(!ds || ! dd) return(0);
-	if(get_lparam_type(ds) == LIST_SPEC) return(1);
-
-	get_path( source, cs );
-	get_path( dest, cd );
-
-	if(get_lparam_type(dd) == LIST_SPEC && 
-	   get_lparam_id(dd) == ID_GOTO_PARENT)
-	{
-		CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-		HTREEITEM hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem();
-		if(hItem) {
-			hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetParentItem( hItem );
-			if(hItem) {
-				return( copy_item_to_dir( source, hItem, action, 0, 0, 0, 0, 0 ) );
-			}
-		}
-		return(0);
-	}
-
-	srcname = cs.GetBuffer( _MAX_PATH );
-	destname = cd.GetBuffer( _MAX_PATH );
-
-	inx2volname( source, srcvolpath, _MAX_PATH );
-	inx2volname( dest, destvolpath, _MAX_PATH );
-
-	if(action == ACTION_ASK) {
-		action = ACTION_COPY;
-	}
-
-	isdir = get_lparam_isdir(m_cl->GetItemData(source));
-	if( 0 == CopyWithProgress(
-		srcvolpath, 
-		srcname, 
-		destvolpath, 
-		destname,
-		isdir,
-		(action == ACTION_MOVE),
-		&was_moved, GetBrowserSession().Owner() ))
-	{
-		update_floppy_view(destvolpath);
-		update_floppy_view(srcvolpath);
-		return(1);
-	}
-	return(0);
-}
-
-int CHFVExplorerListView::is_mac_application( int inx )
-{
-	CString type = m_cl->GetItemText( inx, FIELD_TYPE );
-	return( type == "APPL" );
-}
-
-int is_pc_application( CString &app_name )
-{
-	char *s;
-	int i;
-
-	s = app_name.GetBuffer(MAX_PATH);
-	if(is_extension( s, ".EXE" )) i = 1;
-	else if(is_extension( s, ".COM" )) i = 1;
-	else if(is_extension( s, ".BAT" )) i = 1;
-	else i = 0;
-	app_name.ReleaseBuffer();
-
-	return(i);
-}
-
-int CHFVExplorerListView::is_mac_item( int inx )
-{
-	CString type;
-
-	type = m_cl->GetItemText( inx, FIELD_TYPE );
-	return( type != "" );
-}
 
 int CHFVExplorerListView::new_bowser_on( CString start_dir )
 {
@@ -1559,12 +1202,25 @@ int CHFVExplorerListView::do_open_with_pc( CString document, CString application
 	return(1);
 }
 
-int CHFVExplorerListView::do_open_with( CString document, CString application, int mac, CString creator )
+bool CHFVExplorerListView::OpenWithDrop(const FileOperations::Location& source,
+    const FileOperations::Location& application,bool mac)
 {
-	if(mac) 
-		return( do_open_with_mac( document, application, creator ) );
-	else
-		return( do_open_with_pc( document, application ) );
+    try{
+        if(mac){
+            if(source.IsClassic()&&!VolumeCoord::Readable(source.expectedResource))return false;
+            return do_open_with_mac(source.LegacyPath().c_str(),application.LegacyPath().c_str(),CString())!=0;
+        }
+        const auto argument=L"\""+source.WindowsPath()+L"\"";
+        const auto result=ShellExecuteW(GetSafeHwnd(),L"open",application.WindowsPath().c_str(),
+            argument.c_str(),nullptr,SW_SHOW);
+        if(INT_PTR(result)>32)return true;
+        CString error;
+        get_execute_error_string(result,error);
+        GetBrowserSession().Owner()->MessageBox(error,"Could not open the document",MB_OK|MB_ICONERROR);
+    }catch(const std::exception& error){
+        GetBrowserSession().Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
+    }
+    return false;
 }
 
 int CHFVExplorerListView::do_open_with( int document, CString app_name, int mac, CString creator )
@@ -1576,38 +1232,6 @@ int CHFVExplorerListView::do_open_with( int document, CString app_name, int mac,
 		return( do_open_with_mac( doc_name, app_name, creator ) );
 	else
 		return( do_open_with_pc( doc_name, app_name ) );
-}
-
-int CHFVExplorerListView::do_open_with( CString document, int application, CString creator )
-{
-	CString app_name;
-	int mac = is_mac_item( application );
-
-	if(mac) {
-		if(!is_mac_application( application )) {
-			AfxMessageBox( "You can only drop documents on applications." );
-			return(0);
-		}
-	}
-
-	if(!get_path(application,app_name)) return(0);
-	/*
-	if(!mac) {
-		if(!is_pc_application( app_name )) {
-			AfxMessageBox( "You can only drop documents on applications." );
-			return(0);
-		}
-	}
-	*/
-	return(do_open_with( document, app_name, mac, creator ));
-}
-
-int CHFVExplorerListView::do_open_with( int document, int application, CString creator )
-{
-	CString doc_name;
-
-	if(!get_path(document,doc_name)) return(0);
-	return(do_open_with( doc_name, application, creator ));
 }
 
 void CHFVExplorerListView::get_icons_folder_name( char *name )
@@ -2794,16 +2418,6 @@ void CHFVExplorerListView::update_current_view()
 }
 #pragma optimize("",on)
 
-void CHFVExplorerListView::inx2volname(int index,char* volume,int capacity)
-{
-    if(!volume||capacity<=0)return;
-    *volume=0;
-    const auto row=BrowserRowAt(index);
-    if(!row)return;
-    const auto& value=row->location.IsClassic()?row->location.ClassicImage():row->path;
-    if(value.size()<size_t(capacity))memcpy(volume,value.c_str(),value.size()+1);
-}
-
 /*
 int do_delete_fat_directory( char *path )
 {
@@ -2857,46 +2471,29 @@ BOOL CHFVExplorerListView::map_selected_item( void )
 
 	inx = -1; count = 0;
 	while( (inx = m_cl->GetNextItem(inx,LVNI_SELECTED)) >= 0 ) {
-		if(get_inx_type(inx) == LIST_HFS) {
-   if(BackgroundCopies::Enabled()){auto row=BrowserRowAt(inx);if(row&&!row->entry.directory){char type[5]{},creator[5]{};memcpy(type,row->entry.finder.data(),4);memcpy(creator,row->entry.finder.data()+4,4);dlg.m_input_types.Add(CString(type));dlg.m_input_creators.Add(CString(creator));dlg.m_input_dos.Add(CString("???"));++count;}continue;}
-
-			CString fullpath;
-			char volpath[_MAX_PATH];
-			hfsdirent ent;
-
-			get_path( inx, fullpath );
-			inx2volname( inx, volpath, _MAX_PATH );
-			char *path = fullpath.GetBuffer( _MAX_PATH );
-
-			if(0 == ReadClassicMetadata( volpath, path, &ent )) {
-				if( (ent.flags & HFS_ISDIR) == 0 ) {
-					ent.u.file.creator[4] = 0;
-					ent.u.file.type[4] = 0;
-					dlg.m_input_types.Add(CString( ent.u.file.type ));
-					dlg.m_input_creators.Add(CString( ent.u.file.creator ));
-					dlg.m_input_dos.Add(CString("???"));
-					count++;
-				}
-			}
-			fullpath.ReleaseBuffer();
-		} else if(get_inx_type(inx) == LIST_FAT) {
-			CString fullpath;
-			get_path( inx, fullpath );
-			if(!get_inx_isdir(inx)) {
-				char extension[100];
-				char *path = fullpath.GetBuffer( _MAX_PATH );
-				get_extension( path, extension );
-				strupr( extension );
-				fullpath.ReleaseBuffer();
-				if(*extension) {
-					dlg.m_input_types.Add(CString("????"));
-					dlg.m_input_creators.Add(CString("????"));
-					dlg.m_input_dos.Add(CString(extension));
-					count++;
-				}
-			}
-		}
-	}
+        const auto row=BrowserRowAt(inx);
+        if(!row||row->entry.directory)continue;
+        if(row->location.IsClassic()){
+            char type[5]{},creator[5]{};
+            memcpy(type,row->entry.finder.data(),4);
+            memcpy(creator,row->entry.finder.data()+4,4);
+            dlg.m_input_types.Add(CString(type));
+            dlg.m_input_creators.Add(CString(creator));
+            dlg.m_input_dos.Add(CString("???"));
+            ++count;
+        }else if(row->location.IsWindows()){
+            const auto& path=row->location.WindowsPath();
+            const auto dot=path.find_last_of(L'.');
+            const auto slash=path.find_last_of(L"\\\\/");
+            if(dot==path.npos||dot+1==path.size()||(slash!=path.npos&&dot<slash))continue;
+            CString extension(path.substr(dot+1).c_str());
+            extension.MakeUpper();
+            dlg.m_input_types.Add(CString("????"));
+            dlg.m_input_creators.Add(CString("????"));
+            dlg.m_input_dos.Add(extension);
+            ++count;
+        }
+    }
 	if(count > 0) {
 		if (dlg.DoModal() == IDOK) {
 			pApp->m_type_mapping_enabled = dlg.m_enabled_param;
@@ -2963,83 +2560,26 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 }
 #pragma optimize("",on)
 
-void CHFVExplorerListView::toggle_label_colors( void ) 
+void CHFVExplorerListView::toggle_label_colors()
 {
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int inx, color;
-
-	pApp->m_show_labels = !pApp->m_show_labels;
-
-	inx = -1;
-	color = FINDER_COLOR_NONE;
-
-	while( (inx = m_cl->GetNextItem(inx,LVNI_ALL)) >= 0 ) {
-		if(pApp->m_show_labels) {
-			DWORD_PTR dat = m_cl->GetItemData( inx );
-			int finder_color = get_lparam_finder_color( dat );
-			color = INDEXTOOVERLAYMASK(finder_color);
-		}
-		m_cl->SetItemState( inx, color, LVIS_OVERLAYMASK );
-	}
+    auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+    app->m_show_labels=!app->m_show_labels;
+    for(int index=0;index<m_cl->GetItemCount();++index){
+        const auto row=BrowserRowAt(index);
+        const auto label=row&&app->m_show_labels?BrowserDirectory::Label(row->entry):0;
+        m_cl->SetItemState(index,label?INDEXTOOVERLAYMASK(label):0,LVIS_OVERLAYMASK);
+    }
 }
 
-void CHFVExplorerListView::set_label_color( int finder_color )
+void CHFVExplorerListView::set_label_color(int color)
 {
- if(BackgroundCopies::Enabled()){
-  auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);
-  std::vector<FileOperations::Request> requests;
-  for(auto& item:selection.items)if(item.IsClassic())
-   requests.emplace_back(FileOperations::EditClassicProperties{std::move(item),FileOperations::FinderLabel{finder_color}});
-  if(!requests.empty())BackgroundCopies::Start(std::move(requests),GetBrowserSession().Owner(),true);return;
- }
- if(BackgroundCopies::Active())return;
-	int inx, color;
-	LV_ITEM	lvitem;
-	DWORD_PTR dat;
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	color = INDEXTOOVERLAYMASK(finder_color);
-	inx = -1;
-	memset( &lvitem, 0, sizeof(lvitem) );
-
-	while( (inx = m_cl->GetNextItem(inx,LVNI_ALL|LVNI_SELECTED)) >= 0 ) {
-		if(get_inx_type(inx) == LIST_HFS) {
-			lvitem.mask = LVIF_TEXT;
-			lvitem.iItem = inx;
-			lvitem.iSubItem = FIELD_LABEL;
-			lvitem.pszText = get_label_text( finder_color );
-			lvitem.iImage = 0; // don't care
-			m_cl->SetItem(&lvitem);
-			dat = m_cl->GetItemData( inx );
-			if(dat) {
-				list_lparam_struct *p = (list_lparam_struct *)dat;
-				p->finder_color = finder_color;
-				dat = (DWORD_PTR)p;
-				m_cl->SetItemData(inx,dat);
-			}
-
-			CString fullpath;
-			char volpath[_MAX_PATH];
-			hfsdirent ent;
-
-			get_path( inx, fullpath );
-			inx2volname( inx, volpath, _MAX_PATH );
-			char *path = fullpath.GetBuffer( _MAX_PATH );
-
-			if(0 == ReadClassicMetadata( volpath, path, &ent )) {
-				ent.fdflags &= ~kColorMask;
-				ent.fdflags |= ((finder_color << 1) & kColorMask);
-				if(0 == WriteClassicMetadata( volpath, path, &ent )) {
-					((CHFVExplorerDoc*)m_pDocument)->set_hfs_volume_clean( volpath );
-				}
-			}
-			fullpath.ReleaseBuffer();
-
-			if(pApp->m_show_labels) {
-				m_cl->SetItemState( inx, color, LVIS_OVERLAYMASK );
-			}
-		}
-	}
+    auto& session=GetBrowserSession();
+    auto selection=session.MacBrowser().SelectedItems(false);
+    std::vector<FileOperations::Request> requests;
+    for(auto& item:selection.items)
+        if(item.IsClassic())
+            requests.emplace_back(FileOperations::EditClassicProperties{std::move(item),FileOperations::FinderLabel{color}});
+    if(!requests.empty())BackgroundCopies::Start(std::move(requests),session.Owner(),true);
 }
 
 void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point) 
@@ -3208,224 +2748,9 @@ void CHFVExplorerListView::OnSysKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags )
 	}
 }
 
-void CHFVExplorerListView::on_properties( int inx ) 
+void CHFVExplorerListView::on_properties(int index)
 {
- if(GetBrowserSession().MacBrowser().Properties(inx))return;
- if(BackgroundCopies::Active())return;
-	CString fullpath;
-	int stype = get_inx_type(inx);
-	// int isdir = get_inx_isdir(inx);
-
-	if(stype == LIST_SPEC) return;
-
-	get_path( inx, fullpath );
-
-	if(inx >= 0) {
-		if(stype == LIST_FAT) {
-			// update_current_view();
-		} else {
-			char volpath[_MAX_PATH];
-			char oldname[_MAX_PATH];
-			hfsdirent ent;
-
-			inx2volname( inx, volpath, _MAX_PATH );
-			char *path = fullpath.GetBuffer( _MAX_PATH );
-
-			CAskProperties dlg;
-			if(0 == ReadClassicMetadata( volpath, path, &ent )) {
-
-				// flags
-				dlg.m_isdir    =	(ent.flags & HFS_ISDIR) != 0;
-				dlg.m_islocked =	(ent.flags & HFS_ISLOCKED) != 0;
-
-				// common
-				ent.name[HFS_MAX_FLEN] = 0;
-				mac_to_pc_charset( (unsigned char *)ent.name );
-				strcpy( oldname, ent.name );
-				dlg.m_name = CString( ent.name );
-				dlg.m_nodeid	= ent.cnid;
-				dlg.m_parentid = ent.parid;
-				dlg.m_backup = ent.bkdate;
-				dlg.m_created = ent.crdate;
-				dlg.m_modified = ent.mddate;
-
-				// finder location
-				dlg.m_x = ent.fdlocation.h;
-				dlg.m_y = ent.fdlocation.v;
-
-				// flags
-				if(dlg.m_isdir) {
-					// file
-					dlg.m_rsize = 0;
-					dlg.m_dsize = 0;
-					dlg.m_creator = "";
-					dlg.m_type =  "";
-
-					// folder
-					dlg.m_valence		= ent.u.dir.valence;
-					dlg.m_bottom    = ent.u.dir.rect.bottom;
-					dlg.m_left			= ent.u.dir.rect.left;
-					dlg.m_rifht 		= ent.u.dir.rect.right;
-					dlg.m_top 			= ent.u.dir.rect.top;
-				} else {
-					// file
-					dlg.m_rsize = ent.u.file.rsize;
-					dlg.m_dsize = ent.u.file.dsize;
-					ent.u.file.creator[4] = 0;
-					ent.u.file.type[4] = 0;
-					dlg.m_creator = CString( ent.u.file.creator );
-					dlg.m_type =  CString( ent.u.file.type );
-
-					// folder
-					dlg.m_valence		= 0;
-					dlg.m_bottom    = 0;
-					dlg.m_left			= 0;
-					dlg.m_rifht 		= 0;
-					dlg.m_top 			= 0;
-				}
-
-				// fdflags
-				dlg.m_isindesktop = (ent.fdflags & HFS_FNDR_ISONDESK) != 0;
-				dlg.m_hasbeeninited = (ent.fdflags & HFS_FNDR_HASBEENINITED) != 0;
-				dlg.m_isinvisible  = (ent.fdflags & HFS_FNDR_ISINVISIBLE) != 0;
-				dlg.m_hasbundle = (ent.fdflags & HFS_FNDR_HASBUNDLE) != 0;
-				dlg.m_hascolors = (ent.fdflags & HFS_FNDR_COLOR) != 0;
-				dlg.m_hascustomicons = (ent.fdflags & HFS_FNDR_HASCUSTOMICON) != 0;
-				dlg.m_hasnoinits = (ent.fdflags & HFS_FNDR_HASNOINITS) != 0;
-				dlg.m_isalias = (ent.fdflags & HFS_FNDR_ISALIAS) != 0;
-				dlg.m_isnamelocked = (ent.fdflags & HFS_FNDR_NAMELOCKED) != 0;
-				dlg.m_isshared = (ent.fdflags & HFS_FNDR_ISSHARED) != 0;
-				dlg.m_isstationery = (ent.fdflags & HFS_FNDR_ISSTATIONERY) != 0;
-				dlg.m_reqswitchlaunch = (ent.fdflags & HFS_FNDR_REQUIRESSWITCHLAUNCH) != 0;
-				dlg.m_reserved = (ent.fdflags & HFS_FNDR_RESERVED) != 0;
-				dlg.m_reservedcolors = (ent.fdflags & HFS_FNDR_COLORRESERVED) != 0;
-
-				if(dlg.DoModal() == IDOK) {
-
-					// flags
-					if(dlg.m_isdir) 
-						ent.flags |= HFS_ISDIR;
-					else
-						ent.flags &= ~HFS_ISDIR;
-					if(dlg.m_islocked) 
-						ent.flags |= HFS_ISLOCKED;
-					else
-						ent.flags &= ~HFS_ISLOCKED;
-
-					if(dlg.m_isdir) {
-						// folder
-						ent.u.dir.valence = dlg.m_valence;
-						ent.u.dir.rect.bottom = dlg.m_bottom;
-						ent.u.dir.rect.left = dlg.m_left;
-						ent.u.dir.rect.right = dlg.m_rifht;
-						ent.u.dir.rect.top = dlg.m_top;
-					} else {
-						// file
-						ent.u.file.rsize = dlg.m_rsize;
-						ent.u.file.dsize = dlg.m_dsize;
-						strncpy( ent.u.file.type, dlg.m_type.GetBuffer(100), 4 );
-						ent.u.file.type[4] = 0;
-						strncpy( ent.u.file.creator, dlg.m_creator.GetBuffer(100), 4 );
-						ent.u.file.creator[4] = 0;
-					}
-
-					// common
-					strncpy( ent.name, dlg.m_name.GetBuffer(100), HFS_MAX_FLEN );
-					ent.name[HFS_MAX_FLEN] = 0;
-					ent.cnid = dlg.m_nodeid;
-					ent.parid = dlg.m_parentid;
-					ent.bkdate = dlg.m_backup;
-					ent.crdate = dlg.m_created;
-					ent.mddate = dlg.m_modified;
-
-					// finder location
-					ent.fdlocation.h = dlg.m_x;
-					ent.fdlocation.v = dlg.m_y;
-
-					// fdflags
-					if(dlg.m_isindesktop) 
-						ent.fdflags |= HFS_FNDR_ISONDESK;
-					else
-						ent.fdflags &= ~HFS_FNDR_ISONDESK;
-					if(dlg.m_hasbeeninited) 
-						ent.fdflags |= HFS_FNDR_HASBEENINITED;
-					else
-						ent.fdflags &= ~HFS_FNDR_HASBEENINITED;
-					if(dlg.m_isinvisible) 
-						ent.fdflags |= HFS_FNDR_ISINVISIBLE;
-					else
-						ent.fdflags &= ~HFS_FNDR_ISINVISIBLE;
-					if(dlg.m_hasbundle) 
-						ent.fdflags |= HFS_FNDR_HASBUNDLE;
-					else
-						ent.fdflags &= ~HFS_FNDR_HASBUNDLE;
-					if(dlg.m_hascolors) 
-						ent.fdflags |= HFS_FNDR_COLOR;
-					else
-						ent.fdflags &= ~HFS_FNDR_COLOR;
-					if(dlg.m_hascustomicons) 
-						ent.fdflags |= HFS_FNDR_HASCUSTOMICON;
-					else
-						ent.fdflags &= ~HFS_FNDR_HASCUSTOMICON;
-					if(dlg.m_hasnoinits) 
-						ent.fdflags |= HFS_FNDR_HASNOINITS;
-					else
-						ent.fdflags &= ~HFS_FNDR_HASNOINITS;
-					if(dlg.m_isalias) 
-						ent.fdflags |= HFS_FNDR_ISALIAS;
-					else
-						ent.fdflags &= ~HFS_FNDR_ISALIAS;
-					if(dlg.m_isnamelocked) 
-						ent.fdflags |= HFS_FNDR_NAMELOCKED;
-					else
-						ent.fdflags &= ~HFS_FNDR_NAMELOCKED;
-					if(dlg.m_isshared) 
-						ent.fdflags |= HFS_FNDR_ISSHARED;
-					else
-						ent.fdflags &= ~HFS_FNDR_ISSHARED;
-					if(dlg.m_isstationery) 
-						ent.fdflags |= HFS_FNDR_ISSTATIONERY;
-					else
-						ent.fdflags &= ~HFS_FNDR_ISSTATIONERY;
-					if(dlg.m_reqswitchlaunch) 
-						ent.fdflags |= HFS_FNDR_REQUIRESSWITCHLAUNCH;
-					else
-						ent.fdflags &= ~HFS_FNDR_REQUIRESSWITCHLAUNCH;
-					if(dlg.m_reserved) 
-						ent.fdflags |= HFS_FNDR_RESERVED;
-					else
-						ent.fdflags &= ~HFS_FNDR_RESERVED;
-					if(dlg.m_reservedcolors) 
-						ent.fdflags |= HFS_FNDR_COLORRESERVED;
-					else
-						ent.fdflags &= ~HFS_FNDR_COLORRESERVED;
-
-					// Name must be changed separately.
-					if(strcmp( oldname, ent.name ) != 0) {
-						// do_rename: takes PC names
-						if(!do_rename( inx, oldname, ent.name, 0))
-						{
-							AfxMessageBox( "Could not rename the file or folder." );
-							return;
-						} else {
-							char *p = strrchr(path,':');
-							if(!p) return; // impossible
-							strcpy( p+1, ent.name );
-						}
-					}
-
-					// HFSIFACE_set_properties: takes PC path
-					if(0 == WriteClassicMetadata( volpath, path, &ent )) {
-						update_floppy_view(volpath);
-					} else {
-						AfxMessageBox( "Failed to set item properties" );
-					}
-				}
-			} else {
-				AfxMessageBox( "Cannot get item properties" );
-			}
-		}
-	}
+    GetBrowserSession().MacBrowser().Properties(index);
 }
 
 #define MAXCMDS 40
@@ -3936,370 +3261,134 @@ BOOL CHFVExplorerListView::OnEraseBkgnd(CDC* pDC)
 }
 */
 
-void CHFVExplorerListView::OnBeginrdrag(NMHDR* pNMHDR, LRESULT* pResult) 
+void CHFVExplorerListView::OnBegindrag(NMHDR* header,LRESULT* result)
 {
-	NM_LISTVIEW* pNMListView = (NM_LISTVIEW*)pNMHDR;
-	// TODO: Add your control notification handler code here
-	
-	*pResult = 0;
-	m_move_type = 0;
+    *result=0;
+    if(m_dragging||StorageUi::busy()||StorageUi::state().sessionOpen)return;
+    auto drag=std::make_unique<BrowserTransfers::Drag>(GetBrowserSession());
+    if(drag->Empty())return;
+    const auto event=reinterpret_cast<const NM_LISTVIEW*>(header);
+    CPoint image;
+    m_drag_list=m_cl->CreateDragImage(event->iItem,&image);
+    if(!m_drag_list)return;
+    if(!m_drag_list->BeginDrag(0,CPoint(0,0))){
+        delete m_drag_list;
+        m_drag_list=nullptr;
+        return;
+    }
+
+    CaptureDragIcons();
+    m_dragging=true;
+    m_browserDrag=std::move(drag);
+    m_sizeDelta=CPoint(event->ptAction)-image;
+    // Use the displacement from the original pointer in list client coordinates.
+    m_dragStart=event->ptAction;
+    auto screen=m_dragStart-m_sizeDelta;
+    m_cl->ClientToScreen(&screen);
+    m_drag_list->DragEnter(nullptr,screen);
+    m_cl->SetCapture();
 }
 
-void CHFVExplorerListView::OnBegindrag(NMHDR* pNMHDR, LRESULT* pResult) 
+void CHFVExplorerListView::CaptureDragIcons()
 {
-	CPoint			ptItem, ptAction, ptImage;
-	NM_LISTVIEW		*pnmListView = (NM_LISTVIEW *)pNMHDR;
-
- if(StorageUi::busy()||StorageUi::state().sessionOpen){*pResult=0;return;}
- m_browserDrag.reset(new BrowserTransfers::Drag(GetBrowserSession()));
- if(m_browserDrag->Empty()){m_browserDrag.reset();*pResult=0;return;}
-	ASSERT(!m_dragging);
-
-	m_move_type = 0;
-	set_cursor_by_type(m_move_type);
-
-	m_dragging = 1;
-	m_iItemDrop = -1;
-	m_TreeiItemDrop = 0;
-	m_save_tree_selection = 0;
-
-	CHFVExplorerApp	*pApp;
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	GetBrowserSession().Tree()->enable_selchange(0);
-
-	m_iItemDrag = pnmListView->iItem;
-	ptAction = pnmListView->ptAction;
-	m_cl->GetItemPosition(m_iItemDrag, &ptItem);  // ptItem is relative to (0,0) and not the view origin
-	m_cl->GetOrigin(&m_ptOrigin);
-	m_drag_list = m_cl->CreateDragImage(m_iItemDrag, &ptImage);
-	m_sizeDelta = ptAction - ptImage;   // difference between cursor pos and image pos
-	m_ptHotSpot = ptAction - ptItem + m_ptOrigin;  // calculate hotspot for the cursor
-	// m_drag_list->SetDragCursorImage(0, m_ptHotSpot);  // define the hot spot for the new cursor image
-	// m_drag_list->DragShowNolock(TRUE);  // lock updates and show drag image
- if(!m_drag_list){m_dragging=FALSE;GetBrowserSession().Tree()->enable_selchange(1);m_browserDrag.reset();*pResult=0;return;}
-	m_drag_list->BeginDrag(0, CPoint(0, 0));
-	ptAction -= m_sizeDelta;
-	m_cl->ClientToScreen(&ptAction);
-	m_drag_list->DragEnter(0, ptAction);
-	m_drag_list->DragMove(ptAction);
-	m_cl->SetCapture();
+    m_dragIcons.clear();
+    const auto style=m_cl->GetStyle()&LVS_TYPEMASK;
+    if(style!=LVS_ICON&&style!=LVS_SMALLICON)return;
+    for(int index=-1;(index=m_cl->GetNextItem(index,LVNI_SELECTED))>=0;){
+        const auto row=BrowserRowAt(index);
+        CPoint position;
+        if(row&&!row->location.IsNone()&&m_cl->GetItemPosition(index,&position))
+            m_dragIcons.push_back({index,row->location,position});
+    }
 }
 
-void CHFVExplorerListView::set_drop_target( int iItem, int onoff )
+void CHFVExplorerListView::PlaceDraggedIcons(CSize displacement)
 {
-	CRect rect;
-	CDC *dc;
-	dc = m_cl->GetDC();
-	if(dc) {
-		if(m_cl->GetItemRect( iItem, &rect, LVIR_ICON )) {
-			int w = rect.right - rect.left;
-			if(w > systemiconsize) {
-				rect.left += ((w - systemiconsize) >> 1);
-				rect.right = rect.left + systemiconsize;
-			}
-			dc->InvertRect( &rect );
-		}
-		if(m_cl->GetItemRect( iItem, &rect, LVIR_LABEL )) 
-			dc->InvertRect( &rect );
-		m_cl->ReleaseDC(dc);
-	}
-}
-
-void CHFVExplorerListView::set_tree_drop_target( HTREEITEM item, int onoff )
-{
-	CHFVExplorerApp	*pApp;
-	CTreeCtrl *tp;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	tp = &GetBrowserSession().Tree()->GetTreeCtrl();
-
-	if(onoff) {
-		if(!m_save_tree_selection) {
-			m_save_tree_selection = tp->GetSelectedItem();
-		}
-		tp->SelectItem( item );
-	} else {
-		tp->SelectItem( m_save_tree_selection );
-	}
-}
-
-void CHFVExplorerListView::ensure_pane( int request_col )
-{
-	CHFVExplorerApp	*pApp;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	GetBrowserSession().Preview()->set_pane( request_col );
-}
-
-int CHFVExplorerListView::tree_view_hit_test( CPoint pt ) 
-{
-	CHFVExplorerApp	*pApp;
-	CTreeCtrl *tp;
-	HTREEITEM item;
-	CPoint treepoint;
-	UINT Flags;
-	int ret = 0;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	tp = &GetBrowserSession().Tree()->GetTreeCtrl();
-	treepoint = pt;
-	tp->ScreenToClient(&treepoint);
-
-	item = tp->HitTest( treepoint, &Flags );
-	if(Flags & (TVHT_ONITEM | TVHT_ONITEMRIGHT)) {
-		if(item != m_TreeiItemDrop) {
-			m_drag_list->DragLeave(0);
-			ensure_pane(PANE_TREE);
-			/*
-			if(m_TreeiItemDrop != 0) {
-				set_tree_drop_target( m_TreeiItemDrop, 0 );
-			}
-			*/
-			m_TreeiItemDrop = item;
-			set_tree_drop_target( m_TreeiItemDrop, 1 );
-			ret = 1;
-		}
-	} else if(m_TreeiItemDrop != 0) {
-		m_drag_list->DragLeave(0);
-		ensure_pane(PANE_TREE);
-		set_tree_drop_target( m_TreeiItemDrop, 0 );
-		m_TreeiItemDrop = 0;
-		ret = 1;
-	}
-	return(ret);
-}
-
-void CHFVExplorerListView::set_cursor_by_type( int control )
-{
-	if(control) {
-		if(m_copy_cursor) SetCursor( m_copy_cursor );
-	} else {
-		if(m_move_cursor) SetCursor( m_move_cursor );
-	}
-}
-
-void CHFVExplorerListView::check_move_type( 
-	int control,
-	int shift
-) {
- if(m_browserDrag){CPoint screen;GetCursorPos(&screen);if(m_browserDrag->Hover(screen,(control?MK_CONTROL:0)|(shift?MK_SHIFT:0)))return;}
-	int is_copy;
-
-	// This is the Explorer-style determination.
-	if(control) {
-		is_copy = 1;
-	} else if(shift) {
-		is_copy = 0;
-	} else {
-		is_copy = 0;
-		if(m_TreeiItemDrop) {
-			CHFVExplorerApp	*pApp;
-			CTreeCtrl *tc;
-			int srcvol, destvol;
-			int srctype, desttype;
-			pApp = (CHFVExplorerApp *)AfxGetApp();
-			tc = GetBrowserSession().Tree()->m_ct;
-			destvol = get_lparam_volinx( tc->GetItemData(m_TreeiItemDrop) );
-			srcvol = get_lparam_volinx( m_cl->GetItemData(m_iItemDrag) );
-			desttype = get_lparam_type( tc->GetItemData(m_TreeiItemDrop) );
-			srctype = get_lparam_type( m_cl->GetItemData(m_iItemDrag) );
-			if(desttype != srctype) {
-				is_copy = 1;
-			} else {
-				if(destvol != srcvol) is_copy = 1;
-			}
-		}
-	}
-	if( m_move_type != is_copy ) {
-		m_move_type = is_copy;
-		set_cursor_by_type(is_copy);
-	}
-}
-
-void CHFVExplorerListView::OnMouseMove(UINT nFlags, CPoint point)
-{
-	// long		lStyle;
-	int			iItem;
-	CPoint screenpoint, screenhitpoint;
-
-	// lStyle = GetWindowLong(m_cl->m_hWnd, GWL_STYLE);
-	// lStyle &= LVS_TYPEMASK;  // drag will do different things in list and report mode
-	if (m_dragging) {
-		screenpoint = point;
-		m_cl->ClientToScreen(&screenpoint);
-		screenhitpoint = screenpoint;
-		screenpoint -= m_sizeDelta;
-		m_drag_list->DragMove(screenpoint);  // move the image
-        if(m_browserDrag&&m_browserDrag->Hover(screenhitpoint,nFlags)){
-         if(m_iItemDrop>=0){set_drop_target(m_iItemDrop,0);m_iItemDrop=-1;}
-         if(m_TreeiItemDrop){set_tree_drop_target(m_TreeiItemDrop,0);m_TreeiItemDrop=0;}
-         return;
+    auto& session=GetBrowserSession();
+    if(!session.ListingAvailable())return;
+    std::vector<FileOperations::Request> requests;
+    for(const auto& icon:m_dragIcons){
+        const auto position=icon.position+displacement;
+        m_cl->SetItemPosition(icon.index,position);
+        if(session.finderLayout&&icon.location.IsClassic()){
+            const FileOperations::FinderPosition finder{
+                short(position.x-FINDER_MAGIC_OFFSET+m_mac_origo.x),
+                short(position.y-FINDER_MAGIC_OFFSET+m_mac_origo.y)};
+            requests.emplace_back(FileOperations::EditClassicProperties{icon.location,finder});
         }
-		if ((iItem = m_cl->HitTest(point)) != -1 && iItem != m_iItemDrag) {
-			if(iItem != m_iItemDrop) {
-				m_drag_list->DragLeave(0);
-				ensure_pane(PANE_LIST);
-				if(m_iItemDrop >= 0) {
-					set_drop_target( m_iItemDrop, 0 );
-				}
-				m_iItemDrop = iItem;
-				set_drop_target( m_iItemDrop, 1 );
-				m_drag_list->DragEnter(0, screenpoint);
-			}
-		} else if(m_iItemDrop >= 0) {
-			m_drag_list->DragLeave(0);
-			ensure_pane(PANE_LIST);
-			set_drop_target( m_iItemDrop, 0 );
-			m_iItemDrop = -1;
-			m_drag_list->DragEnter(0, screenpoint);
-		}
-		if(tree_view_hit_test(screenhitpoint)) {
-			m_drag_list->DragEnter(0, screenpoint);
-		}
-		check_move_type( nFlags & MK_CONTROL, nFlags & MK_SHIFT );
-	}
-
-	CListView::OnMouseMove(nFlags, point);
+    }
+    if(!requests.empty())BackgroundCopies::Start(std::move(requests),session.Owner(),true);
 }
 
-int CHFVExplorerListView::drop_list_to_tree( int item, HTREEITEM htree, int action )
+bool CHFVExplorerListView::IsParentRow(int index)const
 {
-	DWORD_PTR ldat;
+    return m_parentRowData&&index>=0&&LPARAM(m_cl->GetItemData(index))==m_parentRowData;
+}
 
-	if(item < 0 || htree == 0) return(0);
-	
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	if(htree == GetBrowserSession().Tree()->m_ct->GetSelectedItem()) {
-		if(action == ACTION_COPY) {
-			AfxMessageBox( "Cannot copy, the destination folder is the same as the souce folder." );
-		} else {
-			AfxMessageBox( "Cannot move, the destination folder is the same as the souce folder." );
-		}
-		return(0);
-	}
+#ifdef HFV_TESTING
+void CHFVExplorerListView::PlaceSelectedIconsForTest(CSize displacement)
+{
+    CaptureDragIcons();
+    PlaceDraggedIcons(displacement);
+    m_dragIcons.clear();
+}
+#endif
 
-	ldat = m_cl->GetItemData( item );
-	return(copy_item_to_dir( item, htree, action, 0, 0, 0, 0, 0 ));
+void CHFVExplorerListView::set_cursor_by_type(int copy)
+{
+    if(const auto cursor=copy?m_copy_cursor:m_move_cursor)SetCursor(cursor);
+}
+
+void CHFVExplorerListView::UpdateDragModifiers()
+{
+    if(!m_browserDrag)return;
+    CPoint screen;
+    if(!GetCursorPos(&screen))return;
+    const UINT keys=(GetKeyState(VK_CONTROL)<0?MK_CONTROL:0)|(GetKeyState(VK_SHIFT)<0?MK_SHIFT:0);
+    m_browserDrag->Hover(screen,keys);
+}
+
+void CHFVExplorerListView::OnMouseMove(UINT flags,CPoint point)
+{
+    if(m_dragging){
+        auto screen=point;
+        m_cl->ClientToScreen(&screen);
+        m_drag_list->DragMove(screen-m_sizeDelta);
+        m_browserDrag->Hover(screen,flags);
+    }
+    CListView::OnMouseMove(flags,point);
+}
+
+void CHFVExplorerListView::FinishDragImage()
+{
+    m_dragging=false;
+    if(m_drag_list){
+        m_drag_list->DragLeave(nullptr);
+        m_drag_list->EndDrag();
+        delete m_drag_list;
+        m_drag_list=nullptr;
+    }
+    if(::GetCapture()==GetSafeHwnd())::ReleaseCapture();
+    SetCursor(LoadCursor(nullptr,IDC_ARROW));
 }
 
 void CHFVExplorerListView::OnButtonUp(CPoint point)
 {
-	CString creator;
-	int action, update_finfo;
-
-	CHFVExplorerApp	*pApp;
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	update_finfo = GetBrowserSession().finderLayout;
-
-	if(m_move_type) 
-		action = ACTION_COPY;
-	else
-		action = ACTION_MOVE;
-
-	m_shutup_for_now = FALSE;
-
-	BOOL prevTimer = pApp->EnableTimer( FALSE );
-
-	if (m_dragging) {
-		long		lStyle;
-		CString		cstr;
-
-        // Capture loss must not cancel the selection we are about to submit.
-        m_dragging=FALSE;
-		::ReleaseCapture();
-		SetCursor( LoadCursor( 0, IDC_ARROW ) );
-
-		lStyle = GetWindowLong(m_cl->m_hWnd, GWL_STYLE) & LVS_TYPEMASK; 
-		m_dragging = FALSE;
-		m_drag_list->DragLeave(0);
-		m_drag_list->EndDrag();
-        delete m_drag_list;m_drag_list=nullptr;
-
-		if(m_iItemDrop >= 0) {
-			set_drop_target( m_iItemDrop, 0 );
-		}
-		if(m_TreeiItemDrop != 0) {
-			set_tree_drop_target( m_TreeiItemDrop, 0 );
-		}
-		ensure_pane(PANE_LIST);
-        GetBrowserSession().Tree()->enable_selchange(1);
-        CPoint release=point;m_cl->ClientToScreen(&release);
-        UINT keys=(GetKeyState(VK_CONTROL)&0x8000?MK_CONTROL:0)|(GetKeyState(VK_SHIFT)&0x8000?MK_SHIFT:0);
-        auto captured=std::move(m_browserDrag);
-        if(captured&&captured->Drop(release,keys)){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
-        if(!GetBrowserSession().ListingAvailable()){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
-        HTREEITEM nativeTarget=m_TreeiItemDrop;
-        if(m_iItemDrop>=0){auto p=(list_lparam_struct*)m_cl->GetItemData(m_iItemDrop);if(p&&p->isdir)nativeTarget=p->htree;}
-        if(nativeTarget&&GetBrowserSession().MacBrowser().DropSelection(nativeTarget,action)){m_TreeiItemDrop=0;m_iItemDrop=-1;GetBrowserSession().Tree()->enable_selchange(1);pApp->EnableTimer(prevTimer);return;}
-
-
-		if(!VolumeCoord::Available({{GetBrowserSession().MacBrowser().SelectedResourceKey(),VolumeCoord::Mode::Read}})){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
-		if(m_iItemDrop >= 0) {
-			DWORD_PTR dw_drag, dw_drop;
-			int drag_is_dir, drop_is_dir;
-			
-			m_iItemDrag = -1;
-			while( (m_iItemDrag = m_cl->GetNextItem(m_iItemDrag,LVNI_SELECTED)) >= 0 ) {
-				dw_drag = m_cl->GetItemData( m_iItemDrag );
-				dw_drop = m_cl->GetItemData( m_iItemDrop );
-				drag_is_dir = get_lparam_isdir( dw_drag );
-				drop_is_dir = get_lparam_isdir( dw_drop );
-
-				if(drop_is_dir) {
-					if(!do_file_to_folder( m_iItemDrag, m_iItemDrop, action )) {
-						break;
-					}
-				} else {
-					creator = m_cl->GetItemText( m_iItemDrop, FIELD_CREATOR );
-					do_open_with( m_iItemDrag, m_iItemDrop, creator ); // ?? explore folder
-					break;
-				}
-			}
-		} else if(m_TreeiItemDrop != 0) {
-			m_iItemDrag = -1;
-			while( (m_iItemDrag = m_cl->GetNextItem(m_iItemDrag,LVNI_SELECTED)) >= 0 ) {
-				if(!drop_list_to_tree( m_iItemDrag, m_TreeiItemDrop, action )) {
-					break;
-				}
-			}
-		} else {
-			CRect cr;
-			m_cl->GetClientRect( &cr );
-			if(cr.PtInRect(point)) {
-				if (lStyle == LVS_ICON || lStyle == LVS_SMALLICON) {
-					CPoint p2 = point, p3, p4;
-					p2 -= m_ptHotSpot;  // the icon should be drawn exactly where the image is
-					p2 += m_ptOrigin;
-					m_cl->GetItemPosition( m_iItemDrag, &p3 );
-					m_iItemDrag = -1;
-					while( (m_iItemDrag = m_cl->GetNextItem(m_iItemDrag,LVNI_SELECTED)) >= 0 ) {
-						m_cl->GetItemPosition( m_iItemDrag, &p4 );
-						p4 = p4 - p3 + p2;
-						m_cl->SetItemPosition(m_iItemDrag, p4);
-						if(update_finfo) update_finder_position(m_iItemDrag, p4);
-					}
-				}
-			} else { // somewhere else
-			}
-		}
-
-		m_TreeiItemDrop = 0;
-		m_iItemDrop = -1;
-
-		GetBrowserSession().Tree()->enable_selchange(1);
-	}
-	pApp->EnableTimer( prevTimer );
+    if(!m_dragging)return;
+    auto drag=std::move(m_browserDrag);
+    FinishDragImage();
+    auto screen=point;
+    m_cl->ClientToScreen(&screen);
+    const UINT keys=(GetKeyState(VK_CONTROL)<0?MK_CONTROL:0)|(GetKeyState(VK_SHIFT)<0?MK_SHIFT:0);
+    if(!drag->Drop(screen,keys))PlaceDraggedIcons(point-m_dragStart);
+    m_dragIcons.clear();
 }
 
-void CHFVExplorerListView::CancelBrowserDrag(){
- if(!m_dragging)return;m_dragging=FALSE;
- if(m_drag_list){m_drag_list->DragLeave(0);m_drag_list->EndDrag();delete m_drag_list;m_drag_list=nullptr;}
- if(m_iItemDrop>=0&&IsWindow(GetSafeHwnd()))set_drop_target(m_iItemDrop,0);
- if(m_TreeiItemDrop&&GetBrowserSession().Tree())set_tree_drop_target(m_TreeiItemDrop,0);
- m_iItemDrop=-1;m_TreeiItemDrop=nullptr;m_browserDrag.reset();
- if(GetBrowserSession().Tree())GetBrowserSession().Tree()->enable_selchange(1);
- if(::GetCapture()==GetSafeHwnd())::ReleaseCapture();SetCursor(LoadCursor(nullptr,IDC_ARROW));
+void CHFVExplorerListView::CancelBrowserDrag()
+{
+    if(m_dragging)FinishDragImage();
+    m_browserDrag.reset();
+    m_dragIcons.clear();
 }
 void CHFVExplorerListView::OnCancelMode(){CancelBrowserDrag();CListView::OnCancelMode();}
 void CHFVExplorerListView::OnCaptureChanged(CWnd* next){if(m_dragging)CancelBrowserDrag();CListView::OnCaptureChanged(next);}
@@ -4379,12 +3468,7 @@ void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 			break;
 		case VK_SHIFT:
 		case VK_CONTROL:
-			if (m_dragging) {
-				// For immediate response.
-				int ctrl = GetAsyncKeyState( VK_CONTROL ) & 0x80000000ul;
-				int shift = GetAsyncKeyState( VK_SHIFT ) & 0x80000000ul;
-				check_move_type( ctrl, shift );
-			}
+			UpdateDragModifiers();
 			handled = 1;
 			break;
 	}
@@ -4437,12 +3521,7 @@ void CHFVExplorerListView::OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags)
 	switch( nChar ) {
 		case VK_SHIFT:
 		case VK_CONTROL:
-			if (m_dragging) {
-				// For immediate response.
-				int ctrl = GetAsyncKeyState( VK_CONTROL ) & 0x80000000ul;
-				int shift = GetAsyncKeyState( VK_SHIFT ) & 0x80000000ul;
-				check_move_type( ctrl, shift );
-			}
+			UpdateDragModifiers();
 			break;
 	}
 	CListView::OnKeyUp(nChar, nRepCnt, nFlags);
@@ -4468,33 +3547,6 @@ void CHFVExplorerListView::on_volume_changed( int volinx )
 	}
 	*/
 }
-
-// Kicked out.
-/*
-DWORD CHFVExplorerListView::stupid_get_date( int inx, int whichone )
-{
-	CString fullpath;
-	char volpath[_MAX_PATH];
-	char *path;
-	hfsdirent ent;
-	DWORD result = 0;
-
-	if(inx >= 0 && get_inx_type(inx) == LIST_HFS) {
-		get_path( inx, fullpath );
-		inx2volname( inx, volpath, _MAX_PATH );
-		path = fullpath.GetBuffer( _MAX_PATH );
-		if(0 == ReadClassicMetadata( volpath, path, &ent )) {
-			if(whichone == FIELD_CREATED) {
-				result = ent.crdate;
-			} else {
-				result = ent.mddate;
-			}
-		}
-		fullpath.ReleaseBuffer();
-	}
-	return(result);
-}
-*/
 
 void CHFVExplorerListView::do_report_sort(void) {
  SortBrowserRows(m_sorted_by_column,m_sort_is_ascending!=FALSE);
@@ -4582,23 +3634,6 @@ void CHFVExplorerListView::DrawItem(LPDRAWITEMSTRUCT lpDrawItemStruct)
 void CHFVExplorerListView::empty_clipboard( void )
 {
  BrowserTransfers::Clear();
-	m_clipboard.RemoveAll();
-	m_clipboard_type.RemoveAll();
-	m_clipboard_isdir.RemoveAll();
-	m_clipboard_volpath.RemoveAll();
-	m_clipboard_cutting.RemoveAll();
-	m_clipboard_volinx.RemoveAll();
-}
-
-BOOL in_string_list( LPCSTR path, CStringArray & arr )
-{
-	int i, count;
-
-	count = arr.GetSize();
-	for(i=0; i<count; i++) {
-		if(arr.ElementAt(i).CompareNoCase(path) == 0) return(TRUE);
-	}
-	return(FALSE);
 }
 
 void CHFVExplorerListView::edit_cut_copy(BOOL cutting,BOOL append){GetBrowserSession().MacBrowser().Capture(cutting!=FALSE,append!=FALSE);}

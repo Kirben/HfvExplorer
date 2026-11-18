@@ -24,7 +24,7 @@ public:
  Drag(BrowserSession&);
  ~Drag();
  bool Empty()const{return selection_.items.empty();}
- bool Hover(CPoint screen,UINT keys);
+ void Hover(CPoint screen,UINT keys);
  bool Drop(CPoint screen,UINT keys);
 #ifdef HFV_TESTING
  bool TestDrop(BrowserSession&,bool tree,HTREEITEM,int row,UINT keys);

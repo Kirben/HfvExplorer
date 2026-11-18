@@ -5,6 +5,7 @@
 #include "BrowserSession.h"
 #include "BrowserPresentation.h"
 #include "BackgroundCopies.h"
+#include "Own_ids.h"
 #include "BackgroundJobController.h"
 #include "BrowserLifetime.h"
 #include "DialogClose.h"
@@ -520,7 +521,11 @@ int RunBackgroundMetadataTest(const char* directory){
   fprintf(report,"PASS: slow folder creation stays non-modal and uses the captured target; completion refreshes, failures/cancellation leave no folder and release reservations.\n");
   Check(session.MacBrowser().ShowTestFolder(mount,2),"show delayed Properties source");
   start(1);
-  Check(session.MacBrowser().Properties(Row(session,L"File")),"start Properties before navigating");
+  Select(session,L"File");
+  BackgroundCopies::enabled=false;
+  session.List()->SendMessage(WM_COMMAND,ID_OWN_FILE_PROPERTIES);
+  BackgroundCopies::enabled=true;
+  Check(BackgroundCopies::Active(),"Properties command did not use the typed background job");
   Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});
   Host(session,host);
   Check(frame->IsWindowEnabled() && !MetadataDialogs::Window(),"navigation blocked by Properties");
@@ -566,8 +571,70 @@ int RunBackgroundMetadataTest(const char* directory){
   edit.item=renamed;propertyEdit={changed.properties,changed.properties};strcpy_s(propertyEdit.desired.name,"Folder");memcpy(propertyEdit.desired.u.file.creator,"FAIL",4);submit(edit,false);Check(!memcmp(submit(inspect).properties.u.file.creator,"TEST",4),"failed metadata transaction changed creator");
   fprintf(report,"PASS: classic folder creation, patch-only label/Finder position updates, stale Properties rejection, modeless editor apply with rename, preserved catalog IDs/forks and failed-rename transaction rollback.\n");
 #ifdef HFV_FLOPPY_TESTING
-  std::vector<BYTE> bytes(1474560);{CFile f;Check(f.Open(classic,CFile::modeRead)&&f.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"load metadata floppy");}TestFloppy disk(bytes);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach metadata floppy");struct Detach{~Detach(){readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}}detach;char device[64];get_floppy_volume_file_name(25,device);mkdir.parent.SetClassic(device,mkdir.parent.ClassicPath());mkdir.name=u"Physical";submit(mkdir);patch.item=renamed;patch.item.SetClassic(device,patch.item.ClassicPath());patch.change=FileOperations::FinderLabel{5};submit(patch);physical_floppy_suspend(25);inspect.item=patch.item;auto physical=submit(inspect);Check((physical.properties.fdflags&14)==10&&physical.writable&&disk.writes&&!disk.locked,"physical metadata was not persisted/unlocked");
-  fprintf(report,"PASS: simulated physical-floppy folder creation and label updates persist with exclusive lock/finalization cleanup; unsupported USB flush accepted. No real hardware accessed.\n");
+  {
+   std::vector<BYTE> bytes(1474560);
+   {CFile f;Check(f.Open(classic,CFile::modeRead)&&f.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"load metadata floppy");}
+   TestFloppy disk(bytes);
+   readonly_cd_backend_init();
+   Check(readonly_floppy_attach_api(25,&disk),"attach metadata floppy");
+   struct Detach {
+    CHFVVolume* mounted=nullptr;
+    ~Detach(){if(mounted)mounted->close();readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}
+   } detach;
+   auto doc=surviving.Document();
+   char device[64];
+   get_floppy_volume_file_name(25,device);
+   const int index=doc->insert_volume(device,1,0,0,0);
+   Check(index>=0,"insert metadata floppy in the browser");
+   auto& mounted=doc->m_volumes[index];
+   detach.mounted=&mounted;
+   Check(mounted.open(),"mount metadata floppy in the browser");
+   auto tree=surviving.Tree();
+   mounted.m_rootitem=tree->initialize_volume(index,mounted.m_volume_name,2,1,0,0,0);
+   const auto notifications=tree->SelectionNotificationsEnabled();
+   tree->enable_selchange(0);
+   tree->GetTreeCtrl().SelectItem(mounted.m_rootitem);
+   tree->enable_selchange(notifications);
+   doc->open_sub_directory(index,2,mounted.m_volume_name);
+   mkdir.parent.SetClassic(device,mkdir.parent.ClassicPath());
+   mkdir.name=u"Physical";
+   submit(mkdir);
+
+   Select(surviving,L"Edited");
+   auto item=surviving.MacBrowser().CaptureItem(Row(surviving,L"Edited"));
+   Check(item.IsPhysical()&&item.MediaGenerationKnown(),"metadata command lost its captured floppy generation");
+   BackgroundCopies::enabled=false;
+   surviving.List()->SendMessage(WM_COMMAND,ID_OWN_SHORTCUT_COLOR_HOT);
+   BackgroundCopies::enabled=true;
+   Check(BackgroundCopies::Active(),"Finder label did not queue a typed job");
+   finished();
+   Check(!BackgroundCopies::LastResult().code,"Finder label command failed");
+   inspect.item=item;
+   auto physical=submit(inspect);
+   Check((physical.properties.fdflags&14)==2*FINDER_COLOR_HOT&&physical.writable,"Finder label did not persist");
+
+   surviving.finderLayout=true;
+   surviving.List()->set_style(LVS_ICON);
+   surviving.List()->set_origo(FINDER_MAGIC_OFFSET,FINDER_MAGIC_OFFSET);
+   Select(surviving,L"Edited");
+   auto& list=surviving.List()->GetListCtrl();
+   const int row=Row(surviving,L"Edited");
+   const CPoint startPosition(70,80);
+   Check(list.SetItemPosition(row,startPosition),"place initial Finder icon");
+   const CSize displacement(12,16);
+   BackgroundCopies::enabled=false;
+   surviving.List()->PlaceSelectedIconsForTest(displacement);
+   BackgroundCopies::enabled=true;
+   Check(BackgroundCopies::Active(),"Finder icon placement did not queue a typed job");
+   finished();
+   Check(!BackgroundCopies::LastResult().code,"Finder location command failed");
+   physical=submit(inspect);
+   Check(physical.properties.fdlocation.h==82&&physical.properties.fdlocation.v==96&&
+         (physical.properties.fdflags&14)==2*FINDER_COLOR_HOT&&disk.writes&&!disk.locked,
+         "Finder icon placement changed unrelated metadata or left the floppy locked");
+   surviving.finderLayout=false;
+   fprintf(report,"PASS: browser Finder label and icon placement use typed jobs on a simulated physical floppy and preserve other metadata.\n");
+  }
 #endif
   // Final-window close cancels a queued create and waits for validation cleanup.
   int lastMount=surviving.MacBrowser().AttachTestVolume(slow,"last-metadata");Check(surviving.MacBrowser().ShowTestFolder(lastMount,2),"show final metadata source");start(1);Check(surviving.MacBrowser().CreateFolder(target,u"MustNotExist"),"start final metadata operation");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});auto pending=FileOperations::Pending().front().Job();HWND last=frame->GetSafeHwnd();frame->SendMessage(WM_CLOSE);Check(IsWindow(last)&&pending->cancelled(),"last-window metadata close did not cancel safely");SetEvent(gate.release);Until([&]{return app.m_browsers.empty();});Check(!Find(*base,u"MustNotExist")&&FileOperations::Pending().empty(),"last-window metadata cleanup failed");

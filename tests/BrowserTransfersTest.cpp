@@ -368,6 +368,20 @@ int RunBrowserTransfersTest(const char* directory)
   Check(!Find(*av,2,u"Within")&&Find(*av,outer,u"Within")==withinId,
         "default same-volume drop did not move the original catalog entry");
 
+  Until([&]{return Row(sb,L"Within")>=0;},"same-image move did not refresh the nested listing");
+  const auto parentRow=[&]{
+   for(int i=0;i<sb.List()->GetListCtrl().GetItemCount();++i)
+    if(sb.List()->IsParentRow(i))return i;
+   return -1;
+  }();
+  Check(parentRow>=0,"nested folder has no typed parent drop row");
+  Select(sb,L"Within");
+  BrowserTransfers::Drag toParent(sb);
+  Success(Transfer([&]{return toParent.TestDrop(sb,false,nullptr,parentRow,0);}));
+  Verify(*av,2,u"Within",71);
+  Check(!Find(*av,outer,u"Within")&&Find(*av,2,u"Within")==withinId,
+        "same-window parent drop did not move the captured file back to its parent");
+
   stage="same-image overwrite move";
   Put(*av,2,u"Collision",44);
   Put(*av,outer,u"Collision",92);

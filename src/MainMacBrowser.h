@@ -48,8 +48,6 @@ public:
     BrowserDirectory::Folder DescribeFolder(HTREEITEM item=nullptr);
     void BindRow(BrowserDirectory::Row&,const std::string& resourceKey={});
     bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&,std::function<void(bool)> completed={});
-    int Drop(int row, HTREEITEM target, int action);
-    bool DropSelection(HTREEITEM target,int action);
     bool Command(UINT);
     bool ContextMenu(CPoint);
     bool Find();

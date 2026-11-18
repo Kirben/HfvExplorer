@@ -424,10 +424,7 @@ struct MainMacBrowser::State {
         bool legacy=canConvert(target)&&std::all_of(sources.begin(),sources.end(),canConvert)&&std::any_of(sources.begin(),sources.end(),[&](const Location& p){return legacyType(p)!=legacyType(target);});
         bool complete=true;std::vector<FileOperations::Request> background;
         if(legacy){
-         session_.List()->m_shutup_for_now=FALSE;
          for(auto& source:sources){
-          CString sourcePath=classicImage(source)?CString(Wide(source.expectedName).c_str()):source.IsClassic()?CString(source.ClassicPath().c_str()):CString(source.WindowsPath().c_str());
-          if(!BackgroundCopies::Enabled()&&legacyType(source)!=legacyType(target)&&!Hidden(session_)&&!session_.List()->ask_set_copy_mode(legacyType(source)==LIST_HFS,sourcePath)){complete=false;break;}
           FileOperations::Request request = FileOperations::OrdinaryCopy{{source}, target};
           if (legacyType(source) != legacyType(target)) {
               const bool ask = (legacyType(source)==LIST_HFS ? App().m_copyout_mode : App().m_copyin_mode) == 6;
@@ -628,12 +625,12 @@ bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!Selectio
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){const auto row=session_.List()->BrowserRowAt(i);if(row&&row->location.IsMounted())selected.push_back(state_->Item(i,false));}
     if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
     FileOperations::DeleteEntries request{std::move(selected)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
-bool MainMacBrowser::Properties(int row){
- if(BackgroundCopies::Enabled()){auto item=state_->Item(row,false);if(item.LegacyType()==LIST_FAT)return false;return MetadataDialogs::Show(item,session_.Owner());}
-const auto model=session_.List()->BrowserRowAt(row);if(!model||!model->location.IsMounted())return false;
-    auto item=state_->Item(row,false);auto volume=item.Volume();Entry e;if(!Run(session_,[&](Storage::Job&){e=volume->Stat(item.Id());}))return true;
-    std::wstring text=Wide(e.name)+L"\n"+FromAnsi(volume->Description())+(volume->Writable()?L"":L" (read-only)")+L"\nData fork: "+std::to_wstring(e.forks[0].size)+L" bytes\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";
-    if(e.hardLink)text+=L"\nHard links: "+std::to_wstring(e.linkCount);MessageBoxW(session_.Owner()->m_hWnd,text.c_str(),L"Properties",MB_OK);return true;}
+bool MainMacBrowser::Properties(int index)
+{
+    const auto row=session_.List()->BrowserRowAt(index);
+    if(!session_.ListingAvailable()||!row||row->location.IsNone()||row->location.IsWindows())return false;
+    return MetadataDialogs::Show(row->location,session_.Owner());
+}
 BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
  BrowserTransfers::Selection out;if(!session_.ListingAvailable())return out;out.canMove=session_.List()->BrowserSelectionAllows(false);
  if(cut&&!out.canMove)return out;
@@ -659,29 +656,6 @@ bool MainMacBrowser::Paste(){try{return BrowserTransfers::Paste(session_);}catch
  browserTransferError=e.what();
 #endif
  if(!Hidden(session_))session_.Owner()->MessageBox(e.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return true;}}
-int MainMacBrowser::Drop(int row,HTREEITEM target,int action){
-    if(row<0||!target)return -1;
-    const auto model=session_.List()->BrowserRowAt(row);
-    if(!model)return 1;
-    try{
-        auto folder=state_->Target(target);
-        if(!model->location.IsMounted()&&!folder.IsMounted())return -1;
-        return state_->Transfer({state_->Item(row,action==2)},folder)?1:0;
-    }catch(const std::exception& e){AfxMessageBox(e.what());return 0;}
-}
-bool MainMacBrowser::DropSelection(HTREEITEM target,int action){
-    if(!target)return false;
-    if(!session_.ListingAvailable())return true;
-    try{
-        auto folder=state_->Target(target);
-        auto selection=SelectedItems(action==2);
-        if(!BackgroundCopies::Enabled()&&!folder.IsMounted()&&
-           std::none_of(selection.items.begin(),selection.items.end(),[](const Location& item){return item.IsMounted();}))
-            return false;
-        if(!selection.items.empty())state_->Transfer(selection.items,folder);
-    }catch(const std::exception& e){AfxMessageBox(e.what());}
-    return true;
-}
 bool MainMacBrowser::Command(UINT id){if(!Active())return false;
     if(id>=ID_OWN_WITH_MAC_FIRST&&id<ID_OWN_FILE_PROPERTIES)return true; // Classic emulator/file-type actions do not apply.
     if(id>=ID_OWN_MAP_THIS&&id<=ID_OWN_SHORTCUT_WINDOWS)return true;return false;}
