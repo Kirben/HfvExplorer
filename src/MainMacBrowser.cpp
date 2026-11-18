@@ -22,6 +22,7 @@
 #include <commdlg.h>
 #include <set>
 #include <algorithm>
+#include <deque>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
@@ -73,6 +74,41 @@ bool RunOperation(BrowserSession& session,FileOperations::Request request,bool c
 }
 using Location=FileOperations::Location;
 
+// Windows share these snapshots on the browser UI thread. Weak mount
+// references keep cached listings from retaining image handles.
+struct FolderSnapshot {
+    std::weak_ptr<Volume> volume;
+    uint64_t revision;
+    uint32_t folder;
+    std::vector<uint32_t> ancestry;
+    std::wstring title;
+    std::vector<Entry> entries;
+    uint64_t free;
+};
+std::deque<FolderSnapshot> folderCache;
+
+const FolderSnapshot* CachedFolder(const std::shared_ptr<Volume>& volume,uint64_t revision,
+                                   uint32_t folder,const std::vector<uint32_t>& ancestry) {
+    for(auto it=folderCache.rbegin();it!=folderCache.rend();++it)
+        if(it->volume.lock()==volume && it->revision==revision && it->folder==folder && it->ancestry==ancestry)
+            return &*it;
+    return nullptr;
+}
+void RememberFolder(FolderSnapshot snapshot) {
+    auto volume=snapshot.volume.lock();
+    folderCache.erase(std::remove_if(folderCache.begin(),folderCache.end(),[&](const FolderSnapshot& old){
+        return old.volume.expired() || (old.volume.lock()==volume &&
+              (old.revision!=snapshot.revision || (old.folder==snapshot.folder && old.ancestry==snapshot.ancestry)));
+    }),folderCache.end());
+    constexpr size_t cacheLimit=64;
+    if(folderCache.size()>=cacheLimit)folderCache.pop_front();
+    folderCache.push_back(std::move(snapshot));
+}
+void ForgetFolders(const std::shared_ptr<Volume>& volume) {
+    folderCache.erase(std::remove_if(folderCache.begin(),folderCache.end(),[&](const FolderSnapshot& entry){
+        return entry.volume.expired() || entry.volume.lock()==volume;
+    }),folderCache.end());
+}
 }
 struct MainMacBrowser::State {
     BrowserSession& session_;
@@ -128,13 +164,28 @@ struct MainMacBrowser::State {
         if(showing)return true;
         auto title=Wide(mounts.at(index).volume->Name());if(id!=2&&item){wchar_t leaf[1024]{};TVITEMW value{};value.mask=TVIF_TEXT;value.hItem=item;value.pszText=leaf;value.cchTextMax=ARRAYSIZE(leaf);if(SendMessageW(session_.Tree()->m_ct->m_hWnd,TVM_GETITEMW,0,reinterpret_cast<LPARAM>(&value)))title+=L":"+std::wstring(leaf);}
         session_.SetLocationTitle(std::move(title));
-        if(session_.Defer(mounts.at(index).volume->ResourceKey(),mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);}))return true;
-        session_.ClearCurrent();showing=true;struct Done{bool& flag;~Done(){flag=false;}}done{showing};
-        auto volume=mounts.at(index).volume;uint64_t revision=0;std::wstring folderTitle;std::vector<std::pair<uint32_t,std::vector<Entry>>> levels;std::vector<Entry> entries;uint64_t free=0;bool mutableFolder=true;
+        auto volume=mounts.at(index).volume;
+        const auto key=volume->ResourceKey();
+        uint64_t revision=0;std::wstring folderTitle;std::vector<std::pair<uint32_t,std::vector<Entry>>> levels;std::vector<Entry> entries;uint64_t free=0;bool mutableFolder=true;
         std::vector<uint32_t> ancestors;std::vector<std::pair<uint32_t,std::u16string>> savedPath;
-        for(auto a=item;a;a=session_.Tree()->m_ct->GetParentItem(a)){auto p=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(a));ancestors.push_back(uint32_t(p->id));wchar_t text[1024]{};TVITEMW value{};value.mask=TVIF_TEXT;value.hItem=a;value.pszText=text;value.cchTextMax=ARRAYSIZE(text);SendMessageW(session_.Tree()->m_ct->m_hWnd,TVM_GETITEMW,0,reinterpret_cast<LPARAM>(&value));savedPath.push_back({uint32_t(p->id),U16(text)});}
-        if(!Run(session_,[&](Storage::Job&){
-            VolumeCoord::Lease read({{volume->ResourceKey(),VolumeCoord::Mode::Read}});revision=VolumeCoord::Revision(volume->ResourceKey());
+        for(auto a=item;a;a=session_.Tree()->m_ct->GetParentItem(a)){auto p=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(a));if(!p)return false;ancestors.push_back(uint32_t(p->id));wchar_t text[1024]{};TVITEMW value{};value.mask=TVIF_TEXT;value.hItem=a;value.pszText=text;value.cchTextMax=ARRAYSIZE(text);SendMessageW(session_.Tree()->m_ct->m_hWnd,TVM_GETITEMW,0,reinterpret_cast<LPARAM>(&value));savedPath.push_back({uint32_t(p->id),U16(text)});}
+        const bool canCache=volume->HasPersistentWorker();
+        bool cached=false;
+        auto restoreCached=[&]{
+            if(!canCache || rebuild)return false;
+            revision=VolumeCoord::Revision(key);
+            const auto* snapshot=CachedFolder(volume,revision,id,ancestors);
+            if(!snapshot)return false;
+            folderTitle=snapshot->title;
+            entries=snapshot->entries;
+            free=snapshot->free;
+            return true;
+        };
+        if(!VolumeCoord::Readable(key))cached=restoreCached();
+        if(!cached && session_.Defer(key,mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);}))return true;
+        session_.ClearCurrent();showing=true;struct Done{bool& flag;~Done(){flag=false;}}done{showing};
+        if(!cached && !Run(session_,[&](Storage::Job&){
+            VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});revision=VolumeCoord::Revision(key);
             if(rebuild){
                 // Follow the visible path rather than backing-inode parent IDs.
                 // Converting a folder to hard links retains its inode CNID but
@@ -150,11 +201,18 @@ struct MainMacBrowser::State {
             }
             auto currentFolder=volume->Stat(id);folderTitle=Wide(currentFolder.name);mutableFolder=(currentFolder.id==2||!currentFolder.protectedFile);
             entries=volume->List(id);free=volume->FreeBytes();})){
-            if(readBusy){session_.Defer(volume->ResourceKey(),mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);},true);return true;}
-            auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
-            auto root=mounts[index].root;for(auto child=tree->m_ct->GetChildItem(root);child;){auto next=tree->m_ct->GetNextSiblingItem(child);tree->m_ct->DeleteItem(child);child=next;}
-            tree->m_ct->SelectItem(root);tree->enable_selchange(enabled);
-            session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});shown.clear();current=index;folder=2;folderMutable=false;return false;}
+            if(readBusy){
+                cached=restoreCached();
+                if(!cached){session_.Defer(key,mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);},true);return true;}
+            }
+            if(!cached){
+                auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
+                auto root=mounts[index].root;for(auto child=tree->m_ct->GetChildItem(root);child;){auto next=tree->m_ct->GetNextSiblingItem(child);tree->m_ct->DeleteItem(child);child=next;}
+                tree->m_ct->SelectItem(root);tree->enable_selchange(enabled);
+                session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});shown.clear();current=index;folder=2;folderMutable=false;return false;
+            }
+        }
+        if(canCache&&!cached)RememberFolder({volume,revision,id,ancestors,folderTitle,entries,free});
         entries.erase(std::remove_if(entries.begin(),entries.end(),[](const Entry& e){return !App().m_show_invisible_mac&&((uint16_t(e.finder[8])<<8|e.finder[9])&0x4000);}),entries.end());
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         if(rebuild){
@@ -168,16 +226,25 @@ struct MainMacBrowser::State {
         std::map<uint32_t,HTREEITEM> children;
         for(auto& e:entries)if(e.directory)children[e.id]=Insert(index,e.id,item,Wide(e.name));
         auto list=session_.List();auto& lc=list->GetListCtrl();list->list_clear();list->destroy_pointers();list->initialize_volume("",id==2?0:ID_GOTO_PARENT);
-        auto capabilities=volume->Supports();if(!mutableFolder)capabilities.create=capabilities.rename=capabilities.remove=false;
+        const auto backendCapabilities=volume->Supports();
+        auto capabilities=backendCapabilities;
+        if(cached||!mutableFolder)capabilities.create=capabilities.rename=capabilities.remove=false;
         list->SetBrowserCapabilities(capabilities);
         for(const auto& e:entries){
-            auto row=BrowserDirectory::FromMac(e,index,volume->Supports());
+            auto row=BrowserDirectory::FromMac(e,index,backendCapabilities);
             list->InsertBrowserRow(row,e.directory?children[e.id]:nullptr);
         }
         session_.SetLocationTitle(id==2?Wide(volume->Name()):Wide(volume->Name())+L":"+folderTitle);
-        session_.Observe(volume->ResourceKey(),revision,LIST_MAC,index,id);shown=std::move(entries);current=index;folder=id;folderMutable=mutableFolder;control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);session_.MacBrowser().Sort(FIELD_NAME,true);
+        session_.Observe(volume->ResourceKey(),revision,LIST_MAC,index,id);shown=std::move(entries);current=index;folder=id;folderMutable=!cached&&mutableFolder;control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);session_.MacBrowser().Sort(FIELD_NAME,true);
         if(session_.Status()){CString status;status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
             session_.Status()->SetPaneText(0,status);}
+        if(cached)session_.Defer(key,false,[this,index,id]{
+            int selected;uint32_t selectedId;
+            if(Selected(selected,selectedId) && selected==index && selectedId==id){
+                StorageQuietRefresh quiet;
+                Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),true);
+            }
+        },true,true);
         return true;
     }
     bool Transfer(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed={}) {
@@ -291,7 +358,10 @@ bool MainMacBrowser::Select(LPARAM data){auto p=reinterpret_cast<lparam_struct*>
     state_->Show(p->volinx,uint32_t(p->id),session_.Tree()->m_ct->GetSelectedItem());return true;}
 bool MainMacBrowser::Refresh(){int i;uint32_t id;if(!state_->Selected(i,id))return false;
     auto& mount=state_->mounts[i];
+    if(mount.volume->HasPersistentWorker()&&!VolumeCoord::Readable(mount.volume->ResourceKey()))
+        return state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem());
     if(session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();}))return true;
+    ForgetFolders(mount.volume);
     bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(!mount.physicalPath.empty())mount.volume=Removable::Reopen(mount.physicalPath,mount.physicalOffset);else if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No HFS+ / HFSX disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
     if(!ready){if(readBusy){session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();},true);return true;}if(mount.drive>=0){ReleaseCd(mount.drive);return false;}session_.List()->initialize_volume("",0);return true;}
     if(!mount.physicalPath.empty()){id=2;TreeText(session_,mount.root,Wide(mount.volume->Name())+L" - "+mount.suffix+L" [read-only]");state_->Show(i,2,mount.root);}

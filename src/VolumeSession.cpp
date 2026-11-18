@@ -19,6 +19,14 @@ enum class SessionCommandCode {
 constexpr size_t sessionReadLimit = 256 * 1024;
 #ifdef HFV_TESTING
 std::atomic<HANDLE> readPauseEntered{nullptr}, readPauseRelease{nullptr};
+std::atomic<HANDLE> writePauseEntered{nullptr}, writePauseRelease{nullptr};
+void PauseForTest(const std::atomic<HANDLE>& entered,const std::atomic<HANDLE>& release) {
+    if(auto event=entered.load()){
+        SetEvent(event);
+        Check(WaitForSingleObject(release.load(),15000)==WAIT_OBJECT_0,
+              "The test did not release the paused fork transfer");
+    }
+}
 #endif
 
 void SessionReply(HANDLE output, unsigned code = 0, const std::string& error = {},
@@ -336,14 +344,7 @@ public:
                 });
             }
 #ifdef HFV_TESTING
-            if (!offset && bytes>count) {
-                auto entered=readPauseEntered.load();
-                if (entered) {
-                    SetEvent(entered);
-                    Check(WaitForSingleObject(readPauseRelease.load(),15000)==WAIT_OBJECT_0,
-                          "The test did not release the paused fork read");
-                }
-            }
+            if (!offset && bytes>count) PauseForTest(readPauseEntered,readPauseRelease);
 #endif
             if (count) output += count;
             offset += count; bytes -= count;
@@ -443,6 +444,9 @@ private:
                     const bool localRead = original && !fork;
                     Data bytes;
                     try {
+#ifdef HFV_TESTING
+                        if(!fork && !offset)PauseForTest(writePauseEntered,writePauseRelease);
+#endif
                         if (localRead) {
                             if (localProgress) localProgress(offset, size_t(size));
                         } else {
@@ -897,6 +901,10 @@ int Child(const char* inputText, const char* outputText) {
 void PauseVolumeReadForTest(HANDLE entered,HANDLE release) {
     if(entered)readPauseRelease=release;
     readPauseEntered=entered;
+}
+void PauseVolumeWriteForTest(HANDLE entered,HANDLE release) {
+    if(entered)writePauseRelease=release;
+    writePauseEntered=entered;
 }
 DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
     auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);

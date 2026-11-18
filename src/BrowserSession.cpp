@@ -61,11 +61,12 @@ void BrowserSession::SetLocationTitle(std::wstring title){
 }
 std::string BrowserSession::ObservedWindowsKey(const std::string& path)const{return current_.type==LIST_FAT&&!_stricmp(current_.path.c_str(),path.c_str())?current_.key:std::string();}
 void BrowserSession::ClearCurrent(){current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
-bool BrowserSession::Defer(const std::string& key,bool classic,std::function<void()> next,bool force){
+bool BrowserSession::Defer(const std::string& key,bool classic,std::function<void()> next,bool force,bool keepListing){
  if(!force&&!(classic&&key.empty()&&BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
- ClearCurrent();deferredKey_=key;deferredClassic_=classic;deferred_=std::move(next);
- if(list_){list_->list_clear();list_->SetBrowserCapabilities({});}
- if(status_)status_->SetPaneText(0,"Waiting for this volume to finish its file operation...");
+ if(!keepListing)ClearCurrent();
+ deferredKey_=key;deferredClassic_=classic;deferred_=std::move(next);
+ if(list_&&!keepListing){list_->list_clear();list_->SetBrowserCapabilities({});}
+ if(status_)status_->SetPaneText(0,keepListing?"Showing the last folder listing while this volume is busy.":"Waiting for this volume to finish its file operation...");
  if(notifications_)notifications_->SetTimer(2,100,nullptr);return true;
 }
 BrowserSession::~BrowserSession(){DetachPanes();notifications_.reset();}
