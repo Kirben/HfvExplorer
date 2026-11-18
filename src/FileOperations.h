@@ -9,7 +9,7 @@ extern "C" {
 }
 namespace FileOperations {
 enum class Kind {CreateHardLink,Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute,SetBasicMetadata,SetCompression};
-enum class MetadataPatch {All,Label,Position};
+
 struct OrdinaryCopy {
  std::vector<Location> sources;
  Location destination;
@@ -28,8 +28,46 @@ struct RenameEntry {
 struct DeleteEntries {
  std::vector<Location> selection;
 };
+struct InspectProperties { static constexpr Kind kind = Kind::Inspect; Location item; };
+struct FinderLabel { int value; };
+struct FinderPosition { short x, y; };
+struct ClassicPropertyEdit { hfsdirent original, desired; };
+struct EditClassicProperties {
+ static constexpr Kind kind = Kind::SetProperties;
+ Location item;
+ std::variant<ClassicPropertyEdit, FinderLabel, FinderPosition> change;
+};
+struct EditBasicMetadata {
+ static constexpr Kind kind = Kind::SetBasicMetadata;
+ Location item;
+ MacBrowser::Entry original, desired;
+};
+struct EditAttributes {
+ static constexpr Kind kind = Kind::SetAttributes;
+ Location item;
+ HfsPlus::Attributes original, desired;
+};
+struct ChangeCompression {
+ static constexpr Kind kind = Kind::SetCompression;
+ Location item;
+ MacBrowser::Entry original;
+ HfsPlus::Attributes originalAttributes;
+ HfsPlus::Volume::CompressionMode method;
+};
+struct ImportAttributeValue {
+ static constexpr Kind kind = Kind::ReadAttributeFile;
+ Location item;
+ std::u16string name;
+};
+struct ExportAttributeValue {
+ static constexpr Kind kind = Kind::ExportAttribute;
+ Location item; // Windows output file
+ HfsPlus::AttributeData value;
+};
+using MetadataOperation = std::variant<InspectProperties, EditClassicProperties, EditBasicMetadata,
+                                       EditAttributes, ChangeCompression, ImportAttributeValue, ExportAttributeValue>;
 class Request {
- std::variant<OrdinaryCopy, LegacyConversion, RenameEntry, DeleteEntries, Kind> operation_;
+ std::variant<OrdinaryCopy, LegacyConversion, RenameEntry, DeleteEntries, MetadataOperation, Kind> operation_;
  // Other operations retain their existing selection and destination fields.
  // For conversion these are the optional preflight selection and folder.
  std::vector<Location> otherSources_;
@@ -40,6 +78,9 @@ public:
  Request(LegacyConversion conversion) : operation_(std::move(conversion)) {}
  Request(RenameEntry rename) : operation_(std::move(rename)) {}
  Request(DeleteEntries deletion) : operation_(std::move(deletion)) {}
+ template<class T, std::enable_if_t<std::is_constructible_v<MetadataOperation, T>, int> = 0>
+ Request(T metadata) : operation_(MetadataOperation(std::move(metadata))) {}
+ const MetadataOperation* Metadata() const { return std::get_if<MetadataOperation>(&operation_); }
  const RenameEntry* Rename() const { return std::get_if<RenameEntry>(&operation_); }
  const DeleteEntries* Delete() const { return std::get_if<DeleteEntries>(&operation_); }
  Kind OperationKind() const {
@@ -47,10 +88,14 @@ public:
   if (std::holds_alternative<LegacyConversion>(operation_)) return Kind::LegacyCopy;
   if (Rename()) return Kind::Rename;
   if (Delete()) return Kind::Delete;
+  if (auto* metadata = Metadata()) return std::visit([](const auto& value) { return value.kind; }, *metadata);
   return std::get<Kind>(operation_);
  }
  void SetKind(Kind kind) {
-  if (kind == Kind::LegacyCopy || kind == Kind::Rename || kind == Kind::Delete)
+  if (kind == Kind::LegacyCopy || kind == Kind::Rename || kind == Kind::Delete ||
+      kind == Kind::Inspect || kind == Kind::SetProperties || kind == Kind::SetBasicMetadata ||
+      kind == Kind::SetAttributes || kind == Kind::SetCompression ||
+      kind == Kind::ReadAttributeFile || kind == Kind::ExportAttribute)
    throw HfsPlus::Error("This operation requires its own request payload");
   if (kind == OperationKind()) return;
   if (kind == Kind::Copy) {
@@ -84,13 +129,6 @@ public:
   return copy ? copy->destination : otherTarget_;
  }
  std::u16string name;
- MacBrowser::Entry metadata,originalMetadata;
- HfsPlus::Attributes attributes,originalAttributes;
- MetadataPatch patch=MetadataPatch::All;
- hfsdirent originalProperties{},properties{};
- int label=0;short x=0,y=0;
- bool compressed=false;
- HfsPlus::Volume::CompressionMode compressionMethod=HfsPlus::Volume::CompressionMode::Zlib;
  bool background=false;
  unsigned fork=0;
  void SetLegacySourcePath(std::string path) {

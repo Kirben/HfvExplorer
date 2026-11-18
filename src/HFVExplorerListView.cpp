@@ -600,7 +600,7 @@ BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=u
 void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
 {
  if(BackgroundCopies::Enabled()){
-  if(get_inx_type(inx)!=LIST_HFS)return;FileOperations::Request request;request.SetKind(FileOperations::Kind::SetProperties);request.Sources()={GetBrowserSession().MacBrowser().CaptureItem(inx)};request.patch=FileOperations::MetadataPatch::Position;request.x=short(p.x-FINDER_MAGIC_OFFSET+m_mac_origo.x);request.y=short(p.y-FINDER_MAGIC_OFFSET+m_mac_origo.y);BackgroundCopies::Start({request},GetBrowserSession().Owner(),true);return;
+  if(get_inx_type(inx)!=LIST_HFS)return;FileOperations::EditClassicProperties request{GetBrowserSession().MacBrowser().CaptureItem(inx),FileOperations::FinderPosition{short(p.x-FINDER_MAGIC_OFFSET+m_mac_origo.x),short(p.y-FINDER_MAGIC_OFFSET+m_mac_origo.y)}};BackgroundCopies::Start({request},GetBrowserSession().Owner(),true);return;
  }
  if(BackgroundCopies::Active())return;
 	if(get_inx_type(inx) == LIST_HFS) {
@@ -3157,8 +3157,11 @@ void CHFVExplorerListView::toggle_label_colors( void )
 void CHFVExplorerListView::set_label_color( int finder_color )
 {
  if(BackgroundCopies::Enabled()){
-  FileOperations::Request request;request.SetKind(FileOperations::Kind::SetProperties);request.patch=FileOperations::MetadataPatch::Label;request.label=finder_color;auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);for(auto& item:selection.items)if(item.LegacyType()==LIST_HFS)request.Sources().push_back(item);
-  std::vector<FileOperations::Request> requests;for(auto& item:request.Sources()){auto one=request;one.Sources()={item};requests.push_back(std::move(one));}if(!requests.empty())BackgroundCopies::Start(std::move(requests),GetBrowserSession().Owner(),true);return;
+  auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);
+  std::vector<FileOperations::Request> requests;
+  for(auto& item:selection.items)if(item.IsClassic())
+   requests.emplace_back(FileOperations::EditClassicProperties{std::move(item),FileOperations::FinderLabel{finder_color}});
+  if(!requests.empty())BackgroundCopies::Start(std::move(requests),GetBrowserSession().Owner(),true);return;
  }
  if(BackgroundCopies::Active())return;
 	int inx, color;
