@@ -1002,8 +1002,10 @@ void directoryMetadata(){
  }
  puts("PASS: folder Finder/date/attribute transactions, 64-bit dates, date-only merge finalization, child fork preservation, read-only refusal and journal/write/flush recovery in HFS+ and both HFSX modes");
 }
+void RunLargeAttributeTests();
 int wmain(int argc, wchar_t **argv) {
     try {
+        if(argc==2&&!wcscmp(argv[1],L"--large-attributes")){RunLargeAttributeTests();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--hard-links")){hardLinks();hardLinkFailures();return 0;}
           if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
         auto saveMemory = [](Memory &memory, const wchar_t *path) {

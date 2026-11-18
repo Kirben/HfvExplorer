@@ -486,7 +486,8 @@ Current filesystem support
   files; physical mixed-mode/multisession hardware testing remains outstanding.
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
   GPT filesystem images and compressed DMG
-  containers are not implemented. GPT support below is for external journals only.
+  containers are not implemented. GPT partition discovery is supported for physical
+  removable disks and separate external journal images.
 - Compressed-file reads decode decmpfs stored data (1/9/10), zlib (3/4), LZVN
   (7/8), LZFSE (11/12) and LZBITMAP (13/14), from attributes or resource-fork blocks. Listings show
   logical sizes; exports produce decompressed data. Compression storage is hidden
@@ -501,8 +502,10 @@ Current filesystem support
   existing metadata. Deletion reclaims fork-backed attributes. Attributes use binary,
   case-sensitive keys even on case-insensitive volumes, with incremental B-tree
   updates and the same internal journal/recovery path as other metadata.
-  Properties > Extended attributes lists named values; small values can be edited
-  as hexadecimal bytes, and Import/Export value handles larger binary values.
+  Properties > Extended attributes lists named values. The hex editor uses 64 KiB
+  pages with Previous/Next and direct decimal byte-offset navigation. Navigation
+  stages the current page; Set value stages it explicitly. Partial-page edits keep
+  the value length; Import value replaces a whole value, including its length.
   Set value stages an edit; Apply saves all staged changes. The editor rejects stale
   snapshots and malformed com.apple.system.Security ACL records. Owner/group UUIDs,
   ACE order, rights and inheritance flags are retained as Mac metadata; they are not
@@ -514,10 +517,18 @@ Current filesystem support
   attributes. Transfers to classic HFS or other destinations unable to preserve
   attributes fail before copying/removing sources. Logical compressed-file exports
   omit compression storage attributes; hard-link exports omit private link topology.
-  Limits: 64 MiB per attribute and 128 MiB per entry; HFS+ attribute names have at most
-  127 UTF-16 units. AppleDouble export also requires names within 127 UTF-8 bytes and
-  its attribute directory within 64 KiB. Existing larger attributes cannot be edited
-  through this implementation. Raw fork exports intentionally contain only that fork.
+  Attribute payloads have no application-imposed per-value or combined byte cap.
+  Large values are streamed through 64 KiB buffers into immutable temporary-file
+  snapshots; copies share snapshots. Edited pages have separate file-backed
+  overlays. Source volumes can close without invalidating staged values. Snapshot
+  files are deleted automatically on final release, including cancellation/errors.
+  Temporary disk space is required; sparse staging is used where supported.
+  Native names retain HFS+'s 127 UTF-16-unit limit and Mac ACLs retain Apple's
+  128-entry limit. AppleDouble's encoded name/count/offset widths still apply:
+  names up to 254 UTF-8 bytes, 65535 attributes and 32-bit payload offsets. The
+  attribute directory is no longer limited to 64 KiB. Its small directory records
+  and filesystem B-tree metadata remain in memory; large payloads do not.
+  Raw fork exports intentionally contain only the selected fork.
 - HFS+/HFSX compressed files can be overwritten, renamed, deleted and have their
   ordinary attributes/ACLs edited. Overwrites preserve the original supported
   codec family. Properties offers zlib (3/4), LZVN (7/8), LZFSE (11/12), LZBITMAP
@@ -560,7 +571,8 @@ Current filesystem support
   extended Finder fields that MFS cannot represent are rejected before transfer.
   MFS is flat: importing files is enabled, while New folder remains disabled.
   Native MFS-to-MFS transfers preserve file versions; other filesystems do not
-  acquire MFS version semantics. Physical MFS media access is not implemented.
+  acquire MFS version semantics. Eligible physical MFS media support read-only access
+  through the native removable-disk reader; physical MFS writing is not implemented.
   Native classic HFS CD/floppy access retains its existing media restrictions.
 - MFS mutations snapshot the bounded image and validate the proposed directory/map
   before writing. Reported write/short-write/flush errors restore touched bytes.

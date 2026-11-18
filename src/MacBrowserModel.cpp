@@ -280,7 +280,7 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
         if(job.cancelled())throw Storage::Cancelled();Check(depth<=128&&ancestors.insert(at).second,"Cyclic source folder");
         auto e=v.Stat(at);Check(!e.identity.empty(),"Cannot verify source identity; source items were retained");++count;
         if(requireRemovable)v.ValidateRemoval(at);
-        auto attributes=v.GetAttributes(at);for(const auto& a:attributes){auto size=a.second.size();bytes(a.first.data(),a.first.size()*2);bytes(&size,sizeof(size));bytes(a.second.data(),a.second.size());}
+        auto attributes=v.GetAttributes(at);for(const auto& a:attributes){auto size=a.second.size();bytes(a.first.data(),a.first.size()*2);bytes(&size,sizeof(size));HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<a.second.size();){auto n=size_t((std::min)(uint64_t(buffer.size()),a.second.size()-at));a.second.Read(at,buffer.data(),n);bytes(buffer.data(),n);at+=n;}}
         bytes(e.identity.data(),e.identity.size());bytes(e.name.data(),e.name.size()*2);
         bytes(&e.created,sizeof(e.created));bytes(&e.modified,sizeof(e.modified));bytes(e.finder.data(),e.finder.size());
         bytes(&e.forks[0].size,sizeof(uint64_t));bytes(&e.forks[1].size,sizeof(uint64_t));

@@ -45,7 +45,7 @@ bool AppleDouble(const std::wstring &path, Double &out) {
     File f(path, GENERIC_READ, OPEN_EXISTING); uint8_t header[26];
     if (f.Size() < sizeof(header)) return false;
     f.Read(0, header, sizeof(header)); unsigned count = HfsPlus::Disk::U16(header + 24);
-    if (U32(header) != 0x00051607 || U32(header + 4) != 0x00020000 || count > 1024 ||
+    if (U32(header) != 0x00051607 || U32(header + 4) != 0x00020000 ||
         26ULL + count * 12ULL > f.Size()) return false;
     bool resource = false; std::set<uint32_t> ids;std::vector<std::pair<uint64_t,uint64_t>> ranges;
     for (unsigned i = 0; i < count; ++i) {
@@ -68,24 +68,27 @@ HfsPlus::Attributes DoubleAttributes(const std::wstring& path,const Double& d){
     uint64_t total=U32(header+8),start=U32(header+12),length=U32(header+16),at=d.finderOffset+70;
     Check(total<=d.finderOffset+d.finderSize&&total>=at&&start>=at&&Range(start,length,total),"Invalid AppleDouble attribute ranges");
     uint64_t bytes=0;std::vector<std::pair<uint64_t,uint64_t>> ranges;
-    for(unsigned i=0;i<HfsPlus::Disk::U16(header+34);++i){uint8_t entry[11];Check(Range(at,11,start)&&at+11<=65536,"Truncated AppleDouble attribute entry");file.Read(at,entry,sizeof(entry));unsigned nameLength=entry[10];
-        uint64_t next=(at+11+nameLength+3)&~3ULL;Check(nameLength>1&&nameLength<=128&&next<=start&&next<=65536,"Invalid AppleDouble attribute name length");
+    for(unsigned i=0;i<HfsPlus::Disk::U16(header+34);++i){uint8_t entry[11];Check(Range(at,11,start),"Truncated AppleDouble attribute entry");file.Read(at,entry,sizeof(entry));unsigned nameLength=entry[10];
+        uint64_t next=(at+11+nameLength+3)&~3ULL;Check(nameLength>1&&nameLength<=255&&next<=start,"Invalid AppleDouble attribute name length");
         std::string utf8(nameLength,0);file.Read(at+11,&utf8[0],nameLength);Check(utf8.back()==0&&utf8.find('\0')==utf8.size()-1,"Invalid AppleDouble attribute name");
         utf8.pop_back();int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,utf8.data(),int(utf8.size()),nullptr,0);Check(n>0,"Invalid AppleDouble UTF-8 attribute name");std::wstring name(n,0);Check(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,utf8.data(),int(utf8.size()),&name[0],n)==n,"Invalid attribute name");
-        uint64_t offset=U32(entry),size=U32(entry+4);Check(offset>=start&&Range(offset,size,start+length)&&size<=64*1024*1024,"Invalid AppleDouble attribute data");bytes+=size;Check(bytes<=128*1024*1024,"AppleDouble attributes exceed the 128 MiB limit");
-        HfsPlus::Bytes value(size_t(size),0);if(size)file.Read(offset,value.data(),value.size());Check(out.emplace(U16(name),std::move(value)).second,"Duplicate AppleDouble attribute name");if(size)ranges.push_back({offset,offset+size});at=next;
+        uint64_t offset=U32(entry),size=U32(entry+4);Check(offset>=start&&Range(offset,size,start+length),"Invalid AppleDouble attribute data");
+        auto value=HfsPlus::AttributeData::Snapshot(size,[&](uint64_t at,void* p,size_t n){file.Read(offset+at,p,n);});Check(out.emplace(U16(name),std::move(value)).second,"Duplicate AppleDouble attribute name");if(size)ranges.push_back({offset,offset+size});at=next;
     }
     std::sort(ranges.begin(),ranges.end());for(size_t i=1;i<ranges.size();++i)Check(ranges[i].first>=ranges[i-1].second,"Overlapping AppleDouble attributes");return out;
 }
-HfsPlus::Bytes DoubleHeader(const Entry& e){
+struct DoublePlan {HfsPlus::Bytes prefix;HfsPlus::Attributes attributes;
+ void Write(File& file)const{file.Write(prefix.data(),prefix.size());HfsPlus::Bytes buffer(65536);for(const auto& item:attributes)for(uint64_t at=0;at<item.second.size();){auto n=size_t((std::min)(uint64_t(buffer.size()),item.second.size()-at));item.second.Read(at,buffer.data(),n);file.Write(buffer.data(),n);at+=n;}}
+};
+DoublePlan DoubleHeader(const Entry& e){
     HfsPlus::ValidateAttributes(e.attributes);std::vector<std::string> names;uint64_t headerSize=e.attributes.empty()?82:120,total=0;
-    for(const auto& item:e.attributes){auto name=BrowserPresentation::Utf8(item.first);Check(name.size()<128,"Attribute name exceeds AppleDouble's 127 UTF-8 byte limit");names.push_back(name);headerSize=(headerSize+12+name.size()+3)&~3ULL;total+=item.second.size();}
-    Check(headerSize<=65536&&e.attributes.size()<=65535,"AppleDouble attribute directory exceeds 64 KiB");
+    for(const auto& item:e.attributes){auto name=BrowserPresentation::Utf8(item.first);Check(name.size()<255,"Attribute name exceeds AppleDouble's 254 UTF-8 byte field limit");names.push_back(name);headerSize=(headerSize+12+name.size()+3)&~3ULL;Check(item.second.size()<=UINT32_MAX-total,"Attribute values exceed AppleDouble's 32-bit offsets");total+=item.second.size();}
+    Check(e.attributes.size()<=65535,"AppleDouble attribute count exceeds its 16-bit field");
     uint64_t resource=headerSize+total;Check(resource<=UINT32_MAX&&e.forks[1].size<=UINT32_MAX-resource,"Metadata/resource fork is too large for AppleDouble; use raw fork export");
-    HfsPlus::Bytes b(size_t(resource),0);P32(b.data(),0x00051607);P32(b.data()+4,0x00020000);P16(b.data()+24,2);P32(b.data()+26,9);P32(b.data()+30,50);P32(b.data()+34,uint32_t(resource-50));P32(b.data()+38,2);P32(b.data()+42,uint32_t(resource));P32(b.data()+46,uint32_t(e.forks[1].size));memcpy(b.data()+50,e.finder.data(),32);
+    HfsPlus::Bytes b(size_t(headerSize),0);P32(b.data(),0x00051607);P32(b.data()+4,0x00020000);P16(b.data()+24,2);P32(b.data()+26,9);P32(b.data()+30,50);P32(b.data()+34,uint32_t(resource-50));P32(b.data()+38,2);P32(b.data()+42,uint32_t(resource));P32(b.data()+46,uint32_t(e.forks[1].size));memcpy(b.data()+50,e.finder.data(),32);
     if(!e.attributes.empty()){P32(b.data()+84,0x41545452);P32(b.data()+92,uint32_t(resource));P32(b.data()+96,uint32_t(headerSize));P32(b.data()+100,uint32_t(total));P16(b.data()+118,uint16_t(e.attributes.size()));size_t at=120,data=size_t(headerSize),i=0;
-        for(const auto& item:e.attributes){auto& name=names[i++];P32(b.data()+at,uint32_t(data));P32(b.data()+at+4,uint32_t(item.second.size()));b[at+10]=uint8_t(name.size()+1);memcpy(b.data()+at+11,name.c_str(),name.size()+1);at=(at+12+name.size()+3)&~size_t(3);if(!item.second.empty())memcpy(b.data()+data,item.second.data(),item.second.size());data+=item.second.size();}}
-    return b;
+        for(const auto& item:e.attributes){auto& name=names[i++];P32(b.data()+at,uint32_t(data));P32(b.data()+at+4,uint32_t(item.second.size()));b[at+10]=uint8_t(name.size()+1);memcpy(b.data()+at+11,name.c_str(),name.size()+1);at=(at+12+name.size()+3)&~size_t(3);data+=item.second.size();}}
+    return {std::move(b),e.attributes};
 }
 void Leaf(const std::u16string &s) {
     Check(!s.empty() && s.size()<=255 && s != u"." && s != u".." && s.back() != u'.' && s.back() != u' ', "Invalid Windows filename");
@@ -166,7 +169,7 @@ public:
         auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
         Double old;bool exists=GetFileAttributesW(companion.c_str())!=INVALID_FILE_ATTRIBUTES;Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
         std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
-        try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);output.Write(header.data(),header.size());if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.Write(buffer.data(),n);at+=n;}}output.Flush();}
+        try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);header.Write(output);if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.Write(buffer.data(),n);at+=n;}}output.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
             if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;}
             Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;if(finish)finish();
@@ -289,7 +292,7 @@ public:
             staged = Temp(root);reserve(staged);resource = Temp(root);reserve(resource);
             {
                 File data(staged, GENERIC_WRITE, TRUNCATE_EXISTING), rsrc(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
-                rsrc.Write(header.data(),header.size());
+                header.Write(rsrc);
                 std::vector<uint8_t> buffer(1024*1024);
                 for (unsigned f=0; f<2; ++f) for (uint64_t at=0; at<e.forks[f].size;) {
                     size_t n=size_t((std::min)(uint64_t(buffer.size()),e.forks[f].size-at));

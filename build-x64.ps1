@@ -32,6 +32,8 @@ if($Test -or $TestHfsPlus) {
  New-Item -ItemType Directory -Path $hfsPlusDirectory | Out-Null
  & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" (Join-Path $hfsPlusDirectory 'formatted.dsk')
  if($LASTEXITCODE){throw "HFS+ core tests failed; retained $hfsPlusDirectory"}
+ & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large-attributes
+ if($LASTEXITCODE){throw 'Large streamed attribute tests failed.'}
  & "$PSScriptRoot\tests\test-hfsplus-compression.ps1" -Directory (Join-Path $hfsPlusDirectory 'native-compression')
  if($LASTEXITCODE){throw 'Native compressed-file tests failed.'}
  & "$PSScriptRoot\bin\x64\hfsplus-tests.exe" --large (Join-Path $hfsPlusDirectory 'large.dsk')

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
@@ -184,11 +185,11 @@ std::string FolderIdentity(std::string value){for(int n=0;n<2;++n){auto at=value
 Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& completion){
  Storage::Progress p;p.phase=request.kind==Kind::Inspect?"Reading properties":request.kind==Kind::CreateFolder?"Creating folder":"Updating properties";p.utf8=true;p.path=Utf8(request.name);job.progress(p);
  if(request.kind==Kind::ReadAttributeFile){
-  Check(request.sources.size()==1,"Select one binary attribute value file");auto source=Source(request.sources[0]);auto e=source.first->Stat(source.second);Check(!e.directory&&e.forks[0].size<=64*1024*1024,"Attribute value must be a file no larger than 64 MiB");HfsPlus::Bytes bytes(size_t(e.forks[0].size),0);
-  for(size_t at=0;at<bytes.size();){Cancel(job);auto n=(std::min)(size_t(65536),bytes.size()-at);source.first->Read(source.second,0,at,bytes.data()+at,n);at+=n;}Cancel(job);completion.attributes[request.name]=std::move(bytes);
+  Check(request.sources.size()==1,"Select one binary attribute value file");auto source=Source(request.sources[0]);auto e=source.first->Stat(source.second);Check(!e.directory,"Attribute value must be a file");
+  auto bytes=HfsPlus::AttributeData::Snapshot(e.forks[0].size,[&](uint64_t at,void* p,size_t n){Cancel(job);source.first->Read(source.second,0,at,p,n);});Cancel(job);completion.attributes[request.name]=std::move(bytes);
  }else if(request.kind==Kind::ExportAttribute){
   Check(Absolute(request.target.windowsPath)&&request.attributes.count(request.name),"Choose an attribute and a new output filename");auto& bytes=request.attributes.at(request.name);auto& path=request.target.windowsPath;HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create attribute output; choose a new filename");Mark(completion,request.target);
-  try{for(size_t at=0;at<bytes.size();){Cancel(job);auto n=(std::min)(size_t(65536),bytes.size()-at);DWORD written=0;if(!WriteFile(file,bytes.data()+at,DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Attribute export write failed");at+=n;}Cancel(job);if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");CloseHandle(file);}catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
+  try{HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<bytes.size();){Cancel(job);auto n=size_t((std::min)(uint64_t(buffer.size()),bytes.size()-at));bytes.Read(at,buffer.data(),n);DWORD written=0;if(!WriteFile(file,buffer.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Attribute export write failed");at+=n;}Cancel(job);if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");CloseHandle(file);}catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
  }else if(request.kind==Kind::CreateFolder){
   const auto& item=request.target;Check(!request.name.empty(),"Enter a folder name");
   if(item.volume){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&source.first->Supports().createFolders&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,request.name);source.first->MakeDirectory(source.second,request.name);}
@@ -249,6 +250,7 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
 }
 
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
+ HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});Cancel(job);
  Cancel(job);
  if(request.kind==Kind::CreateHardLink){Check(request.sources.size()==1,"Select one source for a hard link");auto source=Source(request.sources.front());auto target=Destination(request.target);Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,request.sources.front());MarkChild(completion,request.target,request.name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,request.name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
  if(request.kind==Kind::CreateFolder||request.kind==Kind::Inspect||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::ReadAttributeFile||request.kind==Kind::ExportAttribute||request.kind==Kind::SetBasicMetadata||request.kind==Kind::SetCompression)return Metadata(request,job,completion);
