@@ -727,6 +727,96 @@ void FinalizeOutcome(Storage::Result& result, Completion& completion, Storage::J
  completion.completed=result.completed;
 }
 }
+namespace {
+std::string LaunchVersion(Volume& volume,uint32_t id,Storage::Job& job)
+{
+ const auto entry=volume.Stat(id);
+ Check(!entry.directory,"The launcher selection must be a file");
+ auto version=MacBrowser::Snapshot(volume,id,job);
+ uint64_t hash=14695981039346656037ULL;
+ std::vector<uint8_t> buffer(65536);
+ for(unsigned fork=0;fork<2;++fork){
+  for(uint64_t offset=0;offset<entry.forks[fork].size;){
+   Cancel(job);
+   auto count=size_t((std::min)(uint64_t(buffer.size()),entry.forks[fork].size-offset));
+   volume.Read(id,fork,offset,buffer.data(),count);
+   for(size_t i=0;i<count;++i){hash^=buffer[i];hash*=1099511628211ULL;}
+   offset+=count;
+  }
+ }
+ hfsdirent classic{};
+ if(volume.GetClassicProperties(id,classic))
+  version+=":"+std::to_string(classic.bkdate)+":"+std::to_string(classic.flags);
+ return version+":"+std::to_string(hash);
+}
+}
+
+std::string CaptureLaunchVersion(const Location& item,Storage::Job& job)
+{
+ LegacyEngine::Scope engine;
+ VolumeCoord::Lease lease({{item.ResourceKey(),VolumeCoord::Mode::Read}});
+ auto original=Source(item);
+ auto version=LaunchVersion(*original.first,original.second,job);
+ if(!item.Volume())original.first->Close();
+ return version;
+}
+
+Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
+                                const std::wstring& editedFile,Storage::Job& job)
+{
+ Storage::OutcomeEvidence evidence;
+ Storage::Result result;
+ Completion completion;
+ hfs_take_rollback();
+ HFSIFACE_take_delete_retained_change();
+ try {
+  Check(item.IsClassic()&&!version.empty(),"The original launcher document could not be verified");
+  LegacyEngine::Scope engine;
+  VolumeCoord::Lease lease({{item.ResourceKey(),VolumeCoord::Mode::Write},
+                           {VolumeCoord::PathKey(editedFile),VolumeCoord::Mode::Read}});
+  HANDLE file=CreateFileW(editedFile.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                         FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
+  if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot read the edited temporary document");
+  struct CloseFile{HANDLE file;~CloseFile(){CloseHandle(file);}} close{file};
+  BY_HANDLE_FILE_INFORMATION info{};
+  LARGE_INTEGER size{};
+  Check(GetFileInformationByHandle(file,&info)&&
+        !(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))&&
+        GetFileSizeEx(file,&size)&&size.QuadPart>=0,"Invalid edited temporary document");
+  WriteWithMedia(item,[&]{
+   auto original=Source(item,true);
+   auto& volume=*original.first;
+   const auto id=original.second;
+   Check(LaunchVersion(volume,id,job)==version,"The original document changed after launch");
+   auto replacement=volume.Stat(id);
+   Check(volume.Writable()&&!replacement.protectedFile,"The original document is read-only");
+   replacement.forks[0].size=uint64_t(size.QuadPart);
+   replacement.modified=uint64_t(time(nullptr))+2082844800ULL;
+   Cancel(job);
+   Mark(completion,item);
+   // The classic replacement stages both forks and preserves Finder metadata.
+   volume.PutResourceReplacement(id,replacement,[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
+    Cancel(job);
+    if(fork){volume.Read(id,1,offset,bytes,count);return;}
+    LARGE_INTEGER position{};position.QuadPart=LONGLONG(offset);
+    DWORD received=0;
+    if(!SetFilePointerEx(file,position,nullptr,FILE_BEGIN)||
+       !ReadFile(file,bytes,DWORD(count),&received,nullptr)||received!=count)
+     throw Failure(GetLastError(),"Could not read the entire edited data fork");
+   },{});
+   volume.Close();
+  });
+  completion.completed=1;
+ }catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Write-back cancelled"};}
+ catch(const FloppyWriteFailure& error){result={1,error.error,error.what()};}
+ catch(const Failure& error){result={1,error.error,error.what()};}
+ catch(const VolumeCoord::Busy& error){result={1,ERROR_BUSY,error.what()};}
+ catch(const std::exception& error){result={1,ERROR_WRITE_FAULT,error.what()};}
+ FinalizeOutcome(result,completion,job,evidence);
+ if(!completion.affected.empty())VolumeCoord::Changed({item.ResourceKey()});
+ return result;
+}
+
 Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Completion& completion){
  Storage::OutcomeEvidence evidence;
  hfs_take_rollback(); HFSIFACE_take_delete_retained_change(); // Discard anything outside this operation on the executor thread.

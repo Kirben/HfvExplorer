@@ -286,12 +286,7 @@ public:
 	void empty_clipboard( void );
 	void edit_select_all(void);
 
-	void update_callback(
-		LPSTR doc_win_name,
-		LPSTR destvolpath,
-		LPSTR destname,
-		BOOL copy_back
-	);
+
 
 // Operations
 public:
