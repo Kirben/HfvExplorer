@@ -6,5 +6,8 @@ bool Show(FileOperations::Location,CWnd*);
 void Shutdown();
 #ifdef HFV_TESTING
 HWND Window();
+std::string LastError();
+bool ImportValue(HWND,FileOperations::Location,const std::u16string&);
+unsigned CloseDuringDispatch(HWND);
 #endif
 }

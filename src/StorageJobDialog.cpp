@@ -83,7 +83,7 @@ struct TaskbarEntry{HWND owner;TaskbarProgress::Value progress;};
 std::map<const void*,TaskbarEntry> taskbarEntries; // UI thread only.
 class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
- bool modeless_=false,completed_=false,mutation_=false;
+ bool modeless_=false,completed_=false,mutation_=false,handlingTimer_=false;unsigned dispatchDepth_=0;
  std::string operation_="Copy";
  std::function<bool()> advance_;
  std::function<void()> finished_,cancelled_;
@@ -198,7 +198,9 @@ public:
  }
  void OnCancel() override {if(modeless_&&completed_){DestroyWindow();return;}if(cancellable_){if(cancelled_)cancelled_();job_->cancel();GetDlgItem(IDCANCEL)->EnableWindow(FALSE);SetDlgItemText(IDCANCEL,"Cancelling...");}}
  void OnOK() override {}
+ bool Dispatching()const{return dispatchDepth_!=0;}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l) override {
+  struct Dispatch{unsigned& depth;explicit Dispatch(unsigned& n):depth(n){++depth;}~Dispatch(){--depth;}} dispatch(dispatchDepth_);
   if(message==WM_DESTROY)PrepareToClose();
   if(message==WM_CLOSE){if(modeless_||cancellable_)OnCancel();return 0;}
   if(message==WM_APP+94){
@@ -209,6 +211,7 @@ public:
   if(hidden_&&message==WM_WINDOWPOSCHANGING)reinterpret_cast<WINDOWPOS*>(l)->flags&=~SWP_SHOWWINDOW;
 #endif
   if(message==WM_TIMER&&w==1){
+   if(completed_||handlingTimer_)return 0;handlingTimer_=true;struct Timer{bool& active;~Timer(){active=false;}}timer{handlingTimer_};
 #ifdef HFV_TESTING
    if(hidden_&&cancellable_&&storageUiTest.cancelOnTimer&&!job_->cancelled())OnCancel();
 #endif
@@ -234,7 +237,10 @@ public:
    if(job_->done()){
     if(modeless_){
      try{if(advance_&&advance_())return 0;}catch(const std::exception& error){if(cancelled_)cancelled_();job_=std::make_shared<Storage::Job>();job_->finish({1,ERROR_UNHANDLED_EXCEPTION,error.what()});}
-     KillTimer(1);state(TBPF_NOPROGRESS);completed_=true;DialogClose::SetKind(m_hWnd,DialogClose::Kind::Dialog);if(finished_)finished_();
+     KillTimer(1);state(TBPF_NOPROGRESS);completed_=true;DialogClose::SetKind(m_hWnd,DialogClose::Kind::Dialog);std::string displayError;
+     try{if(finished_)finished_();}catch(CException* error){char text[512]{};error->GetErrorMessage(text,ARRAYSIZE(text));displayError=text[0]?text:"MFC completion error";error->Delete();}catch(const std::exception& error){displayError=error.what();if(displayError.empty())displayError="Completion callback failed";}catch(...){displayError="Unknown completion error";}
+     if(!GetSafeHwnd()||!IsWindow(m_hWnd))return 0;
+     if(!displayError.empty()){auto result=job_->result();auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
      auto result=job_->result();auto p=job_->progress();
      if(!result.code&&!p.skipped){DestroyWindow();return 0;}
      auto status=operation_+(result.error==ERROR_CANCELLED?" cancelled":result.code?" failed":" finished with skipped files");SetDlgItemText(IDC_CP_PHASE,status.c_str());
@@ -401,10 +407,10 @@ struct Batch {
    mode.reset();
   }
   if(cancelled||next==requests.size())return false;
-  auto& pending=requests[next];int direction=pending.target.type==LIST_HFS?0:1;
+  auto& pending=requests[next];int direction=(pending.kind==FileOperations::Kind::LegacyCopy?pending.legacyTarget.IsClassic():pending.target.IsClassic())?0:1;
   if(pending.askMode&&all[direction]){if(direction)pending.conversion.output=choices[direction].output;else{pending.conversion.input=choices[direction].input;pending.conversion.appledouble=choices[direction].appledouble;}pending.askMode=false;}
   if(pending.askMode){
-   dialog->Planning();mode.reset(new ModeDialog(hidden));mode->m_outcopy=direction;mode->m_copy_mode=lastMode[direction];mode->m_appledouble=lastAd<0?static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble:lastAd;mode->m_copying_fname=pending.sourcePath.c_str();
+   dialog->Planning();mode.reset(new ModeDialog(hidden));mode->m_outcopy=direction;mode->m_copy_mode=lastMode[direction];mode->m_appledouble=lastAd<0?static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble:lastAd;mode->m_copying_fname=pending.legacySource.LegacyPath().c_str();
    if(!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create copy mode window");
    dialog->ShowWindow(SW_HIDE);if(!hidden)mode->ShowWindow(SW_SHOWNOACTIVATE);return true;
   }
@@ -412,7 +418,7 @@ struct Batch {
   operation.reset(new FileOperations::Operation(FileOperations::Submit(std::move(request))));
   dialog->Next(operation->Job());if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);return true;
  }
- void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();BrowserLifetime::Collect();if(completed)completed(complete);if(complete&&observed)observed(snapshot);observed={};snapshot={};}
+ void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();BrowserLifetime::Collect();auto onCompleted=std::move(completed);auto onObserved=std::move(observed);auto result=std::move(snapshot);snapshot={};if(onCompleted)onCompleted(complete);if(complete&&onObserved)onObserved(result);}
 };
 std::vector<std::unique_ptr<Batch>> batches;
 }
@@ -426,7 +432,7 @@ bool Enabled(){
 bool Active(){return active.load()!=0;}
 bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single,std::function<void(bool)> completed,std::function<void(const FileOperations::Completion&)> observed){
  if(requests.empty())return false;
- batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->finished&&!b->dialog->GetSafeHwnd();}),batches.end());
+ batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->finished&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
  auto batch=std::unique_ptr<Batch>(new Batch);auto ptr=batch.get();batch->requests=std::move(requests);batch->completed=std::move(completed);batch->observed=std::move(observed);
  auto kind=batch->requests.front().kind;bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
  const char* title=kind==FileOperations::Kind::CreateHardLink?"Creating hard link":kind==FileOperations::Kind::SetCompression?"Changing file compression":kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":kind==FileOperations::Kind::CreateFolder?"Creating folder":kind==FileOperations::Kind::Inspect?"Reading properties":kind==FileOperations::Kind::SetAttributes?"Updating extended attributes":kind==FileOperations::Kind::ReadAttributeFile?"Reading attribute value":kind==FileOperations::Kind::ExportAttribute?"Exporting attribute":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Updating properties":kind==FileOperations::Kind::ReplaceResource?"Importing resource fork":"Copying files";
@@ -452,7 +458,7 @@ void TransferOwner(HWND closing,HWND replacement){
  for(auto& batch:batches)if(batch->dialog->ProgressOwner()==closing)batch->dialog->ProgressOwner(replacement);
 }
 void CancelAll(){for(auto& b:batches)if(!b->finished){b->cancelled=true;if(b->operation)b->operation->Job()->cancel();if(b->mode&&b->mode->GetSafeHwnd())b->mode->OnCancel();}}
-void Shutdown(){CancelAll();Storage::copyWorker().shutdown();for(auto& b:batches){if(!b->finished)b->Finish();if(b->dialog->GetSafeHwnd())b->dialog->DestroyWindow();}batches.clear();BrowserLifetime::Collect();}
+void Shutdown(){CancelAll();Storage::copyWorker().shutdown();for(auto& b:batches){if(!b->finished)b->Finish();if(b->dialog->GetSafeHwnd())b->dialog->DestroyWindow();}batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return !b->dialog->Dispatching();}),batches.end());BrowserLifetime::Collect();}
 #ifdef HFV_TESTING
 unsigned ProgressOwners(HWND owner){unsigned n=0;for(auto& b:batches)if(!b->finished&&b->dialog->ProgressOwner()==owner)++n;return n;}
 unsigned TaskbarJobs(HWND owner){unsigned n=0;for(auto& item:taskbarEntries)if(item.second.owner==owner)++n;return n;}
