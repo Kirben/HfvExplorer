@@ -311,6 +311,34 @@ int RunCopyProcessTest(const char *directory) {
         fprintf(report, "PASS: malformed worker protocol refused and image ownership restored\n");
         auto host = Wide(root + "\\host");
         Check(CreateDirectoryW(host.c_str(), nullptr) != FALSE, "host fixture directory");
+        Request exportPacket = ExportFileFork{Native(source, file),
+            Location::Windows(host + L"\\malformed-output.bin"), ForkSelector::Data};
+        exportPacket.background = true;
+        struct Rejection { unsigned fault; const char* expected; };
+        const Rejection invalidRequests[] = {
+            {8, "Copy requires a source"},
+            {9, "Invalid fork selector"},
+            {10, "Fork jobs require exactly one source"},
+            {11, "Truncated copy-worker"},
+            {12, "Invalid copy-worker string length"},
+            {13, "Trailing copy-worker packet data"},
+        };
+        for (const auto& invalid : invalidRequests) {
+            CopyProcess::fault = invalid.fault;
+            auto refused = Submit(invalid.fault == 8 ? request : exportPacket);
+            Wait(refused);
+            CopyProcess::fault = 0;
+            const auto result = refused.Job()->result();
+            Check(result.code && result.message.find(invalid.expected) != std::string::npos &&
+                  !refused.Snapshot().complete && refused.Snapshot().completed == 0,
+                  result.message.c_str());
+            Check(GetFileAttributesW((host + L"\\malformed-output.bin").c_str()) == INVALID_FILE_ATTRIBUTES,
+                  "Rejected request created a fork output");
+            Verify(*source, file);
+            Verify(*target, child.id);
+        }
+        fprintf(report, "PASS: worker rejects missing and extra endpoints, invalid fork selectors, "
+                        "truncated data and trailing endpoint data before writing output\n");
         Request exportRequest;
         exportRequest.background = true;
         exportRequest.Copy().sources = {Native(source, file)};
