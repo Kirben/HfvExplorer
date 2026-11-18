@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
+#include "CopyProgress.h"
 #include "BrowserDirectory.h"
 #include "MainMacBrowser.h"
 #include "StorageJobDialog.h"
@@ -168,13 +169,13 @@ void TestNavigation()
 }
 int RunBrowserSessionTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;CString root=directory;FILE* report=fopen(root+"\\browser-session-report.txt","w");if(!report)return 2;
- auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_pre=nullptr;app.m_pStatusBar=nullptr;app.m_mac_window_mode=0;app.m_dosicons=DI_NO_ICONS;app.m_show_invisible_mac=app.m_show_invisible_fat=1;InitializeStorageUi();
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_mac_window_mode=0;app.m_dosicons=DI_NO_ICONS;app.m_show_invisible_mac=app.m_show_invisible_fat=1;InitializeStorageUi();
  int result=0;
  try{
   TestNavigation();
   auto first=std::make_unique<Panes>();Panes second;auto& a=*first;auto& b=second;
-  // Keep every legacy alias pointed at B while issuing commands to A.
-  app.m_doc=&b.doc;app.m_tree=&b.tree;app.m_list=&b.list;app.m_pMainWnd=&b.owner;
+  // Keep the MFC main-window pointer on B while issuing commands to A.
+  app.m_pMainWnd=&b.owner;
   auto va=std::make_shared<Fixture>(u"First"),vb=std::make_shared<Fixture>(u"Second");va->owner=&a.owner;va->other=&b.owner;va->slow=true;
   int ia=a.Session().MacBrowser().AttachTestVolume(va,"same-key"),ib=b.Session().MacBrowser().AttachTestVolume(vb,"same-key");
   storageUiTest={};storageUiTest.releaseAfterTwoTimers=va->gate;Check(a.Session().MacBrowser().ShowTestFolder(ia,2)&&va->ownerOnly&&!va->wrongThread&&storageUiTest.timerTicks>0,"session A worker/owner routing used global window B");storageUiTest.releaseAfterTwoTimers=nullptr;va->slow=false;
@@ -193,6 +194,27 @@ int RunBrowserSessionTest(const char* directory){
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"First.txt")>=0,"startup before global main-window assignment");
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
+  auto launchA=a.Session().MacBrowser().CaptureItem(Find(a.list,L"first classic"));
+  auto launchB=b.Session().MacBrowser().CaptureItem(Find(b.list,L"second classic"));
+  auto verifyExport=[&](Panes& origin,const FileOperations::Location& selected,const char* leaf){
+   CString staged;
+   Check(StageWindowsLaunchDocument(origin.Session(),selected,staged),"could not stage the captured launcher document");
+   int separator=staged.ReverseFind('\\');
+   bool matches=staged.Mid(separator+1).Left(int(strlen(leaf)))==leaf&&GetFileAttributes(staged)!=INVALID_FILE_ATTRIBUTES;
+   Check(matches,"launcher exported a selection from a different browser");
+   return staged;
+  };
+  app.m_pMainWnd=&b.owner;
+  auto stagedA=verifyExport(a,launchA,"first classic");
+  app.m_pMainWnd=&a.owner;
+  auto stagedB=verifyExport(b,launchB,"second classic");
+  auto folderA=stagedA.Left(stagedA.ReverseFind('\\'));
+  auto folderB=stagedB.Left(stagedB.ReverseFind('\\'));
+  DeleteFile(stagedA);
+  DeleteFile(stagedB);
+  RemoveDirectory(folderA);
+  RemoveDirectory(folderB);
+  Check(folderA!=folderB,"launcher exports shared a temporary directory");
   a.doc.m_volumes[0].close();b.doc.m_volumes[0].close();
   Check(b.Session().MacBrowser().ShowTestFolder(ib,2),"restore B native view");
   bool refused=false;try{BrowserSession invalid;invalid.Attach(&a.owner,&b.tree,&a.list);}catch(const std::logic_error&){refused=true;}Check(refused,"pane binding stolen by another session");
@@ -221,11 +243,11 @@ startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
    frame.SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);Check(!startup.GetBrowserSession().finderLayout,"frame command routing");
    frame.DestroyWindow();Check(startup.GetBrowserSession().Tree()==nullptr&&startup.GetBrowserSession().List()==nullptr&&startup.GetBrowserSession().Owner()==nullptr,"frame pane lifetime detachment");
   }
-  app.m_doc=&b.doc;app.m_tree=&b.tree;app.m_list=&b.list;app.m_pMainWnd=&b.owner;
-  first.reset();Check(app.m_doc==&b.doc&&app.m_tree==&b.tree&&app.m_list==&b.list&&b.doc.HasIcon('BBBB')&&b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(b.list,L"Second file")>=0,"closing A invalidated session B");
+  app.m_pMainWnd=&b.owner;
+  first.reset();Check(app.m_pMainWnd==&b.owner&&b.doc.HasIcon('BBBB')&&b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(b.list,L"Second file")>=0,"closing A invalidated session B");
   fprintf(report,"PASS: two hidden browser sessions with independent mounts, navigation, selection, sort/layout, native clipboard and classic Finder icon tables; Windows folders and same-named classic HFS images; explicit slow-read owner routing, errors/retry, pre-main-window startup, real hidden frame creation/commands/teardown, pane ownership and closing one session while the other stays usable. No physical devices or computer control.\n");
   fprintf(report,"PASS: with floppy detection disabled and an unavailable removable root listed first, startup chooses a fixed root without probing removable media.\n");
  }catch(const std::exception& e){BrowserDirectory::testObserveRead={};fprintf(report,"FAIL: %s\n",e.what());result=1;}
- storageUiTest.releaseAfterTwoTimers=nullptr;app.m_doc=nullptr;app.m_tree=nullptr;app.m_list=nullptr;app.m_pMainWnd=nullptr;fclose(report);return result;
+ storageUiTest.releaseAfterTwoTimers=nullptr;app.m_pMainWnd=nullptr;fclose(report);return result;
 }
 #endif

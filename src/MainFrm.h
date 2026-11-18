@@ -100,6 +100,8 @@ public:
  BOOL PreTranslateMessage(MSG*) override;
  BOOL OnCmdMsg(UINT,int,void*,AFX_CMDHANDLERINFO*) override;
  afx_msg void OnActivate(UINT,CWnd*,BOOL);
+ afx_msg void OnFileOpenImage();
+ afx_msg void OnOpenRecentImage(UINT);
  afx_msg void OnUpdateMacTransfer(CCmdUI*);
  afx_msg void OnUpdateMacEdit(CCmdUI*);
 
@@ -113,6 +115,7 @@ protected:  // control bar embedded members
 	char m_waiting_emulator1[100];
 	char m_waiting_emulator2[100];
 	
+ bool m_handlingTimer=false;
 	// Pointers to wait_item_struct
 	CPointerWordArray m_wait_items;
 

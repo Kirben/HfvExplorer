@@ -38,7 +38,6 @@
 #include "special.h"
 #include "own_ids.h"
 #include "utils.h"
-#include "openfile.h"
 #include "shell.h"
 #include <direct.h>
 #include "hfs\libhfs\hfs.h"
@@ -342,7 +341,6 @@ CHFVExplorerListView::~CHFVExplorerListView()
 {
  m_browserDrag.reset();
  if(m_browserSession)m_browserSession->Detach(this);
- auto application=static_cast<CHFVExplorerApp*>(AfxGetApp());if(application->m_list==this)application->m_list=nullptr;
 	if(m_pimagelist) {
 		delete m_pimagelist;
 		m_pimagelist = 0;
@@ -867,63 +865,6 @@ int CHFVExplorerListView::get_path( int inx, CString &doc_name )
 	}
 	return(1);
 }
-
-/*
-int copy_file( open_file_type *sfp, open_file_type *dfp )
-{
-	const BLOCKSIZE = 512;
-	unsigned char buf[BLOCKSIZE];
-	int ok = 0, bytes, del_dest = 0;
-
-	if(sfp->Open( open_file_type::ModeOpen )) {
-		if(dfp->Open( open_file_type::ModeCreate )) {
-			START_TIME_CONSUMING(1000);
-			int copying = 1;
-			while(copying) {
-				UPDATE_TIME_CONSUMING(0);
-				bytes = sfp->Read( buf, BLOCKSIZE );
-				if( bytes == 0 ) {
-					copying = 0;
-					if(sfp->LastError() != open_file_type::EndOfFile) {
-						sfp->ErrorAlert();
-					} else {
-						ok = 1;
-					}
-				} else {
-					if(!dfp->Write( buf, bytes )) {
-						dfp->ErrorAlert();
-						copying = 0;
-						del_dest = 1;
-					}
-				}
-			} // while copying
-		} else {
-			dfp->ErrorAlert();
-		}
-	} else {
-		sfp->ErrorAlert();
-	}
-	dfp->Close();
-	sfp->Close();
-	END_TIME_CONSUMING;
-	if(del_dest) {
-		dfp->Delete();
-	}
-	return(ok);
-}
-
-int copy_file_list( int source, int dest, int stype, int dtype )
-{
-	open_file_type s_fp( 
-		stype == LIST_FAT ? open_file_type::SystemFAT :
-				open_file_type::SystemHFS, source );
-	open_file_type d_fp( 
-		dtype == LIST_FAT ? open_file_type::SystemFAT :
-				open_file_type::SystemHFS, dest );
-
-	return(copy_file( &s_fp, &d_fp ));
-}
-*/
 
 int ask_dir( char *new_name )
 {
@@ -2192,7 +2133,10 @@ void CHFVExplorerListView::update_callback(
 	}
 	if(do_delete) {
 		SetFileAttributes( doc_win_name, FILE_ATTRIBUTE_NORMAL );
-		DeleteFile(doc_win_name);
+		if(DeleteFile(doc_win_name)){
+			CString folder(doc_win_name);
+			RemoveDirectory(folder.Left(folder.ReverseFind('\\')));
+		}
 	}
 }
 
@@ -2205,7 +2149,15 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
 			 doc_win_name[_MAX_PATH],
 			 doc_win_folder[_MAX_PATH], srcvolpath[_MAX_PATH], *srcname;
 
-	if(!get_path(doc_inx,document)) return(0);
+ FileOperations::Location selection;
+ try {
+  selection=GetBrowserSession().MacBrowser().CaptureItem(doc_inx);
+ }catch(const std::exception& error){
+  GetBrowserSession().Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
+  return FALSE;
+ }
+ if(!selection.IsClassic()||selection.ClassicImage().size()>=_MAX_PATH)return FALSE;
+ document=selection.ClassicPath().c_str();
 
 	srcname = document.GetBuffer(_MAX_PATH);
 	old_extension = strrchr( srcname, '.' );
@@ -2227,37 +2179,11 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
 		}
 	}
 
-	if(!GetTempPath( sizeof(doc_win_folder), doc_win_folder )) {
-		AfxMessageBox( "Could not find the directory for temporary files. Check your TMP or TEMP environment variables." );
-		return(FALSE);
-	}
-	// GetTempPath always returns a trailing backslash.
-	doc_win_folder[strlen(doc_win_folder)-1] = 0;
-	strcpy( doc_win_name, doc_win_folder );
-
-	inx2volname( doc_inx, srcvolpath, _MAX_PATH );
-
-	HFSIFACE_set_modeout(4);
-
-	int was_moved, copyret;
-	srcname = document.GetBuffer(_MAX_PATH);
-
-	copyret = CopyWithProgress(
-		srcvolpath, 
-		srcname,
-		doc_win_name, 
-		doc_win_name,
-		FALSE,
-		FALSE,
-		&was_moved, GetBrowserSession().Owner()
-	);
-	if( copyret != 0 ) {
-		AfxMessageBox( "Failed to copy the file." );
-		return(FALSE);
-	}
-	document.ReleaseBuffer();
-
-	copyout_get_last_open_file( doc_win_name, sizeof(doc_win_name) );
+ CString staged;
+ if(!StageWindowsLaunchDocument(GetBrowserSession(),selection,staged))return FALSE;
+ strcpy_s(doc_win_name,staged);
+ strcpy_s(doc_win_folder,staged.Left(staged.ReverseFind('\\')));
+ strcpy_s(srcvolpath,selection.ClassicImage().c_str());
 
 	DWORD attribs = FILE_ATTRIBUTE_TEMPORARY;
 	if(mount_flags(srcvolpath) == 0) {

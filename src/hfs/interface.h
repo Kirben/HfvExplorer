@@ -32,7 +32,7 @@ void HFSIFACE_directory_copy_hook(HfvDirectoryCopyHook,void*);
 void hfs_tester(void);
 
 void HFSIFACE_init( HWND hwnd );
-void HFSIFACE_set_error_window( HWND hwnd );
+HWND HFSIFACE_exchange_error_window(HWND hwnd);
 
 int HFSIFACE_delete( char *volpath, char *path );
 int HFSIFACE_copy( 

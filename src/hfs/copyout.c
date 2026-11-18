@@ -118,31 +118,6 @@ static long copyout_read(hfsfile *file,void *buffer,unsigned long length) {
 #define hfs_read copyout_read
 HFV_THREAD_LOCAL char *cpo_error = "no error";
 
-static HFV_THREAD_LOCAL char m_last_opened_file[_MAX_PATH];
-
-void copyout_set_last_open_file( const char *path )
-{
-	*m_last_opened_file = 0;
-	if(path) strncpy( m_last_opened_file, path, sizeof(m_last_opened_file) );
-}
-
-void copyout_set_last_open_file2( const char *dir, const char *path )
-{
-	int len;
-	char fullpath[_MAX_PATH];
-
-	strcpy( fullpath, dir );
-	len = strlen( fullpath );
-	if(len > 0 && fullpath[len-1] != '\\') strcat( fullpath, "\\" );
-	strcat( fullpath, path );
-	copyout_set_last_open_file( fullpath );
-}
-
-void copyout_get_last_open_file( char *path, int maxpath )
-{
-	strncpy( path, m_last_opened_file, maxpath );
-}
-
 # define MACB_BLOCKSZ	128
 
 /* Copy Routines =========================================================== */
@@ -644,7 +619,6 @@ int opendst(char *dstname, char *hint)
   if(length+separator+strlen(hint)>=sizeof(resolved)){cpo_error="Destination path is too long";return -1;}
   strcpy(resolved,dstname);if(separator)strcat(resolved,"\\");strcat(resolved,hint);dstname=resolved;
  }
- copyout_set_last_open_file(dstname);
  attributes=GetFileAttributesA(dstname);error=GetLastError();existing=attributes!=INVALID_FILE_ATTRIBUTES;
  if(!existing&&error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)decision=-1;
  else if(existing&&copyout_overwrite){
@@ -704,7 +678,6 @@ int opendst(char *dstname, char *hint)
 	}
 
 #ifdef WIN32
-			copyout_set_last_open_file2( dstname, hint );
       if (_chdir(dstname) < 0)
 #else
       if (_chdir2(dstname) < 0)

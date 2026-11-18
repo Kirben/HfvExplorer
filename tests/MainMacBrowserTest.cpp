@@ -83,7 +83,7 @@ bool TestAutomaticCdSelection(std::function<std::unique_ptr<HfsPlus::Source>(int
 bool TestHfsPlusMainCdBrowser(std::unique_ptr<HfsPlus::Source> source,CWnd* owner,
                              std::function<void()> changeMedia) {
     auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());Tree tree;List list;
-    app.m_tree=&tree;app.m_list=&list;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;
+    app.m_mac_window_mode=0;
     BrowserSession session;session.Attach(owner,&tree,&list);auto& browser=session.MacBrowser();bool valid=false;
     try {
         CMenu menu;Check(menu.LoadMenu(IDR_MAINFRAME)&&menu.GetMenuState(32902,MF_BYCOMMAND)==UINT(-1),"obsolete CD menu returned");
@@ -95,7 +95,7 @@ bool TestHfsPlusMainCdBrowser(std::unique_ptr<HfsPlus::Source> source,CWnd* owne
         Check(browser.ShowTestFolder(index,2)&&!browser.Writable()&&owner->IsWindowEnabled(),"read-only main CD controls");
         changeMedia();valid=!browser.ShowTestFolder(index,2)&&list.GetListCtrl().GetItemCount()==0&&owner->IsWindowEnabled();
     }catch(const std::exception&){valid=false;}
-    browser.Clear();if(list.m_hWnd)list.DestroyWindow();if(tree.m_hWnd)tree.DestroyWindow();app.m_tree=nullptr;app.m_list=nullptr;
+    browser.Clear();if(list.m_hWnd)list.DestroyWindow();if(tree.m_hWnd)tree.DestroyWindow();
     return valid;
 }
 
@@ -149,8 +149,8 @@ int RunMainMacBrowserTest(const char* directory){
         fprintf(report,"PASS: MFS flat listing/copy and locked-file protection with 255-byte MacRoman names; shared Unicode search routes; self-copy guards across separate Windows/classic adapters.\n");
         fprintf(report,"PASS: shared adapters preserve long Unicode names, both forks and Finder metadata across HFS+/HFSX, Windows AppleDouble and classic HFS; recursive totals, self/descendant rejection, cancellation and failed-replacement preservation.\n");
         auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());CWnd owner;Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden unified browser",WS_OVERLAPPED,0,0,700,400,nullptr,0)!=FALSE,"create hidden owner");
-        app.m_pMainWnd=&owner;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;InitializeStorageUi();
-        Tree tree;List list;BrowserSession session;session.Attach(&owner,&tree,&list);app.m_tree=&tree;app.m_list=&list;
+        app.m_pMainWnd=&owner;app.m_mac_window_mode=0;InitializeStorageUi();
+        Tree tree;List list;BrowserSession session;session.Attach(&owner,&tree,&list);
         Check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),&owner,100,nullptr)!=FALSE,"create real tree view");
         Check(list.Create(nullptr,nullptr,WS_CHILD|LVS_REPORT,CRect(200,0,700,400),&owner,101,nullptr)!=FALSE,"create real list view");tree.Init();list.Initialize();
         storageUiTest={};auto failed=ShowStorageWaitJob([&](Storage::Job&){
@@ -209,7 +209,7 @@ int RunMainMacBrowserTest(const char* directory){
             Check(returned,"directory hard-link navigation returns to visible parent");
             fprintf(report,"PASS: main-browser directory hard-link navigation returns to visible parent.\n");
         }
-        browser.Clear();list.DestroyWindow();tree.DestroyWindow();app.m_list=nullptr;app.m_tree=nullptr;owner.DestroyWindow();app.m_pMainWnd=nullptr;
+        browser.Clear();list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();app.m_pMainWnd=nullptr;
         fprintf(report,"PASS: real main tree/list controls show Unicode names, open folders, refresh and restore the owner; no standalone browser or physical media used.\n");
     }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());fclose(report);return 1;}catch(CException* e){char message[512];e->GetErrorMessage(message,sizeof(message));e->Delete();fprintf(report,"FAIL: %s\n",message);fclose(report);return 1;}
     fclose(report);return 0;

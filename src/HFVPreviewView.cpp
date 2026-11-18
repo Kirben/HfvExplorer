@@ -47,7 +47,6 @@ CHFVPreviewView::CHFVPreviewView()
 CHFVPreviewView::~CHFVPreviewView()
 {
  if(m_browserSession)m_browserSession->Detach(this);
- auto application=static_cast<CHFVExplorerApp*>(AfxGetApp());if(application->m_pre==this)application->m_pre=nullptr;
 	if(m_hfont) {
 		DeleteObject( m_hfont );
 		m_hfont = 0;
