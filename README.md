@@ -1,6 +1,20 @@
 HFVExplorer 2.0.0
 -----------------
 
+## File replacement safety
+
+Windows replacements retain read guards on captured destination versions, bind
+Copy/Move overwrite approval to that version and check staged/public files by
+identity. The destination directory is held against rename/removal during
+publication. Regular-file opens reject directory/reparse-point substitutions;
+resource and attribute layouts are parsed from the same handle as their bytes.
+On reported publication failure, rollback removes only this operation's output.
+Unrelated replacement files are preserved. If the original data/metadata pair
+cannot be restored, both original backups are retained where possible and the
+error identifies their exact recovery paths. These runtime guards are not a
+persistent transaction journal and do not make multi-file Windows publication
+or classic HFS/MFS writes atomic against power loss.
+
 ## Physical removable disks (read-only)
 
 Use **File > Check for Mac removable disks**, or enable **Check for other Mac

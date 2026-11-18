@@ -205,11 +205,13 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if (choice == Storage::ConflictChoice::Cancel) throw Storage::Cancelled();
         if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped;progress.processed+=entry.forks[0].size+entry.forks[1].size;job.progress(progress);return false; }
     }
+    if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
     if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name,found);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
-    dst.Put(parent, entry, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
+    auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:std::string{};
+    dst.Put(parent, outgoing, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
         if (job.cancelled()) throw Storage::Cancelled();
         src.Read(entry.id, fork, offset, p, n);
         if(job.cancelled())throw Storage::Cancelled();
