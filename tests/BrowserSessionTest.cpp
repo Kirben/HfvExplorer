@@ -13,6 +13,7 @@
 #include "ReadOnlyCdBackend.h"
 #include "FakeFloppy.h"
 #include <cstdio>
+#include <atomic>
 #include <fcntl.h>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
@@ -79,12 +80,98 @@ struct Panes {
   tree.enable_selchange(0);doc.m_volumes[0].m_rootitem=tree.Classic();tree.GetTreeCtrl().SelectItem(doc.m_volumes[0].m_rootitem);tree.enable_selchange(1);doc.open_sub_directory(0,2,"Same");
  }
 };
+class NavigationFixture : public Fixture {
+public:
+ HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+ std::atomic<bool> changed{false};
+ explicit NavigationFixture(const std::u16string& name):Fixture(name){}
+ ~NavigationFixture(){CloseHandle(entered);}
+ std::vector<MacBrowser::Entry> List(uint32_t id)override{
+  if(id!=3)return {Stat(3),Stat(4)};
+  SetEvent(entered);
+  Check(WaitForSingleObject(gate,5000)==WAIT_OBJECT_0,"navigation test read timed out");
+  return {Stat(5)};
+ }
+ void ValidateMedia()override{if(changed)throw HfsPlus::Error("Media changed during navigation");}
+};
+
+template<class Predicate>
+void PumpUntil(Predicate ready,const char* message)
+{
+ DWORD start=GetTickCount();
+ while(!ready()){
+  Check(GetTickCount()-start<8000,message);
+  MSG msg;
+  while(PeekMessage(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessage(&msg);}
+  Sleep(5);
+ }
+}
+
+void TestNavigation()
+{
+ auto slow=std::make_shared<NavigationFixture>(u"Slow");
+ auto other=std::make_shared<Fixture>(u"Other");
+ Panes first;
+ auto& session=first.Session();
+ auto& browser=session.MacBrowser();
+ int second=browser.AttachTestVolume(other,"other");
+ Check(browser.ShowTestFolder(second,2),"open other volume");
+ auto quickRoot=first.tree.GetTreeCtrl().GetSelectedItem();
+ int index=browser.AttachTestVolume(slow,"slow");
+ Check(browser.ShowTestFolder(index,2),"open slow volume");
+ auto& tree=first.tree.GetTreeCtrl();
+ auto slowRoot=tree.GetSelectedItem();
+ auto child=tree.GetChildItem(slowRoot);
+ session.asyncNavigationForTest=true;
+ tree.SelectItem(child);
+ PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;}, "slow folder never started");
+ Check(session.Navigating()&&Find(first.list,L"Slow file")>=0&&first.owner.IsWindowEnabled(),
+    "pending navigation hid its previous listing or blocked the owner");
+ tree.SelectItem(quickRoot);
+ PumpUntil([&]{return !session.Navigating();},"replacement navigation waited for the stale read");
+ Check(Find(first.list,L"Other file")>=0,"replacement folder did not publish");
+ Check(browser.Refresh()&&session.Navigating()&&Find(first.list,L"Other file")>=0,
+       "refresh did not use the per-window request or discarded the prior listing");
+ PumpUntil([&]{return !session.Navigating();},"asynchronous refresh did not finish");
+ SetEvent(slow->gate);
+ PumpUntil([&]{return VolumeCoord::Available({{slow->ResourceKey(),VolumeCoord::Mode::Write}});},"stale navigation retained its read lease");
+ Check(Find(first.list,L"Other file")>=0&&Find(first.list,L"Slow child")<0,"stale folder replaced newer selection");
+
+ tree.SelectItem(slowRoot);
+ PumpUntil([&]{return !session.Navigating();},"return to slow root failed");
+ ResetEvent(slow->gate);
+ ResetEvent(slow->entered);
+ tree.SelectItem(tree.GetChildItem(slowRoot));
+ PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;},"media swap read never started");
+ slow->changed=true;
+ SetEvent(slow->gate);
+ PumpUntil([&]{return !session.Navigating();},"media swap read did not finish");
+ Check(!session.ListingAvailable()&&Find(first.list,L"Slow file")>=0&&Find(first.list,L"Slow child")<0,
+       "a listing from changed media was published or left actionable");
+
+ auto closing=std::make_shared<NavigationFixture>(u"Closing");
+ {
+  Panes pane;
+  auto& window=pane.Session();
+  int mount=window.MacBrowser().AttachTestVolume(closing,"closing");
+  Check(window.MacBrowser().ShowTestFolder(mount,2),"open closing fixture");
+  window.asyncNavigationForTest=true;
+  auto& control=pane.tree.GetTreeCtrl();
+  control.SelectItem(control.GetChildItem(control.GetSelectedItem()));
+  PumpUntil([&]{return WaitForSingleObject(closing->entered,0)==WAIT_OBJECT_0;},"closing read never started");
+ }
+ SetEvent(closing->gate);
+ PumpUntil([&]{return VolumeCoord::Available({{closing->ResourceKey(),VolumeCoord::Mode::Write}});},"closed window retained its read lease");
+ Check(Find(first.list,L"Slow child")<0,"closed-window navigation affected another window");
+}
+
 }
 int RunBrowserSessionTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;CString root=directory;FILE* report=fopen(root+"\\browser-session-report.txt","w");if(!report)return 2;
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_pre=nullptr;app.m_pStatusBar=nullptr;app.m_mac_window_mode=0;app.m_dosicons=DI_NO_ICONS;app.m_show_invisible_mac=app.m_show_invisible_fat=1;InitializeStorageUi();
  int result=0;
  try{
+  TestNavigation();
   auto first=std::make_unique<Panes>();Panes second;auto& a=*first;auto& b=second;
   // Keep every legacy alias pointed at B while issuing commands to A.
   app.m_doc=&b.doc;app.m_tree=&b.tree;app.m_list=&b.list;app.m_pMainWnd=&b.owner;

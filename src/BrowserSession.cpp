@@ -21,6 +21,7 @@ struct BrowserSession::Notifications:public CWnd {
  explicit Notifications(BrowserSession& value):session(value){if(!CreateEx(0,AfxRegisterWndClass(0),"HFV volume notifications",0,0,0,0,0,HWND_MESSAGE,nullptr))throw std::runtime_error("Cannot create volume notification mailbox");}
  ~Notifications(){if(GetSafeHwnd())DestroyWindow();}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l)override{
+  if(message==WM_TIMER&&w==3){session.CompleteNavigation();return 0;}
   if(message==WM_TIMER&&w==2){
    if(!session.owner_||!session.tree_||!session.list_){session.deferred_={};KillTimer(2);return 0;}
    if(StorageUi::busy()||StorageUi::state().sessionOpen||(session.deferredClassic_&&session.deferredKey_.empty()&&BackgroundCopies::Active())||!VolumeCoord::Readable(session.deferredKey_))return 0;
@@ -28,7 +29,7 @@ struct BrowserSession::Notifications:public CWnd {
   }
   if((message==VolumeCoord::Notification&&w==session.subscription_.Id())||(message==WM_TIMER&&w==1)){
    auto list=session.List();bool editing=list&&IsWindow(list->GetSafeHwnd())&&(list->GetListCtrl().GetEditControl()||list->IsDragging());
-   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||editing||(!session.current_.key.empty()&&!VolumeCoord::Available({{session.current_.key,session.current_.type==LIST_FAT?VolumeCoord::Mode::Browse:VolumeCoord::Mode::Read}}))){SetTimer(1,75,nullptr);return 0;}
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||session.Navigating()||editing||(!session.current_.key.empty()&&!VolumeCoord::Available({{session.current_.key,session.current_.type==LIST_FAT?VolumeCoord::Mode::Browse:VolumeCoord::Mode::Read}}))){SetTimer(1,75,nullptr);return 0;}
    KillTimer(1);session.ProcessChanges();return 0;
   }
   return CWnd::WindowProc(message,w,l);
@@ -61,7 +62,64 @@ void BrowserSession::SetLocationTitle(std::wstring title){
  locationTitle_=std::move(title);UpdateWindowTitle();
 }
 std::string BrowserSession::ObservedWindowsKey(const std::string& path)const{return current_.type==LIST_FAT&&!_stricmp(current_.path.c_str(),path.c_str())?current_.key:std::string();}
-void BrowserSession::ClearCurrent(){current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
+void BrowserSession::ClearCurrent(){CancelNavigation();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
+void BrowserSession::CancelNavigation()
+{
+    deferred_ = {};
+    if (notifications_)notifications_->KillTimer(2);
+    if (!navigation_)
+        return;
+    navigation_->cancel();
+    navigation_.reset();
+    navigationReady_ = {};
+    if (notifications_)
+        notifications_->KillTimer(3);
+}
+
+void BrowserSession::Navigate(std::function<Storage::Result(Storage::Job&)> read,
+    std::function<void(const Storage::Result&)> ready)
+{
+    CancelNavigation();
+    deferred_ = {};
+    notifications_->KillTimer(2);
+    navigation_ = Storage::navigationWorker().submit(std::move(read));
+    navigationReady_ = std::move(ready);
+    listingPending_ = true;
+    notifications_->SetTimer(3, 25, nullptr);
+    if (status_)
+        status_->SetPaneText(0, "Loading folder...");
+}
+
+void BrowserSession::CompleteNavigation()
+{
+    if (!navigation_ || !navigation_->done() || StorageUi::busy() || StorageUi::state().sessionOpen)
+        return;
+    auto job = std::move(navigation_);
+    auto ready = std::move(navigationReady_);
+    notifications_->KillTimer(3);
+    if (job->cancelled() || !tree_ || !list_)
+        return;
+    try {
+        ready(job->result());
+    } catch (const std::exception& error) {
+        if (status_)
+            status_->SetPaneText(0, error.what());
+    }
+}
+
+void BrowserSession::RejectNavigation(const std::string& key,const std::string& message)
+{
+    if (status_)
+        status_->SetPaneText(0, message.c_str());
+    if (current_.key == key) {
+        current_.revision = VolumeCoord::Revision(key);
+        dirty_.erase(key);
+    }
+#ifdef HFV_TESTING
+    ++notificationErrors;
+#endif
+}
+
 bool BrowserSession::Defer(const std::string& key,bool classic,std::function<void()> next,bool force,bool keepListing){
  if(!force&&!(classic&&key.empty()&&BackgroundCopies::Active())&&VolumeCoord::Readable(key))return false;
  if(!keepListing)ClearCurrent();
@@ -80,7 +138,7 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
     tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
 void BrowserSession::StopNotifications(){
- subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
+ CancelNavigation();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
  if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);}
 }
 void BrowserSession::DetachPanes(){
@@ -89,8 +147,8 @@ void BrowserSession::DetachPanes(){
     if(tree_)tree_->BindBrowserSession(nullptr);if(list_)list_->BindBrowserSession(nullptr);if(preview_)preview_->BindBrowserSession(nullptr);
     tree_=nullptr;list_=nullptr;preview_=nullptr;owner_=nullptr;status_=nullptr;
 }
-void BrowserSession::Detach(HFVExplorerTreeView* view){if(tree_==view){tree_=nullptr;browser_->ForgetTree();}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
-void BrowserSession::Detach(CHFVExplorerListView* view){if(list_==view)list_=nullptr;if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
+void BrowserSession::Detach(HFVExplorerTreeView* view){if(tree_==view){CancelNavigation();tree_=nullptr;browser_->ForgetTree();}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
+void BrowserSession::Detach(CHFVExplorerListView* view){if(list_==view){CancelNavigation();list_=nullptr;}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
 void BrowserSession::Detach(CHFVPreviewView* view){if(preview_==view)preview_=nullptr;if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
 BrowserSession& CHFVExplorerListView::GetBrowserSession()const{
     if(m_browserSession)return *m_browserSession;
@@ -121,6 +179,7 @@ void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot
     BrowserPresentation::Batch treeBatch(tree_->GetTreeCtrl().m_hWnd);
     BrowserPresentation::Batch listBatch(list_->GetListCtrl().m_hWnd, true);
     if (listing) {
+        listingPending_ = false;
         list_->m_browser_folder_path = snapshot.folderPath;
         list_->m_browser_folder_identity = snapshot.folderIdentity;
         if (snapshot.capabilitiesKnown)
@@ -174,6 +233,7 @@ void BrowserSession::ProcessChanges(){
  auto& control=list_->GetListCtrl();for(int row=-1;(row=control.GetNextItem(row,LVNI_SELECTED))>=0;){auto entry=list_->BrowserRowAt(row);if(entry){ids.push_back(entry->id);paths.push_back(entry->path);}}
  try{
   if(context.type==LIST_MAC){if(!browser_->RefreshForChange(context.key))throw std::runtime_error("The selected volume could not be refreshed");}else RefreshLegacy(context);
+  if(Navigating())return;
   list_->m_sorted_by_column=column;list_->m_sort_is_ascending=ascending;list_->SortBrowserRows(column,ascending);
   bool restored=false;for(int row=0;row<control.GetItemCount();++row){auto entry=list_->BrowserRowAt(row);if(!entry)continue;bool selected=context.type==LIST_FAT?std::find(paths.begin(),paths.end(),entry->path)!=paths.end():std::find(ids.begin(),ids.end(),entry->id)!=ids.end();if(selected){if(!restored)control.SetItemState(-1,0,LVIS_SELECTED);control.SetItemState(row,LVIS_SELECTED,LVIS_SELECTED);restored=true;}}
 #ifdef HFV_TESTING

@@ -4,6 +4,7 @@
 #include <functional>
 namespace BrowserDirectory { struct Row; struct Snapshot; }
 #include "VolumeCoordinator.h"
+namespace Storage { class Job; struct Result; }
 class CHFVExplorerDoc;
 class HFVExplorerTreeView;
 class CHFVExplorerListView;
@@ -20,9 +21,12 @@ class BrowserSession {
  std::map<std::string,std::vector<KnownRoot>> roots_;
  Context current_;
  std::map<std::string,uint64_t> seen_,dirty_;
- bool refreshing_=false;
+ bool refreshing_=false,listingPending_=false;
  std::wstring locationTitle_;
  std::function<void()> deferred_;std::string deferredKey_;bool deferredClassic_=false;
+ std::shared_ptr<Storage::Job> navigation_;
+ std::function<void(const Storage::Result&)> navigationReady_;
+ void CompleteNavigation();
  void ProcessChanges();
  void RefreshLegacy(const Context&);
 
@@ -58,12 +62,19 @@ public:
     void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={});
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
+    void CancelNavigation();
+    void Navigate(std::function<Storage::Result(Storage::Job&)>,
+                  std::function<void(const Storage::Result&)>);
+    bool Navigating() const { return bool(navigation_); }
+    bool ListingAvailable() const { return !listingPending_; }
+    void RejectNavigation(const std::string& key,const std::string& message);
     std::string ObservedWindowsKey(const std::string& path)const;
  void SetLocationTitle(std::wstring);
  std::wstring WindowTitle()const;
  void UpdateWindowTitle()const;
  bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false,bool keepListing=false);
 #ifdef HFV_TESTING
+    bool asyncNavigationForTest=false;
     unsigned notificationRefreshes=0,notificationErrors=0;
 #endif
     bool finderLayout=false;

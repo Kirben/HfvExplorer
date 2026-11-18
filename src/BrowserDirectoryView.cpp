@@ -56,11 +56,13 @@ const BrowserDirectory::Row* CHFVExplorerListView::BrowserRowAt(int row)const{
  return found==m_browser_rows.end()?nullptr:&found->second;
 }
 bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{
+ if(!GetBrowserSession().ListingAvailable())return false;
  auto& list=GetListCtrl();bool selected=false;for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=BrowserRowAt(row);if(!p)continue;selected=true;if(p->storageType==LIST_FAT){if(!VolumeCoord::Available({{p->accessKey,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;}else{auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();if(!VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;}}
  if(selected)return true;auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();return key.empty()||VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Browse}});
 }
 
 bool CHFVExplorerListView::BrowserSelectionAllows(bool rename)const{
+ if(!GetBrowserSession().ListingAvailable())return false;
  bool selected=false;auto& list=GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){
   auto binding=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(!binding||binding->type==LIST_SPEC)continue;

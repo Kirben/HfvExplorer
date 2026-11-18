@@ -62,6 +62,7 @@ public:
     }
     bool Writable() const override { return usable_ && canWrite_; }
     bool Journaled() const override { return journaled_; }
+    void ValidateMedia()override{Call call(*this);Ready();source_->CheckMedia();}
     void ReleaseMedia()override{std::unique_lock<std::recursive_mutex> lock(mutex_,std::try_to_lock);if(!lock.owns_lock())throw VolumeCoord::Busy();Check(!writable_,"Only read-only physical media can be released this way");usable_=false;volume_.reset();source_.reset();}
     void Reload() override {
         Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }

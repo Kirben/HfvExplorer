@@ -123,5 +123,6 @@ public:
  }
 };
 inline Worker& worker(){static Worker value;return value;}
+inline Worker& navigationWorker(){static Worker value(4);return value;}
 inline Worker& copyWorker(){static Worker value(4);return value;}
 }

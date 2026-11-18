@@ -95,6 +95,7 @@ public:MediaVolume(std::shared_ptr<MacBrowser::Volume> v,std::shared_ptr<Source>
  HfsPlus::Attributes GetAttributes(uint32_t id)override{return Call([&]{return backend_->GetAttributes(id);});}
  void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{Call([&]{backend_->Read(id,f,at,p,n);return true;});}
  uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw Error("Physical removable disks are read-only");}uint32_t Put(uint32_t,const MacBrowser::Entry&,MacBrowser::Reader,bool)override{throw Error("Physical removable disks are read-only");}void Rename(uint32_t,uint32_t,const std::u16string&)override{throw Error("Physical removable disks are read-only");}void Remove(uint32_t)override{throw Error("Physical removable disks are read-only");}
+ void ValidateMedia()override{Call([]{return true;});}
  void Reload()override{Call([&]{backend_->Reload();return true;});}void ReleaseMedia()override{std::lock_guard<std::recursive_mutex> lock(mutex_);backend_.reset();source_.reset();}
 };
 std::string Key(const Device& d,const Partition& p){auto path=d.path;for(auto& c:path)c=wchar_t(towupper(c));return "removable:"+Utf8(path)+"@"+std::to_string(p.offset)+"+"+std::to_string(p.length);}
