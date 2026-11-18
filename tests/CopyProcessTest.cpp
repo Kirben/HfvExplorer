@@ -939,6 +939,77 @@ int RunCopyProcessTest(const char *directory) {
             fprintf(report, "PASS: real launch failure after suspension restores browser mounts and "
                             "non-journaled write access; both images reopen without leaked handles\n");
         }
+        for(const bool dc42:{false,true}) {
+            const auto path=Wide(root+(dc42?"\\persistent-mfs.dc42":"\\persistent-mfs.img"));
+            { auto seed=MfsImageFixture(path,dc42); Put(*seed,2,u"Mounted payload",4096,71); }
+            auto volume=OpenBrowserImage(path);
+            Check(volume && volume->HasPersistentWorker() && volume->Writable() &&
+                      !volume->Supports().createFolders && volume->SupportsBasicMetadata(),
+                  "MFS writable persistent mount capabilities");
+            const auto pid=CopyProcess::VolumeSessionPidForTest(volume);
+            {
+                auto shared=OpenBrowserImage(path);
+                Entry original;
+                Check(shared==volume && pid && shared->FindChild(2,u"Mounted payload",original),
+                      "browser opens did not share an MFS worker");
+                const auto host=Wide(root+(dc42?"\\mfs-dc42-source":"\\mfs-raw-source"));
+                Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"MFS copy source folder");
+                { auto source=OpenWindows(host); Put(*source,2,u"Mounted payload",8192); }
+                const OrdinaryCopy copy{{Location::Windows(host+L"\\Mounted payload")},Native(volume)};
+                Storage::Job job;
+                bool staged=false;
+                job.transport([&](const Storage::Progress& progress){
+                    if(progress.fileBytes>8192){staged=true;job.cancel();}
+                },[](const std::string&){return Storage::ConflictChoice::Replace;});
+                Completion completion;
+                const auto aborted=ExecuteInWorker(copy,job,completion);
+                Check(staged && aborted.outcome==Storage::Outcome::Cancelled && !aborted.partial,
+                      "mounted MFS overwrite was not cancelled");
+                Verify(*shared,original.id,4096,71);
+
+                auto replaced=Submit(copy);
+                Conflict(replaced);replaced.Job()->resolve(Storage::ConflictChoice::Replace);Wait(replaced);
+                if(replaced.Job()->result().code)throw HfsPlus::Error(replaced.Job()->result().message);
+                Entry updated;
+                Check(replaced.Snapshot().complete && shared->FindChild(2,u"Mounted payload",updated),
+                      "mounted MFS replacement did not refresh the shared mount");
+                Verify(*shared,updated.id,8192);
+                auto desired=updated;
+                desired.name=u"Renamed payload";desired.version=7;
+                auto edited=Submit(EditBasicMetadata{Native(volume,updated.id),updated,desired});
+                Wait(edited);
+                Check(!edited.Job()->result().code && shared->FindTransferChild(2,desired,updated) &&
+                          updated.version==7 && CopyProcess::VolumeSessionPidForTest(shared)==pid,
+                      "mounted MFS metadata or version lookup restarted the worker");
+            }
+            volume->SuspendWorker();
+            std::weak_ptr<Volume> previous=volume;
+            volume.reset();
+            Until([&]{return previous.expired();});
+            volume=OpenBrowserImage(path);
+            Check(volume && volume->Writable(),"clean MFS image did not reopen writable");
+            const auto beforeCrash=CopyProcess::VolumeSessionPidForTest(volume);
+            CopyProcess::CrashVolumeSessionDuringPutForTest(volume);
+            bool failed=false;
+            try{Put(*volume,2,u"Interrupted write",4096);}
+            catch(const HfsPlus::Error&){failed=true;}
+            Check(failed && CopyProcess::lastExitCode==81 && !volume->Writable(),
+                  "MFS worker did not stop after a flushed sector write");
+            volume->Reload();
+            Check(!volume->Writable() && CopyProcess::VolumeSessionPidForTest(volume)!=beforeCrash,
+                  "MFS crash refresh did not restore read-only browsing");
+            volume.reset();
+            volume=OpenBrowserImage(path);
+            Entry retained;
+            Check(volume && !volume->Writable() && volume->FindChild(2,u"Renamed payload",retained),
+                  "fresh MFS mount did not enforce the durable write lock");
+            Verify(*volume,retained.id,8192);
+            bool denied=false;
+            try{Put(*volume,2,u"Rejected",4096);}
+            catch(const HfsPlus::Error&){denied=true;}
+            Check(denied,"MFS crash recovery allowed a new write");
+            fprintf(report,"PASS: %s MFS shared read/write worker, version metadata, fork-safe cancellation and durable read-only crash recovery\n",dc42?"Disk Copy 4.2":"raw");
+        }
         CopyProcess::fault = 1;
         auto crash = Submit(request);
         Wait(crash);

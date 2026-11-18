@@ -445,7 +445,7 @@ struct Process {
 
 enum class SessionCommandCode {
     Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
-    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, CopyWithin, GetClassicProperties, SetClassicProperties, CloseClassic, TestCrashRename, TestCrashPut
+    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, CopyWithin, GetClassicProperties, SetClassicProperties, CloseClassic, FindMfs, SetBasicMetadata, TestCrashRename, TestCrashPut
 };
 constexpr size_t sessionReadLimit = 256 * 1024;
 
@@ -470,7 +470,9 @@ class PersistentVolume final : public Volume {
     std::unique_ptr<Process> worker_;
     std::u16string name_;
     std::string description_;
-    const bool classic_;
+    const ImageFormat format_;
+    bool Classic()const{return format_==ImageFormat::Classic;}
+    bool Mfs()const{return format_==ImageFormat::Mfs;}
     bool hfsx_ = false, caseSensitive_ = false, journaled_ = false;
     bool writeAllowed_ = false, initialized_ = false;
     std::atomic<bool> writable_{false}, lost_{false};
@@ -500,7 +502,7 @@ class PersistentVolume final : public Volume {
     }
     void RecordRollback(Storage::Rollback rollback) {
         Storage::OutcomeEvidence::NoteRollback(rollback);
-        if (classic_ && rollback == Storage::Rollback::Failed) {
+        if (format_!=ImageFormat::HfsPlus && rollback == Storage::Rollback::Failed) {
             writable_ = false;
             writeAllowed_ = false;
         }
@@ -549,7 +551,7 @@ class PersistentVolume final : public Volume {
         Call(command, std::move(data), mutation, [] {});
     }
     void Stop() {
-        if (classic_ && Alive()) {
+        if (Classic() && Alive()) {
             try { Simple(SessionCommandCode::CloseClassic, {}, true); }
             catch (...) { Lost(); throw; }
         }
@@ -573,7 +575,7 @@ class PersistentVolume final : public Volume {
             Send(process->input.value, File, std::move(value));
         }
         Data mount;
-        mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_); mount.put(classic_);
+        mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_); mount.put(uint64_t(format_));
         Send(process->input.value, SessionMount, std::move(mount));
         worker_ = std::move(process);
         try {
@@ -586,6 +588,7 @@ class PersistentVolume final : public Volume {
             Response(SessionResult);
             // These descriptors are immutable after publication, so menu
             // updates do not wait on the pipe while a write is in flight.
+            if (Mfs() && initialized_ && !lost_) generation_ = NextGeneration();
             if (!initialized_) {
                 name_ = std::move(name);
                 description_ = std::move(description);
@@ -609,8 +612,8 @@ class PersistentVolume final : public Volume {
         return entry;
     }
 public:
-    PersistentVolume(std::wstring path, std::string key, std::wstring journal, bool classic)
-        : path_(std::move(path)), journal_(std::move(journal)), key_(std::move(key)), classic_(classic),
+    PersistentVolume(std::wstring path, std::string key, std::wstring journal, ImageFormat format)
+        : path_(std::move(path)), journal_(std::move(journal)), key_(std::move(key)), format_(format),
           generation_(NextGeneration()) {
         auto open = [&](bool write) {
             guard_ = HfsPlus::OpenImage(path_.c_str(), write);
@@ -630,21 +633,22 @@ public:
     bool HasPersistentWorker() const override { return true; }
     std::string ResourceKey() const override { return key_; }
     std::u16string Name() const override { return name_; }
-    const char* Kind() const override { return classic_ ? "HFS" : hfsx_ ? "HFSX" : "HFS+"; }
+    const char* Kind() const override { return Mfs() ? "MFS" : Classic() ? "HFS" : hfsx_ ? "HFSX" : "HFS+"; }
     std::string Description() const override { return description_; }
     bool Writable() const override { return writable_ && !lost_; }
     bool CaseSensitive() const override { return caseSensitive_; }
     bool Journaled() const override { return journaled_; }
-    bool SupportsHardLinks() const override { return !classic_; }
-    bool SupportsCompression() const override { return !classic_; }
-    bool SupportsAttributes() const override { return !classic_; }
+    bool SupportsHardLinks() const override { return format_==ImageFormat::HfsPlus; }
+    bool SupportsCompression() const override { return format_==ImageFormat::HfsPlus; }
+    bool SupportsAttributes() const override { return format_==ImageFormat::HfsPlus; }
     Capabilities Supports() const override {
         auto result = Volume::Supports();
-        result.unicodeNames = !classic_;
+        result.unicodeNames = format_==ImageFormat::HfsPlus;
+        result.createFolders = !Mfs();
         return result;
     }
     bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {
-        if (!classic_) return false;
+        if (!Classic()) return false;
         std::lock_guard<std::mutex> lock(mutex_);
         Data args; args.put(id);
         Call(SessionCommandCode::GetClassicProperties, std::move(args), false, [&] {
@@ -652,6 +656,30 @@ public:
             entry = DecodeClassic(result); result.end();
         });
         return true;
+    }
+    bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override {
+        return Mfs()?FindMfs(parent,name,{},found):Volume::FindChild(parent,name,found);
+    }
+    bool FindTransferChild(uint32_t parent,const Entry& source,Entry& found)override {
+        return Mfs()?FindMfs(parent,source.name,source.version,found):Volume::FindTransferChild(parent,source,found);
+    }
+    bool FindMfs(uint32_t parent,const std::u16string& name,std::optional<unsigned> version,Entry& found) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args;args.put(parent);args.u16(name);args.put(version.has_value());
+        if(version)args.put(*version);
+        bool exists=false;
+        Call(SessionCommandCode::FindMfs,std::move(args),false,[&]{
+            auto packet=Response(SessionBytes);
+            exists=packet.flag();packet.end();
+            if(exists)found=ReadEntry();
+        });
+        return exists;
+    }
+    bool SupportsBasicMetadata()const override{return Mfs();}
+    void SetBasicMetadata(uint32_t id,const Entry& entry)override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args;args.put(id);EncodeEntry(args,entry);
+        Simple(SessionCommandCode::SetBasicMetadata,std::move(args),true);
     }
     void SetClassicProperties(uint32_t id, const hfsdirent& entry) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -947,7 +975,7 @@ public:
     }
     void CrashDuringPut() {
         std::lock_guard<std::mutex> lock(mutex_);
-        Check(classic_ && Alive(), "Classic fixture volume worker is not running");
+        Check((Classic() || Mfs()) && Alive(), "Non-journaled fixture worker is not running");
         crashPut_ = true;
     }
 #endif
@@ -978,7 +1006,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
     #ifdef HFV_TESTING
         constexpr auto maximumCommand = SessionCommandCode::TestCrashPut;
 #else
-        constexpr auto maximumCommand = SessionCommandCode::CloseClassic;
+        constexpr auto maximumCommand = SessionCommandCode::SetBasicMetadata;
 #endif
         Check(opcode <= uint64_t(maximumCommand), "Invalid volume session command");
         auto command = SessionCommandCode(opcode);
@@ -1075,9 +1103,16 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                           current.name == entry.name && current.forks[0].size == entry.forks[0].size,
                           "The file changed before resource fork replacement");
                 }
+#ifdef HFV_TESTING
+                const bool crashMfs=command==SessionCommandCode::TestCrashPut && !strcmp(volume.Kind(),"MFS");
+                struct CrashMfs {
+                    explicit CrashMfs(bool enabled){MfsImageSource::crashAfterSectorWrite=enabled;}
+                    ~CrashMfs(){MfsImageSource::crashAfterSectorWrite=false;}
+                } crashGuard(crashMfs);
+#endif
                 auto read = [&](unsigned fork, uint64_t offset, void* out, size_t size) {
 #ifdef HFV_TESTING
-                    if (command == SessionCommandCode::TestCrashPut && (fork || offset)) ExitProcess(80);
+                    if (command == SessionCommandCode::TestCrashPut && !crashMfs && (fork || offset)) ExitProcess(80);
 #endif
                     auto* buffer = static_cast<uint8_t*>(out);
                     while (size) {
@@ -1164,6 +1199,24 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 Send(output, SessionBytes, std::move(result));
                 break;
             }
+            case SessionCommandCode::FindMfs: {
+                const auto parent=number(packet);
+                Entry selector,found;
+                selector.name=packet.u16();
+                const auto byVersion=packet.flag();
+                if(byVersion)selector.version=number(packet);
+                packet.end();
+                const auto exists=byVersion?volume.FindTransferChild(parent,selector,found)
+                                           :volume.FindChild(parent,selector.name,found);
+                writeNumber(exists);
+                if(exists)writeEntry(found);
+                break;
+            }
+            case SessionCommandCode::SetBasicMetadata: {
+                const auto id=number(packet);auto entry=DecodeEntry(packet);packet.end();
+                volume.SetBasicMetadata(id,entry);
+                break;
+            }
             case SessionCommandCode::CloseClassic:
                 packet.end();
                 Check(!strcmp(volume.Kind(),"HFS"), "Unexpected classic close command");
@@ -1198,8 +1251,8 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
 }
 } // namespace
 std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring& path, const std::string& key,
-                                                       const std::wstring& journal, bool classic) {
-    return std::make_shared<PersistentVolume>(path, key, journal, classic);
+                                                       const std::wstring& journal, ImageFormat format) {
+    return std::make_shared<PersistentVolume>(path, key, journal, format);
 }
 
 int VolumeSessionChild(const char* inputText, const char* outputText) {
@@ -1222,11 +1275,16 @@ int VolumeSessionChild(const char* inputText, const char* outputText) {
             Check(message == SessionMount, "Expected a volume session mount");
             auto path = data.wide();
             auto journal = data.wide();
-            auto writable = data.flag(), classic = data.flag();
+            auto writable = data.flag();
+            auto format = data.get();
+            Check(format<=uint64_t(ImageFormat::Mfs),"Invalid volume session image format");
             data.end();
             ImageHandleTransfer::Scope storage(files);
             std::shared_ptr<Volume> volume;
-            if (classic) {
+            if (format==uint64_t(ImageFormat::Mfs)) {
+                Check(journal.empty(),"MFS has no external journal");
+                volume=OpenMfsImage(path,writable);
+            } else if (format==uint64_t(ImageFormat::Classic)) {
                 Check(journal.empty(), "Classic HFS has no external journal");
                 floppy_module_global_init();
                 volume = OpenClassicImage(path, writable);
@@ -1344,6 +1402,7 @@ bool UsesWorker(const Request &request) {
     if(auto* folder=request.Get<CreateFolder>(); folder&&persistent(folder->parent)) return false;
     if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&persistent(link->source)&&persistent(link->parent)) return false;
     if(auto* metadata=request.Metadata()) {
+        if(auto* edit=std::get_if<EditBasicMetadata>(metadata); edit && persistent(edit->item)) return false;
         if(auto* edit=std::get_if<EditClassicProperties>(metadata); edit && persistent(edit->item)) return false;
         if(auto* attrs=std::get_if<EditAttributes>(metadata); attrs&&persistent(attrs->item)) return false;
         if(auto* compression=std::get_if<ChangeCompression>(metadata);
