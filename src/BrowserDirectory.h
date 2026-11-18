@@ -22,7 +22,7 @@ struct Row {
     HTREEITEM treeItem=nullptr;
     MacBrowser::Entry entry;
     MacBrowser::Capabilities capabilities;
-    int storageType = LIST_MAC, volume = -1;
+    int storageType = LIST_MAC, volume = -1, mediaDrive = -1;
     uint32_t id = 0, parent = 0;
     std::string path,accessKey;
     uint64_t created = 0, modified = 0, directoryItems = 0;

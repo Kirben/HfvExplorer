@@ -164,16 +164,26 @@ struct MainMacBrowser::State {
         out.directory=row.entry.directory;
         out.expectedIdentity=row.entry.identity;
         if(row.storageType==LIST_MAC){
-            out.SetMounted(mounts.at(row.volume).volume,row.id);
+            auto& mount=mounts.at(row.volume);
+            out.SetMounted(mount.volume,row.id);
+            row.mediaDrive=mount.drive;
+            row.accessKey=mount.volume->ResourceKey();
             out.expectedName=row.entry.name;
             out.expectedParent=row.entry.parent;
         }else if(row.storageType==LIST_FAT&&!row.path.empty()){
             out.SetWindows(FromAnsi(row.path));
+            if(out.WindowsPath().size()>=2 && out.WindowsPath()[1]==L':') {
+                const auto drive=towupper(out.WindowsPath()[0]);
+                if(drive>=L'A'&&drive<=L'Z')row.mediaDrive=drive-L'A';
+            }
+            if(row.accessKey.empty())row.accessKey=resourceKey;
         }else if(row.storageType==LIST_HFS&&!row.path.empty()){
             auto& volume=session_.Document()->m_volumes[row.volume];
             out.SetClassic(std::string((LPCSTR)volume.m_file_name),row.path);
             out.expectedCatalogId=row.id;
             out.expectedResource=resourceKey.empty()?VolumeCoord::ImageKey(out.ClassicImage()):resourceKey;
+            row.accessKey=out.expectedResource;
+            if(out.IsPhysical())row.mediaDrive=out.Drive();
             if(volume.m_mediaGenerationKnown)out.BindMediaGeneration(volume.m_mediaGeneration);
         }
     }

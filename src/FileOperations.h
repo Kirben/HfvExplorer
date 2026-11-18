@@ -148,6 +148,7 @@ PlanAccessForTest InspectPlanForTest(const Request&,const std::string& key,bool 
 #endif
 std::vector<Operation> Pending();
 void CancelPending();
+std::vector<uint8_t> ReadDataPrefix(const Location&, size_t maximum, bool& truncated, Storage::Job&);
 std::string CaptureLaunchVersion(const Location&, Storage::Job&);
 Storage::Result ApplyLaunchEdit(const Location&, const std::string&, const std::wstring&, Storage::Job&);
 

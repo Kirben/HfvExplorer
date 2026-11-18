@@ -378,6 +378,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3&&!strcmp(__argv[1],"--verify-background-copies"))ExitProcess(RunBackgroundCopiesTest(__argv[2]));
  extern int RunBrowserTransfersTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-browser-transfers"))ExitProcess(RunBrowserTransfersTest(__argv[2]));
+ extern int RunBrowserPreviewTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-browser-preview"))ExitProcess(RunBrowserPreviewTest(__argv[2]));
  extern int RunBrowserWindowsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-browser-windows"))ExitProcess(RunBrowserWindowsTest(__argv[2]));
  extern int RunVolumeCoordinationTest(const char*);

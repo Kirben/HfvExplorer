@@ -3,6 +3,8 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
+#include "HFVPreviewView.h"
+#include "BrowserPresentation.h"
 #include "MainMacBrowser.h"
 #include "VolumeSession.h"
 #include "HfsPlusDisk.h"
@@ -37,7 +39,14 @@ int Find(BrowserSession& session,const wchar_t* name){
 std::wstring Image(const CString& path,const std::u16string& name){
  int count=MultiByteToWideChar(CP_ACP,0,path,-1,nullptr,0);std::wstring wide(count,L'\0');MultiByteToWideChar(CP_ACP,0,path,-1,&wide[0],count);wide.resize(count-1);
  auto disk=HfsPlus::CreateImage(wide.c_str(),8*1024*1024);HfsPlus::Volume::Format(*disk,name,true);disk.reset();
- auto volume=MacBrowser::OpenImage(wide);volume->MakeDirectory(2,u"One");volume->MakeDirectory(2,u"Two");volume->MakeDirectory(2,u"Cafe \u65e5\u672c");return wide;
+ auto volume=MacBrowser::OpenImage(wide);volume->MakeDirectory(2,u"One");volume->MakeDirectory(2,u"Two");volume->MakeDirectory(2,u"Cafe \u65e5\u672c");
+ if(name==u"First"){
+  MacBrowser::Entry entry;entry.name=u"Read Me";entry.forks[0].size=5;
+  memcpy(entry.finder.data(),"TEXTttxt",8);
+  const char bytes[]={'C','a','f',char(0x8e),'\r'};
+  volume->Put(2,entry,[&](unsigned,uint64_t at,void* out,size_t count){memcpy(out,bytes+at,count);},false);
+ }
+ return wide;
 }
 std::wstring Caption(CWnd* window){wchar_t text[32768]{};GetWindowTextW(window->GetSafeHwnd(),text,ARRAYSIZE(text));return text;}
 void NoQuit(){MSG message{};Check(!PeekMessage(&message,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE),"closing a browser posted WM_QUIT with another window open");}
@@ -71,6 +80,29 @@ int RunBrowserWindowsTest(const char* directory){
   Check(!sb.MacBrowser().Active(),"recent image command opened in the other browser");
   app.ActivateBrowser(b);Check(app.OpenDocumentFile(secondImage)==sb.Document(),"image open did not target second browser");
   Check(sa.MacBrowser().Active()&&sb.MacBrowser().Active(),"opening an image cleared another browser");
+  Check(!sa.Preview()->Enabled()&&!sb.Preview()->Enabled(),"preview should start hidden");
+  a->SendMessage(WM_COMMAND,ID_VIEW_PREVIEW_PANE);
+  Check(sa.Preview()->Enabled()&&(sa.Preview()->GetStyle()&WS_VISIBLE)&&!sb.Preview()->Enabled(),
+        "preview command changed the wrong frame");
+  const int previewItem=Find(sa,L"Read Me");
+  Check(previewItem>=0,"preview fixture is absent from the typed Mac listing");
+  sa.List()->GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);
+  sa.List()->GetListCtrl().SetItemState(previewItem,LVIS_SELECTED,LVIS_SELECTED);
+  const HWND pane=sa.Preview()->GetSafeHwnd();
+  const HWND edit=FindWindowExW(pane,nullptr,L"EDIT",nullptr);
+  bool previewReady=false;
+  for(int n=0;n<500&&!previewReady;++n){
+   MSG message{};
+   while(PeekMessage(&message,pane,WM_TIMER,WM_TIMER,PM_REMOVE))DispatchMessage(&message);
+   previewReady=BrowserPresentation::Text(edit)==L"Caf\u00e9\r\n";
+   if(!previewReady)Sleep(10);
+  }
+  Check(previewReady,"selection notification did not publish the native text preview");
+  const HWND hide=FindWindowExW(pane,nullptr,L"BUTTON",nullptr);
+  Check(hide!=nullptr,"preview Hide button is missing");
+  SendMessage(pane,WM_COMMAND,MAKEWPARAM(GetDlgCtrlID(hide),BN_CLICKED),reinterpret_cast<LPARAM>(hide));
+  Check(!sa.Preview()->Enabled()&&!(sa.Preview()->GetStyle()&WS_VISIBLE)&&!sb.Preview()->Enabled(),
+        "Hide did not close only the originating preview pane");
   a->OnUpdateFrameTitle(TRUE);b->OnUpdateFrameTitle(TRUE);Check(Caption(a)==L"First \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","disk captions leaked between frames or MFC restored Untitled");
   Check(sa.MacBrowser().Activate(Find(sa,L"Cafe \u65e5\u672c")),"open Unicode title folder");Check(Caption(a)==L"First:Cafe \u65e5\u672c \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","Unicode folder caption or frame isolation failed");Check(sa.MacBrowser().ShowTestFolder(0,2),"restore title test root");
   sa.List()->GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);sb.List()->GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);

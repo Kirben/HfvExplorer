@@ -684,8 +684,7 @@ void HFVExplorerTreeView::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags)
 	} else if( nChar == VK_TAB ) {
 		CHFVExplorerApp	*pApp;
 		pApp = (CHFVExplorerApp *)AfxGetApp();
-		// GetBrowserSession().Preview()->set_pane_index( PANE_LIST );
-		GetBrowserSession().Preview()->set_pane( PANE_LIST );
+        if(auto list=GetBrowserSession().List())list->SetFocus();
 		ok = 1;
 	}
 	if(!ok)	CTreeView::OnChar(nChar, nRepCnt, nFlags);

@@ -146,6 +146,7 @@ BEGIN
     BEGIN
         MENUITEM "&Toolbar",                    ID_VIEW_TOOLBAR
         MENUITEM "Status &Bar",                 ID_VIEW_STATUS_BAR
+        MENUITEM "&Preview pane",               ID_VIEW_PREVIEW_PANE
         MENUITEM SEPARATOR
         MENUITEM "Lar&ge Icons",                ID_VIEW_LARGEICONS
         MENUITEM "S&mall Icons",                ID_VIEW_SMALLICONS

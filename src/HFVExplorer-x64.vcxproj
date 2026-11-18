@@ -38,6 +38,7 @@
     <ClCompile Include="HFVExplorerTreeView.cpp" />
     <ClCompile Include="HFVExplorerView.cpp" />
     <ClCompile Include="HFVPreviewView.cpp" />
+    <ClCompile Include="BrowserPreview.cpp" /><ClCompile Include="..\tests\BrowserPreviewTest.cpp" />
     <ClCompile Include="icon.cpp" />
     <ClCompile Include="mactypes.cpp" />
     <ClCompile Include="MainFrm.cpp" />

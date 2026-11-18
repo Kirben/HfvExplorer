@@ -532,7 +532,7 @@ int CHFVExplorerListView::list_clear()
 {
     CancelBrowserDrag();
     m_parentRowData=0;
-    if(GetBrowserSession().Preview()&&IsWindow(GetBrowserSession().Preview()->GetSafeHwnd()))GetBrowserSession().Preview()->set_file(nullptr);
+    if(GetBrowserSession().Preview()&&IsWindow(GetBrowserSession().Preview()->GetSafeHwnd()))GetBrowserSession().Preview()->Clear();
 	m_cl->DeleteAllItems();
  destroy_pointers();m_directory_capabilities_known=false;
 	m_item_count = 0;
@@ -3402,27 +3402,14 @@ void CHFVExplorerListView::OnLButtonUp(UINT nFlags, CPoint point)
 	CListView::OnLButtonUp(nFlags, point);
 }
 
-void CHFVExplorerListView::OnItemchanged(NMHDR* pNMHDR, LRESULT* pResult) 
+void CHFVExplorerListView::OnItemchanged(NMHDR* notification, LRESULT* result)
 {
- if(StorageUi::busy()){*pResult=0;return;}
-	NM_LISTVIEW* pNMListView = (NM_LISTVIEW*)pNMHDR;
-	// TODO: Add your control notification handler code here
-	
-	if( (pNMListView->uNewState & LVIS_FOCUSED) &&
-		  (pNMListView->uOldState & LVIS_FOCUSED) == 0) {
-		int item = pNMListView->iItem;
-		if((item >= 0) && m_cl) {
-			DWORD_PTR dat = m_cl->GetItemData( item );
-			if(dat) {
-				CHFVExplorerApp	*pApp;
-				pApp = (CHFVExplorerApp *)AfxGetApp();
-				if(pApp && GetBrowserSession().Preview()) {
-					GetBrowserSession().Preview()->set_file( (!VolumeCoord::Readable(GetBrowserSession().MacBrowser().SelectedResourceKey())||get_lparam_type(dat)==LIST_MAC) ? nullptr : (list_lparam_struct *)dat );
-				}
-			}
-		}
-	}
-	*pResult = 0;
+    const auto change=reinterpret_cast<const NMLISTVIEW*>(notification);
+    if ((change->uChanged & LVIF_STATE) && ((change->uNewState ^ change->uOldState) & LVIS_SELECTED)) {
+        if (m_browserSession && m_browserSession->Preview())
+            m_browserSession->Preview()->RequestSelection();
+    }
+    *result=0;
 }
 
 void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags) 
@@ -3460,10 +3447,7 @@ void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 			handled = 1;
 			break;
 		case VK_TAB:
-			CHFVExplorerApp	*pApp;
-			pApp = (CHFVExplorerApp *)AfxGetApp();
-			GetBrowserSession().Preview()->set_pane( PANE_TREE );
-			// GetBrowserSession().Preview()->set_pane_index( PANE_TREE );
+            if(auto tree=GetBrowserSession().Tree())tree->SetFocus();
 			handled = 1;
 			break;
 		case VK_SHIFT:

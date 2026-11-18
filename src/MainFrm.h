@@ -32,13 +32,19 @@ class LauncherWriteBack;
 struct MediaControlTarget;
 class BrowserSession;
 
+class PreviewSplitter : public CSplitterWnd {
+public:
+    void ShowPreview(CWnd&, bool);
+    void RecalcLayout() override;
+};
+
 class CMainFrame : public CFrameWnd
 {
  BrowserSession* m_browserSession=nullptr;
  bool m_restoreMaximized=false;
 protected: // create from serialization only
 	CSplitterWnd m_wndSplitter;
-	CSplitterWnd m_wndSplitter2;
+	PreviewSplitter m_wndSplitter2;
 
 	CMainFrame();
 	DECLARE_DYNCREATE(CMainFrame)
@@ -122,6 +128,8 @@ protected:
 	//{{AFX_MSG(CMainFrame)
 	afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
 	afx_msg void OnViewDetails();
+    afx_msg void OnViewPreviewPane();
+    afx_msg void OnUpdateViewPreviewPane(CCmdUI*);
 	afx_msg void OnViewLargeicons();
 	afx_msg void OnViewList();
 	afx_msg void OnViewSmallicons();

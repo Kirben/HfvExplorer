@@ -92,6 +92,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	//{{AFX_MSG_MAP(CMainFrame)
 	ON_WM_CREATE()
 	ON_COMMAND(ID_HFV_VIEW_DETAILS, OnViewDetails)
+    ON_COMMAND(ID_VIEW_PREVIEW_PANE, OnViewPreviewPane)
+    ON_UPDATE_COMMAND_UI(ID_VIEW_PREVIEW_PANE, OnUpdateViewPreviewPane)
 	ON_COMMAND(ID_VIEW_LARGEICONS, OnViewLargeicons)
 	ON_COMMAND(ID_HFV_VIEW_LIST, OnViewList)
 	ON_COMMAND(ID_VIEW_SMALLICONS, OnViewSmallicons)
@@ -245,46 +247,6 @@ void CMainFrame::Dump(CDumpContext& dc) const
 /////////////////////////////////////////////////////////////////////////////
 // CMainFrame message handlers
 
-// #define TWOVIEWS
-
-#ifdef TWOVIEWS
-BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
-{
-	if(!m_wndSplitter.CreateStatic( this, 1, 2, WS_CHILD | WS_VISIBLE ))
-	{
-		TRACE0("Failed to create split bar ");
-		return FALSE;
-	}
-
-	if (!m_wndSplitter.CreateView(0, PANE_TREE,
-		RUNTIME_CLASS(HFVExplorerTreeView), CSize(200, 0), pContext))
-	{
-		TRACE0("Failed to create first pane\n");
-		return FALSE;
-	}
-
-	if (!m_wndSplitter.CreateView(0, PANE_LIST,
-		RUNTIME_CLASS(CHFVExplorerListView), CSize(300, 0), pContext))
-	{
-		TRACE0("Failed to create second pane\n");
-		return FALSE;
-	}
-
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-
- auto tree=(HFVExplorerTreeView*)m_wndSplitter.GetPane(0,PANE_TREE);
- auto list=(CHFVExplorerListView*)m_wndSplitter.GetPane(0,PANE_LIST);
- m_browserSession=&static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc)->GetBrowserSession();
- m_browserSession->Attach(this,tree,list,nullptr,&m_wndStatusBar);
-
- tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();
-
-	m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
-
-	return TRUE;
-	// return CFrameWnd::OnCreateClient(lpcs, pContext);
-}
-#else
 BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 {
 	if(!m_wndSplitter.CreateStatic( this, 1, 2, WS_CHILD | WS_VISIBLE ))
@@ -309,9 +271,8 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 		return FALSE;
 	}
 
-	int cyText = max(lpcs->cy - 70, 20);    // height of text pane
 	if (!m_wndSplitter2.CreateView(0, 0,
-		RUNTIME_CLASS(CHFVExplorerListView), CSize(0, cyText), pContext))
+		RUNTIME_CLASS(CHFVExplorerListView), CSize(0, 0), pContext))
 	{
 		TRACE0("Failed to create second pane\n");
 		return FALSE;
@@ -332,14 +293,64 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
  m_browserSession=&static_cast<CHFVExplorerDoc*>(pContext->m_pCurrentDoc)->GetBrowserSession();
  m_browserSession->Attach(this,tree,list,preview,&m_wndStatusBar);
 
- tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();preview->Initialize();
+ m_wndSplitter2.ShowPreview(*preview,false);
+ tree->Initialize();list->Initialize();list->set_style(LVS_ICON);list->FillList();
 
 	m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 
 	return TRUE;
 	// return CFrameWnd::OnCreateClient(lpcs, pContext);
 }
-#endif
+
+void PreviewSplitter::ShowPreview(CWnd& pane, bool visible)
+{
+    // Keep the second static pane alive, but omit its row and splitter bar
+    // from layout when disabled.
+    m_nRows=visible ? 2 : 1;
+    if(visible) {
+        CRect rect;
+        GetClientRect(rect);
+        const int preferred=rect.Width()<510 ? 230 : 168;
+        SetRowInfo(0,(std::max)(64,rect.Height()-(std::min)(preferred,rect.Height()/2)),0);
+        SetRowInfo(1,0,0);
+    }
+    pane.ShowWindow(visible ? SW_SHOWNA : SW_HIDE);
+    RecalcLayout();
+}
+
+void PreviewSplitter::RecalcLayout()
+{
+    if(m_nRows==2) {
+        CRect rect;
+        GetClientRect(rect);
+        auto& first=m_pRowInfo[0].nIdealSize;
+        first=(std::min)(first,(std::max)(24,rect.Height()-(std::min)(116,rect.Height()/2)));
+    }
+    CSplitterWnd::RecalcLayout();
+}
+
+void CMainFrame::OnViewPreviewPane()
+{
+    auto preview=m_browserSession ? m_browserSession->Preview() : nullptr;
+    if(!preview)return;
+    const bool show=!preview->Enabled();
+    if(!show) {
+        const HWND focus=::GetFocus();
+        if(GetActiveView()==preview || focus==preview->GetSafeHwnd() || ::IsChild(preview->GetSafeHwnd(),focus)) {
+            SetActiveView(m_browserSession->List());
+            m_browserSession->List()->SetFocus();
+        }
+    }
+    preview->EnablePreview(show);
+    m_wndSplitter2.ShowPreview(*preview,show);
+}
+
+void CMainFrame::OnUpdateViewPreviewPane(CCmdUI* ui)
+{
+    auto preview=m_browserSession ? m_browserSession->Preview() : nullptr;
+    ui->Enable(preview!=nullptr);
+    ui->SetCheck(preview && preview->Enabled());
+}
 
 void CMainFrame::OnViewDetails() 
 {
