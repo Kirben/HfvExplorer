@@ -26,9 +26,8 @@ void Check(bool ok, const char *text) {
 std::wstring Wide(const std::string &p) { return {p.begin(), p.end()}; }
 Location Native(std::shared_ptr<Volume> v, uint32_t id = 2) {
     Location l;
-    l.type = LIST_MAC;
-    l.volume = std::move(v);
-    l.id = id;
+
+    l.SetMounted(std::move(v), id);
     return l;
 }
 std::shared_ptr<Volume> Image(const std::wstring &path,
@@ -144,7 +143,9 @@ int RunCopyParentExitTest(const char *directory) {
         auto source = Image(Wide(root + "\\source.dsk")), target = Image(Wide(root + "\\target.dsk"));
         auto id = Put(*source, 2, u"Retained", 2 * 1024 * 1024);
         CopyProcess::enabled = true;
-        CopyProcess::fault = 2;
+        CopyProcess::ioGate = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        Check(CopyProcess::ioGate.load() != nullptr, "parent-exit gate");
+        CopyProcess::fault = 7;
         Request request;
         request.background = true;
         auto from = Native(source, id);
@@ -153,9 +154,11 @@ int RunCopyParentExitTest(const char *directory) {
         request.target = Native(target);
         auto op = Submit(request);
         DWORD end = GetTickCount() + 15000;
-        while (!op.Job()->done() && !op.Job()->progress().fileBytes && LONG(end - GetTickCount()) > 0)
+        while (!op.Job()->done() && op.Job()->progress().phase != "Worker test gate" &&
+               LONG(end - GetTickCount()) > 0)
             Sleep(10);
-        Check(!op.Job()->done() && op.Job()->progress().fileBytes > 0, "parent-exit copy did not start");
+        Check(!op.Job()->done() && op.Job()->progress().phase == "Worker test gate",
+              "parent-exit copy did not start");
         FILE *file = fopen((root + "\\worker.pid").c_str(), "w");
         Check(file != nullptr, "parent-exit PID file");
         fprintf(file, "%lu", CopyProcess::lastProcess.load());
@@ -311,8 +314,8 @@ int RunCopyProcessTest(const char *directory) {
         Request exportRequest;
         exportRequest.background = true;
         exportRequest.sources = {Native(source, file)};
-        exportRequest.target.type = LIST_FAT;
-        exportRequest.target.windowsPath = host;
+
+        exportRequest.target.SetWindows(host);
         Pass(Submit(exportRequest));
         auto windows = ResolveWindowsFile(host + L"\\Both forks");
         Verify(*windows.first, windows.second);
@@ -402,16 +405,16 @@ int RunCopyProcessTest(const char *directory) {
             fork.kind = Kind::ExportFork;
             fork.sources = {Native(source, plain)};
             fork.fork = 1;
-            fork.target.type = LIST_FAT;
-            fork.target.windowsPath = host + L"\\resource.bin";
+
+            fork.target.SetWindows(host + L"\\resource.bin");
             Pass(Submit(fork));
             auto replaceId = Put(*target, 2, u"Replace resource", 4096);
             Request replace;
             replace.background = true;
             replace.kind = Kind::ReplaceResource;
             Location raw;
-            raw.type = LIST_FAT;
-            raw.windowsPath = fork.target.windowsPath;
+
+            raw.SetWindows(fork.target.WindowsPath());
             replace.sources = {raw};
             replace.target = Native(target, replaceId);
             Pass(Submit(replace));
@@ -478,10 +481,10 @@ int RunCopyProcessTest(const char *directory) {
             Request import;
             import.kind = Kind::LegacyCopy;
             import.background = true;
-            import.sourceVolume = root;
-            import.sourcePath = input;
-            import.targetVolume = root + "\\classic.dsk";
-            import.targetPath = "Classic:";
+
+            import.legacySource = FileOperations::Location::FromLegacy(root, input);
+
+            import.legacyTarget = FileOperations::Location::FromLegacy(root + "\\classic.dsk", "Classic:");
             import.conversion.input = 'r';
             Pass(Submit(import));
             Entry mapped;
@@ -490,9 +493,10 @@ int RunCopyProcessTest(const char *directory) {
             Request exportMapped;
             exportMapped.kind = Kind::LegacyCopy;
             exportMapped.background = true;
-            exportMapped.sourceVolume = import.targetVolume;
-            exportMapped.sourcePath = "Classic:Mapped";
-            exportMapped.targetPath = root + "\\mapped-export";
+
+            exportMapped.legacySource =
+                FileOperations::Location::FromLegacy(import.legacyTarget.LegacyVolume(), "Classic:Mapped");
+            exportMapped.SetLegacyTargetPath(root + "\\mapped-export");
             exportMapped.conversion.output = 'r';
             Pass(Submit(exportMapped));
             Check(GetFileAttributesA((root + "\\mapped-export.zzz").c_str()) != INVALID_FILE_ATTRIBUTES,
@@ -504,12 +508,13 @@ int RunCopyProcessTest(const char *directory) {
         Request conversion;
         conversion.kind = Kind::LegacyCopy;
         conversion.background = true;
-        conversion.sourceVolume = root + "\\classic.dsk";
-        conversion.sourcePath = "Classic:Plain";
-        conversion.targetPath = root + "\\converted.bin";
+
+        conversion.legacySource =
+            FileOperations::Location::FromLegacy(root + "\\classic.dsk", "Classic:Plain");
+        conversion.SetLegacyTargetPath(root + "\\converted.bin");
         conversion.conversion.output = 'b';
         Pass(Submit(conversion));
-        Check(GetFileAttributesA(conversion.targetPath.c_str()) != INVALID_FILE_ATTRIBUTES,
+        Check(GetFileAttributesA(conversion.legacyTarget.LegacyPath().c_str()) != INVALID_FILE_ATTRIBUTES,
               "worker MacBinary conversion output");
         fprintf(report, "PASS: legacy MacBinary conversion in child process\n");
         auto slow = Put(*source, 2, u"Slow", 2 * 1024 * 1024);
@@ -561,9 +566,23 @@ int RunCopyProcessTest(const char *directory) {
             auto delayedFolder = target->MakeDirectory(2, u"Parallel delayed");
             Request first = delayed;
             first.target = Native(target, delayedFolder);
-            CopyProcess::fault = 2;
+            struct Gate {
+                HANDLE event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+                Gate() {
+                    Check(event != nullptr, "parallel process gate");
+                    CopyProcess::ioGate = event;
+                }
+                ~Gate() {
+                    SetEvent(event);
+                    CopyProcess::ioGate = nullptr;
+                    CloseHandle(event);
+                }
+            } gate;
+            CopyProcess::fault = 7;
             auto blocked = Submit(first);
-            Until([&] { return blocked.Job()->progress().fileBytes > 0 || blocked.Job()->done(); });
+            Until([&] {
+                return blocked.Job()->progress().phase == "Worker test gate" || blocked.Job()->done();
+            });
             Check(!blocked.Job()->done(), "first process did not stay active");
             auto firstPid = CopyProcess::lastProcess.load();
             std::vector<Operation> queued;
@@ -583,6 +602,7 @@ int RunCopyProcessTest(const char *directory) {
                 Wait(waiting);
                 Check(waiting.Job()->result().error == ERROR_CANCELLED, "queued process copy cancellation");
             }
+            SetEvent(gate.event);
             Pass(blocked);
             Check(otherTarget->FindChild(2, u"Parallel", child), "independent child output");
             Verify(*otherTarget, child.id, 4096);
@@ -628,11 +648,10 @@ int RunCopyProcessTest(const char *directory) {
                 Request physical;
                 physical.background = true;
                 physical.sources = {Native(source, plain)};
-                physical.target.type = LIST_HFS;
+
                 char path[MAX_PATH];
                 get_floppy_volume_file_name(25, path);
-                physical.target.classicImage = path;
-                physical.target.classicPath = "Floppy:";
+                physical.target.SetClassic(path, "Floppy:");
                 Pass(Submit(physical));
                 auto overwrite = Submit(physical);
                 Conflict(overwrite);

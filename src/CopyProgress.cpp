@@ -201,7 +201,7 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
 }
 int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved,CWnd* owner) {
  *moved=0;FileOperations::Request request;request.kind=FileOperations::Kind::LegacyCopy;
- request.sourceVolume=sourcevol;request.sourcePath=source;request.targetVolume=targetvol;request.targetPath=target;
+ request.legacySource=FileOperations::Location::FromLegacy(sourcevol,source);request.legacyTarget=FileOperations::Location::FromLegacy(targetvol,target);
  request.directory=directory!=0;request.move=move!=0;request.conversion=CaptureLegacyCopyOptions(HFSIFACE_copy_mode());
  auto operation=FileOperations::Submit(std::move(request));
  auto result=ShowSubmittedStorageJob(operation.Job(),macVolume(sourcevol)?"Copying from Macintosh":"Copying files",false,directory==0,true,owner);

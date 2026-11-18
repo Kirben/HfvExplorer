@@ -26,11 +26,12 @@ DWORD floppyGeneration = 7;
 std::atomic<DWORD> lastProcess{0};
 std::atomic<bool> enabled{false};
 std::atomic<unsigned> fault{0};
+std::atomic<HANDLE> ioGate{nullptr};
 #endif
 namespace {
 using namespace FileOperations;
 using namespace MacBrowser;
-constexpr uint64_t protocol = 1;
+constexpr uint64_t protocol = 2;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     Settings = 1,
@@ -44,6 +45,7 @@ enum Message : DWORD {
     Cancel,
     Fixture,
     Mapping,
+    IoGate,
     Finished
 };
 void Check(bool ok, const char *message) {
@@ -212,68 +214,65 @@ struct Endpoint {
     std::vector<Entry> path;
 };
 void CaptureMedia(Location &l) {
-    if (l.mediaGenerationKnown || l.type != LIST_HFS || l.classicImage.empty())
+    if (!l.IsPhysical() || l.MediaGenerationKnown())
         return;
-    int floppy = physical_floppy_path(l.classicImage.c_str());
-    if (floppy >= 0) {
-        if (!physical_floppy_generation(floppy, &l.mediaGeneration)) {
-            HANDLE opened = floppy_init(floppy, TRUE);
-            bool valid = opened && get_floppy_size(opened, floppy) > 0 &&
-                         physical_floppy_generation(floppy, &l.mediaGeneration);
+    DWORD generation = 0;
+    if (l.Media() == ClassicMedia::Floppy) {
+        if (!physical_floppy_generation(l.Drive(), &generation)) {
+            HANDLE opened = floppy_init(l.Drive(), TRUE);
+            bool valid = opened && get_floppy_size(opened, l.Drive()) > 0 &&
+                         physical_floppy_generation(l.Drive(), &generation);
             if (opened)
-                floppy_final(floppy);
+                floppy_final(l.Drive());
             Check(valid, "Cannot establish selected floppy identity");
         }
-        l.mediaGenerationKnown = true;
-    } else if (readonly_media_path(l.classicImage.c_str())) {
-        l.mediaGenerationKnown =
-            physical_cd_generation(toupper((unsigned char)l.classicImage[0]) - 'A', &l.mediaGeneration) != 0;
-    }
+        l.BindMediaGeneration(generation);
+    } else if (physical_cd_generation(l.Drive(), &generation))
+        l.BindMediaGeneration(generation);
 }
 Endpoint Capture(const Location &location) {
     Endpoint out;
     out.location = location;
-    if (!location.volume) {
+    if (!location.IsMounted()) {
         CaptureMedia(out.location);
         return out;
     }
-    auto host = location.volume->HostPath(location.id);
+    auto host = location.HostPath();
     if (!host.empty()) {
-        out.location.volume.reset();
-        out.location.type = LIST_FAT;
-        out.location.windowsPath = host;
-        out.location.id = 2;
+        out.location.SetWindows(host);
         return out;
     }
-    out.origin = location.volume->WorkerDescription();
+    out.origin = location.Volume()->WorkerDescription();
     if (out.origin.kind == WorkerOrigin::Classic) {
-        out.location.classicImage = location.classicImage;
-        if (out.location.classicImage.empty()) {
-            int n = WideCharToMultiByte(CP_ACP, 0, out.origin.path.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string path(n, 0);
-            WideCharToMultiByte(CP_ACP, 0, out.origin.path.c_str(), -1, &path[0], n, nullptr, nullptr);
-            path.pop_back();
-            out.location.classicImage = path;
+        int n = WideCharToMultiByte(CP_ACP, 0, out.origin.path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        Check(n > 0, "Invalid classic worker path");
+        std::string path(n, 0);
+        WideCharToMultiByte(CP_ACP, 0, out.origin.path.c_str(), -1, &path[0], n, nullptr, nullptr);
+        path.pop_back();
+        auto media = Location::Classic(path, ":");
+        CaptureMedia(media);
+        if (media.MediaGenerationKnown()) {
+            out.origin.generationKnown = true;
+            out.origin.generation = media.MediaGeneration();
         }
-        CaptureMedia(out.location);
     }
     Check(out.origin.kind != WorkerOrigin::Unavailable,
           "This storage backend cannot be transferred to the copy worker");
-    auto selected = location.volume->Stat(location.id);
+    auto selected = location.Volume()->Stat(location.Id());
     Check(location.expectedIdentity.empty() || location.expectedIdentity == selected.identity,
           "The selected entry was replaced before the operation started");
     Check(location.expectedName.empty() || location.expectedName == selected.name,
           "The selected entry was renamed before the operation started");
     Check(!location.expectedParent || location.expectedParent == selected.parent,
           "The selected entry was moved before the operation started");
-    if (!strcmp(location.volume->Kind(), "HFS+") || !strcmp(location.volume->Kind(), "HFSX")) {
+    if (!strcmp(location.Volume()->Kind(), "HFS+") || !strcmp(location.Volume()->Kind(), "HFSX")) {
         out.path.push_back(selected);
         return out;
     }
     std::set<uint32_t> ancestors;
-    for (uint32_t id = location.id; id != 2;) {
+    for (uint32_t id = location.Id(); id != 2;) {
         Check(ancestors.size() < 128 && ancestors.insert(id).second, "Invalid copy-worker source ancestry");
-        auto entry = location.volume->Stat(id);
+        auto entry = location.Volume()->Stat(id);
         out.path.push_back(entry);
         id = entry.parent;
     }
@@ -282,22 +281,34 @@ Endpoint Capture(const Location &location) {
 }
 void EncodeEndpoint(Data &d, const Endpoint &e) {
     const auto &l = e.location;
-    d.put(uint64_t(l.type));
-    d.put(l.id);
+    d.put(uint64_t(l.kind()));
     d.put(l.cut);
     d.put(l.directory);
-    d.wide(l.windowsPath);
-    d.put(l.classicImage);
-    d.put(l.classicPath);
     d.put(l.expectedCatalogId);
     d.put(l.expectedParent);
-    d.put(l.mediaGenerationKnown);
-    d.put(l.mediaGeneration);
     d.put(l.expectedIdentity);
     d.put(l.expectedResource);
     d.u16(l.expectedName);
-    d.put(bool(l.volume));
-    if (l.volume) {
+    switch (l.kind()) {
+    case Location::Kind::None:
+        break;
+    case Location::Kind::Windows:
+        d.wide(l.WindowsPath());
+        break;
+    case Location::Kind::ClassicImage:
+        d.put(l.ClassicImage());
+        d.put(l.ClassicPath());
+        break;
+    case Location::Kind::ClassicMedia:
+        d.put(l.Drive());
+        d.put(uint64_t(l.Media()));
+        d.put(l.ClassicPath());
+        d.put(l.MediaGenerationKnown());
+        if (l.MediaGenerationKnown())
+            d.put(l.MediaGeneration());
+        break;
+    case Location::Kind::Mounted:
+        d.put(l.Id());
         EncodeOrigin(d, e.origin);
         d.put(e.path.size());
         for (auto &p : e.path) {
@@ -307,6 +318,7 @@ void EncodeEndpoint(Data &d, const Endpoint &e) {
             d.put(p.directory);
             d.put(p.identity);
         }
+        break;
     }
 }
 std::string AnsiPath(const std::wstring &path) {
@@ -337,6 +349,13 @@ std::shared_ptr<Volume> OpenOrigin(const WorkerOrigin &o) {
     Check(bool(volume), "Cannot reopen selected volume in the copy worker");
     if (o.generationKnown) {
         auto now = volume->WorkerDescription();
+        if (o.kind == WorkerOrigin::Classic) {
+            auto media = Location::Classic(AnsiPath(o.path), ":");
+            CaptureMedia(media);
+            now.generationKnown = media.MediaGenerationKnown();
+            if (now.generationKnown)
+                now.generation = media.MediaGeneration();
+        }
         Check(now.generationKnown && now.generation == o.generation,
               "Media changed before the copy worker opened it; select the volume again");
     }
@@ -346,59 +365,101 @@ std::shared_ptr<Volume> OpenOrigin(const WorkerOrigin &o) {
 struct WorkerMounts {
     std::map<std::vector<uint8_t>, std::shared_ptr<Volume>> volumes;
 };
-Location DecodeEndpoint(Data &d, WorkerMounts &mounts) {
+uint32_t CatalogNumber(Data &d) {
+    auto value = d.get();
+    Check(value <= UINT32_MAX, "Catalog identifier exceeds its field width");
+    return uint32_t(value);
+}
+Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted = true) {
+    auto tag = d.get();
+    Check(tag <= uint64_t(Location::Kind::ClassicMedia), "Invalid typed worker location");
+    Check(allowMounted || tag != uint64_t(Location::Kind::Mounted),
+          "Legacy conversion cannot carry a mounted backend");
     Location l;
-    l.type = int(d.get());
-    l.id = uint32_t(d.get());
     l.cut = d.get() != 0;
     l.directory = d.get() != 0;
-    l.windowsPath = d.wide();
-    l.classicImage = d.text();
-    l.classicPath = d.text();
-    l.expectedCatalogId = uint32_t(d.get());
-    l.expectedParent = uint32_t(d.get());
-    l.mediaGenerationKnown = d.get() != 0;
-    l.mediaGeneration = DWORD(d.get());
+    l.expectedCatalogId = CatalogNumber(d);
+    l.expectedParent = CatalogNumber(d);
     l.expectedIdentity = d.text();
     l.expectedResource = d.text();
     l.expectedName = d.u16();
-    bool native = d.get() != 0;
-    if (native) {
+    switch (Location::Kind(tag)) {
+    case Location::Kind::None:
+        return l;
+    case Location::Kind::Windows:
+        l.SetWindows(d.wide());
+        return l;
+    case Location::Kind::ClassicImage: {
+        auto image = d.text(), path = d.text();
+        l.SetImage(std::move(image), std::move(path));
+        break;
+    }
+    case Location::Kind::ClassicMedia: {
+        auto drive = d.get(), media = d.get();
+        Check(drive < 26 && media <= uint64_t(ClassicMedia::Cd), "Invalid physical worker location");
+        auto path = d.text();
+        auto generation = d.get();
+        Check(generation <= 1, "Invalid media-generation presence flag");
+        auto guard = l;
+        l = Location::Physical(int(drive), ClassicMedia(media), std::move(path));
+        l.cut = guard.cut;
+        l.directory = guard.directory;
+        l.expectedCatalogId = guard.expectedCatalogId;
+        l.expectedParent = guard.expectedParent;
+        l.expectedIdentity = std::move(guard.expectedIdentity);
+        l.expectedResource = std::move(guard.expectedResource);
+        l.expectedName = std::move(guard.expectedName);
+        if (generation)
+            l.BindMediaGeneration(CatalogNumber(d));
+        return l;
+    }
+    case Location::Kind::Mounted: {
+        auto selectedId = CatalogNumber(d);
+        Check(selectedId >= 2, "Invalid mounted catalog identifier");
         auto origin = DecodeOrigin(d);
+        auto count = d.get();
+        Check(count <= 128, "Invalid worker path depth");
+        std::vector<Entry> path;
+        for (uint64_t i = 0; i < count; ++i) {
+            Entry e;
+            e.name = d.u16();
+            e.resolvedId = CatalogNumber(d);
+            e.version = CatalogNumber(d);
+            e.directory = d.get() != 0;
+            e.identity = d.text();
+            path.push_back(std::move(e));
+        }
         Data key;
         EncodeOrigin(key, origin);
         auto found = mounts.volumes.find(key.bytes);
         if (found == mounts.volumes.end())
             found = mounts.volumes.emplace(key.bytes, OpenOrigin(origin)).first;
-        l.volume = found->second;
-        auto selectedId = l.id;
-        l.id = 2;
-        bool stable = !strcmp(l.volume->Kind(), "HFS+") || !strcmp(l.volume->Kind(), "HFSX");
-        auto count = d.get();
+        auto volume = found->second;
+        uint32_t id = 2;
+        bool stable = !strcmp(volume->Kind(), "HFS+") || !strcmp(volume->Kind(), "HFSX");
         Check(!stable || count == 1, "Invalid stable catalog endpoint");
-        Check(count <= 128, "Invalid worker path depth");
-        for (uint64_t i = 0; i < count; ++i) {
-            auto name = d.u16();
-            auto raw = d.get(), version = d.get();
-            bool directory = d.get() != 0;
-            auto identity = d.text();
+        for (auto &segment : path) {
             bool matched = false;
-            auto candidates = stable ? std::vector<Entry>{l.volume->Stat(selectedId)} : l.volume->List(l.id);
+            auto candidates = stable ? std::vector<Entry>{volume->Stat(selectedId)} : volume->List(id);
             for (auto &e : candidates)
-                if (e.name == name && e.version == version && e.directory == directory &&
-                    (!raw || e.resolvedId == raw)) {
+                if (e.name == segment.name && e.version == segment.version &&
+                    e.directory == segment.directory &&
+                    (!segment.resolvedId || e.resolvedId == segment.resolvedId)) {
                     Check(!matched, "Ambiguous worker source path");
-                    Check(origin.kind == WorkerOrigin::Removable || e.identity == identity,
+                    Check(origin.kind == WorkerOrigin::Removable || e.identity == segment.identity,
                           "The selected entry changed before worker execution");
-                    l.id = e.id;
+                    id = e.id;
                     matched = true;
                 }
             Check(matched, "The selected entry is no longer present");
         }
-        auto e = l.volume->Stat(l.id);
+        l.SetMounted(volume, id);
+        auto e = volume->Stat(id);
         l.expectedIdentity = e.identity;
         l.expectedParent = e.parent;
         l.expectedName = e.name;
+        return l;
+    }
     }
     return l;
 }
@@ -406,10 +467,10 @@ void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fault) {
     d.put(uint64_t(r.kind));
     d.u16(r.name);
     d.put(r.fork);
-    d.put(r.sourceVolume);
-    d.put(r.sourcePath);
-    d.put(r.targetVolume);
-    d.put(r.targetPath);
+    if (r.kind == Kind::LegacyCopy) {
+        EncodeEndpoint(d, Endpoint{r.legacySource, {}, {}});
+        EncodeEndpoint(d, Endpoint{r.legacyTarget, {}, {}});
+    }
     d.put(r.directory);
     d.put(r.move);
     d.put(uint8_t(r.conversion.output));
@@ -429,10 +490,11 @@ void DecodeSettings(Data &d, Request &r, HANDLE &parent, unsigned &fault) {
     r.kind = Kind(kind);
     r.name = d.u16();
     r.fork = unsigned(d.get());
-    r.sourceVolume = d.text();
-    r.sourcePath = d.text();
-    r.targetVolume = d.text();
-    r.targetPath = d.text();
+    if (r.kind == Kind::LegacyCopy) {
+        WorkerMounts unused;
+        r.legacySource = DecodeEndpoint(d, unused, false);
+        r.legacyTarget = DecodeEndpoint(d, unused, false);
+    }
     r.directory = d.get() != 0;
     r.move = d.get() != 0;
     r.conversion.output = char(d.get());
@@ -519,6 +581,9 @@ struct Handoff {
 struct Process {
     Handle input, output, process, thread, parent;
     DWORD pid = 0;
+#ifdef HFV_TESTING
+    Handle gate;
+#endif
     ~Process() {
         input.reset();
         output.reset();
@@ -543,6 +608,13 @@ struct Process {
         std::vector<HANDLE> inherited{childInput.value, childOutput.value, parent.value};
         for (auto &f : files)
             inherited.push_back(f.handle);
+#ifdef HFV_TESTING
+        if (fault == 7) {
+            Check(ioGate.load() != nullptr, "Missing process-test gate");
+            gate.reset(ImageHandleTransfer::Duplicate(ioGate.load(), true));
+            inherited.push_back(gate.value);
+        }
+#endif
         SIZE_T size = 0;
         InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
         std::vector<uint8_t> attributes(size);
@@ -586,6 +658,22 @@ struct Process {
     }
 };
 } // namespace
+#ifdef HFV_TESTING
+std::vector<uint8_t> EncodeLocationForTest(const Location &location) {
+    Check(!location.IsMounted(), "This codec test does not open mounted volumes");
+    Data data;
+    EncodeEndpoint(data, Endpoint{location, {}, {}});
+    return data.bytes;
+}
+Location DecodeLocationForTest(const std::vector<uint8_t> &bytes) {
+    Data data;
+    data.bytes = bytes;
+    WorkerMounts none;
+    auto location = DecodeEndpoint(data, none, false);
+    data.end();
+    return location;
+}
+#endif
 bool UsesWorker(const Request &request) {
 #ifdef HFV_TESTING
     if (!enabled)
@@ -600,6 +688,11 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
     for (auto &source : request.sources)
         sources.push_back(Capture(source));
     auto target = Capture(request.target);
+    auto execution = request;
+    if (request.kind == Kind::LegacyCopy) {
+        execution.legacySource = Capture(request.legacySource).location;
+        execution.legacyTarget = Capture(request.legacyTarget).location;
+    }
     Handoff handoff;
     Storage::Result result;
     bool launched = false;
@@ -615,10 +708,15 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         unsigned testFault = 0;
 #endif
         Data settings;
-        EncodeSettings(settings, request, worker.parent.value, testFault);
+        EncodeSettings(settings, execution, worker.parent.value, testFault);
         Send(worker.input.value, Settings, std::move(settings));
 
 #ifdef HFV_TESTING
+        if (worker.gate.value) {
+            Data gate;
+            gate.put(uintptr_t(worker.gate.value));
+            Send(worker.input.value, IoGate, std::move(gate));
+        }
         if (!floppyFixture.empty()) {
             Data d;
             d.wide(floppyFixture);
@@ -734,6 +832,7 @@ int Child(const char *inputText, const char *outputText) {
            output = HANDLE(uintptr_t(_strtoui64(outputText, nullptr, 10)));
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     try {
+        HANDLE ioGate = nullptr;
         std::wstring floppyPath;
         DWORD floppyGeneration = 7;
         TypeMappings::Snapshot mappings;
@@ -763,6 +862,13 @@ int Child(const char *inputText, const char *outputText) {
                 floppyGeneration = DWORD(d.get());
 #else
                 throw HfsPlus::Error("Test fixtures are disabled");
+#endif
+            } else if (message == IoGate) {
+#ifdef HFV_TESTING
+                Check(!ioGate, "Repeated test gate");
+                ioGate = HANDLE(uintptr_t(d.get()));
+#else
+                throw HfsPlus::Error("Test gates are disabled");
 #endif
             } else if (message == Mapping) {
                 auto direction = d.get();
@@ -894,17 +1000,29 @@ int Child(const char *inputText, const char *outputText) {
                 }
                 request.target = DecodeEndpoint(target, mounts);
                 target.end();
-                if (request.kind == Kind::ReplaceResource && !request.target.volume &&
-                    request.target.type == LIST_FAT) {
-                    auto endpoint = ResolveWindowsFile(request.target.windowsPath);
-                    request.target.volume = endpoint.first;
-                    request.target.id = endpoint.second;
+                if (request.kind == Kind::ReplaceResource && !request.target.Volume() &&
+                    request.target.LegacyType() == LIST_FAT) {
+                    auto endpoint = ResolveWindowsFile(request.target.WindowsPath());
+                    request.target.SetMounted(endpoint.first, endpoint.second);
                     auto e = endpoint.first->Stat(endpoint.second);
                     request.target.expectedParent = e.parent;
                 }
 #ifdef HFV_TESTING
                 bool injected = false;
+                unsigned bulkReads = 0;
                 HfsPlus::workerIoFault = [&](bool write, uint64_t, size_t n) {
+                    if (testFault == 7 && !write && n >= 65536 && ++bulkReads >= 2) {
+                        Check(ioGate != nullptr, "Missing inherited test gate");
+                        auto progress = job.progress();
+                        progress.phase = "Worker test gate";
+                        job.progress(progress);
+                        DWORD until = GetTickCount() + 40000;
+                        while (WaitForSingleObject(ioGate, 10) != WAIT_OBJECT_0) {
+                            if (job.cancelled())
+                                throw Storage::Cancelled();
+                            Check(LONG(until - GetTickCount()) > 0, "Process-test gate timed out");
+                        }
+                    }
                     if (testFault == 2 && !write && n >= 65536)
                         Sleep(100);
                     if (testFault == 3 && !write && n >= 65536 && !injected) {
@@ -933,7 +1051,7 @@ int Child(const char *inputText, const char *outputText) {
             HfsPlus::workerIoFault = {};
 #endif
             request.sources.clear();
-            request.target.volume.reset();
+            request.target = {};
             mounts.volumes.clear();
         }
         if (!safe && !result.code)

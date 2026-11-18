@@ -11,11 +11,11 @@ namespace BrowserTransfers {
 namespace {
 Selection clipboard;
 uint64_t revision=0;
-std::string Resource(const FileOperations::Location& p){if(p.volume)return p.volume->ResourceKey();return p.type==LIST_FAT?VolumeCoord::HostKey(p.windowsPath):VolumeCoord::ImageKey(p.classicImage);}
+std::string Resource(const FileOperations::Location& p){return p.StorageKey();}
 bool Same(const FileOperations::Location& a,const FileOperations::Location& b){
- if(a.type!=b.type||Resource(a)!=Resource(b))return false;
- if(a.volume||b.volume)return a.volume&&b.volume&&a.id==b.id;
- return a.type==LIST_FAT?!_wcsicmp(a.windowsPath.c_str(),b.windowsPath.c_str()):!_stricmp(a.classicPath.c_str(),b.classicPath.c_str());
+ if(a.LegacyType()!=b.LegacyType()||Resource(a)!=Resource(b))return false;
+ if(a.Volume()||b.Volume())return a.Volume()&&b.Volume()&&a.Id()==b.Id();
+ return a.LegacyType()==LIST_FAT?!_wcsicmp(a.WindowsPath().c_str(),b.WindowsPath().c_str()):!_stricmp(a.ClassicPath().c_str(),b.ClassicPath().c_str());
 }
 struct Target {
  BrowserSession* session=nullptr;HWND control=nullptr;HTREEITEM item=nullptr;int row=-1;bool tree=false,writable=false;
@@ -27,9 +27,7 @@ Target Resolve(BrowserSession& session,bool tree,HTREEITEM item,int row){
  out.control=tree?tv->GetSafeHwnd():list->GetSafeHwnd();
  if(!tree&&row>=0){auto p=list->BrowserRowAt(row);if(!p||!p->entry.directory)return {};out.writable=p->capabilities.create;auto binding=reinterpret_cast<list_lparam_struct*>(list->GetListCtrl().GetItemData(row));item=binding?binding->htree:nullptr;if(!item)return {};}
  else if(!tree)out.writable=list->BrowserDirectoryWritable();
- try{out.folder=session.MacBrowser().TargetFolder(item);if(tree)out.writable=out.folder.volume?out.folder.volume->Supports().create:
-  out.folder.type==LIST_FAT?session.Document()->m_fats[out.folder.index].m_type!=DRIVE_CDROM:
-  !session.Document()->m_volumes[out.folder.index].m_is_cd;}
+ try{out.folder=session.MacBrowser().TargetFolder(item);if(tree){auto binding=reinterpret_cast<lparam_struct*>(tv->m_ct->GetItemData(item));if(!binding)return {};out.writable=out.folder.IsMounted()?out.folder.Volume()->Supports().create:out.folder.IsWindows()?session.Document()->m_fats[binding->volinx].m_type!=DRIVE_CDROM:!session.Document()->m_volumes[binding->volinx].m_is_cd;}}
  catch(const std::exception&){return {};}
  return out;
 }
@@ -50,6 +48,7 @@ bool Transfer(const Selection& selection,Target& target,UINT keys){
 Selection Snapshot(){return clipboard;}
 void Publish(Selection value,bool append){
  if(value.items.empty())return;
+ for(const auto& item:value.items)if(item.IsNone())throw HfsPlus::Error("Clipboard entries need a file location");
  bool movable=value.canMove&&(!append||clipboard.items.empty()||clipboard.canMove);
  if(!append)clipboard={};
  for(auto& item:value.items){auto found=std::find_if(clipboard.items.begin(),clipboard.items.end(),[&](const FileOperations::Location& p){return Same(item,p);});if(found==clipboard.items.end())clipboard.items.push_back(std::move(item));else *found=std::move(item);}
@@ -66,7 +65,7 @@ bool Paste(BrowserSession& session){
  return true;
 }
 Effect Choose(const Selection& selection,const FileOperations::Location& target,bool writable,UINT keys){
- if(!writable||selection.items.empty()||StorageUi::busy()||StorageUi::state().sessionOpen)return Effect::None;
+ if(!writable||target.IsNone()||selection.items.empty()||std::any_of(selection.items.begin(),selection.items.end(),[](const FileOperations::Location& item){return item.IsNone();})||StorageUi::busy()||StorageUi::state().sessionOpen)return Effect::None;
  if(keys&MK_CONTROL)return Effect::Copy;
  if(keys&MK_SHIFT)return selection.canMove?Effect::Move:Effect::None;
  if(!selection.canMove)return Effect::Copy;
