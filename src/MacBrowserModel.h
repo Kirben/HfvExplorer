@@ -96,6 +96,12 @@ public:
     virtual void SetBasicMetadata(uint32_t,const Entry&){throw HfsPlus::Error("This format has no basic metadata editor");}
     virtual uint32_t MakeDirectory(uint32_t parent, const std::u16string &) = 0;
     virtual uint32_t Put(uint32_t parent, const Entry &, Reader, bool replace) = 0;
+    // A backend that can read the original data fork locally reports those
+    // bytes separately so the caller can update progress and cancel.
+    virtual uint32_t PutResourceReplacement(uint32_t, const Entry& entry, Reader reader,
+                                             std::function<void(uint64_t,size_t)>) {
+        return Put(entry.parent, entry, std::move(reader), true);
+    }
     virtual void Rename(uint32_t id, uint32_t parent, const std::u16string &) = 0;
     virtual void Remove(uint32_t id) = 0;
 };

@@ -168,20 +168,43 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
 Storage::Result ExportFork(const ExportFileFork& request,Storage::Job& job,Completion& completion){
  const auto fork=static_cast<unsigned>(request.fork);auto source=Source(request.source);auto entry=source.first->Stat(source.second);Check(!entry.directory,"Select a file for fork export");
  source.first->Read(source.second,fork,0,nullptr,0);auto& path=request.output.WindowsPath();
- HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create output; choose a new filename");
- Mark(completion,request.output);
- try{std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Exporting fork";progress.totalFiles=1;progress.path=Utf8(entry.name);progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
+ HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create output; choose a new filename");
+ try{Mark(completion,request.output);std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Exporting fork";progress.totalFiles=1;progress.path=Utf8(entry.name);progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
   for(uint64_t at=0;at<entry.forks[fork].size;){Cancel(job);size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));source.first->Read(source.second,fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Fork export write failed");at+=n;progress.bytes=progress.fileBytes=progress.processed=at;job.progress(progress);}
-  if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Fork export flush failed");CloseHandle(file);
- }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
+  Cancel(job);
+  if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Fork export flush failed");
+  CloseHandle(file);
+ }catch(...){
+  FILE_DISPOSITION_INFO remove{TRUE};
+  const bool deleted=SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove))!=FALSE;
+  const auto error=GetLastError();
+  CloseHandle(file);
+  if(!deleted){Storage::OutcomeEvidence::NoteRetainedChange();throw Failure(error,"Could not remove the incomplete fork export");}
+  throw;
+ }
  completion.complete=true;completion.completed=1;return {};
 }
 Storage::Result ReplaceResource(const ImportResourceFork& request,Storage::Job& job,Completion& completion){
  auto from=Source(request.input),target=Source(request.file);auto volume=target.first;uint32_t id=target.second;auto original=volume->Stat(id),replacement=original;Check(!original.directory,"Select a file for resource import");
- replacement.forks[1].size=from.first->Stat(from.second).forks[0].size;replacement.modified=uint64_t(time(nullptr))+2082844800ULL;Cancel(job);
+ const auto input=from.first->Stat(from.second);
+ Check(!input.directory,"Select a file containing the replacement resource fork");
+ replacement.forks[1].size=input.forks[0].size;replacement.modified=uint64_t(time(nullptr))+2082844800ULL;Cancel(job);
  Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Importing resource fork";progress.totalFiles=1;progress.path=Utf8(original.name);progress.totalBytes=progress.fileTotal=replacement.forks[0].size+replacement.forks[1].size;
  uint64_t readThrough[2]={};Mark(completion,request.file);
- volume->Put(original.parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){Cancel(job);if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);Cancel(job);auto end=at+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.bytes+=added;progress.fileBytes+=added;progress.processed+=added;job.progress(progress);},true);
+ auto report=[&](unsigned fork,uint64_t at,size_t n){
+  Cancel(job);
+  auto end=at+n,added=end>readThrough[fork]?end-readThrough[fork]:0;
+  readThrough[fork]=(std::max)(readThrough[fork],end);
+  progress.bytes+=added;progress.fileBytes+=added;progress.processed+=added;
+  job.progress(progress);
+  Cancel(job);
+ };
+ volume->PutResourceReplacement(id,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){
+  Cancel(job);
+  if(fork)from.first->Read(from.second,0,at,data,n);
+  else volume->Read(id,0,at,data,n);
+  report(fork,at,n);
+ },[&](uint64_t at,size_t n){report(0,at,n);});
  if(!request.input.Volume())from.first->Close();completion.complete=true;completion.completed=1;return {};
 }
 

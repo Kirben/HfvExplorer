@@ -791,9 +791,18 @@ public:
         return id;
     }
     uint32_t Put(uint32_t parent, const Entry& entry, Reader reader, bool replace) override {
+        return StreamPut(parent, entry, std::move(reader), replace, 0, {});
+    }
+    uint32_t PutResourceReplacement(uint32_t id, const Entry& entry, Reader reader,
+                                     std::function<void(uint64_t,size_t)> localProgress) override {
+        return StreamPut(entry.parent, entry, std::move(reader), true, id, std::move(localProgress));
+    }
+private:
+    uint32_t StreamPut(uint32_t parent, const Entry& entry, Reader reader, bool replace, uint32_t original,
+                       std::function<void(uint64_t,size_t)> localProgress) {
         std::lock_guard<std::mutex> lock(mutex_);
         Data args;
-        args.put(parent); args.put(replace); args.put(entry.attributesKnown);
+        args.put(parent); args.put(replace); args.put(entry.attributesKnown); args.put(original);
         EncodeEntry(args, entry);
         uint32_t id = 0;
         std::exception_ptr sourceFailure;
@@ -819,14 +828,20 @@ public:
                     Check(fork <= 1 && size && size <= sessionReadLimit, "Invalid fork transfer range");
                     const auto length = fork ? entry.forks[1].size : entry.forks[0].size;
                     Check(offset <= length && size <= length - offset, "Fork transfer exceeds source length");
+                    const bool localRead = original && !fork;
                     Data bytes;
                     try {
-                        bytes.bytes.resize(size_t(size));
-                        reader(unsigned(fork), offset, bytes.bytes.data(), bytes.bytes.size());
+                        if (localRead) {
+                            if (localProgress) localProgress(offset, size_t(size));
+                        } else {
+                            bytes.bytes.resize(size_t(size));
+                            reader(unsigned(fork), offset, bytes.bytes.data(), bytes.bytes.size());
+                        }
                     } catch (...) {
                         sourceFailure = std::current_exception();
                     }
                     if (sourceFailure) Send(worker_->input.value, Cancel);
+                    else if (localRead) Send(worker_->input.value, SessionContinue);
                     else Send(worker_->input.value, SessionBytes, std::move(bytes));
                 }
             }, &entry.attributes);
@@ -836,6 +851,7 @@ public:
         }
         return id;
     }
+public:
     bool CopyWithin(const std::vector<uint32_t>& ids, uint32_t parent, Storage::Job& job) {
         // Leave room for the command, destination catalog ID, and selection count.
         Check(!ids.empty() && ids.size() <= FrameLimit(SessionCommand) / 8 - 3, "Same-image copy selection exceeds the worker request size");
@@ -1049,26 +1065,42 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             case SessionCommandCode::Put: {
                 const auto parent = number(packet);
                 const auto replace = packet.flag(), attributesKnown = packet.flag();
+                const auto original = number(packet);
                 auto entry = DecodeEntry(packet); packet.end();
                 entry.attributesKnown = attributesKnown;
                 entry.attributes = std::move(*attributes[0]);
-                const auto id = volume.Put(parent, entry, [&](unsigned fork, uint64_t offset, void* out, size_t size) {
+                if (original) {
+                    const auto current = volume.Stat(original);
+                    Check(replace && entry.id == original && !current.directory && current.parent == parent &&
+                          current.name == entry.name && current.forks[0].size == entry.forks[0].size,
+                          "The file changed before resource fork replacement");
+                }
+                auto read = [&](unsigned fork, uint64_t offset, void* out, size_t size) {
 #ifdef HFV_TESTING
                     if (command == SessionCommandCode::TestCrashPut && (fork || offset)) ExitProcess(80);
 #endif
                     auto* buffer = static_cast<uint8_t*>(out);
                     while (size) {
                         const auto count = (std::min)(size, sessionReadLimit);
+                        const bool localRead = original && !fork;
+                        if (localRead) volume.Read(original, 0, offset, buffer, count);
                         Data range; range.put(fork); range.put(offset); range.put(count);
                         Send(output, SessionReadRequest, std::move(range));
                         Data bytes;
                         const auto reply = Receive(input, bytes);
                         if (reply == Cancel) { bytes.end(); throw Storage::Cancelled(); }
-                        Check(reply == SessionBytes && bytes.bytes.size() == count, "Invalid fork transfer data");
-                        memcpy(buffer, bytes.bytes.data(), count);
+                        if (localRead) {
+                            Check(reply == SessionContinue, "Invalid original data fork response");
+                            bytes.end();
+                        } else {
+                            Check(reply == SessionBytes && bytes.bytes.size() == count, "Invalid fork transfer data");
+                            memcpy(buffer, bytes.bytes.data(), count);
+                        }
                         offset += count; buffer += count; size -= count;
                     }
-                }, replace);
+                };
+                const auto id = original ? volume.PutResourceReplacement(original, entry, std::move(read), {})
+                                         : volume.Put(parent, entry, std::move(read), replace);
                 writeNumber(id);
                 break;
             }
@@ -1303,6 +1335,9 @@ bool UsesWorker(const Request &request) {
         const char mode = conversion->source.IsWindows() ? conversion->options.input : conversion->options.output;
         if (mode && strchr("ambt5rR", mode)) return false;
     }
+    if (auto* output=request.Get<ExportFileFork>(); output && persistent(output->source)) return false;
+    if (auto* input=request.Get<ImportResourceFork>(); input && persistent(input->file) && windows(input->input))
+        return false;
     if(auto* rename=request.Rename(); rename&&persistent(rename->source)) return false;
     if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
         std::all_of(deletion->selection.begin(),deletion->selection.end(),persistent)) return false;

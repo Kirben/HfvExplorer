@@ -207,7 +207,19 @@ public:
         time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),time_t(int64_t(desired.modified)-2082844800LL)};
         Check(hfs_setdirmetadata(volume_,const_cast<char*>(path.c_str()),long(expected.resolvedId),merge?nullptr:desired.finder.data(),desired.datesValid?dates:nullptr)==0);
     }
-    uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {LegacyEngine::Scope engine(context_);
+    uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {
+        return PutFile(parent,e,std::move(read),replace,nullptr);
+    }
+    uint32_t PutResourceReplacement(uint32_t id,const Entry& entry,Reader reader,
+                                    std::function<void(uint64_t,size_t)>)override {
+        LegacyEngine::Scope engine(context_);
+        hfsdirent original{};
+        GetClassicProperties(id,original);
+        return PutFile(entry.parent,entry,std::move(reader),true,&original);
+    }
+private:
+    uint32_t PutFile(uint32_t parent,const Entry& e,Reader read,bool replace,const hfsdirent* original) {
+        LegacyEngine::Scope engine(context_);
         ValidateEntry(e);BeforeWrite();RootScope scope(volume_);
         if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
         auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(e.name);hfsdirent old;bool exists=hfs_stat(volume_,const_cast<char*>(path.c_str()),&old)==0;
@@ -222,6 +234,10 @@ public:
                     read(fork,at,bytes.data(),n);Check(hfs_write(file,bytes.data(),(unsigned long)n)==n);at+=n;}}
             hfsdirent meta;Check(hfs_fstat(file,&meta)==0);meta.fdflags=HfsPlus::Disk::U16(e.finder.data()+8);
             if(e.datesValid){meta.crdate=time_t(int64_t(e.created)-2082844800LL);meta.mddate=time_t(int64_t(e.modified)-2082844800LL);}
+            if(original){
+                meta.bkdate=original->bkdate;
+                meta.flags=(meta.flags&~HFS_ISLOCKED)|(original->flags&HFS_ISLOCKED);
+            }
             Check(hfs_fsetattr(file,&meta)==0);Check(hfs_fsetfinderinfo(file,e.finder.data())==0);
         }catch(...){result=-1;failure=std::current_exception();}
         if(hfs_close(file)<0){result=-1;error=hfs_error;}
@@ -229,6 +245,7 @@ public:
         if(result){if(!exists)hfs_note_rollback(hfs_delete(volume_,const_cast<char*>(path.c_str()))==0?1:3);if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
         Check(hfs_flush(volume_)==0);return Id(path);
     }
+public:
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}
     void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{LegacyEngine::Scope engine(context_);
         auto from=dynamic_cast<Classic*>(&source);Check(from&&CanMoveFrom(source));BeforeWrite();RootScope scope(volume_);
