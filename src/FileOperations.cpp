@@ -4,6 +4,7 @@
 #include "FileOperations.h"
 #include "CopyProcess.h"
 #include "TransferConversion.h"
+#include "TypeMappingSnapshot.h"
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
@@ -374,13 +375,57 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
  return access;
 }
 
+Reader AdaptRawClassic(Volume& source, Entry& entry, bool importing, bool resource,
+                      const TypeMappings::Snapshot& mappings) {
+ Check(entry.attributes.empty(),"Raw copy cannot preserve extended attributes or Mac ACLs");
+ const auto dot=entry.name.rfind(u'.');
+ if(importing){
+  entry.finder.fill(0);
+  memcpy(entry.finder.data(),"????UNIX",8);
+  if(dot!=entry.name.npos && entry.name.size()-dot<30){
+   const auto suffix=Wide(entry.name.substr(dot+1));
+   const auto mapping=std::find_if(mappings.windowsToHfs.begin(),mappings.windowsToHfs.end(),
+      [&](const auto& value){return !_wcsicmp(Wide(Ansi(value.first)).c_str(),suffix.c_str());});
+   if(mapping!=mappings.windowsToHfs.end() && mapping->second.size()==9){
+    memcpy(entry.finder.data(),mapping->second.data(),8);
+    // The legacy resource import keeps the extension even when Strip is set.
+    if(!resource && dot && mapping->second[8]=='x')entry.name.resize(dot);
+   }
+  }
+  const auto size=entry.forks[0].size;
+  entry.forks[0].size=resource?0:size;
+  entry.forks[1].size=resource?size:0;
+ }else{
+  const std::string typeCreator(reinterpret_cast<const char*>(entry.finder.data()),8);
+  const auto mapping=std::find_if(mappings.hfsToWindows.begin(),mappings.hfsToWindows.end(),
+     [&](const auto& value){return value.first==typeCreator;});
+  if(mapping!=mappings.hfsToWindows.end() && (dot==entry.name.npos || entry.name.size()-dot>6)){
+   const auto suffix=Ansi(mapping->second);
+   if(dot!=entry.name.npos)entry.name.resize(dot);
+   if(suffix.empty() || suffix.front()!=u'.')entry.name+=u'.';
+   entry.name+=suffix;
+  }
+  entry.forks[0].size=entry.forks[resource?1:0].size;
+  entry.forks[1].size=0;
+  entry.portableContainer=true;
+ }
+ const auto inputFork=!importing && resource ? 1u : 0u;
+ const auto id=entry.id;
+ return [&source,id,inputFork](unsigned, uint64_t at,void* buffer,size_t count){
+  source.Read(id,inputFork,at,buffer,count);
+ };
+}
+
 std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion, Storage::Job& job,
                                               Completion& completion) {
  const bool importing=conversion.source.IsWindows() && conversion.destination.IsClassic();
  const bool exporting=conversion.source.IsClassic() && conversion.destination.IsWindows();
  if(!importing && !exporting) return {};
  char mode=importing ? conversion.options.input : conversion.options.output;
- if(!TransferConversion::Supported(mode) && mode!='a') return {};
+ const bool mounted=CopyProcess::ConvertsWithMountedClassic(conversion);
+ const bool raw=mounted && (mode=='r' || mode=='R');
+ if(!TransferConversion::Supported(mode) && mode!='a' && !raw) return {};
+ const auto mappings=raw?TypeMappings::Capture():TypeMappings::Snapshot{};
  auto sourceLocation=conversion.selection ? conversion.selection->source : conversion.source;
  sourceLocation.cut=conversion.move;
  auto source=Source(sourceLocation);
@@ -415,13 +460,14 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
  if(conversion.move) snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job,bool(sourceLocation.Volume())));
  TransferAdapter adapt=[&](Volume& volume,Entry& entry,Storage::Job& active,bool root) {
   char selected=mode;
+  bool paired=false;
+  if(importing && (selected=='a' || raw) && conversion.options.appledouble && !entry.directory) {
+   const auto path=volume.HostPath(entry.id);
+   const auto slash=path.find_last_of(L"\\/");
+   if(slash!=path.npos)paired=WindowsResourceCompanion(path.substr(0,slash+1)+L"%"+path.substr(slash+1));
+  }
   if(selected=='a' && !entry.directory) {
    if(importing) {
-    const auto path=volume.HostPath(entry.id);
-    const auto slash=path.find_last_of(L"\\/");
-    const auto companion=slash==path.npos ? std::wstring{} : path.substr(0,slash+1)+L"%"+path.substr(slash+1);
-    const bool paired=conversion.options.appledouble && !companion.empty() &&
-                       WindowsResourceCompanion(companion);
     const auto dot=entry.name.rfind(u'.');
     const auto suffix=dot==entry.name.npos ? std::wstring{} : Wide(entry.name.substr(dot));
     if(paired) selected='&';
@@ -437,7 +483,8 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
    else selected=entry.forks[1].size ? 'm' : 'r';
   }
   Reader reader;
-  if(TransferConversion::Supported(selected)) reader=TransferConversion::Adapt(selected,importing,volume,entry,active);
+  if(raw && !entry.directory && !paired) reader=AdaptRawClassic(volume,entry,importing,mode=='R',mappings);
+  else if(TransferConversion::Supported(selected)) reader=TransferConversion::Adapt(selected,importing,volume,entry,active);
   if(root && !outputName.empty()) entry.name=outputName;
   else if(exporting) {
    for(auto& c:entry.name) {
