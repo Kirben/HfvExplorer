@@ -123,8 +123,15 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);Storage::OutcomeEvidence::NoteRetainedChange();++progress.files;job.progress(progress);}
  return true;
 }
-enum class ExecutionRoute { Local, MountedCopy, TemporaryWorker };
-Storage::Result CopyRequest(const OrdinaryCopy& request,ExecutionRoute route,Storage::Job& job,Completion& completion){
+enum class ExecutionRoute { Local, TemporaryWorker };
+struct ExecutionPlan {
+ ExecutionRoute route=ExecutionRoute::Local;
+ std::vector<VolumeCoord::Access> resources;
+ std::vector<MacBrowser::ForkSource> copySources;
+};
+
+Storage::Result CopyRequest(const OrdinaryCopy& request,const std::vector<MacBrowser::ForkSource>& routes,
+                            Storage::Job& job,Completion& completion){
  Check(!request.sources.empty(),"Select a source file or folder");
  HFSIFACE_get_dir_flush();
  std::vector<std::string> snapshots;
@@ -144,12 +151,7 @@ Storage::Result CopyRequest(const OrdinaryCopy& request,ExecutionRoute route,Sto
   if(!inPlace){
    for(size_t i=0;i<request.sources.size();++i)
     snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
-   if(route==ExecutionRoute::MountedCopy){
-    std::vector<uint32_t> ids;
-    ids.reserve(opened.size());
-    for(const auto& source:opened)ids.push_back(source.second);
-    complete=VolumeSession::CopyWithinMountedImage(*destination.first,ids,destination.second,job);
-   }else complete=CopyMany(opened,*destination.first,destination.second,job);
+   complete=CopyMany(opened,*destination.first,destination.second,job,{},routes);
   }
   if(!request.destination.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
@@ -376,8 +378,6 @@ bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
     return false;
 }
 ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
-    if (const auto* copy=request.Get<OrdinaryCopy>(); copy && VolumeSession::CopiesWithinMountedImage(*copy))
-        return ExecutionRoute::MountedCopy;
     if (inWorker) return ExecutionRoute::Local;
 #ifdef HFV_TESTING
     if (!CopyProcess::enabled)
@@ -387,17 +387,13 @@ ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
     auto windows=[](const Location& item) {
         return item.IsWindows() || (item.IsMounted() && !strcmp(item.Volume()->Kind(), "Windows"));
     };
-    if (auto* copy = request.Get<OrdinaryCopy>(); copy && !copy->sources.empty()) {
-        if (persistent(copy->destination)) {
-            const auto destinationKey = copy->destination.Volume()->ResourceKey();
-            if (std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
-                return windows(source) || (persistent(source) && source.Volume()->ResourceKey() != destinationKey);
-            })) return ExecutionRoute::Local;
-        } else if (windows(copy->destination) &&
-                   std::any_of(copy->sources.begin(), copy->sources.end(), persistent) &&
-                   std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
-                       return windows(source) || persistent(source);
-                   })) return ExecutionRoute::Local;
+    if (const auto* copy=request.Get<OrdinaryCopy>()) {
+        // A mounted destination can stage inputs from any supported source.
+        // For Windows exports, stream a mixed selection when at least one
+        // source is mounted, so exporting another item does not suspend it.
+        if(persistent(copy->destination) || (windows(copy->destination)&&
+           std::any_of(copy->sources.begin(),copy->sources.end(),persistent)))
+            return ExecutionRoute::Local;
     }
     if (auto* conversion = request.Conversion(); conversion && ConvertsWithMountedClassic(*conversion)) {
         const char mode = conversion->source.IsWindows() ? conversion->options.input : conversion->options.output;
@@ -503,14 +499,17 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request, Execution
  return access;
 }
 
-struct ExecutionPlan {
- ExecutionRoute route=ExecutionRoute::Local;
- std::vector<VolumeCoord::Access> resources;
-};
 ExecutionPlan PlanOperation(const Request& request, bool inWorker=false){
  ValidateRequest(request);
  const auto route=SelectRoute(request,inWorker);
- return {route,BindResources(request,route)};
+ ExecutionPlan plan{route,BindResources(request,route),{}};
+ if(const auto* copy=request.Get<OrdinaryCopy>();copy&&route==ExecutionRoute::Local){
+  plan.copySources.reserve(copy->sources.size());
+  for(const auto& source:copy->sources)
+   plan.copySources.push_back(VolumeSession::SharesMountedImage(source,copy->destination)
+       ?MacBrowser::ForkSource::MountedWorker:MacBrowser::ForkSource::Stream);
+ }
+ return plan;
 }
 
 Reader AdaptRawClassic(Volume& source, Entry& entry, bool importing, bool resource,
@@ -649,12 +648,12 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
  return result;
 }
 
-Storage::Result Execute(const Request& request,ExecutionRoute route,Storage::Job& job,Completion& completion){
+Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage::Job& job,Completion& completion){
  HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});Cancel(job);
  Cancel(job);
  if(const auto* link=request.Get<CreateHardLink>()){auto source=Source(link->source);auto target=Destination(link->parent);Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,link->source);MarkChild(completion,link->parent,link->name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,link->name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
  if(request.OperationKind()==Kind::CreateFolder||request.Metadata())return Metadata(request,job,completion);
- if(const auto* operation=request.Get<OrdinaryCopy>())return CopyRequest(*operation,route,job,completion);
+ if(const auto* operation=request.Get<OrdinaryCopy>())return CopyRequest(*operation,plan.copySources,job,completion);
  if(const auto* operation=request.Get<ExportFileFork>())return ExportFork(*operation,job,completion);
  if(const auto* operation=request.Get<ImportResourceFork>())return ReplaceResource(*operation,job,completion);
  if (const auto* rename = request.Rename())
@@ -825,7 +824,7 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
   const auto plan=PlanOperation(request,true);
   LegacyEngine::Scope engine;
   VolumeCoord::Lease access(plan.resources);
-  result=Execute(request,plan.route,job,completion);
+  result=Execute(request,plan,job,completion);
  }
  catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
  catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}
@@ -838,7 +837,9 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
 #ifdef HFV_TESTING
 PlanAccessForTest InspectPlanForTest(const Request& request,const std::string& key,bool inWorker){
  const auto plan=PlanOperation(request,inWorker);
- PlanAccessForTest result{plan.route==ExecutionRoute::TemporaryWorker,plan.route==ExecutionRoute::MountedCopy,false,false};
+ const auto local=std::count(plan.copySources.begin(),plan.copySources.end(),MacBrowser::ForkSource::MountedWorker);
+ PlanAccessForTest result{plan.route==ExecutionRoute::TemporaryWorker,local!=0,false,false,
+                          size_t(local),plan.copySources.size()-local};
  for(const auto& access:plan.resources)if(access.key==key){
   result.read|=access.mode==VolumeCoord::Mode::Read;
   result.write|=access.mode==VolumeCoord::Mode::Write;
@@ -857,7 +858,7 @@ Operation Submit(Request request){
    const auto route=plan->execution.route;
    const auto current=BindResources(*values,route);
    VolumeCoord::OperationLease currentPaths(current);
-   if(route==ExecutionRoute::TemporaryWorker){std::vector<std::string> keys,writes;for(auto& item:current){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}if(auto* copy=values->Get<OrdinaryCopy>()){Mark(completion,copy->destination);for(auto& item:copy->sources)if(item.cut)Mark(completion,item);}else if(auto* legacy=values->Conversion()){Mark(completion,legacy->destination);if(legacy->move)Mark(completion,legacy->source);}else if(auto* output=values->Get<ExportFileFork>())Mark(completion,output->output);else if(auto* input=values->Get<ImportResourceFork>())Mark(completion,input->file);result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,route,job,completion);}
+   if(route==ExecutionRoute::TemporaryWorker){std::vector<std::string> keys,writes;for(auto& item:current){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}if(auto* copy=values->Get<OrdinaryCopy>()){Mark(completion,copy->destination);for(auto& item:copy->sources)if(item.cut)Mark(completion,item);}else if(auto* legacy=values->Conversion()){Mark(completion,legacy->destination);if(legacy->move)Mark(completion,legacy->source);}else if(auto* output=values->Get<ExportFileFork>())Mark(completion,output->output);else if(auto* input=values->Get<ImportResourceFork>())Mark(completion,input->file);result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,plan->execution,job,completion);}
   }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
   catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}

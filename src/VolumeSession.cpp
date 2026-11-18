@@ -14,7 +14,7 @@ using namespace WorkerTransport;
 namespace {
 enum class SessionCommandCode {
     Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
-    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, CopyWithin, GetClassicProperties, SetClassicProperties, CloseClassic, FindMfs, SetBasicMetadata, TestCrashRename, TestCrashPut
+    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindMfs, SetBasicMetadata, TestCrashRename, TestCrashPut
 };
 constexpr size_t sessionReadLimit = 256 * 1024;
 #ifdef HFV_TESTING
@@ -404,18 +404,25 @@ public:
         return id;
     }
     uint32_t Put(uint32_t parent, const Entry& entry, Reader reader, bool replace) override {
-        return StreamPut(parent, entry, std::move(reader), replace, 0, {});
+        return StreamPut(parent, entry, std::move(reader), replace, 0, 0, {});
     }
     uint32_t PutResourceReplacement(uint32_t id, const Entry& entry, Reader reader,
                                      std::function<void(uint64_t,size_t)> localProgress) override {
-        return StreamPut(entry.parent, entry, std::move(reader), true, id, std::move(localProgress));
+        return StreamPut(entry.parent, entry, std::move(reader), true, id, 0,
+            [progress=std::move(localProgress)](unsigned,uint64_t offset,size_t size){
+                if(progress)progress(offset,size);
+            });
+    }
+    void PutFromSource(uint32_t parent,const Entry& entry,bool replace,
+                       std::function<void(unsigned,uint64_t,size_t)> progress) {
+        StreamPut(parent,entry,{},replace,0,entry.id,std::move(progress));
     }
 private:
     uint32_t StreamPut(uint32_t parent, const Entry& entry, Reader reader, bool replace, uint32_t original,
-                       std::function<void(uint64_t,size_t)> localProgress) {
+                       uint32_t source,std::function<void(unsigned,uint64_t,size_t)> localProgress) {
         std::lock_guard<std::mutex> lock(mutex_);
         Data args;
-        args.put(parent); args.put(replace); args.put(entry.attributesKnown); args.put(original);
+        args.put(parent); args.put(replace); args.put(entry.attributesKnown); args.put(original); args.put(source);
         EncodeEntry(args, entry);
         uint32_t id = 0;
         std::exception_ptr sourceFailure;
@@ -441,14 +448,14 @@ private:
                     Check(fork <= 1 && size && size <= sessionReadLimit, "Invalid fork transfer range");
                     const auto length = fork ? entry.forks[1].size : entry.forks[0].size;
                     Check(offset <= length && size <= length - offset, "Fork transfer exceeds source length");
-                    const bool localRead = original && !fork;
+                    const bool localRead = source || (original && !fork);
                     Data bytes;
                     try {
 #ifdef HFV_TESTING
                         if(!fork && !offset)PauseForTest(writePauseEntered,writePauseRelease);
 #endif
                         if (localRead) {
-                            if (localProgress) localProgress(offset, size_t(size));
+                            if (localProgress) localProgress(unsigned(fork), offset, size_t(size));
                         } else {
                             bytes.bytes.resize(size_t(size));
                             reader(unsigned(fork), offset, bytes.bytes.data(), bytes.bytes.size());
@@ -468,46 +475,6 @@ private:
         return id;
     }
 public:
-    bool CopyWithin(const std::vector<uint32_t>& ids, uint32_t parent, Storage::Job& job) {
-        // Leave room for the command, destination catalog ID, and selection count.
-        Check(!ids.empty() && ids.size() <= FrameLimit(SessionCommand) / 8 - 3, "Same-image copy selection exceeds the worker request size");
-        std::lock_guard<std::mutex> lock(mutex_);
-        Data args;
-        args.put(parent); args.put(uint64_t(ids.size()));
-        for (auto id : ids) args.put(id);
-        bool complete = false, cancelled = false;
-        std::string error;
-        Call(SessionCommandCode::CopyWithin, std::move(args), true, [&] {
-            for (;;) {
-                Data packet;
-                const auto message = Receive(worker_->output.value, packet);
-                if (message == SessionResult) ReadResult(packet);
-                if (message == SessionBytes) {
-                    complete = packet.flag(); cancelled = packet.flag(); error = packet.text();
-                    const auto rollback = packet.get();
-                    const auto retained = packet.flag();
-                    packet.end();
-                    Check(rollback <= uint64_t(Storage::Rollback::Failed), "Invalid same-image copy rollback");
-                    RecordRollback(Storage::Rollback(rollback));
-                    if (retained) Storage::OutcomeEvidence::NoteRetainedChange();
-                    break;
-                }
-                if (message == Progress) {
-                    job.progress(DecodeProgress(packet)); packet.end();
-                    Send(worker_->input.value, job.cancelled() ? Cancel : SessionContinue);
-                } else {
-                    Check(message == Conflict, "Unexpected same-image copy response");
-                    auto path = packet.text(); packet.end();
-                    Data choice;
-                    choice.put(uint64_t(job.replace(path)));
-                    Send(worker_->input.value, Choice, std::move(choice));
-                }
-            }
-        });
-        if (cancelled) throw Storage::Cancelled();
-        if (!error.empty()) throw HfsPlus::Error(error);
-        return complete;
-    }
     void ValidateEntry(const Entry& entry) const override {
         auto& self = const_cast<PersistentVolume&>(*this);
         std::lock_guard<std::mutex> lock(self.mutex_);
@@ -688,10 +655,17 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             case SessionCommandCode::Put: {
                 const auto parent = number(packet);
                 const auto replace = packet.flag(), attributesKnown = packet.flag();
-                const auto original = number(packet);
+                const auto original = number(packet), source = number(packet);
+                Check(!original||!source,"Conflicting in-worker fork sources");
                 auto entry = DecodeEntry(packet); packet.end();
                 entry.attributesKnown = attributesKnown;
                 entry.attributes = std::move(*attributes[0]);
+                if(source){
+                    const auto current=volume.Stat(source);
+                    Check(entry.id==source && !current.directory && current.parent!=parent &&
+                          current.forks[0].size==entry.forks[0].size && current.forks[1].size==entry.forks[1].size,
+                          "The same-image fork source changed");
+                }
                 if (original) {
                     const auto current = volume.Stat(original);
                     Check(replace && entry.id == original && !current.directory && current.parent == parent &&
@@ -712,15 +686,15 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                     auto* buffer = static_cast<uint8_t*>(out);
                     while (size) {
                         const auto count = (std::min)(size, sessionReadLimit);
-                        const bool localRead = original && !fork;
-                        if (localRead) volume.Read(original, 0, offset, buffer, count);
+                        const auto localSource = source ? source : !fork ? original : 0;
+                        if (localSource) volume.Read(localSource, fork, offset, buffer, count);
                         Data range; range.put(fork); range.put(offset); range.put(count);
                         Send(output, SessionReadRequest, std::move(range));
                         Data bytes;
                         const auto reply = Receive(input, bytes);
                         if (reply == Cancel) { bytes.end(); throw Storage::Cancelled(); }
-                        if (localRead) {
-                            Check(reply == SessionContinue, "Invalid original data fork response");
+                        if (localSource) {
+                            Check(reply == SessionContinue, "Invalid in-worker fork response");
                             bytes.end();
                         } else {
                             Check(reply == SessionBytes && bytes.bytes.size() == count, "Invalid fork transfer data");
@@ -748,50 +722,6 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 auto entry = DecodeEntry(packet); packet.end();
                 entry.attributes = std::move(*attributes[0]);
                 volume.ValidateEntry(entry);
-                break;
-            }
-            case SessionCommandCode::CopyWithin: {
-                const auto parent = number(packet);
-                const auto count = packet.get();
-                Check(count && count <= (packet.bytes.size() - packet.at) / 8, "Invalid same-image copy selection");
-                const std::shared_ptr<Volume> borrowed(&volume, [](Volume*) {});
-                std::vector<std::pair<std::shared_ptr<Volume>, uint32_t>> sources;
-                sources.reserve(size_t(count));
-                for (uint64_t i = 0; i < count; ++i) sources.emplace_back(borrowed, number(packet));
-                packet.end();
-                Storage::Job job;
-                job.transport([&](const Storage::Progress& progress) {
-                    Data update;
-                    EncodeProgress(update, progress);
-                    Send(output, Progress, std::move(update));
-                    Data response;
-                    const auto message = Receive(input, response);
-                    response.end();
-                    Check(message == Cancel || message == SessionContinue, "Invalid same-image progress response");
-                    if (message == Cancel) job.cancel();
-                }, [&](const std::string& path) {
-                    Data conflict;
-                    conflict.put(path);
-                    Send(output, Conflict, std::move(conflict));
-                    Data response;
-                    Check(Receive(input, response) == Choice, "Missing same-image overwrite response");
-                    const auto choice = response.get();
-                    response.end();
-                    Check(choice >= uint64_t(Storage::ConflictChoice::Replace) &&
-                          choice <= uint64_t(Storage::ConflictChoice::Cancel) &&
-                          choice != uint64_t(Storage::ConflictChoice::ReplaceAll), "Invalid same-image overwrite choice");
-                    return Storage::ConflictChoice(choice);
-                });
-                bool complete = false, cancelled = false;
-                std::string error;
-                try { complete = MacBrowser::CopyMany(sources, volume, parent, job); }
-                catch (const Storage::Cancelled&) { cancelled = true; }
-                catch (const std::exception& failure) { error = failure.what(); }
-                Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(hfs_take_rollback()));
-                Data result;
-                result.put(complete); result.put(cancelled); result.put(error);
-                result.put(uint64_t(evidence.RollbackState())); result.put(evidence.RetainedChanges());
-                Send(output, SessionBytes, std::move(result));
                 break;
             }
             case SessionCommandCode::FindMfs: {
@@ -928,16 +858,13 @@ void CrashVolumeSessionDuringPutForTest(const std::shared_ptr<MacBrowser::Volume
     persistent->CrashDuringPut();
 }
 #endif
-bool CopiesWithinMountedImage(const OrdinaryCopy& copy) {
-    if (!copy.destination.IsMounted() || copy.sources.empty() ||
-        !dynamic_cast<PersistentVolume*>(copy.destination.Volume().get())) return false;
-    return std::all_of(copy.sources.begin(), copy.sources.end(), [&](const Location& source) {
-        // An overwrite move also needs the in-worker copy route. Streaming
-        // from and to the same session would nest calls on one command pipe.
-        return source.IsMounted() && source.Volume() == copy.destination.Volume();
-    });
+bool SharesMountedImage(const Location& source,const Location& destination) {
+    return source.IsMounted() && destination.IsMounted() && source.Volume()==destination.Volume() &&
+           dynamic_cast<PersistentVolume*>(destination.Volume().get());
 }
-bool CopyWithinMountedImage(Volume& volume, const std::vector<uint32_t>& ids, uint32_t parent, Storage::Job& job) {
-    return dynamic_cast<PersistentVolume&>(volume).CopyWithin(ids, parent, job);
+
+void PutFromMountedSource(Volume& volume,uint32_t parent,const Entry& entry,bool replace,
+                          std::function<void(unsigned,uint64_t,size_t)> progress) {
+    dynamic_cast<PersistentVolume&>(volume).PutFromSource(parent,entry,replace,std::move(progress));
 }
 } // namespace VolumeSession
