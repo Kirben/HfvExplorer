@@ -207,7 +207,7 @@ public:
             replacement.reset(new FileVersion(staged));Publication("metadata-staged");if(primary)primary->Verify(path);original.Verify(companion);
             if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;original.Verify(backup);}
             Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;Publication("metadata-published");if(finish)finish();if(primary)primary->Verify(path);replacement->Verify(companion);if(backed)original.Verify(backup);
-        }catch(...){bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
+        }catch(...){bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(backed||published)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
         if(!backup.empty())DeleteFileW(backup.c_str());
     }
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;PublishMetadata(id,e);}
@@ -240,7 +240,7 @@ public:
             if(merge)finish();else{auto metadata=now;metadata.finder=desired.finder;metadata.attributes=desired.attributes;metadata.attributesKnown=true;
                 bool companion=std::any_of(metadata.finder.begin(),metadata.finder.end(),[](uint8_t b){return b!=0;})||!metadata.attributes.empty();
                 if(companion)PublishMetadata(id,metadata,finish);else finish();}
-        }catch(...){auto failure=std::current_exception();Check(SetFileTime(h,&rollbackCreated,nullptr,&rollbackModified)!=FALSE,"Folder timestamp rollback failed; source retained");std::rethrow_exception(failure);}
+        }catch(...){auto failure=std::current_exception();bool restored=SetFileTime(h,&rollbackCreated,nullptr,&rollbackModified)!=FALSE;Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);Check(restored,"Folder timestamp rollback failed; source retained");std::rethrow_exception(failure);}
     }
     void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool parentExists)override{
         std::vector<std::wstring> names,reserved;
@@ -367,6 +367,7 @@ public:
             if(backed && !MoveFileExW(backup.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}
             if(!staged.empty())DeleteFileW(staged.c_str()); if(!resource.empty())DeleteFileW(resource.c_str());
             if(!backed&&!backup.empty())DeleteFileW(backup.c_str()); if(!backedResource&&!backupResource.empty())DeleteFileW(backupResource.c_str());
+            if(published||publishedResource||backed||backedResource)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
             if(!restored)throw HfsPlus::Error(Recovery("Export rollback could not restore the original pair",backed?(Missing(backup)?path:backup):std::wstring{},backedResource?(Missing(backupResource)?companion:backupResource):std::wstring{})); throw;
         }
         if(!backup.empty())DeleteFileW(backup.c_str()); if(!backupResource.empty())DeleteFileW(backupResource.c_str()); return Id(path);
@@ -386,7 +387,7 @@ public:
         for(const auto& item:paths_)if(descendant(item.second)){dataReaders_.erase(item.first);resourceReaders_.erase(item.first);}
         if(resource)Check(MoveFileExW(oldResource.c_str(),newResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot rename resource companion; source retained");
         if(!MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)){
-            if(resource)Check(MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");
+            if(resource){bool restored=MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE;Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);Check(restored,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");}
             throw HfsPlus::Error("Cannot rename the selected Windows entry; source retained");
         }
         for(auto& item:paths_)if(descendant(item.second))item.second=target+item.second.substr(path.size());

@@ -242,9 +242,22 @@ public:
      if(!GetSafeHwnd()||!IsWindow(m_hWnd))return 0;
      if(!displayError.empty()){auto result=job_->result();auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
      auto result=job_->result();auto p=job_->progress();
-     if(!result.code&&!p.skipped){DestroyWindow();return 0;}
-     auto status=operation_+(result.error==ERROR_CANCELLED?" cancelled":result.code?" failed":" finished with skipped files");SetDlgItemText(IDC_CP_PHASE,status.c_str());
-     auto text=BrowserPresentation::FromUtf8(result.message);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,text.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
+     if(result.outcome==Storage::Outcome::Succeeded){DestroyWindow();return 0;}
+     const char* ending=result.outcome==Storage::Outcome::Cancelled ? " cancelled" :
+                       result.outcome==Storage::Outcome::Failed ? " failed" : " finished with skipped files";
+     auto status=operation_+ending;
+     if(result.partial)status+=" (partial completion)";
+     SetDlgItemText(IDC_CP_PHASE,status.c_str());
+     auto detail=result.message;
+     auto append=[&](const char* message){if(!detail.empty())detail+=" ";detail+=message;};
+     if(result.partial)append("Completed changes were retained.");
+     switch(result.rollback){
+     case Storage::Rollback::Restored: append("The failed change was rolled back."); break;
+     case Storage::Rollback::Failed: append("Rollback failed. Inspect the destination before retrying."); break;
+     case Storage::Rollback::Unverified: append("The final storage state could not be verified."); break;
+     default: break;
+     }
+     auto text=BrowserPresentation::FromUtf8(detail);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,text.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
     }
     KillTimer(1);if(keepWindow_)EndModalLoop(IDOK);else{state(TBPF_NOPROGRESS);PrepareToClose();EndDialog(IDOK);}}
    return 0;

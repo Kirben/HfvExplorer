@@ -88,8 +88,9 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
   for(int failure=0;failure<2;++failure)for(unsigned at=0;at<writes;++at) {
    save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount injected metadata failure");if(!cache)require(b_finish(volume)==0,"disable injected block cache");
    calls=0;failAt=at;mode=failure;fired=false;fhook_write=failingWrite;
+   hfs_take_rollback();
    result=mutate(volume,operation);if(!result)result=hfs_flush(volume);
-   fhook_write=originalWrite;require(fired&&result<0,"metadata write failure was hidden");
+   fhook_write=originalWrite;require(fired&&result<0&&hfs_take_rollback()==1,"metadata failure did not report restored rollback");
    verify(volume);
    require(hfs_umount(volume)==0,"rollback left invalid pending metadata");
    require(load(path)==seed,"failed metadata operation left partial image writes");
@@ -157,7 +158,8 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount unrecoverable-write fixture");
  hfsfile* held=hfs_open(volume,blockerName);require(held!=nullptr,"hold unrelated file during rollback failure");
  calls=0;failAt=0;mode=2;fired=false;fhook_write=failingWrite;
- int permanent=mutate(volume,0);require(permanent<0&&(volume->flags&HFS_WRITE_FAILED)&&(volume->flags&HFS_READONLY),"failed rollback left volume writable");
+ hfs_take_rollback();
+ int permanent=mutate(volume,0);require(hfs_take_rollback()==3&&permanent<0&&(volume->flags&HFS_WRITE_FAILED)&&(volume->flags&HFS_READONLY),"failed rollback left volume writable");
  std::string message=hfs_error?hfs_error:"";size_t first=message.find('"'),last=message.find('"',first+1);
  require(first!=std::string::npos&&last!=std::string::npos,"failed rollback did not retain original sector evidence");
  CString undoPath(message.substr(first+1,last-first-1).c_str());auto undo=load(undoPath);

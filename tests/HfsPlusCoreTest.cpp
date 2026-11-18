@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "StorageOutcome.h"
 #include "HfsPlusDisk.h"
 #include <cstdio>
 using namespace HfsPlus;
@@ -89,8 +90,11 @@ void attributeTests() {
     {Volume v(base,true);id=v.Put(2,u"File",5003,723,pattern);v.SetAttributes(id,old);}
     Attributes next{{u"user.Value",Bytes(79003,0x82)},{u"user.New",{1,2,0,4}},{u"com.apple.system.Security",security(1)}};
     for(unsigned operation=0;operation<3;++operation)for(const char* phase:{"data-flushed","journal-data-flushed","journal-committed","home-flushed","journal-cleared"}){
+        Storage::OutcomeEvidence evidence;
         Memory disk=base;{Volume v(disk,true);v.fault=[&](const char* at){if(!strcmp(at,phase))throw Error("Attribute interruption");};fails([&]{if(operation==0)v.SetAttributes(id,next);else if(operation==1)v.Remove(id);else v.Put(2,u"File",81,37,pattern,nullptr,true,nullptr,&next);},"Missing attribute fault boundary");}
         auto unchanged=disk.bytes;Volume replay(disk,false);bool committed=strcmp(phase,"data-flushed")&&strcmp(phase,"journal-data-flushed");
+        must(evidence.RollbackState()==(committed?Storage::Rollback::Unverified:Storage::Rollback::Restored),
+             "Journal fault did not report its publication boundary");
         if(operation==1&&committed){for(auto& e:replay.List())must(e.id!=id,"Committed attribute deletion not replayed");}
         else{must(replay.GetAttributes(id)==(committed?next:old),"Attribute transaction recovered mixed state");verify(replay,id,0,operation==2&&committed?81:5003);verify(replay,id,1,operation==2&&committed?37:723);}
         must(disk.bytes==unchanged,"Read-only attribute replay wrote image");

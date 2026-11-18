@@ -404,6 +404,12 @@ static HFV_THREAD_LOCAL int (*mutation_cancel)(void*)=NULL;
 static HFV_THREAD_LOCAL void* mutation_cancel_context=NULL;
 void HFSIFACE_delete_cancel(int (*callback)(void*),void* context){mutation_cancel=callback;mutation_cancel_context=context;}
 static int deletion_cancelled(void){if(mutation_cancel&&mutation_cancel(mutation_cancel_context)){errno=EINTR;hfs_error="Deletion cancelled";return 1;}return 0;}
+static HFV_THREAD_LOCAL int delete_retained_change;
+int HFSIFACE_take_delete_retained_change(void) {
+ int changed=delete_retained_change;
+ delete_retained_change=0;
+ return changed;
+}
 int do_delete_directory( hfsvol *vol, char *path )
 {
   hfsdir *dir;
@@ -438,6 +444,7 @@ int do_delete_directory( hfsvol *vol, char *path )
 				}
 			}
 
+			delete_retained_change=1;
 			// NEW: since we deleted from the volume, the hfsutils iteration
 			// structures are not in sync anymore. Must close and reopen.
 			hfs_closedir(dir);

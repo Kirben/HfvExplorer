@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Independent implementation of the MFS disk structures documented by Apple.
+#include "StorageOutcome.h"
 #include "MfsImage.h"
 #include "ImageHandleTransfer.h"
 #include <algorithm>
@@ -66,6 +67,14 @@ bool Apply(MfsSource& source,const std::vector<BYTE>& original,const std::vector
  try{if(write(payload)&&source.Flush()&&write(metadata)&&source.Flush())return true;}catch(...){}
  bool restored=true;for(auto i=touched.rbegin();i!=touched.rend();++i){try{if(!source.WriteAt(i->first,original.data()+i->first,i->second))restored=false;}catch(...){restored=false;}}
  try{if(!source.Flush())restored=false;}catch(...){restored=false;}
+ if(restored) {
+  BYTE verify[512];
+  for(const auto& part:touched) {
+   try { if(!source.ReadAt(part.first,verify,part.second) || memcmp(verify,original.data()+part.first,part.second)) restored=false; }
+   catch(...) { restored=false; }
+  }
+ }
+ if(!touched.empty())Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
  error="MFS write or flush failed; original bytes were restored.";
  if(!restored){recoveryRequired=true;source.DisableWrites();auto file=RecoveryFile(original);error="MFS rollback failed; further writes are disabled.";if(!file.empty())error+=" Original complete image saved at: "+file+". Verify the source before manual recovery.";else error+=" Could not save the original image; preserve the source for recovery.";}
  return false;

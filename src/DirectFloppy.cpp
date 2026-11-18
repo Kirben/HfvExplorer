@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "DirectFloppy.h"
+#include "StorageOutcome.h"
 #include <string.h>
 namespace {
 const DWORD kSize=1474560,kBuffer=65536,kSector=512;
@@ -23,6 +24,7 @@ public:
 }
 DirectFloppy::DirectFloppy(FloppyWriteApi* api):api_(api?api:&native){cache_init(&cache_);}
 DirectFloppy::~DirectFloppy(){
+ if(writes_&&!finished_)Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
  if(current==this)current=nullptr;
  if(handle_!=INVALID_HANDLE_VALUE){if(locked_)api_->Unlock(handle_);api_->Close(handle_);}
  if(scratch_)VirtualFree(scratch_,0,MEM_RELEASE);if(pending_)VirtualFree(pending_,0,MEM_RELEASE);cache_final(&cache_);
@@ -116,5 +118,6 @@ bool DirectFloppy::Finish(){
    memset(dirty_.data()+sector,0,end-sector);sector=end;
   }
  }
- return verify();
+ finished_=verify();
+ return finished_;
 }

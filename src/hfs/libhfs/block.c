@@ -44,6 +44,16 @@
 
 #include "..\..\filehook.h"
 
+static HFV_THREAD_LOCAL int rollback_status;
+void hfs_note_rollback(int status) {
+ if(status>rollback_status)rollback_status=status;
+}
+int hfs_take_rollback(void) {
+ int status=rollback_status;
+ rollback_status=0;
+ return status;
+}
+
 /*
  * NAME:	block->init()
  * DESCRIPTION:	initialize a volume's block cache
@@ -356,6 +366,7 @@ int b_end_mutation(hfsvol *vol,int result) {
   if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,(vol->mdb.drNmAlBlks+4095)/4096));
   if(m->cache)memcpy(vol->cache,m->cache,sizeof(bcache));
   for(i=0;i<m->file_count;++i)*m->files[i].file=m->files[i].saved;
+  if(m->used)hfs_note_rollback(rollback?3:1);
   if(rollback)quarantine_mutation(m,vol);
  }
  free_mutation(m);

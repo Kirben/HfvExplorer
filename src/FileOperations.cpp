@@ -110,7 +110,7 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  // captured descendant path by renaming its selected ancestor first.
  for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&request.sources[i].IsClassic()&&request.sources[j].IsClassic()){auto a=request.sources[i].ClassicPath(),b=request.sources[j].ClassicPath();if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}
  Storage::Progress progress;progress.phase="Moving";progress.scanning=false;progress.fileCopy=progress.utf8=true;progress.totalFiles=unsigned(sources.size());job.progress(progress);
- for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);++progress.files;job.progress(progress);}
+ for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);Storage::OutcomeEvidence::NoteRetainedChange();++progress.files;job.progress(progress);}
  return true;
 }
 Storage::Result CopyRequest(const OrdinaryCopy& request,Storage::Job& job,Completion& completion){
@@ -504,12 +504,29 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
 }
 Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> job):state_(std::move(state)),job_(std::move(job)){}
 Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->mutex);return state_->completion;}
+namespace {
+void FinalizeOutcome(Storage::Result& result, Completion& completion, Storage::Job& job,
+                     const Storage::OutcomeEvidence& evidence) {
+ const auto progress=job.progress();
+ Storage::OutcomeEvidence classic;
+ Storage::OutcomeEvidence::NoteRollback(static_cast<Storage::Rollback>(hfs_take_rollback()));
+ if(HFSIFACE_take_delete_retained_change())Storage::OutcomeEvidence::NoteRetainedChange();
+ result.Finalize(evidence,completion.completed,progress.skipped);
+ result.Finalize(classic,progress.files,progress.skipped);
+ completion.completed=result.completed;
+}
+}
 Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Completion& completion){
- try{ValidateRequest(request);LegacyEngine::Scope engine;VolumeCoord::Lease access(Resources(request));VolumeCoord::OperationLease current(Resources(request));return Execute(request,job,completion);}
- catch(const Storage::Cancelled&){return {1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
- catch(const Failure& e){return {1,e.error,e.what()};}
- catch(const std::exception& e){return {1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
- catch(...){return {1,ERROR_UNHANDLED_EXCEPTION,"Unexpected copy-worker failure"};}
+ Storage::OutcomeEvidence evidence;
+ hfs_take_rollback(); HFSIFACE_take_delete_retained_change(); // Discard anything outside this operation on the executor thread.
+ Storage::Result result;
+ try{ValidateRequest(request);LegacyEngine::Scope engine;VolumeCoord::Lease access(Resources(request));VolumeCoord::OperationLease current(Resources(request));result=Execute(request,job,completion);}
+ catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
+ catch(const Failure& e){result={1,e.error,e.what()};}
+ catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
+ catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected copy-worker failure"};}
+ FinalizeOutcome(result,completion,job,evidence);
+ return result;
 }
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
@@ -517,13 +534,14 @@ Operation Submit(Request request){
  auto access=std::make_shared<std::unique_ptr<VolumeCoord::Lease>>();
  struct Plan {std::atomic<bool> ready{false};std::vector<VolumeCoord::Access> resources;Storage::Result error;};auto plan=std::make_shared<Plan>();
  auto planning=queue.submit([plan,values](Storage::Job& job){try{if(job.cancelled())throw Storage::Cancelled();ValidateRequest(*values);plan->resources=Resources(*values);}catch(const Storage::Cancelled&){plan->error={1,ERROR_CANCELLED,"Cancelled while identifying Windows paths"};}catch(const std::exception& error){plan->error={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}catch(...){plan->error={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected path planning failure"};}plan->ready.store(true,std::memory_order_release);return Storage::Result{};});
- auto job=queue.submit([state,values,access,plan](Storage::Job& job){Completion completion;Storage::Result result;
+ auto job=queue.submit([state,values,access,plan](Storage::Job& job){Completion completion;Storage::Result result;Storage::OutcomeEvidence evidence;hfs_take_rollback();HFSIFACE_take_delete_retained_change();
   try{Cancel(job);if(plan->error.code){result=plan->error;}else{if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
    VolumeCoord::OperationLease currentPaths(Resources(*values));if(CopyProcess::UsesWorker(*values)){std::vector<std::string> keys,writes;for(auto& item:plan->resources){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}if(auto* copy=values->Get<OrdinaryCopy>()){Mark(completion,copy->destination);for(auto& item:copy->sources)if(item.cut)Mark(completion,item);}else if(auto* legacy=values->Conversion()){Mark(completion,legacy->destination);if(legacy->move)Mark(completion,legacy->source);}else if(auto* output=values->Get<ExportFileFork>())Mark(completion,output->output);else if(auto* input=values->Get<ImportResourceFork>())Mark(completion,input->file);result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,job,completion);}
   }
-  catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
+  catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
+  FinalizeOutcome(result,completion,job,evidence);
   std::vector<std::string> changed;
   for(auto& item:completion.affected)changed.push_back(item.resourceKey);
   access->reset();VolumeCoord::Changed(changed);

@@ -283,7 +283,9 @@ int RunCopyReleaseTest(const char *directory) {
         Wait(partial);
         Entry remaining;
         Check(CopyProcess::lastProcess && partial.Job()->result().code &&
-                  partial.Snapshot().completed == 1 && !partial.Snapshot().affected.empty() &&
+                  partial.Job()->result().outcome == Storage::Outcome::Failed && partial.Job()->result().partial &&
+                  partial.Job()->result().completed == 1 && partial.Snapshot().completed == 1 &&
+                  !partial.Snapshot().affected.empty() &&
                   !target->FindChild(2, u"Partial worker delete", remaining) && target->Stat(2).directory,
               "Worker delete lost partial completion or attempted a volume root");
         fprintf(report, "PASS: shipping worker folder/rename/delete/hard links, partial delete notifications, "
@@ -753,7 +755,8 @@ int RunCopyProcessTest(const char *directory) {
             Put(*unrelated, 2, u"Independent", 4096);
             running.Job()->cancel();
             Wait(running);
-            Check(running.Job()->result().error == ERROR_CANCELLED, "slow worker cancellation");
+            Check(running.Job()->result().outcome == Storage::Outcome::Cancelled &&
+                      !running.Job()->result().partial, "slow worker cancellation");
             CopyProcess::fault = 0;
         }
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "cancel retained source");
@@ -772,7 +775,7 @@ int RunCopyProcessTest(const char *directory) {
         auto interrupted = Submit(delayed);
         Wait(interrupted);
         Check(interrupted.Job()->result().code && !interrupted.Snapshot().complete &&
-                  CopyProcess::lastExitCode == 74,
+                  CopyProcess::lastExitCode == 74 && interrupted.Job()->result().rollback == Storage::Rollback::Unverified,
               "Expected the worker to exit inside its write hook");
         CopyProcess::fault = 0;
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "worker crash retained source");

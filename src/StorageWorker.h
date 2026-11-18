@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <windows.h>
+#include "StorageOutcome.h"
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -19,7 +20,25 @@ struct Progress {
  unsigned files=0,skipped=0,totalFiles=0;
  bool scanning=true,fileCopy=false,byteTransfer=false,utf8=false;
 };
-struct Result {int code=0;DWORD error=0;std::string message;bool moved=false;};
+struct Result {
+ int code=0;
+ DWORD error=0;
+ std::string message;
+ bool moved=false;
+ Outcome outcome=Outcome::Succeeded;
+ Rollback rollback=Rollback::None;
+ unsigned completed=0, skipped=0;
+ bool partial=false;
+
+ void Finalize(const OutcomeEvidence& evidence, unsigned items, unsigned skippedItems) {
+  if(items>completed)completed=items;
+  if(skippedItems>skipped)skipped=skippedItems;
+  if(evidence.RollbackState()>rollback)rollback=evidence.RollbackState();
+  outcome=error==ERROR_CANCELLED ? Outcome::Cancelled : code ? Outcome::Failed :
+          skipped ? Outcome::Skipped : Outcome::Succeeded;
+  partial=partial || (outcome!=Outcome::Succeeded && (completed || evidence.RetainedChanges()));
+ }
+};
 class Cancelled : public std::exception {public:const char* what()const noexcept override{return "Storage job cancelled";}};
 class Job {
  mutable std::mutex mutex_;
@@ -39,7 +58,7 @@ public:
  void progress(const Progress& value){{std::lock_guard<std::mutex> lock(mutex_);progress_=value;}if(report_)report_(value);}
  bool done()const{std::lock_guard<std::mutex> lock(mutex_);return done_;}
  Result result()const{std::lock_guard<std::mutex> lock(mutex_);return result_;}
- void finish(Result result){ {std::lock_guard<std::mutex> lock(mutex_);result_=std::move(result);done_=true;}SetEvent(event_);}
+ void finish(Result result){ {std::lock_guard<std::mutex> lock(mutex_);OutcomeEvidence evidence;result.Finalize(evidence,0,0);result_=std::move(result);done_=true;}SetEvent(event_);}
  void wait()const{WaitForSingleObject(event_,INFINITE);}
  std::string conflict()const{std::lock_guard<std::mutex> lock(mutex_);return conflict_;}
  std::pair<uint64_t,std::string> conflictState()const{std::lock_guard<std::mutex> lock(mutex_);return {conflictId_,conflict_};}
@@ -83,10 +102,13 @@ class Worker {
    }
    if(entry.job->done())continue;
    Result result;
+   OutcomeEvidence evidence;
    try {result=entry.work(*entry.job);}
    catch(const Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
    catch(const std::exception& error){result={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}
    catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected storage error"};}
+   const auto progress=entry.job->progress();
+   result.Finalize(evidence,progress.files,progress.skipped);
    entry.job->finish(std::move(result));condition_.notify_all();
   }
  }

@@ -592,6 +592,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     completion.completed = unsigned(d.get());
                     if (!d.get())
                         handoff.MarkUnclean();
+                    DecodeOutcome(d,result);
                     finished = true;
                 } else
                     throw HfsPlus::Error("Unexpected copy-worker response");
@@ -610,6 +611,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         Check(GetExitCodeProcess(worker.process.value, &exit) && exit == 0,
               "Copy worker failed during cleanup; inspect the destination");
     } catch (...) {
+        if(requestSent)Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
         if (requestSent && ReportsAffectedStorage(request.OperationKind()))
             for (const auto& key : writes) AddAffected(completion, key);
         handoff.RestoreAfterFailure(std::current_exception(), requestSent);
@@ -842,6 +844,10 @@ int Child(const char *inputText, const char *outputText) {
         final.put(completion.complete);
         final.put(completion.completed);
         final.put(safe);
+        if(!safe && result.rollback<Storage::Rollback::Unverified)result.rollback=Storage::Rollback::Unverified;
+        Storage::OutcomeEvidence evidence;
+        result.Finalize(evidence,completion.completed,job.progress().skipped);
+        EncodeOutcome(final,result);
         Send(output, Finished, std::move(final));
         return 0;
     } catch (const std::exception &error) {
@@ -854,6 +860,9 @@ int Child(const char *inputText, const char *outputText) {
             final.put(0);
             final.put(0);
             final.put(1);
+            Storage::Result failed{1,ERROR_UNHANDLED_EXCEPTION,{}};
+            failed.outcome=Storage::Outcome::Failed;
+            EncodeOutcome(final,failed);
             Send(output, Finished, std::move(final));
             return 0;
         } catch (...) {
