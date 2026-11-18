@@ -4,6 +4,9 @@
 #include "FileOperations.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
+#include "BrowserSession.h"
+#include "ReadOnlyFloppy.h"
+#include "ReadOnlyCdBackend.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
 #include "VolumeCoordinator.h"
@@ -173,7 +176,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, int fin
     return false;
 }
 
-BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId)
+BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId,Storage::Job* job)
 {
  LegacyEngine::Scope engine;BrowserDirectory::ObserveRead("classic-directory");
  BrowserDirectory::Snapshot snapshot;snapshot.capabilitiesKnown=true;
@@ -207,6 +210,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
 				ret = HFSIFACE_get_dir_first_readonly( volpath, parent_dir, &item );
 				if (ret == 0) {
 					while (ret == 0) {
+			if(job&&job->cancelled())throw Storage::Cancelled();
 						mac_to_pc_charset( item.catkeyrec.ckrCName );
 						if(strcmp((char*)item.catkeyrec.ckrCName,this_name) == 0) {
 							finder_view_mode = get_finder_view_mode( item.catdatarec.u.d.dirUsrInfo.frView );
@@ -231,6 +235,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
 		item.id = id;
 		ret = HFSIFACE_get_dir_first_readonly( volpath, path, &item );
 		while (ret == 0) {
+			if(job&&job->cancelled())throw Storage::Cancelled();
 			if(item.catdatarec.cdrType == cdrDirRec) {
 				is_inited = (item.catdatarec.u.d.dirUsrInfo.frFlags & kHasBeenInited) != 0;
 				is_invisible = (item.catdatarec.u.d.dirUsrInfo.frFlags & fInvisible);
@@ -277,6 +282,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
 	errno=0;ret = HFSIFACE_get_dir_first_readonly( volpath, path, &item );
  if(ret<0)throw std::runtime_error(hfs_error?hfs_error:"Cannot read classic HFS directory");
 	while (ret == 0) {
+			if(job&&job->cancelled())throw Storage::Cancelled();
 		mac_to_pc_charset( item.catkeyrec.ckrCName );
 		BrowserDirectory::ObserveRead((char*)item.catkeyrec.ckrCName);
 		BrowserDirectory::Row row;if(prepare_classic_browser_row(&item,finder_view_mode,row)){row.path=directory+(directory.empty()||directory.back()!=':'?":":"")+(char*)item.catkeyrec.ckrCName;snapshot.rows.push_back(std::move(row));}
@@ -286,4 +292,89 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
  if(errno!=ENOENT)throw std::runtime_error(hfs_error?hfs_error:"Classic HFS directory enumeration failed");
  snapshot.finderMode=finder_view_mode;
 	return snapshot;
+}
+
+void CHFVExplorerDoc::ValidateNavigationMedia(const CHFVVolume& volume)
+{
+ if(!volume.m_is_floppy||!volume.m_mediaGenerationKnown)return;
+ const int drive=physical_floppy_path(volume.m_file_name);
+ FloppyReadApi* api=nullptr;
+#ifdef HFV_FLOPPY_TESTING
+ api=physical_floppy_test_api(drive);
+ if(!api)throw std::runtime_error("The floppy is no longer attached");
+#endif
+ ReadOnlyFloppy probe(api);
+ if(!probe.OpenDrive(drive)||probe.Generation()!=volume.m_mediaGeneration)
+  throw std::runtime_error("The floppy changed during navigation");
+}
+
+bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh)
+{
+ auto& session=GetBrowserSession();
+ if(!session.UsesAsyncNavigation()||index<0||index>=m_hfs_count)return false;
+ auto tree=session.Tree();
+ const auto item=tree->GetTreeCtrl().GetSelectedItem();
+ auto& selected=m_volumes[index];
+ const auto root=selected.m_rootitem;
+ if(!item||!root||selected.m_free)return false;
+ CString directory=tree->get_directory_name(root,index,id);
+ if(directory.IsEmpty())directory=selected.m_volume_name;
+ if(directory.IsEmpty()&&id!=2)return false;
+ std::string path=(LPCSTR)directory;
+ path+=':';
+ const auto parent=tree->get_parent_id(root,index,id);
+ const auto image=selected.m_file_name;
+ const auto key=VolumeCoord::ImageKey(std::string((LPCSTR)image));
+ auto reader=std::shared_ptr<CHFVExplorerDoc>(new CHFVExplorerDoc(false));
+ reader->m_mac_show_invisibles=m_mac_show_invisibles;
+ auto& volume=reader->m_volumes[index];
+ volume.m_file_name=image;
+ volume.m_is_floppy=selected.m_is_floppy;
+ volume.m_is_cd=selected.m_is_cd;
+ volume.m_is_hd=selected.m_is_hd;
+ volume.m_is_removable=selected.m_is_removable;
+ volume.m_free=0;
+ reader->m_hfs_count=index+1;
+ const auto generation=selected.m_mediaGenerationKnown
+     ? std::optional<DWORD>(selected.m_mediaGeneration):std::nullopt;
+ const auto finder=session.finderLayout;
+ auto listing=std::make_shared<BrowserDirectory::Snapshot>();
+ session.Navigate([reader,listing,index,id,path,finder,parent,key,generation](Storage::Job& job){
+  try{
+   VolumeCoord::Lease lease({{key,VolumeCoord::Mode::Read}});
+   if(job.cancelled())throw Storage::Cancelled();
+   auto& volume=reader->m_volumes[index];
+   if(!volume.open())throw std::runtime_error("Cannot open the selected classic HFS volume");
+   if(generation &&
+      (!volume.m_mediaGenerationKnown||volume.m_mediaGeneration!=*generation))
+    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The floppy changed. Select its drive to open the new disk."};
+   reader->m_classicRevision[index]=VolumeCoord::Revision(key);
+   CString directory= id==2 ? volume.m_volume_name+":" : CString(path.c_str());
+   *listing=reader->read_classic_browser_directory(index,id,directory,finder,parent,&job);
+   ValidateNavigationMedia(volume);
+   reader->CopyNavigationIcons(*listing);
+   return Storage::Result{};
+  }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
+ },[this,reader,listing,index,id,item,root,image,key,refresh,path,parent](const Storage::Result& result){
+  auto& session=GetBrowserSession();
+  auto tree=session.Tree();
+  if(index>=m_hfs_count||m_volumes[index].m_free||m_volumes[index].m_rootitem!=root||
+     m_volumes[index].m_file_name!=image||tree->GetTreeCtrl().GetSelectedItem()!=item)return;
+  if(result.error==ERROR_BUSY){
+   session.Defer(key,true,[this,index,id,refresh]{NavigateClassicFolder(index,id,refresh);},true,true);
+   return;
+  }
+  if(result.code){session.RejectNavigation(key,result.message);return;}
+  if(listing->revision!=VolumeCoord::Revision(key)){NavigateClassicFolder(index,id,refresh);return;}
+  auto parentPath=parent?tree->get_directory_name(root,index,parent):CString();
+  reader->m_volumes[index].m_rootitem=root;
+  m_volumes.ReplaceFrom(index,reader->m_volumes,index);
+  m_classicRevision[index]=listing->revision;
+  tree->GetTreeCtrl().SetItemText(root,m_volumes[index].m_volume_name);
+  if(refresh)tree->delete_subdir_contents(item);
+  session.List()->initialize_volume(parentPath,parent?ID_GOTO_PARENT:0);
+  std::string shown=id==2?std::string((LPCSTR)m_volumes[index].m_volume_name)+":" : path;
+  PublishClassicFolder(index,id,shown,*listing);
+ });
+ return true;
 }

@@ -170,10 +170,7 @@ struct MainMacBrowser::State {
         m.root=Insert(index,2,nullptr,label,true);
     }
     bool UseAsyncNavigation() const {
-#ifdef HFV_TESTING
-        if(session_.asyncNavigationForTest)return true;
-#endif
-        return session_.Owner()->IsWindowVisible()!=FALSE;
+        return session_.UsesAsyncNavigation();
     }
     bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool asynchronous=false,bool reload=false) {
         session_.CancelNavigation();
@@ -476,17 +473,44 @@ bool MainMacBrowser::ScanRemovable(bool silent,bool startupOnly){
 int MainMacBrowser::OpenRemovableRoot(const char* root){
  std::vector<Removable::Mounted> found;auto wide=FromAnsi(root);auto result=ShowStorageWaitJob([&](Storage::Job&){found=Removable::FromDriveRoot(wide);return Storage::Result{};},Hidden(session_),session_.Owner());
  if(result.code){session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});if(!Hidden(session_))session_.Owner()->MessageBox(result.message.c_str(),"Reading Mac removable disk",MB_OK|MB_ICONERROR);return -1;}
- if(found.empty())return 0;int selected=-1;
+ if(found.empty())return 0;
+ AdoptRemovable(found,false);
+ return 1;
+}
+void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,bool asynchronous){
+ int selected=-1;
  for(auto& v:found){auto key=VolumeCoord::Wide(v.volume->ResourceKey());int slot=-1;for(size_t i=0;i<state_->mounts.size();++i)if(state_->mounts[i].key==key){slot=int(i);break;}if(slot<0){slot=int(state_->mounts.size());state_->mounts.push_back({v.volume,key,nullptr,-1});}auto& mount=state_->mounts[slot];mount.volume=v.volume;mount.physicalPath=v.device.path;mount.physicalOffset=v.partition.offset;mount.suffix=v.label;if(!mount.root)state_->Root(slot);if(selected<0)selected=slot;}
- state_->Show(selected,2,state_->mounts[selected].root);return 1;
+ if(selected<0)return;
+ auto item=state_->mounts[selected].root;
+ if(asynchronous){
+  auto tree=session_.Tree();auto enabled=tree->SelectionNotificationsEnabled();
+  tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(item);tree->enable_selchange(enabled);
+ }
+ state_->Show(selected,2,item,false,asynchronous);
 }
 int MainMacBrowser::OpenCd(const char* root) {
     int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;
-    for(auto& mount:state_->mounts)if(mount.drive==drive&&mount.root)return 0; // Windows side stays selectable.
+    if(HasCdRoot(drive))return 0; // Windows side stays selectable.
     bool detected=false,busy=false;std::shared_ptr<Volume> volume;auto result=ShowStorageWaitJob([&](Storage::Job&){try{VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});volume=MacBrowser::OpenCdRoot(root);}catch(const VolumeCoord::Busy&){busy=true;}catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};},Hidden(session_),session_.Owner());
     if(busy){std::string saved=root;auto doc=session_.Document();int index=-1;for(int n=0;n<doc->m_fat_count;++n)if(toupper((unsigned char)doc->m_fats[n].m_letter)-'A'==drive){index=n;break;}session_.Defer(VolumeCoord::DeviceKey(drive),true,[this,index,saved]{if(index>=0)session_.Document()->open_fat_directory(index,const_cast<char*>(saved.c_str()),1);else OpenCd(saved.c_str());},true);return 1;}
-    if(result.code){if(detected){if(!Hidden(session_))AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return -1;}return 0;}if(!volume)return 0;state_->mounts.push_back({volume,FromAnsi(root),nullptr,drive});int i=int(state_->mounts.size()-1);
-    state_->Root(i);state_->Show(i,2,state_->mounts[i].root);return 1;
+    if(result.code){if(detected){if(!Hidden(session_))AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return -1;}return 0;}if(!volume)return 0;
+    AdoptCd(drive,root,std::move(volume),false);
+    return 1;
+}
+bool MainMacBrowser::HasCdRoot(int drive)const{
+ return std::any_of(state_->mounts.begin(),state_->mounts.end(),
+    [&](const auto& mount){return mount.drive==drive&&mount.root;});
+}
+void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<Volume> volume,bool asynchronous){
+ state_->mounts.push_back({std::move(volume),FromAnsi(root.c_str()),nullptr,drive});
+ int index=int(state_->mounts.size()-1);
+ state_->Root(index);
+ auto item=state_->mounts[index].root;
+ if(asynchronous){
+  auto tree=session_.Tree();auto enabled=tree->SelectionNotificationsEnabled();
+  tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(item);tree->enable_selchange(enabled);
+ }
+ state_->Show(index,2,item,false,asynchronous);
 }
 bool MainMacBrowser::Select(LPARAM data){auto p=reinterpret_cast<lparam_struct*>(data);if(!p||p->type!=LIST_MAC)return false;
     state_->Show(p->volinx,uint32_t(p->id),session_.Tree()->m_ct->GetSelectedItem(),false,state_->UseAsyncNavigation());return true;}

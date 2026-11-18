@@ -77,7 +77,8 @@ struct Panes {
   char label[]="Same",type[]="TEXT",creator[]="TEST";Check(hfs_format(const_cast<char*>((LPCSTR)path),0,label)==0,"format session classic image");
   auto v=hfs_mount(const_cast<char*>((LPCSTR)path),0,O_RDWR);Check(v!=nullptr,"mount session classic image");std::string file="Same:";file+=filename;
   Check(hfs_create(v,&file[0],type,creator)==0&&hfs_umount(v)==0,"populate session classic image");
-  doc.m_hfs_count=1;doc.m_volumes[0].m_file_name=path;doc.m_volumes[0].m_volume_name="Same";Check(doc.m_volumes[0].open()!=0,"open session classic volume");
+  Check(doc.insert_volume(path,0,0,0,0)==0,"register session classic volume");
+  doc.m_volumes[0].m_volume_name="Same";Check(doc.m_volumes[0].open()!=0,"open session classic volume");
   tree.enable_selchange(0);doc.m_volumes[0].m_rootitem=tree.Classic();tree.GetTreeCtrl().SelectItem(doc.m_volumes[0].m_rootitem);tree.enable_selchange(1);doc.open_sub_directory(0,2,"Same");
  }
 };
@@ -191,9 +192,35 @@ int RunBrowserSessionTest(const char* directory){
   CString wa=root+"\\first",wb=root+"\\second";Check(CreateDirectoryA(wa,nullptr)&&CreateDirectoryA(wb,nullptr),"create host fixtures");
   {CFile file;Check(file.Open(wa+"\\first.txt",CFile::modeCreate|CFile::modeWrite)!=FALSE,"host first file");}{CFile file;Check(file.Open(wb+"\\second.txt",CFile::modeCreate|CFile::modeWrite)!=FALSE,"host second file");}
   a.Windows(wa);b.Windows(wb);Check(Find(a.list,L"First.txt")>=0&&Find(a.list,L"Second.txt")<0&&Find(b.list,L"Second.txt")>=0,"Windows directory state used another session");
+  {
+   auto& session=a.Session();
+   session.asyncNavigationForTest=true;
+   HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+   HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+   struct Cleanup{HANDLE entered,release;~Cleanup(){SetEvent(release);BrowserDirectory::testObserveRead={};CloseHandle(release);CloseHandle(entered);}} cleanup{entered,release};
+   BrowserDirectory::testObserveRead=[=](const char* path){
+    if(wa.CompareNoCase(path)==0){SetEvent(entered);WaitForSingleObject(release,5000);}
+   };
+   Check(a.doc.NavigateWindowsFolder(0,(LPCSTR)wa,true),"queue asynchronous Windows folder refresh");
+   PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"Windows worker read did not start");
+   Check(session.Navigating()&&a.owner.IsWindowEnabled()&&Find(a.list,L"First.txt")>=0,
+         "slow Windows refresh disabled its window or cleared the listing");
+   SetEvent(release);
+   PumpUntil([&]{return !session.Navigating();},"Windows refresh did not finish");
+   Check(Find(a.list,L"First.txt")>=0&&session.ListingAvailable(),"Windows refresh did not publish its listing");
+   session.asyncNavigationForTest=false;
+  }
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"First.txt")>=0,"startup before global main-window assignment");
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
+  a.Session().asyncNavigationForTest=true;
+  auto classicRoot=a.doc.m_volumes[0].m_rootitem;
+  Check(a.doc.NavigateClassicFolder(0,2,true)&&a.Session().Navigating()&&
+        Find(a.list,L"first classic")>=0,"classic refresh did not retain the listing");
+  PumpUntil([&]{return !a.Session().Navigating();},"classic refresh did not finish");
+  Check(Find(a.list,L"first classic")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==classicRoot,
+        "classic asynchronous read changed selection or lost its listing");
+  a.Session().asyncNavigationForTest=false;
   auto launchA=a.Session().MacBrowser().CaptureItem(Find(a.list,L"first classic"));
   auto launchB=b.Session().MacBrowser().CaptureItem(Find(b.list,L"second classic"));
   auto verifyExport=[&](Panes& origin,const FileOperations::Location& selected,const char* leaf){
@@ -234,7 +261,9 @@ startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
    {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
     auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
     FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){for(int i=0;i<doc.m_hfs_count;++i)doc.m_volumes[i].close();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
-    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.m_fats[0].m_rootitem);BrowserDirectory::testObserveRead={};
+    app.m_disable_autofloppy=TRUE;startup.GetBrowserSession().asyncNavigationForTest=true;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.m_fats[0].m_rootitem);
+    PumpUntil([&]{return !startup.GetBrowserSession().Navigating();},"floppy navigation did not finish");
+    BrowserDirectory::testObserveRead={};
     auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
     Check(disk.opens>0&&!windowsProbe&&found&&startup.m_hfs_count==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_volumes[0].m_rootitem,"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
     fprintf(report,"PASS: selecting a simulated Mac floppy with startup/automatic detection disabled mounts HFS and lists its file without attempting Windows folder enumeration.\n");

@@ -65,6 +65,7 @@ public:
     void CancelNavigation();
     void Navigate(std::function<Storage::Result(Storage::Job&)>,
                   std::function<void(const Storage::Result&)>);
+    bool UsesAsyncNavigation() const;
     bool Navigating() const { return bool(navigation_); }
     bool ListingAvailable() const { return !listingPending_; }
     void RejectNavigation(const std::string& key,const std::string& message);
