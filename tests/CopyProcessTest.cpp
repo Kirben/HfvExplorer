@@ -543,6 +543,59 @@ int RunCopyProcessTest(const char *directory) {
                 Verify(*image,replacement.id);
             }
             fprintf(report,"PASS: HFS+ and HFSX same-image recursive copy, self-copy refusal and overwrite cancellation without worker restart\n");
+            const auto hostFolder=Wide(root+"\\persistent-windows");
+            Check(CreateDirectoryW(hostFolder.c_str(),nullptr)!=FALSE,"persistent Windows copy folder");
+            const auto hostTarget=Location::Windows(hostFolder);
+            const auto hostFile=Location::Windows(hostFolder+L"\\Persistent payload");
+            {
+                auto host=OpenWindows(hostFolder);
+                Put(*host,2,u"Persistent payload",4096,71);
+            }
+            const auto uploadFolder=to->MakeDirectory(2,u"Windows imports");
+            const auto uploadTarget=Native(to,uploadFolder);
+            const auto uploadOld=Put(*to,uploadFolder,u"Persistent payload",4096,89);
+            auto cancelOverwrite=[](const OrdinaryCopy& copy){
+                Storage::Job job;
+                bool staged=false;
+                job.transport([&](const Storage::Progress& progress){
+                    if(progress.fileBytes>300000 && !progress.files){
+                        staged=true;
+                        job.cancel();
+                    }
+                },[](const std::string&){return Storage::ConflictChoice::Replace;});
+                Completion completion;
+                auto result=ExecuteInWorker(copy,job,completion);
+                Check(staged && result.outcome==Storage::Outcome::Cancelled && !result.partial,
+                      "Windows transfer did not cancel during overwrite staging");
+            };
+            const auto download=OrdinaryCopy{{Native(from,original.id)},hostTarget};
+            cancelOverwrite(download);
+            {
+                auto host=ResolveWindowsFile(hostFile.WindowsPath());
+                Verify(*host.first,host.second,4096,71);
+            }
+            CopyProcess::lastProcess=0;
+            auto exportOp=Submit(download);
+            Conflict(exportOp); exportOp.Job()->resolve(Storage::ConflictChoice::Replace); Wait(exportOp);
+            Check(!exportOp.Job()->result().code && exportOp.Snapshot().complete && !CopyProcess::lastProcess,
+                  "Windows export used handoff or failed");
+            {
+                auto host=ResolveWindowsFile(hostFile.WindowsPath());
+                Verify(*host.first,host.second);
+            }
+            const auto upload=OrdinaryCopy{{hostFile},uploadTarget};
+            cancelOverwrite(upload);
+            Verify(*to,uploadOld,4096,89);
+            auto importOp=Submit(upload);
+            Conflict(importOp); importOp.Job()->resolve(Storage::ConflictChoice::Replace); Wait(importOp);
+            Entry uploaded;
+            Check(!importOp.Job()->result().code && importOp.Snapshot().complete && !CopyProcess::lastProcess &&
+                      to->FindChild(uploadFolder,u"Persistent payload",uploaded),
+                  "Windows import used handoff or failed");
+            Verify(*to,uploaded.id);
+            verifySessions();
+            fprintf(report,"PASS: Windows both-fork transfer and mid-overwrite cancellation in both directions keep persistent image workers mounted\n");
+
             auto stablePid=CopyProcess::VolumeSessionPidForTest(to);
             HfsPlus::Attributes edited{{u"user.session",{1,2,3,4}}};
             auto attrs=Submit(EditAttributes{Native(to,copied.id),{},edited});
@@ -613,32 +666,96 @@ int RunCopyProcessTest(const char *directory) {
 
                 const auto exportDir=Wide(root + "\\classic-session-export");
                 Check(CreateDirectoryW(exportDir.c_str(),nullptr)!=FALSE,"classic export fixture folder");
-                for (const char mode : {'m','r'}) {
-                    const auto folder=mode=='m'?exportDir+L"\\MacBinary":exportDir+L"\\Raw";
-                    Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"classic export mode fixture folder");
-                    LegacyConversion conversion{Location::Classic(path,":"),Location::Windows(folder)};
+                Entry lines;
+                lines.name=u"Text lines";
+                lines.forks[0].size=4;
+                const auto textId=classic->Put(sourceFolder,lines,[](unsigned, uint64_t at, void* output, size_t size){
+                    memcpy(output,"a\rb\r"+at,size);
+                },false);
+                for (const char mode : {'m','5','b','a','r','R','t'}) {
+                    const auto folder=exportDir+L"\\"+std::wstring(1,wchar_t(mode));
+                    // Windows folder names are case-insensitive.
+                    const auto output=mode=='R'?folder+L"-resource":folder;
+                    Check(CreateDirectoryW(output.c_str(),nullptr)!=FALSE,"classic export mode fixture folder");
+                    LegacyConversion conversion{Location::Classic(path,":"),Location::Windows(output)};
                     conversion.options.output=mode;
-                    conversion.selection=ConversionSelection{Native(classic,renamed.id),Location::Windows(folder)};
-                    Pass(Submit(conversion));
-                    Check(classic->Writable() && alias->FindChild(sourceFolder,u"Renamed payload",renamed),
-                          "classic conversion did not restore browsing after handoff");
-                    if(mode=='r') {
-                        WIN32_FIND_DATAW file{};
-                        auto search=FindFirstFileW((folder+L"\\Renamed payload*").c_str(),&file);
-                        Check(search!=INVALID_HANDLE_VALUE,"classic raw export missed the resolved catalog path");
-                        FindClose(search);
-                        Check(file.nFileSizeLow==300000,"classic raw export wrote the wrong fork length");
-                        const auto rawFile=Location::Windows(folder+L"\\"+file.cFileName);
-                        LegacyConversion import{rawFile,Location::Classic(path,":")};
-                        import.options.input='r';
-                        import.selection=ConversionSelection{rawFile,Native(classic,targetFolder)};
-                        Pass(Submit(import));
-                        Entry imported;
-                        Check(classic->Writable() && alias->FindChild(targetFolder,u"Renamed payload",imported) &&
-                                  imported.forks[0].size==300000,
-                              "classic raw import did not commit to the selected mounted folder");
+                    conversion.selection=ConversionSelection{Native(classic,mode=='t'?textId:renamed.id),Location::Windows(output)};
+                    CopyProcess::lastProcess=0;
+                    auto exported=Submit(conversion);
+                    Wait(exported);
+                    if(exported.Job()->result().code)throw HfsPlus::Error(exported.Job()->result().message);
+                    Check(exported.Snapshot().complete && !CopyProcess::lastProcess &&
+                              CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                          "classic conversion export replaced its mounted worker");
+                    WIN32_FIND_DATAW file{};
+                    const auto mask=mode=='t'?L"\\Text lines.txt":L"\\Renamed payload*";
+                    auto search=FindFirstFileW((output+mask).c_str(),&file);
+                    Check(search!=INVALID_HANDLE_VALUE,"classic conversion did not produce a Windows file");
+                    FindClose(search);
+                    if(mode=='r' || mode=='R'){
+                        const DWORD expected=mode=='r'?300000:173;
+                        Check(file.nFileSizeLow==expected,"classic raw export wrote the wrong fork length");
                     }
+                    const auto exportedFile=Location::Windows(output+L"\\"+file.cFileName);
+                    const auto importFolder=classic->MakeDirectory(targetFolder,u"Import "+std::u16string(1,char16_t(mode))+(mode=='R'?u" resource":u""));
+                    LegacyConversion import{exportedFile,Location::Classic(path,":")};
+                    import.options.input=mode;
+                    import.selection=ConversionSelection{exportedFile,Native(classic,importFolder)};
+                    auto imported=Submit(import);
+                    Wait(imported);
+                    if(imported.Job()->result().code)throw HfsPlus::Error(imported.Job()->result().message);
+                    auto entries=alias->List(importFolder);
+                    Check(imported.Snapshot().complete && entries.size()==1 && !CopyProcess::lastProcess &&
+                              CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                          "classic conversion import replaced its mounted worker");
+                    if(mode=='r' || mode=='R'){
+                        const unsigned fork=mode=='R'?1:0;
+                        const auto expected=fork?173u:300000u;
+                        Check(entries[0].forks[fork].size==expected && !entries[0].forks[1-fork].size,
+                              "classic raw import wrote to the wrong fork");
+                        BYTE sample[16];
+                        alias->Read(entries[0].id,fork,0,sample,sizeof(sample));
+                        for(unsigned i=0;i<sizeof(sample);++i)
+                            Check(sample[i]==BYTE(i*7+fork*13),"classic raw fork bytes changed");
+                    }else if(mode=='t'){
+                        char text[4];
+                        Check(entries[0].forks[0].size==sizeof(text) && !entries[0].forks[1].size,
+                              "classic text round trip produced the wrong fork lengths");
+                        alias->Read(entries[0].id,0,0,text,sizeof(text));
+                        Check(!memcmp(text,"a\rb\r",sizeof(text)),"classic text round trip changed line endings");
+                    }else Verify(*alias,entries[0].id);
                 }
+                struct RestoreMappings {
+                    TypeMappings::Snapshot previous=TypeMappings::Capture();
+                    ~RestoreMappings(){TypeMappings::Apply(previous);}
+                } restoreMappings;
+                TypeMappings::Snapshot mappings;
+                mappings.hfsToWindows={{"TEXTTEST","hfvx"}};
+                mappings.windowsToHfs={{"HFVX","TEXTTESTx"}};
+                TypeMappings::Apply(mappings);
+                lines.name=u"Mapped raw";
+                memcpy(lines.finder.data(),"TEXTTEST",8);
+                const auto mappedId=classic->Put(sourceFolder,lines,[](unsigned, uint64_t at, void* output, size_t size){
+                    memcpy(output,"data"+at,size);
+                },false);
+                const auto exportRoot=Location::Windows(exportDir);
+                LegacyConversion mappedExport{Location::Classic(path,":"),exportRoot};
+                mappedExport.options.output='r';
+                mappedExport.selection=ConversionSelection{Native(classic,mappedId),exportRoot};
+                auto mappingExport=Submit(mappedExport);Wait(mappingExport);
+                const auto mappedPath=Location::Windows(exportDir+L"\\Mapped raw.hfvx");
+                Check(!mappingExport.Job()->result().code &&
+                          GetFileAttributesW(mappedPath.WindowsPath().c_str())!=INVALID_FILE_ATTRIBUTES,
+                      "mounted raw export did not apply the mapped extension");
+                LegacyConversion mappedImport{mappedPath,Location::Classic(path,":")};
+                mappedImport.options.input='r';
+                mappedImport.selection=ConversionSelection{mappedPath,Native(classic,targetFolder)};
+                auto mappingImport=Submit(mappedImport);Wait(mappingImport);
+                Entry mapped;
+                Check(!mappingImport.Job()->result().code && classic->FindChild(targetFolder,u"Mapped raw",mapped) &&
+                          !memcmp(mapped.finder.data(),"TEXTTEST",8) && !CopyProcess::lastProcess &&
+                          CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                      "mounted raw import did not apply the type mapping and strip policy");
             }
             classic->SuspendWorker();
             std::weak_ptr<Volume> previousMount=classic;

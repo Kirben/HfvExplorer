@@ -1264,18 +1264,44 @@ bool CopiesWithinMountedImage(const OrdinaryCopy& copy) {
 bool CopyWithinMountedImage(Volume& volume, const std::vector<uint32_t>& ids, uint32_t parent, Storage::Job& job) {
     return dynamic_cast<PersistentVolume&>(volume).CopyWithin(ids, parent, job);
 }
+bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
+    if (!conversion.selection) return false;
+    auto classic = [](const Location& item) {
+        return item.IsMounted() && item.Volume()->HasPersistentWorker() &&
+               !strcmp(item.Volume()->Kind(), "HFS");
+    };
+    const auto& selection = *conversion.selection;
+    if (conversion.source.IsWindows() && conversion.destination.IsClassic())
+        return selection.source.IsWindows() && classic(selection.folder);
+    if (conversion.source.IsClassic() && conversion.destination.IsWindows())
+        return classic(selection.source) && selection.folder.IsWindows();
+    return false;
+}
 bool UsesWorker(const Request &request) {
 #ifdef HFV_TESTING
     if (!enabled)
         return false;
 #endif
     auto persistent=[](const Location& item) { return item.IsMounted() && item.Volume()->HasPersistentWorker(); };
-    if (auto* copy = request.Get<OrdinaryCopy>(); copy && persistent(copy->destination) && !copy->sources.empty()) {
+    auto windows=[](const Location& item) {
+        return item.IsWindows() || (item.IsMounted() && !strcmp(item.Volume()->Kind(), "Windows"));
+    };
+    if (auto* copy = request.Get<OrdinaryCopy>(); copy && !copy->sources.empty()) {
         if (CopiesWithinMountedImage(*copy)) return false;
-        const auto destinationKey = copy->destination.Volume()->ResourceKey();
-        if (std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
-            return persistent(source) && source.Volume()->ResourceKey() != destinationKey;
-        })) return false;
+        if (persistent(copy->destination)) {
+            const auto destinationKey = copy->destination.Volume()->ResourceKey();
+            if (std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
+                return windows(source) || (persistent(source) && source.Volume()->ResourceKey() != destinationKey);
+            })) return false;
+        } else if (windows(copy->destination) &&
+                   std::any_of(copy->sources.begin(), copy->sources.end(), persistent) &&
+                   std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
+                       return windows(source) || persistent(source);
+                   })) return false;
+    }
+    if (auto* conversion = request.Conversion(); conversion && ConvertsWithMountedClassic(*conversion)) {
+        const char mode = conversion->source.IsWindows() ? conversion->options.input : conversion->options.output;
+        if (mode && strchr("ambt5rR", mode)) return false;
     }
     if(auto* rename=request.Rename(); rename&&persistent(rename->source)) return false;
     if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
