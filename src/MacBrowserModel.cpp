@@ -2,7 +2,7 @@
 #include "stdafx.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
-#include "CopyProcess.h"
+#include "VolumeSession.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "BrowserPresentation.h"
@@ -257,7 +257,7 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
         if(persistent)
-            return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,externalJournal));
+            return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,externalJournal));
         try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true,externalJournal.empty()?nullptr:externalJournal.c_str()), true,key,externalJournal); }
         catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false,externalJournal.empty()?nullptr:externalJournal.c_str()), false,key,externalJournal); }
     }
@@ -266,11 +266,11 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     if (!MfsImage::Recognizes(*mfs)) {
         mfs.reset();
         if (!externalJournal.empty() || !RecognizesClassicImage(path)) return {};
-        if (persistent) return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,{},CopyProcess::ImageFormat::Classic));
+        if (persistent) return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
         return OpenClassicImage(path,true);
     }
     mfs.reset();
-    if(persistent)return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,{},CopyProcess::ImageFormat::Mfs));
+    if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Mfs));
     return OpenMfsImage(path,true);
     });
 }

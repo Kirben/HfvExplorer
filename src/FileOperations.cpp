@@ -3,6 +3,7 @@
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "CopyProcess.h"
+#include "VolumeSession.h"
 #include "CopyWorkerProtocol.h"
 #include "TransferConversion.h"
 #include "TypeMappingSnapshot.h"
@@ -130,7 +131,7 @@ Storage::Result CopyRequest(const OrdinaryCopy& request,ExecutionRoute route,Sto
   if(route==ExecutionRoute::MountedCopy){
    std::vector<uint32_t> ids;ids.reserve(opened.size());
    for(const auto& source:opened)ids.push_back(source.second);
-   complete=CopyProcess::CopyWithinMountedImage(*destination.first,ids,destination.second,job);
+   complete=VolumeSession::CopyWithinMountedImage(*destination.first,ids,destination.second,job);
   }else complete=CopyMany(opened,*destination.first,destination.second,job);
  }catch(...){if(disk&&disk->Error())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");throw;}
  if(!request.destination.Volume())destination.first->Close();
@@ -326,8 +327,21 @@ void ValidateRequest(const Request& r){
   Check(!link->source.IsNone() && !link->parent.IsNone() && !link->name.empty(), "Choose a hard link source, destination and name");
  }
 }
+bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
+    if (!conversion.selection) return false;
+    auto classic = [](const Location& item) {
+        return item.IsMounted() && item.Volume()->HasPersistentWorker() &&
+               !strcmp(item.Volume()->Kind(), "HFS");
+    };
+    const auto& selection = *conversion.selection;
+    if (conversion.source.IsWindows() && conversion.destination.IsClassic())
+        return selection.source.IsWindows() && classic(selection.folder);
+    if (conversion.source.IsClassic() && conversion.destination.IsWindows())
+        return classic(selection.source) && selection.folder.IsWindows();
+    return false;
+}
 ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
-    if (const auto* copy=request.Get<OrdinaryCopy>(); copy && CopyProcess::CopiesWithinMountedImage(*copy))
+    if (const auto* copy=request.Get<OrdinaryCopy>(); copy && VolumeSession::CopiesWithinMountedImage(*copy))
         return ExecutionRoute::MountedCopy;
     if (inWorker) return ExecutionRoute::Local;
 #ifdef HFV_TESTING
@@ -350,7 +364,7 @@ ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
                        return windows(source) || persistent(source);
                    })) return ExecutionRoute::Local;
     }
-    if (auto* conversion = request.Conversion(); conversion && CopyProcess::ConvertsWithMountedClassic(*conversion)) {
+    if (auto* conversion = request.Conversion(); conversion && ConvertsWithMountedClassic(*conversion)) {
         const char mode = conversion->source.IsWindows() ? conversion->options.input : conversion->options.output;
         if (mode && strchr("ambt5rR", mode)) return ExecutionRoute::Local;
     }
@@ -397,7 +411,7 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request, Execution
  }
  if(request.OperationKind()==Kind::LegacyCopy){
   const auto& conversion=request.Legacy();
-  const bool sharedExport=CopyProcess::ConvertsWithMountedClassic(conversion) &&
+  const bool sharedExport=ConvertsWithMountedClassic(conversion) &&
                           conversion.destination.IsWindows() && !handoff;
   if(request.Legacy().source.IsWindows())AddPath(access,request.Legacy().source.WindowsPath(),request.Legacy().move?Mode::Write:Mode::Read);else access.push_back({sharedExport?conversion.selection->source.ResourceKey():conversion.source.ResourceKey(),(conversion.move||(!sharedExport&&(request.background||handoff)))?Mode::Write:Mode::Read});
   if(request.Legacy().destination.IsWindows())access.push_back({VolumeCoord::LegacyOutputKey(request.Legacy().destination.WindowsPath()),Mode::Write});else access.push_back({request.Legacy().destination.ResourceKey(),Mode::Write});return access;
@@ -511,7 +525,7 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
  const bool exporting=conversion.source.IsClassic() && conversion.destination.IsWindows();
  if(!importing && !exporting) return {};
  char mode=importing ? conversion.options.input : conversion.options.output;
- const bool mounted=CopyProcess::ConvertsWithMountedClassic(conversion);
+ const bool mounted=ConvertsWithMountedClassic(conversion);
  const bool raw=mounted && (mode=='r' || mode=='R');
  if(!TransferConversion::Supported(mode) && mode!='a' && !raw) return {};
  const auto mappings=raw?TypeMappings::Capture():TypeMappings::Snapshot{};

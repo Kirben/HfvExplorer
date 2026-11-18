@@ -21,6 +21,7 @@
 #include "stdafx.h"
 #include "WindowsCompatibility.h"
 #include "CopyProcess.h"
+#include "VolumeSession.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
@@ -328,7 +329,7 @@ int CHFVExplorerApp::ExitInstance(){BrowserTransfers::Clear();ShutdownStorageUi(
 
 BOOL CHFVExplorerApp::InitInstance()
 {
- if(__argc==4&&!strcmp(__argv[1],"--volume-session"))ExitProcess(CopyProcess::VolumeSessionChild(__argv[2],__argv[3]));
+ if(__argc==4&&!strcmp(__argv[1],"--volume-session"))ExitProcess(VolumeSession::Child(__argv[2],__argv[3]));
  if(__argc==4&&!strcmp(__argv[1],"--copy-worker"))ExitProcess(CopyProcess::Child(__argv[2],__argv[3]));
  auto windows=WindowsCompatibility::Current();
  if(__argc==3&&!strcmp(__argv[1],"--compatibility-report")){
