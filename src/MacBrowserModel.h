@@ -68,6 +68,7 @@ public:
     virtual void ResumeWorker(){Reload();}
     virtual void WorkerUncleanExit(){}
     virtual void ReleaseWorkerReaders(const std::vector<std::string>&){}
+    virtual void ValidateMedia() {}
     virtual void ReleaseMedia() {} // Explicit physical-media release, including idle clipboard references.
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}

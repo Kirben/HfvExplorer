@@ -561,5 +561,6 @@ Storage::Result ShowSubmittedStorageJob(const std::shared_ptr<Storage::Job>& job
 void ShutdownStorageUi(){
  FileOperations::CancelPending();BackgroundCopies::Shutdown();MetadataDialogs::Shutdown();
  nativeSession.reset();StorageUi::state().wait=nullptr;StorageUi::state().thread=0;
+ Storage::navigationWorker().shutdown();
  Storage::worker().shutdown();
 }

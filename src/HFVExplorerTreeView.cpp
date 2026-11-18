@@ -614,6 +614,7 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 	int volinx, type;
 
 	if(!m_selchange_enabled) return;
+	GetBrowserSession().CancelNavigation();
 
 	enable_selchange(0);
 
