@@ -25,27 +25,34 @@ class Job {
  mutable std::mutex mutex_;
  std::condition_variable condition_;
  Progress progress_;Result result_;bool done_=false;
+ uint64_t conflictId_=0;
  std::string conflict_;ConflictChoice choice_=ConflictChoice::None;bool replaceAll_=false,cancelled_=false;
  HANDLE event_;
+ std::function<void(const Progress&)> report_;
+ std::function<ConflictChoice(const std::string&)> ask_;
 public:
  Job():event_(CreateEvent(NULL,TRUE,FALSE,NULL)) {if(!event_)throw std::runtime_error("Could not create job completion event");}
  ~Job(){CloseHandle(event_);}
  HANDLE event()const{return event_;}
  Progress progress()const{std::lock_guard<std::mutex> lock(mutex_);return progress_;}
- void progress(const Progress& value){std::lock_guard<std::mutex> lock(mutex_);progress_=value;}
+ void transport(std::function<void(const Progress&)> report,std::function<ConflictChoice(const std::string&)> ask){report_=std::move(report);ask_=std::move(ask);}
+ void progress(const Progress& value){{std::lock_guard<std::mutex> lock(mutex_);progress_=value;}if(report_)report_(value);}
  bool done()const{std::lock_guard<std::mutex> lock(mutex_);return done_;}
  Result result()const{std::lock_guard<std::mutex> lock(mutex_);return result_;}
  void finish(Result result){ {std::lock_guard<std::mutex> lock(mutex_);result_=std::move(result);done_=true;}SetEvent(event_);}
  void wait()const{WaitForSingleObject(event_,INFINITE);}
  std::string conflict()const{std::lock_guard<std::mutex> lock(mutex_);return conflict_;}
+ std::pair<uint64_t,std::string> conflictState()const{std::lock_guard<std::mutex> lock(mutex_);return {conflictId_,conflict_};}
+ void resolve(uint64_t id,ConflictChoice choice){{std::lock_guard<std::mutex> lock(mutex_);if(id!=conflictId_||conflict_.empty())return;choice_=cancelled_?ConflictChoice::Cancel:choice;}condition_.notify_all();}
  bool cancelled()const{std::lock_guard<std::mutex> lock(mutex_);return cancelled_;}
  void cancel(){ {std::lock_guard<std::mutex> lock(mutex_);cancelled_=true;choice_=ConflictChoice::Cancel;}condition_.notify_all();}
  void resolve(ConflictChoice choice){ {std::lock_guard<std::mutex> lock(mutex_);choice_=cancelled_?ConflictChoice::Cancel:choice;}condition_.notify_all();}
  ConflictChoice replace(const std::string& path) {
+  if(ask_)return ask_(path);
   std::unique_lock<std::mutex> lock(mutex_);
   if(cancelled_)return ConflictChoice::Cancel;
   if(replaceAll_)return ConflictChoice::Replace;
-  conflict_=path;choice_=ConflictChoice::None;
+  ++conflictId_;conflict_=path;choice_=ConflictChoice::None;
   condition_.wait(lock,[&]{return choice_!=ConflictChoice::None;});
   ConflictChoice result=choice_;conflict_.clear();
   if(result==ConflictChoice::ReplaceAll){replaceAll_=true;return ConflictChoice::Replace;}

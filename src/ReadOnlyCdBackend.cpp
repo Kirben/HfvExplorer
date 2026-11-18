@@ -5,6 +5,9 @@
 #include "ReadOnlyFloppy.h"
 #include "DirectFloppy.h"
 #include "ReadOnlySource.h"
+#include "ImageHandleTransfer.h"
+#include <io.h>
+#include <fcntl.h>
 #include "floppy.h"
 #define _FHOOK_INTERNAL_
 #include "filehook.h"
@@ -63,6 +66,7 @@ int hookedOpen(const char* path, int flags, ...) {
     }
     int drive = pathDrive(path);
     if (drive < 0) {
+        if(!(flags&(_O_CREAT|_O_TRUNC|_O_APPEND))){try{int n=MultiByteToWideChar(CP_ACP,0,path,-1,nullptr,0);std::wstring wide(n,0);MultiByteToWideChar(CP_ACP,0,path,-1,&wide[0],n);HANDLE h=ImageHandleTransfer::Open(wide.c_str(),(flags&(_O_RDWR|_O_WRONLY))!=0);if(h!=INVALID_HANDLE_VALUE){int fd=_open_osfhandle(intptr_t(h),flags|_O_BINARY);if(fd<0)CloseHandle(h);return fd;}}catch(...){errno=EACCES;return -1;}}
         if (flags & _O_CREAT) { va_list ap; va_start(ap, flags); int mode = va_arg(ap,int); va_end(ap); return fhook_open_image(path,flags,mode); }
         return fhook_open_image(path, flags);
     }
@@ -241,6 +245,7 @@ int is_any_floppy_present(int drive) {std::lock_guard<std::recursive_mutex> devi
 #endif
     return device.OpenDrive(drive)?1:0;
 }
+int physical_cd_generation(int drive,unsigned long* generation){std::lock_guard<std::recursive_mutex> lock(deviceLock(drive));if(drive<0||drive>=MAX_DEVICES||!generation||!cd_init(drive,TRUE))return 0;bool ok=cds[drive].MediaGeneration(*generation);cd_final(drive);return ok?1:0;}
 int physical_floppy_generation(int drive,unsigned long* generation){std::lock_guard<std::recursive_mutex> deviceGuard(deviceLock(drive));
  if(drive<0||drive>=MAX_DEVICES||!generation)return 0;
  if(auto writer=DirectFloppy::Current(drive)){*generation=writer->Generation();return 1;}

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MacBrowserModel.h"
+#include "StorageHandoff.h"
+#include <io.h>
 #include "VolumeCoordinator.h"
 #include "LegacyEngine.h"
 #include "ReadOnlySource.h"
@@ -29,7 +31,7 @@ std::string Encode(const std::u16string &s) {
 }
 struct RootScope {
  hfsvol* volume;long previous;
- explicit RootScope(hfsvol* v):volume(v),previous(hfs_getcwd(v)){Check(hfs_setcwd(v,HFS_CNID_ROOTDIR)==0);}
+ explicit RootScope(hfsvol* v):volume(v),previous(0){if(!v)throw HfsPlus::Error("This volume is being used by the copy worker");previous=hfs_getcwd(v);Check(hfs_setcwd(v,HFS_CNID_ROOTDIR)==0);}
  ~RootScope(){hfs_setcwd(volume,previous);}
 };
 class Classic final : public Volume {
@@ -38,7 +40,7 @@ class Classic final : public Volume {
     std::string image_;
     std::string resourceKey_;
     std::string imageIdentity_;
-    bool write_;
+    bool write_;bool suspended_=false;
     std::unique_ptr<ReadOnlySources::Registration> registration_;
     std::map<uint32_t,std::string> paths_;
     uint32_t next_ = 3;
@@ -70,17 +72,22 @@ public:
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
+    WorkerOrigin WorkerDescription()const override{WorkerOrigin out;if(registration_)return out;out.kind=WorkerOrigin::Classic;out.path=VolumeCoord::Wide(image_);out.root=paths_.at(2);out.identity=imageIdentity_;out.writable=write_;return out;}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{LegacyEngine::Scope engine(context_);if(registration_||!volume_||volume_->fd>=0x10000000)return {};auto file=_get_osfhandle(volume_->fd);if(file==-1)throw HfsPlus::Error("Cannot transfer classic image handle");return {{VolumeCoord::Wide(image_),uintptr_t(file)}};}
+    void WorkerUncleanExit()override{LegacyEngine::Scope engine(context_);write_=false;}
+    void SuspendWorker()override{LegacyEngine::Scope engine(context_);if(registration_)return;if(volume_){auto v=volume_;volume_=nullptr;suspended_=true;int closed=hfs_umount(v);if(closed)write_=false;Check(closed==0);}}
+    void ResumeWorker()override{LegacyEngine::Scope engine(context_);if(!suspended_)return;volume_=hfs_mount(const_cast<char*>(image_.c_str()),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);suspended_=false;}
     void Close()override{LegacyEngine::Scope engine(context_);if(volume_){auto v=volume_;volume_=nullptr;Check(hfs_umount(v)==0);}}
     std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name()const override{LegacyEngine::Scope engine(context_);return Decode(paths_.at(2));}
     const char *Kind()const override{return "HFS";}
-    bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&HFS_READONLY);}
+    bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&(HFS_READONLY|HFS_WRITE_FAILED));}
     bool CaseSensitive()const override{return false;}
     void ValidateEntry(const Entry& e)const override{
         Volume::ValidateEntry(e);if(e.datesValid&&(e.created>UINT32_MAX||e.modified>UINT32_MAX))throw HfsPlus::Error("Classic HFS cannot preserve dates after February 2040");Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
     }
-    uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
+    uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(volume_!=nullptr);Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
     Entry Stat(uint32_t id)override{LegacyEngine::Scope engine(context_);return Describe(Path(id),id);}
     void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent)override {LegacyEngine::Scope engine(context_);
         auto dst=dynamic_cast<Classic*>(&target);if(!dst)return;RootScope sourceScope(volume_),targetScope(dst->volume_);
@@ -157,6 +164,6 @@ public:
     void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);auto path=Path(id);Check(write_&&id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
 };
 }
-std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key){return std::make_shared<Classic>(std::move(source),key);}
-std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return std::make_shared<Classic>(image,path,write);}
+std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key));}
+std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return TrackWorkerVolume(std::make_shared<Classic>(image,path,write));}
 }

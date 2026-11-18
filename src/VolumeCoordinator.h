@@ -41,6 +41,7 @@ public:
  Lease(const Lease&)=delete;Lease& operator=(const Lease&)=delete;
 };
 bool Readable(const std::string&);
+bool Overlapping(const std::vector<std::string>&,const std::string&);
 // Advisory command eligibility; workers must still acquire an atomic reservation.
 bool Available(const std::vector<Access>&);
 // Scoped command work may reuse a writer already owned by this worker thread.

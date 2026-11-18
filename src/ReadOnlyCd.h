@@ -21,6 +21,7 @@ public:
     bool ReadBytes(ULONGLONG offset, DWORD count, void* buffer);
     bool ReadVolume(ULONGLONG offset, DWORD count, void* buffer);
     HANDLE Handle() const { return handle_; }
+    bool MediaGeneration(DWORD& out){if(!CheckIdentity()||!identity_)return false;out=generation_;return true;}
     DWORD Error() const { return error_; }
     ULONGLONG MediaSize() const { return mediaSize_; }
     ULONGLONG LengthQuerySize() const { return lengthSize_; }

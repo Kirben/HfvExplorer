@@ -16,6 +16,7 @@ public:
     virtual bool WriteAt(uint64_t,const void*,size_t){return false;}
     virtual bool Flush(){return false;}
     virtual void DisableWrites(){}
+    virtual std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const{return {};}
 };
 class MfsImageSource : public MfsSource {
 public:
@@ -28,7 +29,9 @@ public:
     bool WriteAt(uint64_t,const void*,size_t)override;
     bool Flush()override;
     void DisableWrites()override{writable_=false;}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return {{path_,uintptr_t(file_)}};}
 private:
+    std::wstring path_;
     bool writable_=false;
     MfsImageSource(const MfsImageSource&) = delete;
     MfsImageSource& operator=(const MfsImageSource&) = delete;

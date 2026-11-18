@@ -1,6 +1,36 @@
 HFVExplorer 2.0.0
 -----------------
 
+## Copy worker processes
+
+Ordinary file/folder copies, legacy conversions and fork export/import execute in
+separate headless worker processes. Each worker owns its filesystem engines,
+streaming reads/writes, overwrite handling and cleanup. The browser coordinates
+reservations and displays progress and questions through a versioned pipe protocol;
+file contents and extended-attribute payloads do not travel through that protocol.
+
+Regular image handles are duplicated into the worker through an explicit handle
+whitelist. Dormant parent handles retain exclusive access throughout the handoff.
+Classic mounts are closed before copying; HFS+/HFSX and MFS engines are suspended
+and reopened after the child has exited. Physical media are reopened by the worker
+with the existing native access/locking and media-change checks. Existing CD
+transports without a change counter retain their read-only transport checks.
+
+Closing a browser can transfer progress to another browser. Closing the last one
+still cancels and drains jobs. If the browser process disappears unexpectedly,
+workers cancel cooperatively and complete cleanup rather than being killed in the
+middle of a write. After an unexpected worker exit, the browser never retries or deletes additional
+source items; non-journaled mounted volumes are reopened read-only after an
+unclean exit. These protections do not provide crash-resumable copying or make
+classic HFS/MFS transactions safe against power loss. A busy Mac volume remains
+reserved while unrelated volumes and Windows paths can proceed independently.
+
+The Test build's `--verify-copy-process NEW_DIRECTORY` exercises actual child
+processes with generated images, a file-backed simulated floppy and hidden test
+windows. It covers formats, conversion, forks, attributes, compression/hard links,
+overwrite/cancel, conflicting jobs, worker failure, parent death and owner closing.
+No physical devices or desktop automation are used by these tests.
+
 ## File replacement safety
 
 Windows replacements retain read guards on captured destination versions, bind
