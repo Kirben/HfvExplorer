@@ -4,6 +4,7 @@
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
+#include "CopyProcess.h"
 #include "HfsPlusDisk.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
@@ -89,6 +90,46 @@ int RunBrowserWindowsTest(const char* directory){
   bool translated=TranslateAccelerator(ah,LoadAccelerators(AfxGetResourceHandle(),MAKEINTRESOURCE(IDR_MAINFRAME)),&key)!=0;SetKeyboardState(prior);
   Check(translated&&app.m_browsers.size()==3,"Ctrl+Enter is not wired to New browser");auto c=app.m_browsers.back();HWND ch=c->GetSafeHwnd();
   c->SendMessage(WM_CLOSE);Check(!IsWindow(ch)&&IsWindow(ah)&&IsWindow(bh)&&app.m_browsers.size()==2,"closing the newest window closed another browser");NoQuit();
+  const auto sharedPath=VolumeCoord::Wide(std::string((LPCSTR)firstImage));
+  Check(sa.MacBrowser().ShowTestFolder(0,2)&&sb.MacBrowser().OpenImage(sharedPath)==1,
+        "open one image in both browsers");
+  auto firstSelection=sa.MacBrowser().CaptureItem(Find(sa,L"One"));
+  auto peerSelection=sb.MacBrowser().CaptureItem(Find(sb,L"One"));
+  auto shared=firstSelection.Volume();
+  auto pid=CopyProcess::VolumeSessionPidForTest(shared);
+  Check(shared==peerSelection.Volume()&&pid&&pid!=GetCurrentProcessId(),
+        "the same mounted image did not share a distinct worker process");
+  auto renamed=FileOperations::Submit(FileOperations::RenameEntry{firstSelection,u"Renamed"});
+  Check(WaitForSingleObject(renamed.Job()->event(),10000)==WAIT_OBJECT_0&&
+        !renamed.Job()->result().code,"rename on persistent session failed");
+  const auto deadline=GetTickCount()+10000;
+  while((Find(sa,L"Renamed")<0||Find(sb,L"Renamed")<0)&&LONG(deadline-GetTickCount())>0) {
+   MSG message{};
+   while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessage(&message);}
+   Sleep(1);
+  }
+  Check(Find(sa,L"Renamed")>=0&&Find(sb,L"Renamed")>=0&&CopyProcess::VolumeSessionPidForTest(shared)==pid,
+        "rename did not refresh both browsers within the same worker session");
+  auto oldSelection=sa.MacBrowser().CaptureItem(Find(sa,L"Renamed"));
+  CopyProcess::CrashVolumeSessionOnRenameForTest(shared);
+  auto refused=FileOperations::Submit(FileOperations::RenameEntry{oldSelection,u"Committed before crash"});
+  Check(WaitForSingleObject(refused.Job()->event(),10000)==WAIT_OBJECT_0&&refused.Job()->result().code&&
+        refused.Job()->result().rollback==Storage::Rollback::Unverified,
+        "lost rename reply was not reported as unverified");
+  Check(sa.MacBrowser().Refresh()&&sb.MacBrowser().Refresh()&&Find(sa,L"Committed before crash")>=0&&
+        Find(sb,L"Committed before crash")>=0&&CopyProcess::VolumeSessionPidForTest(shared)!=pid&&shared->Writable(),
+        "refresh did not recover both browsers after a worker crash");
+  oldSelection.expectedName.clear();
+  auto stale=FileOperations::Submit(FileOperations::RenameEntry{oldSelection,u"Stale rename"});
+  Check(WaitForSingleObject(stale.Job()->event(),10000)==WAIT_OBJECT_0&&stale.Job()->result().code,
+        "selection from the crashed worker was accepted");
+  auto fresh=sa.MacBrowser().CaptureItem(Find(sa,L"Committed before crash"));
+  auto retry=FileOperations::Submit(FileOperations::RenameEntry{fresh,u"Recovered rename"});
+  Check(WaitForSingleObject(retry.Job()->event(),10000)==WAIT_OBJECT_0&&!retry.Job()->result().code&&
+        sa.MacBrowser().Refresh()&&Find(sa,L"Recovered rename")>=0,
+        "fresh selection could not write after journal recovery");
+  fprintf(report,"PASS: two browsers share one persistent worker, rename refreshes both without remounting, "
+                 "worker crash requires refresh, stale selections are rejected and fresh writes succeed.\n");
   // Make the first frame the MFC main window before closing it: this is the
   // case that CFrameWnd's default SDI shutdown used to close every document.
   app.ActivateBrowser(a);a->SendMessage(WM_CLOSE);

@@ -225,16 +225,18 @@ bool SupportsOperation(Kind kind) {
     }
 }
 
-static void EncodeEntry(Data& d, const Entry& e) {
+void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.id); d.put(e.parent); d.u16(e.name); d.put(e.version);
+    d.put(e.resolvedId); d.put(e.linkCount); d.put(e.hardLink); d.put(e.identity); d.put(e.readError);
     d.put(e.created); d.put(e.modified); d.put(e.datesValid);
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
 }
-static Entry DecodeEntry(Data& d) {
+Entry DecodeEntry(Data& d) {
     Entry e;
     e.id=CatalogNumber(d); e.parent=CatalogNumber(d); e.name=d.u16(); e.version=CatalogNumber(d);
+    e.resolvedId=CatalogNumber(d); e.linkCount=CatalogNumber(d); e.hardLink=d.flag(); e.identity=d.text(); e.readError=d.text();
     e.created=d.get(); e.modified=d.get(); e.datesValid=d.flag();
     e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
     e.forks[0].size=d.get(); e.forks[1].size=d.get();

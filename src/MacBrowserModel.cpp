@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
+#include "CopyProcess.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "BrowserPresentation.h"
@@ -60,6 +61,7 @@ public:
             (journaled_?(external_?", external journal":", internal journal"):", non-journaled")+(expanded_?", expanded timestamps":"");
     }
     bool Writable() const override { return usable_ && canWrite_; }
+    bool Journaled() const override { return journaled_; }
     void ReleaseMedia()override{std::unique_lock<std::recursive_mutex> lock(mutex_,std::try_to_lock);if(!lock.owns_lock())throw VolumeCoord::Busy();Check(!writable_,"Only read-only physical media can be released this way");usable_=false;volume_.reset();source_.reset();}
     void Reload() override {
         Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
@@ -240,12 +242,14 @@ std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::str
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
     return TrackWorkerVolume(std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal)));
 }
-std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {
+static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     auto source = HfsPlus::OpenImage(path.c_str(), false);
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
+        if(persistent)
+            return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,externalJournal));
         try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true,externalJournal.empty()?nullptr:externalJournal.c_str()), true,key,externalJournal); }
         catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false,externalJournal.empty()?nullptr:externalJournal.c_str()), false,key,externalJournal); }
     }
@@ -256,6 +260,12 @@ std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &e
     if(!mfs->Open(path.c_str(),error,true)){mfs.reset(new MfsImageSource);if(!mfs->Open(path.c_str(),error))throw HfsPlus::Error(error);}
     return TrackWorkerVolume(std::make_shared<Mfs>(std::move(mfs),key));
     });
+}
+std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {
+    return OpenImageImpl(path,externalJournal,false);
+}
+std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal) {
+    return OpenImageImpl(path,externalJournal,true);
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {
     auto source = HfsPlus::OpenCd(drive, std::move(media));
