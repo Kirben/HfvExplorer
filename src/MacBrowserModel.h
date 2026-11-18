@@ -87,6 +87,8 @@ Entry DescribeWindowsFile(const std::wstring &path);
 std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring &path);
 bool WindowsResourceCompanion(const std::wstring &path);
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
+std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key);
+std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource>,const std::string& key);
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.
 // A move removes its source only after the entire selected tree was copied.

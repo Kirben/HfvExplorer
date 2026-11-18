@@ -229,16 +229,7 @@ void CHFVExplorerApp::LoadSettings(void)
 
 	m_disable_autofloppy = GetProfileInt("Setup","DisableAutoFloppy",1);
 
-	m_do_harddisks = GetProfileInt("Setup","EnableMacHardDisksAtYourOwnRisk",0);
-	if(m_do_harddisks) {
-		int warn = GetProfileInt("Setup","WarnBeforeHardDiskUse",1);
-		if(warn) {
-			AfxMessageBox( "You have enabled the Mac hard disk access. Be careful, It is NOT properly tested!" );
-			WriteProfileInt("Setup","WarnBeforeHardDiskUse",0);
-		}
-	} else {
-		WriteProfileString("Setup","WarnBeforeHardDiskUse",NULL);
-	}
+
 }
 
 void CHFVExplorerApp::SaveSettings(void)
@@ -296,7 +287,6 @@ void CHFVExplorerApp::SaveSettings(void)
 
 	WriteProfileInt("Setup","UsePartialNames",m_use_partial_names);
 
-	// WriteProfileInt("Setup","EnableMacHardDisksAtYourOwnRisk",m_do_harddisks);
 }
 
 void CHFVExplorerApp::CheckDefaultSettings(void)
@@ -349,6 +339,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3&&!strcmp(__argv[1],"--verify-windows-path-coordination"))ExitProcess(RunWindowsPathCoordinationTest(__argv[2]));
  extern int RunPerVolumeCommandsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-per-volume-commands"))ExitProcess(RunPerVolumeCommandsTest(__argv[2]));
+ extern int RunPhysicalRemovableTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-physical-removable"))ExitProcess(RunPhysicalRemovableTest(__argv[2]));
  extern int RunHardLinksBrowserTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-hard-links"))ExitProcess(RunHardLinksBrowserTest(__argv[2]));
  extern int RunFolderMetadataTest(const char*);
@@ -434,7 +426,6 @@ BOOL CHFVExplorerApp::InitInstance()
 	CheckDefaultSettings();
 
 	m_prevVersion = m_version;
- m_startup_hds = m_do_harddisks = FALSE;
 
 	if(m_version != "2.0.0") {
 		m_version = "2.0.0";

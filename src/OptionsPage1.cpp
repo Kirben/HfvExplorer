@@ -100,7 +100,7 @@ static int CALLBACK EnumFontFamProc(
 BOOL COptionsPage1::OnInitDialog() 
 {
 	CPropertyPage::OnInitDialog();
- GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->EnableWindow(FALSE);
+ GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->EnableWindow(TRUE);
 
 	HDC hdc = ::GetDC( ::GetDesktopWindow() );
 	(void)EnumFontFamilies(

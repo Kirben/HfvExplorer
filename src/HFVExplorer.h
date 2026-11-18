@@ -127,7 +127,7 @@ public:
 
 	BOOL m_use_partial_names;
 	BOOL m_disable_autofloppy;
-	BOOL m_do_harddisks;
+
 
 
 protected:

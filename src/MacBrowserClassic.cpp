@@ -3,6 +3,7 @@
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
 #include "LegacyEngine.h"
+#include "ReadOnlySource.h"
 #include "HfsPlusDisk.h"
 #include "charset.h"
 #include <fcntl.h>
@@ -38,6 +39,7 @@ class Classic final : public Volume {
     std::string resourceKey_;
     std::string imageIdentity_;
     bool write_;
+    std::unique_ptr<ReadOnlySources::Registration> registration_;
     std::map<uint32_t,std::string> paths_;
     uint32_t next_ = 3;
     uint32_t Id(const std::string &p) { for (auto &e : paths_) if(e.second == p)return e.first; paths_[next_]=p;return next_++; }
@@ -62,6 +64,10 @@ public:
         auto colon=root.find(':');root=colon==root.npos?":":root.substr(colon);
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
+    }
+    Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key):write_(false){
+        resourceKey_=key;context_=LegacyEngine::ForVolume(key);LegacyEngine::Scope engine(context_);registration_.reset(new ReadOnlySources::Registration(std::move(source)));image_=registration_->Path();imageIdentity_=key+":"+image_;volume_=hfs_mount(const_cast<char*>(image_.c_str()),1,O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
+        try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
     void Close()override{LegacyEngine::Scope engine(context_);if(volume_){auto v=volume_;volume_=nullptr;Check(hfs_umount(v)==0);}}
@@ -151,5 +157,6 @@ public:
     void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);auto path=Path(id);Check(write_&&id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
 };
 }
+std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key){return std::make_shared<Classic>(std::move(source),key);}
 std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return std::make_shared<Classic>(image,path,write);}
 }
