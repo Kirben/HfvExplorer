@@ -14,10 +14,12 @@ struct OrdinaryCopy {
  std::vector<Location> sources;
  Location destination;
 };
+struct ConversionSelection { Location source, folder; };
 struct LegacyConversion {
  Location source, destination;
  bool directory=false, move=false, askMode=false;
  LegacyCopyOptions options;
+ std::optional<ConversionSelection> selection;
 };
 struct RenameEntry {
  Location source;
@@ -66,71 +68,43 @@ struct ExportAttributeValue {
 };
 using MetadataOperation = std::variant<InspectProperties, EditClassicProperties, EditBasicMetadata,
                                        EditAttributes, ChangeCompression, ImportAttributeValue, ExportAttributeValue>;
+struct CreateFolder { Location parent; std::u16string name; };
+enum class ForkSelector { Data, Resource };
+struct ExportFileFork { Location source, output; ForkSelector fork = ForkSelector::Data; };
+struct ImportResourceFork { Location input, file; };
+struct CreateHardLink { Location source, parent; std::u16string name; };
 class Request {
- std::variant<OrdinaryCopy, LegacyConversion, RenameEntry, DeleteEntries, MetadataOperation, Kind> operation_;
- // Other operations retain their existing selection and destination fields.
- // For conversion these are the optional preflight selection and folder.
- std::vector<Location> otherSources_;
- Location otherTarget_;
+ using Operation = std::variant<OrdinaryCopy, LegacyConversion, RenameEntry, DeleteEntries,
+                                MetadataOperation, CreateFolder, ExportFileFork,
+                                ImportResourceFork, CreateHardLink>;
+ Operation operation_;
 public:
  Request() = default;
- Request(OrdinaryCopy copy) : operation_(std::move(copy)) {}
- Request(LegacyConversion conversion) : operation_(std::move(conversion)) {}
- Request(RenameEntry rename) : operation_(std::move(rename)) {}
- Request(DeleteEntries deletion) : operation_(std::move(deletion)) {}
- template<class T, std::enable_if_t<std::is_constructible_v<MetadataOperation, T>, int> = 0>
- Request(T metadata) : operation_(MetadataOperation(std::move(metadata))) {}
- const MetadataOperation* Metadata() const { return std::get_if<MetadataOperation>(&operation_); }
- const RenameEntry* Rename() const { return std::get_if<RenameEntry>(&operation_); }
- const DeleteEntries* Delete() const { return std::get_if<DeleteEntries>(&operation_); }
+ template<class T, std::enable_if_t<std::is_constructible_v<Operation, T>, int> = 0>
+ Request(T operation) : operation_(std::move(operation)) {}
+ template<class T> T* Get() { return std::get_if<T>(&operation_); }
+ template<class T> const T* Get() const { return std::get_if<T>(&operation_); }
+ const MetadataOperation* Metadata() const { return Get<MetadataOperation>(); }
+ const RenameEntry* Rename() const { return Get<RenameEntry>(); }
+ const DeleteEntries* Delete() const { return Get<DeleteEntries>(); }
+ LegacyConversion* Conversion() { return Get<LegacyConversion>(); }
+ const LegacyConversion* Conversion() const { return Get<LegacyConversion>(); }
+ LegacyConversion& Legacy() { return std::get<LegacyConversion>(operation_); }
+ const LegacyConversion& Legacy() const { return std::get<LegacyConversion>(operation_); }
+ OrdinaryCopy& Copy() { return std::get<OrdinaryCopy>(operation_); }
+ const OrdinaryCopy& Copy() const { return std::get<OrdinaryCopy>(operation_); }
  Kind OperationKind() const {
-  if (std::holds_alternative<OrdinaryCopy>(operation_)) return Kind::Copy;
-  if (std::holds_alternative<LegacyConversion>(operation_)) return Kind::LegacyCopy;
+  if (Get<OrdinaryCopy>()) return Kind::Copy;
+  if (Conversion()) return Kind::LegacyCopy;
   if (Rename()) return Kind::Rename;
   if (Delete()) return Kind::Delete;
   if (auto* metadata = Metadata()) return std::visit([](const auto& value) { return value.kind; }, *metadata);
-  return std::get<Kind>(operation_);
+  if (Get<CreateFolder>()) return Kind::CreateFolder;
+  if (Get<ExportFileFork>()) return Kind::ExportFork;
+  if (Get<ImportResourceFork>()) return Kind::ReplaceResource;
+  return Kind::CreateHardLink;
  }
- void SetKind(Kind kind) {
-  if (kind == Kind::LegacyCopy || kind == Kind::Rename || kind == Kind::Delete ||
-      kind == Kind::Inspect || kind == Kind::SetProperties || kind == Kind::SetBasicMetadata ||
-      kind == Kind::SetAttributes || kind == Kind::SetCompression ||
-      kind == Kind::ReadAttributeFile || kind == Kind::ExportAttribute)
-   throw HfsPlus::Error("This operation requires its own request payload");
-  if (kind == OperationKind()) return;
-  if (kind == Kind::Copy) {
-   operation_ = OrdinaryCopy{std::move(otherSources_), std::move(otherTarget_)};
-  } else {
-   if (auto* copy = std::get_if<OrdinaryCopy>(&operation_)) {
-    otherSources_ = std::move(copy->sources);
-    otherTarget_ = std::move(copy->destination);
-   }
-   operation_ = kind;
-  }
- }
- LegacyConversion* Conversion() { return std::get_if<LegacyConversion>(&operation_); }
- const LegacyConversion* Conversion() const { return std::get_if<LegacyConversion>(&operation_); }
- LegacyConversion& Legacy() { return std::get<LegacyConversion>(operation_); }
- const LegacyConversion& Legacy() const { return std::get<LegacyConversion>(operation_); }
- std::vector<Location>& Sources() {
-  auto* copy = std::get_if<OrdinaryCopy>(&operation_);
-  return copy ? copy->sources : otherSources_;
- }
- const std::vector<Location>& Sources() const {
-  const auto* copy = std::get_if<OrdinaryCopy>(&operation_);
-  return copy ? copy->sources : otherSources_;
- }
- Location& Target() {
-  auto* copy = std::get_if<OrdinaryCopy>(&operation_);
-  return copy ? copy->destination : otherTarget_;
- }
- const Location& Target() const {
-  const auto* copy = std::get_if<OrdinaryCopy>(&operation_);
-  return copy ? copy->destination : otherTarget_;
- }
- std::u16string name;
  bool background=false;
- unsigned fork=0;
  void SetLegacySourcePath(std::string path) {
   auto& source = Legacy().source;
   source = Location::FromLegacy(source.IsClassic() ? source.ClassicImage() : std::string(), path);

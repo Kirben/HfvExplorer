@@ -150,8 +150,8 @@ int RunCopyParentExitTest(const char *directory) {
         request.background = true;
         auto from = Native(source, id);
         from.cut = true;
-        request.Sources() = {from};
-        request.Target() = Native(target);
+        request.Copy().sources = {from};
+        request.Copy().destination = Native(target);
         auto op = Submit(request);
         DWORD end = GetTickCount() + 15000;
         while (!op.Job()->done() && op.Job()->progress().phase != "Worker test gate" &&
@@ -188,8 +188,8 @@ int RunCopyReleaseTest(const char *directory) {
         source->SetAttributes(id, attrs);
         Request request;
         request.background = true;
-        request.Sources() = {Native(source, id)};
-        request.Target() = Native(target);
+        request.Copy().sources = {Native(source, id)};
+        request.Copy().destination = Native(target);
         Pass(Submit(request));
         Entry copied;
         Check(target->FindChild(2, u"Shipping", copied) && target->GetAttributes(copied.id) == attrs,
@@ -207,13 +207,13 @@ int RunCopyReleaseTest(const char *directory) {
         Verify(*target, copied.id, 4096);
         auto plain = Put(*source, 2, u"Plain", 4096);
         auto classic = ClassicImage(root + "\\classic.dsk");
-        request.Sources() = {Native(source, plain)};
-        request.Target() = Native(classic);
+        request.Copy().sources = {Native(source, plain)};
+        request.Copy().destination = Native(classic);
         Pass(Submit(request));
         Check(classic->FindChild(2, u"Plain", copied), "shipping classic output");
         Verify(*classic, copied.id, 4096);
         auto mfs = MfsImageFixture(Wide(root + "\\mfs.img"), false);
-        request.Target() = Native(mfs);
+        request.Copy().destination = Native(mfs);
         Pass(Submit(request));
         Check(mfs->FindChild(2, u"Plain", copied), "shipping MFS output");
         Verify(*mfs, copied.id, 4096);
@@ -259,8 +259,8 @@ int RunCopyProcessTest(const char *directory) {
         source->SetAttributes(file, attrs);
         Request request;
         request.background = true;
-        request.Sources() = {Native(source, folder)};
-        request.Target() = Native(target);
+        request.Copy().sources = {Native(source, folder)};
+        request.Copy().destination = Native(target);
         Pass(Submit(request));
         Entry copied, child;
         Check(target->FindChild(2, u"Folder", copied) && target->FindChild(copied.id, u"Both forks", child),
@@ -313,9 +313,9 @@ int RunCopyProcessTest(const char *directory) {
         Check(CreateDirectoryW(host.c_str(), nullptr) != FALSE, "host fixture directory");
         Request exportRequest;
         exportRequest.background = true;
-        exportRequest.Sources() = {Native(source, file)};
+        exportRequest.Copy().sources = {Native(source, file)};
 
-        exportRequest.Target().SetWindows(host);
+        exportRequest.Copy().destination.SetWindows(host);
         Pass(Submit(exportRequest));
         auto windows = ResolveWindowsFile(host + L"\\Both forks");
         Verify(*windows.first, windows.second);
@@ -327,9 +327,9 @@ int RunCopyProcessTest(const char *directory) {
             guardVolume->Read(guarded, 0, 0, nullptr, 0);
             Request independent;
             independent.background = true;
-            independent.Sources() = {Native(guardVolume, guarded)};
+            independent.Copy().sources = {Native(guardVolume, guarded)};
             auto parent = target->MakeDirectory(2, u"Cache isolation");
-            independent.Target() = Native(target, parent);
+            independent.Copy().destination = Native(target, parent);
             Pass(Submit(independent));
             Denied(host + L"\\Unrelated guard");
             Verify(*guardVolume, guarded, 4096);
@@ -340,8 +340,8 @@ int RunCopyProcessTest(const char *directory) {
         auto classic = ClassicImage(root + "\\classic.dsk");
         Request roundtrip;
         roundtrip.background = true;
-        roundtrip.Sources() = {Native(source, plain)};
-        roundtrip.Target() = Native(classic);
+        roundtrip.Copy().sources = {Native(source, plain)};
+        roundtrip.Copy().destination = Native(classic);
         Pass(Submit(roundtrip));
         Entry classicFile;
         Check(classic->FindChild(2, u"Plain", classicFile), "classic worker output");
@@ -352,8 +352,8 @@ int RunCopyProcessTest(const char *directory) {
             source->MakeHardLink(original, links, u"Second");
             Request copy;
             copy.background = true;
-            copy.Sources() = {Native(source, links)};
-            copy.Target() = Native(target);
+            copy.Copy().sources = {Native(source, links)};
+            copy.Copy().destination = Native(target);
             Pass(Submit(copy));
             Entry folderEntry, first, second;
             Check(target->FindChild(2, u"Links", folderEntry) &&
@@ -367,8 +367,8 @@ int RunCopyProcessTest(const char *directory) {
             auto alias = source->MakeHardLink(directory, 2, u"Directory alias");
             auto inside = source->List(alias).front();
             auto out = target->MakeDirectory(2, u"Alias export");
-            copy.Sources() = {Native(source, inside.id)};
-            copy.Target() = Native(target, out);
+            copy.Copy().sources = {Native(source, inside.id)};
+            copy.Copy().destination = Native(target, out);
             Pass(Submit(copy));
             Check(target->FindChild(out, u"Inside", first), "child selection inside directory hard link");
             Verify(*target, first.id, 4096);
@@ -383,8 +383,8 @@ int RunCopyProcessTest(const char *directory) {
                 true);
             source->SetAttributes(streamed, metadata);
             source->SetCompression(streamed, true, {});
-            copy.Sources() = {Native(source, streamed)};
-            copy.Target() = Native(target);
+            copy.Copy().sources = {Native(source, streamed)};
+            copy.Copy().destination = Native(target);
             Pass(Submit(copy));
             Check(target->FindChild(2, u"Streamed metadata", first) &&
                       target->GetAttributes(first.id) == metadata,
@@ -394,29 +394,27 @@ int RunCopyProcessTest(const char *directory) {
                  moveFolder = source->MakeDirectory(2, u"Move target");
             auto moveSource = Native(source, moveId);
             moveSource.cut = true;
-            copy.Sources() = {moveSource};
-            copy.Target() = Native(source, moveFolder);
+            copy.Copy().sources = {moveSource};
+            copy.Copy().destination = Native(source, moveFolder);
             Pass(Submit(copy));
             Check(source->FindChild(moveFolder, u"In-place move", first) && first.id == moveId,
                   "worker same-volume move identity");
             Verify(*source, first.id, 4096);
-            Request fork;
+            Request fork = ExportFileFork{};
             fork.background = true;
-            fork.SetKind(Kind::ExportFork);
-            fork.Sources() = {Native(source, plain)};
-            fork.fork = 1;
+            fork.Get<ExportFileFork>()->source = Native(source, plain);
+            fork.Get<ExportFileFork>()->fork = ForkSelector::Resource;
 
-            fork.Target().SetWindows(host + L"\\resource.bin");
+            fork.Get<ExportFileFork>()->output.SetWindows(host + L"\\resource.bin");
             Pass(Submit(fork));
             auto replaceId = Put(*target, 2, u"Replace resource", 4096);
-            Request replace;
+            Request replace = ImportResourceFork{};
             replace.background = true;
-            replace.SetKind(Kind::ReplaceResource);
             Location raw;
 
-            raw.SetWindows(fork.Target().WindowsPath());
-            replace.Sources() = {raw};
-            replace.Target() = Native(target, replaceId);
+            raw.SetWindows(fork.Get<ExportFileFork>()->output.WindowsPath());
+            replace.Get<ImportResourceFork>()->input = raw;
+            replace.Get<ImportResourceFork>()->file = Native(target, replaceId);
             Pass(Submit(replace));
             Verify(*target, replaceId, 4096);
             fprintf(report, "PASS: hard links, directory-alias child selection, streamed 1 MiB attributes, "
@@ -425,23 +423,23 @@ int RunCopyProcessTest(const char *directory) {
         auto classic2 = OpenClassic(root + "\\classic.dsk", "Classic:", true);
         Request back;
         back.background = true;
-        back.Sources() = {Native(classic2, classic2->List().front().id)};
+        back.Copy().sources = {Native(classic2, classic2->List().front().id)};
         auto classicOut = target->MakeDirectory(2, u"Classic back");
-        back.Target() = Native(target, classicOut);
+        back.Copy().destination = Native(target, classicOut);
         Pass(Submit(back));
         Check(target->FindChild(classicOut, u"Plain", child), "classic worker input");
         Verify(*target, child.id, 4096);
         fprintf(report, "PASS: classic HFS read/write handoff, shared classic mount restoration\n");
         for (bool dc42 : {false, true}) {
             auto mfs = MfsImageFixture(Wide(root + (dc42 ? "\\mfs.dc42" : "\\mfs.img")), dc42);
-            roundtrip.Target() = Native(mfs);
+            roundtrip.Copy().destination = Native(mfs);
             Pass(Submit(roundtrip));
             Entry e;
             Check(mfs->FindChild(2, u"Plain", e), "MFS process output");
             Verify(*mfs, e.id, 4096);
             auto dest = target->MakeDirectory(2, dc42 ? u"DC42 back" : u"MFS back");
-            back.Sources() = {Native(mfs, e.id)};
-            back.Target() = Native(target, dest);
+            back.Copy().sources = {Native(mfs, e.id)};
+            back.Copy().destination = Native(target, dest);
             Pass(Submit(back));
             Check(target->FindChild(dest, u"Plain", e), "MFS process input");
             Verify(*target, e.id, 4096);
@@ -456,7 +454,7 @@ int RunCopyProcessTest(const char *directory) {
             v.UseExternalJournal(uuid);
         }
         auto external = OpenImage(extPath, journal);
-        roundtrip.Target() = Native(external);
+        roundtrip.Copy().destination = Native(external);
         Pass(Submit(roundtrip));
         Check(external->FindChild(2, u"Plain", child), "external journal worker output");
         Verify(*external, child.id, 4096);
@@ -520,23 +518,36 @@ int RunCopyProcessTest(const char *directory) {
         auto slow = Put(*source, 2, u"Slow", 2 * 1024 * 1024);
         Request delayed;
         delayed.background = true;
-        delayed.Sources() = {Native(source, slow)};
-        delayed.Target() = Native(target);
-        CopyProcess::fault = 2;
-        auto running = Submit(delayed);
-        DWORD until = GetTickCount() + 10000;
-        while (!running.Job()->done() && running.Job()->progress().phase != "Copying" &&
-               LONG(until - GetTickCount()) > 0)
-            Sleep(10);
-        Check(!running.Job()->done(), "slow worker did not stay active");
-        Denied(Wide(root + "\\source.dsk"));
-        Denied(Wide(root + "\\target.dsk"));
-        auto unrelated = Image(Wide(root + "\\unrelated.dsk"));
-        Put(*unrelated, 2, u"Independent", 4096);
-        running.Job()->cancel();
-        Wait(running);
-        Check(running.Job()->result().error == ERROR_CANCELLED, "slow worker cancellation");
-        CopyProcess::fault = 0;
+        delayed.Copy().sources = {Native(source, slow)};
+        delayed.Copy().destination = Native(target);
+        {
+            struct CancellationGate {
+                HANDLE event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+                CancellationGate() {
+                    Check(event != nullptr, "create cancellation test gate");
+                    CopyProcess::ioGate = event;
+                }
+                ~CancellationGate() {
+                    SetEvent(event);
+                    CopyProcess::ioGate = nullptr;
+                    CloseHandle(event);
+                }
+            } gate;
+            CopyProcess::fault = 7;
+            auto running = Submit(delayed);
+            Until([&] {
+                return running.Job()->done() || running.Job()->progress().phase == "Worker test gate";
+            });
+            Check(!running.Job()->done(), "worker did not reach the cancellation gate");
+            Denied(Wide(root + "\\source.dsk"));
+            Denied(Wide(root + "\\target.dsk"));
+            auto unrelated = Image(Wide(root + "\\unrelated.dsk"));
+            Put(*unrelated, 2, u"Independent", 4096);
+            running.Job()->cancel();
+            Wait(running);
+            Check(running.Job()->result().error == ERROR_CANCELLED, "slow worker cancellation");
+            CopyProcess::fault = 0;
+        }
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "cancel retained source");
         fprintf(report, "PASS: slow-read cancellation, continuous exclusive image locks, unrelated volume "
                         "stays usable\n");
@@ -565,7 +576,7 @@ int RunCopyProcessTest(const char *directory) {
             auto otherFile = Put(*otherSource, 2, u"Parallel", 4096);
             auto delayedFolder = target->MakeDirectory(2, u"Parallel delayed");
             Request first = delayed;
-            first.Target() = Native(target, delayedFolder);
+            first.Copy().destination = Native(target, delayedFolder);
             struct Gate {
                 HANDLE event = CreateEvent(nullptr, TRUE, FALSE, nullptr);
                 Gate() {
@@ -591,8 +602,8 @@ int RunCopyProcessTest(const char *directory) {
             CopyProcess::fault = 0;
             Request independent;
             independent.background = true;
-            independent.Sources() = {Native(otherSource, otherFile)};
-            independent.Target() = Native(otherTarget);
+            independent.Copy().sources = {Native(otherSource, otherFile)};
+            independent.Copy().destination = Native(otherTarget);
             Pass(Submit(independent));
             Check(!blocked.Job()->done() && CopyProcess::lastProcess != firstPid,
                   "independent copy process serialized behind reserved volume");
@@ -611,8 +622,8 @@ int RunCopyProcessTest(const char *directory) {
             auto nonjournal = MfsImageFixture(Wide(root + "\\unclean-mfs.img"), false);
             Request unsafe;
             unsafe.background = true;
-            unsafe.Sources() = {Native(source, plain)};
-            unsafe.Target() = Native(nonjournal);
+            unsafe.Copy().sources = {Native(source, plain)};
+            unsafe.Copy().destination = Native(nonjournal);
             CopyProcess::fault = 1;
             auto failed = Submit(unsafe);
             Wait(failed);
@@ -647,11 +658,11 @@ int RunCopyProcessTest(const char *directory) {
                 CopyProcess::floppyFixture = Wide(diskPath);
                 Request physical;
                 physical.background = true;
-                physical.Sources() = {Native(source, plain)};
+                physical.Copy().sources = {Native(source, plain)};
 
                 char path[MAX_PATH];
                 get_floppy_volume_file_name(25, path);
-                physical.Target().SetClassic(path, "Floppy:");
+                physical.Copy().destination.SetClassic(path, "Floppy:");
                 Pass(Submit(physical));
                 auto overwrite = Submit(physical);
                 Conflict(overwrite);
@@ -711,8 +722,8 @@ int RunCopyProcessTest(const char *directory) {
             auto uiFolder = target->MakeDirectory(2, u"Owner transfer");
             Request ui;
             ui.background = true;
-            ui.Sources() = {Native(source, slow)};
-            ui.Target() = Native(target, uiFolder);
+            ui.Copy().sources = {Native(source, slow)};
+            ui.Copy().destination = Native(target, uiFolder);
             CopyProcess::fault = 2;
             bool completed = false;
             Check(BackgroundCopies::Start({ui}, &first, true, [&](bool ok) { completed = ok; }),
@@ -737,7 +748,7 @@ int RunCopyProcessTest(const char *directory) {
             fprintf(report, "PASS: real subprocess with modeless progress, enabled owners, first owner "
                             "destruction and progress reassignment; hidden windows only\n");
             auto closingFolder = target->MakeDirectory(2, u"Last owner closing");
-            ui.Target() = Native(target, closingFolder);
+            ui.Copy().destination = Native(target, closingFolder);
             CopyProcess::fault = 2;
             Check(BackgroundCopies::Start({ui}, &second, true), "last-owner process start");
             Until([] {

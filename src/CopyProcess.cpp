@@ -31,7 +31,7 @@ std::atomic<HANDLE> ioGate{nullptr};
 namespace {
 using namespace FileOperations;
 using namespace MacBrowser;
-constexpr uint64_t protocol = 3;
+constexpr uint64_t protocol = 4;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     Settings = 1,
@@ -465,8 +465,7 @@ Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted = true)
 }
 void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fault) {
     d.put(uint64_t(r.OperationKind()));
-    d.u16(r.name);
-    d.put(r.fork);
+    if (auto* output = r.Get<ExportFileFork>()) d.put(uint64_t(output->fork));
     if (const auto* legacy = r.Conversion()) {
         EncodeEndpoint(d, Endpoint{legacy->source, {}, {}});
         EncodeEndpoint(d, Endpoint{legacy->destination, {}, {}});
@@ -487,8 +486,6 @@ void DecodeSettings(Data &d, Request &r, HANDLE &parent, unsigned &fault) {
     Check(kind == uint64_t(Kind::Copy) || kind == uint64_t(Kind::LegacyCopy) ||
               kind == uint64_t(Kind::ExportFork) || kind == uint64_t(Kind::ReplaceResource),
           "Invalid worker operation");
-    auto name = d.u16();
-    auto fork = unsigned(d.get());
     if (kind == uint64_t(Kind::LegacyCopy)) {
         WorkerMounts unused;
         LegacyConversion legacy;
@@ -503,11 +500,15 @@ void DecodeSettings(Data &d, Request &r, HANDLE &parent, unsigned &fault) {
         legacy.options.targetGenerationKnown = d.get() != 0;
         legacy.options.targetGeneration = DWORD(d.get());
         r = std::move(legacy);
+    } else if (kind == uint64_t(Kind::ExportFork)) {
+        auto fork = d.get();
+        Check(fork <= uint64_t(ForkSelector::Resource), "Invalid fork selector");
+        r = ExportFileFork{{}, {}, static_cast<ForkSelector>(fork)};
+    } else if (kind == uint64_t(Kind::ReplaceResource)) {
+        r = ImportResourceFork{};
     } else {
-        r.SetKind(Kind(kind));
+        r = OrdinaryCopy{};
     }
-    r.name = std::move(name);
-    r.fork = fork;
     parent = HANDLE(uintptr_t(d.get()));
     fault = unsigned(d.get());
 }
@@ -690,9 +691,22 @@ bool UsesWorker(const Request &request) {
 Storage::Result Run(const Request &request, Storage::Job &job, Completion &completion,
                     const std::vector<std::string> &keys, const std::vector<std::string> &writes) {
     std::vector<Endpoint> sources;
-    for (auto &source : request.Sources())
-        sources.push_back(Capture(source));
-    auto target = Capture(request.Target());
+    Endpoint target;
+    if (auto* copy = request.Get<OrdinaryCopy>()) {
+        for (const auto& source : copy->sources) sources.push_back(Capture(source));
+        target = Capture(copy->destination);
+    } else if (auto* legacy = request.Conversion()) {
+        if (legacy->selection) {
+            sources.push_back(Capture(legacy->selection->source));
+            target = Capture(legacy->selection->folder);
+        }
+    } else if (auto* output = request.Get<ExportFileFork>()) {
+        sources.push_back(Capture(output->source));
+        target = Capture(output->output);
+    } else if (auto* input = request.Get<ImportResourceFork>()) {
+        sources.push_back(Capture(input->input));
+        target = Capture(input->file);
+    }
     auto execution = request;
     if (request.OperationKind() == Kind::LegacyCopy) {
         execution.Legacy().source = Capture(request.Legacy().source).location;
@@ -999,18 +1013,33 @@ int Child(const char *inputText, const char *outputText) {
             } detach{bool(simulatedFloppy)};
 #endif
             try {
+                std::vector<Location> decoded;
                 for (auto &packet : sourcePackets) {
-                    request.Sources().push_back(DecodeEndpoint(packet, mounts));
+                    decoded.push_back(DecodeEndpoint(packet, mounts));
                     packet.end();
                 }
-                request.Target() = DecodeEndpoint(target, mounts);
+                auto destination = DecodeEndpoint(target, mounts);
                 target.end();
-                if (request.OperationKind() == Kind::ReplaceResource && !request.Target().Volume() &&
-                    request.Target().LegacyType() == LIST_FAT) {
-                    auto endpoint = ResolveWindowsFile(request.Target().WindowsPath());
-                    request.Target().SetMounted(endpoint.first, endpoint.second);
-                    auto e = endpoint.first->Stat(endpoint.second);
-                    request.Target().expectedParent = e.parent;
+                if (auto* copy = request.Get<OrdinaryCopy>()) {
+                    *copy = OrdinaryCopy{std::move(decoded), std::move(destination)};
+                } else if (auto* legacy = request.Conversion()) {
+                    Check(decoded.size() == (destination.IsNone() ? 0 : 1), "Invalid conversion selection");
+                    if (!decoded.empty())
+                        legacy->selection = ConversionSelection{std::move(decoded.front()), std::move(destination)};
+                } else {
+                    Check(decoded.size() == 1, "Fork jobs require exactly one source");
+                    if (auto* output = request.Get<ExportFileFork>()) {
+                        output->source = std::move(decoded.front());
+                        output->output = std::move(destination);
+                    } else if (auto* input = request.Get<ImportResourceFork>()) {
+                        if (destination.IsWindows()) {
+                            auto endpoint = ResolveWindowsFile(destination.WindowsPath());
+                            destination.SetMounted(endpoint.first, endpoint.second);
+                            auto e = endpoint.first->Stat(endpoint.second);
+                            destination.expectedParent = e.parent;
+                        }
+                        *input = ImportResourceFork{std::move(decoded.front()), std::move(destination)};
+                    }
                 }
 #ifdef HFV_TESTING
                 bool injected = false;
@@ -1055,8 +1084,7 @@ int Child(const char *inputText, const char *outputText) {
 #ifdef HFV_TESTING
             HfsPlus::workerIoFault = {};
 #endif
-            request.Sources().clear();
-            request.Target() = {};
+            request = OrdinaryCopy{};
             mounts.volumes.clear();
         }
         if (!safe && !result.code)

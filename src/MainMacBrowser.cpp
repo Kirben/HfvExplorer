@@ -195,8 +195,7 @@ struct MainMacBrowser::State {
               request = FileOperations::LegacyConversion{
                   source, target, source.directory, source.cut, ask,
                   CaptureLegacyCopyOptions(HFSIFACE_copy_mode())};
-              request.Sources() = {source};
-              request.Target() = target;
+              request.Legacy().selection = FileOperations::ConversionSelection{source, target};
           }
           if(BackgroundCopies::Enabled())background.push_back(std::move(request));else if(!RunOperation(session_,std::move(request),true,!source.directory)){complete=false;break;}
          }
@@ -322,7 +321,7 @@ bool MainMacBrowser::Activate(int row){auto p=reinterpret_cast<list_lparam_struc
     if(!p||p->type!=LIST_MAC)return false;if(p->isdir){auto item=p->htree;session_.Tree()->m_ct->SelectItem(item);Select(session_.Tree()->m_ct->GetItemData(item));}
     else{auto& list=session_.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);Export(0);}return true;}
 bool MainMacBrowser::CreateFolder(const FileOperations::Location& target,const std::u16string& name){
- FileOperations::Request request;request.SetKind(FileOperations::Kind::CreateFolder);request.Target()=target;request.name=name;return RunOperation(session_,std::move(request),false,true);
+ FileOperations::CreateFolder request{target,name};return RunOperation(session_,std::move(request),false,true);
 }
 bool MainMacBrowser::CanPasteHardLink()const{
  if(!Writable())return false;int index;uint32_t folder;if(!state_->Selected(index,folder))return false;auto target=state_->mounts[index].volume;auto selection=BrowserTransfers::Snapshot();return target->SupportsHardLinks()&&selection.items.size()==1&&selection.items[0].Volume()&&selection.items[0].Volume()->SupportsHardLinks()&&selection.items[0].Volume()->ResourceKey()==target->ResourceKey();
@@ -330,7 +329,7 @@ bool MainMacBrowser::CanPasteHardLink()const{
 bool MainMacBrowser::PasteHardLink(){
  if(!CanPasteHardLink())return true;auto selection=BrowserTransfers::Snapshot();auto target=state_->Target();std::wstring name=Wide(selection.items[0].expectedName)+L" link";
  if(!EditHfsPlusName(session_.Owner(),name,target.Volume()->CaseSensitive()))return true;
- FileOperations::Request request;request.SetKind(FileOperations::Kind::CreateHardLink);request.Sources()={selection.items[0]};request.Sources()[0].cut=false;request.Target()=target;request.name=U16(name);RunOperation(session_,std::move(request));if(!BackgroundCopies::Enabled())Refresh();return true;
+ FileOperations::CreateHardLink request{selection.items[0],target,U16(name)};request.source.cut=false;RunOperation(session_,std::move(request));if(!BackgroundCopies::Enabled())Refresh();return true;
 }
 bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!CanCreateFolder())return true;
  auto target=state_->Target();std::wstring name=L"New Folder";
@@ -425,12 +424,12 @@ void MainMacBrowser::ImportResource(){
     auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(!p||p->type!=LIST_MAC||p->isdir)return;
     auto selected=state_->Item(row,false);
     std::wstring path;if(!FileDialog(session_,path,false))return;Location input;input.SetWindows(path);
-    FileOperations::Request request;request.SetKind(FileOperations::Kind::ReplaceResource);request.Sources()={input};request.Target()=selected;
+    FileOperations::ImportResourceFork request{input,selected};
     RunOperation(session_,std::move(request),true,true);if(!BackgroundCopies::Enabled())Refresh();
 }
 void MainMacBrowser::Export(unsigned fork){if(!Active())return;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return;
  auto item=state_->Item(row,false);if(item.directory)return;auto path=Wide(item.expectedName)+(fork?L".rsrc":L"");if(!FileDialog(session_,path,true))return;path=BrowserPresentation::WindowsPath(path);
- FileOperations::Request request;request.SetKind(FileOperations::Kind::ExportFork);request.Sources()={item};request.Target().SetWindows(path);request.fork=fork;RunOperation(session_,std::move(request),true,true);}
+ FileOperations::ExportFileFork request{item,Location::Windows(path),fork ? FileOperations::ForkSelector::Resource : FileOperations::ForkSelector::Data};RunOperation(session_,std::move(request),true,true);}
 
 void MainMacBrowser::Sort(int column,bool ascending){
 if(Active())session_.List()->SortBrowserRows(column,ascending);
