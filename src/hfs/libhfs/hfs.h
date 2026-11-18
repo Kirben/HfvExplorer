@@ -158,6 +158,9 @@ int hfs_setattr(hfsvol *, char *, hfsdirent *);
 /* Rollback status: 0 none, 1 restored, 2 unverified, 3 failed. */
 void hfs_note_rollback(int);
 int hfs_take_rollback(void);
+hfsvol *hfs_mount_session(char *, int, int);
+int hfs_mark_session_dirty(hfsvol *);
+int hfs_session_mounts(int enabled);
 int hfs_editattrs(hfsvol *, char *, char *, hfsdirent *);
 int hfs_fsetattr(hfsfile *, hfsdirent *);
 /* Full on-disk Finder information, including extended folder/file fields. */

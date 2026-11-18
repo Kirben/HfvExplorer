@@ -14,6 +14,7 @@ extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
 #include "hfs/Replacement.h"
+int hfs_recognizes_image(char*);
 }
 namespace MacBrowser {
 namespace {
@@ -41,14 +42,57 @@ class Classic final : public Volume {
     std::string resourceKey_;
     std::string imageIdentity_;
     bool write_;bool suspended_=false;
+    bool session_=false, markedDirty_=false, closeFailed_=false;
+    void BeforeWrite() {
+        if (!Writable()) throw HfsPlus::Error("Classic HFS volume is read-only");
+        if (session_ && !markedDirty_) {
+            Check(hfs_mark_session_dirty(volume_) == 0);
+            markedDirty_ = true;
+        }
+    }
     std::unique_ptr<ReadOnlySources::Registration> registration_;
     std::map<uint32_t,std::string> paths_;
     uint32_t next_ = 3;
-    uint32_t Id(const std::string &p) { for (auto &e : paths_) if(e.second == p)return e.first; paths_[next_]=p;return next_++; }
-    std::string Path(uint32_t id) { return paths_.at(id); }
+    uint32_t Id(const std::string& path, uint32_t cnid=0) {
+        if (session_) {
+            if(!cnid){hfsdirent entry{};Check(hfs_stat(volume_,const_cast<char*>(path.c_str()),&entry)==0);cnid=uint32_t(entry.cnid);}
+            paths_[cnid]=path;
+            return cnid;
+        }
+        for (const auto& item : paths_) if (item.second == path) return item.first;
+        paths_[next_]=path;
+        return next_++;
+    }
+    std::string Path(uint32_t id) {
+        if(!session_ || id==2)return paths_.at(id);
+        RootScope scope(volume_);
+        const auto cached=paths_.find(id);
+        hfsdirent entry{};
+        if(cached!=paths_.end() && hfs_stat(volume_,cached->second.data(),&entry)==0 && uint32_t(entry.cnid)==id)
+            return cached->second;
+
+        // The catalog ID survives a handoff. Rebuild stale paths lazily after
+        // a remount or after an ancestor moved.
+        std::vector<std::string> pending{":"};
+        std::set<uint32_t> seen{2};
+        while(!pending.empty()){
+            auto path=std::move(pending.back());pending.pop_back();
+            auto directory=hfs_opendir(volume_,path.data());Check(directory!=nullptr);
+            struct Close{hfsdir* value;~Close(){hfs_closedir(value);}} close{directory};
+            while(hfs_readdir(directory,&entry)==0){
+                const auto child=path+entry.name;
+                const auto cnid=uint32_t(entry.cnid);
+                paths_[cnid]=child;
+                if(cnid==id)return child;
+                if((entry.flags&HFS_ISDIR)&&seen.insert(cnid).second)pending.push_back(child+":");
+            }
+            if(errno!=ENOENT)Check(false);
+        }
+        throw HfsPlus::Error("The selected classic HFS catalog entry no longer exists");
+    }
     Entry Describe(const std::string &path, uint32_t id) {
         RootScope scope(volume_);hfsdirent in; Check(hfs_stat(volume_, const_cast<char*>(path.c_str()), &in) == 0); Entry e;
-        e.id=id;if(id==2)e.parent=1;else{auto parent=path.substr(0,path.find_last_of(':'));if(parent.empty())parent=":";e.parent=Id(parent);}
+        e.id=id;if(id==2)e.parent=1;else{auto parent=path.substr(0,path.find_last_of(':'));if(parent.empty())parent=":";e.parent=session_?uint32_t(in.parid):Id(parent);}
         e.name=Decode(in.name);e.identity=imageIdentity_+":"+std::to_string(uint32_t(in.cnid));e.resolvedId=uint32_t(in.cnid);
         e.directory=(in.flags&HFS_ISDIR)!=0;e.protectedFile=(in.flags&HFS_ISLOCKED)!=0;
         e.created=uint32_t(int64_t(in.crdate)+2082844800LL);e.modified=uint32_t(int64_t(in.mddate)+2082844800LL);e.datesValid=true;
@@ -57,12 +101,12 @@ class Classic final : public Volume {
         Check(hfs_getfinderinfo(volume_,const_cast<char*>(path.c_str()),e.finder.data())==0);return e;
     }
 public:
-    Classic(const std::string &image, std::string root, bool write) : write_(write),image_(image) {
+    Classic(const std::string &image, std::string root, bool write, bool session=false) : image_(image),write_(write),session_(session) {
         resourceKey_=VolumeCoord::ImageKey(image);context_=LegacyEngine::ForVolume(resourceKey_);LegacyEngine::Scope engine(context_);
         imageIdentity_=image;HANDLE identity=CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
         if(identity!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(identity,&info))imageIdentity_=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);CloseHandle(identity);}
         std::vector<char> converted(root.begin(),root.end());converted.push_back(0);pc_to_mac_charset((unsigned char*)converted.data());root=converted.data();
-        volume_=hfs_mount(const_cast<char*>(image.c_str()),1,write?O_RDWR:O_RDONLY);Check(volume_!=nullptr);
+        volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image.c_str()),1,write?O_RDWR:O_RDONLY);Check(volume_!=nullptr);
         auto colon=root.find(':');root=colon==root.npos?":":root.substr(colon);
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
@@ -72,17 +116,50 @@ public:
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
-    WorkerOrigin WorkerDescription()const override{WorkerOrigin out;if(registration_)return out;out.kind=WorkerOrigin::Classic;out.path=VolumeCoord::Wide(image_);out.root=paths_.at(2);out.identity=imageIdentity_;out.writable=write_;return out;}
+    WorkerOrigin WorkerDescription()const override{WorkerOrigin out;if(registration_)return out;out.kind=WorkerOrigin::Classic;out.path=VolumeCoord::Wide(image_);out.root=paths_.at(2);out.identity=imageIdentity_;out.writable=Writable();return out;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{LegacyEngine::Scope engine(context_);if(registration_||!volume_||volume_->fd>=0x10000000)return {};auto file=_get_osfhandle(volume_->fd);if(file==-1)throw HfsPlus::Error("Cannot transfer classic image handle");return {{VolumeCoord::Wide(image_),uintptr_t(file)}};}
     void WorkerUncleanExit()override{LegacyEngine::Scope engine(context_);write_=false;}
     void SuspendWorker()override{LegacyEngine::Scope engine(context_);if(registration_)return;if(volume_){auto v=volume_;volume_=nullptr;suspended_=true;int closed=hfs_umount(v);if(closed)write_=false;Check(closed==0);}}
-    void ResumeWorker()override{LegacyEngine::Scope engine(context_);if(!suspended_)return;volume_=hfs_mount(const_cast<char*>(image_.c_str()),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);suspended_=false;}
-    void Close()override{LegacyEngine::Scope engine(context_);if(volume_){auto v=volume_;volume_=nullptr;Check(hfs_umount(v)==0);}}
+    void ResumeWorker()override{LegacyEngine::Scope engine(context_);if(!suspended_)return;volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image_.c_str()),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);suspended_=false;markedDirty_=false;}
+    void Close()override {
+        LegacyEngine::Scope engine(context_);
+        if (volume_) {
+            auto v=volume_; volume_=nullptr;
+            if(hfs_umount(v)!=0){closeFailed_=true;Check(false);}
+        }
+    }
+    bool WorkerWritesSafe() const override {
+        LegacyEngine::Scope engine(context_);
+        return !closeFailed_ && (!volume_ || Writable());
+    }
     std::string ResourceKey()const override{return resourceKey_;}
-    std::u16string Name()const override{LegacyEngine::Scope engine(context_);return Decode(paths_.at(2));}
+    std::u16string Name()const override{LegacyEngine::Scope engine(context_);hfsvolent info{};Check(hfs_vstat(volume_,&info)==0);return Decode(info.name);}
     const char *Kind()const override{return "HFS";}
     bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&(HFS_READONLY|HFS_WRITE_FAILED));}
     bool CaseSensitive()const override{return false;}
+    Capabilities Supports() const override {
+        auto result = Volume::Supports();
+        result.unicodeNames = false;
+        return result;
+    }
+    bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {
+        LegacyEngine::Scope engine(context_);
+        RootScope scope(volume_);
+        auto path=Path(id);
+        Check(hfs_stat(volume_,path.data(),&entry)==0);
+        return true;
+    }
+    void SetClassicProperties(uint32_t id, const hfsdirent& entry) override {
+        LegacyEngine::Scope engine(context_);
+        RootScope scope(volume_);
+        auto path=Path(id);
+        auto desired=entry;
+        if(id==2)throw HfsPlus::Error("Select a file or folder below the volume root");
+        auto destination=path.substr(0,path.find_last_of(':')+1)+Encode(Decode(desired.name));
+        BeforeWrite();
+        Check(hfs_editattrs(volume_,path.data(),destination.data(),&desired)==0);
+        paths_[id]=std::move(destination);
+    }
     void ValidateEntry(const Entry& e)const override{
         Volume::ValidateEntry(e);if(e.datesValid&&(e.created>UINT32_MAX||e.modified>UINT32_MAX))throw HfsPlus::Error("Classic HFS cannot preserve dates after February 2040");Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
@@ -114,7 +191,7 @@ public:
     std::vector<Entry> List(uint32_t parent)override {LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);auto path=Path(parent);if(path.back()!=':')path+=":";hfsdir* dir=hfs_opendir(volume_,const_cast<char*>(path.c_str()));Check(dir!=nullptr);
         struct Close{hfsdir* p;~Close(){hfs_closedir(p);}}close{dir};hfsdirent e;std::vector<Entry> out;
-        while(hfs_readdir(dir,&e)==0){auto p=path+e.name;auto item=Describe(p,Id(p));item.parent=parent;out.push_back(item);}
+        while(hfs_readdir(dir,&e)==0){auto p=path+e.name;auto item=Describe(p,Id(p,uint32_t(e.cnid)));item.parent=parent;out.push_back(item);}
         if(errno!=ENOENT)Check(false);return out;
     }
     void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override {LegacyEngine::Scope engine(context_);
@@ -123,15 +200,15 @@ public:
         Check(n<=LONG_MAX&&hfs_read(f,p,(unsigned long)n)==n);
     }
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override {LegacyEngine::Scope engine(context_);
-        if(!write_)throw HfsPlus::Error("Classic source is read-only");RootScope scope(volume_);auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(hfs_mkdir(volume_,const_cast<char*>(path.c_str()))==0);return Id(path);
+        BeforeWrite();RootScope scope(volume_);auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(hfs_mkdir(volume_,const_cast<char*>(path.c_str()))==0);return Id(path);
     }
     void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);
-        if(!Writable())throw HfsPlus::Error("Classic destination is read-only");if(!merge)ValidateEntry(desired);auto path=Path(id);
+        if(!Writable())throw HfsPlus::Error("Classic destination is read-only");if(!merge)ValidateEntry(desired);BeforeWrite();auto path=Path(id);
         time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),time_t(int64_t(desired.modified)-2082844800LL)};
         Check(hfs_setdirmetadata(volume_,const_cast<char*>(path.c_str()),long(expected.resolvedId),merge?nullptr:desired.finder.data(),desired.datesValid?dates:nullptr)==0);
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {LegacyEngine::Scope engine(context_);
-        if(!write_)throw HfsPlus::Error("Classic source is read-only");ValidateEntry(e);RootScope scope(volume_);
+        ValidateEntry(e);BeforeWrite();RootScope scope(volume_);
         if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
         auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(e.name);hfsdirent old;bool exists=hfs_stat(volume_,const_cast<char*>(path.c_str()),&old)==0;
         if(exists&&!replace)throw HfsPlus::Error("Destination already exists");
@@ -154,15 +231,34 @@ public:
     }
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}
     void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{LegacyEngine::Scope engine(context_);
-        auto from=dynamic_cast<Classic*>(&source);Check(from&&CanMoveFrom(source)&&write_);RootScope scope(volume_);
+        auto from=dynamic_cast<Classic*>(&source);Check(from&&CanMoveFrom(source));BeforeWrite();RootScope scope(volume_);
         auto old=from->Path(id),path=Path(parent);if(path.back()!=':')path+=':';path+=Encode(entry.name);
         Check(hfs_rename(volume_,const_cast<char*>(old.c_str()),const_cast<char*>(path.c_str()))==0);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{LegacyEngine::Scope engine(context_);
-        RootScope scope(volume_);auto from=Path(id),to=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(write_&&hfs_rename(volume_,const_cast<char*>(from.c_str()),const_cast<char*>(to.c_str()))==0);paths_[id]=to;
+        BeforeWrite();RootScope scope(volume_);auto from=Path(id),to=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(write_&&hfs_rename(volume_,const_cast<char*>(from.c_str()),const_cast<char*>(to.c_str()))==0);paths_[id]=to;
     }
-    void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);auto path=Path(id);Check(write_&&id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
+    void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);BeforeWrite();RootScope scope(volume_);auto path=Path(id);Check(id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
 };
+}
+static std::string ClassicImagePath(const std::wstring& path) {
+    BOOL lost=FALSE;
+    const int size=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.data(),int(path.size()),nullptr,0,nullptr,nullptr);
+    std::string result(size,0);
+    if (!size || !WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.data(),int(path.size()),result.data(),size,nullptr,&lost) || lost)
+        return {};
+    return result;
+}
+bool RecognizesClassicImage(const std::wstring& path) {
+    auto ansi=ClassicImagePath(path);
+    // Detection reads only the disk headers. The worker validates and mounts
+    // the catalog, even when the recognized image needs repair.
+    return !ansi.empty() && hfs_recognizes_image(ansi.data()) != 0;
+}
+std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path, bool writable) {
+    const auto ansi=ClassicImagePath(path);
+    if(ansi.empty()) throw HfsPlus::Error("Classic HFS image path cannot be represented");
+    return TrackWorkerVolume(std::make_shared<Classic>(ansi,":",writable,true));
 }
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key));}
 std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return TrackWorkerVolume(std::make_shared<Classic>(image,path,write));}

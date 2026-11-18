@@ -432,6 +432,8 @@ struct Batch {
   }
   if (pending && pending->askMode) {
    dialog->Planning();mode.reset(new ModeDialog(hidden));mode->m_outcopy=direction;mode->m_copy_mode=lastMode[direction];mode->m_appledouble=lastAd<0?static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble:lastAd;mode->m_copying_fname=pending->source.LegacyPath().c_str();
+   if(pending->selection&&pending->selection->source.IsMounted())
+    mode->m_copying_fname=CString(MacBrowser::Wide(pending->selection->source.expectedName).c_str());
    if(!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create copy mode window");
    dialog->ShowWindow(SW_HIDE);if(!hidden)mode->ShowWindow(SW_SHOWNOACTIVATE);return true;
   }

@@ -73,11 +73,28 @@ struct hfs_engine_context *hfs_context_use(struct hfs_engine_context *context) {
 
 /* High-Level Volume Routines ============================================== */
 
+int hfs_recognizes_image(char *path) {
+  hfsvol vol;
+  int recognized;
+  memset(&vol,0,sizeof(vol));
+#ifdef WIN32
+  vol.fd=open(path,O_RDONLY|O_BINARY);
+#else
+  vol.fd=open(path,O_RDONLY);
+#endif
+  if(vol.fd<0)return 0;
+  vol.pnum=1;
+  vol.flags=HFS_READONLY;
+  recognized=l_readblock0(&vol)==0 && l_readmdb(&vol)==0 && vol.mdb.drSigWord==HFS_SIGWORD;
+  close(vol.fd);
+  return recognized;
+}
+
 /*
  * NAME:	hfs->mount()
  * DESCRIPTION:	open an HFS volume; return volume descriptor or 0 (error)
  */
-hfsvol *hfs_mount(char *path, int pnum, int flags)
+static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 {
   struct _stat64 dev;
   hfsvol *vol = 0;
@@ -237,7 +254,8 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
 
       /* verify this is an HFS volume */
 
-      if (vol->mdb.drSigWord != HFS_SIGWORD)
+      if (vol->mdb.drSigWord != HFS_SIGWORD ||
+          (session && (vol->mdb.drVCSize == 0x482b || vol->mdb.drVCSize == 0x4858)))
 	{
 	  close(vol->fd);
 	  v_destruct(vol);
@@ -278,6 +296,8 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
 
       if (! (vol->mdb.drAtrb & HFS_ATRB_UMOUNTED))
 	{
+          if (session)
+            vol->flags |= HFS_READONLY;
 	  /* volume was not cleanly unmounted; scavenge free-space */
 
 	  if (v_scavenge(vol) < 0)
@@ -305,6 +325,36 @@ hfsvol *hfs_mount(char *path, int pnum, int flags)
   ++vol->refs;
 
   return hfs_curvol = vol;
+}
+
+static HFV_THREAD_LOCAL int session_mounts;
+int hfs_session_mounts(int enabled) {
+  int previous=session_mounts;
+  session_mounts=enabled;
+  return previous;
+}
+hfsvol *hfs_mount(char *path, int pnum, int flags) {
+  hfsvol *vol=mount_impl(path,pnum,flags,session_mounts);
+  if (session_mounts && vol && !(vol->flags&HFS_READONLY) && (vol->mdb.drAtrb&HFS_ATRB_UMOUNTED)) {
+    if (hfs_mark_session_dirty(vol)<0) {
+      hfs_umount(vol);
+      ERROR(EIO,"Cannot mark classic HFS image dirty before writing");
+      return 0;
+    }
+  }
+  return vol;
+}
+
+hfsvol *hfs_mount_session(char *path, int pnum, int flags) {
+  return mount_impl(path,pnum,flags,1);
+}
+
+/* Publish and flush the dirty flag before any non-journaled session write. */
+int hfs_mark_session_dirty(hfsvol *vol) {
+  if (b_begin_mutation(vol)<0) return -1;
+  vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
+  vol->flags |= HFS_UPDATE_MDB;
+  return b_end_mutation(vol,0);
 }
 
 /*

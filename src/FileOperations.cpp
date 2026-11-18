@@ -142,7 +142,7 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
  HFSIFACE_get_dir_flush();int silent=HFSIFACE_silencer(1);HFSIFACE_delete_cancel(CancelClassic,&job);struct Silent{int previous;~Silent(){HFSIFACE_delete_cancel(nullptr,nullptr);HFSIFACE_silencer(previous);}}scope{silent};
  for(size_t index=0;index<count;++index){const auto& item=items[index];Cancel(job);progress.path=item.Volume()?Utf8(item.expectedName):item.IsWindows()?Utf8(U16(item.WindowsPath())):Utf8(Ansi(item.ClassicPath()));job.progress(progress);
   if(item.Volume()){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.id!=2,"Cannot rename or delete a volume root");
-   if(rename){Check(rename->parent.IsNone()||(rename->parent.IsMounted()&&rename->parent.Volume()==source.first),"Rename must stay within the same mounted volume");Check(source.first->Supports().rename&&!e.protectedFile,"The selected entry cannot be renamed");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.SetWindows(path.substr(0,path.find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);}source.first->Rename(source.second,rename->parent.IsNone()?e.parent:rename->parent.Id(),rename->name);}
+   if(rename){Check(rename->parent.IsNone()||(rename->parent.IsMounted()&&rename->parent.Volume()==source.first),"Rename must stay within the same mounted volume");Check(source.first->Supports().rename&&!e.protectedFile,"The selected entry cannot be renamed");if(rename->checkNameLock&&!strcmp(source.first->Kind(),"HFS"))Check(!(HfsPlus::Disk::U16(e.finder.data()+8)&HFS_FNDR_NAMELOCKED),"Remove the Finder name lock before renaming this entry");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.SetWindows(path.substr(0,path.find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);}source.first->Rename(source.second,rename->parent.IsNone()?e.parent:rename->parent.Id(),rename->name);}
    else{Check(source.first->Supports().remove,"The selected entry cannot be deleted");Mark(completion,item);RemoveTree(*source.first,source.second,job,true);}
   }else if(item.IsWindows()){
    auto source=Source(item,true);Cancel(job);source.first->Close();
@@ -220,10 +220,12 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
   }
   if(auto* edit=std::get_if<EditAttributes>(metadata)){Check(completion.supportsAttributes&&completion.writable,"This item cannot store extended attributes");Check(completion.attributes==edit->original,"Attributes changed while Properties was open; reopen Properties before saving");Cancel(job);Mark(completion,item);source.first->SetAttributes(source.second,edit->desired);completion.attributes=edit->desired;}
 
+  if(item.IsMounted()) completion.classicProperties=source.first->GetClassicProperties(source.second,completion.properties);
   if(item.IsClassic()&&!item.Volume()){source.first->Close();auto image=item.ClassicImage(),path=item.ClassicPath();Check(HFSIFACE_get_properties(&image[0],&path[0],&completion.properties)==0,"Cannot read classic HFS properties");completion.classicProperties=true;completion.writable=physical_floppy_path(item.ClassicImage().c_str())>=0?true:!readonly_media_path(item.ClassicImage().c_str())&&(GetFileAttributesA(item.ClassicImage().c_str())&FILE_ATTRIBUTE_READONLY)==0;Cancel(job);}
   if(auto* edit=std::get_if<EditClassicProperties>(metadata)){
-   Check(completion.classicProperties,"This format does not expose editable classic Finder properties");auto disk=WritableFloppy(item);auto image=item.ClassicImage(),path=item.ClassicPath();
-   hfsdirent current{};Check(HFSIFACE_get_properties(&image[0],&path[0],&current)==0,"Cannot revalidate classic HFS properties");Check(!item.expectedCatalogId||uint32_t(current.cnid)==item.expectedCatalogId,"The selected HFS entry was replaced");Cancel(job);
+   Check(completion.classicProperties && completion.writable,"This item does not expose writable classic Finder properties");
+   auto current=completion.properties;
+   Check(!item.expectedCatalogId||uint32_t(current.cnid)==item.expectedCatalogId,"The selected HFS entry was replaced");Cancel(job);
    auto changed=current;
    if(auto* label=std::get_if<FinderLabel>(&edit->change)){Check(label->value>=0&&label->value<=7,"Invalid Finder label");changed.fdflags=short((changed.fdflags&~14)|(label->value<<1));}
    else if(auto* position=std::get_if<FinderPosition>(&edit->change)){changed.fdlocation.h=position->x;changed.fdlocation.v=position->y;changed.fdflags&=~HFS_FNDR_HASBEENINITED;}
@@ -231,6 +233,11 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
     Check(changed.cnid==current.cnid&&changed.parid==current.parid&&((changed.flags^current.flags)&HFS_ISDIR)==0,"Catalog identity and item kind cannot be changed");
     if(!(current.flags&HFS_ISDIR))Check(changed.u.file.dsize==current.u.file.dsize&&changed.u.file.rsize==current.u.file.rsize,"Fork lengths cannot be changed through Properties");
    }
+   if(item.IsMounted()){
+    Cancel(job);Mark(completion,item);source.first->SetClassicProperties(source.second,changed);
+    completion.complete=true;completion.completed=1;return {};
+   }
+   auto disk=WritableFloppy(item);auto image=item.ClassicImage(),path=item.ClassicPath();
    auto to=path;char name[32]{};strcpy_s(name,changed.name);if(std::holds_alternative<ClassicPropertyEdit>(edit->change)){mac_to_pc_charset((unsigned char*)name);Check(HfvValidRenameLeaf(name,true),"Invalid classic HFS name");to=path.substr(0,path.find_last_of(':')+1)+name;}
    std::vector<char> macPath(path.begin(),path.end()),macTo(to.begin(),to.end());macPath.push_back(0);macTo.push_back(0);pc_to_mac_charset((unsigned char*)macPath.data());pc_to_mac_charset((unsigned char*)macTo.data());
    hfsvol* volume=hfs_mount(&image[0],0,O_RDWR);Check(volume!=nullptr,"Cannot open classic HFS for editing");
@@ -278,7 +285,8 @@ void ValidateRequest(const Request& r){
   legacy->destination.LegacyVolume(); legacy->destination.LegacyPath();
   if (legacy->selection)
    Check(!legacy->selection->source.IsNone() &&
-         (legacy->selection->folder.IsWindows() || legacy->selection->folder.IsClassic()),
+         (legacy->selection->folder.IsWindows() || legacy->selection->folder.IsClassic() ||
+          (legacy->selection->folder.IsMounted() && !strcmp(legacy->selection->folder.Volume()->Kind(),"HFS"))),
          "Invalid conversion selection");
  } else if (const auto* folder = r.Get<CreateFolder>()) {
   Check(!folder->parent.IsNone() && !folder->name.empty(), "Choose a destination and folder name");
@@ -487,12 +495,19 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
   auto source=MacBrowser::ResolveWindowsFile(request.Legacy().source.WindowsPath());
   noLostMetadata(*source.first,source.second);source.first->Close();
  }
+ const bool mountedClassic=legacy.selection &&
+    ((legacy.source.IsClassic() && legacy.selection->source.IsMounted()) ||
+     (legacy.destination.IsClassic() && legacy.selection->folder.IsMounted()));
  if(legacy.selection){
   // Captured paths/identities never depend on another window's volume indexes.
   auto source=Source(legacy.selection->source);noLostMetadata(*source.first,source.second);
-  auto target=legacy.selection->folder.IsWindows()?OpenWindows(legacy.selection->folder.WindowsPath()):OpenClassic(legacy.selection->folder.ClassicImage(),legacy.selection->folder.ClassicPath(),false);
-  CheckMedia(legacy.selection->folder);source.first->ValidateCopyTo(source.second,*target,2);
-  source.first->Close();target->Close();
+  if(legacy.move&&mountedClassic)Check(source.first->Writable(),"A cut source is read-only");
+  auto& folder=legacy.selection->folder;
+  auto target=folder.IsMounted()?Destination(folder):
+    std::make_pair(folder.IsWindows()?OpenWindows(folder.WindowsPath()):OpenClassic(folder.ClassicImage(),folder.ClassicPath(),false),uint32_t(2));
+  if(folder.IsMounted())Check(target.first->Writable(),"The destination is read-only");
+  CheckMedia(folder);source.first->ValidateCopyTo(source.second,*target.first,target.second);
+  source.first->Close();target.first->Close();
  }
   Mark(completion,request.Legacy().destination);if(request.Legacy().move)Mark(completion,request.Legacy().source);
  auto sourceLocation=!legacy.selection?request.Legacy().source:legacy.selection->source;sourceLocation.cut=request.Legacy().move;
@@ -500,6 +515,11 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
  std::vector<std::string> snapshots;auto options=request.Legacy().options;options.targetGenerationKnown=request.Legacy().destination.MediaGenerationKnown();options.targetGeneration=options.targetGenerationKnown?request.Legacy().destination.MediaGeneration():0;
  if(physicalMove){auto source=Source(sourceLocation);snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job));if(!sourceLocation.Volume())source.first->Close();options.verifyFloppy=true;}
  std::shared_ptr<Volume> mediaGuard;if(request.Legacy().source.MediaGenerationKnown()){mediaGuard=OpenClassic(request.Legacy().source.ClassicImage(),":",false);CheckMedia(request.Legacy().source);}
+ struct ClassicSessionMounts {
+  int previous;
+  explicit ClassicSessionMounts(bool enabled):previous(hfs_session_mounts(enabled)){}
+  ~ClassicSessionMounts(){hfs_session_mounts(previous);}
+ } classicMounts(mountedClassic);
  auto result=MakeCopyJob(request.Legacy().source.LegacyVolume(),request.Legacy().source.LegacyPath(),request.Legacy().destination.LegacyVolume(),request.Legacy().destination.LegacyPath(),request.Legacy().directory,physicalMove?0:request.Legacy().move,options)(job);
  if(mediaGuard)mediaGuard->Close();
  completion.completed=job.progress().files;bool copied=!result.code&&!job.progress().skipped;
