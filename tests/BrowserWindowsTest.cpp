@@ -99,6 +99,60 @@ int RunBrowserWindowsTest(const char* directory){
   auto pid=CopyProcess::VolumeSessionPidForTest(shared);
   Check(shared==peerSelection.Volume()&&pid&&pid!=GetCurrentProcessId(),
         "the same mounted image did not share a distinct worker process");
+  {
+   MacBrowser::Entry payload;payload.name=u"Slow payload";payload.forks[0].size=512*1024;
+   shared->Put(firstSelection.Id(),payload,[](unsigned,uint64_t,void* out,size_t n){memset(out,0x5a,n);},false);
+   MacBrowser::Entry other;
+   Check(shared->FindChild(2,u"Two",other),"peer folder fixture");
+   MacBrowser::Entry marker;marker.name=u"Peer listing";
+   shared->Put(other.id,marker,[](unsigned,uint64_t,void*,size_t){},false);
+   auto output=sharedPath.substr(0,sharedPath.find_last_of(L'\\'))+L"\\slow-export";
+   Check(CreateDirectoryW(output.c_str(),nullptr)!=FALSE,"slow export fixture folder");
+
+   struct ReadPause {
+    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    std::shared_ptr<Storage::Job> job;
+    ~ReadPause(){
+     CopyProcess::PauseVolumeReadForTest(nullptr,nullptr);
+     if(release)SetEvent(release);
+     if(job && !job->done()){job->cancel();job->wait();}
+     if(release)CloseHandle(release);
+     if(entered)CloseHandle(entered);
+    }
+   } pause;
+   Check(pause.entered && pause.release,"make slow export pause");
+   CopyProcess::PauseVolumeReadForTest(pause.entered,pause.release);
+   FileOperations::Request request=FileOperations::OrdinaryCopy{{firstSelection},FileOperations::Location::Windows(output)};
+   request.background=true;
+   auto exportJob=FileOperations::Submit(std::move(request));
+   pause.job=exportJob.Job();
+   Check(WaitForSingleObject(pause.entered,10000)==WAIT_OBJECT_0,"background export did not reach its first read chunk");
+   Check(!exportJob.Job()->done() && VolumeCoord::Readable(shared->ResourceKey()) &&
+              !VolumeCoord::Available({{shared->ResourceKey(),VolumeCoord::Mode::Write}}),
+         "background export did not share reads while excluding writers");
+   const auto start=GetTickCount();
+   const bool navigated=sb.MacBrowser().Activate(Find(sb,L"Two")) && Find(sb,L"Peer listing")>=0;
+   const bool stillCopying=!exportJob.Job()->done();
+   CopyProcess::PauseVolumeReadForTest(nullptr,nullptr);
+   SetEvent(pause.release);
+   Check(navigated && stillCopying && GetTickCount()-start<5000 &&
+              CopyProcess::VolumeSessionPidForTest(shared)==pid,
+         "the second browser could not list a folder while the same image was exporting");
+   Check(WaitForSingleObject(exportJob.Job()->event(),10000)==WAIT_OBJECT_0 &&
+              !exportJob.Job()->result().code && exportJob.Snapshot().complete,"slow background export failed");
+   {
+    auto file=MacBrowser::ResolveWindowsFile(output+L"\\One\\Slow payload");
+    auto entry=file.first->Stat(file.second);
+    uint8_t first=0,last=0;
+    Check(entry.forks[0].size==512*1024,"slow export length changed");
+    file.first->Read(file.second,0,0,&first,1);
+    file.first->Read(file.second,0,entry.forks[0].size-1,&last,1);
+    Check(first==0x5a && last==0x5a,"slow export content changed");
+   }
+   Check(sb.MacBrowser().ShowTestFolder(1,2),"restore second browser root");
+   fprintf(report,"PASS: second hidden browser navigates the same mounted image during a paused export, with writers excluded and worker PID unchanged.\n");
+  }
   auto renamed=FileOperations::Submit(FileOperations::RenameEntry{firstSelection,u"Renamed"});
   Check(WaitForSingleObject(renamed.Job()->event(),10000)==WAIT_OBJECT_0&&
         !renamed.Job()->result().code,"rename on persistent session failed");

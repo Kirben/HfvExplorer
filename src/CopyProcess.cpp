@@ -448,6 +448,9 @@ enum class SessionCommandCode {
     HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, CopyWithin, GetClassicProperties, SetClassicProperties, CloseClassic, FindMfs, SetBasicMetadata, TestCrashRename, TestCrashPut
 };
 constexpr size_t sessionReadLimit = 256 * 1024;
+#ifdef HFV_TESTING
+std::atomic<HANDLE> readPauseEntered{nullptr}, readPauseRelease{nullptr};
+#endif
 
 void SessionReply(HANDLE output, unsigned code = 0, const std::string& error = {},
                   Storage::Rollback rollback = Storage::Rollback::None) {
@@ -751,16 +754,32 @@ public:
         return entry;
     }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t bytes) override {
-        std::lock_guard<std::mutex> lock(mutex_);
         auto output = static_cast<uint8_t*>(out);
+        uint64_t generation=0;
         do {
-            auto count = (std::min)(bytes, sessionReadLimit);
-            Data args; args.put(id); args.put(fork); args.put(offset); args.put(count);
-            Call(SessionCommandCode::Read, std::move(args), false, [&] {
-                auto packet = Response(SessionBytes);
-                Check(packet.bytes.size() == count, "Short volume session read");
-                if (count) memcpy(output, packet.bytes.data(), count);
-            });
+            const auto count = (std::min)(bytes, sessionReadLimit);
+            {
+                // Leave the pipe available for browsing between fork chunks.
+                std::lock_guard<std::mutex> lock(mutex_);
+                Check(!generation || generation == generation_, "The mounted volume changed during a fork read");
+                generation=generation_;
+                Data args; args.put(id); args.put(fork); args.put(offset); args.put(count);
+                Call(SessionCommandCode::Read, std::move(args), false, [&] {
+                    auto packet = Response(SessionBytes);
+                    Check(packet.bytes.size() == count, "Short volume session read");
+                    if (count) memcpy(output, packet.bytes.data(), count);
+                });
+            }
+#ifdef HFV_TESTING
+            if (!offset && bytes>count) {
+                auto entered=readPauseEntered.load();
+                if (entered) {
+                    SetEvent(entered);
+                    Check(WaitForSingleObject(readPauseRelease.load(),15000)==WAIT_OBJECT_0,
+                          "The test did not release the paused fork read");
+                }
+            }
+#endif
             if (count) output += count;
             offset += count; bytes -= count;
         } while (bytes);
@@ -1314,6 +1333,10 @@ int VolumeSessionChild(const char* inputText, const char* outputText) {
     return 0;
 }
 #ifdef HFV_TESTING
+void PauseVolumeReadForTest(HANDLE entered,HANDLE release) {
+    if(entered)readPauseRelease=release;
+    readPauseEntered=entered;
+}
 DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
     auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);
     return persistent ? persistent->Pid() : 0;
