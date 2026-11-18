@@ -50,6 +50,21 @@ windows. It covers formats, conversion, forks, attributes, compression/hard link
 overwrite/cancel, conflicting jobs, worker failure, parent death and owner closing.
 No physical devices or desktop automation are used by these tests.
 
+## Dialog and background-operation safety
+
+Attribute names and lists use Unicode controls so non-ANSI names round-trip
+without recoding. Navigation tracks names instead of mutable list indexes. Invalid edits
+keep the current row and draft intact. Apply waits for an in-flight attribute
+import; the editor is temporarily held until success, failure or cancellation,
+while browser windows remain usable. Closing the editor discards late delivery.
+Closed Properties/editor windows release captured volumes and attribute snapshots
+immediately. C++ dialog objects are collected after active message handlers
+return, including nested shutdown. Completion callback exceptions are shown as
+result-display failures without changing a completed file operation into a
+reported storage failure; callback captures are released even when callbacks throw.
+Stale/reentrant progress timers cannot finish a job twice, and closing a progress
+window from its completion callback defers object collection until dispatch returns.
+
 ## File replacement safety
 
 Windows replacements retain read guards on captured destination versions, bind
