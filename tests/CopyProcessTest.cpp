@@ -570,19 +570,89 @@ int RunCopyProcessTest(const char *directory) {
             fprintf(report, "PASS: captured custom type/creator mappings, extension stripping and mapped raw "
                             "export names\n");
         }
-        // Legacy conversion continues to use its original converter inside the child.
-        Request conversion;
-        conversion = FileOperations::LegacyConversion{};
-        conversion.background = true;
-
-        conversion.Legacy().source =
-            FileOperations::Location::FromLegacy(root + "\\classic.dsk", "Classic:Plain");
-        conversion.SetLegacyTargetPath(root + "\\converted.bin");
-        conversion.Legacy().options.output = 'b';
-        Pass(Submit(conversion));
-        Check(GetFileAttributesA(conversion.Legacy().destination.LegacyPath().c_str()) != INVALID_FILE_ATTRIBUTES,
-              "worker MacBinary conversion output");
-        fprintf(report, "PASS: legacy MacBinary conversion in child process\n");
+        const auto classicPath = root + "\\classic.dsk";
+        auto conversion = [&](Location from, Location to, char mode) {
+            LegacyConversion options;
+            options.source = std::move(from);
+            options.destination = std::move(to);
+            options.options.input = options.options.output = mode;
+            Request request = std::move(options);
+            request.background = true;
+            return request;
+        };
+        auto classicLocation = [&](const std::string& name) { return Location::Classic(classicPath, "Classic:" + name); };
+        for (char mode : {'m', '5', 'b'}) {
+            std::string suffix = mode == 'b' ? ".hqx" : ".bin";
+            auto container = Location::Windows(Wide(root + "\\container-" + mode + suffix));
+            auto exportFile = conversion(classicLocation("Plain"), container, mode);
+            Pass(Submit(exportFile));
+            Check(GetFileAttributesW(container.WindowsPath().c_str()) != INVALID_FILE_ATTRIBUTES,
+                  "Converted output missing");
+            auto duplicate = Submit(exportFile);
+            Conflict(duplicate);
+            duplicate.Job()->resolve(Storage::ConflictChoice::Skip);
+            Wait(duplicate);
+            Check(!duplicate.Job()->result().code && !duplicate.Snapshot().complete &&
+                      duplicate.Job()->progress().skipped == 1, "Converted export did not use common overwrite handling");
+            auto name = std::string("Imported ") + mode;
+            Pass(Submit(conversion(container, classicLocation(name), mode)));
+            Entry record;
+            Check(classic->FindChild(2, U16(Wide(name)), record), "Decoded file missing");
+            Verify(*classic, record.id, 4096);
+            if (mode == 'b') {
+                CFile file(container.LegacyPath().c_str(), CFile::modeReadWrite | CFile::shareExclusive);
+                file.SetLength(file.GetLength() / 2);
+                file.Close();
+                auto damaged = Submit(conversion(container, classicLocation(name), mode));
+                Wait(damaged);
+                Check(damaged.Job()->result().code && !damaged.Snapshot().completed,
+                      "Truncated BinHex unexpectedly published");
+                Verify(*classic, record.id, 4096);
+            }
+        }
+        Entry text;
+        text.name = u"Lines";
+        text.forks[0].size = 4;
+        memcpy(text.finder.data(), "TEXTUNIX", 8);
+        classic->Put(2, text, [](unsigned, uint64_t at, void* p, size_t n) {
+            memcpy(p, "a\rb\r" + at, n);
+        }, false);
+        auto textPath = Location::Windows(Wide(root + "\\lines.txt"));
+        Pass(Submit(conversion(classicLocation("Lines"), textPath, 't')));
+        {
+            CFile file(textPath.LegacyPath().c_str(), CFile::modeRead);
+            char contents[6]{};
+            Check(file.Read(contents, sizeof(contents)) == sizeof(contents) &&
+                      !memcmp(contents, "a\r\nb\r\n", sizeof(contents)), "Windows text line endings");
+        }
+        Pass(Submit(conversion(textPath, classicLocation("Imported text"), 't')));
+        Check(classic->FindChild(2, u"Imported text", text) && text.forks[0].size == 4,
+              "Imported text length");
+        char resultText[4]{};
+        classic->Read(text.id, 0, 0, resultText, sizeof(resultText));
+        Check(!memcmp(resultText, "a\rb\r", sizeof(resultText)), "Macintosh text line endings");
+        auto mixed = Wide(root + "\\mixed");
+        Check(CreateDirectoryW(mixed.c_str(), nullptr) &&
+                  CopyFileW(textPath.WindowsPath().c_str(), (mixed + L"\\Mixed.txt").c_str(), TRUE) &&
+                  CopyFileW(Wide(root + "\\container-m.bin").c_str(), (mixed + L"\\Wrapped.bin").c_str(), TRUE),
+              "Create mixed automatic conversion fixture");
+        {
+            CFile raw((root + "\\mixed\\Raw.dat").c_str(), CFile::modeCreate | CFile::modeWrite);
+            raw.Write("raw", 3);
+        }
+        Pass(Submit(conversion(Location::Windows(mixed), classicLocation(""), 'a')));
+        Entry mixedFolder, wrapped, raw, lines;
+        Check(classic->FindChild(2, u"mixed", mixedFolder) && mixedFolder.directory &&
+                  classic->FindChild(mixedFolder.id, u"Plain", wrapped) &&
+                  classic->FindChild(mixedFolder.id, u"Raw.dat", raw) && raw.forks[0].size == 3 &&
+                  classic->FindChild(mixedFolder.id, u"Mixed", lines) && lines.forks[0].size == 4,
+              "Automatic folder transfer did not select an adapter for each file");
+        Verify(*classic, wrapped.id, 4096);
+        Check(GetFileAttributesW(Wide(root + "\\%container-m.bin").c_str()) == INVALID_FILE_ATTRIBUTES,
+              "Portable container unexpectedly needs a sidecar");
+        fprintf(report, "PASS: automatic folder transfer mixes text, wrapped forks and raw files\n");
+        fprintf(report, "PASS: common pipeline MacBinary I/II and BinHex fork round trips, overwrite Skip, "
+                        "malformed BinHex rollback and text line endings\n");
         auto slow = Put(*source, 2, u"Slow", 2 * 1024 * 1024);
         Request delayed;
         delayed.background = true;

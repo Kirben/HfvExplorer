@@ -171,9 +171,9 @@ public:
     bool SupportsBasicMetadata()const override{return true;}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=Encode(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
-             std::set<uint32_t> &ancestors, unsigned depth,bool removal=false) {
+             std::set<uint32_t> &ancestors, unsigned depth,bool removal=false,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
     Planned out; out.entry = v.Stat(id);auto identity=out.entry.resolvedId?out.entry.resolvedId:id;
     Check(depth <= 128 && ancestors.insert(identity).second, "Recursive folder link or excessive folder depth");
@@ -183,8 +183,10 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     // their private backing topology or compressed resource-fork storage.
     if(out.entry.compressed)out.entry.attributes.erase(u"com.apple.decmpfs");
     if(out.entry.hardLink)out.entry.attributes.erase(u"com.apple.system.hfs.firstlink");
-    if (out.entry.directory){if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal));}
+    if (out.entry.directory){
+        if (adapter) out.reader=adapter(v,out.entry,job,depth==0);if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal,adapter));}
     else { if(!removal){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
+        if (adapter) out.reader=adapter(v,out.entry,job,depth==0);
         ++p.totalFiles; Check(UINT64_MAX - p.totalBytes >= out.entry.forks[0].size,
         "Copy size overflow"); p.totalBytes += out.entry.forks[0].size;
         Check(UINT64_MAX - p.totalBytes >= out.entry.forks[1].size, "Copy size overflow");
@@ -225,7 +227,8 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:std::string{};
     dst.Put(parent, outgoing, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
         if (job.cancelled()) throw Storage::Cancelled();
-        src.Read(entry.id, fork, offset, p, n);
+        if (plan.reader) plan.reader(fork, offset, p, n);
+        else src.Read(entry.id, fork, offset, p, n);
         if(job.cancelled())throw Storage::Cancelled();
         auto end=offset+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.fileBytes += added; progress.bytes += added;progress.processed+=added;job.progress(progress);
     }, found);
@@ -320,11 +323,11 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  }
 }
 }
-bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job){
+bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter){
     Check(dst.Writable(),"The destination is read-only");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
-        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0));}
+        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,adapter));}
     ValidatePlans(dst,plans,parent,true);
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     CopiedLinks copies;for(size_t i=0;i<plans.size();++i)if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies))complete=false;

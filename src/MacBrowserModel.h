@@ -23,6 +23,7 @@ struct Entry {
     HfsPlus::Attributes attributes;
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
     unsigned version = 0; // optional legacy file version, not part of its identity
+    bool portableContainer = false; // Encoded Macintosh metadata is already in the data stream.
     std::string expectedDestinationIdentity; // transient overwrite approval; never filesystem metadata
     std::string identity; // backend object/version identity for move revalidation
 };
@@ -31,6 +32,10 @@ struct Capabilities {
     bool unicodeNames = true, resourceForks = true, createFolders = true;
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
+class Volume;
+// Adapt a scanned entry before destination validation. Return a reader for
+// transformed forks, or an empty reader to use the original storage adapter.
+using TransferAdapter = std::function<Reader(Volume &, Entry &, Storage::Job &, bool root)>;
 // File operations and browsing have separate queues. Native backends guard
 // calls and leases; callers reserve volumes before a multi-call transaction.
 // GUI code holds IDs and copied entries, never filesystem catalog records.
@@ -103,7 +108,7 @@ std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string 
 // A move removes its source only after the entire selected tree was copied.
 bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage::Job &, bool move = false);
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> &,
-              Volume &target,uint32_t parent,Storage::Job &);
+              Volume &target,uint32_t parent,Storage::Job &, const TransferAdapter & = {});
 void RemoveTree(Volume &, uint32_t id, Storage::Job &,bool deletionProgress=false);
 std::string Snapshot(Volume &,uint32_t id,Storage::Job &,bool requireRemovable=false);
 std::wstring Wide(const std::u16string &);
