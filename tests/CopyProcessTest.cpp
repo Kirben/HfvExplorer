@@ -105,6 +105,101 @@ void Pass(const Operation &op) {
     Check(CopyProcess::lastProcess && CopyProcess::lastProcess != GetCurrentProcessId(),
           "copy must run in a different process");
 }
+void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstring& folder) {
+    Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"mounted fork fixture directory");
+    const auto pid=CopyProcess::VolumeSessionPidForTest(image);
+    const auto directory=image->MakeDirectory(2,u"Fork job fixtures");
+    const auto id=Put(*image,directory,u"Fork payload");
+    HfsPlus::Attributes attributes{{u"user.fork-metadata",{12,34,56}}};
+    if(image->SupportsAttributes())image->SetAttributes(id,attributes);
+    hfsdirent classic{};
+    const bool isClassic=image->GetClassicProperties(id,classic);
+    if(isClassic){
+        classic.bkdate=1000000000;
+        classic.fdflags|=6;
+        image->SetClassicProperties(id,classic);
+    }
+    const auto original=image->Stat(id);
+    CopyProcess::lastProcess=0;
+
+    auto verifyBytes=[](Volume& volume,uint32_t file,unsigned fork,uint64_t length,unsigned bias){
+        std::vector<BYTE> bytes(65536);
+        for(uint64_t at=0;at<length;){
+            const auto count=size_t((std::min)(uint64_t(bytes.size()),length-at));
+            volume.Read(file,fork,at,bytes.data(),count);
+            for(size_t n=0;n<count;++n)
+                Check(bytes[n]==BYTE((at+n)*7+bias),"mounted fork payload was changed");
+            at+=count;
+        }
+    };
+    for(const auto selector:{ForkSelector::Data,ForkSelector::Resource}){
+        const unsigned fork=static_cast<unsigned>(selector);
+        const auto path=folder+(fork?L"\\resource.bin":L"\\data.bin");
+        auto operation=Submit(ExportFileFork{Native(image,id),Location::Windows(path),selector});
+        Wait(operation);
+        if(operation.Job()->result().code)throw HfsPlus::Error(operation.Job()->result().message);
+        auto output=ResolveWindowsFile(path);
+        const auto entry=output.first->Stat(output.second);
+        Check(operation.Snapshot().complete && entry.forks[0].size==original.forks[fork].size &&
+                  !entry.forks[1].size,"mounted export used the wrong fork");
+        verifyBytes(*output.first,output.second,0,entry.forks[0].size,fork*13);
+    }
+
+    const auto cancelledPath=folder+L"\\cancelled.bin";
+    Storage::Job exportJob;
+    bool exportStarted=false;
+    exportJob.transport([&](const Storage::Progress& progress){
+        if(progress.fileBytes){exportStarted=true;exportJob.cancel();}
+    },{});
+    Completion completion;
+    const auto cancelledExport=ExecuteInWorker(
+        ExportFileFork{Native(image,id),Location::Windows(cancelledPath),ForkSelector::Data},exportJob,completion);
+    Check(exportStarted && cancelledExport.outcome==Storage::Outcome::Cancelled &&
+              GetFileAttributesW(cancelledPath.c_str())==INVALID_FILE_ATTRIBUTES,
+          "cancelled mounted fork export left a partial file");
+
+    const auto replacement=folder+L"\\replacement.bin";
+    {
+        auto windows=OpenWindows(folder);
+        Put(*windows,2,u"replacement.bin",300000,71);
+    }
+    auto rejected=Submit(ImportResourceFork{Location::Windows(folder),Native(image,id)});
+    Wait(rejected);
+    Check(rejected.Job()->result().code && image->Stat(id).forks[1].size==173,
+          "resource replacement accepted a directory as fork input");
+    const ImportResourceFork request{Location::Windows(replacement),Native(image,id)};
+    Storage::Job importJob;
+    bool stagedResource=false;
+    importJob.transport([&](const Storage::Progress& progress){
+        if(progress.fileBytes>original.forks[0].size){stagedResource=true;importJob.cancel();}
+    },{});
+    Completion importCompletion;
+    const auto cancelledImport=ExecuteInWorker(request,importJob,importCompletion);
+    Check(stagedResource && cancelledImport.outcome==Storage::Outcome::Cancelled &&
+              !cancelledImport.partial && image->Stat(id).forks[1].size==173,
+          "cancelled resource replacement modified the original file");
+    verifyBytes(*image,id,0,300000,0);
+    verifyBytes(*image,id,1,173,13);
+
+    auto operation=Submit(request);
+    Wait(operation);
+    if(operation.Job()->result().code)throw HfsPlus::Error(operation.Job()->result().message);
+    Entry updated;
+    Check(operation.Snapshot().complete && image->FindChild(directory,u"Fork payload",updated) &&
+              updated.forks[0].size==300000 && updated.forks[1].size==300000 &&
+              updated.finder==original.finder && updated.created==original.created &&
+              (!image->SupportsAttributes() || image->GetAttributes(updated.id)==attributes),
+          "resource replacement failed to preserve the data fork or metadata");
+    if(isClassic){
+        hfsdirent properties{};
+        Check(image->GetClassicProperties(updated.id,properties) && properties.bkdate==classic.bkdate,
+              "classic resource replacement lost its backup date");
+    }
+    verifyBytes(*image,updated.id,0,300000,0);
+    verifyBytes(*image,updated.id,1,300000,71);
+    Check(!CopyProcess::lastProcess && CopyProcess::VolumeSessionPidForTest(image)==pid,
+          "fork operations restarted the persistent worker");
+}
 void Conflict(const Operation &op) {
     DWORD until = GetTickCount() + 10000;
     while (op.Job()->conflict().empty() && !op.Job()->done() && LONG(until - GetTickCount()) > 0)
@@ -596,6 +691,9 @@ int RunCopyProcessTest(const char *directory) {
             verifySessions();
             fprintf(report,"PASS: Windows both-fork transfer and mid-overwrite cancellation in both directions keep persistent image workers mounted\n");
 
+            TestMountedForkJobs(from,Wide(root+"\\fork-hfsplus"));
+            TestMountedForkJobs(to,Wide(root+"\\fork-hfsx"));
+
             auto stablePid=CopyProcess::VolumeSessionPidForTest(to);
             HfsPlus::Attributes edited{{u"user.session",{1,2,3,4}}};
             auto attrs=Submit(EditAttributes{Native(to,copied.id),{},edited});
@@ -757,6 +855,8 @@ int RunCopyProcessTest(const char *directory) {
                           CopyProcess::VolumeSessionPidForTest(classic)==pid,
                       "mounted raw import did not apply the type mapping and strip policy");
             }
+            TestMountedForkJobs(classic,Wide(root+"\\fork-classic"));
+            fprintf(report,"PASS: mounted HFS, HFS+ and HFSX fork selectors and cancellation preserve original forks, Finder metadata and worker PID\n");
             classic->SuspendWorker();
             std::weak_ptr<Volume> previousMount=classic;
             alias.reset();
@@ -1406,18 +1506,30 @@ int RunCopyProcessTest(const char *directory) {
                             "destruction and progress reassignment; hidden windows only\n");
             auto closingFolder = target->MakeDirectory(2, u"Last owner closing");
             ui.Copy().destination = Native(target, closingFolder);
-            CopyProcess::fault = 2;
+            struct ShutdownGate {
+                HANDLE event=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+                ShutdownGate() {
+                    Check(event!=nullptr,"create last-owner cancellation gate");
+                    CopyProcess::ioGate=event;
+                    CopyProcess::fault=7;
+                }
+                ~ShutdownGate() {
+                    SetEvent(event);
+                    CopyProcess::ioGate=nullptr;
+                    CopyProcess::fault=0;
+                    CloseHandle(event);
+                }
+            } shutdownGate;
             Check(BackgroundCopies::Start({ui}, &second, true), "last-owner process start");
             Until([] {
                 auto pending = Pending();
-                return !pending.empty() && pending.front().Job()->progress().fileBytes > 0;
+                return !pending.empty() && pending.front().Job()->progress().phase == "Worker test gate";
             });
             auto closing = Pending();
             Check(closing.size() == 1, "last-owner active operation");
             auto closingJob = closing.front().Job();
             BackgroundCopies::CancelAll();
             BackgroundCopies::Shutdown();
-            CopyProcess::fault = 0;
             Check(!BackgroundCopies::Active() && closingJob->done() &&
                       closingJob->result().error == ERROR_CANCELLED,
                   "last-owner process shutdown did not drain cancellation");
