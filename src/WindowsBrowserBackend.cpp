@@ -5,17 +5,15 @@
 #include "MainMacBrowser.h"
 #include "PhysicalRemovable.h"
 #include "Floppy.h"
-#include "BackgroundCopies.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
-#include "HostFileSizes.h"
+#include "HfsPlusDisk.h"
 #include "charset.h"
 #include "aspecial.h"
 #include "utils.h"
-#include <set>
 #include <stdexcept>
 extern HICON get_dos_icon(CHFVExplorerApp*,char*,int);
 extern int is_afp_directory(char*);
@@ -24,89 +22,130 @@ struct Find {
  HANDLE handle=INVALID_HANDLE_VALUE;
  ~Find(){if(handle!=INVALID_HANDLE_VALUE)FindClose(handle);}
 };
-std::string key(std::string name){if(!name.empty())CharUpperBuffA(&name[0],DWORD(name.size()));return name;}
+// The old tree and icon adapters still take ANSI paths. Keep their path
+// separate from the Unicode location used for selection and file operations.
+std::string LegacyPath(const std::wstring& path) {
+ const UINT page=GetACP();
+ const bool utf8=page==CP_UTF8;
+ const DWORD flags=utf8?0:WC_NO_BEST_FIT_CHARS;
+ BOOL lost=FALSE;
+ const auto count=WideCharToMultiByte(page,flags,path.c_str(),-1,nullptr,0,nullptr,utf8?nullptr:&lost);
+ if(lost||count<=1||count>MAX_PATH)return {};
+ std::string text(count,'\0');
+ if(!WideCharToMultiByte(page,flags,path.c_str(),-1,text.data(),count,nullptr,utf8?nullptr:&lost)||lost)return {};
+ text.pop_back();
+ return text;
 }
-BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(int volume,const char* directory,bool listing,Storage::Job& job){
+
+bool IsCompanion(const std::wstring& directory,const std::wstring& leaf) {
+ if(leaf.size()<2||leaf.front()!=L'%')return false;
+ if(GetFileAttributesW((directory+leaf.substr(1)).c_str())==INVALID_FILE_ATTRIBUTES)return false;
+ try{return MacBrowser::WindowsResourceCompanion(directory+leaf);}
+ catch(const std::exception&){return false;}
+}
+}
+
+BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
+    int volume,const char* directory,bool listing,Storage::Job& job)
+{
+ if(!directory||!*directory)throw std::runtime_error("Select a Windows folder");
  BrowserDirectory::ObserveRead(directory);
- if(BackgroundCopies::Active()){
-  BrowserDirectory::Snapshot out;out.resourceKey=VolumeCoord::PathKey(VolumeCoord::Wide(directory));out.revision=VolumeCoord::Revision(out.resourceKey);out.capabilitiesKnown=true;
-  out.folderPath=VolumeCoord::Wide(directory);try{out.folderIdentity=MacBrowser::DescribeWindowsFile(out.folderPath).identity;}catch(const std::exception&){}
-  char root[]={directory[0],':','\\',0};out.capabilities.create=out.capabilities.rename=out.capabilities.remove=GetDriveTypeA(root)!=DRIVE_CDROM;
-  std::string prefix=directory;if(!prefix.empty()&&prefix.back()!='\\')prefix+='\\';
-  Find find;WIN32_FIND_DATAA info{};find.handle=FindFirstFileA((prefix+"*.*").c_str(),&info);
-  if(find.handle==INVALID_HANDLE_VALUE){if(GetLastError()==ERROR_FILE_NOT_FOUND)return out;throw std::runtime_error("Cannot enumerate Windows folder");}
-  do{
-   if(job.cancelled())throw Storage::Cancelled();if(!strcmp(info.cFileName,".")||!strcmp(info.cFileName,"..")||(!m_pc_show_invisibles&&(info.dwFileAttributes&FILE_ATTRIBUTE_HIDDEN)))continue;
-   if(info.cFileName[0]=='%'&&GetFileAttributesA((prefix+(info.cFileName+1)).c_str())!=INVALID_FILE_ATTRIBUTES){try{if(MacBrowser::WindowsResourceCompanion(VolumeCoord::Wide(prefix+info.cFileName)))continue;}catch(const std::exception&){}}
-   BrowserDirectory::Row row;row.storageType=LIST_FAT;row.volume=volume;row.capabilities=out.capabilities;row.path=prefix+info.cFileName;
-   row.entry.name=BrowserDirectory::FromAnsi(info.cFileName);row.entry.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;row.entry.forks[0].size=row.entry.directory?0:HostDirectoryEntrySize(info);
-   row.created=BrowserDirectory::Ticks(info.ftCreationTime);row.modified=BrowserDirectory::Ticks(info.ftLastWriteTime);
-   try{row.entry=MacBrowser::DescribeWindowsFile(VolumeCoord::Wide(row.path));}catch(const std::exception&){/* Staged replacements may be briefly locked; keep OS metadata. */}
-   row.accessKey=VolumeCoord::ObservedPathKey(out.resourceKey,VolumeCoord::Wide(info.cFileName),row.entry.identity,row.entry.directory);
-   out.rows.push_back(std::move(row));
-  }while(FindNextFileA(find.handle,&info));
-  if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
-return out;
- }
+ BrowserDirectory::Snapshot snapshot;
+ snapshot.folderPath=VolumeCoord::Wide(directory);
+ snapshot.resourceKey=VolumeCoord::PathKey(snapshot.folderPath);
+ // Browsing the folder can overlap a write to a child file. Both idle and
+ // busy listings take the same lease and tolerate briefly locked children.
+ const VolumeCoord::Lease access({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});
+ snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
+ try{snapshot.folderIdentity=MacBrowser::DescribeWindowsFile(snapshot.folderPath).identity;}
+ catch(const std::exception&){}
+ wchar_t root[MAX_PATH]{};
+ const bool writable=!GetVolumePathNameW(snapshot.folderPath.c_str(),root,ARRAYSIZE(root))||
+     GetDriveTypeW(root)!=DRIVE_CDROM;
+ snapshot.capabilitiesKnown=true;
+ snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
+
+ auto folder=snapshot.folderPath;
+ if(folder.back()!=L'\\'&&folder.back()!=L'/')folder+=L'\\';
+ auto ioFolder=BrowserPresentation::WindowsPath(folder);
+ if(ioFolder.back()!=L'\\')ioFolder+=L'\\';
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ std::string ansiFolder=LegacyPath(folder);
+ const bool afp=listing&&!ansiFolder.empty()&&ansiFolder.size()+sizeof(":AFP_AfpInfo")<=MAX_PATH&&
+     is_afp_directory(ansiFolder.data())!=0;
+ const DWORD deadline=listing&&app.m_dosicons!=DI_NO_ICONS&&app.m_fat_icon_time_limit>0?
+     GetTickCount()+DWORD(app.m_fat_icon_time_limit)*1000:0;
  LegacyEngine::Scope engine;
- BrowserDirectory::Snapshot snapshot;snapshot.resourceKey=VolumeCoord::PathKey(VolumeCoord::Wide(directory));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
- snapshot.folderPath=VolumeCoord::Wide(directory);try{snapshot.folderIdentity=MacBrowser::DescribeWindowsFile(snapshot.folderPath).identity;}catch(const std::exception&){}
- std::string prefix=directory;if(prefix.empty())throw std::runtime_error("Select a Windows folder");if(prefix.back()!='\\')prefix+='\\';
- bool afp=is_afp_directory(const_cast<char*>(directory))!=0;
- char root[]={directory[0],':',char(92),0};bool writable=GetDriveTypeA(root)!=DRIVE_CDROM;
- std::set<std::string> ignored;
- snapshot.capabilitiesKnown=true;snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
- auto append=[&](const char* display,const std::string& path,bool folder,const WIN32_FIND_DATAA& info,HICON small,HICON large,const char* type,const char* creator,bool companions,bool own=false){
-  BrowserDirectory::ObserveRead(path.c_str());
-  BrowserDirectory::Row row;row.storageType=LIST_FAT;row.volume=volume;row.path=path;
-  row.entry.name=BrowserDirectory::FromAnsi(display);row.entry.directory=folder;
-  row.created=BrowserDirectory::Ticks(info.ftCreationTime);row.modified=BrowserDirectory::Ticks(info.ftLastWriteTime);
-  if(folder){row.countKnown=false;}
-  else row.entry.forks[0].size=HostDirectoryEntrySize(info);
-  memcpy(row.entry.finder.data(),type,(std::min)(strlen(type),size_t(4)));
-  memcpy(row.entry.finder.data()+4,creator,(std::min)(strlen(creator),size_t(4)));
-  if(companions&&!folder){auto normalized=MacBrowser::DescribeWindowsFile(MacBrowser::Wide(BrowserDirectory::FromAnsi(path.c_str())));
-   normalized.name=row.entry.name;row.entry=std::move(normalized);
-  }
-  if(row.entry.identity.empty()){try{row.entry.identity=MacBrowser::DescribeWindowsFile(VolumeCoord::Wide(path)).identity;}catch(const std::exception&){/* Unidentifiable entries are revalidated before a mutation is queued. */}}
-  row.icon16=small;row.icon32=large;
-  if(own&&(small||large)){row.ownedIcons=std::make_shared<BrowserDirectory::OwnedIcons>();row.ownedIcons->small=small;row.ownedIcons->large=large;}row.capabilities.create=row.capabilities.rename=row.capabilities.remove=writable;
-  auto leaf=path.substr(path.find_last_of("\\/")+1);row.accessKey=VolumeCoord::ObservedPathKey(snapshot.resourceKey,VolumeCoord::Wide(leaf),row.entry.identity,row.entry.directory);
-  snapshot.rows.push_back(std::move(row));
- };
- // Keep the classic AppleDouble/AFP icon and filename conventions in this backend.
- // The view receives only a normalized row and its operation binding.
- {
-  Find find;WIN32_FIND_DATAA info{};find.handle=FindFirstFileA((prefix+"%*.*").c_str(),&info);
-  if(find.handle==INVALID_HANDLE_VALUE&&GetLastError()!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("Cannot read Windows folder (Windows error "+std::to_string(GetLastError())+").");
-  if(find.handle!=INVALID_HANDLE_VALUE)do{
-   if(job.cancelled())throw Storage::Cancelled();HICON small=nullptr,large=nullptr;char name[MAX_PATH],type[20]{},creator[20]{};int show=0;
-   if(get_apple_double(prefix.c_str(),info.cFileName,&small,&large,name,type,creator,&show)){
-    ignored.insert(key(std::string("%")+name));ignored.insert(key(name));
-    if(show){std::string path=prefix+name;bool folder=isdirectory(path.c_str())!=0;
-     remove_ardi_special_chars((unsigned char*)name);mac_to_pc_charset((unsigned char*)name);
-     WIN32_FILE_ATTRIBUTE_DATA data{};WIN32_FIND_DATAA actual=info;
-     if(GetFileAttributesExA(path.c_str(),GetFileExInfoStandard,&data)){actual.ftCreationTime=data.ftCreationTime;actual.ftLastWriteTime=data.ftLastWriteTime;actual.nFileSizeHigh=data.nFileSizeHigh;actual.nFileSizeLow=data.nFileSizeLow;}
-     append(name,path,folder,actual,small,large,type,creator,true);
+ Find find;
+ WIN32_FIND_DATAW info{};
+ find.handle=FindFirstFileW((ioFolder+L"*").c_str(),&info);
+ if(find.handle==INVALID_HANDLE_VALUE){
+  if(GetLastError()==ERROR_FILE_NOT_FOUND)return snapshot;
+  throw std::runtime_error("Cannot enumerate Windows folder");
+ }
+ do{
+  if(job.cancelled())throw Storage::Cancelled();
+  const std::wstring leaf=info.cFileName;
+  if(leaf==L"."||leaf==L".."||
+     (!m_pc_show_invisibles&&(info.dwFileAttributes&FILE_ATTRIBUTE_HIDDEN))||
+     IsCompanion(ioFolder,leaf))continue;
+
+  BrowserDirectory::Row row;
+  row.storageType=LIST_FAT;
+  row.volume=volume;
+  row.capabilities=snapshot.capabilities;
+  const auto path=folder+leaf;
+  row.path=LegacyPath(path);
+  if(row.path.empty()&&info.cAlternateFileName[0])row.path=LegacyPath(folder+info.cAlternateFileName);
+  row.location=FileOperations::Location::Windows(path);
+  row.entry.name=MacBrowser::U16(leaf);
+  row.entry.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
+  if(!row.entry.directory)
+   row.entry.forks[0].size=(uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
+  row.created=BrowserDirectory::Ticks(info.ftCreationTime);
+  row.modified=BrowserDirectory::Ticks(info.ftLastWriteTime);
+  try{row.entry=MacBrowser::DescribeWindowsFile(path);}
+  catch(const std::exception&){/* Keep the enumerated metadata if a child is briefly locked. */}
+
+  const auto finderFlags=HfsPlus::Disk::U16(row.entry.finder.data()+8);
+  if(!m_mac_show_invisibles&&(finderFlags&fInvisible))continue;
+  if(listing&&!row.entry.directory&&!row.path.empty()) {
+   auto ansiLeaf=LegacyPath(leaf);
+   const bool hasFinder=std::any_of(row.entry.finder.begin(),row.entry.finder.end(),[](uint8_t byte){return byte!=0;});
+   if(!ansiFolder.empty()&&!ansiLeaf.empty()&&ansiFolder.size()+ansiLeaf.size()+1<MAX_PATH) {
+    char name[MAX_PATH],type[20]{},creator[20]{};
+    int show=1;
+    if(hasFinder){
+     // The common AppleDouble parser has already supplied the metadata.
+     // Use the legacy helper here only for its icon cache and artwork.
+     get_apple_double(ansiFolder.c_str(),ansiLeaf.data(),&row.icon16,&row.icon32,name,type,creator,&show);
+    }else if(afp) {
+     get_afp(ansiFolder.c_str(),ansiLeaf.data(),&row.icon16,&row.icon32,name,type,creator,&show);
+     memcpy(row.entry.finder.data(),type,(std::min)(strlen(type),size_t(4)));
+     memcpy(row.entry.finder.data()+4,creator,(std::min)(strlen(creator),size_t(4)));
     }
    }
-  }while(FindNextFileA(find.handle,&info));
-  if(find.handle!=INVALID_HANDLE_VALUE&&GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows companion enumeration failed");
- }
- DWORD deadline=app.m_dosicons!=DI_NO_ICONS&&app.m_fat_icon_time_limit>0?GetTickCount()+DWORD(app.m_fat_icon_time_limit)*1000:0;
- Find find;WIN32_FIND_DATAA info{};find.handle=FindFirstFileA((prefix+"*.*").c_str(),&info);
- if(find.handle==INVALID_HANDLE_VALUE){if(GetLastError()==ERROR_FILE_NOT_FOUND)return snapshot;throw std::runtime_error("Cannot enumerate Windows folder");}
- do{
-  if(job.cancelled())throw Storage::Cancelled();bool folder=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;bool owned=false;
-  if((folder&&(!strcmp(info.cFileName,".")||!strcmp(info.cFileName,"..")))||ignored.count(key(info.cFileName))||(!m_pc_show_invisibles&&(info.dwFileAttributes&FILE_ATTRIBUTE_HIDDEN)))continue;
-  dos_lfn_fdata(&info);std::string path=prefix+info.cFileName;HICON small=nullptr,large=nullptr;char type[20]{},creator[20]{},name[MAX_PATH];int show=1;
-  if(!folder&&listing){
-   if(afp)get_afp(prefix.c_str(),info.cFileName,&small,&large,name,type,creator,&show);
-   if(!large){int mode=deadline&&LONG(GetTickCount()-deadline)>=0?DI_NO_ICONS:app.m_dosicons;small=get_dos_icon(&app,const_cast<char*>(path.c_str()),mode);if(small==(HICON)1)small=nullptr;large=small;owned=true;}
+   if(!row.icon16&&!row.icon32) {
+    const int mode=deadline&&LONG(GetTickCount()-deadline)>=0?DI_NO_ICONS:app.m_dosicons;
+    const auto icon=get_dos_icon(&app,row.path.data(),mode);
+    if(icon&&icon!=(HICON)1) {
+     row.ownedIcons=std::make_shared<BrowserDirectory::OwnedIcons>();
+     row.ownedIcons->small=row.ownedIcons->large=icon;
+     row.icon16=row.icon32=icon;
+    }
+   }
   }
-  append(info.cFileName,path,folder,info,small,large,type,creator,false,owned);
-  Storage::Progress progress;progress.phase="Reading folder";progress.path=path;job.progress(progress);
- }while(FindNextFileA(find.handle,&info));
+
+  const auto display=BrowserPresentation::Utf8(row.entry.name);
+  BrowserDirectory::ObserveRead(row.path.empty()?display.c_str():row.path.c_str());
+  row.accessKey=VolumeCoord::ObservedPathKey(snapshot.resourceKey,leaf,row.entry.identity,row.entry.directory);
+  snapshot.rows.push_back(std::move(row));
+  Storage::Progress progress;
+  progress.phase="Reading folder";
+  progress.path=display;
+  progress.utf8=true;
+  job.progress(progress);
+ }while(FindNextFileW(find.handle,&info));
  if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
  return snapshot;
 }
@@ -121,7 +160,13 @@ void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& 
   if(n)WideCharToMultiByte(CP_ACP,0,name.c_str(),-1,&ansi[0],n,nullptr,nullptr);
   if(row.storageType==LIST_HFS)
    return tree->tree_insert(m_volumes[row.volume].m_rootitem,row.volume,const_cast<char*>(ansi.c_str()),row.id,row.parent);
-  return tree->tree_fat_insert(root,row.volume,const_cast<char*>(ansi.c_str()),const_cast<char*>(row.path.c_str()));
+  if(row.path.empty())return HTREEITEM{};
+  const auto child=tree->tree_fat_insert(root,row.volume,ansi.data(),const_cast<char*>(row.path.c_str()));
+  if(child){
+   TVITEMW text{};text.mask=TVIF_TEXT;text.hItem=child;text.pszText=name.data();
+   SendMessageW(tree->GetTreeCtrl().m_hWnd,TVM_SETITEMW,0,reinterpret_cast<LPARAM>(&text));
+  }
+  return child;
  });
 }
 

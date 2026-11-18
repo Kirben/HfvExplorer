@@ -170,8 +170,8 @@ struct MainMacBrowser::State {
             row.accessKey=mount.volume->ResourceKey();
             out.expectedName=row.entry.name;
             out.expectedParent=row.entry.parent;
-        }else if(row.storageType==LIST_FAT&&!row.path.empty()){
-            out.SetWindows(FromAnsi(row.path));
+        }else if(row.storageType==LIST_FAT&&(out.IsWindows()||!row.path.empty())){
+            if(!out.IsWindows())out.SetWindows(FromAnsi(row.path));
             if(out.WindowsPath().size()>=2 && out.WindowsPath()[1]==L':') {
                 const auto drive=towupper(out.WindowsPath()[0]);
                 if(drive>=L'A'&&drive<=L'Z')row.mediaDrive=drive-L'A';

@@ -247,7 +247,7 @@ int RunBrowserSessionTest(const char* directory){
   a.doc.AddIcon('AAAA');b.doc.AddIcon('BBBB');Check(a.doc.HasIcon('AAAA')&&!a.doc.HasIcon('BBBB')&&b.doc.HasIcon('BBBB'),"classic Finder icon tables are shared");
   CString wa=root+"\\first",wb=root+"\\second";Check(CreateDirectoryA(wa,nullptr)&&CreateDirectoryA(wb,nullptr),"create host fixtures");
   {CFile file;Check(file.Open(wa+"\\first.txt",CFile::modeCreate|CFile::modeWrite)!=FALSE,"host first file");}{CFile file;Check(file.Open(wb+"\\second.txt",CFile::modeCreate|CFile::modeWrite)!=FALSE,"host second file");}
-  a.Windows(wa);b.Windows(wb);Check(Find(a.list,L"First.txt")>=0&&Find(a.list,L"Second.txt")<0&&Find(b.list,L"Second.txt")>=0,"Windows directory state used another session");
+  a.Windows(wa);b.Windows(wb);Check(Find(a.list,L"first.txt")>=0&&Find(a.list,L"second.txt")<0&&Find(b.list,L"second.txt")>=0,"Windows directory state used another session");
   {
    auto& session=a.Session();
    session.asyncNavigationForTest=true;
@@ -259,11 +259,11 @@ int RunBrowserSessionTest(const char* directory){
    };
    Check(a.doc.NavigateWindowsFolder(0,(LPCSTR)wa,true),"queue asynchronous Windows folder refresh");
    PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"Windows worker read did not start");
-   Check(session.Navigating()&&a.owner.IsWindowEnabled()&&Find(a.list,L"First.txt")>=0,
+   Check(session.Navigating()&&a.owner.IsWindowEnabled()&&Find(a.list,L"first.txt")>=0,
          "slow Windows refresh disabled its window or cleared the listing");
    SetEvent(release);
    PumpUntil([&]{return !session.Navigating();},"Windows refresh did not finish");
-   Check(Find(a.list,L"First.txt")>=0&&session.ListingAvailable(),"Windows refresh did not publish its listing");
+   Check(Find(a.list,L"first.txt")>=0&&session.ListingAvailable(),"Windows refresh did not publish its listing");
    session.asyncNavigationForTest=false;
   }
   {
@@ -276,7 +276,7 @@ int RunBrowserSessionTest(const char* directory){
    auto& session=a.Session();
    Check(session.RevealFindHit(hit,0),"queue Windows Find result");
    PumpUntil([&]{return !session.Navigating();},"Windows Find did not complete");
-   Check(Selected(a.list,L"Reveal.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==hit.destination.WindowsPath(),
+   Check(Selected(a.list,L"reveal.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==hit.destination.WindowsPath(),
        "Windows Find did not materialize its folder path and select its file");
    auto copy=filename+".replacement";
    {CFile file;Check(file.Open(copy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacement search file");}
@@ -288,7 +288,7 @@ int RunBrowserSessionTest(const char* directory){
    Check(DeleteFileA(filename)&&RemoveDirectoryA(nested)&&RemoveDirectoryA(wa+"\\\\Nested"),
        "clean up the Windows Find fixture before the startup check");
   }
-  app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"First.txt")>=0,"startup before global main-window assignment");
+  app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"first.txt")>=0,"startup before global main-window assignment");
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
   a.Session().asyncNavigationForTest=true;
@@ -453,13 +453,13 @@ int RunBrowserSessionTest(const char* directory){
    const auto key=VolumeCoord::ImageKey(nextImage);
    PumpUntil([&]{return VolumeCoord::Available({{key,VolumeCoord::Mode::Write}});},"superseded image retained its lease");
    BrowserDirectory::testObserveRead={};
-   Check(Find(*session.List(),L"First.txt")>=0&&Find(*session.List(),L"Peer image")<0,
+   Check(Find(*session.List(),L"first.txt")>=0&&Find(*session.List(),L"Peer image")<0,
          "superseded image replaced a newer folder selection");
 
    auto missing=VolumeCoord::Wide((LPCSTR)(root+"\\missing.dsk"));
    Check(session.MacBrowser().OpenImage(missing)==1,"queue missing image");
    PumpUntil([&]{return !session.Navigating();},"missing image did not complete");
-   Check(session.ListingAvailable()&&Find(*session.List(),L"First.txt")>=0&&!session.navigationErrorForTest.empty(),
+   Check(session.ListingAvailable()&&Find(*session.List(),L"first.txt")>=0&&!session.navigationErrorForTest.empty(),
          "failed image open invalidated the previously loaded folder");
    session.MacBrowser().OpenImages({firstImage,missing,nextImage});
    PumpUntil([&]{return !session.Navigating();},"image batch did not complete");

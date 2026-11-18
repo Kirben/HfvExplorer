@@ -716,10 +716,67 @@ int RunWindowsPathCoordinationTest(const char* directory){
    MacBrowser::Entry Stat(uint32_t id)override{return base->Stat(id);}std::vector<MacBrowser::Entry> List(uint32_t id)override{return base->List(id);}void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override{if(n){SetEvent(gate.entered);Check(WaitForSingleObject(gate.release,15000)==WAIT_OBJECT_0,"Windows read gate not released");if(fail)throw HfsPlus::Error("Injected Windows source read failure");}base->Read(id,fork,at,p,n);base->Close();}
    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{return base->MakeDirectory(parent,name);}uint32_t Put(uint32_t parent,const MacBrowser::Entry& e,MacBrowser::Reader r,bool replace)override{return base->Put(parent,e,r,replace);}void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{base->Rename(id,parent,name);}void Remove(uint32_t id)override{base->Remove(id);}
   };
+  const auto companionName=L"Read Me \u65e5";
+  {
+   auto folder=MacBrowser::OpenWindows(wide(b));
+   MacBrowser::Entry entry;entry.name=MacBrowser::U16(companionName);entry.forks[0].size=11;entry.forks[1].size=19;
+   memcpy(entry.finder.data(),"TEXTttxt",8);
+   folder->Put(2,entry,[](unsigned fork,uint64_t,void* output,size_t bytes){memset(output,fork?'R':'D',bytes);},false);
+  }
+  save(b+"\\Legacy","Finder-only data");
+  {
+   // A version 1 AppleDouble file with a 16-byte classic Finder record.
+   uint8_t header[54]{};
+   HfsPlus::Disk::P32(header,0x00051607);
+   HfsPlus::Disk::P32(header+4,0x00010000);
+   HfsPlus::Disk::P16(header+24,1);
+   HfsPlus::Disk::P32(header+26,9);
+   HfsPlus::Disk::P32(header+30,38);
+   HfsPlus::Disk::P32(header+34,16);
+   memcpy(header+38,"TEXTttxt",8);
+   CFile sidecar;
+   Check(sidecar.Open(b+"\\%Legacy",CFile::modeCreate|CFile::modeWrite),"create legacy companion");
+   sidecar.Write(header,sizeof header);
+  }
+  save(b+"\\%Orphan","Unpaired percent file");
+  save(b+"\\%Other","Invalid companion");
+  auto listing=[&](BrowserSession& session){
+   std::map<std::u16string,BrowserDirectory::Row> rows;
+   auto& control=session.List()->GetListCtrl();
+   for(int i=0;i<control.GetItemCount();++i)if(const auto row=session.List()->BrowserRowAt(i))
+    rows.emplace(row->entry.name,*row);
+   return rows;
+  };
   app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto first=app.CreateBrowser(FALSE),second=app.CreateBrowser(FALSE);Check(first&&second,"create independent Windows browsers");auto& left=first->GetBrowserSession();auto& right=second->GetBrowserSession();Host(left,a);Host(right,b);
+  const auto idle=listing(right);
+  const auto unicode=idle.find(MacBrowser::U16(companionName));
+  Check(unicode!=idle.end()&&unicode->second.location.IsWindows()&&
+        unicode->second.location.WindowsPath()==wide(b)+L"\\"+companionName&&
+        unicode->second.entry.forks[1].size==19&&
+        !memcmp(unicode->second.entry.finder.data(),"TEXTttxt",8)&&
+        idle.count(u"Other")==1&&idle.count(u"%Orphan")==1&&idle.count(u"%Other")==1&&idle.size()==6,
+        "idle Windows listing lost Unicode, Finder metadata, or an ordinary percent-prefixed file");
+  const auto legacy=idle.find(u"Legacy");
+  Check(legacy!=idle.end()&&!memcmp(legacy->second.entry.finder.data(),"TEXTttxt",8)&&
+        legacy->second.entry.forks[1].size==0&&idle.count(u"%Legacy")==0,
+        "legacy Finder-only companion was not merged with its data file");
   auto resolved=MacBrowser::ResolveWindowsFile(wide(input+"\\Held"));auto slow=std::make_shared<GatedWindows>(resolved.first,gate);FileOperations::Request request;FileOperations::Location source,target;source.SetMounted(slow,resolved.second);source.expectedName=u"Held";target.SetWindows(wide(a));target.expectedIdentity=MacBrowser::DescribeWindowsFile(wide(a)).identity;request.Copy().sources={source};request.Copy().destination=target;
   auto slowPath=wide(input+"\\Held");DWORD uiThread=GetCurrentThreadId();std::atomic<unsigned> plans{0};VolumeCoord::SetPathLookupObserver([&](const std::wstring& path){if(path.size()>=slowPath.size()&&!_wcsicmp(path.c_str()+path.size()-slowPath.size(),slowPath.c_str())){Check(GetCurrentThreadId()!=uiThread,"Windows path planning ran on the UI thread");if(++plans==1){SetEvent(planningGate.entered);Check(WaitForSingleObject(planningGate.release,15000)==WAIT_OBJECT_0,"Windows planner not released");}}});
   Check(BackgroundCopies::Start({request},first,true),"start Windows copy");Until([&]{return WaitForSingleObject(planningGate.entered,0)==WAIT_OBJECT_0;});Check(first->IsWindowEnabled()&&second->IsWindowEnabled()&&right.List()->StorageSelectionAvailable(),"slow path planning blocked UI");Host(right,b);SetEvent(planningGate.release);Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(first->IsWindowEnabled()&&second->IsWindowEnabled(),"Windows copy disabled browsers");
+  Host(right,b);
+  const auto active=listing(right);
+  Check(active.size()==idle.size()&&BackgroundCopies::Active(),"paused copy changed the sibling folder listing");
+  for(const auto& saved:idle){
+   const auto found=active.find(saved.first);
+   Check(found!=active.end(),"paused copy changed a displayed Windows filename");
+   const auto& before=saved.second;const auto& during=found->second;
+   Check(before.location.WindowsPath()==during.location.WindowsPath()&&
+         before.entry.identity==during.entry.identity&&before.accessKey==during.accessKey&&
+         before.entry.finder==during.entry.finder&&
+         before.entry.forks[0].size==during.entry.forks[0].size&&before.entry.forks[1].size==during.entry.forks[1].size,
+         "paused copy changed typed paths or AppleDouble metadata");
+  }
+  fprintf(report,"PASS: Windows names, typed Unicode paths, Finder codes, and fork sizes agree before and during a paused copy.\n");
   // Actual staging entries are protected until publication/rollback finishes.
   WIN32_FIND_DATAA temporary{};HANDLE find=FindFirstFileA(a+"\\HFV*.tmp",&temporary);Check(find!=INVALID_HANDLE_VALUE,"copy did not stage output");CString staged=a+"\\"+temporary.cFileName;FindClose(find);Check(!VolumeCoord::Readable(VolumeCoord::PathKey(wide(staged))),"copy staging file was not reserved");
   // An independent copy may share the read-only source, and its target is on the same drive.
