@@ -19,8 +19,17 @@ struct LegacyConversion {
  bool directory=false, move=false, askMode=false;
  LegacyCopyOptions options;
 };
+struct RenameEntry {
+ Location source;
+ std::u16string name;
+ Location parent;
+ bool checkNameLock = true;
+};
+struct DeleteEntries {
+ std::vector<Location> selection;
+};
 class Request {
- std::variant<OrdinaryCopy, LegacyConversion, Kind> operation_;
+ std::variant<OrdinaryCopy, LegacyConversion, RenameEntry, DeleteEntries, Kind> operation_;
  // Other operations retain their existing selection and destination fields.
  // For conversion these are the optional preflight selection and folder.
  std::vector<Location> otherSources_;
@@ -29,13 +38,20 @@ public:
  Request() = default;
  Request(OrdinaryCopy copy) : operation_(std::move(copy)) {}
  Request(LegacyConversion conversion) : operation_(std::move(conversion)) {}
+ Request(RenameEntry rename) : operation_(std::move(rename)) {}
+ Request(DeleteEntries deletion) : operation_(std::move(deletion)) {}
+ const RenameEntry* Rename() const { return std::get_if<RenameEntry>(&operation_); }
+ const DeleteEntries* Delete() const { return std::get_if<DeleteEntries>(&operation_); }
  Kind OperationKind() const {
   if (std::holds_alternative<OrdinaryCopy>(operation_)) return Kind::Copy;
   if (std::holds_alternative<LegacyConversion>(operation_)) return Kind::LegacyCopy;
+  if (Rename()) return Kind::Rename;
+  if (Delete()) return Kind::Delete;
   return std::get<Kind>(operation_);
  }
  void SetKind(Kind kind) {
-  if (kind == Kind::LegacyCopy) throw HfsPlus::Error("Legacy conversion requires its own request payload");
+  if (kind == Kind::LegacyCopy || kind == Kind::Rename || kind == Kind::Delete)
+   throw HfsPlus::Error("This operation requires its own request payload");
   if (kind == OperationKind()) return;
   if (kind == Kind::Copy) {
    operation_ = OrdinaryCopy{std::move(otherSources_), std::move(otherTarget_)};
@@ -75,7 +91,6 @@ public:
  int label=0;short x=0,y=0;
  bool compressed=false;
  HfsPlus::Volume::CompressionMode compressionMethod=HfsPlus::Volume::CompressionMode::Zlib;
- bool checkNameLock=true;
  bool background=false;
  unsigned fork=0;
  void SetLegacySourcePath(std::string path) {

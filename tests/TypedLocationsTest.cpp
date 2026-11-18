@@ -224,10 +224,15 @@ int RunTypedLocationsTest(const char *directory) {
         Wait(bad);
         Check(bad.Job()->result().code && backend->calls == before,
               "Unknown operation reached a mutation backend");
-        Request rename;
-        rename.SetKind(Kind::Rename);
-        rename.Sources() = {Location::Mounted(backend, 99)};
-        rename.name = u"After";
+        auto emptyDelete = Submit(DeleteEntries{});
+        Wait(emptyDelete);
+        Check(emptyDelete.Job()->result().code && backend->calls == before,
+              "Empty delete reached a backend");
+        auto blankRename = Submit(RenameEntry{Location::Mounted(backend, 99), {}});
+        Wait(blankRename);
+        Check(blankRename.Job()->result().code && backend->calls == before,
+              "Blank rename reached a backend");
+        Request rename = FileOperations::RenameEntry{Location::Mounted(backend, 99), u"After"};
         auto changed = Submit(rename);
         Wait(changed);
         Check(!changed.Job()->result().code && backend->renamedParent == 17,

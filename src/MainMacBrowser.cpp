@@ -344,18 +344,18 @@ FileOperations::Location MainMacBrowser::CaptureItem(int row){
  return item;
 }
 bool MainMacBrowser::RenameItem(int row,const std::u16string& name){
- auto item=CaptureItem(row);FileOperations::Request request;request.SetKind(FileOperations::Kind::Rename);request.Sources()={item};request.name=name;if(item.IsMounted())request.Target().SetMounted(item.Volume(),item.expectedParent?item.expectedParent:state_->folder);
+ auto item=CaptureItem(row);FileOperations::RenameEntry request{item, name};
  bool result=RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled()&&Active())Refresh();return result;
 }
 bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())return true;
  auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
  auto item=state_->Item(row,false);auto name=Wide(item.expectedName);
- if(EditHfsPlusName(session_.Owner(),name,item.Volume()->CaseSensitive())){FileOperations::Request request;request.SetKind(FileOperations::Kind::Rename);request.Sources()={item};request.Target().SetMounted(item.Volume(),item.expectedParent);request.name=U16(name);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
+ if(EditHfsPlusName(session_.Owner(),name,item.Volume()->CaseSensitive())){FileOperations::RenameEntry request{item, U16(name)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
 }
 bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!SelectionWritable())return true;
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(i));if(p->type==LIST_MAC)selected.push_back(state_->Item(i,false));}
     if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
-    FileOperations::Request request;request.SetKind(FileOperations::Kind::Delete);request.Sources()=std::move(selected);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
+    FileOperations::DeleteEntries request{std::move(selected)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
 bool MainMacBrowser::Properties(int row){
  if(BackgroundCopies::Enabled()){auto item=state_->Item(row,false);if(item.LegacyType()==LIST_FAT)return false;return MetadataDialogs::Show(item,session_.Owner());}
 auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));if(!p||p->type!=LIST_MAC)return false;
