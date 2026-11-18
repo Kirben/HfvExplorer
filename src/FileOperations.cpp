@@ -3,6 +3,7 @@
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "CopyProcess.h"
+#include "TransferConversion.h"
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
@@ -359,6 +360,96 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
  return access;
 }
 
+std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion, Storage::Job& job,
+                                              Completion& completion) {
+ const bool importing=conversion.source.IsWindows() && conversion.destination.IsClassic();
+ const bool exporting=conversion.source.IsClassic() && conversion.destination.IsWindows();
+ if(!importing && !exporting) return {};
+ char mode=importing ? conversion.options.input : conversion.options.output;
+ if(!TransferConversion::Supported(mode) && mode!='a') return {};
+ auto sourceLocation=conversion.selection ? conversion.selection->source : conversion.source;
+ sourceLocation.cut=conversion.move;
+ auto source=Source(sourceLocation);
+ Location folder=conversion.selection ? conversion.selection->folder : conversion.destination;
+ std::u16string outputName;
+ if(!conversion.selection && exporting) {
+  auto path=folder.WindowsPath();
+  auto flags=GetFileAttributesW(path.c_str());
+  if(flags==INVALID_FILE_ATTRIBUTES || !(flags&FILE_ATTRIBUTE_DIRECTORY)) {
+   auto end=path.find_last_of(L"\\/");
+   outputName=U16(path.substr(end+1));
+   folder.SetWindows(path.substr(0,end+1));
+  }
+ } else if(!conversion.selection && importing) {
+  auto path=folder.ClassicPath();
+  if(path.back()!=':') {
+   auto image=folder.ClassicImage();
+   hfsdirent entry{};
+   if(HFSIFACE_get_properties(&image[0],&path[0],&entry)!=0 || !(entry.flags&HFS_ISDIR)) {
+    const auto end=path.find_last_of(':');
+    outputName=Ansi(path.substr(end+1));
+    folder.SetClassic(std::move(image),path.substr(0,end+1));
+    if(conversion.destination.MediaGenerationKnown())
+     folder.BindMediaGeneration(conversion.destination.MediaGeneration());
+   }
+  }
+ }
+ auto disk=WritableFloppy(folder,conversion.move || conversion.options.verifyFloppy);
+ CheckMedia(folder);
+ auto target=Destination(folder);
+ std::vector<std::string> snapshots;
+ if(conversion.move) snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job,bool(sourceLocation.Volume())));
+ TransferAdapter adapt=[&](Volume& volume,Entry& entry,Storage::Job& active,bool root) {
+  char selected=mode;
+  if(selected=='a' && !entry.directory) {
+   if(importing) {
+    const auto path=volume.HostPath(entry.id);
+    const auto slash=path.find_last_of(L"\\/");
+    const auto companion=slash==path.npos ? std::wstring{} : path.substr(0,slash+1)+L"%"+path.substr(slash+1);
+    const bool paired=conversion.options.appledouble && !companion.empty() &&
+                       WindowsResourceCompanion(companion);
+    const auto dot=entry.name.rfind(u'.');
+    const auto suffix=dot==entry.name.npos ? std::wstring{} : Wide(entry.name.substr(dot));
+    if(paired) selected='&';
+    else if(!_wcsicmp(suffix.c_str(),L".hqx")) selected='b';
+    else if(!_wcsicmp(suffix.c_str(),L".bin")) selected='m';
+    else if(!_wcsicmp(suffix.c_str(),L".txt") || !_wcsicmp(suffix.c_str(),L".c") ||
+            !_wcsicmp(suffix.c_str(),L".h")) selected='t';
+    else {
+     selected='r';
+     memcpy(entry.finder.data(),"????UNIX",8);
+    }
+   } else if(!memcmp(entry.finder.data(),"TEXT",4) || !memcmp(entry.finder.data(),"ttro",4)) selected='t';
+   else selected=entry.forks[1].size ? 'm' : 'r';
+  }
+  Reader reader;
+  if(TransferConversion::Supported(selected)) reader=TransferConversion::Adapt(selected,importing,volume,entry,active);
+  if(root && !outputName.empty()) entry.name=outputName;
+  else if(exporting) {
+   for(auto& c:entry.name) {
+    if(c<32) c=u'-';
+    switch(c) {
+    case u'\\': case u'/': case u':': case u'*': case u'?':
+    case u'"': case u'<': case u'>': case u'|': c=u'-'; break;
+    }
+   }
+  }
+  return reader;
+ };
+ Mark(completion,folder);
+ bool complete=CopyMany({source},*target.first,target.second,job,adapt);
+ if(!folder.Volume())target.first->Close();
+ if(!sourceLocation.Volume())source.first->Close();
+ Finish(disk);
+ disk.reset();
+ if(complete && conversion.move) DeleteMovedSources({sourceLocation},snapshots,job,completion);
+ completion.complete=complete;
+ completion.completed=job.progress().files;
+ Storage::Result result;
+ result.moved=complete && conversion.move;
+ return result;
+}
+
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
  HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});Cancel(job);
  Cancel(job);
@@ -372,6 +463,7 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
  if (const auto* deletion = request.Delete())
   return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
  const auto& legacy = request.Legacy();
+ if(auto converted=CopyConverted(legacy,job,completion))return *converted;
  // Legacy containers cannot carry arbitrary attributes/ACLs. Preflight the
  // complete selection before converters can create partial output.
  auto noLostMetadata=[&](MacBrowser::Volume& volume,uint32_t root){

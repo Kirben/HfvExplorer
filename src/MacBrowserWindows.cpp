@@ -316,30 +316,48 @@ public:
         if(!e.expectedDestinationIdentity.empty()){auto identity=existed?original.Identity():std::string{};if(sidecar)identity+="/"+originalResource.Identity();Check(existed&&identity==e.expectedDestinationIdentity,"Destination changed while the overwrite decision was pending; source retained");}
         Check(!existed || replace, "Destination already exists");
         Check(!sidecar || (existed && AppleDouble(companion, old)), "An unrelated companion file blocks export; it was preserved");
-        auto outgoing=e;if(!e.attributesKnown&&sidecar)outgoing.attributes=DoubleAttributes(companion,old);auto header=DoubleHeader(outgoing);
+        auto outgoing=e;if(!e.attributesKnown&&sidecar)outgoing.attributes=DoubleAttributes(companion,old);const bool withCompanion = !outgoing.portableContainer || !outgoing.attributes.empty() ||
+            outgoing.forks[1].size != 0;
+        auto header=DoubleHeader(outgoing);
         std::wstring staged, resource, backup, backupResource;
         bool published = false, publishedResource = false, backed = false, backedResource = false;
         std::unique_ptr<FileVersion> newData,newResource;
         std::vector<std::unique_ptr<VolumeCoord::OperationLease>> staging;
         auto reserve=[&](const std::wstring& name){staging.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(name),VolumeCoord::Mode::Write}}));};
         try {
-            staged = Temp(root);reserve(staged);resource = Temp(root);reserve(resource);
+            staged = Temp(root);reserve(staged);
+            if (withCompanion) { resource = Temp(root); reserve(resource); }
             {
-                File data(staged, GENERIC_WRITE, TRUNCATE_EXISTING), rsrc(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
-                header.Write(rsrc);
+                File data(staged, GENERIC_WRITE, TRUNCATE_EXISTING);
+                std::unique_ptr<File> rsrc;
+                if (withCompanion) {
+                    rsrc = std::make_unique<File>(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
+                    header.Write(*rsrc);
+                }
                 std::vector<uint8_t> buffer(1024*1024);
                 for (unsigned f=0; f<2; ++f) for (uint64_t at=0; at<e.forks[f].size;) {
                     size_t n=size_t((std::min)(uint64_t(buffer.size()),e.forks[f].size-at));
-                    read(f,at,buffer.data(),n); (f ? rsrc : data).Write(buffer.data(),n); at+=n;
+                    read(f,at,buffer.data(),n); (f ? *rsrc : data).Write(buffer.data(),n); at+=n;
                 }
-                data.Dates(e);rsrc.Dates(e);data.Flush(); rsrc.Flush();
+                data.Dates(e);data.Flush();
+                if (rsrc) { rsrc->Dates(e); rsrc->Flush(); }
             }
             {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
-            newData.reset(new FileVersion(staged));newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
+            newData.reset(new FileVersion(staged));if (withCompanion) newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
             if (existed) { backup=Temp(root);reserve(backup); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true;original.Verify(backup); }
             if (sidecar) { backupResource=Temp(root);reserve(backupResource); Check(MoveFileExW(companion.c_str(),backupResource.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old resource fork"); backedResource=true;originalResource.Verify(backupResource); }
             Check(MoveFileExW(staged.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported data"); staged.clear(); published=true;Publication("data-published");
-            Check(MoveFileExW(resource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported resource fork"); resource.clear(); publishedResource=true;Publication("resource-published");newData->Verify(path);newResource->Verify(companion);if(backed)original.Verify(backup);if(backedResource)originalResource.Verify(backupResource);
+            if (withCompanion) {
+                Check(MoveFileExW(resource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,
+                      "Cannot publish exported resource fork");
+                resource.clear();
+                publishedResource = true;
+                Publication("resource-published");
+                newResource->Verify(companion);
+            } else Check(Missing(companion), "An unrelated companion appeared during export");
+            newData->Verify(path);
+            if(backed)original.Verify(backup);
+            if(backedResource)originalResource.Verify(backupResource);
         } catch (...) {
             bool restored=true;
             if(publishedResource && (!newResource->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;
