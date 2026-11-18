@@ -48,6 +48,9 @@ public:
     virtual const char *Kind() const = 0;
     virtual std::string Description() const { return Kind(); }
     virtual bool Writable() const = 0;
+    virtual bool HasPersistentWorker() const { return false; }
+    virtual bool Journaled() const { return false; }
+    virtual std::string WorkerEntryIdentity(const std::string& identity) const { return identity; }
     virtual Capabilities Supports() const {
         Capabilities out; out.create = out.rename = out.remove = Writable(); return out;
     }
@@ -92,6 +95,7 @@ public:
 };
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {},std::wstring externalJournal = {});
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal = {}); // null = unrecognized
+std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal = {});
 std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = not HFS+/HFSX
 // Drive roots only; unrecognized/unreadable media falls back, recognized mount errors propagate.
 std::shared_ptr<Volume> OpenCdRoot(const char *root,

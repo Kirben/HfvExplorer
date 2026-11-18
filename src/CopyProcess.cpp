@@ -133,6 +133,7 @@ Endpoint Capture(const Location &location) {
     Check(!location.expectedParent || location.expectedParent == selected.parent,
           "The selected entry was moved before the operation started");
     if (!strcmp(location.Volume()->Kind(), "HFS+") || !strcmp(location.Volume()->Kind(), "HFSX")) {
+        selected.identity=location.Volume()->WorkerEntryIdentity(selected.identity);
         out.path.push_back(selected);
         return out;
     }
@@ -369,7 +370,7 @@ struct Process {
 #endif
         }
     }
-    void Launch(const std::vector<ImageHandleTransfer::File> &files) {
+    void Launch(const std::vector<ImageHandleTransfer::File> &files, bool session = false) {
         SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
         HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
         Check(CreatePipe(&inRead, &inWrite, &security, 0) != FALSE, "Cannot create worker control pipe");
@@ -388,7 +389,7 @@ struct Process {
         for (auto &f : files)
             inherited.push_back(f.handle);
 #ifdef HFV_TESTING
-        if (fault == 7) {
+        if (!session && fault == 7) {
             Check(ioGate.load() != nullptr, "Missing process-test gate");
             gate.reset(ImageHandleTransfer::Duplicate(ioGate.load(), true));
             inherited.push_back(gate.value);
@@ -419,12 +420,12 @@ struct Process {
             Check(overrideSize < ARRAYSIZE(overridePath), "Invalid test worker executable path");
             wcscpy_s(executable, overridePath);
         }
-        if (fault == failWorkerLaunch) {
+        if (!session && fault == failWorkerLaunch) {
             // A Win32 path with a reserved character cannot name an executable.
             wcscpy_s(executable, L"C:\\HFV-invalid-?.exe");
         }
 #endif
-        auto command = L"\"" + std::wstring(executable) + L"\" --copy-worker " +
+        auto command = L"\"" + std::wstring(executable) + (session ? L"\" --volume-session " : L"\" --copy-worker ") +
                        std::to_wstring(uintptr_t(childInput.value)) + L" " +
                        std::to_wstring(uintptr_t(childOutput.value));
         STARTUPINFOEXW startup{};
@@ -440,7 +441,539 @@ struct Process {
         pid = info.dwProcessId;
     }
 };
+
+enum class SessionCommandCode {
+    Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
+    HardLink, ValidateRemoval, ValidateCopy, Compression, TestCrashRename
+};
+constexpr size_t sessionReadLimit = 256 * 1024;
+
+void SessionReply(HANDLE output, unsigned code = 0, const std::string& error = {},
+                  Storage::Rollback rollback = Storage::Rollback::None) {
+    Data result;
+    result.put(code); result.put(error); result.put(uint64_t(rollback));
+    Send(output, SessionResult, std::move(result));
+}
+
+class SessionError : public HfsPlus::Error {
+public:
+    using HfsPlus::Error::Error;
+};
+
+class PersistentVolume final : public Volume {
+    std::wstring path_, journal_;
+    std::string key_;
+    std::unique_ptr<HfsPlus::Source> guard_, journalGuard_;
+    std::unique_ptr<VolumeCoord::ImageDependency> dependency_;
+    mutable std::mutex mutex_;
+    std::unique_ptr<Process> worker_;
+    std::u16string name_;
+    std::string description_;
+    bool hfsx_ = false, caseSensitive_ = false, journaled_ = false;
+    bool writeAllowed_ = false, initialized_ = false;
+    std::atomic<bool> writable_{false}, lost_{false};
+#ifdef HFV_TESTING
+    bool crashRename_ = false;
+#endif
+    uint64_t generation_;
+    static uint64_t NextGeneration() {
+        static std::atomic<uint64_t> sequence{0};
+        return ++sequence;
+    }
+    bool Alive() const {
+        return worker_ && WaitForSingleObject(worker_->process.value, 0) == WAIT_TIMEOUT;
+    }
+    void Lost() {
+        if (!lost_) {
+            generation_ = NextGeneration();
+            lost_ = true;
+            if (!journaled_) writeAllowed_ = false;
+        }
+        worker_.reset();
+    }
+    void Ready() {
+        if (Alive()) return;
+        if (worker_) Lost();
+        throw HfsPlus::Error("The volume worker stopped. Refresh the volume before retrying any changes.");
+    }
+    void ReadResult(Data& packet) {
+            auto code = packet.get();
+            auto error = packet.text();
+            auto rollback = packet.get();
+            packet.end();
+            Check(code <= 2 && rollback <= uint64_t(Storage::Rollback::Failed), "Invalid volume session result");
+            Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(rollback));
+            if (code == 2) throw HfsPlus::ExternalJournalRequired(error);
+            if (code == 1) throw SessionError(error);
+    }
+    Data Response(Message expected) {
+        Data packet;
+        const auto message = Receive(worker_->output.value, packet);
+        if (message == SessionResult) ReadResult(packet);
+        Check(message == expected, "Unexpected volume session response");
+        return packet;
+    }
+    template<class Read>
+    void Call(SessionCommandCode command, Data data, bool mutation, Read read,
+              const HfsPlus::Attributes* attributes = nullptr) {
+        Ready();
+        try {
+            Data request;
+            request.put(uint64_t(command));
+            request.bytes.insert(request.bytes.end(), data.bytes.begin(), data.bytes.end());
+            if (attributes) {
+                Storage::Job transfer;
+                SendAttributes(worker_->input.value, 0, *attributes, transfer);
+            }
+            Send(worker_->input.value, SessionCommand, std::move(request));
+            read();
+            Response(SessionResult);
+        } catch (const SessionError&) {
+            throw;
+        } catch (...) {
+            Lost();
+            if (mutation) Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
+            throw HfsPlus::Error("The volume worker stopped. Refresh and inspect the volume before retrying.");
+        }
+    }
+    void Simple(SessionCommandCode command, Data data, bool mutation) {
+        Call(command, std::move(data), mutation, [] {});
+    }
+    void Start() {
+        auto process = std::make_unique<Process>();
+        struct Inherited {
+            std::vector<ImageHandleTransfer::File> files;
+            ~Inherited() { for (const auto& file : files) CloseHandle(file.handle); }
+        } inherited;
+        for (const auto& file : WorkerFiles()) {
+            auto handle = ImageHandleTransfer::Duplicate(HANDLE(file.second), true);
+            try { inherited.files.push_back({file.first, handle, writeAllowed_}); }
+            catch (...) { CloseHandle(handle); throw; }
+        }
+        process->Launch(inherited.files, true);
+        for (const auto& file : inherited.files) {
+            Data value;
+            value.wide(file.path); value.put(uintptr_t(file.handle)); value.put(file.writable);
+            Send(process->input.value, File, std::move(value));
+        }
+        Data mount;
+        mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_);
+        Send(process->input.value, SessionMount, std::move(mount));
+        worker_ = std::move(process);
+        try {
+            auto info = Response(SessionBytes);
+            auto name = info.u16();
+            auto description = info.text();
+            auto hfsx = info.flag(), caseSensitive = info.flag(), journaled = info.flag();
+            auto writable = info.flag();
+            info.end();
+            Response(SessionResult);
+            // These descriptors are immutable after publication, so menu
+            // updates do not wait on the pipe while a write is in flight.
+            if (!initialized_) {
+                name_ = std::move(name);
+                description_ = std::move(description);
+                hfsx_ = hfsx;
+                caseSensitive_ = caseSensitive;
+                journaled_ = journaled;
+                initialized_ = true;
+            }
+            writable_ = writable;
+            lost_ = false;
+        } catch (...) {
+            worker_.reset();
+            throw;
+        }
+    }
+    Entry ReadEntry() {
+        auto packet = Response(SessionEntry);
+        auto entry = DecodeEntry(packet);
+        packet.end();
+        entry.identity = std::to_string(generation_) + "/" + entry.identity;
+        return entry;
+    }
+public:
+    PersistentVolume(std::wstring path, std::string key, std::wstring journal)
+        : path_(std::move(path)), journal_(std::move(journal)), key_(std::move(key)),
+          generation_(NextGeneration()) {
+        auto open = [&](bool write) {
+            guard_ = HfsPlus::OpenImage(path_.c_str(), write);
+            if (!journal_.empty()) journalGuard_ = HfsPlus::OpenImage(journal_.c_str(), write);
+        };
+        try { open(true); }
+        catch (const HfsPlus::Error&) { guard_.reset(); open(false); }
+        writeAllowed_ = guard_->Writable();
+        if (!journal_.empty())
+            dependency_ = std::make_unique<VolumeCoord::ImageDependency>(key_, journal_);
+        Start();
+    }
+
+    bool HasPersistentWorker() const override { return true; }
+    std::string ResourceKey() const override { return key_; }
+    std::u16string Name() const override { return name_; }
+    const char* Kind() const override { return hfsx_ ? "HFSX" : "HFS+"; }
+    std::string Description() const override { return description_; }
+    bool Writable() const override { return writable_ && !lost_; }
+    bool CaseSensitive() const override { return caseSensitive_; }
+    bool Journaled() const override { return journaled_; }
+    bool SupportsHardLinks() const override { return true; }
+    bool SupportsCompression() const override { return true; }
+    bool SupportsAttributes() const override { return true; }
+    std::string WorkerEntryIdentity(const std::string& identity) const override {
+        auto separator = identity.find('/');
+        return separator == identity.npos ? identity : identity.substr(separator + 1);
+    }
+    WorkerOrigin WorkerDescription() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        WorkerOrigin origin;
+        origin.kind = WorkerOrigin::Image;
+        origin.path = path_;
+        origin.journal = journal_;
+        origin.writable = writable_ && !lost_;
+        return origin;
+    }
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles() const override {
+        auto files = guard_->WorkerFiles();
+        if (journalGuard_) {
+            auto journal = journalGuard_->WorkerFiles();
+            files.insert(files.end(), journal.begin(), journal.end());
+        }
+        return files;
+    }
+    void SuspendWorker() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (worker_ && !Alive()) Lost();
+        worker_.reset();
+    }
+    void WorkerUncleanExit() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Lost();
+    }
+    void ResumeWorker() override { Reload(); }
+    void Reload() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (Alive()) return;
+        if (worker_) Lost();
+        Start();
+    }
+    uint64_t FreeBytes() const override {
+        auto& self = *const_cast<PersistentVolume*>(this);
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t bytes = 0;
+        self.Call(SessionCommandCode::Root, {}, false, [&] {
+            auto result = self.Response(SessionBytes); bytes = result.get(); result.end();
+        });
+        return bytes;
+    }
+    std::vector<Entry> List(uint32_t parent) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(parent);
+        std::vector<Entry> entries;
+        Call(SessionCommandCode::List, std::move(args), false, [&] {
+            auto packet = Response(SessionBytes); auto count = packet.get(); packet.end();
+            Check(count <= UINT32_MAX, "Invalid volume directory count");
+            for (uint64_t i = 0; i < count; ++i) entries.push_back(ReadEntry());
+        });
+        return entries;
+    }
+    Entry Stat(uint32_t id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id);
+        Entry entry;
+        Call(SessionCommandCode::Stat, std::move(args), false, [&] { entry = ReadEntry(); });
+        return entry;
+    }
+    void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t bytes) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto output = static_cast<uint8_t*>(out);
+        do {
+            auto count = (std::min)(bytes, sessionReadLimit);
+            Data args; args.put(id); args.put(fork); args.put(offset); args.put(count);
+            Call(SessionCommandCode::Read, std::move(args), false, [&] {
+                auto packet = Response(SessionBytes);
+                Check(packet.bytes.size() == count, "Short volume session read");
+                if (count) memcpy(output, packet.bytes.data(), count);
+            });
+            if (count) output += count;
+            offset += count; bytes -= count;
+        } while (bytes);
+    }
+    HfsPlus::Attributes GetAttributes(uint32_t id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id);
+        AttributeSets sets;
+        Call(SessionCommandCode::Attributes, std::move(args), false, [&] {
+            auto packet = Response(AttributeSet);
+            ReceiveAttributes(worker_->output.value, packet, sets);
+            Check(sets[0].has_value(), "Missing volume attributes");
+        });
+        return std::move(*sets[0]);
+    }
+    void SetAttributes(uint32_t id, const HfsPlus::Attributes& attributes) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id);
+        Call(SessionCommandCode::SetAttributes, std::move(args), true, [] {}, &attributes);
+    }
+    void SetCompressionMethod(uint32_t id, HfsPlus::Volume::CompressionMode method,
+                              std::function<void(uint64_t,uint64_t)> progress) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id); args.put(uint64_t(method));
+        std::exception_ptr stopped;
+        try {
+            Call(SessionCommandCode::Compression, std::move(args), true, [&] {
+                for (;;) {
+                    Data packet;
+                    auto message = Receive(worker_->output.value, packet);
+                    if (message == SessionResult) ReadResult(packet); // Early failure.
+                    if (message == SessionBytes) { packet.end(); break; }
+                    Check(message == SessionProgress, "Unexpected volume compression response");
+                    auto done = packet.get(), total = packet.get(); packet.end();
+                    try { if (progress) progress(done,total); }
+                    catch (...) { stopped = std::current_exception(); }
+                    Send(worker_->input.value, stopped ? Cancel : SessionContinue);
+                }
+            });
+        } catch (const SessionError&) {
+            if(stopped)std::rethrow_exception(stopped);
+            throw;
+        }
+    }
+    void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress) override {
+        using Mode = HfsPlus::Volume::CompressionMode;
+        SetCompressionMethod(id, compressed ? Mode::Zlib : Mode::Uncompressed, std::move(progress));
+    }
+    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(parent); args.u16(name);
+        uint32_t id = 0;
+        Call(SessionCommandCode::MakeDirectory, std::move(args), true, [&] {
+            auto packet = Response(SessionBytes); id = uint32_t(packet.get()); packet.end();
+        });
+        return id;
+    }
+    uint32_t Put(uint32_t,const Entry&,Reader,bool) override {
+        throw HfsPlus::Error("Writing forks on this image requires a copy worker operation");
+    }
+    void Rename(uint32_t id,uint32_t parent,const std::u16string& name) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id); args.put(parent); args.u16(name);
+        auto command = SessionCommandCode::Rename;
+#ifdef HFV_TESTING
+        if (crashRename_) { crashRename_ = false; command = SessionCommandCode::TestCrashRename; }
+#endif
+        Simple(command, std::move(args), true);
+    }
+    void Remove(uint32_t id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id); Simple(SessionCommandCode::Remove, std::move(args), true);
+    }
+    uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(source); args.put(parent); args.u16(name); args.put(replace);
+        uint32_t id = 0;
+        Call(SessionCommandCode::HardLink, std::move(args), true, [&] {
+            auto packet = Response(SessionBytes); id = uint32_t(packet.get()); packet.end();
+        });
+        return id;
+    }
+    void ValidateRemoval(uint32_t id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id); Simple(SessionCommandCode::ValidateRemoval, std::move(args), false);
+    }
+    void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent) override {
+        if (target.ResourceKey()!=key_) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id); args.put(parent); Simple(SessionCommandCode::ValidateCopy, std::move(args), false);
+    }
+#ifdef HFV_TESTING
+    DWORD Pid() const { std::lock_guard<std::mutex> lock(mutex_); return worker_ ? worker_->pid : 0; }
+    void CrashOnRename() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Check(Alive(), "Fixture volume worker is not running");
+        crashRename_ = true;
+    }
+#endif
+};
+
+void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
+    auto number = [](Data& packet) {
+        auto value = packet.get();
+        Check(value <= UINT32_MAX, "Invalid volume session catalog number");
+        return uint32_t(value);
+    };
+    auto writeNumber = [&](uint64_t value) {
+        Data packet; packet.put(value); Send(output, SessionBytes, std::move(packet));
+    };
+    auto writeEntry = [&](const Entry& entry) {
+        Data packet; EncodeEntry(packet, entry); Send(output, SessionEntry, std::move(packet));
+    };
+    for (;;) {
+        Data packet;
+        auto message = Receive(input, packet);
+        AttributeSets attributes;
+        if (message == AttributeSet) {
+            ReceiveAttributes(input, packet, attributes);
+            message = Receive(input, packet);
+        }
+        Check(message == SessionCommand, "Invalid volume session command frame");
+        auto opcode = packet.get();
+    #ifdef HFV_TESTING
+        constexpr auto maximumCommand = SessionCommandCode::TestCrashRename;
+#else
+        constexpr auto maximumCommand = SessionCommandCode::Compression;
+#endif
+        Check(opcode <= uint64_t(maximumCommand), "Invalid volume session command");
+        auto command = SessionCommandCode(opcode);
+        Check(attributes[0].has_value() == (command == SessionCommandCode::SetAttributes) && !attributes[1],
+              "Unexpected volume session attributes");
+        Storage::OutcomeEvidence evidence;
+        try {
+            switch (command) {
+            case SessionCommandCode::Root: packet.end(); writeNumber(volume.FreeBytes()); break;
+            case SessionCommandCode::List: {
+                auto id = number(packet); packet.end();
+                auto entries = volume.List(id);
+                writeNumber(entries.size());
+                for (const auto& entry : entries) writeEntry(entry);
+                break;
+            }
+            case SessionCommandCode::Stat: {
+                auto id = number(packet); packet.end(); writeEntry(volume.Stat(id)); break;
+            }
+            case SessionCommandCode::Read: {
+                auto id = number(packet), fork = number(packet);
+                auto offset = packet.get(), size = packet.get(); packet.end();
+                Check(fork <= 1 && size <= sessionReadLimit, "Invalid volume read range");
+                Data bytes; bytes.bytes.resize(size_t(size));
+                volume.Read(id, fork, offset, bytes.bytes.data(), bytes.bytes.size());
+                Send(output, SessionBytes, std::move(bytes));
+                break;
+            }
+            case SessionCommandCode::Attributes: {
+                auto id = number(packet); packet.end();
+                auto values = volume.GetAttributes(id);
+                Storage::Job transfer;
+                SendAttributes(output, 0, values, transfer);
+                break;
+            }
+            case SessionCommandCode::SetAttributes: {
+                auto id = number(packet); packet.end(); volume.SetAttributes(id, *attributes[0]); break;
+            }
+            case SessionCommandCode::MakeDirectory: {
+                auto parent = number(packet); auto name = packet.u16(); packet.end();
+                writeNumber(volume.MakeDirectory(parent, name)); break;
+            }
+#ifdef HFV_TESTING
+            case SessionCommandCode::TestCrashRename:
+#endif
+            case SessionCommandCode::Rename: {
+                auto id = number(packet), parent = number(packet);
+                auto name = packet.u16(); packet.end(); volume.Rename(id, parent, name);
+#ifdef HFV_TESTING
+                if (command == SessionCommandCode::TestCrashRename) ExitProcess(79);
+#endif
+                break;
+            }
+            case SessionCommandCode::Remove: {
+                auto id = number(packet); packet.end(); volume.Remove(id); break;
+            }
+            case SessionCommandCode::HardLink: {
+                auto id = number(packet), parent = number(packet);
+                auto name = packet.u16(); auto replace = packet.flag(); packet.end();
+                writeNumber(volume.MakeHardLink(id, parent, name, replace)); break;
+            }
+            case SessionCommandCode::Compression: {
+                auto id = number(packet); auto method = packet.get(); packet.end();
+                using Mode = HfsPlus::Volume::CompressionMode;
+                Check(method <= uint64_t(Mode::StoredInline), "Invalid volume compression method");
+                volume.SetCompressionMethod(id, Mode(method), [&](uint64_t done, uint64_t total) {
+                    Data progress; progress.put(done); progress.put(total);
+                    Send(output, SessionProgress, std::move(progress));
+                    Data answer; auto decision = Receive(input, answer); answer.end();
+                    if (decision == Cancel) throw Storage::Cancelled();
+                    Check(decision == SessionContinue, "Invalid volume compression decision");
+                });
+                Send(output, SessionBytes);
+                break;
+            }
+            case SessionCommandCode::ValidateRemoval: {
+                auto id = number(packet); packet.end(); volume.ValidateRemoval(id); break;
+            }
+            case SessionCommandCode::ValidateCopy: {
+                auto id = number(packet), parent = number(packet);
+                packet.end(); volume.ValidateCopyTo(id, volume, parent); break;
+            }
+            }
+            SessionReply(output);
+        } catch (const std::exception& error) {
+            SessionReply(output, 1, error.what(), evidence.RollbackState());
+        }
+    }
+}
 } // namespace
+std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring& path, const std::string& key,
+                                                       const std::wstring& journal) {
+    return std::make_shared<PersistentVolume>(path, key, journal);
+}
+
+int VolumeSessionChild(const char* inputText, const char* outputText) {
+    HANDLE input = HANDLE(uintptr_t(_strtoui64(inputText, nullptr, 10)));
+    HANDLE output = HANDLE(uintptr_t(_strtoui64(outputText, nullptr, 10)));
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    try {
+        std::vector<ImageHandleTransfer::File> files;
+        for (;;) {
+            Data data;
+            auto message = Receive(input, data);
+            if (message == File) {
+                auto path = data.wide();
+                auto handle = HANDLE(uintptr_t(data.get()));
+                auto writable = data.flag();
+                data.end();
+                files.push_back({std::move(path), handle, writable});
+                continue;
+            }
+            Check(message == SessionMount, "Expected a volume session mount");
+            auto path = data.wide();
+            auto journal = data.wide();
+            auto writable = data.flag();
+            data.end();
+            ImageHandleTransfer::Scope storage(files);
+            auto guard = HfsPlus::OpenImage(path.c_str(), writable, journal.empty() ? nullptr : journal.c_str());
+            auto key = VolumeCoord::ImageKey(path);
+            std::shared_ptr<Volume> volume;
+            try { volume = FromHfsPlus(std::move(guard), writable, key, journal); }
+            catch (const HfsPlus::ExternalJournalRequired&) { throw; }
+            catch (const HfsPlus::Error&) {
+                if (!writable) throw;
+                volume = FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false, journal.empty() ? nullptr : journal.c_str()), false, key, journal);
+            }
+            Data info;
+            info.u16(volume->Name()); info.put(volume->Description()); info.put(!strcmp(volume->Kind(), "HFSX"));
+            info.put(volume->CaseSensitive()); info.put(volume->Journaled()); info.put(volume->Writable());
+            Send(output, SessionBytes, std::move(info));
+            SessionReply(output);
+            ServeVolume(input, output, *volume);
+            return 0;
+        }
+    } catch (const HfsPlus::ExternalJournalRequired& error) {
+        try { SessionReply(output, 2, error.what()); } catch (...) {}
+    } catch (const std::exception& error) {
+        try { SessionReply(output, 1, error.what()); } catch (...) {}
+    }
+    return 0;
+}
+#ifdef HFV_TESTING
+DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
+    auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);
+    return persistent ? persistent->Pid() : 0;
+}
+void CrashVolumeSessionOnRenameForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
+    auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);
+    Check(bool(persistent), "Fixture volume is not owned by a persistent worker");
+    persistent->CrashOnRename();
+}
+#endif
 #ifdef HFV_TESTING
 std::vector<uint8_t> EncodeLocationForTest(const Location &location) {
     Check(!location.IsMounted(), "This codec test does not open mounted volumes");
@@ -461,6 +994,17 @@ bool UsesWorker(const Request &request) {
     if (!enabled)
         return false;
 #endif
+    auto persistent=[](const Location& item) { return item.IsMounted() && item.Volume()->HasPersistentWorker(); };
+    if(auto* rename=request.Rename(); rename&&persistent(rename->source)) return false;
+    if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
+        std::all_of(deletion->selection.begin(),deletion->selection.end(),persistent)) return false;
+    if(auto* folder=request.Get<CreateFolder>(); folder&&persistent(folder->parent)) return false;
+    if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&persistent(link->source)&&persistent(link->parent)) return false;
+    if(auto* metadata=request.Metadata()) {
+        if(auto* attrs=std::get_if<EditAttributes>(metadata); attrs&&persistent(attrs->item)) return false;
+        if(auto* compression=std::get_if<ChangeCompression>(metadata);
+            compression&&persistent(compression->item)) return false;
+    }
     return SupportsOperation(request.OperationKind());
 }
 Storage::Result Run(const Request &request, Storage::Job &job, Completion &completion,

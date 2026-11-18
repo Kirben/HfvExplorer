@@ -362,6 +362,42 @@ int RunCopyProcessTest(const char *directory) {
         Verify(*target, child.id);
         fprintf(report, "PASS: overwrite Replace/Skip/Cancel and existing destination retained\n");
         {
+            const auto fromPath = Wide(root + "\\persistent-source.dsk");
+            const auto toPath = Wide(root + "\\persistent-target.dsk");
+            { auto seed = Image(fromPath); Put(*seed,2,u"Persistent payload",4096); }
+            Image(toPath, HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+            auto from = OpenBrowserImage(fromPath), to = OpenBrowserImage(toPath);
+            Entry original, copied;
+            Check(from->HasPersistentWorker() && to->HasPersistentWorker() &&
+                      from->FindChild(2,u"Persistent payload",original),
+                  "persistent copy fixture could not browse");
+            auto initialIdentity = original.identity;
+            auto fromPid = CopyProcess::VolumeSessionPidForTest(from);
+            auto toPid = CopyProcess::VolumeSessionPidForTest(to);
+            auto selected = Native(from,original.id);
+            selected.expectedIdentity = original.identity;
+            Pass(Submit(OrdinaryCopy{{selected},Native(to)}));
+            Check(from->Stat(original.id).identity==initialIdentity &&
+                      to->FindChild(2,u"Persistent payload",copied) &&
+                      CopyProcess::VolumeSessionPidForTest(from)!=fromPid &&
+                      CopyProcess::VolumeSessionPidForTest(to)!=toPid,
+                  "cross-volume copy did not resume persistent sessions after handoff");
+            Verify(*to,copied.id,4096);
+            auto stablePid=CopyProcess::VolumeSessionPidForTest(to);
+            HfsPlus::Attributes edited{{u"user.session",{1,2,3,4}}};
+            auto attrs=Submit(EditAttributes{Native(to,copied.id),{},edited});
+            Wait(attrs);
+            Check(!attrs.Job()->result().code&&to->GetAttributes(copied.id)==edited,
+                  "persistent metadata write did not update the mounted volume");
+            auto compression=Submit(ChangeCompression{Native(to,copied.id),to->Stat(copied.id),edited,
+                HfsPlus::Volume::CompressionMode::Zlib});
+            Wait(compression);
+            Check(!compression.Job()->result().code&&to->Stat(copied.id).compressed&&
+                      CopyProcess::VolumeSessionPidForTest(to)==stablePid,
+                  "metadata writes restarted the volume session");
+            fprintf(report,"PASS: persistent HFS+/HFSX sessions retain metadata writes and resume after cross-volume copies\n");
+        }
+        {
             const auto inputPath = Wide(root + "\\launch-source.dsk");
             const auto outputPath = Wide(root + "\\launch-target.dsk");
             {
@@ -593,7 +629,8 @@ int RunCopyProcessTest(const char *directory) {
             HfsPlus::Volume v(*disk, true);
             v.UseExternalJournal(uuid);
         }
-        auto external = OpenImage(extPath, journal);
+        auto external = OpenBrowserImage(extPath, journal);
+        Check(external->HasPersistentWorker(), "External journal image did not get a worker session");
         roundtrip.Copy().destination = Native(external);
         Pass(Submit(roundtrip));
         Check(external->FindChild(2, u"Plain", child), "external journal worker output");
