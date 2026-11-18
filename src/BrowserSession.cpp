@@ -67,10 +67,10 @@ void BrowserSession::ClearCurrent(){CancelNavigation();listingPending_=false;cur
 bool BrowserSession::UsesAsyncNavigation() const
 {
 #ifdef HFV_TESTING
-    if (asyncNavigationForTest)
-        return true;
+    return owner_ && (asyncNavigationForTest || owner_->IsWindowVisible());
+#else
+    return owner_ != nullptr;
 #endif
-    return owner_ && owner_->IsWindowVisible();
 }
 
 void BrowserSession::CancelNavigation()
@@ -103,8 +103,12 @@ bool MatchesNavigationEntry(const BrowserDirectory::Row& row, const FileOperatio
 }
 
 void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigation::Read read,
-    BrowserNavigation::Publish publish, std::function<bool()> mountCurrent, std::function<void()> retry)
+    BrowserNavigation::Publish publish, std::function<bool()> mountCurrent, std::function<void()> retry,
+    std::function<bool()> nextOnError)
 {
+    const bool openingImage=request.image.has_value();
+    const bool previousListing=ListingAvailable();
+    const bool restoreOnError=request.intent==BrowserNavigation::Intent::OpenImage&&previousListing;
     CancelNavigation();
     navigationMediaDrive_=request.mediaDrive;
 #ifdef HFV_TESTING
@@ -136,23 +140,29 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
         [request,result,read=std::move(read)](Storage::Job& job){return read(request,*result,job);});
     navigationReady_=[this,anchor,request=std::move(request),result,publish=std::move(publish),
                       mountCurrent=std::move(mountCurrent),retry=std::move(retry),
-                      selection=std::move(selection)](const Storage::Result& status) mutable {
+                      selection=std::move(selection),restoreOnError,nextOnError=std::move(nextOnError)](const Storage::Result& status) mutable {
         const auto stillCurrent=[&]{return tree_->GetTreeCtrl().GetSelectedItem()==anchor && mountCurrent();};
         if(!stillCurrent())return;
         result->status=status;
         if(status.error==ERROR_BUSY){
             const auto& key=result->listing.resourceKey.empty()?request.resource:result->listing.resourceKey;
-            Defer(key,request.folder.IsClassic(),[this,anchor,mountCurrent,retry]{
-                if(tree_->GetTreeCtrl().GetSelectedItem()==anchor && mountCurrent())retry();
+            Defer(key,request.folder.IsClassic(),[this,anchor,mountCurrent,retry,restoreOnError]{
+                if(tree_->GetTreeCtrl().GetSelectedItem()==anchor && mountCurrent()){
+                    if(restoreOnError)listingPending_=false;
+                    retry();
+                }
             },true,true);
             return;
         }
         if(status.code){
+            if(restoreOnError)listingPending_=false;
+            if(nextOnError&&nextOnError())return;
             RejectNavigation(request.resource,status.message);
             return;
         }
         const auto& listing=result->listing;
         if(!listing.resourceKey.empty() && listing.revision!=VolumeCoord::Revision(listing.resourceKey)){
+            if(restoreOnError)listingPending_=false;
             retry();
             return;
         }
@@ -161,9 +171,11 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
             RejectNavigation(request.resource,"The search result changed or is hidden.");
             return;
         }
+        if(restoreOnError&&!result->journalPrompt.empty())listingPending_=false;
         publish(*result);
         // A drive probe may hand off to another navigation (for example an HFS+ CD).
         if(Navigating())return;
+        if(restoreOnError&&result->folder.IsNone())listingPending_=false;
         if(request.folder.IsMounted() && result->folder.Volume()!=request.folder.Volume())selection.clear();
         if(!request.reveal.IsNone())selection={request.reveal};
         auto& control=list_->GetListCtrl();
@@ -184,7 +196,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
     };
     listingPending_=true;
     notifications_->SetTimer(3,25,nullptr);
-    if(status_)status_->SetPaneText(0,"Loading folder...");
+    if(status_)status_->SetPaneText(0,openingImage?"Opening image...":"Loading folder...");
 }
 
 bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)

@@ -4,7 +4,11 @@
 #include "StorageWorker.h"
 
 namespace BrowserNavigation {
-enum class Intent { SelectFolder, RefreshFolder, RevealFindHit };
+enum class Intent { SelectFolder, RefreshFolder, RevealFindHit, StartupFolder, OpenImage };
+
+struct ImageSource {
+    std::wstring path, externalJournal;
+};
 
 struct Request {
     FileOperations::Location folder;
@@ -14,12 +18,15 @@ struct Request {
     std::vector<uint32_t> catalogRoute;
     std::optional<DWORD> windowsMediaSerial;
     int mediaDrive=-1;
+    std::optional<ImageSource> image;
+    bool tryNextStartupRoot=false;
 };
 
 struct Result {
     FileOperations::Location folder;
     BrowserDirectory::Snapshot listing;
     Storage::Result status;
+    std::string journalPrompt;
 };
 
 using Read = std::function<Storage::Result(const Request&, Result&, Storage::Job&)>;

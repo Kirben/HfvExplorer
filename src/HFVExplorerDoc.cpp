@@ -1608,9 +1608,107 @@ CString CHFVExplorerDoc::hfs_find_match(
 	return( path );
 }
 
-BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName) 
+int CHFVExplorerDoc::BuildBrowserRoots(int preferred,bool readClassic)
 {
-	int native=GetBrowserSession().MacBrowser().OpenImage(lpszPathName);
+    auto tree=GetBrowserSession().Tree();
+    tree->initialize_tree();
+    for(int index=0;index<m_hfs_count;++index){
+        auto& volume=m_volumes[index];
+        volume.m_rootitem=nullptr;
+        if(volume.m_free)continue;
+        const bool ready=readClassic&&VolumeCoord::Readable(VolumeCoord::ImageKey(std::string((LPCSTR)volume.m_file_name)));
+        if(ready&&!volume.open()){
+            volume.m_volume_name.Empty();
+            volume.m_file_name.Empty();
+            volume.m_free=1;
+            continue;
+        }
+        CString label=volume.m_volume_name.IsEmpty()?volume.m_file_name:volume.m_volume_name;
+        volume.m_rootitem=tree->initialize_volume(index,label,CNID_ROOT_ID,volume.m_is_floppy,
+            volume.m_is_cd,volume.m_is_hd,volume.m_is_removable);
+        if(preferred<0&&(!readClassic||ready))preferred=index;
+    }
+    for(int index=0;index<m_fat_count;++index){
+        auto& drive=m_fats[index];
+        drive.m_rootitem=tree->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,
+            &drive.m_volume_name,toupper((unsigned char)drive.m_letter)<'C');
+    }
+    return preferred;
+}
+
+bool CHFVExplorerDoc::NavigateInitialFolder(int firstClassic)
+{
+    using namespace BrowserNavigation;
+    for(int index=firstClassic;index<m_hfs_count;++index){
+        const auto& volume=m_volumes[index];
+        if(volume.m_free||!volume.m_rootitem)continue;
+        const auto image=std::string((LPCSTR)volume.m_file_name);
+        Request request{};
+        request.intent=Intent::StartupFolder;
+        request.folder=FileOperations::Location::Classic(image,":");
+        request.folder.directory=true;
+        request.folder.expectedResource=VolumeCoord::ImageKey(image);
+        request.resource=request.folder.expectedResource;
+        if(volume.m_mediaGenerationKnown)request.folder.BindMediaGeneration(volume.m_mediaGeneration);
+        request.tryNextStartupRoot=true;
+        if(NavigateClassicFolder(index,CNID_ROOT_ID,false,&request))return true;
+    }
+    // Starting a browser must not implicitly probe an empty floppy or CD.
+    for(int index=0;index<m_fat_count;++index)
+        if(m_fats[index].m_type==DRIVE_FIXED&&NavigateStartupDirectory((LPCSTR)m_fats[index].m_volume_name,false))
+            return true;
+    return false;
+}
+
+bool CHFVExplorerDoc::NavigateStartupDirectory(const std::string& path,bool mac)
+{
+    using namespace BrowserNavigation;
+    if(path.empty()||path.size()>=MAX_PATH)return false;
+    Request request{};
+    request.intent=Intent::StartupFolder;
+    if(mac){
+        const auto volumeName=path.substr(0,path.find(':'));
+        for(int index=0;index<m_hfs_count;++index){
+            const auto& volume=m_volumes[index];
+            if(volume.m_free||!volume.m_rootitem||volume.m_volume_name.CompareNoCase(volumeName.c_str()))continue;
+            auto image=std::string((LPCSTR)volume.m_file_name);
+            request.folder=FileOperations::Location::Classic(image,path.find(':')==path.npos?path+":":path);
+            request.folder.directory=true;
+            request.folder.expectedResource=VolumeCoord::ImageKey(image);
+            request.resource=request.folder.expectedResource;
+            if(volume.m_mediaGenerationKnown)request.folder.BindMediaGeneration(volume.m_mediaGeneration);
+            return NavigateClassicFolder(index,0,false,&request);
+        }
+        return false;
+    }
+    if(path.size()<3||path[1]!=':'||path[2]!='\\')return false;
+    for(int index=0;index<m_fat_count;++index)
+        if(toupper((unsigned char)m_fats[index].m_letter)==toupper((unsigned char)path[0])&&m_fats[index].m_rootitem){
+            request.folder=FileOperations::Location::Windows(VolumeCoord::Wide(path));
+            request.folder.directory=true;
+            return NavigateWindowsFolder(index,path,false,&request);
+        }
+    return false;
+}
+
+BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
+{
+    auto& session=GetBrowserSession();
+    const bool first=!browserOpened_;
+    browserOpened_=true;
+    if(first&&session.UsesAsyncNavigation()){
+        const auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+        const bool explicitImage=lpszPathName&&*lpszPathName;
+        const bool namedClassicFolder=!explicitImage&&!app->m_opendir.IsEmpty()&&app->m_opendir.Mid(1,2)!=":\\";
+        session.Tree()->enable_selchange(0);
+        BuildBrowserRoots(-1,namedClassicFolder);
+        session.Tree()->enable_selchange(1);
+        if(app->m_startup_hds)session.MacBrowser().ScanRemovable(true,true);
+        if(explicitImage)return session.MacBrowser().OpenImage(lpszPathName)>0;
+        if(app->m_opendir.IsEmpty())NavigateInitialFolder();
+        return TRUE;
+    }
+	int native=session.MacBrowser().OpenImage(lpszPathName);
  if(native)return native>0;
  if(BackgroundCopies::Active()&&GetBrowserSession().Tree()->m_ct->GetRootItem()){
   // Extend the tree without closing mounted readers used by other jobs.
@@ -1671,43 +1769,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 		}
 	} 
 
-	GetBrowserSession().Tree()->initialize_tree();
-
-	for( i=0; i<m_hfs_count; i++) {
-		m_volumes[i].m_rootitem = 0;
-        if(!m_volumes[i].m_free&&!VolumeCoord::Readable(VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[i].m_file_name)))){
-            CString label=m_volumes[i].m_volume_name;if(label.IsEmpty())label=m_volumes[i].m_file_name;
-            m_volumes[i].m_rootitem=GetBrowserSession().Tree()->initialize_volume(i,label,CNID_ROOT_ID,m_volumes[i].m_is_floppy,m_volumes[i].m_is_cd,m_volumes[i].m_is_hd,m_volumes[i].m_is_removable);continue;
-        }
-		if(!m_volumes[i].m_free && m_volumes[i].open()) {
-			m_volumes[i].m_rootitem = 
-				GetBrowserSession().Tree()->initialize_volume(
-					i, m_volumes[i].m_volume_name, 
-					CNID_ROOT_ID, 
-					m_volumes[i].m_is_floppy,
-					m_volumes[i].m_is_cd,
-					m_volumes[i].m_is_hd,
-					m_volumes[i].m_is_removable );
-			if(showme < 0) showme = i;
-		} else {
-			m_volumes[i].m_volume_name = "";
-			m_volumes[i].m_file_opened = 0;
-			m_volumes[i].m_file_name = "";
-			m_volumes[i].m_free = 1;
-			m_volumes[i].m_rootitem = 0;
-			m_volumes[i].m_opened = 0;
-		}
-	}
-
-	for( i=0; i<m_fat_count; i++) {
-		m_fats[i].m_rootitem = 
-			GetBrowserSession().Tree()->initialize_fat_volume(
-				i, 
-				&m_fats[i].m_volume_name, 
-				m_fats[i].m_type,
-				&m_fats[i].m_volume_name,
-				toupper(m_fats[i].m_letter) < 'C' );
-	}
+    showme=BuildBrowserRoots(showme);
 
 	if(showme >= 0) {
 		open_sub_directory( showme, CNID_ROOT_ID, m_volumes[showme].m_volume_name );

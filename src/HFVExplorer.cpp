@@ -538,7 +538,7 @@ void CHFVExplorerApp::OpenStartupDirectory(BrowserSession& session)
  m_opendir.Empty();
  auto frame=session.Owner();
  const bool windows=directory.Mid(1,2)==":\\";
- session.Document()->my_chdir(directory,!windows);
+ session.Document()->NavigateStartupDirectory((LPCSTR)directory,!windows);
  if(is_desktop_application){
   frame->SetWindowPos(nullptr,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW|SWP_NOZORDER);
   frame->ShowWindow(SW_SHOWMAXIMIZED);
