@@ -97,7 +97,8 @@ bool MatchesNavigationEntry(const BrowserDirectory::Row& row, const FileOperatio
         (!item.expectedCatalogId || row.id==item.expectedCatalogId) &&
         !_stricmp(row.path.c_str(),item.ClassicPath().c_str());
     return item.IsWindows() && row.storageType==LIST_FAT &&
-        !_wcsicmp(VolumeCoord::Wide(row.path).c_str(),item.WindowsPath().c_str()) &&
+        !_wcsicmp((row.location.IsWindows()?row.location.WindowsPath():VolumeCoord::Wide(row.path)).c_str(),
+                  item.WindowsPath().c_str()) &&
         (item.expectedIdentity.empty() || row.entry.identity==item.expectedIdentity);
 }
 }
@@ -380,13 +381,13 @@ void BrowserSession::ProcessChanges(){
  }
  if(current_.key.empty()||dirty_[current_.key]<=current_.revision)return;
  StorageQuietRefresh quiet;auto context=current_;refreshing_=true;struct Done{bool& value;~Done(){value=false;}}done{refreshing_};
- int column=list_->m_sorted_by_column;bool ascending=list_->m_sort_is_ascending!=FALSE;std::vector<uint32_t> ids;std::vector<std::string> paths;
- auto& control=list_->GetListCtrl();for(int row=-1;(row=control.GetNextItem(row,LVNI_SELECTED))>=0;){auto entry=list_->BrowserRowAt(row);if(entry){ids.push_back(entry->id);paths.push_back(entry->path);}}
+ int column=list_->m_sorted_by_column;bool ascending=list_->m_sort_is_ascending!=FALSE;std::vector<uint32_t> ids;std::vector<std::wstring> paths;
+ auto& control=list_->GetListCtrl();for(int row=-1;(row=control.GetNextItem(row,LVNI_SELECTED))>=0;){auto entry=list_->BrowserRowAt(row);if(entry){ids.push_back(entry->id);if(entry->location.IsWindows())paths.push_back(entry->location.WindowsPath());}}
  try{
   if(context.type==LIST_MAC){if(!browser_->RefreshForChange(context.key))throw std::runtime_error("The selected volume could not be refreshed");}else RefreshLegacy(context);
   if(Navigating())return;
   list_->m_sorted_by_column=column;list_->m_sort_is_ascending=ascending;list_->SortBrowserRows(column,ascending);
-  bool restored=false;for(int row=0;row<control.GetItemCount();++row){auto entry=list_->BrowserRowAt(row);if(!entry)continue;bool selected=context.type==LIST_FAT?std::find(paths.begin(),paths.end(),entry->path)!=paths.end():std::find(ids.begin(),ids.end(),entry->id)!=ids.end();if(selected){if(!restored)control.SetItemState(-1,0,LVIS_SELECTED);control.SetItemState(row,LVIS_SELECTED,LVIS_SELECTED);restored=true;}}
+  bool restored=false;for(int row=0;row<control.GetItemCount();++row){auto entry=list_->BrowserRowAt(row);if(!entry)continue;bool selected=context.type==LIST_FAT?entry->location.IsWindows()&&std::find(paths.begin(),paths.end(),entry->location.WindowsPath())!=paths.end():std::find(ids.begin(),ids.end(),entry->id)!=ids.end();if(selected){if(!restored)control.SetItemState(-1,0,LVIS_SELECTED);control.SetItemState(row,LVIS_SELECTED,LVIS_SELECTED);restored=true;}}
 #ifdef HFV_TESTING
   ++notificationRefreshes;
 #endif

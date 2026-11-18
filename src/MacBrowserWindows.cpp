@@ -74,7 +74,8 @@ bool AppleDouble(File& f, Double &out) {
     uint8_t header[26];
     if (f.Size() < sizeof(header)) return false;
     f.Read(0, header, sizeof(header)); unsigned count = HfsPlus::Disk::U16(header + 24);
-    if (U32(header) != 0x00051607 || U32(header + 4) != 0x00020000 ||
+    const auto version = U32(header + 4);
+    if (U32(header) != 0x00051607 || (version != 0x00010000 && version != 0x00020000) ||
         26ULL + count * 12ULL > f.Size()) return false;
     bool resource = false; std::set<uint32_t> ids;std::vector<std::pair<uint64_t,uint64_t>> ranges;
     for (unsigned i = 0; i < count; ++i) {
@@ -83,10 +84,15 @@ bool AppleDouble(File& f, Double &out) {
         if (!ids.insert(id).second || at < 26 + count * 12 || !Range(at, n, f.Size())) return false;
         if(n)ranges.push_back({at,uint64_t(at)+n});
         if (id == 2) { out.offset = at; out.size = n; resource = true; }
-        if (id == 9 && n >= out.finder.size()){out.finderOffset=at;out.finderSize=n;f.Read(at, out.finder.data(), out.finder.size());}
+        if (id == 9 && n >= 16) {
+            out.finderOffset = at;
+            out.finderSize = n;
+            f.Read(at, out.finder.data(), (std::min)(size_t(n), out.finder.size()));
+        }
     }
     std::sort(ranges.begin(),ranges.end());for(size_t i=1;i<ranges.size();++i)if(ranges[i].first<ranges[i-1].second)return false;
-    return resource;
+    // Finder-only companions have no resource descriptor.
+    return resource || out.finderSize != 0;
 }
 
 bool AppleDouble(const std::wstring& path,Double& out){if(GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES)return false;File file(path,GENERIC_READ,OPEN_EXISTING);return AppleDouble(file,out);}
