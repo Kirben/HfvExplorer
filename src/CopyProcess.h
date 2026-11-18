@@ -4,6 +4,8 @@
 #include <atomic>
 namespace CopyProcess {
 bool UsesWorker(const FileOperations::Request &);
+bool CopiesWithinMountedImage(const FileOperations::OrdinaryCopy&);
+bool CopyWithinMountedImage(MacBrowser::Volume&, const std::vector<uint32_t>&, uint32_t, Storage::Job&);
 Storage::Result Run(const FileOperations::Request &, Storage::Job &, FileOperations::Completion &,
                     const std::vector<std::string> &, const std::vector<std::string> &);
 int Child(const char *, const char *);

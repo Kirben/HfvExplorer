@@ -234,6 +234,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         else src.Read(entry.id, fork, offset, p, n);
         if(job.cancelled())throw Storage::Cancelled();
         auto end=offset+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.fileBytes += added; progress.bytes += added;progress.processed+=added;job.progress(progress);
+        if(job.cancelled())throw Storage::Cancelled();
     }, found);
     if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }

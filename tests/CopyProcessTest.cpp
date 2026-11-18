@@ -482,6 +482,67 @@ int RunCopyProcessTest(const char *directory) {
             Verify(*to,nested.id,4096);
             verifySessions();
 
+            for (const auto& image : {from,to}) {
+                const auto pid = CopyProcess::VolumeSessionPidForTest(image);
+                const auto sourceFolder = image->MakeDirectory(2,u"Same-image source");
+                const auto targetFolder = image->MakeDirectory(2,u"Same-image target");
+                const auto descendant = image->MakeDirectory(sourceFolder,u"Descendant");
+                const auto payload = Put(*image,sourceFolder,u"Both forks");
+                const HfsPlus::Attributes attributes{{u"user.recursive",{1,2,3}}};
+                image->SetAttributes(sourceFolder,attributes);
+                Request same = OrdinaryCopy{{Native(image,sourceFolder)},Native(image,targetFolder)};
+                same.background = true;
+                auto recursiveSame = Submit(same);
+                Wait(recursiveSame);
+                Entry copiedTree, copiedFile, copiedDescendant;
+                Check(!recursiveSame.Job()->result().code && recursiveSame.Snapshot().complete &&
+                          image->FindChild(targetFolder,u"Same-image source",copiedTree) &&
+                          image->FindChild(copiedTree.id,u"Both forks",copiedFile) &&
+                          image->FindChild(copiedTree.id,u"Descendant",copiedDescendant) &&
+                          image->GetAttributes(copiedTree.id) == attributes,
+                      "same-image recursive copy failed");
+                Verify(*image,copiedFile.id);
+
+                for (const auto invalidParent : {sourceFolder,descendant}) {
+                    auto refused = Submit(OrdinaryCopy{{Native(image,sourceFolder)},Native(image,invalidParent)});
+                    Wait(refused);
+                    Entry unexpected;
+                    Check(refused.Job()->result().code &&
+                              !image->FindChild(invalidParent,u"Same-image source",unexpected),
+                          "same-image copy accepted a folder as its own ancestor");
+                }
+
+                const auto oldFile = Put(*image,targetFolder,u"Both forks",4096,71);
+                const auto freeBefore = image->FreeBytes();
+                Storage::Job interrupted;
+                bool staged = false;
+                interrupted.transport([&](const Storage::Progress& progress) {
+                    // The data fork has been staged before the resource fork is read.
+                    if (progress.fileBytes > 300000 && !progress.files) {
+                        staged = true;
+                        interrupted.cancel();
+                    }
+                }, [](const std::string&) { return Storage::ConflictChoice::Replace; });
+                Completion interruptedCompletion;
+                const auto overwrite = OrdinaryCopy{{Native(image,payload)},Native(image,targetFolder)};
+                const auto aborted = ExecuteInWorker(overwrite,interrupted,interruptedCompletion);
+                Check(staged && aborted.outcome == Storage::Outcome::Cancelled &&
+                          !aborted.partial && !interruptedCompletion.complete,
+                      "same-image overwrite did not cancel after staging the data fork");
+                Verify(*image,oldFile,4096,71);
+                Verify(*image,payload);
+                Check(image->FreeBytes() == freeBefore, "same-image rollback leaked space");
+                auto retry = Submit(overwrite);
+                Conflict(retry);
+                retry.Job()->resolve(Storage::ConflictChoice::Replace);
+                Wait(retry);
+                Entry replacement;
+                Check(!retry.Job()->result().code && image->FindChild(targetFolder,u"Both forks",replacement) &&
+                          CopyProcess::VolumeSessionPidForTest(image) == pid,
+                      "same-image replacement restarted its worker or failed");
+                Verify(*image,replacement.id);
+            }
+            fprintf(report,"PASS: HFS+ and HFSX same-image recursive copy, self-copy refusal and overwrite cancellation without worker restart\n");
             auto stablePid=CopyProcess::VolumeSessionPidForTest(to);
             HfsPlus::Attributes edited{{u"user.session",{1,2,3,4}}};
             auto attrs=Submit(EditAttributes{Native(to,copied.id),{},edited});

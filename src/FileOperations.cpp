@@ -123,7 +123,13 @@ Storage::Result CopyRequest(const OrdinaryCopy& request,Storage::Job& job,Comple
   if(!request.destination.Volume())destination.first->Close();for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();Finish(disk);completion.complete=true;completion.completed=unsigned(opened.size());Storage::Result result;result.moved=true;return result;
  }
  for(size_t i=0;i<request.sources.size();++i)snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
- bool complete;try{complete=CopyMany(opened,*destination.first,destination.second,job);}catch(...){if(disk&&disk->Error())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");throw;}
+ bool complete;try{
+  if(CopyProcess::CopiesWithinMountedImage(request)){
+   std::vector<uint32_t> ids;ids.reserve(opened.size());
+   for(const auto& source:opened)ids.push_back(source.second);
+   complete=CopyProcess::CopyWithinMountedImage(*destination.first,ids,destination.second,job);
+  }else complete=CopyMany(opened,*destination.first,destination.second,job);
+ }catch(...){if(disk&&disk->Error())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");throw;}
  if(!request.destination.Volume())destination.first->Close();
  for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
  Finish(disk);disk.reset(); // Includes all final unmount writes; never delete sources before this.
