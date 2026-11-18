@@ -30,7 +30,7 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
         m_pimagelist->Add(row.icon32?row.icon32:row.icon16);m_pimagelistSmall->Add(row.icon16?row.icon16:row.icon32);}
     uint64_t created=row.storageType==LIST_FAT?row.created:e.created,modified=row.storageType==LIST_FAT?row.modified:e.modified;
     auto data=make_lparam(row.storageType,row.volume,long(row.id),const_cast<char*>(row.path.c_str()),e.directory,tree,
-        row.icon32?row.icon32:row.icon16,row.icon16?row.icon16:row.icon32,DWORD(created),DWORD(created>>32),DWORD(modified),DWORD(modified>>32),BrowserDirectory::Label(e));
+        row.icon32?row.icon32:row.icon16,row.icon16?row.icon16:row.icon32,DWORD(created),DWORD(created>>32),DWORD(modified),DWORD(modified>>32));
     LVITEMW item{};item.mask=LVIF_TEXT|LVIF_IMAGE|LVIF_PARAM;item.iItem=m_item_count;item.pszText=const_cast<wchar_t*>(name.c_str());item.iImage=image;item.lParam=data;
     if(!m_cl->GetItemCount()){item.mask|=LVIF_STATE;item.state=item.stateMask=LVIS_FOCUSED|LVIS_SELECTED;}
     int index=int(SendMessageW(m_cl->m_hWnd,LVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item)));
@@ -89,15 +89,7 @@ bool CHFVExplorerListView::BrowserSelectionAllows(bool rename)const{
  return selected;
 }
 void CHFVExplorerListView::SortBrowserRows(int column,bool ascending){
- // Legacy rename/label operations update the control and binding; keep the
- // presentation copy in sync while retaining exact byte counts and timestamps.
- for(int row=0;row<m_cl->GetItemCount();++row){auto key=LPARAM(m_cl->GetItemData(row));auto found=m_browser_rows.find(key);if(found==m_browser_rows.end())continue;
-  wchar_t name[1024]{};LVITEMW value{};value.iSubItem=0;value.pszText=name;value.cchTextMax=ARRAYSIZE(name);
-  SendMessageW(m_cl->m_hWnd,LVM_GETITEMTEXTW,row,reinterpret_cast<LPARAM>(&value));
-  if(found->second.storageType!=LIST_MAC)found->second.entry.name=MacBrowser::U16(name);auto p=reinterpret_cast<list_lparam_struct*>(key);
-  found->second.entry.finder[9]=BYTE((found->second.entry.finder[9]&~14)|(p->finder_color<<1));
- }
-
+    CancelBrowserDrag();
     struct Context {const std::map<LPARAM,BrowserDirectory::Row>* rows;int column;bool ascending;} context{&m_browser_rows,column,ascending};
     auto compare=[](LPARAM left,LPARAM right,LPARAM raw)->int {
         auto& c=*reinterpret_cast<Context*>(raw);auto a=reinterpret_cast<list_lparam_struct*>(left),b=reinterpret_cast<list_lparam_struct*>(right);

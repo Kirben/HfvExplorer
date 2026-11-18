@@ -196,19 +196,6 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
  std::vector<VolumeCoord::Access> access{{from,move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read},{to,VolumeCoord::Mode::Write}};if(!macVolume(sourceVolume)){auto path=VolumeCoord::Wide(source);auto at=path.find_last_of(L"\\/");auto companion=path.substr(0,at+1)+L"%"+path.substr(at+1);access.push_back({VolumeCoord::PathKey(companion),move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read});}
  return CommandStorage::Guard(access,work,{to});
 }
-int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved,CWnd* owner) {
- *moved = 0;
- FileOperations::Request request = FileOperations::LegacyConversion{
-     FileOperations::Location::FromLegacy(sourcevol, source),
-     FileOperations::Location::FromLegacy(targetvol, target),
-     directory != 0, move != 0, false, CaptureLegacyCopyOptions(HFSIFACE_copy_mode())};
- auto operation=FileOperations::Submit(std::move(request));
- auto result=ShowSubmittedStorageJob(operation.Job(),macVolume(sourcevol)?"Copying from Macintosh":"Copying files",false,directory==0,true,owner);
- if(result.code&&result.error!=ERROR_CANCELLED){const char* text=result.message.empty()?"The copy failed.":result.message.c_str();if(owner)owner->MessageBox(text,"HFVExplorer",MB_OK|MB_ICONERROR);else AfxMessageBox(text,MB_OK|MB_ICONERROR);}
- if(result.code&&physical_floppy_path(targetvol)>=0&&owner)owner->PostMessage(WM_COMMAND,ID_VIEW_REFRESH);
- *moved=result.moved?1:0;return result.code;
-}
-
 bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Location& source,CString& output)
 {
  output.Empty();

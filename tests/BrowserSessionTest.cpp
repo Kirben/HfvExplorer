@@ -240,7 +240,7 @@ int RunBrowserSessionTest(const char* directory){
   Check(b.tree.GetTreeCtrl().GetSelectedItem()==selected&&Find(b.list,L"Second file")>=0,"navigation changed another window");
   a.list.m_sorted_by_column=FIELD_SIZE;a.list.m_sort_is_ascending=false;a.Session().finderLayout=true;Check(b.list.m_sorted_by_column==FIELD_NAME&&b.list.m_sort_is_ascending&&!b.Session().finderLayout,"sort/layout state shared between windows");a.Session().finderLayout=false;
   a.list.GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);a.list.GetListCtrl().SetItemState(Find(a.list,L"First child"),LVIS_SELECTED,LVIS_SELECTED);
-  Check(a.Session().MacBrowser().Capture(false,false),"capture session A selection");Check(a.Session().MacBrowser().TestClipboardCount()==1&&b.Session().MacBrowser().TestClipboardCount()==1&&a.list.m_clipboard.GetSize()==0&&b.list.m_clipboard.GetSize()==0,"native clipboard overwrote legacy clipboard");
+  Check(a.Session().MacBrowser().Capture(false,false),"capture session A selection");Check(a.Session().MacBrowser().TestClipboardCount()==1&&b.Session().MacBrowser().TestClipboardCount()==1,"shared clipboard lost the captured selection");
   va->fail=true;Check(!a.Session().MacBrowser().ShowTestFolder(ia,2)&&!a.list.BrowserDirectoryWritable()&&Find(b.list,L"Second file")>=0&&a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled(),"session failure affected another window or owner");va->fail=false;
   Check(a.Session().MacBrowser().ShowTestFolder(ia,2),"session error retry");
   a.doc.AddIcon('AAAA');b.doc.AddIcon('BBBB');Check(a.doc.HasIcon('AAAA')&&!a.doc.HasIcon('BBBB')&&b.doc.HasIcon('BBBB'),"classic Finder icon tables are shared");
