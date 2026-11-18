@@ -21,7 +21,8 @@ public:
  BrowserTemplate(CRuntimeClass* doc,CRuntimeClass* frame):CMultiDocTemplate(IDR_MAINFRAME,doc,frame,RUNTIME_CLASS(CHFVExplorerView)){}
  CDocument* OpenDocumentFile(LPCTSTR path,BOOL visible=TRUE)override{return OpenDocumentFile(path,TRUE,visible);}
  CDocument* OpenDocumentFile(LPCTSTR path,BOOL addToMru,BOOL visible)override{
-  auto doc=CMultiDocTemplate::OpenDocumentFile(path,addToMru,FALSE);
+  // Image requests add their MRU entry after the root listing is published.
+  auto doc=CMultiDocTemplate::OpenDocumentFile(path,path?FALSE:addToMru,FALSE);
   if(!doc)return nullptr;
   auto frame=static_cast<CMainFrame*>(static_cast<CHFVExplorerDoc*>(doc)->GetBrowserSession().Owner());
   static_cast<CHFVExplorerApp*>(AfxGetApp())->RegisterBrowser(frame);

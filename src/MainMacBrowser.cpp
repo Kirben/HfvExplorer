@@ -469,8 +469,117 @@ int MainMacBrowser::SelectedCdDrive()const{int i;uint32_t id;return state_->Sele
 int MainMacBrowser::OpenImage(const char* path) {
     if(!path||!*path)return 0;return OpenImage(FromAnsi(path));
 }
+namespace {
+std::wstring AbsoluteImagePath(const std::wstring& path)
+{
+    wchar_t full[32768];
+    const auto size=GetFullPathNameW(path.c_str(),ARRAYSIZE(full),full,nullptr);
+    return size&&size<ARRAYSIZE(full)?std::wstring(full,size):path;
+}
+
+void RememberImage(const std::wstring& path)
+{
+    const auto size=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,nullptr,0,nullptr,nullptr);
+    if(!size)return;
+    std::string ansi(size,0);
+    BOOL lost=FALSE;
+    if(WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,ansi.data(),size,nullptr,&lost)&&!lost)
+        App().AddToRecentFileList(ansi.c_str());
+}
+}
+
+int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& externalJournal,
+    std::function<bool()> next)
+{
+    using namespace BrowserNavigation;
+    Request request{};
+    request.intent=Intent::OpenImage;
+    request.image=ImageSource{path,externalJournal};
+
+    // A mounted root is still read on the navigation worker. Do not change the
+    // tree selection until both opening and reading the root have succeeded.
+    std::shared_ptr<Volume> existing;
+    for(const auto& mount:state_->mounts)
+        if(mount.volume&&!_wcsicmp(path.c_str(),mount.key.c_str())){
+            existing=mount.volume;
+            break;
+        }
+
+    struct RootListing {std::vector<Entry> entries;uint64_t free=0;};
+    auto root=std::make_shared<RootListing>();
+    const bool showInvisible=App().m_show_invisible_mac!=FALSE;
+    session_.Navigate(std::move(request),
+        [existing,root,showInvisible](const Request& request,Result& result,Storage::Job& job){
+            const auto& source=*request.image;
+            const auto key=VolumeCoord::ImageKey(source.path);
+            result.listing.resourceKey=key;
+            if(job.cancelled())throw Storage::Cancelled();
+            try{
+                std::vector<VolumeCoord::Access> access{{key,VolumeCoord::Mode::Read}};
+                if(!source.externalJournal.empty())
+                    access.push_back({VolumeCoord::ImageKey(source.externalJournal),VolumeCoord::Mode::Read});
+                VolumeCoord::Lease lease(std::move(access));
+                auto volume=existing;
+                if(!volume||volume->ResourceKey()!=key)
+                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal);
+                if(!volume)return Storage::Result{1,ERROR_UNRECOGNIZED_VOLUME,"This file does not contain a supported Mac volume."};
+                result.listing.revision=VolumeCoord::Revision(key);
+                if(job.cancelled())throw Storage::Cancelled();
+                BrowserDirectory::ObserveRead("image-root");
+                root->entries=volume->List(2);
+                root->free=volume->FreeBytes();
+                volume->ValidateMedia();
+                if(VolumeCoord::ImageKey(source.path)!=key)
+                    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The selected image was replaced while opening it."};
+                result.folder=Location::Mounted(volume);
+                result.folder.directory=true;
+                State::FillListing(result.listing,root->entries,-1,volume->Supports(),showInvisible,true);
+            }catch(const HfsPlus::ExternalJournalRequired& error){
+                result.listing.resourceKey.clear();
+                result.journalPrompt=error.what();
+            }catch(const VolumeCoord::Busy&){
+                return Storage::Result{1,ERROR_BUSY,"The image is busy."};
+            }
+            return Storage::Result{};
+        },
+        [this,path,root,next](Result& result){
+            if(!result.journalPrompt.empty()){
+                if(Hidden(session_)){
+                    if(!next||!next())session_.RejectNavigation({},result.journalPrompt);
+                    return;
+                }
+                std::wstring journal;
+                if(SelectHfsPlusExternalJournal(session_.Owner(),journal,result.journalPrompt))
+                    QueueImageOpen(path,journal,next);
+                else if(next)next();
+                return;
+            }
+            const auto volume=result.folder.Volume();
+            auto match=std::find_if(state_->mounts.begin(),state_->mounts.end(),[&](const auto& mount){
+                return mount.volume&&mount.volume->ResourceKey()==volume->ResourceKey();
+            });
+            int index;
+            if(match==state_->mounts.end()){
+                index=int(state_->mounts.size());
+                state_->mounts.push_back({volume,path,nullptr,-1});
+            }else index=int(match-state_->mounts.begin());
+            if(!state_->mounts[index].root)state_->Root(index);
+            for(auto& row:result.listing.rows)row.volume=index;
+            state_->Publish(index,2,state_->mounts[index].root,false,false,volume,
+                result.listing.revision,Wide(volume->Name()),{},root->entries,root->free,true,{2},&result.listing);
+            RememberImage(path);
+            if(next)next();
+        },
+        []{return true;},[this,path,externalJournal,next]{QueueImageOpen(path,externalJournal,next);},next);
+    return 1;
+}
+
 int MainMacBrowser::OpenImage(const std::wstring& path,const std::wstring& externalJournal) {
-    auto wide=path;wchar_t full[32768];if(GetFullPathNameW(wide.c_str(),ARRAYSIZE(full),full,nullptr))wide=full;
+    const auto wide=AbsoluteImagePath(path);
+    if(session_.UsesAsyncNavigation())return QueueImageOpen(wide,externalJournal);
+#ifndef HFV_TESTING
+    return -1;
+#else
     for(size_t i=0;i<state_->mounts.size();++i)if(!_wcsicmp(wide.c_str(),state_->mounts[i].key.c_str())){
         if(!state_->mounts[i].root)state_->Root(int(i));state_->Show(int(i),2,state_->mounts[i].root);return 1;}
     auto key=VolumeCoord::ImageKey(wide);if(session_.Defer(key,false,[this,wide,externalJournal]{OpenImage(wide,externalJournal);}))return 1;
@@ -483,10 +592,25 @@ int MainMacBrowser::OpenImage(const std::wstring& path,const std::wstring& exter
     if(!ok)return -1;if(!volume)return 0;
     for(size_t n=0;n<state_->mounts.size();++n)if(state_->mounts[n].volume&&state_->mounts[n].volume->ResourceKey()==volume->ResourceKey()){state_->Show(int(n),2,state_->mounts[n].root);return 1;}
     state_->mounts.push_back({volume,wide,nullptr,-1});int i=int(state_->mounts.size()-1);state_->Root(i);state_->Show(i,2,state_->mounts[i].root);
-    int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,nullptr,0,nullptr,nullptr);
-    std::string ansi(n,0);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,&ansi[0],n,nullptr,&lost);
-    if(!lost&&n)App().AddToRecentFileList(ansi.c_str());return 1;
+    RememberImage(wide);
+    return 1;
+#endif
 }
+
+bool MainMacBrowser::QueueNextImage(const std::shared_ptr<const std::vector<std::wstring>>& batch,size_t index)
+{
+    if(index>=batch->size())return false;
+    return QueueImageOpen((*batch)[index],{},[this,batch,index]{return QueueNextImage(batch,index+1);})>0;
+}
+
+void MainMacBrowser::OpenImages(std::vector<std::wstring> paths)
+{
+    if(paths.empty())return;
+    for(auto& path:paths)path=AbsoluteImagePath(path);
+    // A drop owns one sequence of pending opens. New navigation supersedes it.
+    QueueNextImage(std::make_shared<const std::vector<std::wstring>>(std::move(paths)),0);
+}
+
 bool MainMacBrowser::ScanRemovable(bool silent,bool startupOnly){
  if(startupOnly&&state_->removableScanned)return true;state_->removableScanned=true;
  Removable::Discovery snapshot;auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=Removable::Scan(job);return Storage::Result{};},Hidden(session_),session_.Owner());

@@ -313,13 +313,23 @@ void CHFVExplorerDoc::ValidateNavigationMedia(const CHFVVolume& volume)
 namespace {
 struct ClassicAncestor { uint32_t id, parent; std::string name; };
 
-std::vector<ClassicAncestor> ReadClassicRoute(const std::string& image,uint32_t id)
+std::vector<ClassicAncestor> ReadClassicRoute(const std::string& image,uint32_t& id,std::string requested={})
 {
  LegacyEngine::Scope engine;
  auto path=image;
  auto volume=hfs_mount(path.data(),1,O_RDONLY);
  if(!volume)throw std::runtime_error("Cannot read the classic HFS folder path");
  struct Close {hfsvol* volume;~Close(){hfs_umount(volume);}} close{volume};
+ if(!id){
+  const auto colon=requested.find(':');
+  if(colon==requested.npos)throw std::runtime_error("The startup folder path is unavailable");
+  requested.erase(0,colon);
+  pc_to_mac_charset(reinterpret_cast<unsigned char*>(requested.data()));
+  hfsdirent entry{};
+  if(hfs_stat(volume,requested.data(),&entry)<0||!(entry.flags&HFS_ISDIR))
+   throw std::runtime_error("The classic HFS startup folder is unavailable");
+  id=uint32_t(entry.cnid);
+ }
  std::vector<ClassicAncestor> route;
  std::set<long> visited;
  long node=id;
@@ -346,7 +356,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  const auto item=tree->GetTreeCtrl().GetSelectedItem();
  auto& selected=m_volumes[index];
  const auto root=selected.m_rootitem;
- if(!item||!root||selected.m_free)return false;
+ if((!item&&!find)||!root||selected.m_free)return false;
  using namespace BrowserNavigation;
  CString directory=tree->get_directory_name(root,index,id);
  if(directory.IsEmpty())directory=selected.m_volume_name;
@@ -398,11 +408,11 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
       (!volume.m_mediaGenerationKnown||volume.m_mediaGeneration!=request.folder.MediaGeneration()))
     return Storage::Result{1,ERROR_MEDIA_CHANGED,"The floppy changed. Select its drive to open the new disk."};
    reader->m_classicRevision[index]=VolumeCoord::Revision(request.resource);
-   const auto id=request.folder.expectedCatalogId;
+   auto id=request.folder.expectedCatalogId;
    const bool readRoute=request.intent!=Intent::SelectFolder;
    std::string directory=id==2?std::string((LPCSTR)volume.m_volume_name)+":":request.folder.ClassicPath();
    if(readRoute&&id!=2){
-    *route=ReadClassicRoute(request.folder.ClassicImage(),id);
+    *route=ReadClassicRoute(request.folder.ClassicImage(),id,directory);
     directory=std::string((LPCSTR)volume.m_volume_name)+":";
     for(const auto& step:*route)directory+=step.name+":";
    }
@@ -412,12 +422,13 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    if(result.listing.resourceKey!=request.resource)
     return Storage::Result{1,ERROR_MEDIA_CHANGED,"The classic HFS image was replaced."};
    result.folder.SetClassic(request.folder.ClassicImage(),directory);
+   result.folder.expectedCatalogId=id;
    if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
    ValidateNavigationMedia(volume);
    reader->CopyNavigationIcons(result.listing);
    return Storage::Result{};
   }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
- },[this,reader,route,index,id,item,root,refresh,path,findResult=bool(find),parent](Result& result){
+ },[this,reader,route,index,item,root,refresh,path,findResult=bool(find),parent](Result& result){
   auto& session=GetBrowserSession();
   auto tree=session.Tree();
   auto& control=tree->GetTreeCtrl();
@@ -443,7 +454,16 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   const auto parentId=route->empty()?parent:route->back().parent;
   const auto parentPath=parentId?tree->get_directory_name(root,index,parentId):CString();
   session.List()->initialize_volume(parentPath,parentId?ID_GOTO_PARENT:0);
-  PublishClassicFolder(index,id,shown,result.listing);
- },mountCurrent,retry);
+  PublishClassicFolder(index,result.folder.expectedCatalogId,shown,result.listing);
+ },mountCurrent,retry,[this,index,root,initial=find&&find->tryNextStartupRoot]{
+  if(!initial)return false;
+  auto& volume=m_volumes[index];
+  volume.m_volume_name.Empty();
+  volume.m_file_name.Empty();
+  volume.m_free=1;
+  volume.m_rootitem=nullptr;
+  GetBrowserSession().Tree()->GetTreeCtrl().DeleteItem(root);
+  return NavigateInitialFolder(index+1);
+ });
  return true;
 }

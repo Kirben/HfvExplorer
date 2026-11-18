@@ -69,7 +69,7 @@ public:
     void NavigationMediaChanged(DWORD driveMask);
     void Navigate(BrowserNavigation::Request, BrowserNavigation::Read,
         BrowserNavigation::Publish, std::function<bool()> mountCurrent,
-        std::function<void()> retry);
+        std::function<void()> retry, std::function<bool()> nextOnError={});
     bool RevealFindHit(const FindHit&,int legacyVolume=-1);
     bool UsesAsyncNavigation() const;
     bool Navigating() const { return bool(navigation_); }

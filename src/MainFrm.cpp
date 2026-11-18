@@ -723,38 +723,25 @@ BOOL CMainFrame::OnQueryNewPalette()
 	// return CFrameWnd::OnQueryNewPalette();
 }
 
-void CMainFrame::OnDropFiles(HDROP hDropInfo) 
+void CMainFrame::OnDropFiles(HDROP drop)
 {
-	int handled = 0;
-	POINT p;
-	char name[MAX_PATH];
-	int i, count;
-	CHFVExplorerApp	*pApp;
-	CString currdir = "";
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	count = DragQueryFile( hDropInfo, 0xFFFFFFFF, 0, 0 );
-	for(i=0; i<count; i++ ){
-		if(DragQueryFile( hDropInfo, i, name, MAX_PATH-1 ) > 0) {
-		  DragQueryPoint( hDropInfo, &p );
-			if(is_extension( name, ".HF*" ) || is_extension( name, ".DSK" )) {
-				int save = GetBrowserSession().Document()->m_hfs_count;
-				GetBrowserSession().Document()->OnOpenDocument(name);
-				if(save < GetBrowserSession().Document()->m_hfs_count) {
-					currdir = GetBrowserSession().Document()->m_volumes[GetBrowserSession().Document()->m_hfs_count-1].m_volume_name + ":";
-				}
-			}
-		}
-	}
-	if(currdir != "") GetBrowserSession().Document()->my_chdir( currdir, 1 );
-
-	DragFinish(hDropInfo);
-	handled = 1;
-
-	if(!handled) {
-		CFrameWnd::OnDropFiles(hDropInfo);
-	}
+    std::vector<std::wstring> images;
+    const auto count=DragQueryFileW(drop,0xffffffff,nullptr,0);
+    for(UINT index=0;index<count;++index){
+        const auto size=DragQueryFileW(drop,index,nullptr,0);
+        std::wstring path(size+1,0);
+        if(!size||DragQueryFileW(drop,index,path.data(),size+1)!=size)continue;
+        path.resize(size);
+        const auto dot=path.find_last_of(L'.');
+        if(dot==path.npos)continue;
+        const auto extension=path.substr(dot);
+        if(!_wcsicmp(extension.c_str(),L".dsk")||!_wcsnicmp(extension.c_str(),L".hf",3)||
+           !_wcsicmp(extension.c_str(),L".img")||!_wcsicmp(extension.c_str(),L".image")||
+           !_wcsicmp(extension.c_str(),L".mfs")||!_wcsicmp(extension.c_str(),L".dc42"))
+            images.push_back(std::move(path));
+    }
+    DragFinish(drop);
+    GetBrowserSession().MacBrowser().OpenImages(std::move(images));
 }
 
 void CMainFrame::OnChildRegistration(WPARAM wParam, LPARAM lParam) 

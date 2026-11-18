@@ -7,6 +7,7 @@
 #include "BrowserDirectory.h"
 #include "MainMacBrowser.h"
 #include "FindFiles.h"
+#include "HfsPlusDisk.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "utils.h"
@@ -322,6 +323,12 @@ int RunBrowserSessionTest(const char* directory){
        "Find rebound the classic catalog ID to a replacement file");
    a.tree.GetTreeCtrl().SelectItem(classicRoot);
    PumpUntil([&]{return !a.Session().Navigating();},"return to classic root after Find");
+   Check(a.doc.NavigateStartupDirectory("Same:Nested",true),"queue named classic startup folder");
+   PumpUntil([&]{return !a.Session().Navigating();},"classic startup folder did not publish");
+   Check(Find(a.list,L"found")>=0&&Find(b.list,L"second classic")>=0,
+         "classic startup path opened the wrong folder or volume");
+   a.tree.GetTreeCtrl().SelectItem(classicRoot);
+   PumpUntil([&]{return !a.Session().Navigating();},"return to classic root after startup folder");
   }
   a.Session().asyncNavigationForTest=false;
   fprintf(report,"PASS: typed Windows and classic HFS Find materialize an unexpanded folder, reveal the file, and reject a replacement at the same path.\n");
@@ -356,11 +363,21 @@ int RunBrowserSessionTest(const char* directory){
    app.m_startup_floppies=FALSE;startup.m_fat_count=2;
    startup.m_fats[0].m_letter='Z';startup.m_fats[0].m_type=DRIVE_REMOVABLE;startup.m_fats[0].m_volume_name="Z:\\";
    startup.m_fats[1].m_letter=wa[0];startup.m_fats[1].m_type=DRIVE_FIXED;startup.m_fats[1].m_volume_name=wa;
-   bool probedRemovable=false;BrowserDirectory::testObserveRead=[&](const char* path){probedRemovable|=std::string(path).find("Z:")==0;};
-   Check(startup.OnNewDocument()!=FALSE,"initialize real browser document");BrowserDirectory::testObserveRead={};
-   Check(!probedRemovable&&startup.GetBrowserSession().Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_fats[1].m_rootitem,"startup selected/probed an empty floppy with detection disabled");
-startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
-   Check(startup.GetBrowserSession().List()->GetListCtrl().GetItemCount()==2,"real startup directory listing");
+   app.m_startup_hds=FALSE;
+   const auto invalid=root+"\\invalid-startup.dsk";
+   {CFile file;Check(file.Open(invalid,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create invalid startup image");file.SetLength(512);}
+   Check(startup.insert_volume(invalid,0,0,0,0)==0,"add invalid discovered image before fixed startup root");
+   auto& boot=startup.GetBrowserSession();
+   boot.asyncNavigationForTest=true;
+   bool probedRemovable=false;
+   BrowserDirectory::testObserveRead=[&](const char* path){probedRemovable|=std::string(path).find("Z:")==0;};
+   Check(startup.OnNewDocument()!=FALSE&&boot.Navigating()&&!boot.ListingAvailable(),"startup did not queue its first folder");
+   PumpUntil([&]{return !boot.Navigating();},"startup Windows folder did not publish");
+   BrowserDirectory::testObserveRead={};
+   Check(startup.m_volumes[0].m_free&&!probedRemovable&&
+         boot.Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_fats[1].m_rootitem,
+         "startup did not skip the invalid image or probed the disabled floppy");
+   Check(boot.List()->GetListCtrl().GetItemCount()==2,"real startup directory listing");
 #ifdef HFV_FLOPPY_TESTING
    {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
     auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
@@ -384,6 +401,79 @@ startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
 #endif
    frame.SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);Check(!startup.GetBrowserSession().finderLayout,"frame command routing");
    frame.DestroyWindow();Check(startup.GetBrowserSession().Tree()==nullptr&&startup.GetBrowserSession().List()==nullptr&&startup.GetBrowserSession().Owner()==nullptr,"frame pane lifetime detachment");
+  }
+  {
+   const auto firstImage=VolumeCoord::Wide((LPCSTR)(root+"\\startup-image.dsk"));
+   const auto nextImage=VolumeCoord::Wide((LPCSTR)(root+"\\startup-peer.dsk"));
+   for(const auto& fixture:std::vector<std::pair<std::wstring,std::u16string>>{
+          {firstImage,u"Startup image"},{nextImage,u"Peer image"}}){
+    auto image=HfsPlus::CreateImage(fixture.first.c_str(),8*1024*1024);
+    HfsPlus::Volume::Format(*image,fixture.second,true);
+    image.reset();
+    auto volume=MacBrowser::OpenImage(fixture.first);
+    volume->MakeDirectory(2,fixture.second);
+    volume->Close();
+   }
+
+   Doc imageDocument;
+   Frame frame;
+   CCreateContext context{};
+   context.m_pCurrentDoc=&imageDocument;
+   context.m_pNewViewClass=RUNTIME_CLASS(CHFVExplorerView);
+   app.m_pMainWnd=nullptr;
+   Check(frame.LoadFrame(IDR_MAINFRAME,WS_OVERLAPPEDWINDOW,nullptr,&context)!=FALSE,"create image startup frame");
+   auto& session=imageDocument.GetBrowserSession();
+   session.asyncNavigationForTest=true;
+   imageDocument.m_fat_count=1;
+   imageDocument.m_fats[0].m_letter=wa[0];
+   imageDocument.m_fats[0].m_type=DRIVE_FIXED;
+   imageDocument.m_fats[0].m_volume_name=wa;
+   Check(imageDocument.OnOpenDocument(CString(firstImage.c_str()))&&session.Navigating()&&
+         !session.ListingAvailable()&&app.m_pMainWnd==nullptr,"command-line image did not schedule before showing frame");
+   PumpUntil([&]{return !session.Navigating();},"startup image did not publish");
+   Check(session.ListingAvailable()&&Find(*session.List(),L"Startup image")>=0&&
+         imageDocument.m_fats[0].m_rootitem,"startup image lost its root or the Windows tree");
+
+   HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+   HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+   struct Gate {
+    HANDLE entered,release;
+    ~Gate(){BrowserDirectory::testObserveRead={};SetEvent(release);CloseHandle(release);CloseHandle(entered);}
+   } gate{entered,release};
+   BrowserDirectory::testObserveRead=[=](const char* tag){
+    if(!strcmp(tag,"image-root")){SetEvent(entered);WaitForSingleObject(release,5000);}
+   };
+   Check(session.MacBrowser().OpenImage(nextImage)==1,"queue a delayed image open");
+   PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"image root read did not start");
+   Check(Find(*session.List(),L"Startup image")>=0&&!session.ListingAvailable()&&frame.IsWindowEnabled(),
+         "image opening replaced the previous listing or disabled the frame");
+   session.Tree()->GetTreeCtrl().SelectItem(imageDocument.m_fats[0].m_rootitem);
+   PumpUntil([&]{return !session.Navigating();},"folder selection waited for superseded image opening");
+   SetEvent(release);
+   const auto key=VolumeCoord::ImageKey(nextImage);
+   PumpUntil([&]{return VolumeCoord::Available({{key,VolumeCoord::Mode::Write}});},"superseded image retained its lease");
+   BrowserDirectory::testObserveRead={};
+   Check(Find(*session.List(),L"First.txt")>=0&&Find(*session.List(),L"Peer image")<0,
+         "superseded image replaced a newer folder selection");
+
+   auto missing=VolumeCoord::Wide((LPCSTR)(root+"\\missing.dsk"));
+   Check(session.MacBrowser().OpenImage(missing)==1,"queue missing image");
+   PumpUntil([&]{return !session.Navigating();},"missing image did not complete");
+   Check(session.ListingAvailable()&&Find(*session.List(),L"First.txt")>=0&&!session.navigationErrorForTest.empty(),
+         "failed image open invalidated the previously loaded folder");
+   session.MacBrowser().OpenImages({firstImage,missing,nextImage});
+   PumpUntil([&]{return !session.Navigating();},"image batch did not complete");
+   Check(session.ListingAvailable()&&Find(*session.List(),L"Peer image")>=0,"image batch stopped at an invalid image");
+
+   const auto startupPath=wa+"\\StartupFolder";
+   Check(CreateDirectoryA(startupPath,nullptr)!=FALSE,"create unexpanded Windows startup folder");
+   {CFile file;Check(file.Open(startupPath+"\\Marker",CFile::modeCreate|CFile::modeWrite)!=FALSE,"create startup folder marker");}
+   Check(imageDocument.NavigateStartupDirectory((LPCSTR)startupPath,false),"queue named Windows startup folder");
+   PumpUntil([&]{return !session.Navigating();},"named Windows startup folder did not publish");
+   Check(Find(*session.List(),L"Marker")>=0&&session.MacBrowser().TargetFolder().IsWindows(),
+         "named Windows startup path did not materialize the containing tree");
+   frame.DestroyWindow();
+   fprintf(report,"PASS: pre-show image open, stale image rejection, previous listing on failure, and multi-image continuation.\n");
   }
   app.m_pMainWnd=&b.owner;
   first.reset();Check(app.m_pMainWnd==&b.owner&&b.doc.HasIcon('BBBB')&&b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(b.list,L"Second file")>=0,"closing A invalidated session B");

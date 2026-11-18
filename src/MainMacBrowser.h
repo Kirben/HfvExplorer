@@ -11,11 +11,15 @@ class MainMacBrowser {
     BrowserSession& session_;
     struct State;
     std::unique_ptr<State> state_;
+    int QueueImageOpen(const std::wstring&,const std::wstring&,
+        std::function<bool()> next={});
+    bool QueueNextImage(const std::shared_ptr<const std::vector<std::wstring>>&,size_t);
 public:
     ~MainMacBrowser();
     explicit MainMacBrowser(BrowserSession&);
     void ForgetTree();
     int OpenImage(const char *path);
+    void OpenImages(std::vector<std::wstring> paths);
     int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});
     int OpenCd(const char *root);
     bool HasCdRoot(int drive) const;
