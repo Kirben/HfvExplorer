@@ -2,6 +2,8 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "CopyProcess.h"
+#include "VolumeSession.h"
+#include "WorkerTransport.h"
 #include "TypeMappingSnapshot.h"
 #include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
@@ -105,9 +107,34 @@ void Pass(const Operation &op) {
     Check(CopyProcess::lastProcess && CopyProcess::lastProcess != GetCurrentProcessId(),
           "copy must run in a different process");
 }
+void TestWorkerTransport() {
+    using namespace WorkerTransport;
+    HANDLE read=nullptr,write=nullptr;
+    Check(CreatePipe(&read,&write,nullptr,4096)!=FALSE,"create transport fixture pipe");
+    Handle input(read),output(write);
+    const ImageHandleTransfer::File file{L"fixture.dsk",HANDLE(uintptr_t(17)),true};
+    SendImageFile(output.value,file);
+    const HfsPlus::Attributes attributes{{u"user.fixture",{1,2,3}}};
+    Storage::Job transfer;
+    SendAttributes(output.value,0,attributes,transfer);
+    Data packet;
+    Check(Available(input.value) && Receive(input.value,packet)==CopyWorkerProtocol::File,"shared image frame missing");
+    const auto decoded=DecodeImageFile(packet);
+    Check(decoded.path==file.path && decoded.handle==file.handle && decoded.writable,"shared image frame changed");
+    Check(Receive(input.value,packet)==CopyWorkerProtocol::AttributeSet,"shared attribute frame missing");
+    AttributeSets sets;
+    ReceiveAttributes(input.value,packet,sets);
+    Check(sets[0] && *sets[0]==attributes && !Available(input.value),"shared attribute transport changed or left bytes");
+    DWORD oversized[]={DWORD(CopyWorkerProtocol::protocol),DWORD(CopyWorkerProtocol::SessionBytes),CopyWorkerProtocol::maximumFrame+1};
+    Exact(output.value,oversized,sizeof(oversized),true);
+    bool rejected=false;
+    try { Receive(input.value,packet); } catch (const HfsPlus::Error&) { rejected=true; }
+    Check(rejected,"shared transport accepted an oversized frame");
+}
+
 void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstring& folder) {
     Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"mounted fork fixture directory");
-    const auto pid=CopyProcess::VolumeSessionPidForTest(image);
+    const auto pid=VolumeSession::VolumeSessionPidForTest(image);
     const auto directory=image->MakeDirectory(2,u"Fork job fixtures");
     const auto id=Put(*image,directory,u"Fork payload");
     HfsPlus::Attributes attributes{{u"user.fork-metadata",{12,34,56}}};
@@ -197,7 +224,7 @@ void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstrin
     }
     verifyBytes(*image,updated.id,0,300000,0);
     verifyBytes(*image,updated.id,1,300000,71);
-    Check(!CopyProcess::lastProcess && CopyProcess::VolumeSessionPidForTest(image)==pid,
+    Check(!CopyProcess::lastProcess && VolumeSession::VolumeSessionPidForTest(image)==pid,
           "fork operations restarted the persistent worker");
 }
 void Conflict(const Operation &op) {
@@ -303,6 +330,19 @@ int RunCopyReleaseTest(const char *directory) {
     try {
         Check(GetEnvironmentVariableW(L"HFV_COPY_WORKER_TEST_EXECUTABLE", nullptr, 0) > 0,
               "shipping worker executable not configured");
+        {
+            const auto path=Wide(root+"\\session.dsk");
+            { auto seed=Image(path); Put(*seed,2,u"Mounted read",4096); }
+            auto mounted=OpenBrowserImage(path);
+            Entry entry;
+            const auto pid=VolumeSession::VolumeSessionPidForTest(mounted);
+            Check(pid && mounted->FindChild(2,u"Mounted read",entry),"shipping volume session did not mount");
+            Verify(*mounted,entry.id,4096);
+            const auto written=Put(*mounted,2,u"Mounted write",8192);
+            Verify(*mounted,written,8192);
+            Check(VolumeSession::VolumeSessionPidForTest(mounted)==pid,"shipping mount restarted during read/write");
+            fprintf(report,"PASS: shipping persistent worker launches and runs read/write through the shared transport\n");
+        }
         auto source = Image(Wide(root + "\\source.dsk")),
              target = Image(Wide(root + "\\target.dsk"), HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
         auto id = Put(*source, 2, u"Shipping", 4096);
@@ -434,6 +474,8 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestWorkerTransport();
+        fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {
             bool rejected = false;
             try {
@@ -499,12 +541,12 @@ int RunCopyProcessTest(const char *directory) {
                   "persistent copy fixture could not browse");
             const auto existing = copied;
             const auto freeBeforeFailure = to->FreeBytes();
-            const auto fromPid = CopyProcess::VolumeSessionPidForTest(from);
-            const auto toPid = CopyProcess::VolumeSessionPidForTest(to);
+            const auto fromPid = VolumeSession::VolumeSessionPidForTest(from);
+            const auto toPid = VolumeSession::VolumeSessionPidForTest(to);
             auto verifySessions = [&] {
                 Check(from->Stat(original.id).identity == original.identity &&
-                          CopyProcess::VolumeSessionPidForTest(from) == fromPid &&
-                          CopyProcess::VolumeSessionPidForTest(to) == toPid,
+                          VolumeSession::VolumeSessionPidForTest(from) == fromPid &&
+                          VolumeSession::VolumeSessionPidForTest(to) == toPid,
                       "cross-volume copy restarted a persistent session");
             };
             struct Gate {
@@ -578,7 +620,7 @@ int RunCopyProcessTest(const char *directory) {
             verifySessions();
 
             for (const auto& image : {from,to}) {
-                const auto pid = CopyProcess::VolumeSessionPidForTest(image);
+                const auto pid = VolumeSession::VolumeSessionPidForTest(image);
                 const auto sourceFolder = image->MakeDirectory(2,u"Same-image source");
                 const auto targetFolder = image->MakeDirectory(2,u"Same-image target");
                 const auto descendant = image->MakeDirectory(sourceFolder,u"Descendant");
@@ -633,7 +675,7 @@ int RunCopyProcessTest(const char *directory) {
                 Wait(retry);
                 Entry replacement;
                 Check(!retry.Job()->result().code && image->FindChild(targetFolder,u"Both forks",replacement) &&
-                          CopyProcess::VolumeSessionPidForTest(image) == pid,
+                          VolumeSession::VolumeSessionPidForTest(image) == pid,
                       "same-image replacement restarted its worker or failed");
                 Verify(*image,replacement.id);
             }
@@ -720,7 +762,7 @@ int RunCopyProcessTest(const char *directory) {
             TestMountedForkJobs(from,Wide(root+"\\fork-hfsplus"));
             TestMountedForkJobs(to,Wide(root+"\\fork-hfsx"));
 
-            auto stablePid=CopyProcess::VolumeSessionPidForTest(to);
+            auto stablePid=VolumeSession::VolumeSessionPidForTest(to);
             HfsPlus::Attributes edited{{u"user.session",{1,2,3,4}}};
             auto attrs=Submit(EditAttributes{Native(to,copied.id),{},edited});
             Wait(attrs);
@@ -731,7 +773,7 @@ int RunCopyProcessTest(const char *directory) {
                 HfsPlus::Volume::CompressionMode::Zlib});
             Wait(compression);
             Check(!compression.Job()->result().code&&to->Stat(compressible).compressed&&
-                      CopyProcess::VolumeSessionPidForTest(to)==stablePid,
+                      VolumeSession::VolumeSessionPidForTest(to)==stablePid,
                   "metadata writes restarted the volume session");
             fprintf(report,"PASS: persistent HFS+/HFSX sessions stay mounted through copy, cancellation, and aborted overwrite\n");
         }
@@ -748,7 +790,7 @@ int RunCopyProcessTest(const char *directory) {
                   "classic image did not share a writable persistent mount");
             Entry sentinel;
             {
-                auto pid = CopyProcess::VolumeSessionPidForTest(classic);
+                auto pid = VolumeSession::VolumeSessionPidForTest(classic);
                 Check(alias->FindChild(2,u"Crash sentinel",sentinel),"classic persistent root listing");
                 Verify(*alias,sentinel.id,4096);
 
@@ -784,7 +826,7 @@ int RunCopyProcessTest(const char *directory) {
                 Wait(rename);
                 Entry renamed;
                 Check(!rename.Job()->result().code && alias->FindChild(sourceFolder,u"Renamed payload",renamed) &&
-                          CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                          VolumeSession::VolumeSessionPidForTest(classic)==pid,
                       "classic rename did not refresh the shared mount");
                 Verify(*alias,renamed.id);
 
@@ -809,7 +851,7 @@ int RunCopyProcessTest(const char *directory) {
                     Wait(exported);
                     if(exported.Job()->result().code)throw HfsPlus::Error(exported.Job()->result().message);
                     Check(exported.Snapshot().complete && !CopyProcess::lastProcess &&
-                              CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                              VolumeSession::VolumeSessionPidForTest(classic)==pid,
                           "classic conversion export replaced its mounted worker");
                     WIN32_FIND_DATAW file{};
                     const auto mask=mode=='t'?L"\\Text lines.txt":L"\\Renamed payload*";
@@ -830,7 +872,7 @@ int RunCopyProcessTest(const char *directory) {
                     if(imported.Job()->result().code)throw HfsPlus::Error(imported.Job()->result().message);
                     auto entries=alias->List(importFolder);
                     Check(imported.Snapshot().complete && entries.size()==1 && !CopyProcess::lastProcess &&
-                              CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                              VolumeSession::VolumeSessionPidForTest(classic)==pid,
                           "classic conversion import replaced its mounted worker");
                     if(mode=='r' || mode=='R'){
                         const unsigned fork=mode=='R'?1:0;
@@ -878,7 +920,7 @@ int RunCopyProcessTest(const char *directory) {
                 Entry mapped;
                 Check(!mappingImport.Job()->result().code && classic->FindChild(targetFolder,u"Mapped raw",mapped) &&
                           !memcmp(mapped.finder.data(),"TEXTTEST",8) && !CopyProcess::lastProcess &&
-                          CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                          VolumeSession::VolumeSessionPidForTest(classic)==pid,
                       "mounted raw import did not apply the type mapping and strip policy");
             }
             TestMountedForkJobs(classic,Wide(root+"\\fork-classic"));
@@ -901,15 +943,15 @@ int RunCopyProcessTest(const char *directory) {
             Check(bool(classic),"classic image detection failed after a clean unmount");
             Check(classic->Writable(),"clean classic image did not reopen writable");
 
-            const auto beforeCrash=CopyProcess::VolumeSessionPidForTest(classic);
-            CopyProcess::CrashVolumeSessionDuringPutForTest(classic);
+            const auto beforeCrash=VolumeSession::VolumeSessionPidForTest(classic);
+            VolumeSession::CrashVolumeSessionDuringPutForTest(classic);
             bool lost=false;
             try { Put(*classic,2,u"Interrupted write"); }
             catch (const HfsPlus::Error&) { lost=true; }
-            Check(lost && CopyProcess::lastExitCode==80 && !classic->Writable(),
+            Check(lost && WorkerTransport::lastExitCode==80 && !classic->Writable(),
                   "classic worker did not fail at the injected point or the image remained writable");
             classic->Reload();
-            Check(!classic->Writable() && CopyProcess::VolumeSessionPidForTest(classic)!=beforeCrash &&
+            Check(!classic->Writable() && VolumeSession::VolumeSessionPidForTest(classic)!=beforeCrash &&
                       classic->FindChild(2,u"Crash sentinel",sentinel),
                   "classic worker did not recover its image read-only");
             Verify(*classic,sentinel.id,4096);
@@ -972,7 +1014,7 @@ int RunCopyProcessTest(const char *directory) {
             Check(volume && volume->HasPersistentWorker() && volume->Writable() &&
                       !volume->Supports().createFolders && volume->SupportsBasicMetadata(),
                   "MFS writable persistent mount capabilities");
-            const auto pid=CopyProcess::VolumeSessionPidForTest(volume);
+            const auto pid=VolumeSession::VolumeSessionPidForTest(volume);
             {
                 auto shared=OpenBrowserImage(path);
                 Entry original;
@@ -1005,7 +1047,7 @@ int RunCopyProcessTest(const char *directory) {
                 auto edited=Submit(EditBasicMetadata{Native(volume,updated.id),updated,desired});
                 Wait(edited);
                 Check(!edited.Job()->result().code && shared->FindTransferChild(2,desired,updated) &&
-                          updated.version==7 && CopyProcess::VolumeSessionPidForTest(shared)==pid,
+                          updated.version==7 && VolumeSession::VolumeSessionPidForTest(shared)==pid,
                       "mounted MFS metadata or version lookup restarted the worker");
             }
             volume->SuspendWorker();
@@ -1014,15 +1056,15 @@ int RunCopyProcessTest(const char *directory) {
             Until([&]{return previous.expired();});
             volume=OpenBrowserImage(path);
             Check(volume && volume->Writable(),"clean MFS image did not reopen writable");
-            const auto beforeCrash=CopyProcess::VolumeSessionPidForTest(volume);
-            CopyProcess::CrashVolumeSessionDuringPutForTest(volume);
+            const auto beforeCrash=VolumeSession::VolumeSessionPidForTest(volume);
+            VolumeSession::CrashVolumeSessionDuringPutForTest(volume);
             bool failed=false;
             try{Put(*volume,2,u"Interrupted write",4096);}
             catch(const HfsPlus::Error&){failed=true;}
-            Check(failed && CopyProcess::lastExitCode==81 && !volume->Writable(),
+            Check(failed && WorkerTransport::lastExitCode==81 && !volume->Writable(),
                   "MFS worker did not stop after a flushed sector write");
             volume->Reload();
-            Check(!volume->Writable() && CopyProcess::VolumeSessionPidForTest(volume)!=beforeCrash,
+            Check(!volume->Writable() && VolumeSession::VolumeSessionPidForTest(volume)!=beforeCrash,
                   "MFS crash refresh did not restore read-only browsing");
             volume.reset();
             volume=OpenBrowserImage(path);
@@ -1407,12 +1449,12 @@ int RunCopyProcessTest(const char *directory) {
               "worker read failure propagation");
         CopyProcess::fault = 0;
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "read failure retained source");
-        CopyProcess::lastExitCode = 0;
+        WorkerTransport::lastExitCode = 0;
         CopyProcess::fault = 4;
         auto interrupted = Submit(delayed);
         Wait(interrupted);
         Check(interrupted.Job()->result().code && !interrupted.Snapshot().complete &&
-                  CopyProcess::lastExitCode == 74 && interrupted.Job()->result().rollback == Storage::Rollback::Unverified,
+                  WorkerTransport::lastExitCode == 74 && interrupted.Job()->result().rollback == Storage::Rollback::Unverified,
               "Expected the worker to exit inside its write hook");
         CopyProcess::fault = 0;
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "worker crash retained source");

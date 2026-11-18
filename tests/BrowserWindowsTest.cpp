@@ -4,7 +4,7 @@
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
-#include "CopyProcess.h"
+#include "VolumeSession.h"
 #include "HfsPlusDisk.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
@@ -96,7 +96,7 @@ int RunBrowserWindowsTest(const char* directory){
   auto firstSelection=sa.MacBrowser().CaptureItem(Find(sa,L"One"));
   auto peerSelection=sb.MacBrowser().CaptureItem(Find(sb,L"One"));
   auto shared=firstSelection.Volume();
-  auto pid=CopyProcess::VolumeSessionPidForTest(shared);
+  auto pid=VolumeSession::VolumeSessionPidForTest(shared);
   Check(shared==peerSelection.Volume()&&pid&&pid!=GetCurrentProcessId(),
         "the same mounted image did not share a distinct worker process");
   {
@@ -114,7 +114,7 @@ int RunBrowserWindowsTest(const char* directory){
     HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
     std::shared_ptr<Storage::Job> job;
     ~ReadPause(){
-     CopyProcess::PauseVolumeReadForTest(nullptr,nullptr);
+     VolumeSession::PauseVolumeReadForTest(nullptr,nullptr);
      if(release)SetEvent(release);
      if(job && !job->done()){job->cancel();job->wait();}
      if(release)CloseHandle(release);
@@ -122,7 +122,7 @@ int RunBrowserWindowsTest(const char* directory){
     }
    } pause;
    Check(pause.entered && pause.release,"make slow export pause");
-   CopyProcess::PauseVolumeReadForTest(pause.entered,pause.release);
+   VolumeSession::PauseVolumeReadForTest(pause.entered,pause.release);
    FileOperations::Request request=FileOperations::OrdinaryCopy{{firstSelection},FileOperations::Location::Windows(output)};
    request.background=true;
    auto exportJob=FileOperations::Submit(std::move(request));
@@ -134,10 +134,10 @@ int RunBrowserWindowsTest(const char* directory){
    const auto start=GetTickCount();
    const bool navigated=sb.MacBrowser().Activate(Find(sb,L"Two")) && Find(sb,L"Peer listing")>=0;
    const bool stillCopying=!exportJob.Job()->done();
-   CopyProcess::PauseVolumeReadForTest(nullptr,nullptr);
+   VolumeSession::PauseVolumeReadForTest(nullptr,nullptr);
    SetEvent(pause.release);
    Check(navigated && stillCopying && GetTickCount()-start<5000 &&
-              CopyProcess::VolumeSessionPidForTest(shared)==pid,
+              VolumeSession::VolumeSessionPidForTest(shared)==pid,
          "the second browser could not list a folder while the same image was exporting");
    Check(WaitForSingleObject(exportJob.Job()->event(),10000)==WAIT_OBJECT_0 &&
               !exportJob.Job()->result().code && exportJob.Snapshot().complete,"slow background export failed");
@@ -162,16 +162,16 @@ int RunBrowserWindowsTest(const char* directory){
    while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessage(&message);}
    Sleep(1);
   }
-  Check(Find(sa,L"Renamed")>=0&&Find(sb,L"Renamed")>=0&&CopyProcess::VolumeSessionPidForTest(shared)==pid,
+  Check(Find(sa,L"Renamed")>=0&&Find(sb,L"Renamed")>=0&&VolumeSession::VolumeSessionPidForTest(shared)==pid,
         "rename did not refresh both browsers within the same worker session");
   auto oldSelection=sa.MacBrowser().CaptureItem(Find(sa,L"Renamed"));
-  CopyProcess::CrashVolumeSessionOnRenameForTest(shared);
+  VolumeSession::CrashVolumeSessionOnRenameForTest(shared);
   auto refused=FileOperations::Submit(FileOperations::RenameEntry{oldSelection,u"Committed before crash"});
   Check(WaitForSingleObject(refused.Job()->event(),10000)==WAIT_OBJECT_0&&refused.Job()->result().code&&
         refused.Job()->result().rollback==Storage::Rollback::Unverified,
         "lost rename reply was not reported as unverified");
   Check(sa.MacBrowser().Refresh()&&sb.MacBrowser().Refresh()&&Find(sa,L"Committed before crash")>=0&&
-        Find(sb,L"Committed before crash")>=0&&CopyProcess::VolumeSessionPidForTest(shared)!=pid&&shared->Writable(),
+        Find(sb,L"Committed before crash")>=0&&VolumeSession::VolumeSessionPidForTest(shared)!=pid&&shared->Writable(),
         "refresh did not recover both browsers after a worker crash");
   oldSelection.expectedName.clear();
   auto stale=FileOperations::Submit(FileOperations::RenameEntry{oldSelection,u"Stale rename"});
