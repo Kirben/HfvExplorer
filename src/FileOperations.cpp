@@ -130,27 +130,26 @@ Storage::Result CopyRequest(const Request& request,Storage::Job& job,Completion&
  completion.complete=complete;completion.completed=job.progress().files;
  Storage::Result result;result.moved=complete&&std::any_of(request.Sources().begin(),request.Sources().end(),[](const Location& p){return p.cut;});return result;
 }
-Storage::Result Mutate(const Request& request,Storage::Job& job,Completion& completion){
- Check(!request.Sources().empty(),"Select a file or folder");if(request.OperationKind()==Kind::Rename)Check(request.Sources().size()==1,"Rename requires one selected entry");
- Storage::Progress progress;progress.fileCopy=false;progress.phase=request.OperationKind()==Kind::Rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(request.Sources().size());progress.utf8=true;job.progress(progress);
+Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t count,Storage::Job& job,Completion& completion){
+ Storage::Progress progress;progress.fileCopy=false;progress.phase=rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(count);progress.utf8=true;job.progress(progress);
  HFSIFACE_get_dir_flush();int silent=HFSIFACE_silencer(1);HFSIFACE_delete_cancel(CancelClassic,&job);struct Silent{int previous;~Silent(){HFSIFACE_delete_cancel(nullptr,nullptr);HFSIFACE_silencer(previous);}}scope{silent};
- for(auto& item:request.Sources()){Cancel(job);progress.path=item.Volume()?Utf8(item.expectedName):item.IsWindows()?Utf8(U16(item.WindowsPath())):Utf8(Ansi(item.ClassicPath()));job.progress(progress);
+ for(size_t index=0;index<count;++index){const auto& item=items[index];Cancel(job);progress.path=item.Volume()?Utf8(item.expectedName):item.IsWindows()?Utf8(U16(item.WindowsPath())):Utf8(Ansi(item.ClassicPath()));job.progress(progress);
   if(item.Volume()){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.id!=2,"Cannot rename or delete a volume root");
-   if(request.OperationKind()==Kind::Rename){Check(request.Target().IsNone()||(request.Target().IsMounted()&&request.Target().Volume()==source.first),"Rename must stay within the same mounted volume");Check(source.first->Supports().rename&&!e.protectedFile,"The selected entry cannot be renamed");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.SetWindows(path.substr(0,path.find_last_of(L"\\/")+1));MarkChild(completion,parent,request.name);}source.first->Rename(source.second,request.Target().IsNone()?e.parent:request.Target().Id(),request.name);}
+   if(rename){Check(rename->parent.IsNone()||(rename->parent.IsMounted()&&rename->parent.Volume()==source.first),"Rename must stay within the same mounted volume");Check(source.first->Supports().rename&&!e.protectedFile,"The selected entry cannot be renamed");Mark(completion,item);if(!HostPath(item).empty()){auto path=HostPath(item);Location parent;parent.SetWindows(path.substr(0,path.find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);}source.first->Rename(source.second,rename->parent.IsNone()?e.parent:rename->parent.Id(),rename->name);}
    else{Check(source.first->Supports().remove,"The selected entry cannot be deleted");Mark(completion,item);RemoveTree(*source.first,source.second,job,true);}
   }else if(item.IsWindows()){
    auto source=Source(item,true);Cancel(job);source.first->Close();
    std::string path; // ANSI legacy path is retained verbatim.
    int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.WindowsPath().c_str(),-1,nullptr,0,nullptr,nullptr);std::vector<char> converted(n);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.WindowsPath().c_str(),-1,converted.data(),n,nullptr,&lost);Check(n&&!lost,"Windows path cannot be represented by the legacy backend");path=converted.data();Check(Absolute(path),"Use an absolute Windows path");
    Mark(completion,item);
-   if(request.OperationKind()==Kind::Rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,request.name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,request.name);
+   if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,rename->name);
    }else if(!DeleteHostSelectionJob(CString(path.c_str()),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }else{
    Check(item.IsClassic()&&!item.ClassicImage().empty(),"Invalid classic HFS source");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The selected source image was replaced");auto disk=WritableFloppy(item);auto image=item.ClassicImage(),path=item.ClassicPath();hfsdirent entry{};
    if(HFSIFACE_get_properties(&image[0],&path[0],&entry))throw HfsPlus::Error(ClassicError("Cannot read the selected HFS entry"));
    Cancel(job);if(item.expectedCatalogId)Check(uint32_t(entry.cnid)==item.expectedCatalogId,"The selected classic HFS entry was replaced");Check(entry.cnid!=2,"Cannot rename or delete a volume root");
    Mark(completion,item);int code;
-   if(request.OperationKind()==Kind::Rename){Check(!request.checkNameLock||!(entry.fdflags&HFS_FNDR_NAMELOCKED),"Remove the Finder name lock before renaming this entry");auto wide=Wide(request.name);char leaf[32];BOOL lost=FALSE;int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,wide.c_str(),-1,leaf,ARRAYSIZE(leaf),nullptr,&lost);Check(n&&!lost&&HfvValidRenameLeaf(leaf,true),"Invalid classic HFS filename");auto to=path.substr(0,path.find_last_of(':')+1)+leaf;code=HFSIFACE_rename(&image[0],&path[0],&to[0]);}
+   if(rename){Check(!rename->checkNameLock||!(entry.fdflags&HFS_FNDR_NAMELOCKED),"Remove the Finder name lock before renaming this entry");auto wide=Wide(rename->name);char leaf[32];BOOL lost=FALSE;int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,wide.c_str(),-1,leaf,ARRAYSIZE(leaf),nullptr,&lost);Check(n&&!lost&&HfvValidRenameLeaf(leaf,true),"Invalid classic HFS filename");auto to=path.substr(0,path.find_last_of(':')+1)+leaf;code=HFSIFACE_rename(&image[0],&path[0],&to[0]);}
    else code=item.directory?HFSIFACE_rmdir(&image[0],&path[0]):HFSIFACE_delete(&image[0],&path[0]);
    std::string error=ClassicError("Classic HFS operation failed");Finish(disk);if(code){Cancel(job);throw HfsPlus::Error(error);}
   }
@@ -238,20 +237,53 @@ void AddPath(std::vector<VolumeCoord::Access>& access,const std::wstring& path,V
 std::u16string SourceName(const Location& item){if(!item.expectedName.empty())return item.expectedName;auto path=HostPath(item);if(!path.empty())return U16(path.substr(path.find_last_of(L"\\/")+1));if(item.IsClassic()&&!item.ClassicPath().empty())return Ansi(item.ClassicPath().substr(item.ClassicPath().find_last_of(':')+1));return {};}
 void ValidateRequest(const Request& r){
  Check(int(r.OperationKind())>=0&&int(r.OperationKind())<=int(Kind::SetCompression),"Unknown file operation");
+ if (const auto* rename = r.Rename()) {
+  Check(!rename->source.IsNone(), "Select an entry to rename");
+  Check(!rename->name.empty(), "Enter a new name");
+  Check(rename->parent.IsNone() ||
+        (rename->source.IsMounted() && rename->parent.IsMounted() &&
+         rename->source.Volume() == rename->parent.Volume()),
+        "Rename must stay within the same mounted volume");
+  return;
+ }
+ if (const auto* deletion = r.Delete()) {
+  Check(!deletion->selection.empty(), "Select entries to delete");
+  for (const auto& item : deletion->selection)
+   Check(!item.IsNone(), "No source file location was supplied");
+  return;
+ }
  for(const auto& source:r.Sources())Check(!source.IsNone(),"No source file location was supplied");
  switch(r.OperationKind()){case Kind::LegacyCopy:Check((r.Legacy().source.IsWindows()||r.Legacy().source.IsClassic())&&(r.Legacy().destination.IsWindows()||r.Legacy().destination.IsClassic()),"Legacy conversion needs explicit Windows or classic locations");r.Legacy().source.LegacyVolume();r.Legacy().source.LegacyPath();r.Legacy().destination.LegacyVolume();r.Legacy().destination.LegacyPath();return;case Kind::CreateFolder:case Kind::ExportAttribute:Check(!r.Target().IsNone(),"No destination location was supplied");return;default:Check(!r.Sources().empty(),"Select a source file or folder");}
  switch(r.OperationKind()){case Kind::Copy:case Kind::CreateHardLink:case Kind::ExportFork:case Kind::ReplaceResource:Check(!r.Target().IsNone(),"No destination location was supplied");break;default:break;}
 }
 std::vector<VolumeCoord::Access> Resources(const Request& request){
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
+ auto reserveMutation = [&](const Location& item) {
+  auto path = HostPath(item);
+  if (path.empty()) access.push_back({Resource(item), Mode::Write});
+  else AddPath(access, path, Mode::Write);
+  return path;
+ };
+ if (const auto* rename = request.Rename()) {
+  auto path = reserveMutation(rename->source);
+  if (!path.empty()) {
+   auto parent = path.substr(0, path.find_last_of(L"\\/") + 1);
+   auto explicitParent = rename->parent.IsNone() ? std::wstring{} : HostPath(rename->parent);
+   AddPath(access, ChildPath(explicitParent.empty() ? parent : explicitParent, rename->name), Mode::Write);
+  }
+  return access;
+ }
+ if (const auto* deletion = request.Delete()) {
+  for (const auto& item : deletion->selection) reserveMutation(item);
+  return access;
+ }
  if(request.OperationKind()==Kind::LegacyCopy){
   if(request.Legacy().source.IsWindows())AddPath(access,request.Legacy().source.WindowsPath(),request.Legacy().move?Mode::Write:Mode::Read);else access.push_back({request.Legacy().source.ResourceKey(),(request.Legacy().move||request.background||CopyProcess::UsesWorker(request))?Mode::Write:Mode::Read});
   if(request.Legacy().destination.IsWindows())access.push_back({VolumeCoord::LegacyOutputKey(request.Legacy().destination.WindowsPath()),Mode::Write});else access.push_back({request.Legacy().destination.ResourceKey(),Mode::Write});return access;
  }
- for(const auto& item:request.Sources()){auto mode=request.OperationKind()==Kind::CreateHardLink||request.OperationKind()==Kind::Rename||request.OperationKind()==Kind::Delete||request.OperationKind()==Kind::SetProperties||request.OperationKind()==Kind::SetAttributes||request.OperationKind()==Kind::SetBasicMetadata||request.OperationKind()==Kind::SetCompression||item.cut||((request.background||CopyProcess::UsesWorker(request))&&!item.IsWindows())?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
+ for(const auto& item:request.Sources()){auto mode=request.OperationKind()==Kind::CreateHardLink||request.OperationKind()==Kind::SetProperties||request.OperationKind()==Kind::SetAttributes||request.OperationKind()==Kind::SetBasicMetadata||request.OperationKind()==Kind::SetCompression||item.cut||((request.background||CopyProcess::UsesWorker(request))&&!item.IsWindows())?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
    // Explicit Windows adapters are still file readers when a copy is not a move.
-   if(request.OperationKind()!=Kind::Rename&&request.OperationKind()!=Kind::Delete&&request.OperationKind()!=Kind::SetProperties&&request.OperationKind()!=Kind::SetAttributes&&request.OperationKind()!=Kind::SetBasicMetadata&&request.OperationKind()!=Kind::SetCompression&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
-   if(request.OperationKind()==Kind::Rename){auto parent=path.substr(0,path.find_last_of(L"\\/"));AddPath(access,ChildPath(parent,request.name),Mode::Write);}
+   if(request.OperationKind()!=Kind::SetProperties&&request.OperationKind()!=Kind::SetAttributes&&request.OperationKind()!=Kind::SetBasicMetadata&&request.OperationKind()!=Kind::SetCompression&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
   }}
  if(request.OperationKind()==Kind::CreateHardLink||request.OperationKind()==Kind::Copy||request.OperationKind()==Kind::ReplaceResource||request.OperationKind()==Kind::ExportFork||request.OperationKind()==Kind::ExportAttribute||request.OperationKind()==Kind::CreateFolder){auto path=HostPath(request.Target());if(path.empty())access.push_back({Resource(request.Target()),Mode::Write});else if(request.OperationKind()==Kind::CreateFolder)AddPath(access,ChildPath(path,request.name),Mode::Write,false);else if(request.OperationKind()==Kind::CreateHardLink)AddPath(access,ChildPath(path,request.name),Mode::Write);else if(request.OperationKind()==Kind::Copy){bool known=true;for(const auto& source:request.Sources()){auto name=SourceName(source);if(name.empty()){known=false;break;}AddPath(access,ChildPath(path,name),Mode::Write);}if(!known)AddPath(access,path,Mode::Write,false);}else AddPath(access,path,Mode::Write,request.OperationKind()!=Kind::ExportFork&&request.OperationKind()!=Kind::ExportAttribute);
  }return access;
@@ -265,7 +297,11 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
  if(request.OperationKind()==Kind::Copy)return CopyRequest(request,job,completion);
  if(request.OperationKind()==Kind::ExportFork)return ExportFork(request,job,completion);
  if(request.OperationKind()==Kind::ReplaceResource)return ReplaceResource(request,job,completion);
- if(request.OperationKind()!=Kind::LegacyCopy)return Mutate(request,job,completion);
+ if (const auto* rename = request.Rename())
+  return Mutate(rename, &rename->source, 1, job, completion);
+ if (const auto* deletion = request.Delete())
+  return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
+ Check(request.Conversion() != nullptr, "Unsupported file operation");
  // Legacy containers cannot carry arbitrary attributes/ACLs. Preflight the
  // complete selection before converters can create partial output.
  auto noLostMetadata=[&](MacBrowser::Volume& volume,uint32_t root){
