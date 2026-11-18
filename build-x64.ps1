@@ -83,6 +83,11 @@ if($Test -or $TestHfsPlus) {
  $mfsBrowserTest.WaitForExit()
  Get-Content (Join-Path $mfsBrowser 'mfs-write-browser-report.txt')
  if($mfsBrowserTest.ExitCode -ne 0){throw 'MFS browser write tests failed'}
+ $removable=Join-Path $hfsPlusDirectory 'physical-removable'
+ $removableTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-physical-removable',('"'+$removable+'"')) -WindowStyle Hidden -PassThru
+ if(!$removableTest.WaitForExit(60000)){$removableTest.Kill();throw 'Physical removable tests timed out'}
+ Get-Content (Join-Path $removable 'physical-removable-report.txt')
+ if($removableTest.ExitCode -ne 0){throw 'Physical removable tests failed'}
  $links=Join-Path $hfsPlusDirectory 'hard-links'
  $linksTest=Start-Process -FilePath "$PSScriptRoot\bin\tests\HFVExplorer.exe" -ArgumentList @('--verify-hard-links',('"'+$links+'"')) -WindowStyle Hidden -PassThru
  if(!$linksTest.WaitForExit(60000)){$linksTest.Kill();throw 'Hard-link tests timed out'}

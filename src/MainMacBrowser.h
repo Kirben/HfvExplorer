@@ -15,6 +15,8 @@ public:
     int OpenImage(const char *path);
     int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});
     int OpenCd(const char *root);
+    bool ScanRemovable(bool silent=false,bool startupOnly=false);
+    int OpenRemovableRoot(const char* root);
     void DetachTree();
     void RebuildTree();
     void Clear();

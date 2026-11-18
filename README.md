@@ -1,5 +1,36 @@
 HFVExplorer 2.0.0
 -----------------
+
+## Physical removable disks (read-only)
+
+Use **File > Check for Mac removable disks**, or enable **Check for other Mac
+media at startup** in General options. Supported Mac volumes appear in the same
+browser as images and CDs. Selecting a Mac-formatted Windows drive root also
+probes it; Windows-readable drives retain their normal Windows browsing path.
+
+Native Windows APIs provide read-only access to external USB/FireWire, removable
+and hot-plug disks, including compatible Zip drives. MFS, classic HFS, HFS+ and
+HFSX volumes support browsing and export of both forks. Raw volumes, bounded Apple
+partition maps, primary Apple MBR partitions and validated GPT Apple HFS partitions
+are recognized, including multiple volumes and offsets beyond 4 GiB. Internal
+fixed disks are excluded. No custom driver is used. Administrator access may be
+needed for raw disk reads.
+
+Device discovery and reads run on storage workers. A bounded read cache checks
+the media-change counter even on cache hits; swaps, short reads and missing
+identity support invalidate/refuse access. Refresh reopens changed media. These
+mounts cannot write, format or delete. Existing dedicated floppy/CD paths remain
+available. Reading 400/800 KB Mac GCR disks still requires suitable hardware.
+Extended MBR chains and physical volumes requiring an external journal are not
+supported. Internal journals replay in memory. Close the mounted browsers/copies
+before removing media; close HFVExplorer if Windows still reports it in use.
+
+Tests use injected devices and generated images, never physical hardware. They
+cover formats, partition validation, 512/4096-byte sectors, large offsets,
+read-only enforcement, media swaps/errors, startup/manual discovery and copies
+continuing after the source browser closes. Physical-drive validation remains
+outstanding.
+
 Target: Windows 7 SP1 with KB2533623 or a superseding update; Windows 8/8.1,
 10 and 11 x64. Build with pinned v143 14.44 tools and matching static MFC/CRT.
 Build and run checks with build-x64.ps1. Older Windows versions still await
@@ -454,7 +485,7 @@ Current filesystem support
   cooked 2048-byte data sectors. Tests use injected layouts/sources and fixture
   files; physical mixed-mode/multisession hardware testing remains outstanding.
 - Raw, Apple partition map and classic HFS-wrapped HFS+ images are recognized.
-  Physical HFS+ / HFSX floppy access, GPT filesystem images and compressed DMG
+  GPT filesystem images and compressed DMG
   containers are not implemented. GPT support below is for external journals only.
 - Compressed-file reads decode decmpfs stored data (1/9/10), zlib (3/4), LZVN
   (7/8), LZFSE (11/12) and LZBITMAP (13/14), from attributes or resource-fork blocks. Listings show
@@ -463,8 +494,8 @@ Current filesystem support
   Other unrecognized compression methods are refused explicitly.
 - File and directory hard links resolve for browsing/export, including compressed
   backing files. Private inode directories are hidden. Broken links are marked
-  unreadable; directory navigation returns to the visible parent. Creating,
-  deleting or editing hard links/backing inodes remains unsupported.
+  unreadable; directory navigation returns to the visible parent. File and directory
+  hard-link creation, mutation and unlinking use the shared backing inode.
 - HFS+/HFSX extended attributes and Mac ACLs support reading, creation, replacement
   and removal on ordinary files and folders. Rename and fork-only overwrite retain
   existing metadata. Deletion reclaims fork-backed attributes. Attributes use binary,

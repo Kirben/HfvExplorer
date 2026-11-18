@@ -23,6 +23,6 @@
 <ClCompile Include="..\src\hfs\libhfs\node.c" />
 <ClCompile Include="..\src\hfs\libhfs\record.c" />
 <ClCompile Include="..\src\hfs\libhfs\volume.c" />
-<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-readonly.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\DirectFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /><ClCompile Include="..\src\cache.cpp"><PreprocessorDefinitions>HFV_STANDALONE_CACHE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemGroup>
+<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-readonly.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlySource.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\DirectFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /><ClCompile Include="..\src\cache.cpp"><PreprocessorDefinitions>HFV_STANDALONE_CACHE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

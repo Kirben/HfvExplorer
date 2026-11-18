@@ -97,7 +97,7 @@ public:
 };
 
 class Mfs final : public Volume {
-    std::unique_ptr<MfsImageSource> source_;
+    std::unique_ptr<MfsSource> source_;
     MfsImage image_;
     mutable std::recursive_mutex mutex_;
     struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Mfs& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
@@ -125,7 +125,7 @@ class Mfs final : public Volume {
     }
     static std::string Encode(const std::u16string& name,unsigned maximum=255){std::string encoded,error;if(!MfsImage::EncodeName(Wide(name),encoded,error,maximum))throw HfsPlus::Error(error);return encoded;}
 public:
-    explicit Mfs(std::unique_ptr<MfsImageSource> source,std::string key):source_(std::move(source)),resourceKey_(std::move(key)){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
+    explicit Mfs(std::unique_ptr<MfsSource> source,std::string key):source_(std::move(source)),resourceKey_(std::move(key)){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
     std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name()const override{return *std::atomic_load(&name_);}
     const char* Kind()const override{return "MFS";}
@@ -217,6 +217,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }
 }
+std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key){return std::make_shared<Mfs>(std::move(source),key);}
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
     return std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal));
 }

@@ -155,6 +155,7 @@ protected:
 	afx_msg void OnEditCut();
 	afx_msg void OnEditPaste();
  afx_msg void OnPasteHardLink();
+ afx_msg void OnScanRemovable();
  afx_msg void OnUpdatePasteHardLink(CCmdUI*);
 	afx_msg void OnEditCopyAppend();
 	afx_msg void OnEditCutAppend();

@@ -4,6 +4,7 @@
 #include "ReadOnlyCdBackend.h"
 #include "ReadOnlyFloppy.h"
 #include "DirectFloppy.h"
+#include "ReadOnlySource.h"
 #include "floppy.h"
 #define _FHOOK_INTERNAL_
 #include "filehook.h"
@@ -29,7 +30,8 @@ ReadOnlyFloppy* floppies[MAX_DEVICES] = {};
 FloppyReadApi* floppyApis[MAX_DEVICES] = {};
 #endif
 const int kFdBase = 0x10000000, kFdCount = 128;
-struct Descriptor { int drive; long position; bool floppy; bool direct; bool writable; };
+struct Descriptor { int drive=-1; hfv_offset_t position=0; bool floppy=false; bool direct=false; bool writable=false;std::shared_ptr<HfsPlus::Source> source;std::recursive_mutex mutex; };
+std::recursive_mutex& descriptorLock(const std::shared_ptr<Descriptor>& d){return d->source?d->mutex:deviceLock(d->drive);}
 std::shared_ptr<Descriptor> descriptors[kFdCount];
 #ifdef HFV_CD_TESTING
 char fixtures[MAX_DEVICES][MAX_PATH] = {};
@@ -51,10 +53,14 @@ bool ensureFloppy(int drive) {
 }
 bool virtualFd(int fd) { return fd >= kFdBase && fd < kFdBase + kFdCount; }
 int hookedStat(const char* path, struct _stat64* st) {
-    if (pathDrive(path) >= 0) { errno = ENOENT; return -1; }
+    if (ReadOnlySources::IsPath(path)||pathDrive(path) >= 0) { errno = ENOENT; return -1; }
     return _stat64(path, st);
 }
 int hookedOpen(const char* path, int flags, ...) {
+    if(ReadOnlySources::IsPath(path)){
+        if(flags&(_O_CREAT|_O_TRUNC|_O_APPEND|_O_WRONLY|_O_RDWR)){errno=EROFS;return -1;}auto source=ReadOnlySources::Find(path);if(!source){errno=ENOENT;return -1;}
+        try{source->CheckMedia();}catch(...){errno=EIO;return -1;}auto d=std::make_shared<Descriptor>();d->source=std::move(source);std::lock_guard<std::mutex> slots(descriptorMutex);for(int n=0;n<kFdCount;++n)if(!descriptors[n]){descriptors[n]=d;return kFdBase+n;}errno=EMFILE;return -1;
+    }
     int drive = pathDrive(path);
     if (drive < 0) {
         if (flags & _O_CREAT) { va_list ap; va_start(ap, flags); int mode = va_arg(ap,int); va_end(ap); return fhook_open_image(path,flags,mode); }
@@ -76,10 +82,10 @@ int hookedOpen(const char* path, int flags, ...) {
 }
 int hookedClose(int fd) {
     auto d=descriptor(fd);
-    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(deviceLock(d->drive));
+    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _close(fd); }
     {std::lock_guard<std::mutex> slots(descriptorMutex);if(descriptors[fd-kFdBase]!=d){errno=EBADF;return -1;}descriptors[fd-kFdBase].reset();}
-    if(!d->direct){if(d->floppy)floppy_final(d->drive);else cd_final(d->drive);}return 0;
+    if(!d->source&&!d->direct){if(d->floppy)floppy_final(d->drive);else cd_final(d->drive);}return 0;
 }
 int hookedIdentity(int fd,const char* path) {
     auto d=descriptor(fd);if(!d)return virtualFd(fd)?0:-1;
@@ -88,7 +94,7 @@ int hookedIdentity(int fd,const char* path) {
 }
 int hookedSync(int fd) {
     auto d=descriptor(fd);
-    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(deviceLock(d->drive));
+    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if(d&&descriptor(fd)!=d){errno=EBADF;return -1;}
     if(!d){if(virtualFd(fd)){errno=EBADF;return -1;}return _commit(fd);}
     if(!d->direct||!d->writable){errno=EROFS;return -1;}
@@ -99,10 +105,11 @@ int hookedSync(int fd) {
 }
 int hookedRead(int fd, void* buffer, unsigned count) {
     auto d=descriptor(fd);
-    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(deviceLock(d->drive));
+    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if(d&&descriptor(fd)!=d){errno=EBADF;return -1;}
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _read(fd,buffer,count); }
     if (count > INT_MAX) { errno=EINVAL; return -1; }
+    if(d->source){try{auto size=d->source->Size();if(uint64_t(d->position)>size){errno=EINVAL;return -1;}count=unsigned((std::min)(uint64_t(count),size-uint64_t(d->position)));d->source->Read(uint64_t(d->position),buffer,count);d->position+=count;return int(count);}catch(...){errno=EIO;return -1;}}
     if(d->direct){auto disk=DirectFloppy::Current(d->drive);if(!disk){errno=EBADF;return -1;}count=min(count,1474560u-DWORD(d->position));if(!disk->Read(d->position,count,buffer)){errno=EIO;return -1;}d->position+=count;return count;}
     if(d->floppy&&!ensureFloppy(d->drive)){errno=EIO;return -1;}
     DWORD available=(d->floppy?floppies[d->drive]->VolumeSize():cds[d->drive].VolumeSize()) - d->position;
@@ -112,7 +119,7 @@ int hookedRead(int fd, void* buffer, unsigned count) {
 }
 int hookedWrite(int fd, const void* buffer, unsigned count) {
     auto d=descriptor(fd);
-    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(deviceLock(d->drive));
+    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if(d&&descriptor(fd)!=d){errno=EBADF;return -1;}
     if(d&&d->direct&&d->writable){auto disk=DirectFloppy::Current(d->drive);if(!disk){errno=EBADF;return -1;}if(count>INT_MAX||!disk->Write(d->position,count,buffer)){errno=EIO;return -1;}d->position+=count;return count;}
     if (virtualFd(fd)) { errno=EROFS; return -1; }
@@ -120,16 +127,17 @@ int hookedWrite(int fd, const void* buffer, unsigned count) {
 }
 hfv_offset_t hookedSeek(int fd, hfv_offset_t offset, int origin) {
     auto d=descriptor(fd);
-    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(deviceLock(d->drive));
+    std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if(d&&descriptor(fd)!=d){errno=EBADF;return -1;}
     if (!d) { if (virtualFd(fd)) { errno=EBADF; return -1; } return _lseeki64(fd,offset,origin); }
+    if(d->source){try{d->source->CheckMedia();auto size=d->source->Size();LONGLONG base=origin==SEEK_SET?0:origin==SEEK_CUR?d->position:origin==SEEK_END?LONGLONG(size):-1;if(base<0||offset< -base||offset>LONGLONG(size)-base){errno=EINVAL;return -1;}return d->position=base+offset;}catch(...){errno=EIO;return -1;}}
     if(d->direct&&!DirectFloppy::Current(d->drive)){errno=EBADF;return -1;}
     if(!d->direct&&d->floppy&&!ensureFloppy(d->drive)){errno=EIO;return -1;}
     LONGLONG size=d->direct?1474560:d->floppy?floppies[d->drive]->VolumeSize():cds[d->drive].VolumeSize();
     LONGLONG base=origin==SEEK_SET?0:origin==SEEK_CUR?d->position:origin==SEEK_END?size:-1;
     if(base<0 || offset < -base || offset > size-base) { errno=EINVAL; return -1; }
     LONGLONG position=base+offset;
-    d->position=(long)position; return d->position;
+    d->position=position; return d->position;
 }
 }
 extern "C" {

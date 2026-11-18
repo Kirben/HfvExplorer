@@ -1517,9 +1517,9 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
    }
   }
  }
+ if(list&&volinx>=0&&volinx<m_fat_count&&is_fat_root_directory(path)&&(m_fats[volinx].m_type==DRIVE_REMOVABLE||m_fats[volinx].m_type==DRIVE_FIXED))if(GetBrowserSession().MacBrowser().OpenRemovableRoot(path)!=0)return;
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
-
 	dbdb("open_fat_directory");
 	if(list) {
 		if(is_fat_root_directory(path)) {
@@ -1716,6 +1716,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 
 	
  GetBrowserSession().MacBrowser().RebuildTree();
+ if(pApp->m_startup_hds)GetBrowserSession().MacBrowser().ScanRemovable(true,true);
 	return(1);
 }
 
@@ -1912,6 +1913,7 @@ void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL c
 
 
 	OnOpenDocument("") ;
+ if(check_hds)GetBrowserSession().MacBrowser().ScanRemovable(true);
 
 	if(currdir != "") my_chdir( currdir, mac );
 }

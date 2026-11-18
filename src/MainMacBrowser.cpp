@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MetadataDialogs.h"
+#include "PhysicalRemovable.h"
 #include "HFVExplorer.h"
 #include "MainMacBrowser.h"
 #include "FileOperations.h"
@@ -75,8 +76,8 @@ using Location=FileOperations::Location;
 struct MainMacBrowser::State {
     BrowserSession& session_;
     explicit State(BrowserSession& session):session_(session){}
-    struct Mount {std::shared_ptr<Volume> volume;std::wstring key;HTREEITEM root=nullptr;int drive=-1;};
-    std::vector<Mount> mounts;
+    struct Mount {std::shared_ptr<Volume> volume;std::wstring key;HTREEITEM root=nullptr;int drive=-1;std::wstring physicalPath,suffix;uint64_t physicalOffset=0;};
+    std::vector<Mount> mounts;bool removableScanned=false;
 
     std::vector<Entry> shown;
     int current=-1;uint32_t folder=2;bool showing=false,folderMutable=true;
@@ -118,6 +119,7 @@ struct MainMacBrowser::State {
     }
     void Root(int index) {
         auto& m=mounts[index];if(!m.volume)return;auto label=Wide(m.volume->Name())+L" ("+FromAnsi(m.volume->Description())+L")";
+        if(!m.suffix.empty())label+=L" - "+m.suffix;
         if(m.drive>=0)label+=std::wstring(L" - ")+wchar_t('A'+m.drive)+L":";
         if(!m.volume->Writable())label+=L" [read-only]";
         m.root=Insert(index,2,nullptr,label,true);
@@ -247,6 +249,25 @@ int MainMacBrowser::OpenImage(const std::wstring& path,const std::wstring& exter
     std::string ansi(n,0);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,&ansi[0],n,nullptr,&lost);
     if(!lost&&n)App().AddToRecentFileList(ansi.c_str());return 1;
 }
+bool MainMacBrowser::ScanRemovable(bool silent,bool startupOnly){
+ if(startupOnly&&state_->removableScanned)return true;state_->removableScanned=true;
+ Removable::Discovery snapshot;auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=Removable::Scan(job);return Storage::Result{};},Hidden(session_),session_.Owner());
+ if(result.code){if(!silent&&!Hidden(session_))session_.Owner()->MessageBox(result.message.c_str(),"Checking Mac removable disks",MB_OK|MB_ICONERROR);return false;}
+ int selected=-1;uint32_t folder=2;state_->Selected(selected,folder);auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);std::set<int> retained;
+ for(auto& found:snapshot.volumes){int slot=-1;auto key=VolumeCoord::Wide(found.volume->ResourceKey());for(size_t i=0;i<state_->mounts.size();++i)if(state_->mounts[i].key==key){slot=int(i);break;}if(slot<0){slot=int(state_->mounts.size());state_->mounts.push_back({found.volume,key,nullptr,-1});}auto& mount=state_->mounts[slot];mount.volume=found.volume;mount.physicalPath=found.device.path;mount.physicalOffset=found.partition.offset;mount.suffix=found.label;if(mount.root){tree->delete_subdir_contents(mount.root);auto old=mount.root;mount.root=nullptr;tree->m_ct->DeleteItem(old);}state_->Root(slot);retained.insert(slot);}
+ for(size_t i=0;i<state_->mounts.size();++i){auto& mount=state_->mounts[i];if(mount.physicalPath.empty()||retained.count(int(i)))continue;if(mount.root)tree->m_ct->DeleteItem(mount.root);mount.root=nullptr;mount.volume.reset();}
+ tree->enable_selchange(enabled);
+ if(selected>=0&&!state_->mounts[selected].physicalPath.empty()){if(retained.count(selected))state_->Show(selected,2,state_->mounts[selected].root);else{session_.ClearCurrent();session_.SetLocationTitle({});session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});}}
+ if(!silent&&!snapshot.errors.empty()&&!Hidden(session_)){std::string message="Some removable disks could not be read:\r\n";for(size_t i=0;i<snapshot.errors.size()&&i<8;++i)message+="\r\n"+snapshot.errors[i];session_.Owner()->MessageBox(message.c_str(),"Checking Mac removable disks",MB_OK|MB_ICONINFORMATION);}
+ return true;
+}
+int MainMacBrowser::OpenRemovableRoot(const char* root){
+ std::vector<Removable::Mounted> found;auto wide=FromAnsi(root);auto result=ShowStorageWaitJob([&](Storage::Job&){found=Removable::FromDriveRoot(wide);return Storage::Result{};},Hidden(session_),session_.Owner());
+ if(result.code){session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});if(!Hidden(session_))session_.Owner()->MessageBox(result.message.c_str(),"Reading Mac removable disk",MB_OK|MB_ICONERROR);return -1;}
+ if(found.empty())return 0;int selected=-1;
+ for(auto& v:found){auto key=VolumeCoord::Wide(v.volume->ResourceKey());int slot=-1;for(size_t i=0;i<state_->mounts.size();++i)if(state_->mounts[i].key==key){slot=int(i);break;}if(slot<0){slot=int(state_->mounts.size());state_->mounts.push_back({v.volume,key,nullptr,-1});}auto& mount=state_->mounts[slot];mount.volume=v.volume;mount.physicalPath=v.device.path;mount.physicalOffset=v.partition.offset;mount.suffix=v.label;if(!mount.root)state_->Root(slot);if(selected<0)selected=slot;}
+ state_->Show(selected,2,state_->mounts[selected].root);return 1;
+}
 int MainMacBrowser::OpenCd(const char* root) {
     int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;
     for(auto& mount:state_->mounts)if(mount.drive==drive&&mount.root)return 0; // Windows side stays selectable.
@@ -260,9 +281,10 @@ bool MainMacBrowser::Select(LPARAM data){auto p=reinterpret_cast<lparam_struct*>
 bool MainMacBrowser::Refresh(){int i;uint32_t id;if(!state_->Selected(i,id))return false;
     auto& mount=state_->mounts[i];
     if(session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();}))return true;
-    bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No HFS+ / HFSX disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
+    bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(!mount.physicalPath.empty())mount.volume=Removable::Reopen(mount.physicalPath,mount.physicalOffset);else if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No HFS+ / HFSX disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
     if(!ready){if(readBusy){session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();},true);return true;}if(mount.drive>=0){ReleaseCd(mount.drive);return false;}session_.List()->initialize_volume("",0);return true;}
-    if(mount.drive>=0){id=2;state_->Show(i,2,mount.root);}
+    if(!mount.physicalPath.empty()){id=2;TreeText(session_,mount.root,Wide(mount.volume->Name())+L" - "+mount.suffix+L" [read-only]");state_->Show(i,2,mount.root);}
+    else if(mount.drive>=0){id=2;state_->Show(i,2,mount.root);}
     else if(!state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem())&&id!=2)state_->Show(i,2,mount.root);
     return true;
 }

@@ -112,6 +112,7 @@ BEGIN
         MENUITEM "Format &new volume...",       ID_FILE_NEWVOLUME
         MENUITEM "Format Mac image...", ID_FILE_NEWHFSPLUS
         MENUITEM "&Open volume...\tCtrl+O",     ID_FILE_OPEN
+        MENUITEM "Check for Mac removable disks", ID_FILE_SCAN_REMOVABLE
         MENUITEM "Import file...", ID_FILE_MAC_IMPORT
         MENUITEM "Replace resource fork...", ID_FILE_MAC_IMPORT_RESOURCE
         MENUITEM "Export data fork...", ID_FILE_MAC_EXPORT_DATA
