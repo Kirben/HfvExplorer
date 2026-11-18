@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "FileOperations.h"
 #include "CopyProcess.h"
+#include "CopyWorkerProtocol.h"
 #include "BrowserTransfers.h"
 #include <cstdio>
 #include <type_traits>
@@ -190,6 +191,60 @@ int RunTypedLocationsTest(const char *directory) {
         BrowserTransfers::Clear();
         fprintf(report, "PASS: exclusive typed addresses, immutable payloads, Unicode paths, invalid "
                         "combinations, media snapshots, lifetime ownership and no browser indexes\n");
+        {
+            namespace Protocol = CopyWorkerProtocol;
+            using Protocol::Endpoint;
+            using Protocol::EncodeRequest;
+            using Protocol::DecodeRequest;
+            const auto output = Location::Windows(L"C:\\protocol-output.bin");
+            const Request request = ExportFileFork{windows, output, ForkSelector::Resource};
+            // A placeholder handle is sufficient for pure decoding. The child validates the live handle.
+            const auto parent = reinterpret_cast<HANDLE>(uintptr_t(1));
+            const std::vector<Endpoint> sources{{windows, {}, {}}};
+            const Endpoint target{output, {}, {}};
+            auto encoded = EncodeRequest(request, parent, 0, sources, target);
+            auto valid = encoded;
+            auto decoded = DecodeRequest(valid);
+            Check(decoded.kind == Kind::ExportFork && decoded.fork == ForkSelector::Resource &&
+                      decoded.sources.size() == 1 && decoded.sources[0].location.WindowsPath() == windows.WindowsPath() &&
+                      decoded.target.location.WindowsPath() == output.WindowsPath(),
+                  "Direct request round trip changed the fork or endpoints");
+            for (size_t length = 0; length < encoded.bytes.size(); ++length) {
+                auto truncated = encoded;
+                truncated.bytes.resize(length);
+                Reject([&] { DecodeRequest(truncated); }, "Truncated request prefix accepted");
+            }
+            auto missing = EncodeRequest(request, parent, 0, {}, target);
+            Reject([&] { DecodeRequest(missing); }, "Missing fork source accepted");
+            auto extra = EncodeRequest(request, parent, 0, {sources.front(), sources.front()}, target);
+            Reject([&] { DecodeRequest(extra); }, "Extra fork source accepted");
+            auto noTarget = EncodeRequest(request, parent, 0, sources, Endpoint{});
+            Reject([&] { DecodeRequest(noTarget); }, "Missing fork target accepted");
+            auto wrongFork = encoded;
+            wrongFork.bytes[8] = 2;
+            Reject([&] { DecodeRequest(wrongFork); }, "Invalid fork selector accepted");
+            auto wrongTag = encoded;
+            wrongTag.bytes[0] = 255;
+            Reject([&] { DecodeRequest(wrongTag); }, "Invalid operation accepted");
+            auto wrongFlag = encoded;
+            wrongFlag.bytes[6 * sizeof(uint64_t)] = 2; // cut flag in the first endpoint
+            Reject([&] { DecodeRequest(wrongFlag); }, "Invalid endpoint flag accepted");
+            auto trailing = encoded;
+            trailing.bytes.push_back(0);
+            Reject([&] { DecodeRequest(trailing); }, "Trailing request bytes accepted");
+            DWORD frame[] = {DWORD(Protocol::protocol), DWORD(Protocol::RequestPacket), DWORD(encoded.bytes.size())};
+            Check(Protocol::ValidateFrame(frame) == Protocol::RequestPacket, "Valid request frame rejected");
+            ++frame[0];
+            Reject([&] { Protocol::ValidateFrame(frame); }, "Unknown protocol version accepted");
+            frame[0] = DWORD(Protocol::protocol);
+            frame[1] = 0;
+            Reject([&] { Protocol::ValidateFrame(frame); }, "Unknown message tag accepted");
+            frame[1] = DWORD(Protocol::RequestPacket);
+            frame[2] = Protocol::FrameLimit(Protocol::RequestPacket) + 1;
+            Reject([&] { Protocol::ValidateFrame(frame); }, "Oversized request frame accepted");
+            fprintf(report, "PASS: direct worker request round trip and malformed frame, operation, fork, "
+                            "flag, endpoint count, length and trailing-data checks without a process\n");
+        }
         Request copy = OrdinaryCopy{{windows}, Location::Mounted(backend)};
         Check(copy.OperationKind() == Kind::Copy && !copy.Conversion() &&
                   copy.Copy().sources.size() == 1 && copy.Copy().destination.IsMounted(),
