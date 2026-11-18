@@ -142,6 +142,7 @@ Storage::Result ExecuteInWorker(const Request&,Storage::Job&,Completion&);
 #ifdef HFV_TESTING
 struct PlanAccessForTest {
  bool temporaryWorker, sameMount, read, write;
+ size_t workerSources, streamedSources;
 };
 PlanAccessForTest InspectPlanForTest(const Request&,const std::string& key,bool inWorker=false);
 #endif

@@ -127,8 +127,10 @@ std::shared_ptr<Volume> OpenClassicImage(const std::wstring&, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.
 // A move removes its source only after the entire selected tree was copied.
 bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage::Job &, bool move = false);
+enum class ForkSource { Stream, MountedWorker };
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> &,
-              Volume &target,uint32_t parent,Storage::Job &, const TransferAdapter & = {});
+              Volume &target,uint32_t parent,Storage::Job &, const TransferAdapter & = {},
+              const std::vector<ForkSource>& routes = {});
 void RemoveTree(Volume &, uint32_t id, Storage::Job &,bool deletionProgress=false);
 std::string Snapshot(Volume &,uint32_t id,Storage::Job &,bool requireRemovable=false);
 std::wstring Wide(const std::u16string &);

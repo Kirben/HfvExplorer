@@ -732,6 +732,68 @@ int RunCopyProcessTest(const char *directory) {
                       "mounted fork export plan did not share source reads");
                 fprintf(report,"PASS: one execution plan pairs mounted export, cut, same-image copy and worker handoff with expected leases\n");
             }
+            {
+                const auto mixedFolder=from->MakeDirectory(2,u"Mixed sources");
+                const auto within=Put(*from,2,u"Already mounted",1024,12);
+                const auto remote=Put(*to,2,u"Other image",2048,23);
+                const auto oldRemote=Put(*from,mixedFolder,u"Other image",512,79);
+                Put(*from,mixedFolder,u"Windows file",512,80);
+                {
+                    auto host=OpenWindows(hostFolder);
+                    Put(*host,2,u"Windows file",4096,34);
+                }
+                auto cut=Native(from,within);
+                cut.cut=true;
+                Request mixed=OrdinaryCopy{{cut,Native(to,remote),Location::Windows(hostFolder+L"\\Windows file")},
+                    Native(from,mixedFolder)};
+                mixed.background=true;
+                auto plan=InspectPlanForTest(mixed,from->ResourceKey());
+                Check(plan.workerSources==1&&plan.streamedSources==2&&plan.write&&!plan.temporaryWorker,
+                      "mixed plan did not assign each source to the destination pair");
+                const auto fromPid=VolumeSession::VolumeSessionPidForTest(from);
+                const auto toPid=VolumeSession::VolumeSessionPidForTest(to);
+                CopyProcess::lastProcess=0;
+                auto stopped=Submit(mixed);
+                Conflict(stopped);
+                auto progress=stopped.Job()->progress();
+                const auto total=1024+2048+4096+3*173;
+                Check(progress.totalFiles==3&&progress.files==1&&progress.totalBytes==total&&
+                      progress.processed==1024+173&&stopped.Job()->conflict()=="Other image",
+                      "mixed progress did not include the whole ordered selection");
+                stopped.Job()->resolve(Storage::ConflictChoice::Cancel);
+                Wait(stopped);
+                const auto cancelled=stopped.Job()->result();
+                Check(cancelled.outcome==Storage::Outcome::Cancelled&&cancelled.completed==1&&cancelled.partial&&
+                      !stopped.Snapshot().complete,"mixed cancellation lost the partial completion");
+                Verify(*from,within,1024,12);
+                Verify(*from,oldRemote,512,79);
+
+                auto retry=Submit(mixed);
+                Conflict(retry);
+                Check(retry.Job()->conflict()=="Already mounted","mixed retry changed source ordering");
+                retry.Job()->resolve(Storage::ConflictChoice::ReplaceAll);
+                Wait(retry);
+                const auto result=retry.Job()->result();
+                const auto finalProgress=retry.Job()->progress();
+                Check(!result.code,result.message.c_str());
+                Check(result.moved&&retry.Snapshot().complete&&result.completed==3,
+                      "mixed Cut did not report all copied files and completed source cleanup");
+                Check(finalProgress.files==3&&finalProgress.processed==total,
+                      "mixed Cut cleanup reset the combined progress");
+                Check(!CopyProcess::lastProcess&&VolumeSession::VolumeSessionPidForTest(from)==fromPid&&
+                      VolumeSession::VolumeSessionPidForTest(to)==toPid,
+                      "mixed replacement restarted a mounted worker or launched a temporary worker");
+                Entry copied;
+                Check(!from->FindChild(2,u"Already mounted",copied),"completed mixed Cut retained the moved source");
+                Check(from->FindChild(mixedFolder,u"Already mounted",copied),"same-image result missing");
+                Verify(*from,copied.id,1024,12);
+                Check(from->FindChild(mixedFolder,u"Other image",copied),"other image result missing");
+                Verify(*from,copied.id,2048,23);
+                Check(from->FindChild(mixedFolder,u"Windows file",copied),"Windows result missing");
+                Verify(*from,copied.id,4096,34);
+                Verify(*to,remote,2048,23);
+                fprintf(report,"PASS: mixed same-image, other-image, and Windows sources share progress, Replace All, and partial Cut cancellation without a worker handoff.\n");
+            }
             cancelOverwrite(download);
             {
                 auto host=ResolveWindowsFile(hostFile.WindowsPath());

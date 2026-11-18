@@ -176,7 +176,7 @@ public:
 };
 struct Planned { Entry entry; std::vector<Planned> children; Reader reader; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
-             std::set<uint32_t> &ancestors, unsigned depth,bool removal=false,const TransferAdapter& adapter={}) {
+             std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
     Planned out; out.entry = v.Stat(id);auto identity=out.entry.resolvedId?out.entry.resolvedId:id;
     Check(depth <= 128 && ancestors.insert(identity).second, "Recursive folder link or excessive folder depth");
@@ -187,19 +187,22 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     if(out.entry.compressed)out.entry.attributes.erase(u"com.apple.decmpfs");
     if(out.entry.hardLink)out.entry.attributes.erase(u"com.apple.system.hfs.firstlink");
     if (out.entry.directory){
-        if (adapter) out.reader=adapter(v,out.entry,job,depth==0);if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal,adapter));}
+        if (adapter) out.reader=adapter(v,out.entry,job,depth==0);if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal,reportProgress,adapter));}
     else { if(!removal){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
         if (adapter) out.reader=adapter(v,out.entry,job,depth==0);
         ++p.totalFiles; Check(UINT64_MAX - p.totalBytes >= out.entry.forks[0].size,
         "Copy size overflow"); p.totalBytes += out.entry.forks[0].size;
         Check(UINT64_MAX - p.totalBytes >= out.entry.forks[1].size, "Copy size overflow");
         p.totalBytes += out.entry.forks[1].size; }
-    ancestors.erase(identity); job.progress(p); return out;
+    ancestors.erase(identity);
+    // Cut cleanup scans quietly so the transfer's completed totals remain visible.
+    if(reportProgress)job.progress(p);
+    return out;
 }
 using CopiedLinks=std::map<std::pair<std::string,uint32_t>,std::pair<uint32_t,std::u16string>>;
 void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
-              Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies) {
+              Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route) {
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
     found=dst.FindTransferChild(parent,entry,existing);
@@ -210,7 +213,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
         if(!found)Storage::OutcomeEvidence::NoteRetainedChange();
         auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
-        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies))complete=false;}catch(...){failure=std::current_exception();}
+        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
         // child creates/renames can change its dates even on Skip/cancellation.
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
@@ -229,14 +232,26 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name,found);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:std::string{};
-    dst.Put(parent, outgoing, [&](unsigned fork, uint64_t offset, void *p, size_t n) {
-        if (job.cancelled()) throw Storage::Cancelled();
-        if (plan.reader) plan.reader(fork, offset, p, n);
-        else src.Read(entry.id, fork, offset, p, n);
+    const auto advance=[&](unsigned fork,uint64_t offset,size_t count){
         if(job.cancelled())throw Storage::Cancelled();
-        auto end=offset+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.fileBytes += added; progress.bytes += added;progress.processed+=added;job.progress(progress);
+        const auto end=offset+count;
+        const auto added=end>readThrough[fork]?end-readThrough[fork]:0;
+        readThrough[fork]=(std::max)(readThrough[fork],end);
+        progress.fileBytes+=added;
+        progress.bytes+=added;
+        progress.processed+=added;
+        job.progress(progress);
         if(job.cancelled())throw Storage::Cancelled();
-    }, found);
+    };
+    if(route==ForkSource::MountedWorker)
+        VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
+    else
+        dst.Put(parent,outgoing,[&](unsigned fork,uint64_t offset,void* p,size_t count){
+            if(job.cancelled())throw Storage::Cancelled();
+            if(plan.reader)plan.reader(fork,offset,p,count);
+            else src.Read(entry.id,fork,offset,p,count);
+            advance(fork,offset,count);
+        },found);
     if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }
 }
@@ -299,7 +314,7 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
 }
 void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress) {
     Check(id != 2 && v.Writable(), "Cannot delete the volume root or a read-only item");
-    std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0,true);
+    std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0,true,deletionProgress);
     std::function<void(const Planned &)> remove = [&](const Planned &n) {
         if (job.cancelled()) throw Storage::Cancelled();
         // A directory hard link is a link, not ownership of its backing children.
@@ -349,14 +364,19 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  }
 }
 }
-bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter){
+bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes){
+    Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
     Check(dst.Writable(),"The destination is read-only");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
-        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,adapter));}
+        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));}
     ValidatePlans(dst,plans,parent,true);
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
-    CopiedLinks copies;for(size_t i=0;i<plans.size();++i)if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies))complete=false;
+    CopiedLinks copies;
+    for(size_t i=0;i<plans.size();++i){
+        const auto route=routes.empty()?ForkSource::Stream:routes[i];
+        if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
+    }
     return complete;
 }
 bool Copy(Volume &src,uint32_t id,Volume &dst,uint32_t parent,Storage::Job& job,bool move){
