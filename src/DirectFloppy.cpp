@@ -63,7 +63,7 @@ bool DirectFloppy::Open(int drive,bool verifyWrites){
 bool DirectFloppy::flushWrites(){
  if(!pendingCount_)return !error_;
  if(!verify())return false;
- DWORD got=0;writes_=true;
+ DWORD got=0;writes_=true;finished_=false;
  if(!api_->Write(handle_,pendingOffset_,pendingCount_,pending_,got))return fail(GetLastError());
  if(got!=pendingCount_)return fail(ERROR_WRITE_FAULT);
  pendingCount_=0;return verify();

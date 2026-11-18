@@ -256,6 +256,40 @@ int RunFloppyCopyRegressionsTest(const char* directory){
   for(unsigned fault=0;fault<ARRAYSIZE(cases);++fault){reset();switch(fault){case 0:device->denyLock=true;break;case 1:device->writeFail=true;break;case 2:device->shortWrite=true;break;case 3:device->flushError=ERROR_NOT_READY;break;case 4:device->badRead=true;break;case 5:device->shortRead=true;break;case 6:device->readFail=true;break;case 7:device->swapOnFlush=true;break;case 8:device->writeProtect=true;break;}
    paste(true);done();Check(BackgroundCopies::LastResult().code&&present()&&BrowserTransfers::Any()&&BrowserTransfers::Snapshot().items.front().cut,(std::string("failed Cut lost source/clipboard: ")+cases[fault]).c_str());if(fault==0||fault==8)Check(device->writes==0&&device->disk.media==blank,"denied lock changed media");fprintf(report,"PASS: %s retained source/Cut and released floppy access.\n",cases[fault]);
   }
+  auto mutation=[&](const char* name,auto makeRequest){
+   reset();paste(false);done();
+   Check(!BackgroundCopies::LastResult().code&&device->readbacks>0,"ordinary floppy copy skipped readback");
+   device->flushed=false;
+   auto item=FileOperations::Location::Classic(physical,"AuditFloppy:Payload");
+   item.BindMediaGeneration(device->disk.changeCount);
+   auto before=device->disk.media;
+   auto writes=device->writes;
+   ++device->disk.changeCount;
+   auto stale=FileOperations::Submit(makeRequest(item));
+   stale.Job()->wait();
+   auto rejected=stale.Job()->result();
+   Check(rejected.error==ERROR_MEDIA_CHANGED&&device->writes==writes&&
+         device->disk.media==before&&!device->locked,
+         (std::string(name)+": stale request, error "+std::to_string(rejected.error)+" "+rejected.message).c_str());
+   item.BindMediaGeneration(device->disk.changeCount);
+   device->badRead=true;
+   auto failed=FileOperations::Submit(makeRequest(item));
+   failed.Job()->wait();
+   auto failure=failed.Job()->result();
+   // An HFS transaction can hit the fault at its own sync, then fail rollback
+   // because the device error is already latched.
+   Check(failure.error==ERROR_CRC&&failure.rollback>=Storage::Rollback::Unverified&&
+         device->writes>writes&&!device->locked,
+         (std::string(name)+": readback, error "+std::to_string(failure.error)+
+          ", rollback "+std::to_string(int(failure.rollback))+" "+failure.message).c_str());
+  };
+  mutation("Floppy rename did not reject a stale generation or report failed readback",
+      [](const auto& item){return FileOperations::RenameEntry{item,u"Changed"};});
+  mutation("Floppy delete did not reject a stale generation or report failed readback",
+      [](const auto& item){return FileOperations::DeleteEntries{{item}};});
+  mutation("Floppy Finder edit did not reject a stale generation or report failed readback",
+      [](const auto& item){return FileOperations::EditClassicProperties{item,FileOperations::FinderLabel{3}};});
+  fprintf(report,"PASS: rename, delete and Finder edits reject stale media and report device readback failure.\n");
   reset();device->gateRead=true;paste(true);Until([&]{return WaitForSingleObject(device->entered,0)==WAIT_OBJECT_0;});Check(BackgroundCopies::Active()&&present()&&BrowserTransfers::Any()&&frame->IsWindowEnabled(),"source removed, job timed out or browser disabled before readback completed");SendMessage(BackgroundCopies::DialogWindow(),WM_COMMAND,IDCANCEL,0);SetEvent(device->release);done();Check(present()&&BrowserTransfers::Any()&&BackgroundCopies::LastResult().error==ERROR_CANCELLED,"cancel during verification removed source or lost Cancel result");
   // A mode question can outlive its selected disk. A replacement disk in
   // the same drive must never inherit that queued write request.
