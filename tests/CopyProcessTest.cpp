@@ -664,6 +664,32 @@ int RunCopyProcessTest(const char *directory) {
                       "Windows transfer did not cancel during overwrite staging");
             };
             const auto download=OrdinaryCopy{{Native(from,original.id)},hostTarget};
+            {
+                Request planned=download;planned.background=true;
+                auto exportPlan=InspectPlanForTest(planned,from->ResourceKey());
+                Check(exportPlan.read && !exportPlan.write && !exportPlan.temporaryWorker && !exportPlan.sameMount,
+                      "background mounted export plan did not share source reads");
+                planned.Copy().sources.front().cut=true;
+                auto cutPlan=InspectPlanForTest(planned,from->ResourceKey());
+                Check(cutPlan.write && !cutPlan.read && !cutPlan.temporaryWorker,
+                      "mounted cut export plan failed to reserve the source for mutation");
+                const auto same=InspectPlanForTest(OrdinaryCopy{{Native(from,original.id)},Native(from)},from->ResourceKey());
+                Check(same.sameMount && same.write && !same.temporaryWorker,
+                      "same-image plan did not choose its mounted worker and exclusive access");
+                Request handoff=OrdinaryCopy{{Native(source,file)},hostTarget};
+                const auto temporary=InspectPlanForTest(handoff,source->ResourceKey());
+                const auto childPlan=InspectPlanForTest(handoff,source->ResourceKey(),true);
+                Check(temporary.temporaryWorker && temporary.write && !temporary.read &&
+                          !childPlan.temporaryWorker && childPlan.read && !childPlan.write,
+                      "temporary worker planning did not reserve the handoff or prevent nested routing");
+                Request fork=ExportFileFork{Native(from,original.id),
+                    Location::Windows(hostFolder+L"\\plan-fork.bin"),ForkSelector::Resource};
+                fork.background=true;
+                const auto forkPlan=InspectPlanForTest(fork,from->ResourceKey());
+                Check(forkPlan.read && !forkPlan.write && !forkPlan.temporaryWorker,
+                      "mounted fork export plan did not share source reads");
+                fprintf(report,"PASS: one execution plan pairs mounted export, cut, same-image copy and worker handoff with expected leases\n");
+            }
             cancelOverwrite(download);
             {
                 auto host=ResolveWindowsFile(hostFile.WindowsPath());

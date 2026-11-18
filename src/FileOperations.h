@@ -139,6 +139,12 @@ public:
 // the submitting browser or progress dialog. UI refresh is a separate consumer.
 Operation Submit(Request);
 Storage::Result ExecuteInWorker(const Request&,Storage::Job&,Completion&);
+#ifdef HFV_TESTING
+struct PlanAccessForTest {
+ bool temporaryWorker, sameMount, read, write;
+};
+PlanAccessForTest InspectPlanForTest(const Request&,const std::string& key,bool inWorker=false);
+#endif
 std::vector<Operation> Pending();
 void CancelPending();
 
