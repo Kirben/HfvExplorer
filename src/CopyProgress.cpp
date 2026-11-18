@@ -8,6 +8,7 @@
 #include "charset.h"
 #include "FloppyWriter.h"
 #include "DirectFloppy.h"
+#include "FloppyFileWrite.h"
 #include "MacBrowserModel.h"
 #include "ReadOnlyCdBackend.h"
 #include <vector>
@@ -33,23 +34,18 @@ std::string copyError() {
 }
 Storage::Result copyToFloppy(Storage::Job& job,int drive,const std::string& sourceVolume,const std::string& source,
  const std::string& targetVolume,const std::string& target,int directory,int move,LegacyCopyOptions options) {
- FloppyWriteApi* api=nullptr;
-#ifdef HFV_FLOPPY_TESTING
- api=dynamic_cast<FloppyWriteApi*>(physical_floppy_test_api(drive));
- if(!api)return {1,ERROR_NOT_SUPPORTED,"No simulated writable floppy is attached"};
-#endif
- HFSIFACE_get_dir_flush();physical_floppy_suspend(drive);
- DirectFloppy disk(api);
- if(!disk.Open(drive,options.verifyFloppy))return {1,disk.Error(),"Could not open and lock the destination HFS floppy (Windows error "+std::to_string(disk.Error())+")."};
- if(options.targetGenerationKnown&&disk.Generation()!=options.targetGeneration)return {1,ERROR_MEDIA_CHANGED,"Floppy media changed after selection; select the volume again"};
- bool sameVolume=!_stricmp(sourceVolume.c_str(),targetVolume.c_str());
+ const auto generation=options.targetGenerationKnown?std::optional<DWORD>(options.targetGeneration):std::nullopt;
+ const bool sameVolume=!_stricmp(sourceVolume.c_str(),targetVolume.c_str());
  Storage::Result result;
- try {result=MakeCopyJob(sourceVolume,source,targetVolume,target,directory,sameVolume?move:0,options)(job);}
- catch(...){HFSIFACE_get_dir_flush();disk.Finish();throw;}
- HFSIFACE_get_dir_flush();
- auto p=job.progress();p.phase=options.verifyFloppy?"Verifying floppy":"Flushing floppy";job.progress(p);
- if(!disk.Finish())return {1,disk.Error(),"Floppy copy failed while writing/flushing buffered data (Windows error "+std::to_string(disk.Error())+"). "+(sameVolume&&move?"The floppy may be incomplete; the move may have been partly applied.":"The destination may be incomplete; source files were retained.")};
- if(result.code){result.moved=false;if(disk.WritesStarted())result.message+=" The destination may contain partial files.";}
+ try {
+  const bool wrote=RunFloppyWrite(drive,generation,[&]{
+   result=MakeCopyJob(sourceVolume,source,targetVolume,target,directory,sameVolume?move:0,options)(job);
+   auto progress=job.progress();progress.phase="Verifying floppy";job.progress(progress);
+  });
+  if(result.code){result.moved=false;if(wrote)result.message+=" The destination may contain partial files.";}
+ }catch(const FloppyWriteFailure& error){
+  return {1,error.error,error.what()};
+ }
  return result;
 }
 bool macVolume(const std::string& path) {

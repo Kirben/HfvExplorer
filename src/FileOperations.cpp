@@ -10,7 +10,7 @@
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
-#include "DirectFloppy.h"
+#include "FloppyFileWrite.h"
 #include "ReadOnlyCdBackend.h"
 #include "RenameName.h"
 #include "charset.h"
@@ -78,25 +78,32 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  if(value.IsWindows()){Check(Absolute(value.WindowsPath()),"Use an absolute Windows destination path");auto volume=OpenWindows(value.WindowsPath());if(!value.expectedIdentity.empty())Check(FolderIdentity(volume->Stat(2).identity)==FolderIdentity(value.expectedIdentity),"The destination folder was replaced");return {volume,2};}
  return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true),2};
 }
-std::unique_ptr<DirectFloppy> WritableFloppy(const Location& target,bool verify=false){
- int drive=target.IsPhysical()&&target.Media()==ClassicMedia::Floppy?target.Drive():-1;if(drive<0)return {};
- physical_floppy_suspend(drive);std::unique_ptr<DirectFloppy> disk;
-#ifdef HFV_FLOPPY_TESTING
- auto api=dynamic_cast<FloppyWriteApi*>(physical_floppy_test_api(drive));Check(api!=nullptr,"No simulated writable floppy is attached");disk.reset(new DirectFloppy(api));
-#else
- disk.reset(new DirectFloppy);
-#endif
- if(!disk->Open(drive,verify))throw Failure(disk->Error(),"Cannot open and lock the floppy");CheckMedia(target);return disk;
+bool IsFloppy(const Location& item){
+ return item.IsPhysical()&&item.Media()==ClassicMedia::Floppy;
 }
-void Finish(std::unique_ptr<DirectFloppy>& disk){HFSIFACE_get_dir_flush();if(disk&&!disk->Finish())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");}
+void WriteWithMedia(const Location& item,const std::function<void()>& mutate){
+ if(IsFloppy(item)){
+  std::optional<DWORD> generation;
+  if(item.MediaGenerationKnown())generation=item.MediaGeneration();
+  RunFloppyWrite(item.Drive(),generation,mutate);
+ }else{
+  mutate();
+  HFSIFACE_get_dir_flush();
+ }
+}
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,Storage::Job& job,Completion& completion){
  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> fresh(sources.size());
- for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);bool physical=sources[i].IsClassic()&&physical_floppy_path(sources[i].ClassicImage().c_str())>=0;
+ for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);bool physical=IsFloppy(sources[i]);
   fresh[i]=Source(sources[i],!physical);Check(MacBrowser::Snapshot(*fresh[i].first,fresh[i].second,job)==snapshots[i],"Source changed during the copy; source items were retained");if(physical)fresh[i].first->Close();
  }
- for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);auto disk=WritableFloppy(sources[i],true);
-  if(disk){fresh[i]=Source(sources[i],true);Check(MacBrowser::Snapshot(*fresh[i].first,fresh[i].second,job)==snapshots[i],"Source floppy changed before move cleanup; source items were retained");}
-  Mark(completion,sources[i]);RemoveTree(*fresh[i].first,fresh[i].second,job);if(!sources[i].Volume())fresh[i].first->Close();Finish(disk);
+ for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);WriteWithMedia(sources[i],[&]{
+  const bool physical=IsFloppy(sources[i]);
+  auto opened=physical?Source(sources[i],true):std::move(fresh[i]);
+  if(physical)Check(MacBrowser::Snapshot(*opened.first,opened.second,job)==snapshots[i],"Source floppy changed before move cleanup; source items were retained");
+  Mark(completion,sources[i]);
+  RemoveTree(*opened.first,opened.second,job);
+  if(!sources[i].Volume())opened.first->Close();
+  });
  }
 }
 bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
@@ -118,25 +125,43 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
 }
 enum class ExecutionRoute { Local, MountedCopy, TemporaryWorker };
 Storage::Result CopyRequest(const OrdinaryCopy& request,ExecutionRoute route,Storage::Job& job,Completion& completion){
- Check(!request.sources.empty(),"Select a source file or folder");HFSIFACE_get_dir_flush();auto disk=WritableFloppy(request.destination,std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;}));
- auto destination=Destination(request.destination);Check(destination.first->Supports().create,"The destination does not support file creation");
- std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;std::vector<std::string> snapshots;
- for(auto& item:request.sources){Cancel(job);auto source=Source(item);if(item.cut&&item.Volume())Check(source.first->Writable(),"A cut source is read-only");opened.push_back(source);}
- for(size_t i=0;i<opened.size();++i)MarkChild(completion,request.destination,opened[i].first->Stat(opened[i].second).name);
- if(MoveInPlace(request,opened,*destination.first,destination.second,job,completion)){
-  if(!request.destination.Volume())destination.first->Close();for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();Finish(disk);completion.complete=true;completion.completed=unsigned(opened.size());Storage::Result result;result.moved=true;return result;
+ Check(!request.sources.empty(),"Select a source file or folder");
+ HFSIFACE_get_dir_flush();
+ std::vector<std::string> snapshots;
+ bool complete=false,inPlace=false;
+ WriteWithMedia(request.destination,[&]{
+  auto destination=Destination(request.destination);
+  Check(destination.first->Supports().create,"The destination does not support file creation");
+  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;
+  for(auto& item:request.sources){
+   Cancel(job);
+   auto source=Source(item);
+   if(item.cut&&item.Volume())Check(source.first->Writable(),"A cut source is read-only");
+   opened.push_back(std::move(source));
+  }
+  for(const auto& item:opened)MarkChild(completion,request.destination,item.first->Stat(item.second).name);
+  inPlace=MoveInPlace(request,opened,*destination.first,destination.second,job,completion);
+  if(!inPlace){
+   for(size_t i=0;i<request.sources.size();++i)
+    snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
+   if(route==ExecutionRoute::MountedCopy){
+    std::vector<uint32_t> ids;
+    ids.reserve(opened.size());
+    for(const auto& source:opened)ids.push_back(source.second);
+    complete=VolumeSession::CopyWithinMountedImage(*destination.first,ids,destination.second,job);
+   }else complete=CopyMany(opened,*destination.first,destination.second,job);
+  }
+  if(!request.destination.Volume())destination.first->Close();
+  for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
+ });
+ if(inPlace){
+  completion.complete=true;
+  completion.completed=unsigned(request.sources.size());
+  Storage::Result result;
+  result.moved=true;
+  return result;
  }
- for(size_t i=0;i<request.sources.size();++i)snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
- bool complete;try{
-  if(route==ExecutionRoute::MountedCopy){
-   std::vector<uint32_t> ids;ids.reserve(opened.size());
-   for(const auto& source:opened)ids.push_back(source.second);
-   complete=VolumeSession::CopyWithinMountedImage(*destination.first,ids,destination.second,job);
-  }else complete=CopyMany(opened,*destination.first,destination.second,job);
- }catch(...){if(disk&&disk->Error())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");throw;}
- if(!request.destination.Volume())destination.first->Close();
- for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
- Finish(disk);disk.reset(); // Includes all final unmount writes; never delete sources before this.
+ // A Cut source must remain intact until destination unmount and readback succeed.
  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
  completion.complete=complete;completion.completed=job.progress().files;
  Storage::Result result;result.moved=complete&&std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;});return result;
@@ -156,13 +181,17 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
    if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,rename->name);
    }else if(!DeleteHostSelectionJob(CString(path.c_str()),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }else{
-   Check(item.IsClassic()&&!item.ClassicImage().empty(),"Invalid classic HFS source");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The selected source image was replaced");auto disk=WritableFloppy(item);auto image=item.ClassicImage(),path=item.ClassicPath();hfsdirent entry{};
+   Check(item.IsClassic()&&!item.ClassicImage().empty(),"Invalid classic HFS source");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The selected source image was replaced");int code;std::string error;
+   WriteWithMedia(item,[&]{
+   auto image=item.ClassicImage(),path=item.ClassicPath();hfsdirent entry{};
    if(HFSIFACE_get_properties(&image[0],&path[0],&entry))throw HfsPlus::Error(ClassicError("Cannot read the selected HFS entry"));
    Cancel(job);if(item.expectedCatalogId)Check(uint32_t(entry.cnid)==item.expectedCatalogId,"The selected classic HFS entry was replaced");Check(entry.cnid!=2,"Cannot rename or delete a volume root");
-   Mark(completion,item);int code;
+   Mark(completion,item);
    if(rename){Check(!rename->checkNameLock||!(entry.fdflags&HFS_FNDR_NAMELOCKED),"Remove the Finder name lock before renaming this entry");auto wide=Wide(rename->name);char leaf[32];BOOL lost=FALSE;int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,wide.c_str(),-1,leaf,ARRAYSIZE(leaf),nullptr,&lost);Check(n&&!lost&&HfvValidRenameLeaf(leaf,true),"Invalid classic HFS filename");auto to=path.substr(0,path.find_last_of(':')+1)+leaf;code=HFSIFACE_rename(&image[0],&path[0],&to[0]);}
    else code=item.directory?HFSIFACE_rmdir(&image[0],&path[0]):HFSIFACE_delete(&image[0],&path[0]);
-   std::string error=ClassicError("Classic HFS operation failed");Finish(disk);if(code){Cancel(job);throw HfsPlus::Error(error);}
+   if(code)error=ClassicError("Classic HFS operation failed");
+   });
+   if(code){Cancel(job);throw HfsPlus::Error(error);}
   }
   ++completion.completed;++progress.files;job.progress(progress);
  }
@@ -231,9 +260,11 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
   const auto& item=folder->parent;
   if(item.Volume()){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&source.first->Supports().createFolders&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,folder->name);source.first->MakeDirectory(source.second,folder->name);}
   else if(item.IsWindows()){auto volume=OpenWindows(item.WindowsPath());auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();}
-  else{Check(item.IsClassic(),"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();Finish(disk);}
+  else{Check(item.IsClassic(),"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The destination image was replaced");WriteWithMedia(item,[&]{auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();});}
  }else{
-  const auto& item=std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();completion.basicMetadata=source.first->SupportsBasicMetadata();completion.supportsCompression=source.first->SupportsCompression();
+  const auto& item=std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);
+  auto update=[&]{
+  auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();completion.basicMetadata=source.first->SupportsBasicMetadata();completion.supportsCompression=source.first->SupportsCompression();
   if(completion.supportsAttributes)completion.attributes=source.first->GetAttributes(source.second);Cancel(job);
   if(auto* edit=std::get_if<ChangeCompression>(metadata)){
    Check(completion.supportsCompression&&completion.writable,"This volume cannot change compression");auto& now=completion.entry;auto& old=edit->original;
@@ -262,16 +293,20 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
    }
    if(item.IsMounted()){
     Cancel(job);Mark(completion,item);source.first->SetClassicProperties(source.second,changed);
-    completion.complete=true;completion.completed=1;return {};
+    return;
    }
-   auto disk=WritableFloppy(item);auto image=item.ClassicImage(),path=item.ClassicPath();
+   auto image=item.ClassicImage(),path=item.ClassicPath();
    auto to=path;char name[32]{};strcpy_s(name,changed.name);if(std::holds_alternative<ClassicPropertyEdit>(edit->change)){mac_to_pc_charset((unsigned char*)name);Check(HfvValidRenameLeaf(name,true),"Invalid classic HFS name");to=path.substr(0,path.find_last_of(':')+1)+name;}
    std::vector<char> macPath(path.begin(),path.end()),macTo(to.begin(),to.end());macPath.push_back(0);macTo.push_back(0);pc_to_mac_charset((unsigned char*)macPath.data());pc_to_mac_charset((unsigned char*)macTo.data());
    hfsvol* volume=hfs_mount(&image[0],0,O_RDWR);Check(volume!=nullptr,"Cannot open classic HFS for editing");
-   try{Cancel(job);Mark(completion,item);int code=hfs_editattrs(volume,macPath.data(),macTo.data(),&changed);auto error=code?ClassicError("Cannot update properties; rollback was attempted"):std::string();int closed=hfs_umount(volume);volume=nullptr;if(closed&&error.empty())error=ClassicError("Cannot close the updated HFS volume");Check(code==0&&closed==0,error.c_str());Finish(disk);
+   try{Cancel(job);Mark(completion,item);int code=hfs_editattrs(volume,macPath.data(),macTo.data(),&changed);auto error=code?ClassicError("Cannot update properties; rollback was attempted"):std::string();int closed=hfs_umount(volume);volume=nullptr;if(closed&&error.empty())error=ClassicError("Cannot close the updated HFS volume");Check(code==0&&closed==0,error.c_str());
    }catch(...){if(volume)hfs_umount(volume);throw;}
-
   }
+  };
+  if(item.IsClassic()&&std::holds_alternative<EditClassicProperties>(*metadata))
+   WriteWithMedia(item,update);
+  else
+   update();
  }
  completion.complete=true;completion.completed=1;return {};
 }
@@ -556,10 +591,11 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
    }
   }
  }
- auto disk=WritableFloppy(folder,conversion.move || conversion.options.verifyFloppy);
- CheckMedia(folder);
- auto target=Destination(folder);
  std::vector<std::string> snapshots;
+ bool complete=false;
+ WriteWithMedia(folder,[&]{
+ if(!IsFloppy(folder))CheckMedia(folder);
+ auto target=Destination(folder);
  if(conversion.move) snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job,bool(sourceLocation.Volume())));
  TransferAdapter adapt=[&](Volume& volume,Entry& entry,Storage::Job& active,bool root) {
   char selected=mode;
@@ -601,11 +637,10 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
   return reader;
  };
  Mark(completion,folder);
- bool complete=CopyMany({source},*target.first,target.second,job,adapt);
+ complete=CopyMany({source},*target.first,target.second,job,adapt);
  if(!folder.Volume())target.first->Close();
  if(!sourceLocation.Volume())source.first->Close();
- Finish(disk);
- disk.reset();
+ });
  if(complete && conversion.move) DeleteMovedSources({sourceLocation},snapshots,job,completion);
  completion.complete=complete;
  completion.completed=job.progress().files;
@@ -703,6 +738,7 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
   result=Execute(request,plan.route,job,completion);
  }
  catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
+ catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}
  catch(const Failure& e){result={1,e.error,e.what()};}
  catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
  catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected copy-worker failure"};}
@@ -734,6 +770,7 @@ Operation Submit(Request request){
    if(route==ExecutionRoute::TemporaryWorker){std::vector<std::string> keys,writes;for(auto& item:current){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}if(auto* copy=values->Get<OrdinaryCopy>()){Mark(completion,copy->destination);for(auto& item:copy->sources)if(item.cut)Mark(completion,item);}else if(auto* legacy=values->Conversion()){Mark(completion,legacy->destination);if(legacy->move)Mark(completion,legacy->source);}else if(auto* output=values->Get<ExportFileFork>())Mark(completion,output->output);else if(auto* input=values->Get<ImportResourceFork>())Mark(completion,input->file);result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,route,job,completion);}
   }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
+  catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
   FinalizeOutcome(result,completion,job,evidence);
