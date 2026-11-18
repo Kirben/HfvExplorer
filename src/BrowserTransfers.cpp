@@ -25,9 +25,18 @@ Target Resolve(BrowserSession& session,bool tree,HTREEITEM item,int row){
  Target out;out.session=&session;out.tree=tree;out.item=item;out.row=row;
  auto list=session.List();auto tv=session.Tree();if(!list||!tv)return {};
  out.control=tree?tv->GetSafeHwnd():list->GetSafeHwnd();
- if(!tree&&row>=0){auto p=list->BrowserRowAt(row);if(!p||!p->entry.directory)return {};out.writable=p->capabilities.create;auto binding=reinterpret_cast<list_lparam_struct*>(list->GetListCtrl().GetItemData(row));item=binding?binding->htree:nullptr;if(!item)return {};}
- else if(!tree)out.writable=list->BrowserDirectoryWritable();
- try{out.folder=session.MacBrowser().TargetFolder(item);if(tree){auto binding=reinterpret_cast<lparam_struct*>(tv->m_ct->GetItemData(item));if(!binding)return {};out.writable=out.folder.IsMounted()?out.folder.Volume()->Supports().create:out.folder.IsWindows()?session.Document()->m_fats[binding->volinx].m_type!=DRIVE_CDROM:!session.Document()->m_volumes[binding->volinx].m_is_cd;}}
+ try{
+  if(!tree&&row>=0){
+   auto model=list->BrowserRowAt(row);
+   if(!session.ListingAvailable()||!model||!model->entry.directory||model->location.IsNone())return {};
+   out.folder=model->location;
+   out.writable=model->capabilities.create;
+  }else{
+   auto folder=session.MacBrowser().DescribeFolder(item);
+   out.folder=std::move(folder.location);
+   out.writable=tree?folder.writable:list->BrowserDirectoryWritable();
+  }
+ }
  catch(const std::exception&){return {};}
  return out;
 }
@@ -85,7 +94,17 @@ bool Drag::Hover(CPoint screen,UINT keys){
  if(effect==Effect::None)SetCursor(LoadCursor(nullptr,IDC_NO));else if(list)list->set_cursor_by_type(effect==Effect::Copy);
  return true;
 }
-bool Drag::Drop(CPoint screen,UINT keys){ClearHighlight();if(!IsWindow(source_))return true;HWND window=WindowFromPoint(screen);if(window==source_||IsChild(source_,window))return false;auto target=Hit(screen);Transfer(selection_,target,keys);return true;}
+bool Drag::Drop(CPoint screen,UINT keys){
+ ClearHighlight();
+ if(!IsWindow(source_))return true;
+ const auto window=WindowFromPoint(screen);
+ const bool sameWindow=window==source_||IsChild(source_,window);
+ auto target=Hit(screen);
+ // The list view handles local icon placement and dropping onto applications.
+ if(sameWindow&&(!target.session||(!target.tree&&target.row<0)))return false;
+ Transfer(selection_,target,keys);
+ return true;
+}
 #ifdef HFV_TESTING
 bool Drag::TestDrop(BrowserSession& session,bool tree,HTREEITEM item,int row,UINT keys){if(!IsWindow(source_))return false;auto target=Resolve(session,tree,item,row);return Transfer(selection_,target,keys);}
 #endif

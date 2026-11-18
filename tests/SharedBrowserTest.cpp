@@ -106,6 +106,19 @@ int RunSharedBrowserTest(const char* directory){
   check(windowsItem.IsWindows() && windowsItem.WindowsPath()==VolumeCoord::Wide(std::string((LPCSTR)path)) &&
         windowsItem.expectedIdentity==list.BrowserRowAt(row)->entry.identity &&
         !windowsItem.expectedIdentity.empty(), "Windows command lost the published file identity");
+  auto binding=reinterpret_cast<list_lparam_struct*>(control.GetItemData(row));
+  strcpy(binding->path,"C:\\unrelated.txt");
+  control.SetItemText(row,0,"Unrelated label");
+  CString capturedPath;
+  check(list.get_path(row,capturedPath)&&capturedPath==path&&
+        doc.GetBrowserSession().MacBrowser().CaptureItem(row).expectedIdentity==windowsItem.expectedIdentity,
+        "a control label or legacy binding redirected a typed file command");
+  const auto folderRow=list.BrowserRowAt(find(control,L"Folder"));
+  check(folderRow&&folderRow->treeItem,"missing Windows child folder in tree");
+  auto folderTarget=doc.GetBrowserSession().MacBrowser().TargetFolder(folderRow->treeItem);
+  check(folderTarget.IsWindows()&&folderTarget.WindowsPath()==folderRow->location.WindowsPath()&&
+        folderTarget.expectedIdentity==folderRow->location.expectedIdentity&&!folderTarget.expectedIdentity.empty(),
+        "tree command lost the published Windows destination identity");
   calls=0;BrowserDirectory::testObserveRead=[&](const char*){if(++calls==3)throw std::runtime_error("injected Windows read error");};
   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();BrowserDirectory::testObserveRead={};
   check(control.GetItemCount()==1&&list.BrowserRowAt(0)==nullptr&&!list.BrowserDirectoryWritable()&&owner.IsWindowEnabled(),"failed Windows snapshot published partial rows");

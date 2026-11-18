@@ -5,6 +5,7 @@
 class CHFVExplorerListView;
 class BrowserSession;
 namespace Removable { struct Mounted; }
+namespace BrowserDirectory { struct Row; struct Folder; }
 class MainMacBrowser {
     BrowserSession& session_;
     struct State;
@@ -33,7 +34,7 @@ public:
     bool NewFolder();
     bool CreateFolder(const FileOperations::Location&,const std::u16string&);
     bool Rename();
-    bool RenameItem(int row,const std::u16string& name);
+    bool RenameItem(int row,const std::u16string& name,bool checkLock=true);
     FileOperations::Location CaptureItem(int row);
     bool Delete(bool confirm);
     bool Properties(int row);
@@ -43,6 +44,8 @@ public:
     bool PasteHardLink();
     BrowserTransfers::Selection SelectedItems(bool cut);
     FileOperations::Location TargetFolder(HTREEITEM item=nullptr);
+    BrowserDirectory::Folder DescribeFolder(HTREEITEM item=nullptr);
+    void BindRow(BrowserDirectory::Row&,const std::string& resourceKey={});
     bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&,std::function<void(bool)> completed={});
     int Drop(int row, HTREEITEM target, int action);
     bool DropSelection(HTREEITEM target,int action);

@@ -40,7 +40,7 @@ struct Tree:HFVExplorerTreeView {
 };
 struct List:CHFVExplorerListView {void Bind(Doc* doc){m_pDocument=doc;}void PostNcDestroy()override{};};
 std::wstring Text(CListCtrl& list,int row){wchar_t text[1024]{};LVITEMW item{};item.pszText=text;item.cchTextMax=ARRAYSIZE(text);SendMessageW(list.m_hWnd,LVM_GETITEMTEXTW,row,reinterpret_cast<LPARAM>(&item));return text;}
-int Find(List& list,const wchar_t* name){for(int row=0;row<list.GetListCtrl().GetItemCount();++row)if(Text(list.GetListCtrl(),row)==name)return row;return -1;}
+int Find(CHFVExplorerListView& list,const wchar_t* name){for(int row=0;row<list.GetListCtrl().GetItemCount();++row)if(Text(list.GetListCtrl(),row)==name)return row;return -1;}
 class Fixture:public MacBrowser::Volume {
  std::u16string name_;
 public:
@@ -266,6 +266,15 @@ startup.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);
     BrowserDirectory::testObserveRead={};
     auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
     Check(disk.opens>0&&!windowsProbe&&found&&startup.m_hfs_count==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_volumes[0].m_rootitem,"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
+    const int row=Find(*session.List(),L"Readable");
+    auto original=session.MacBrowser().CaptureItem(row);
+    Check(original.IsPhysical()&&original.MediaGenerationKnown(),"floppy row did not bind its media generation");
+    auto& mounted=startup.m_volumes[0];
+    ++mounted.m_mediaGeneration;
+    auto stale=session.MacBrowser().CaptureItem(row);
+    --mounted.m_mediaGeneration;
+    Check(stale.MediaGenerationKnown()&&stale.MediaGeneration()==original.MediaGeneration(),
+          "a command rebound a published row to replacement floppy media");
     fprintf(report,"PASS: selecting a simulated Mac floppy with startup/automatic detection disabled mounts HFS and lists its file without attempting Windows folder enumeration.\n");
    }
 #endif

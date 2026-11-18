@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "MacBrowserModel.h"
+#include "FileLocation.h"
 #include "ftypes.h"
 #include <cstdio>
 #include <cstring>
@@ -12,7 +13,13 @@ struct OwnedIcons {
  HICON small=nullptr,large=nullptr;
  ~OwnedIcons(){if(small)DestroyIcon(small);if(large&&large!=small)DestroyIcon(large);}
 };
+struct Folder {
+    FileOperations::Location location;
+    bool writable=false;
+};
 struct Row {
+    FileOperations::Location location;
+    HTREEITEM treeItem=nullptr;
     MacBrowser::Entry entry;
     MacBrowser::Capabilities capabilities;
     int storageType = LIST_MAC, volume = -1;

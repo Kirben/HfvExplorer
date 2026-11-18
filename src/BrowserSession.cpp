@@ -189,15 +189,32 @@ void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot
     BrowserPresentation::Batch listBatch(list_->GetListCtrl().m_hWnd, true);
     if (listing) {
         listingPending_ = false;
-        list_->m_browser_folder_path = snapshot.folderPath;
-        list_->m_browser_folder_identity = snapshot.folderIdentity;
         if (snapshot.capabilitiesKnown)
             list_->SetBrowserCapabilities(snapshot.capabilities);
     }
-    for (const auto& row : snapshot.rows) {
+    for (auto row : snapshot.rows) {
+        browser_->BindRow(row,snapshot.resourceKey);
         HTREEITEM child = row.entry.directory ? addFolder(row) : nullptr;
+        if(child)tree_->BindBrowserFolder(child,{row.location,row.capabilities.create});
         if (listing)
             list_->InsertBrowserRow(row, child);
+    }
+    if(listing&&type==LIST_FAT&&!snapshot.folderPath.empty()){
+        auto location=FileOperations::Location::Windows(snapshot.folderPath);
+        location.directory=true;
+        location.expectedIdentity=snapshot.folderIdentity;
+        tree_->BindBrowserFolder(tree_->GetTreeCtrl().GetSelectedItem(),{std::move(location),snapshot.capabilities.create});
+    }else if(listing&&type==LIST_HFS){
+        const auto& volume=document_->m_volumes[index];
+        const auto item=tree_->find_item(index,volume.m_rootitem,folder);
+        if(item){
+            auto location=FileOperations::Location::Classic((LPCSTR)volume.m_file_name,folder==2?":":path);
+            location.directory=true;
+            location.expectedCatalogId=folder;
+            location.expectedResource=snapshot.resourceKey;
+            if(volume.m_mediaGenerationKnown)location.BindMediaGeneration(volume.m_mediaGeneration);
+            tree_->BindBrowserFolder(item,{std::move(location),snapshot.capabilities.create});
+        }
     }
     if (listing) {
         if (type == LIST_MAC)
