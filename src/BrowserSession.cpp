@@ -7,6 +7,7 @@
 #include "DeviceWait.h"
 #include "StorageJobDialog.h"
 #include "BrowserPresentation.h"
+#include "BrowserDirectory.h"
 #include "charset.h"
 extern "C" {
 #include "hfs/libhfs/hfs.h"
@@ -113,6 +114,32 @@ BrowserSession& CMainFrame::GetBrowserSession()const{
 }
 
 void BrowserSession::Watch(const std::string& key){subscription_.Watch(key);}
+void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot,
+    int type, int index, uint32_t folder, const std::string& path, bool listing,
+    const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder)
+{
+    BrowserPresentation::Batch treeBatch(tree_->GetTreeCtrl().m_hWnd);
+    BrowserPresentation::Batch listBatch(list_->GetListCtrl().m_hWnd, true);
+    if (listing) {
+        list_->m_browser_folder_path = snapshot.folderPath;
+        list_->m_browser_folder_identity = snapshot.folderIdentity;
+        if (snapshot.capabilitiesKnown)
+            list_->SetBrowserCapabilities(snapshot.capabilities);
+    }
+    for (const auto& row : snapshot.rows) {
+        HTREEITEM child = row.entry.directory ? addFolder(row) : nullptr;
+        if (listing)
+            list_->InsertBrowserRow(row, child);
+    }
+    if (listing) {
+        if (type == LIST_MAC)
+            list_->SortBrowserRows(FIELD_NAME, true);
+        else
+            list_->do_report_sort();
+        Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path);
+    }
+}
+
 void BrowserSession::Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder,std::string path){
  if(document_&&index>=0&&((type==LIST_FAT&&index<document_->m_fat_count)||(type==LIST_HFS&&index<document_->m_hfs_count))){
   auto& known=roots_[key];auto found=std::find_if(known.begin(),known.end(),[&](const KnownRoot& r){return r.type==type&&r.index==index;});

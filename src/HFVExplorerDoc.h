@@ -104,7 +104,7 @@ protected: // create from serialization only
     bool prepare_classic_browser_row(hfs_item_type*,int,BrowserDirectory::Row&);
     BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long);
     BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&);
-    void apply_browser_directory(const BrowserDirectory::Snapshot&,bool);
+    void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
 	void fat_walk( int volinx, LPSTR path, int list );
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );
