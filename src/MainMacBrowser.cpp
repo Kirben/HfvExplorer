@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "StorageHandoff.h"
 #include "MetadataDialogs.h"
 #include "PhysicalRemovable.h"
 #include "HFVExplorer.h"
@@ -182,18 +183,26 @@ struct MainMacBrowser::State {
     bool Transfer(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed={}) {
         if(target.IsClassic()){auto doc=session_.Document();auto path=target.ClassicImage();for(int n=0;n<doc->m_hfs_count;++n)if(!doc->m_volumes[n].m_file_name.IsEmpty()&&!_stricmp(Location::Classic(std::string((LPCSTR)doc->m_volumes[n].m_file_name),":").ClassicImage().c_str(),path.c_str()))doc->m_volumes[n].close();}
         auto convertible=[](const Location& p){if(p.LegacyType()!=LIST_HFS)return true;auto n=p.ClassicImage().size();return n>=4&&p.ClassicImage()[n-4]=='.'&&(!_stricmp(p.ClassicImage().c_str()+n-3,"DSK")||!_strnicmp(p.ClassicImage().c_str()+n-3,"HF",2));};
-        bool legacy=!target.Volume()&&convertible(target)&&std::all_of(sources.begin(),sources.end(),[&](const Location& p){return !p.Volume()&&convertible(p);})&&std::any_of(sources.begin(),sources.end(),[&](const Location& p){return p.LegacyType()!=target.LegacyType();});
+        auto classicImage=[](const Location& item){return item.IsMounted()&&!strcmp(item.Volume()->Kind(),"HFS")&&item.Volume()->HasPersistentWorker();};
+        auto legacyType=[&](const Location& item){return classicImage(item)?LIST_HFS:item.LegacyType();};
+        auto conversionEndpoint=[&](const Location& item){
+            if(!classicImage(item))return item;
+            auto path=item.Volume()->WorkerDescription().path;
+            return Location::Classic((LPCSTR)CString(path.c_str()),":");
+        };
+        auto canConvert=[&](const Location& item){return classicImage(item)||(!item.Volume()&&convertible(item));};
+        bool legacy=canConvert(target)&&std::all_of(sources.begin(),sources.end(),canConvert)&&std::any_of(sources.begin(),sources.end(),[&](const Location& p){return legacyType(p)!=legacyType(target);});
         bool complete=true;std::vector<FileOperations::Request> background;
         if(legacy){
          session_.List()->m_shutup_for_now=FALSE;
          for(auto& source:sources){
-          CString sourcePath=source.LegacyType()==LIST_HFS?CString(source.ClassicPath().c_str()):CString(source.WindowsPath().c_str());
-          if(!BackgroundCopies::Enabled()&&source.LegacyType()!=target.LegacyType()&&!Hidden(session_)&&!session_.List()->ask_set_copy_mode(source.LegacyType()==LIST_HFS,sourcePath)){complete=false;break;}
+          CString sourcePath=classicImage(source)?CString(Wide(source.expectedName).c_str()):source.IsClassic()?CString(source.ClassicPath().c_str()):CString(source.WindowsPath().c_str());
+          if(!BackgroundCopies::Enabled()&&legacyType(source)!=legacyType(target)&&!Hidden(session_)&&!session_.List()->ask_set_copy_mode(legacyType(source)==LIST_HFS,sourcePath)){complete=false;break;}
           FileOperations::Request request = FileOperations::OrdinaryCopy{{source}, target};
-          if (source.LegacyType() != target.LegacyType()) {
-              const bool ask = (source.IsClassic() ? App().m_copyout_mode : App().m_copyin_mode) == 6;
+          if (legacyType(source) != legacyType(target)) {
+              const bool ask = (legacyType(source)==LIST_HFS ? App().m_copyout_mode : App().m_copyin_mode) == 6;
               request = FileOperations::LegacyConversion{
-                  source, target, source.directory, source.cut, ask,
+                  conversionEndpoint(source), conversionEndpoint(target), source.directory, source.cut, ask,
                   CaptureLegacyCopyOptions(HFSIFACE_copy_mode())};
               request.Legacy().selection = FileOperations::ConversionSelection{source, target};
           }

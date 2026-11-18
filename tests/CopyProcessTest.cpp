@@ -559,6 +559,131 @@ int RunCopyProcessTest(const char *directory) {
             fprintf(report,"PASS: persistent HFS+/HFSX sessions stay mounted through copy, cancellation, and aborted overwrite\n");
         }
         {
+            const auto path = root + "\\classic-session.dsk";
+            {
+                auto seed = ClassicImage(path);
+                Put(*seed,2,u"Crash sentinel",4096);
+            }
+            auto classic = OpenBrowserImage(Wide(path));
+            auto alias = OpenBrowserImage(Wide(path));
+            Check(classic && classic == alias && classic->HasPersistentWorker() && classic->Writable() &&
+                      classic->Name() == u"Classic" && !classic->SupportsAttributes(),
+                  "classic image did not share a writable persistent mount");
+            Entry sentinel;
+            {
+                auto pid = CopyProcess::VolumeSessionPidForTest(classic);
+                Check(alias->FindChild(2,u"Crash sentinel",sentinel),"classic persistent root listing");
+                Verify(*alias,sentinel.id,4096);
+
+                const auto sourceFolder=classic->MakeDirectory(2,u"Copy source");
+                const auto targetFolder=classic->MakeDirectory(2,u"Copy target");
+                const auto sourceFile=Put(*classic,sourceFolder,u"Payload");
+                const auto oldFile=Put(*classic,targetFolder,u"Payload",4096,71);
+                auto edit=Submit(EditClassicProperties{Native(classic,sourceFile),FinderLabel{3}});
+                Wait(edit);
+                hfsdirent properties{};
+                Check(!edit.Job()->result().code && alias->GetClassicProperties(sourceFile,properties) &&
+                          (properties.fdflags&14)==6,
+                      "classic Finder label edit did not reach the shared worker");
+
+                const auto freeBefore=classic->FreeBytes();
+                Storage::Job job;
+                bool staged=false;
+                job.transport([&](const Storage::Progress& progress) {
+                    if (progress.fileBytes>300000 && !progress.files) {
+                        staged=true;
+                        job.cancel();
+                    }
+                }, [](const std::string&) { return Storage::ConflictChoice::Replace; });
+                Completion completion;
+                const auto overwrite=OrdinaryCopy{{Native(classic,sourceFile)},Native(alias,targetFolder)};
+                const auto aborted=ExecuteInWorker(overwrite,job,completion);
+                Check(staged && aborted.outcome==Storage::Outcome::Cancelled &&
+                          aborted.rollback==Storage::Rollback::Restored && !aborted.partial,
+                      "classic overwrite did not roll back on cancellation");
+                Verify(*classic,oldFile,4096,71);
+                Check(classic->FreeBytes()==freeBefore,"classic cancelled overwrite leaked space");
+                auto rename=Submit(RenameEntry{Native(classic,sourceFile),u"Renamed payload"});
+                Wait(rename);
+                Entry renamed;
+                Check(!rename.Job()->result().code && alias->FindChild(sourceFolder,u"Renamed payload",renamed) &&
+                          CopyProcess::VolumeSessionPidForTest(classic)==pid,
+                      "classic rename did not refresh the shared mount");
+                Verify(*alias,renamed.id);
+
+                const auto exportDir=Wide(root + "\\classic-session-export");
+                Check(CreateDirectoryW(exportDir.c_str(),nullptr)!=FALSE,"classic export fixture folder");
+                for (const char mode : {'m','r'}) {
+                    const auto folder=mode=='m'?exportDir+L"\\MacBinary":exportDir+L"\\Raw";
+                    Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"classic export mode fixture folder");
+                    LegacyConversion conversion{Location::Classic(path,":"),Location::Windows(folder)};
+                    conversion.options.output=mode;
+                    conversion.selection=ConversionSelection{Native(classic,renamed.id),Location::Windows(folder)};
+                    Pass(Submit(conversion));
+                    Check(classic->Writable() && alias->FindChild(sourceFolder,u"Renamed payload",renamed),
+                          "classic conversion did not restore browsing after handoff");
+                    if(mode=='r') {
+                        WIN32_FIND_DATAW file{};
+                        auto search=FindFirstFileW((folder+L"\\Renamed payload*").c_str(),&file);
+                        Check(search!=INVALID_HANDLE_VALUE,"classic raw export missed the resolved catalog path");
+                        FindClose(search);
+                        Check(file.nFileSizeLow==300000,"classic raw export wrote the wrong fork length");
+                        const auto rawFile=Location::Windows(folder+L"\\"+file.cFileName);
+                        LegacyConversion import{rawFile,Location::Classic(path,":")};
+                        import.options.input='r';
+                        import.selection=ConversionSelection{rawFile,Native(classic,targetFolder)};
+                        Pass(Submit(import));
+                        Entry imported;
+                        Check(classic->Writable() && alias->FindChild(targetFolder,u"Renamed payload",imported) &&
+                                  imported.forks[0].size==300000,
+                              "classic raw import did not commit to the selected mounted folder");
+                    }
+                }
+            }
+            classic->SuspendWorker();
+            std::weak_ptr<Volume> previousMount=classic;
+            alias.reset();
+            classic.reset();
+            Until([&]{return previousMount.expired();});
+            {
+                // A Ctrl-Z in the reserved tail of the MDB is ordinary binary
+                // data and must not stop the format probe prematurely.
+                CFile raw(path.c_str(),CFile::modeReadWrite | CFile::shareExclusive);
+                raw.Seek(1024+400,CFile::begin);
+                const BYTE controlZ=0x1a;
+                raw.Write(&controlZ,1);
+                raw.Flush();
+            }
+            classic=OpenBrowserImage(Wide(path));
+            Check(bool(classic),"classic image detection failed after a clean unmount");
+            Check(classic->Writable(),"clean classic image did not reopen writable");
+
+            const auto beforeCrash=CopyProcess::VolumeSessionPidForTest(classic);
+            CopyProcess::CrashVolumeSessionDuringPutForTest(classic);
+            bool lost=false;
+            try { Put(*classic,2,u"Interrupted write"); }
+            catch (const HfsPlus::Error&) { lost=true; }
+            Check(lost && CopyProcess::lastExitCode==80 && !classic->Writable(),
+                  "classic worker did not fail at the injected point or the image remained writable");
+            classic->Reload();
+            Check(!classic->Writable() && CopyProcess::VolumeSessionPidForTest(classic)!=beforeCrash &&
+                      classic->FindChild(2,u"Crash sentinel",sentinel),
+                  "classic worker did not recover its image read-only");
+            Verify(*classic,sentinel.id,4096);
+            classic.reset();
+            classic=OpenBrowserImage(Wide(path));
+            Check(classic && !classic->Writable() && classic->FindChild(2,u"Crash sentinel",sentinel),
+                  "fresh classic mount ignored the on-disk dirty flag");
+            Verify(*classic,sentinel.id,4096);
+            bool refused=false;
+            try { Put(*classic,2,u"Disallowed recovery write",4096); }
+            catch (const HfsPlus::Error&) { refused=true; }
+            Entry unexpected;
+            Check(refused && !classic->FindChild(2,u"Disallowed recovery write",unexpected),
+                  "read-only recovery accepted a new write");
+            fprintf(report,"PASS: classic HFS shared mount, Finder edit, rename refresh, conversions, overwrite rollback and durable read-only crash recovery\n");
+        }
+        {
             const auto inputPath = Wide(root + "\\launch-source.dsk");
             const auto outputPath = Wide(root + "\\launch-target.dsk");
             {

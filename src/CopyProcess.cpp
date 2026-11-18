@@ -141,6 +141,7 @@ Endpoint Capture(const Location &location) {
     for (uint32_t id = location.Id(); id != 2;) {
         Check(ancestors.size() < 128 && ancestors.insert(id).second, "Invalid copy-worker source ancestry");
         auto entry = location.Volume()->Stat(id);
+        entry.identity = location.Volume()->WorkerEntryIdentity(entry.identity);
         out.path.push_back(entry);
         id = entry.parent;
     }
@@ -444,7 +445,7 @@ struct Process {
 
 enum class SessionCommandCode {
     Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
-    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, CopyWithin, TestCrashRename
+    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, CopyWithin, GetClassicProperties, SetClassicProperties, CloseClassic, TestCrashRename, TestCrashPut
 };
 constexpr size_t sessionReadLimit = 256 * 1024;
 
@@ -469,11 +470,12 @@ class PersistentVolume final : public Volume {
     std::unique_ptr<Process> worker_;
     std::u16string name_;
     std::string description_;
+    const bool classic_;
     bool hfsx_ = false, caseSensitive_ = false, journaled_ = false;
     bool writeAllowed_ = false, initialized_ = false;
     std::atomic<bool> writable_{false}, lost_{false};
 #ifdef HFV_TESTING
-    bool crashRename_ = false;
+    bool crashRename_ = false, crashPut_ = false;
 #endif
     uint64_t generation_;
     static uint64_t NextGeneration() {
@@ -496,13 +498,20 @@ class PersistentVolume final : public Volume {
         if (worker_) Lost();
         throw HfsPlus::Error("The volume worker stopped. Refresh the volume before retrying any changes.");
     }
+    void RecordRollback(Storage::Rollback rollback) {
+        Storage::OutcomeEvidence::NoteRollback(rollback);
+        if (classic_ && rollback == Storage::Rollback::Failed) {
+            writable_ = false;
+            writeAllowed_ = false;
+        }
+    }
     void ReadResult(Data& packet) {
             auto code = packet.get();
             auto error = packet.text();
             auto rollback = packet.get();
             packet.end();
             Check(code <= 2 && rollback <= uint64_t(Storage::Rollback::Failed), "Invalid volume session result");
-            Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(rollback));
+            RecordRollback(Storage::Rollback(rollback));
             if (code == 2) throw HfsPlus::ExternalJournalRequired(error);
             if (code == 1) throw SessionError(error);
     }
@@ -539,6 +548,13 @@ class PersistentVolume final : public Volume {
     void Simple(SessionCommandCode command, Data data, bool mutation) {
         Call(command, std::move(data), mutation, [] {});
     }
+    void Stop() {
+        if (classic_ && Alive()) {
+            try { Simple(SessionCommandCode::CloseClassic, {}, true); }
+            catch (...) { Lost(); throw; }
+        }
+        worker_.reset();
+    }
     void Start() {
         auto process = std::make_unique<Process>();
         struct Inherited {
@@ -557,7 +573,7 @@ class PersistentVolume final : public Volume {
             Send(process->input.value, File, std::move(value));
         }
         Data mount;
-        mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_);
+        mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_); mount.put(classic_);
         Send(process->input.value, SessionMount, std::move(mount));
         worker_ = std::move(process);
         try {
@@ -593,8 +609,8 @@ class PersistentVolume final : public Volume {
         return entry;
     }
 public:
-    PersistentVolume(std::wstring path, std::string key, std::wstring journal)
-        : path_(std::move(path)), journal_(std::move(journal)), key_(std::move(key)),
+    PersistentVolume(std::wstring path, std::string key, std::wstring journal, bool classic)
+        : path_(std::move(path)), journal_(std::move(journal)), key_(std::move(key)), classic_(classic),
           generation_(NextGeneration()) {
         auto open = [&](bool write) {
             guard_ = HfsPlus::OpenImage(path_.c_str(), write);
@@ -608,17 +624,40 @@ public:
         Start();
     }
 
+    ~PersistentVolume() override {
+        try { Stop(); } catch (...) {}
+    }
     bool HasPersistentWorker() const override { return true; }
     std::string ResourceKey() const override { return key_; }
     std::u16string Name() const override { return name_; }
-    const char* Kind() const override { return hfsx_ ? "HFSX" : "HFS+"; }
+    const char* Kind() const override { return classic_ ? "HFS" : hfsx_ ? "HFSX" : "HFS+"; }
     std::string Description() const override { return description_; }
     bool Writable() const override { return writable_ && !lost_; }
     bool CaseSensitive() const override { return caseSensitive_; }
     bool Journaled() const override { return journaled_; }
-    bool SupportsHardLinks() const override { return true; }
-    bool SupportsCompression() const override { return true; }
-    bool SupportsAttributes() const override { return true; }
+    bool SupportsHardLinks() const override { return !classic_; }
+    bool SupportsCompression() const override { return !classic_; }
+    bool SupportsAttributes() const override { return !classic_; }
+    Capabilities Supports() const override {
+        auto result = Volume::Supports();
+        result.unicodeNames = !classic_;
+        return result;
+    }
+    bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {
+        if (!classic_) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id);
+        Call(SessionCommandCode::GetClassicProperties, std::move(args), false, [&] {
+            auto result = Response(SessionBytes);
+            entry = DecodeClassic(result); result.end();
+        });
+        return true;
+    }
+    void SetClassicProperties(uint32_t id, const hfsdirent& entry) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Data args; args.put(id); EncodeClassic(args, entry);
+        Simple(SessionCommandCode::SetClassicProperties, std::move(args), true);
+    }
     std::string WorkerEntryIdentity(const std::string& identity) const override {
         auto separator = identity.find('/');
         return separator == identity.npos ? identity : identity.substr(separator + 1);
@@ -643,7 +682,7 @@ public:
     void SuspendWorker() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (worker_ && !Alive()) Lost();
-        worker_.reset();
+        Stop();
     }
     void WorkerUncleanExit() override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -759,7 +798,11 @@ public:
         uint32_t id = 0;
         std::exception_ptr sourceFailure;
         try {
-            Call(SessionCommandCode::Put, std::move(args), true, [&] {
+            auto command = SessionCommandCode::Put;
+#ifdef HFV_TESTING
+            if (crashPut_) { crashPut_ = false; command = SessionCommandCode::TestCrashPut; }
+#endif
+            Call(command, std::move(args), true, [&] {
                 for (;;) {
                     Data packet;
                     auto message = Receive(worker_->output.value, packet);
@@ -813,7 +856,7 @@ public:
                     const auto retained = packet.flag();
                     packet.end();
                     Check(rollback <= uint64_t(Storage::Rollback::Failed), "Invalid same-image copy rollback");
-                    Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(rollback));
+                    RecordRollback(Storage::Rollback(rollback));
                     if (retained) Storage::OutcomeEvidence::NoteRetainedChange();
                     break;
                 }
@@ -886,6 +929,11 @@ public:
         Check(Alive(), "Fixture volume worker is not running");
         crashRename_ = true;
     }
+    void CrashDuringPut() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Check(classic_ && Alive(), "Classic fixture volume worker is not running");
+        crashPut_ = true;
+    }
 #endif
 };
 
@@ -912,18 +960,20 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
         Check(message == SessionCommand, "Invalid volume session command frame");
         auto opcode = packet.get();
     #ifdef HFV_TESTING
-        constexpr auto maximumCommand = SessionCommandCode::TestCrashRename;
+        constexpr auto maximumCommand = SessionCommandCode::TestCrashPut;
 #else
-        constexpr auto maximumCommand = SessionCommandCode::CopyWithin;
+        constexpr auto maximumCommand = SessionCommandCode::CloseClassic;
 #endif
         Check(opcode <= uint64_t(maximumCommand), "Invalid volume session command");
         auto command = SessionCommandCode(opcode);
         const bool carriesAttributes = command == SessionCommandCode::SetAttributes ||
-            command == SessionCommandCode::Put || command == SessionCommandCode::FinalizeDirectory ||
+            command == SessionCommandCode::Put || command == SessionCommandCode::TestCrashPut ||
+            command == SessionCommandCode::FinalizeDirectory ||
             command == SessionCommandCode::ValidateEntry;
         Check(attributes[0].has_value() == carriesAttributes && !attributes[1],
               "Unexpected volume session attributes");
         Storage::OutcomeEvidence evidence;
+        hfs_take_rollback();
         try {
             switch (command) {
             case SessionCommandCode::Root: packet.end(); writeNumber(volume.FreeBytes()); break;
@@ -993,6 +1043,9 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 Send(output, SessionBytes);
                 break;
             }
+#ifdef HFV_TESTING
+            case SessionCommandCode::TestCrashPut:
+#endif
             case SessionCommandCode::Put: {
                 const auto parent = number(packet);
                 const auto replace = packet.flag(), attributesKnown = packet.flag();
@@ -1000,6 +1053,9 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 entry.attributesKnown = attributesKnown;
                 entry.attributes = std::move(*attributes[0]);
                 const auto id = volume.Put(parent, entry, [&](unsigned fork, uint64_t offset, void* out, size_t size) {
+#ifdef HFV_TESTING
+                    if (command == SessionCommandCode::TestCrashPut && (fork || offset)) ExitProcess(80);
+#endif
                     auto* buffer = static_cast<uint8_t*>(out);
                     while (size) {
                         const auto count = (std::min)(size, sessionReadLimit);
@@ -1069,11 +1125,29 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 try { complete = MacBrowser::CopyMany(sources, volume, parent, job); }
                 catch (const Storage::Cancelled&) { cancelled = true; }
                 catch (const std::exception& failure) { error = failure.what(); }
+                Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(hfs_take_rollback()));
                 Data result;
                 result.put(complete); result.put(cancelled); result.put(error);
                 result.put(uint64_t(evidence.RollbackState())); result.put(evidence.RetainedChanges());
                 Send(output, SessionBytes, std::move(result));
                 break;
+            }
+            case SessionCommandCode::CloseClassic:
+                packet.end();
+                Check(!strcmp(volume.Kind(),"HFS"), "Unexpected classic close command");
+                volume.Close();
+                SessionReply(output);
+                return;
+            case SessionCommandCode::GetClassicProperties: {
+                auto id = number(packet); packet.end();
+                hfsdirent entry{};
+                Check(volume.GetClassicProperties(id, entry), "Classic Finder properties are unavailable");
+                Data result; EncodeClassic(result, entry);
+                Send(output, SessionBytes, std::move(result)); break;
+            }
+            case SessionCommandCode::SetClassicProperties: {
+                auto id = number(packet); auto entry = DecodeClassic(packet); packet.end();
+                volume.SetClassicProperties(id, entry); break;
             }
             case SessionCommandCode::ValidateRemoval: {
                 auto id = number(packet); packet.end(); volume.ValidateRemoval(id); break;
@@ -1085,14 +1159,15 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             }
             SessionReply(output);
         } catch (const std::exception& error) {
+            Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(hfs_take_rollback()));
             SessionReply(output, 1, error.what(), evidence.RollbackState());
         }
     }
 }
 } // namespace
 std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring& path, const std::string& key,
-                                                       const std::wstring& journal) {
-    return std::make_shared<PersistentVolume>(path, key, journal);
+                                                       const std::wstring& journal, bool classic) {
+    return std::make_shared<PersistentVolume>(path, key, journal, classic);
 }
 
 int VolumeSessionChild(const char* inputText, const char* outputText) {
@@ -1115,17 +1190,23 @@ int VolumeSessionChild(const char* inputText, const char* outputText) {
             Check(message == SessionMount, "Expected a volume session mount");
             auto path = data.wide();
             auto journal = data.wide();
-            auto writable = data.flag();
+            auto writable = data.flag(), classic = data.flag();
             data.end();
             ImageHandleTransfer::Scope storage(files);
-            auto guard = HfsPlus::OpenImage(path.c_str(), writable, journal.empty() ? nullptr : journal.c_str());
-            auto key = VolumeCoord::ImageKey(path);
             std::shared_ptr<Volume> volume;
-            try { volume = FromHfsPlus(std::move(guard), writable, key, journal); }
-            catch (const HfsPlus::ExternalJournalRequired&) { throw; }
-            catch (const HfsPlus::Error&) {
-                if (!writable) throw;
-                volume = FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false, journal.empty() ? nullptr : journal.c_str()), false, key, journal);
+            if (classic) {
+                Check(journal.empty(), "Classic HFS has no external journal");
+                floppy_module_global_init();
+                volume = OpenClassicImage(path, writable);
+            } else {
+                auto guard = HfsPlus::OpenImage(path.c_str(), writable, journal.empty() ? nullptr : journal.c_str());
+                auto key = VolumeCoord::ImageKey(path);
+                try { volume = FromHfsPlus(std::move(guard), writable, key, journal); }
+                catch (const HfsPlus::ExternalJournalRequired&) { throw; }
+                catch (const HfsPlus::Error&) {
+                    if (!writable) throw;
+                    volume = FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false, journal.empty() ? nullptr : journal.c_str()), false, key, journal);
+                }
             }
             Data info;
             info.u16(volume->Name()); info.put(volume->Description()); info.put(!strcmp(volume->Kind(), "HFSX"));
@@ -1151,6 +1232,11 @@ void CrashVolumeSessionOnRenameForTest(const std::shared_ptr<MacBrowser::Volume>
     auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);
     Check(bool(persistent), "Fixture volume is not owned by a persistent worker");
     persistent->CrashOnRename();
+}
+void CrashVolumeSessionDuringPutForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
+    auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);
+    Check(bool(persistent), "Fixture volume is not owned by a persistent worker");
+    persistent->CrashDuringPut();
 }
 #endif
 #ifdef HFV_TESTING
@@ -1197,6 +1283,7 @@ bool UsesWorker(const Request &request) {
     if(auto* folder=request.Get<CreateFolder>(); folder&&persistent(folder->parent)) return false;
     if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&persistent(link->source)&&persistent(link->parent)) return false;
     if(auto* metadata=request.Metadata()) {
+        if(auto* edit=std::get_if<EditClassicProperties>(metadata); edit && persistent(edit->item)) return false;
         if(auto* attrs=std::get_if<EditAttributes>(metadata); attrs&&persistent(attrs->item)) return false;
         if(auto* compression=std::get_if<ChangeCompression>(metadata);
             compression&&persistent(compression->item)) return false;
@@ -1237,8 +1324,37 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
     }
     auto execution = request;
     if (request.OperationKind() == Kind::LegacyCopy) {
-        execution.Legacy().source = Capture(request.Legacy().source).location;
-        execution.Legacy().destination = Capture(request.Legacy().destination).location;
+        const auto& conversion = request.Legacy();
+        const char mode = conversion.source.IsClassic() ? conversion.options.output : conversion.options.input;
+        auto legacyAddress = [&](const Location& original, const Endpoint& captured, bool folder) {
+            // The shared transfer engine already has typed endpoints. Only
+            // the older converter needs names expressed as legacy HFS paths.
+            if ((mode && strchr("ambt5", mode)) || captured.origin.kind != WorkerOrigin::Image ||
+                !captured.location.IsMounted() || strcmp(captured.location.Volume()->Kind(), "HFS"))
+                return Capture(original).location;
+            std::string path(":");
+            for (const auto& segment : captured.path) {
+                hfsdirent entry{};
+                Check(captured.location.Volume()->GetClassicProperties(segment.id, entry),
+                      "Cannot identify a classic conversion path");
+                const std::string macName(entry.name);
+                mac_to_pc_charset(reinterpret_cast<unsigned char*>(entry.name));
+                const std::string legacyName(entry.name);
+                pc_to_mac_charset(reinterpret_cast<unsigned char*>(entry.name));
+                Check(macName == entry.name, "The legacy converter cannot represent this classic HFS name");
+                if (path.size() > 1) path += ':';
+                path += legacyName;
+            }
+            if (folder && path.back() != ':') path += ':';
+            return Location::Classic(AnsiPath(captured.origin.path), std::move(path));
+        };
+        if (request.Legacy().selection) {
+            execution.Legacy().source = legacyAddress(request.Legacy().source, sources.front(), false);
+            execution.Legacy().destination = legacyAddress(request.Legacy().destination, target, true);
+        } else {
+            execution.Legacy().source = Capture(request.Legacy().source).location;
+            execution.Legacy().destination = Capture(request.Legacy().destination).location;
+        }
     }
     WorkerStorageHandoff handoff;
     Storage::Result result;
@@ -1551,9 +1667,13 @@ int Child(const char *inputText, const char *outputText) {
                     if (mounted.second->Writable())
                         writableMounts.push_back(mounted.second);
                 result = FileOperations::ExecuteInWorker(request, job, completion);
-                for (auto &volume : writableMounts)
-                    if (!volume->Writable())
-                        safe = false;
+                for (auto &volume : writableMounts) {
+                    if (!volume->WorkerWritesSafe()) safe = false;
+                    if (!strcmp(volume->Kind(), "HFS")) {
+                        try { volume->Close(); }
+                        catch (const std::exception&) { safe = false; }
+                    }
+                }
             } catch (const std::exception &error) {
                 result = {1, ERROR_UNHANDLED_EXCEPTION, error.what()};
             } catch (...) {

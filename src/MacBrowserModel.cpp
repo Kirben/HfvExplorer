@@ -256,7 +256,12 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     }
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);
-    if (!MfsImage::Recognizes(*mfs)) return {};
+    if (!MfsImage::Recognizes(*mfs)) {
+        mfs.reset();
+        if (!externalJournal.empty() || !RecognizesClassicImage(path)) return {};
+        if (persistent) return TrackWorkerVolume(CopyProcess::MountPersistentImage(path,key,{},true));
+        return OpenClassicImage(path,true);
+    }
     mfs.reset(new MfsImageSource);
     if(!mfs->Open(path.c_str(),error,true)){mfs.reset(new MfsImageSource);if(!mfs->Open(path.c_str(),error))throw HfsPlus::Error(error);}
     return TrackWorkerVolume(std::make_shared<Mfs>(std::move(mfs),key));

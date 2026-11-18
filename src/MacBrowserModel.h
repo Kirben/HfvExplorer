@@ -3,6 +3,9 @@
 #include "HfsPlus.h"
 #include "MfsImage.h"
 #include "StorageWorker.h"
+extern "C" {
+#include "hfs/libhfs/hfs.h"
+}
 
 class MediaImageSource;
 namespace MacBrowser {
@@ -48,6 +51,7 @@ public:
     virtual const char *Kind() const = 0;
     virtual std::string Description() const { return Kind(); }
     virtual bool Writable() const = 0;
+    virtual bool WorkerWritesSafe() const { return Writable(); }
     virtual bool HasPersistentWorker() const { return false; }
     virtual bool Journaled() const { return false; }
     virtual std::string WorkerEntryIdentity(const std::string& identity) const { return identity; }
@@ -86,6 +90,8 @@ public:
     virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
     virtual bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found){return FindChild(parent,entry.name,found);}
+    virtual bool GetClassicProperties(uint32_t, hfsdirent&) { return false; }
+    virtual void SetClassicProperties(uint32_t, const hfsdirent&) { throw HfsPlus::Error("Classic Finder properties are unavailable"); }
     virtual bool SupportsBasicMetadata()const{return false;}
     virtual void SetBasicMetadata(uint32_t,const Entry&){throw HfsPlus::Error("This format has no basic metadata editor");}
     virtual uint32_t MakeDirectory(uint32_t parent, const std::u16string &) = 0;
@@ -108,6 +114,8 @@ std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key);
 std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource>,const std::string& key);
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
+bool RecognizesClassicImage(const std::wstring&);
+std::shared_ptr<Volume> OpenClassicImage(const std::wstring&, bool writable);
 // Recursive transfers retain both forks and reject self/descendant copies.
 // A move removes its source only after the entire selected tree was copied.
 bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage::Job &, bool move = false);

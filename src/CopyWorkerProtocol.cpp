@@ -245,7 +245,7 @@ Entry DecodeEntry(Data& d) {
     memcpy(e.finder.data(),finder.data(),finder.size());
     return e;
 }
-static void EncodeClassic(Data& d, const hfsdirent& e) {
+void EncodeClassic(Data& d, const hfsdirent& e) {
     d.put(std::string(e.name, strnlen_s(e.name,sizeof(e.name))));
     d.put(uint32_t(e.flags)); d.put(uint32_t(e.cnid)); d.put(uint32_t(e.parid));
     d.put(uint64_t(e.crdate)); d.put(uint64_t(e.mddate)); d.put(uint64_t(e.bkdate));
@@ -263,7 +263,7 @@ static uint16_t Word(Data& d) {
     Check(value<=UINT16_MAX,"Invalid worker metadata field width");
     return uint16_t(value);
 }
-static hfsdirent DecodeClassic(Data& d) {
+hfsdirent DecodeClassic(Data& d) {
     hfsdirent e{};
     auto name=d.text();
     Check(name.size()<sizeof(e.name)&&name.find(char(0))==name.npos,"Invalid classic metadata name");
@@ -425,7 +425,7 @@ WireRequest DecodeRequest(Data &d) {
     case Kind::LegacyCopy:
         Check(count == 0 ? wire.target.kind == Address::None :
               wire.target.kind == Address::Windows || wire.target.kind == Address::ClassicImage ||
-                  wire.target.kind == Address::ClassicMedia, "Invalid conversion selection");
+                  wire.target.kind == Address::ClassicMedia || wire.target.kind == Address::Mounted, "Invalid conversion selection");
         break;
     case Kind::ExportFork:
         Check(wire.target.kind == Address::Windows, "Fork export requires a Windows output file");

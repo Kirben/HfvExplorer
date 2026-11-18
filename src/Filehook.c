@@ -53,7 +53,8 @@
 int fhook_open_image(const char* path,int flags,...) {
  int fd=-1,mode=0;errno_t result;
  if(flags&_O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
- result=_sopen_s(&fd,path,flags|_O_NOINHERIT,_SH_DENYWR,mode);
+ // Disk sectors must bypass the CRT text-mode EOF and newline handling.
+ result=_sopen_s(&fd,path,flags|_O_NOINHERIT|_O_BINARY,_SH_DENYWR,mode);
  if(result){unsigned long error=0;_get_doserrno(&error);
   errno=(error==ERROR_SHARING_VIOLATION||error==ERROR_LOCK_VIOLATION)?EBUSY:result;
   return -1;}
