@@ -7,6 +7,7 @@
 #include "StorageJobDialog.h"
 #include "FileOperations.h"
 #include "BackgroundCopies.h"
+#include "BackgroundJobController.h"
 #include "BrowserLifetime.h"
 #include "DialogClose.h"
 #include "DynCopyModeSelect.h"
@@ -83,10 +84,14 @@ struct TaskbarEntry{HWND owner;TaskbarProgress::Value progress;};
 std::map<const void*,TaskbarEntry> taskbarEntries; // UI thread only.
 class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
- bool modeless_=false,completed_=false,mutation_=false,handlingTimer_=false;unsigned dispatchDepth_=0;
+ bool modeless_=false,completed_=false,mutation_=false,handlingTimer_=false;
+ bool dismissOnCompletion_=false;unsigned dispatchDepth_=0;
  std::string operation_="Copy";
  std::function<bool()> advance_;
- std::function<void()> finished_,cancelled_;
+ std::function<Storage::Result()> finished_;
+ std::function<void()> cancelled_;
+ std::function<void(uint64_t,Storage::ConflictChoice)> resolve_;
+ std::function<void(const char*)> failed_;
  CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false,cancellable_=false;
  ITaskbarList3* taskbar_=nullptr;bool uninitialize_=false;uint64_t taskbarDone_=0,taskbarTotal_=0;
  HWND owner_;
@@ -150,6 +155,7 @@ class JobDialog : public CDialog {
  DWORD started_=GetTickCount();
 public:
  void Operation(const char* operation){operation_=operation;mutation_=operation_!="Copy"&&operation_!="Resource import";}
+ void DismissOnCompletion(){dismissOnCompletion_=true;}
  void Planning(){job_=std::make_shared<Storage::Job>();Storage::Progress p;p.phase="Choose a copy mode";job_->progress(p);job_->finish({});}
  HWND ProgressOwner()const{return owner_;}
  void ProgressOwner(HWND window){
@@ -158,7 +164,12 @@ public:
   if(tracked)state(TBPF_NOPROGRESS); // Clear only this job's old taskbar contribution.
   owner_=window;if(tracked)state(waiting?TBPF_INDETERMINATE:TBPF_NORMAL);
  }
- void Background(std::function<bool()> next,std::function<void()> finished,std::function<void()> cancel){modeless_=true;advance_=std::move(next);finished_=std::move(finished);cancelled_=std::move(cancel);}
+ void Background(std::function<bool()> next, std::function<Storage::Result()> finish,
+     std::function<void()> cancel, std::function<void(uint64_t,Storage::ConflictChoice)> resolve,
+     std::function<void(const char*)> fail) {
+  modeless_=true;advance_=std::move(next);finished_=std::move(finish);cancelled_=std::move(cancel);
+  resolve_=std::move(resolve);failed_=std::move(fail);
+ }
  void Next(const std::shared_ptr<Storage::Job>& job){job_=job;started_=GetTickCount();waiting_=true;GetDlgItem(IDC_CP_BAR)->SendMessage(PBM_SETMARQUEE,TRUE,40);update();}
  void BeforeClose(std::function<void(HWND)> callback){beforeClose_=std::move(callback);}
  void PrepareToClose(){if(beforeClose_)beforeClose_(GetSafeHwnd());}
@@ -196,7 +207,7 @@ public:
   if(job_->done())PostMessage(WM_APP+94,0,0);
   return RunModalLoop(MLF_NOKICKIDLE);
  }
- void OnCancel() override {if(modeless_&&completed_){DestroyWindow();return;}if(cancellable_){if(cancelled_)cancelled_();job_->cancel();GetDlgItem(IDCANCEL)->EnableWindow(FALSE);SetDlgItemText(IDCANCEL,"Cancelling...");}}
+ void OnCancel() override {if(modeless_&&completed_){DestroyWindow();return;}if(cancellable_){if(modeless_)cancelled_();else job_->cancel();GetDlgItem(IDCANCEL)->EnableWindow(FALSE);SetDlgItemText(IDCANCEL,"Cancelling...");}}
  void OnOK() override {}
  bool Dispatching()const{return dispatchDepth_!=0;}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l) override {
@@ -221,28 +232,31 @@ public:
    if(owner_&&!::IsWindowEnabled(owner_))storageUiTest.disabledDuring=true;
 #endif
    update();
-   auto conflict=job_->conflict();
+   auto [conflictId, conflict]=job_->conflictState();
    if(!conflict.empty()){
     KillTimer(1);
+    auto answer = Storage::ConflictChoice::None;
 #ifdef HFV_TESTING
-    if(hidden_){if(!modeless_||storageUiTest.answer!=Storage::ConflictChoice::None)job_->resolve(storageUiTest.answer==Storage::ConflictChoice::None?Storage::ConflictChoice::Cancel:storageUiTest.answer);}
+    if(hidden_)answer=!modeless_&&storageUiTest.answer==Storage::ConflictChoice::None?Storage::ConflictChoice::Cancel:storageUiTest.answer;
     else
 #endif
     {
      ConflictDialog prompt(conflict,this,job_->progress().utf8,modeless_?job_:nullptr);INT_PTR choice=prompt.DoModal();
-     job_->resolve(choice==IDC_REPLACE?Storage::ConflictChoice::Replace:choice==IDC_REPLACE_ALL?Storage::ConflictChoice::ReplaceAll:choice==IDC_SKIP?Storage::ConflictChoice::Skip:Storage::ConflictChoice::Cancel);
+     answer=choice==IDC_REPLACE?Storage::ConflictChoice::Replace:choice==IDC_REPLACE_ALL?Storage::ConflictChoice::ReplaceAll:choice==IDC_SKIP?Storage::ConflictChoice::Skip:Storage::ConflictChoice::Cancel;
     }
+    if(modeless_)resolve_(conflictId,answer);
+    else if(answer!=Storage::ConflictChoice::None)job_->resolve(conflictId,answer);
     SetTimer(1,50,nullptr);
    }
-   if(job_->done()){
+   if(modeless_||job_->done()){
     if(modeless_){
-     try{if(advance_&&advance_())return 0;}catch(const std::exception& error){if(cancelled_)cancelled_();job_=std::make_shared<Storage::Job>();job_->finish({1,ERROR_UNHANDLED_EXCEPTION,error.what()});}
+     try{if(advance_&&advance_())return 0;}catch(const std::exception& error){failed_(error.what());}
      KillTimer(1);state(TBPF_NOPROGRESS);completed_=true;DialogClose::SetKind(m_hWnd,DialogClose::Kind::Dialog);std::string displayError;
-     try{if(finished_)finished_();}catch(CException* error){char text[512]{};error->GetErrorMessage(text,ARRAYSIZE(text));displayError=text[0]?text:"MFC completion error";error->Delete();}catch(const std::exception& error){displayError=error.what();if(displayError.empty())displayError="Completion callback failed";}catch(...){displayError="Unknown completion error";}
+     Storage::Result result=job_->result();
+     try{result=finished_();}catch(CException* error){char text[512]{};error->GetErrorMessage(text,ARRAYSIZE(text));displayError=text[0]?text:"MFC completion error";error->Delete();}catch(const std::exception& error){displayError=error.what();if(displayError.empty())displayError="Completion callback failed";}catch(...){displayError="Unknown completion error";}
      if(!GetSafeHwnd()||!IsWindow(m_hWnd))return 0;
-     if(!displayError.empty()){auto result=job_->result();auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
-     auto result=job_->result();auto p=job_->progress();
-     if(result.outcome==Storage::Outcome::Succeeded){DestroyWindow();return 0;}
+     if(!displayError.empty()){auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
+     if(dismissOnCompletion_||result.outcome==Storage::Outcome::Succeeded){DestroyWindow();return 0;}
      const char* ending=result.outcome==Storage::Outcome::Cancelled ? " cancelled" :
                        result.outcome==Storage::Outcome::Failed ? " failed" : " finished with skipped files";
      auto status=operation_+ending;
@@ -397,51 +411,78 @@ public:
 };
 int lastMode[2]={0,0};int lastAd=-1;
 struct Batch {
- std::vector<FileOperations::Request> requests;size_t next=0;
- std::unique_ptr<FileOperations::Operation> operation;
- std::unique_ptr<JobDialog> dialog;std::unique_ptr<ModeDialog> mode;
- std::function<void(bool)> completed;
- std::function<void(const FileOperations::Completion&)> observed;FileOperations::Completion snapshot;
- bool complete=true,finished=false,cancelled=false,hidden=false;
- bool all[2]={false,false};LegacyCopyOptions choices[2];
- bool Advance(){
-  if(operation){auto result=operation->Job()->result();
-#ifdef HFV_TESTING
-   lastResult=result;
-#endif
-   snapshot=operation->Snapshot();cancelled=cancelled||operation->Job()->cancelled();complete=complete&&!result.code&&operation->Snapshot().complete;if(result.code)cancelled=true;operation.reset();}
-  if(mode){
-   if(!mode->ready)return true;
-   if(!mode->accepted)cancelled=true;
-   else{auto& r=requests[next];int direction=mode->m_outcopy?1:0;int selection=mode->m_copy_mode;const char values[]="ambtrRx5";
-    char value=selection>=0&&selection<8?values[selection]:'a';if(direction)r.Legacy().options.output=value;else{r.Legacy().options.input=value;r.Legacy().options.appledouble=mode->m_appledouble!=FALSE;}
-    lastMode[direction]=selection;lastAd=mode->m_appledouble!=FALSE;all[direction]=mode->m_said_ok_all!=0;choices[direction]=r.Legacy().options;r.Legacy().askMode=false;
+ JobController controller;
+ std::unique_ptr<JobDialog> dialog;
+ std::unique_ptr<ModeDialog> mode;
+ bool hidden = false;
+
+ Batch(std::vector<FileOperations::Request> requests, std::function<void(bool)> completed,
+       std::function<void(const FileOperations::Completion&)> observed)
+     : controller(std::move(requests), std::move(completed), std::move(observed)) {}
+
+ bool Advance() {
+  if (mode) {
+   if (!mode->ready)
+    return true;
+   if (mode->accepted) {
+    int direction = mode->m_outcopy ? 1 : 0;
+    lastMode[direction] = mode->m_copy_mode;
+    lastAd = mode->m_appledouble != FALSE;
+    controller.ChooseMode({mode->m_copy_mode, lastAd != 0, mode->m_said_ok_all != 0});
+   } else {
+    controller.Cancel();
+    dialog->DismissOnCompletion();
    }
    mode.reset();
   }
-  if(cancelled||next==requests.size())return false;
-  auto* pending = requests[next].Conversion();
-  int direction = pending && pending->destination.IsClassic() ? 0 : 1;
-  if (pending && pending->askMode && all[direction]) {
-   if (direction) pending->options.output = choices[direction].output;
-   else {
-    pending->options.input = choices[direction].input;
-    pending->options.appledouble = choices[direction].appledouble;
-   }
-   pending->askMode = false;
+  switch (controller.Advance()) {
+  case JobController::Step::Running:
+   return true;
+  case JobController::Step::Finished:
+   return false;
+  case JobController::Step::Started:
+   dialog->Next(controller.Job());
+   if (!hidden)
+    dialog->ShowWindow(SW_SHOWNOACTIVATE);
+   return true;
+  case JobController::Step::ChooseMode:
+   const auto& pending = *controller.PendingMode();
+   int direction = pending.destination.IsClassic() ? 0 : 1;
+   dialog->Planning();
+   mode = std::make_unique<ModeDialog>(hidden);
+   mode->m_outcopy = direction;
+   mode->m_copy_mode = lastMode[direction];
+   mode->m_appledouble = lastAd < 0 ? static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble : lastAd;
+   mode->m_copying_fname = pending.source.LegacyPath().c_str();
+   if (pending.selection && pending.selection->source.IsMounted())
+    mode->m_copying_fname = CString(MacBrowser::Wide(pending.selection->source.expectedName).c_str());
+   if (!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT, CWnd::GetDesktopWindow()))
+    throw std::runtime_error("Cannot create copy mode window");
+   dialog->ShowWindow(SW_HIDE);
+   if (!hidden)
+    mode->ShowWindow(SW_SHOWNOACTIVATE);
+   return true;
   }
-  if (pending && pending->askMode) {
-   dialog->Planning();mode.reset(new ModeDialog(hidden));mode->m_outcopy=direction;mode->m_copy_mode=lastMode[direction];mode->m_appledouble=lastAd<0?static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble:lastAd;mode->m_copying_fname=pending->source.LegacyPath().c_str();
-   if(pending->selection&&pending->selection->source.IsMounted())
-    mode->m_copying_fname=CString(MacBrowser::Wide(pending->selection->source.expectedName).c_str());
-   if(!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create copy mode window");
-   dialog->ShowWindow(SW_HIDE);if(!hidden)mode->ShowWindow(SW_SHOWNOACTIVATE);return true;
-  }
-  auto request=std::move(requests[next++]);request.background=true;
-  operation.reset(new FileOperations::Operation(FileOperations::Submit(std::move(request))));
-  dialog->Next(operation->Job());if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);return true;
+  return false;
  }
- void Finish(){complete=complete&&!cancelled;if(operation)complete=complete&&!operation->Job()->result().code&&operation->Snapshot().complete;finished=true;--active;requests.clear();operation.reset();BrowserLifetime::Collect();auto onCompleted=std::move(completed);auto onObserved=std::move(observed);auto result=std::move(snapshot);snapshot={};if(onCompleted)onCompleted(complete);if(complete&&onObserved)onObserved(result);}
+
+ void Cancel() {
+  controller.Cancel();
+  if (mode && mode->GetSafeHwnd())
+   mode->OnCancel();
+ }
+
+ Storage::Result Finish() {
+  if (!controller.Finished()) {
+   --active;
+   controller.Finish();
+#ifdef HFV_TESTING
+   lastResult = controller.Result();
+#endif
+   BrowserLifetime::Collect();
+  }
+  return controller.Result();
+ }
 };
 std::vector<std::unique_ptr<Batch>> batches;
 }
@@ -455,9 +496,10 @@ bool Enabled(){
 bool Active(){return active.load()!=0;}
 bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single,std::function<void(bool)> completed,std::function<void(const FileOperations::Completion&)> observed){
  if(requests.empty())return false;
- batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->finished&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
- auto batch=std::unique_ptr<Batch>(new Batch);auto ptr=batch.get();batch->requests=std::move(requests);batch->completed=std::move(completed);batch->observed=std::move(observed);
- auto kind=batch->requests.front().OperationKind();bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
+ batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->controller.Finished()&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
+ auto kind=requests.front().OperationKind();
+ auto batch=std::make_unique<Batch>(std::move(requests),std::move(completed),std::move(observed));
+ auto ptr=batch.get();bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
  const char* title=kind==FileOperations::Kind::CreateHardLink?"Creating hard link":kind==FileOperations::Kind::SetCompression?"Changing file compression":kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":kind==FileOperations::Kind::CreateFolder?"Creating folder":kind==FileOperations::Kind::Inspect?"Reading properties":kind==FileOperations::Kind::SetAttributes?"Updating extended attributes":kind==FileOperations::Kind::ReadAttributeFile?"Reading attribute value":kind==FileOperations::Kind::ExportAttribute?"Exporting attribute":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Updating properties":kind==FileOperations::Kind::ReplaceResource?"Importing resource fork":"Copying files";
  const char* operation=kind==FileOperations::Kind::CreateHardLink?"Hard-link creation":kind==FileOperations::Kind::SetCompression?"Compression change":kind==FileOperations::Kind::Rename?"Rename":kind==FileOperations::Kind::Delete?"Delete":kind==FileOperations::Kind::CreateFolder?"Folder creation":kind==FileOperations::Kind::Inspect?"Properties read":kind==FileOperations::Kind::SetAttributes?"Attribute update":kind==FileOperations::Kind::ReadAttributeFile?"Attribute read":kind==FileOperations::Kind::ExportAttribute?"Attribute export":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Properties update":kind==FileOperations::Kind::ReplaceResource?"Resource import":"Copy";
  if(mutation)single=true;
@@ -471,23 +513,26 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
   batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),title,hidden,CWnd::GetDesktopWindow(),false,false,single,true,true));
   batch->dialog->Operation(operation);
   batch->dialog->ProgressOwner(owner?owner->GetSafeHwnd():nullptr);
-  batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{ptr->Finish();},[ptr]{ptr->cancelled=true;});
+  batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{return ptr->Finish();},
+   [ptr]{ptr->Cancel();},
+   [ptr](uint64_t id, Storage::ConflictChoice choice){ptr->controller.Resolve(id,choice);},
+   [ptr](const char* message){ptr->controller.Fail(message);});
   if(!batch->dialog->Create(single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background copy progress");
   batch->hidden=hidden;batch->dialog->Planning();batch->Advance();
   batches.push_back(std::move(batch));return true;
- }catch(...){if(batch&&batch->operation){auto job=batch->operation->Job();job->cancel();ShowSubmittedStorageJob(job,"Cancelling copy",true,true,true,owner);}--active;throw;}
+ }catch(...){if(batch){batch->Cancel();if(auto job=batch->controller.Job())job->wait();}--active;throw;}
 }
 void TransferOwner(HWND closing,HWND replacement){
  for(auto& batch:batches)if(batch->dialog->ProgressOwner()==closing)batch->dialog->ProgressOwner(replacement);
 }
-void CancelAll(){for(auto& b:batches)if(!b->finished){b->cancelled=true;if(b->operation)b->operation->Job()->cancel();if(b->mode&&b->mode->GetSafeHwnd())b->mode->OnCancel();}}
-void Shutdown(){CancelAll();Storage::copyWorker().shutdown();for(auto& b:batches){if(!b->finished)b->Finish();if(b->dialog->GetSafeHwnd())b->dialog->DestroyWindow();}batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return !b->dialog->Dispatching();}),batches.end());BrowserLifetime::Collect();}
+void CancelAll(){for(auto& batch:batches)batch->Cancel();}
+void Shutdown(){CancelAll();Storage::copyWorker().shutdown();for(auto& b:batches){if(!b->controller.Finished())b->Finish();if(b->dialog->GetSafeHwnd())b->dialog->DestroyWindow();}batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return !b->dialog->Dispatching();}),batches.end());BrowserLifetime::Collect();}
 #ifdef HFV_TESTING
-unsigned ProgressOwners(HWND owner){unsigned n=0;for(auto& b:batches)if(!b->finished&&b->dialog->ProgressOwner()==owner)++n;return n;}
+unsigned ProgressOwners(HWND owner){unsigned n=0;for(auto& b:batches)if(!b->controller.Finished()&&b->dialog->ProgressOwner()==owner)++n;return n;}
 unsigned TaskbarJobs(HWND owner){unsigned n=0;for(auto& item:taskbarEntries)if(item.second.owner==owner)++n;return n;}
 unsigned DialogCount(){unsigned n=0;for(auto& b:batches)if(b->dialog->GetSafeHwnd())++n;return n;}
 HWND ModeWindow(){for(auto& b:batches)if(b->mode)return b->mode->GetSafeHwnd();return nullptr;}
-HWND DialogWindow(){for(auto& b:batches)if(!b->finished)return b->dialog->GetSafeHwnd();return nullptr;}
+HWND DialogWindow(){for(auto& b:batches)if(!b->controller.Finished())return b->dialog->GetSafeHwnd();return nullptr;}
 #endif
 }
 StorageQuietRefresh::StorageQuietRefresh(){++quietRefreshDepth;}
