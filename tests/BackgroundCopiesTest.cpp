@@ -5,6 +5,7 @@
 #include "BrowserSession.h"
 #include "BrowserPresentation.h"
 #include "BackgroundCopies.h"
+#include "BackgroundJobController.h"
 #include "BrowserLifetime.h"
 #include "DialogClose.h"
 #include "MainMacBrowser.h"
@@ -96,11 +97,50 @@ public:FakeFloppy disk;bool locked=false;unsigned writes=0;
 #endif
 void Host(BrowserSession& s,const CString& path){auto tree=s.Tree();bool enabled=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(s.Document()->m_fats[0].m_rootitem);tree->enable_selchange(enabled);s.Document()->open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);}
 }
+static void TestJobController(const std::wstring& directory)
+{
+ using Controller = BackgroundCopies::JobController;
+ auto target = FileOperations::Location::Windows(directory);
+ FileOperations::LegacyConversion conversion;
+ conversion.destination = target;
+ conversion.askMode = true;
+ unsigned calls = 0;
+ Controller planning({conversion}, [&](bool success) {
+  ++calls;
+  Check(!success, "cancelled copy-mode selection reported success");
+ });
+ Check(planning.Advance() == Controller::Step::ChooseMode && !planning.Job(), "controller submitted before mode selection");
+ planning.Cancel();
+ Check(planning.Advance() == Controller::Step::Finished, "cancelled planning still requested input");
+ planning.Finish();
+ planning.Finish();
+ Check(calls == 1 && planning.Result().outcome == Storage::Outcome::Cancelled, "planning cancellation outcome or notification");
+
+ FileOperations::CreateFolder create{target, u"controller-first"};
+ FileOperations::CreateFolder duplicate{target, u"controller-first"};
+ FileOperations::CreateFolder later{target, u"controller-later"};
+ Controller sequence({create, duplicate, later}, [&](bool success) {
+  ++calls;
+  Check(!success, "failed batch reported success");
+ });
+ Check(sequence.Advance() == Controller::Step::Started, "controller failed to start first job");
+ sequence.Job()->wait();
+ Check(sequence.Advance() == Controller::Step::Started, "controller failed to start second job");
+ sequence.Job()->wait();
+ Check(sequence.Advance() == Controller::Step::Finished, "controller continued after failure");
+ sequence.Finish();
+ Check(calls == 2 && sequence.Result().outcome == Storage::Outcome::Failed &&
+       GetFileAttributesW((directory + L"\\controller-first").c_str()) != INVALID_FILE_ATTRIBUTES &&
+       GetFileAttributesW((directory + L"\\controller-later").c_str()) == INVALID_FILE_ATTRIBUTES,
+       "controller did not retain earlier work or stop after failure");
+}
+
 int RunBackgroundCopiesTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\background-copy-report.txt","w");if(!report)return 2;int result=0;
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;app.m_copyin_mode=app.m_copyout_mode=0;
  Gate gate;
  try{
+  TestJobController(VolumeCoord::Wide(directory));
   auto longFolder=VolumeCoord::Wide(std::string((LPCSTR)host));for(int level=0;level<3;++level){longFolder+=L"\\"+std::wstring(80,wchar_t(L'a'+level));auto full=BrowserPresentation::WindowsPath(longFolder);Check(CreateDirectoryW(full.c_str(),nullptr)!=FALSE,"create long source folder");}
   auto longFile=BrowserPresentation::WindowsPath(longFolder+L"\\StoredCase.txt");HANDLE file=CreateFileW(longFile.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);Check(file!=INVALID_HANDLE_VALUE,"create long source file");DWORD written;Check(WriteFile(file,"LONG",4,&written,nullptr)&&written==4,"write long source");CloseHandle(file);
   auto resolved=MacBrowser::ResolveWindowsFile(longFolder+L"\\storedcase.txt");Check(resolved.first->Stat(resolved.second).name==u"StoredCase.txt","direct long source lookup lost stored filename case");char longBytes[4]{};resolved.first->Read(resolved.second,0,0,longBytes,4);Check(!memcmp(longBytes,"LONG",4),"long source lookup read different data");resolved.first->Close();
