@@ -111,7 +111,40 @@ int RunFileOperationsTest(const char* directory){
   // The legacy backend keeps its safe path-based host mutations and converters.
   Save(root+"\\ordinary.txt","KEEP");Save(root+"\\%ordinary.txt","UNRELATED");Request hostRename = FileOperations::RenameEntry{Host(root+"\\ordinary.txt"), u"renamed.txt"};Pass(Submit(hostRename));Check(Load(root+"\\renamed.txt").size()==4,"Windows rename job");Request hostRemove = FileOperations::DeleteEntries{{Host(root+"\\renamed.txt")}};Pass(Submit(hostRemove));Check(Load(root+"\\%ordinary.txt").size()==9,"Windows delete removed unrelated companion");
   std::string classic=root+"\\classic.dsk";{CFile f;Check(f.Open(classic.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create classic job image");f.SetLength(2*1024*1024);}char label[]="Classic",type[]="TEXT",creator[]="TEST",name[]="Classic:Original";Check(hfs_format(&classic[0],0,label)==0,"format classic job fixture");auto v=hfs_mount(&classic[0],0,O_RDWR);Check(v&&hfs_create(v,name,type,creator)==0,"create classic job source");auto f=hfs_open(v,name);Check(f&&hfs_write(f,const_cast<char*>("DATA"),4)==4&&hfs_close(f)==0&&hfs_umount(v)==0,"write classic source");
-  Location classicSource;classicSource.SetClassic(classic,"Classic:Original");Request classicRename = FileOperations::RenameEntry{classicSource, u"Renamed"};Pass(Submit(classicRename));
+  Location classicSource=Location::Classic(classic,"Classic:Original");
+  {
+   auto original=OpenClassic(classic,"Classic:",true);
+   Entry entry;entry.name=u"Launch document";entry.forks[0].size=4;entry.forks[1].size=3;
+   memcpy(entry.finder.data(),"TEXTTEST",8);
+   original->Put(2,entry,[](unsigned fork,uint64_t,void* data,size_t bytes){
+    memcpy(data,fork?"RSR":"DATA",bytes);
+   },false);
+   original->Close();
+   auto location=Location::Classic(classic,"Classic:Launch document");
+   location.expectedResource=location.ResourceKey();
+   Storage::Job capture;
+   auto version=CaptureLaunchVersion(location,capture);
+   auto edited=root+"\\edited-launch.txt";
+   Save(edited,"EDIT");
+   Storage::Job apply;
+   auto updated=ApplyLaunchEdit(location,version,W(edited),apply);
+   Check(!updated.code,updated.message.c_str());
+   Save(edited,"LATE");
+   Storage::Job stale;
+   Check(ApplyLaunchEdit(location,version,W(edited),stale).code&&
+         Load(edited)==std::vector<BYTE>({'L','A','T','E'}),
+         "stale launcher write-back was accepted or discarded edits");
+   auto reopened=OpenClassic(classic,"Classic:",false);
+   Entry actual;
+   Check(reopened->FindChild(2,entry.name,actual)&&actual.forks[0].size==4&&actual.forks[1].size==3&&
+         !memcmp(actual.finder.data(),"TEXTTEST",8),"launcher write-back did not preserve metadata");
+   char data[4]{},resource[3]{};
+   reopened->Read(actual.id,0,0,data,sizeof(data));reopened->Read(actual.id,1,0,resource,sizeof(resource));
+   reopened->Close();
+   Check(!memcmp(data,"EDIT",4)&&!memcmp(resource,"RSR",3),"launcher wrote the wrong data or lost the resource fork");
+   fprintf(report,"PASS: launcher write-back preserves the resource fork and Finder metadata, and retains edits when the original has changed.\n");
+  }
+  Request classicRename = FileOperations::RenameEntry{classicSource, u"Renamed"};Pass(Submit(classicRename));
   Request legacy;legacy = FileOperations::LegacyConversion{};legacy.Legacy().source=FileOperations::Location::FromLegacy(classic,"Classic:Renamed");legacy.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\raw.dat");legacy.Legacy().options.output='r';legacy.Legacy().options.input='r';legacy.Legacy().options.appledouble=false;
   {Gate gate;auto captured=Submit(legacy);legacy.Legacy().options.output='5';HFSIFACE_restore_copy_settings('5','m',1);gate.Release();Pass(captured);char out,in;int ad;HFSIFACE_copy_settings(&out,&in,&ad);Check(out=='5'&&in=='m'&&ad==1&&Load(root+"\\raw.dat")==std::vector<BYTE>({'D','A','T','A'}),"queued conversion settings were not captured/restored");}
   Save(root+"\\import.dat","HELLO");legacy.Legacy().source=FileOperations::Location::FromLegacy(root,root+"\\import.dat");legacy.Legacy().destination=FileOperations::Location::FromLegacy(classic,"Classic:Imported");legacy.Legacy().options.input='r';Pass(Submit(legacy));hfsdirent imported{};std::string importPath="Classic:Imported";Check(HFSIFACE_get_properties(&classic[0],&importPath[0],&imported)==0&&imported.u.file.dsize==5,"captured import mode ignored");
@@ -132,6 +165,16 @@ int RunFileOperationsTest(const char* directory){
    for(auto choice:{Storage::ConflictChoice::Cancel,Storage::ConflictChoice::Skip}){auto overwrite=Submit(import);Conflict(overwrite.Job());overwrite.Job()->resolve(choice);Wait(overwrite);Check(readImported()=="OLD"&&Load(root+"\\Duplicate").size()==8,"declined floppy overwrite changed destination/source");if(choice==Storage::ConflictChoice::Cancel)Check(overwrite.Job()->result().error==ERROR_CANCELLED,"floppy Cancel not propagated");else Check(!overwrite.Job()->result().code&&!overwrite.Snapshot().complete&&overwrite.Job()->progress().skipped==1,"floppy Skip not propagated");}
    Request wrappedExport;wrappedExport = FileOperations::LegacyConversion{};wrappedExport.Legacy().source=FileOperations::Location::FromLegacy(path,"Floppy:Duplicate");wrappedExport.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\container.bin");wrappedExport.Legacy().options.output='m';wrappedExport.Legacy().options.appledouble=false;Pass(Submit(wrappedExport));auto wrapped=import;wrapped.SetLegacySourcePath(wrappedExport.Legacy().destination.LegacyPath());wrapped.Legacy().options.input='m';auto embedded=Submit(wrapped);Conflict(embedded.Job());Check(embedded.Job()->conflict().find("Duplicate")!=std::string::npos,"overwrite checked container filename rather than embedded Mac name");embedded.Job()->resolve(Storage::ConflictChoice::Skip);Wait(embedded);Check(!embedded.Job()->result().code&&embedded.Job()->progress().skipped==1&&readImported()=="OLD","skipped converted-name import changed floppy data");
    auto replace=Submit(import);Conflict(replace.Job());replace.Job()->resolve(Storage::ConflictChoice::Replace);Pass(replace);Check(readImported()=="NEW DATA","confirmed floppy replacement not saved");
+   auto launch=Location::Classic(path,"Floppy:Duplicate");
+   launch.BindMediaGeneration(disk.disk.changeCount);
+   Storage::Job capture;
+   auto version=CaptureLaunchVersion(launch,capture);
+   ++disk.disk.changeCount;
+   auto writes=disk.writes;
+   Storage::Job playback;
+   auto rejected=ApplyLaunchEdit(launch,version,W(root+"\\Duplicate"),playback);
+   Check(rejected.error==ERROR_MEDIA_CHANGED&&disk.writes==writes&&!disk.locked&&
+         Load(root+"\\Duplicate").size()==8,"launcher wrote to swapped floppy media or removed the edit");
    // Exercise the converted-move path without the physical-floppy wrapper's
    // extra source-retention policy: Skip must never fall through to DeleteFile.
    auto imageMove=import;imageMove.SetLegacySourcePath(root+"\\ImageMove");imageMove.Legacy().destination=FileOperations::Location::FromLegacy(classic,"Classic:");Save(imageMove.Legacy().source.LegacyPath(),"KEEP");Pass(Submit(imageMove));Save(imageMove.Legacy().source.LegacyPath(),"NEW");imageMove.Legacy().move=true;auto skippedImport=Submit(imageMove);Conflict(skippedImport.Job());skippedImport.Job()->resolve(Storage::ConflictChoice::Skip);Wait(skippedImport);Check(!skippedImport.Job()->result().code&&!skippedImport.Snapshot().complete&&Load(imageMove.Legacy().source.LegacyPath()).size()==3,"skipped converted move deleted its Windows source");auto unchanged=OpenClassic(classic,"Classic:",false);bool keptOld=false;for(auto& e:unchanged->List())if(e.name==u"ImageMove"){char data[4]{};unchanged->Read(e.id,0,0,data,4);keptOld=!memcmp(data,"KEEP",4);}unchanged->Close();Check(keptOld,"skipped converted move changed its old destination");

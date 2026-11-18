@@ -21,22 +21,14 @@
 #ifndef _MAINFRM_DEFINED
 #define _MAINFRM_DEFINED
 #include "HostOffsets.h"
+#include <memory>
+#include <vector>
 
 int ask_new_volume( char *volpath, char *vname, hfv_size_t *psize, int *normal, int *floppyDrive = nullptr );
 
 #define MYTIMERID 123
 
-typedef struct {
-	HANDLE m_waiting_emulator_process;
-	char m_waiting_doc_win_name[_MAX_PATH];
-	char m_waiting_srcvolpath[_MAX_PATH];
-	char m_waiting_srcname[_MAX_PATH];
-	CTime m_waiting_emu_mtime;
-	LONG m_waiting_emu_size;
-	DWORD m_start_watch_emulator;
-	// CDWordArray m_process_list;
-} wait_item_struct;
-
+class LauncherWriteBack;
 struct MediaControlTarget;
 class BrowserSession;
 
@@ -85,12 +77,7 @@ public:
 	void MountPath( char *name );
 	void go_home_dir( void );
 	void WaitEmulator( char *name1, char *name2 );
-	void WaitEmulator2( 
-		HANDLE process,
-		LPCSTR doc_win_name,
-		LPCSTR srcvolpath,
-		LPCSTR srcname
-	);
+ void TrackLaunchedDocument(std::unique_ptr<LauncherWriteBack>);
 	HWND FindEmuWindow( void );
 	virtual void LoadWindowPosition(void);
 	virtual void SaveWindowPosition(void);
@@ -116,8 +103,7 @@ protected:  // control bar embedded members
 	char m_waiting_emulator2[100];
 	
  bool m_handlingTimer=false;
-	// Pointers to wait_item_struct
-	CPointerWordArray m_wait_items;
+ std::vector<std::unique_ptr<LauncherWriteBack>> m_launchedDocuments;
 
 	/*
 	HANDLE m_waiting_emulator_process;

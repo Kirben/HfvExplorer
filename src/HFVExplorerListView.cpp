@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "LauncherWriteBack.h"
 #include "CommandStorage.h"
 #include "BackgroundCopies.h"
 #include "BrowserSession.h"
@@ -2089,65 +2090,10 @@ int CHFVExplorerListView::do_make_shortcut_e_win32( int doc_inx, CString applica
 	return(retval);
 }
 
-void CHFVExplorerListView::update_callback(
-	LPSTR doc_win_name,
-	LPSTR destvolpath,
-	LPSTR destname,
-	BOOL copy_back
-)
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int copyret, was_moved;
-	BOOL do_delete = TRUE, do_update_finder = TRUE;
-	hfsdirent ent, ent2;
-
-	if(copy_back) {
-		if(0 != ReadClassicMetadata( destvolpath, destname, &ent )) {
-			do_update_finder = FALSE;
-		}
-		HFSIFACE_set_modein( 4, pApp->m_copyin_appledouble );
-		copyret = CopyWithProgress(
-			doc_win_name, 
-			doc_win_name,
-			destvolpath, 
-			destname,
-			FALSE,
-			FALSE,
-			&was_moved, GetBrowserSession().Owner()
-		);
-		if( copyret != 0 ) {
-			do_delete = FALSE;
-			AfxMessageBox( "Failed to copy the file back. If you need the changes, the temporary file \"" + CString(doc_win_name) + "\" is still available." );
-		} else if(do_update_finder) {
-			if(0 == ReadClassicMetadata( destvolpath, destname, &ent2 )) {
-				ent2.fdlocation.h = (signed short)( unmagic(ent.fdlocation.h) - FINDER_MAGIC_OFFSET );
-				ent2.fdlocation.v = (signed short)( unmagic(ent.fdlocation.v) - FINDER_MAGIC_OFFSET );
-				memcpy( &ent2.u.file.type, ent.u.file.type, 5 );
-				memcpy( &ent2.u.file.creator, ent.u.file.creator, 5 );
-				ent2.crdate = ent.crdate;
-				ent2.fdflags &= ~HFS_FNDR_HASBEENINITED;
-				WriteClassicMetadata( destvolpath, destname, &ent2 );
-			}
-			update_floppy_view(destvolpath);
-		}
-	}
-	if(do_delete) {
-		SetFileAttributes( doc_win_name, FILE_ATTRIBUTE_NORMAL );
-		if(DeleteFile(doc_win_name)){
-			CString folder(doc_win_name);
-			RemoveDirectory(folder.Left(folder.ReverseFind('\\')));
-		}
-	}
-}
-
 int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, CString creator, int make_shortcut )
 {
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int retval = 0;
-	CString document;
-	char extension[_MAX_PATH], *old_extension,
-			 doc_win_name[_MAX_PATH],
-			 doc_win_folder[_MAX_PATH], srcvolpath[_MAX_PATH], *srcname;
+ CString document;
+ char extension[_MAX_PATH];
 
  FileOperations::Location selection;
  try {
@@ -2159,9 +2105,7 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
  if(!selection.IsClassic()||selection.ClassicImage().size()>=_MAX_PATH)return FALSE;
  document=selection.ClassicPath().c_str();
 
-	srcname = document.GetBuffer(_MAX_PATH);
-	old_extension = strrchr( srcname, '.' );
-	document.ReleaseBuffer();
+ const char* old_extension=strrchr(static_cast<LPCSTR>(document),'.');
 
 	if(!old_extension || strlen(old_extension) > 6) {
 		if( !tmap_hfs2fat( (LPCSTR)type, (LPCSTR)creator, extension ) ) {
@@ -2179,65 +2123,46 @@ int CHFVExplorerListView::do_make_shortcut_windows( int doc_inx, CString type, C
 		}
 	}
 
+ auto& session=GetBrowserSession();
+ auto owner=session.Owner();
+ std::string version;
+ auto captured=ShowStorageWaitJob([&](Storage::Job& job){
+  version=FileOperations::CaptureLaunchVersion(selection,job);
+  return Storage::Result{};
+ },!owner->IsWindowVisible(),owner);
+ if(captured.code){
+  owner->MessageBox(captured.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
+  return FALSE;
+ }
  CString staged;
- if(!StageWindowsLaunchDocument(GetBrowserSession(),selection,staged))return FALSE;
- strcpy_s(doc_win_name,staged);
- strcpy_s(doc_win_folder,staged.Left(staged.ReverseFind('\\')));
- strcpy_s(srcvolpath,selection.ClassicImage().c_str());
+ if(!StageWindowsLaunchDocument(session,selection,staged))return FALSE;
+ CString directory=staged.Left(staged.ReverseFind(char(92)));
+ DWORD attributes=FILE_ATTRIBUTE_TEMPORARY;
+ if(mount_flags(const_cast<char*>(selection.ClassicImage().c_str()))==0)attributes|=FILE_ATTRIBUTE_READONLY;
+ SetFileAttributes(staged,attributes);
 
-	DWORD attribs = FILE_ATTRIBUTE_TEMPORARY;
-	if(mount_flags(srcvolpath) == 0) {
-		attribs |= FILE_ATTRIBUTE_READONLY;
-	}
-	SetFileAttributes( doc_win_name, attribs );
-
-	/*
-	char app_win_path[_MAX_PATH];
-	HINSTANCE hinst = FindExecutable(
-		doc_win_name,
-		doc_win_folder,
-		app_win_path
-	);
-	if(hinst <= (HINSTANCE)32) {
-		AfxMessageBox( 
-			"There is no Windows association for file extension \"" + CString(extension) + "\"."
-		);
-		update_callback( doc_win_name, "", "", FALSE );
-		return(FALSE);
-	}
-	*/
-
-	SHELLEXECUTEINFO sh;
-	memset( &sh, 0, sizeof(SHELLEXECUTEINFO) );
-  sh.cbSize = sizeof(SHELLEXECUTEINFO);
-	sh.hwnd = GetSafeHwnd();
-  sh.lpVerb = "open",	
-
-  sh.lpFile = doc_win_name;
-  sh.lpParameters = "";
-
-	/*
-  sh.lpFile = app_win_path;
-  sh.lpParameters = doc_win_name;
-	*/
-
-  sh.lpDirectory = doc_win_folder;
-  sh.nShow = SW_SHOWNORMAL; //SW_SHOWMAXIMIZED;
-	sh.fMask = SEE_MASK_NOCLOSEPROCESS;
-	ShellExecuteEx( &sh );
-
-	if(sh.hInstApp <= (HINSTANCE)32) {
-		AfxMessageBox( 
-			"Could not start \"" + CString(doc_win_name) + "\"."
-		);
-		update_callback( doc_win_name, "", "", FALSE );
-
-		return(FALSE);
-	} else {
-		static_cast<CMainFrame*>(GetBrowserSession().Owner())->WaitEmulator2( sh.hProcess, doc_win_name, srcvolpath, document );
-	}
-
-	return(retval);
+ auto writeBack=std::make_unique<LauncherWriteBack>(selection,std::move(version),staged);
+ if(!writeBack->CaptureBaseline(owner)){
+  LauncherWriteBack::Discard(staged);
+  return FALSE;
+ }
+ SHELLEXECUTEINFO launch{};
+ launch.cbSize=sizeof(launch);
+ launch.hwnd=owner->GetSafeHwnd();
+ launch.lpVerb="open";
+ launch.lpFile=staged;
+ launch.lpDirectory=directory;
+ launch.nShow=SW_SHOWNORMAL;
+ launch.fMask=SEE_MASK_NOCLOSEPROCESS;
+ BOOL launched=ShellExecuteEx(&launch);
+ writeBack->Track(launch.hProcess);
+ if(!launched||reinterpret_cast<INT_PTR>(launch.hInstApp)<=32){
+  owner->MessageBox("Could not open "+staged,"HFVExplorer",MB_OK|MB_ICONERROR);
+  LauncherWriteBack::Discard(staged);
+  return FALSE;
+ }
+ static_cast<CMainFrame*>(owner)->TrackLaunchedDocument(std::move(writeBack));
+ return TRUE;
 }
 
 int CHFVExplorerListView::do_make_shortcut_vmac( int doc_inx, CString application, CString creator, int make_shortcut )

@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "LauncherWriteBack.h"
 #include "CommandStorage.h"
 #include "LegacyEngine.h"
 #include "DialogClose.h"
@@ -602,19 +603,6 @@ static void get_process_list( CDWordArray & plist )
 // hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
 // TerminateProcess(hProcess, 0);
 
-static HANDLE get_top_window_phandle( void )
-{
-	DWORD pid;
-	HANDLE hProcess;
-	HWND hwnd;
-
-	hwnd = ::GetForegroundWindow();
-	GetWindowThreadProcessId( hwnd, &pid );
-	// Must open the process with minimal access rights
-	hProcess = OpenProcess(STANDARD_RIGHTS_REQUIRED |PROCESS_QUERY_INFORMATION, FALSE, pid);
-	return( hProcess );
-}
-
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
  if(nIDEvent==9202){
@@ -629,78 +617,22 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
  if(HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
  if(m_deviceChangeDeferred)PostMessage(WM_APP+91);
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	int i, count;
-	wait_item_struct *w;
 
 	if(m_handlingTimer)return;
 
 	m_handlingTimer=true;
  struct TimerGuard{bool& active;~TimerGuard(){active=false;}} guard{m_handlingTimer};
 
-	count = m_wait_items.GetSize();
-	for(i=count-1; i>=0; i--) {
-		w = (wait_item_struct *)m_wait_items.ElementAt(i);
-		if(w->m_waiting_emulator_process) {
-			DWORD exitcode;
-			// Windows NT: The handle must have PROCESS_QUERY_INFORMATION access
-			if(GetExitCodeProcess(w->m_waiting_emulator_process,&exitcode)) {
-				if(exitcode != STILL_ACTIVE) {
-
-					// Has it died very soon? Maybe it launched some other app,
-					// or activated a previous instance.
-
-					BOOL going_away = TRUE;
-
-					if(GetTickCount() < w->m_start_watch_emulator) {
-						HANDLE hProcess = get_top_window_phandle();
-						if(hProcess) {
-							w->m_waiting_emulator_process = hProcess;
-							// CloseHandle(hProcess);
-							going_away = FALSE;
-						}
-						w->m_start_watch_emulator = 0;
-					}
-
-					if(going_away && VolumeCoord::Available({{VolumeCoord::ImageKey(std::string(w->m_waiting_srcvolpath)),VolumeCoord::Mode::Write}}) && can_have_exclusive_access(w->m_waiting_doc_win_name)) {
-						m_wait_items.RemoveAt(i);
-						w->m_waiting_emulator_process = 0;
-						if(m_was_zoomed) {
-							ShowWindow( SW_RESTORE );
-							ShowWindow( SW_SHOWMAXIMIZED );
-						} else {
-							ShowWindow( SW_RESTORE );
-						}
-						SetForegroundWindow();
-						UpdateWindow();
-						m_was_zoomed = 0;
-
-						CFileStatus rStatus;
-						BOOL do_update = FALSE;
-
-						if(CFile::GetStatus(w->m_waiting_doc_win_name,rStatus)) {
-							if( w->m_waiting_emu_mtime != rStatus.m_mtime ||
-									w->m_waiting_emu_size != rStatus.m_size)
-							{
-								int answer = MessageBox(
-									"The file " + CString(w->m_waiting_doc_win_name) + 
-									" was changed. Do you want to update the original file?","HFVExplorer",
-									MB_YESNO | MB_ICONQUESTION
-								);
-								if(answer == IDYES) do_update = TRUE;
-							}
-						}
-						GetBrowserSession().List()->update_callback(
-							w->m_waiting_doc_win_name,
-							w->m_waiting_srcvolpath,
-							w->m_waiting_srcname,
-							do_update
-						);
-						delete w;
-					}
-				}
-			}
-		}
-	}
+ if(!StorageUi::busy()){
+  for(size_t i=m_launchedDocuments.size();i>0;--i){
+   auto& item=m_launchedDocuments[i-1];
+   if(!item->Ready())continue;
+   auto completed=std::move(item);
+   m_launchedDocuments.erase(m_launchedDocuments.begin()+i-1);
+   completed->Complete(GetBrowserSession());
+   break;
+  }
+ }
 
 	if(*m_waiting_emulator1) {
 		int stop_wait = 0;
@@ -760,38 +692,9 @@ void CMainFrame::WaitEmulator( char *name1, char *name2 )
 	ShowWindow( SW_MINIMIZE );
 }
 
-void CMainFrame::WaitEmulator2( 
-	HANDLE process,
-	LPCSTR doc_win_name,
-	LPCSTR srcvolpath,
-	LPCSTR srcname
-)
+void CMainFrame::TrackLaunchedDocument(std::unique_ptr<LauncherWriteBack> document)
 {
-	CFileStatus rStatus;
-	wait_item_struct *w;
-
-	w = new wait_item_struct;
-
-	if(process == 0) {
-		process = get_top_window_phandle();
-	}
-
-	w->m_waiting_emulator_process = process;
-	strcpy( w->m_waiting_doc_win_name, doc_win_name );
-	strcpy( w->m_waiting_srcvolpath, srcvolpath );
-	strcpy( w->m_waiting_srcname, srcname );
-
-	if(CFile::GetStatus(doc_win_name,rStatus)) {
-		w->m_waiting_emu_mtime = rStatus.m_mtime;
-		w->m_waiting_emu_size = rStatus.m_size;
-	}
-	w->m_start_watch_emulator = GetTickCount() + 2500ul;
-	// get_process_list( w->m_process_list );
-
-	m_wait_items.Add( (DWORD_PTR)w );
-
-	m_was_zoomed = IsZoomed();
-	// ShowWindow( SW_MINIMIZE );
+ m_launchedDocuments.push_back(std::move(document));
 }
 
 BOOL CMainFrame::DestroyWindow() 
@@ -1354,8 +1257,7 @@ void CMainFrame::OnClose()
  }
 
 	BOOL do_close = TRUE;
-	int count = m_wait_items.GetSize();
-	if(count != 0) {
+	if(!m_launchedDocuments.empty()) {
 		int answer = AfxMessageBox( 
 			"There might be some launched documents open. If you terminate HFVExplorer now, any possible changes will not be written back to the HFS volumes, and the temporary files are not deleted.\r\n\r\nClose HFVExplorer anyway?",
 			MB_YESNO | MB_ICONQUESTION

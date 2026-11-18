@@ -147,5 +147,7 @@ PlanAccessForTest InspectPlanForTest(const Request&,const std::string& key,bool 
 #endif
 std::vector<Operation> Pending();
 void CancelPending();
+std::string CaptureLaunchVersion(const Location&, Storage::Job&);
+Storage::Result ApplyLaunchEdit(const Location&, const std::string&, const std::wstring&, Storage::Job&);
 
 }
