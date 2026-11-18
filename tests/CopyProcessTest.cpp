@@ -218,6 +218,76 @@ int RunCopyReleaseTest(const char *directory) {
         Pass(Submit(request));
         Check(mfs->FindChild(2, u"Plain", copied), "shipping MFS output");
         Verify(*mfs, copied.id, 4096);
+        auto execute = [&](Request mutation) {
+            CopyProcess::lastProcess = 0;
+            mutation.background = true;
+            auto op = Submit(std::move(mutation));
+            Pass(op);
+            Check(!op.Snapshot().affected.empty(), "Worker mutation omitted affected storage");
+        };
+        execute(CreateFolder{Native(target), u"Worker folder"});
+        Entry folder, renamed;
+        Check(target->FindChild(2, u"Worker folder", folder) && folder.directory, "Worker folder missing");
+        Entry original;
+        Check(target->FindChild(2, u"Shipping", original), "Missing rename fixture");
+        execute(RenameEntry{Native(target, original.id), u"Renamed by worker", Native(target, folder.id)});
+        Check(target->FindChild(folder.id, u"Renamed by worker", renamed) && renamed.id == original.id,
+              "Worker rename did not preserve the file");
+        auto linkSource = Put(*target, folder.id, u"Worker link source", 4096);
+        execute(FileOperations::CreateHardLink{Native(target, linkSource), Native(target, folder.id), u"Worker link"});
+        Entry link;
+        Check(target->FindChild(folder.id, u"Worker link", link), "Worker hard link missing");
+        execute(DeleteEntries{{Native(target, link.id)}});
+        Check(!target->FindChild(folder.id, u"Worker link", link), "Worker delete did not remove the link");
+
+        auto staleAttributes = target->GetAttributes(renamed.id);
+        auto attributes = staleAttributes;
+        attributes[u"user.worker"] = HfsPlus::AttributeData::Snapshot(1024 * 1024 + 7,
+            [](uint64_t offset, void* bytes, size_t count) {
+                memset(bytes, offset % 2 ? 7 : 11, count);
+            });
+        execute(EditAttributes{Native(target, renamed.id), staleAttributes, attributes});
+        Check(target->GetAttributes(renamed.id) == attributes, "Worker streamed attributes changed");
+        CopyProcess::lastProcess = 0;
+        auto stale = Submit(EditAttributes{Native(target, renamed.id), staleAttributes, {}});
+        Wait(stale);
+        Check(CopyProcess::lastProcess && stale.Job()->result().code && stale.Snapshot().affected.empty() &&
+                  target->GetAttributes(renamed.id) == attributes, "Worker accepted stale attribute edit");
+        execute(ChangeCompression{Native(target, renamed.id), target->Stat(renamed.id), attributes,
+                                  HfsPlus::Volume::CompressionMode::Zlib});
+        Check(target->Stat(renamed.id).compressed, "Worker did not apply compression");
+
+        auto mfsOriginal = mfs->Stat(copied.id);
+        auto mfsDesired = mfsOriginal;
+        mfsDesired.version = 7;
+        execute(EditBasicMetadata{Native(mfs, copied.id), mfsOriginal, mfsDesired});
+        Check(mfs->Stat(copied.id).version == 7, "Worker lost MFS version change");
+        auto classicItem = Location::Classic(root + "\\classic.dsk", "Classic:Plain");
+        classic->Close();
+        auto inspect = Submit(InspectProperties{classicItem});
+        Wait(inspect);
+        Check(!inspect.Job()->result().code && inspect.Snapshot().classicProperties, "Classic Properties fixture");
+        auto before = inspect.Snapshot().properties;
+        auto after = before;
+        after.fdlocation.h = 25;
+        classic = OpenClassic(root + "\\classic.dsk", "Classic:", true);
+        execute(EditClassicProperties{classicItem, ClassicPropertyEdit{before, after}});
+        Entry classicResult;
+        Check(classic->FindChild(2, u"Plain", classicResult) && classicResult.finder[12] == 0 &&
+                  classicResult.finder[13] == 25,
+              "Worker lost classic Properties edit");
+
+        auto partialId = Put(*target, 2, u"Partial worker delete", 4096);
+        CopyProcess::lastProcess = 0;
+        auto partial = Submit(DeleteEntries{{Native(target, partialId), Native(target)}});
+        Wait(partial);
+        Entry remaining;
+        Check(CopyProcess::lastProcess && partial.Job()->result().code &&
+                  partial.Snapshot().completed == 1 && !partial.Snapshot().affected.empty() &&
+                  !target->FindChild(2, u"Partial worker delete", remaining) && target->Stat(2).directory,
+              "Worker delete lost partial completion or attempted a volume root");
+        fprintf(report, "PASS: shipping worker folder/rename/delete/hard links, partial delete notifications, "
+                        "classic and MFS Properties, streamed attributes, stale edits and compression\n");
         fprintf(report,
                 "PASS: actual Release executable in private headless worker mode; HFS+/HFSX, classic HFS and "
                 "MFS writes, both forks/attributes, overwrite, cancellation and parent restoration. "

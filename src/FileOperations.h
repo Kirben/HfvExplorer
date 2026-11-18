@@ -138,7 +138,7 @@ public:
 // The queue/worker owns the request until execution finishes, independently of
 // the submitting browser or progress dialog. UI refresh is a separate consumer.
 Operation Submit(Request);
-Storage::Result ExecuteCopyWorker(const Request&,Storage::Job&,Completion&);
+Storage::Result ExecuteInWorker(const Request&,Storage::Job&,Completion&);
 std::vector<Operation> Pending();
 void CancelPending();
 
