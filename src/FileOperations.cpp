@@ -750,6 +750,35 @@ std::string LaunchVersion(Volume& volume,uint32_t id,Storage::Job& job)
 }
 }
 
+std::vector<uint8_t> ReadDataPrefix(const Location& item, size_t maximum, bool& truncated,
+                                    Storage::Job& job) {
+ Cancel(job);
+ LegacyEngine::Scope engine;
+ std::vector<VolumeCoord::Access> access;
+ const auto path = HostPath(item);
+ if(path.empty()) access.push_back({item.ResourceKey(),VolumeCoord::Mode::Read});
+ else AddPath(access,path,VolumeCoord::Mode::Read);
+ VolumeCoord::Lease lease(std::move(access));
+ Cancel(job);
+ auto source = Source(item);
+ source.first->ValidateMedia();
+ const auto before = source.first->Stat(source.second);
+ Check(!before.directory && before.readError.empty(),"The selected file cannot be read");
+ const auto size = before.forks[0].size;
+ std::vector<uint8_t> bytes(size_t((std::min)(size,uint64_t(maximum))));
+ if(!bytes.empty()) source.first->Read(source.second,0,0,bytes.data(),bytes.size());
+ Cancel(job);
+ CheckMedia(item);
+ source.first->ValidateMedia();
+ const auto after = source.first->Stat(source.second);
+ Check(before.identity==after.identity && before.name==after.name &&
+       before.modified==after.modified && size==after.forks[0].size,
+       "The selected file changed while reading");
+ if(!item.Volume())source.first->Close();
+ truncated = size > bytes.size();
+ return bytes;
+}
+
 std::string CaptureLaunchVersion(const Location& item,Storage::Job& job)
 {
  LegacyEngine::Scope engine;

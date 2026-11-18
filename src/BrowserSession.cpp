@@ -63,7 +63,7 @@ void BrowserSession::SetLocationTitle(std::wstring title){
  locationTitle_=std::move(title);UpdateWindowTitle();
 }
 std::string BrowserSession::ObservedWindowsKey(const std::string& path)const{return current_.type==LIST_FAT&&!_stricmp(current_.path.c_str(),path.c_str())?current_.key:std::string();}
-void BrowserSession::ClearCurrent(){CancelNavigation();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
+void BrowserSession::ClearCurrent(){CancelNavigation();if(preview_)preview_->Clear();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::UsesAsyncNavigation() const
 {
 #ifdef HFV_TESTING
@@ -110,6 +110,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
     const bool previousListing=ListingAvailable();
     const bool restoreOnError=request.intent==BrowserNavigation::Intent::OpenImage&&previousListing;
     CancelNavigation();
+    if(preview_)preview_->Clear();
     navigationMediaDrive_=request.mediaDrive;
 #ifdef HFV_TESTING
     navigationErrorForTest.clear();
@@ -219,6 +220,7 @@ bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)
 
 void BrowserSession::NavigationMediaChanged(DWORD driveMask)
 {
+    if(preview_)preview_->MediaChanged(driveMask);
     if(navigationMediaDrive_<0 || !(driveMask&(DWORD(1)<<navigationMediaDrive_)))return;
     CancelNavigation();
     RejectNavigation({},"The selected media changed during navigation.");
@@ -273,7 +275,7 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
     tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
 void BrowserSession::StopNotifications(){
- CancelNavigation();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
+ CancelNavigation();if(preview_)preview_->Clear();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
  if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);}
 }
 void BrowserSession::DetachPanes(){
@@ -295,11 +297,7 @@ BrowserSession& HFVExplorerTreeView::GetBrowserSession()const{
     if(m_pDocument)return static_cast<CHFVExplorerDoc*>(m_pDocument)->GetBrowserSession();
     throw std::logic_error("Tree view has no browser session");
 }
-BrowserSession& CHFVPreviewView::GetBrowserSession()const{
-    if(m_browserSession)return *m_browserSession;
-    if(m_pDocument)return static_cast<CHFVExplorerDoc*>(m_pDocument)->GetBrowserSession();
-    throw std::logic_error("Preview has no browser session");
-}
+
 BrowserSession& CMainFrame::GetBrowserSession()const{
     if(m_browserSession)return *m_browserSession;
     auto doc=static_cast<CHFVExplorerDoc*>(const_cast<CMainFrame*>(this)->GetActiveDocument());
@@ -348,6 +346,7 @@ void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot
         else
             list_->do_report_sort();
         Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path);
+        if(preview_)preview_->RequestSelection();
     }
 }
 
