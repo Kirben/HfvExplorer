@@ -1390,49 +1390,6 @@ bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
         return classic(selection.source) && selection.folder.IsWindows();
     return false;
 }
-bool UsesWorker(const Request &request) {
-#ifdef HFV_TESTING
-    if (!enabled)
-        return false;
-#endif
-    auto persistent=[](const Location& item) { return item.IsMounted() && item.Volume()->HasPersistentWorker(); };
-    auto windows=[](const Location& item) {
-        return item.IsWindows() || (item.IsMounted() && !strcmp(item.Volume()->Kind(), "Windows"));
-    };
-    if (auto* copy = request.Get<OrdinaryCopy>(); copy && !copy->sources.empty()) {
-        if (CopiesWithinMountedImage(*copy)) return false;
-        if (persistent(copy->destination)) {
-            const auto destinationKey = copy->destination.Volume()->ResourceKey();
-            if (std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
-                return windows(source) || (persistent(source) && source.Volume()->ResourceKey() != destinationKey);
-            })) return false;
-        } else if (windows(copy->destination) &&
-                   std::any_of(copy->sources.begin(), copy->sources.end(), persistent) &&
-                   std::all_of(copy->sources.begin(), copy->sources.end(), [&](const Location& source) {
-                       return windows(source) || persistent(source);
-                   })) return false;
-    }
-    if (auto* conversion = request.Conversion(); conversion && ConvertsWithMountedClassic(*conversion)) {
-        const char mode = conversion->source.IsWindows() ? conversion->options.input : conversion->options.output;
-        if (mode && strchr("ambt5rR", mode)) return false;
-    }
-    if (auto* output=request.Get<ExportFileFork>(); output && persistent(output->source)) return false;
-    if (auto* input=request.Get<ImportResourceFork>(); input && persistent(input->file) && windows(input->input))
-        return false;
-    if(auto* rename=request.Rename(); rename&&persistent(rename->source)) return false;
-    if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
-        std::all_of(deletion->selection.begin(),deletion->selection.end(),persistent)) return false;
-    if(auto* folder=request.Get<CreateFolder>(); folder&&persistent(folder->parent)) return false;
-    if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&persistent(link->source)&&persistent(link->parent)) return false;
-    if(auto* metadata=request.Metadata()) {
-        if(auto* edit=std::get_if<EditBasicMetadata>(metadata); edit && persistent(edit->item)) return false;
-        if(auto* edit=std::get_if<EditClassicProperties>(metadata); edit && persistent(edit->item)) return false;
-        if(auto* attrs=std::get_if<EditAttributes>(metadata); attrs&&persistent(attrs->item)) return false;
-        if(auto* compression=std::get_if<ChangeCompression>(metadata);
-            compression&&persistent(compression->item)) return false;
-    }
-    return SupportsOperation(request.OperationKind());
-}
 Storage::Result Run(const Request &request, Storage::Job &job, Completion &completion,
                     const std::vector<std::string> &keys, const std::vector<std::string> &writes) {
     std::vector<Endpoint> sources;

@@ -3,7 +3,6 @@
 #include "FileOperations.h"
 #include <atomic>
 namespace CopyProcess {
-bool UsesWorker(const FileOperations::Request &);
 bool ConvertsWithMountedClassic(const FileOperations::LegacyConversion&);
 bool CopiesWithinMountedImage(const FileOperations::OrdinaryCopy&);
 bool CopyWithinMountedImage(MacBrowser::Volume&, const std::vector<uint32_t>&, uint32_t, Storage::Job&);
