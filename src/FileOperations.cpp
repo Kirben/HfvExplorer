@@ -95,40 +95,40 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
   Mark(completion,sources[i]);RemoveTree(*fresh[i].first,fresh[i].second,job);if(!sources[i].Volume())fresh[i].first->Close();Finish(disk);
  }
 }
-bool MoveInPlace(const Request& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
+bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
  if(!target.Supports().rename)return false;
- for(size_t i=0;i<sources.size();++i)if(!request.Sources()[i].cut||!target.CanMoveFrom(*sources[i].first))return false;
+ for(size_t i=0;i<sources.size();++i)if(!request.sources[i].cut||!target.CanMoveFrom(*sources[i].first))return false;
  auto existing=target.List(parent);std::vector<Entry> entries;
  for(size_t i=0;i<sources.size();++i){auto& source=*sources[i].first;auto id=sources[i].second;Check(id!=2,"Select files or folders rather than a volume root");source.ValidateCopyTo(id,target,parent);auto entry=source.Stat(id);
   for(auto& e:existing)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   for(auto& e:entries)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
-  if(request.Sources()[i].Volume()&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
+  if(request.sources[i].Volume()&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
   Check(!entry.protectedFile&&entry.readError.empty()&&!(HfsPlus::Disk::U16(entry.finder.data()+8)&HFS_FNDR_NAMELOCKED),"The selected entry cannot be moved");entries.push_back(entry);
  }
  // Classic adapters use root-relative paths. Avoid invalidating a later
  // captured descendant path by renaming its selected ancestor first.
- for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&request.Sources()[i].IsClassic()&&request.Sources()[j].IsClassic()){auto a=request.Sources()[i].ClassicPath(),b=request.Sources()[j].ClassicPath();if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}
+ for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&request.sources[i].IsClassic()&&request.sources[j].IsClassic()){auto a=request.sources[i].ClassicPath(),b=request.sources[j].ClassicPath();if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}
  Storage::Progress progress;progress.phase="Moving";progress.scanning=false;progress.fileCopy=progress.utf8=true;progress.totalFiles=unsigned(sources.size());job.progress(progress);
- for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.Sources()[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);++progress.files;job.progress(progress);}
+ for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);++progress.files;job.progress(progress);}
  return true;
 }
-Storage::Result CopyRequest(const Request& request,Storage::Job& job,Completion& completion){
- Check(!request.Sources().empty(),"Select a source file or folder");HFSIFACE_get_dir_flush();auto disk=WritableFloppy(request.Target(),std::any_of(request.Sources().begin(),request.Sources().end(),[](const Location& p){return p.cut;}));
- auto destination=Destination(request.Target());Check(destination.first->Supports().create,"The destination does not support file creation");
+Storage::Result CopyRequest(const OrdinaryCopy& request,Storage::Job& job,Completion& completion){
+ Check(!request.sources.empty(),"Select a source file or folder");HFSIFACE_get_dir_flush();auto disk=WritableFloppy(request.destination,std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;}));
+ auto destination=Destination(request.destination);Check(destination.first->Supports().create,"The destination does not support file creation");
  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;std::vector<std::string> snapshots;
- for(auto& item:request.Sources()){Cancel(job);auto source=Source(item);if(item.cut&&item.Volume())Check(source.first->Writable(),"A cut source is read-only");opened.push_back(source);}
- for(size_t i=0;i<opened.size();++i)MarkChild(completion,request.Target(),opened[i].first->Stat(opened[i].second).name);
+ for(auto& item:request.sources){Cancel(job);auto source=Source(item);if(item.cut&&item.Volume())Check(source.first->Writable(),"A cut source is read-only");opened.push_back(source);}
+ for(size_t i=0;i<opened.size();++i)MarkChild(completion,request.destination,opened[i].first->Stat(opened[i].second).name);
  if(MoveInPlace(request,opened,*destination.first,destination.second,job,completion)){
-  if(!request.Target().Volume())destination.first->Close();for(size_t i=0;i<request.Sources().size();++i)if(!request.Sources()[i].Volume())opened[i].first->Close();Finish(disk);completion.complete=true;completion.completed=unsigned(opened.size());Storage::Result result;result.moved=true;return result;
+  if(!request.destination.Volume())destination.first->Close();for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();Finish(disk);completion.complete=true;completion.completed=unsigned(opened.size());Storage::Result result;result.moved=true;return result;
  }
- for(size_t i=0;i<request.Sources().size();++i)snapshots.push_back(request.Sources()[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.Sources()[i].Volume())):std::string());
+ for(size_t i=0;i<request.sources.size();++i)snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
  bool complete;try{complete=CopyMany(opened,*destination.first,destination.second,job);}catch(...){if(disk&&disk->Error())throw Failure(disk->Error(),"Floppy write or verification failed (Windows error "+std::to_string(disk->Error())+"). The disk may be incomplete");throw;}
- if(!request.Target().Volume())destination.first->Close();
- for(size_t i=0;i<request.Sources().size();++i)if(!request.Sources()[i].Volume())opened[i].first->Close();
+ if(!request.destination.Volume())destination.first->Close();
+ for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
  Finish(disk);disk.reset(); // Includes all final unmount writes; never delete sources before this.
- if(complete)DeleteMovedSources(request.Sources(),snapshots,job,completion);
+ if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
  completion.complete=complete;completion.completed=job.progress().files;
- Storage::Result result;result.moved=complete&&std::any_of(request.Sources().begin(),request.Sources().end(),[](const Location& p){return p.cut;});return result;
+ Storage::Result result;result.moved=complete&&std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;});return result;
 }
 Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t count,Storage::Job& job,Completion& completion){
  Storage::Progress progress;progress.fileCopy=false;progress.phase=rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(count);progress.utf8=true;job.progress(progress);
@@ -157,24 +157,24 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
  }
  completion.complete=true;return {};
 }
-Storage::Result ExportFork(const Request& request,Storage::Job& job,Completion& completion){
- Check(request.Sources().size()==1&&request.fork<2&&Absolute(request.Target().WindowsPath()),"Invalid fork export request");auto source=Source(request.Sources()[0]);auto entry=source.first->Stat(source.second);Check(!entry.directory,"Select a file for fork export");
- source.first->Read(source.second,request.fork,0,nullptr,0);auto& path=request.Target().WindowsPath();
+Storage::Result ExportFork(const ExportFileFork& request,Storage::Job& job,Completion& completion){
+ const auto fork=static_cast<unsigned>(request.fork);auto source=Source(request.source);auto entry=source.first->Stat(source.second);Check(!entry.directory,"Select a file for fork export");
+ source.first->Read(source.second,fork,0,nullptr,0);auto& path=request.output.WindowsPath();
  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create output; choose a new filename");
- Mark(completion,request.Target());
- try{std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Exporting fork";progress.totalFiles=1;progress.path=Utf8(entry.name);progress.totalBytes=progress.fileTotal=entry.forks[request.fork].size;
-  for(uint64_t at=0;at<entry.forks[request.fork].size;){Cancel(job);size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[request.fork].size-at));source.first->Read(source.second,request.fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Fork export write failed");at+=n;progress.bytes=progress.fileBytes=progress.processed=at;job.progress(progress);}
+ Mark(completion,request.output);
+ try{std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Exporting fork";progress.totalFiles=1;progress.path=Utf8(entry.name);progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
+  for(uint64_t at=0;at<entry.forks[fork].size;){Cancel(job);size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));source.first->Read(source.second,fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Fork export write failed");at+=n;progress.bytes=progress.fileBytes=progress.processed=at;job.progress(progress);}
   if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Fork export flush failed");CloseHandle(file);
  }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
  completion.complete=true;completion.completed=1;return {};
 }
-Storage::Result ReplaceResource(const Request& request,Storage::Job& job,Completion& completion){
- Check(request.Sources().size()==1&&bool(request.Target().Volume()),"Invalid resource import request");auto from=Source(request.Sources()[0]),target=Source(request.Target());auto volume=target.first;uint32_t id=target.second;auto original=volume->Stat(id),replacement=original;Check(!original.directory,"Select a file for resource import");
+Storage::Result ReplaceResource(const ImportResourceFork& request,Storage::Job& job,Completion& completion){
+ auto from=Source(request.input),target=Source(request.file);auto volume=target.first;uint32_t id=target.second;auto original=volume->Stat(id),replacement=original;Check(!original.directory,"Select a file for resource import");
  replacement.forks[1].size=from.first->Stat(from.second).forks[0].size;replacement.modified=uint64_t(time(nullptr))+2082844800ULL;Cancel(job);
  Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Importing resource fork";progress.totalFiles=1;progress.path=Utf8(original.name);progress.totalBytes=progress.fileTotal=replacement.forks[0].size+replacement.forks[1].size;
- uint64_t readThrough[2]={};Mark(completion,request.Target());
+ uint64_t readThrough[2]={};Mark(completion,request.file);
  volume->Put(original.parent,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){Cancel(job);if(fork)from.first->Read(from.second,0,at,data,n);else volume->Read(id,0,at,data,n);Cancel(job);auto end=at+n,added=end>readThrough[fork]?end-readThrough[fork]:0;readThrough[fork]=(std::max)(readThrough[fork],end);progress.bytes+=added;progress.fileBytes+=added;progress.processed+=added;job.progress(progress);},true);
- if(!request.Sources()[0].Volume())from.first->Close();completion.complete=true;completion.completed=1;return {};
+ if(!request.input.Volume())from.first->Close();completion.complete=true;completion.completed=1;return {};
 }
 
 bool SameProperties(const hfsdirent& a,const hfsdirent& b){
@@ -185,18 +185,19 @@ bool SameProperties(const hfsdirent& a,const hfsdirent& b){
 std::string FolderIdentity(std::string value){for(int n=0;n<2;++n){auto at=value.find_last_of(':');if(at==value.npos)return {};value.resize(at);}return value;}
 Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& completion){
  const auto* metadata = request.Metadata();
- Storage::Progress p;p.phase=request.OperationKind()==Kind::Inspect?"Reading properties":request.OperationKind()==Kind::CreateFolder?"Creating folder":"Updating properties";p.utf8=true;p.path=Utf8(request.name);if(metadata)if(auto* input=std::get_if<ImportAttributeValue>(metadata))p.path=Utf8(input->name);job.progress(p);
+ const auto* folder = request.Get<CreateFolder>();
+ Storage::Progress p;p.phase=request.OperationKind()==Kind::Inspect?"Reading properties":request.OperationKind()==Kind::CreateFolder?"Creating folder":"Updating properties";p.utf8=true;if(folder)p.path=Utf8(folder->name);if(metadata)if(auto* input=std::get_if<ImportAttributeValue>(metadata))p.path=Utf8(input->name);job.progress(p);
  if(auto* input=metadata?std::get_if<ImportAttributeValue>(metadata):nullptr){
   auto source=Source(input->item);auto e=source.first->Stat(source.second);Check(!e.directory,"Attribute value must be a file");
   auto bytes=HfsPlus::AttributeData::Snapshot(e.forks[0].size,[&](uint64_t at,void* p,size_t n){Cancel(job);source.first->Read(source.second,0,at,p,n);});Cancel(job);completion.attributes[input->name]=std::move(bytes);
  }else if(auto* output=metadata?std::get_if<ExportAttributeValue>(metadata):nullptr){
   const auto& bytes=output->value;const auto& path=output->item.WindowsPath();HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create attribute output; choose a new filename");Mark(completion,output->item);
   try{HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<bytes.size();){Cancel(job);auto n=size_t((std::min)(uint64_t(buffer.size()),bytes.size()-at));bytes.Read(at,buffer.data(),n);DWORD written=0;if(!WriteFile(file,buffer.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Attribute export write failed");at+=n;}Cancel(job);if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");CloseHandle(file);}catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
- }else if(request.OperationKind()==Kind::CreateFolder){
-  const auto& item=request.Target();Check(!request.name.empty(),"Enter a folder name");
-  if(item.Volume()){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&source.first->Supports().createFolders&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,request.name);source.first->MakeDirectory(source.second,request.name);}
-  else if(item.IsWindows()){auto volume=OpenWindows(item.WindowsPath());auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();}
-  else{Check(item.IsClassic(),"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,request.name);volume->MakeDirectory(2,request.name);volume->Close();Finish(disk);}
+ }else if(folder){
+  const auto& item=folder->parent;
+  if(item.Volume()){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&source.first->Supports().createFolders&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,folder->name);source.first->MakeDirectory(source.second,folder->name);}
+  else if(item.IsWindows()){auto volume=OpenWindows(item.WindowsPath());auto e=volume->Stat(2);if(!item.expectedIdentity.empty())Check(!FolderIdentity(e.identity).empty()&&FolderIdentity(e.identity)==FolderIdentity(item.expectedIdentity),"The destination folder changed");Cancel(job);MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();}
+  else{Check(item.IsClassic(),"Invalid folder destination");if(!item.expectedResource.empty())Check(VolumeCoord::ImageKey(item.ClassicImage())==item.expectedResource,"The destination image was replaced");auto disk=WritableFloppy(item);CheckMedia(item);auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();Finish(disk);}
  }else{
   const auto& item=std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);auto source=Source(item);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();completion.basicMetadata=source.first->SupportsBasicMetadata();completion.supportsCompression=source.first->SupportsCompression();
   if(completion.supportsAttributes)completion.attributes=source.first->GetAttributes(source.second);Cancel(job);
@@ -262,9 +263,27 @@ void ValidateRequest(const Request& r){
    Check(!input->name.empty(), "Enter an attribute name");
   return;
  }
- for(const auto& source:r.Sources())Check(!source.IsNone(),"No source file location was supplied");
- switch(r.OperationKind()){case Kind::LegacyCopy:Check((r.Legacy().source.IsWindows()||r.Legacy().source.IsClassic())&&(r.Legacy().destination.IsWindows()||r.Legacy().destination.IsClassic()),"Legacy conversion needs explicit Windows or classic locations");r.Legacy().source.LegacyVolume();r.Legacy().source.LegacyPath();r.Legacy().destination.LegacyVolume();r.Legacy().destination.LegacyPath();return;case Kind::CreateFolder:Check(!r.Target().IsNone(),"No destination location was supplied");return;default:Check(!r.Sources().empty(),"Select a source file or folder");}
- switch(r.OperationKind()){case Kind::Copy:case Kind::CreateHardLink:case Kind::ExportFork:case Kind::ReplaceResource:Check(!r.Target().IsNone(),"No destination location was supplied");break;default:break;}
+ if (const auto* copy = r.Get<OrdinaryCopy>()) {
+  Check(!copy->sources.empty() && !copy->destination.IsNone(), "Choose sources and a copy destination");
+  for (const auto& source : copy->sources) Check(!source.IsNone(), "No source file location was supplied");
+ } else if (const auto* legacy = r.Conversion()) {
+  legacy->source.LegacyVolume(); legacy->source.LegacyPath();
+  legacy->destination.LegacyVolume(); legacy->destination.LegacyPath();
+  if (legacy->selection)
+   Check(!legacy->selection->source.IsNone() &&
+         (legacy->selection->folder.IsWindows() || legacy->selection->folder.IsClassic()),
+         "Invalid conversion selection");
+ } else if (const auto* folder = r.Get<CreateFolder>()) {
+  Check(!folder->parent.IsNone() && !folder->name.empty(), "Choose a destination and folder name");
+ } else if (const auto* exportFork = r.Get<ExportFileFork>()) {
+  Check(!exportFork->source.IsNone() && exportFork->output.IsWindows() &&
+        (exportFork->fork == ForkSelector::Data || exportFork->fork == ForkSelector::Resource), "Invalid fork export request");
+ } else if (const auto* importFork = r.Get<ImportResourceFork>()) {
+  Check(!importFork->input.IsNone() && (importFork->file.IsMounted() || importFork->file.IsWindows()),
+        "Invalid resource import request");
+ } else if (const auto* link = r.Get<CreateHardLink>()) {
+  Check(!link->source.IsNone() && !link->parent.IsNone() && !link->name.empty(), "Choose a hard link source, destination and name");
+ }
 }
 std::vector<VolumeCoord::Access> Resources(const Request& request){
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
@@ -301,27 +320,58 @@ std::vector<VolumeCoord::Access> Resources(const Request& request){
   else AddPath(access, path, mode, kind != Kind::ExportAttribute);
   return access;
  }
- for(const auto& item:request.Sources()){auto mode=request.OperationKind()==Kind::CreateHardLink||item.cut||((request.background||CopyProcess::UsesWorker(request))&&!item.IsWindows())?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
-   // Explicit Windows adapters are still file readers when a copy is not a move.
-   if(!item.cut)mode=Mode::Read;AddPath(access,path,mode);
-  }}
- if(request.OperationKind()==Kind::CreateHardLink||request.OperationKind()==Kind::Copy||request.OperationKind()==Kind::ReplaceResource||request.OperationKind()==Kind::ExportFork||request.OperationKind()==Kind::CreateFolder){auto path=HostPath(request.Target());if(path.empty())access.push_back({Resource(request.Target()),Mode::Write});else if(request.OperationKind()==Kind::CreateFolder)AddPath(access,ChildPath(path,request.name),Mode::Write,false);else if(request.OperationKind()==Kind::CreateHardLink)AddPath(access,ChildPath(path,request.name),Mode::Write);else if(request.OperationKind()==Kind::Copy){bool known=true;for(const auto& source:request.Sources()){auto name=SourceName(source);if(name.empty()){known=false;break;}AddPath(access,ChildPath(path,name),Mode::Write);}if(!known)AddPath(access,path,Mode::Write,false);}else AddPath(access,path,Mode::Write,request.OperationKind()!=Kind::ExportFork);
- }return access;
+ auto reserve = [&](const Location& item, Mode mode, bool companions = true) {
+  auto path = HostPath(item);
+  if (path.empty()) access.push_back({Resource(item), mode});
+  else AddPath(access, path, mode, companions);
+ };
+ auto reserveChild = [&](const Location& parent, const std::u16string& name, bool companions) {
+  auto path = HostPath(parent);
+  if (path.empty()) access.push_back({Resource(parent), Mode::Write});
+  else AddPath(access, ChildPath(path, name), Mode::Write, companions);
+ };
+ auto reserveCopySource = [&](const Location& source) {
+  const auto mode = source.cut || (HostPath(source).empty() &&
+      (request.background || CopyProcess::UsesWorker(request))) ? Mode::Write : Mode::Read;
+  reserve(source, mode);
+ };
+ if (const auto* copy = request.Get<OrdinaryCopy>()) {
+  for (const auto& source : copy->sources) reserveCopySource(source);
+  auto path = HostPath(copy->destination);
+  if (path.empty()) access.push_back({Resource(copy->destination), Mode::Write});
+  else for (const auto& source : copy->sources) {
+   auto name = SourceName(source);
+   if (name.empty()) { AddPath(access, path, Mode::Write, false); break; }
+   AddPath(access, ChildPath(path, name), Mode::Write);
+  }
+ } else if (const auto* folder = request.Get<CreateFolder>()) {
+  reserveChild(folder->parent, folder->name, false);
+ } else if (const auto* link = request.Get<CreateHardLink>()) {
+  reserve(link->source, HostPath(link->source).empty() ? Mode::Write : Mode::Read);
+  reserveChild(link->parent, link->name, true);
+ } else if (const auto* exportFork = request.Get<ExportFileFork>()) {
+  reserveCopySource(exportFork->source);
+  reserve(exportFork->output, Mode::Write, false);
+ } else if (const auto* importFork = request.Get<ImportResourceFork>()) {
+  reserveCopySource(importFork->input);
+  reserve(importFork->file, Mode::Write);
+ }
+ return access;
 }
 
 Storage::Result Execute(const Request& request,Storage::Job& job,Completion& completion){
  HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});Cancel(job);
  Cancel(job);
- if(request.OperationKind()==Kind::CreateHardLink){Check(request.Sources().size()==1,"Select one source for a hard link");auto source=Source(request.Sources().front());auto target=Destination(request.Target());Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,request.Sources().front());MarkChild(completion,request.Target(),request.name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,request.name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
+ if(const auto* link=request.Get<CreateHardLink>()){auto source=Source(link->source);auto target=Destination(link->parent);Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,link->source);MarkChild(completion,link->parent,link->name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,link->name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
  if(request.OperationKind()==Kind::CreateFolder||request.Metadata())return Metadata(request,job,completion);
- if(request.OperationKind()==Kind::Copy)return CopyRequest(request,job,completion);
- if(request.OperationKind()==Kind::ExportFork)return ExportFork(request,job,completion);
- if(request.OperationKind()==Kind::ReplaceResource)return ReplaceResource(request,job,completion);
+ if(const auto* operation=request.Get<OrdinaryCopy>())return CopyRequest(*operation,job,completion);
+ if(const auto* operation=request.Get<ExportFileFork>())return ExportFork(*operation,job,completion);
+ if(const auto* operation=request.Get<ImportResourceFork>())return ReplaceResource(*operation,job,completion);
  if (const auto* rename = request.Rename())
   return Mutate(rename, &rename->source, 1, job, completion);
  if (const auto* deletion = request.Delete())
   return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
- Check(request.Conversion() != nullptr, "Unsupported file operation");
+ const auto& legacy = request.Legacy();
  // Legacy containers cannot carry arbitrary attributes/ACLs. Preflight the
  // complete selection before converters can create partial output.
  auto noLostMetadata=[&](MacBrowser::Volume& volume,uint32_t root){
@@ -330,24 +380,24 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
   std::function<void(uint32_t,unsigned)> walk=[&](uint32_t id,unsigned depth){
    Cancel(job);Check(depth<=128&&ancestors.insert(id).second,"Recursive conversion source");
    Check(volume.GetAttributes(id).empty(),"Legacy conversion cannot preserve extended attributes or Mac ACLs; use an HFS+/HFSX or Windows both-fork copy");
-   auto entry=volume.Stat(id);Check(!request.Target().IsClassic()||!entry.datesValid||(entry.created<=UINT32_MAX&&entry.modified<=UINT32_MAX),"Classic HFS conversion cannot preserve dates after February 2040; source retained");if(entry.directory)for(auto& child:volume.List(id))walk(child.id,depth+1);
+   auto entry=volume.Stat(id);Check(!legacy.destination.IsClassic()||!entry.datesValid||(entry.created<=UINT32_MAX&&entry.modified<=UINT32_MAX),"Classic HFS conversion cannot preserve dates after February 2040; source retained");if(entry.directory)for(auto& child:volume.List(id))walk(child.id,depth+1);
    ancestors.erase(id);
   };
   walk(root,0);
  };
- if(request.Sources().empty()&&request.Legacy().source.IsWindows()){
+ if(!legacy.selection&&request.Legacy().source.IsWindows()){
   auto source=MacBrowser::ResolveWindowsFile(request.Legacy().source.WindowsPath());
   noLostMetadata(*source.first,source.second);source.first->Close();
  }
- if(!request.Sources().empty()){
+ if(legacy.selection){
   // Captured paths/identities never depend on another window's volume indexes.
-  auto source=Source(request.Sources().front());noLostMetadata(*source.first,source.second);
-  auto target=request.Target().IsWindows()?OpenWindows(request.Target().WindowsPath()):OpenClassic(request.Target().ClassicImage(),request.Target().ClassicPath(),false);
-  CheckMedia(request.Target());source.first->ValidateCopyTo(source.second,*target,2);
+  auto source=Source(legacy.selection->source);noLostMetadata(*source.first,source.second);
+  auto target=legacy.selection->folder.IsWindows()?OpenWindows(legacy.selection->folder.WindowsPath()):OpenClassic(legacy.selection->folder.ClassicImage(),legacy.selection->folder.ClassicPath(),false);
+  CheckMedia(legacy.selection->folder);source.first->ValidateCopyTo(source.second,*target,2);
   source.first->Close();target->Close();
  }
   Mark(completion,request.Legacy().destination);if(request.Legacy().move)Mark(completion,request.Legacy().source);
- auto sourceLocation=request.Sources().empty()?request.Legacy().source:request.Sources().front();sourceLocation.cut=request.Legacy().move;
+ auto sourceLocation=!legacy.selection?request.Legacy().source:legacy.selection->source;sourceLocation.cut=request.Legacy().move;
  bool physicalMove=request.Legacy().move&&((sourceLocation.IsClassic()&&physical_floppy_path(sourceLocation.ClassicImage().c_str())>=0)||physical_floppy_path(request.Legacy().destination.LegacyVolume().c_str())>=0);
  std::vector<std::string> snapshots;auto options=request.Legacy().options;options.targetGenerationKnown=request.Legacy().destination.MediaGenerationKnown();options.targetGeneration=options.targetGenerationKnown?request.Legacy().destination.MediaGeneration():0;
  if(physicalMove){auto source=Source(sourceLocation);snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job));if(!sourceLocation.Volume())source.first->Close();options.verifyFloppy=true;}
@@ -377,7 +427,7 @@ Operation Submit(Request request){
  auto planning=queue.submit([plan,values](Storage::Job& job){try{if(job.cancelled())throw Storage::Cancelled();ValidateRequest(*values);plan->resources=Resources(*values);}catch(const Storage::Cancelled&){plan->error={1,ERROR_CANCELLED,"Cancelled while identifying Windows paths"};}catch(const std::exception& error){plan->error={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}catch(...){plan->error={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected path planning failure"};}plan->ready.store(true,std::memory_order_release);return Storage::Result{};});
  auto job=queue.submit([state,values,access,plan](Storage::Job& job){Completion completion;Storage::Result result;
   try{Cancel(job);if(plan->error.code){result=plan->error;}else{if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
-   VolumeCoord::OperationLease currentPaths(Resources(*values));if(CopyProcess::UsesWorker(*values)){std::vector<std::string> keys,writes;for(auto& item:plan->resources){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}Mark(completion,values->Target());for(auto& item:values->Sources())if(item.cut)Mark(completion,item);if(values->OperationKind()==Kind::LegacyCopy){Mark(completion,values->Legacy().destination);if(values->Legacy().move)Mark(completion,values->Legacy().source);}result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,job,completion);}
+   VolumeCoord::OperationLease currentPaths(Resources(*values));if(CopyProcess::UsesWorker(*values)){std::vector<std::string> keys,writes;for(auto& item:plan->resources){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}if(auto* copy=values->Get<OrdinaryCopy>()){Mark(completion,copy->destination);for(auto& item:copy->sources)if(item.cut)Mark(completion,item);}else if(auto* legacy=values->Conversion()){Mark(completion,legacy->destination);if(legacy->move)Mark(completion,legacy->source);}else if(auto* output=values->Get<ExportFileFork>())Mark(completion,output->output);else if(auto* input=values->Get<ImportResourceFork>())Mark(completion,input->file);result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,job,completion);}
   }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}

@@ -192,10 +192,8 @@ int RunTypedLocationsTest(const char *directory) {
                         "combinations, media snapshots, lifetime ownership and no browser indexes\n");
         Request copy = OrdinaryCopy{{windows}, Location::Mounted(backend)};
         Check(copy.OperationKind() == Kind::Copy && !copy.Conversion() &&
-                  copy.Sources().size() == 1 && copy.Target().IsMounted(),
+                  copy.Copy().sources.size() == 1 && copy.Copy().destination.IsMounted(),
               "Ordinary copy was not captured with its own inputs");
-        Reject([&] { copy.SetKind(Kind::LegacyCopy); },
-               "Legacy conversion accepted a bare operation tag");
         Request conversion = LegacyConversion{
             Location::Image(root + "\\converter.dsk", "Fixture:File"), windows,
             false, false, true, {}};
@@ -207,23 +205,17 @@ int RunTypedLocationsTest(const char *directory) {
         Check(captured.Legacy().options.output == 'a',
               "Editing conversion options changed a captured request");
         Request missing;
-        missing.Sources() = {Location{}};
-        missing.Target() = Location::Mounted(backend);
+        missing.Copy().sources = {Location{}};
+        missing.Copy().destination = Location::Mounted(backend);
         auto before = backend->calls;
         auto bad = Submit(missing);
         Wait(bad);
         Check(bad.Job()->result().code && backend->calls == before, "Missing source reached a backend");
-        missing.Sources() = {Location::Mounted(backend, 99)};
-        missing.Target() = {};
+        missing.Copy().sources = {Location::Mounted(backend, 99)};
+        missing.Copy().destination = {};
         bad = Submit(missing);
         Wait(bad);
         Check(bad.Job()->result().code && backend->calls == before, "Missing destination reached a backend");
-        auto unknown = missing;
-        unknown.SetKind(static_cast<Kind>(999));
-        bad = Submit(unknown);
-        Wait(bad);
-        Check(bad.Job()->result().code && backend->calls == before,
-              "Unknown operation reached a mutation backend");
         auto emptyDelete = Submit(DeleteEntries{});
         Wait(emptyDelete);
         Check(emptyDelete.Job()->result().code && backend->calls == before,
