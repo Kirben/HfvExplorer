@@ -1,6 +1,25 @@
 HFVExplorer 2.0.0
 -----------------
 
+## Typed file locations
+
+File-operation jobs, clipboard transfers and worker messages carry one explicit
+address: a Windows path, an owned mounted-volume/catalog entry, a classic image
+and catalog path, or physical classic media with a drive and optional media-change
+counter. Browser array indexes and inactive address fields are no longer stored
+in jobs. Legacy conversion endpoints use the same typed addresses; ANSI strings
+are produced only at the converter boundary, with routing and encoding checks.
+
+Missing required locations are rejected before backend access. Classic browser
+roots are captured explicitly as `:`. Renaming without an explicit destination
+retains the source parent. Refresh notifications carry storage keys rather than
+ambiguous address fields. The worker protocol validates its address tag, field
+widths, paths and media identity, with no process pointers or document indexes.
+
+`--verify-typed-locations NEW_DIRECTORY` checks invalid addresses, Unicode paths,
+media snapshots, ownership, clipboard validation, missing/unknown requests and
+worker-codec round trips and malformed input. It never opens physical media.
+
 ## Copy worker processes
 
 Ordinary file/folder copies, legacy conversions and fork export/import execute in
