@@ -87,6 +87,7 @@ Lease::Lease(std::vector<Access> values,bool reuseWriter){
 }
 Lease::~Lease(){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(auto& a:access_){auto& resource=bus.resources[a.key];if(a.mode==Mode::Write)resource.writer=false;else if(a.mode==Mode::Browse)--resource.browsers;else --resource.readers;}}
 BackendRead::BackendRead(const std::string& key){lease_.reset(new Lease({{key,Mode::Read}},true));}
+bool Overlapping(const std::vector<std::string>& keys,const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(auto& held:keys)if(Overlap(bus,held,key))return true;return false;}
 bool Available(const std::vector<Access>& access){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(const auto& a:access)for(const auto& held:bus.resources){const auto& r=held.second;if((r.writer&&(a.mode==Mode::Browse?Contains(bus,held.first,a.key):Overlap(bus,a.key,held.first)))||(a.mode==Mode::Write&&((r.readers&&Overlap(bus,a.key,held.first))||(r.browsers&&Contains(bus,a.key,held.first)))))return false;}return true;}
 bool Readable(const std::string& key){return Available({{key,Mode::Read}});}
 OperationLease::OperationLease(std::vector<Access> access){lease_.reset(new Lease(std::move(access),true));}

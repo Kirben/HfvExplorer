@@ -5,14 +5,22 @@
 #include <objbase.h>
 #pragma comment(lib,"ole32.lib")
 #include "HfsPlusDisk.h"
+#include "ImageHandleTransfer.h"
 namespace HfsPlus {
+#ifdef HFV_TESTING
+std::function<void(bool,uint64_t,size_t)> workerIoFault;
+#endif
 namespace {
 class Image final : public Source {
     HANDLE file_ = INVALID_HANDLE_VALUE;
     uint64_t size_ = 0;
     bool writable_ = false;
+    std::wstring path_;
     std::wstring journalPath_;std::shared_ptr<Source> journalDevice_;std::string journalUuid_;
     void Io(uint64_t offset, void *bytes, size_t n, bool write) {
+#ifdef HFV_TESTING
+        if(workerIoFault)workerIoFault(write,offset,n);
+#endif
         Disk::Check(Disk::Range(offset, n, size_), "Image I/O range overflow");
         LARGE_INTEGER at;
         at.QuadPart = offset;
@@ -31,11 +39,12 @@ class Image final : public Source {
     }
 
   public:
-    Image(const wchar_t *path, bool write, uint64_t createSize,const wchar_t* journalPath=nullptr) :journalPath_(journalPath?journalPath:L"") {
+    Image(const wchar_t *path, bool write, uint64_t createSize,const wchar_t* journalPath=nullptr) :path_(path?path:L""),journalPath_(journalPath?journalPath:L"") {
         Disk::Check(path && *path && wcsncmp(path, L"\\\\.\\", 4) != 0 &&
                         wcsncmp(path, L"\\\\?\\GLOBALROOT", 14) != 0,
                     "Physical device paths are not HFS+ images");
-        file_ = CreateFileW(path, GENERIC_READ | (write ? GENERIC_WRITE : 0), FILE_SHARE_READ, nullptr,
+        if(!createSize)file_=ImageHandleTransfer::Open(path,write);
+        if(file_==INVALID_HANDLE_VALUE)file_ = CreateFileW(path, GENERIC_READ | (write ? GENERIC_WRITE : 0), FILE_SHARE_READ, nullptr,
                             createSize ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         Disk::Check(file_ != INVALID_HANDLE_VALUE, "Cannot open HFS+ image (it may be in use)");
         try {
@@ -66,6 +75,7 @@ class Image final : public Source {
         if (file_ != INVALID_HANDLE_VALUE)
             CloseHandle(file_);
     }
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{std::vector<std::pair<std::wstring,uintptr_t>> out{{path_,uintptr_t(file_)}};if(journalDevice_){auto extra=journalDevice_->WorkerFiles();out.insert(out.end(),extra.begin(),extra.end());}return out;}
     std::shared_ptr<Source> OpenJournal(const Bytes&)override;
     uint64_t Size() const override { return size_; }
     bool Writable() const override { return writable_; }
@@ -90,6 +100,7 @@ std::array<uint8_t,16> GptUuid(const uint8_t* p){std::array<uint8_t,16> out{};fo
 class JournalPartition final:public Source{
  std::unique_ptr<Source> file_;uint64_t base_,length_;
 public:JournalPartition(std::unique_ptr<Source> file,uint64_t base,uint64_t length):file_(std::move(file)),base_(base),length_(length){}
+ std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return file_->WorkerFiles();}
  uint64_t Size()const override{return length_;}bool Writable()const override{return file_->Writable();}
  void Read(uint64_t at,void* p,size_t n)override{Disk::Check(Disk::Range(at,n,length_),"External journal partition read range");file_->Read(base_+at,p,n);}
  void Write(uint64_t at,const void* p,size_t n)override{Disk::Check(Disk::Range(at,n,length_),"External journal partition write range");file_->Write(base_+at,p,n);}void Flush()override{file_->Flush();}

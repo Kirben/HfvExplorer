@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Independent implementation of the MFS disk structures documented by Apple.
 #include "MfsImage.h"
+#include "ImageHandleTransfer.h"
 #include <algorithm>
 #include <set>
 #include <limits>
@@ -19,7 +20,8 @@ bool MfsImageSource::Open(const wchar_t* path,std::string& error,bool write) {
     length_=0;writable_=false;
     // Regular images only. All readers/writers exclude competing write handles.
     if(!path || wcsncmp(path,L"\\\\.\\",4)==0 || wcsncmp(path,L"\\\\?\\",4)==0) {error="Choose a regular disk image file.";return false;}
-    file_=CreateFileW(path,GENERIC_READ|(write?GENERIC_WRITE:0),FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    path_=path;file_=ImageHandleTransfer::Open(path,write);
+    if(file_==INVALID_HANDLE_VALUE)file_=CreateFileW(path,GENERIC_READ|(write?GENERIC_WRITE:0),FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
     if(file_==INVALID_HANDLE_VALUE) {error="Could not open the image (it may be in use by another process).";return false;}
     LARGE_INTEGER size;
     if(GetFileType(file_)!=FILE_TYPE_DISK || !GetFileSizeEx(file_,&size) || size.QuadPart<0) {

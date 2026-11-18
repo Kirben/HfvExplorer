@@ -6,6 +6,7 @@
 
 class MediaImageSource;
 namespace MacBrowser {
+struct WorkerOrigin;
 struct DetectedVolumeError : HfsPlus::Error { using HfsPlus::Error::Error; };
 struct Fork { uint64_t size = 0; };
 // Presentation and transfer data: deliberately independent of catalog layouts,
@@ -49,6 +50,12 @@ public:
     virtual uint64_t FreeBytes() const = 0;
     virtual void Reload() {}
     virtual void Close() {}
+    virtual WorkerOrigin WorkerDescription()const;
+    virtual std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const{return {};}
+    virtual void SuspendWorker() {}
+    virtual void ResumeWorker(){Reload();}
+    virtual void WorkerUncleanExit(){}
+    virtual void ReleaseWorkerReaders(const std::vector<std::string>&){}
     virtual void ReleaseMedia() {} // Explicit physical-media release, including idle clipboard references.
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}

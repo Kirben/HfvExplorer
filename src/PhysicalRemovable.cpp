@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "PhysicalRemovable.h"
+#include "StorageHandoff.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
 #include "DeviceWait.h"
@@ -83,9 +84,11 @@ public:Slice(std::shared_ptr<Source> source,uint64_t offset,uint64_t length):sou
 class MfsMedia final:public MfsSource{std::shared_ptr<Source> source_;public:explicit MfsMedia(std::shared_ptr<Source> s):source_(std::move(s)){}uint64_t Length()const override{return source_->Size();}bool ReadAt(uint64_t at,void* p,size_t n)override{source_->Read(at,p,n);return true;}};
 class SharedSource final:public Source{std::shared_ptr<Source> source_;public:explicit SharedSource(std::shared_ptr<Source> s):source_(std::move(s)){}uint64_t Size()const override{return source_->Size();}bool Writable()const override{return false;}void Read(uint64_t at,void* p,size_t n)override{source_->Read(at,p,n);}void Write(uint64_t,const void*,size_t)override{throw Error("Physical removable disks are read-only");}void Flush()override{throw Error("Physical removable disks are read-only");}void CheckMedia()override{source_->CheckMedia();}};
 class MediaVolume final:public MacBrowser::Volume {
+ MacBrowser::WorkerOrigin workerOrigin_;
  std::shared_ptr<MacBrowser::Volume> backend_;std::shared_ptr<Source> source_;std::string key_,kind_,description_;std::u16string name_;uint64_t free_;bool sensitive_,attributes_;MacBrowser::Capabilities capabilities_;std::recursive_mutex mutex_;
  template<class F>auto Call(F work)->decltype(work()){VolumeCoord::BackendRead lease(key_);std::lock_guard<std::recursive_mutex> lock(mutex_);Check(bool(backend_),"Removable disk was released; refresh it");source_->CheckMedia();try{auto value=work();source_->CheckMedia();return value;}catch(...){auto failure=std::current_exception();source_->CheckMedia();std::rethrow_exception(failure);}}
-public:MediaVolume(std::shared_ptr<MacBrowser::Volume> v,std::shared_ptr<Source> s,std::string key):backend_(std::move(v)),source_(std::move(s)),key_(std::move(key)){name_=backend_->Stat(2).name;kind_=backend_->Kind();description_=backend_->Description()+", physical removable disk (read-only)";free_=backend_->FreeBytes();sensitive_=backend_->CaseSensitive();attributes_=backend_->SupportsAttributes();capabilities_=backend_->Supports();capabilities_.create=capabilities_.rename=capabilities_.remove=false;}
+public:MediaVolume(std::shared_ptr<MacBrowser::Volume> v,std::shared_ptr<Source> s,std::string key,MacBrowser::WorkerOrigin origin):workerOrigin_(std::move(origin)),backend_(std::move(v)),source_(std::move(s)),key_(std::move(key)){name_=backend_->Stat(2).name;kind_=backend_->Kind();description_=backend_->Description()+", physical removable disk (read-only)";free_=backend_->FreeBytes();sensitive_=backend_->CaseSensitive();attributes_=backend_->SupportsAttributes();capabilities_=backend_->Supports();capabilities_.create=capabilities_.rename=capabilities_.remove=false;}
+ MacBrowser::WorkerOrigin WorkerDescription()const override{return workerOrigin_;}
  std::string ResourceKey()const override{return key_;}std::u16string Name()const override{return name_;}const char* Kind()const override{return kind_.c_str();}std::string Description()const override{return description_;}bool Writable()const override{return false;}bool CaseSensitive()const override{return sensitive_;}uint64_t FreeBytes()const override{return free_;}
  MacBrowser::Capabilities Supports()const override{return capabilities_;}bool SupportsAttributes()const override{return attributes_;}
  std::vector<MacBrowser::Entry> List(uint32_t id)override{return Call([&]{auto entries=backend_->List(id);for(auto& e:entries)e.identity=key_+":"+e.identity;return entries;});}MacBrowser::Entry Stat(uint32_t id)override{return Call([&]{auto e=backend_->Stat(id);e.identity=key_+":"+e.identity;return e;});}
@@ -120,7 +123,7 @@ std::vector<Mounted> Open(const Device& device,std::shared_ptr<Api> api){if(!api
   if(Volume::Recognizes(*slice))backend=MacBrowser::FromHfsPlus(std::unique_ptr<Source>(new SharedSource(slice)),false,key);
   else if(HfsPlus::Disk::U16(signature.data())==0x4244){if(disk->MediaGeometry().floppy)continue;backend=MacBrowser::OpenClassicSource(slice,key);}
   else {std::unique_ptr<MfsSource> source(new MfsMedia(slice));if(MfsImage::Recognizes(*source))backend=MacBrowser::FromMfs(std::move(source),key);}
-  if(!backend)continue;Mounted mounted;mounted.device=device;mounted.partition=partition;mounted.volume=std::make_shared<MediaVolume>(std::move(backend),slice,key);mounted.label=device.label;if(partition.index)mounted.label+=L", partition "+std::to_wstring(partition.index);result.push_back(std::move(mounted));}
+  if(!backend)continue;Mounted mounted;mounted.device=device;mounted.partition=partition;MacBrowser::WorkerOrigin origin;origin.kind=MacBrowser::WorkerOrigin::Removable;origin.path=device.path;origin.offset=partition.offset;origin.generationKnown=true;origin.generation=disk->Generation();mounted.volume=MacBrowser::TrackWorkerVolume(std::make_shared<MediaVolume>(std::move(backend),slice,key,origin));mounted.label=device.label;if(partition.index)mounted.label+=L", partition "+std::to_wstring(partition.index);result.push_back(std::move(mounted));}
  disk->CheckMedia();return result;
 }
 Discovery Scan(Storage::Job& job,std::shared_ptr<Api> api){if(!api)api=NativeApi();Discovery result;auto devices=api->Enumerate();std::set<std::wstring> seen;for(auto& device:devices){if(job.cancelled())throw Storage::Cancelled();if(!Eligible(device)||!seen.insert(device.path).second)continue;Storage::Progress progress;progress.phase="Checking Mac removable disks";progress.path=Utf8(device.label);progress.utf8=true;job.progress(progress);try{auto volumes=Open(device,api);result.volumes.insert(result.volumes.end(),volumes.begin(),volumes.end());}catch(const std::exception& e){result.errors.push_back(Utf8(device.label)+": "+e.what());}}return result;}

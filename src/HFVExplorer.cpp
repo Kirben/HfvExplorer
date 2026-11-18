@@ -20,6 +20,7 @@
 
 #include "stdafx.h"
 #include "WindowsCompatibility.h"
+#include "CopyProcess.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
@@ -327,6 +328,7 @@ int CHFVExplorerApp::ExitInstance(){BrowserTransfers::Clear();ShutdownStorageUi(
 
 BOOL CHFVExplorerApp::InitInstance()
 {
+ if(__argc==4&&!strcmp(__argv[1],"--copy-worker"))ExitProcess(CopyProcess::Child(__argv[2],__argv[3]));
  auto windows=WindowsCompatibility::Current();
  if(__argc==3&&!strcmp(__argv[1],"--compatibility-report")){
   FILE* output=nullptr;if(fopen_s(&output,__argv[2],"w")||!output)ExitProcess(2);
@@ -335,6 +337,12 @@ BOOL CHFVExplorerApp::InitInstance()
  if(!WindowsCompatibility::Supported(windows)){AfxMessageBox(WindowsCompatibility::Requirement(),MB_OK|MB_ICONERROR);return FALSE;}
 
 #ifdef HFV_TESTING
+ extern int RunCopyReleaseTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-copy-release"))ExitProcess(RunCopyReleaseTest(__argv[2]));
+ extern int RunCopyParentExitTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-copy-parent-exit"))ExitProcess(RunCopyParentExitTest(__argv[2]));
+ extern int RunCopyProcessTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-copy-process"))ExitProcess(RunCopyProcessTest(__argv[2]));
  extern int RunWindowsPathCoordinationTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-windows-path-coordination"))ExitProcess(RunWindowsPathCoordinationTest(__argv[2]));
  extern int RunPerVolumeCommandsTest(const char*);

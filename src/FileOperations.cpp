@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
+#include "CopyProcess.h"
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
@@ -46,11 +47,12 @@ bool Absolute(const std::string& p){return p.size()>=3&&((isalpha((unsigned char
 bool Absolute(const std::wstring& p){return p.size()>=3&&((iswalpha(p[0])&&p[1]==L':'&&(p[2]==L'\\'||p[2]==L'/'))||(p[0]==L'\\'&&p[1]==L'\\'));}
 void CheckMedia(const Location& item){
  if(!item.mediaGenerationKnown)return;DWORD generation=0;
- if(!physical_floppy_generation(physical_floppy_path(item.classicImage.c_str()),&generation)||generation!=item.mediaGeneration)throw Failure(ERROR_MEDIA_CHANGED,"Floppy media changed after selection; select the volume again");
+ int floppy=physical_floppy_path(item.classicImage.c_str());bool valid=floppy>=0?physical_floppy_generation(floppy,&generation)!=0:readonly_media_path(item.classicImage.c_str())&&physical_cd_generation(toupper((unsigned char)item.classicImage[0])-'A',&generation);
+ if(!valid||generation!=item.mediaGeneration)throw Failure(ERROR_MEDIA_CHANGED,"Media changed after selection; select the volume again");
 }
 std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mutate=false){
  if(!value.expectedResource.empty())Check(VolumeCoord::ImageKey(value.classicImage)==value.expectedResource,"The selected source image was replaced");
- if(value.volume){auto e=value.volume->Stat(value.id);
+ if(value.volume){CheckMedia(value);auto e=value.volume->Stat(value.id);
   if(!value.expectedIdentity.empty())Check(e.identity==value.expectedIdentity,"The selected entry was replaced before the operation started");
   if(!value.expectedName.empty())Check(e.name==value.expectedName,"The selected entry was renamed before the operation started");
   if(value.expectedParent)Check(e.parent==value.expectedParent,"The selected entry was moved before the operation started");
@@ -237,10 +239,10 @@ std::u16string SourceName(const Location& item){if(!item.expectedName.empty())re
 std::vector<VolumeCoord::Access> Resources(const Request& request){
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
  if(request.kind==Kind::LegacyCopy){
-  if(Absolute(request.sourcePath))AddPath(access,VolumeCoord::Wide(request.sourcePath),request.move?Mode::Write:Mode::Read);else access.push_back({VolumeCoord::ImageKey(request.sourceVolume),(request.move||request.background)?Mode::Write:Mode::Read});
+  if(Absolute(request.sourcePath))AddPath(access,VolumeCoord::Wide(request.sourcePath),request.move?Mode::Write:Mode::Read);else access.push_back({VolumeCoord::ImageKey(request.sourceVolume),(request.move||request.background||CopyProcess::UsesWorker(request))?Mode::Write:Mode::Read});
   if(Absolute(request.targetPath))access.push_back({VolumeCoord::LegacyOutputKey(VolumeCoord::Wide(request.targetPath)),Mode::Write});else access.push_back({VolumeCoord::ImageKey(request.targetVolume),Mode::Write});return access;
  }
- for(const auto& item:request.sources){auto mode=request.kind==Kind::CreateHardLink||request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::SetBasicMetadata||request.kind==Kind::SetCompression||item.cut||(request.background&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
+ for(const auto& item:request.sources){auto mode=request.kind==Kind::CreateHardLink||request.kind==Kind::Rename||request.kind==Kind::Delete||request.kind==Kind::SetProperties||request.kind==Kind::SetAttributes||request.kind==Kind::SetBasicMetadata||request.kind==Kind::SetCompression||item.cut||((request.background||CopyProcess::UsesWorker(request))&&item.type!=LIST_FAT)?Mode::Write:Mode::Read;auto path=HostPath(item);if(path.empty())access.push_back({Resource(item),mode});else{
    // Explicit Windows adapters are still file readers when a copy is not a move.
    if(request.kind!=Kind::Rename&&request.kind!=Kind::Delete&&request.kind!=Kind::SetProperties&&request.kind!=Kind::SetAttributes&&request.kind!=Kind::SetBasicMetadata&&request.kind!=Kind::SetCompression&&!item.cut)mode=Mode::Read;AddPath(access,path,mode);
    if(request.kind==Kind::Rename){auto parent=path.substr(0,path.find_last_of(L"\\/"));AddPath(access,ChildPath(parent,request.name),Mode::Write);}
@@ -297,6 +299,13 @@ Storage::Result Execute(const Request& request,Storage::Job& job,Completion& com
 }
 Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> job):state_(std::move(state)),job_(std::move(job)){}
 Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->mutex);return state_->completion;}
+Storage::Result ExecuteCopyWorker(const Request& request,Storage::Job& job,Completion& completion){
+ try{LegacyEngine::Scope engine;VolumeCoord::Lease access(Resources(request));VolumeCoord::OperationLease current(Resources(request));return Execute(request,job,completion);}
+ catch(const Storage::Cancelled&){return {1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
+ catch(const Failure& e){return {1,e.error,e.what()};}
+ catch(const std::exception& e){return {1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
+ catch(...){return {1,ERROR_UNHANDLED_EXCEPTION,"Unexpected copy-worker failure"};}
+}
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
  auto& queue=values->background?Storage::copyWorker():Storage::worker();
@@ -305,7 +314,7 @@ Operation Submit(Request request){
  auto planning=queue.submit([plan,values](Storage::Job& job){try{if(job.cancelled())throw Storage::Cancelled();plan->resources=Resources(*values);}catch(const Storage::Cancelled&){plan->error={1,ERROR_CANCELLED,"Cancelled while identifying Windows paths"};}catch(const std::exception& error){plan->error={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}catch(...){plan->error={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected path planning failure"};}plan->ready.store(true,std::memory_order_release);return Storage::Result{};});
  auto job=queue.submit([state,values,access,plan](Storage::Job& job){Completion completion;Storage::Result result;
   try{Cancel(job);if(plan->error.code){result=plan->error;}else{if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
-   VolumeCoord::OperationLease currentPaths(Resources(*values));result=Execute(*values,job,completion);}
+   VolumeCoord::OperationLease currentPaths(Resources(*values));if(CopyProcess::UsesWorker(*values)){std::vector<std::string> keys,writes;for(auto& item:plan->resources){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}Mark(completion,values->target);for(auto& item:values->sources)if(item.cut)Mark(completion,item);if(values->kind==Kind::LegacyCopy){Location target;target.type=Absolute(values->targetPath)?LIST_FAT:LIST_HFS;target.windowsPath=VolumeCoord::Wide(values->targetPath);target.classicImage=values->targetVolume;Mark(completion,target);if(values->move){Location source;source.type=Absolute(values->sourcePath)?LIST_FAT:LIST_HFS;source.windowsPath=VolumeCoord::Wide(values->sourcePath);source.classicImage=values->sourceVolume;Mark(completion,source);}}result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,job,completion);}
   }
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled; completed changes were retained"};}
   catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}

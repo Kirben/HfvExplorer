@@ -19,6 +19,8 @@
  */
 
 #include "stdafx.h"
+#include "TypeMappingSnapshot.h"
+#include <stdexcept>
 #include <mutex>
 namespace {std::recursive_mutex mappingMutex;}
 #include "HFVExplorer.h"
@@ -33,6 +35,11 @@ static char THIS_FILE[] = __FILE__;
 
 static CMapStringToString map_hfs2fat;
 static CMapStringToString map_fat2hfs;
+namespace TypeMappings {
+Snapshot Capture(){std::lock_guard<std::recursive_mutex> mapping(mappingMutex);Snapshot out;auto copy=[](CMapStringToString& map,std::vector<std::pair<std::string,std::string>>& values){POSITION at=map.GetStartPosition();while(at){CString key,value;map.GetNextAssoc(at,key,value);values.emplace_back((LPCSTR)key,(LPCSTR)value);}};copy(map_hfs2fat,out.hfsToWindows);copy(map_fat2hfs,out.windowsToHfs);return out;}
+void Apply(const Snapshot& values){std::lock_guard<std::recursive_mutex> mapping(mappingMutex);for(auto& e:values.hfsToWindows)if(e.first.size()!=8||e.second.empty()||e.second.size()>=100)throw std::runtime_error("Invalid HFS-to-Windows type mapping");for(auto& e:values.windowsToHfs)if(e.first.empty()||e.first.size()>=100||e.second.size()!=9)throw std::runtime_error("Invalid Windows-to-HFS type mapping");map_hfs2fat.RemoveAll();map_fat2hfs.RemoveAll();for(auto& e:values.hfsToWindows)map_hfs2fat.SetAt(e.first.c_str(),e.second.c_str());for(auto& e:values.windowsToHfs)map_fat2hfs.SetAt(e.first.c_str(),e.second.c_str());}
+}
+
 
 /////////////////////////////////////////////////////////////////////////////
 // CFileTypeMapping dialog

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MacBrowserModel.h"
+#include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "BrowserPresentation.h"
@@ -17,10 +18,11 @@ void Check(bool ok, const char *message) { if (!ok) throw HfsPlus::Error(message
 class Plus final : public Volume {
     std::unique_ptr<HfsPlus::Source> source_;
     std::unique_ptr<HfsPlus::Volume> volume_;
-    bool writable_;std::atomic<bool> usable_{true};
-    std::u16string name_;bool caseSensitive_=false,hfsx_=false,journaled_=false,external_=false,expanded_=false,canWrite_=false;
+    std::atomic<bool> writable_;std::atomic<bool> usable_{true};
+    std::u16string name_;bool caseSensitive_=false,hfsx_=false,journaled_=false,external_=false,expanded_=false;std::atomic<bool> canWrite_{false};
     mutable std::recursive_mutex mutex_;
     struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Plus& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
+    std::wstring externalJournal_;
     std::string resourceKey_;std::unique_ptr<VolumeCoord::ImageDependency> journalDependency_;
     template<class F> auto Mutate(F work) -> decltype(work()) {
         Call call(*this);if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access");
@@ -44,7 +46,12 @@ class Plus final : public Volume {
     }
 public:
     Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key,std::wstring externalJournal)
-        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();external_=volume_->ExternalJournal();expanded_=volume_->ExpandedTimes();canWrite_=volume_->Writable();if(!externalJournal.empty()&&volume_->ExternalJournal())journalDependency_.reset(new VolumeCoord::ImageDependency(ResourceKey(),externalJournal));}
+        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)),externalJournal_(externalJournal) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();external_=volume_->ExternalJournal();expanded_=volume_->ExpandedTimes();canWrite_=volume_->Writable();if(!externalJournal.empty()&&volume_->ExternalJournal())journalDependency_.reset(new VolumeCoord::ImageDependency(ResourceKey(),externalJournal));}
+    WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;out.journal=externalJournal_;}else if(source_->MediaDrive()>=0){out.kind=WorkerOrigin::Cd;out.drive=source_->MediaDrive();uint32_t generation=0;out.generationKnown=source_->MediaGeneration(generation);out.generation=generation;}out.writable=writable_;return out;}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
+    void SuspendWorker()override{Call call(*this);usable_=false;volume_.reset();}
+    void ResumeWorker()override{Reload();}
+    void WorkerUncleanExit()override{if(!journaled_){writable_=false;canWrite_=false;}}
     std::string ResourceKey()const override{return resourceKey_.empty()?Volume::ResourceKey():resourceKey_;}
     std::u16string Name() const override { return name_; }
     const char *Kind() const override { return hfsx_ ? "HFSX" : "HFS+"; }
@@ -127,6 +134,11 @@ class Mfs final : public Volume {
     static std::string Encode(const std::u16string& name,unsigned maximum=255){std::string encoded,error;if(!MfsImage::EncodeName(Wide(name),encoded,error,maximum))throw HfsPlus::Error(error);return encoded;}
 public:
     explicit Mfs(std::unique_ptr<MfsSource> source,std::string key):source_(std::move(source)),resourceKey_(std::move(key)){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
+    WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;}out.writable=source_->Writable();return out;}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
+    void WorkerUncleanExit()override{source_->DisableWrites();writable_=false;}
+    void SuspendWorker()override{Call call(*this);usable_=false;image_=MfsImage();}
+    void ResumeWorker()override{Call call(*this);if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();usable_=true;}
     std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name()const override{return *std::atomic_load(&name_);}
     const char* Kind()const override{return "MFS";}
@@ -220,9 +232,9 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }
 }
-std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key){return std::make_shared<Mfs>(std::move(source),key);}
+std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key){return TrackWorkerVolume(std::make_shared<Mfs>(std::move(source),key));}
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
-    return std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal));
+    return TrackWorkerVolume(std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal)));
 }
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
@@ -238,7 +250,7 @@ std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &e
     if (!MfsImage::Recognizes(*mfs)) return {};
     mfs.reset(new MfsImageSource);
     if(!mfs->Open(path.c_str(),error,true)){mfs.reset(new MfsImageSource);if(!mfs->Open(path.c_str(),error))throw HfsPlus::Error(error);}
-    return std::make_shared<Mfs>(std::move(mfs),key);
+    return TrackWorkerVolume(std::make_shared<Mfs>(std::move(mfs),key));
     });
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {

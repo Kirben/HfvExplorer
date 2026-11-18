@@ -26,8 +26,14 @@ class Source {
     virtual void Flush() = 0;
     // Removable read-only sources validate media even for cached catalog reads.
     virtual void CheckMedia() {}
+    virtual std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const{return {};}
+    virtual int MediaDrive()const{return -1;}
+    virtual bool MediaGeneration(uint32_t&)const{return false;}
     virtual std::shared_ptr<Source> OpenJournal(const Bytes&){throw ExternalJournalRequired("Select the matching external journal disk image");}
 };
+#ifdef HFV_TESTING
+extern std::function<void(bool,uint64_t,size_t)> workerIoFault;
+#endif
 std::unique_ptr<Source> OpenImage(const wchar_t *, bool write, const wchar_t *externalJournal = nullptr);
 std::unique_ptr<Source> CreateImage(const wchar_t *, uint64_t size, const wchar_t *externalJournal = nullptr);
 std::string CreateExternalJournalImage(const wchar_t*,uint64_t size = 64ULL*1024*1024);

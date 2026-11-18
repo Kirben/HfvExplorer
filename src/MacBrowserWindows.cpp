@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MacBrowserModel.h"
+#include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusDisk.h"
 #include "BrowserPresentation.h"
@@ -252,6 +253,7 @@ public:
         for(const auto& name:names)for(const auto& companion:reserved)Check(_wcsicmp(name.c_str(),companion.c_str())!=0,"Source names collide with required Windows metadata companions; rename them before copying");
     }
     bool CaseSensitive() const override { return false; }
+    void ReleaseWorkerReaders(const std::vector<std::string>& keys)override{std::lock_guard<std::recursive_mutex> lock(mutex_);for(unsigned fork=0;fork<2;++fork){auto& readers=fork?resourceReaders_:dataReaders_;for(auto it=readers.begin();it!=readers.end();){auto path=Path(it->first);auto key=VolumeCoord::PathKey(fork?Companion(path):path);if(VolumeCoord::Overlapping(keys,key))it=readers.erase(it);else ++it;}}}
     void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
     void ValidateEntry(const Entry& e)const override {
         Volume::ValidateEntry(e);Check(!e.datesValid||(e.created<=UINT64_MAX/10000000ULL-9561628800ULL&&e.modified<=UINT64_MAX/10000000ULL-9561628800ULL),"Dates exceed the Windows FILETIME range");DoubleHeader(e);Leaf(e.name);Leaf(u"%"+e.name);Check(e.forks[1].size<=UINT32_MAX-82,"Resource fork is too large for AppleDouble export; use raw fork export");
@@ -391,11 +393,11 @@ std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstrin
     // the legacy Windows view may capitalize display paths for presentation.
     auto parent=path.substr(0,slash);if(parent.size()==2&&parent.back()==L':')parent+=L'\\';
     auto actual=parent+(parent.back()==L'\\'?L"":L"\\")+data.cFileName;
-    auto volume=std::make_shared<Windows>(parent);auto entry=volume->DescribeFile(actual);return {volume,entry.id};
+    auto volume=std::make_shared<Windows>(parent);auto entry=volume->DescribeFile(actual);return {TrackWorkerVolume(volume),entry.id};
 }
 Entry DescribeWindowsFile(const std::wstring& path){
     auto parent=path.substr(0,path.find_last_of(L"\\/"));if(parent.size()==2&&parent.back()==L':')parent+=L'\\';
     Windows volume(parent);return volume.DescribeFile(path);
 }
-std::shared_ptr<Volume> OpenWindows(const std::wstring &path) { return std::make_shared<Windows>(path); }
+std::shared_ptr<Volume> OpenWindows(const std::wstring &path) { return TrackWorkerVolume(std::make_shared<Windows>(path)); }
 }

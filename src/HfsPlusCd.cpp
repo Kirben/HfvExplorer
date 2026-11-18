@@ -16,6 +16,7 @@ namespace {
 class Cd final : public Source {
     std::shared_ptr<MediaImageSource> media_;
     uint64_t size_ = 0,base_ = 0;
+    int drive_=-1;
     DWORD generation_ = 0;
     bool valid_ = true;
     std::string failure_;
@@ -27,7 +28,7 @@ class Cd final : public Source {
     }
 
   public:
-    Cd(int drive, std::shared_ptr<MediaImageSource> media) : media_(std::move(media)) {
+    Cd(int drive, std::shared_ptr<MediaImageSource> media) : media_(std::move(media)),drive_(drive) {
         Disk::Check(drive >= 0 && drive < 26, "Invalid CD drive");
         if (!media_)
             media_ = MakeNativeCdImageSource();
@@ -51,6 +52,8 @@ class Cd final : public Source {
         }
         if(!matched){if(!media_->SelectTrack(latest.number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;}
     }
+    int MediaDrive()const override{return drive_;}
+    bool MediaGeneration(uint32_t& value)const override{value=generation_;return true;}
     uint64_t Size() const override { return size_; }
     bool Writable() const override { return false; }
     void CheckMedia() override {
