@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "HfsPlus.h"
+#include "StorageOutcome.h"
+#include <exception>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -353,7 +355,7 @@ struct Journal {
         Prune();
         return !enabled || RequiredBytes() < size - headerSize;
     }
-    void WriteLog(const std::function<void(const char *)> &fault) {
+    void WriteLog(const std::function<void(const char *)> &fault, bool* publishing=nullptr) {
         Check(enabled && start == end, "Journal must be empty before committing");
         auto blocks = Blocks();
         size_t capacity = (listSize - 16) / 16 - 1;
@@ -396,6 +398,7 @@ struct Journal {
         if (fault)
             fault("journal-data-flushed");
         end = pos;
+        if(publishing)*publishing=true;
         StoreHeader();
         if (fault)
             fault("journal-committed");
@@ -406,7 +409,17 @@ struct Journal {
     // afterwards native replay opens the new log directly. In particular, never
     // make an old journal replay change JIB: a native kernel could otherwise keep
     // using the old journal object after replay. No private recovery format.
+    struct CommitEvidence {
+        bool complete = false;
+        bool publicationStarted = false;
+        ~CommitEvidence() {
+            if (!complete)
+                Storage::OutcomeEvidence::NoteRollback(publicationStarted
+                    ? Storage::Rollback::Unverified : Storage::Rollback::Restored);
+        }
+    };
     void CommitReplacement(Journal &replacement, const std::function<void(const char *)> &fault) {
+        CommitEvidence evidence;
         Prune();
         Check(start == end && replacement.Fits(), "Replacement journal cannot encode relocation");
         view.source.Flush();
@@ -419,6 +432,7 @@ struct Journal {
         });
         Check(infoOffset % headerSize == 0, "Unaligned journal info block");
         auto info = view.Read(infoOffset, headerSize);
+        evidence.publicationStarted = true;
         view.Write(infoOffset, info.data(), info.size());
         if (fault)
             fault("journal-resize-jib-written");
@@ -436,12 +450,14 @@ struct Journal {
         Adopt(replacement);
         if (fault)
             fault("journal-resize-cleared");
+        evidence.complete=true;
     }
     void Commit(const std::function<void(const char *)> &fault) {
         Prune();
         if (view.patches.empty())
             return;
         Check(view.source.Writable(), "Image is read-only");
+        CommitEvidence evidence;
         view.source.Flush();
         if (fault)
             fault("data-flushed");
@@ -454,6 +470,7 @@ struct Journal {
             Sector cleanPrimary = primary->second, cleanAlternate = alternate->second;
             auto dirty = view.Read(1024, 512);
             P32(dirty.data() + 4, U32(dirty.data() + 4) & ~0x100u);
+            evidence.publicationStarted = true;
             view.Write(1024, dirty.data(), 512);
             view.source.Flush();
             view.patches.erase(2);
@@ -465,9 +482,10 @@ struct Journal {
             view.source.Flush();
             if (fault)
                 fault("home-flushed");
+            evidence.complete=true;
             return;
         }
-        WriteLog(fault);
+        WriteLog(fault,&evidence.publicationStarted);
         view.Apply();
         if (fault)
             fault("home-flushed");
@@ -475,6 +493,7 @@ struct Journal {
         StoreHeader();
         if (fault)
             fault("journal-cleared");
+        evidence.complete=true;
     }
 };
 } // namespace Disk

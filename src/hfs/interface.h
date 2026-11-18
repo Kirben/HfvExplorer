@@ -45,6 +45,7 @@ int HFSIFACE_copy(
 	int *pwas_moved );
 int HFSIFACE_rename( char *volpath, char *oldname, char *newname );
 int HFSIFACE_mkdir( char *volpath, char *path );
+int HFSIFACE_take_delete_retained_change(void);
 int HFSIFACE_rmdir( char *volpath, char *path );
 int HFSIFACE_format( char *volpath, char *vname, hfv_size_t size, BOOL initialize );
 

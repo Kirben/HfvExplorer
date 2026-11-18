@@ -392,7 +392,7 @@ int delete_host_tree(const CString& path,unsigned depth,Storage::Job* job) {
     if(job&&job->cancelled()){ok=0;error=ERROR_CANCELLED;break;}
     CString child=path+"\\"+entry.cFileName;
     if(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ok=delete_host_tree(child,depth+1,job);
-    else ok=DeleteFileA(child)!=FALSE;
+    else {ok=DeleteFileA(child)!=FALSE;if(ok)Storage::OutcomeEvidence::NoteRetainedChange();}
     if(!ok){error=GetLastError();break;}
    }while(FindNextFileA(search,&entry));
    if(ok&&GetLastError()!=ERROR_NO_MORE_FILES){ok=0;error=GetLastError();}
@@ -400,7 +400,9 @@ int delete_host_tree(const CString& path,unsigned depth,Storage::Job* job) {
   }
  }
  directory.close();
- return RemoveDirectoryA(path)!=FALSE; // A reparse point itself, never its target.
+ const bool removed=RemoveDirectoryA(path)!=FALSE; // A reparse point itself, never its target.
+ if(removed)Storage::OutcomeEvidence::NoteRetainedChange();
+ return removed;
 }
 }
 int DeleteFATDirJob(CString &dir,Storage::Job* job)
@@ -422,6 +424,7 @@ int DeleteHostSelectionJob(const CString& path,bool directory,Storage::Job* job)
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(path.IsEmpty()){SetLastError(ERROR_INVALID_NAME);return 0;}
  if(!(directory?DeleteFATDirJob(const_cast<CString&>(path),job):DeleteFileA(path)))return 0;
+ Storage::OutcomeEvidence::NoteRetainedChange();
  int slash=path.ReverseFind('\\');CString name=path.Mid(slash+1);
  // Selecting a metadata file never authorizes deleting the associated data file.
  if(name.IsEmpty()||name[0]=='%')return 1;

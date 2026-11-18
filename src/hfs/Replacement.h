@@ -59,13 +59,16 @@ static void replacement_finish(HfsReplacement *state,int *result,char **error) {
   }
  }
  if(displaced&&!published) {
-  if(hfs_rename(state->volume,state->backup,state->original)<0)
+  if(hfs_rename(state->volume,state->backup,state->original)<0) {
+   hfs_note_rollback(3);
    *error="HFS publication and rollback failed; previous file retained under HFV*.bak";
+  } else hfs_note_rollback(1);
  }
  if(published) {
-  if(hfs_flush(state->volume)<0) {*result=-1;*error="HFS publication flush failed; previous file retained under HFV*.bak";}
+  if(hfs_flush(state->volume)<0) {hfs_note_rollback(2);*result=-1;*error="HFS publication flush failed; previous file retained under HFV*.bak";}
   else if(hfs_delete(state->volume,state->backup)<0) {*result=-1;*error="New HFS file saved; previous file retained under HFV*.bak";}
- } else hfs_delete(state->volume,state->temporary);
+ } else if(hfs_delete(state->volume,state->temporary)<0)hfs_note_rollback(3);
+ else if(*result<0)hfs_note_rollback(1);
  state->active=0;
  if(hfs_setcwd(state->volume,cwd)<0) {*result=-1;*error="Could not restore HFS directory after replacement";}
 }

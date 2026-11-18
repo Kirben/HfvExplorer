@@ -205,6 +205,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
+        if(!found)Storage::OutcomeEvidence::NoteRetainedChange();
         auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
         try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
@@ -284,6 +285,7 @@ void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress)
         if(job.cancelled())throw Storage::Cancelled();
         if(deletionProgress){p.path=BrowserPresentation::Utf8(n.entry.name);p.scanning=false;job.progress(p);}
         v.Remove(n.entry.id);
+        Storage::OutcomeEvidence::NoteRetainedChange();
         if(deletionProgress){++p.files;job.progress(p);}
     };
     std::function<void(const Planned &)> validate=[&](const Planned& n){if(job.cancelled())throw Storage::Cancelled();v.ValidateRemoval(n.entry.id);for(const auto& c:n.children)validate(c);};

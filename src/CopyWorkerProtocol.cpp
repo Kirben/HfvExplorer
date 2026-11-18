@@ -19,6 +19,21 @@ Message ValidateFrame(const DWORD (&header)[3]) {
               header[2] <= FrameLimit(header[1]), "Invalid copy-worker protocol frame");
     return Message(header[1]);
 }
+void EncodeOutcome(Data &d, const Storage::Result &result) {
+    d.put(uint64_t(result.outcome)); d.put(uint64_t(result.rollback));
+    d.put(result.completed); d.put(result.skipped); d.put(result.partial);
+}
+void DecodeOutcome(Data &d, Storage::Result &result) {
+    const auto outcome=d.get(), rollback=d.get(), completed=d.get(), skipped=d.get();
+    Check(outcome<=uint64_t(Storage::Outcome::Failed) && rollback<=uint64_t(Storage::Rollback::Failed) &&
+          completed<=UINT32_MAX && skipped<=UINT32_MAX, "Invalid worker operation outcome");
+    result.outcome=Storage::Outcome(outcome); result.rollback=Storage::Rollback(rollback);
+    result.completed=unsigned(completed); result.skipped=unsigned(skipped); result.partial=d.flag();
+    const auto expected=result.error==ERROR_CANCELLED ? Storage::Outcome::Cancelled :
+        result.code ? Storage::Outcome::Failed : result.skipped ? Storage::Outcome::Skipped : Storage::Outcome::Succeeded;
+    Check(result.outcome==expected && (!result.partial||expected!=Storage::Outcome::Succeeded),
+          "Inconsistent worker operation outcome");
+}
 void EncodeProgress(Data &d, const Storage::Progress &p) {
     d.put(p.path);
     d.put(p.phase);

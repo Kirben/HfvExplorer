@@ -149,7 +149,7 @@ public:
         }catch(...){result=-1;failure=std::current_exception();}
         if(hfs_close(file)<0){result=-1;error=hfs_error;}
         replacement_finish(&state,&result,&error);
-        if(result){if(!exists)hfs_delete(volume_,const_cast<char*>(path.c_str()));if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
+        if(result){if(!exists)hfs_note_rollback(hfs_delete(volume_,const_cast<char*>(path.c_str()))==0?1:3);if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
         Check(hfs_flush(volume_)==0);return Id(path);
     }
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}

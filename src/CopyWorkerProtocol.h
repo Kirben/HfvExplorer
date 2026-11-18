@@ -14,7 +14,7 @@ using FileOperations::ForkSelector;
 using MacBrowser::Entry;
 using MacBrowser::WorkerOrigin;
 
-constexpr uint64_t protocol = 6;
+constexpr uint64_t protocol = 7;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     RequestPacket = 1,
@@ -108,6 +108,8 @@ struct WireRequest {
 bool SupportsOperation(Kind kind);
 DWORD FrameLimit(DWORD message);
 Message ValidateFrame(const DWORD (&header)[3]);
+void EncodeOutcome(Data &data, const Storage::Result &result);
+void DecodeOutcome(Data &data, Storage::Result &result);
 void EncodeProgress(Data &data, const Storage::Progress &progress);
 Storage::Progress DecodeProgress(Data &data);
 void EncodeOrigin(Data &data, const WorkerOrigin &origin);

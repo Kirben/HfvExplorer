@@ -155,6 +155,9 @@ int hfs_stat(hfsvol *, char *, hfsdirent *);
 int hfs_fstat(hfsfile *, hfsdirent *);
 int hfs_setattr(hfsvol *, char *, hfsdirent *);
 /* Rename and edit attributes under one runtime undo transaction. */
+/* Rollback status: 0 none, 1 restored, 2 unverified, 3 failed. */
+void hfs_note_rollback(int);
+int hfs_take_rollback(void);
 int hfs_editattrs(hfsvol *, char *, char *, hfsdirent *);
 int hfs_fsetattr(hfsfile *, hfsdirent *);
 /* Full on-disk Finder information, including extended folder/file fields. */
