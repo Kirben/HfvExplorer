@@ -22,6 +22,7 @@ struct Entry {
     HfsPlus::Attributes attributes;
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
     unsigned version = 0; // optional legacy file version, not part of its identity
+    std::string expectedDestinationIdentity; // transient overwrite approval; never filesystem metadata
     std::string identity; // backend object/version identity for move revalidation
 };
 struct Capabilities {
@@ -103,5 +104,5 @@ std::u16string U16(const std::wstring &);
 }
 
 #ifdef HFV_TESTING
-namespace MacBrowser {extern std::function<void(const char*)> directoryMetadataFault;}
+namespace MacBrowser {extern std::function<void(const char*)> directoryMetadataFault;extern std::function<void(const char*)> windowsPublicationFault;}
 #endif

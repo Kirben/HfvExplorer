@@ -8,6 +8,7 @@
 namespace MacBrowser {
 #ifdef HFV_TESTING
 std::function<void(const char*)> directoryMetadataFault;
+std::function<void(const char*)> windowsPublicationFault;
 #endif
 namespace {
 using namespace HfsPlus::Disk;
@@ -16,8 +17,9 @@ struct File {
     HANDLE h = INVALID_HANDLE_VALUE;
     File(const std::wstring &path, DWORD access, DWORD disposition)
         : h(CreateFileW(path.c_str(), access, FILE_SHARE_READ, nullptr, disposition,
-                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)) {
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)) {
         Check(h != INVALID_HANDLE_VALUE, "Cannot open Windows file");
+        BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(h,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))){CloseHandle(h);h=INVALID_HANDLE_VALUE;throw HfsPlus::Error("Windows file was replaced by a directory or reparse point");}
     }
     ~File() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); }
     uint64_t Size() { LARGE_INTEGER n; Check(GetFileSizeEx(h, &n) != FALSE, "Cannot get Windows file size"); return n.QuadPart; }
@@ -39,10 +41,36 @@ struct File {
         Check(SetFileTime(h,&a,nullptr,&b)!=FALSE,"Cannot preserve Windows file timestamps");
     }
 };
+// Keep writers off the captured version. Renames are allowed so our own
+// publication can move it, but every moved version is checked by file identity.
+struct FileVersion {
+ HANDLE handle=INVALID_HANDLE_VALUE;BY_HANDLE_FILE_INFORMATION info{};
+ explicit FileVersion(const std::wstring& path){handle=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,nullptr);if(handle==INVALID_HANDLE_VALUE){auto error=GetLastError();Check(error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND,"Cannot protect destination from competing writes");return;}if(!GetFileInformationByHandle(handle,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))){CloseHandle(handle);handle=INVALID_HANDLE_VALUE;throw HfsPlus::Error("Destination became a directory or reparse point");}}
+ ~FileVersion(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
+ FileVersion(const FileVersion&)=delete;FileVersion& operator=(const FileVersion&)=delete;
+ bool Present()const{return handle!=INVALID_HANDLE_VALUE;}
+ bool Matches(const std::wstring& path)const{try{FileVersion other(path);if(Present()!=other.Present())return false;if(!Present())return true;const auto& a=info;const auto& b=other.info;return a.dwVolumeSerialNumber==b.dwVolumeSerialNumber&&a.nFileIndexHigh==b.nFileIndexHigh&&a.nFileIndexLow==b.nFileIndexLow&&a.nFileSizeHigh==b.nFileSizeHigh&&a.nFileSizeLow==b.nFileSizeLow&&a.ftLastWriteTime.dwHighDateTime==b.ftLastWriteTime.dwHighDateTime&&a.ftLastWriteTime.dwLowDateTime==b.ftLastWriteTime.dwLowDateTime;}catch(...){return false;}}
+ std::string Identity()const{const auto& a=info;return std::to_string(a.dwVolumeSerialNumber)+":"+std::to_string(a.nFileIndexHigh)+":"+std::to_string(a.nFileIndexLow)+":"+std::to_string(a.ftLastWriteTime.dwHighDateTime)+":"+std::to_string(a.ftLastWriteTime.dwLowDateTime);}
+ void Verify(const std::wstring& path)const{Check(Matches(path),"Destination changed during staging/publication; replacement was refused");}
+};
+struct DirectoryLease {
+ HANDLE handle;std::string identity;
+ explicit DirectoryLease(const std::wstring& path):handle(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)){Check(handle!=INVALID_HANDLE_VALUE,"Cannot protect destination folder during publication");BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(handle,&info)||!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){CloseHandle(handle);throw HfsPlus::Error("Destination folder was replaced or became a directory link");}identity=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow)+":";}
+ ~DirectoryLease(){CloseHandle(handle);}
+ DirectoryLease(const DirectoryLease&)=delete;DirectoryLease& operator=(const DirectoryLease&)=delete;
+};
+bool Missing(const std::wstring& path){auto flags=GetFileAttributesW(path.c_str());auto error=GetLastError();return flags==INVALID_FILE_ATTRIBUTES&&(error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND);}
+void Publication(const char* phase){
+#ifdef HFV_TESTING
+ if(windowsPublicationFault)windowsPublicationFault(phase);
+#else
+ (void)phase;
+#endif
+}
+std::string Recovery(const char* message,const std::wstring& data,const std::wstring& resource){std::string result=message;if(!data.empty())result+=" Data backup: "+BrowserPresentation::Utf8(U16(data));if(!resource.empty())result+=" Metadata backup: "+BrowserPresentation::Utf8(U16(resource));return result+". Preserve these files; do not delete them.";}
 struct Double { uint64_t offset = 0, size = 0, finderOffset=0, finderSize=0; std::array<uint8_t,32> finder{}; };
-bool AppleDouble(const std::wstring &path, Double &out) {
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
-    File f(path, GENERIC_READ, OPEN_EXISTING); uint8_t header[26];
+bool AppleDouble(File& f, Double &out) {
+    uint8_t header[26];
     if (f.Size() < sizeof(header)) return false;
     f.Read(0, header, sizeof(header)); unsigned count = HfsPlus::Disk::U16(header + 24);
     if (U32(header) != 0x00051607 || U32(header + 4) != 0x00020000 ||
@@ -60,8 +88,10 @@ bool AppleDouble(const std::wstring &path, Double &out) {
     return resource;
 }
 
-HfsPlus::Attributes DoubleAttributes(const std::wstring& path,const Double& d){
-    HfsPlus::Attributes out;if(d.finderSize<=34)return out;File file(path,GENERIC_READ,OPEN_EXISTING);
+bool AppleDouble(const std::wstring& path,Double& out){if(GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES)return false;File file(path,GENERIC_READ,OPEN_EXISTING);return AppleDouble(file,out);}
+HfsPlus::Attributes DoubleAttributes(const std::wstring& path,const Double&){
+    File file(path,GENERIC_READ,OPEN_EXISTING);Double d;Check(AppleDouble(file,d),"Attribute companion changed or became invalid");
+    HfsPlus::Attributes out;if(d.finderSize<=34)return out;
     uint8_t header[36]{};Check(d.finderSize>=70,"Truncated AppleDouble attributes");file.Read(d.finderOffset+34,header,sizeof(header));
     if(!U32(header))return out; // Some older companions contain only padded Finder info.
     Check(U32(header)==0x41545452,"Unknown AppleDouble attribute extension; companion retained");
@@ -167,13 +197,16 @@ public:
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Double d;auto path=Companion(Path(id));return AppleDouble(path,d)?DoubleAttributes(path,d):HfsPlus::Attributes{};}
     void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={}){
         auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
-        Double old;bool exists=GetFileAttributesW(companion.c_str())!=INVALID_FILE_ATTRIBUTES;Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
+        DirectoryLease directory(root);FileVersion original(companion);std::unique_ptr<FileVersion> replacement,primary;std::unique_ptr<DirectoryLease> folder;
+        if(e.directory){folder.reset(new DirectoryLease(path));Check(e.identity.compare(0,folder->identity.size(),folder->identity)==0,"Primary folder changed before metadata publication");}else{primary.reset(new FileVersion(path));Check(primary->Present()&&e.identity.substr(0,e.identity.find('/'))==primary->Identity(),"Primary file changed before metadata publication");}
+        Double old;bool exists=original.Present();Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");Check(old.size==e.forks[1].size,"Resource fork changed before metadata publication");
         std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
         try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);header.Write(output);if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.Write(buffer.data(),n);at+=n;}}output.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
-            if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;}
-            Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;if(finish)finish();
-        }catch(...){bool restored=true;if(published&&!DeleteFileW(companion.c_str()))restored=false;if(backed&&!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());Check(restored,"Metadata rollback failed; preserve the HFV temporary backup");throw;}
+            replacement.reset(new FileVersion(staged));Publication("metadata-staged");if(primary)primary->Verify(path);original.Verify(companion);
+            if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;original.Verify(backup);}
+            Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;Publication("metadata-published");if(finish)finish();if(primary)primary->Verify(path);replacement->Verify(companion);if(backed)original.Verify(backup);
+        }catch(...){bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
         if(!backup.empty())DeleteFileW(backup.c_str());
     }
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;PublishMetadata(id,e);}
@@ -264,12 +297,9 @@ public:
     }
     void Read(uint32_t id, unsigned fork, uint64_t at, void *p, size_t n) override {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        auto path = Path(id); uint64_t size, offset = 0;
-        if (fork) { Double d; Check(AppleDouble(Companion(path), d), "Resource fork companion is missing or invalid"); offset = d.offset; size = d.size; path = Companion(path); }
-        else { File f(path, GENERIC_READ, OPEN_EXISTING); size = f.Size(); }
-        Check(Range(at, n, size), "Read outside Windows file");
-        auto& readers=fork?resourceReaders_:dataReaders_;auto& file=readers[id];
-        if(!file)file=std::make_shared<File>(path,GENERIC_READ,OPEN_EXISTING);file->Read(offset+at,p,n);
+        auto path=Path(id);auto& readers=fork?resourceReaders_:dataReaders_;auto& file=readers[id];if(!file)file=std::make_shared<File>(fork?Companion(path):path,GENERIC_READ,OPEN_EXISTING);
+        uint64_t offset=0,size=file->Size();if(fork){Double d;Check(AppleDouble(*file,d),"Resource fork companion is missing or invalid");offset=d.offset;size=d.size;}
+        Check(Range(at,n,size),"Read outside Windows file");file->Read(offset+at,p,n);
     }
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name) override {
         Leaf(name); auto path = Child(Path(parent),Wide(name));
@@ -279,13 +309,15 @@ public:
         Leaf(e.name);Leaf(u"%"+e.name); Check(e.forks[1].size <= UINT32_MAX - 82, "Resource fork is too large for AppleDouble export; export the raw fork instead");
         auto root = Path(parent), path = Child(root,Wide(e.name)), companion = Companion(path);
         if(!e.name.empty()&&e.name[0]==u'%'&&e.name.size()>1){Double owned;auto owner=Child(root,Wide(e.name.substr(1)));Check(GetFileAttributesW(owner.c_str())==INVALID_FILE_ATTRIBUTES||!AppleDouble(path,owned),"The destination is another item's metadata companion; it was preserved");}
-        bool existed = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-        bool sidecar = GetFileAttributesW(companion.c_str()) != INVALID_FILE_ATTRIBUTES; Double old;
+        DirectoryLease directory(root);FileVersion original(path),originalResource(companion);
+        bool existed=original.Present(),sidecar=originalResource.Present();Double old;
+        if(!e.expectedDestinationIdentity.empty()){auto identity=existed?original.Identity():std::string{};if(sidecar)identity+="/"+originalResource.Identity();Check(existed&&identity==e.expectedDestinationIdentity,"Destination changed while the overwrite decision was pending; source retained");}
         Check(!existed || replace, "Destination already exists");
         Check(!sidecar || (existed && AppleDouble(companion, old)), "An unrelated companion file blocks export; it was preserved");
         auto outgoing=e;if(!e.attributesKnown&&sidecar)outgoing.attributes=DoubleAttributes(companion,old);auto header=DoubleHeader(outgoing);
         std::wstring staged, resource, backup, backupResource;
         bool published = false, publishedResource = false, backed = false, backedResource = false;
+        std::unique_ptr<FileVersion> newData,newResource;
         std::vector<std::unique_ptr<VolumeCoord::OperationLease>> staging;
         auto reserve=[&](const std::wstring& name){staging.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(name),VolumeCoord::Mode::Write}}));};
         try {
@@ -301,19 +333,21 @@ public:
                 data.Dates(e);rsrc.Dates(e);data.Flush(); rsrc.Flush();
             }
             {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
-            if (existed) { backup=Temp(root);reserve(backup); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true; }
-            if (sidecar) { backupResource=Temp(root);reserve(backupResource); Check(MoveFileExW(companion.c_str(),backupResource.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old resource fork"); backedResource=true; }
-            Check(MoveFileExW(staged.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported data"); staged.clear(); published=true;
-            Check(MoveFileExW(resource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported resource fork"); resource.clear(); publishedResource=true;
+            newData.reset(new FileVersion(staged));newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
+            if (existed) { backup=Temp(root);reserve(backup); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true;original.Verify(backup); }
+            if (sidecar) { backupResource=Temp(root);reserve(backupResource); Check(MoveFileExW(companion.c_str(),backupResource.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old resource fork"); backedResource=true;originalResource.Verify(backupResource); }
+            Check(MoveFileExW(staged.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported data"); staged.clear(); published=true;Publication("data-published");
+            Check(MoveFileExW(resource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported resource fork"); resource.clear(); publishedResource=true;Publication("resource-published");newData->Verify(path);newResource->Verify(companion);if(backed)original.Verify(backup);if(backedResource)originalResource.Verify(backupResource);
         } catch (...) {
             bool restored=true;
-            if(publishedResource && !DeleteFileW(companion.c_str()))restored=false;
-            if(published && !DeleteFileW(path.c_str()))restored=false;
-            if(backedResource && !MoveFileExW(backupResource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;
-            if(backed && !MoveFileExW(backup.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;
+            if(publishedResource && (!newResource->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;
+            if(published && (!newData->Matches(path)||!DeleteFileW(path.c_str())))restored=false;
+            bool slots=(!backed||Missing(path))&&(!backedResource||Missing(companion));if(!slots)restored=false;
+            if(slots){if(backedResource && !MoveFileExW(backupResource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;
+            if(backed && !MoveFileExW(backup.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}
             if(!staged.empty())DeleteFileW(staged.c_str()); if(!resource.empty())DeleteFileW(resource.c_str());
             if(!backed&&!backup.empty())DeleteFileW(backup.c_str()); if(!backedResource&&!backupResource.empty())DeleteFileW(backupResource.c_str());
-            Check(restored,"Export rollback failed; old data is retained in destination hfv*.tmp backup files. Do not delete them."); throw;
+            if(!restored)throw HfsPlus::Error(Recovery("Export rollback could not restore the original pair",backed?(Missing(backup)?path:backup):std::wstring{},backedResource?(Missing(backupResource)?companion:backupResource):std::wstring{})); throw;
         }
         if(!backup.empty())DeleteFileW(backup.c_str()); if(!backupResource.empty())DeleteFileW(backupResource.c_str()); return Id(path);
     }

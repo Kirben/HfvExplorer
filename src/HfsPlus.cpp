@@ -633,7 +633,7 @@ struct Volume::Impl {
         std::vector<Record> added;
         for(const auto& value:desired){auto was=old.find(value.first);if(was!=old.end()&&was->second==value.second)continue;
             Record record;record.key=AttributeKey(id,value.first);
-            if(value.second.size()<=1024){record.value.assign(16+value.second.size()+(value.second.size()&1),0);P32(record.value.data(),0x10);P32(record.value.data()+12,uint32_t(value.second.size()));std::copy(value.second.begin(),value.second.end(),record.value.begin()+16);added.push_back(std::move(record));}
+            if(value.second.size()<=1024){record.value.assign(16+value.second.size()+(value.second.size()&1),0);P32(record.value.data(),0x10);P32(record.value.data()+12,uint32_t(value.second.size()));value.second.Read(0,record.value.data()+16,size_t(value.second.size()));added.push_back(std::move(record));}
             else{auto f=Allocate(value.second.size(),false,true);uint64_t logical=0;Bytes buffer(65536,0);
                 for(auto e:f.extents){uint64_t at=uint64_t(e.start)*bs,remaining=uint64_t(e.count)*bs;while(remaining){size_t n=size_t((std::min)(remaining,uint64_t(buffer.size()))),actual=size_t((std::min)(uint64_t(n),f.size-logical));std::fill(buffer.begin(),buffer.begin()+n,0);value.second.Read(logical,buffer.data(),actual);view.Write(at,buffer.data(),n);logical+=actual;at+=n;remaining-=n;}}
                 record.value.assign(88,0);P32(record.value.data(),0x20);EncodeFork(record.value.data()+8,f,bs);added.push_back(std::move(record));
