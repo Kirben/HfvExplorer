@@ -10,10 +10,63 @@ extern "C" {
 namespace FileOperations {
 enum class Kind {CreateHardLink,Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute,SetBasicMetadata,SetCompression};
 enum class MetadataPatch {All,Label,Position};
-struct Request {
- Kind kind=Kind::Copy;
+struct OrdinaryCopy {
  std::vector<Location> sources;
- Location target;
+ Location destination;
+};
+struct LegacyConversion {
+ Location source, destination;
+ bool directory=false, move=false, askMode=false;
+ LegacyCopyOptions options;
+};
+class Request {
+ std::variant<OrdinaryCopy, LegacyConversion, Kind> operation_;
+ // Other operations retain their existing selection and destination fields.
+ // For conversion these are the optional preflight selection and folder.
+ std::vector<Location> otherSources_;
+ Location otherTarget_;
+public:
+ Request() = default;
+ Request(OrdinaryCopy copy) : operation_(std::move(copy)) {}
+ Request(LegacyConversion conversion) : operation_(std::move(conversion)) {}
+ Kind OperationKind() const {
+  if (std::holds_alternative<OrdinaryCopy>(operation_)) return Kind::Copy;
+  if (std::holds_alternative<LegacyConversion>(operation_)) return Kind::LegacyCopy;
+  return std::get<Kind>(operation_);
+ }
+ void SetKind(Kind kind) {
+  if (kind == Kind::LegacyCopy) throw HfsPlus::Error("Legacy conversion requires its own request payload");
+  if (kind == OperationKind()) return;
+  if (kind == Kind::Copy) {
+   operation_ = OrdinaryCopy{std::move(otherSources_), std::move(otherTarget_)};
+  } else {
+   if (auto* copy = std::get_if<OrdinaryCopy>(&operation_)) {
+    otherSources_ = std::move(copy->sources);
+    otherTarget_ = std::move(copy->destination);
+   }
+   operation_ = kind;
+  }
+ }
+ LegacyConversion* Conversion() { return std::get_if<LegacyConversion>(&operation_); }
+ const LegacyConversion* Conversion() const { return std::get_if<LegacyConversion>(&operation_); }
+ LegacyConversion& Legacy() { return std::get<LegacyConversion>(operation_); }
+ const LegacyConversion& Legacy() const { return std::get<LegacyConversion>(operation_); }
+ std::vector<Location>& Sources() {
+  auto* copy = std::get_if<OrdinaryCopy>(&operation_);
+  return copy ? copy->sources : otherSources_;
+ }
+ const std::vector<Location>& Sources() const {
+  const auto* copy = std::get_if<OrdinaryCopy>(&operation_);
+  return copy ? copy->sources : otherSources_;
+ }
+ Location& Target() {
+  auto* copy = std::get_if<OrdinaryCopy>(&operation_);
+  return copy ? copy->destination : otherTarget_;
+ }
+ const Location& Target() const {
+  const auto* copy = std::get_if<OrdinaryCopy>(&operation_);
+  return copy ? copy->destination : otherTarget_;
+ }
  std::u16string name;
  MacBrowser::Entry metadata,originalMetadata;
  HfsPlus::Attributes attributes,originalAttributes;
@@ -24,14 +77,15 @@ struct Request {
  HfsPlus::Volume::CompressionMode compressionMethod=HfsPlus::Volume::CompressionMode::Zlib;
  bool checkNameLock=true;
  bool background=false;
- bool askMode=false;
  unsigned fork=0;
- // Retain the original MacBinary/BinHex/text/AppleDouble conversion route.
- Location legacySource,legacyTarget;
- void SetLegacySourcePath(std::string path){legacySource=Location::FromLegacy(legacySource.IsClassic()?legacySource.ClassicImage():std::string(),path);}
- void SetLegacyTargetPath(std::string path){legacyTarget=Location::FromLegacy(legacyTarget.IsClassic()?legacyTarget.ClassicImage():std::string(),path);}
- bool directory=false,move=false;
- LegacyCopyOptions conversion;
+ void SetLegacySourcePath(std::string path) {
+  auto& source = Legacy().source;
+  source = Location::FromLegacy(source.IsClassic() ? source.ClassicImage() : std::string(), path);
+ }
+ void SetLegacyTargetPath(std::string path) {
+  auto& destination = Legacy().destination;
+  destination = Location::FromLegacy(destination.IsClassic() ? destination.ClassicImage() : std::string(), path);
+ }
 };
 struct Change {std::string resourceKey;};
 struct Completion {

@@ -62,7 +62,7 @@ bool Run(BrowserSession& session_,std::function<void(Storage::Job&)> work,bool c
     return result.code==0;
 }
 bool RunOperation(BrowserSession& session,FileOperations::Request request,bool copy=false,bool single=false){
- if(BackgroundCopies::Enabled()&&(request.kind==FileOperations::Kind::CreateHardLink||request.kind==FileOperations::Kind::Rename||request.kind==FileOperations::Kind::Delete||request.kind==FileOperations::Kind::CreateFolder||request.kind==FileOperations::Kind::SetProperties||request.kind==FileOperations::Kind::ReplaceResource||(copy&&request.kind==FileOperations::Kind::ExportFork)))return BackgroundCopies::Start({std::move(request)},session.Owner(),single);
+ if(BackgroundCopies::Enabled()&&(request.OperationKind()==FileOperations::Kind::CreateHardLink||request.OperationKind()==FileOperations::Kind::Rename||request.OperationKind()==FileOperations::Kind::Delete||request.OperationKind()==FileOperations::Kind::CreateFolder||request.OperationKind()==FileOperations::Kind::SetProperties||request.OperationKind()==FileOperations::Kind::ReplaceResource||(copy&&request.OperationKind()==FileOperations::Kind::ExportFork)))return BackgroundCopies::Start({std::move(request)},session.Owner(),single);
  auto operation=FileOperations::Submit(std::move(request));auto result=ShowSubmittedStorageJob(operation.Job(),copy?"Copying files":"Updating files",Hidden(session),single,true,session.Owner());
 #ifdef HFV_TESTING
  browserTransferError=result.message;
@@ -189,15 +189,19 @@ struct MainMacBrowser::State {
          for(auto& source:sources){
           CString sourcePath=source.LegacyType()==LIST_HFS?CString(source.ClassicPath().c_str()):CString(source.WindowsPath().c_str());
           if(!BackgroundCopies::Enabled()&&source.LegacyType()!=target.LegacyType()&&!Hidden(session_)&&!session_.List()->ask_set_copy_mode(source.LegacyType()==LIST_HFS,sourcePath)){complete=false;break;}
-          FileOperations::Request request;request.kind=source.LegacyType()==target.LegacyType()?FileOperations::Kind::Copy:FileOperations::Kind::LegacyCopy;request.sources={source};request.target=target;
-          request.legacySource=source;
-          request.legacyTarget=target;
-          request.askMode=request.kind==FileOperations::Kind::LegacyCopy&&(source.LegacyType()==LIST_HFS?App().m_copyout_mode:App().m_copyin_mode)==6;
-          request.directory=source.directory;request.move=source.cut;request.conversion=CaptureLegacyCopyOptions(HFSIFACE_copy_mode());
+          FileOperations::Request request = FileOperations::OrdinaryCopy{{source}, target};
+          if (source.LegacyType() != target.LegacyType()) {
+              const bool ask = (source.IsClassic() ? App().m_copyout_mode : App().m_copyin_mode) == 6;
+              request = FileOperations::LegacyConversion{
+                  source, target, source.directory, source.cut, ask,
+                  CaptureLegacyCopyOptions(HFSIFACE_copy_mode())};
+              request.Sources() = {source};
+              request.Target() = target;
+          }
           if(BackgroundCopies::Enabled())background.push_back(std::move(request));else if(!RunOperation(session_,std::move(request),true,!source.directory)){complete=false;break;}
          }
         }else{
-         FileOperations::Request request;request.kind=FileOperations::Kind::Copy;request.sources=sources;request.target=target;
+         FileOperations::Request request = FileOperations::OrdinaryCopy{sources, target};
          if(BackgroundCopies::Enabled())background.push_back(std::move(request));else complete=RunOperation(session_,std::move(request),true,sources.size()==1&&!sources[0].directory);
         }
         if(BackgroundCopies::Enabled()){if(!complete)return false;return BackgroundCopies::Start(std::move(background),session_.Owner(),sources.size()==1&&!sources[0].directory,std::move(completed));}
@@ -318,7 +322,7 @@ bool MainMacBrowser::Activate(int row){auto p=reinterpret_cast<list_lparam_struc
     if(!p||p->type!=LIST_MAC)return false;if(p->isdir){auto item=p->htree;session_.Tree()->m_ct->SelectItem(item);Select(session_.Tree()->m_ct->GetItemData(item));}
     else{auto& list=session_.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);Export(0);}return true;}
 bool MainMacBrowser::CreateFolder(const FileOperations::Location& target,const std::u16string& name){
- FileOperations::Request request;request.kind=FileOperations::Kind::CreateFolder;request.target=target;request.name=name;return RunOperation(session_,std::move(request),false,true);
+ FileOperations::Request request;request.SetKind(FileOperations::Kind::CreateFolder);request.Target()=target;request.name=name;return RunOperation(session_,std::move(request),false,true);
 }
 bool MainMacBrowser::CanPasteHardLink()const{
  if(!Writable())return false;int index;uint32_t folder;if(!state_->Selected(index,folder))return false;auto target=state_->mounts[index].volume;auto selection=BrowserTransfers::Snapshot();return target->SupportsHardLinks()&&selection.items.size()==1&&selection.items[0].Volume()&&selection.items[0].Volume()->SupportsHardLinks()&&selection.items[0].Volume()->ResourceKey()==target->ResourceKey();
@@ -326,7 +330,7 @@ bool MainMacBrowser::CanPasteHardLink()const{
 bool MainMacBrowser::PasteHardLink(){
  if(!CanPasteHardLink())return true;auto selection=BrowserTransfers::Snapshot();auto target=state_->Target();std::wstring name=Wide(selection.items[0].expectedName)+L" link";
  if(!EditHfsPlusName(session_.Owner(),name,target.Volume()->CaseSensitive()))return true;
- FileOperations::Request request;request.kind=FileOperations::Kind::CreateHardLink;request.sources={selection.items[0]};request.sources[0].cut=false;request.target=target;request.name=U16(name);RunOperation(session_,std::move(request));if(!BackgroundCopies::Enabled())Refresh();return true;
+ FileOperations::Request request;request.SetKind(FileOperations::Kind::CreateHardLink);request.Sources()={selection.items[0]};request.Sources()[0].cut=false;request.Target()=target;request.name=U16(name);RunOperation(session_,std::move(request));if(!BackgroundCopies::Enabled())Refresh();return true;
 }
 bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!CanCreateFolder())return true;
  auto target=state_->Target();std::wstring name=L"New Folder";
@@ -340,18 +344,18 @@ FileOperations::Location MainMacBrowser::CaptureItem(int row){
  return item;
 }
 bool MainMacBrowser::RenameItem(int row,const std::u16string& name){
- auto item=CaptureItem(row);FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.sources={item};request.name=name;if(item.IsMounted())request.target.SetMounted(item.Volume(),item.expectedParent?item.expectedParent:state_->folder);
+ auto item=CaptureItem(row);FileOperations::Request request;request.SetKind(FileOperations::Kind::Rename);request.Sources()={item};request.name=name;if(item.IsMounted())request.Target().SetMounted(item.Volume(),item.expectedParent?item.expectedParent:state_->folder);
  bool result=RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled()&&Active())Refresh();return result;
 }
 bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())return true;
  auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
  auto item=state_->Item(row,false);auto name=Wide(item.expectedName);
- if(EditHfsPlusName(session_.Owner(),name,item.Volume()->CaseSensitive())){FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.sources={item};request.target.SetMounted(item.Volume(),item.expectedParent);request.name=U16(name);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
+ if(EditHfsPlusName(session_.Owner(),name,item.Volume()->CaseSensitive())){FileOperations::Request request;request.SetKind(FileOperations::Kind::Rename);request.Sources()={item};request.Target().SetMounted(item.Volume(),item.expectedParent);request.name=U16(name);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
 }
 bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!SelectionWritable())return true;
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(i));if(p->type==LIST_MAC)selected.push_back(state_->Item(i,false));}
     if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
-    FileOperations::Request request;request.kind=FileOperations::Kind::Delete;request.sources=std::move(selected);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
+    FileOperations::Request request;request.SetKind(FileOperations::Kind::Delete);request.Sources()=std::move(selected);RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
 bool MainMacBrowser::Properties(int row){
  if(BackgroundCopies::Enabled()){auto item=state_->Item(row,false);if(item.LegacyType()==LIST_FAT)return false;return MetadataDialogs::Show(item,session_.Owner());}
 auto p=reinterpret_cast<list_lparam_struct*>(session_.List()->GetListCtrl().GetItemData(row));if(!p||p->type!=LIST_MAC)return false;
@@ -421,12 +425,12 @@ void MainMacBrowser::ImportResource(){
     auto p=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(!p||p->type!=LIST_MAC||p->isdir)return;
     auto selected=state_->Item(row,false);
     std::wstring path;if(!FileDialog(session_,path,false))return;Location input;input.SetWindows(path);
-    FileOperations::Request request;request.kind=FileOperations::Kind::ReplaceResource;request.sources={input};request.target=selected;
+    FileOperations::Request request;request.SetKind(FileOperations::Kind::ReplaceResource);request.Sources()={input};request.Target()=selected;
     RunOperation(session_,std::move(request),true,true);if(!BackgroundCopies::Enabled())Refresh();
 }
 void MainMacBrowser::Export(unsigned fork){if(!Active())return;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return;
  auto item=state_->Item(row,false);if(item.directory)return;auto path=Wide(item.expectedName)+(fork?L".rsrc":L"");if(!FileDialog(session_,path,true))return;path=BrowserPresentation::WindowsPath(path);
- FileOperations::Request request;request.kind=FileOperations::Kind::ExportFork;request.sources={item};request.target.SetWindows(path);request.fork=fork;RunOperation(session_,std::move(request),true,true);}
+ FileOperations::Request request;request.SetKind(FileOperations::Kind::ExportFork);request.Sources()={item};request.Target().SetWindows(path);request.fork=fork;RunOperation(session_,std::move(request),true,true);}
 
 void MainMacBrowser::Sort(int column,bool ascending){
 if(Active())session_.List()->SortBrowserRows(column,ascending);

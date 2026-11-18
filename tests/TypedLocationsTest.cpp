@@ -190,27 +190,43 @@ int RunTypedLocationsTest(const char *directory) {
         BrowserTransfers::Clear();
         fprintf(report, "PASS: exclusive typed addresses, immutable payloads, Unicode paths, invalid "
                         "combinations, media snapshots, lifetime ownership and no browser indexes\n");
+        Request copy = OrdinaryCopy{{windows}, Location::Mounted(backend)};
+        Check(copy.OperationKind() == Kind::Copy && !copy.Conversion() &&
+                  copy.Sources().size() == 1 && copy.Target().IsMounted(),
+              "Ordinary copy was not captured with its own inputs");
+        Reject([&] { copy.SetKind(Kind::LegacyCopy); },
+               "Legacy conversion accepted a bare operation tag");
+        Request conversion = LegacyConversion{
+            Location::Image(root + "\\converter.dsk", "Fixture:File"), windows,
+            false, false, true, {}};
+        Check(conversion.OperationKind() == Kind::LegacyCopy && conversion.Conversion() &&
+                  conversion.Legacy().askMode && conversion.Legacy().destination.IsWindows(),
+              "Legacy conversion did not retain its typed payload");
+        auto captured = conversion;
+        conversion.Legacy().options.output = 'r';
+        Check(captured.Legacy().options.output == 'a',
+              "Editing conversion options changed a captured request");
         Request missing;
-        missing.sources = {Location{}};
-        missing.target = Location::Mounted(backend);
+        missing.Sources() = {Location{}};
+        missing.Target() = Location::Mounted(backend);
         auto before = backend->calls;
         auto bad = Submit(missing);
         Wait(bad);
         Check(bad.Job()->result().code && backend->calls == before, "Missing source reached a backend");
-        missing.sources = {Location::Mounted(backend, 99)};
-        missing.target = {};
+        missing.Sources() = {Location::Mounted(backend, 99)};
+        missing.Target() = {};
         bad = Submit(missing);
         Wait(bad);
         Check(bad.Job()->result().code && backend->calls == before, "Missing destination reached a backend");
         auto unknown = missing;
-        unknown.kind = static_cast<Kind>(999);
+        unknown.SetKind(static_cast<Kind>(999));
         bad = Submit(unknown);
         Wait(bad);
         Check(bad.Job()->result().code && backend->calls == before,
               "Unknown operation reached a mutation backend");
         Request rename;
-        rename.kind = Kind::Rename;
-        rename.sources = {Location::Mounted(backend, 99)};
+        rename.SetKind(Kind::Rename);
+        rename.Sources() = {Location::Mounted(backend, 99)};
         rename.name = u"After";
         auto changed = Submit(rename);
         Wait(changed);

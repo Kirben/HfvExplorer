@@ -401,16 +401,24 @@ struct Batch {
    if(!mode->ready)return true;
    if(!mode->accepted)cancelled=true;
    else{auto& r=requests[next];int direction=mode->m_outcopy?1:0;int selection=mode->m_copy_mode;const char values[]="ambtrRx5";
-    char value=selection>=0&&selection<8?values[selection]:'a';if(direction)r.conversion.output=value;else{r.conversion.input=value;r.conversion.appledouble=mode->m_appledouble!=FALSE;}
-    lastMode[direction]=selection;lastAd=mode->m_appledouble!=FALSE;all[direction]=mode->m_said_ok_all!=0;choices[direction]=r.conversion;r.askMode=false;
+    char value=selection>=0&&selection<8?values[selection]:'a';if(direction)r.Legacy().options.output=value;else{r.Legacy().options.input=value;r.Legacy().options.appledouble=mode->m_appledouble!=FALSE;}
+    lastMode[direction]=selection;lastAd=mode->m_appledouble!=FALSE;all[direction]=mode->m_said_ok_all!=0;choices[direction]=r.Legacy().options;r.Legacy().askMode=false;
    }
    mode.reset();
   }
   if(cancelled||next==requests.size())return false;
-  auto& pending=requests[next];int direction=(pending.kind==FileOperations::Kind::LegacyCopy?pending.legacyTarget.IsClassic():pending.target.IsClassic())?0:1;
-  if(pending.askMode&&all[direction]){if(direction)pending.conversion.output=choices[direction].output;else{pending.conversion.input=choices[direction].input;pending.conversion.appledouble=choices[direction].appledouble;}pending.askMode=false;}
-  if(pending.askMode){
-   dialog->Planning();mode.reset(new ModeDialog(hidden));mode->m_outcopy=direction;mode->m_copy_mode=lastMode[direction];mode->m_appledouble=lastAd<0?static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble:lastAd;mode->m_copying_fname=pending.legacySource.LegacyPath().c_str();
+  auto* pending = requests[next].Conversion();
+  int direction = pending && pending->destination.IsClassic() ? 0 : 1;
+  if (pending && pending->askMode && all[direction]) {
+   if (direction) pending->options.output = choices[direction].output;
+   else {
+    pending->options.input = choices[direction].input;
+    pending->options.appledouble = choices[direction].appledouble;
+   }
+   pending->askMode = false;
+  }
+  if (pending && pending->askMode) {
+   dialog->Planning();mode.reset(new ModeDialog(hidden));mode->m_outcopy=direction;mode->m_copy_mode=lastMode[direction];mode->m_appledouble=lastAd<0?static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble:lastAd;mode->m_copying_fname=pending->source.LegacyPath().c_str();
    if(!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create copy mode window");
    dialog->ShowWindow(SW_HIDE);if(!hidden)mode->ShowWindow(SW_SHOWNOACTIVATE);return true;
   }
@@ -434,7 +442,7 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
  if(requests.empty())return false;
  batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->finished&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
  auto batch=std::unique_ptr<Batch>(new Batch);auto ptr=batch.get();batch->requests=std::move(requests);batch->completed=std::move(completed);batch->observed=std::move(observed);
- auto kind=batch->requests.front().kind;bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
+ auto kind=batch->requests.front().OperationKind();bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
  const char* title=kind==FileOperations::Kind::CreateHardLink?"Creating hard link":kind==FileOperations::Kind::SetCompression?"Changing file compression":kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":kind==FileOperations::Kind::CreateFolder?"Creating folder":kind==FileOperations::Kind::Inspect?"Reading properties":kind==FileOperations::Kind::SetAttributes?"Updating extended attributes":kind==FileOperations::Kind::ReadAttributeFile?"Reading attribute value":kind==FileOperations::Kind::ExportAttribute?"Exporting attribute":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Updating properties":kind==FileOperations::Kind::ReplaceResource?"Importing resource fork":"Copying files";
  const char* operation=kind==FileOperations::Kind::CreateHardLink?"Hard-link creation":kind==FileOperations::Kind::SetCompression?"Compression change":kind==FileOperations::Kind::Rename?"Rename":kind==FileOperations::Kind::Delete?"Delete":kind==FileOperations::Kind::CreateFolder?"Folder creation":kind==FileOperations::Kind::Inspect?"Properties read":kind==FileOperations::Kind::SetAttributes?"Attribute update":kind==FileOperations::Kind::ReadAttributeFile?"Attribute read":kind==FileOperations::Kind::ExportAttribute?"Attribute export":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Properties update":kind==FileOperations::Kind::ReplaceResource?"Resource import":"Copy";
  if(mutation)single=true;
