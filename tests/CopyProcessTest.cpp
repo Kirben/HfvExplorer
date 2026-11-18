@@ -31,9 +31,10 @@ Location Native(std::shared_ptr<Volume> v, uint32_t id = 2) {
     return l;
 }
 std::shared_ptr<Volume> Image(const std::wstring &path,
-                              HfsPlus::Volume::FormatKind kind = HfsPlus::Volume::FormatKind::HfsPlus) {
+                              HfsPlus::Volume::FormatKind kind = HfsPlus::Volume::FormatKind::HfsPlus,
+                              bool journaled = true) {
     auto source = HfsPlus::CreateImage(path.c_str(), 16 * 1024 * 1024);
-    HfsPlus::Volume::Format(*source, u"Process fixture", true, kind);
+    HfsPlus::Volume::Format(*source, u"Process fixture", journaled, kind);
     source.reset();
     return OpenImage(path);
 }
@@ -288,6 +289,45 @@ int RunCopyProcessTest(const char *directory) {
         Check(again.Job()->result().error == ERROR_CANCELLED, "worker cancel conflict");
         Verify(*target, child.id);
         fprintf(report, "PASS: overwrite Replace/Skip/Cancel and existing destination retained\n");
+        {
+            const auto inputPath = Wide(root + "\\launch-source.dsk");
+            const auto outputPath = Wide(root + "\\launch-target.dsk");
+            {
+                auto input = Image(inputPath, HfsPlus::Volume::FormatKind::HfsPlus, false);
+                auto output = Image(outputPath, HfsPlus::Volume::FormatKind::HfsPlus, false);
+                const auto from = Put(*input, 2, u"Launch source", 4096);
+                const auto retained = Put(*output, 2, u"Existing file", 4096);
+                const Request copy = OrdinaryCopy{{Native(input, from)}, Native(output)};
+                CopyProcess::lastProcess = 0;
+                CopyProcess::fault = CopyProcess::failWorkerLaunch;
+                auto failed = Submit(copy);
+                Wait(failed);
+                CopyProcess::fault = 0;
+                const auto result = failed.Job()->result();
+                Check(result.code && result.message.find("Cannot start copy worker") != std::string::npos &&
+                          !failed.Snapshot().complete && !CopyProcess::lastProcess,
+                      "Launch failure did not reach CreateProcess after suspension");
+                Entry file;
+                Check(input->Writable() && output->Writable() &&
+                          input->FindChild(2, u"Launch source", file) && file.id == from &&
+                          output->FindChild(2, u"Existing file", file) && file.id == retained &&
+                          !output->FindChild(2, u"Launch source", file),
+                      "Browser mounts were not restored unchanged after failed launch");
+                Verify(*input, from, 4096);
+                Verify(*output, retained, 4096);
+                // Non-journaled images must retain write access when no worker launched.
+                Put(*output, 2, u"Browser write after failed launch", 4096);
+            }
+            auto reopenedInput = OpenImage(inputPath);
+            auto reopenedOutput = OpenImage(outputPath);
+            Entry file;
+            Check(reopenedInput->Writable() && reopenedOutput->Writable() &&
+                      reopenedInput->FindChild(2, u"Launch source", file) &&
+                      reopenedOutput->FindChild(2, u"Browser write after failed launch", file),
+                  "Browser could not reopen images after failed worker launch");
+            fprintf(report, "PASS: real launch failure after suspension restores browser mounts and "
+                            "non-journaled write access; both images reopen without leaked handles\n");
+        }
         CopyProcess::fault = 1;
         auto crash = Submit(request);
         Wait(crash);
@@ -587,13 +627,19 @@ int RunCopyProcessTest(const char *directory) {
               "worker read failure propagation");
         CopyProcess::fault = 0;
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "read failure retained source");
+        CopyProcess::lastExitCode = 0;
         CopyProcess::fault = 4;
         auto interrupted = Submit(delayed);
         Wait(interrupted);
-        Check(interrupted.Job()->result().code && !interrupted.Snapshot().complete,
-              "mid-write worker crash must fail");
+        Check(interrupted.Job()->result().code && !interrupted.Snapshot().complete &&
+                  CopyProcess::lastExitCode == 74,
+              "Expected the worker to exit inside its write hook");
         CopyProcess::fault = 0;
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "worker crash retained source");
+        Check(source->Writable() && target->Writable() &&
+                  !source->List(2).empty() && !target->List(2).empty(),
+              "Browser could not list the recovered journaled mounts");
+        Verify(*source, slow, 2 * 1024 * 1024);
         Pass(Submit(delayed));
         Check(target->FindChild(2, u"Slow", child), "retry after worker write crash");
         Verify(*target, child.id, 2 * 1024 * 1024);

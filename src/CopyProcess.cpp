@@ -17,14 +17,11 @@
 #ifdef HFV_TESTING
 #include "ProcessFloppy.h"
 #endif
-extern "C" {
-void HFSIFACE_get_dir_flush(void);
-}
 namespace CopyProcess {
 #ifdef HFV_TESTING
 std::wstring floppyFixture;
 DWORD floppyGeneration = 7;
-std::atomic<DWORD> lastProcess{0};
+std::atomic<DWORD> lastProcess{0}, lastExitCode{0};
 std::atomic<bool> enabled{false};
 std::atomic<unsigned> fault{0};
 std::atomic<HANDLE> ioGate{nullptr};
@@ -255,78 +252,6 @@ Request ResolveRequest(WireRequest wire, WorkerMounts &mounts) {
     }
     return ImportResourceFork{std::move(source), std::move(target)};
 }
-struct Handoff {
-    std::vector<std::shared_ptr<Volume>> volumes, suspended;
-    std::vector<ImageHandleTransfer::File> files;
-    std::vector<HANDLE> owned;
-    bool restored = false;
-    ~Handoff() {
-        if (!restored) {
-            try {
-                Restore();
-            } catch (...) {
-            }
-        }
-        for (auto h : owned)
-            CloseHandle(h);
-    }
-    void Prepare(const std::vector<std::string> &keys, const std::vector<std::string> &writes) {
-        volumes = WorkerVolumes(keys);
-        HFSIFACE_get_dir_flush();
-        for (auto &volume : volumes)
-            if (!volume->HostPath(2).empty())
-                volume->ReleaseWorkerReaders(writes);
-        for (auto &volume : volumes)
-            for (auto &file : volume->WorkerFiles()) {
-                auto existing =
-                    std::find_if(files.begin(), files.end(), [&](const ImageHandleTransfer::File &p) {
-                        return ImageHandleTransfer::Canonical(p.path) ==
-                               ImageHandleTransfer::Canonical(file.first);
-                    });
-                if (existing != files.end()) {
-                    if (volume->Writable())
-                        existing->writable = true;
-                    continue;
-                }
-                HANDLE copy = ImageHandleTransfer::Duplicate(HANDLE(file.second), true);
-                owned.push_back(copy);
-                files.push_back({file.first, copy, volume->Writable()});
-            }
-        // Capture every handle before closing any classic mounts shared by adapters.
-        for (auto &volume : volumes) {
-            if (!volume->WorkerFiles().empty() || volume->WorkerDescription().kind == WorkerOrigin::Classic) {
-                suspended.push_back(volume);
-                volume->SuspendWorker();
-            }
-        }
-        for (int drive = 0; drive < 26; ++drive)
-            if (std::find(keys.begin(), keys.end(), VolumeCoord::DeviceKey(drive)) != keys.end())
-                physical_floppy_suspend(drive);
-    }
-    void Failed() {
-        for (auto &volume : suspended)
-            volume->WorkerUncleanExit();
-    }
-    void Restore() {
-        if (restored)
-            return;
-        restored = true;
-        HFSIFACE_get_dir_flush();
-        ImageHandleTransfer::Scope transferred(files);
-        std::string failure;
-        for (auto &volume : suspended)
-            try {
-                volume->ResumeWorker();
-            } catch (const std::exception &error) {
-                if (!failure.empty())
-                    failure += "; ";
-                failure += error.what();
-            }
-        if (!failure.empty())
-            throw HfsPlus::Error("Copy worker finished, but browser storage could not be reopened: " +
-                                 failure);
-    }
-};
 struct Process {
     Handle input, output, process, thread, parent;
     DWORD pid = 0;
@@ -336,8 +261,13 @@ struct Process {
     ~Process() {
         input.reset();
         output.reset();
-        if (process.value)
+        if (process.value) {
             WaitForSingleObject(process.value, INFINITE);
+#ifdef HFV_TESTING
+            DWORD code = 0;
+            if (GetExitCodeProcess(process.value, &code)) lastExitCode = code;
+#endif
+        }
     }
     void Launch(const std::vector<ImageHandleTransfer::File> &files) {
         SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
@@ -388,6 +318,10 @@ struct Process {
         if (overrideSize) {
             Check(overrideSize < ARRAYSIZE(overridePath), "Invalid test worker executable path");
             wcscpy_s(executable, overridePath);
+        }
+        if (fault == failWorkerLaunch) {
+            // A Win32 path with a reserved character cannot name an executable.
+            wcscpy_s(executable, L"C:\\HFV-invalid-?.exe");
         }
 #endif
         auto command = L"\"" + std::wstring(executable) + L"\" --copy-worker " +
@@ -454,13 +388,13 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         execution.Legacy().source = Capture(request.Legacy().source).location;
         execution.Legacy().destination = Capture(request.Legacy().destination).location;
     }
-    Handoff handoff;
+    WorkerStorageHandoff handoff;
     Storage::Result result;
     bool launched = false;
     try {
         handoff.Prepare(keys, writes);
         Process worker;
-        worker.Launch(handoff.files);
+        worker.Launch(handoff.Files());
         launched = true;
 #ifdef HFV_TESTING
         lastProcess = worker.pid;
@@ -481,7 +415,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
             Send(worker.input.value, Fixture, std::move(d));
         }
 #endif
-        for (auto &file : handoff.files) {
+        for (auto &file : handoff.Files()) {
             Data d;
             d.wide(file.path);
             d.put(uintptr_t(file.handle));
@@ -536,7 +470,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     completion.complete = d.get() != 0;
                     completion.completed = unsigned(d.get());
                     if (!d.get())
-                        handoff.Failed();
+                        handoff.MarkUnclean();
                     finished = true;
                 } else
                     throw HfsPlus::Error("Unexpected copy-worker response");
@@ -555,22 +489,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         Check(GetExitCodeProcess(worker.process.value, &exit) && exit == 0,
               "Copy worker failed during cleanup; inspect the destination");
     } catch (...) {
-        auto failure = std::current_exception();
-        if (launched)
-            handoff.Failed();
-        try {
-            handoff.Restore();
-        } catch (const std::exception &restore) {
-            std::string original = "Copy worker failed";
-            try {
-                std::rethrow_exception(failure);
-            } catch (const std::exception &e) {
-                original = e.what();
-            } catch (...) {
-            }
-            throw HfsPlus::Error(original + "; " + restore.what());
-        }
-        std::rethrow_exception(failure);
+        handoff.RestoreAfterFailure(std::current_exception(), launched);
     }
     handoff.Restore();
     return result;
