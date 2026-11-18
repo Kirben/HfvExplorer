@@ -200,9 +200,11 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
  return CommandStorage::Guard(access,work,{to});
 }
 int CopyWithProgress(char* sourcevol,char* source,char* targetvol,char* target,int directory,int move,int* moved,CWnd* owner) {
- *moved=0;FileOperations::Request request;request.kind=FileOperations::Kind::LegacyCopy;
- request.legacySource=FileOperations::Location::FromLegacy(sourcevol,source);request.legacyTarget=FileOperations::Location::FromLegacy(targetvol,target);
- request.directory=directory!=0;request.move=move!=0;request.conversion=CaptureLegacyCopyOptions(HFSIFACE_copy_mode());
+ *moved = 0;
+ FileOperations::Request request = FileOperations::LegacyConversion{
+     FileOperations::Location::FromLegacy(sourcevol, source),
+     FileOperations::Location::FromLegacy(targetvol, target),
+     directory != 0, move != 0, false, CaptureLegacyCopyOptions(HFSIFACE_copy_mode())};
  auto operation=FileOperations::Submit(std::move(request));
  auto result=ShowSubmittedStorageJob(operation.Job(),macVolume(sourcevol)?"Copying from Macintosh":"Copying files",false,directory==0,true,owner);
  if(result.code&&result.error!=ERROR_CANCELLED){const char* text=result.message.empty()?"The copy failed.":result.message.c_str();if(owner)owner->MessageBox(text,"HFVExplorer",MB_OK|MB_ICONERROR);else AfxMessageBox(text,MB_OK|MB_ICONERROR);}

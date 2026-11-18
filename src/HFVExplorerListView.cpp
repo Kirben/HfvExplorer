@@ -600,7 +600,7 @@ BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=u
 void CHFVExplorerListView::update_finder_position( int inx, CPoint p )
 {
  if(BackgroundCopies::Enabled()){
-  if(get_inx_type(inx)!=LIST_HFS)return;FileOperations::Request request;request.kind=FileOperations::Kind::SetProperties;request.sources={GetBrowserSession().MacBrowser().CaptureItem(inx)};request.patch=FileOperations::MetadataPatch::Position;request.x=short(p.x-FINDER_MAGIC_OFFSET+m_mac_origo.x);request.y=short(p.y-FINDER_MAGIC_OFFSET+m_mac_origo.y);BackgroundCopies::Start({request},GetBrowserSession().Owner(),true);return;
+  if(get_inx_type(inx)!=LIST_HFS)return;FileOperations::Request request;request.SetKind(FileOperations::Kind::SetProperties);request.Sources()={GetBrowserSession().MacBrowser().CaptureItem(inx)};request.patch=FileOperations::MetadataPatch::Position;request.x=short(p.x-FINDER_MAGIC_OFFSET+m_mac_origo.x);request.y=short(p.y-FINDER_MAGIC_OFFSET+m_mac_origo.y);BackgroundCopies::Start({request},GetBrowserSession().Owner(),true);return;
  }
  if(BackgroundCopies::Active())return;
 	if(get_inx_type(inx) == LIST_HFS) {
@@ -1282,11 +1282,11 @@ int CHFVExplorerListView::do_rename(
 
  CString cs;if(!get_path(item,cs)||cs.GetLength()>=sizeof(old_path))return 0;
  strcpy(old_path,(LPCSTR)cs);
- FileOperations::Request request;request.kind=FileOperations::Kind::Rename;request.checkNameLock=check_lock!=0;
+ FileOperations::Request request;request.SetKind(FileOperations::Kind::Rename);request.checkNameLock=check_lock!=0;
  FileOperations::Location source;source.directory=get_lparam_isdir(ds)!=0;
  if(get_lparam_type(ds)==LIST_HFS){inx2volname(item,volpath,_MAX_PATH);source.SetClassic(volpath,old_path);source.expectedCatalogId=uint32_t(get_lparam_id(ds));}
  else source.SetWindows(VolumeCoord::Wide(old_path));
- request.sources={source};request.name=BrowserDirectory::FromAnsi(new_name);
+ request.Sources()={source};request.name=BrowserDirectory::FromAnsi(new_name);
  auto operation=FileOperations::Submit(std::move(request));auto outcome=ShowSubmittedStorageJob(operation.Job(),"Renaming",HiddenOperationProgress(GetBrowserSession().Owner()),true,true,GetBrowserSession().Owner());
  result=outcome.code==0;if(outcome.code&&outcome.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(outcome.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
  if(result){std::string changed=old_path;auto pos=changed.find_last_of(source.LegacyType()==LIST_HFS?':':'\\');if(pos!=std::string::npos)changed.resize(pos+1);changed+=new_name;
@@ -3116,17 +3116,17 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
 
  if(BackgroundCopies::Enabled()){
   auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);if(selection.items.empty())return;
-  FileOperations::Request request;request.kind=FileOperations::Kind::Delete;request.sources=std::move(selection.items);BackgroundCopies::Start({std::move(request)},GetBrowserSession().Owner(),true);return;
+  FileOperations::Request request;request.SetKind(FileOperations::Kind::Delete);request.Sources()=std::move(selection.items);BackgroundCopies::Start({std::move(request)},GetBrowserSession().Owner(),true);return;
  }
- FileOperations::Request request;request.kind=FileOperations::Kind::Delete;
+ FileOperations::Request request;request.SetKind(FileOperations::Kind::Delete);
  for(int row=-1;(row=m_cl->GetNextItem(row,LVNI_SELECTED))>=0;){
   auto binding=reinterpret_cast<list_lparam_struct*>(m_cl->GetItemData(row));if(!binding||binding->type==LIST_SPEC)continue;
   CString path;get_path(row,path);FileOperations::Location source;source.directory=binding->isdir!=0;
   if(binding->type==LIST_HFS){char image[MAX_PATH];inx2volname(row,image,MAX_PATH);source.SetClassic(image,(LPCSTR)path);source.expectedCatalogId=uint32_t(binding->id);}
   else source.SetWindows(VolumeCoord::Wide(std::string((LPCSTR)path)));
-  request.sources.push_back(std::move(source));
+  request.Sources().push_back(std::move(source));
  }
- if(request.sources.empty())return;auto selected=request.sources;auto operation=FileOperations::Submit(std::move(request));
+ if(request.Sources().empty())return;auto selected=request.Sources();auto operation=FileOperations::Submit(std::move(request));
  auto result=ShowSubmittedStorageJob(operation.Job(),"Deleting files",HiddenOperationProgress(GetBrowserSession().Owner()),false,true,GetBrowserSession().Owner());
  if(result.code&&result.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
  bool host=false;for(auto& source:selected){if(source.LegacyType()==LIST_HFS)update_floppy_view(const_cast<char*>(source.ClassicImage().c_str()));else host=true;}
@@ -3158,8 +3158,8 @@ void CHFVExplorerListView::toggle_label_colors( void )
 void CHFVExplorerListView::set_label_color( int finder_color )
 {
  if(BackgroundCopies::Enabled()){
-  FileOperations::Request request;request.kind=FileOperations::Kind::SetProperties;request.patch=FileOperations::MetadataPatch::Label;request.label=finder_color;auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);for(auto& item:selection.items)if(item.LegacyType()==LIST_HFS)request.sources.push_back(item);
-  std::vector<FileOperations::Request> requests;for(auto& item:request.sources){auto one=request;one.sources={item};requests.push_back(std::move(one));}if(!requests.empty())BackgroundCopies::Start(std::move(requests),GetBrowserSession().Owner(),true);return;
+  FileOperations::Request request;request.SetKind(FileOperations::Kind::SetProperties);request.patch=FileOperations::MetadataPatch::Label;request.label=finder_color;auto selection=GetBrowserSession().MacBrowser().SelectedItems(false);for(auto& item:selection.items)if(item.LegacyType()==LIST_HFS)request.Sources().push_back(item);
+  std::vector<FileOperations::Request> requests;for(auto& item:request.Sources()){auto one=request;one.Sources()={item};requests.push_back(std::move(one));}if(!requests.empty())BackgroundCopies::Start(std::move(requests),GetBrowserSession().Owner(),true);return;
  }
  if(BackgroundCopies::Active())return;
 	int inx, color;

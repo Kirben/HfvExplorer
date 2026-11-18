@@ -31,7 +31,7 @@ std::atomic<HANDLE> ioGate{nullptr};
 namespace {
 using namespace FileOperations;
 using namespace MacBrowser;
-constexpr uint64_t protocol = 2;
+constexpr uint64_t protocol = 3;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     Settings = 1,
@@ -464,21 +464,21 @@ Location DecodeEndpoint(Data &d, WorkerMounts &mounts, bool allowMounted = true)
     return l;
 }
 void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fault) {
-    d.put(uint64_t(r.kind));
+    d.put(uint64_t(r.OperationKind()));
     d.u16(r.name);
     d.put(r.fork);
-    if (r.kind == Kind::LegacyCopy) {
-        EncodeEndpoint(d, Endpoint{r.legacySource, {}, {}});
-        EncodeEndpoint(d, Endpoint{r.legacyTarget, {}, {}});
+    if (const auto* legacy = r.Conversion()) {
+        EncodeEndpoint(d, Endpoint{legacy->source, {}, {}});
+        EncodeEndpoint(d, Endpoint{legacy->destination, {}, {}});
+        d.put(legacy->directory);
+        d.put(legacy->move);
+        d.put(uint8_t(legacy->options.output));
+        d.put(uint8_t(legacy->options.input));
+        d.put(legacy->options.appledouble);
+        d.put(legacy->options.verifyFloppy);
+        d.put(legacy->options.targetGenerationKnown);
+        d.put(legacy->options.targetGeneration);
     }
-    d.put(r.directory);
-    d.put(r.move);
-    d.put(uint8_t(r.conversion.output));
-    d.put(uint8_t(r.conversion.input));
-    d.put(r.conversion.appledouble);
-    d.put(r.conversion.verifyFloppy);
-    d.put(r.conversion.targetGenerationKnown);
-    d.put(r.conversion.targetGeneration);
     d.put(uintptr_t(parent));
     d.put(fault);
 }
@@ -487,22 +487,27 @@ void DecodeSettings(Data &d, Request &r, HANDLE &parent, unsigned &fault) {
     Check(kind == uint64_t(Kind::Copy) || kind == uint64_t(Kind::LegacyCopy) ||
               kind == uint64_t(Kind::ExportFork) || kind == uint64_t(Kind::ReplaceResource),
           "Invalid worker operation");
-    r.kind = Kind(kind);
-    r.name = d.u16();
-    r.fork = unsigned(d.get());
-    if (r.kind == Kind::LegacyCopy) {
+    auto name = d.u16();
+    auto fork = unsigned(d.get());
+    if (kind == uint64_t(Kind::LegacyCopy)) {
         WorkerMounts unused;
-        r.legacySource = DecodeEndpoint(d, unused, false);
-        r.legacyTarget = DecodeEndpoint(d, unused, false);
+        LegacyConversion legacy;
+        legacy.source = DecodeEndpoint(d, unused, false);
+        legacy.destination = DecodeEndpoint(d, unused, false);
+        legacy.directory = d.get() != 0;
+        legacy.move = d.get() != 0;
+        legacy.options.output = char(d.get());
+        legacy.options.input = char(d.get());
+        legacy.options.appledouble = d.get() != 0;
+        legacy.options.verifyFloppy = d.get() != 0;
+        legacy.options.targetGenerationKnown = d.get() != 0;
+        legacy.options.targetGeneration = DWORD(d.get());
+        r = std::move(legacy);
+    } else {
+        r.SetKind(Kind(kind));
     }
-    r.directory = d.get() != 0;
-    r.move = d.get() != 0;
-    r.conversion.output = char(d.get());
-    r.conversion.input = char(d.get());
-    r.conversion.appledouble = d.get() != 0;
-    r.conversion.verifyFloppy = d.get() != 0;
-    r.conversion.targetGenerationKnown = d.get() != 0;
-    r.conversion.targetGeneration = DWORD(d.get());
+    r.name = std::move(name);
+    r.fork = fork;
     parent = HANDLE(uintptr_t(d.get()));
     fault = unsigned(d.get());
 }
@@ -679,19 +684,19 @@ bool UsesWorker(const Request &request) {
     if (!enabled)
         return false;
 #endif
-    return request.kind == Kind::Copy || request.kind == Kind::LegacyCopy ||
-           request.kind == Kind::ExportFork || request.kind == Kind::ReplaceResource;
+    return request.OperationKind() == Kind::Copy || request.OperationKind() == Kind::LegacyCopy ||
+           request.OperationKind() == Kind::ExportFork || request.OperationKind() == Kind::ReplaceResource;
 }
 Storage::Result Run(const Request &request, Storage::Job &job, Completion &completion,
                     const std::vector<std::string> &keys, const std::vector<std::string> &writes) {
     std::vector<Endpoint> sources;
-    for (auto &source : request.sources)
+    for (auto &source : request.Sources())
         sources.push_back(Capture(source));
-    auto target = Capture(request.target);
+    auto target = Capture(request.Target());
     auto execution = request;
-    if (request.kind == Kind::LegacyCopy) {
-        execution.legacySource = Capture(request.legacySource).location;
-        execution.legacyTarget = Capture(request.legacyTarget).location;
+    if (request.OperationKind() == Kind::LegacyCopy) {
+        execution.Legacy().source = Capture(request.Legacy().source).location;
+        execution.Legacy().destination = Capture(request.Legacy().destination).location;
     }
     Handoff handoff;
     Storage::Result result;
@@ -731,7 +736,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
             d.put(file.writable);
             Send(worker.input.value, File, std::move(d));
         }
-        if (request.kind == Kind::LegacyCopy) {
+        if (request.OperationKind() == Kind::LegacyCopy) {
             auto mappings = TypeMappings::Capture();
             for (unsigned direction = 0; direction < 2; ++direction)
                 for (auto &entry : direction ? mappings.windowsToHfs : mappings.hfsToWindows) {
@@ -995,17 +1000,17 @@ int Child(const char *inputText, const char *outputText) {
 #endif
             try {
                 for (auto &packet : sourcePackets) {
-                    request.sources.push_back(DecodeEndpoint(packet, mounts));
+                    request.Sources().push_back(DecodeEndpoint(packet, mounts));
                     packet.end();
                 }
-                request.target = DecodeEndpoint(target, mounts);
+                request.Target() = DecodeEndpoint(target, mounts);
                 target.end();
-                if (request.kind == Kind::ReplaceResource && !request.target.Volume() &&
-                    request.target.LegacyType() == LIST_FAT) {
-                    auto endpoint = ResolveWindowsFile(request.target.WindowsPath());
-                    request.target.SetMounted(endpoint.first, endpoint.second);
+                if (request.OperationKind() == Kind::ReplaceResource && !request.Target().Volume() &&
+                    request.Target().LegacyType() == LIST_FAT) {
+                    auto endpoint = ResolveWindowsFile(request.Target().WindowsPath());
+                    request.Target().SetMounted(endpoint.first, endpoint.second);
                     auto e = endpoint.first->Stat(endpoint.second);
-                    request.target.expectedParent = e.parent;
+                    request.Target().expectedParent = e.parent;
                 }
 #ifdef HFV_TESTING
                 bool injected = false;
@@ -1050,8 +1055,8 @@ int Child(const char *inputText, const char *outputText) {
 #ifdef HFV_TESTING
             HfsPlus::workerIoFault = {};
 #endif
-            request.sources.clear();
-            request.target = {};
+            request.Sources().clear();
+            request.Target() = {};
             mounts.volumes.clear();
         }
         if (!safe && !result.code)
