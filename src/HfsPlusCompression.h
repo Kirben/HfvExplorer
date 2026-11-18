@@ -2,23 +2,25 @@
 #pragma once
 #include "HfsPlus.h"
 namespace HfsPlus {
-// Plans zlib decmpfs output in 64 KiB units before any filesystem mutation.
+// Plans decmpfs output in 64 KiB units before any filesystem mutation.
 // Re-encoding validates per-unit checksums so a changing input cannot publish
 // a resource table that describes different data. Memory is bounded by the table.
-class ZlibCompression {
+class EncodedCompression {
 public:
     using Reader=std::function<void(uint64_t,void*,size_t)>;
-    ZlibCompression(uint64_t size,Reader);
+    EncodedCompression(uint64_t size,Reader,Volume::CompressionMode = Volume::CompressionMode::Zlib);
     const Bytes& Attribute()const{return attribute_;}
     bool UsesResource()const{return !units_.empty();}
     uint64_t ResourceSize()const{return resourceSize_;}
     void ReadResource(uint64_t,void*,size_t);
 private:
     struct Unit{uint32_t offset,length,checksum;};
+    Volume::CompressionMode method_;
     Reader reader_;Bytes attribute_,prefix_,footer_,cached_;std::vector<Unit> units_;
     uint64_t size_=0,resourceSize_=0,cachedIndex_=UINT64_MAX;
     Bytes Encode(uint64_t);
 };
+using ZlibCompression = EncodedCompression; // Existing callers default to zlib.
 // A bounded random-access decmpfs reader. One decoded 64 KiB unit is cached;
 // resource tables and payloads are fetched on demand, never as a whole file.
 class Compression {

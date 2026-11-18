@@ -32,6 +32,7 @@ struct Request {
  hfsdirent originalProperties{},properties{};
  int label=0;short x=0,y=0;
  bool compressed=false;
+ HfsPlus::Volume::CompressionMode compressionMethod=HfsPlus::Volume::CompressionMode::Zlib;
  bool checkNameLock=true;
  bool background=false;
  bool askMode=false;

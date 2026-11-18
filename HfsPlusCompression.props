@@ -11,8 +11,11 @@
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\inftrees.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\zlib\zutil.c"><PreprocessorDefinitions>Z_SOLO;Z_PREFIX;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_decode_base.c" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_encode.c" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_encode_base.c" />
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzvn_encode_base.c" />
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzfse_fse.c" />
 <ClCompile Include="$(MSBuildThisFileDirectory)src\compression\lzfse\lzvn_decode_base.c" />
-<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\libzbitmap\libzbitmap.c"><PreprocessorDefinitions>ZBM_DECODE_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+<ClCompile Include="$(MSBuildThisFileDirectory)src\compression\libzbitmap\libzbitmap.c"></ClCompile>
 </ItemGroup>
 </Project>
