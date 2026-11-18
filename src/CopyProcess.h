@@ -10,8 +10,9 @@ int Child(const char *, const char *);
 #ifdef HFV_TESTING
 std::vector<uint8_t> EncodeLocationForTest(const FileOperations::Location &);
 FileOperations::Location DecodeLocationForTest(const std::vector<uint8_t> &);
-extern std::atomic<DWORD> lastProcess;
+extern std::atomic<DWORD> lastProcess, lastExitCode;
 extern std::atomic<bool> enabled;
+inline constexpr unsigned failWorkerLaunch = 14;
 extern std::atomic<unsigned> fault;
 extern std::atomic<HANDLE> ioGate;
 extern std::wstring floppyFixture;
