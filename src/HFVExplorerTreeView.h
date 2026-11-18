@@ -34,12 +34,17 @@ typedef struct {
 	char path[MAX_PATH];
 } lparam_struct;
 
+#include "BrowserDirectory.h"
 class BrowserSession;
 class HFVExplorerTreeView : public CTreeView
 {
  BrowserSession* m_browserSession=nullptr;
+ std::map<HTREEITEM,BrowserDirectory::Folder> m_browserFolders;
+
 public:
  BrowserSession& GetBrowserSession()const;
+ void BindBrowserFolder(HTREEITEM item,BrowserDirectory::Folder folder);
+ const BrowserDirectory::Folder* BrowserFolderAt(HTREEITEM) const;
  BrowserSession* BrowserBinding()const{return m_browserSession;}
  void BindBrowserSession(BrowserSession* session){m_browserSession=session;}
 

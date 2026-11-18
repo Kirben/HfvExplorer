@@ -34,7 +34,11 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     LVITEMW item{};item.mask=LVIF_TEXT|LVIF_IMAGE|LVIF_PARAM;item.iItem=m_item_count;item.pszText=const_cast<wchar_t*>(name.c_str());item.iImage=image;item.lParam=data;
     if(!m_cl->GetItemCount()){item.mask|=LVIF_STATE;item.state=item.stateMask=LVIS_FOCUSED|LVIS_SELECTED;}
     int index=int(SendMessageW(m_cl->m_hWnd,LVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item)));
-    if(index<0)return index;m_browser_rows[data]=row;
+    if(index<0)return index;
+    auto& value=m_browser_rows[data];
+    value=row;
+    value.treeItem=tree;
+    if(value.location.IsNone())GetBrowserSession().MacBrowser().BindRow(value);
     std::wstring size=e.directory?(row.countKnown?std::to_wstring(row.directoryItems)+L" items":L"Folder"):
         std::to_wstring(BrowserDirectory::Bytes(e)/1024+(BrowserDirectory::Bytes(e)%1024!=0))+L" KB";
     if(!e.readError.empty())size=L"Unreadable";
@@ -57,16 +61,30 @@ const BrowserDirectory::Row* CHFVExplorerListView::BrowserRowAt(int row)const{
 }
 bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{
  if(!GetBrowserSession().ListingAvailable())return false;
- auto& list=GetListCtrl();bool selected=false;for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){auto p=BrowserRowAt(row);if(!p)continue;selected=true;if(p->storageType==LIST_FAT){if(!VolumeCoord::Available({{p->accessKey,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;}else{auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();if(!VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;}}
- if(selected)return true;auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();return key.empty()||VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Browse}});
+ auto& list=GetListCtrl();
+ bool selected=false;
+ for(int index=-1;(index=list.GetNextItem(index,LVNI_SELECTED))>=0;){
+  const auto row=BrowserRowAt(index);
+  if(!row||row->location.IsNone())continue;
+  selected=true;
+  const auto& location=row->location;
+  const auto key=location.IsMounted()?location.Volume()->ResourceKey():
+      location.IsWindows()?row->accessKey:location.expectedResource;
+  if(!VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}}))return false;
+ }
+ if(selected)return true;
+ const auto key=GetBrowserSession().MacBrowser().SelectedResourceKey();
+ return key.empty()||VolumeCoord::Available({{key,exclusive?VolumeCoord::Mode::Write:VolumeCoord::Mode::Browse}});
 }
 
 bool CHFVExplorerListView::BrowserSelectionAllows(bool rename)const{
  if(!GetBrowserSession().ListingAvailable())return false;
  bool selected=false;auto& list=GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){
-  auto binding=reinterpret_cast<list_lparam_struct*>(list.GetItemData(row));if(!binding||binding->type==LIST_SPEC)continue;
-  selected=true;auto model=BrowserRowAt(row);if(!model||!model->entry.readError.empty()||!(rename?model->capabilities.rename:model->capabilities.remove))return false;
+  const auto model=BrowserRowAt(row);
+  if(!model)continue;
+  selected=true;
+  if(model->location.IsNone()||!model->entry.readError.empty()||!(rename?model->capabilities.rename:model->capabilities.remove))return false;
  }
  return selected;
 }

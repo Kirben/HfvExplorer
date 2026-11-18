@@ -157,6 +157,7 @@ int HFVExplorerTreeView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl )
 
 void HFVExplorerTreeView::destroy_pointers()
 {
+    m_browserFolders.clear();
 	int i, count = m_pointer_array.GetSize();
 	DWORD_PTR dw;
 	lparam_struct *p;
@@ -597,7 +598,17 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 /////////////////////////////////////////////////////////////////////////////
 // HFVExplorerTreeView message handlers
 
+void HFVExplorerTreeView::BindBrowserFolder(HTREEITEM item,BrowserDirectory::Folder folder)
+{
+ if(item&&!folder.location.IsNone())m_browserFolders.insert_or_assign(item,std::move(folder));
+}
+const BrowserDirectory::Folder* HFVExplorerTreeView::BrowserFolderAt(HTREEITEM item) const
+{
+ auto folder=m_browserFolders.find(item);
+ return folder==m_browserFolders.end()?nullptr:&folder->second;
+}
 void HFVExplorerTreeView::OnDeleteItem(NMHDR* header,LRESULT* result){
+ m_browserFolders.erase(reinterpret_cast<NMTREEVIEW*>(header)->itemOld.hItem);
  auto item=reinterpret_cast<NMTREEVIEW*>(header);DWORD_PTR key=DWORD_PTR(item->itemOld.lParam);auto found=m_pointer_slots.find(key);
  if(found!=m_pointer_slots.end()){INT_PTR slot=found->second;m_pointer_array.SetAt(slot,0);m_free_slots.push_back(slot);m_pointer_slots.erase(found);delete reinterpret_cast<lparam_struct*>(key);}
  *result=0;

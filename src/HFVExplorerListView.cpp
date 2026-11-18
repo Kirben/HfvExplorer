@@ -199,9 +199,9 @@ int CHFVExplorerListView::get_lparam_creation( LPARAM lparam, DWORD *lo, DWORD *
 
 int CHFVExplorerListView:: get_inx_type(int inx)
 {
-	DWORD_PTR dat = m_cl->GetItemData( inx );
-	if(!dat) return(-1);
-	return(get_lparam_type(dat));
+    if(const auto row=BrowserRowAt(inx))return row->location.LegacyType();
+    const auto data=m_cl->GetItemData(inx);
+    return data&&get_lparam_type(data)==LIST_SPEC?LIST_SPEC:-1;
 }
 
 HTREEITEM CHFVExplorerListView::get_lparam_htree( LPARAM lparam )
@@ -227,6 +227,7 @@ int CHFVExplorerListView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl 
 
 void CHFVExplorerListView::destroy_pointers()
 {
+    m_editing_item=-1;
  m_browser_rows.clear();
 	int i, count = m_pointer_array->GetSize();
 	DWORD_PTR dw;
@@ -847,24 +848,14 @@ void pc_activate( char *path )
 	}
 }
 
-int CHFVExplorerListView::get_path( int inx, CString &doc_name )
+int CHFVExplorerListView::get_path(int index, CString& path)
 {
-	DWORD_PTR dat;
-
-	dat = m_cl->GetItemData( inx );
-	if(!dat || get_lparam_type(dat)==LIST_MAC) return(0);
-	doc_name = "";
-	if(get_lparam_type(dat) == LIST_FAT) {
-		char fullpath[MAX_PATH];
-		if(!get_lparam_path(dat,fullpath,MAX_PATH-1)) return(0);
-		doc_name += CString( fullpath );
-	} else { // LIST_HFS
-        auto row=BrowserRowAt(inx);if(row&&!row->path.empty()){doc_name=row->path.c_str();return 1;}
-		int dummy;
-		doc_name += ((CHFVExplorerDoc*)m_pDocument)->get_directory(0,&dummy) +
-							CString(":") + m_cl->GetItemText( inx, 0 );
-	}
-	return(1);
+    path.Empty();
+    const auto row=BrowserRowAt(index);
+    if(!row||(!row->location.IsWindows()&&!row->location.IsClassic()))return 0;
+    try{path=row->location.LegacyPath().c_str();}
+    catch(const std::exception&){return 0;}
+    return !path.IsEmpty();
 }
 
 int ask_dir( char *new_name )
@@ -1207,35 +1198,38 @@ int CHFVExplorerListView::do_rename(
 	int check_lock
 )
 {
-	DWORD_PTR ds = m_cl->GetItemData( item );
-	char volpath[_MAX_PATH];
-	char old_path[_MAX_PATH];
-	int result = 0;
+    if(!GetBrowserSession().ListingAvailable())return 0;
+    const auto row=BrowserRowAt(item);
+    if(!row||row->location.IsNone()||!old_name)return 0;
+    auto visibleName=row->entry.name;
+    if(row->entry.version)
+        visibleName+=MacBrowser::U16(L" [version "+std::to_wstring(row->entry.version)+L"]");
+    const auto inputName=BrowserDirectory::FromAnsi(old_name);
+    if(inputName!=row->entry.name&&inputName!=visibleName)return 0;
+    auto source=row->location;
+    bool macRename=source.IsClassic();
+    if(!HfvValidRenameLeaf(old_name,macRename)||!HfvValidRenameLeaf(new_name,macRename))return 0;
+    if(BackgroundCopies::Enabled()){
+        try{return GetBrowserSession().MacBrowser().RenameItem(item,BrowserDirectory::FromAnsi(new_name),check_lock!=0)?1:0;}
+        catch(const std::exception& error){if(!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return 0;}
+    }
+    const auto ds=LPARAM(m_cl->GetItemData(item));
+    const auto oldPath=source.LegacyPath();
 
-	if(!ds || get_lparam_type(ds) == LIST_SPEC) return(0);
-	bool macRename=get_lparam_type(ds)==LIST_HFS;
-	if(!HfvValidRenameLeaf(old_name,macRename)||!HfvValidRenameLeaf(new_name,macRename))return 0;
- if(BackgroundCopies::Enabled()){
-  if(m_cl->GetItemText(item,0)!=old_name)return 0;
-  try{return GetBrowserSession().MacBrowser().RenameItem(item,BrowserDirectory::FromAnsi(new_name))?1:0;}
-  catch(const std::exception& error){if(!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return 0;}
- }
-
-
- CString cs;if(!get_path(item,cs)||cs.GetLength()>=sizeof(old_path))return 0;
- strcpy(old_path,(LPCSTR)cs);
- FileOperations::Location source;source.directory=get_lparam_isdir(ds)!=0;
- if(get_lparam_type(ds)==LIST_HFS){inx2volname(item,volpath,_MAX_PATH);source.SetClassic(volpath,old_path);source.expectedCatalogId=uint32_t(get_lparam_id(ds));}
- else source.SetWindows(VolumeCoord::Wide(old_path));
  FileOperations::RenameEntry request{source, BrowserDirectory::FromAnsi(new_name), {}, check_lock != 0};
  auto operation=FileOperations::Submit(std::move(request));auto outcome=ShowSubmittedStorageJob(operation.Job(),"Renaming",HiddenOperationProgress(GetBrowserSession().Owner()),true,true,GetBrowserSession().Owner());
- result=outcome.code==0;if(outcome.code&&outcome.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(outcome.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
- if(result){std::string changed=old_path;auto pos=changed.find_last_of(source.LegacyType()==LIST_HFS?':':'\\');if(pos!=std::string::npos)changed.resize(pos+1);changed+=new_name;
-  auto found=m_browser_rows.find(LPARAM(ds));if(found!=m_browser_rows.end()){found->second.path=changed;found->second.entry.name=BrowserDirectory::FromAnsi(new_name);}
+ const bool result=outcome.code==0;if(outcome.code&&outcome.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(outcome.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
+ if(result){std::string changed=oldPath;auto pos=changed.find_last_of(source.LegacyType()==LIST_HFS?':':'\\');if(pos!=std::string::npos)changed.resize(pos+1);changed+=new_name;
+  auto found=m_browser_rows.find(LPARAM(ds));if(found!=m_browser_rows.end()){found->second.path=changed;found->second.entry.name=BrowserDirectory::FromAnsi(new_name);
+   auto& location=found->second.location;
+   if(source.IsClassic()){
+    location.SetClassic(source.ClassicImage(),changed);
+    if(source.MediaGenerationKnown())location.BindMediaGeneration(source.MediaGeneration());
+   }else location.SetWindows(VolumeCoord::Wide(changed));}
   auto binding=reinterpret_cast<list_lparam_struct*>(ds);if(changed.size()<sizeof(binding->path))strcpy(binding->path,changed.c_str());
  }
 
- if(source.LegacyType()==LIST_HFS)update_floppy_view(volpath);
+ if(source.LegacyType()==LIST_HFS)update_floppy_view(const_cast<char*>(source.ClassicImage().c_str()));
 
 	return(result);
 }
@@ -2634,20 +2628,14 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 {
  if(GetBrowserSession().MacBrowser().Activate(inx))return;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	DWORD_PTR dat; unsigned long id = 0;
 	CString name, type, creator, host_program;
-	int entry_type, isdir, volinx;
-	char path[MAX_PATH];
-	int emulator = 0;
-
-	if(control < 0) emulator = -control;
-
-	dat = m_cl->GetItemData( inx );
-	entry_type = get_lparam_type(dat);
-	id = get_lparam_id(dat);
-	isdir = get_lparam_isdir(dat);
-	volinx = get_lparam_volinx( dat );
-	name = m_cl->GetItemText( inx, 0 );
+    if(!GetBrowserSession().ListingAvailable())return;
+    const auto row=BrowserRowAt(inx);
+    const auto binding=row?0:m_cl->GetItemData(inx);
+    if(!row&&(!binding||get_lparam_type(binding)!=LIST_SPEC))return;
+    const int entry_type=row?row->location.LegacyType():LIST_SPEC;
+    const auto id=row?row->id:get_lparam_id(binding);
+    int emulator=control<0?-control:0;
 
 	if(entry_type == LIST_SPEC) {
 		if(make_shortcut) {
@@ -2660,12 +2648,12 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 		return;
 	}
 
-	if(isdir) {
+	if(row->entry.directory) {
 		if(make_shortcut) {
 			AfxMessageBox( "Cannot make shortcuts to folders." );
 			return;
 		}
-		HTREEITEM hItem = get_lparam_htree(dat);
+		HTREEITEM hItem = row->treeItem;
 		if(hItem) {
 			if(control) {
 				CString where;
@@ -2682,10 +2670,12 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 		return;
 	}
 
-	if(entry_type == LIST_UNKNOWN || entry_type == LIST_SPEC) return;
- if(entry_type==LIST_FAT){auto row=BrowserRowAt(inx);if(!row||!VolumeCoord::Readable(row->accessKey))return;}else if(!VolumeCoord::Readable(GetBrowserSession().MacBrowser().SelectedResourceKey()))return;
-
-	type = m_cl->GetItemText( inx, FIELD_TYPE );
+	if(!VolumeCoord::Readable(row->location.IsWindows()?row->accessKey:row->location.expectedResource))return;
+    name=MacBrowser::Wide(row->entry.name).c_str();
+    char finderType[5]{},finderCreator[5]{};
+    memcpy(finderType,row->entry.finder.data(),4);
+    memcpy(finderCreator,row->entry.finder.data()+4,4);
+    type=finderType;
 
 	if(make_shortcut && entry_type == LIST_FAT) {
 		if(emulator == ID_OWN_SHORTCUT_CREATE_VMAC || emulator == ID_OWN_SHORTCUT_CREATE_SS) {
@@ -2700,8 +2690,10 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 			AfxMessageBox( "Please make Windows shortcuts in Explorer." );
 			return;
 		}
-		if(get_lparam_path(dat,path,MAX_PATH-1)) {
-			pc_activate( path );
+		CString path;
+		if(get_path(inx,path)) {
+			pc_activate(path.GetBuffer());
+			path.ReleaseBuffer();
 		}
 		return;
 	}
@@ -2717,7 +2709,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 	}
 
 	host_program = "";
-	creator = m_cl->GetItemText( inx, FIELD_CREATOR );
+	creator = finderCreator;
 
 	if(emulator == ID_OWN_SHORTCUT_CREATE_VMAC || emulator == ID_OWN_SHORTCUT_CREATE_SS) {
 		if(type == "APPL") {
@@ -2736,7 +2728,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 		if(type != "APPL") {
 			LPSTR cr;
 			cr = creator.GetBuffer(MAX_PATH);
-			host_program = ((CHFVExplorerDoc*)m_pDocument)->hfs_find_match("APPL",cr,volinx);
+			host_program = ((CHFVExplorerDoc*)m_pDocument)->hfs_find_match("APPL",cr,row->volume);
 			creator.ReleaseBuffer();
 			if(host_program == "") {
 				if(type == "TEXT" || type == "ttro" || type == "ttxt" ) {
@@ -2802,24 +2794,14 @@ void CHFVExplorerListView::update_current_view()
 }
 #pragma optimize("",on)
 
-void CHFVExplorerListView::inx2volname( 
-	int inx, 
-	char *volpath, 
-	int size )
+void CHFVExplorerListView::inx2volname(int index,char* volume,int capacity)
 {
-	DWORD_PTR dat = m_cl->GetItemData( inx );
-	int volinx = get_lparam_volinx( dat );
-	CString cs;
-
-	if(get_lparam_type(dat) == LIST_HFS) {
-		cs = ((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_file_name;
-	} else {
-		// cs = ((CHFVExplorerDoc*)m_pDocument)->m_fats[volinx].m_volume_name;
-		get_path( inx, cs );
-	}
-	char *p = cs.GetBuffer( size );
-	strcpy( volpath, p );
-	cs.ReleaseBuffer();
+    if(!volume||capacity<=0)return;
+    *volume=0;
+    const auto row=BrowserRowAt(index);
+    if(!row)return;
+    const auto& value=row->location.IsClassic()?row->location.ClassicImage():row->path;
+    if(value.size()<size_t(capacity))memcpy(volume,value.c_str(),value.size()+1);
 }
 
 /*
@@ -4246,6 +4228,7 @@ void CHFVExplorerListView::OnButtonUp(CPoint point)
         UINT keys=(GetKeyState(VK_CONTROL)&0x8000?MK_CONTROL:0)|(GetKeyState(VK_SHIFT)&0x8000?MK_SHIFT:0);
         auto captured=std::move(m_browserDrag);
         if(captured&&captured->Drop(release,keys)){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
+        if(!GetBrowserSession().ListingAvailable()){m_TreeiItemDrop=0;m_iItemDrop=-1;pApp->EnableTimer(prevTimer);return;}
         HTREEITEM nativeTarget=m_TreeiItemDrop;
         if(m_iItemDrop>=0){auto p=(list_lparam_struct*)m_cl->GetItemData(m_iItemDrop);if(p&&p->isdir)nativeTarget=p->htree;}
         if(nativeTarget&&GetBrowserSession().MacBrowser().DropSelection(nativeTarget,action)){m_TreeiItemDrop=0;m_iItemDrop=-1;GetBrowserSession().Tree()->enable_selchange(1);pApp->EnableTimer(prevTimer);return;}
