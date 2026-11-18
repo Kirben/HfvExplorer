@@ -313,6 +313,7 @@ struct Volume::Impl {
     const Bytes *allocationExclusions = nullptr;
     std::map<uint32_t, Entry> entries;
     std::vector<Record> attributeRecords;
+    std::map<std::pair<uint32_t,std::u16string>,AttributeData> attributeSnapshots;
     bool attributesLoaded = false, attributesDirty = false, attributeIndexValid = false;
     std::map<std::pair<uint32_t,std::u16string>,std::map<uint32_t,size_t>> attributeIndex;
     std::map<uint32_t, std::unique_ptr<Compression>> compressedReaders;
@@ -458,7 +459,7 @@ struct Volume::Impl {
     }
     void LoadEntries() {
         compressedReaders.clear();
-        attributeRecords.clear();
+        attributeSnapshots.clear();attributeRecords.clear();
         attributeIndex.clear();attributeIndexValid=false;
         attributesLoaded = false;
         fileMetadata = directoryMetadata = 0;
@@ -603,17 +604,19 @@ struct Volume::Impl {
         }
         Check(parts.size()==used,"Unexpected HFS+ attribute extents");Validate(f);return result;
     }
-    Bytes Attribute(uint32_t id,const std::u16string& name) {
-        auto value=AttributeStorage(id,name);
-        if(value.inlineValue){auto& v=*value.inlineValue;return Bytes(v.begin()+16,v.begin()+16+U32(v.data()+12));}
-        auto& f=value.fork;Check(f.size<=64*1024*1024,"Extended attribute exceeds the 64 MiB read limit");
-        if(name==u"com.apple.decmpfs")Check(f.size<=131088,"Oversized com.apple.decmpfs attribute");
-        Bytes out(size_t(f.size));ForkRead(view,f,bs,0,out.data(),out.size());return out;
+    AttributeData Attribute(uint32_t id,const std::u16string& name) {
+        auto key=std::make_pair(id,name);auto cached=attributeSnapshots.find(key);if(cached!=attributeSnapshots.end())return cached->second;
+        auto value=AttributeStorage(id,name);AttributeData data;
+        if(value.inlineValue){auto& v=*value.inlineValue;data=Bytes(v.begin()+16,v.begin()+16+U32(v.data()+12));}
+        else{auto& f=value.fork;
+            if(name==u"com.apple.decmpfs"){Check(f.size<=131088,"Oversized com.apple.decmpfs attribute");Bytes bytes(size_t(f.size));ForkRead(view,f,bs,0,bytes.data(),bytes.size());data=std::move(bytes);}
+            else data=AttributeData::Snapshot(f.size,[&](uint64_t at,void* p,size_t n){ForkRead(view,f,bs,at,p,n);});
+        }
+        attributeSnapshots.emplace(std::move(key),data);return data;
     }
     Attributes GetAttributes(uint32_t id) {
-        LoadAttributes();IndexAttributes();Attributes out;uint64_t bytes=0;
-        for(auto i=attributeIndex.lower_bound({id,{}});i!=attributeIndex.end()&&i->first.first==id;++i){auto name=i->first.second;auto data=Attribute(id,name);
-            bytes+=data.size();Check(bytes<=128*1024*1024,"Extended attributes exceed the 128 MiB per-entry limit");out.emplace(std::move(name),std::move(data));}
+        LoadAttributes();IndexAttributes();Attributes out;
+        for(auto i=attributeIndex.lower_bound({id,{}});i!=attributeIndex.end()&&i->first.first==id;++i){auto name=i->first.second;out.emplace(name,Attribute(id,name));}
         return out;
     }
     void AttributeFlags(uint32_t id) {
@@ -621,7 +624,7 @@ struct Volume::Impl {
         auto record=CatalogRecord(id);auto flags=U16(record->value.data()+2);P16(record->value.data()+2,uint16_t((flags&~12u)|(any?4:0)|(security?8:0)));
     }
     void ReplaceAttributes(uint32_t id,const Attributes& desired,bool compressionWriter=false,bool linkWriter=false) {
-        auto ordinary=desired;if(linkWriter)ordinary.erase(u"com.apple.system.hfs.firstlink");if(compressionWriter){auto i=ordinary.find(u"com.apple.decmpfs");if(i!=ordinary.end()){Check(i->second.size()<=131088,"Oversized decmpfs attribute");ordinary.erase(i);}}ValidateAttributes(ordinary);uint64_t attributeBytes=0;for(const auto& a:desired){attributeBytes+=a.second.size();Check(attributeBytes<=128*1024*1024,"Extended attributes including compression exceed the per-entry limit");}LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
+        auto ordinary=desired;if(linkWriter)ordinary.erase(u"com.apple.system.hfs.firstlink");if(compressionWriter){auto i=ordinary.find(u"com.apple.decmpfs");if(i!=ordinary.end()){Check(i->second.size()<=131088,"Oversized decmpfs attribute");ordinary.erase(i);}}ValidateAttributes(ordinary);LoadAttributes();auto old=GetAttributes(id);if(old==desired)return;attributesDirty=true;
         std::vector<Fork> freed;
         for(const auto& value:old){auto now=desired.find(value.first);if(now!=desired.end()&&now->second==value.second)continue;
             auto storage=AttributeStorage(id,value.first);if(!storage.inlineValue)freed.push_back(storage.fork);}
@@ -632,13 +635,13 @@ struct Volume::Impl {
             Record record;record.key=AttributeKey(id,value.first);
             if(value.second.size()<=1024){record.value.assign(16+value.second.size()+(value.second.size()&1),0);P32(record.value.data(),0x10);P32(record.value.data()+12,uint32_t(value.second.size()));std::copy(value.second.begin(),value.second.end(),record.value.begin()+16);added.push_back(std::move(record));}
             else{auto f=Allocate(value.second.size(),false,true);uint64_t logical=0;Bytes buffer(65536,0);
-                for(auto e:f.extents){uint64_t at=uint64_t(e.start)*bs,remaining=uint64_t(e.count)*bs;while(remaining){size_t n=size_t((std::min)(remaining,uint64_t(buffer.size()))),actual=size_t((std::min)(uint64_t(n),f.size-logical));std::fill(buffer.begin(),buffer.begin()+n,0);std::copy_n(value.second.data()+logical,actual,buffer.data());view.Write(at,buffer.data(),n);logical+=actual;at+=n;remaining-=n;}}
+                for(auto e:f.extents){uint64_t at=uint64_t(e.start)*bs,remaining=uint64_t(e.count)*bs;while(remaining){size_t n=size_t((std::min)(remaining,uint64_t(buffer.size()))),actual=size_t((std::min)(uint64_t(n),f.size-logical));std::fill(buffer.begin(),buffer.begin()+n,0);value.second.Read(logical,buffer.data(),actual);view.Write(at,buffer.data(),n);logical+=actual;at+=n;remaining-=n;}}
                 record.value.assign(88,0);P32(record.value.data(),0x20);EncodeFork(record.value.data()+8,f,bs);added.push_back(std::move(record));
                 uint32_t block=0;for(size_t i=0;i<f.extents.size();){if(i<8){block+=f.extents[i++].count;continue;}Record continuation;continuation.key=AttributeKey(id,value.first,block);continuation.value.assign(72,0);P32(continuation.value.data(),0x30);for(unsigned n=0;n<8&&i<f.extents.size();++n,++i){P32(continuation.value.data()+8+n*8,f.extents[i].start);P32(continuation.value.data()+12+n*8,f.extents[i].count);block+=f.extents[i].count;}added.push_back(std::move(continuation));}
             }
         }
         attributeRecords.erase(std::remove_if(attributeRecords.begin(),attributeRecords.end(),[&](const Record& r){if(U32(r.key.data()+4)!=id)return false;auto name=AttributeName(r);auto was=old.find(name);auto now=desired.find(name);return now==desired.end()||was==old.end()||was->second!=now->second;}),attributeRecords.end());
-        attributeRecords.insert(attributeRecords.end(),added.begin(),added.end());attributeIndexValid=false;for(auto& f:freed)Free(f);AttributeFlags(id);
+        attributeRecords.insert(attributeRecords.end(),added.begin(),added.end());attributeIndexValid=false;for(auto& f:freed)Free(f);AttributeFlags(id);for(auto i=attributeSnapshots.lower_bound({id,{}});i!=attributeSnapshots.end()&&i->first.first==id;)i=attributeSnapshots.erase(i);
     }
     bool IsCompressed(uint32_t id) { return Get(id).compressed; }
     Compression &Compressed(uint32_t id) {
@@ -647,7 +650,7 @@ struct Volume::Impl {
             auto attribute = Attribute(id, u"com.apple.decmpfs");
             Fork resource = Get(id).forks[1];
             auto reader = std::unique_ptr<Compression>(new Compression(
-                std::move(attribute), resource.size, [this, resource](uint64_t offset, void *p, size_t n) {
+                Bytes(attribute), resource.size, [this, resource](uint64_t offset, void *p, size_t n) {
                     ForkRead(view, resource, bs, offset, p, n);
                 }));
             // Keep one active file's decoded unit, not 64 KiB for every file
@@ -717,7 +720,7 @@ struct Volume::Impl {
         Check(!e.directory||chained,"Directory hard-link inode has no link chain");
         if(chained){
             Check(U32(raw->value.data()+44)==links.size(),"Hard-link count does not match catalog links");uint32_t head=0;
-            if(e.directory){auto a=GetAttributes(inode);auto i=a.find(u"com.apple.system.hfs.firstlink");Check(i!=a.end()&&!i->second.empty()&&i->second.back()==0,"Missing directory first-link attribute");uint64_t n=0;for(size_t j=0;j+1<i->second.size();++j){auto c=i->second[j];Check(c>='0'&&c<='9',"Invalid directory first-link attribute");n=n*10+c-'0';Check(n<=UINT32_MAX,"Directory first-link ID overflow");}head=uint32_t(n);}
+            if(e.directory){auto a=GetAttributes(inode);auto i=a.find(u"com.apple.system.hfs.firstlink");Check(i!=a.end()&&!i->second.empty()&&i->second.size()<=11&&i->second.back()==0,"Missing directory first-link attribute");uint64_t n=0;for(size_t j=0;j+1<i->second.size();++j){auto c=i->second[j];Check(c>='0'&&c<='9',"Invalid directory first-link attribute");n=n*10+c-'0';Check(n<=UINT32_MAX,"Directory first-link ID overflow");}head=uint32_t(n);}
             else head=U32(raw->value.data()+4);
             std::set<uint32_t> expected(links.begin(),links.end()),seen;uint32_t previous=0;
             for(uint32_t id=head;id;){Check(expected.count(id)&&seen.insert(id).second,"Broken/cyclic hard-link chain");auto r=CatalogRecord(id);Check((U16(r->value.data()+2)&0x20)&&U32(r->value.data()+32)==previous,"Broken hard-link back pointer");previous=id;id=U32(r->value.data()+36);}
@@ -1286,7 +1289,7 @@ struct Volume::Impl {
         committedAttributes = fresh.committedAttributes;
         committedAttributesFork = fresh.committedAttributesFork;
         LoadEntries();
-        attributeRecords=std::move(desiredAttributes);attributesLoaded=true;attributeIndexValid=false;
+        attributeSnapshots.clear();attributeRecords=std::move(desiredAttributes);attributesLoaded=true;attributeIndexValid=false;
         AuditAllocation();
     }
     void Commit(const std::function<void(const char *)> &fault, Journal *mirror = nullptr,
@@ -1516,7 +1519,7 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     auto method=compression;
     if(method==CompressionMode::Preserve&&e.compressed){
         auto oldAttribute=p.GetAttributes(existing).at(u"com.apple.decmpfs");
-        Compression validate(oldAttribute,old[1].size,{}); // Validate before inspecting possibly corrupt metadata.
+        Compression validate(Bytes(oldAttribute),old[1].size,{}); // Validate before inspecting possibly corrupt metadata.
         auto a=oldAttribute.data()+4;uint32_t type=uint32_t(a[0])|uint32_t(a[1])<<8|uint32_t(a[2])<<16|uint32_t(a[3])<<24;
         method=type==3||type==4?CompressionMode::Zlib:type==7||type==8?CompressionMode::Lzvn:type==11||type==12?CompressionMode::Lzfse:type==13||type==14?CompressionMode::Lzbitmap:type==1&&dataSize<=3786?CompressionMode::StoredInline:CompressionMode::Stored;
     }
@@ -1608,13 +1611,12 @@ void Volume::SetAttributes(uint32_t id,const Attributes& attributes) {
     try{auto desired=attributes;if(p.Get(id).compressed)desired[u"com.apple.decmpfs"]=p.Attribute(id,u"com.apple.decmpfs");auto old=p.GetAttributes(id);if(old.count(u"com.apple.system.hfs.firstlink"))desired[u"com.apple.system.hfs.firstlink"]=old.at(u"com.apple.system.hfs.firstlink");p.ReplaceAttributes(id,desired,true,true);p.Commit(fault);}catch(...){p.usable=false;throw;}
 }
 void ValidateAttributes(const Attributes& attributes) {
-    uint64_t total=0;
     for(const auto& item:attributes){const auto& name=item.first;Check(!name.empty()&&name.size()<=127,"HFS+ attribute names must have 1-127 UTF-16 units");
         for(size_t i=0;i<name.size();++i){auto c=name[i];Check(c!=0,"NUL in extended attribute name");if(c>=0xd800&&c<=0xdbff){Check(++i<name.size()&&name[i]>=0xdc00&&name[i]<=0xdfff,"Invalid attribute Unicode");}else Check(c<0xdc00||c>0xdfff,"Invalid attribute Unicode");}
         Check(name!=u"com.apple.FinderInfo"&&name!=u"com.apple.ResourceFork","Finder information and resource forks use their dedicated fields");
         Check(name!=u"com.apple.decmpfs"&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink"&&name!=u"system.xattrextents","Compression/encryption/link attributes cannot be written by the ordinary attribute editor");
-        Check(item.second.size()<=64*1024*1024,"Extended attribute exceeds the 64 MiB limit");total+=item.second.size();Check(total<=128*1024*1024,"Extended attributes exceed the 128 MiB per-entry limit");
-        if(name==u"com.apple.system.Security"){const auto& b=item.second;Check(b.size()>=44&&U32(b.data())==0x012cc16d,"Invalid Mac ACL header (expected disk byte order)");auto count=U32(b.data()+36);Check(count==0xffffffff||count<=128,"Mac ACL has too many entries");Check(b.size()==44ULL+(count==0xffffffff?0:24ULL*count),"Mac ACL entry count/length mismatch");}
+
+        if(name==u"com.apple.system.Security"){const auto& b=item.second;Check(b.size()>=44&&b.size()<=44+24*128&&U32(b.data())==0x012cc16d,"Invalid Mac ACL header (expected disk byte order)");auto count=U32(b.data()+36);Check(count==0xffffffff||count<=128,"Mac ACL has too many entries");Check(b.size()==44ULL+(count==0xffffffff?0:24ULL*count),"Mac ACL entry count/length mismatch");}
     }
 }
 void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {

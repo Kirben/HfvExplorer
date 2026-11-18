@@ -8,6 +8,7 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
+#include "HfsPlusAttributeData.h"
 namespace HfsPlus {
 using Bytes = std::vector<uint8_t>;
 struct ExternalJournalRequired : std::runtime_error {using std::runtime_error::runtime_error;};
@@ -38,7 +39,7 @@ struct Fork {
     uint32_t blocks = 0;
     std::vector<Extent> extents;
 };
-using Attributes = std::map<std::u16string, Bytes>;
+using Attributes = std::map<std::u16string, AttributeData>;
 // On-disk Mac ACLs retain owner/group UUIDs, ACE order, rights and inheritance flags.
 // These are filesystem metadata, not Windows access-control enforcement.
 void ValidateAttributes(const Attributes &);

@@ -22,6 +22,7 @@ foreach($test in @('physical-removable','hard-links','folder-metadata','other-hf
  Run-Hidden $app @(('--verify-'+$test),(Join-Path $OutputDirectory $test))
 }
 Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--self-test')
+Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--large-attributes')
 Run-Hidden (Join-Path $here 'hfsplus-tests.exe') @('--other-features',(Join-Path $OutputDirectory 'other-hfsplus-features'))
 Run-Hidden (Join-Path $here 'mfs-readonly.exe') @((Join-Path $OutputDirectory 'mfs-core'))
 Run-Hidden (Join-Path $here 'image-roundtrip.exe') @((Join-Path $OutputDirectory 'classic-optical.dsk'),'--keep')
