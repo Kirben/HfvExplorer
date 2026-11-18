@@ -519,19 +519,20 @@ Current filesystem support
   its attribute directory within 64 KiB. Existing larger attributes cannot be edited
   through this implementation. Raw fork exports intentionally contain only that fork.
 - HFS+/HFSX compressed files can be overwritten, renamed, deleted and have their
-  ordinary attributes/ACLs edited. Overwrites re-encode logical contents as zlib
-  decmpfs, regardless of the original supported compression method. Properties
-  offers background Compress/Decompress actions on writable ordinary files.
-  New compression uses type 3 inline data (3802-byte attribute limit) or type 4
-  resource storage with independently encoded 64 KiB units. Incompressible units
-  use the stored-data marker; compression is not guaranteed to save space.
-  Finder information, dates and ordinary attributes/ACLs survive conversion.
+  ordinary attributes/ACLs edited. Overwrites preserve the original supported
+  codec family. Properties offers zlib (3/4), LZVN (7/8), LZFSE (11/12), LZBITMAP
+  (13/14), stored (9/10), legacy inline stored (1), and decompression. Select a
+  method and use Compress; an already compressed file can be converted directly.
+  Output chooses inline storage within Apple's 3802-byte attribute limit, then
+  resource-fork storage with 64 KiB units. Legacy type 1 accepts up to 3786 data
+  bytes; use Stored for larger files. Stored methods do not reduce size.
+  Incompressible units use method-specific stored markers; compression is not
+  guaranteed to save space. Conversion runs as a cancellable background job.
   A genuine resource fork is preserved: explicit compression is refused if it
   needs that fork, while an ordinary overwrite/import uses uncompressed storage
   when necessary to retain both forks. Conversion uses copy-on-write allocation
   and the existing journal commit/replay path. It requires temporary free space;
-  type-4 compressed resource offsets remain limited to 32 bits. No other new
-  compression encoders are included. Encryption remains
+  compressed resource offsets remain limited to 32 bits for every codec. Encryption remains
   unsupported; private compression/encryption/link attributes cannot be created
   through the ordinary attribute editor.
 - Catalog and extents B-trees are updated incrementally, including node splits,

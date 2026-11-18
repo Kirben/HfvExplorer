@@ -629,6 +629,50 @@ void EditNativeCodecs(){
   {Volume v(disk);Check(v.Stat(file).compressed,"Edited native codec not compressed");VerifyContent(v,file,Plain(90000));}
  }
 }
+uint32_t Method(const Bytes& a){return uint32_t(a[4])|uint32_t(a[5])<<8|uint32_t(a[6])<<16|uint32_t(a[7])<<24;}
+void AllWriterMethods(){
+ using Mode=Volume::CompressionMode;
+ for(auto method:{Mode::Zlib,Mode::Lzvn,Mode::Lzfse,Mode::Lzbitmap,Mode::Stored,Mode::StoredInline}){
+  uint32_t inlineType=method==Mode::Zlib?3:method==Mode::Lzvn?7:method==Mode::Lzfse?11:method==Mode::Lzbitmap?13:method==Mode::Stored?9:1;
+  for(unsigned n:{0u,1u,1024u,3785u,3786u,3787u,65536u,65537u,160001u}){
+   if(method==Mode::StoredInline&&n>3786)continue;
+   auto data=Plain(n);EncodedCompression encoded(n,[&](uint64_t at,void* p,size_t bytes){memcpy(p,data.data()+at,bytes);},method);
+   auto type=Method(encoded.Attribute());Check(type==inlineType+(encoded.UsesResource()?1:0),"Wrong requested output compression type");
+   Check(encoded.UsesResource()||encoded.Attribute().size()<=3802,"Oversized emitted inline value");Bytes resource(size_t(encoded.ResourceSize()));if(!resource.empty())encoded.ReadResource(0,resource.data(),resource.size());
+   if(encoded.UsesResource()&&type!=4){auto count=(uint64_t(n)+65535)/65536;Check(resource[0]+uint32_t(resource[1])*256+uint32_t(resource[2])*65536+uint32_t(resource[3])*16777216==(count+1)*4,"Wrong non-zlib offset table");Check(resource.size()>=(count+1)*4,"Short resource offset table");}
+   Compression decoded(encoded.Attribute(),resource.size(),[&](uint64_t at,void* p,size_t bytes){memcpy(p,resource.data()+at,bytes);});Bytes got(n);Check(decoded.Read(0,got.data(),got.size())==got.size()&&got==data,"All-method encoder round trip");
+   if(n==160001&&method!=Mode::Stored)Check(resource.size()<n/2,"Codec emitted only stored units for compressible data");
+   if(n>65536){Bytes cross((std::min)(size_t(57),data.size()-65520));Check(decoded.Read(65520,cross.data(),cross.size())==cross.size()&&!memcmp(cross.data(),data.data()+65520,cross.size()),"New codec random cross-block read");}
+  }
+  if(method==Mode::StoredInline){Reject([&]{EncodedCompression invalid(3787,[](uint64_t,void*,size_t){},method);},"Oversized legacy stored encoding accepted");}
+  else{
+   Bytes random(140001);std::mt19937 rng(91823);for(auto& b:random)b=uint8_t(rng());bool changing=false;
+   EncodedCompression plan(random.size(),[&](uint64_t at,void* p,size_t n){memcpy(p,random.data()+at,n);if(changing)static_cast<uint8_t*>(p)[0]^=1;},method);Bytes resource(size_t(plan.ResourceSize()));plan.ReadResource(0,resource.data(),resource.size());Compression decoded(plan.Attribute(),resource.size(),[&](uint64_t at,void* p,size_t n){memcpy(p,resource.data()+at,n);});Bytes got(random.size());Check(decoded.Read(0,got.data(),got.size())==got.size()&&got==random,"New codec incompressible fallback");
+   EncodedCompression changed(random.size(),[&](uint64_t at,void* p,size_t n){memcpy(p,random.data()+at,n);if(changing)static_cast<uint8_t*>(p)[0]^=1;},method);changing=true;Reject([&]{changed.ReadResource(0,resource.data(),resource.size());},"New codec changing input accepted");
+  }
+  for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive})for(bool journaled:{false,true}){
+   Image disk;Volume::Format(disk,u"All writers",journaled,kind);auto data=Plain(method==Mode::StoredInline?1024:140001);uint32_t id,alias;std::array<uint8_t,32> finder{};finder[0]='T';std::array<uint64_t,2> dates{3000000000,3000000123};
+   {Volume v(disk,true);id=v.Put(2,u"File",data.size(),0,[&](unsigned,uint64_t at,void* p,size_t n){memcpy(p,data.data()+at,n);},&finder,false,nullptr,nullptr,Mode::Uncompressed,&dates);v.SetAttributes(id,{{u"user.keep",{7,8,9}}});alias=v.MakeHardLink(id,2,u"Alias");for(auto entry:v.List())if(entry.name==u"File")id=entry.id;v.SetCompression(alias,method);VerifyContent(v,id,data);Check(Method(v.GetAttributes(id).at(u"com.apple.decmpfs"))==inlineType+(data.size()>65536?1:0),"Filesystem codec selection lost");Check(v.Stat(id).finder==finder&&v.Stat(id).created==dates[0]&&v.GetAttributes(id).at(u"user.keep")==Bytes({7,8,9}),"New codec lost metadata");}
+   {Volume v(disk,true);VerifyContent(v,alias,data);auto edited=Plain(data.size()+31);v.Put(2,u"File",edited.size(),0,[&](unsigned,uint64_t at,void* p,size_t n){memcpy(p,edited.data()+at,n);},nullptr,true);VerifyContent(v,alias,edited);Check(Method(v.GetAttributes(id).at(u"com.apple.decmpfs"))==inlineType+(edited.size()>65536?1:0),"Overwrite changed compression codec");v.SetCompression(id,Mode::Zlib);VerifyContent(v,alias,edited);v.SetCompression(alias,method);VerifyContent(v,id,edited);v.SetCompression(id,Mode::Uncompressed);VerifyContent(v,alias,edited);Check(!v.Stat(alias).compressed,"New codec decompression left flag");}
+   {Image resourceDisk=disk;Volume v(resourceDisk,true);auto small=Plain(512);Bytes resource{3,7,9};auto r=v.Put(2,u"Both forks",small.size(),resource.size(),[&](unsigned f,uint64_t at,void* p,size_t n){memcpy(p,(f?resource:small).data()+at,n);});v.SetCompression(r,method);VerifyContent(v,r,small,resource);v.SetCompression(r,Mode::Uncompressed);VerifyContent(v,r,small,resource);
+    if(method!=Mode::StoredInline){auto large=Plain(140001);v.Put(2,u"Both forks",large.size(),resource.size(),[&](unsigned f,uint64_t at,void* p,size_t n){memcpy(p,(f?resource:large).data()+at,n);},nullptr,true);auto writes=resourceDisk.writes;Reject([&]{v.SetCompression(r,method);},"New codec consumed genuine resource fork");Check(resourceDisk.writes==writes,"Resource conflict changed image");VerifyContent(v,r,large,resource);}
+   }
+   // A failed payload write must not replace the old uncompressed forks.
+   struct FaultImage:Image{bool fail=false;void Write(uint64_t at,const void* p,size_t n)override{if(fail){fail=false;Image::Write(at,p,n/2);throw Error("Partial all-codec write");}Image::Write(at,p,n);}};
+   FaultImage partial;static_cast<Image&>(partial)=disk;partial.fail=true;{Volume v(partial,true);Reject([&]{v.SetCompression(id,method);},"Partial all-codec conversion accepted");}{Volume v(partial);VerifyContent(v,alias,Plain(data.size()+31));Check(!v.Stat(id).compressed,"Partial new codec replaced old metadata");}
+   if(journaled)for(const char* phase:{"data-flushed","journal-committed"}){Image failed=disk;{Volume v(failed,true);v.fault=[&](const char* at){if(!strcmp(at,phase))throw Error("All-codec interruption");};Reject([&]{v.SetCompression(id,method);},"All-codec interruption missed");}unsigned writes=failed.writes;Volume recovered(failed);VerifyContent(recovered,alias,Plain(data.size()+31));Check(failed.writes==writes,"All-codec read-only recovery wrote image");}
+  }
+ }
+ puts("PASS: all 11 decmpfs output types, real codec compression, incompressible fallback, boundary/random reads, source changes, method-preserving overwrites, conversion, shared inodes and journal recovery in HFS+ and both HFSX modes");
+}
+void RejectInvalidPreservedCodec(){
+ {Image disk;Volume::Format(disk,u"Directory guard",true);Volume v(disk,true);auto folder=v.MakeDirectory(2,u"Folder");auto writes=disk.writes;Reject([&]{v.SetCompression(folder,false);},"No-op directory compression accepted");Check(disk.writes==writes,"Directory compression refusal wrote image");}
+
+ for(auto attribute:{Bytes{1,2,3},Header(99,1024,Bytes{1})}){
+  Image disk;Volume::Format(disk,u"Bad preserved codec",true);uint32_t id,carrier;{Volume v(disk,true);id=Put(v,2,u"Bad",{});carrier=Put(v,2,u"Carrier",Bytes(65536));}disk.Value(id)[41]|=0x20;Attributes(disk,carrier,{{AttrKey(id),Inline(attribute)}});
+  Volume v(disk,true);auto writes=disk.writes;bool read=false;Reject([&]{v.Put(2,u"Bad",1000,0,[&](unsigned,uint64_t,void*,size_t){read=true;},nullptr,true);},"Invalid preserved codec accepted");Check(disk.writes==writes&&!read,"Corrupt preserved codec changed data before refusal");
+ }
+}
 void WriterCodecTests(){
  // Check emitted framing independently of the filesystem reader.
  Bytes plain=Plain(160000);ZlibCompression plan(plain.size(),[&](uint64_t at,void* p,size_t n){memcpy(p,plain.data()+at,n);});Check(plan.UsesResource(),"Expected type-4 encoding");Bytes encoded(size_t(plan.ResourceSize()));plan.ReadResource(0,encoded.data(),encoded.size());auto map=U32(encoded.data()+4);Check(U32(encoded.data())==256&&U32(encoded.data()+8)==map-256&&U32(encoded.data()+12)==50&&map+50==encoded.size()&&!memcmp(encoded.data()+map+30,"cmpf",4)&&U16(encoded.data()+map+38)==1,"Invalid emitted resource map");
@@ -637,6 +681,8 @@ void WriterCodecTests(){
 }
 } // namespace
 void RunHfsPlusCompressionTests() {
+    RejectInvalidPreservedCodec();
+    AllWriterMethods();
     WriterCodecTests();
     EditNativeCodecs();
     for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive})for(bool journaled:{false,true})WritableFilesystem(kind,journaled);
@@ -661,5 +707,13 @@ void CreateHfsPlusFeatureFixture(const wchar_t *path) {
 }
 
 void CreateHfsPlusCompressionEncodingFixture(const wchar_t* prefix){
+ using Mode=Volume::CompressionMode;
+ for(auto method:{Mode::Zlib,Mode::Lzvn,Mode::Lzfse,Mode::Lzbitmap,Mode::Stored,Mode::StoredInline})for(unsigned sample=0;sample<3;++sample){
+  auto plain=Plain(method==Mode::StoredInline?1024:sample?180001:1024);if(sample==2){std::mt19937 rng(56123);for(auto& b:plain)b=uint8_t(rng());}
+  EncodedCompression encoder(plain.size(),[&](uint64_t at,void* p,size_t n){memcpy(p,plain.data()+at,n);},method);
+  auto base=std::wstring(prefix)+L"-codec"+std::to_wstring(unsigned(method))+L"-"+std::to_wstring(sample);
+  auto save=[&](const wchar_t* suffix,const Bytes& bytes){auto path=base+suffix;FILE* out=_wfopen(path.c_str(),L"wb");Check(out!=nullptr,"Create all-codec fixture");bool ok=fwrite(bytes.data(),1,bytes.size(),out)==bytes.size();fclose(out);Check(ok,"Write all-codec fixture");};save(L".raw",plain);save(L".attr",encoder.Attribute());Bytes resource(size_t(encoder.ResourceSize()));if(!resource.empty())encoder.ReadResource(0,resource.data(),resource.size());save(L".rsrc",resource);
+ }
+
  for(unsigned mode=0;mode<3;++mode){Bytes plain=Plain(mode?180001:8197);if(mode==2){std::mt19937 rng(56123);for(auto& b:plain)b=uint8_t(rng());}ZlibCompression encoder(plain.size(),[&](uint64_t at,void* p,size_t n){memcpy(p,plain.data()+at,n);});auto save=[&](const wchar_t* suffix,const Bytes& bytes){auto path=std::wstring(prefix)+std::to_wstring(mode)+suffix;FILE* out=_wfopen(path.c_str(),L"wb");Check(out!=nullptr,"Create encoder fixture");bool ok=fwrite(bytes.data(),1,bytes.size(),out)==bytes.size();fclose(out);Check(ok,"Write encoder fixture");};save(L".raw",plain);save(L".attr",encoder.Attribute());Bytes resource(size_t(encoder.ResourceSize()));if(!resource.empty())encoder.ReadResource(0,resource.data(),resource.size());save(L".rsrc",resource);}
 }

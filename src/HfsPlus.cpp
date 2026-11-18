@@ -1512,11 +1512,18 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     if(convertTimes)for(unsigned at=12;at<=28;at+=4){auto raw=U32(p.CatalogRecord(e.id)->value.data()+at);if(raw)(void)Time::Encode(raw,true);}
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
-    std::unique_ptr<ZlibCompression> encoded;
-    if(compression==CompressionMode::Zlib||(compression==CompressionMode::Preserve&&e.compressed)){
-        encoded.reset(new ZlibCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);}));
+    std::unique_ptr<EncodedCompression> encoded;
+    auto method=compression;
+    if(method==CompressionMode::Preserve&&e.compressed){
+        auto oldAttribute=p.GetAttributes(existing).at(u"com.apple.decmpfs");
+        Compression validate(oldAttribute,old[1].size,{}); // Validate before inspecting possibly corrupt metadata.
+        auto a=oldAttribute.data()+4;uint32_t type=uint32_t(a[0])|uint32_t(a[1])<<8|uint32_t(a[2])<<16|uint32_t(a[3])<<24;
+        method=type==3||type==4?CompressionMode::Zlib:type==7||type==8?CompressionMode::Lzvn:type==11||type==12?CompressionMode::Lzfse:type==13||type==14?CompressionMode::Lzbitmap:type==1&&dataSize<=3786?CompressionMode::StoredInline:CompressionMode::Stored;
+    }
+    if(method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
+        encoded.reset(new EncodedCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);},method));
         if(resourceSize&&encoded->UsesResource()){
-            Check(compression!=CompressionMode::Zlib,"Compression needs the resource fork; this file has a genuine resource fork. Decompress it or retain it uncompressed.");
+            Check(compression==CompressionMode::Preserve,"Compression needs the resource fork; this file has a genuine resource fork. Decompress it or retain it uncompressed.");
             encoded.reset(); // A normal overwrite must preserve both incoming forks.
         }
     }
@@ -1570,11 +1577,16 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     }
 }
 void Volume::SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress){
+    auto& p=*p_;p.Guard();Check(!p.Get(p.Content(id)).directory,"Select an ordinary file for compression");
+    auto e=Stat(id);Check(e.readError.empty(),"Cannot convert an unreadable compressed file");if(e.compressed==compressed)return;
+    SetCompression(id,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed,std::move(progress));
+}
+void Volume::SetCompression(uint32_t id,CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){
     auto& p=*p_;p.Guard();auto raw=p.Get(p.Content(id));Check(!raw.directory,"Select an ordinary file for compression");
+    Check(method!=CompressionMode::Preserve,"Choose a compression method or Uncompressed");
     auto e=Stat(id);Check(e.readError.empty(),"Cannot convert an unreadable compressed file");
-    if(compressed==e.compressed)return;
     uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint64_t,2> dates{e.created,e.modified};
-    Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,compressed?CompressionMode::Zlib:CompressionMode::Uncompressed,&dates);
+    Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,method,&dates);
 }
 void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,const std::array<uint64_t,2>* dates,const Attributes* attributes){
  auto& p=*p_;p.Guard();id=p.Content(id);auto e=p.Get(id);Check(e.directory,"Select a folder for directory metadata");if(attributes)ValidateAttributes(*attributes);

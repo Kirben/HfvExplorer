@@ -201,7 +201,7 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
    Check(completion.supportsCompression&&completion.writable,"This volume cannot change compression");auto& now=completion.entry;auto& old=request.originalMetadata;
    Check(now.id==old.id&&now.parent==old.parent&&now.name==old.name&&now.modified==old.modified&&now.created==old.created&&now.finder==old.finder&&now.compressed==old.compressed&&now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size&&completion.attributes==request.originalAttributes,"The file changed while Properties was open; reopen Properties");
    Cancel(job);Mark(completion,item);p.phase=request.compressed?"Compressing file":"Decompressing file";p.path=Utf8(now.name);p.byteTransfer=true;p.scanning=false;p.totalBytes=now.forks[0].size+now.forks[1].size;
-   source.first->SetCompression(source.second,request.compressed,[&](uint64_t done,uint64_t total){Cancel(job);p.processed=p.bytes=done;p.totalBytes=total;job.progress(p);});completion.entry=source.first->Stat(source.second);
+   source.first->SetCompressionMethod(source.second,request.compressed?request.compressionMethod:HfsPlus::Volume::CompressionMode::Uncompressed,[&](uint64_t done,uint64_t total){Cancel(job);p.processed=p.bytes=done;p.totalBytes=total;job.progress(p);});completion.entry=source.first->Stat(source.second);
   }
   if(request.kind==Kind::SetBasicMetadata){
    Check(completion.basicMetadata&&completion.writable,"This format has no writable basic metadata editor");auto& now=completion.entry;auto& old=request.originalMetadata;

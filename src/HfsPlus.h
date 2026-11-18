@@ -70,7 +70,8 @@ class Volume {
     Entry Stat(uint32_t id) const;
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
-    enum class CompressionMode { Preserve, Uncompressed, Zlib };
+    enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline };
+    void SetCompression(uint32_t id,CompressionMode,std::function<void(uint64_t,uint64_t)> progress = {});
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress = {});
     // Streaming, copy-on-write replacement. Source callback must return exact bytes.
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,

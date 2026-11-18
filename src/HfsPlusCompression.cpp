@@ -2,7 +2,7 @@
 // decmpfs disk header: Apple xnu/bsd/sys/decmpfs.h. Resource layouts: the
 // independently documented decmpfs readers in Sleuth Kit (tsk/fs/decmpfs.c).
 // Our parser is independent of those engines. Codec sources are unmodified
-// zlib and Apple's BSD-licensed LZFSE/LZVN decoders (compression/README.md).
+// zlib and Apple's BSD-licensed LZFSE/LZVN codecs (compression/README.md).
 #include "HfsPlusCompression.h"
 #include "HfsPlusDisk.h"
 #define Z_SOLO
@@ -10,6 +10,7 @@
 #include "compression/zlib/zlib.h"
 extern "C" {
 #include "compression/lzfse/lzvn_decode_base.h"
+#include "compression/lzfse/lzfse.h"
 #include "compression/libzbitmap/libzbitmap.h"
 }
 #include <cstdlib>
@@ -122,23 +123,44 @@ Bytes DeflateUnit(const Bytes& input){
 }
 uint32_t UnitChecksum(const Bytes& bytes){return uint32_t(crc32(0,bytes.data(),uInt(bytes.size())));}
 }
-Bytes ZlibCompression::Encode(uint64_t index){Bytes plain(size_t((std::min)(uint64_t(65536),size_-index*65536)));if(!plain.empty())reader_(index*65536,plain.data(),plain.size());return DeflateUnit(plain);}
-ZlibCompression::ZlibCompression(uint64_t size,Reader reader):reader_(std::move(reader)),size_(size){
+Bytes EncodedCompression::Encode(uint64_t index){
+ Bytes plain(size_t((std::min)(uint64_t(65536),size_-index*65536)));if(!plain.empty())reader_(index*65536,plain.data(),plain.size());
+ using Mode=Volume::CompressionMode;
+ if(method_==Mode::Zlib)return DeflateUnit(plain);
+ if(method_==Mode::StoredInline)return plain;
+ Bytes output(131072);size_t bytes=0;uint8_t marker=0xff;
+ if(method_==Mode::Stored){output=plain;output.insert(output.begin(),0xcc);return output;}
+ if(!plain.empty()){
+  if(method_==Mode::Lzvn){Bytes scratch(lzvn_encode_scratch_size());bytes=lzvn_encode_buffer(output.data(),output.size(),plain.data(),plain.size(),scratch.data());marker=6;}
+  else if(method_==Mode::Lzfse)bytes=lzfse_encode_buffer(output.data(),output.size(),plain.data(),plain.size(),nullptr);
+  else if(method_==Mode::Lzbitmap)Check(zbm_compress(output.data(),output.size(),plain.data(),plain.size(),&bytes)==0,"Cannot encode LZBITMAP unit");
+ }
+ if(method_==Mode::Lzvn)marker=6;
+ if(!bytes||bytes>=plain.size()+1){output=plain;output.insert(output.begin(),marker);}else output.resize(bytes);
+ return output;
+}
+EncodedCompression::EncodedCompression(uint64_t size,Reader reader,Volume::CompressionMode method):method_(method),reader_(std::move(reader)),size_(size){
+ using Mode=Volume::CompressionMode;
+ Check(method==Mode::Zlib||method==Mode::Lzvn||method==Mode::Lzfse||method==Mode::Lzbitmap||method==Mode::Stored||method==Mode::StoredInline,"Choose an explicit compression method");
  Check(size<=INT64_MAX,"Compressed logical size exceeds Apple limit");
+ Check(method!=Mode::StoredInline||size<=3786,"Legacy type-1 stored data must fit the 3802-byte inline attribute limit; use Stored for larger files");
  attribute_.resize(16);PutLittle(attribute_.data(),0x636d7066);PutLittle(attribute_.data()+8,size,8);
  auto count=size/65536+(size%65536!=0);Bytes first=Encode(0);
+ uint32_t type=method==Mode::Zlib?3:method==Mode::Lzvn?7:method==Mode::Lzfse?11:method==Mode::Lzbitmap?13:method==Mode::Stored?9:1;
  // Apple's on-disk decmpfs xattr limit includes the 16-byte header.
- if(size<=65536&&first.size()+16<=3802){PutLittle(attribute_.data()+4,3);attribute_.insert(attribute_.end(),first.begin(),first.end());return;}
- Check(count&&(count<=(UINT32_MAX-310ULL)/8),"Compressed resource block table exceeds the format limit");
- uint64_t offset=264+count*8;
- for(uint64_t i=0;i<count;++i){auto payload=i?Encode(i):std::move(first);Check(offset+payload.size()+50<=UINT32_MAX,"Compressed resource fork exceeds its 32-bit offset limit");units_.push_back({uint32_t(offset),uint32_t(payload.size()),UnitChecksum(payload)});offset+=payload.size();}
- PutLittle(attribute_.data()+4,4);resourceSize_=offset+50;prefix_.resize(size_t(264+count*8),0);
+ if(size<=65536&&first.size()+16<=3802){PutLittle(attribute_.data()+4,type);attribute_.insert(attribute_.end(),first.begin(),first.end());return;}
+ bool zlib=method==Mode::Zlib;
+ Check(count&&count<=(zlib?(UINT32_MAX-310ULL)/8:UINT32_MAX/4-1),"Compressed resource block table exceeds the format limit");
+ uint64_t offset=zlib?264+count*8:(count+1)*4;
+ for(uint64_t i=0;i<count;++i){auto payload=i?Encode(i):std::move(first);Check(offset+payload.size()+(zlib?50:0)<=UINT32_MAX,"Compressed resource fork exceeds its 32-bit offset limit");units_.push_back({uint32_t(offset),uint32_t(payload.size()),UnitChecksum(payload)});offset+=payload.size();}
+ PutLittle(attribute_.data()+4,type+1);resourceSize_=offset+(zlib?50:0);prefix_.resize(size_t(zlib?264+count*8:(count+1)*4),0);
+ if(!zlib){for(size_t i=0;i<units_.size();++i)PutLittle(prefix_.data()+i*4,units_[i].offset);PutLittle(prefix_.data()+units_.size()*4,offset);return;}
  Disk::P32(prefix_.data(),256);Disk::P32(prefix_.data()+4,uint32_t(offset));Disk::P32(prefix_.data()+8,uint32_t(offset-256));Disk::P32(prefix_.data()+12,50);Disk::P32(prefix_.data()+256,uint32_t(offset-260));PutLittle(prefix_.data()+260,count);
  for(size_t i=0;i<units_.size();++i){PutLittle(prefix_.data()+264+i*8,units_[i].offset-260);PutLittle(prefix_.data()+268+i*8,units_[i].length);}
  // One unnamed 'cmpf' resource (ID 1); data offset is relative to the data area.
  footer_.resize(50,0);Disk::P16(footer_.data()+24,28);Disk::P16(footer_.data()+26,50);memcpy(footer_.data()+30,"cmpf",4);Disk::P16(footer_.data()+36,10);Disk::P16(footer_.data()+38,1);Disk::P16(footer_.data()+40,0xffff);
 }
-void ZlibCompression::ReadResource(uint64_t at,void* output,size_t n){
+void EncodedCompression::ReadResource(uint64_t at,void* output,size_t n){
  Disk::Check(Disk::Range(at,n,resourceSize_),"Read beyond encoded compressed resource");auto p=static_cast<uint8_t*>(output);
  while(n){const Bytes* data=nullptr;size_t skip=0;
   if(at<prefix_.size()){data=&prefix_;skip=size_t(at);}
