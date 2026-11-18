@@ -26,6 +26,7 @@
 #include "DeviceWait.h"
 #include "HFVExplorer.h"
 #include "BrowserTransfers.h"
+#include "BrowserSession.h"
 
 #include "MainFrm.h"
 #include "HFVExplorerDoc.h"
@@ -49,7 +50,6 @@ static char THIS_FILE[] = __FILE__;
 BEGIN_MESSAGE_MAP(CHFVExplorerApp, CWinApp)
 	//{{AFX_MSG_MAP(CHFVExplorerApp)
 	ON_COMMAND(ID_APP_ABOUT, OnAppAbout)
-	ON_COMMAND(ID_FILE_OPEN, OnFileOpen)
 	//}}AFX_MSG_MAP
 	// Standard file based document commands
  ON_COMMAND(ID_FILE_NEW, OnNewBrowser)
@@ -59,7 +59,6 @@ BEGIN_MESSAGE_MAP(CHFVExplorerApp, CWinApp)
  ON_COMMAND(ID_APP_EXIT, OnExitBrowsers)
 END_MESSAGE_MAP()
 
-	// ON_COMMAND(ID_FILE_OPEN, CWinApp::OnFileOpen)
 
 /////////////////////////////////////////////////////////////////////////////
 // CHFVExplorerApp construction
@@ -87,12 +86,10 @@ void CHFVExplorerApp::set_font( char *name, int ps )
 
 CHFVExplorerApp::CHFVExplorerApp()
 {
-	m_pStatusBar = 0;
- m_main=nullptr;m_doc=nullptr;m_tree=nullptr;m_list=nullptr;m_pre=nullptr;m_wndSplitter=nullptr;m_wndSplitter2=nullptr;
+
 	m_opendir = "";
 	is_desktop_application = 1;
 	m_parent_hwnd = 0;
-	m_startdir_processed = 0;
 	m_dosicons = 1;
 	m_fat_icon_time_limit = 0;
 	m_mountall = TRUE;
@@ -469,9 +466,8 @@ BOOL CHFVExplorerApp::InitInstance()
 
 	if (!ProcessShellCommand(cmdInfo)) return FALSE;
 
-	m_pMainWnd->DragAcceptFiles();
-
 	tmap_init();
+	if(auto frame=ActiveBrowser())OpenStartupDirectory(frame->GetBrowserSession());
 
 	return TRUE;
 }
@@ -535,56 +531,22 @@ void CHFVExplorerApp::OnAppAbout()
 #define CHILDMAGIC 0x12345678
 static UINT our_child_registration = RegisterWindowMessage("HFVRegisterChild");
 
-BOOL CHFVExplorerApp::OnIdle(LONG lCount) 
+void CHFVExplorerApp::OpenStartupDirectory(BrowserSession& session)
 {
-	int x, y, cx, cy;
-	UINT flags;
-	CWnd *insertafter;
-
-	if(m_opendir != "") {
-		int pc = m_opendir.Mid(1,2) == ":\\";
-		// __asm int 3
-		m_doc->my_chdir( m_opendir, !pc );
-		m_opendir = "";
-		// m_main->ActivateFrame( SW_SHOW );
-		x = 0;
-		y = 0;
-		cx = 0;
-		cy = 0;
-		if(is_desktop_application) {
-			insertafter = 0;
-			flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW |SWP_NOZORDER;
-		} else {
-			insertafter = (CWnd *)&CWnd::wndTopMost;
-			insertafter = (CWnd *)0;
-			flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW;
-
-			CHFVExplorerApp	*pApp;
-			pApp = (CHFVExplorerApp *)AfxGetApp();
-			LPARAM w;
-			// __asm int 3
-			w = (LPARAM)pApp->m_main->m_hWnd;
-			::PostMessage( m_parent_hwnd, our_child_registration, CHILDMAGIC, (LPARAM)w );
-		}
-		m_main->SetWindowPos( insertafter, x, y, cx, cy, flags );
-		m_startdir_processed = 1;
-		if(is_desktop_application) {
-			m_main->ShowWindow(SW_SHOWMAXIMIZED);
-		}
-		SetForegroundWindow(m_main->m_hWnd);
-	} else if(!m_startdir_processed) {
-		/*
-		CString dir;
-		int mac;
-		m_startdir_processed = 1;
-		if(is_desktop_application) {
-			get_last_directory( &dir, &mac );
-			if(dir != "") my_chdir( dir, mac );
-		}
-		*/
-	}
-	
-	return CWinApp::OnIdle(lCount);
+ if(m_opendir.IsEmpty())return;
+ const CString directory=m_opendir;
+ m_opendir.Empty();
+ auto frame=session.Owner();
+ const bool windows=directory.Mid(1,2)==":\\";
+ session.Document()->my_chdir(directory,!windows);
+ if(is_desktop_application){
+  frame->SetWindowPos(nullptr,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW|SWP_NOZORDER);
+  frame->ShowWindow(SW_SHOWMAXIMIZED);
+ }else{
+  ::PostMessage(m_parent_hwnd,our_child_registration,CHILDMAGIC,reinterpret_cast<LPARAM>(frame->GetSafeHwnd()));
+  frame->SetWindowPos(nullptr,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW);
+ }
+ frame->SetForegroundWindow();
 }
 
 void CHFVExplorerApp::add_child( HWND hi ) 
@@ -611,20 +573,6 @@ void CHFVExplorerApp::kill_childs()
 		dir = get_directory( 0, &mac );
 		save_last_directory( dir, mac );
 */
-
-void CHFVExplorerApp::OnFileOpen() 
-{
-	CString name = "";
- auto owner=m_main;
-
-	CFileDialog dlg( TRUE, _T("DSK"), name,
-				OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR,
-				_T("Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||"), owner );
-	if(dlg.DoModal() == IDOK) {
-		name = dlg.GetPathName();
-		if(owner)owner->GetBrowserSession().Document()->OnOpenDocument(name);else OpenDocumentFile(name);
-	}
-}
 
 BOOL CHFVExplorerApp::EnableTimer( BOOL onoff )
 {

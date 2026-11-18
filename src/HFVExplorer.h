@@ -35,6 +35,7 @@
 // See HFVExplorer.cpp for the implementation of this class
 //
 
+class BrowserSession;
 class CHFVExplorerApp : public CWinApp
 {
 public:
@@ -47,6 +48,11 @@ public:
  CMainFrame* CreateBrowser(BOOL visible=TRUE);
  void RegisterBrowser(CMainFrame*);
  void ActivateBrowser(CMainFrame*);
+ CMainFrame* ActiveBrowser() const;
+ void OpenRecentImage(UINT command,BrowserSession&);
+#ifdef HFV_TESTING
+ void InitRecentImagesForTest(){LoadStdProfileSettings(10);}
+#endif
  void ForgetBrowser(CMainFrame*);
  CDocument* OpenDocumentFile(LPCTSTR path) override;
  afx_msg void OnNewBrowser();
@@ -62,18 +68,9 @@ public:
 	HFONT get_font();
 	void set_font( char *name, int ps );
 
-	CStatusBar *m_pStatusBar;
-	CHFVExplorerListView *m_list;
-	HFVExplorerTreeView *m_tree;
-	CHFVExplorerDoc *m_doc;
-	CSplitterWnd *m_wndSplitter;
-	CSplitterWnd *m_wndSplitter2;
-	CMainFrame *m_main;
-	CHFVPreviewView *m_pre;
 	CString m_opendir;
 	HWND m_parent_hwnd;
 	int is_desktop_application;
-	int m_startdir_processed;
 
 	int		m_dosicons;
 	int		m_fat_icon_time_limit;
@@ -145,14 +142,13 @@ protected:
 	public:
 	virtual BOOL InitInstance();
  virtual int ExitInstance() override;
-	virtual BOOL OnIdle(LONG lCount);
+	void OpenStartupDirectory(BrowserSession&);
 	//}}AFX_VIRTUAL
 
 // Implementation
 
 	//{{AFX_MSG(CHFVExplorerApp)
 	afx_msg void OnAppAbout();
-	afx_msg void OnFileOpen();
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()
 };

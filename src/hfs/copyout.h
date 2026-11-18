@@ -28,8 +28,6 @@ int cpo_raw(hfsvol *, char *, char *);
 
 // LAURI
 int cpo_raw_resource( hfsvol *, char *, char *);
-void copyout_set_last_open_file( const char *path );
-void copyout_get_last_open_file( char *path, int maxpath );
 
 // Optional observer; byte counts are source bytes read, before conversion.
 typedef void (*copyout_progress_fn)(const char*,unsigned long,unsigned long long,int,void*);

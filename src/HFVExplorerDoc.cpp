@@ -740,7 +740,6 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover):m_browserSession(new BrowserSess
 CHFVExplorerDoc::~CHFVExplorerDoc()
 {
  m_browserSession.reset();
- auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());if(app->m_doc==this)app->m_doc=nullptr;
  clear_hash_table();
 	destroy_icon_cache();
 	delete m_icon_array;

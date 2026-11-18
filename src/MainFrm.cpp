@@ -80,6 +80,8 @@ UINT our_child_registration = RegisterWindowMessage("HFVRegisterChild");
 IMPLEMENT_DYNCREATE(CMainFrame, CFrameWnd)
 
 BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
+ ON_COMMAND(ID_FILE_OPEN, OnFileOpenImage)
+ ON_COMMAND_RANGE(ID_FILE_MRU_FILE1, ID_FILE_MRU_FILE16, OnOpenRecentImage)
  ON_UPDATE_COMMAND_UI(ID_FILE_EJECT, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_FILE_RELOAD, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_CD_EJECT_RELOAD, OnUpdatePhysicalMedia)
@@ -159,7 +161,6 @@ CMainFrame::CMainFrame()
 
 CMainFrame::~CMainFrame()
 {
- auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());if(app->m_main==this)app->m_main=nullptr;
 }
 
 int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
@@ -528,11 +529,29 @@ bool CMainFrame::CommandAllowed(UINT id)const{
 BOOL CMainFrame::OnCmdMsg(UINT id,int code,void* extra,AFX_CMDHANDLERINFO* info){
  if(!info&&!CommandAllowed(id)){if(code==CN_UPDATE_COMMAND_UI)static_cast<CCmdUI*>(extra)->Enable(FALSE);return TRUE;}
 
- // Commands and update-UI queries may target an inactive frame explicitly.
- // The view/document chain remains the frame's own; old app-only commands
- // receive the same owner, including during accelerator dispatch.
- if(code==CN_COMMAND&&!info)static_cast<CHFVExplorerApp*>(AfxGetApp())->ActivateBrowser(this);
+ if(code==CN_COMMAND&&!info){
+  struct ErrorOwner{
+   HWND previous;
+   ~ErrorOwner(){HFSIFACE_exchange_error_window(previous);}
+  } owner{HFSIFACE_exchange_error_window(GetSafeHwnd())};
+  // Handle image opens before document and application command fallback.
+  if(id==ID_FILE_OPEN){OnFileOpenImage();return TRUE;}
+  if(id>=ID_FILE_MRU_FILE1&&id<=ID_FILE_MRU_FILE16){OnOpenRecentImage(id);return TRUE;}
+  return CFrameWnd::OnCmdMsg(id,code,extra,info);
+ }
  return CFrameWnd::OnCmdMsg(id,code,extra,info);
+}
+void CMainFrame::OnFileOpenImage()
+{
+ if(StorageUi::busy()||StorageUi::state().sessionOpen)return;
+ auto& session=GetBrowserSession();
+ CFileDialog dialog(TRUE,"DSK",nullptr,OFN_HIDEREADONLY|OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR,
+    "Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||",session.Owner());
+ if(dialog.DoModal()==IDOK)session.Document()->OnOpenDocument(dialog.GetPathName());
+}
+void CMainFrame::OnOpenRecentImage(UINT command)
+{
+ static_cast<CHFVExplorerApp*>(AfxGetApp())->OpenRecentImage(command,GetBrowserSession());
 }
 void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 {
@@ -598,18 +617,25 @@ static HANDLE get_top_window_phandle( void )
 
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
- if(nIDEvent==9202){if(!BackgroundCopies::Active()){auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());for(auto frame:app->m_browsers)frame->KillTimer(9202);app->OnExitBrowsers();}return;}
+ if(nIDEvent==9202){
+  if(!BackgroundCopies::Active()&&!StorageUi::busy()&&!StorageUi::state().sessionOpen){
+   auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+   for(auto frame:app->m_browsers)frame->KillTimer(9202);
+   app->OnExitBrowsers();
+  }
+  return;
+ }
  if(nIDEvent==9201){if(!BackgroundCopies::Active()||static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()>1){KillTimer(9201);PostMessage(WM_CLOSE);}return;}
  if(HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
  if(m_deviceChangeDeferred)PostMessage(WM_APP+91);
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	int i, count;
 	wait_item_struct *w;
-	static BOOL inhere = FALSE;
 
-	if(inhere) return;
+	if(m_handlingTimer)return;
 
-	inhere = TRUE;
+	m_handlingTimer=true;
+ struct TimerGuard{bool& active;~TimerGuard(){active=false;}} guard{m_handlingTimer};
 
 	count = m_wait_items.GetSize();
 	for(i=count-1; i>=0; i--) {
@@ -655,9 +681,9 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 							if( w->m_waiting_emu_mtime != rStatus.m_mtime ||
 									w->m_waiting_emu_size != rStatus.m_size)
 							{
-								int answer = AfxMessageBox( 
+								int answer = MessageBox(
 									"The file " + CString(w->m_waiting_doc_win_name) + 
-									" was changed. Do yo want to update the original file?",
+									" was changed. Do you want to update the original file?","HFVExplorer",
 									MB_YESNO | MB_ICONQUESTION
 								);
 								if(answer == IDYES) do_update = TRUE;
@@ -720,7 +746,6 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 		}
 	}
 
-	inhere = FALSE;
 
 	CFrameWnd::OnTimer(nIDEvent);
 }

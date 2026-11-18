@@ -37,11 +37,11 @@ void host(const CString& path,uint64_t size,uint64_t date){HANDLE h=CreateFileA(
 int RunSharedBrowserTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;CString root=directory;FILE* report=fopen((root+"\\shared-browser-report.txt"),"w");if(!report)return 2;
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());CWnd owner;app.m_startup_floppies=app.m_startup_cds=app.m_startup_hds=0;
- app.m_show_invisible_mac=app.m_show_invisible_fat=1;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=0;app.m_pre=nullptr;app.m_pStatusBar=nullptr;
+ app.m_show_invisible_mac=app.m_show_invisible_fat=1;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=0;
  Doc doc;Tree tree;List list;
  try{
   check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden shared browser",WS_OVERLAPPED,0,0,700,400,nullptr,0)!=FALSE,"create hidden main owner");
-  app.m_pMainWnd=&owner;app.m_tree=&tree;app.m_list=&list;InitializeStorageUi();
+  app.m_pMainWnd=&owner;InitializeStorageUi();
   check(tree.Create(nullptr,nullptr,WS_CHILD|TVS_HASLINES,CRect(0,0,200,400),&owner,100,nullptr)!=FALSE,"create tree");
   check(list.Create(nullptr,nullptr,WS_CHILD|LVS_REPORT,CRect(200,0,700,400),&owner,101,nullptr)!=FALSE,"create list");
   doc.GetBrowserSession().Attach(&owner,&tree,&list);tree.Init();list.Initialize();tree.Bind(&doc);list.Bind(&doc);
@@ -132,7 +132,7 @@ int RunSharedBrowserTest(const char* directory){
   fprintf(report,"PASS: classic BinHex 5/MacBinary I export and Automatic import remain in the existing conversion backend. No physical devices or computer control used.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());BrowserDirectory::testObserveRead={};fclose(report);return 1;}
  BrowserDirectory::testObserveRead={};doc.m_volumes[0].close();tree.Bind(nullptr);list.Bind(nullptr);
- list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();app.m_tree=nullptr;app.m_list=nullptr;app.m_doc=nullptr;app.m_pMainWnd=nullptr;
+ list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();app.m_pMainWnd=nullptr;
  fclose(report);return 0;
 }
 #endif

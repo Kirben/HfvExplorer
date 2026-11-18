@@ -80,7 +80,8 @@ bool Drag::Hover(CPoint screen,UINT keys){
  auto target=Hit(screen);auto effect=Choose(selection_,target.folder,target.session&&target.writable,keys);
  if(effect==Effect::None)ClearHighlight();
  else if(highlight_!=target.control||treeHighlight_!=target.tree||highlightItem_!=target.item||highlightRow_!=target.row){ClearHighlight();highlight_=target.control;treeHighlight_=target.tree;highlightItem_=target.item;highlightRow_=target.row;if(target.tree)SendMessage(highlight_,TVM_SELECTITEM,TVGN_DROPHILITE,reinterpret_cast<LPARAM>(target.item));else if(target.row>=0){LVITEM item{};item.state=item.stateMask=LVIS_DROPHILITED;SendMessage(highlight_,LVM_SETITEMSTATE,target.row,reinterpret_cast<LPARAM>(&item));}}
- auto list=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_list;
+ auto frame=DYNAMIC_DOWNCAST(CMainFrame,CWnd::FromHandlePermanent(source_));
+ auto list=frame?frame->GetBrowserSession().List():nullptr;
  if(effect==Effect::None)SetCursor(LoadCursor(nullptr,IDC_NO));else if(list)list->set_cursor_by_type(effect==Effect::Copy);
  return true;
 }

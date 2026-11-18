@@ -558,7 +558,6 @@ HFVExplorerTreeView::HFVExplorerTreeView()
 HFVExplorerTreeView::~HFVExplorerTreeView()
 {
  if(m_browserSession)m_browserSession->Detach(this);
- auto application=static_cast<CHFVExplorerApp*>(AfxGetApp());if(application->m_tree==this)application->m_tree=nullptr;
 	destroy_pointers();
 	m_selchange_enabled = 0;
 	if(m_pimagelistSmall) {

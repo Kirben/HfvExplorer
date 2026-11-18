@@ -58,7 +58,7 @@ public:uint32_t fail;bool failList=false;
 };
 }
 int RunVolumeCoordinationTest(const char* directory){
- if(!CreateDirectoryA(directory,nullptr))return 2;CString root=directory;FILE* report=fopen(root+"\\volume-coordination-report.txt","w");if(!report)return 2;int result=0;auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_mac_window_mode=0;app.m_dosicons=DI_NO_ICONS;app.m_pre=nullptr;app.m_pStatusBar=nullptr;app.m_show_invisible_fat=app.m_show_invisible_mac=1;InitializeStorageUi();
+ if(!CreateDirectoryA(directory,nullptr))return 2;CString root=directory;FILE* report=fopen(root+"\\volume-coordination-report.txt","w");if(!report)return 2;int result=0;auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_mac_window_mode=0;app.m_dosicons=DI_NO_ICONS;app.m_show_invisible_fat=app.m_show_invisible_mac=1;InitializeStorageUi();
  try{
   // Atomic lease rules are independent of the currently serialized storage queue.
   {Lease reader({{"lease-A",Mode::Read}});bool read=false,writeBlocked=false,other=false;
@@ -68,7 +68,7 @@ int RunVolumeCoordinationTest(const char* directory){
   std::wstring upper=path;CharUpperBuffW(&upper[0],DWORD(upper.size()));Check(ImageKey(path)==ImageKey(upper)&&MacBrowser::OpenImage(upper)==volume,"case alias has a separate resource/backend");
   auto alias=VolumeCoord::Wide(std::string((LPCSTR)(root+"\\alias.dsk")));if(CreateHardLinkW(alias.c_str(),path.c_str(),nullptr))Check(ImageKey(alias)==ImageKey(path)&&MacBrowser::OpenImage(alias)==volume,"hard-link alias has a separate resource/backend");else fprintf(report,"NOTE: hard-link creation unavailable; case-alias identity verified.\n");
   auto key=volume->ResourceKey();uint32_t one=volume->MakeDirectory(2,u"One"),two=volume->MakeDirectory(2,u"Two"),keep=File(*volume,one,u"Keep"),change=File(*volume,one,u"Change"),other=File(*volume,two,u"Other");
-  auto ap=std::make_unique<Panes>(),bp=std::make_unique<Panes>(),up=std::make_unique<Panes>();auto& a=*ap;auto& b=*bp;auto& unrelated=*up;a.Native(volume);a.Enter(L"One");b.Native(same);b.Enter(L"Two");auto separate=Image(VolumeCoord::Wide(std::string((LPCSTR)(root+"\\unrelated.dsk"))));unrelated.Native(separate);app.m_pMainWnd=&unrelated.owner;app.m_doc=&unrelated.doc;app.m_tree=&unrelated.tree;app.m_list=&unrelated.list;
+  auto ap=std::make_unique<Panes>(),bp=std::make_unique<Panes>(),up=std::make_unique<Panes>();auto& a=*ap;auto& b=*bp;auto& unrelated=*up;a.Native(volume);a.Enter(L"One");b.Native(same);b.Enter(L"Two");auto separate=Image(VolumeCoord::Wide(std::string((LPCSTR)(root+"\\unrelated.dsk"))));unrelated.Native(separate);app.m_pMainWnd=&unrelated.owner;
   Select(a.list,L"Keep");Select(b.list,L"Other");a.list.m_sorted_by_column=FIELD_SIZE;a.list.m_sort_is_ascending=FALSE;
   auto rename = FileOperations::RenameEntry{Native(volume,change), u"Changed", Native(volume,one)};auto renamed=FileOperations::Submit(rename);Done(renamed);storageUiTest={};Until([&]{return a.Session().notificationRefreshes>=1&&b.Session().notificationRefreshes>=1;});
   Check(storageUiTest.dialogCreations==0&&a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled(),"notification refresh opened a modal progress dialog or disabled a peer");
@@ -104,6 +104,6 @@ int RunVolumeCoordinationTest(const char* directory){
   Check(a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled()&&wa.owner.IsWindowEnabled()&&wb.owner.IsWindowEnabled(),"notification refresh left an owner disabled");
   fprintf(report,"PASS: Windows folder refresh and classic HFS cached-reader invalidation across two real hidden browser sessions; inactive legacy paths invalidate lazily without changing the active native view. No physical devices or computer control.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());FileOperations::CancelPending();result=1;}
- app.m_doc=nullptr;app.m_tree=nullptr;app.m_list=nullptr;app.m_pMainWnd=nullptr;fclose(report);return result;
+ app.m_pMainWnd=nullptr;fclose(report);return result;
 }
 #endif

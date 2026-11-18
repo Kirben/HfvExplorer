@@ -59,11 +59,16 @@ int RunBrowserWindowsTest(const char* directory){
   // Deliberately keep app ownership at B, then route commands to inactive A.
   app.ActivateBrowser(b);a->SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);
   Check((sa.List()->GetStyle()&LVS_TYPEMASK)==LVS_REPORT&&(sb.List()->GetStyle()&LVS_TYPEMASK)==LVS_ICON,"view command changed the wrong frame");
+  Check(app.ActiveBrowser()==b,"command routing changed MFC's active browser");
   a->SendMessage(WM_COMMAND,ID_VIEW_MAC_WINDOW);Check(sa.finderLayout&&!sb.finderLayout,"Finder layout leaked between windows");
   b->SendMessage(WM_COMMAND,ID_HFV_VIEW_LIST);Check(sa.finderLayout&&(sb.List()->GetStyle()&LVS_TYPEMASK)==LVS_LIST,"second frame command used first frame");
   a->SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);
   auto firstImage=host+"\\first.dsk",secondImage=host+"\\second.dsk";Image(firstImage,u"First");Image(secondImage,u"Second");
-  app.ActivateBrowser(a);Check(app.OpenDocumentFile(firstImage)==sa.Document(),"image open did not target first browser");
+  app.InitRecentImagesForTest();
+  app.AddToRecentFileList(firstImage);
+  a->SendMessage(WM_COMMAND,ID_FILE_MRU_FILE1);
+  Check(sa.MacBrowser().Active(),"recent image command did not open in its originating browser");
+  Check(!sb.MacBrowser().Active(),"recent image command opened in the other browser");
   app.ActivateBrowser(b);Check(app.OpenDocumentFile(secondImage)==sb.Document(),"image open did not target second browser");
   Check(sa.MacBrowser().Active()&&sb.MacBrowser().Active(),"opening an image cleared another browser");
   a->OnUpdateFrameTitle(TRUE);b->OnUpdateFrameTitle(TRUE);Check(Caption(a)==L"First \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","disk captions leaked between frames or MFC restored Untitled");
@@ -262,11 +267,11 @@ int RunBrowserWindowsTest(const char* directory){
   // Make the first frame the MFC main window before closing it: this is the
   // case that CFrameWnd's default SDI shutdown used to close every document.
   app.ActivateBrowser(a);a->SendMessage(WM_CLOSE);
-  Check(!IsWindow(ah)&&IsWindow(bh)&&app.m_browsers.size()==1&&app.m_pMainWnd==b&&app.m_doc==sb.Document()&&app.m_list==sb.List()&&app.m_tree==sb.Tree(),"first window closure did not transfer ownership to the surviving browser");NoQuit();
+  Check(!IsWindow(ah)&&IsWindow(bh)&&app.m_browsers.size()==1&&app.m_pMainWnd==b&&app.ActiveBrowser()==b,"first window closure did not transfer ownership to the surviving browser");NoQuit();
   b->SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);Check((sb.List()->GetStyle()&LVS_TYPEMASK)==LVS_REPORT&&sb.MacBrowser().Refresh(),"remaining window is not usable after first closes");
   b->SendMessage(WM_COMMAND,ID_TOOLS_NEW_BROWSER);Check(app.m_browsers.size()==2,"remaining window cannot create another browser");
   // Explicit File/Exit closes the full collection; a title-bar close does not.
-  b->SendMessage(WM_COMMAND,ID_APP_EXIT);Check(app.m_browsers.empty()&&!IsWindow(bh)&&app.m_pMainWnd==nullptr&&app.m_main==nullptr&&app.m_doc==nullptr&&app.m_list==nullptr,"File Exit did not close the remaining browser collection");
+  b->SendMessage(WM_COMMAND,ID_APP_EXIT);Check(app.m_browsers.empty()&&!IsWindow(bh)&&app.m_pMainWnd==nullptr&&app.ActiveBrowser()==nullptr,"File Exit did not close the remaining browser collection");
   MSG quit{};Check(PeekMessage(&quit,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE)!=FALSE,"last window did not terminate the message loop");
   fprintf(report,"PASS: independent real hidden top-level frames/documents/panes; New browser menu and Ctrl+Enter; view/layout and image-open command routing; per-window disk/folder and Unicode captions, startup and MFC title-update persistence; busy/failed-creation guards; closing newest and first/main windows without WM_QUIT; surviving browser refresh/new commands; explicit File Exit and final-window shutdown. No hardware access or computer control.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());result=1;}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include <afxadv.h>
 #include "BackgroundCopies.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerView.h"
@@ -59,27 +60,38 @@ void CHFVExplorerApp::RegisterBrowser(CMainFrame* frame){
 }
 void CHFVExplorerApp::ActivateBrowser(CMainFrame* frame){
  if(std::find(m_browsers.begin(),m_browsers.end(),frame)==m_browsers.end())return;
- auto& session=frame->GetBrowserSession();
- m_pMainWnd=m_main=frame;m_doc=session.Document();m_tree=session.Tree();m_list=session.List();m_pre=session.Preview();m_pStatusBar=session.Status();
- // Kept only for old launcher utilities. Browser operations use their session.
- HFSIFACE_set_error_window(frame->GetSafeHwnd());
+ m_pMainWnd=frame;
+}
+CMainFrame* CHFVExplorerApp::ActiveBrowser() const{
+ auto found=std::find(m_browsers.begin(),m_browsers.end(),m_pMainWnd);
+ return found==m_browsers.end()?nullptr:*found;
 }
 void CHFVExplorerApp::ForgetBrowser(CMainFrame* frame){
  auto found=std::find(m_browsers.begin(),m_browsers.end(),frame);if(found==m_browsers.end())return;
  m_browsers.erase(found);
  BackgroundCopies::TransferOwner(frame->GetSafeHwnd(),m_browsers.empty()?nullptr:m_browsers.back()->GetSafeHwnd());
- if(m_main!=frame&&m_pMainWnd!=frame)return;
+ if(m_pMainWnd!=frame)return;
  if(!m_browsers.empty()){ActivateBrowser(m_browsers.back());return;}
- m_main=nullptr;m_doc=nullptr;m_tree=nullptr;m_list=nullptr;m_pre=nullptr;m_pStatusBar=nullptr;m_wndSplitter=nullptr;m_wndSplitter2=nullptr;
- HFSIFACE_set_error_window(nullptr);
  // Leave m_pMainWnd until WM_NCDESTROY: MFC posts WM_QUIT for the last frame.
 }
 void CHFVExplorerApp::OnNewBrowser(){CreateBrowser();}
 void CHFVExplorerApp::OnUpdateNewBrowser(CCmdUI* ui){ui->Enable(!StorageUi::busy()&&!StorageUi::state().sessionOpen);}
 CDocument* CHFVExplorerApp::OpenDocumentFile(LPCTSTR path){
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return nullptr;
- if(m_main){auto doc=m_main->GetBrowserSession().Document();return doc->OnOpenDocument(path)?doc:nullptr;}
+ if(auto frame=ActiveBrowser()){
+  auto doc=frame->GetBrowserSession().Document();
+  return doc->OnOpenDocument(path)?doc:nullptr;
+ }
  InstallBrowserTemplate();return m_browserTemplate->OpenDocumentFile(path);
+}
+void CHFVExplorerApp::OpenRecentImage(UINT command,BrowserSession& session){
+ if(StorageUi::busy()||StorageUi::state().sessionOpen||!m_pRecentFileList)return;
+ const int index=int(command-ID_FILE_MRU_FILE1);
+ if(index<0||index>=m_pRecentFileList->GetSize())return;
+ const CString path=(*m_pRecentFileList)[index];
+ if(!path.IsEmpty()&&!session.Document()->OnOpenDocument(path) &&
+    path==(*m_pRecentFileList)[index])
+  m_pRecentFileList->Remove(index);
 }
 void CHFVExplorerApp::OnExitBrowsers(){
  if(BackgroundCopies::Active()){BackgroundCopies::CancelAll();for(auto frame:m_browsers)frame->SetTimer(9202,100,nullptr);return;}

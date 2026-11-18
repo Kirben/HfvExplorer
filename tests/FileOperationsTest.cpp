@@ -74,7 +74,7 @@ int RunFileOperationsTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;FILE* report=fopen((root+"\\file-operations-report.txt").c_str(),"w");if(!report)return 2;
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());CWnd owner,other;InitializeStorageUi();int result=0;
  try{
-  Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden operation owner",WS_OVERLAPPED,0,0,600,400,nullptr,0)&&other.CreateEx(0,AfxRegisterWndClass(0),"Other browser",WS_OVERLAPPED,0,0,600,400,nullptr,0),"create hidden owners");app.m_pMainWnd=&other;app.m_mac_window_mode=0;app.m_pre=nullptr;
+  Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden operation owner",WS_OVERLAPPED,0,0,600,400,nullptr,0)&&other.CreateEx(0,AfxRegisterWndClass(0),"Other browser",WS_OVERLAPPED,0,0,600,400,nullptr,0),"create hidden owners");app.m_pMainWnd=&other;app.m_mac_window_mode=0;
   auto source=Image(W(root+"\\source.dsk"),u"Source",HfsPlus::Volume::FormatKind::HfsPlus),target=Image(W(root+"\\target.dsk"),u"Target",HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
   uint32_t file=Put(*source,u"Payload"),folder=target->MakeDirectory(2,u"Copies");auto expected=source->Stat(file);auto delayed=std::make_shared<Delayed>(source);delayed->delay=120;delayed->owner=&owner;delayed->other=&other;
   Request copy;copy.Copy().sources={Native(delayed,file,&expected)};copy.Copy().destination=Native(target,folder);
@@ -141,6 +141,6 @@ int RunFileOperationsTest(const char* directory){
   Check(!delayed->wrongThread,"native mutation ran on UI thread");Check(Pending().empty(),"completed operations left in pending registry");
   fprintf(report,"PASS: real journaled HFS+/HFSX operations, legacy Windows and classic HFS rename/delete, retained raw/BinHex conversion route and captured import/export/AppleDouble settings restored after queued operations, successful/skipped moves and cancellation between classic delete entries. No physical devices or computer control.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());CancelPending();result=1;}
- app.m_tree=nullptr;app.m_list=nullptr;app.m_pre=nullptr;app.m_pMainWnd=nullptr;if(owner.m_hWnd)owner.DestroyWindow();if(other.m_hWnd)other.DestroyWindow();fclose(report);return result;
+ app.m_pMainWnd=nullptr;if(owner.m_hWnd)owner.DestroyWindow();if(other.m_hWnd)other.DestroyWindow();fclose(report);return result;
 }
 #endif
