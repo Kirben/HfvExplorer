@@ -44,6 +44,7 @@
 
 #define ID_GOTO_PARENT 0x12345678
 
+namespace BrowserNavigation { struct Request; }
 class CHFVExplorerDoc : public CDocument
 {
  friend class MainMacBrowser;
@@ -105,10 +106,10 @@ protected: // create from serialization only
     BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr);
     BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&);
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
-    bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false);
+    bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     void PublishClassicFolder(int index, uint32_t id, const std::string& path,
                               const BrowserDirectory::Snapshot&);
-    bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false);
+    bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&);
     void CopyNavigationIcons(BrowserDirectory::Snapshot&);
     static void ValidateNavigationMedia(const CHFVVolume&);

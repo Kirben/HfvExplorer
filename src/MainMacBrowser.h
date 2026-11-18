@@ -5,6 +5,7 @@
 class CHFVExplorerListView;
 class BrowserSession;
 namespace Removable { struct Mounted; }
+namespace BrowserNavigation { struct Request; }
 namespace BrowserDirectory { struct Row; struct Folder; }
 class MainMacBrowser {
     BrowserSession& session_;
@@ -52,6 +53,7 @@ public:
     bool Command(UINT);
     bool ContextMenu(CPoint);
     bool Find();
+    bool RevealFindHit(const BrowserNavigation::Request&);
     void Import();
     void ImportResource();
     void Export(unsigned fork);

@@ -21,6 +21,7 @@ extern "C" {
 #include "charset.h"
 #include "aspecial.h"
 #include <set>
+#include <fcntl.h>
 #include <algorithm>
 #include <stdexcept>
 extern HICON get_dos_icon(CHFVExplorerApp*,char*,int);
@@ -103,6 +104,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, int fin
 			OSType fdType = pitem->catdatarec.u.f.filUsrWds.fdType;
 			OSType fdCreator = pitem->catdatarec.u.f.filUsrWds.fdCreator;
 			if(pitem->catdatarec.cdrType == cdrFilRec) {
+				id = pitem->catdatarec.u.f.filFlNum;
 				size_in_bytes = (hfv_size_t)pitem->catdatarec.u.f.filLgLen +
 												pitem->catdatarec.u.f.filRLgLen;
 				creation_date = pitem->catdatarec.u.f.filCrDat;
@@ -308,23 +310,61 @@ void CHFVExplorerDoc::ValidateNavigationMedia(const CHFVVolume& volume)
   throw std::runtime_error("The floppy changed during navigation");
 }
 
-bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh)
+namespace {
+struct ClassicAncestor { uint32_t id, parent; std::string name; };
+
+std::vector<ClassicAncestor> ReadClassicRoute(const std::string& image,uint32_t id)
+{
+ LegacyEngine::Scope engine;
+ auto path=image;
+ auto volume=hfs_mount(path.data(),1,O_RDONLY);
+ if(!volume)throw std::runtime_error("Cannot read the classic HFS folder path");
+ struct Close {hfsvol* volume;~Close(){hfs_umount(volume);}} close{volume};
+ std::vector<ClassicAncestor> route;
+ std::set<long> visited;
+ long node=id;
+ while(node!=2){
+  if(!visited.insert(node).second||route.size()>=MAX_PATH)
+   throw std::runtime_error("Cyclic or oversized HFS folder path");
+  const auto current=node;
+  char name[32]{};
+  if(hfs_dirinfo(volume,&node,name)<0)
+   throw std::runtime_error("The classic HFS folder no longer exists");
+  mac_to_pc_charset(reinterpret_cast<unsigned char*>(name));
+  route.push_back({uint32_t(current),uint32_t(node),name});
+ }
+ std::reverse(route.begin(),route.end());
+ return route;
+}
+}
+
+bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,const BrowserNavigation::Request* find)
 {
  auto& session=GetBrowserSession();
- if(!session.UsesAsyncNavigation()||index<0||index>=m_hfs_count)return false;
+ if((!find&&!session.UsesAsyncNavigation())||index<0||index>=m_hfs_count)return false;
  auto tree=session.Tree();
  const auto item=tree->GetTreeCtrl().GetSelectedItem();
  auto& selected=m_volumes[index];
  const auto root=selected.m_rootitem;
  if(!item||!root||selected.m_free)return false;
+ using namespace BrowserNavigation;
  CString directory=tree->get_directory_name(root,index,id);
  if(directory.IsEmpty())directory=selected.m_volume_name;
- if(directory.IsEmpty()&&id!=2)return false;
+ if(directory.IsEmpty()&&!find)return false;
  std::string path=(LPCSTR)directory;
  path+=':';
  const auto parent=tree->get_parent_id(root,index,id);
  const auto image=selected.m_file_name;
  const auto key=VolumeCoord::ImageKey(std::string((LPCSTR)image));
+ Request request=find?*find:Request{FileOperations::Location::Classic((LPCSTR)image,path),
+     refresh?Intent::RefreshFolder:Intent::SelectFolder,key};
+ if(find&&request.folder.expectedResource!=key)return false;
+ request.folder.directory=true;
+ request.folder.expectedCatalogId=id;
+ request.folder.expectedResource=key;
+ if(request.folder.IsPhysical())request.mediaDrive=request.folder.Drive();
+ if(!find&&selected.m_mediaGenerationKnown)
+  request.folder.BindMediaGeneration(selected.m_mediaGeneration);
  auto reader=std::shared_ptr<CHFVExplorerDoc>(new CHFVExplorerDoc(false));
  reader->m_mac_show_invisibles=m_mac_show_invisibles;
  auto& volume=reader->m_volumes[index];
@@ -335,46 +375,75 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh)
  volume.m_is_removable=selected.m_is_removable;
  volume.m_free=0;
  reader->m_hfs_count=index+1;
- const auto generation=selected.m_mediaGenerationKnown
-     ? std::optional<DWORD>(selected.m_mediaGeneration):std::nullopt;
  const auto finder=session.finderLayout;
- auto listing=std::make_shared<BrowserDirectory::Snapshot>();
- session.Navigate([reader,listing,index,id,path,finder,parent,key,generation](Storage::Job& job){
+ auto route=std::make_shared<std::vector<ClassicAncestor>>();
+ const auto mountCurrent=[this,index,root,image]{
+  return index<m_hfs_count&&!m_volumes[index].m_free&&m_volumes[index].m_rootitem==root&&
+         m_volumes[index].m_file_name==image;
+ };
+ const auto retry=[this,index,id,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
+  if(!NavigateClassicFolder(index,id,refresh,found?&*found:nullptr))
+   GetBrowserSession().RejectNavigation(found?found->resource:std::string(),"The classic HFS volume changed.");
+ };
+ session.Navigate(std::move(request),
+ [reader,route,index,finder,parent](const Request& request,Result& result,Storage::Job& job){
   try{
-   VolumeCoord::Lease lease({{key,VolumeCoord::Mode::Read}});
+   VolumeCoord::Lease lease({{request.resource,VolumeCoord::Mode::Read}});
    if(job.cancelled())throw Storage::Cancelled();
    auto& volume=reader->m_volumes[index];
+   if(VolumeCoord::ImageKey(request.folder.ClassicImage())!=request.resource)
+    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The classic HFS image was replaced."};
    if(!volume.open())throw std::runtime_error("Cannot open the selected classic HFS volume");
-   if(generation &&
-      (!volume.m_mediaGenerationKnown||volume.m_mediaGeneration!=*generation))
+   if(request.folder.MediaGenerationKnown() &&
+      (!volume.m_mediaGenerationKnown||volume.m_mediaGeneration!=request.folder.MediaGeneration()))
     return Storage::Result{1,ERROR_MEDIA_CHANGED,"The floppy changed. Select its drive to open the new disk."};
-   reader->m_classicRevision[index]=VolumeCoord::Revision(key);
-   CString directory= id==2 ? volume.m_volume_name+":" : CString(path.c_str());
-   *listing=reader->read_classic_browser_directory(index,id,directory,finder,parent,&job);
+   reader->m_classicRevision[index]=VolumeCoord::Revision(request.resource);
+   const auto id=request.folder.expectedCatalogId;
+   const bool readRoute=request.intent!=Intent::SelectFolder;
+   std::string directory=id==2?std::string((LPCSTR)volume.m_volume_name)+":":request.folder.ClassicPath();
+   if(readRoute&&id!=2){
+    *route=ReadClassicRoute(request.folder.ClassicImage(),id);
+    directory=std::string((LPCSTR)volume.m_volume_name)+":";
+    for(const auto& step:*route)directory+=step.name+":";
+   }
+   if(directory.size()>=MAX_PATH)throw std::runtime_error("The classic HFS path exceeds the supported length");
+   const auto parentId=route->empty()?parent:route->back().parent;
+   result.listing=reader->read_classic_browser_directory(index,id,directory.c_str(),finder,parentId,&job);
+   if(result.listing.resourceKey!=request.resource)
+    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The classic HFS image was replaced."};
+   result.folder.SetClassic(request.folder.ClassicImage(),directory);
+   if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
    ValidateNavigationMedia(volume);
-   reader->CopyNavigationIcons(*listing);
+   reader->CopyNavigationIcons(result.listing);
    return Storage::Result{};
   }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
- },[this,reader,listing,index,id,item,root,image,key,refresh,path,parent](const Storage::Result& result){
+ },[this,reader,route,index,id,item,root,refresh,path,findResult=bool(find),parent](Result& result){
   auto& session=GetBrowserSession();
   auto tree=session.Tree();
-  if(index>=m_hfs_count||m_volumes[index].m_free||m_volumes[index].m_rootitem!=root||
-     m_volumes[index].m_file_name!=image||tree->GetTreeCtrl().GetSelectedItem()!=item)return;
-  if(result.error==ERROR_BUSY){
-   session.Defer(key,true,[this,index,id,refresh]{NavigateClassicFolder(index,id,refresh);},true,true);
-   return;
-  }
-  if(result.code){session.RejectNavigation(key,result.message);return;}
-  if(listing->revision!=VolumeCoord::Revision(key)){NavigateClassicFolder(index,id,refresh);return;}
-  auto parentPath=parent?tree->get_directory_name(root,index,parent):CString();
-  reader->m_volumes[index].m_rootitem=root;
+  auto& control=tree->GetTreeCtrl();
+  auto& volume=reader->m_volumes[index];
+  volume.m_rootitem=root;
   m_volumes.ReplaceFrom(index,reader->m_volumes,index);
-  m_classicRevision[index]=listing->revision;
-  tree->GetTreeCtrl().SetItemText(root,m_volumes[index].m_volume_name);
-  if(refresh)tree->delete_subdir_contents(item);
-  session.List()->initialize_volume(parentPath,parent?ID_GOTO_PARENT:0);
-  std::string shown=id==2?std::string((LPCSTR)m_volumes[index].m_volume_name)+":" : path;
-  PublishClassicFolder(index,id,shown,*listing);
- });
+  m_classicRevision[index]=result.listing.revision;
+  control.SetItemText(root,m_volumes[index].m_volume_name);
+  const auto& shown=result.folder.ClassicPath();
+  auto target=item;
+  const auto enabled=tree->SelectionNotificationsEnabled();
+  tree->enable_selchange(0);
+  if(findResult||(refresh&&_stricmp(path.c_str(),shown.c_str()))){
+   // Build only the confirmed ancestry for the destination.
+   if(refresh)tree->delete_subdir_contents(root);
+   target=root;
+   for(auto& step:*route)target=tree->tree_insert(root,index,step.name.data(),step.id,step.parent);
+   control.SelectItem(target);
+   control.EnsureVisible(target);
+  }
+  if(refresh)tree->delete_subdir_contents(target);
+  tree->enable_selchange(enabled);
+  const auto parentId=route->empty()?parent:route->back().parent;
+  const auto parentPath=parentId?tree->get_directory_name(root,index,parentId):CString();
+  session.List()->initialize_volume(parentPath,parentId?ID_GOTO_PARENT:0);
+  PublishClassicFolder(index,id,shown,result.listing);
+ },mountCurrent,retry);
  return true;
 }

@@ -157,10 +157,10 @@ void CHFVExplorerDoc::PublishWindowsFolder(int index, const std::string& path,
  if(auto status=session.Status())status->SetPaneText(0,path.c_str());
 }
 
-bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, bool refresh)
+bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, bool refresh, const BrowserNavigation::Request* find)
 {
  auto& session = GetBrowserSession();
- if (!session.UsesAsyncNavigation() || index < 0 || index >= m_fat_count ||
+ if ((!find&&!session.UsesAsyncNavigation()) || index < 0 || index >= m_fat_count ||
      path.size() < 3 || path[1] != ':')
   return false;
 
@@ -171,7 +171,6 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
  reader->m_mac_show_invisibles = m_mac_show_invisibles;
  reader->GetBrowserSession().finderLayout=session.finderLayout;
  struct Listing {
-  BrowserDirectory::Snapshot snapshot;
   std::vector<Removable::Mounted> removable;
   std::shared_ptr<MacBrowser::Volume> cd;
   bool floppy=false;
@@ -185,10 +184,23 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
  const auto type=m_fats[index].m_type;
  const bool atRoot=is_fat_root_directory(const_cast<char*>(path.c_str()))!=0;
  const int drive=toupper(static_cast<unsigned char>(path[0]))-'A';
- const bool probeCd=atRoot&&type==DRIVE_CDROM&&!session.MacBrowser().HasCdRoot(drive);
- const bool probeRemovable=atRoot&&(type==DRIVE_REMOVABLE||type==DRIVE_FIXED);
+ const bool probeCd=!find&&atRoot&&type==DRIVE_CDROM&&!session.MacBrowser().HasCdRoot(drive);
+ const bool probeRemovable=!find&&atRoot&&(type==DRIVE_REMOVABLE||type==DRIVE_FIXED);
  const auto deviceKey=(probeCd||probeRemovable)?VolumeCoord::DeviceKey(drive):std::string();
- session.Navigate([reader,listing,index,drive,type,probeCd,probeRemovable,deviceKey,refresh](Storage::Job& job) {
+ using namespace BrowserNavigation;
+ Request request=find?*find:Request{FileOperations::Location::Windows(VolumeCoord::Wide(path)),
+     refresh?Intent::RefreshFolder:Intent::SelectFolder,{}};
+ request.folder.directory=true;
+ request.mediaDrive=drive;
+ request.resource=deviceKey.empty()?session.ObservedWindowsKey(path):deviceKey;
+ const auto mountCurrent=[this,index,root,drive]{
+  return index<m_fat_count&&m_fats[index].m_rootitem==root&&toupper((unsigned char)m_fats[index].m_letter)-'A'==drive;
+ };
+ const auto retry=[this,index,path,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
+  NavigateWindowsFolder(index,path,refresh,found?&*found:nullptr);
+ };
+ session.Navigate(std::move(request),
+ [reader,listing,index,drive,type,probeCd,probeRemovable,deviceKey](const Request& request,Result& result,Storage::Job& job) {
   try {
    if(job.cancelled())throw Storage::Cancelled();
    if(probeCd||probeRemovable){
@@ -200,9 +212,14 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
       volume.m_file_name=image;volume.m_is_floppy=1;volume.m_free=0;
       if(volume.open()){
        reader->m_classicRevision[0]=VolumeCoord::Revision(deviceKey);
-       listing->snapshot=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",reader->GetBrowserSession().finderLayout,0,&job);
+       result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",reader->GetBrowserSession().finderLayout,0,&job);
        ValidateNavigationMedia(volume);
-       reader->CopyNavigationIcons(listing->snapshot);
+       result.folder=FileOperations::Location::Classic(image,(LPCSTR)(volume.m_volume_name+":"));
+       result.folder.directory=true;
+       result.folder.expectedCatalogId=2;
+       result.folder.expectedResource=deviceKey;
+       if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
+       reader->CopyNavigationIcons(result.listing);
        listing->floppy=true;
        return Storage::Result{};
       }
@@ -210,6 +227,8 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
      listing->removable=Removable::FromDriveRoot(VolumeCoord::Wide(listing->path));
      if(!listing->removable.empty()){
       for(auto& mount:listing->removable)mount.volume->ValidateMedia();
+      result.folder=FileOperations::Location::Mounted(listing->removable.front().volume);
+      result.folder.directory=true;
       return Storage::Result{};
      }
     }
@@ -217,12 +236,14 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
      listing->cd=MacBrowser::OpenCdRoot(listing->path.c_str());
      if(listing->cd){
       listing->cd->ValidateMedia();
+      result.folder=FileOperations::Location::Mounted(listing->cd);
+      result.folder.directory=true;
       return Storage::Result{};
      }
     }
    }
    if(job.cancelled())throw Storage::Cancelled();
-   if(refresh){
+   if(request.intent==Intent::RefreshFolder){
     auto& path=listing->path;
     while(path.size()>3){
      auto attrs=GetFileAttributesA(path.c_str());
@@ -238,40 +259,29 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
    DWORD serial=0;
    const bool checkSerial=(type==DRIVE_REMOVABLE||type==DRIVE_CDROM)&&
       GetVolumeInformationA(driveRoot,nullptr,0,&serial,nullptr,nullptr,nullptr,0);
-   listing->snapshot=reader->read_windows_browser_directory(index,listing->path.c_str(),true,job);
+   if(request.windowsMediaSerial&&(!checkSerial||serial!=*request.windowsMediaSerial))
+    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The Windows media changed since the search."};
+   result.listing=reader->read_windows_browser_directory(index,listing->path.c_str(),true,job);
    if(checkSerial){
     DWORD after=0;
     if(!GetVolumeInformationA(driveRoot,nullptr,0,&after,nullptr,nullptr,nullptr,0)||serial!=after)
      return Storage::Result{1,ERROR_MEDIA_CHANGED,"The selected media changed during navigation"};
    }
-   reader->CopyNavigationIcons(listing->snapshot);
+   result.folder.SetWindows(result.listing.folderPath);
+   result.folder.expectedIdentity=result.listing.folderIdentity;
+   reader->CopyNavigationIcons(result.listing);
   }catch(const VolumeCoord::Busy&){
+   if(deviceKey.empty())result.listing.resourceKey=VolumeCoord::PathKey(VolumeCoord::Wide(listing->path));
    return Storage::Result{1, ERROR_BUSY, "Volume busy"};
   }
   return Storage::Result{};
- }, [this,reader,listing,index,drive,path,item,root,deviceKey,refresh](const Storage::Result& result) {
+ }, [this,reader,listing,index,drive,path,item,root,deviceKey,refresh,findResult=bool(find)](Result& result) {
   auto& session=GetBrowserSession();
   auto tree=session.Tree();
   auto& control=tree->GetTreeCtrl();
-  if(index>=m_fat_count||m_fats[index].m_rootitem!=root||control.GetSelectedItem()!=item)return;
-  if (result.error == ERROR_BUSY) {
-   auto key = deviceKey.empty()?VolumeCoord::PathKey(VolumeCoord::Wide(path)):deviceKey;
-   session.Defer(key, false, [this, index, path, refresh] {
-    NavigateWindowsFolder(index, path, refresh);
-   }, true, true);
-   return;
-  }
-  if (result.code) {
-   session.RejectNavigation(session.ObservedWindowsKey(path), result.message);
-   return;
-  }
   if(listing->cd){session.MacBrowser().AdoptCd(drive,path,std::move(listing->cd),true);return;}
   if(!listing->removable.empty()){session.MacBrowser().AdoptRemovable(listing->removable,true);return;}
-  auto& snapshot=listing->snapshot;
-  if(snapshot.revision!=VolumeCoord::Revision(snapshot.resourceKey)){
-   NavigateWindowsFolder(index,path,refresh);
-   return;
-  }
+  auto& snapshot=result.listing;
   if(listing->floppy){
    auto& prepared=reader->m_volumes[0];
    int mounted=get_volume_index_by_filename(prepared.m_file_name);
@@ -293,17 +303,39 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
    PublishClassicFolder(mounted,2,std::string((LPCSTR)m_volumes[mounted].m_volume_name)+":",snapshot);
    return;
   }
+  const auto shown=result.folder.LegacyPath();
   auto destination=item;
-  if(listing->path!=path){
-   destination=tree->tree_find_fat(root,const_cast<char*>(listing->path.c_str()));
+  if(findResult||_stricmp(shown.c_str(),path.c_str())){
+   destination=tree->tree_find_fat(root,const_cast<char*>(shown.c_str()));
+   if(!destination&&findResult){
+    auto binding=reinterpret_cast<lparam_struct*>(control.GetItemData(root));
+    std::string prefix=binding?binding->path:"";
+    while(prefix.size()>3&&prefix.back()=='\\')prefix.pop_back();
+    if(prefix.empty()||_strnicmp(shown.c_str(),prefix.c_str(),prefix.size())||
+       (shown.size()>prefix.size()&&prefix.back()!='\\'&&shown[prefix.size()]!='\\'))
+     throw std::runtime_error("The search result is outside the selected volume.");
+    destination=root;
+    auto first=prefix.size();
+    if(prefix.back()=='\\')prefix.pop_back();
+    while(first<shown.size()){
+     if(shown[first]=='\\')++first;
+     const auto end=shown.find('\\',first);
+     auto leaf=shown.substr(first,end==shown.npos?end:end-first);
+     if(leaf.empty())break;
+     prefix+="\\"+leaf;
+     destination=tree->tree_fat_insert(destination,index,leaf.data(),prefix.data());
+     first=end==shown.npos?shown.size():end;
+    }
+   }
    if(!destination)destination=root;
    auto enabled=tree->SelectionNotificationsEnabled();
    tree->enable_selchange(0);
    control.SelectItem(destination);
+   control.EnsureVisible(destination);
    tree->enable_selchange(enabled);
   }
   if(refresh)tree->delete_subdir_contents(destination);
-  PublishWindowsFolder(index,listing->path,snapshot);
- });
+  PublishWindowsFolder(index,shown,snapshot);
+ },mountCurrent,retry);
  return true;
 }

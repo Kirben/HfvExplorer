@@ -9,6 +9,7 @@
 #include "BrowserPresentation.h"
 #include "BrowserDirectory.h"
 #include "charset.h"
+#include "FindFiles.h"
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 }
@@ -74,6 +75,7 @@ bool BrowserSession::UsesAsyncNavigation() const
 
 void BrowserSession::CancelNavigation()
 {
+    navigationMediaDrive_=-1;
     deferred_ = {};
     if (notifications_)notifications_->KillTimer(2);
     if (!navigation_)
@@ -85,18 +87,129 @@ void BrowserSession::CancelNavigation()
         notifications_->KillTimer(3);
 }
 
-void BrowserSession::Navigate(std::function<Storage::Result(Storage::Job&)> read,
-    std::function<void(const Storage::Result&)> ready)
+namespace {
+bool MatchesNavigationEntry(const BrowserDirectory::Row& row, const FileOperations::Location& item)
+{
+    if (item.IsMounted()) return row.storageType==LIST_MAC && row.id==item.Id() &&
+        (item.expectedName.empty() || row.entry.name==item.expectedName) &&
+        (!item.expectedParent || row.entry.parent==item.expectedParent);
+    if (item.IsClassic()) return row.storageType==LIST_HFS &&
+        (!item.expectedCatalogId || row.id==item.expectedCatalogId) &&
+        !_stricmp(row.path.c_str(),item.ClassicPath().c_str());
+    return item.IsWindows() && row.storageType==LIST_FAT &&
+        !_wcsicmp(VolumeCoord::Wide(row.path).c_str(),item.WindowsPath().c_str()) &&
+        (item.expectedIdentity.empty() || row.entry.identity==item.expectedIdentity);
+}
+}
+
+void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigation::Read read,
+    BrowserNavigation::Publish publish, std::function<bool()> mountCurrent, std::function<void()> retry)
 {
     CancelNavigation();
-    deferred_ = {};
-    notifications_->KillTimer(2);
-    navigation_ = Storage::navigationWorker().submit(std::move(read));
-    navigationReady_ = std::move(ready);
-    listingPending_ = true;
-    notifications_->SetTimer(3, 25, nullptr);
-    if (status_)
-        status_->SetPaneText(0, "Loading folder...");
+    navigationMediaDrive_=request.mediaDrive;
+#ifdef HFV_TESTING
+    navigationErrorForTest.clear();
+#endif
+    const auto anchor=tree_->GetTreeCtrl().GetSelectedItem();
+    auto result=std::make_shared<BrowserNavigation::Result>();
+    result->folder=request.folder;
+
+    std::vector<FileOperations::Location> selection;
+    if (request.intent==BrowserNavigation::Intent::RefreshFolder &&
+        current_.key==request.resource &&
+        (request.folder.IsMounted()?current_.folder==request.folder.Id():
+         request.folder.IsClassic()?current_.folder==request.folder.expectedCatalogId:
+         !_wcsicmp(VolumeCoord::Wide(current_.path).c_str(),request.folder.WindowsPath().c_str()))) {
+        auto& control=list_->GetListCtrl();
+        for(int index=-1;(index=control.GetNextItem(index,LVNI_SELECTED))>=0;)
+            if(const auto row=list_->BrowserRowAt(index);row&&!row->location.IsNone())
+            {
+                auto item=row->location;
+                item.expectedIdentity.clear();
+                item.expectedName.clear();
+                item.expectedParent=0;
+                selection.push_back(std::move(item));
+            }
+    }
+
+    navigation_=Storage::navigationWorker().submit(
+        [request,result,read=std::move(read)](Storage::Job& job){return read(request,*result,job);});
+    navigationReady_=[this,anchor,request=std::move(request),result,publish=std::move(publish),
+                      mountCurrent=std::move(mountCurrent),retry=std::move(retry),
+                      selection=std::move(selection)](const Storage::Result& status) mutable {
+        const auto stillCurrent=[&]{return tree_->GetTreeCtrl().GetSelectedItem()==anchor && mountCurrent();};
+        if(!stillCurrent())return;
+        result->status=status;
+        if(status.error==ERROR_BUSY){
+            const auto& key=result->listing.resourceKey.empty()?request.resource:result->listing.resourceKey;
+            Defer(key,request.folder.IsClassic(),[this,anchor,mountCurrent,retry]{
+                if(tree_->GetTreeCtrl().GetSelectedItem()==anchor && mountCurrent())retry();
+            },true,true);
+            return;
+        }
+        if(status.code){
+            RejectNavigation(request.resource,status.message);
+            return;
+        }
+        const auto& listing=result->listing;
+        if(!listing.resourceKey.empty() && listing.revision!=VolumeCoord::Revision(listing.resourceKey)){
+            retry();
+            return;
+        }
+        if(!request.reveal.IsNone() && std::none_of(listing.rows.begin(),listing.rows.end(),
+            [&](const auto& row){return MatchesNavigationEntry(row,request.reveal);})){
+            RejectNavigation(request.resource,"The search result changed or is hidden.");
+            return;
+        }
+        publish(*result);
+        // A drive probe may hand off to another navigation (for example an HFS+ CD).
+        if(Navigating())return;
+        if(request.folder.IsMounted() && result->folder.Volume()!=request.folder.Volume())selection.clear();
+        if(!request.reveal.IsNone())selection={request.reveal};
+        auto& control=list_->GetListCtrl();
+        bool restored=false;
+        for(int index=0;index<control.GetItemCount()&&!selection.empty();++index){
+            const auto row=list_->BrowserRowAt(index);
+            if(!row||std::none_of(selection.begin(),selection.end(),
+                [&](const auto& item){return MatchesNavigationEntry(*row,item);}))continue;
+            if(!restored)control.SetItemState(-1,0,LVIS_SELECTED|LVIS_FOCUSED);
+            const UINT state=LVIS_SELECTED|(!restored?LVIS_FOCUSED:0);
+            control.SetItemState(index,state,state);
+            if(!restored&&!request.reveal.IsNone())control.EnsureVisible(index,FALSE);
+            restored=true;
+        }
+#ifdef HFV_TESTING
+        if(request.intent==BrowserNavigation::Intent::RefreshFolder)++notificationRefreshes;
+#endif
+    };
+    listingPending_=true;
+    notifications_->SetTimer(3,25,nullptr);
+    if(status_)status_->SetPaneText(0,"Loading folder...");
+}
+
+bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)
+{
+    using namespace BrowserNavigation;
+    if(!tree_||!list_||!document_||hit.destination.IsNone())return false;
+    Request request{hit.destination,Intent::RevealFindHit,{},hit.reveal,hit.nativePath,hit.windowsMediaSerial};
+    if(request.folder.IsMounted()){
+        request.resource=request.folder.Volume()->ResourceKey();
+        if(!hit.reveal.IsNone()&&!request.catalogRoute.empty())request.catalogRoute.pop_back();
+        return browser_->RevealFindHit(request);
+    }
+    if(request.folder.IsClassic()){
+        request.resource=request.folder.expectedResource;
+        return document_->NavigateClassicFolder(legacyVolume,request.folder.expectedCatalogId,false,&request);
+    }
+    const auto path=request.folder.LegacyPath();
+    return document_->NavigateWindowsFolder(legacyVolume,path,false,&request);
+}
+
+void BrowserSession::NavigationMediaChanged(DWORD driveMask)
+{
+    if(navigationMediaDrive_<0 || !(driveMask&(DWORD(1)<<navigationMediaDrive_)))return;
+    CancelNavigation();
+    RejectNavigation({},"The selected media changed during navigation.");
 }
 
 void BrowserSession::CompleteNavigation()
@@ -111,9 +224,9 @@ void BrowserSession::CompleteNavigation()
     try {
         ready(job->result());
     } catch (const std::exception& error) {
-        if (status_)
-            status_->SetPaneText(0, error.what());
+        RejectNavigation({},error.what());
     }
+    if(!navigation_&&!deferred_)navigationMediaDrive_=-1;
 }
 
 void BrowserSession::RejectNavigation(const std::string& key,const std::string& message)
@@ -126,6 +239,7 @@ void BrowserSession::RejectNavigation(const std::string& key,const std::string& 
     }
 #ifdef HFV_TESTING
     ++notificationErrors;
+    navigationErrorForTest=message;
 #endif
 }
 
