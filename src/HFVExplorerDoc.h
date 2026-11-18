@@ -102,9 +102,16 @@ protected: // create from serialization only
 	BOOL hfs_find_next( hfs_item_type *pitem );
 
     bool prepare_classic_browser_row(hfs_item_type*,int,BrowserDirectory::Row&);
-    BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long);
+    BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr);
     BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&);
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
+    bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false);
+    void PublishClassicFolder(int index, uint32_t id, const std::string& path,
+                              const BrowserDirectory::Snapshot&);
+    bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false);
+    void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&);
+    void CopyNavigationIcons(BrowserDirectory::Snapshot&);
+    static void ValidateNavigationMedia(const CHFVVolume&);
 	void fat_walk( int volinx, LPSTR path, int list );
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );
@@ -234,7 +241,18 @@ protected: // create from serialization only
 // Attributes
 public:
  BrowserSession& GetBrowserSession()const{return *m_browserSession;}
-	CHFVVolume m_volumes[MAX_HFS_VOLUMES];
+    class VolumeSlots {
+        std::unique_ptr<CHFVVolume> volumes_[MAX_HFS_VOLUMES];
+    public:
+        CHFVVolume& operator[](int index) {
+            auto& volume = volumes_[index];
+            if (!volume) volume = std::make_unique<CHFVVolume>();
+            return *volume;
+        }
+        void ReplaceFrom(int index, VolumeSlots& source, int slot) {
+            volumes_[index].swap(source.volumes_[slot]);
+        }
+    } m_volumes;
 	CFATVolume m_fats[MAX_FAT_VOLUMES];
 	int m_hfs_count;
 	int m_fat_count;

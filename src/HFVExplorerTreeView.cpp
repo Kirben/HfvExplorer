@@ -633,7 +633,9 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 					volinx = get_lparam_volinx( m_ct->GetItemData( hItem ) );
 					name = m_ct->GetItemText( hItem );
 					if(id != 0 && name != "" && m_pDocument) {
-						((CHFVExplorerDoc*)m_pDocument)->open_sub_directory( volinx, id, "" );
+						auto doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
+                        if(type!=LIST_HFS||!doc->NavigateClassicFolder(volinx,uint32_t(id)))
+                            doc->open_sub_directory(volinx,id,"");
 					}
 					break;
 				case LIST_FAT:
@@ -641,7 +643,9 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 					if(get_lparam_path( dw, path, MAX_PATH-1 ) && m_pDocument) {
 						volinx = get_lparam_volinx( dw );
 						if(volinx >= 0) {
-							((CHFVExplorerDoc*)m_pDocument)->open_fat_directory( volinx, path, 1 );
+							auto doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
+                            if(!doc->NavigateWindowsFolder(volinx,path))
+                                doc->open_fat_directory(volinx,path,1);
 
 						}
 					}

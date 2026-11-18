@@ -1371,6 +1371,12 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
  BrowserDirectory::Snapshot snapshot;
  auto result=ShowStorageWaitJob([&](Storage::Job&){snapshot=read_classic_browser_directory(volinx,id,path,GetBrowserSession().finderLayout!=0,parent);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
  if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ PublishClassicFolder(volinx,uint32_t(id),(LPCSTR)path,snapshot);
+}
+
+void CHFVExplorerDoc::PublishClassicFolder(int volinx,uint32_t id,const std::string& path,
+    const BrowserDirectory::Snapshot& snapshot)
+{
  int finder_view_mode=snapshot.finderMode;
  if(GetBrowserSession().finderLayout){
 		switch(finder_view_mode) {
@@ -1423,7 +1429,12 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
 		}
   GetBrowserSession().List()->set_origo(snapshot.originX,snapshot.originY);
  }
- apply_browser_directory(snapshot, LIST_HFS, volinx, uint32_t(id), (LPCSTR)path, true);
+ apply_browser_directory(snapshot, LIST_HFS, volinx, id, path, true);
+ if(auto status=GetBrowserSession().Status()){
+  CString message;const auto& mdb=m_volumes[volinx].m_MDB;
+  message.Format("Exploring \"%s\": %I64u kB free",path.c_str(),hfv_size_t(mdb.drFreeBks)*mdb.drAlBlkSiz/1024);
+  status->SetPaneText(0,message);
+ }
 }
 
 
@@ -1932,6 +1943,13 @@ void CHFVExplorerDoc::CheckNewFloppy( int index )
 void CHFVExplorerDoc::OnViewRefresh() 
 {
  if(GetBrowserSession().MacBrowser().Refresh())return;
+ if(GetBrowserSession().UsesAsyncNavigation()){
+  auto& tree=GetBrowserSession().Tree()->GetTreeCtrl();
+  auto selected=tree.GetSelectedItem();
+  auto binding=selected?reinterpret_cast<lparam_struct*>(tree.GetItemData(selected)):nullptr;
+  if(binding&&binding->type==LIST_FAT&&NavigateWindowsFolder(binding->volinx,binding->path,true))return;
+  if(binding&&binding->type==LIST_HFS&&NavigateClassicFolder(binding->volinx,uint32_t(binding->id),true))return;
+ }
  if(BackgroundCopies::Active()){
   CheckNewMedia(TRUE,TRUE,TRUE);
   auto tree=GetBrowserSession().Tree();auto item=tree->GetTreeCtrl().GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->GetTreeCtrl().GetItemData(item)):nullptr;

@@ -4,6 +4,7 @@
 #include "BrowserTransfers.h"
 class CHFVExplorerListView;
 class BrowserSession;
+namespace Removable { struct Mounted; }
 class MainMacBrowser {
     BrowserSession& session_;
     struct State;
@@ -15,6 +16,9 @@ public:
     int OpenImage(const char *path);
     int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});
     int OpenCd(const char *root);
+    bool HasCdRoot(int drive) const;
+    void AdoptCd(int drive,const std::string& root,std::shared_ptr<MacBrowser::Volume>,bool asynchronous);
+    void AdoptRemovable(std::vector<Removable::Mounted>&,bool asynchronous);
     bool ScanRemovable(bool silent=false,bool startupOnly=false);
     int OpenRemovableRoot(const char* root);
     void DetachTree();

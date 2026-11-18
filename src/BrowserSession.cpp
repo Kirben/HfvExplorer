@@ -63,6 +63,15 @@ void BrowserSession::SetLocationTitle(std::wstring title){
 }
 std::string BrowserSession::ObservedWindowsKey(const std::string& path)const{return current_.type==LIST_FAT&&!_stricmp(current_.path.c_str(),path.c_str())?current_.key:std::string();}
 void BrowserSession::ClearCurrent(){CancelNavigation();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
+bool BrowserSession::UsesAsyncNavigation() const
+{
+#ifdef HFV_TESTING
+    if (asyncNavigationForTest)
+        return true;
+#endif
+    return owner_ && owner_->IsWindowVisible();
+}
+
 void BrowserSession::CancelNavigation()
 {
     deferred_ = {};
@@ -247,15 +256,25 @@ void BrowserSession::ProcessChanges(){
 }
 void BrowserSession::RefreshLegacy(const Context& context){
  if(!document_)return;
+ if(UsesAsyncNavigation()){
+  auto item=tree_->GetTreeCtrl().GetSelectedItem();
+  auto binding=item?reinterpret_cast<lparam_struct*>(tree_->GetTreeCtrl().GetItemData(item)):nullptr;
+  if(!binding||binding->type!=context.type||binding->volinx!=context.index||
+     (context.type==LIST_HFS&&uint32_t(binding->id)!=context.folder)||
+     (context.type==LIST_FAT&&_stricmp(binding->path,context.path.c_str())))return;
+ }
  if(context.index<0||(context.type==LIST_FAT?context.index>=document_->m_fat_count:context.index>=document_->m_hfs_count))throw std::runtime_error("The volume is no longer attached");
  if(context.type==LIST_FAT){
+  if(document_->NavigateWindowsFolder(context.index,context.path,true))return;
   std::string path=context.path;auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Browse}});for(;;){DWORD a=GetFileAttributesA(path.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_DIRECTORY))break;DWORD error=GetLastError();if(error!=ERROR_PATH_NOT_FOUND&&error!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("The Windows folder is unavailable");auto slash=path.find_last_of('\\');if(slash==2&&path[1]==':'){path.resize(3);continue;}if(slash==path.npos||slash<3)throw std::runtime_error("The Windows folder no longer exists");path.resize(slash);}return Storage::Result{};},!owner_->IsWindowVisible(),owner_);
   if(result.code)throw std::runtime_error(result.message);
   auto item=tree_->tree_find_fat(document_->m_fats[context.index].m_rootitem,const_cast<char*>(path.c_str()));if(!item)item=document_->m_fats[context.index].m_rootitem;
   bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);tree_->GetTreeCtrl().SelectItem(item);tree_->delete_subdir_contents(item);tree_->enable_selchange(enabled);
   document_->open_fat_directory(context.index,const_cast<char*>(path.c_str()),1);return;
  }
- if(context.type!=LIST_HFS)return;auto& mounted=document_->m_volumes[context.index];std::string path;
+ if(context.type!=LIST_HFS)return;
+ if(document_->NavigateClassicFolder(context.index,context.folder,true))return;
+ auto& mounted=document_->m_volumes[context.index];std::string path;
  auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Read}});mounted.close();if(!mounted.open())throw std::runtime_error("The HFS volume could not be reopened");
   auto volume=hfs_mount(const_cast<char*>((LPCSTR)mounted.m_file_name),1,O_RDONLY);if(!volume)throw std::runtime_error(hfs_error?hfs_error:"The HFS volume is unavailable");struct Close{hfsvol* v;~Close(){hfs_umount(v);}}close{volume};
   long id=long(context.folder);if(hfs_setcwd(volume,id)<0)id=2;std::vector<std::string> names;std::set<long> visited;
