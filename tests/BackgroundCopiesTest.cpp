@@ -658,9 +658,21 @@ int RunBackgroundMetadataTest(const char* directory){
    Select(surviving,L"Edited");
    auto& list=surviving.List()->GetListCtrl();
    const int row=Row(surviving,L"Edited");
-   const CPoint startPosition(70,80);
+   auto* finderFrame=surviving.Owner();
+   const UINT initialDpi=NativeDpi::Window(finderFrame->GetSafeHwnd());
+   RECT frameBounds{};
+   finderFrame->GetWindowRect(&frameBounds);
+   auto changeDpi=[&](UINT dpi) {
+    finderFrame->SendMessage(NativeDpi::Changed,MAKEWPARAM(dpi,dpi),LPARAM(&frameBounds));
+   };
+   changeDpi(144);
+   const CPoint startPosition(NativeDpi::Scale(70,144),NativeDpi::Scale(80,144));
    Check(list.SetItemPosition(row,startPosition),"place initial Finder icon");
-   const CSize displacement(12,16);
+   changeDpi(192);
+   CPoint scaledPosition;
+   Check(list.GetItemPosition(row,&scaledPosition)&&scaledPosition==CPoint(140,160),
+         "DPI change altered the Finder icon's logical position");
+   const CSize displacement(NativeDpi::Scale(12,192),NativeDpi::Scale(16,192));
    BackgroundCopies::enabled=false;
    surviving.List()->PlaceSelectedIconsForTest(displacement);
    BackgroundCopies::enabled=true;
@@ -671,6 +683,7 @@ int RunBackgroundMetadataTest(const char* directory){
    Check(physical.properties.fdlocation.h==82&&physical.properties.fdlocation.v==96&&
          (physical.properties.fdflags&14)==2*FINDER_COLOR_HOT&&disk.writes&&!disk.locked,
          "Finder icon placement changed unrelated metadata or left the floppy locked");
+   changeDpi(initialDpi);
    surviving.finderLayout=false;
    fprintf(report,"PASS: browser Finder label and icon placement use typed jobs on a simulated physical floppy and preserve other metadata.\n");
   }

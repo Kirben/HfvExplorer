@@ -110,7 +110,9 @@ continuing after the source browser closes. Physical-drive validation remains
 outstanding.
 
 Target: Windows 7 SP1 with KB2533623 or a superseding update; Windows 8/8.1,
-10 and 11 x64. Build with pinned v143 14.44 tools and matching static MFC/CRT.
+10 and 11 x64. HFVExplorer uses Per-Monitor DPI Awareness V2 on Windows 10
+1703 and newer, and system DPI awareness on older supported Windows versions.
+Build with pinned v143 14.44 tools and matching static MFC/CRT.
 Build and run checks with build-x64.ps1. Older Windows versions still await
 VM execution tests. The original readme
 below describes the historical release and its obsolete drivers.

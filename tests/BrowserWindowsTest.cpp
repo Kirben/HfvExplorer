@@ -49,6 +49,35 @@ std::wstring Image(const CString& path,const std::u16string& name){
  return wide;
 }
 std::wstring Caption(CWnd* window){wchar_t text[32768]{};GetWindowTextW(window->GetSafeHwnd(),text,ARRAYSIZE(text));return text;}
+void CheckDpiAwareness(HWND frame) {
+ Check(IsProcessDPIAware()!=FALSE,"shipping manifest did not enable DPI awareness");
+ using Query=HANDLE(WINAPI*)(HWND);
+ using Equal=BOOL(WINAPI*)(HANDLE,HANDLE);
+ using Valid=BOOL(WINAPI*)(HANDLE);
+ using Set=HANDLE(WINAPI*)(HANDLE);
+ const auto user=GetModuleHandleW(L"user32.dll");
+ const auto query=reinterpret_cast<Query>(GetProcAddress(user,"GetWindowDpiAwarenessContext"));
+ const auto equal=reinterpret_cast<Equal>(GetProcAddress(user,"AreDpiAwarenessContextsEqual"));
+ const auto valid=reinterpret_cast<Valid>(GetProcAddress(user,"IsValidDpiAwarenessContext"));
+ const auto set=reinterpret_cast<Set>(GetProcAddress(user,"SetThreadDpiAwarenessContext"));
+ const auto perMonitorV2=reinterpret_cast<HANDLE>(INT_PTR(-4));
+ const auto systemAware=reinterpret_cast<HANDLE>(INT_PTR(-2));
+ if(!query||!equal||!valid||!valid(perMonitorV2)){
+  Check(NativeDpi::Window(frame)==NativeDpi::System(),"legacy system-DPI fallback");
+  if(query&&equal)Check(equal(query(frame),systemAware)!=FALSE,"legacy window is not system-DPI aware");
+  return;
+ }
+ Check(equal(query(frame),perMonitorV2)!=FALSE,"shipping frame did not enter PMv2");
+ Check(set!=nullptr,"system-DPI context unavailable");
+ const auto previous=set(systemAware);
+ Check(previous!=nullptr,"could not enter system-DPI context");
+ const auto legacy=CreateWindowExW(0,L"STATIC",L"",WS_POPUP,0,0,1,1,nullptr,nullptr,nullptr,nullptr);
+ const auto systemDpi=NativeDpi::System();
+ set(previous);
+ const bool fallback=legacy&&equal(query(legacy),systemAware)&&NativeDpi::Window(legacy)==systemDpi;
+ if(legacy)DestroyWindow(legacy);
+ Check(fallback,"system-aware window did not use the system DPI");
+}
 void NoQuit(){MSG message{};Check(!PeekMessage(&message,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE),"closing a browser posted WM_QUIT with another window open");}
 struct MenuState:CCmdUI{bool enabled=false;void Enable(BOOL value=TRUE)override{enabled=value!=FALSE;}};
 }
@@ -60,7 +89,10 @@ int RunBrowserWindowsTest(const char* directory){
   app.InstallBrowserTemplate(RUNTIME_CLASS(BrowserWindowTestDoc),RUNTIME_CLASS(BrowserWindowTestFrame));
   auto a=app.CreateBrowser(FALSE);Check(a&&app.m_browsers.size()==1&&app.m_pMainWnd==a,"first browser registration");auto& sa=a->GetBrowserSession();
   Check(sa.AwaitNavigationForTest(),"startup folder completion");
-  HWND ah=a->GetSafeHwnd();a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==VolumeCoord::Wide(std::string((LPCSTR)host))+L" \u2014 HFVExplorer","startup Windows folder title was replaced by Untitled");Check(!a->IsWindowVisible(),"test unexpectedly displayed a browser");
+  HWND ah=a->GetSafeHwnd();
+  CheckDpiAwareness(ah);
+  fprintf(report,"PASS: executable DPI awareness and system-DPI fallback.\n");
+  a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==VolumeCoord::Wide(std::string((LPCSTR)host))+L" \u2014 HFVExplorer","startup Windows folder title was replaced by Untitled");Check(!a->IsWindowVisible(),"test unexpectedly displayed a browser");
   MenuState menu;menu.m_nID=ID_TOOLS_NEW_BROWSER;Check(a->OnCmdMsg(ID_TOOLS_NEW_BROWSER,CN_UPDATE_COMMAND_UI,&menu,nullptr)&&menu.enabled,"New browser has no enabled update handler");
   a->SendMessage(WM_COMMAND,ID_TOOLS_NEW_BROWSER);Check(app.m_browsers.size()==2,"New browser menu did not create an independent window");
   auto b=app.m_browsers.back();auto& sb=b->GetBrowserSession();HWND bh=b->GetSafeHwnd();
@@ -151,6 +183,10 @@ int RunBrowserWindowsTest(const char* directory){
    change(144,suggested);
    Check(details.GetColumnWidth(0)==253,"round trips drifted from the user column width");
   }
+  sa.List()->set_style(LVS_LIST);
+  change(192,suggested);
+  sa.List()->set_style(LVS_REPORT);
+  Check(details.GetColumnWidth(0)==NativeDpi::Scale(253,192,144),"List mode transition changed Details widths");
   change(96,original);
   details.SetColumnWidth(0,originalWidth);
   Check(listIconSize(details,LVSIL_NORMAL)==CSize(32,32),"browser image list return to 100 percent");

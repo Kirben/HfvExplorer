@@ -240,12 +240,14 @@ void CHFVExplorerListView::ApplyDpi(UINT dpi)
     m_smallImages.Apply(dpi, [&](HIMAGELIST images) {
         m_cl->SendMessage(LVM_SETIMAGELIST,LVSIL_SMALL,LPARAM(images));
     });
-    auto* header = m_cl->GetHeaderCtrl();
-    if (header) {
-        for (int i = 0; i < header->GetItemCount() && i < ARRAYSIZE(m_columns); ++i) {
-            const auto width = m_columns[i].Resize(m_cl->GetColumnWidth(i), m_dpi, dpi);
-            m_cl->SetColumnWidth(i, width);
-        }
+    // Width messages in List mode address the icon column rather than
+    // the actual Details columns. Read and write the column records.
+    for (int i = 0; i < ARRAYSIZE(m_columns); ++i) {
+        LVCOLUMN column{};
+        column.mask = LVCF_WIDTH;
+        if (!m_cl->GetColumn(i, &column)) continue;
+        column.cx = m_columns[i].Resize(column.cx, m_dpi, dpi);
+        m_cl->SetColumn(i, &column);
     }
     m_cl->SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
     m_dpi = dpi;
