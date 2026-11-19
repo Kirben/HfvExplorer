@@ -440,6 +440,11 @@ public:
 };
 }
 
+bool DecodeAppleDataCompression(const HfsPlus::Bytes& packed,HfsPlus::Bytes& decoded)
+{
+    return DecodeAdc(packed,decoded);
+}
+
 bool Unwrap(std::unique_ptr<HfsPlus::Source>& source)
 {
     const auto footer=ReadFooter(*source);

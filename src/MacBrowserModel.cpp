@@ -9,6 +9,7 @@
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
+#include "NdifImage.h"
 #include "ApfsVolume.h"
 #include "DiskPartitions.h"
 #include "DmgEncryption.h"
@@ -320,7 +321,7 @@ std::shared_ptr<Volume> OpenLegacyDmgVolume(const std::shared_ptr<HfsPlus::Sourc
 }
 
 std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
-                                const std::wstring& externalJournal)
+                                const std::wstring& externalJournal,const char* unsupported="The DMG contains no supported filesystem")
 {
     if(HfsPlus::Volume::Recognizes(*source))
         return FromHfsPlus(std::move(source),false,key,externalJournal);
@@ -340,7 +341,7 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
     }
     std::unique_ptr<HfsPlus::Source> opticalSource=std::make_unique<ReadOnlyDiskSlice>(disk,0,disk->Size());
     if(auto optical=Optical::Open(opticalSource,key))return optical;
-    throw HfsPlus::Error("The DMG contains no supported filesystem");
+    throw HfsPlus::Error(unsupported);
 }
 }
 
@@ -377,6 +378,8 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
     const bool encrypted=Dmg::Unlock(source,password);
     if(Dmg::Unwrap(source)||encrypted)return OpenDmg(std::move(source),key,externalJournal);
+    if(externalJournal.empty()&&Ndif::Unwrap(source))
+        return OpenDmg(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
     if(externalJournal.empty())
         if(auto tracks=CdMedia::OpenTrackImage(path,source,key))return OpenTrackImages(std::move(*tracks),key);
     if (HfsPlus::Volume::Recognizes(*source)) {
