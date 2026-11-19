@@ -60,7 +60,7 @@ void FloppyWriter::Report(bool ok,int drive) {
  ok?"PASS":"FAIL",'A'+drive,error_,stage_.c_str(),offset_,offset_/512,track/2,track%2,(offset_%kTrack)/512+1,requested_,transferred_,writtenTracks_,plannedTracks_,verifiedTracks_,plannedTracks_,writesStarted_);
  diagnostics_+=line;
 }
-bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks,FloppyProgress progress,void* context,const std::vector<BYTE>* expectedOriginal) {
+bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks,FloppyProgress progress,void* context,const std::vector<BYTE>* expectedOriginal,std::optional<DWORD> expectedGeneration) {
     error_=flushError_=0;writesStarted_=false;writtenTracks_=verifiedTracks_=0;plannedTracks_=160;diagnostics_.clear();Mark("Validate source image");
     if(drive<0 || drive>25 || !ValidateFloppyHfs(image) || (expectedOriginal && (formatTracks || expectedOriginal->size()!=kImage))) {error_=ERROR_INVALID_PARAMETER;Report(false,drive);return false;}
     Mark("Acquire exclusive floppy access");
@@ -92,6 +92,7 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
     if(!geometry1440(geometry)) {SetLastError(ERROR_NOT_SUPPORTED);return finish(false);}
     Mark("Check initial media readiness");
     if(!api_->Verify(handle,generation)) return finish(false);
+    if(expectedGeneration&&*expectedGeneration!=generation){SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
     Mark("Lock volume");
     if(!api_->Lock(handle)) return finish(false);
     locked=true;

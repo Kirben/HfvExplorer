@@ -4,8 +4,12 @@
 namespace BackgroundCopies {
 bool Enabled();bool Active();
 bool Start(std::vector<FileOperations::Request>,CWnd* owner,bool singleFile,std::function<void(bool)> completed={},std::function<void(const FileOperations::Completion&)> observed={});
+struct StorageJobOptions {
+ bool cancellable=false;
+ const char* successMessage=nullptr;
+};
 bool StartStorage(std::function<Storage::Result(Storage::Job&)>,CWnd* owner,const char* title,
-                  const char* operation,std::function<void(bool)> completed={});
+                  const char* operation,std::function<void(bool)> completed={},StorageJobOptions options={});
 void TransferOwner(HWND closing,HWND replacement);
 void CancelAll();void Shutdown();
 #ifdef HFV_TESTING

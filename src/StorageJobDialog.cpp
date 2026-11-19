@@ -86,7 +86,7 @@ class JobDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
  bool modeless_=false,completed_=false,mutation_=false,handlingTimer_=false;
  bool dismissOnCompletion_=false;unsigned dispatchDepth_=0;
- std::string operation_="Copy";
+ std::string operation_="Copy",successMessage_;
  std::function<bool()> advance_;
  std::function<Storage::Result()> finished_;
  std::function<void()> cancelled_;
@@ -154,6 +154,7 @@ class JobDialog : public CDialog {
  }
  DWORD started_=GetTickCount();
 public:
+ void SuccessMessage(const char* message){if(message)successMessage_=message;}
  void Operation(const char* operation){operation_=operation;mutation_=operation_!="Copy"&&operation_!="Resource import";}
  void DismissOnCompletion(){dismissOnCompletion_=true;}
  void Planning(){job_=std::make_shared<Storage::Job>();Storage::Progress p;p.phase="Choose a copy mode";job_->progress(p);job_->finish({});}
@@ -255,14 +256,15 @@ public:
      Storage::Result result=job_->result();
      try{result=finished_();}catch(CException* error){char text[512]{};error->GetErrorMessage(text,ARRAYSIZE(text));displayError=text[0]?text:"MFC completion error";error->Delete();}catch(const std::exception& error){displayError=error.what();if(displayError.empty())displayError="Completion callback failed";}catch(...){displayError="Unknown completion error";}
      if(!GetSafeHwnd()||!IsWindow(m_hWnd))return 0;
-     if(!displayError.empty()){auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
-     if(dismissOnCompletion_||result.outcome==Storage::Outcome::Succeeded){DestroyWindow();return 0;}
-     const char* ending=result.outcome==Storage::Outcome::Cancelled ? " cancelled" :
+     if(!displayError.empty()){auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
+     if(dismissOnCompletion_||(result.outcome==Storage::Outcome::Succeeded&&successMessage_.empty())){DestroyWindow();return 0;}
+     const bool succeeded=result.outcome==Storage::Outcome::Succeeded;
+     const char* ending=succeeded?" completed":result.outcome==Storage::Outcome::Cancelled ? " cancelled" :
                        result.outcome==Storage::Outcome::Failed ? " failed" : " finished with skipped files";
      auto status=operation_+ending;
      if(result.partial)status+=" (partial completion)";
      SetDlgItemText(IDC_CP_PHASE,status.c_str());
-     auto detail=result.message;
+     auto detail=succeeded?successMessage_:result.message;
      auto append=[&](const char* message){if(!detail.empty())detail+=" ";detail+=message;};
      if(result.partial)append("Completed changes were retained.");
      switch(result.rollback){
@@ -271,7 +273,7 @@ public:
      case Storage::Rollback::Unverified: append("The final storage state could not be verified."); break;
      default: break;
      }
-     auto text=BrowserPresentation::FromUtf8(detail);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,text.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
+     auto text=BrowserPresentation::FromUtf8(detail);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,text.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
     }
     KillTimer(1);if(keepWindow_)EndModalLoop(IDOK);else{state(TBPF_NOPROGRESS);PrepareToClose();EndDialog(IDOK);}}
    return 0;
@@ -488,7 +490,7 @@ struct Batch {
  }
 };
 std::vector<std::unique_ptr<Batch>> batches;
-bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancellable,const char* title,const char* operation){
+bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancellable,const char* title,const char* operation,const char* successMessage=nullptr){
  batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->controller.Finished()&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
  auto ptr=batch.get();
  ++active;
@@ -500,6 +502,7 @@ bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancel
   // Desktop owner: never disables or binds the lifetime to a browser frame.
   batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),title,hidden,CWnd::GetDesktopWindow(),false,false,single,cancellable,true));
   batch->dialog->Operation(operation);
+  batch->dialog->SuccessMessage(successMessage);
   batch->dialog->ProgressOwner(owner?owner->GetSafeHwnd():nullptr);
   batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{return ptr->Finish();},
    [ptr]{ptr->Cancel();},
@@ -530,9 +533,9 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
  return StartBatch(std::move(batch),owner,single,true,title,operation);
 }
 bool StartStorage(JobController::Work work,CWnd* owner,const char* title,
-                  const char* operation,std::function<void(bool)> completed){
+                  const char* operation,std::function<void(bool)> completed,StorageJobOptions options){
  return StartBatch(std::make_unique<Batch>(std::move(work),std::move(completed)),
-                   owner,true,false,title,operation);
+                   owner,true,options.cancellable,title,operation,options.successMessage);
 }
 void TransferOwner(HWND closing,HWND replacement){
  for(auto& batch:batches)if(batch->dialog->ProgressOwner()==closing)batch->dialog->ProgressOwner(replacement);

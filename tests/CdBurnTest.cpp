@@ -5,6 +5,7 @@
 #include "DeviceWait.h"
 #include "CdBurn.h"
 #include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
 #include "OptionsSheet.h"
 #include <imapi2error.h>
 #include <stdio.h>
@@ -85,6 +86,26 @@ int RunCdBurnTest(const char* directory){
    StorageAction action;auto preflight=ShowStorageWaitJob(PrepareCdBurn(path,L"simulated-recorder",std::make_shared<CdBurnPlan>(),std::make_shared<FakeBurn>()),true);
    check(preflight.code==0&&!StorageUi::state().sessionOpen&&owner.IsWindowEnabled(),"complete preflight closes waiting dialog before configuration/confirmation UI");
   }
+  auto modeless=std::make_shared<FakeBurn>();
+  modeless->delay=60;
+  const char verified[]="Recording finalized and verified.";
+  storageUiTest={};
+  check(BackgroundCopies::StartStorage(MakeCdBurnJob(*plan,modeless),&owner,"Hidden modeless burn",
+        "CD burn",{},{true,verified})&&owner.IsWindowEnabled(),"submit modeless burn");
+  const auto progress=BackgroundCopies::DialogWindow();
+  const auto started=GetTickCount();
+  while(BackgroundCopies::Active()&&GetTickCount()-started<5000){
+   MSG message{};
+   while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){if(message.message!=WM_QUIT)DispatchMessage(&message);}
+   Sleep(1);
+  }
+  char detail[128]{};
+  GetDlgItemTextA(progress,IDC_CP_FILE,detail,ARRAYSIZE(detail));
+  check(!BackgroundCopies::Active()&&!BackgroundCopies::LastResult().code&&
+        modeless->configurations==1&&modeless->writes==1&&!strcmp(detail,verified)&&
+        !storageUiTest.disabledDuring&&owner.IsWindowEnabled()&&load(path)==bytes,
+        "modeless burn failed to finalize, verify, report completion or preserve its input");
+  SendMessage(progress,WM_CLOSE,0,0);
   COptionsSheet options("Options",nullptr,99);check(options.GetPageCount()==9&&options.m_last_active_page==8,"HPBurner page removed and remembered tab index clamped");
   check(FindResourceA(AfxGetResourceHandle(),MAKEINTRESOURCEA(167),RT_DIALOG)==nullptr,"HPBurner tab resource removed");
   owner.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;

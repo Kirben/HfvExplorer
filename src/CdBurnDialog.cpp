@@ -4,6 +4,7 @@
 #include "CdBurn.h"
 #include "CdBurnDialog.h"
 #include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
 namespace {
 class BurnDialog : public CDialog {
  const std::vector<CdRecorder>& recorders_;
@@ -37,7 +38,6 @@ void ShowCdBurnDialog(CWnd* owner,const char* initialImage){
  if(result.code){AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return;}
  CString question;question.Format("Burn this image to the blank disc in:\r\n%s\r\n\r\nImage: %s\r\nSize: %.2f MiB\r\n\r\nThe disc will be finalized and fully verified. Existing discs are not erased or overwritten.\r\n\r\nStart burning?",recorder.name.c_str(),(LPCSTR)dialog.image,double(plan->bytes)/(1024*1024));
  if(AfxMessageBox(question,MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
- result=ShowStorageJob(MakeCdBurnJob(*plan),"Burning CD image",false,true,true);
- if(result.code){if(result.error!=ERROR_CANCELLED)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);else AfxMessageBox("Burn cancelled. If recording started, the disc may be incomplete.",MB_OK|MB_ICONINFORMATION);}
- else AfxMessageBox("CD image burned, finalized and fully verified.",MB_OK|MB_ICONINFORMATION);
+ BackgroundCopies::StartStorage(MakeCdBurnJob(*plan),owner,"Burning CD image","CD burn",{},
+     {true,"CD image burned, finalized and fully verified."});
 }

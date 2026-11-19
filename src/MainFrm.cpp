@@ -951,7 +951,7 @@ void CMainFrame::OnFileNewvolume()
   pc_to_mac_charset((unsigned char*)vname);
   if(!PrepareFloppyHfs(vname,image,error)){AfxMessageBox(error.c_str());return;}
   WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume",ReleaseFloppyForWrite,GetBrowserSession().Document());
-  SendMessage(WM_COMMAND,ID_VIEW_REFRESH);return;
+  return;
  }
 
  auto wide=VolumeCoord::Wide(volpath);auto formatted=ShowStorageJob(CommandStorage::Guard(CommandStorage::ImageWrite(wide),[=](Storage::Job&){LegacyEngine::Scope engine;return HFSIFACE_format(const_cast<char*>(volpath),const_cast<char*>(vname),size,init)==0?Storage::Result{}:Storage::Result{1,ERROR_WRITE_FAULT,"Could not format the selected image"};},{VolumeCoord::ImageKey(wide),VolumeCoord::PathKey(wide)}),"Format HFS image",false,false,false,this);
@@ -1084,8 +1084,8 @@ void CMainFrame::OnFileVolumefromfloppy()
 {
  CAskVolumeToFloppy dialog(this);dialog.to_floppy=FALSE;dialog.m_caption="Create a volume file from floppy";
  if(dialog.DoModal()!=IDOK)return;
- auto result=ShowStorageJob(MakeFloppyImageJob(dialog.m_drive,(LPCSTR)dialog.m_volname),"Reading floppy image",false,true,true);
- if(result.code&&result.error!=ERROR_CANCELLED)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
+ BackgroundCopies::StartStorage(MakeFloppyImageJob(dialog.m_drive,(LPCSTR)dialog.m_volname),
+     this,"Reading floppy image","Floppy image dump",{},{true});
 }
 
 void CMainFrame::OnToolsDumpcddebug()
@@ -1314,7 +1314,6 @@ void CMainFrame::OnFileVolumetofloppy()
  std::vector<BYTE> image;std::string error;
  auto loaded=ShowStorageWaitJob(CommandStorage::Guard({{VolumeCoord::ImageKey(std::string((LPCSTR)dialog.m_volname)),VolumeCoord::Mode::Read}},[&](Storage::Job&){return LoadFloppyHfs(dialog.m_volname,image,error)?Storage::Result{}:Storage::Result{1,ERROR_READ_FAULT,error};}));if(loaded.code){AfxMessageBox(loaded.message.c_str());return;}
  WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname,ReleaseFloppyForWrite,GetBrowserSession().Document());
- SendMessage(WM_COMMAND,ID_VIEW_REFRESH);
 }
 
 void CMainFrame::OnToolsFind()

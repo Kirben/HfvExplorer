@@ -710,6 +710,10 @@ int RunPerVolumeCommandsTest(const char* directory){
   fprintf(report,"PASS: burning reserves source image plus recorder/drive aliases, rejects late conflicts and remapped targets before recording, and formatting distinguishes busy images from unrelated new images.\n");
 #ifdef HFV_FLOPPY_TESTING
   std::vector<BYTE> bytes;std::string why;Check(PrepareFloppyHfs("PolicyFloppy",bytes,why),"prepare policy floppy");TestFloppy disk(bytes);auto write=MakeFloppyWriteJob(24,bytes,&disk);reservation=std::make_unique<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{device24,VolumeCoord::Mode::Read}});blocked=run(write);Check(blocked.error==ERROR_BUSY&&!disk.disk.opens&&!disk.writes,"floppy format touched busy device");Check(!run(MakeFloppyWriteJob(25,bytes,&disk)).code&&disk.writes&&!disk.locked,"unrelated floppy write/verify failed");reservation.reset();
+  const auto writesBefore=disk.writes;
+  auto replaced=run(MakeFloppyWriteJob(25,bytes,&disk,{},disk.disk.changeCount+1));
+  Check(replaced.error==ERROR_MEDIA_CHANGED&&disk.writes==writesBefore&&!disk.locked,
+        "queued floppy write accepted a disk that replaced the confirmed media");
   fprintf(report,"PASS: simulated floppy format/write checks reader reservations before opening the device; an unrelated floppy completes write/readback and unlocks during the stalled copy.\n");
 #endif
   CString cdFixture=host+"\\idle-cd.dsk";{auto image=HfsPlus::CreateImage(VolumeCoord::Wide((LPCSTR)cdFixture).c_str(),8*1024*1024);HfsPlus::Volume::Format(*image,u"IdleCD",true);}

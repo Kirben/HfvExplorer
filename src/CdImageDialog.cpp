@@ -4,6 +4,7 @@
 #include "CdImageDialog.h"
 #include "CdImage.h"
 #include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
 namespace {
 class CdTrackDialog:public CDialog {
 public:
@@ -45,8 +46,8 @@ void ShowCdImageDialog(CWnd* owner) {
  if(inspected.code){if(inspected.error!=ERROR_CANCELLED)AfxMessageBox(inspected.message.c_str(),MB_OK|MB_ICONERROR);return;}
  CdTrackDialog choose(owner,*tracks);if(choose.DoModal()!=IDOK)return;
  CdImageSelection selection;selection.track=tracks->at(choose.selected).number;selection.expected=tracks->at(choose.selected);selection.identityKnown=true;selection.generation=*generation;selection.macVolumeOnly=choose.macOnly;
- auto result=ShowStorageJob(MakeCdImageJob(options.drive,(LPCSTR)options.output,source,selection),"Saving CD image",false,true,true,owner);
- if(result.code&&result.error!=ERROR_CANCELLED)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
+ BackgroundCopies::StartStorage(MakeCdImageJob(options.drive,(LPCSTR)options.output,source,selection),
+     owner,"Saving CD image","CD image dump",{},{true});
 }
 
 #ifdef HFV_TESTING
