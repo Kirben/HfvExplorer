@@ -129,6 +129,38 @@ int RunNdifImageTest(const char* directory)
                   result.back()=='B',"NDIF cross-chunk read differed");
             Reject([&]{source->Write(0,data.data(),1);},"NDIF allowed a write");
         }
+        Bytes bits;
+        unsigned bit=0;
+        auto emit=[&](unsigned value,unsigned width){
+            for(unsigned i=width;i;--i){
+                if(bit%8==0)bits.push_back(0);
+                bits.back()|=uint8_t(((value>>(i-1))&1)<<(7-bit%8));
+                ++bit;
+            }
+        };
+        emit(0,3);emit('K',8); // one literal followed by distance-one copies
+        const auto shortDistance=[&](unsigned offset){
+            constexpr unsigned cutoffs[]={10,20,40,80,160,672};
+            unsigned width=1;
+            for(auto threshold:cutoffs)if(offset>threshold)++width;
+            emit(0,width);
+        };
+        for(unsigned at=1;at<508;at+=3){
+            emit(at==1?0:1,2);
+            shortDistance(at);
+        }
+        emit(8,4);shortDistance(508); // length code 1000 gives a four-byte copy
+        auto ken=Map(1,2);
+        Row(ken,0,0,0x80,0,uint32_t(bits.size()));Row(ken,1,1,0xff,0,0);
+        std::unique_ptr<Source> kenSource=std::make_unique<Memory>(Pack(bits,Resource(ken)));
+        Check(Ndif::Unwrap(kenSource)&&Disk::Read(*kenSource,0,512)==Bytes(512,'K'),
+              "NDIF KenCode expansion differed");
+        bits.resize(bits.size()-4);
+        Row(ken,0,0,0x80,0,uint32_t(bits.size()));
+        kenSource=std::make_unique<Memory>(Pack(bits,Resource(ken)));
+        Check(Ndif::Unwrap(kenSource),"Truncated NDIF KenCode fixture did not reach the codec");
+        Reject([&]{Disk::Read(*kenSource,0,512);},"NDIF accepted truncated KenCode data");
+        fprintf(report,"PASS: NDIF KenCode literals, overlapping copies and truncated stream rejection.\n");
         auto invalid=bcem;
         Row(invalid,2,1,0x83,512,24);
         std::unique_ptr<Source> input=std::make_unique<Memory>(Pack(data,Resource(invalid)));
