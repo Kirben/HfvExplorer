@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "FindFiles.h"
+#include "MacBrowserModel.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriter.h"
 #include "ReadOnlyCdBackend.h"
@@ -63,6 +64,22 @@ int RunFindFilesTest(const char* directory){
   std::string loop=host+"\\Loop";bool link=CreateSymbolicLinkA(loop.c_str(),host.c_str(),SYMBOLIC_LINK_FLAG_DIRECTORY|2)!=FALSE;
   if(link){windows.pattern="*.*";auto linked=execute(windows);check(linked.first->result().code==0&&linked.second->hits.size()==3,"directory reparse points not traversed");check(RemoveDirectoryA(loop.c_str())!=FALSE,"remove test link only");}
   else fprintf(report,"NOTE: directory-link test skipped because link creation is unavailable (Windows %lu).\n",GetLastError());
+  windows.pattern="*";windows.limit=1;
+  auto cappedWindows=execute(windows);
+  check(cappedWindows.first->result().code==0&&cappedWindows.second->hits.size()==1&&
+        cappedWindows.second->truncated&&cappedWindows.second->hits.front().reveal.IsWindows(),
+        "common Windows match limit and typed location");
+  {
+   auto mounted=MacBrowser::OpenClassic(image,"FindMac:",false);
+   FindRequest scoped;scoped.location.mac=true;scoped.location.native=mounted;scoped.location.directory="FindMac";
+   scoped.pattern="read";scoped.limit=1;
+   auto cappedMounted=execute(scoped);
+   check(cappedMounted.first->result().code==0&&cappedMounted.second->hits.size()==1&&
+         cappedMounted.second->truncated&&cappedMounted.second->hits.front().reveal.IsMounted()&&
+         cappedMounted.second->hits.front().nativePath.size()>1,
+         "common mounted match limit and typed catalog route");
+   mounted->Close();
+  }
   windows.location.directory=root+"\\Missing";check(execute(windows).first->result().code!=0,"missing Windows search folder reported");
   readonly_cd_backend_init();char physical[64];get_floppy_volume_file_name(25,physical);FakeFloppy fake(original);check(readonly_floppy_attach_api(25,&fake),"attach read-only search floppy");
   mac.location={true,physical,"FindMac:","FindMac:",0};mac.pattern="read";auto physicalResult=execute(mac);

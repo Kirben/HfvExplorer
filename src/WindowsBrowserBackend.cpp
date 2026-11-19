@@ -11,6 +11,7 @@
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
+#include "WindowsFolderEntries.h"
 #include "HfsPlusDisk.h"
 #include "charset.h"
 #include "aspecial.h"
@@ -19,10 +20,6 @@
 extern HICON get_dos_icon(CHFVExplorerApp*,char*,int);
 extern int is_afp_directory(char*);
 namespace {
-struct Find {
- HANDLE handle=INVALID_HANDLE_VALUE;
- ~Find(){if(handle!=INVALID_HANDLE_VALUE)FindClose(handle);}
-};
 // The old tree and icon adapters still take ANSI paths. Keep their path
 // separate from the Unicode location used for selection and file operations.
 std::string LegacyPath(const std::wstring& path) {
@@ -85,11 +82,9 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
  const DWORD deadline=listing&&app.m_dosicons!=DI_NO_ICONS&&app.m_fat_icon_time_limit>0?
      GetTickCount()+DWORD(app.m_fat_icon_time_limit)*1000:0;
  LegacyEngine::Scope engine;
- Find find;
- WIN32_FIND_DATAW info{};
- find.handle=FindFirstFileW((ioFolder+L"*").c_str(),&info);
- if(find.handle==INVALID_HANDLE_VALUE){
-  if(GetLastError()==ERROR_FILE_NOT_FOUND){
+ WindowsFolderEntries find(ioFolder+L"*");
+ if(!find){
+  if(find.Error()==ERROR_FILE_NOT_FOUND){
    StorageLocation::ValidateMedia(media);
    return snapshot;
   }
@@ -97,6 +92,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
  }
  do{
   if(job.cancelled())throw Storage::Cancelled();
+  const auto& info=find.Entry();
   const std::wstring leaf=info.cFileName;
   if(leaf==L"."||leaf==L".."||
      (!m_pc_show_invisibles&&(info.dwFileAttributes&FILE_ATTRIBUTE_HIDDEN))||
@@ -158,8 +154,8 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
   progress.path=display;
   progress.utf8=true;
   job.progress(progress);
- }while(FindNextFileW(find.handle,&info));
- if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
+ }while(find.Next());
+ if(find.Error()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
  StorageLocation::ValidateMedia(media);
  return snapshot;
 }
