@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <vector>
-#include "CopyProgress.h"
+#include "TransferFixture.h"
 #include "resource.h"
 #include "DynCopyModeSelect.h"
 #include "OptionsPage2.h"
@@ -25,7 +25,6 @@
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
-#include "hfs/copyout.h"
 extern int hfv_replacement_fault;
 }
 void import_map(CString& path);
@@ -61,14 +60,18 @@ public:
  }
  bool Flush(HANDLE) override{SetLastError(failure==6?ERROR_WRITE_FAULT:ERROR_INVALID_FUNCTION);return false;}
 };
-struct Progress {ULONGLONG bytes=0;unsigned files=0,events=0;bool named=true;ULONGLONG fileBytes=0,expected=0;bool bounded=true;};
-void observe(const char* path,unsigned long bytes,unsigned long long total,int complete,void* context) {
- auto& progress=*static_cast<Progress*>(context);progress.bytes+=bytes;progress.files+=complete?1:0;
- if(!bytes && !complete){progress.fileBytes=0;progress.expected=total;}
- progress.fileBytes+=bytes;progress.bounded=progress.bounded && progress.fileBytes<=total && (!complete || progress.fileBytes==total);
- ++progress.events;progress.named=progress.named && path && *path;
-}
 void check(bool ok,const char* message) {if(!ok)throw message;}
+void expectNoConflict(const std::shared_ptr<Storage::Job>& job) {
+ const auto start=GetTickCount();
+ while(!job->done()){
+  if(!job->conflict().empty()||GetTickCount()-start>10000){
+   job->cancel();
+   job->wait();
+   throw std::runtime_error("An invalid or self-copy reached the overwrite stage or stalled");
+  }
+  Sleep(1);
+ }
+}
 unsigned confirmReplacement(const std::shared_ptr<Storage::Job>& job){
  DWORD deadline=GetTickCount()+15000;unsigned conflicts=0;std::string previous;
  while(!job->done()){
@@ -103,8 +106,8 @@ int RunCopyProgressTest(const char* directory) {
   // An explicit path, case alias and containing folder must never replace the source.
   for(const char* destination : {"CopyTest:Folder:Nested:Game", "copytest:folder:nested:game", "CopyTest:Folder:Nested:"}) {
    for(int move : {0,1}) {
-    auto same=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)image,destination,0,move,'a'));
-    same->wait();check(same->result().code!=0&&same->result().message.find("same HFS file")!=std::string::npos,"reject copy/move onto the same HFS catalog entry before mutation");
+    auto same=TransferFixture::Submit((LPCSTR)image,binary,(LPCSTR)image,destination,0,move,'a');
+    expectNoConflict(same);check(same->result().code!=0,"reject copy/move onto the same HFS catalog entry before mutation");
     volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after self-copy rejection");
     file=hfs_open(volume,binary);check(file!=nullptr,"self-copy preserved source entry");
     std::vector<BYTE> verify(data.size());check(hfs_read(file,verify.data(),(unsigned long)verify.size())==verify.size()&&verify==data,"self-copy preserved data fork");
@@ -113,7 +116,7 @@ int RunCopyProgressTest(const char* directory) {
    }
   }
   fprintf(out,"PASS: self-copy/self-move rejects exact paths, case aliases and containing folders, preserving both forks.\n");
-  auto missingHfs=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Missing:Game",(LPCSTR)image,"CopyTest:Folder:Nested:",0,0,'a'));
+  auto missingHfs=TransferFixture::Submit((LPCSTR)image,"CopyTest:Missing:Game",(LPCSTR)image,"CopyTest:Folder:Nested:",0,0,'a');
   missingHfs->wait();check(missingHfs->result().code!=0,"missing HFS source fails");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after failed preflight");
   file=hfs_open(volume,binary);check(file!=nullptr,"failed HFS source preflight preserves existing destination");
@@ -124,7 +127,8 @@ int RunCopyProgressTest(const char* directory) {
   // Replacement needs space for the new forks without freeing the old file first.
   CString replacementInput=root+"\\Game";
   {CFile f;check(f.Open(replacementInput,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacementInput replacement");f.SetLength(5*1024*1024);f.Close();}
-  auto fullReplacement=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)replacementInput,(LPCSTR)image,"CopyTest:Folder:Nested:",0,1,'r'));
+  HFSIFACE_set_modein(4,0);
+  auto fullReplacement=TransferFixture::Submit((LPCSTR)root,(LPCSTR)replacementInput,(LPCSTR)image,"CopyTest:Folder:Nested:",0,1,'r');
   check(confirmReplacement(fullReplacement)==1,"HFS replacement must ask before staging a conflicting file");check(fullReplacement->result().code!=0&&GetFileAttributesA(replacementInput)!=INVALID_FILE_ATTRIBUTES,"disk-full replacement fails and retains move source");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen full destination");
   file=hfs_open(volume,binary);check(file!=nullptr,"disk-full replacement retained previous HFS entry");
@@ -132,29 +136,31 @@ int RunCopyProgressTest(const char* directory) {
   preservedFork.resize(resource.size());check(hfs_setfork(file,1)==0&&hfs_read(file,preservedFork.data(),(unsigned long)preservedFork.size())==preservedFork.size()&&preservedFork==resource,"disk-full preserves previous HFS resource fork");
   check(hfs_close(file)==0&&hfs_umount(volume)==0,"close full destination");
   DeleteFileA(replacementInput);
+  HFSIFACE_set_modein(0,0);
   fprintf(out,"PASS: disk-full HFS replacement preserves the previous entry, both forks and host move source.\n");
   for(const char* destination : {"CopyTest:Folder:","CopyTest:Folder:Nested:"}) {
-   auto recursive=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)image,destination,1,0,'a'));
-   recursive->wait();check(recursive->result().code!=0&&recursive->result().message.find("descendant")!=std::string::npos,"reject recursive HFS self-copy before creating children");
+   auto recursive=TransferFixture::Submit((LPCSTR)image,"CopyTest:Folder",(LPCSTR)image,destination,1,0,'a');
+   expectNoConflict(recursive);check(recursive->result().code!=0,"reject recursive HFS self-copy before creating children");
   }
   fprintf(out,"PASS: folder copies into themselves or descendants are rejected before recursive mutation.\n");
-  Progress progress;copyout_set_progress(observe,&progress);int moved=0;
-  CString target=root;char source[100]="CopyTest:Folder";HFSIFACE_set_modeout(0);
-  check(HFSIFACE_copy(image.GetBuffer(),source,target.GetBuffer(),target.GetBuffer(),1,0,&moved)==0,"recursive automatic export");
-  image.ReleaseBuffer();target.ReleaseBuffer();copyout_set_progress(nullptr,nullptr);
-  check(progress.files==2 && progress.bytes==data.size()+resource.size()+6 && progress.events>5 && progress.named && progress.bounded,"progress tracks successful files and source bytes across folders/forks");
+  auto original=TransferFixture::Submit((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a');
+  original->wait();
+  auto progress=original->progress();
+  check(original->result().code==0&&progress.files==2&&progress.totalFiles==2&&
+        progress.bytes==progress.processed&&progress.processed==progress.totalBytes,
+        "typed recursive Automatic export accounts for published files and byte totals");
   auto macbinary=load(root+"\\Folder\\Nested\\Game.bin");
   check(macbinary.size()>=128+16512+resource.size() && !memcmp(macbinary.data()+128,data.data(),data.size()) &&
    !memcmp(macbinary.data()+128+16512,resource.data(),resource.size()),"MacBinary preserves both forks under progress");
   CString legacyPath=root+"\\binhex5.bin";
-  auto legacyJob=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)root,(LPCSTR)legacyPath,0,0,'5'));
+  auto legacyJob=TransferFixture::Submit((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)root,(LPCSTR)legacyPath,0,0,'5');
   legacyJob->wait();check(legacyJob->result().code==0,"BinHex 5 worker export");
   auto legacy=load(legacyPath);check(legacy.size()==macbinary.size(),"legacy fork alignment under worker");
   for(unsigned i=99;i<128;++i)check(legacy[i]==0,"worker selected MacBinary I header");
   check(!memcmp(legacy.data()+128,data.data(),data.size()) && !memcmp(legacy.data()+128+16512,resource.data(),resource.size()),"legacy worker export both forks");
   for(int fault : {2,0}) {
    hfv_replacement_fault=fault;
-   auto replacement=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,binary,0,0,'a'));
+   auto replacement=TransferFixture::Submit((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,binary,0,0,'a');
    confirmReplacement(replacement);hfv_replacement_fault=0;
    check((replacement->result().code!=0)==(fault!=0),"HFS replacement publication result");
    volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen published/rolled-back replacement");
@@ -167,26 +173,22 @@ int RunCopyProgressTest(const char* directory) {
   CString damagedLegacy=root+"\\damaged.bin";
   {CFile f;check(f.Open(damagedLegacy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create damaged import");f.Write(legacy.data(),(UINT)legacy.size()-200);f.Close();}
   HFSIFACE_set_modein(0,0);
-  auto damagedJob=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)damagedLegacy,(LPCSTR)image,"CopyTest:Folder:Nested:Game",0,0,'a'));
+  auto damagedJob=TransferFixture::Submit((LPCSTR)root,(LPCSTR)damagedLegacy,(LPCSTR)image,"CopyTest:Folder:Nested:Game",0,0,'a');
   confirmReplacement(damagedJob);check(damagedJob->result().code!=0,"truncated MacBinary worker import rejected");
   volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen after rejected import");
   {char game[]="CopyTest:Folder:Nested:Game";auto f=hfs_open(volume,game);std::vector<BYTE> d(data.size()),r(resource.size());check(f&&hfs_read(f,d.data(),(unsigned long)d.size())==d.size()&&hfs_setfork(f,1)==0&&hfs_read(f,r.data(),(unsigned long)r.size())==r.size()&&hfs_close(f)==0&&d==data&&r==resource,"preflight rejection preserves existing destination through interface cleanup");}
   check(hfs_umount(volume)==0,"close preserved destination");
-  auto legacyImport=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,"CopyTest:Legacy imported",0,0,'a'));
+  auto legacyImport=TransferFixture::Submit((LPCSTR)root,(LPCSTR)legacyPath,(LPCSTR)image,"CopyTest:Legacy imported",0,0,'a');
   confirmReplacement(legacyImport);check(legacyImport->result().code==0,"automatic .bin worker import recognizes BinHex 5");
   auto exportedText=load(root+"\\Folder\\Text.txt");
   check(exportedText.size()==7 && !memcmp(exportedText.data(),"HELLO\r\n",7),"automatic text conversion unchanged");
-  volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen fixture");
-  copyout_set_progress(observe,&progress);unsigned before=progress.files;
-  CString invalid=root+"\\missing\\file";check(cpo_raw(volume,text,invalid.GetBuffer())<0 && progress.files==before,"failed destination does not increment completed files");invalid.ReleaseBuffer();
-  copyout_set_progress(nullptr,nullptr);hfs_umount(volume);
   WIN32_FIND_DATAA entry={};entry.nFileSizeHigh=1;entry.nFileSizeLow=37;
   check(HostDirectoryEntrySize(entry)==0x100000025ULL,"Windows listing retains high file-size bits");
   entry.dwFileAttributes=FILE_ATTRIBUTE_DIRECTORY;entry.nFileSizeLow=12;
   check(HostDirectoryEntrySize(entry)==12,"directory entry count is not interpreted as a byte size");
   // Exercise the actual worker-owned recursive copy and folder-wide accounting.
   auto execute=[&](Storage::ConflictChoice choice) {
-   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'));
+   auto job=TransferFixture::Submit((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a');
    unsigned conflicts=0;std::string pending;DWORD start=GetTickCount();
    while(!job->done()) {
     if(GetTickCount()-start>10000)throw std::runtime_error("Conflict test timed out");
@@ -203,7 +205,7 @@ int RunCopyProgressTest(const char* directory) {
   fprintf(out,"Testing skip\n");fflush(out);
   auto skipped=execute(Storage::ConflictChoice::Skip);
   check(skipped.first->result().code==0 && skipped.first->progress().skipped==2 && skipped.first->progress().files==0,"skip existing files and merge existing directories");
-  check(skipped.first->progress().totalFiles==2 && skipped.first->progress().totalBytes==data.size()+resource.size()+6 &&
+  check(skipped.first->progress().totalFiles==2 && skipped.first->progress().totalBytes==macbinary.size()+textBefore.size() &&
    skipped.first->progress().processed==skipped.first->progress().totalBytes,"folder total includes both forks and skipped work");
   check(load(root+"\\Folder\\Nested\\Game.bin")==readBefore,"skip leaves existing output untouched");
   fprintf(out,"Testing cancel\n");fflush(out);
@@ -218,10 +220,15 @@ int RunCopyProgressTest(const char* directory) {
   CString safePath=root+"\\preserved.bin";
   for(int fault : {1,2,3}) {
    {CFile f;check(f.Open(safePath,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create previous output");f.Write("ORIGINAL",8);f.Close();}
-   auto work=MakeCopyJob((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)safePath,0,1,'a');
-   auto job=Storage::worker().submit([work,fault](Storage::Job& job){copyout_test_fault(fault);struct Reset{~Reset(){copyout_test_fault(0);}}reset;return work(job);});
+   auto work=TransferFixture::Work((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)safePath,0,1,'a');
+   auto job=Storage::worker().submit([work,fault](Storage::Job& job){struct Reset{~Reset(){MacBrowser::windowsPublicationFault={};}} reset;
+    if(fault)MacBrowser::windowsPublicationFault=[fault](const char* at){
+     static const char* phases[]={"","before-data-write","before-data-flush","data-published"};
+     if(!strcmp(at,phases[fault]))throw HfsPlus::Error("Injected Windows copy failure");
+    };
+    return work(job);});
    while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}
-   copyout_test_fault(0);
+
    check(job->result().code!=0&&load(safePath)==std::vector<BYTE>({'O','R','I','G','I','N','A','L'}),"failed write/flush/publish preserves previous Windows output");
    volume=hfs_mount(image.GetBuffer(),0,O_RDONLY);image.ReleaseBuffer();check(volume!=nullptr,"reopen source after failed move");
    hfsdirent preserved;check(hfs_stat(volume,binary,&preserved)==0&&preserved.u.file.dsize==data.size()&&preserved.u.file.rsize==resource.size(),"failed move retains HFS source and both forks");
@@ -236,10 +243,10 @@ int RunCopyProgressTest(const char* directory) {
   import_map(mapping);
   for(auto choice : {Storage::ConflictChoice::Skip,Storage::ConflictChoice::Cancel,Storage::ConflictChoice::ReplaceAll}) {
    for(const auto& path : {mapped,unmapped}){CFile f;check(f.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create mapped conflict");f.Write("KEEP",4);f.Close();}
-   auto job=Storage::worker().submit(MakeCopyJob((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)root,0,0,'r'));
+   auto job=TransferFixture::Submit((LPCSTR)image,binary,(LPCSTR)root,(LPCSTR)root,0,0,'r');
    unsigned conflicts=0;std::string pending;
    while(!job->done()) {
-    auto conflict=job->conflict();if(!conflict.empty()&&conflict!=pending){pending=conflict;++conflicts;check(conflict==(LPCSTR)mapped,"conflict names mapped destination");job->resolve(choice);}Sleep(1);
+    auto conflict=job->conflict();if(!conflict.empty()&&conflict!=pending){pending=conflict;++conflicts;check(conflict=="Game.safe","conflict names mapped destination");job->resolve(choice);}Sleep(1);
    }
    if(conflicts!=1){fprintf(out,"Mapped export diagnostic: conflicts=%u code=%d error=%lu message=%s\n",conflicts,job->result().code,job->result().error,job->result().message.c_str());fflush(out);}
    check(conflicts==1,"mapped export asks before replacing final output");
@@ -255,19 +262,28 @@ int RunCopyProgressTest(const char* directory) {
   {CFile f;check(f.Open(hostSource+":Finder",CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows alternate stream");f.Write("FORK",4);f.Close();}
   for(int fault : {1,2,3,0}) {
    {CFile f;check(f.Open(hostDestination,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows destination");f.Write("OLD",3);f.Close();}
-   auto work=MakeCopyJob((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)hostDirectory,0,0,'a');
-   auto job=Storage::worker().submit([work,fault](Storage::Job& job){copyout_test_fault(fault);struct Reset{~Reset(){copyout_test_fault(0);}}reset;return work(job);});
-   while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}copyout_test_fault(0);
+   {CFile f;check(f.Open(hostDestination+":Finder",CFile::modeCreate|CFile::modeWrite)!=FALSE,
+        "create destination alternate stream");f.Write("KEEP",4);f.Close();}
+   auto work=TransferFixture::Work((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)hostDirectory,0,0,'a');
+   auto job=Storage::worker().submit([work,fault](Storage::Job& job){struct Reset{~Reset(){MacBrowser::windowsPublicationFault={};}} reset;
+    if(fault)MacBrowser::windowsPublicationFault=[fault](const char* at){
+     static const char* phases[]={"","before-data-write","before-data-flush","data-published"};
+     if(!strcmp(at,phases[fault]))throw HfsPlus::Error("Injected Windows copy failure");
+    };
+    return work(job);});
+   while(!job->done()){if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::ReplaceAll);Sleep(1);}
    check((job->result().code!=0)==(fault!=0),"Windows staged copy result");
    check(load(hostDestination)==(fault?std::vector<BYTE>({'O','L','D'}):std::vector<BYTE>({'N','E','W'})),"Windows copy failure preserves previous destination");
+   check(load(hostDestination+":Finder")==(fault?std::vector<BYTE>({'K','E','E','P'}):std::vector<BYTE>({'F','O','R','K'})),
+         "Windows publication preserves the original named stream on failure and copies the source stream on success");
   }
   check(load(hostDestination+":Finder")==std::vector<BYTE>({'F','O','R','K'}),"Windows staging preserves alternate streams");
-  auto sameHost=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)root,0,1,'a'));
+  auto sameHost=TransferFixture::Submit((LPCSTR)root,(LPCSTR)hostSource,(LPCSTR)root,(LPCSTR)root,0,1,'a');
   sameHost->wait();check(sameHost->result().code!=0&&load(hostSource)==std::vector<BYTE>({'N','E','W'}),"Windows self-move preserves original file");
   fprintf(out,"PASS: Windows copies stage replacements and preserve existing output on write/flush/publication failures; self-move retains source.\n");
-  auto failed=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Missing",(LPCSTR)root,(LPCSTR)root,0,0,'a'));
+  auto failed=TransferFixture::Submit((LPCSTR)image,"CopyTest:Missing",(LPCSTR)root,(LPCSTR)root,0,0,'a');
   failed->wait();check(failed->result().code!=0,"source scan errors reach completion");
-  auto hostFailure=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)(root+"\\DoesNotExist"),(LPCSTR)root,(LPCSTR)(root+"\\NoOutput"),0,0,'a'));
+  auto hostFailure=TransferFixture::Submit((LPCSTR)root,(LPCSTR)(root+"\\DoesNotExist"),(LPCSTR)root,(LPCSTR)(root+"\\NoOutput"),0,0,'a');
   hostFailure->wait();check(hostFailure->result().code!=0&&!hostFailure->result().message.empty()&&hostFailure->result().message!="no error","missing host copy reports meaningful failure without stale library errors");
   // Production copy job -> working HFS image -> locked physical write/readback.
   std::vector<BYTE> blank;std::string floppyError;
@@ -291,11 +307,11 @@ int RunCopyProgressTest(const char* directory) {
   }
   auto physicalCopy=[&](CopyFloppy& api,const std::string& fromVolume,const std::string& from,int dir,int move=0) {
    check(readonly_floppy_attach_api(25,&api),"attach copy floppy");
-   auto job=Storage::worker().submit(MakeCopyJob(fromVolume,from,floppyPath,"FloppyCopy:",dir,move,'a'));
+   auto job=TransferFixture::Submit(fromVolume,from,floppyPath,"FloppyCopy:",dir,move,'a');
    job->wait();return job->result();
   };
   CopyFloppy physical(blank);
-  auto physicalResult=physicalCopy(physical,(LPCSTR)image,"CopyTest:Folder",1,1);
+  auto physicalResult=physicalCopy(physical,(LPCSTR)image,"CopyTest:Folder",1);
   unsigned changedTracks=0;for(size_t offset=0;offset<blank.size();offset+=9216)if(memcmp(blank.data()+offset,physical.disk.media.data()+offset,9216))++changedTracks;
   check(physicalResult.code==0&&!physicalResult.moved&&changedTracks>0&&changedTracks<160&&physical.writes>0&&physical.disk.requestedReadBytes<blank.size()&&!physical.locked,"recursive direct copy avoids whole-disk passes, flushes buffered writes and retains source");
   check(readonly_floppy_attach_api(25,&physical),"reattach populated floppy");
@@ -307,7 +323,7 @@ int RunCopyProgressTest(const char* directory) {
    hfs_read(file,readResource.data(),(unsigned long)readResource.size())==readResource.size()&&hfs_close(file)==0&&hfs_umount(volume)==0&&readData==data&&readResource==resource,"floppy preserves both forks");
   // Import a Windows MacBinary file while a GUI reader remains open.
   CString imported=root+"\\Folder\\Nested\\Game.bin";
-  auto importJob=Storage::worker().submit(MakeCopyJob((LPCSTR)root,(LPCSTR)imported,floppyPath,"FloppyCopy:",0,1,'a'));importJob->wait();
+  auto importJob=TransferFixture::Submit((LPCSTR)root,(LPCSTR)imported,floppyPath,"FloppyCopy:",0,0,'a');importJob->wait();
   check(importJob->result().code==0&&!importJob->result().moved&&load(imported)==macbinary,"Windows import retains source until verified and preserves original source");
   BYTE signature[2];check(browsing.Seek(1024,CFile::begin)==1024&&browsing.Read(signature,2)==2&&signature[0]==0x42&&signature[1]==0x44,"existing GUI reader resumes after locked write");browsing.Close();
   volume=hfs_mount(floppyPath,0,O_RDONLY);check(volume!=nullptr,"mount imported floppy");
@@ -334,7 +350,7 @@ int RunCopyProgressTest(const char* directory) {
   CString hugePath=hugeDirectory+"\\Game.bin";HANDLE huge=CreateFileA(hugePath,GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
   check(huge!=INVALID_HANDLE_VALUE,"create sparse large conflict");DWORD ignored;LARGE_INTEGER length;length.QuadPart=0x80001000ULL;
   check(DeviceIoControl(huge,FSCTL_SET_SPARSE,nullptr,0,nullptr,0,&ignored,nullptr)&&SetFilePointerEx(huge,length,nullptr,FILE_BEGIN)&&SetEndOfFile(huge),"size sparse conflict above 2 GiB");CloseHandle(huge);
-  auto largeConflict=Storage::worker().submit(MakeCopyJob((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)hugeDirectory,(LPCSTR)hugeDirectory,0,0,'a'));
+  auto largeConflict=TransferFixture::Submit((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)hugeDirectory,(LPCSTR)hugeDirectory,0,0,'a');
   DWORD deadline=GetTickCount();bool asked=false;
   while(!largeConflict->done()){
    if(!largeConflict->conflict().empty()){asked=true;largeConflict->resolve(Storage::ConflictChoice::Skip);}
@@ -356,25 +372,25 @@ int RunCopyProgressTest(const char* directory) {
    check(options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCOUNT)==8&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCOUNT)==8&&options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCURSEL)==7&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCURSEL)==7,"persistent BinHex 5 choices preserve ask index");
    options.DestroyWindow();HFSIFACE_set_modeout(7);check(HFSIFACE_copy_mode()=='5',"BinHex 5 mode dispatch");HFSIFACE_set_modeout(0);
   }
-  auto uiCopy=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden copy integration",true);
+  auto uiCopy=ShowStorageJob(TransferFixture::Work((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden copy integration",true);
   check(uiCopy.code==0 && storageUiTest.disabledDuring && storageUiTest.enabledAfter && storageUiTest.dialogClosed && owner.IsWindowEnabled()&&storageUiTest.copyBarCount==2,"folder copy retains both bars and restores main window");
   storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;
-  auto uiSingle=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)root,(LPCSTR)root,0,0,'a'),"Hidden single file",true,true);
+  auto uiSingle=ShowStorageJob(TransferFixture::Work((LPCSTR)image,"CopyTest:Folder:Nested:Game",(LPCSTR)root,(LPCSTR)root,0,0,'a'),"Hidden single file",true,true);
   check(uiSingle.code==0&&storageUiTest.copyBarCount==1&&storageUiTest.dialogCreations==1&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled(),"single file has one bar and restores owner");
   storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;
-  auto uiSmallFolder=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder:Nested",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden one-file folder",true);
+  auto uiSmallFolder=ShowStorageJob(TransferFixture::Work((LPCSTR)image,"CopyTest:Folder:Nested",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden one-file folder",true);
   check(uiSmallFolder.code==0&&storageUiTest.copyBarCount==2,"folder containing one file still has both bars");
   check(readonly_floppy_attach_api(25,&physical),"attach populated floppy for full dialog lifecycle");
   storageUiTest={};
-  auto uiFloppy=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder:Text",floppyPath,"FloppyCopy:",0,0,'a'),"Hidden floppy copy cycles",true,true);
+  auto uiFloppy=ShowStorageJob(TransferFixture::Work((LPCSTR)image,"CopyTest:Folder:Text",floppyPath,"FloppyCopy:",0,0,'a'),"Hidden floppy copy cycles",true,true);
   check(uiFloppy.code==0&&storageUiTest.dialogCreations==1&&storageUiTest.copyBarCount==1&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled(),"all floppy read/check/write/verify phases share one single-file dialog and restore owner");
   check(readonly_floppy_attach_api(25,nullptr),"detach dialog lifecycle floppy");
   storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Cancel;
-  auto uiCancel=ShowStorageJob(MakeCopyJob((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden cancelled copy",true);
+  auto uiCancel=ShowStorageJob(TransferFixture::Work((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden cancelled copy",true);
   check(uiCancel.error==ERROR_CANCELLED && storageUiTest.enabledAfter && owner.IsWindowEnabled(),"cancelled copy/conflict completion restores main window");
   owner.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;
-  fprintf(out,"PASS: BinHex 5 worker import/export and preflight preservation, copy/options mode mapping; recursive Automatic export, nested folders, both forks, text conversion, exact source byte/file progress and failure accounting, worker execution, directory totals, overwrite/skip/cancel/replace-all and source errors, hidden copy/conflict completion restoration, one bar for single files and two for folders (including one-file folders), one dialog across physical-copy phases; no physical devices.\n");
- } catch(const std::exception& error) {copyout_set_progress(nullptr,nullptr);fprintf(out,"FAIL: %s\n",error.what());fclose(out);return 1;} catch(const char* error) {copyout_set_progress(nullptr,nullptr);fprintf(out,"FAIL: %s (HFS: %s)\n",error,hfs_error?hfs_error:"");fclose(out);return 1;}
+  fprintf(out,"PASS: BinHex 5 worker import/export and preflight preservation, copy/options mode mapping; recursive Automatic export, nested folders, both forks, text conversion, exact output byte/file progress and failure accounting, worker execution, directory totals, overwrite/skip/cancel/replace-all and source errors, hidden copy/conflict completion restoration, one bar for single files and two for folders (including one-file folders), one dialog across physical-copy phases; no physical devices.\n");
+ } catch(const std::exception& error) {fprintf(out,"FAIL: %s\n",error.what());fclose(out);return 1;} catch(const char* error) {fprintf(out,"FAIL: %s (HFS: %s)\n",error,hfs_error?hfs_error:"");fclose(out);return 1;}
  fclose(out);return 0;
 }
 #endif

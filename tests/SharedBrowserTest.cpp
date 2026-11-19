@@ -7,7 +7,7 @@
 #include "BrowserDirectory.h"
 #include "MainMacBrowser.h"
 #include "StorageJobDialog.h"
-#include "CopyProgress.h"
+#include "TransferFixture.h"
 #include "DeviceWait.h"
 #include "utils.h"
 #include <cstdio>
@@ -127,9 +127,9 @@ int RunSharedBrowserTest(const char* directory){
    control.SetItemState(-1,0,LVIS_SELECTED);control.SetItemState(selected,LVIS_SELECTED,LVIS_SELECTED);list.DeleteForTest();check(GetFileAttributesA(windows+"\\Job renamed")==INVALID_FILE_ATTRIBUTES&&owner.IsWindowEnabled(),"Windows deletion view did not complete its independent job");
   }
   // Exercise the retained conversion backend using a path produced by the common view.
-  auto copied=Storage::worker().submit(MakeCopyJob((LPCSTR)image,(LPCSTR)source,(LPCSTR)windows,(LPCSTR)(windows+"\\typed.bin"),0,0,'5'));
+  auto copied=TransferFixture::Submit((LPCSTR)image,(LPCSTR)source,(LPCSTR)windows,(LPCSTR)(windows+"\\typed.bin"),0,0,'5');
   copied->wait();check(!copied->result().code&&GetFileAttributesA(windows+"\\typed.bin")!=INVALID_FILE_ATTRIBUTES,"classic MacBinary conversion route was lost");
-  auto imported=Storage::worker().submit(MakeCopyJob((LPCSTR)windows,(LPCSTR)(windows+"\\typed.bin"),(LPCSTR)image,"Shared:Imported",0,0,'a'));
+  auto imported=TransferFixture::Submit((LPCSTR)windows,(LPCSTR)(windows+"\\typed.bin"),(LPCSTR)image,"Shared:Imported",0,0,'a');
   imported->wait();check(!imported->result().code,"classic Automatic import route was lost");
   doc.open_sub_directory(0,2,"Shared");check(find(control,L"Imported")>=0,"classic catalog refresh after converted import");
   {int selected=find(control,L"Imported");char from[]="Imported",to[]="Job imported";check(selected>=0&&list.RenameForTest(selected,from,to),"classic HFS rename view job");
