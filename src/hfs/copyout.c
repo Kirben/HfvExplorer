@@ -43,7 +43,7 @@
 # include "libhfs\data.h"
 # include "copyout.h"
 # include "binhex.h"
-# include "crc.h"
+# include "macbinary.h"
 #ifdef __EMX__
 # include "stdio.h"
 # include "io.h"
@@ -182,7 +182,7 @@ int copyout_host_copy(const char *source,const char *destination) {
  * DESCRIPTION:	perform copy using MacBinary I/II translation
  */
 static
-int do_macb(hfsfile *ifile, int ofile, int legacy)
+int do_macb(hfsfile *ifile, int ofile, int version, const unsigned char *finder)
 {
   hfsdirent ent;
   unsigned char buf[HFS_BLOCKSZ * 4];
@@ -216,11 +216,13 @@ int do_macb(hfsfile *ifile, int ofile, int legacy)
   d_putw(buf + 75, ent.fdlocation.v);
   d_putw(buf + 77, ent.fdlocation.h);
   buf[81] = (ent.flags & HFS_ISLOCKED) ? 1 : 0;
-  if (!legacy) {
-    buf[101] = ent.fdflags & 0xff;
-    buf[122] = buf[123] = 129;
-    d_putw(&buf[124], crc_macb(buf, 124, 0x0000));
+  if (version != MacBinaryI) buf[101] = ent.fdflags & 0xff;
+  if (version == MacBinaryIII) {
+    memcpy(buf + 79, finder + 14, 2);
+    if (!(finder[24] & 0x7f)) buf[106] = finder[24];
+    buf[107] = finder[25];
   }
+  macbinary_finish_header(buf, version);
 
   if (write(ofile, buf, MACB_BLOCKSZ) < MACB_BLOCKSZ)
     return -1;
@@ -823,7 +825,7 @@ void closefiles(hfsfile *ifile, int ofile, int *result)
  * NAME:	cpo->macb()
  * DESCRIPTION:	copy an HFS file to a UNIX file using MacBinary II translation
  */
-static int cpo_macbinary(hfsvol *vol, char *srcname, char *dstname, int legacy)
+static int cpo_macbinary(hfsvol *vol, char *srcname, char *dstname, int version)
 {
   hfsfile *ifile;
   int ofile, result = 0;
@@ -833,7 +835,13 @@ static int cpo_macbinary(hfsvol *vol, char *srcname, char *dstname, int legacy)
     return -1;
   if(!ifile)return 0;
 
-  result = do_macb(ifile, ofile, legacy);
+  {
+    unsigned char finder[32] = {0};
+    if (version == MacBinaryIII && hfs_getfinderinfo(vol, srcname, finder) < 0) {
+      cpo_error = hfs_error;
+      result = -1;
+    } else result = do_macb(ifile, ofile, version, finder);
+  }
   closefiles(ifile, ofile, &result);
 
   return result;
@@ -841,10 +849,13 @@ static int cpo_macbinary(hfsvol *vol, char *srcname, char *dstname, int legacy)
 
 /* Both formats use .bin and identical 128-byte fork alignment. */
 int cpo_macb(hfsvol *vol, char *srcname, char *dstname) {
-  return cpo_macbinary(vol, srcname, dstname, 0);
+  return cpo_macbinary(vol, srcname, dstname, MacBinaryII);
 }
 int cpo_macb1(hfsvol *vol, char *srcname, char *dstname) {
-  return cpo_macbinary(vol, srcname, dstname, 1);
+  return cpo_macbinary(vol, srcname, dstname, MacBinaryI);
+}
+int cpo_macb3(hfsvol *vol, char *srcname, char *dstname) {
+  return cpo_macbinary(vol, srcname, dstname, MacBinaryIII);
 }
 
 /*

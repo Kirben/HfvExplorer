@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 extern "C" {
 #include "hfs/binhex.h"
-#include "hfs/crc.h"
+#include "hfs/macbinary.h"
 }
 
 namespace TransferConversion {
@@ -166,13 +166,12 @@ Reader MacBinary(char mode, bool importing, Volume& volume, Entry& entry) {
         const auto length = entry.forks[0].size;
         Check(length >= header.size(), "Truncated MacBinary header");
         volume.Read(id, 0, 0, header.data(), header.size());
-        Check(!header[0] && !header[74] && !header[82] && header[1] && header[1] <= 63,
-              "Invalid MacBinary header");
-        const bool v1 = std::all_of(header.begin() + 99, header.end(), [](uint8_t byte) { return !byte; });
-        if (!v1) {
-            Check(header[123] <= 129, "Unsupported MacBinary version");
-            Check(crc_macb(header.data(), 124, 0) == Word(header.data() + 124), "Corrupt MacBinary header CRC");
-        }
+        const auto version=macbinary_version(header.data());
+        Check(version,"Invalid MacBinary signature, version or header CRC");
+        const bool v1=version==MacBinaryI;
+        const bool roman=version!=MacBinaryIII||!(header[106]&0x7f);
+        Check(roman||std::all_of(header.begin()+2,header.begin()+2+header[1],[](auto byte){return byte<128;}),
+              "MacBinary filename uses an unsupported Macintosh script");
         const uint64_t data = Long(header.data() + 83), resource = Long(header.data() + 87);
         const uint64_t start = 128 + (v1 ? 0 : Padded(Word(header.data() + 120)));
         const uint64_t resourceAt = start + Padded(data);
@@ -186,6 +185,11 @@ Reader MacBinary(char mode, bool importing, Volume& volume, Entry& entry) {
         entry.finder[8] = header[73] & ~3;
         entry.finder[9] = v1 ? 0 : (header[101] & ~1);
         memcpy(entry.finder.data() + 10, header.data() + 75, 4);
+        if(version==MacBinaryIII){
+            memcpy(entry.finder.data()+14,header.data()+79,2);
+            entry.finder[24]=header[106];
+            entry.finder[25]=header[107];
+        }
         entry.protectedFile = (header[81] & 1) != 0;
         entry.created = Long(header.data() + 91);
         entry.modified = Long(header.data() + 95);
@@ -208,11 +212,14 @@ Reader MacBinary(char mode, bool importing, Volume& volume, Entry& entry) {
     Long(header.data() + 87, uint32_t(resource));
     Long(header.data() + 91, uint32_t(entry.created));
     Long(header.data() + 95, uint32_t(entry.modified));
-    if (mode != '5') {
-        header[101] = entry.finder[9];
-        header[122] = header[123] = 129;
-        Word(header.data() + 124, crc_macb(header.data(), 124, 0));
+    const auto version=mode=='5'?MacBinaryI:mode=='3'?MacBinaryIII:MacBinaryII;
+    if(version!=MacBinaryI)header[101]=entry.finder[9];
+    if(version==MacBinaryIII){
+        memcpy(header.data()+79,entry.finder.data()+14,2);
+        if(!(entry.finder[24]&0x7f))header[106]=entry.finder[24];
+        header[107]=entry.finder[25];
     }
+    macbinary_finish_header(header.data(),version);
     const uint64_t resourceAt = 128 + Padded(data);
     Carrier(entry, u".bin", resourceAt + Padded(resource));
     return [&volume, id, header, data, resource, resourceAt](unsigned, uint64_t at, void* out, size_t count) {
@@ -304,7 +311,7 @@ Reader BinHex(bool importing, Volume& volume, Entry& entry, Storage::Job& job) {
 }
 }
 
-bool Supported(char mode) { return mode == 'm' || mode == '5' || mode == 'b' || mode == 't'; }
+bool Supported(char mode) { return mode == 'm' || mode == '5' || mode == '3' || mode == 'b' || mode == 't'; }
 
 Reader Adapt(char mode, bool importing, Volume& source, Entry& entry, Storage::Job& job) {
     if (entry.directory) return {};

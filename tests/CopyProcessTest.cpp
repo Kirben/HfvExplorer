@@ -1622,13 +1622,19 @@ int RunCopyProcessTest(const char *directory) {
             return request;
         };
         auto classicLocation = [&](const std::string& name) { return Location::Classic(classicPath, "Classic:" + name); };
-        for (char mode : {'m', '5', 'b'}) {
+        for (char mode : {'m', '5', '3', 'b'}) {
             std::string suffix = mode == 'b' ? ".hqx" : ".bin";
             auto container = Location::Windows(Wide(root + "\\container-" + mode + suffix));
             auto exportFile = conversion(classicLocation("Plain"), container, mode);
             Pass(Submit(exportFile));
             Check(GetFileAttributesW(container.WindowsPath().c_str()) != INVALID_FILE_ATTRIBUTES,
                   "Converted output missing");
+            if(mode=='3'){
+                CFile file(container.LegacyPath().c_str(),CFile::modeRead);
+                unsigned char header[128]{};
+                Check(file.Read(header,sizeof(header))==sizeof(header)&&!memcmp(header+102,"mBIN",4)&&
+                      header[122]==130&&header[123]==129,"MacBinary III signature or versions differ");
+            }
             auto duplicate = Submit(exportFile);
             Conflict(duplicate);
             duplicate.Job()->resolve(Storage::ConflictChoice::Skip);
@@ -1640,14 +1646,18 @@ int RunCopyProcessTest(const char *directory) {
             Entry record;
             Check(classic->FindChild(2, U16(Wide(name)), record), "Decoded file missing");
             Verify(*classic, record.id, 4096);
-            if (mode == 'b') {
+            if (mode == 'b' || mode == '3') {
                 CFile file(container.LegacyPath().c_str(), CFile::modeReadWrite | CFile::shareExclusive);
-                file.SetLength(file.GetLength() / 2);
+                if(mode=='b')file.SetLength(file.GetLength() / 2);
+                else {
+                    file.Seek(102,CFile::begin);
+                    file.Write("x",1);
+                }
                 file.Close();
                 auto damaged = Submit(conversion(container, classicLocation(name), mode));
                 Wait(damaged);
                 Check(damaged.Job()->result().code && !damaged.Snapshot().completed,
-                      "Truncated BinHex unexpectedly published");
+                      "Invalid BinHex or MacBinary III unexpectedly published");
                 Verify(*classic, record.id, 4096);
             }
         }
@@ -1692,8 +1702,8 @@ int RunCopyProcessTest(const char *directory) {
         Check(GetFileAttributesW(Wide(root + "\\%container-m.bin").c_str()) == INVALID_FILE_ATTRIBUTES,
               "Portable container unexpectedly needs a sidecar");
         fprintf(report, "PASS: automatic folder transfer mixes text, wrapped forks and raw files\n");
-        fprintf(report, "PASS: common pipeline MacBinary I/II and BinHex fork round trips, overwrite Skip, "
-                        "malformed BinHex rollback and text line endings\n");
+        fprintf(report, "PASS: common pipeline MacBinary I/II/III and BinHex fork round trips, overwrite Skip, "
+                        "malformed header rollback and text line endings\n");
         auto slow = Put(*source, 2, u"Slow", 2 * 1024 * 1024);
         Request delayed;
         delayed.background = true;

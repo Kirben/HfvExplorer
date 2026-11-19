@@ -115,7 +115,8 @@ int do_copyin(hfsvol *vol, int argc, char *argv[], char *dest, int mode)
 
   switch (mode)
     {
-    case '5': /* BinHex 5.0 is MacBinary I; reader detects I/II. */
+    case '3':
+    case '5': /* BinHex 5.0 is MacBinary I. */
     case 'm':
       copyfile = cpi_macb;
       break;
@@ -202,6 +203,10 @@ int do_copyout(hfsvol *vol, int argc, char *argv[], char *dest, int mode)
     {
     case '5':
       copyfile = cpo_macb1;
+      break;
+
+    case '3':
+      copyfile = cpo_macb3;
       break;
 
     case 'm':

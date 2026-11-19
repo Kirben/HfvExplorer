@@ -94,8 +94,8 @@ void JobController::ChooseMode(const ModeChoice& choice)
         return;
     int direction = conversion->destination.IsWindows() ? 1 : 0;
     auto& pending = requests_[next_].Legacy();
-    const char modes[] = "ambtrRx5";
-    char value = choice.selection >= 0 && choice.selection < 8 ? modes[choice.selection] : 'a';
+    const char modes[] = "ambtrRx53";
+    char value = choice.selection >= 0 && size_t(choice.selection) < sizeof(modes) - 1 ? modes[choice.selection] : 'a';
     if (direction)
         pending.options.output = value;
     else {

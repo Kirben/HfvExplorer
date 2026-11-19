@@ -50,9 +50,9 @@ void CDynCopyModeSelect::DoDataExchange(CDataExchange* pDX)
 	//{{AFX_DATA_MAP(CDynCopyModeSelect)
 	DDX_Check(pDX, IDC_COPYIN_APPLEDOUBLE, m_appledouble);
 	// This dialog omits the persistent "ask" choice at index 6.
-    int selected = m_copy_mode == 7 ? 6 : m_copy_mode;
+    int selected = m_copy_mode >= 7 ? m_copy_mode - 1 : m_copy_mode;
     DDX_CBIndex(pDX, IDC_COPY_MODE, selected);
-    if (pDX->m_bSaveAndValidate) m_copy_mode = selected == 6 ? 7 : selected;
+    if (pDX->m_bSaveAndValidate) m_copy_mode = selected >= 6 ? selected + 1 : selected;
 	DDX_Text(pDX, IDC_COPYING_FNAME, m_copying_fname);
 	DDV_MaxChars(pDX, m_copying_fname, 255);
 	//}}AFX_DATA_MAP
@@ -83,7 +83,8 @@ BOOL CDynCopyModeSelect::OnInitDialog()
 {
 	CDialog::OnInitDialog();
     SendDlgItemMessage(IDC_COPY_MODE, CB_ADDSTRING, 0, (LPARAM)"BinHex 5.0 (MacBinary I)");
-    SendDlgItemMessage(IDC_COPY_MODE, CB_SETCURSEL, m_copy_mode == 7 ? 6 : m_copy_mode, 0);
+    SendDlgItemMessage(IDC_COPY_MODE, CB_ADDSTRING, 0, (LPARAM)"MacBinary III");
+    SendDlgItemMessage(IDC_COPY_MODE, CB_SETCURSEL, m_copy_mode >= 7 ? m_copy_mode - 1 : m_copy_mode, 0);
 
 	GetDlgItem(IDC_COPYIN_APPLEDOUBLE)->EnableWindow( !m_outcopy );
 

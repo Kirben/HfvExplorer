@@ -1305,6 +1305,9 @@ void HFSIFACE_set_modeout( int outmode )
 		case 7:
 			HFSIFACE_copyout_mode = '5';
 			break;
+		case 8:
+			HFSIFACE_copyout_mode = '3';
+			break;
 		case 6:
 			HFSIFACE_copyout_mode = 'x';
 			break;
@@ -1337,6 +1340,9 @@ void HFSIFACE_set_modein( int inmode, int appledouble )
 			break;
 		case 7:
 			HFSIFACE_copyin_mode = '5';
+			break;
+		case 8:
+			HFSIFACE_copyin_mode = '3';
 			break;
 		case 6:
 			HFSIFACE_copyin_mode = 'x';

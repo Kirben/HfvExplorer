@@ -40,7 +40,7 @@
 # include "copyin.h"
 # include "copyout.h"
 # include "binhex.h"
-# include "crc.h"
+# include "macbinary.h"
 #ifdef __EMX__
 # include "io.h"
 #endif
@@ -511,9 +511,8 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
   hfsdirent ent;
   char *dsthint, type[5], creator[5];
   unsigned char buf[MACB_BLOCKSZ];
-  unsigned short crc;
   unsigned long dsize, rsize;
-  int legacy, i;
+  int version, legacy, i;
   char macname[64];
   unsigned secondary;
 
@@ -528,40 +527,22 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
       return -1;
     }
 
-  if (buf[0] != 0 || buf[74] != 0 || buf[82] != 0)
+  version = macbinary_version(buf);
+  if (!version)
     {
-      cpi_error = "invalid MacBinary file header";
+      cpi_error = "invalid MacBinary signature, version or header CRC";
       close(ifile);
       return -1;
     }
-
-  /* BinHex 5.0 produces MacBinary I: no version fields or header CRC.
-     Require its reserved tail to be zero so a corrupt version-II header
-     cannot silently be accepted as version I. */
-  legacy = 1;
-  for (i = 99; i < MACB_BLOCKSZ; ++i)
-    if (buf[i]) legacy = 0;
-  crc = d_getw(&buf[124]);
-  if (!legacy && crc_macb(buf, 124, 0x0000) != crc)
-    {
-      cpi_error = "corrupt MacBinary II header (bad CRC)";
-      close(ifile);
-      return -1;
-    }
-  if (!legacy && buf[123] > 129)
-    {
-      cpi_error = "unsupported MacBinary file version";
-      close(ifile);
-      return -1;
-    }
-  /* The name is Pascal text; a 63-byte name has no terminating byte in
-     the header. Do not interpret type bytes as part of a C string. */
-  if (buf[1] < 1 || buf[1] > 63 || memchr(buf + 2, 0, buf[1]) || memchr(buf + 2, ':', buf[1]))
-    {
-      cpi_error = "invalid MacBinary file header (bad file name)";
-      close(ifile);
-      return -1;
-    }
+  legacy = version == MacBinaryI;
+  if (version == MacBinaryIII && (buf[106] & 0x7f))
+    for (i = 0; i < buf[1]; ++i)
+      if (buf[2 + i] >= 128)
+        {
+          cpi_error = "MacBinary filename uses an unsupported Macintosh script";
+          close(ifile);
+          return -1;
+        }
   memcpy(macname, buf + 2, buf[1]);
   macname[buf[1]] = 0;
   dsize = d_getl(&buf[83]);
@@ -631,6 +612,19 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
       cpi_error = hfs_error;
       result = -1;
     }
+
+  if (result == 0 && version == MacBinaryIII) {
+    unsigned char finder[32] = {0};
+    memcpy(finder, buf + 65, 8);
+    d_putw(finder + 8, ent.fdflags);
+    memcpy(finder + 10, buf + 75, 6);
+    finder[24] = buf[106];
+    finder[25] = buf[107];
+    if (hfs_fsetfinderinfo(ofile, finder) < 0) {
+      cpi_error = hfs_error;
+      result = -1;
+    }
+  }
 
   closefiles(ifile, ofile, &result);
 

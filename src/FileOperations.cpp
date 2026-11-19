@@ -642,7 +642,7 @@ TransferExecution DescribeTransfer(const LegacyConversion& copy,bool background,
        "A mounted conversion destination must be a folder");
  const auto mode=copy.source.IsWindows()?copy.options.input:copy.options.output;
  const bool handoff=temporary&&!ProcessLocal(copy.source)&&!ProcessLocal(copy.destination)&&
-     !(ConvertsWithMountedClassic(copy)&&mode&&strchr("ambt5rR",mode));
+     !(ConvertsWithMountedClassic(copy)&&mode&&strchr("ambt53rR",mode));
  return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
   [&copy,background,handoff]{
    std::vector<VolumeCoord::Access> access;
