@@ -2,6 +2,10 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "HfsPlusCd.h"
+#include "MacBrowserModel.h"
+#include "FileOperations.h"
+#include "ReadOnlyCdBackend.h"
+#include "StorageHandoff.h"
 #include "HfsPlusDisk.h"
 #include "CdImage.h"
 #include "StorageJobDialog.h"
@@ -339,6 +343,83 @@ int RunHfsPlusCdTest(const char *directory) {
             auto source = OpenCd(3, media); media->workerOnly = true;
             check(TestHfsPlusMainCdBrowser(std::move(source), &owner, [&] { ++media->generation; }) && !media->wrongThread,
                   "CD browser controls/media-loss invalidation/owner restoration");
+        }
+        {
+            readonly_cd_backend_init();
+            auto path=root+"\\classic-cd.dsk";
+            {
+                auto image=CreateImage(wide(path).c_str(), 8*1024*1024);
+            }
+            char label[]="Classic CD";
+            check(hfs_format(path.data(),0,label)==0,"format classic CD fixture");
+            {
+                auto original=MacBrowser::OpenClassic(path,":",true);
+                const auto folder=original->MakeDirectory(2,u"Classic folder");
+                MacBrowser::Entry file;file.name=u"Classic forks";
+                file.forks[0].size=8192;file.forks[1].size=4096;
+                memcpy(file.finder.data(),"TEXTttxt",8);
+                original->Put(folder,file,payload,false);
+                original->Close();
+            }
+            const auto raw=load(path);
+            const size_t base=16*2048;
+            Bytes image(base+raw.size());
+            memcpy(image.data()+base,raw.data(),raw.size());
+            Disk::P16(image.data(),0x4552);
+            Disk::P16(image.data()+2,512);
+            Disk::P32(image.data()+4,uint32_t(image.size()/512));
+            auto map=image.data()+512;
+            Disk::P16(map,0x504d);
+            Disk::P32(map+4,1);
+            Disk::P32(map+8,uint32_t(base/512));
+            Disk::P32(map+12,uint32_t(raw.size()/512));
+            memcpy(map+48,"Apple_HFS",9);
+            auto media=std::make_shared<Disc>(image);
+            auto cd=MacBrowser::OpenCdRoot("D:\\",[](const char*){return UINT(DRIVE_CDROM);},
+                [media](int drive){return MacBrowser::OpenCd(drive,media);});
+            check(cd&&!strcmp(cd->Kind(),"HFS")&&!cd->Writable()&&cd->Name()==u"Classic CD",
+                  "classic CD was not mounted read-only by the common selector");
+            const auto origin=cd->WorkerDescription();
+            check(origin.kind==MacBrowser::WorkerOrigin::Cd&&origin.drive==3&&origin.generation==media->generation&&
+                  origin.generationKnown,"classic CD lost the worker media identity");
+            MacBrowser::Entry folder,file;
+            check(cd->FindChild(2,u"Classic folder",folder)&&cd->FindChild(folder.id,u"Classic forks",file)&&
+                  file.forks[0].size==8192&&file.forks[1].size==4096&&!memcmp(file.finder.data(),"TEXTttxt",8),
+                  "classic CD listing lost folder, Finder metadata or a fork");
+            for(unsigned fork=0;fork<2;++fork){
+                Bytes actual(144),expected(144);
+                cd->Read(file.id,fork,512,actual.data(),actual.size());
+                payload(fork,512,expected.data(),expected.size());
+                check(actual==expected,"classic CD returned the wrong fork bytes");
+            }
+            reject([&]{cd->Rename(file.id,folder.id,u"No write");},"classic CD allowed rename");
+            const auto exportFolder=wide(root)+L"\\classic-export";
+            check(CreateDirectoryW(exportFolder.c_str(),nullptr)!=FALSE,"create classic CD export directory");
+            const auto target=FileOperations::Location::Windows(exportFolder);
+            FileOperations::LegacyConversion conversion{
+                FileOperations::Location::Physical(3,FileOperations::ClassicMedia::Cd,":"),
+                target,false,false,false,{'m','a'}};
+            conversion.selection=FileOperations::ConversionSelection{
+                FileOperations::Location::Mounted(cd,file.id),target};
+            auto copy=FileOperations::Submit(conversion);
+            check(WaitForSingleObject(copy.Job()->event(),10000)==WAIT_OBJECT_0 &&
+                  !copy.Job()->result().code &&
+                  GetFileAttributesW((exportFolder+L"\\Classic forks.bin").c_str())!=INVALID_FILE_ATTRIBUTES,
+                  "classic CD bypassed the configured MacBinary copy mode");
+            ++media->generation;
+            reject([&]{cd->ValidateMedia();},"classic CD accepted a replacement disc");
+            cd->ReleaseMedia();
+            reject([&]{cd->List(2);},"released classic CD remained readable");
+            image.resize(image.size()-2048);
+            auto shortened=MacBrowser::OpenCd(3,std::make_shared<Disc>(std::move(image)));
+            check(shortened&&shortened->FindChild(2,u"Classic folder",folder)&&
+                  shortened->FindChild(folder.id,u"Classic forks",file),
+                  "shortened classic CD partition lost its readable catalog");
+            Bytes tail(144),expected(144);
+            shortened->Read(file.id,1,512,tail.data(),tail.size());
+            payload(1,512,expected.data(),expected.size());
+            check(tail==expected,"shortened classic CD returned wrong resource bytes");
+            fprintf(report,"PASS: classic HFS CD selection, read-only shared volume, both forks, Finder metadata and media-change invalidation.\n");
         }
         owner.DestroyWindow();
         AfxGetApp()->m_pMainWnd = nullptr;

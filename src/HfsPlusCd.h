@@ -7,5 +7,5 @@ namespace HfsPlus {
 int CdDriveFromRoot(const char *path);
 // Read-only newest supported Mac data track. The same native transport and TOC policy
 // are used by Dump CD to file. Injection is for synthetic tests, never paths.
-std::unique_ptr<Source> OpenCd(int drive, std::shared_ptr<MediaImageSource> media = {});
+std::unique_ptr<Source> OpenCd(int drive, std::shared_ptr<MediaImageSource> media = {}, uint16_t* macSignature = nullptr);
 } // namespace HfsPlus

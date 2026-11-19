@@ -297,10 +297,14 @@ std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wst
     return OpenImageImpl(path,externalJournal,true);
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {
-    auto source = HfsPlus::OpenCd(drive, std::move(media));
-    if (!HfsPlus::Volume::Recognizes(*source)) return {};
-    try { return FromHfsPlus(std::move(source), false,VolumeCoord::DeviceKey(drive)); }
-    catch (const std::exception &e) { throw DetectedVolumeError(e.what()); }
+    uint16_t signature=0;
+    auto source = HfsPlus::OpenCd(drive, std::move(media), &signature);
+    const auto key=VolumeCoord::DeviceKey(drive);
+    try {
+        if (HfsPlus::Volume::Recognizes(*source)) return FromHfsPlus(std::move(source),false,key);
+        if (signature==0x4244) return OpenClassicSource(std::move(source),key);
+        return {};
+    } catch (const std::exception &e) { throw DetectedVolumeError(e.what()); }
 }
 std::shared_ptr<Volume> OpenCdRoot(const char *root,
     std::function<UINT(const char *)> driveType,

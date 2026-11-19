@@ -23,7 +23,8 @@ public:
     int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});
     int OpenCd(const char *root);
     bool HasCdRoot(int drive) const;
-    void AdoptCd(int drive,const std::string& root,std::shared_ptr<MacBrowser::Volume>,bool asynchronous);
+    void AdoptCd(int drive,const std::string& root,std::shared_ptr<MacBrowser::Volume>,bool asynchronous,bool select=true);
+    void ScanCds();
     void AdoptRemovable(std::vector<Removable::Mounted>&,bool asynchronous);
     bool ScanRemovable(bool silent=false,bool startupOnly=false);
     int OpenRemovableRoot(const char* root);
