@@ -112,13 +112,17 @@ public:
 };
 
 template<class Predicate>
-void PumpUntil(Predicate ready,const char* message)
+void PumpUntil(Predicate ready,const char* message,bool dispatchTimers=true)
 {
  DWORD start=GetTickCount();
  while(!ready()){
   Check(GetTickCount()-start<8000,message);
   MSG msg;
-  while(PeekMessage(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessage(&msg);}
+  while(PeekMessage(&msg,nullptr,0,0,PM_REMOVE)){
+   if(!dispatchTimers&&msg.message==WM_TIMER)continue;
+   TranslateMessage(&msg);
+   DispatchMessage(&msg);
+  }
   Sleep(5);
  }
 }
@@ -159,11 +163,11 @@ void TestNavigation()
  Check(session.Navigating()&&Find(first.list,L"Slow file")>=0&&first.owner.IsWindowEnabled(),
     "pending navigation hid its previous listing or blocked the owner");
  tree.SelectItem(quickRoot);
- PumpUntil([&]{return !session.Navigating();},"replacement navigation waited for the stale read");
+ PumpUntil([&]{return !session.Navigating();},"replacement navigation waited for the stale read",false);
  Check(Find(first.list,L"Other file")>=0,"replacement folder did not publish");
  Check(browser.Refresh()&&session.Navigating()&&Find(first.list,L"Other file")>=0,
        "refresh did not use the per-window request or discarded the prior listing");
- PumpUntil([&]{return !session.Navigating();},"asynchronous refresh did not finish");
+ PumpUntil([&]{return !session.Navigating();},"asynchronous refresh did not finish",false);
  SetEvent(slow->gate);
  PumpUntil([&]{return VolumeCoord::Available({{slow->ResourceKey(),VolumeCoord::Mode::Write}});},"stale navigation retained its read lease");
  Check(Find(first.list,L"Other file")>=0&&Find(first.list,L"Slow child")<0,"stale folder replaced newer selection");
@@ -237,7 +241,7 @@ void TestNavigation()
   PumpUntil([&]{return WaitForSingleObject(closing->entered,0)==WAIT_OBJECT_0;},"closing read never started");
  }
  SetEvent(closing->gate);
- PumpUntil([&]{return VolumeCoord::Available({{closing->ResourceKey(),VolumeCoord::Mode::Write}});},"closed window retained its read lease");
+ PumpUntil([&]{return VolumeCoord::Available({{closing->ResourceKey(),VolumeCoord::Mode::Write}});},"closed window retained its read lease",false);
  Check(Find(first.list,L"Slow child")<0,"closed-window navigation affected another window");
 }
 
@@ -315,17 +319,17 @@ int RunBrowserSessionTest(const char* directory){
    const DWORD mask=1u<<24;
    session.NavigationMediaChanged(mask);
    browser.QueueMediaChanges(mask,0);
-   Check(browser.ApplyMediaChanges(),"queue changed drive probe");
-   PumpUntil([&]{return WaitForSingleObject(gate->entered,0)==WAIT_OBJECT_0;},"changed drive probe did not enter");
+   Check(browser.MediaUpdatesPending(),"queue changed drive probe");
+   PumpUntil([&]{return WaitForSingleObject(gate->entered,0)==WAIT_OBJECT_0;},"changed drive probe did not enter",false);
    Check(a.owner.IsWindowEnabled()&&control.GetSelectedItem()==selected&&Selected(a.list,L"first.txt"),
          "slow notice blocked browsing or discarded selection");
    // Finish a newer notice while the obsolete probe still has its read lease.
    session.NavigationMediaChanged(mask);
    browser.QueueMediaChanges(mask,mask);
-   Check(browser.ApplyMediaChanges(),"queue newer drive arrival");
-   PumpUntil([&]{return gate->probes.load()==2;},"newer arrival waited for the old probe");
+   Check(browser.MediaUpdatesPending(),"queue newer drive arrival");
+   PumpUntil([&]{return gate->probes.load()==2;},"newer arrival waited for the old probe",false);
    SetEvent(gate->release);
-   PumpUntil([&]{return !browser.ApplyMediaChanges();},"targeted drive change did not finish");
+   PumpUntil([&]{return !browser.MediaUpdatesPending();},"targeted drive change did not finish",false);
    const auto added=session.Mounts().FindWindowsDrive(24);
    Check(added&&added->root&&control.GetSelectedItem()==selected&&
          control.GetChildItem(original)==child&&(control.GetItemState(original,TVIS_EXPANDED)&TVIS_EXPANDED)&&
@@ -334,7 +338,7 @@ int RunBrowserSessionTest(const char* directory){
    browser.SetDriveTypeForTest([](int){return UINT(DRIVE_NO_ROOT_DIR);});
    session.NavigationMediaChanged(mask);
    browser.QueueMediaChanges(mask,0);
-   PumpUntil([&]{return !browser.ApplyMediaChanges();},"targeted drive removal did not finish");
+   PumpUntil([&]{return !browser.MediaUpdatesPending();},"targeted drive removal did not finish",false);
    Check(!session.Mounts().FindWindowsDrive(24)&&control.GetSelectedItem()==selected&&Selected(a.list,L"first.txt"),
          "targeted removal cleared another drive or its listing");
    browser.SetDriveTypeForTest({});
@@ -648,7 +652,11 @@ int RunBrowserSessionTest(const char* directory){
          "failed image open invalidated the previously loaded folder");
    session.MacBrowser().OpenImages({firstImage,missing,nextImage});
    PumpUntil([&]{return !session.Navigating();},"image batch did not complete");
-   Check(session.ListingAvailable()&&Find(*session.List(),L"Peer image")>=0,"image batch stopped at an invalid image");
+   if(!session.ListingAvailable()||Find(*session.List(),L"Peer image")<0){
+    fprintf(report,"Image batch state: %ls, listing available=%d, error=%s\n",
+        session.WindowTitle().c_str(),session.ListingAvailable(),session.navigationErrorForTest.c_str());
+    throw std::runtime_error("image batch stopped before publishing its last image");
+   }
 
    const auto peerRow=Find(*session.List(),L"Peer image");
    Check(peerRow>=0&&session.MacBrowser().Activate(peerRow)&&session.AwaitNavigationForTest(),

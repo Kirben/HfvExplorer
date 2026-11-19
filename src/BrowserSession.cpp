@@ -19,16 +19,54 @@ extern "C" {
 #include <set>
 #include <fcntl.h>
 struct BrowserSession::Notifications:public CWnd {
+ static constexpr UINT NavigationReady=WM_APP+31,MediaReady=WM_APP+32;
+ static constexpr UINT_PTR NavigationRetry=3,MediaRetry=4;
+ struct Mailbox {
+  std::mutex mutex;
+  HWND window=nullptr;
+ };
  BrowserSession& session;
- explicit Notifications(BrowserSession& value):session(value){if(!CreateEx(0,AfxRegisterWndClass(0),"HFV volume notifications",0,0,0,0,0,HWND_MESSAGE,nullptr))throw std::runtime_error("Cannot create volume notification mailbox");}
- ~Notifications(){if(GetSafeHwnd())DestroyWindow();}
+ std::shared_ptr<Mailbox> mailbox=std::make_shared<Mailbox>();
+
+ explicit Notifications(BrowserSession& value):session(value)
+ {
+  if(!CreateEx(0,AfxRegisterWndClass(0),"HFV volume notifications",0,0,0,0,0,HWND_MESSAGE,nullptr))
+   throw std::runtime_error("Cannot create volume notification mailbox");
+  mailbox->window=GetSafeHwnd();
+ }
+ ~Notifications()
+ {
+  {
+   std::lock_guard<std::mutex> lock(mailbox->mutex);
+   mailbox->window=nullptr;
+  }
+  if(GetSafeHwnd())DestroyWindow();
+ }
+ void NotifyOnCompletion(const std::shared_ptr<Storage::Job>& job,UINT message)
+ {
+  job->whenFinished([weak=std::weak_ptr<Mailbox>(mailbox),message]{
+   if(const auto target=weak.lock()){
+    std::lock_guard<std::mutex> lock(target->mutex);
+    if(target->window)::PostMessage(target->window,message,0,0);
+   }
+  });
+ }
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l)override{
-  if(message==WM_TIMER&&w==4){
-   if(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&!HfvDeviceWait::busy()&&
-      !session.MacBrowser().ApplyMediaChanges())KillTimer(4);
+  if(message==MediaReady||(message==WM_TIMER&&w==MediaRetry)){
+   if(!session.Tree()||!session.List()||!session.MacBrowser().MediaUpdatesPending()){
+    KillTimer(MediaRetry);
+    return 0;
+   }
+   const bool blocked=StorageUi::busy()||StorageUi::state().sessionOpen||HfvDeviceWait::busy();
+   if(blocked||session.MacBrowser().ApplyMediaChanges()==MainMacBrowser::MediaUpdate::Retry)
+    SetTimer(MediaRetry,60,nullptr);
+   else KillTimer(MediaRetry);
    return 0;
   }
-  if(message==WM_TIMER&&w==3){session.CompleteNavigation();return 0;}
+  if(message==NavigationReady||(message==WM_TIMER&&w==NavigationRetry)){
+   session.CompleteNavigation();
+   return 0;
+  }
   if(message==WM_TIMER&&w==2){
    if(!session.owner_||!session.tree_||!session.list_){session.deferred_={};KillTimer(2);return 0;}
    if(StorageUi::busy()||StorageUi::state().sessionOpen||(session.deferredClassic_&&session.deferredKey_.empty()&&BackgroundCopies::Active())||!VolumeCoord::Readable(session.deferredKey_))return 0;
@@ -99,7 +137,12 @@ bool BrowserSession::AwaitNavigationForTest()
 
 void BrowserSession::ScheduleMediaUpdates()
 {
- if(notifications_)notifications_->SetTimer(4,60,nullptr);
+ if(notifications_)notifications_->PostMessage(Notifications::MediaReady);
+}
+
+void BrowserSession::NotifyMediaCompletion(const std::shared_ptr<Storage::Job>& job)
+{
+ if(notifications_)notifications_->NotifyOnCompletion(job,Notifications::MediaReady);
 }
 
 void BrowserSession::CancelNavigation()
@@ -113,7 +156,7 @@ void BrowserSession::CancelNavigation()
     navigation_.reset();
     navigationReady_ = {};
     if (notifications_)
-        notifications_->KillTimer(3);
+        notifications_->KillTimer(Notifications::NavigationRetry);
 }
 
 namespace {
@@ -208,7 +251,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
 #endif
     };
     listingPending_=true;
-    notifications_->SetTimer(3,25,nullptr);
+    notifications_->NotifyOnCompletion(navigation_,Notifications::NavigationReady);
     if(status_)status_->SetPaneText(0,openingImage?"Opening image...":"Loading folder...");
 }
 
@@ -293,11 +336,17 @@ void BrowserSession::NavigationMediaChanged(DWORD driveMask)
 
 void BrowserSession::CompleteNavigation()
 {
-    if (!navigation_ || !navigation_->done() || StorageUi::busy() || StorageUi::state().sessionOpen)
+    if(!navigation_||!navigation_->done()){
+        notifications_->KillTimer(Notifications::NavigationRetry);
         return;
+    }
+    if(StorageUi::busy()||StorageUi::state().sessionOpen){
+        notifications_->SetTimer(Notifications::NavigationRetry,25,nullptr);
+        return;
+    }
     auto job = std::move(navigation_);
     auto ready = std::move(navigationReady_);
-    notifications_->KillTimer(3);
+    notifications_->KillTimer(Notifications::NavigationRetry);
     if (job->cancelled() || !tree_ || !list_)
         return;
     try {
@@ -341,7 +390,7 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
 }
 void BrowserSession::StopNotifications(){
  CancelNavigation();if(preview_)preview_->Clear();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
- if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);}
+ if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);notifications_->KillTimer(Notifications::MediaRetry);}
 }
 void BrowserSession::DetachPanes(){
     ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();

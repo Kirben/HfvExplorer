@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <stdexcept>
+#include <optional>
 namespace Storage {
 enum class ConflictChoice {None,Replace,ReplaceAll,Skip,Cancel};
 struct Progress {
@@ -50,6 +51,7 @@ class Job {
  HANDLE event_;
  std::function<void(const Progress&)> report_;
  std::function<ConflictChoice(const std::string&)> ask_;
+ std::function<void()> completion_;
 public:
  Job():event_(CreateEvent(NULL,TRUE,FALSE,NULL)) {if(!event_)throw std::runtime_error("Could not create job completion event");}
  ~Job(){CloseHandle(event_);}
@@ -59,7 +61,28 @@ public:
  void progress(const Progress& value){{std::lock_guard<std::mutex> lock(mutex_);progress_=value;}if(report_)report_(value);}
  bool done()const{std::lock_guard<std::mutex> lock(mutex_);return done_;}
  Result result()const{std::lock_guard<std::mutex> lock(mutex_);return result_;}
- void finish(Result result){ {std::lock_guard<std::mutex> lock(mutex_);OutcomeEvidence evidence;result.Finalize(evidence,0,0);result_=std::move(result);done_=true;}SetEvent(event_);}
+ // One completion observer, invoked outside the job lock. Late observers
+ // receive the same notification even if the job has already finished.
+ void whenFinished(std::function<void()> notify){
+  {
+   std::lock_guard<std::mutex> lock(mutex_);
+   if(!done_){completion_=std::move(notify);return;}
+  }
+  notify();
+ }
+ void finish(Result result){
+  std::function<void()> notify;
+  {
+   std::lock_guard<std::mutex> lock(mutex_);
+   OutcomeEvidence evidence;
+   result.Finalize(evidence,0,0);
+   result_=std::move(result);
+   done_=true;
+   notify=std::move(completion_);
+  }
+  SetEvent(event_);
+  if(notify)notify();
+ }
  void wait()const{WaitForSingleObject(event_,INFINITE);}
  std::string conflict()const{std::lock_guard<std::mutex> lock(mutex_);return conflict_;}
  std::pair<uint64_t,std::string> conflictState()const{std::lock_guard<std::mutex> lock(mutex_);return {conflictId_,conflict_};}
@@ -87,6 +110,7 @@ class Worker {
  void loop() {
   for(;;) {
    Entry entry;
+   std::optional<Result> readinessError;
    {
     std::unique_lock<std::mutex> lock(mutex_);
     for(;;){
@@ -94,13 +118,14 @@ class Worker {
      auto found=queue_.end();
      for(auto it=queue_.begin();it!=queue_.end();++it){
       try{if(!it->ready||it->ready(it->job)){found=it;break;}}
-      catch(const std::exception& error){it->job->finish({1,ERROR_UNHANDLED_EXCEPTION,error.what()});found=it;break;}
+      catch(const std::exception& error){readinessError=Result{1,ERROR_UNHANDLED_EXCEPTION,error.what()};found=it;break;}
      }
      if(found!=queue_.end()){entry=std::move(*found);queue_.erase(found);break;}
      // Conflicting requests do not occupy workers or hold a partial lease.
      condition_.wait_for(lock,std::chrono::milliseconds(10));
     }
    }
+   if(readinessError){entry.job->finish(std::move(*readinessError));continue;}
    if(entry.job->done())continue;
    Result result;
    OutcomeEvidence evidence;

@@ -495,13 +495,19 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 result.listing.revision=VolumeCoord::Revision(key);
                 if(job.cancelled())throw Storage::Cancelled();
                 BrowserDirectory::ObserveRead("image-root");
+                if(job.cancelled())throw Storage::Cancelled();
                 root->entries=volume->List(2);
                 root->free=volume->FreeBytes();
-                result.listing.folder=Location::Mounted(volume);
-                StorageLocation::ValidateMedia(result.listing.folder);
+                auto folder=Location::Mounted(volume);
+                StorageLocation::ValidateMedia(folder);
                 StorageLocation::ValidateImage(source.path,key);
-                result.listing.folder.directory=true;
+                folder.directory=true;
+                result.listing.folder=std::move(folder);
                 State::FillListing(result.listing,root->entries,volume->Supports(),showInvisible,true);
+                if(job.cancelled()){
+                    result.listing={};
+                    throw Storage::Cancelled();
+                }
             }catch(const HfsPlus::ExternalJournalRequired& error){
                 result.listing.resourceKey.clear();
                 result.journalPrompt=error.what();
@@ -578,7 +584,7 @@ void MainMacBrowser::ScanRemovable(bool silent,bool startupOnly)
   return Storage::Result{};
  });
  state_->externalScan=State::ExternalScan{media,std::move(job),generation,silent};
- session_.ScheduleMediaUpdates();
+ session_.NotifyMediaCompletion(state_->externalScan->job);
 }
 void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,int drive,bool select){
  if(select&&!found.empty()){
@@ -695,11 +701,12 @@ void MainMacBrowser::QueueMediaChanges(DWORD changed,DWORD arrived,bool rescan)
  session_.ScheduleMediaUpdates();
 }
 
-bool MainMacBrowser::ApplyMediaChanges()
+MainMacBrowser::MediaUpdate MainMacBrowser::ApplyMediaChanges()
 {
  auto tree=session_.Tree();
  auto doc=session_.Document();
- if(!tree||!session_.List()||!doc)return false;
+ if(!tree||!session_.List()||!doc)return MediaUpdate::Idle;
+ bool retry=false;
  if(state_->externalScan&&state_->externalScan->job->done()){
   auto scan=std::exchange(state_->externalScan,std::nullopt);
   const auto result=scan->job->result();
@@ -722,7 +729,7 @@ bool MainMacBrowser::ApplyMediaChanges()
   get_floppy_volume_file_name(drive,classicPath);
   const auto classicIndex=doc->get_volume_index_by_filename(classicPath);
   if(!pending.job){
-   if(!VolumeCoord::Readable(key)){++it;continue;}
+   if(!VolumeCoord::Readable(key)){retry=true;++it;continue;}
    auto media=std::make_shared<State::DriveMedia>();
    const bool arrived=pending.arrived,rescan=pending.rescan;
    const bool checkFloppy=rescan||classicIndex>=0||App().m_startup_floppies;
@@ -747,11 +754,12 @@ bool MainMacBrowser::ApplyMediaChanges()
      catch(const HfsPlus::Error&){/* Keep the Windows drive available. */}
      return Storage::Result{};
     });
+   session_.NotifyMediaCompletion(pending.job);
    ++it;continue;
   }
   if(!pending.job->done()){++it;continue;}
   const auto result=pending.job->result();
-  if(result.error==ERROR_BUSY){pending.job.reset();++it;continue;}
+  if(result.error==ERROR_BUSY){pending.job.reset();retry=true;++it;continue;}
   if(result.code){it=state_->driveChanges.erase(it);continue;}
   std::vector<VolumeCoord::Access> resources{{key,VolumeCoord::Mode::Write}};
   for(const auto& mount:state_->mounts)
@@ -759,7 +767,7 @@ bool MainMacBrowser::ApplyMediaChanges()
     resources.push_back({mount.volume->ResourceKey(),VolumeCoord::Mode::Write});
   CommandStorage::Reservation access;
   try{access=std::make_shared<VolumeCoord::Lease>(std::move(resources));}
-  catch(const VolumeCoord::Busy&){++it;continue;}
+  catch(const VolumeCoord::Busy&){retry=true;++it;continue;}
 
   // Publish only this drive and keep the other tree handles and listings intact.
   auto media=std::move(pending.media);
@@ -836,6 +844,11 @@ bool MainMacBrowser::ApplyMediaChanges()
    });
   }
  }
+ return retry?MediaUpdate::Retry:MediaUpdatesPending()?MediaUpdate::Working:MediaUpdate::Idle;
+}
+
+bool MainMacBrowser::MediaUpdatesPending() const
+{
  return state_->externalScan.has_value()||!state_->driveChanges.empty();
 }
 

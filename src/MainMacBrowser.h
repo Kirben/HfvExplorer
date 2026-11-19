@@ -27,7 +27,9 @@ public:
     void AdoptRemovable(std::vector<Removable::Mounted>&,int drive=-1,bool select=true);
     void QueueMediaChanges(DWORD changed,DWORD arrived,bool rescan=false);
     void ScanMedia();
-    bool ApplyMediaChanges();
+    enum class MediaUpdate { Idle, Working, Retry };
+    MediaUpdate ApplyMediaChanges();
+    bool MediaUpdatesPending() const;
     void ReconcileRemovable(std::vector<Removable::Mounted>&,int drive,const std::vector<std::wstring>& failed={});
     void ScanRemovable(bool silent=false,bool startupOnly=false);
     void DetachTree();

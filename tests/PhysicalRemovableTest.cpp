@@ -112,7 +112,7 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
        "Explicit Mac removable drive selection fell through to Windows enumeration");
  const auto selected=sa.Tree()->GetTreeCtrl().GetSelectedItem();
  a->SendMessage(WM_COMMAND,ID_FILE_SCAN_REMOVABLE);
- Until([&]{return api->enumerations==3&&!sa.MacBrowser().ApplyMediaChanges();},"manual rescan did not finish");
+ Until([&]{return api->enumerations==3&&!sa.MacBrowser().MediaUpdatesPending();},"manual rescan did not finish");
  Check(sa.Tree()->GetTreeCtrl().GetSelectedItem()==selected&&
        MacRoots(sa)==2&&MacRoots(sb)==0&&Row(sa,L"Hello")>=0,
        "Manual scan replaced stable removable mounts or their selection");

@@ -89,6 +89,7 @@ public:
     bool RevealFindHit(const FindHit&);
     bool UsesAsyncNavigation() const;
     void ScheduleMediaUpdates();
+    void NotifyMediaCompletion(const std::shared_ptr<Storage::Job>&);
     bool Navigating() const { return bool(navigation_); }
     bool ListingAvailable() const { return !listingPending_; }
     void RejectNavigation(const std::string& key,const std::string& message);
