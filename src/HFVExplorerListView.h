@@ -139,6 +139,9 @@ public:
     void SetBrowserCapabilities(MacBrowser::Capabilities caps){m_directory_capabilities=caps;m_directory_capabilities_known=true;}
     bool BrowserDirectoryWritable()const{return !m_directory_capabilities_known||m_directory_capabilities.create;}
     bool BrowserSelectionAllows(bool rename)const;
+    std::optional<bool> BrowserItemCommandEnabled(UINT command) const;
+    bool RunBrowserItemCommand(UINT command);
+    void UpdateBrowserItemMenu(CMenu& menu) const;
     bool StorageSelectionAvailable(bool exclusive=false)const;
     int InsertBrowserRow(const BrowserDirectory::Row&,HTREEITEM);
     void SortBrowserRows(int column,bool ascending);

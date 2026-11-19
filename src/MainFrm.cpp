@@ -111,7 +111,6 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_UPDATE_COMMAND_UI_RANGE(ID_FILE_MAC_IMPORT,ID_FILE_MAC_IMPORT_RESOURCE,OnUpdateMacTransfer)
  ON_UPDATE_COMMAND_UI(ID_EDIT_CUT,OnUpdateMacEdit)
  ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE,OnUpdateMacEdit)
- ON_UPDATE_COMMAND_UI(ID_OWN_FILE_PROPERTIES, OnUpdateItemProperties)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
 
@@ -629,11 +628,22 @@ bool CMainFrame::CommandAllowed(UINT id)const{
 BOOL CMainFrame::OnCmdMsg(UINT id,int code,void* extra,AFX_CMDHANDLERINFO* info){
  if(!info&&!CommandAllowed(id)){if(code==CN_UPDATE_COMMAND_UI)static_cast<CCmdUI*>(extra)->Enable(FALSE);return TRUE;}
 
+ if (!info && m_browserSession && m_browserSession->List()) {
+  auto& list = *m_browserSession->List();
+  if (code == CN_UPDATE_COMMAND_UI) {
+   if (const auto enabled = list.BrowserItemCommandEnabled(id)) {
+    static_cast<CCmdUI*>(extra)->Enable(*enabled);
+    return TRUE;
+   }
+  }
+ }
  if(code==CN_COMMAND&&!info){
   struct ErrorOwner{
    HWND previous;
    ~ErrorOwner(){HFSIFACE_exchange_error_window(previous);}
   } owner{HFSIFACE_exchange_error_window(GetSafeHwnd())};
+  if (m_browserSession && m_browserSession->List() && m_browserSession->List()->RunBrowserItemCommand(id))
+      return TRUE;
   // Handle image opens before document and application command fallback.
   if(id==ID_FILE_OPEN){OnFileOpenImage();return TRUE;}
   if(id>=ID_FILE_MRU_FILE1&&id<=ID_FILE_MRU_FILE16){OnOpenRecentImage(id);return TRUE;}
@@ -1460,13 +1470,6 @@ void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
  }
  ui->Enable(enabled);
 }
-void CMainFrame::OnUpdateItemProperties(CCmdUI* ui)
-{
-    auto* list = m_browserSession ? m_browserSession->List() : nullptr;
-    const int selected = list ? list->GetListCtrl().GetNextItem(-1, LVNI_SELECTED) : -1;
-    ui->Enable(selected >= 0 && m_browserSession->MacBrowser().CanInspectProperties(selected));
-}
-
 void CMainFrame::OnUpdateMacEdit(CCmdUI* ui){
  auto& browser=GetBrowserSession().MacBrowser();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
  bool allowed=browser.Active()?(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable()):

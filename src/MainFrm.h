@@ -119,7 +119,6 @@ public:
  afx_msg void OnOpenRecentImage(UINT);
  afx_msg void OnUpdateMacTransfer(CCmdUI*);
  afx_msg void OnUpdateMacEdit(CCmdUI*);
- afx_msg void OnUpdateItemProperties(CCmdUI*);
 
 protected:  // control bar embedded members
 	CStatusBar  m_wndStatusBar;

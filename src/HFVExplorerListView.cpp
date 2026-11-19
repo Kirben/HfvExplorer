@@ -968,6 +968,63 @@ void CHFVExplorerListView::set_label_color(int color)
     if(!requests.empty())BackgroundCopies::Start(std::move(requests),session.Owner(),true);
 }
 
+std::optional<bool> CHFVExplorerListView::BrowserItemCommandEnabled(UINT command) const
+{
+    auto& session = GetBrowserSession();
+    auto& browser = session.MacBrowser();
+    const int selected = m_cl->GetNextItem(-1, LVNI_SELECTED);
+    const auto* row = BrowserRowAt(selected);
+    const bool ready = session.ListingAvailable();
+    switch (command) {
+    case ID_OWN_FILE_OPEN:
+    case ID_OWN_FOLDER_OPEN:
+        return ready && ((row && !row->location.IsNone()) || IsParentRow(selected));
+    case ID_OWN_FILE_PROPERTIES:
+    case ID_OWN_FOLDER_PROPERTIES:
+        return browser.CanInspectProperties(selected);
+    case ID_OWN_NEW_FOLDER:
+        return ready && (browser.Active() ? browser.CanCreateFolder() : BrowserDirectoryWritable());
+    case ID_OWN_DELETE:
+        return ready && (browser.Active() ? browser.SelectionWritable() : BrowserSelectionAllows(false));
+    default:
+        return std::nullopt;
+    }
+}
+
+bool CHFVExplorerListView::RunBrowserItemCommand(UINT command)
+{
+    const auto enabled = BrowserItemCommandEnabled(command);
+    if (!enabled) return false;
+    if (!*enabled) return true;
+    switch (command) {
+    case ID_OWN_FILE_OPEN:
+    case ID_OWN_FOLDER_OPEN:
+        activate_list_item(m_cl->GetNextItem(-1, LVNI_SELECTED), FALSE, FALSE);
+        break;
+    case ID_OWN_FILE_PROPERTIES:
+    case ID_OWN_FOLDER_PROPERTIES:
+        on_properties(m_cl->GetNextItem(-1, LVNI_SELECTED));
+        break;
+    case ID_OWN_NEW_FOLDER:
+        new_folder();
+        break;
+    case ID_OWN_DELETE:
+        try_delete_selected_items(TRUE);
+        break;
+    }
+    return true;
+}
+
+void CHFVExplorerListView::UpdateBrowserItemMenu(CMenu& menu) const
+{
+    for (UINT command : {ID_OWN_FILE_OPEN, ID_OWN_FOLDER_OPEN, ID_OWN_FILE_PROPERTIES,
+                         ID_OWN_FOLDER_PROPERTIES, ID_OWN_NEW_FOLDER, ID_OWN_DELETE}) {
+        if (menu.GetMenuState(command, MF_BYCOMMAND) != UINT(-1))
+            menu.EnableMenuItem(command, MF_BYCOMMAND |
+                (*BrowserItemCommandEnabled(command) ? MF_ENABLED : MF_GRAYED));
+    }
+}
+
 void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point) 
 {
  if(GetBrowserSession().MacBrowser().ContextMenu(point))return;
@@ -980,7 +1037,11 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
   menu.AppendMenu(MF_STRING|(BrowserDirectoryWritable()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New Folder...");
   menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"Properties...");
   menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_OWN_DELETE,"Delete");
-  auto command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,GetBrowserSession().Owner());if(command==ID_OWN_DELETE)try_delete_selected_items(TRUE);else if(command==ID_OWN_NEW_FOLDER)new_folder();else if(command==ID_OWN_FILE_PROPERTIES){int row=m_cl->GetNextItem(-1,LVNI_SELECTED);if(row>=0)on_properties(row);}else if(command)GetBrowserSession().Owner()->SendMessage(WM_COMMAND,command);return;
+  UpdateBrowserItemMenu(menu);
+  const auto command = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y,
+                                           GetBrowserSession().Owner());
+  if (command) GetBrowserSession().Owner()->SendMessage(WM_COMMAND, command);
+  return;
  }
 	CMenu cm, cpop, cpop2, cpop3;
 	int inx, hit = 0;
@@ -1106,6 +1167,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 			cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_TOGGLE_LABEL_COLORS, label_string );
 			cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_PROGRAM_OPTIONS, "&Options..." );
 		}
+		UpdateBrowserItemMenu(cm);
 		if(cm.TrackPopupMenu( TPM_LEFTALIGN, point.x, point.y, this )) {
 		}
 		if(pop_created) cpop.DestroyMenu();
@@ -1161,6 +1223,7 @@ void CHFVExplorerListView::save_icon_command( int inx )
 
 BOOL CHFVExplorerListView::OnCommand(WPARAM wParam, LPARAM lParam) 
 {
+ if (RunBrowserItemCommand(LOWORD(wParam))) return TRUE;
  if(GetBrowserSession().MacBrowser().Command(LOWORD(wParam)))return TRUE;
 	int handled = 1;
 	UINT cmd = LOWORD(wParam);
@@ -1194,36 +1257,10 @@ BOOL CHFVExplorerListView::OnCommand(WPARAM wParam, LPARAM lParam)
 		case ID_OWN_TOGGLE_LABEL_COLORS:
 			toggle_label_colors();
 			break;
-		case ID_OWN_FOLDER_OPEN:
-			inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
-			if(inx >= 0) {
-				activate_list_item( inx, FALSE, FALSE );
-			}
-			break;
-		case ID_OWN_FILE_OPEN:
-			// OnSysKeyDown( VK_RETURN, 0, 0 );
-			inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
-			if(inx >= 0) {
-				activate_list_item( inx, FALSE, FALSE );
-			}
-			break;
-		case ID_OWN_FOLDER_PROPERTIES:
-		case ID_OWN_FILE_PROPERTIES:
-			inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
-			if(inx >= 0) {
-				on_properties( inx );
-			}
-			break;
 		case ID_OWN_MAP_THIS:
 			inx = m_cl->GetNextItem( -1, LVNI_SELECTED );
 			if(inx >= 0) {
 				map_selected_item();
-			}
-			break;
-		case ID_OWN_DELETE:
-			inx = m_cl->GetNextItem( -1, LVNI_SELECTED );
-			if(inx >= 0) {
-				try_delete_selected_items( TRUE );
 			}
 			break;
 		case ID_OWN_SAVE_ICON:
@@ -1231,9 +1268,6 @@ BOOL CHFVExplorerListView::OnCommand(WPARAM wParam, LPARAM lParam)
 			if(inx >= 0) {
 				save_icon_command(inx);
 			}
-			break;
-		case ID_OWN_NEW_FOLDER:
-			new_folder();
 			break;
 		case ID_OWN_PROGRAM_OPTIONS:
 			{
@@ -1815,17 +1849,15 @@ void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 			inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
 			if(inx >= 0) {
 				int ctrl = GetAsyncKeyState( VK_CONTROL ) & 0x80000000ul;
-				activate_list_item( inx, ctrl != 0, FALSE );
+                if (ctrl) activate_list_item(inx, TRUE, FALSE);
+                else RunBrowserItemCommand(ID_OWN_FILE_OPEN);
 			}
 			handled = 1;
 			break;
 		case VK_DELETE:
-			inx = m_cl->GetNextItem( -1, LVNI_SELECTED );
-			if(inx >= 0) {
-				try_delete_selected_items( TRUE );
-			}
-			handled = 1;
-			break;
+            RunBrowserItemCommand(ID_OWN_DELETE);
+            handled = 1;
+            break;
 		case VK_F4:
 			inx = m_cl->GetNextItem( -1, LVNI_SELECTED );
 			if(inx >= 0) {

@@ -557,17 +557,23 @@ int RunBackgroundMetadataTest(const char* directory){
   Check(propertiesMenu.CreatePopupMenu() &&
         propertiesMenu.AppendMenu(MF_STRING, ID_OWN_FILE_PROPERTIES, "Properties..."),
         "create Properties menu");
-  auto propertiesEnabled = [&] {
+  for (UINT command : {ID_OWN_FILE_OPEN, ID_OWN_NEW_FOLDER, ID_OWN_DELETE})
+   Check(propertiesMenu.AppendMenu(MF_STRING, command, "Browser command"), "add browser command");
+  auto menuEnabled = [&](UINT command) {
    frame->SendMessage(WM_INITMENUPOPUP, WPARAM(propertiesMenu.GetSafeHmenu()), 0);
-   return (propertiesMenu.GetMenuState(ID_OWN_FILE_PROPERTIES, MF_BYCOMMAND) & (MF_DISABLED | MF_GRAYED)) == 0;
+   return (propertiesMenu.GetMenuState(command, MF_BYCOMMAND) & (MF_DISABLED | MF_GRAYED)) == 0;
   };
+  auto propertiesEnabled = [&] { return menuEnabled(ID_OWN_FILE_PROPERTIES); };
+  Check(menuEnabled(ID_OWN_FILE_OPEN) && menuEnabled(ID_OWN_NEW_FOLDER) && menuEnabled(ID_OWN_DELETE),
+        "frame disabled valid HFS+ browser commands");
   Check(propertiesEnabled(), "frame disabled Properties for a selected HFS+ file");
   session.List()->GetListCtrl().SetItemState(-1, 0, LVIS_SELECTED);
-  Check(!propertiesEnabled(), "frame enabled Properties without a selected row");
+  Check(!propertiesEnabled() && !menuEnabled(ID_OWN_FILE_OPEN) && !menuEnabled(ID_OWN_DELETE)
+        && menuEnabled(ID_OWN_NEW_FOLDER), "popup used stale selection");
   Select(session,L"File");
   Check(propertiesEnabled(), "frame did not re-enable Properties after selection");
   BackgroundCopies::enabled=false;
-  session.List()->SendMessage(WM_COMMAND,ID_OWN_FILE_PROPERTIES);
+  frame->SendMessage(WM_COMMAND,ID_OWN_FILE_PROPERTIES);
   BackgroundCopies::enabled=true;
   Check(BackgroundCopies::Active(),"Properties command did not use the typed background job");
   Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});
