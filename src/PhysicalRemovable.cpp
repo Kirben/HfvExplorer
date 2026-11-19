@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "PhysicalRemovable.h"
+#include "MediaDiscovery.h"
 #include "StorageHandoff.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
@@ -128,7 +129,7 @@ std::vector<Mounted> Open(const Device& device,std::shared_ptr<Api> api){if(!api
   if(!backend)continue;Mounted mounted;mounted.device=device;mounted.partition=partition;MacBrowser::WorkerOrigin origin;origin.kind=MacBrowser::WorkerOrigin::Removable;origin.path=device.path;origin.offset=partition.offset;origin.generationKnown=true;origin.generation=disk->Generation();mounted.volume=MacBrowser::TrackWorkerVolume(std::make_shared<MediaVolume>(std::move(backend),slice,key,origin));mounted.label=device.label;if(partition.index)mounted.label+=L", partition "+std::to_wstring(partition.index);result.push_back(std::move(mounted));}
  disk->CheckMedia();return result;
 }
-Discovery Scan(Storage::Job& job,std::shared_ptr<Api> api){if(!api)api=NativeApi();Discovery result;auto devices=api->Enumerate();std::set<std::wstring> seen;for(auto& device:devices){if(job.cancelled())throw Storage::Cancelled();if(!Eligible(device)||!seen.insert(device.path).second)continue;Storage::Progress progress;progress.phase="Checking Mac removable disks";progress.path=Utf8(device.label);progress.utf8=true;job.progress(progress);try{auto volumes=Open(device,api);result.volumes.insert(result.volumes.end(),volumes.begin(),volumes.end());}catch(const std::exception& e){result.errors.push_back(Utf8(device.label)+": "+e.what());}}return result;}
-std::vector<Mounted> FromDriveRoot(const std::wstring& root){if(!Root(root))return {};auto api=NativeApi();if(api->WindowsReadableRoot(root))return {};Device device;if(!api->FromRoot(root,device))return {};return Open(device,api);}
+Discovery Scan(Storage::Job& job,std::shared_ptr<Api> api){if(!api)api=NativeApi();Discovery result;auto devices=api->Enumerate();std::set<std::wstring> seen;for(auto& device:devices){if(job.cancelled())throw Storage::Cancelled();if(!Eligible(device)||!seen.insert(device.path).second)continue;Storage::Progress progress;progress.phase="Checking Mac removable disks";progress.path=Utf8(device.label);progress.utf8=true;job.progress(progress);try{auto volumes=MediaDiscovery::External(device,api,job);result.volumes.insert(result.volumes.end(),volumes.begin(),volumes.end());}catch(const Storage::MediaChanged&){throw;}catch(const Storage::Cancelled&){throw;}catch(const std::exception& e){result.errors.push_back(Utf8(device.label)+": "+e.what());}}return result;}
+std::vector<Mounted> FromDriveRoot(const std::wstring& root,Storage::Job* job){if(!Root(root))return {};auto api=NativeApi();if(api->WindowsReadableRoot(root))return {};Device device;if(!api->FromRoot(root,device))return {};return job?MediaDiscovery::External(device,api,*job):Open(device,api);}
 std::shared_ptr<MacBrowser::Volume> Reopen(const std::wstring& path,uint64_t offset){auto api=NativeApi();for(auto& d:api->Enumerate())if(!_wcsicmp(d.path.c_str(),path.c_str()))for(auto& v:Open(d,api))if(v.partition.offset==offset)return v.volume;Device d;if(path.size()==6&&path.substr(0,4)==L"\\\\.\\"&&api->FromRoot(path.substr(4)+L"\\",d))for(auto& v:Open(d,api))if(v.partition.offset==offset)return v.volume;throw Error("The removable Mac partition is no longer present; scan removable disks again");}
 }

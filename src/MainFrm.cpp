@@ -30,6 +30,7 @@
 #include "MainMacBrowser.h"
 #include "HfsPlusDialogs.h"
 #include "DeviceWait.h"
+#include "MediaDiscovery.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
 #include "FloppyWriter.h"
@@ -777,49 +778,27 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
  }
  if(message==WM_DEVICECHANGE&&m_browserSession&&lParam&&
     (wParam==DBT_DEVICEARRIVAL||wParam==DBT_DEVICEREMOVECOMPLETE)){
-  const auto notice=reinterpret_cast<const DEV_BROADCAST_VOLUME*>(lParam);
-  if(notice->dbcv_devicetype==DBT_DEVTYP_VOLUME&&notice->dbcv_size>=sizeof(*notice))
+  const auto* notice=reinterpret_cast<const DEV_BROADCAST_VOLUME*>(lParam);
+  if(notice->dbcv_devicetype==DBT_DEVTYP_VOLUME&&notice->dbcv_size>=sizeof(*notice)){
+   const auto& browsers=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers;
+   if(browsers.empty()||browsers.front()==this)MediaDiscovery::Changed(notice->dbcv_unitmask);
    m_browserSession->NavigationMediaChanged(notice->dbcv_unitmask);
- }
- if(message==WM_DEVICECHANGE&&StorageUi::state().sessionOpen){
-  if((wParam==DBT_DEVICEARRIVAL||wParam==DBT_DEVICEREMOVECOMPLETE)&&lParam&&
-     reinterpret_cast<DEV_BROADCAST_HDR*>(lParam)->dbch_devicetype==DBT_DEVTYP_VOLUME)m_deviceChangeDeferred=true;
-  return TRUE;
- }
- if(HfvDeviceWait::busy()) {
-  if(message==WM_DEVICECHANGE) {
-   if((wParam==DBT_DEVICEARRIVAL||wParam==DBT_DEVICEREMOVECOMPLETE)&&lParam&&
-      reinterpret_cast<DEV_BROADCAST_HDR*>(lParam)->dbch_devicetype==DBT_DEVTYP_VOLUME)m_deviceChangeDeferred=true;
+   if(!m_deviceChangeDeferred){
+    m_deviceChangeDeferred=true;
+    PostMessage(WM_APP+91);
+   }
    return TRUE;
   }
-  if(message==WM_COMMAND || message==WM_CLOSE)return 0;
  }
- if(message==WM_APP+91 && m_deviceChangeDeferred) {
-  m_deviceChangeDeferred=false;PostMessage(WM_COMMAND,ID_VIEW_REFRESH);return 0;
+ if(HfvDeviceWait::busy()&&(message==WM_COMMAND||message==WM_CLOSE))return 0;
+ if(message==WM_APP+91&&m_deviceChangeDeferred){
+  if(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&!HfvDeviceWait::busy()){
+   m_deviceChangeDeferred=false;
+   if(m_browserSession)m_browserSession->Document()->CheckNewMedia(FALSE,TRUE,TRUE);
+  }
+  return 0;
  }
-	if(message == our_child_registration) {
-		OnChildRegistration(wParam,lParam);
-	} else if(message == WM_DEVICECHANGE) {
-		if( wParam == DBT_DEVICEREMOVECOMPLETE ) {
-			DEV_BROADCAST_HDR *p;
-			p = (DEV_BROADCAST_HDR *)lParam;
-			// AfxMessageBox( "Device removed" );
-			if(p->dbch_devicetype == DBT_DEVTYP_VOLUME) {
-				// AfxMessageBox( "DBT_DEVTYP_VOLUME" );
-				CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-				GetBrowserSession().Document()->CheckNewMedia( FALSE, TRUE, TRUE );
-			}
-		} else if( wParam == DBT_DEVICEARRIVAL ) {
-			DEV_BROADCAST_HDR *p;
-			p = (DEV_BROADCAST_HDR *)lParam;
-			// AfxMessageBox( "Device arrived" );
-			if(p->dbch_devicetype == DBT_DEVTYP_VOLUME) {
-				// AfxMessageBox( "DBT_DEVTYP_VOLUME" );
-				CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-				GetBrowserSession().Document()->CheckNewMedia( FALSE, TRUE, TRUE );
-			}
-		}
-	}
+ if(message==our_child_registration)OnChildRegistration(wParam,lParam);
 	return CFrameWnd::WindowProc(message, wParam, lParam);
 }
 
@@ -1137,7 +1116,13 @@ void CMainFrame::OnCdEjectEjectReload(int reload)
 {
  auto target=SelectedMediaControlTarget();if(!CanControlMedia(target))return;
  CommandStorage::Reservation held;try{held=std::make_shared<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{VolumeCoord::DeviceKey(target.drive),VolumeCoord::Mode::Write}});}catch(const VolumeCoord::Busy&){return;}
- auto browsers=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers;for(auto browser:browsers)browser->GetBrowserSession().MacBrowser().ReleaseCd(target.drive);
+ const auto mask=DWORD(1)<<target.drive;
+ MediaDiscovery::Changed(mask);
+ auto browsers=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers;
+ for(auto browser:browsers){
+  browser->GetBrowserSession().NavigationMediaChanged(mask);
+  browser->GetBrowserSession().MacBrowser().ReleaseCd(target.drive);
+ }
  auto app=(CHFVExplorerApp*)AfxGetApp();auto document=GetBrowserSession().Document();
  auto result=ShowStorageWaitJob(MakeMediaControlJob(target,reload!=0,nullptr,[=]{
   for(auto browser:browsers){auto doc=browser->GetBrowserSession().Document();for(int i=0;i<doc->m_hfs_count;++i){auto mounted=MacMediaControlTarget(doc->m_volumes[i].m_file_name);if(mounted.drive==target.drive)doc->m_volumes[i].close();}}

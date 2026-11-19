@@ -30,6 +30,7 @@
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
 #include "RefreshStorage.h"
+#include "MediaDiscovery.h"
 #include "StorageJobDialog.h"
 #include "HostFileSizes.h"
 #include "HFVExplorer.h"
@@ -866,7 +867,7 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
  if(list&&volinx>=0&&volinx<m_fat_count&&m_fats[volinx].m_type==DRIVE_REMOVABLE&&is_fat_root_directory(path)){
   int drive=toupper((unsigned char)path[0])-'A';bool present=false;
   auto owner=GetBrowserSession().Owner();
-  bool becameBusy=false;auto probe=ShowStorageWaitJob([&](Storage::Job&){try{VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});present=is_hfs_floppy_present(drive)!=0;}catch(const VolumeCoord::Busy&){becameBusy=true;}return Storage::Result{};},!owner->IsWindowVisible(),owner);
+  bool becameBusy=false;auto probe=ShowStorageWaitJob([&](Storage::Job& job){try{present=MediaDiscovery::Floppy(drive,job);}catch(const VolumeCoord::Busy&){becameBusy=true;}return Storage::Result{};},!owner->IsWindowVisible(),owner);
   if(becameBusy){std::string saved=path;GetBrowserSession().Defer(VolumeCoord::DeviceKey(drive),true,[this,volinx,saved,list]{open_fat_directory(volinx,const_cast<char*>(saved.c_str()),list);},true);return;}
   if(!probe.code&&present){
    char image[MAX_PATH];get_floppy_volume_file_name(drive,image);int index=get_volume_index_by_filename(CString(image));

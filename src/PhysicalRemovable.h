@@ -41,7 +41,7 @@ struct Discovery {std::vector<Mounted> volumes;std::vector<std::string> errors;}
 std::vector<Mounted> Open(const Device&,std::shared_ptr<Api> api={});
 Discovery Scan(Storage::Job&,std::shared_ptr<Api> api={});
 std::shared_ptr<MacBrowser::Volume> Reopen(const std::wstring&,uint64_t offset);
-std::vector<Mounted> FromDriveRoot(const std::wstring&);
+std::vector<Mounted> FromDriveRoot(const std::wstring&,Storage::Job* job=nullptr);
 #ifdef HFV_TESTING
 void SetTestApi(std::shared_ptr<Api>);
 #endif

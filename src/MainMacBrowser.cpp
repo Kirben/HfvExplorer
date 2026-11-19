@@ -3,6 +3,7 @@
 #include "WorkerEndpoint.h"
 #include "MetadataDialogs.h"
 #include "PhysicalRemovable.h"
+#include "MediaDiscovery.h"
 #include "HFVExplorer.h"
 #include "MainMacBrowser.h"
 #include "FileOperations.h"
@@ -634,7 +635,7 @@ bool MainMacBrowser::ScanRemovable(bool silent,bool startupOnly){
  return true;
 }
 int MainMacBrowser::OpenRemovableRoot(const char* root){
- std::vector<Removable::Mounted> found;auto wide=FromAnsi(root);auto result=ShowStorageWaitJob([&](Storage::Job&){found=Removable::FromDriveRoot(wide);return Storage::Result{};},Hidden(session_),session_.Owner());
+ std::vector<Removable::Mounted> found;auto wide=FromAnsi(root);auto result=ShowStorageWaitJob([&](Storage::Job& job){found=Removable::FromDriveRoot(wide,&job);return Storage::Result{};},Hidden(session_),session_.Owner());
  if(result.code){session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});if(!Hidden(session_))session_.Owner()->MessageBox(result.message.c_str(),"Reading Mac removable disk",MB_OK|MB_ICONERROR);return -1;}
  if(found.empty())return 0;
  AdoptRemovable(found,false);
@@ -654,7 +655,7 @@ void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,bool 
 int MainMacBrowser::OpenCd(const char* root) {
     int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;
     if(HasCdRoot(drive))return 0; // Windows side stays selectable.
-    bool detected=false,busy=false;std::shared_ptr<Volume> volume;auto result=ShowStorageWaitJob([&](Storage::Job&){try{VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});volume=MacBrowser::OpenCdRoot(root);}catch(const VolumeCoord::Busy&){busy=true;}catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};},Hidden(session_),session_.Owner());
+    bool detected=false,busy=false;std::shared_ptr<Volume> volume;auto result=ShowStorageWaitJob([&](Storage::Job& job){try{volume=MediaDiscovery::Optical(drive,job);}catch(const VolumeCoord::Busy&){busy=true;}catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};},Hidden(session_),session_.Owner());
     if(busy){std::string saved=root;auto doc=session_.Document();int index=-1;for(int n=0;n<doc->m_fat_count;++n)if(toupper((unsigned char)doc->m_fats[n].m_letter)-'A'==drive){index=n;break;}session_.Defer(VolumeCoord::DeviceKey(drive),true,[this,index,saved]{if(index>=0)session_.Document()->open_fat_directory(index,const_cast<char*>(saved.c_str()),1);else OpenCd(saved.c_str());},true);return 1;}
     if(result.code){if(detected){if(!Hidden(session_))AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return -1;}return 0;}if(!volume)return 0;
     AdoptCd(drive,root,std::move(volume),false);
@@ -688,13 +689,12 @@ void MainMacBrowser::ScanCds() {
         for(auto& probe:probes){
             if(job.cancelled())throw Storage::Cancelled();
             try{
-                VolumeCoord::Lease read({{VolumeCoord::DeviceKey(probe.drive),VolumeCoord::Mode::Read}});
                 if(probe.existing){
                     try{probe.existing->ValidateMedia();continue;}
                     catch(const std::exception&){}
                 }
                 probe.changed=true;
-                probe.replacement=MacBrowser::OpenCdRoot(probe.root.c_str());
+                probe.replacement=MediaDiscovery::Optical(probe.drive,job);
             }catch(const VolumeCoord::Busy&){}
             catch(const MacBrowser::DetectedVolumeError&){/* Explicit selection reports mount errors. */}
         }
