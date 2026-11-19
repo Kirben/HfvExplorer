@@ -618,6 +618,7 @@ static void get_process_list( CDWordArray & plist )
 
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
+ if(nIDEvent==9203){PostMessage(WM_APP+91);return;}
  if(nIDEvent==9202){
   if(!BackgroundCopies::Active()&&!StorageUi::busy()&&!StorageUi::state().sessionOpen){
    auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
@@ -628,7 +629,7 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
  }
  if(nIDEvent==9201){if(!BackgroundCopies::Active()||static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()>1){KillTimer(9201);PostMessage(WM_CLOSE);}return;}
  if(HfvDeviceWait::busy()||StorageUi::state().sessionOpen)return;
- if(m_deviceChangeDeferred)PostMessage(WM_APP+91);
+
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
 	if(m_handlingTimer)return;
@@ -783,18 +784,21 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
    const auto& browsers=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers;
    if(browsers.empty()||browsers.front()==this)MediaDiscovery::Changed(notice->dbcv_unitmask);
    m_browserSession->NavigationMediaChanged(notice->dbcv_unitmask);
-   if(!m_deviceChangeDeferred){
-    m_deviceChangeDeferred=true;
+   auto& browser=m_browserSession->MacBrowser();
+   browser.QueueMediaChanges(notice->dbcv_unitmask,wParam==DBT_DEVICEARRIVAL?notice->dbcv_unitmask:0);
+   if(!m_mediaChangesPending){
+    m_mediaChangesPending=true;
+    SetTimer(9203,100,nullptr);
     PostMessage(WM_APP+91);
    }
    return TRUE;
   }
  }
  if(HfvDeviceWait::busy()&&(message==WM_COMMAND||message==WM_CLOSE))return 0;
- if(message==WM_APP+91&&m_deviceChangeDeferred){
+ if(message==WM_APP+91&&m_mediaChangesPending){
   if(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&!HfvDeviceWait::busy()){
-   m_deviceChangeDeferred=false;
-   if(m_browserSession)m_browserSession->Document()->CheckNewMedia(FALSE,TRUE,TRUE);
+   m_mediaChangesPending=m_browserSession&&m_browserSession->MacBrowser().ApplyMediaChanges();
+   if(!m_mediaChangesPending)KillTimer(9203);
   }
   return 0;
  }

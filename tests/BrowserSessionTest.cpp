@@ -278,6 +278,61 @@ int RunBrowserSessionTest(const char* directory){
   a.Windows(wa);b.Windows(wb);Check(Find(a.list,L"first.txt")>=0&&Find(a.list,L"second.txt")<0&&Find(b.list,L"second.txt")>=0,"Windows directory state used another session");
   {
    auto& session=a.Session();
+   auto& browser=session.MacBrowser();
+   auto& control=a.tree.GetTreeCtrl();
+   const auto original=a.doc.m_fats[0].m_rootitem;
+   const auto child=control.InsertItem("Unrelated folder",original);
+   control.Expand(original,TVE_EXPAND);
+   const auto selected=control.GetSelectedItem();
+   const auto file=Find(a.list,L"first.txt");
+   a.list.GetListCtrl().SetItemState(file,LVIS_SELECTED,LVIS_SELECTED);
+   struct Gate {
+    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    std::atomic<unsigned> probes{0};
+    ~Gate(){CloseHandle(entered);CloseHandle(release);}
+   };
+   const auto gate=std::make_shared<Gate>();
+   browser.SetDriveTypeForTest([gate](int drive)->UINT{
+    Check(drive==24,"media notice probed an unrelated drive");
+    if(++gate->probes==1){
+     SetEvent(gate->entered);
+     WaitForSingleObject(gate->release,5000);
+     return DRIVE_NO_ROOT_DIR;
+    }
+    return DRIVE_RAMDISK;
+   });
+   const DWORD mask=1u<<24;
+   session.NavigationMediaChanged(mask);
+   browser.QueueMediaChanges(mask,0);
+   Check(browser.ApplyMediaChanges(),"queue changed drive probe");
+   PumpUntil([&]{return WaitForSingleObject(gate->entered,0)==WAIT_OBJECT_0;},"changed drive probe did not enter");
+   Check(a.owner.IsWindowEnabled()&&control.GetSelectedItem()==selected&&Selected(a.list,L"first.txt"),
+         "slow notice blocked browsing or discarded selection");
+   // Finish a newer notice while the obsolete probe still has its read lease.
+   session.NavigationMediaChanged(mask);
+   browser.QueueMediaChanges(mask,mask);
+   Check(browser.ApplyMediaChanges(),"queue newer drive arrival");
+   PumpUntil([&]{return gate->probes.load()==2;},"newer arrival waited for the old probe");
+   SetEvent(gate->release);
+   PumpUntil([&]{return !browser.ApplyMediaChanges();},"targeted drive change did not finish");
+   const auto added=session.Mounts().FindWindowsDrive(24);
+   Check(added&&added->root&&control.GetSelectedItem()==selected&&
+         control.GetChildItem(original)==child&&(control.GetItemState(original,TVIS_EXPANDED)&TVIS_EXPANDED)&&
+         Selected(a.list,L"first.txt")&&Find(b.list,L"second.txt")>=0,
+         "media change replaced an unrelated root or published an obsolete result");
+   browser.SetDriveTypeForTest([](int){return UINT(DRIVE_NO_ROOT_DIR);});
+   session.NavigationMediaChanged(mask);
+   browser.QueueMediaChanges(mask,0);
+   PumpUntil([&]{return !browser.ApplyMediaChanges();},"targeted drive removal did not finish");
+   Check(!session.Mounts().FindWindowsDrive(24)&&control.GetSelectedItem()==selected&&Selected(a.list,L"first.txt"),
+         "targeted removal cleared another drive or its listing");
+   browser.SetDriveTypeForTest({});
+   a.doc.m_fat_count=1;
+   fprintf(report,"PASS: device notices probe only named drives, discard stale results, and preserve unrelated roots, expansion and file selection.\n");
+  }
+  {
+   auto& session=a.Session();
    session.asyncNavigationForTest=true;
    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);

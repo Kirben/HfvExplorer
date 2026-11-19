@@ -177,6 +177,7 @@ int CHFVExplorerDoc::insert_volume(
 			m_volumes[i].m_file_name = name;
 			m_volumes[i].m_free = 0;
 			m_volumes[i].m_opened = 0;
+			m_volumes[i].m_mediaGenerationKnown = false;
 			m_volumes[i].m_volume_name = "";
 			m_volumes[i].m_rootitem = 0;
 			m_volumes[i].m_floppy_update_needed = 0;
@@ -802,6 +803,7 @@ int CHFVExplorerDoc::BuildBrowserRoots(int preferred,bool readClassic)
     }
     for(int index=0;index<m_fat_count;++index){
         auto& drive=m_fats[index];
+        if(drive.m_type==DRIVE_NO_ROOT_DIR)continue;
         drive.m_rootitem=tree->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,
             &drive.m_volume_name,toupper((unsigned char)drive.m_letter)<'C');
     }

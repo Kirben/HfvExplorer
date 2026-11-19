@@ -69,6 +69,7 @@ std::optional<BrowserMountInventory::Entry> BrowserMountInventory::Lookup(Addres
  case Kind::WindowsDrive:{
   if(index>=windowsCount)return {};
   const auto& volume=windows[index];
+  if(volume.m_type==DRIVE_NO_ROOT_DIR)return {};
   entry.root=volume.m_rootitem;
   entry.locator=VolumeCoord::Wide(volume.m_volume_name.GetString());
   entry.drive=toupper(static_cast<unsigned char>(volume.m_letter))-'A';
@@ -148,4 +149,8 @@ void BrowserMountInventory::MediaChanged(DWORD driveMask)
 {
  for(int drive=0;drive<26;++drive)
   if(driveMask&(DWORD(1)<<drive))++mediaEpoch_[drive];
+ for(int index=0;index<windowsCount;++index){
+  const auto drive=toupper(static_cast<unsigned char>(windows[index].m_letter))-'A';
+  if(drive>=0&&drive<26&&(driveMask&(DWORD(1)<<drive)))windowsSerial_[index].reset();
+ }
 }
