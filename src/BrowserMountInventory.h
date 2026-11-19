@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
-#include "Mactypes.h"
+#include "ClassicCatalog.h"
 #include "CFATVolume.h"
 #include "MacBrowserModel.h"
 #include <array>
@@ -35,15 +35,30 @@ public:
         int drive=-1;
         uint64_t mediaEpoch=0;
     };
+    struct ClassicMount {
+        CString m_file_name, m_volume_name;
+        HTREEITEM m_rootitem=nullptr;
+        bool m_free=true,m_opened=false,m_is_floppy=false,m_is_cd=false,m_is_hd=false,m_is_removable=false;
+        bool m_floppy_update_needed=false,m_mediaGenerationKnown=false;
+        DWORD m_mediaGeneration=0;
+        uint64_t freeBytes=0;
+        int open();
+        void close(){m_opened=false;}
+        void ReadMount(const MacBrowser::ClassicMountInfo&);
+        void update_time_stamp();
+        bool update_if_needed(int ask);
+    private:
+        FILETIME modified_{};
+    };
     class ClassicSlots {
-        std::unique_ptr<CHFVVolume> volumes_[MAX_HFS_VOLUMES];
+        std::unique_ptr<ClassicMount> volumes_[MAX_HFS_VOLUMES];
     public:
-        CHFVVolume& operator[](int index) {
+        ClassicMount& operator[](int index) {
             auto& volume=volumes_[index];
-            if(!volume)volume=std::make_unique<CHFVVolume>();
+            if(!volume)volume=std::make_unique<ClassicMount>();
             return *volume;
         }
-        const CHFVVolume* Find(int index) const { return volumes_[index].get(); }
+        const ClassicMount* Find(int index) const { return volumes_[index].get(); }
         void ReplaceFrom(int index,ClassicSlots& source,int slot) {
             volumes_[index].swap(source.volumes_[slot]);
         }

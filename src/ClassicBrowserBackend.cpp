@@ -178,14 +178,14 @@ bool BrowserFolderReader::prepare_classic_browser_row( hfs_item_type *pitem, Cat
     return false;
 }
 
-BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId,Storage::Job* job)
+BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId,Storage::Job* job,MacBrowser::Volume* mounted)
 {
  BrowserDirectory::ObserveRead("classic-directory");
  BrowserDirectory::Snapshot snapshot;
  snapshot.capabilitiesKnown=true;
  auto& selected=slots_[volinx];
  const std::string image=(LPCSTR)selected.m_file_name;
- const std::string directory=(LPCSTR)doc_name;
+ std::string directory=(LPCSTR)doc_name;
  snapshot.resourceKey=VolumeCoord::ImageKey(image);
  VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});
  snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
@@ -194,7 +194,16 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  const bool writable=!selected.m_is_cd&&(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY));
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
 
- auto volume=MacBrowser::OpenClassic(image,directory,false);
+ auto opened=mounted?nullptr:MacBrowser::OpenClassic(image,id==2?":":directory,false);
+ auto* volume=mounted?mounted:opened.get();
+ if(opened){
+  auto location=FileOperations::Location::Classic(image,directory);
+  if(selected.m_mediaGenerationKnown)location.BindMediaGeneration(selected.m_mediaGeneration);
+  const auto info=MacBrowser::ReadClassicMountInfo(*volume);
+  StorageLocation::ValidateClassicGeneration(location,info.generation);
+  selected.ReadMount(info);
+  if(id==2)directory=std::string(selected.m_volume_name.GetString())+":";
+ }
  auto records=MacBrowser::ReadClassicCatalog(*volume,job);
  snapshot.finderMode=FINDER_VIEW_MODE_ICON;
  if(finder&&parentId){
@@ -205,7 +214,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
   MacBrowser::Volume*& ptr;
   ~ResetArtwork(){ptr=nullptr;}
  } resetArtwork{artworkVolume_};
- artworkVolume_=volume.get();
+ artworkVolume_=volume;
  LegacyEngine::Scope finderResources;
  int x=INT_MAX,y=INT_MAX;
  for(auto& record:records){
@@ -235,22 +244,13 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  if(x!=INT_MAX)snapshot.originX=x;
  if(y!=INT_MAX)snapshot.originY=y;
  OwnIcons(snapshot);
- volume->Close();
+ if(opened)volume->Close();
  revisions_[volinx]=snapshot.revision;
  return snapshot;
 }
 
 namespace {
 using MacBrowser::ClassicAncestor;
-std::vector<ClassicAncestor> ReadClassicRoute(const std::string& image,uint32_t& id,const std::string& requested)
-{
- auto volume=MacBrowser::OpenClassic(image,id?":":requested,false);
- if(!id)id=volume->Stat(2).resolvedId;
- auto route=MacBrowser::ReadClassicAncestors(*volume,id);
- volume->Close();
- return route;
-}
-
 }
 
 bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,const BrowserNavigation::Request* find)
@@ -303,7 +303,8 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    if(job.cancelled())throw Storage::Cancelled();
    auto& volume=reader->Slots()[index];
    StorageLocation::ValidateImage(VolumeCoord::Wide(request.folder.ClassicImage()),request.resource);
-   if(!volume.open())throw std::runtime_error("Cannot open the selected classic HFS volume");
+   auto backend=MacBrowser::OpenClassic(request.folder.ClassicImage(),":",false);
+   volume.ReadMount(MacBrowser::ReadClassicMountInfo(*backend));
    StorageLocation::ValidateClassicGeneration(request.folder,volume.m_mediaGenerationKnown?
        std::optional<DWORD>(volume.m_mediaGeneration):std::nullopt);
    reader->Revision(index)=VolumeCoord::Revision(request.resource);
@@ -311,13 +312,18 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    const bool readRoute=request.intent!=Intent::SelectFolder;
    std::string directory=id==2?std::string((LPCSTR)volume.m_volume_name)+":":request.folder.ClassicPath();
    if(readRoute&&id!=2){
-    *route=ReadClassicRoute(request.folder.ClassicImage(),id,directory);
+    if(!id){
+     MacBrowser::SelectClassicCatalogFolder(*backend,directory);
+     id=backend->Stat(2).resolvedId;
+    }
+    *route=MacBrowser::ReadClassicAncestors(*backend,id);
     directory=std::string((LPCSTR)volume.m_volume_name)+":";
     for(const auto& step:*route)directory+=step.name+":";
    }
    if(directory.size()>=MAX_PATH)throw std::runtime_error("The classic HFS path exceeds the supported length");
    const auto parentId=route->empty()?parent:route->back().parent;
-   result.listing=reader->read_classic_browser_directory(index,id,directory.c_str(),finder,parentId,&job);
+   if(id!=2)MacBrowser::SelectClassicCatalogFolder(*backend,directory);
+   result.listing=reader->read_classic_browser_directory(index,id,directory.c_str(),finder,parentId,&job,backend.get());
    if(result.listing.resourceKey!=request.resource)
     return Storage::Result{1,ERROR_MEDIA_CHANGED,"The classic HFS image was replaced."};
    result.folder.SetClassic(request.folder.ClassicImage(),directory);

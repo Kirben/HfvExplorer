@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "BrowserMountInventory.h"
+#include "Mactypes.h"
 #include "BrowserDirectory.h"
 #include "itemtype.h"
 #include "bndl.h"
@@ -21,7 +22,7 @@ public:
  BrowserMountInventory::ClassicSlots& Slots(){return slots_;}
  uint64_t& Revision(int index){return revisions_[index];}
  void SetOptions(Options options){options_=options;}
- BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr);
+ BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr,MacBrowser::Volume* mounted=nullptr);
  BrowserDirectory::Snapshot read_windows_browser_directory(int,const std::wstring&,bool,Storage::Job&,std::optional<DWORD> expectedSerial={});
 	void delete_cache();
 	int exists_icon_cache_file();

@@ -12,6 +12,13 @@ struct ClassicCatalogEntry {
     std::optional<PackedRecord> folderIcon;
 };
 std::vector<ClassicCatalogEntry> ReadClassicCatalog(Volume&, Storage::Job*);
+struct ClassicMountInfo {
+    std::string label;
+    uint64_t freeBytes=0;
+    std::optional<DWORD> generation;
+};
+ClassicMountInfo ReadClassicMountInfo(Volume&);
+void SelectClassicCatalogFolder(Volume&,const std::string& path);
 struct ClassicAncestor { uint32_t id, parent; std::string name; };
 std::vector<ClassicAncestor> ReadClassicAncestors(Volume&,uint32_t catalogId);
 std::vector<ClassicAncestor> ResolveClassicFolders(Volume&, const std::string& relative, bool showHidden);

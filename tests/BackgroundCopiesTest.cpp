@@ -609,7 +609,7 @@ int RunBackgroundMetadataTest(const char* directory){
    readonly_cd_backend_init();
    Check(readonly_floppy_attach_api(25,&disk),"attach metadata floppy");
    struct Detach {
-    CHFVVolume* mounted=nullptr;
+    BrowserMountInventory::ClassicMount* mounted=nullptr;
     ~Detach(){if(mounted)mounted->close();readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}
    } detach;
    auto doc=surviving.Document();
