@@ -266,6 +266,18 @@ int RunNdifImageTest(const char* directory)
             Check(cases>0,"No Apple LZH fixtures were checked");
             fprintf(report,"PASS: %u Apple DART LZH chunks matched the corresponding RLE chunks byte-for-byte.\n",cases);
         }
+        auto contiguous=Map(1,0);
+        P32(contiguous.data()+76,5);
+        std::unique_ptr<Source> noTable=std::make_unique<Memory>(Pack(data,Resource(contiguous)));
+        Check(Ndif::Unwrap(noTable)&&Disk::Read(*noTable,0,512)==Bytes(512,'A'),
+              "Contiguous legacy NDIF did not read its designated data fork");
+        Bytes shortData(data.begin(),data.begin()+516);
+        noTable=std::make_unique<Memory>(Pack(shortData,Resource(contiguous)));
+        Reject([&]{Ndif::Unwrap(noTable);},"Truncated contiguous NDIF accepted");
+        P32(contiguous.data()+116,1);
+        noTable=std::make_unique<Memory>(Pack(data,Resource(contiguous)));
+        Reject([&]{Ndif::Unwrap(noTable);},"An encrypted NDIF was treated as ordinary data");
+        fprintf(report,"PASS: contiguous legacy NDIF, bounds and encrypted-image rejection.\n");
         auto invalid=bcem;
         Row(invalid,2,1,0x83,512,24);
         std::unique_ptr<Source> input=std::make_unique<Memory>(Pack(data,Resource(invalid)));

@@ -132,10 +132,18 @@ Layout Map(Source& input,Fork map,Fork data)
     const auto version=U16(p);
     Check(version>=10&&version<=12,"Unsupported NDIF header version");
     Check(p[4]<=63&&U32(p+84)<=1,"Invalid NDIF image name or segment flag");
+    Check(!U32(p+116),"Encrypted ShrinkWrap NDIF images are unsupported");
     const uint64_t sectors=U32(p+68),maxChunk=U32(p+72),base=U32(p+76),count=U32(p+124);
-    Check(sectors&&sectors<=0xffffff&&base<=data.length&&count>=2&&count<=sectors+1&&
+    Check(sectors&&sectors<=0xffffff&&base<=data.length&&count<=sectors+1&&
           count*ChunkBytes==map.length-HeaderBytes,"Invalid NDIF block map geometry");
     Layout out{sectors*Sector,U32(p+80),{}};
+    // Older read-only NDIF can store a contiguous data fork without a table.
+    if(!count){
+        Check(!U32(p+84)&&Range(base,out.length,data.length),"Truncated contiguous NDIF disk");
+        out.chunks.push_back({0,out.length,data.at+base,out.length,Raw});
+        return out;
+    }
+    Check(count>=2,"Missing NDIF block descriptors");
     constexpr unsigned Batch=1024;
     out.chunks.reserve(size_t(count-1));
     for(uint64_t index=0;index<count;){
