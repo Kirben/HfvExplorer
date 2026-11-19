@@ -294,7 +294,6 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  auto route=std::make_shared<std::vector<ClassicAncestor>>();
  const auto mount=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,index});
  if(!mount)return false;
- const auto mountCurrent=[this,mount]{return GetBrowserSession().Mounts().IsCurrent(*mount);};
  const auto retry=[this,index,id,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
   if(!NavigateClassicFolder(index,id,refresh,found?&*found:nullptr))
    GetBrowserSession().RejectNavigation(found?found->resource:std::string(),"The classic HFS volume changed.");
@@ -349,16 +348,14 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    if(refresh)tree->delete_subdir_contents(root);
    target=root;
    for(auto& step:*route)target=tree->tree_insert(root,index,step.name.data(),step.id,step.parent);
-   control.SelectItem(target);
-   control.EnsureVisible(target);
   }
   if(refresh)tree->delete_subdir_contents(target);
   tree->enable_selchange(enabled);
   const auto parentId=route->empty()?parent:route->back().parent;
   const auto parentPath=parentId?tree->get_directory_name(root,index,parentId):CString();
-  session.List()->initialize_volume(parentPath,parentId?ID_GOTO_PARENT:0);
+  session.PrepareFolderPresentation(target,parentPath,parentId!=0);
   PublishClassicFolder(index,result.folder.expectedCatalogId,shown,result.listing);
- },mountCurrent,retry,[this,index,root,initial=find&&find->tryNextStartupRoot]{
+ },mount,retry,[this,index,root,initial=find&&find->tryNextStartupRoot]{
   if(!initial)return false;
   auto& volume=m_volumes[index];
   volume.m_volume_name.Empty();

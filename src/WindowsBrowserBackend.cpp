@@ -191,7 +191,7 @@ void CHFVExplorerDoc::CopyNavigationIcons(BrowserDirectory::Snapshot& snapshot)
 }
 
 void CHFVExplorerDoc::PublishWindowsFolder(int index, const std::string& path,
-    const BrowserDirectory::Snapshot& snapshot)
+    const BrowserDirectory::Snapshot& snapshot,HTREEITEM item)
 {
  auto& session = GetBrowserSession();
  auto parent = path;
@@ -201,7 +201,7 @@ void CHFVExplorerDoc::PublishWindowsFolder(int index, const std::string& path,
   parent.resize(separator == 2 ? 3 : separator);
  else
   parent.clear();
- session.List()->initialize_volume(parent.c_str(), root ? 0 : ID_GOTO_PARENT);
+ session.PrepareFolderPresentation(item,parent.c_str(),!root);
  apply_browser_directory(snapshot, LIST_FAT, index, 2, path, true);
  if(auto status=session.Status())status->SetPaneText(0,path.c_str());
 }
@@ -249,7 +249,6 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
  request.resource=deviceKey.empty()?session.ObservedWindowsKey(path):deviceKey;
  const auto mount=session.Mounts().Lookup({BrowserMountInventory::Kind::WindowsDrive,index});
  if(!mount)return false;
- const auto mountCurrent=[this,mount]{return GetBrowserSession().Mounts().IsCurrent(*mount);};
  const auto retry=[this,index,path,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
   NavigateWindowsFolder(index,path,refresh,found?&*found:nullptr);
  };
@@ -339,12 +338,11 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
       tree->initialize_volume(mounted,prepared.m_volume_name,2,1,0,0,0);
    tree->delete_subdir_contents(prepared.m_rootitem);
    control.SetItemText(prepared.m_rootitem,prepared.m_volume_name);
-   control.SelectItem(prepared.m_rootitem);
    tree->enable_selchange(enabled);
    m_volumes.ReplaceFrom(mounted,reader->m_volumes,0);
    m_classicRevision[mounted]=snapshot.revision;
    for(auto& row:snapshot.rows)row.volume=mounted;
-   session.List()->initialize_volume("",0);
+   session.PrepareFolderPresentation(m_volumes[mounted].m_rootitem,"",false);
    PublishClassicFolder(mounted,2,std::string((LPCSTR)m_volumes[mounted].m_volume_name)+":",snapshot);
    return;
   }
@@ -374,14 +372,9 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
     }
    }
    if(!destination)destination=root;
-   auto enabled=tree->SelectionNotificationsEnabled();
-   tree->enable_selchange(0);
-   control.SelectItem(destination);
-   control.EnsureVisible(destination);
-   tree->enable_selchange(enabled);
   }
   if(refresh)tree->delete_subdir_contents(destination);
-  PublishWindowsFolder(index,CStringA(shown.c_str()).GetString(),snapshot);
- },mountCurrent,retry);
+  PublishWindowsFolder(index,CStringA(shown.c_str()).GetString(),snapshot,destination);
+ },mount,retry);
  return true;
 }

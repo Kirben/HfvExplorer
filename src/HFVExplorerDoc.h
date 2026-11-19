@@ -110,7 +110,7 @@ protected: // create from serialization only
                               const BrowserDirectory::Snapshot&);
     bool NavigateWindowsFolder(int index, const std::wstring& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
-    void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&);
+    void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&,HTREEITEM item);
     void CopyNavigationIcons(BrowserDirectory::Snapshot&);
 	void fat_walk( int volinx, LPSTR path, int list );
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
