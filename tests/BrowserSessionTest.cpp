@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "DocumentLaunch.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "CopyProgress.h"
@@ -229,6 +230,18 @@ int RunBrowserSessionTest(const char* directory){
  int result=0;
  try{
   TestNavigation();
+  {
+   using namespace DocumentLaunch;
+   const auto classic=FileOperations::Location::Classic(std::string((LPCSTR)(root+"\\launch.dsk")),"Launch:Folder:File name");
+   const auto host=FileOperations::Location::Windows(VolumeCoord::Wide((LPCSTR)root)+L"\\File \u65e5.txt");
+   Check(ExecutorCommand("\"C:\\Program Files\\Executor.exe\" -bpp 8",classic,"Launch:Editor")==
+         "\"C:\\Program Files\\Executor.exe\" -bpp 8 \"Launch:Editor\" \"Launch:Folder:File name\"",
+         "Executor command lost its options, quoting or captured Classic path");
+   Check(DiskArguments(classic,"D:")==CString(classic.ClassicImage().c_str())+"?D:Launch:Folder:File name"&&
+         WindowsArgument(host)==L"\""+host.WindowsPath()+L"\"",
+         "Disk or Windows launcher changed its captured path");
+   fprintf(report,"PASS: Executor, emulator disk and Windows arguments constructed without launching a program.\n");
+  }
   fprintf(report,"PASS: stale selection and Find results, worker media validation, per-drive media notifications, and closing during a read.\n");
   auto first=std::make_unique<Panes>();Panes second;auto& a=*first;auto& b=second;
   // Keep the MFC main-window pointer on B while issuing commands to A.
