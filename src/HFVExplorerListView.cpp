@@ -245,18 +245,27 @@ CHFVExplorerListView::~CHFVExplorerListView()
 	destroy_pointers();
 }
 
+void CHFVExplorerListView::ApplyDpi(UINT dpi)
+{
+    if (m_dpi == dpi) return;
+    auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
+    auto* header = m_cl->GetHeaderCtrl();
+    if (header) {
+        for (int i = 0; i < header->GetItemCount() && i < ARRAYSIZE(m_columns); ++i) {
+            const auto width = m_columns[i].Resize(m_cl->GetColumnWidth(i), m_dpi, dpi);
+            m_cl->SetColumnWidth(i, width);
+        }
+    }
+    m_cl->SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
+    m_dpi = dpi;
+}
+
 int CHFVExplorerListView::Initialize()
 {
 	LV_COLUMN		lvcolumn;
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	if(pApp->get_font()) {
-		::SendMessage( 
-			m_cl->m_hWnd, 
-			WM_SETFONT,
-			(WPARAM)pApp->get_font(),
-			MAKELPARAM(TRUE,0) );
-	}
+    m_cl->SendMessage(WM_SETFONT, WPARAM(pApp->get_font(m_dpi)), TRUE);
 
 	// m_bkcolor = RGB( 255,255,192 );
 	// m_cl->SetBkColor( m_bkcolor );

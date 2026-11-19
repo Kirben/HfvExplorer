@@ -21,6 +21,7 @@
 #ifndef _MAINFRM_DEFINED
 #define _MAINFRM_DEFINED
 #include "HostOffsets.h"
+#include "NativeDpi.h"
 #include <memory>
 #include <vector>
 
@@ -32,7 +33,16 @@ class LauncherWriteBack;
 struct MediaControlTarget;
 class BrowserSession;
 
-class PreviewSplitter : public CSplitterWnd {
+class BrowserSplitter : public CSplitterWnd {
+public:
+    void ApplyDpi(UINT from, UINT to);
+protected:
+    UINT dpi_ = NativeDpi::Base;
+private:
+    NativeDpi::Measurement firstPane_;
+};
+
+class PreviewSplitter : public BrowserSplitter {
 public:
     void ShowPreview(CWnd&, bool);
     void RecalcLayout() override;
@@ -42,8 +52,10 @@ class CMainFrame : public CFrameWnd
 {
  BrowserSession* m_browserSession=nullptr;
  bool m_restoreMaximized=false;
+ UINT m_dpi=NativeDpi::Base;
+ void ApplyDpi(UINT, const RECT*);
 protected: // create from serialization only
-	CSplitterWnd m_wndSplitter;
+	BrowserSplitter m_wndSplitter;
 	PreviewSplitter m_wndSplitter2;
 
 	CMainFrame();

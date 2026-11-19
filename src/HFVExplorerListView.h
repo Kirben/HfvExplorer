@@ -23,6 +23,7 @@
 
 // #define PARENTIDFLAG 0xFFFF8000ul
 
+#include "NativeDpi.h"
 #include "ftypes.h"
 #include "HostOffsets.h"
 #include "BrowserDirectory.h"
@@ -121,6 +122,12 @@ public:
 	void OnButtonUp(CPoint point);
 	int FillList();
 	int Initialize();
+    void ApplyDpi(UINT);
+    UINT DisplayDpi() const { return m_dpi; }
+private:
+    UINT m_dpi = NativeDpi::Base;
+    NativeDpi::Measurement m_columns[7];
+public:
 	void set_style( long style );
 	CImageList *m_pimagelist;
 	CImageList *m_pimagelistSmall;

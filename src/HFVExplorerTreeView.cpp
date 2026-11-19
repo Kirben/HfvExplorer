@@ -70,16 +70,14 @@ void HFVExplorerTreeView::set_style( long style )
 }
 
 
+void HFVExplorerTreeView::ApplyDpi(UINT dpi)
+{
+    auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
+    m_ct->SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
+}
+
 void HFVExplorerTreeView::Initialize()
 {
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	if(pApp->get_font()) {
-		::SendMessage( 
-			m_ct->m_hWnd, 
-			WM_SETFONT,
-			(WPARAM)pApp->get_font(),
-			MAKELPARAM(TRUE,0) );
-	}
 
 	tree_clear();
 	ASSERT(m_pimagelistSmall != NULL);

@@ -59,6 +59,7 @@ protected:
 
 	void on_volume_changed( int volinx );
 	void Initialize();
+    void ApplyDpi(UINT dpi);
 	int tree_clear();
 	int get_htree_type( HTREEITEM htree );
 	void set_style( long style );

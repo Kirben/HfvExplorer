@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "NativeDpi.h"
 #include "WindowsCompatibility.h"
 #include "CopyProcess.h"
 #include "VolumeSession.h"
@@ -68,20 +69,10 @@ CHFVExplorerApp theApp;
 // Quick hack from "volume.c"
 extern "C" void set_invalid_cd_hack( int onoff );
 
-/* changed by noda */
-void CHFVExplorerApp::set_font( char *name, int ps )
+void CHFVExplorerApp::ClearBrowserFonts()
 {
-	int	charset = 0; /* ascii */
-
-	if(m_hfont) {
-		DeleteObject( m_hfont );
-		m_hfont = 0;
-	}
-	/* noda */
-	if(m_is_font_sjis == TRUE){
-		charset = 128;
-	}
-	m_hfont = CreateFont( -ps, 0, 0, 0, FW_NORMAL, (BYTE)FALSE, 0, 0, charset, 0, 0, 0, 0, name ); /* SHIFT_JIS */
+    for (const auto& font : m_browserFonts) DeleteObject(font.second);
+    m_browserFonts.clear();
 }
 
 CHFVExplorerApp::CHFVExplorerApp()
@@ -101,9 +92,7 @@ CHFVExplorerApp::CHFVExplorerApp()
 	m_copyin_appledouble = TRUE;
 	m_timer_enabled = TRUE;
 	m_version = "";
-	// m_hfont = CreateFont( -point_size, 0, 0, 0, FW_NORMAL, (BYTE)FALSE, 0, 0, 0, 0, 0, 0, 0, font_name );
 	m_is_font_sjis = FALSE; /* noda */
-	set_font( font_name, point_size );
 	m_next_icon_index = 0;
 	m_show_invisible_mac = 0;
 	m_show_invisible_fat = 1;
@@ -141,9 +130,15 @@ CHFVExplorerApp::CHFVExplorerApp()
 
 }
 
-HFONT CHFVExplorerApp::get_font()
+HFONT CHFVExplorerApp::get_font(UINT dpi)
 {
-	return(m_hfont);
+    const auto cached = m_browserFonts.find(dpi);
+    if (cached != m_browserFonts.end()) return cached->second;
+    const int height = (std::max)(1, NativeDpi::Scale(point_size, dpi));
+    const auto font = CreateFont(-height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        m_is_font_sjis ? SHIFTJIS_CHARSET : ANSI_CHARSET, 0, 0, 0, 0, font_name);
+    if (font) m_browserFonts.emplace(dpi, font);
+    return font;
 }
 
 CHFVExplorerApp::~CHFVExplorerApp()
@@ -152,10 +147,7 @@ CHFVExplorerApp::~CHFVExplorerApp()
 	kill_childs();
 	floppy_module_global_final();
 	SaveSettings();
-	if(m_hfont) {
-		DeleteObject( m_hfont );
-		m_hfont = 0;
-	}
+    for (const auto& font : m_browserFonts) DeleteObject(font.second);
 	tmap_final();
 }
 
@@ -219,7 +211,7 @@ void CHFVExplorerApp::LoadSettings(void)
 		lstrcpy( font_name, (LPCSTR)f );
 	}
 	m_is_font_sjis = is_font_sjis = GetProfileInt("Setup","IsFontSjis",0);/* noda */
-	set_font( font_name, point_size );
+	ClearBrowserFonts();
 
 	m_type_mapping_enabled = GetProfileInt("Setup","TypeMappingEnabled",1);
 
