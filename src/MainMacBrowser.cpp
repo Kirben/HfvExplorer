@@ -467,7 +467,7 @@ struct MainMacBrowser::State {
 MainMacBrowser::MainMacBrowser(BrowserSession& session):session_(session),state_(new State(session)){}
 MainMacBrowser::~MainMacBrowser()=default;
 void MainMacBrowser::ForgetTree(){state_->restore.clear();for(auto& mount:state_->mounts)mount.root=nullptr;}
-std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->m_ct->GetItemData(item)):nullptr;if(!p)return {};if(p->type==LIST_HFS&&p->volinx>=0&&p->volinx<doc->m_hfs_count)return doc->m_volumes[p->volinx].m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->m_volumes[p->volinx].m_file_name));if(p->type==LIST_FAT)return session_.ObservedWindowsKey(p->path);return {};}
+std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->m_ct->GetItemData(item)):nullptr;if(!p)return {};if(p->type==LIST_HFS&&p->volinx>=0&&p->volinx<doc->m_hfs_count)return doc->m_volumes[p->volinx].m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->m_volumes[p->volinx].m_file_name));if(p->type==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return session_.ObservedWindowsKey(folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(p->path));}return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::Writable()const{int i;uint32_t id;return session_.ListingAvailable()&&state_->Selected(i,id)&&state_->folderMutable&&state_->mounts[i].volume->Supports().create;}
 bool MainMacBrowser::CanCreateFolder()const{int i;uint32_t id;return Writable()&&state_->Selected(i,id)&&state_->mounts[i].volume->Supports().createFolders;}
@@ -800,6 +800,17 @@ FileOperations::Location MainMacBrowser::CaptureItem(int row){
 bool MainMacBrowser::RenameItem(int row,const std::u16string& name,bool checkLock){
  auto item=CaptureItem(row);FileOperations::RenameEntry request{item, name, {}, checkLock};
  bool result=RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled()&&Active())Refresh();return result;
+}
+bool MainMacBrowser::RenameWindowsItem(int row){
+ const auto* selected=session_.List()->BrowserRowAt(row);
+ if(!selected||!selected->location.IsWindows())return false;
+ try{
+  auto name=Wide(selected->entry.name);
+  auto item=CaptureItem(row);
+  if(EditWindowsName(session_.Owner(),name))
+   RunOperation(session_,FileOperations::RenameEntry{std::move(item),U16(name),{},false},false,true);
+ }catch(const std::exception& error){MessageBoxA(session_.Owner()->GetSafeHwnd(),error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);}
+ return true;
 }
 bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())return true;
  auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;

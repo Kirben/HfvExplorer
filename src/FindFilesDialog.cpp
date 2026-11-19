@@ -10,21 +10,21 @@ public:
  FindRequest request;
  FindOptions(CWnd* owner,FindLocation location):CDialog(IDD_FIND_FILES,owner){request.location=std::move(location);}
  BOOL OnInitDialog() override {
-  CDialog::OnInitDialog();SetDlgItemText(IDC_FIND_SCOPE,request.location.directory.c_str());CheckDlgButton(IDC_FIND_RECURSIVE,BST_CHECKED);
-  if(request.location.native){BrowserPresentation::UnicodeEdit(m_hWnd,IDC_FIND_PATTERN);BrowserPresentation::UnicodeControl(m_hWnd,IDC_FIND_SCOPE,L"STATIC");SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(request.location.directory).c_str());}
+  CDialog::OnInitDialog();CheckDlgButton(IDC_FIND_RECURSIVE,BST_CHECKED);
+  if(request.location.UsesUnicode()){BrowserPresentation::UnicodeEdit(m_hWnd,IDC_FIND_PATTERN);BrowserPresentation::UnicodeControl(m_hWnd,IDC_FIND_SCOPE,L"STATIC");SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(request.location.directory).c_str());}else SetDlgItemText(IDC_FIND_SCOPE,request.location.directory.c_str());
   ((CEdit*)GetDlgItem(IDC_FIND_PATTERN))->LimitText(255);GetDlgItem(IDC_FIND_PATTERN)->SetFocus();return FALSE;
  }
  BOOL OnCommand(WPARAM w,LPARAM l) override {
-  if(LOWORD(w)==IDC_FIND_WHOLE){auto text=IsDlgButtonChecked(IDC_FIND_WHOLE)?request.location.root:request.location.directory;if(request.location.native)SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(text).c_str());else SetDlgItemText(IDC_FIND_SCOPE,text.c_str());return TRUE;}
+  if(LOWORD(w)==IDC_FIND_WHOLE){auto text=IsDlgButtonChecked(IDC_FIND_WHOLE)?request.location.root:request.location.directory;if(request.location.UsesUnicode())SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(text).c_str());else SetDlgItemText(IDC_FIND_SCOPE,text.c_str());return TRUE;}
   return CDialog::OnCommand(w,l);
  }
  void OnOK() override {
-  CString pattern;GetDlgItemText(IDC_FIND_PATTERN,pattern);
-  if(pattern.IsEmpty()){AfxMessageBox("Enter a filename, part of a name, or a wildcard pattern.");return;}
   auto widePattern=BrowserPresentation::Text(::GetDlgItem(m_hWnd,IDC_FIND_PATTERN));
-  request.pattern=request.location.native?BrowserPresentation::Utf8(std::u16string(widePattern.begin(),widePattern.end())):std::string((LPCSTR)pattern);request.recursive=IsDlgButtonChecked(IDC_FIND_RECURSIVE)!=0;
+  if(widePattern.empty()){AfxMessageBox("Enter a filename, part of a name, or a wildcard pattern.");return;}
+  CString pattern;if(!request.location.UsesUnicode())GetDlgItemText(IDC_FIND_PATTERN,pattern);
+  request.pattern=request.location.UsesUnicode()?BrowserPresentation::Utf8(std::u16string(widePattern.begin(),widePattern.end())):std::string((LPCSTR)pattern);request.recursive=IsDlgButtonChecked(IDC_FIND_RECURSIVE)!=0;
   request.caseSensitive=IsDlgButtonChecked(IDC_FIND_CASE)!=0;request.includeFolders=IsDlgButtonChecked(IDC_FIND_FOLDERS)!=0;
-  if(IsDlgButtonChecked(IDC_FIND_WHOLE)){request.location.directory=request.location.root;if(request.location.native){request.location.nativeFolder=2;request.location.nativePath={2};}}
+  if(IsDlgButtonChecked(IDC_FIND_WHOLE)){request.location.directory=request.location.root;if(!request.location.mac)request.location.origin.SetWindows(request.location.windowsRoot);if(request.location.native){request.location.nativeFolder=2;request.location.nativePath={2};}}
   CDialog::OnOK();
  }
 };

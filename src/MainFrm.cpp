@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "BrowserPresentation.h"
 #include "LauncherWriteBack.h"
 #include "CommandStorage.h"
 #include "LegacyEngine.h"
@@ -1341,9 +1342,11 @@ void CMainFrame::OnToolsFind()
  location.mac=mac!=0;location.directory=(LPCSTR)path;location.volumeIndex=index;
  try{location.origin=session.MacBrowser().TargetFolder(item);}
  catch(const std::exception&){AfxMessageBox("Select a folder or volume to search first.");return;}
- if(path.IsEmpty()){AfxMessageBox("Select a folder or volume to search first.");return;}
+ if(location.origin.IsNone()){AfxMessageBox("Select a folder or volume to search first.");return;}
  if(type==LIST_HFS&&index>=0&&index<GetBrowserSession().Document()->m_hfs_count){location.volume=(LPCSTR)GetBrowserSession().Document()->m_volumes[index].m_file_name;location.root=(LPCSTR)(GetBrowserSession().Document()->m_volumes[index].m_volume_name+":");}
  else if(type==LIST_FAT&&index>=0&&index<GetBrowserSession().Document()->m_fat_count){auto& drive=session.Document()->m_fats[index];location.root=std::string(1,drive.m_letter)+":\\";
+  location.mac=false;location.windowsRoot=VolumeCoord::Wide(location.root);
+  location.directory=BrowserPresentation::Utf8(MacBrowser::U16(location.origin.WindowsPath()));
   location.checkWindowsMedia=drive.m_type==DRIVE_REMOVABLE||drive.m_type==DRIVE_CDROM;
  }
  else {AfxMessageBox("Select a folder or volume to search first.");return;}

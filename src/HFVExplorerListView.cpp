@@ -3559,7 +3559,7 @@ void CHFVExplorerListView::OnEditLabel()
 	int nItem;
 	nItem = m_cl->GetNextItem(-1,LVNI_SELECTED);
 	if(nItem >= 0) {
-		CEdit *dummy = m_cl->EditLabel( nItem );
+        if(!GetBrowserSession().MacBrowser().RenameWindowsItem(nItem))m_cl->EditLabel(nItem);
 	}
 }
 

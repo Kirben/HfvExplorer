@@ -18,7 +18,7 @@ class BrowserSession {
  struct Notifications;
  std::unique_ptr<Notifications> notifications_;
  VolumeCoord::Subscription subscription_;
- struct Context {std::string key,path;uint64_t revision=0;int type=0,index=-1;uint32_t folder=2;};
+ struct Context {std::string key,path;uint64_t revision=0;int type=0,index=-1;uint32_t folder=2;std::wstring windowsPath;};
  struct KnownRoot{int type,index;std::string origin;};
  std::map<std::string,std::vector<KnownRoot>> roots_;
  Context current_;
@@ -62,7 +62,7 @@ public:
     void PresentDirectory(const BrowserDirectory::Snapshot&, int type, int index,
         uint32_t folder, const std::string& path, bool listing,
         const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder);
-    void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={});
+    void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={},std::wstring windowsPath={});
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
     void CancelNavigation();
@@ -75,7 +75,7 @@ public:
     bool Navigating() const { return bool(navigation_); }
     bool ListingAvailable() const { return !listingPending_; }
     void RejectNavigation(const std::string& key,const std::string& message);
-    std::string ObservedWindowsKey(const std::string& path)const;
+    std::string ObservedWindowsKey(const std::wstring& path)const;
  void SetLocationTitle(std::wstring);
  std::wstring WindowTitle()const;
  void UpdateWindowTitle()const;

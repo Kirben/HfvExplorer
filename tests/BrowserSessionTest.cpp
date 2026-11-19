@@ -296,6 +296,24 @@ int RunBrowserSessionTest(const char* directory){
    Check(DeleteFileA(filename)&&RemoveDirectoryA(nested)&&RemoveDirectoryA(wa+"\\\\Nested"),
        "clean up the Windows Find fixture before the startup check");
   }
+  {
+   const auto folder=VolumeCoord::Wide((LPCSTR)wa)+L"\\\u65e5\u672c";
+   const auto file=folder+L"\\\u6587\u4ef6.txt";
+   Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"create Unicode Find folder");
+   auto handle=CreateFileW(file.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
+   Check(handle!=INVALID_HANDLE_VALUE,"create Unicode Find file");CloseHandle(handle);
+   FindLocation scope;scope.origin=FileOperations::Location::Windows(VolumeCoord::Wide((LPCSTR)wa));
+   auto hit=SearchHit(scope,"\xe6\x96\x87\xe4\xbb\xb6.*");
+   auto& session=a.Session();
+   Check(hit.destination.WindowsPath()==folder&&hit.reveal.WindowsPath()==file,"Find changed a Unicode location");
+   Check(session.RevealFindHit(hit,0),"queue Unicode Find result");
+   PumpUntil([&]{return !session.Navigating();},"Unicode Find did not complete");
+   Check(Selected(a.list,L"\u6587\u4ef6.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==folder,
+         "Find did not select the Unicode folder and file");
+   a.tree.GetTreeCtrl().SelectItem(a.doc.m_fats[0].m_rootitem);
+   Check(DeleteFileW(file.c_str())&&RemoveDirectoryW(folder.c_str()),"clean up Unicode Find fixture");
+   fprintf(report,"PASS: Unicode Windows Find opens the matching folder and selects the file.\n");
+  }
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"first.txt")>=0,"startup before global main-window assignment");
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");

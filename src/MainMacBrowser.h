@@ -41,6 +41,7 @@ public:
     bool CreateFolder(const FileOperations::Location&,const std::u16string&);
     bool Rename();
     bool RenameItem(int row,const std::u16string& name,bool checkLock=true);
+    bool RenameWindowsItem(int row);
     FileOperations::Location CaptureItem(int row);
     bool Delete(bool confirm);
     bool Properties(int row);

@@ -19,7 +19,7 @@
  */
 
 #include "stdafx.h"
-#include "utils.h"
+#include "BrowserPresentation.h"
 #include "StorageWorker.h"
 
 #include <vector>
@@ -31,67 +31,69 @@ struct DeleteHandle {
  ~DeleteHandle(){DWORD error=GetLastError();if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);SetLastError(error);}
  void close(){if(value!=INVALID_HANDLE_VALUE){CloseHandle(value);value=INVALID_HANDLE_VALUE;}}
 };
-int delete_host_tree(const CString& path,unsigned depth,Storage::Job* job) {
+int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job) {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
- if(depth>128||path.GetLength()>=MAX_PATH-3){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
+ if(depth>128||path.size()>=32764){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
  DeleteHandle directory;
  // Pin the actual entry without following a junction, and prevent replacement
  // or reparse-point changes while enumerating its children.
- directory.value=CreateFileA(path,0,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+ directory.value=CreateFileW(path.c_str(),0,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
    FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
  if(directory.value==INVALID_HANDLE_VALUE)return 0;
  BY_HANDLE_FILE_INFORMATION info;
  if(!GetFileInformationByHandle(directory.value,&info))return 0;
  if(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)){SetLastError(ERROR_DIRECTORY);return 0;}
  if(!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {
-  WIN32_FIND_DATAA entry;HANDLE search=FindFirstFileA(path+"\\*",&entry);
+  WIN32_FIND_DATAW entry;HANDLE search=FindFirstFileW((path+L"\\*").c_str(),&entry);
   if(search==INVALID_HANDLE_VALUE) {if(GetLastError()!=ERROR_FILE_NOT_FOUND)return 0;}
   else {
    int ok=1;DWORD error=ERROR_SUCCESS;
    do {
-    if(!strcmp(entry.cFileName,".")||!strcmp(entry.cFileName,".."))continue;
+    if(!wcscmp(entry.cFileName,L".")||!wcscmp(entry.cFileName,L".."))continue;
     if(job&&job->cancelled()){ok=0;error=ERROR_CANCELLED;break;}
-    CString child=path+"\\"+entry.cFileName;
+    auto child=path+L"\\"+entry.cFileName;
     if(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ok=delete_host_tree(child,depth+1,job);
-    else {ok=DeleteFileA(child)!=FALSE;if(ok)Storage::OutcomeEvidence::NoteRetainedChange();}
+    else {ok=DeleteFileW(child.c_str())!=FALSE;if(ok)Storage::OutcomeEvidence::NoteRetainedChange();}
     if(!ok){error=GetLastError();break;}
-   }while(FindNextFileA(search,&entry));
+   }while(FindNextFileW(search,&entry));
    if(ok&&GetLastError()!=ERROR_NO_MORE_FILES){ok=0;error=GetLastError();}
    FindClose(search);if(!ok){SetLastError(error);return 0;}
   }
  }
  directory.close();
- const bool removed=RemoveDirectoryA(path)!=FALSE; // A reparse point itself, never its target.
+ const bool removed=RemoveDirectoryW(path.c_str())!=FALSE; // A reparse point itself, never its target.
  if(removed)Storage::OutcomeEvidence::NoteRetainedChange();
  return removed;
 }
-}
-int DeleteFATDirJob(CString &dir,Storage::Job* job)
+int DeleteHostDirectory(const std::wstring& path,Storage::Job* job)
 {
- char path[MAX_PATH];DWORD length=GetFullPathNameA(dir,sizeof(path),path,nullptr);
- if(!length||length>=sizeof(path)||!strncmp(path,"\\\\?\\",4)||!strncmp(path,"\\\\.\\",4)) {SetLastError(ERROR_INVALID_NAME);return 0;}
- while(length>3&&path[length-1]=='\\')path[--length]=0;
- if(length==3&&path[1]==':'&&path[2]=='\\'){SetLastError(ERROR_ACCESS_DENIED);return 0;}
- if(path[0]=='\\'&&path[1]=='\\') {
-  char* server=strchr(path+2,'\\');char* share=server?strchr(server+1,'\\'):nullptr;
-  if(!share){SetLastError(ERROR_ACCESS_DENIED);return 0;}
+ auto full=path;
+ while(full.size()>7&&full.back()==L'\\')full.pop_back();
+ const bool unc=_wcsnicmp(full.c_str(),L"\\\\?\\UNC\\",8)==0;
+ if(unc){
+  const auto server=full.find(L'\\',8);
+  if(server==full.npos||full.find(L'\\',server+1)==full.npos){
+   SetLastError(ERROR_ACCESS_DENIED);return 0;
+  }
+ }else if(full.size()<=7||full[5]!=L':'||full[6]!=L'\\'){
+  SetLastError(ERROR_ACCESS_DENIED);return 0;
  }
- return delete_host_tree(CString(path),0,job);
+ return delete_host_tree(full,0,job);
 }
-
-int DeleteFATDir(CString& dir){return DeleteFATDirJob(dir,nullptr);}
-int DeleteHostSelectionJob(const CString& path,bool directory,Storage::Job* job)
+}
+int DeleteHostSelectionJob(const std::wstring& path,bool directory,Storage::Job* job)
 {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
- if(path.IsEmpty()){SetLastError(ERROR_INVALID_NAME);return 0;}
- if(!(directory?DeleteFATDirJob(const_cast<CString&>(path),job):DeleteFileA(path)))return 0;
+ if(path.empty()){SetLastError(ERROR_INVALID_NAME);return 0;}
+ auto full=BrowserPresentation::WindowsPath(path);
+ if(!(directory?DeleteHostDirectory(full,job):DeleteFileW(full.c_str())))return 0;
  Storage::OutcomeEvidence::NoteRetainedChange();
- int slash=path.ReverseFind('\\');CString name=path.Mid(slash+1);
+ const auto slash=full.find_last_of(L'\\');const auto name=full.substr(slash+1);
  // Selecting a metadata file never authorizes deleting the associated data file.
- if(name.IsEmpty()||name[0]=='%')return 1;
- CString companion=path.Left(slash+1)+"%"+name;
+ if(name.empty()||name[0]==L'%')return 1;
+ const auto companion=full.substr(0,slash+1)+L"%"+name;
  DeleteHandle file;
- file.value=CreateFileA(companion,GENERIC_READ|DELETE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+ file.value=CreateFileW(companion.c_str(),GENERIC_READ|DELETE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
    FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
  if(file.value==INVALID_HANDLE_VALUE)return 1; // Unverified entries are retained.
  BY_HANDLE_FILE_INFORMATION info;LARGE_INTEGER size;BYTE header[26];DWORD got;
@@ -115,4 +117,3 @@ int DeleteHostSelectionJob(const CString& path,bool directory,Storage::Job* job)
  FILE_DISPOSITION_INFO removeVerified={TRUE};
  return SetFileInformationByHandle(file.value,FileDispositionInfo,&removeVerified,sizeof(removeVerified))!=FALSE;
 }
-int DeleteHostSelection(const CString& path,bool directory){return DeleteHostSelectionJob(path,directory,nullptr);}

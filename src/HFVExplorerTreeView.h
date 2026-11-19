@@ -90,6 +90,8 @@ protected:
 		LPSTR fpath );
 	HTREEITEM find_item( int volinx, HTREEITEM root, unsigned long id );
 	HTREEITEM tree_find_fat( HTREEITEM root_item, LPSTR path );
+    HTREEITEM FindWindowsFolder(HTREEITEM root,const std::wstring& path);
+    HTREEITEM InsertWindowsFolder(HTREEITEM parent,int volume,const std::wstring& name,const FileOperations::Location& location,bool writable);
 	CString get_directory_name(	HTREEITEM root_item, int volinx, unsigned long id );
 	unsigned long get_parent_id( HTREEITEM root_item, int volinx, unsigned long id );
 	void expand_dir( HTREEITEM root_item, int volinx, unsigned long parent ) ;

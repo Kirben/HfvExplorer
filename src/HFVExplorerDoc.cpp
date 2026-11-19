@@ -622,7 +622,7 @@ int CHFVExplorerDoc::get_afp(
 
 void CHFVExplorerDoc::fat_walk(int volinx,LPSTR path,int list){
  auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());BrowserDirectory::Snapshot snapshot;std::string directory=path;
- auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,directory.c_str(),list!=0,job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
+ auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=read_windows_browser_directory(volinx,VolumeCoord::Wide(directory),list!=0,job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
  if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
  apply_browser_directory(snapshot, LIST_FAT, volinx, 2, directory, list != 0);
 }
@@ -1975,7 +1975,11 @@ void CHFVExplorerDoc::OnViewRefresh()
   auto& tree=GetBrowserSession().Tree()->GetTreeCtrl();
   auto selected=tree.GetSelectedItem();
   auto binding=selected?reinterpret_cast<lparam_struct*>(tree.GetItemData(selected)):nullptr;
-  if(binding&&binding->type==LIST_FAT&&NavigateWindowsFolder(binding->volinx,binding->path,true))return;
+  if(binding&&binding->type==LIST_FAT){
+   const auto* folder=GetBrowserSession().Tree()->BrowserFolderAt(selected);
+   const auto path=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(binding->path);
+   if(NavigateWindowsFolder(binding->volinx,path,true))return;
+  }
   if(binding&&binding->type==LIST_HFS&&NavigateClassicFolder(binding->volinx,uint32_t(binding->id),true))return;
  }
  if(BackgroundCopies::Active()){

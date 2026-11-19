@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "VolumeCoordinator.h"
+#include "StorageWorker.h"
 #include <cstdio>
 #include <fcntl.h>
 #include <vector>
@@ -8,8 +10,7 @@
 #include <winioctl.h>
 #include "RenameName.h"
 extern int fat_rename(char*,char*);
-extern int DeleteFATDir(CString&);
-extern int DeleteHostSelection(const CString&,bool);
+extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
 extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
@@ -112,25 +113,25 @@ int RunFileMutationTest(const char* directory) {
   check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
   save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");
   check(junction(link,external),"create unprivileged directory junction fixture");
-  check(DeleteFATDir(selected)!=0,"delete selected tree containing a junction");
+  check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)selected),true,nullptr)!=0,"delete selected tree containing a junction");
   check(GetFileAttributesA(selected)==INVALID_FILE_ATTRIBUTES&&load(external+"\\Keep")==std::vector<BYTE>({'O','U','T','S','I','D','E'}),"recursive Windows deletion followed a junction outside its target");
   CString protectedDirectory=root+"\\Locked";check(CreateDirectoryA(protectedDirectory,nullptr)!=FALSE,"create locked deletion fixture");
   save(protectedDirectory+"\\Keep","LOCKED");check(SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_READONLY)!=FALSE,"protect deletion fixture");
-  check(!DeleteFATDir(protectedDirectory)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");
+  check(!DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)protectedDirectory),true,nullptr)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");
   SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_NORMAL);
-  CString driveRoot=root.Left(3);check(!DeleteFATDir(driveRoot),"drive-root deletion accepted");
+  CString driveRoot=root.Left(3);check(!DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)driveRoot),true,nullptr),"drive-root deletion accepted");
   CString ordinary=root+"\\Ordinary",unrelated=root+"\\%Ordinary";
-  save(ordinary,"SELECTED");save(unrelated,"UNRELATED");check(DeleteHostSelection(ordinary,false)!=0,"delete ordinary file");
+  save(ordinary,"SELECTED");save(unrelated,"UNRELATED");check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)ordinary),false,nullptr)!=0,"delete ordinary file");
   check(load(unrelated)==std::vector<BYTE>({'U','N','R','E','L','A','T','E','D'}),"deletion removed an unrelated percent-prefixed file");
   CString reverse=root+"\\Reverse",reverseMetadata=root+"\\%Reverse";save(reverse,"KEEP");save(reverseMetadata,"SELECTED");
-  check(DeleteHostSelection(reverseMetadata,false)!=0&&load(reverse)==std::vector<BYTE>({'K','E','E','P'}),"metadata selection removed unselected data file");
+  check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)reverseMetadata),false,nullptr)!=0&&load(reverse)==std::vector<BYTE>({'K','E','E','P'}),"metadata selection removed unselected data file");
   std::vector<BYTE> appleDouble(70,0);appleDouble[1]=5;appleDouble[2]=0x16;appleDouble[3]=7;appleDouble[5]=2;appleDouble[25]=1;appleDouble[29]=9;appleDouble[33]=38;appleDouble[37]=32;
   CString paired=root+"\\Paired",sidecar=root+"\\%Paired";save(paired,"DATA");
   {CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create genuine AppleDouble");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
-  check(DeleteHostSelection(paired,false)!=0&&GetFileAttributesA(sidecar)==INVALID_FILE_ATTRIBUTES,"verified AppleDouble companion not deleted");
+  check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)paired),false,nullptr)!=0&&GetFileAttributesA(sidecar)==INVALID_FILE_ATTRIBUTES,"verified AppleDouble companion not deleted");
   save(paired,"KEEP");{CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create protected pair");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
   check(SetFileAttributesA(paired,FILE_ATTRIBUTE_READONLY)!=FALSE,"protect selected data file");
-  check(!DeleteHostSelection(paired,false)&&load(sidecar)==appleDouble,"failed data deletion removed its companion");SetFileAttributesA(paired,FILE_ATTRIBUTE_NORMAL);
+  check(!DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)paired),false,nullptr)&&load(sidecar)==appleDouble,"failed data deletion removed its companion");SetFileAttributesA(paired,FILE_ATTRIBUTE_NORMAL);
   CString renameDirectory=root+"\\Rename",cwdDirectory=root+"\\Decoys";check(CreateDirectoryA(renameDirectory,nullptr)&&CreateDirectoryA(cwdDirectory,nullptr),"create rename fixtures");
   save(renameDirectory+"\\Before","SELECTED");save(cwdDirectory+"\\Before","DECOY");
   char cwd[MAX_PATH];check(GetCurrentDirectoryA(sizeof(cwd),cwd)!=0&&SetCurrentDirectoryA(cwdDirectory)!=FALSE,"set decoy working directory");

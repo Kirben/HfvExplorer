@@ -144,6 +144,24 @@ int RunFileOperationsTest(const char* directory){
    Check(!memcmp(data,"EDIT",4)&&!memcmp(resource,"RSR",3),"launcher wrote the wrong data or lost the resource fork");
    fprintf(report,"PASS: launcher write-back preserves the resource fork and Finder metadata, and retains edits when the original has changed.\n");
   }
+  {
+   const auto folder=W(root)+L"\\\u65e5\u672c";
+   const auto original=folder+L"\\\u6587\u4ef6.txt";
+   const auto renamed=folder+L"\\\u65b0.txt";
+   Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"create Unicode mutation folder");
+   auto file=CreateFileW(original.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
+   Check(file!=INVALID_HANDLE_VALUE,"create Unicode mutation file");CloseHandle(file);
+   auto location=Location::Windows(original);
+   location.expectedIdentity=MacBrowser::DescribeWindowsFile(original).identity;
+   Pass(Submit(RenameEntry{location,u"\u65b0.txt"}));
+   Check(GetFileAttributesW(original.c_str())==INVALID_FILE_ATTRIBUTES&&
+         GetFileAttributesW(renamed.c_str())!=INVALID_FILE_ATTRIBUTES,"rename lost the Unicode path");
+   auto target=Location::Windows(folder);target.directory=true;
+   target.expectedIdentity=MacBrowser::DescribeWindowsFile(folder).identity;
+   Pass(Submit(DeleteEntries{{target}}));
+   Check(GetFileAttributesW(folder.c_str())==INVALID_FILE_ATTRIBUTES,"recursive deletion lost a Unicode child");
+   fprintf(report,"PASS: typed Windows rename and recursive delete preserve Unicode paths.\n");
+  }
   Request classicRename = FileOperations::RenameEntry{classicSource, u"Renamed"};Pass(Submit(classicRename));
   Request legacy;legacy = FileOperations::LegacyConversion{};legacy.Legacy().source=FileOperations::Location::FromLegacy(classic,"Classic:Renamed");legacy.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\raw.dat");legacy.Legacy().options.output='r';legacy.Legacy().options.input='r';legacy.Legacy().options.appledouble=false;
   {Gate gate;auto captured=Submit(legacy);legacy.Legacy().options.output='5';HFSIFACE_restore_copy_settings('5','m',1);gate.Release();Pass(captured);char out,in;int ad;HFSIFACE_copy_settings(&out,&in,&ad);Check(out=='5'&&in=='m'&&ad==1&&Load(root+"\\raw.dat")==std::vector<BYTE>({'D','A','T','A'}),"queued conversion settings were not captured/restored");}
