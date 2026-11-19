@@ -16,7 +16,7 @@ std::wstring Wide(const std::u16string &s) { return {s.begin(), s.end()}; }
 std::u16string U16(const std::wstring &s) { return {s.begin(), s.end()}; }
 namespace {
 void Check(bool ok, const char *message) { if (!ok) throw HfsPlus::Error(message); }
-class Plus final : public Volume {
+class Plus final : public Volume, public WorkerEndpoint {
     std::unique_ptr<HfsPlus::Source> source_;
     std::unique_ptr<HfsPlus::Volume> volume_;
     std::atomic<bool> writable_;std::atomic<bool> usable_{true};
@@ -48,6 +48,7 @@ class Plus final : public Volume {
 public:
     Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key,std::wstring externalJournal)
         : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)),externalJournal_(externalJournal) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();external_=volume_->ExternalJournal();expanded_=volume_->ExpandedTimes();canWrite_=volume_->Writable();if(!externalJournal.empty()&&volume_->ExternalJournal())journalDependency_.reset(new VolumeCoord::ImageDependency(ResourceKey(),externalJournal));}
+    WorkerExecution Execution()const override{WorkerExecution result;result.stableCatalogIds=true;return result;}
     WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;out.journal=externalJournal_;}else if(source_->MediaDrive()>=0){out.kind=WorkerOrigin::Cd;out.drive=source_->MediaDrive();uint32_t generation=0;out.generationKnown=source_->MediaGeneration(generation);out.generation=generation;}out.writable=writable_;return out;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
     void SuspendWorker()override{Call call(*this);usable_=false;volume_.reset();}
@@ -107,7 +108,7 @@ public:
     void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{Check(CanMoveFrom(source),"Move must stay on the same volume");Rename(id,parent,entry.name);}
 };
 
-class Mfs final : public Volume {
+class Mfs final : public Volume, public WorkerEndpoint {
     std::unique_ptr<MfsSource> source_;
     MfsImage image_;
     mutable std::recursive_mutex mutex_;

@@ -149,7 +149,7 @@ std::wstring Temp(const std::wstring &directory) {
     }
     throw HfsPlus::Error("Cannot reserve a staging filename");
 }
-class Windows final : public Volume {
+class Windows final : public Volume, public WorkerEndpoint {
     mutable std::recursive_mutex mutex_;
     std::map<uint32_t,std::wstring> paths_;
     std::string resourceKey_;
@@ -259,6 +259,7 @@ public:
         for(const auto& name:names)for(const auto& companion:reserved)Check(_wcsicmp(name.c_str(),companion.c_str())!=0,"Source names collide with required Windows metadata companions; rename them before copying");
     }
     bool CaseSensitive() const override { return false; }
+    WorkerExecution Execution()const override{WorkerExecution out;out.windowsPaths=true;return out;}
     void ReleaseWorkerReaders(const std::vector<std::string>& keys)override{std::lock_guard<std::recursive_mutex> lock(mutex_);for(unsigned fork=0;fork<2;++fork){auto& readers=fork?resourceReaders_:dataReaders_;for(auto it=readers.begin();it!=readers.end();){auto path=Path(it->first);auto key=VolumeCoord::PathKey(fork?Companion(path):path);if(VolumeCoord::Overlapping(keys,key))it=readers.erase(it);else ++it;}}}
     void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
     void ValidateEntry(const Entry& e)const override {

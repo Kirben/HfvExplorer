@@ -6,6 +6,7 @@
 #include "CopyProcess.h"
 #include "VolumeSession.h"
 #include "CopyWorkerProtocol.h"
+#include "WorkerEndpoint.h"
 #include "TransferConversion.h"
 #include "TypeMappingSnapshot.h"
 #include "LegacyEngine.h"
@@ -349,8 +350,7 @@ void ValidateRequest(const Request& r){
 bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
     if (!conversion.selection) return false;
     auto classic = [](const Location& item) {
-        return item.IsMounted() && !strcmp(item.Volume()->Kind(), "HFS") &&
-               (item.Volume()->HasPersistentWorker() || item.Volume()->CdDrive()>=0);
+        return item.IsMounted() && ExecutionFor(*item.Volume()).classicConversion;
     };
     const auto& selection = *conversion.selection;
     if (conversion.source.IsWindows() && conversion.destination.IsClassic())
@@ -365,9 +365,9 @@ ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
     if (!CopyProcess::enabled)
         return ExecutionRoute::Local;
 #endif
-    auto persistent=[](const Location& item) { return item.IsMounted() && item.Volume()->HasPersistentWorker(); };
+    auto persistent=[](const Location& item) { return item.IsMounted() && ExecutionFor(*item.Volume()).Persistent(); };
     auto windows=[](const Location& item) {
-        return item.IsWindows() || (item.IsMounted() && !strcmp(item.Volume()->Kind(), "Windows"));
+        return item.IsWindows() || (item.IsMounted() && ExecutionFor(*item.Volume()).windowsPaths);
     };
     if (const auto* copy=request.Get<OrdinaryCopy>()) {
         // A mounted destination can stage inputs from any supported source.
@@ -452,7 +452,7 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request, Execution
  auto reserveCopySource = [&](const Location& source, bool windowsExport = false) {
   // Retain an image read lease for the full export, excluding writers
   // while allowing the browser to use the mounted session.
-  const bool sharedExport=windowsExport && source.IsMounted() && source.Volume()->HasPersistentWorker() && !handoff;
+  const bool sharedExport=windowsExport && source.IsMounted() && ExecutionFor(*source.Volume()).Persistent() && !handoff;
   const auto mode = source.cut || (HostPath(source).empty() && !sharedExport &&
       (request.background || handoff)) ? Mode::Write : Mode::Read;
   reserve(source, mode);

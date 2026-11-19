@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "VolumeSession.h"
 #include "WorkerTransport.h"
+#include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
 #include "floppy.h"
 #include <algorithm>
@@ -41,7 +42,7 @@ public:
     using HfsPlus::Error::Error;
 };
 
-class PersistentVolume final : public Volume {
+class PersistentVolume final : public Volume, public WorkerEndpoint {
     std::wstring path_, journal_;
     std::string key_;
     std::unique_ptr<HfsPlus::Source> guard_, journalGuard_;
@@ -206,7 +207,13 @@ public:
     ~PersistentVolume() override {
         try { Stop(); } catch (...) {}
     }
-    bool HasPersistentWorker() const override { return true; }
+    WorkerExecution Execution() const override {
+        WorkerExecution out;
+        out.placement=WorkerExecution::Placement::PersistentSession;
+        out.classicConversion=Classic();
+        out.stableCatalogIds=format_==ImageFormat::HfsPlus;
+        return out;
+    }
     std::string ResourceKey() const override { return key_; }
     std::u16string Name() const override { return name_; }
     const char* Kind() const override { return Mfs() ? "MFS" : Classic() ? "HFS" : hfsx_ ? "HFSX" : "HFS+"; }

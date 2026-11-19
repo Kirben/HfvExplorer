@@ -37,7 +37,7 @@ struct RootScope {
  explicit RootScope(hfsvol* v):volume(v),previous(0){if(!v)throw HfsPlus::Error("This volume is being used by the copy worker");previous=hfs_getcwd(v);Check(hfs_setcwd(v,HFS_CNID_ROOTDIR)==0);}
  ~RootScope(){hfs_setcwd(volume,previous);}
 };
-class Classic final : public Volume {
+class Classic final : public Volume, public WorkerEndpoint {
     std::shared_ptr<LegacyEngine::Context> context_;
     hfsvol *volume_ = nullptr;
     std::string image_;
@@ -128,6 +128,7 @@ public:
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
+    WorkerExecution Execution()const override{WorkerExecution out;out.classicConversion=cdDrive_>=0;return out;}
     WorkerOrigin WorkerDescription()const override {
         LegacyEngine::Scope engine(context_);
         WorkerOrigin out;
@@ -172,9 +173,11 @@ public:
             if(hfs_umount(v)!=0){closeFailed_=true;Check(false);}
         }
     }
-    bool WorkerWritesSafe() const override {
+    bool FinishWorkerWrite(Volume&) override {
         LegacyEngine::Scope engine(context_);
-        return !closeFailed_ && (!volume_ || Writable());
+        const bool safe = !closeFailed_ && (!volume_ || Writable());
+        Close();
+        return safe;
     }
     std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name()const override{LegacyEngine::Scope engine(context_);hfsvolent info{};Check(volume_!=nullptr);Check(hfs_vstat(volume_,&info)==0);return Decode(info.name);}

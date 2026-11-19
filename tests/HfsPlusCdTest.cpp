@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "WorkerEndpoint.h"
 #include "HfsPlusCd.h"
 #include "MacBrowserModel.h"
 #include "FileOperations.h"
@@ -379,7 +380,7 @@ int RunHfsPlusCdTest(const char *directory) {
                 [media](int drive){return MacBrowser::OpenCd(drive,media);});
             check(cd&&!strcmp(cd->Kind(),"HFS")&&!cd->Writable()&&cd->Name()==u"Classic CD",
                   "classic CD was not mounted read-only by the common selector");
-            const auto origin=cd->WorkerDescription();
+            const auto origin=MacBrowser::WorkerEndpoint::Find(*cd)->WorkerDescription();
             check(origin.kind==MacBrowser::WorkerOrigin::Cd&&origin.drive==3&&origin.generation==media->generation&&
                   origin.generationKnown,"classic CD lost the worker media identity");
             MacBrowser::Entry folder,file;
