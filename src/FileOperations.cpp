@@ -109,29 +109,46 @@ struct ExecutionPlan {
  std::vector<MacBrowser::ForkSource> copySources;
 };
 
-Storage::Result CopyRequest(const OrdinaryCopy& request,const std::vector<MacBrowser::ForkSource>& routes,
+struct TransferPlan {
+ OrdinaryCopy endpoints;
+ TransferAdapter adapter;
+};
+
+Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkSource>& routes,
                             Storage::Job& job,Completion& completion){
+ const auto& request=transfer.endpoints;
+ const auto& target=request.destination;
  Check(!request.sources.empty(),"Select a source file or folder");
  std::vector<std::string> snapshots;
  bool complete=false,inPlace=false;
- WriteWithMedia(request.destination,[&]{
-  auto destination=Destination(request.destination);
-  Check(destination.first->Supports().create,"The destination does not support file creation");
+ WriteWithMedia(target,[&]{
+  if(!target.IsWindows())StorageLocation::ValidateMedia(target);
+  if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
+  auto destination=Destination(target);
+  const auto folder=destination.first->Stat(destination.second);
+  Check(folder.directory&&destination.first->Supports().create,"The destination does not support file creation");
+  if(target.IsClassic()&&target.expectedCatalogId)
+   Check(folder.resolvedId==target.expectedCatalogId,"The destination HFS folder was replaced");
+
   std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> opened;
-  for(auto& item:request.sources){
+  for(const auto& item:request.sources){
    Cancel(job);
    auto source=Source(item);
    if(item.cut&&item.Volume())Check(source.first->Writable(),"A cut source is read-only");
    opened.push_back(std::move(source));
   }
-  for(const auto& item:opened)MarkChild(completion,request.destination,item.first->Stat(item.second).name);
-  inPlace=MoveInPlace(request,opened,*destination.first,destination.second,job,completion);
+  if(transfer.adapter)Mark(completion,target);
+  else for(const auto& item:opened)MarkChild(completion,target,item.first->Stat(item.second).name);
+
+  // A transform may change the name or forks, so it must run through CopyMany.
+  inPlace=!transfer.adapter&&MoveInPlace(request,opened,*destination.first,destination.second,job,completion);
   if(!inPlace){
+   snapshots.reserve(opened.size());
    for(size_t i=0;i<request.sources.size();++i)
     snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
-   complete=CopyMany(opened,*destination.first,destination.second,job,{},routes);
+   complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes);
   }
-  if(!request.destination.Volume())destination.first->Close();
+  if(!target.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
  });
  if(inPlace){
@@ -142,9 +159,14 @@ Storage::Result CopyRequest(const OrdinaryCopy& request,const std::vector<MacBro
   return result;
  }
  // A Cut source must remain intact until destination unmount and readback succeed.
+ for(const auto& source:request.sources)
+  StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
- completion.complete=complete;completion.completed=job.progress().files;
- Storage::Result result;result.moved=complete&&std::any_of(request.sources.begin(),request.sources.end(),[](const Location& p){return p.cut;});return result;
+ completion.complete=complete;
+ completion.completed=job.progress().files;
+ Storage::Result result;
+ result.moved=complete&&std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
+ return result;
 }
 Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t count,Storage::Job& job,Completion& completion){
  Storage::Progress progress;progress.fileCopy=false;progress.phase=rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(count);progress.utf8=true;job.progress(progress);
@@ -536,18 +558,19 @@ Reader AdaptRawClassic(Volume& source, Entry& entry, bool importing, bool resour
  };
 }
 
-Storage::Result CopyConverted(const LegacyConversion& conversion, Storage::Job& job, Completion& completion) {
+TransferPlan PlanConversion(const LegacyConversion& conversion) {
  const bool importing=conversion.source.IsWindows() && conversion.destination.IsClassic();
  const bool exporting=conversion.source.IsClassic() && conversion.destination.IsWindows();
  const bool translating=importing||exporting;
  const char mode=importing?conversion.options.input:conversion.options.output;
  const bool raw=translating&&(mode=='r'||mode=='R');
  if(translating)Check(TransferConversion::Supported(mode)||mode=='a'||raw,"Unsupported file conversion mode");
- const auto mappings=raw?TypeMappings::Capture():TypeMappings::Snapshot{};
+ auto mappings=raw?TypeMappings::Capture():TypeMappings::Snapshot{};
  auto sourceLocation=conversion.selection ? conversion.selection->source : conversion.source;
  sourceLocation.cut=conversion.move;
  if(sourceLocation.IsClassic()&&conversion.directory){
   auto path=sourceLocation.ClassicPath();
+  Check(!path.empty(),"The classic HFS source path is empty");
   if(path.back()==':'&&path.find(':')!=path.size()-1){
    const auto generation=sourceLocation.MediaGenerationKnown()?std::optional<DWORD>(sourceLocation.MediaGeneration()):std::nullopt;
    path.pop_back();
@@ -574,6 +597,7 @@ Storage::Result CopyConverted(const LegacyConversion& conversion, Storage::Job& 
   }
  } else if(!conversion.selection && folder.IsClassic()) {
   auto path=folder.ClassicPath();
+  Check(!path.empty(),"The classic HFS destination path is empty");
   if(path.back()!=':') {
    auto image=folder.ClassicImage();
    const auto end=path.find_last_of(':');
@@ -593,29 +617,18 @@ Storage::Result CopyConverted(const LegacyConversion& conversion, Storage::Job& 
    }
   }
  }
- if(!translating&&outputName.empty())
-  return CopyRequest(OrdinaryCopy{{sourceLocation},folder},{},job,completion);
-
- auto source=Source(sourceLocation);
- std::vector<std::string> snapshots;
- bool complete=false;
- WriteWithMedia(folder,[&]{
- StorageLocation::ValidateMedia(folder);
- if(folder.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(folder.ClassicImage()),folder.expectedResource);
- auto target=Destination(folder);
- const auto destinationEntry=target.first->Stat(target.second);
- Check(destinationEntry.directory,"The copy destination is not a folder");
- if(folder.IsClassic()&&folder.expectedCatalogId)
-  Check(destinationEntry.resolvedId==folder.expectedCatalogId,"The destination folder was replaced");
- if(conversion.move)snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job,bool(sourceLocation.Volume())));
- TransferAdapter adapt=[&](Volume& volume,Entry& entry,Storage::Job& active,bool root) {
+ TransferPlan plan{OrdinaryCopy{{std::move(sourceLocation)},std::move(folder)},{}};
+ if(!translating&&outputName.empty())return plan;
+ const bool appledouble=conversion.options.appledouble;
+ plan.adapter=[translating,importing,exporting,mode,raw,appledouble,mappings=std::move(mappings),outputName=std::move(outputName)]
+     (Volume& volume,Entry& entry,Storage::Job& active,bool root) -> Reader {
   if(!translating){
    if(root&&!outputName.empty())entry.name=outputName;
    return Reader{};
   }
   char selected=mode;
   bool paired=false;
-  if(importing && (selected=='a' || raw) && conversion.options.appledouble && !entry.directory) {
+  if(importing && (selected=='a' || raw) && appledouble && !entry.directory) {
    const auto path=volume.HostPath(entry.id);
    const auto slash=path.find_last_of(L"\\/");
    if(slash!=path.npos)paired=WindowsResourceCompanion(path.substr(0,slash+1)+L"%"+path.substr(slash+1));
@@ -653,18 +666,7 @@ Storage::Result CopyConverted(const LegacyConversion& conversion, Storage::Job& 
   }
   return reader;
  };
- Mark(completion,folder);
- complete=CopyMany({source},*target.first,target.second,job,adapt);
- if(!folder.Volume())target.first->Close();
- if(!sourceLocation.Volume())source.first->Close();
- });
- StorageLocation::ValidateMedia(sourceLocation,StorageLocation::FloppyProbe::FreshHandle);
- if(complete && conversion.move) DeleteMovedSources({sourceLocation},snapshots,job,completion);
- completion.complete=complete;
- completion.completed=job.progress().files;
- Storage::Result result;
- result.moved=complete && conversion.move;
- return result;
+ return plan;
 }
 
 Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage::Job& job,Completion& completion){
@@ -672,14 +674,14 @@ Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage
  Cancel(job);
  if(const auto* link=request.Get<CreateHardLink>()){auto source=Source(link->source);auto target=Destination(link->parent);Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,link->source);MarkChild(completion,link->parent,link->name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,link->name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
  if(request.OperationKind()==Kind::CreateFolder||request.Metadata())return Metadata(request,job,completion);
- if(const auto* operation=request.Get<OrdinaryCopy>())return CopyRequest(*operation,plan.copySources,job,completion);
+ if(const auto* operation=request.Get<OrdinaryCopy>())return RunTransfer({*operation,{}},plan.copySources,job,completion);
  if(const auto* operation=request.Get<ExportFileFork>())return ExportFork(*operation,job,completion);
  if(const auto* operation=request.Get<ImportResourceFork>())return ReplaceResource(*operation,job,completion);
  if (const auto* rename = request.Rename())
   return Mutate(rename, &rename->source, 1, job, completion);
  if (const auto* deletion = request.Delete())
   return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
- return CopyConverted(request.Legacy(),job,completion);
+ return RunTransfer(PlanConversion(request.Legacy()),{},job,completion);
 }
 }
 Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> job):state_(std::move(state)),job_(std::move(job)){}

@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <vector>
 #include "TransferFixture.h"
+#include "VolumeCoordinator.h"
 #include "resource.h"
 #include "DynCopyModeSelect.h"
 #include "OptionsPage2.h"
@@ -143,6 +144,33 @@ int RunCopyProgressTest(const char* directory) {
    expectNoConflict(recursive);check(recursive->result().code!=0,"reject recursive HFS self-copy before creating children");
   }
   fprintf(out,"PASS: folder copies into themselves or descendants are rejected before recursive mutation.\n");
+  {
+   const CString input=root+"\\stale-cut";
+   {CFile f;check(f.Open(input,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create stale-destination source");f.Write("KEEP",4);}
+   using namespace FileOperations;
+   auto source=Location::Windows(VolumeCoord::Wide(input.GetString()));
+   source.cut=true;
+   auto destination=Location::Classic(image.GetString(),"CopyTest:Folder:Nested:");
+   destination.directory=true;
+   destination.expectedCatalogId=UINT32_MAX;
+   const auto assertReplaced=[&](Request request){
+    auto operation=Submit(std::move(request));
+    expectNoConflict(operation.Job());
+    const auto result=operation.Job()->result();
+    check(result.code&&result.message.find("folder was replaced")!=std::string::npos&&
+          load(input)==std::vector<BYTE>({'K','E','E','P'}),
+          "ordinary and converted Cut must reject a stale destination and retain the source");
+   };
+   assertReplaced(Request(OrdinaryCopy{{source},destination}));
+   LegacyConversion conversion{source,destination,false,true,false,CaptureLegacyCopyOptions('r')};
+   conversion.options.input='r';
+   conversion.selection=ConversionSelection{source,destination};
+   assertReplaced(Request(std::move(conversion)));
+   auto verify=MacBrowser::OpenClassic(image.GetString(),"CopyTest:Folder:Nested:",false);
+   MacBrowser::Entry created;
+   check(!verify->FindChild(2,u"stale-cut",created),"stale destination accepted file data");
+   fprintf(out,"PASS: ordinary and converted Cut reject a stale destination before writing and retain the source.\n");
+  }
   auto original=TransferFixture::Submit((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a');
   original->wait();
   auto progress=original->progress();
