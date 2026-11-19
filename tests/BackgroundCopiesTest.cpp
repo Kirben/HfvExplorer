@@ -291,6 +291,37 @@ int RunFloppyCopyRegressionsTest(const char* directory){
   mutation("Floppy Finder edit did not reject a stale generation or report failed readback",
       [](const auto& item){return FileOperations::EditClassicProperties{item,FileOperations::FinderLabel{3}};});
   fprintf(report,"PASS: rename, delete and Finder edits reject stale media and report device readback failure.\n");
+  reset();paste(false);done();
+  {
+   auto folder=FileOperations::Location::Classic(physical,"AuditFloppy:");
+   folder.directory=true;folder.BindMediaGeneration(device->disk.changeCount);
+   auto create=FileOperations::Submit(FileOperations::CreateFolder{folder,u"Collision"});
+   create.Job()->wait();
+   Check(!create.Job()->result().code,"classic adapter could not create a floppy directory");
+   auto selected=FileOperations::Location::Classic(physical,"AuditFloppy:Payload");
+   selected.BindMediaGeneration(device->disk.changeCount);
+   const auto before=device->disk.media;
+   auto collision=FileOperations::Submit(FileOperations::RenameEntry{selected,u"Collision"});
+   collision.Job()->wait();
+   Check(collision.Job()->result().code&&device->disk.media==before&&
+         readFile(u"Payload")==std::vector<BYTE>(8192,0x42),
+         "classic rename treated a folder collision as an implicit move");
+   device->flushed=false;
+   auto rename=FileOperations::Submit(FileOperations::RenameEntry{selected,u"Renamed"});
+   rename.Job()->wait();
+   Check(!rename.Job()->result().code&&readFile(u"Renamed")==std::vector<BYTE>(8192,0x42),
+         "classic adapter floppy rename lost the original contents");
+   selected.SetClassic(physical,"AuditFloppy:Renamed");
+   selected.BindMediaGeneration(device->disk.changeCount);
+   device->flushed=false;
+   auto remove=FileOperations::Submit(FileOperations::DeleteEntries{{selected}});
+   remove.Job()->wait();
+   auto volume=MacBrowser::OpenClassic(physical,"AuditFloppy:",false);
+   Check(!remove.Job()->result().code&&!Find(*volume,u"Renamed")&&Find(*volume,u"Collision"),
+         "classic adapter floppy delete removed the wrong entry or failed to persist");
+   volume->Close();
+  }
+  fprintf(report,"PASS: shared floppy rename rejects folder collisions and preserves data; delete persists.\n");
   reset();device->gateRead=true;paste(true);Until([&]{return WaitForSingleObject(device->entered,0)==WAIT_OBJECT_0;});Check(BackgroundCopies::Active()&&present()&&BrowserTransfers::Any()&&frame->IsWindowEnabled(),"source removed, job timed out or browser disabled before readback completed");SendMessage(BackgroundCopies::DialogWindow(),WM_COMMAND,IDCANCEL,0);SetEvent(device->release);done();Check(present()&&BrowserTransfers::Any()&&BackgroundCopies::LastResult().error==ERROR_CANCELLED,"cancel during verification removed source or lost Cancel result");
   // A mode question can outlive its selected disk. A replacement disk in
   // the same drive must never inherit that queued write request.

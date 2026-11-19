@@ -63,27 +63,34 @@ public:
   pending.push_back(std::move(folder));
  }
  void mac(){
-  auto volumePath=pathBuffer(request_.location.volume);hfsvol* volume=hfs_mount(volumePath.data(),1,O_RDONLY);
-  if(!volume)throw std::runtime_error(hfs_error?hfs_error:"Could not open the Macintosh volume");
-  struct Close{hfsvol* value;~Close(){hfs_umount(value);}} close={volume};
-  auto root=pathBuffer(request_.location.directory);pc_to_mac_charset(reinterpret_cast<unsigned char*>(root.data()));
-  std::string start=root.data();if(start.find(':')==std::string::npos)start+=':';
-  auto startPath=pathBuffer(start.substr(start.find(':')));hfsdirent entry={};
-  if(hfs_stat(volume,startPath.data(),&entry)<0||!(entry.flags&HFS_ISDIR))throw std::runtime_error("The selected search location is not an accessible Macintosh folder");
-  std::vector<Folder> pending={{start,0,entry.cnid}};std::set<long> visited;
+  auto start=request_.location.directory;
+  if(start.find(':')==std::string::npos)start+=':';
+  const auto origin=request_.location.origin.IsClassic()?request_.location.origin:
+      FileOperations::Location::Classic(request_.location.volume,start);
+  StorageLocation::ValidateImage(VolumeCoord::Wide(origin.ClassicImage()),origin.expectedResource);
+  auto volume=MacBrowser::OpenClassic(origin.ClassicImage(),start,false);
+  StorageLocation::ValidateMedia(origin);
+  std::vector<Folder> pending={{start,0,2}};
+  std::set<uint32_t> visited;
   while(!pending.empty()){
-   Folder folder=std::move(pending.back());pending.pop_back();progress(display(folder.path),true);
-   if(!visited.insert(folder.id).second)throw std::runtime_error("Search stopped because the Macintosh catalog repeats a folder ID");
-   auto path=pathBuffer(folder.path.substr(folder.path.find(':')));hfsdir* directory=hfs_opendir(volume,path.data());
-   if(!directory)throw std::runtime_error(hfs_error?hfs_error:"Could not read a Macintosh folder");
-   struct CloseDir{hfsdir* value;~CloseDir(){hfs_closedir(value);}} closeDir={directory};
-   for(;;){
-    errno=0;if(hfs_readdir(directory,&entry)<0){if(errno==ENOENT)break;throw std::runtime_error(hfs_error?hfs_error:"Could not read the Macintosh catalog");}
-    std::string full=folder.path+(folder.path.back()==':'?"":":")+entry.name;bool isDirectory=(entry.flags&HFS_ISDIR)!=0;
-    if(!hit(display(entry.name),display(folder.path),display(full),isDirectory,isDirectory?0:static_cast<unsigned long long>(entry.u.file.dsize)+entry.u.file.rsize,uint32_t(folder.id),uint32_t(entry.cnid)))return;
-    if(isDirectory&&request_.recursive)queued(pending,{full,folder.depth+1,entry.cnid});
+   Folder folder=std::move(pending.back());pending.pop_back();progress(folder.path,true);
+   const auto parent=volume->Stat(uint32_t(folder.id)).resolvedId;
+   if(!visited.insert(parent).second)throw std::runtime_error("Search stopped because the Macintosh catalog repeats a folder ID");
+   for(const auto& entry:volume->List(uint32_t(folder.id))){
+    hfsdirent properties{};
+    if(!volume->GetClassicProperties(entry.id,properties))
+     throw HfsPlus::Error("Could not read classic HFS catalog properties");
+    const auto name=display(properties.name);
+    const auto full=folder.path+(folder.path.back()==':'?"":":")+name;
+    if(!hit(name,folder.path,full,entry.directory,entry.forks[0].size+entry.forks[1].size,parent,entry.resolvedId)){
+     StorageLocation::ValidateMedia(origin,StorageLocation::FloppyProbe::FreshHandle);
+     return;
+    }
+    if(entry.directory&&request_.recursive)queued(pending,{full,folder.depth+1,long(entry.id)});
    }
   }
+  StorageLocation::ValidateMedia(origin,StorageLocation::FloppyProbe::FreshHandle);
+  volume->Close();
  }
  void native(){
   auto volume=request_.location.native;output_.utf8=true;

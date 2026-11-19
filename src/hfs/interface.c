@@ -1457,9 +1457,6 @@ static HFV_THREAD_LOCAL char ff_path[_MAX_PATH];
 static HFV_THREAD_LOCAL char ff_mac_path[_MAX_PATH];
 static HFV_THREAD_LOCAL hfsdir *ff_dir = 0;
 
-static HFV_THREAD_LOCAL int pIcon13catdatarecValid = 0;
-static HFV_THREAD_LOCAL CatDataRec Icon13catdatarec;
-
 void ff_cleanup( void )
 {
 	if(ff_dir) {
@@ -1479,35 +1476,6 @@ void ff_cleanup( void )
 	}
 }
 
-CatDataRec *HFSIFACE_get_last_Icon13( void )
-{
-	if(pIcon13catdatarecValid) {
-		return(&Icon13catdatarec);
-	} else {
-		return(0);
-	}
-}
-
-static void check_for_icon13( hfs_item_type *pitem )
-{
-	char sub_path[_MAX_PATH];
-	hfsdir *sub_dir;
-	hfsdirent ent;
-	CatKeyRec catkeyrec;
-
-	sprintf( sub_path, "%s%s:", ff_mac_path, pitem->catkeyrec.ckrCName );
-	sub_dir = hfs_opendir( ff_vol, sub_path );
-	if(sub_dir) {
-		while(hfs_readdir2(sub_dir, &ent, &catkeyrec, &Icon13catdatarec) >= 0) {
-			if(strcmp(catkeyrec.ckrCName,"Icon\x00D") == 0) {
-				pIcon13catdatarecValid = 1;
-				break;
-			}
-		}
-		hfs_closedir(sub_dir);
-	}
-}
-
 int HFSIFACE_get_dir_next( hfs_item_type *pitem )
 {
 	int result = 1, looping = 1;
@@ -1515,17 +1483,12 @@ int HFSIFACE_get_dir_next( hfs_item_type *pitem )
 	
 	HFSIFACE_internal_init();
 
-	pIcon13catdatarecValid = 0;
-
 	// Loop to skip deleted items
 	while(looping) {
 		looping = 0;
 		if(hfs_readdir2(ff_dir, &ent, &pitem->catkeyrec, &pitem->catdatarec) >= 0) {
 			if(pitem->catkeyrec.ckrKeyLen == 0) {
 				looping = 1;
-			} else if(pitem->catdatarec.cdrType == cdrDirRec) {
-				// While we are at it, check the "Icon13"
-				check_for_icon13( pitem );
 			}
 			result = 0;
 		}	else {
@@ -1542,22 +1505,6 @@ void HFSIFACE_get_dir_flush( void )
 	ff_cleanup();
 }
 
-int HFSIFACE_get_dir_first_readonly(char* volpath,char* path,hfs_item_type* pitem)
-{
- int result=-1;char* colon;
- if(ff_dir){errno=EBUSY;hfs_error="A directory enumeration is already active";return -1;}
- HFSIFACE_internal_init();
- if(strlen(volpath)>=sizeof(ff_path)||strlen(path)>=sizeof(ff_mac_path)){errno=ENAMETOOLONG;hfs_error="Classic HFS path is too long";return -1;}
- strcpy(ff_path,volpath);strcpy(ff_mac_path,path);pc_to_mac_charset(ff_mac_path);
- /* Root-relative paths cannot resolve to a different mounted volume of the same name. */
- colon=strchr(ff_mac_path,':');if(colon)memmove(ff_mac_path,colon,strlen(colon)+1);
- ff_vol=hfs_mount(ff_path,1,O_RDONLY);
- if(ff_vol){ff_mounted2=1;ff_dir=hfs_opendir(ff_vol,ff_mac_path);
-  if(ff_dir)result=HFSIFACE_get_dir_next(pitem);else result=-1;
- }
- if(result!=0){int failure=errno;char* message=hfs_error;ff_cleanup();errno=failure;hfs_error=message;}
- return result;
-}
 int HFSIFACE_get_dir_first( char *volpath, char *path, hfs_item_type *pitem )
 {
 	int volinx, result = 1;

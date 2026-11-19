@@ -65,7 +65,6 @@ protected: // create from serialization only
 	DECLARE_DYNCREATE(CHFVExplorerDoc)
 	void OnCleanDocument();
 	void enum_floppies( void );
-	void enum_cds(void);
 	void set_floppy_volume_dirty( char *path );
 	void CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL check_hds );
 	void CheckNewFloppy( int index );
@@ -105,7 +104,7 @@ protected: // create from serialization only
 		int stype );
 	BOOL hfs_find_next( hfs_item_type *pitem );
 
-    bool prepare_classic_browser_row(hfs_item_type*,int,BrowserDirectory::Row&);
+    bool prepare_classic_browser_row(hfs_item_type*,CatDataRec*,int,BrowserDirectory::Row&);
     BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr);
     BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&,std::optional<DWORD> expectedSerial={});
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
@@ -125,7 +124,7 @@ protected: // create from serialization only
 	int get_volume_index_by_filename( CString name );
 	int get_volume_index_by_volumename( CString name );
 	int insert_volume( CString name, int is_floppy, int is_cd, int is_hd, int is_removable );
-	void enum_hfs_volumes( LPSTR mask, BOOL floppies, BOOL cds, BOOL hds );
+	void enum_hfs_volumes(LPSTR mask,BOOL floppies);
 	void enum_volumes_ext( LPSTR mask, LPSTR ext );
 	int walk_resource_fork( CFile *fp, LongInt type_to_check, Integer id_to_check );
 	int walk_double_resource_fork( CFile *fp, LongInt type_to_check, Integer id_to_check );

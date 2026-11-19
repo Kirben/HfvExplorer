@@ -310,7 +310,7 @@ struct MainMacBrowser::State {
                         if(!physicalPath.empty())volume=Removable::Reopen(physicalPath,physicalOffset);
                         else if(drive>=0){
                             volume=MacBrowser::OpenCd(drive);
-                            if(!volume)throw HfsPlus::Error("No HFS+ / HFSX disc is present");
+                            if(!volume)throw HfsPlus::Error("No supported Mac disc is present");
                         }else volume->Reload();
                     }
                     if(volume!=request.folder.Volume()){
@@ -424,10 +424,15 @@ struct MainMacBrowser::State {
     bool Transfer(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed={}) {
         if(target.IsClassic()){auto doc=session_.Document();auto path=target.ClassicImage();for(int n=0;n<doc->m_hfs_count;++n)if(!doc->m_volumes[n].m_file_name.IsEmpty()&&!_stricmp(Location::Classic(std::string((LPCSTR)doc->m_volumes[n].m_file_name),":").ClassicImage().c_str(),path.c_str()))doc->m_volumes[n].close();}
         auto convertible=[](const Location& p){if(p.LegacyType()!=LIST_HFS)return true;auto n=p.ClassicImage().size();return n>=4&&p.ClassicImage()[n-4]=='.'&&(!_stricmp(p.ClassicImage().c_str()+n-3,"DSK")||!_strnicmp(p.ClassicImage().c_str()+n-3,"HF",2));};
-        auto classicImage=[](const Location& item){return item.IsMounted()&&!strcmp(item.Volume()->Kind(),"HFS")&&item.Volume()->HasPersistentWorker();};
+        auto classicImage=[](const Location& item){
+            return item.IsMounted()&&!strcmp(item.Volume()->Kind(),"HFS")&&
+                (item.Volume()->HasPersistentWorker()||item.Volume()->CdDrive()>=0);
+        };
         auto legacyType=[&](const Location& item){return classicImage(item)?LIST_HFS:item.LegacyType();};
         auto conversionEndpoint=[&](const Location& item){
             if(!classicImage(item))return item;
+            if(const int drive=item.Volume()->CdDrive();drive>=0)
+                return Location::Physical(drive,FileOperations::ClassicMedia::Cd,":");
             auto path=item.Volume()->WorkerDescription().path;
             return Location::Classic((LPCSTR)CString(path.c_str()),":");
         };
@@ -664,10 +669,56 @@ bool MainMacBrowser::HasCdRoot(int drive)const{
  return std::any_of(state_->mounts.begin(),state_->mounts.end(),
     [&](const auto& mount){return mount.drive==drive&&mount.root;});
 }
-void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<Volume> volume,bool asynchronous){
+void MainMacBrowser::ScanCds() {
+#ifndef HFV_TESTING
+    struct Probe {
+        int drive;
+        std::string root;
+        std::shared_ptr<Volume> existing,replacement;
+        bool changed=false;
+    };
+    std::vector<Probe> probes;
+    const auto doc=session_.Document();
+    for(int index=0;index<doc->m_fat_count;++index){
+        const auto& entry=doc->m_fats[index];
+        if(entry.m_type!=DRIVE_CDROM)continue;
+        const auto drive=toupper(static_cast<unsigned char>(entry.m_letter))-'A';
+        const auto mounted=std::find_if(state_->mounts.begin(),state_->mounts.end(),
+            [&](const auto& item){return item.drive==drive&&item.volume;});
+        probes.push_back({drive,std::string((LPCSTR)entry.m_volume_name),
+            mounted==state_->mounts.end()?nullptr:mounted->volume});
+    }
+    if(probes.empty())return;
+    const auto result=ShowStorageWaitJob([&](Storage::Job& job){
+        for(auto& probe:probes){
+            if(job.cancelled())throw Storage::Cancelled();
+            try{
+                VolumeCoord::Lease read({{VolumeCoord::DeviceKey(probe.drive),VolumeCoord::Mode::Read}});
+                if(probe.existing){
+                    try{probe.existing->ValidateMedia();continue;}
+                    catch(const std::exception&){}
+                }
+                probe.changed=true;
+                probe.replacement=MacBrowser::OpenCdRoot(probe.root.c_str());
+            }catch(const VolumeCoord::Busy&){}
+            catch(const MacBrowser::DetectedVolumeError&){/* Explicit selection reports mount errors. */}
+        }
+        return Storage::Result{};
+    },Hidden(session_),session_.Owner());
+    if(result.code)return;
+    for(auto& probe:probes)if(probe.changed){
+        if(probe.existing)ReleaseCd(probe.drive);
+        if(probe.replacement&&!HasCdRoot(probe.drive))
+            AdoptCd(probe.drive,probe.root,std::move(probe.replacement),false,false);
+    }
+#endif
+}
+
+void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<Volume> volume,bool asynchronous,bool select){
  state_->mounts.push_back({std::move(volume),FromAnsi(root.c_str()),nullptr,drive});
  int index=int(state_->mounts.size()-1);
  state_->Root(index);
+ if(!select)return;
  auto item=state_->mounts[index].root;
  if(asynchronous){
   auto tree=session_.Tree();auto enabled=tree->SelectionNotificationsEnabled();
@@ -687,7 +738,7 @@ bool MainMacBrowser::Refresh(){int i;uint32_t id;if(!state_->Selected(i,id))retu
         return state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem());
     if(session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();}))return true;
     ForgetFolders(mount.volume);
-    bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(!mount.physicalPath.empty())mount.volume=Removable::Reopen(mount.physicalPath,mount.physicalOffset);else if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No HFS+ / HFSX disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
+    bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(!mount.physicalPath.empty())mount.volume=Removable::Reopen(mount.physicalPath,mount.physicalOffset);else if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No supported Mac disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
     if(!ready){if(readBusy){session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();},true);return true;}if(mount.drive>=0){ReleaseCd(mount.drive);return false;}session_.List()->initialize_volume("",0);return true;}
     if(!mount.physicalPath.empty()){id=2;TreeText(session_,mount.root,Wide(mount.volume->Name())+L" - "+mount.suffix+L" [read-only]");state_->Show(i,2,mount.root);}
     else if(mount.drive>=0){id=2;state_->Show(i,2,mount.root);}

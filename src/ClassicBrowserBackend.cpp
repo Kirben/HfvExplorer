@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "LegacyEngine.h"
+#include "ClassicCatalog.h"
+#include "HfsPlusDisk.h"
 #include "FileOperations.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
@@ -26,7 +28,7 @@ extern "C" {
 #include <stdexcept>
 extern HICON get_dos_icon(CHFVExplorerApp*,char*,int);
 extern int is_afp_directory(char*);
-bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, int finder_view_mode, BrowserDirectory::Row& row )
+bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatDataRec* folderIcon, int finder_view_mode, BrowserDirectory::Row& row )
 {
 	int isdir;
 	hfv_size_t size_in_bytes;
@@ -78,13 +80,11 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, int fin
 				id = pitem->catdatarec.u.d.dirDirID;
 
 				// Try to load folder custom icon
-				CatDataRec *pIcon13catdatarec;
-				pIcon13catdatarec = HFSIFACE_get_last_Icon13();
-				if(pIcon13catdatarec) {
+				if(folderIcon) {
 #ifndef ZAPPER
 					load_custom_icons( 
 							pitem->volinx,
-							pIcon13catdatarec,
+							folderIcon,
 							&hicon16, 
 							&hicon32 );
 #endif
@@ -180,158 +180,77 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, int fin
 
 BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId,Storage::Job* job)
 {
- LegacyEngine::Scope engine;BrowserDirectory::ObserveRead("classic-directory");
- BrowserDirectory::Snapshot snapshot;snapshot.capabilitiesKnown=true;
- snapshot.resourceKey=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name));VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
- if(m_classicRevision[volinx]!=snapshot.revision){m_volumes[volinx].close();if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reload changed classic HFS metadata");m_classicRevision[volinx]=snapshot.revision;}
- auto& selectedVolume=m_volumes[volinx];DWORD sourceAttributes=(selectedVolume.m_is_cd||selectedVolume.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(selectedVolume.m_file_name);
- bool writable=!selectedVolume.m_is_cd&&(sourceAttributes==INVALID_FILE_ATTRIBUTES||!(sourceAttributes&FILE_ATTRIBUTE_READONLY));
+ BrowserDirectory::ObserveRead("classic-directory");
+ BrowserDirectory::Snapshot snapshot;
+ snapshot.capabilitiesKnown=true;
+ auto& selected=m_volumes[volinx];
+ const std::string image=(LPCSTR)selected.m_file_name;
+ const std::string directory=(LPCSTR)doc_name;
+ snapshot.resourceKey=VolumeCoord::ImageKey(image);
+ VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});
+ snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
+
+ // Finder artwork still uses the document's cached resource reader.
+ if(m_classicRevision[volinx]!=snapshot.revision){
+  selected.close();
+  if(!selected.open())throw HfsPlus::Error("Cannot reload changed classic HFS metadata");
+  m_classicRevision[volinx]=snapshot.revision;
+ }
+ const DWORD attributes=(selected.m_is_cd||selected.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(image.c_str());
+ const bool writable=!selected.m_is_cd&&(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY));
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
- hfs_item_type item;int ret;char *volpath,*path;int finder_view_mode=FINDER_VIEW_MODE_ICON;
- auto pApp=static_cast<CHFVExplorerApp*>(AfxGetApp());
- HFSIFACE_get_dir_flush();
- struct Flush{~Flush(){HFSIFACE_get_dir_flush();}}flush;
- std::string image=(LPCSTR)m_volumes[volinx].m_file_name,directory=(LPCSTR)doc_name;
- volpath=const_cast<char*>(image.c_str());path=const_cast<char*>(directory.c_str());
 
-	// Find out original Mac view mode
-	if(finder) {
-		char parent_dir[_MAX_PATH], this_name[_MAX_PATH], *ptmp;
-		strcpy( parent_dir, path );
-		ptmp = strrchr( parent_dir, ':' );
-		if(ptmp) { // always
-			*ptmp = 0;
-			ptmp = strrchr( parent_dir, ':' );
-			if(ptmp) {
-				ptmp++;
-				strcpy( this_name, ptmp );
-				*ptmp = 0;
-				memset( &item, 0, sizeof(item) );
-				item.volinx = volinx;
-				item.id = parentId;
-				ret = HFSIFACE_get_dir_first_readonly( volpath, parent_dir, &item );
-				if (ret == 0) {
-					while (ret == 0) {
-			if(job&&job->cancelled())throw Storage::Cancelled();
-						mac_to_pc_charset( item.catkeyrec.ckrCName );
-						if(strcmp((char*)item.catkeyrec.ckrCName,this_name) == 0) {
-							finder_view_mode = get_finder_view_mode( item.catdatarec.u.d.dirUsrInfo.frView );
-							break;
-						}
-						ret = HFSIFACE_get_dir_next( &item );
-					}
-					HFSIFACE_get_dir_flush();
-				}
-			}
-		}
+ auto volume=MacBrowser::OpenClassic(image,directory,false);
+ auto records=MacBrowser::ReadClassicCatalog(*volume,job);
+ snapshot.finderMode=FINDER_VIEW_MODE_ICON;
+ if(finder&&parentId){
+  const auto folder=volume->Stat(2);
+  snapshot.finderMode=get_finder_view_mode(HfsPlus::Disk::U16(folder.finder.data()+14));
+ }
+ volume->Close();
 
-	}
-
-	// Find out max/min scroll bounds
-#define OUTOFBOUNDS 10000
-	if(finder) {
-		int x = OUTOFBOUNDS, y = OUTOFBOUNDS, px, py;
-		int is_inited = 0, is_invisible = 0;
-		memset( &item, 0, sizeof(item) );
-		item.volinx = volinx;
-		item.id = id;
-		ret = HFSIFACE_get_dir_first_readonly( volpath, path, &item );
-		while (ret == 0) {
-			if(job&&job->cancelled())throw Storage::Cancelled();
-			if(item.catdatarec.cdrType == cdrDirRec) {
-				is_inited = (item.catdatarec.u.d.dirUsrInfo.frFlags & kHasBeenInited) != 0;
-				is_invisible = (item.catdatarec.u.d.dirUsrInfo.frFlags & fInvisible);
-				px = (int)(signed short)item.catdatarec.u.d.dirUsrInfo.frLocation.h;
-				py = (int)(signed short)item.catdatarec.u.d.dirUsrInfo.frLocation.v;
-				if(px == -1 && py == -1) is_inited = 0;
-				if(is_invisible == 0 || m_mac_show_invisibles) {
-					if(is_inited || is_inside_magic(px,py)) {
-						px = unmagic(px);
-						py = unmagic(py);
-						if(px < x) x = px;
-						if(py < y) y = py;
-					}
-				}
-			} else if(item.catdatarec.cdrType == cdrFilRec) {
-				is_inited = (item.catdatarec.u.f.filUsrWds.fdFlags & kHasBeenInited) != 0;
-				is_invisible = (item.catdatarec.u.f.filUsrWds.fdFlags & fInvisible);
-				if(strcmp((char *)item.catkeyrec.ckrCName,"Icon\x00D") == 0) is_invisible = 1;
-				px = (int)(signed short)item.catdatarec.u.f.filUsrWds.fdLocation.h;
-				py = (int)(signed short)item.catdatarec.u.f.filUsrWds.fdLocation.v;
-				if(px == -1 && py == -1) is_inited = 0;
-				if(is_invisible == 0 || m_mac_show_invisibles) {
-					if(is_inited || is_inside_magic(px,py)) {
-						px = unmagic(px);
-						py = unmagic(py);
-						if(px < x) x = px;
-						if(py < y) y = py;
-					}
-				}
-			}
-			ret = HFSIFACE_get_dir_next( &item );
-		}
-		if(x == OUTOFBOUNDS) x = 0;
-		if(y == OUTOFBOUNDS) y = 0;
-		snapshot.originX=x;snapshot.originY=y;
-	}
-#undef OUTOFBOUNDS
-
-	// enumerate items into list view
-	memset( &item, 0, sizeof(item) );
-	item.volinx = volinx;
-	item.id = id;
-
-	errno=0;ret = HFSIFACE_get_dir_first_readonly( volpath, path, &item );
- if(ret<0)throw std::runtime_error(hfs_error?hfs_error:"Cannot read classic HFS directory");
-	while (ret == 0) {
-			if(job&&job->cancelled())throw Storage::Cancelled();
-		mac_to_pc_charset( item.catkeyrec.ckrCName );
-		BrowserDirectory::ObserveRead((char*)item.catkeyrec.ckrCName);
-		BrowserDirectory::Row row;if(prepare_classic_browser_row(&item,finder_view_mode,row)){row.path=directory+(directory.empty()||directory.back()!=':'?":":"")+(char*)item.catkeyrec.ckrCName;snapshot.rows.push_back(std::move(row));}
-		ret = HFSIFACE_get_dir_next( &item );
-	}
-
- if(errno!=ENOENT)throw std::runtime_error(hfs_error?hfs_error:"Classic HFS directory enumeration failed");
- snapshot.finderMode=finder_view_mode;
-	return snapshot;
+ LegacyEngine::Scope finderResources;
+ int x=INT_MAX,y=INT_MAX;
+ for(auto& record:records){
+  if(job&&job->cancelled())throw Storage::Cancelled();
+  hfs_item_type item{};
+  item.volinx=volinx;
+  item.id=id;
+  auto name=reinterpret_cast<char*>(item.catkeyrec.ckrCName);
+  strcpy_s(name,sizeof(item.catkeyrec.ckrCName),record.name.c_str());
+  static_assert(sizeof(CatDataRec)==sizeof(MacBrowser::ClassicCatalogEntry::PackedRecord));
+  memcpy(&item.catdatarec,record.data.data(),sizeof(item.catdatarec));
+  CatDataRec folderIcon{};
+  if(record.folderIcon)memcpy(&folderIcon,record.folderIcon->data(),sizeof(folderIcon));
+  mac_to_pc_charset(item.catkeyrec.ckrCName);
+  BrowserDirectory::ObserveRead(name);
+  BrowserDirectory::Row row;
+  if(!prepare_classic_browser_row(&item,record.folderIcon?&folderIcon:nullptr,snapshot.finderMode,row))
+   continue;
+  row.path=directory+(directory.empty()||directory.back()!=':'?":":"")+name;
+  if(finder&&(row.point.x!=-1||row.point.y!=-1)&&
+     (row.initialized||is_inside_magic(row.point.x,row.point.y))){
+   x=(std::min)(x,unmagic(row.point.x));
+   y=(std::min)(y,unmagic(row.point.y));
+  }
+  snapshot.rows.push_back(std::move(row));
+ }
+ if(x!=INT_MAX)snapshot.originX=x;
+ if(y!=INT_MAX)snapshot.originY=y;
+ return snapshot;
 }
 
 namespace {
-struct ClassicAncestor { uint32_t id, parent; std::string name; };
-
-std::vector<ClassicAncestor> ReadClassicRoute(const std::string& image,uint32_t& id,std::string requested={})
+using MacBrowser::ClassicAncestor;
+std::vector<ClassicAncestor> ReadClassicRoute(const std::string& image,uint32_t& id,const std::string& requested)
 {
- LegacyEngine::Scope engine;
- auto path=image;
- auto volume=hfs_mount(path.data(),1,O_RDONLY);
- if(!volume)throw std::runtime_error("Cannot read the classic HFS folder path");
- struct Close {hfsvol* volume;~Close(){hfs_umount(volume);}} close{volume};
- if(!id){
-  const auto colon=requested.find(':');
-  if(colon==requested.npos)throw std::runtime_error("The startup folder path is unavailable");
-  requested.erase(0,colon);
-  pc_to_mac_charset(reinterpret_cast<unsigned char*>(requested.data()));
-  hfsdirent entry{};
-  if(hfs_stat(volume,requested.data(),&entry)<0||!(entry.flags&HFS_ISDIR))
-   throw std::runtime_error("The classic HFS startup folder is unavailable");
-  id=uint32_t(entry.cnid);
- }
- std::vector<ClassicAncestor> route;
- std::set<long> visited;
- long node=id;
- while(node!=2){
-  if(!visited.insert(node).second||route.size()>=MAX_PATH)
-   throw std::runtime_error("Cyclic or oversized HFS folder path");
-  const auto current=node;
-  char name[32]{};
-  if(hfs_dirinfo(volume,&node,name)<0)
-   throw std::runtime_error("The classic HFS folder no longer exists");
-  mac_to_pc_charset(reinterpret_cast<unsigned char*>(name));
-  route.push_back({uint32_t(current),uint32_t(node),name});
- }
- std::reverse(route.begin(),route.end());
+ auto volume=MacBrowser::OpenClassic(image,id?":":requested,false);
+ if(!id)id=volume->Stat(2).resolvedId;
+ auto route=MacBrowser::ReadClassicAncestors(*volume,id);
+ volume->Close();
  return route;
 }
+
 }
 
 bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,const BrowserNavigation::Request* find)

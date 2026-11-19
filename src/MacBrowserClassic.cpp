@@ -15,7 +15,9 @@ extern "C" {
 #include "hfs/libhfs/internal.h"
 #include "hfs/Replacement.h"
 int hfs_recognizes_image(char*);
+int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
+#include "ClassicCatalog.h"
 namespace MacBrowser {
 namespace {
 void Check(bool ok) { if (!ok) throw HfsPlus::Error(hfs_error ? hfs_error : "Classic HFS operation failed"); }
@@ -51,6 +53,8 @@ class Classic final : public Volume {
         }
     }
     std::unique_ptr<ReadOnlySources::Registration> registration_;
+    std::shared_ptr<HfsPlus::Source> media_;
+    int cdDrive_=-1;
     std::map<uint32_t,std::string> paths_;
     uint32_t next_ = 3;
     uint32_t Id(const std::string& path, uint32_t cnid=0) {
@@ -112,11 +116,51 @@ public:
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key):write_(false){
-        resourceKey_=key;context_=LegacyEngine::ForVolume(key);LegacyEngine::Scope engine(context_);registration_.reset(new ReadOnlySources::Registration(std::move(source)));image_=registration_->Path();imageIdentity_=key+":"+image_;volume_=hfs_mount(const_cast<char*>(image_.c_str()),1,O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
+        resourceKey_=key;context_=LegacyEngine::ForVolume(key);LegacyEngine::Scope engine(context_);
+        media_=std::move(source);
+        cdDrive_=media_->MediaDrive();
+        registration_.reset(new ReadOnlySources::Registration(media_));
+        image_=registration_->Path();
+        uint32_t generation=0;
+        imageIdentity_=media_->MediaDrive()>=0 && media_->MediaGeneration(generation)?
+            key+":"+std::to_string(generation):key+":"+image_;
+        volume_=hfs_mount(image_.data(),1,O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
-    WorkerOrigin WorkerDescription()const override{WorkerOrigin out;if(registration_)return out;out.kind=WorkerOrigin::Classic;out.path=VolumeCoord::Wide(image_);out.root=paths_.at(2);out.identity=imageIdentity_;out.writable=Writable();return out;}
+    WorkerOrigin WorkerDescription()const override {
+        LegacyEngine::Scope engine(context_);
+        WorkerOrigin out;
+        if (media_) {
+            uint32_t generation=0;
+            if (media_->MediaDrive()>=0) {
+                out.kind=WorkerOrigin::Cd;
+                out.drive=media_->MediaDrive();
+                out.generationKnown=media_->MediaGeneration(generation);
+                out.generation=generation;
+            }
+            return out;
+        }
+        if (ReadOnlySources::IsPath(image_.c_str())) return out;
+        out.kind=WorkerOrigin::Classic;
+        out.path=VolumeCoord::Wide(image_);
+        out.root=paths_.at(2);
+        out.identity=imageIdentity_;
+        out.writable=Writable();
+        return out;
+    }
+    void ValidateMedia() override {
+        LegacyEngine::Scope engine(context_);
+        if (media_) media_->CheckMedia();
+        else if (ReadOnlySources::IsPath(image_.c_str())) throw Storage::MediaChanged("The CD was released.");
+    }
+    void ReleaseMedia() override {
+        LegacyEngine::Scope engine(context_);
+        if (!registration_) return;
+        Close();
+        registration_.reset();
+        media_.reset();
+    }
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{LegacyEngine::Scope engine(context_);if(registration_||!volume_||volume_->fd>=0x10000000)return {};auto file=_get_osfhandle(volume_->fd);if(file==-1)throw HfsPlus::Error("Cannot transfer classic image handle");return {{VolumeCoord::Wide(image_),uintptr_t(file)}};}
     void WorkerUncleanExit()override{LegacyEngine::Scope engine(context_);write_=false;}
     void SuspendWorker()override{LegacyEngine::Scope engine(context_);if(registration_)return;if(volume_){auto v=volume_;volume_=nullptr;suspended_=true;int closed=hfs_umount(v);if(closed)write_=false;Check(closed==0);}}
@@ -133,8 +177,9 @@ public:
         return !closeFailed_ && (!volume_ || Writable());
     }
     std::string ResourceKey()const override{return resourceKey_;}
-    std::u16string Name()const override{LegacyEngine::Scope engine(context_);hfsvolent info{};Check(hfs_vstat(volume_,&info)==0);return Decode(info.name);}
+    std::u16string Name()const override{LegacyEngine::Scope engine(context_);hfsvolent info{};Check(volume_!=nullptr);Check(hfs_vstat(volume_,&info)==0);return Decode(info.name);}
     const char *Kind()const override{return "HFS";}
+    int CdDrive()const override{return cdDrive_;}
     bool Writable()const override{LegacyEngine::Scope engine(context_);return write_&&volume_&&!(volume_->flags&(HFS_READONLY|HFS_WRITE_FAILED));}
     bool CaseSensitive()const override{return false;}
     Capabilities Supports() const override {
@@ -187,6 +232,65 @@ public:
         auto name=directory+(directory.back()==':'?"":":")+from.name;
         if(hfs_stat(dst->volume_,const_cast<char*>(name.c_str()),&to)==0&&from.cnid==to.cnid)
             throw HfsPlus::Error("Source and destination are the same classic HFS entry");
+    }
+    std::vector<ClassicAncestor> Ancestors(uint32_t id) {
+        LegacyEngine::Scope engine(context_);
+        RootScope scope(volume_);
+        std::vector<ClassicAncestor> route;
+        std::set<long> visited;
+        long node=id;
+        while(node!=HFS_CNID_ROOTDIR){
+            if(!visited.insert(node).second||route.size()>=MAX_PATH)
+                throw HfsPlus::Error("Cyclic or oversized HFS folder path");
+            const auto current=node;
+            char name[32]{};
+            Check(hfs_dirinfo(volume_,&node,name)==0);
+            mac_to_pc_charset(reinterpret_cast<unsigned char*>(name));
+            route.push_back({uint32_t(current),uint32_t(node),name});
+        }
+        std::reverse(route.begin(),route.end());
+        return route;
+    }
+    std::vector<ClassicCatalogEntry> Catalog(Storage::Job* job) {
+        LegacyEngine::Scope engine(context_);
+        RootScope scope(volume_);
+        auto path=Path(2);
+        if(path.back()!=':')path+=':';
+        hfsdir* dir=hfs_opendir(volume_,path.data());
+        Check(dir!=nullptr);
+        struct CloseDir{hfsdir* value;~CloseDir(){hfs_closedir(value);}} close{dir};
+        std::vector<ClassicCatalogEntry> result;
+        hfsdirent entry{};
+        CatKeyRec catalogKey{};
+        CatDataRec catalogData{};
+        static_assert(sizeof(CatDataRec)==sizeof(ClassicCatalogEntry::PackedRecord));
+        for(;;){
+            if(job&&job->cancelled())throw Storage::Cancelled();
+            if(hfs_readdir2(dir,&entry,&catalogKey,&catalogData)<0)break;
+            if(!catalogKey.ckrKeyLen)continue;
+            ClassicCatalogEntry record;
+            record.name=catalogKey.ckrCName;
+            memcpy(record.data.data(),&catalogData,sizeof(catalogData));
+            if(catalogData.cdrType==cdrDirRec){
+                auto child=path+record.name+":";
+                if(auto sub=hfs_opendir(volume_,child.data())){
+                    CloseDir subClose{sub};
+                    CatKeyRec key{};
+                    CatDataRec data{};
+                    while(hfs_readdir2(sub,&entry,&key,&data)==0){
+                        if(job&&job->cancelled())throw Storage::Cancelled();
+                        if(data.cdrType==cdrFilRec&&!strcmp(key.ckrCName,"Icon\r")){
+                            record.folderIcon.emplace();
+                            memcpy(record.folderIcon->data(),&data,sizeof(data));
+                            break;
+                        }
+                    }
+                }
+            }
+            result.push_back(std::move(record));
+        }
+        if(errno!=ENOENT)Check(false);
+        return result;
     }
     std::vector<Entry> List(uint32_t parent)override {LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);auto path=Path(parent);if(path.back()!=':')path+=":";hfsdir* dir=hfs_opendir(volume_,const_cast<char*>(path.c_str()));Check(dir!=nullptr);
@@ -253,10 +357,31 @@ public:
         Check(hfs_rename(volume_,const_cast<char*>(old.c_str()),const_cast<char*>(path.c_str()))==0);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{LegacyEngine::Scope engine(context_);
-        BeforeWrite();RootScope scope(volume_);auto from=Path(id),to=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(write_&&hfs_rename(volume_,const_cast<char*>(from.c_str()),const_cast<char*>(to.c_str()))==0);paths_[id]=to;
+        RootScope scope(volume_);
+        auto from=Path(id),to=Path(parent);
+        if(to.back()!=':')to+=':';
+        to+=Encode(name);
+        hfsdirent source{},destination{};
+        Check(hfs_stat(volume_,from.data(),&source)==0);
+        if(hfs_stat(volume_,to.data(),&destination)==0) {
+            if(source.cnid!=destination.cnid)throw HfsPlus::Error("Rename destination already exists");
+        }else if(errno!=ENOENT)Check(false);
+        BeforeWrite();
+        Check(hfs_rename(volume_,from.data(),to.data())==0);
+        paths_[id]=std::move(to);
     }
     void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);BeforeWrite();RootScope scope(volume_);auto path=Path(id);Check(id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
 };
+}
+std::vector<ClassicCatalogEntry> ReadClassicCatalog(Volume& volume,Storage::Job* job) {
+    auto classic=dynamic_cast<Classic*>(&volume);
+    if(!classic)throw HfsPlus::Error("A classic HFS catalog is required");
+    return classic->Catalog(job);
+}
+std::vector<ClassicAncestor> ReadClassicAncestors(Volume& volume,uint32_t id) {
+    auto classic=dynamic_cast<Classic*>(&volume);
+    if(!classic)throw HfsPlus::Error("A classic HFS catalog is required");
+    return classic->Ancestors(id);
 }
 static std::string ClassicImagePath(const std::wstring& path) {
     BOOL lost=FALSE;

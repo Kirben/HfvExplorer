@@ -246,19 +246,9 @@ void CHFVExplorerDoc::enum_floppies(void)
   if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),1,0,0,0);
  }
 }
-void CHFVExplorerDoc::enum_cds(void)
+void CHFVExplorerDoc::enum_hfs_volumes(LPSTR mask,BOOL floppies)
 {
- for(const auto& media:ScanPhysicalMedia(false,true)) {
-  char path[MAX_PATH];get_cd_volume_file_name(media.drive,path);
-  if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),0,1,0,0);
- }
-}
-void CHFVExplorerDoc::enum_hfs_volumes( 
-	LPSTR mask, BOOL floppies, BOOL cds, BOOL hds
-)
-{
-	if(floppies) enum_floppies();
-	if(cds) enum_cds();
+    if(floppies)enum_floppies();
 
 	// I don't want to say *.HF* here ...
 
@@ -718,12 +708,7 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover):m_browserSession(new BrowserSess
 	::GetModuleFileName( pApp->m_hInstance, dir, _MAX_PATH );
 	cuthere = strrchr( dir, '\\' );
 	if(cuthere) *cuthere = 0;
-	enum_hfs_volumes(
-		dir,
-		pApp->m_startup_floppies,
-		pApp->m_startup_cds,
-		pApp->m_startup_hds
-	);
+	enum_hfs_volumes(dir,pApp->m_startup_floppies);
 
 	enum_fat_volumes();
  }
@@ -1704,6 +1689,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
         BuildBrowserRoots(-1,namedClassicFolder);
         session.Tree()->enable_selchange(1);
         if(app->m_startup_hds)session.MacBrowser().ScanRemovable(true,true);
+        if(app->m_startup_cds)session.MacBrowser().ScanCds();
         if(explicitImage)return session.MacBrowser().OpenImage(lpszPathName)>0;
         if(app->m_opendir.IsEmpty())NavigateInitialFolder();
         return TRUE;
@@ -1789,6 +1775,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 	
  GetBrowserSession().MacBrowser().RebuildTree();
  if(pApp->m_startup_hds)GetBrowserSession().MacBrowser().ScanRemovable(true,true);
+ if(pApp->m_startup_cds)GetBrowserSession().MacBrowser().ScanCds();
 	return(1);
 }
 
@@ -1978,13 +1965,9 @@ void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL c
 	int mac;
 
 	CString currdir = get_directory( 0, &mac );
-	for(const auto& media:ScanPhysicalMedia(check_floppies!=FALSE,check_cds!=FALSE)) {
-  char path[MAX_PATH];if(media.floppy)get_floppy_volume_file_name(media.drive,path);else get_cd_volume_file_name(media.drive,path);
-  if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),media.floppy,!media.floppy,0,0);
- }
-
-
-	OnOpenDocument("") ;
+	if(check_floppies)enum_floppies();
+	OnOpenDocument("");
+ if(check_cds) GetBrowserSession().MacBrowser().ScanCds();
  if(check_hds)GetBrowserSession().MacBrowser().ScanRemovable(true);
 
 	if(currdir != "") my_chdir( currdir, mac );

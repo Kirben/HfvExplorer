@@ -28,7 +28,7 @@ class Cd final : public Source {
     }
 
   public:
-    Cd(int drive, std::shared_ptr<MediaImageSource> media) : media_(std::move(media)),drive_(drive) {
+    Cd(int drive, std::shared_ptr<MediaImageSource> media, uint16_t* macSignature) : media_(std::move(media)),drive_(drive) {
         Disk::Check(drive >= 0 && drive < 26, "Invalid CD drive");
         if (!media_)
             media_ = MakeNativeCdImageSource();
@@ -41,17 +41,25 @@ class Cd final : public Source {
             Fail("Cannot establish CD media identity", media_->Error());
         auto tracks=media_->DataTracks();Disk::Check(!tracks.empty(),"The disc has no data tracks");
         auto latest=tracks.back();bool matched=false;
+        if(macSignature)*macSignature=0;
         for(auto it=tracks.rbegin();it!=tracks.rend();++it){
             if(!media_->SelectTrack(it->number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;
             Disk::Check(size_&&size_%2048==0&&size_<=INT64_MAX,"Invalid CD data-track length");
             CdMedia::MacVolume volume;if(CdMedia::ProbeMac(size_,it->start*2048,[&](ULONGLONG at,DWORD n,void* p){Read(at,p,n);return true;},volume)){
                 // An absolute APM is a property of the disc, not of the HFS+
                 // filesystem. Expose its bounded raw volume to the engine.
-                if(volume.discAddressed){base_=volume.offset;size_=volume.bytes;}matched=true;break;
+                if(macSignature)*macSignature=volume.signature;
+                if(volume.discAddressed||(macSignature&&volume.signature==0x4244)){
+                    base_=volume.offset;
+                    size_=volume.bytes;
+                }
+                matched=true;
+                break;
             }
         }
         if(!matched){if(!media_->SelectTrack(latest.number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;}
     }
+    ~Cd() override { media_->Close(); }
     int MediaDrive()const override{return drive_;}
     bool MediaGeneration(uint32_t& value)const override{value=generation_;return true;}
     uint64_t Size() const override { return size_; }
@@ -85,7 +93,7 @@ class Cd final : public Source {
     void Flush() override {} // no write or flush request is issued to the device
 };
 } // namespace
-std::unique_ptr<Source> OpenCd(int drive, std::shared_ptr<MediaImageSource> media) {
-    return std::unique_ptr<Source>(new Cd(drive, std::move(media)));
+std::unique_ptr<Source> OpenCd(int drive, std::shared_ptr<MediaImageSource> media, uint16_t* macSignature) {
+    return std::make_unique<Cd>(drive, std::move(media), macSignature);
 }
 } // namespace HfsPlus
