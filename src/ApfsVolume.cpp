@@ -2,6 +2,7 @@
 #include "ApfsVolume.h"
 #include "ApfsTree.h"
 #include "HfsPlusDisk.h"
+#include "HfsPlusCompression.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
 #include "WorkerEndpoint.h"
@@ -101,7 +102,7 @@ public:
 
 constexpr auto ResourceFork=u"com.apple.ResourceFork";
 constexpr auto FinderInfo=u"com.apple.FinderInfo";
-constexpr auto Compression=u"com.apple.decmpfs";
+constexpr auto CompressionAttribute=u"com.apple.decmpfs";
 struct Attribute {
     uint64_t size=0,stream=0;
     Bytes embedded;
@@ -140,7 +141,7 @@ struct Inode {
     Entry entry;
     AttributeRecords attributes;
 };
-Inode LoadInode(const Catalog& catalog,uint64_t oid)
+Inode ReadInode(const Catalog& catalog,uint64_t oid)
 {
     Inode out;
     bool found=false;
@@ -157,8 +158,7 @@ Inode LoadInode(const Catalog& catalog,uint64_t oid)
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
-        if(entry.compressed)entry.readError="APFS compressed files are unsupported";
-        else if(!entry.directory&&mode!=0100000)entry.readError="APFS special files are unsupported";
+        if(!entry.directory&&mode!=0100000)entry.readError="APFS special files are unsupported";
         if(record.value.size==inodeSize)return;
         const auto fields=p+inodeSize;
         Check(record.value.size>=inodeSize+4,"Truncated APFS inode extended-field header");
@@ -194,10 +194,6 @@ Inode LoadInode(const Catalog& catalog,uint64_t oid)
         Check(!out.entry.directory,"APFS directory unexpectedly contains a resource fork");
         out.entry.forks[1].size=found->second.size;
     }
-    if(out.attributes.count(Compression)){
-        out.entry.compressed=true;
-        out.entry.readError="APFS compressed files are unsupported";
-    }
     return out;
 }
 
@@ -232,6 +228,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::map<uint64_t,uint32_t> linkIdentities;
     std::map<uint32_t,std::vector<uint32_t>> listings;
     std::map<uint64_t,std::vector<Extent>> extents;
+    std::map<uint64_t,std::unique_ptr<HfsPlus::Compression>> compressed;
     uint64_t next=3;
 
     Item& At(uint32_t id){
@@ -246,6 +243,25 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
         auto result=work();
         source->CheckMedia();
         return result;
+    }
+    Inode LoadInode(const Catalog& catalog,uint64_t oid){
+        auto inode=ReadInode(catalog,oid);
+        const auto found=inode.attributes.find(CompressionAttribute);
+        if(!inode.entry.compressed&&found==inode.attributes.end())return inode;
+        inode.entry.compressed=true;
+        try{
+            Check(!inode.entry.directory&&found!=inode.attributes.end()&&found->second.size>=16,
+                  "Missing or unsupported APFS compression attribute");
+            Bytes header(16);
+            ReadAttribute(found->second,0,header.data(),header.size());
+            const HfsPlus::Compression descriptor(std::move(header),inode.entry.forks[1].size,{});
+            inode.entry.forks[0].size=descriptor.Size();
+            if(descriptor.UsesResource()){
+                Check(found->second.size==16&&inode.entry.forks[1].size>0,"Invalid APFS compression resource");
+                inode.entry.forks[1].size=0;
+            }
+        }catch(const Error& error){inode.entry.readError=error.what();}
+        return inode;
     }
     [[noreturn]] static void ReadOnly(){throw Error("APFS is read-only");}
 public:
@@ -356,7 +372,7 @@ public:
         return Access([&]{
             Attributes out;
             for(const auto& pair:At(id).attributes){
-                if(pair.first==FinderInfo||pair.first==ResourceFork||pair.first==Compression)continue;
+                if(pair.first==FinderInfo||pair.first==ResourceFork||pair.first==CompressionAttribute)continue;
                 const auto& attr=pair.second;
                 if(attr.stream)
                     out.emplace(pair.first,AttributeData::Snapshot(attr.size,[&](uint64_t at,void* data,size_t size){
@@ -374,8 +390,25 @@ public:
             Check(fork<2&&!entry.directory&&Range(at,size,entry.forks[fork].size),"Invalid APFS fork range");
             if(!entry.readError.empty())throw Error(entry.readError);
             if(size){
-                if(fork==0)ReadStream(file.stream,at,data,size);
-                else ReadAttribute(file.attributes.at(ResourceFork),at,data,size);
+                if(fork==1)ReadAttribute(file.attributes.at(ResourceFork),at,data,size);
+                else if(entry.compressed){
+                    auto decoder=compressed.find(file.oid);
+                    if(decoder==compressed.end()){
+                        const auto attr=file.attributes.find(ResourceFork);
+                        const auto resource=attr==file.attributes.end()?Attribute{}:attr->second;
+                        auto reader=[this,resource](uint64_t offset,void* bytes,size_t length){
+                            ReadAttribute(resource,offset,bytes,length);
+                        };
+                        const auto& attribute=file.attributes.at(CompressionAttribute);
+                        // The shared codecs accept compressed units up to 128 KiB.
+                        Check(attribute.size<=131072+16,"APFS compression attribute exceeds supported unit size");
+                        Bytes encoded(size_t(attribute.size));
+                        ReadAttribute(attribute,0,encoded.data(),encoded.size());
+                        decoder=compressed.emplace(file.oid,std::make_unique<HfsPlus::Compression>(
+                            std::move(encoded),resource.size,std::move(reader))).first;
+                    }
+                    Check(decoder->second->Read(at,data,size)==size,"Short APFS compressed read");
+                }else ReadStream(file.stream,at,data,size);
             }
             return true;
         });

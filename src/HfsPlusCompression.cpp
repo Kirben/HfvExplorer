@@ -22,7 +22,42 @@ uint32_t LE32(const uint8_t *p) {
 }
 uint64_t LE64(const uint8_t *p) { return LE32(p) | uint64_t(LE32(p + 4)) << 32; }
 void *ZAlloc(void *, unsigned n, unsigned size) { return calloc(n, size); }
+
 void ZFree(void *, void *p) { free(p); }
+// Inline zlib can expand beyond a resource-fork unit. Validate the complete
+// stream and keep only the requested bytes and a fixed scratch buffer.
+void ReadInlineZlib(const Bytes& attribute,uint64_t size,uint64_t offset,uint8_t* out,size_t count)
+{
+    const auto inputSize=attribute.size()-16;
+    Check(inputSize>0&&inputSize<=UINT_MAX,"Invalid decmpfs inline zlib length");
+    const auto input=attribute.data()+16;
+    if((input[0]&15)==15){
+        Check(inputSize-1==size,"Incorrect decmpfs stored-data length");
+        memcpy(out,input+1+size_t(offset),count);
+        return;
+    }
+    z_stream stream{};
+    stream.zalloc=ZAlloc;stream.zfree=ZFree;
+    Check(inflateInit(&stream)==Z_OK,"Cannot initialize zlib decoder");
+    struct End {z_stream& stream;~End(){inflateEnd(&stream);}} end{stream};
+    stream.next_in=const_cast<Bytef*>(input);
+    stream.avail_in=uInt(inputSize);
+    std::array<uint8_t,32768> buffer;
+    uint64_t position=0;
+    for(;;){
+        stream.next_out=buffer.data();stream.avail_out=uInt(buffer.size());
+        const int status=inflate(&stream,Z_NO_FLUSH);
+        const size_t produced=buffer.size()-stream.avail_out;
+        Check((status==Z_OK||status==Z_STREAM_END)&&Range(position,produced,size),
+              "Invalid or truncated decmpfs inline zlib stream");
+        const auto first=(std::max)(position,offset);
+        const auto last=(std::min)(position+produced,offset+count);
+        if(first<last)memcpy(out+size_t(first-offset),buffer.data()+size_t(first-position),size_t(last-first));
+        position+=produced;
+        if(status==Z_STREAM_END)break;
+    }
+    Check(position==size&&!stream.avail_in,"Incorrect decmpfs inline zlib length");
+}
 Bytes Expand(const Bytes &input, size_t expected, uint32_t type) {
     Check(input.size() && input.size() <= 131072, "Invalid decmpfs compressed unit size");
     bool raw = type == 1 || type == 9 || type == 10 || ((type == 3 || type == 4) && (input[0] & 15) == 15) ||
@@ -179,7 +214,7 @@ Compression::Compression(Bytes attribute, uint64_t resourceSize, Reader resource
     Check(type_ == 1 || type_ == 3 || type_ == 4 || type_ == 7 || type_ == 8 || type_ == 9 || type_ == 10 ||
               type_ == 11 || type_ == 12 || type_ == 13 || type_ == 14,
           ("Unsupported decmpfs compression type " + std::to_string(type_)).c_str());
-    Check(UsesResource() || size_ <= 65536, "Oversized inline decmpfs file");
+    Check(UsesResource() || type_ == 3 || size_ <= 65536, "Oversized inline decmpfs file");
     if (UsesResource())
         Check(attribute_.size() == 16, "Unexpected inline data in resource-based decmpfs header");
 }
@@ -247,6 +282,10 @@ uint64_t Compression::Read(uint64_t offset, void *buffer, size_t n) {
         return 0;
     size_t count = size_t((std::min)(uint64_t(n), size_ - offset)), left = count;
     auto p = static_cast<uint8_t *>(buffer);
+    if(type_==3&&size_>65536){
+        ReadInlineZlib(attribute_,size_,offset,p,count);
+        return count;
+    }
     while (left) {
         uint64_t unit = offset / 65536;
         if (cached_ != unit)

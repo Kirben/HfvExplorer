@@ -120,7 +120,7 @@ void ObjectMapFixture(Memory& disk)
     for(size_t block:{12,13,14})Seal(disk.bytes,block*size,size);
 }
 
-Memory BrowseFixture(bool attributes=false,bool links=false)
+Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false)
 {
     auto disk=Raw();
     constexpr size_t size=4096;
@@ -150,7 +150,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false)
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    const unsigned records=8+(attributes?3:0)+(links?5:0);
+    const unsigned records=8+(attributes?3:0)+(links?5:0)+(compressed?1:0);
     Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
@@ -208,6 +208,11 @@ Memory BrowseFixture(bool attributes=false,bool links=false)
         Little(stream.data(),331,8);Little(stream.data()+8,8,8);Little(stream.data()+16,size,8);
         xattr("com.apple.ResourceFork",1,stream);
         xattr("user.example",2,Bytes{1,2,3});
+    }
+    if(compressed){
+        Bytes data{102,112,109,99,3,0,0,0,0,0,0,0,0,0,0,0,120,156,237,193,49,1,0,0,0,194,160,112,235,223,201,18,158,64,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,189,13,21,40,148,189};
+        Little(data.data()+8,70001,8);
+        xattr("com.apple.decmpfs",2,data);
     }
     extent(0,40);extent(size,0);extent(2*size,42);
     if(attributes){
@@ -326,6 +331,15 @@ int RunApfsContainerTest(const char* directory)
             char data[10];
             authentic->Read(name->id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Independent APFS file differed from expected data");
+            MacBrowser::Entry compressed;
+            Check(authentic->FindChild(2,u"decmpfs.txt",compressed)&&compressed.compressed&&
+                  compressed.forks[0].size==112000,
+                  "Independent APFS compressed size differed from expected");
+            Bytes decoded(112000);
+            authentic->Read(compressed.id,0,0,decoded.data(),decoded.size());
+            for(size_t i=0;i<decoded.size();i+=28)
+                Check(!memcmp(decoded.data()+i,"a compressible line of text\n",28),
+                      "Independent APFS compressed contents differed from expected");
             fprintf(report,"PASS: macOS-generated APFS image and 400-file multi-node directory.\n");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
@@ -429,6 +443,22 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(aliasA.id,0,0,&aByte,1);targetMac->Read(aliasB.id,0,0,&bByte,1);
         Check(aByte=='A'&&bByte=='l',"APFS hard-link groups lost independent file contents");
         fprintf(report,"PASS: separate APFS hard-link groups retain file identity and contents through transfer.\n");
+        auto compressedDisk=BrowseFixture(false,false,true);
+        const auto compressedPath=VolumeCoord::Wide(root+"compressed.img");
+        {
+            auto image=CreateFormatOutput(compressedPath.c_str(),compressedDisk.Size());
+            image->Write(0,compressedDisk.bytes.data(),compressedDisk.bytes.size());image->Flush();image->Keep();
+        }
+        auto compressionVolume=MacBrowser::OpenBrowserImage(compressedPath);
+        const auto compressedFile=compressionVolume->List(compressionVolume->List().at(0).id).at(0);
+        Check(compressedFile.compressed&&compressedFile.forks[0].size==70001&&
+              compressionVolume->GetAttributes(compressedFile.id).empty(),
+              "APFS inline compression logical size or attributes were misread");
+        Bytes decoded(5000);
+        compressionVolume->Read(compressedFile.id,0,65000,decoded.data(),decoded.size());
+        Check(std::all_of(decoded.begin(),decoded.end(),[](uint8_t b){return b=='C';}),
+              "APFS inline zlib crossed 64 KiB incorrectly");
+        fprintf(report,"PASS: bounded APFS inline decmpfs decoding beyond 64 KiB.\n");
         fprintf(report,"PASS: normal browser mount, UTF-8 names, sparse and fragmented data, worker export and read-only enforcement.\n");
         fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
     }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}
