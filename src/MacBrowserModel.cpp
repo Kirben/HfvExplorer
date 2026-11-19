@@ -282,11 +282,22 @@ std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable) {
     return FromMfs(std::move(source),VolumeCoord::ImageKey(path));
 }
 namespace {
-class ReadOnlyMfsImage final : public MfsSource {
+class MfsDiskSource final : public MfsSource {
     std::shared_ptr<HfsPlus::Source> source_;
 public:
-    explicit ReadOnlyMfsImage(std::shared_ptr<HfsPlus::Source> source):source_(std::move(source)){}
+    bool readOnly_;
+    explicit MfsDiskSource(std::shared_ptr<HfsPlus::Source> source,bool readOnly=true)
+        :source_(std::move(source)),readOnly_(readOnly){}
     uint64_t Length()const override{return source_->Size();}
+    bool Writable()const override{return !readOnly_&&source_->Writable();}
+    void DisableWrites()override{readOnly_=true;}
+    bool WriteAt(uint64_t at,const void* bytes,size_t count)override{
+        if(!Writable())return false;
+        try{source_->Write(at,bytes,count);return true;}catch(const HfsPlus::Error&){return false;}
+    }
+    bool Flush()override{
+        try{source_->Flush();return true;}catch(const HfsPlus::Error&){return false;}
+    }
     bool ProcessLocal()const override{return source_->ProcessLocal();}
     bool ReadAt(uint64_t at,void* bytes,size_t count)override{source_->Read(at,bytes,count);return true;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
@@ -313,7 +324,7 @@ public:
 
 std::shared_ptr<Volume> OpenLegacyDmgVolume(const std::shared_ptr<HfsPlus::Source>& source,const std::string& key)
 {
-    auto mfs=std::make_unique<ReadOnlyMfsImage>(source);
+    auto mfs=std::make_unique<MfsDiskSource>(source);
     if(MfsImage::Recognizes(*mfs))return FromMfs(std::move(mfs),key);
     if(source->Size()>=1536&&HfsPlus::Disk::U16(HfsPlus::Disk::Read(*source,1024,2).data())==0x4244)
         return OpenClassicSource(source,key);
@@ -343,6 +354,32 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
     if(auto optical=Optical::Open(opticalSource,key))return optical;
     throw HfsPlus::Error(unsupported);
 }
+}
+
+
+// Resolve the filesystem inside an editable image before choosing its worker.
+static std::optional<VolumeSession::ImageFormat> NdifFormat(HfsPlus::Source& source)
+{
+    using F=VolumeSession::ImageFormat;
+    if(!Ndif::IsEditable(source))return {};
+    if(HfsPlus::Volume::Recognizes(source))return F::NdifHfsPlus;
+    if(source.Size()>=1536){
+        const auto magic=HfsPlus::Disk::U16(HfsPlus::Disk::Read(source,1024,2).data());
+        if(magic==0x4244)return F::NdifClassic;
+        if(magic==0xd2d7)return F::NdifMfs;
+    }
+    return {};
+}
+std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source> source,const std::string& key)
+{
+    const auto format=NdifFormat(*source);
+    Check(format.has_value(),"The selected image no longer contains an editable NDIF volume");
+    const bool writable=source->Writable();
+    if(*format==VolumeSession::ImageFormat::NdifHfsPlus)
+        return FromHfsPlus(std::move(source),writable,key);
+    if(*format==VolumeSession::ImageFormat::NdifClassic)
+        return OpenClassicSource(std::move(source),key,writable,true);
+    return FromMfs(std::make_unique<MfsDiskSource>(std::move(source),!writable),key);
 }
 
 static std::shared_ptr<Volume> OpenTrackImages(
@@ -378,8 +415,17 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
     const bool encrypted=Dmg::Unlock(source,password);
     if(Dmg::Unwrap(source)||encrypted)return OpenDmg(std::move(source),key,externalJournal);
-    if(externalJournal.empty()&&Ndif::Unwrap(source))
-        return OpenDmg(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
+    if(externalJournal.empty()&&Ndif::Unwrap(source)){
+        const auto format=NdifFormat(*source);
+        if(!format)return OpenDmg(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
+        source.reset();
+        if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},*format));
+        try{source=HfsPlus::OpenImage(path.c_str(),true);}
+        catch(const HfsPlus::Error&){source=HfsPlus::OpenImage(path.c_str(),false);}
+        Check(VolumeCoord::ImageKey(path)==key&&Ndif::Unwrap(source)&&NdifFormat(*source)==format,
+              "The selected NDIF image changed while it was being opened");
+        return OpenEditableNdif(std::move(source),key);
+    }
     if(externalJournal.empty())
         if(auto tracks=CdMedia::OpenTrackImage(path,source,key))return OpenTrackImages(std::move(*tracks),key);
     if (HfsPlus::Volume::Recognizes(*source)) {

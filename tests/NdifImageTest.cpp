@@ -6,6 +6,8 @@
 #include "DmgImage.h"
 #include "CopyProcess.h"
 #include "FileOperations.h"
+#include "MfsImage.h"
+#include "WorkerEndpoint.h"
 #include "TransferConversion.h"
 #include "ReadOnlyCdBackend.h"
 #include "HfsPlusDisk.h"
@@ -14,6 +16,7 @@
 #include <cstdio>
 extern "C" {
 #include "hfs/macbinary.h"
+#include "hfs/libhfs/hfs.h"
 }
 namespace {
 using namespace HfsPlus;
@@ -71,7 +74,7 @@ Bytes Pack(const Bytes& data,const Bytes& resources,int version=MacBinaryIII)
     P32(p+83,uint32_t(data.size()));P32(p+87,uint32_t(resources.size()));
     macbinary_finish_header(p,version);
     memcpy(p+128,data.data(),data.size());
-    memcpy(p+forkAt,resources.data(),resources.size());
+    if(!resources.empty())memcpy(p+forkAt,resources.data(),resources.size());
     return packed;
 }
 
@@ -122,6 +125,68 @@ std::wstring Save(const std::string& path,const Bytes& bytes)
     return filename;
 }
 }
+
+namespace {
+void RdWrCase(const std::string& root,const Bytes& disk,const char* kind,bool rawCarrier)
+{
+    const auto name=std::string(kind);
+    auto bcem=Map(uint32_t(disk.size()/512),0);
+    auto wrapped=Pack(disk,rawCarrier?Bytes{}:Resource(bcem));
+    if(rawCarrier)memcpy(wrapped.data()+65,"DDimddsk",8);
+    macbinary_finish_header(wrapped.data(),MacBinaryIII);
+    const auto path=Save(root+"writable-"+name+".bin",wrapped);
+    auto volume=MacBrowser::OpenBrowserImage(path);
+    Check(volume&&std::string(volume->Kind())==kind&&volume->Writable()&&
+          MacBrowser::ExecutionFor(*volume).Persistent(),"NDIF did not open on a writable volume worker");
+    Check(MacBrowser::OpenBrowserImage(path)==volume,"NDIF mount was not shared");
+    Reject([&]{HfsPlus::OpenImage(path.c_str(),true);},"A second NDIF writer obtained a conflicting handle");
+
+    MacBrowser::Entry entry;entry.name=u"Two Forks";
+    entry.forks[0].size=4;entry.forks[1].size=4;
+    const auto reader=[](unsigned fork,uint64_t at,void* target,size_t length){
+        memcpy(target,(fork?"RSRC":"DATA")+size_t(at),length);
+    };
+    const auto id=volume->Put(2,entry,reader,false);
+    volume->Rename(id,2,u"Updated");
+    const auto other=volume->Put(2,entry,reader,false);
+    volume->Remove(other);
+    Reject([&]{
+        auto failed=entry;failed.name=u"Updated";
+        volume->Put(2,failed,[](unsigned,uint64_t,void*,size_t){throw Error("Injected NDIF source failure");},true);
+    },"Failed overwrite was reported as successful");
+    MacBrowser::Entry updated;
+    Check(volume->FindChild(2,u"Updated",updated)&&!volume->FindChild(2,u"Two Forks",entry),
+          "NDIF did not preserve rename/delete/failed-overwrite results");
+    for(unsigned fork=0;fork<2;++fork){
+        char data[4];
+        volume->Read(updated.id,fork,0,data,4);
+        Check(!memcmp(data,fork?"RSRC":"DATA",4),"NDIF write altered a fork");
+    }
+    volume.reset();
+
+    const auto before=wrapped;
+    auto file=HfsPlus::OpenImage(path.c_str(),true);
+    const auto after=Disk::Read(*file,0,size_t(file->Size()));
+    const size_t end=128+disk.size();
+    Check(after.size()==before.size()&&std::equal(before.begin(),before.begin()+128,after.begin())&&
+          std::equal(before.begin()+end,before.end(),after.begin()+end),
+          "NDIF edit wrote outside the data fork");
+    Check(Ndif::Unwrap(file)&&file->Writable(),"Reopened NDIF lost write support");
+    char data=0;
+    Reject([&]{file->Write(file->Size(),&data,1);},"NDIF allowed a write beyond its payload");
+    file.reset();
+    auto reopened=MacBrowser::OpenBrowserImage(path);
+    Check(reopened->FindChild(2,u"Updated",updated),"NDIF edit did not survive reopening");
+
+    auto locked=before;
+    locked[81]=1;
+    macbinary_finish_header(locked.data(),MacBinaryIII);
+    const auto protectedPath=Save(root+"locked-"+name+".bin",locked);
+    auto protectedVolume=MacBrowser::OpenBrowserImage(protectedPath);
+    Check(protectedVolume&&!protectedVolume->Writable(),"Locked NDIF image became writable");
+}
+}
+
 int RunNdifImageTest(const char* directory)
 {
     if(!CreateDirectoryA(directory,nullptr))return 2;
@@ -319,6 +384,23 @@ int RunNdifImageTest(const char* directory)
             });
         }
         const auto volumeBytes=Disk::Read(*raw,0,size_t(raw->Size()));
+        RdWrCase(root,volumeBytes,"HFS+",false);
+        const auto classic=Save(root+"classic-rdwr.raw",Bytes(4*1024*1024));
+        auto native=root+"classic-rdwr.raw";
+        char label[]="Classic RdWr";
+        Check(hfs_format(native.data(),0,label)==0,"Could not format classic NDIF fixture");
+        auto classicFile=HfsPlus::OpenImage(classic.c_str(),false);
+        RdWrCase(root,Disk::Read(*classicFile,0,size_t(classicFile->Size())),"HFS",false);
+        const auto mfsPath=Save(root+"mfs-rdwr.raw",Bytes(400*1024));
+        {
+            MfsImageSource image;
+            std::string error;
+            Check(image.Open(mfsPath.c_str(),error,true),"Could not open MFS fixture");
+            Check(MfsImage::Format(image,"MFS RdWr",400*1024,false,error),error.c_str());
+        }
+        auto mfsFile=HfsPlus::OpenImage(mfsPath.c_str(),false);
+        RdWrCase(root,Disk::Read(*mfsFile,0,size_t(mfsFile->Size())),"MFS",true);
+        fprintf(report,"PASS: HFS+, HFS and MFS in-place NDIF edits, exclusive writers, wrapper preservation and failed overwrite recovery.\n");
         const auto sectors=uint32_t(raw->Size()/512);
         auto rawMap=Map(sectors,2);
         Row(rawMap,0,0,2,0,uint32_t(volumeBytes.size()));Row(rawMap,1,sectors,0xff,0,0);

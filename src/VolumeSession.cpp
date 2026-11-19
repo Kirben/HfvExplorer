@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "VolumeSession.h"
+#include "NdifImage.h"
 #include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
@@ -48,8 +49,9 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     std::u16string name_;
     std::string description_;
     const ImageFormat format_;
-    bool Classic()const{return format_==ImageFormat::Classic;}
-    bool Mfs()const{return format_==ImageFormat::Mfs;}
+    bool Classic()const{return format_==ImageFormat::Classic||format_==ImageFormat::NdifClassic;}
+    bool Mfs()const{return format_==ImageFormat::Mfs||format_==ImageFormat::NdifMfs;}
+    bool Plus()const{return !Classic()&&!Mfs();}
     bool hfsx_ = false, caseSensitive_ = false, journaled_ = false;
     bool writeAllowed_ = false, initialized_ = false;
     std::atomic<bool> writable_{false}, lost_{false};
@@ -79,7 +81,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     }
     void RecordRollback(Storage::Rollback rollback) {
         Storage::OutcomeEvidence::NoteRollback(rollback);
-        if (format_!=ImageFormat::HfsPlus && rollback == Storage::Rollback::Failed) {
+        if (!Plus() && rollback == Storage::Rollback::Failed) {
             writable_ = false;
             writeAllowed_ = false;
         }
@@ -189,6 +191,8 @@ public:
         try { open(true); }
         catch (const HfsPlus::Error&) { guard_.reset(); open(false); }
         writeAllowed_ = guard_->Writable();
+        if(format_>=ImageFormat::NdifHfsPlus)
+            Check(VolumeCoord::ImageKey(path_)==key_,"The selected NDIF image was replaced");
         if (!journal_.empty())
             dependency_ = std::make_unique<VolumeCoord::ImageDependency>(key_, journal_);
         Start();
@@ -201,7 +205,7 @@ public:
         WorkerExecution out;
         out.placement=WorkerExecution::Placement::PersistentSession;
         out.classicConversion=Classic();
-        out.stableCatalogIds=format_==ImageFormat::HfsPlus;
+        out.stableCatalogIds=Plus();
         return out;
     }
     std::string ResourceKey() const override { return key_; }
@@ -211,12 +215,12 @@ public:
     bool Writable() const override { return writable_ && !lost_; }
     bool CaseSensitive() const override { return caseSensitive_; }
     bool Journaled() const override { return journaled_; }
-    bool SupportsHardLinks() const override { return format_==ImageFormat::HfsPlus; }
-    bool SupportsCompression() const override { return format_==ImageFormat::HfsPlus; }
-    bool SupportsAttributes() const override { return format_==ImageFormat::HfsPlus; }
+    bool SupportsHardLinks() const override { return Plus(); }
+    bool SupportsCompression() const override { return Plus(); }
+    bool SupportsAttributes() const override { return Plus(); }
     Capabilities Supports() const override {
         auto result = Volume::Supports();
-        result.unicodeNames = format_==ImageFormat::HfsPlus;
+        result.unicodeNames = Plus();
         result.createFolders = !Mfs();
         return result;
     }
@@ -750,11 +754,27 @@ int Child(const char* inputText, const char* outputText) {
             auto journal = data.wide();
             auto writable = data.flag();
             auto format = data.get();
-            Check(format<=uint64_t(ImageFormat::Mfs),"Invalid volume session image format");
+            Check(format<=uint64_t(ImageFormat::NdifMfs),"Invalid volume session image format");
             data.end();
             ImageHandleTransfer::Scope storage(files);
             std::shared_ptr<Volume> volume;
-            if (format==uint64_t(ImageFormat::Mfs)) {
+            if(format>=uint64_t(ImageFormat::NdifHfsPlus)){
+                Check(journal.empty(),"NDIF has no external journal selection");
+                floppy_module_global_init();
+                const auto key=VolumeCoord::ImageKey(path);
+                const auto open=[&](bool write){
+                    auto disk=HfsPlus::OpenImage(path.c_str(),write);
+                    Check(Ndif::Unwrap(disk),"The selected image is no longer an NDIF image");
+                    return OpenEditableNdif(std::move(disk),key);
+                };
+                try{volume=open(writable);}
+                catch(const HfsPlus::Error&){if(!writable)throw;volume=open(false);}
+                Check((format==uint64_t(ImageFormat::NdifClassic)&&!strcmp(volume->Kind(),"HFS"))||
+                      (format==uint64_t(ImageFormat::NdifMfs)&&!strcmp(volume->Kind(),"MFS"))||
+                      (format==uint64_t(ImageFormat::NdifHfsPlus)&&
+                       (!strcmp(volume->Kind(),"HFS+")||!strcmp(volume->Kind(),"HFSX"))),
+                      "The NDIF filesystem changed before the worker opened it");
+            } else if (format==uint64_t(ImageFormat::Mfs)) {
                 Check(journal.empty(),"MFS has no external journal");
                 volume=OpenMfsImage(path,writable);
             } else if (format==uint64_t(ImageFormat::Classic)) {

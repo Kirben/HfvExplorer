@@ -23,7 +23,7 @@ constexpr auto ChunkBytes=12u;
 constexpr uint64_t MaxCompressedChunk=64*1024*1024;
 enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Rle=0x81,Lzh=0x82,Adc=0x83,ShrinkWrap=0xf0,End=0xff };
 struct Fork {uint64_t at=0,length=0;};
-struct Forks {Fork data,resource;};
+struct Forks {Fork data,resource;bool writableType=false,rawDisk=false;};
 struct Part {
     std::unique_ptr<Source> dataFile,resourceFile;
     Fork data;
@@ -38,16 +38,19 @@ std::optional<Forks> MacBinary(Source& input)
     if(input.Size()<128)return {};
     auto h=Disk::Read(input,0,128);
     const int version=macbinary_version(h.data());
-    if(!version||!U32(h.data()+87))return {};
+    const auto p=h.data();
+    const bool rawDisk=!memcmp(p+65,"DDimddsk",8);
+    if(!version||(!rawDisk&&!U32(p+87)))return {};
+    const bool writableType=(rawDisk||!memcmp(p+65,"dimgddsk",8))&&!p[81];
     const auto aligned=[](uint64_t n){return (n+127)&~uint64_t(127);};
     const uint64_t data=128+(version==MacBinaryI?0:aligned(U16(h.data()+120)));
     const uint64_t length=U32(h.data()+83),resource=U32(h.data()+87);
     const uint64_t resourceAt=data+aligned(length);
-    if(!Range(data,length,input.Size())||!Range(resourceAt,resource,input.Size())){
+    if(!Range(data,length,input.Size())||(resource&&!Range(resourceAt,resource,input.Size()))){
         Check(memcmp(h.data()+69,"ddsk",4)!=0,"Truncated NDIF MacBinary forks");
         return {};
     }
-    return Forks{{data,length},{resourceAt,resource}};
+    return Forks{{data,length},{resourceAt,resource},writableType,rawDisk};
 }
 
 
@@ -305,6 +308,7 @@ public:
 class Image final : public Source {
     std::vector<Part> parts_;
     Layout layout_;
+    const std::optional<uint64_t> direct_;
     std::mutex mutex_;
     size_t cached_=SIZE_MAX;
     Bytes decoded_;
@@ -321,7 +325,9 @@ class Image final : public Source {
         }
     }
 public:
-    Image(std::vector<Part> parts,Layout layout):parts_(std::move(parts)),layout_(std::move(layout)){}
+    Image(std::vector<Part> parts,Layout layout,std::optional<uint64_t> direct={})
+        :parts_(std::move(parts)),layout_(std::move(layout)),direct_(direct){}
+    bool Editable()const{return direct_.has_value();}
     uint64_t Size()const override{return layout_.length;}
     uint32_t ExpectedChecksum()const{return layout_.checksum;}
     void VerifySegments(Storage::Job& job){
@@ -343,7 +349,7 @@ public:
                  " checksum mismatch. The output was discarded.").c_str());
         }
     }
-    bool Writable()const override{return false;}
+    bool Writable()const override{return Editable()&&parts_.front().dataFile->Writable();}
     bool ProcessLocal()const override{return parts_.front().dataFile->ProcessLocal();}
     void CheckMedia()override{
         for(const auto& part:parts_){
@@ -363,8 +369,17 @@ public:
         }
         return files;
     }
-    void Write(uint64_t,const void*,size_t)override{throw Error("NDIF images are read-only");}
-    void Flush()override{}
+    void Write(uint64_t offset,const void* bytes,size_t count)override{
+        Check(Writable(),"This NDIF image is read-only");
+        Check(Range(offset,count,Size())&&(!count||bytes),"Write outside NDIF data fork");
+        std::lock_guard<std::mutex> lock(mutex_);
+        if(count)parts_.front().dataFile->Write(*direct_+offset,bytes,count);
+    }
+    void Flush()override{
+        if(!Writable())return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        parts_.front().dataFile->Flush();
+    }
     void Read(uint64_t offset,void* bytes,size_t count)override{
         Check(Range(offset,count,Size())&&(!count||bytes),"Read outside NDIF image");
         std::lock_guard<std::mutex> lock(mutex_);
@@ -402,6 +417,13 @@ public:
 }
 
 
+
+bool IsEditable(const Source& source)
+{
+    const auto image=dynamic_cast<const Image*>(&source);
+    return image&&image->Editable();
+}
+
 std::optional<uint32_t> ExpectedChecksum(const Source& source)
 {
     const auto image=dynamic_cast<const Image*>(&source);
@@ -436,7 +458,7 @@ uint32_t Checksum(uint32_t running,const void* bytes,size_t count)
 bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
 {
     auto install=[&](Fork data,Source& metadata,Fork resource,std::unique_ptr<Source> companion={},
-                     std::unique_ptr<BinHexForks> decoded={}){
+                     std::unique_ptr<BinHexForks> decoded={},bool writableType=false){
         const auto map=Resource(metadata,resource,"bcem");
         const auto segment=SegmentInfo(metadata,resource);
         if(!map){
@@ -460,16 +482,34 @@ bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
             total+=part.data.length;
         }
         auto layout=Map(metadata,*map,{0,total});
+        std::optional<uint64_t> direct;
+        if(writableType&&!segment&&!segmented&&!layout.checksum){
+            const auto start=layout.chunks.front().packedAt;
+            // Only a one-to-one stored payload can be updated without changing
+            // the map, checksums, or the lengths and offsets in the carrier.
+            if(Range(start,layout.length,data.length)&&
+               std::all_of(layout.chunks.begin(),layout.chunks.end(),[&](const Chunk& chunk){
+                   return chunk.type==Raw&&chunk.packedAt==start+chunk.at;
+               }))direct=data.at+start;
+        }
         if(decoded){
             decoded->Pin(std::move(input));
             parts[0].dataFile=std::move(decoded);
         }else parts[0].dataFile=std::move(input);
         parts[0].resourceFile=std::move(companion);
-        input=std::make_unique<Image>(std::move(parts),std::move(layout));
+        input=std::make_unique<Image>(std::move(parts),std::move(layout),direct);
         return true;
     };
     if(auto forks=MacBinary(*input)){
-        if(install(forks->data,*input,forks->resource))return true;
+        if(install(forks->data,*input,forks->resource,{},{},forks->writableType))return true;
+        if(forks->rawDisk&&!forks->resource.length&&forks->data.length&&forks->data.length%Sector==0){
+            Layout layout{forks->data.length,0,{{0,forks->data.length,0,forks->data.length,Raw}}};
+            std::vector<Part> parts;
+            parts.push_back({std::move(input),{},forks->data});
+            const auto direct=forks->writableType?std::optional<uint64_t>(forks->data.at):std::nullopt;
+            input=std::make_unique<Image>(std::move(parts),std::move(layout),direct);
+            return true;
+        }
     }
     if(auto forks=AppleContainer(*input,0x00051600)){
         if(install(forks->data,*input,forks->resource))return true;
