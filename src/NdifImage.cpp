@@ -21,6 +21,7 @@ constexpr uint64_t MaxCompressedChunk=64*1024*1024;
 enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Adc=0x83,End=0xff };
 struct Fork {uint64_t at=0,length=0;};
 struct Forks {Fork data,resource;};
+struct Part {std::unique_ptr<Source> dataFile,resourceFile;Fork data;uint64_t start=0;};
 struct Chunk {uint64_t at,length,packedAt,packedLength;uint8_t type;};
 struct Layout {uint64_t length;uint32_t checksum;std::vector<Chunk> chunks;};
 
@@ -82,7 +83,7 @@ std::unique_ptr<Source> OptionalFile(const std::wstring& path)
     return HfsPlus::OpenImage(path.c_str(),false);
 }
 
-std::optional<Fork> BlockMap(Source& input,Fork resource)
+std::optional<Fork> Resource(Source& input,Fork resource,const char* type)
 {
     if(resource.length<16)return {};
     const auto header=Disk::Read(input,resource.at,16);
@@ -102,7 +103,7 @@ std::optional<Fork> BlockMap(Source& input,Fork resource)
     std::optional<Fork> found;
     for(unsigned i=0;i<count;++i){
         const auto p=list.data()+i*8;
-        if(memcmp(p,"bcem",4))continue;
+        if(memcmp(p,type,4))continue;
         const auto entries=uint16_t(U16(p+4)+1u);
         const uint64_t start=types+U16(p+6);
         Check(start>=refs&&Range(start,uint64_t(entries)*12,names),"Invalid NDIF resource references");
@@ -127,7 +128,7 @@ Layout Map(Source& input,Fork map,Fork data)
     const auto p=header.data();
     const auto version=U16(p);
     Check(version>=10&&version<=12,"Unsupported NDIF header version");
-    Check(p[4]<=63&&U32(p+84)==0,"Unsupported segmented NDIF image or invalid name");
+    Check(p[4]<=63&&U32(p+84)<=1,"Invalid NDIF image name or segment flag");
     const uint64_t sectors=U32(p+68),maxChunk=U32(p+72),base=U32(p+76),count=U32(p+124);
     Check(sectors&&sectors<=0xffffff&&base<=data.length&&count>=2&&count<=sectors+1&&
           count*ChunkBytes==map.length-HeaderBytes,"Invalid NDIF block map geometry");
@@ -168,28 +169,104 @@ Layout Map(Source& input,Fork map,Fork data)
     return out;
 }
 
+
+struct Segment {
+    unsigned number,count;
+    std::array<uint8_t,16> group;
+};
+std::optional<Segment> SegmentInfo(Source& file,Fork resources)
+{
+    const auto record=Resource(file,resources,"bcm#");
+    if(!record)return {};
+    Check(record->length==24,"Invalid NDIF segment descriptor");
+    const auto bytes=Disk::Read(file,record->at,24);
+    Segment result{U16(bytes.data()),U16(bytes.data()+2),{}};
+    memcpy(result.group.data(),bytes.data()+4,result.group.size());
+    Check(result.number&&result.number<=result.count,"Invalid NDIF segment number");
+    return result;
+}
+std::wstring Parent(const std::wstring& path)
+{
+    const auto split=path.find_last_of(L"\\/");
+    return split==std::wstring::npos?L"":path.substr(0,split+1);
+}
+
+std::vector<Part> MoreParts(const Source& first,const Segment& lead)
+{
+    const auto files=first.WorkerFiles();
+    Check(!files.empty()&&lead.number==1&&lead.count>1,"Open the first segment of the NDIF set");
+    const auto directory=Parent(files.front().first);
+    WIN32_FIND_DATAW data{};
+    const auto handle=FindFirstFileW((directory+L"*").c_str(),&data);
+    Check(handle!=INVALID_HANDLE_VALUE,"Cannot enumerate the NDIF segment directory");
+    struct Listing {HANDLE handle;~Listing(){FindClose(handle);}} listing{handle};
+    std::vector<Part> parts(lead.count);
+    do{
+        if(data.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)continue;
+        const std::wstring name=data.cFileName;
+        const auto extension=name.rfind(L'.');
+        if(extension==std::wstring::npos)continue;
+        const auto suffix=name.c_str()+extension;
+        if(_wcsicmp(suffix,L".bin")&&_wcsicmp(suffix,L".part")&&_wcsicmp(suffix,L".as"))continue;
+        const auto path=directory+name;
+        if(CompareStringOrdinal(path.c_str(),-1,files.front().first.c_str(),-1,TRUE)==CSTR_EQUAL)continue;
+        std::unique_ptr<Source> candidate;
+        try{candidate=HfsPlus::OpenImage(path.c_str(),false);}catch(const Error&){continue;}
+        auto forks=MacBinary(*candidate);
+        if(!forks)forks=AppleContainer(*candidate,0x00051600);
+        if(!forks)continue;
+        const auto info=SegmentInfo(*candidate,forks->resource);
+        if(!info||info->group!=lead.group||info->number==1)continue;
+        Check(info->count==lead.count,"Conflicting NDIF segment set counts");
+        auto& part=parts[info->number-1];
+        Check(!part.dataFile&&forks->data.length,"Duplicate or empty NDIF segment");
+        part.dataFile=std::move(candidate);
+        part.data=forks->data;
+    }while(FindNextFileW(handle,&data));
+    for(size_t i=1;i<parts.size();++i)
+        Check(bool(parts[i].dataFile),("Missing NDIF segment "+std::to_string(i+1)+" of "+std::to_string(parts.size())).c_str());
+    return parts;
+}
+
 class Image final : public Source {
-    std::unique_ptr<Source> input_,metadata_;
+    std::vector<Part> parts_;
     Layout layout_;
     std::mutex mutex_;
     size_t cached_=SIZE_MAX;
     Bytes decoded_;
+    void ReadPacked(uint64_t at,void* bytes,size_t count){
+        auto out=static_cast<uint8_t*>(bytes);
+        while(count){
+            const auto next=std::upper_bound(parts_.begin(),parts_.end(),at,
+                [](uint64_t value,const Part& part){return value<part.start;});
+            const auto& part=*std::prev(next);
+            const auto within=at-part.start;
+            const auto take=size_t((std::min)(uint64_t(count),part.data.length-within));
+            part.dataFile->Read(part.data.at+within,out,take);
+            at+=take;out+=take;count-=take;
+        }
+    }
 public:
-    Image(std::unique_ptr<Source> input,std::unique_ptr<Source> metadata,Layout layout)
-        :input_(std::move(input)),metadata_(std::move(metadata)),layout_(std::move(layout)){}
+    Image(std::vector<Part> parts,Layout layout):parts_(std::move(parts)),layout_(std::move(layout)){}
     uint64_t Size()const override{return layout_.length;}
     uint32_t ExpectedChecksum()const{return layout_.checksum;}
     bool Writable()const override{return false;}
-    bool ProcessLocal()const override{return input_->ProcessLocal();}
+    bool ProcessLocal()const override{return parts_.front().dataFile->ProcessLocal();}
     void CheckMedia()override{
-        input_->CheckMedia();
-        if(metadata_)metadata_->CheckMedia();
+        for(const auto& part:parts_){
+            part.dataFile->CheckMedia();
+            if(part.resourceFile)part.resourceFile->CheckMedia();
+        }
     }
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{
-        auto files=input_->WorkerFiles();
-        if(metadata_){
-            const auto companion=metadata_->WorkerFiles();
-            files.insert(files.end(),companion.begin(),companion.end());
+        std::vector<std::pair<std::wstring,uintptr_t>> files;
+        const auto add=[&](const Source& source){
+            const auto paths=source.WorkerFiles();
+            files.insert(files.end(),paths.begin(),paths.end());
+        };
+        for(const auto& part:parts_){
+            add(*part.dataFile);
+            if(part.resourceFile)add(*part.resourceFile);
         }
         return files;
     }
@@ -206,11 +283,12 @@ public:
             const auto within=offset-chunk->at;
             const auto take=size_t((std::min)(uint64_t(count),chunk->length-within));
             if(chunk->type==Zero)memset(out,0,take);
-            else if(chunk->type==Raw)input_->Read(chunk->packedAt+within,out,take);
+            else if(chunk->type==Raw)ReadPacked(chunk->packedAt+within,out,take);
             else{
                 const auto index=size_t(chunk-layout_.chunks.begin());
                 if(index!=cached_){
-                    const auto packed=Disk::Read(*input_,chunk->packedAt,size_t(chunk->packedLength));
+                    Bytes packed(size_t(chunk->packedLength));
+                    ReadPacked(chunk->packedAt,packed.data(),packed.size());
                     Bytes decoded(size_t(chunk->length));
                     if(chunk->type==KenCode)DecodeKenCode(packed,decoded);
                     else Check(Dmg::DecodeAppleDataCompression(packed,decoded),"Corrupt NDIF ADC data");
@@ -256,10 +334,31 @@ uint32_t Checksum(uint32_t running,const void* bytes,size_t count)
 bool Unwrap(std::unique_ptr<Source>& input)
 {
     auto install=[&](Fork data,Source& metadata,Fork resource,std::unique_ptr<Source> companion={}){
-        const auto map=BlockMap(metadata,resource);
-        if(!map)return false;
-        auto layout=Map(metadata,*map,data);
-        input=std::make_unique<Image>(std::move(input),std::move(companion),std::move(layout));
+        const auto map=Resource(metadata,resource,"bcem");
+        const auto segment=SegmentInfo(metadata,resource);
+        if(!map){
+            Check(!segment,"Open the first segment of the NDIF set");
+            return false;
+        }
+        Check(map->length>=HeaderBytes,"Truncated NDIF header");
+        const auto segmented=U32(Disk::Read(metadata,map->at+84,4).data());
+        Check(segmented<=1,"Invalid NDIF segment flag");
+        std::vector<Part> parts(1);
+        if(segmented){
+            Check(segment.has_value(),"Missing NDIF segment descriptor");
+            parts=MoreParts(*input,*segment);
+        }
+        parts[0].data=data;
+        uint64_t total=0;
+        for(auto& part:parts){
+            part.start=total;
+            Check(part.data.length<=UINT64_MAX-total,"NDIF segment sizes overflow");
+            total+=part.data.length;
+        }
+        auto layout=Map(metadata,*map,{0,total});
+        parts[0].dataFile=std::move(input);
+        parts[0].resourceFile=std::move(companion);
+        input=std::make_unique<Image>(std::move(parts),std::move(layout));
         return true;
     };
     if(auto forks=MacBinary(*input)){

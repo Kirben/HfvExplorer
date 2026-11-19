@@ -29,17 +29,32 @@ public:
     }
 };
 
-Bytes Resource(const Bytes& bcem)
+Bytes Resource(const Bytes& bcem,const Bytes& segment={})
 {
-    const size_t data=256,map=data+4+bcem.size();
-    Bytes out(map+50);
-    auto p=out.data();
-    P32(p,uint32_t(data));P32(p+4,uint32_t(map));P32(p+8,uint32_t(bcem.size()+4));P32(p+12,50);
-    P32(p+data,uint32_t(bcem.size()));memcpy(p+data+4,bcem.data(),bcem.size());
-    auto m=p+map;
-    memcpy(m,p,16);P16(m+24,28);P16(m+26,50);
-    memcpy(m+30,"bcem",4);P16(m+36,10);
-    P16(m+38,128);P16(m+40,0xffff);
+    struct Item {const char* type;const Bytes* bytes;};
+    std::vector<Item> items;
+    if(!bcem.empty())items.push_back({"bcem",&bcem});
+    if(!segment.empty())items.push_back({"bcm#",&segment});
+    size_t map=256;
+    for(const auto& item:items)map+=4+item.bytes->size();
+    const auto mapBytes=30+items.size()*20;
+    Bytes out(map+mapBytes);
+    const auto p=out.data();
+    P32(p,256);P32(p+4,uint32_t(map));P32(p+8,uint32_t(map-256));P32(p+12,uint32_t(mapBytes));
+    const auto m=p+map;
+    memcpy(m,p,16);P16(m+24,28);P16(m+26,uint16_t(mapBytes));
+    P16(m+28,uint16_t(items.size()-1));
+    size_t at=256;
+    for(size_t i=0;i<items.size();++i){
+        const auto& item=items[i];
+        const auto type=m+30+i*8;
+        memcpy(type,item.type,4);P16(type+6,uint16_t(2+items.size()*8+i*12));
+        auto ref=m+30+items.size()*8+i*12;
+        P16(ref,128);P16(ref+2,0xffff);P32(ref+4,uint32_t(at-256));
+        P32(p+at,uint32_t(item.bytes->size()));
+        memcpy(p+at+4,item.bytes->data(),item.bytes->size());
+        at+=4+item.bytes->size();
+    }
     return out;
 }
 
@@ -161,6 +176,38 @@ int RunNdifImageTest(const char* directory)
         Check(Ndif::Unwrap(kenSource),"Truncated NDIF KenCode fixture did not reach the codec");
         Reject([&]{Disk::Read(*kenSource,0,512);},"NDIF accepted truncated KenCode data");
         fprintf(report,"PASS: NDIF KenCode literals, overlapping copies and truncated stream rejection.\n");
+        auto segmented=bcem;P32(segmented.data()+84,1);
+        const auto segment=[](unsigned part){
+            Bytes meta(24);
+            P16(meta.data(),uint16_t(part));P16(meta.data()+2,2);
+            meta[4]=0x5a;
+            return meta;
+        };
+        const auto primary=Save(root+"lead.smi.bin",Pack(Bytes(data.begin(),data.begin()+523),Resource(segmented,segment(1))));
+        auto open=[&]{
+            auto source=HfsPlus::OpenImage(primary.c_str(),false);
+            Check(Ndif::Unwrap(source),"Expected segmented NDIF");
+            return source;
+        };
+        Reject([&]{open();},"NDIF accepted a missing segment");
+        const auto next=Save(root+"continuation.part.bin",
+                             Pack(Bytes(data.begin()+523,data.end()),Resource({},segment(2))));
+        auto joined=open();
+        Check(joined->WorkerFiles().size()==2&&Disk::Read(*joined,1024,512)==Bytes(512,'B'),
+              "NDIF compressed chunk did not cross the physical segment boundary");
+        joined.reset();
+        Save(root+"duplicate.part.bin",Pack(Bytes(data.begin()+523,data.end()),Resource({},segment(2))));
+        Reject([&]{open();},"NDIF accepted duplicate segments");
+        if(const auto real=_wgetenv(L"HFV_NDIF_SEGMENT_TEST_IMAGE")){
+            auto update=MacBrowser::OpenBrowserImage(real);
+            Check(update&&update->Name()==u"Mac OS 8.1 Update"&&!update->List().empty(),"Apple multipart NDIF failed to open");
+            const auto dest=VolumeCoord::Wide(root+"apple-segments.img");
+            Storage::Job job;
+            const auto result=Dmg::Convert(real,dest,Dmg::Output::RawImage,job);
+            Check(!result.code,result.message.c_str());
+            fprintf(report,"PASS: 13-part Apple Mac OS 8.1 update, including original logical checksum.\n");
+        }
+        fprintf(report,"PASS: NDIF segment identity, missing/duplicate rejection and a chunk crossing parts.\n");
         auto invalid=bcem;
         Row(invalid,2,1,0x83,512,24);
         std::unique_ptr<Source> input=std::make_unique<Memory>(Pack(data,Resource(invalid)));
