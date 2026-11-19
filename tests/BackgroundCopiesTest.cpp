@@ -17,6 +17,7 @@
 #include "CdBurn.h"
 #include "FloppyWriteDialog.h"
 #include "ClassicFormatCommand.h"
+#include "HfsPlusDialogs.h"
 #include "FindFilesDialog.h"
 #include "MediaCommands.h"
 #include "RefreshStorage.h"
@@ -890,6 +891,29 @@ int RunPerVolumeCommandsTest(const char* directory){
    Check(results==1&&second.ListingAvailable(),"closed browser search published to another window");
   }
   fprintf(report,"PASS: classic format and Find Files run without blocking another browser; results go to their origin and are suppressed after it closes.\n");
+  {
+   const auto newImage=VolumeCoord::Wide(std::string(host.GetString())+"\\closed-origin.dsk");
+   auto* origin=app.CreateBrowser(FALSE);
+   Check(origin,"open a separate formatter browser");
+   PendingRead format(newImage,uiThread);
+   const auto closing=origin->GetSafeHwnd();
+   Check(StartMacImageFormat(origin->GetBrowserSession(),{newImage,{},u"Detached format",8*1024*1024}),
+         "start HFS+ format in a window that will close");
+   format.Entered();
+   Host(second,host);
+   Until([&]{return !second.Navigating()&&second.ListingAvailable();});
+   Check(other->IsWindowEnabled(),"background HFS+ format blocked the surviving browser");
+   origin->SendMessage(WM_CLOSE);
+   Check(!IsWindow(closing),"format prevented the originating browser from closing");
+   format.Release();
+   Until([&]{return !BackgroundCopies::Active()&&!second.Navigating()&&second.ListingAvailable();});
+   const auto& mounts=second.Mounts().Mounted();
+   Check(!BackgroundCopies::LastResult().code&&GetFileAttributesW(newImage.c_str())!=INVALID_FILE_ATTRIBUTES&&
+         second.MacBrowser().TargetFolder().IsWindows()&&
+         std::none_of(mounts.begin(),mounts.end(),[&](const auto& mount){return mount.key==newImage;}),
+         "format was lost or opened in a different browser after the origin closed");
+   fprintf(report,"PASS: HFS+ image formatting finishes after its originating window closes and leaves the surviving browser alone.\n");
+  }
  }catch(const std::exception& error){fprintf(report,"FAIL: %s; last copy: %s\n",error.what(),BackgroundCopies::LastResult().message.c_str());result=1;}
  SetEvent(stalled.release);BackgroundCopies::CancelAll();FileOperations::CancelPending();Until([]{return !BackgroundCopies::Active();});ShutdownStorageUi();BackgroundCopies::enabled=false;while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
 }

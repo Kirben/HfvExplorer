@@ -7,6 +7,8 @@
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
 #include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
+#include "ImageHandleTransfer.h"
 #include "ImageSize.h"
 #include "MfsImage.h"
 #include <algorithm>
@@ -147,6 +149,87 @@ bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
  NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
 }
+namespace {
+class FormatMfsSource final : public MfsSource {
+    HfsPlus::Source& image_;
+public:
+    explicit FormatMfsSource(HfsPlus::Source& image):image_(image){}
+    uint64_t Length()const override{return image_.Size();}
+    bool Writable()const override{return image_.Writable();}
+    bool ReadAt(uint64_t at,void* p,size_t n)override{try{image_.Read(at,p,n);return true;}catch(...){return false;}}
+    bool WriteAt(uint64_t at,const void* p,size_t n)override{try{image_.Write(at,p,n);return true;}catch(...){return false;}}
+    bool Flush()override{try{image_.Flush();return true;}catch(...){return false;}}
+};
+}
+
+std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageFormatRequest request)
+{
+    return [request=std::move(request)](Storage::Job& job){
+        const bool external=!request.externalJournal.empty();
+        if(external&&(request.mfs||!request.journaled))
+            return Storage::Result{1,ERROR_INVALID_PARAMETER,"An external journal requires a journaled HFS+ or HFSX image."};
+        if(request.mfs ? (request.size<128*1024||request.size>20*1024*1024||request.size%512)
+                       : (request.size<8*1024*1024||request.size%4096||request.size>INT64_MAX))
+            return Storage::Result{1,ERROR_INVALID_PARAMETER,"Invalid image size for the selected format."};
+        auto access=CommandStorage::ImageWrite(request.path);
+        if(external){
+            const auto journal=CommandStorage::ImageWrite(request.externalJournal);
+            if(journal.front().key==access.front().key||journal.back().key==access.back().key)
+                return Storage::Result{1,ERROR_INVALID_PARAMETER,"Choose separate image and journal paths."};
+            access.insert(access.end(),journal.begin(),journal.end());
+        }
+        std::vector<std::string> changed;
+        for(const auto& item:access)changed.push_back(item.key);
+        return CommandStorage::Guard(std::move(access),[&](Storage::Job&){
+            constexpr uint64_t journalSize=64ULL*1024*1024;
+            std::unique_ptr<HfsPlus::NewImage> home,journal;
+            try{
+                const auto tags=request.dc42&&(request.size==400*1024||request.size==800*1024)?request.size/512*12:0;
+                const auto bytes=request.size+(request.dc42?84+tags:0);
+                home=HfsPlus::CreateFormatOutput(request.path.c_str(),bytes,external?request.externalJournal.c_str():nullptr);
+                if(request.mfs){
+                    FormatMfsSource mfs(*home);
+                    std::string name,error;
+                    if(!MfsImage::EncodeName(MacBrowser::Wide(request.name),name,error,27)||
+                       !MfsImage::Format(mfs,name,request.size,request.dc42,error))
+                        throw HfsPlus::Error(error);
+                }else{
+                    HfsPlus::Volume::Format(*home,request.name,request.journaled,request.kind,request.expanded);
+                    if(external){
+                        journal=HfsPlus::CreateFormatOutput(request.externalJournal.c_str(),journalSize);
+                        const auto uuid=HfsPlus::InitializeExternalJournalImage(*journal);
+                        const std::vector<ImageHandleTransfer::File> files{
+                            {request.externalJournal,HANDLE(journal->WorkerFiles().front().second),true}};
+                        ImageHandleTransfer::Scope binding(files);
+                        HfsPlus::Volume volume(*home,true);
+                        volume.UseExternalJournal(uuid);
+                    }
+                }
+                home->Keep();
+                if(journal)journal->Keep();
+                return Storage::Result{};
+            }catch(...){
+                const bool homeRemoved=!home||home->Discard();
+                home.reset(); // Release any duplicate of the journal handle.
+                const bool journalRemoved=!journal||journal->Discard();
+                if(!homeRemoved||!journalRemoved)
+                    throw HfsPlus::Error("Formatting failed and Windows could not remove a partial output. Inspect the image and journal paths.");
+                throw;
+            }
+        },std::move(changed))(job);
+    };
+}
+
+bool StartMacImageFormat(BrowserSession& session,MacImageFormatRequest request)
+{
+    auto complete=session.WhileOpen([path=request.path,journal=request.externalJournal]
+                                  (BrowserSession& origin,const Storage::Result& result){
+        if(!result.code)origin.MacBrowser().OpenImage(path,journal);
+    });
+    return BackgroundCopies::StartStorageResult(MakeMacImageFormatJob(std::move(request)),session.Owner(),
+        "Formatting Mac image","Format image",std::move(complete));
+}
+
 void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
     FormatDialog options(parent);
     if (options.DoModal() != IDOK)
@@ -157,26 +240,8 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
         return;
     std::wstring externalPath;
     if(options.external&&!FileDialog(parent->m_hWnd,externalPath,true,L"External journal disk image\0*.img\0All files\0*.*\0\0",L"img"))return;
-    auto access=CommandStorage::ImageWrite(path);if(options.external){auto other=CommandStorage::ImageWrite(externalPath);access.insert(access.end(),other.begin(),other.end());}
-    std::vector<std::string> changed{VolumeCoord::ImageKey(path),VolumeCoord::PathKey(path)};if(options.external){changed.push_back(VolumeCoord::ImageKey(externalPath));changed.push_back(VolumeCoord::PathKey(externalPath));}
-    auto result = ShowStorageJob(
-        CommandStorage::Guard(access,[&](Storage::Job &) {
-            bool homeCreated=false,journalCreated=false,complete=false;
-            struct Cleanup{std::wstring home,journal;bool& h;bool& j;bool& complete;~Cleanup(){if(!complete){if(h)DeleteFileW(home.c_str());if(j)DeleteFileW(journal.c_str());}}}cleanup{path,externalPath,homeCreated,journalCreated,complete};
-            auto bytes=options.size+(options.dc42?84+((options.size==400*1024||options.size==800*1024)?options.size/512*12:0):0);
-            auto source = HfsPlus::CreateImage(path.c_str(),bytes,options.external?externalPath.c_str():nullptr);homeCreated=true;
-            if(options.mfs){
-                struct WritableMfs:MfsSource{HfsPlus::Source& s;explicit WritableMfs(HfsPlus::Source& v):s(v){}uint64_t Length()const override{return s.Size();}bool Writable()const override{return s.Writable();}bool ReadAt(uint64_t at,void* p,size_t n)override{try{s.Read(at,p,n);return true;}catch(...){return false;}}bool WriteAt(uint64_t at,const void* p,size_t n)override{try{s.Write(at,p,n);return true;}catch(...){return false;}}bool Flush()override{try{s.Flush();return true;}catch(...){return false;}}}mfs(*source);
-                std::string name,error;if(!MfsImage::EncodeName(MacBrowser::Wide(options.name),name,error,27)||!MfsImage::Format(mfs,name,options.size,options.dc42,error))throw HfsPlus::Error(error);
-            }else {HfsPlus::Volume::Format(*source, options.name, options.journaled, options.kind, options.expanded);if(options.external){auto uuid=HfsPlus::CreateExternalJournalImage(externalPath.c_str());journalCreated=true;HfsPlus::Volume volume(*source,true);volume.UseExternalJournal(uuid);}}
-            complete=true;return Storage::Result{};
-        },changed),
-        "Format Mac image",false,false,false,parent);
-    if (result.code) {
-        AfxMessageBox(result.message.c_str());
-        return;
-    }
-    session.MacBrowser().OpenImage(path,externalPath);
+    StartMacImageFormat(session,{std::move(path),std::move(externalPath),std::move(options.name),options.size,
+                                options.kind,options.journaled,options.mfs,options.dc42,options.expanded});
 }
 #ifdef HFV_TESTING
 int RunHfsPlusUiTest(const char *directory) {
@@ -218,6 +283,58 @@ int RunHfsPlusUiTest(const char *directory) {
         }
         for(int choice=3;choice<5;++choice){format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,choice);format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);require(!format.GetDlgItem(IDC_HPLUS_EXTERNAL)->IsWindowEnabled()&&!format.GetDlgItem(IDC_HPLUS_EXPANDED)->IsWindowEnabled()&&!format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"400 KiB","MFS formatter defaults/journal state");}
         format.DestroyWindow();
+        const auto folder=VolumeCoord::Wide(directory);
+        auto run=[&](MacImageFormatRequest request){
+            auto job=Storage::worker().submit(MakeMacImageFormatJob(std::move(request)));
+            job->wait();
+            return job->result();
+        };
+        using Kind=HfsPlus::Volume::FormatKind;
+        for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+            const auto output=folder+L"\\formatted-"+std::to_wstring(int(kind))+L".dsk";
+            require(!run({output,{},u"Background",8*1024*1024,kind}).code,"format HFS+ or HFSX image");
+            auto image=HfsPlus::OpenImage(output.c_str(),false);
+            HfsPlus::Volume volume(*image,false);
+            require(volume.IsHfsX()==(kind!=Kind::HfsPlus)&&
+                    volume.CaseSensitive()==(kind==Kind::HfsXCaseSensitive),"formatted case mode changed");
+        }
+        for(const bool dc42:{false,true}){
+            const auto output=folder+(dc42?L"\\formatted.dc42":L"\\formatted-mfs.dsk");
+            require(!run({output,{},u"MFS Background",400*1024,Kind::HfsPlus,false,true,dc42}).code,
+                    "format a 400 KiB MFS image");
+            auto image=HfsPlus::OpenImage(output.c_str(),false);
+            FormatMfsSource source(*image);
+            MfsImage volume;
+            require(volume.Open(source)&&image->Size()==(dc42?400*1024+84+800*12:400*1024),
+                    "formatted MFS image could not be opened at its selected size");
+        }
+        const auto home=folder+L"\\external.dsk";
+        const auto journal=folder+L"\\external-journal.img";
+        require(!run({home,journal,u"External",8*1024*1024}).code,"format image with external journal");
+        {
+            auto image=HfsPlus::OpenImage(home.c_str(),false,journal.c_str());
+            require(HfsPlus::Volume(*image,false).ExternalJournal(),"formatted external journal did not reopen");
+        }
+        const auto declined=folder+L"\\declined.dsk";
+        require(run({declined,journal,u"Guarded",8*1024*1024}).code&&
+                GetFileAttributesW(declined.c_str())==INVALID_FILE_ATTRIBUTES&&
+                GetFileAttributesW(journal.c_str())!=INVALID_FILE_ATTRIBUTES,
+                "existing journal collision did not preserve the journal and clean up the new image");
+        const auto failedHome=folder+L"\\failed.dsk";
+        const auto failedJournal=folder+L"\\failed-journal.img";
+        bool injected=false;
+        HfsPlus::workerIoFault=[&](bool writing,uint64_t,size_t){
+            if(writing&&!injected&&GetFileAttributesW(failedJournal.c_str())!=INVALID_FILE_ATTRIBUTES){
+                injected=true;
+                throw HfsPlus::Error("Injected external journal write failure");
+            }
+        };
+        const auto failed=run({failedHome,failedJournal,u"Failure",8*1024*1024});
+        HfsPlus::workerIoFault={};
+        require(failed.code&&injected&&GetFileAttributesW(failedHome.c_str())==INVALID_FILE_ATTRIBUTES&&
+                GetFileAttributesW(failedJournal.c_str())==INVALID_FILE_ATTRIBUTES,
+                "external journal failure left outputs behind");
+        fprintf(report,"PASS: all image formats, external journal reopen, existing journal preservation and rollback of both new outputs.\n");
         fprintf(report, "PASS: active Unicode name and formatter dialogs; all HFS+/HFSX/MFS format choices, "
                         "journal default and owner restoration. Main-browser regressions run separately. "
                         "No computer control or physical devices used.\n");

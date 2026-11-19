@@ -11,10 +11,11 @@ namespace HfsPlus {
 std::function<void(bool,uint64_t,size_t)> workerIoFault;
 #endif
 namespace {
-class Image final : public Source {
+class Image final : public NewImage {
     HANDLE file_ = INVALID_HANDLE_VALUE;
     uint64_t size_ = 0;
     bool writable_ = false;
+    bool discard_ = false;
     std::wstring path_;
     std::wstring journalPath_;std::shared_ptr<Source> journalDevice_;std::string journalUuid_;
     void Io(uint64_t offset, void *bytes, size_t n, bool write) {
@@ -39,12 +40,13 @@ class Image final : public Source {
     }
 
   public:
-    Image(const wchar_t *path, bool write, uint64_t createSize,const wchar_t* journalPath=nullptr) :path_(path?path:L""),journalPath_(journalPath?journalPath:L"") {
+    Image(const wchar_t *path, bool write, uint64_t createSize,const wchar_t* journalPath=nullptr,bool discard=false)
+        :discard_(discard),path_(path?path:L""),journalPath_(journalPath?journalPath:L"") {
         Disk::Check(path && *path && wcsncmp(path, L"\\\\.\\", 4) != 0 &&
                         wcsncmp(path, L"\\\\?\\GLOBALROOT", 14) != 0,
                     "Physical device paths are not HFS+ images");
         if(!createSize)file_=ImageHandleTransfer::Open(path,write);
-        if(file_==INVALID_HANDLE_VALUE)file_ = CreateFileW(path, GENERIC_READ | (write ? GENERIC_WRITE : 0), FILE_SHARE_READ, nullptr,
+        if(file_==INVALID_HANDLE_VALUE)file_ = CreateFileW(path, GENERIC_READ | (write ? GENERIC_WRITE : 0) | (discard ? DELETE : 0), FILE_SHARE_READ, nullptr,
                             createSize ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         Disk::Check(file_ != INVALID_HANDLE_VALUE, "Cannot open HFS+ image (it may be in use)");
         try {
@@ -66,14 +68,25 @@ class Image final : public Source {
             size_ = length.QuadPart;
             writable_ = write;
         } catch (...) {
+            Discard();
             CloseHandle(file_);
             file_ = INVALID_HANDLE_VALUE;
             throw;
         }
     }
     ~Image() {
-        if (file_ != INVALID_HANDLE_VALUE)
+        if (file_ != INVALID_HANDLE_VALUE) {
+            Discard();
             CloseHandle(file_);
+        }
+    }
+    void Keep() noexcept override {discard_=false;}
+    bool Discard() noexcept override {
+        if(!discard_)return true;
+        FILE_DISPOSITION_INFO remove{TRUE};
+        if(!SetFileInformationByHandle(file_,FileDispositionInfo,&remove,sizeof(remove)))return false;
+        discard_=false;
+        return true;
     }
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{std::vector<std::pair<std::wstring,uintptr_t>> out{{path_,uintptr_t(file_)}};if(journalDevice_){auto extra=journalDevice_->WorkerFiles();out.insert(out.end(),extra.begin(),extra.end());}return out;}
     std::shared_ptr<Source> OpenJournal(const Bytes&)override;
@@ -136,13 +149,29 @@ std::unique_ptr<Source> CreateImage(const wchar_t *path, uint64_t size,const wch
     return std::unique_ptr<Source>(new Image(path, true, size,externalJournal));
 }
 
-std::string CreateExternalJournalImage(const wchar_t* path,uint64_t size){
+std::unique_ptr<NewImage> CreateFormatOutput(const wchar_t* path,uint64_t size,const wchar_t* journal)
+{
+ Disk::Check(size&&size<=INT64_MAX,"Invalid format output length");
+ return std::make_unique<Image>(path,true,size,journal,true);
+}
+
+std::string InitializeExternalJournalImage(Source& file)
+{
+ const auto size=file.Size();
  Disk::Check(size>=8*1024*1024&&size%4096==0,"External journal disk image must be at least 8 MiB and 4096-byte aligned");
  GUID partition{},disk{};Disk::Check(SUCCEEDED(CoCreateGuid(&partition))&&SUCCEEDED(CoCreateGuid(&disk)),"Cannot generate journal identity");
  char text[37];sprintf_s(text,"%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X",partition.Data1,partition.Data2,partition.Data3,partition.Data4[0],partition.Data4[1],partition.Data4[2],partition.Data4[3],partition.Data4[4],partition.Data4[5],partition.Data4[6],partition.Data4[7]);
- auto file=CreateImage(path,size);try{auto little=[](uint8_t* p,uint64_t n,unsigned bytes){for(unsigned i=0;i<bytes;++i)p[i]=uint8_t(n>>(8*i));};uint64_t sectors=size/512;Bytes table(128*128,0);auto type=Uuid("4A6F7572-6E61-11AA-AA11-00306543ECAC");std::reverse(type.begin(),type.begin()+4);std::reverse(type.begin()+4,type.begin()+6);std::reverse(type.begin()+6,type.begin()+8);memcpy(table.data(),type.data(),16);memcpy(table.data()+16,&partition,16);little(table.data()+32,2048,8);little(table.data()+40,sectors-34,8);const char* label="HFVExplorer external journal";for(unsigned i=0;label[i];++i)table[56+i*2]=uint8_t(label[i]);
- Bytes mbr(512,0);mbr[448]=2;mbr[450]=0xee;mbr[451]=mbr[452]=mbr[453]=0xff;little(mbr.data()+454,1,4);little(mbr.data()+458,(std::min)(sectors-1,uint64_t(UINT32_MAX)),4);mbr[510]=0x55;mbr[511]=0xaa;file->Write(0,mbr.data(),mbr.size());file->Write(1024,table.data(),table.size());file->Write((sectors-33)*512,table.data(),table.size());
- for(bool backup:{false,true}){Bytes h(512,0);memcpy(h.data(),"EFI PART",8);little(h.data()+8,0x10000,4);little(h.data()+12,92,4);little(h.data()+24,backup?sectors-1:1,8);little(h.data()+32,backup?1:sectors-1,8);little(h.data()+40,34,8);little(h.data()+48,sectors-34,8);memcpy(h.data()+56,&disk,16);little(h.data()+72,backup?sectors-33:2,8);little(h.data()+80,128,4);little(h.data()+84,128,4);little(h.data()+88,Crc(table),4);Bytes check(h.begin(),h.begin()+92);little(h.data()+16,Crc(check),4);file->Write((backup?sectors-1:1)*512,h.data(),h.size());}
- file->Flush();return text;}catch(...){file.reset();DeleteFileW(path);throw;}
+ auto little=[](uint8_t* p,uint64_t n,unsigned bytes){for(unsigned i=0;i<bytes;++i)p[i]=uint8_t(n>>(8*i));};uint64_t sectors=size/512;Bytes table(128*128,0);auto type=Uuid("4A6F7572-6E61-11AA-AA11-00306543ECAC");std::reverse(type.begin(),type.begin()+4);std::reverse(type.begin()+4,type.begin()+6);std::reverse(type.begin()+6,type.begin()+8);memcpy(table.data(),type.data(),16);memcpy(table.data()+16,&partition,16);little(table.data()+32,2048,8);little(table.data()+40,sectors-34,8);const char* label="HFVExplorer external journal";for(unsigned i=0;label[i];++i)table[56+i*2]=uint8_t(label[i]);
+ Bytes mbr(512,0);mbr[448]=2;mbr[450]=0xee;mbr[451]=mbr[452]=mbr[453]=0xff;little(mbr.data()+454,1,4);little(mbr.data()+458,(std::min)(sectors-1,uint64_t(UINT32_MAX)),4);mbr[510]=0x55;mbr[511]=0xaa;file.Write(0,mbr.data(),mbr.size());file.Write(1024,table.data(),table.size());file.Write((sectors-33)*512,table.data(),table.size());
+ for(bool backup:{false,true}){Bytes h(512,0);memcpy(h.data(),"EFI PART",8);little(h.data()+8,0x10000,4);little(h.data()+12,92,4);little(h.data()+24,backup?sectors-1:1,8);little(h.data()+32,backup?1:sectors-1,8);little(h.data()+40,34,8);little(h.data()+48,sectors-34,8);memcpy(h.data()+56,&disk,16);little(h.data()+72,backup?sectors-33:2,8);little(h.data()+80,128,4);little(h.data()+84,128,4);little(h.data()+88,Crc(table),4);Bytes check(h.begin(),h.begin()+92);little(h.data()+16,Crc(check),4);file.Write((backup?sectors-1:1)*512,h.data(),h.size());}
+ file.Flush();return text;
+}
+std::string CreateExternalJournalImage(const wchar_t* path,uint64_t size)
+{
+ Disk::Check(size>=8*1024*1024&&size%4096==0,"External journal disk image must be at least 8 MiB and 4096-byte aligned");
+ auto output=CreateFormatOutput(path,size);
+ auto uuid=InitializeExternalJournalImage(*output);
+ output->Keep();
+ return uuid;
 }
 } // namespace HfsPlus
