@@ -355,10 +355,8 @@ WireRequest DecodeRequest(Data &d) {
         LegacyConversion legacy;
         legacy.source = ParseEndpoint(d, false).location;
         legacy.destination = ParseEndpoint(d, false).location;
-        legacy.source.LegacyVolume();
-        legacy.source.LegacyPath();
-        legacy.destination.LegacyVolume();
-        legacy.destination.LegacyPath();
+        Check((legacy.source.IsWindows()||legacy.source.IsClassic())&&
+              (legacy.destination.IsWindows()||legacy.destination.IsClassic()),"Invalid conversion endpoints");
         legacy.directory = d.flag();
         legacy.move = d.flag();
         auto output = d.get(), input = d.get();

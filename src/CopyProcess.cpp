@@ -304,37 +304,8 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
     }
     auto execution = request;
     if (request.OperationKind() == Kind::LegacyCopy) {
-        const auto& conversion = request.Legacy();
-        const char mode = conversion.source.IsClassic() ? conversion.options.output : conversion.options.input;
-        auto legacyAddress = [&](const Location& original, const Endpoint& captured, bool folder) {
-            // The shared transfer engine already has typed endpoints. Only
-            // the older converter needs names expressed as legacy HFS paths.
-            if ((mode && strchr("ambt5", mode)) || captured.origin.kind != WorkerOrigin::Image ||
-                !captured.location.IsMounted() || !ExecutionFor(*captured.location.Volume()).classicConversion)
-                return Capture(original).location;
-            std::string path(":");
-            for (const auto& segment : captured.path) {
-                hfsdirent entry{};
-                Check(captured.location.Volume()->GetClassicProperties(segment.id, entry),
-                      "Cannot identify a classic conversion path");
-                const std::string macName(entry.name);
-                mac_to_pc_charset(reinterpret_cast<unsigned char*>(entry.name));
-                const std::string legacyName(entry.name);
-                pc_to_mac_charset(reinterpret_cast<unsigned char*>(entry.name));
-                Check(macName == entry.name, "The legacy converter cannot represent this classic HFS name");
-                if (path.size() > 1) path += ':';
-                path += legacyName;
-            }
-            if (folder && path.back() != ':') path += ':';
-            return Location::Classic(AnsiPath(captured.origin.path), std::move(path));
-        };
-        if (request.Legacy().selection) {
-            execution.Legacy().source = legacyAddress(request.Legacy().source, sources.front(), false);
-            execution.Legacy().destination = legacyAddress(request.Legacy().destination, target, true);
-        } else {
-            execution.Legacy().source = Capture(request.Legacy().source).location;
-            execution.Legacy().destination = Capture(request.Legacy().destination).location;
-        }
+        execution.Legacy().source=Capture(request.Legacy().source).location;
+        execution.Legacy().destination=Capture(request.Legacy().destination).location;
     }
     WorkerStorageHandoff handoff;
     Storage::Result result;

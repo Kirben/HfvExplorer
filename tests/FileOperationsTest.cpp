@@ -57,13 +57,13 @@ void Save(const std::string& path,const char* data){CFile file;Check(file.Open(p
 #ifdef HFV_FLOPPY_TESTING
 class OperationFloppy:public FloppyWriteApi {
 public:
- FakeFloppy disk;bool locked=false,denyLock=false;unsigned writes=0;
+ FakeFloppy disk;bool locked=false,denyLock=false,denyWrites=false;unsigned writes=0;
  explicit OperationFloppy(const std::vector<BYTE>& data):disk(data){}
  UINT DriveType(int d)override{return disk.DriveType(d);}HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{return disk.Open(p,a,s,f);}
  bool Geometry(HANDLE h,DISK_GEOMETRY& g)override{return disk.Geometry(h,g);}bool Verify(HANDLE h,DWORD& n)override{return disk.Verify(h,n);}bool Read(HANDLE h,ULONGLONG at,DWORD n,void* p,DWORD& got)override{return disk.Read(h,at,n,p,got);}void Close(HANDLE h)override{disk.Close(h);}
  bool Lock(HANDLE)override{if(denyLock){SetLastError(ERROR_ACCESS_DENIED);return false;}locked=true;return true;}bool Dismount(HANDLE)override{return locked;}bool Unlock(HANDLE)override{locked=false;return true;}
  bool FormatTracks1440(HANDLE)override{throw HfsPlus::Error("Mutation must not format a floppy");}
- bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{Check(locked&&at<=disk.media.size()&&n<=disk.media.size()-at,"unsafe simulated floppy write");memcpy(disk.media.data()+size_t(at),p,n);got=n;++writes;return true;}
+ bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{Check(locked&&at<=disk.media.size()&&n<=disk.media.size()-at,"unsafe simulated floppy write");if(denyWrites){got=0;SetLastError(ERROR_WRITE_FAULT);return false;}memcpy(disk.media.data()+size_t(at),p,n);got=n;++writes;return true;}
  bool Flush(HANDLE)override{SetLastError(ERROR_INVALID_FUNCTION);return false;}
 };
 #endif
@@ -183,6 +183,24 @@ int RunFileOperationsTest(const char* directory){
    for(auto choice:{Storage::ConflictChoice::Cancel,Storage::ConflictChoice::Skip}){auto overwrite=Submit(import);Conflict(overwrite.Job());overwrite.Job()->resolve(choice);Wait(overwrite);Check(readImported()=="OLD"&&Load(root+"\\Duplicate").size()==8,"declined floppy overwrite changed destination/source");if(choice==Storage::ConflictChoice::Cancel)Check(overwrite.Job()->result().error==ERROR_CANCELLED,"floppy Cancel not propagated");else Check(!overwrite.Job()->result().code&&!overwrite.Snapshot().complete&&overwrite.Job()->progress().skipped==1,"floppy Skip not propagated");}
    Request wrappedExport;wrappedExport = FileOperations::LegacyConversion{};wrappedExport.Legacy().source=FileOperations::Location::FromLegacy(path,"Floppy:Duplicate");wrappedExport.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\container.bin");wrappedExport.Legacy().options.output='m';wrappedExport.Legacy().options.appledouble=false;Pass(Submit(wrappedExport));auto wrapped=import;wrapped.SetLegacySourcePath(wrappedExport.Legacy().destination.LegacyPath());wrapped.Legacy().options.input='m';auto embedded=Submit(wrapped);Conflict(embedded.Job());Check(embedded.Job()->conflict().find("Duplicate")!=std::string::npos,"overwrite checked container filename rather than embedded Mac name");embedded.Job()->resolve(Storage::ConflictChoice::Skip);Wait(embedded);Check(!embedded.Job()->result().code&&embedded.Job()->progress().skipped==1&&readImported()=="OLD","skipped converted-name import changed floppy data");
    auto replace=Submit(import);Conflict(replace.Job());replace.Job()->resolve(Storage::ConflictChoice::Replace);Pass(replace);Check(readImported()=="NEW DATA","confirmed floppy replacement not saved");
+   const auto moveSource=root+"\\Converted move.txt";
+   Save(moveSource,"first\r\nsecond\r\n");
+   auto convertedMove=import;
+   convertedMove.SetLegacySourcePath(moveSource);
+   convertedMove.Legacy().options.input='t';
+   convertedMove.Legacy().move=true;
+   convertedMove.Legacy().destination.BindMediaGeneration(disk.disk.changeCount);
+   auto unchangedDisk=disk.disk.media;
+   disk.denyWrites=true;
+   auto failedMove=Submit(convertedMove);Wait(failedMove);
+   Check(failedMove.Job()->result().code&&!failedMove.Job()->result().moved&&
+         GetFileAttributesA(moveSource.c_str())!=INVALID_FILE_ATTRIBUTES&&disk.disk.media==unchangedDisk&&!disk.locked,
+         "failed converted floppy write removed its Cut source or changed untouched media");
+   disk.denyWrites=false;
+   auto movedConversion=Submit(convertedMove);Pass(movedConversion);
+   Check(movedConversion.Job()->result().moved&&GetFileAttributesA(moveSource.c_str())==INVALID_FILE_ATTRIBUTES&&!disk.locked,
+         "verified converted floppy write did not commit before removing its Cut source");
+   fprintf(report,"PASS: typed text conversion retains a Cut source on floppy write failure and removes it only after verified retry.\n");
    auto launch=Location::Classic(path,"Floppy:Duplicate");
    launch.BindMediaGeneration(disk.disk.changeCount);
    Storage::Job capture;
