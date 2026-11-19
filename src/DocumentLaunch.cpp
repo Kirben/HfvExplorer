@@ -981,8 +981,7 @@ bool Launchers::Run()
   }
   program=type;
  }else if(type!="APPL"){
-  program=session_.Document()->hfs_find_match("APPL",creator.GetBuffer(),request_.classicSlot);
-  creator.ReleaseBuffer();
+  program=session_.Document()->FindClassicLauncher("APPL",creator,request_.classicSlot);
   if(program.IsEmpty()){
    if(type=="TEXT"||type=="ttro"||type=="ttxt")program="System:Shareware:Tex-Edit:Tex-Edit";
    else{

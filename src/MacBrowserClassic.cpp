@@ -56,6 +56,7 @@ class Classic final : public Volume, public WorkerEndpoint {
     std::shared_ptr<HfsPlus::Source> media_;
     int cdDrive_=-1;
     std::map<uint32_t,std::string> paths_;
+    std::map<uint32_t,uint32_t> artworkIds_;
     uint32_t next_ = 3;
     uint32_t Id(const std::string& path, uint32_t cnid=0) {
         if (session_) {
@@ -254,6 +255,64 @@ public:
         std::reverse(route.begin(),route.end());
         return route;
     }
+    std::vector<ClassicAncestor> ResolveFolders(const std::string& relative, bool showHidden) {
+        LegacyEngine::Scope engine(context_);
+        RootScope scope(volume_);
+        auto path=Path(2);
+        uint32_t id=HFS_CNID_ROOTDIR;
+        size_t start=0;
+        while(start<relative.size()) {
+            const auto end=relative.find(':',start);
+            auto component=relative.substr(start,end==relative.npos?end:end-start);
+            if(component.empty())break;
+            pc_to_mac_charset(reinterpret_cast<unsigned char*>(component.data()));
+            if(path.back()!=':')path+=':';
+            path+=component;
+            hfsdirent entry{};
+            if(hfs_stat(volume_,path.data(),&entry)<0){
+                if(errno==ENOENT)break;
+                Check(false);
+            }
+            if(!(entry.flags&HFS_ISDIR)||(!showHidden&&(entry.fdflags&HFS_FNDR_ISINVISIBLE)))break;
+            id=uint32_t(entry.cnid);
+            if(end==relative.npos)break;
+            start=end+1;
+        }
+        return Ancestors(id);
+    }
+
+    std::string FindApplication(const char* type,const char* creator,bool showHidden,Storage::Job& job) {
+        LegacyEngine::Scope engine(context_);
+        RootScope scope(volume_);
+        std::vector<std::string> pending{":"};
+        std::set<uint32_t> visited{HFS_CNID_ROOTDIR};
+        while(!pending.empty()){
+            auto path=std::move(pending.back());
+            pending.pop_back();
+            auto dir=hfs_opendir(volume_,path.data());
+            Check(dir!=nullptr);
+            struct CloseDir {hfsdir* value;~CloseDir(){hfs_closedir(value);}} close{dir};
+            hfsdirent entry{};
+            while(hfs_readdir(dir,&entry)==0){
+                if(job.cancelled())throw Storage::Cancelled();
+                auto child=path+entry.name;
+                if(entry.flags&HFS_ISDIR){
+                    if(visited.insert(uint32_t(entry.cnid)).second)pending.push_back(child+":");
+                }else if((showHidden||!(entry.fdflags&HFS_FNDR_ISINVISIBLE))&&
+                         !memcmp(entry.u.file.type,type,4)&&!memcmp(entry.u.file.creator,creator,4)){
+                    mac_to_pc_charset(reinterpret_cast<unsigned char*>(child.data()));
+                    return child;
+                }
+            }
+            if(errno!=ENOENT)Check(false);
+        }
+        return {};
+    }
+
+    void ReadArtwork(uint32_t catalogId,uint64_t offset,void* data,size_t size) {
+        Read(artworkIds_.at(catalogId),1,offset,data,size);
+    }
+
     std::vector<ClassicCatalogEntry> Catalog(Storage::Job* job) {
         LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);
@@ -274,6 +333,8 @@ public:
             ClassicCatalogEntry record;
             record.name=catalogKey.ckrCName;
             memcpy(record.data.data(),&catalogData,sizeof(catalogData));
+            if(catalogData.cdrType==cdrFilRec&&entry.u.file.rsize)
+                artworkIds_[uint32_t(entry.cnid)]=Id(path+record.name,uint32_t(entry.cnid));
             if(catalogData.cdrType==cdrDirRec){
                 auto child=path+record.name+":";
                 if(auto sub=hfs_opendir(volume_,child.data())){
@@ -283,6 +344,7 @@ public:
                     while(hfs_readdir2(sub,&entry,&key,&data)==0){
                         if(job&&job->cancelled())throw Storage::Cancelled();
                         if(data.cdrType==cdrFilRec&&!strcmp(key.ckrCName,"Icon\r")){
+                            artworkIds_[uint32_t(entry.cnid)]=Id(child+key.ckrCName,uint32_t(entry.cnid));
                             record.folderIcon.emplace();
                             memcpy(record.folderIcon->data(),&data,sizeof(data));
                             break;
@@ -385,6 +447,15 @@ std::vector<ClassicAncestor> ReadClassicAncestors(Volume& volume,uint32_t id) {
     auto classic=dynamic_cast<Classic*>(&volume);
     if(!classic)throw HfsPlus::Error("A classic HFS catalog is required");
     return classic->Ancestors(id);
+}
+std::vector<ClassicAncestor> ResolveClassicFolders(Volume& volume,const std::string& relative,bool showHidden) {
+    return dynamic_cast<Classic&>(volume).ResolveFolders(relative,showHidden);
+}
+std::string FindClassicApplication(Volume& volume,const char* type,const char* creator,bool showHidden,Storage::Job& job) {
+    return dynamic_cast<Classic&>(volume).FindApplication(type,creator,showHidden,job);
+}
+void ReadClassicArtwork(Volume& volume,uint32_t catalogId,uint64_t offset,void* data,size_t size) {
+    dynamic_cast<Classic&>(volume).ReadArtwork(catalogId,offset,data,size);
 }
 static std::string ClassicImagePath(const std::wstring& path) {
     BOOL lost=FALSE;

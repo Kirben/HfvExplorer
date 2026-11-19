@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "Mactypes.h"
+#include "ClassicCatalog.h"
 #include "FragmentedTestData.h"
 #include <stdio.h>
 #include <vector>
@@ -83,6 +84,16 @@ void RunFragmentedGuiTests(const char* largeManifest,FILE* report) {
   CHFVFile fresh; expect(fresh.open_by_CDR(&volume,&found,fork?CHFVFile::OpenResourceFork:CHFVFile::OpenDataFork)!=0,"reopen fragmented fork");
   fresh.Seek(m.forkSize-23,CFile::begin); expect(fresh.Read(bytes.data(),113)==23,"direct late seek and EOF clipping");
   for(unsigned i=0;i<23;++i) expect(bytes[i]==LargeImagePattern(m.forkSize-23+i,17+fork*101),"direct late seek fidelity");
+ }
+ {
+  auto shared=MacBrowser::OpenClassic(m.image,":",false);
+  const auto records=MacBrowser::ReadClassicCatalog(*shared,nullptr);
+  expect(records.size()==116,"shared classic reader enumerates fragmented catalog");
+  const auto start=m.forkSize-23;
+  BYTE tail[23]{};
+  MacBrowser::ReadClassicArtwork(*shared,m.fileID,start,tail,sizeof(tail));
+  for(unsigned i=0;i<sizeof(tail);++i)
+   expect(tail[i]==LargeImagePattern(start+i,118),"shared resource reader uses overflow extents");
  }
  MDB mdb=volume.m_MDB; BTHdrRec tree=volume.m_extents_file.m_header_rec;
  // Missing records must produce a bounded short read, never guessed sectors.

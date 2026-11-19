@@ -190,12 +190,6 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});
  snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
 
- // Finder artwork still uses the document's cached resource reader.
- if(revisions_[volinx]!=snapshot.revision){
-  selected.close();
-  if(!selected.open())throw HfsPlus::Error("Cannot reload changed classic HFS metadata");
-  revisions_[volinx]=snapshot.revision;
- }
  const DWORD attributes=(selected.m_is_cd||selected.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(image.c_str());
  const bool writable=!selected.m_is_cd&&(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY));
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
@@ -207,8 +201,11 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
   const auto folder=volume->Stat(2);
   snapshot.finderMode=get_finder_view_mode(HfsPlus::Disk::U16(folder.finder.data()+14));
  }
- volume->Close();
-
+ struct ResetArtwork {
+  MacBrowser::Volume*& ptr;
+  ~ResetArtwork(){ptr=nullptr;}
+ } resetArtwork{artworkVolume_};
+ artworkVolume_=volume.get();
  LegacyEngine::Scope finderResources;
  int x=INT_MAX,y=INT_MAX;
  for(auto& record:records){
@@ -238,6 +235,8 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  if(x!=INT_MAX)snapshot.originX=x;
  if(y!=INT_MAX)snapshot.originY=y;
  OwnIcons(snapshot);
+ volume->Close();
+ revisions_[volinx]=snapshot.revision;
  return snapshot;
 }
 

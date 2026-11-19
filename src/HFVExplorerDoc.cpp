@@ -28,6 +28,7 @@
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "BrowserDirectory.h"
+#include "ClassicCatalog.h"
 #include "BrowserPresentation.h"
 #include "RefreshStorage.h"
 #include "MediaDiscovery.h"
@@ -458,176 +459,6 @@ void CHFVExplorerDoc::Dump(CDumpContext& dc) const
 
 // Catalog lookup cursor belongs to this document/session.
 
-BOOL CHFVExplorerDoc::hfs_find_item( LongInt node_index, hfs_item_type *pitem )
-{
-	NodeDescriptor ndescr;
-	CatKeyRec catkeyrec;
-	CatDataRec catdatarec;
-	LongInt index;
-	unsigned char key_length;
-	Integer record, node_offset;
-
-	unsigned long fnode0;
-	unsigned long nodestart;
-	
-	nodestart = node_index * NODESIZE;
-	fnode0 = nodestart;
-
-	speed_fp->Seek( fnode0, CFile::begin );
-	speed_fp->Read( &ndescr, sizeof(NodeDescriptor) );
-	macpc_ndescr( &ndescr );
-	switch( ndescr.ndType ) {
-		case ndIndxNode:
-			for( record=0; record<ndescr.ndNRecs; record++) {
-				speed_fp->Read( &key_length, 1 );
-				catkeyrec.ckrKeyLen = key_length;
-				speed_fp->Read( &catkeyrec.ckrResrv1, 0x25 );
-				macpc_catkeyrec( &catkeyrec );
-				speed_fp->Read( &index, sizeof(LongInt) );
-				if(key_length) { // not deleted index node
-					MACPC_D(index);
-					fnode0 = speed_fp->Seek( 0, CFile::current );
-					if(hfs_find_item( index, pitem )) { // recursion
-						return(1);
-					}
-					speed_fp->Seek( fnode0, CFile::begin );
-				}
-			}
-			break;
-		case ndHdrNode:
-			// never here
-			break;
-		case ndMapNode:
-			// not yet
-			break;
-		case ndLeafNode:
-			for( record=0; record<ndescr.ndNRecs; record++) {
-				speed_fp->Seek( nodestart + NODESIZE - (record+1)*2, CFile::begin );
-				speed_fp->Read( &node_offset, sizeof(Integer) );
-				MACPC_W(node_offset);
-				speed_fp->Seek( nodestart + node_offset, CFile::begin );
-				speed_fp->Read( &key_length, 1 );
-
-				if(key_length) { // not deleted node
-					catkeyrec.ckrKeyLen = key_length;
-					speed_fp->Read( &catkeyrec.ckrResrv1, key_length );
-					macpc_catkeyrec( &catkeyrec );
-					if( (key_length & 1) == 0 ) 
-						speed_fp->Seek( 1, CFile::current );
-					speed_fp->Read( &catdatarec, sizeof(CatDataRec) );
-					macpc_catdatarec( &catdatarec );
-
-					int found = 0;
-					if((catdatarec.u.f.filUsrWds.fdFlags & fInvisible) &&
-							!m_mac_show_invisibles) 
-					{
-						found = 0;
-					} else {
-						switch( pitem->search_type ) {
-							case SEARCH_TYPE_FIND_NAME:
-								if(catkeyrec.ckrParID == pitem->id) {
-									// if(pitem->searchname && 
-									//	 pitem->searchname->CompareNoCase(CString(catkeyrec.ckrCName)) == 0) found = 1;
-									if(*pitem->searchname && stricmp(pitem->searchname,(char *)catkeyrec.ckrCName) == 0) found = 1;
-								}
-								break;
-							case SEARCH_TYPE_ID:
-									if(catkeyrec.ckrParID == pitem->id) {
-									found = 1;
-								}
-								break;
-							case SEARCH_TYPE_FILES:
-								if(catdatarec.cdrType == cdrFilRec &&
-									 catdatarec.u.f.filUsrWds.fdType == pitem->id &&
-									 catdatarec.u.f.filUsrWds.fdCreator == pitem->id2)
-								{
-									found = 1;
-								}
-								break;
-							case SEARCH_TYPE_FOLDERS:
-								if(catdatarec.cdrType == cdrDirRec) found = 1;
-								break;
-							case SEARCH_TYPE_ALL:
-								found = 1;
-								break;
-							case SEARCH_TYPE_THISFOLDER:
-								if(catdatarec.cdrType == cdrDirRec) {
-									if(catdatarec.u.d.dirDirID == pitem->id) {
-										found = 1;
-									}
-								}
-								break;
-						} // switch
-					} // if else
-
-					if( found ) {
-						pitem->index_found++;
-						if( pitem->index_to_found == pitem->index_found ||
-								pitem->search_type == SEARCH_TYPE_FILES ) {
-							memcpy( &pitem->catkeyrec, &catkeyrec, key_length );
-							memcpy( &pitem->catdatarec, &catdatarec, sizeof(CatDataRec) );
-                            return(1);
-						}
-					}
-				}
-			}
-			break;
-	}
-	return(0);
-}
-
-BOOL CHFVExplorerDoc::hfs_find_first( 
-	int volinx,
-	long id, 
-	long id2, 
-	CString searchname,
-	hfs_item_type *pitem, 
-	int stype )
-{
-	memset( pitem, 0, sizeof(hfs_item_type) );
-	pitem->volinx = volinx;
-	if(searchname != "") {
-		strcpy( pitem->searchname, searchname );
-	} else {
-		*pitem->searchname = 0;
-	}
-	pitem->id = id;
-	pitem->id2 = id2;
-	pitem->next_index = 0;
-
-	pitem->index_to_found = 0;
-	pitem->index_found = -1;
-	pitem->search_type = stype;
-
-	CHFVVolume *pvol = &m_volumes[pitem->volinx];
-	speed_fp = &pvol->m_catalog_file;
-
-	if(hfs_find_item( m_volumes[volinx].m_catalog_file.m_header_rec.bthRoot, pitem )) {
-		pitem->next_index++;
-		return(1);
-	} else {
-		return(0);
-	}
-}
-
-BOOL CHFVExplorerDoc::hfs_find_next( hfs_item_type *pitem )
-{
-	pitem->index_to_found = pitem->next_index;
-	pitem->index_found = -1;
-
-	if(hfs_find_item( 
-		m_volumes[pitem->volinx].m_catalog_file.m_header_rec.bthRoot,
-		pitem )) {
-		pitem->next_index++;
-		return(1);
-	} else {
-		return(0);
-	}
-}
-
-// not used any more
-
-
 void CHFVExplorerDoc::set_current_hitem( HTREEITEM hItem )
 {
 	CHFVExplorerApp	*pApp;
@@ -911,57 +742,38 @@ void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
 #pragma optimize("",on)
 
 // must be modified to search fat volumes too
-CString CHFVExplorerDoc::hfs_find_match( 
-	LPSTR type, 
-	LPSTR creator, 
-	int prefered_volinx )
+CString CHFVExplorerDoc::FindClassicLauncher(const char* type,const char* creator,int preferredVolume)
 {
-	unsigned long ut, uc;
-	int found = 0;
-	hfs_item_type item;
-	int volinx;
-
-	ut = string_to_long( (unsigned char *)type );
-	uc = string_to_long( (unsigned char *)creator );
-
-	CString path;
-	path = "";
-	START_TIME_CONSUMING(1000);
-
-	found = 0; // hfs_find_first( prefered_volinx, ut, uc, "", &item, SEARCH_TYPE_FILES );
-	prefered_volinx = -1;
-
-	std::unique_ptr<VolumeCoord::OperationLease> associationRead;
-	if(found) {
-		volinx = prefered_volinx;
-	} else {
-		for( volinx=0; volinx<m_hfs_count; volinx++) {
-		// for( volinx=0; volinx<m_hfs_count && volinx != prefered_volinx; volinx++) {
-   if(m_volumes[volinx].m_free||m_volumes[volinx].m_file_name.IsEmpty())continue;
-   try{associationRead.reset(new VolumeCoord::OperationLease({{VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name)),VolumeCoord::Mode::Read}}));}catch(const VolumeCoord::Busy&){continue;}
-			found = hfs_find_first( volinx, ut, uc, "", &item, SEARCH_TYPE_FILES );
-   if(!found)associationRead.reset();
-			if( found ) break;
-		}
-	}
-	if( found ) {
-		while( found ) {
-			UPDATE_TIME_CONSUMING(1);
-			if(path == "") {
-				path = CString(item.catkeyrec.ckrCName);
-			} else {
-				path = CString(item.catkeyrec.ckrCName) + ":" + path;
-			}
-			if(item.catkeyrec.ckrParID == CNID_ROOT_ID) {
-				found = 0;
-			} else {
-				found = hfs_find_first( volinx, item.catkeyrec.ckrParID, 0, "", &item, SEARCH_TYPE_THISFOLDER );
-			}
-		}
-		path = CString(m_volumes[volinx].m_volume_name) + ":" + path;
-	}
-	END_TIME_CONSUMING;
-	return( path );
+ if(strlen(type)!=4||strlen(creator)!=4)return {};
+ struct Candidate {CString image, name;};
+ std::vector<Candidate> candidates;
+ const auto add=[&](int index){
+  const auto& slot=m_volumes[index];
+  if(!slot.m_free&&!slot.m_file_name.IsEmpty())candidates.push_back({slot.m_file_name,slot.m_volume_name});
+ };
+ if(preferredVolume>=0&&preferredVolume<m_hfs_count)add(preferredVolume);
+ for(int index=0;index<m_hfs_count;++index)
+  if(index!=preferredVolume)add(index);
+ CString path;
+ const bool showHidden=m_mac_show_invisibles!=0;
+ auto owner=GetBrowserSession().Owner();
+ ShowStorageWaitJob([&](Storage::Job& job){
+  for(const auto& candidate:candidates){
+   if(job.cancelled())throw Storage::Cancelled();
+   const std::string image=(LPCSTR)candidate.image;
+   try{
+    VolumeCoord::Lease read({{VolumeCoord::ImageKey(image),VolumeCoord::Mode::Read}});
+    auto volume=MacBrowser::OpenClassic(image,":",false);
+    const auto match=MacBrowser::FindClassicApplication(*volume,type,creator,showHidden,job);
+    if(!match.empty()){
+     path=candidate.name+match.c_str();
+     break;
+    }
+   }catch(const VolumeCoord::Busy&){}catch(const HfsPlus::Error&){}
+  }
+  return Storage::Result{};
+ },!owner->IsWindowVisible(),owner);
+ return path;
 }
 
 int CHFVExplorerDoc::BuildBrowserRoots(int preferred,bool readClassic)
@@ -1213,11 +1025,9 @@ void CHFVExplorerDoc::build_pc_tree( int volinx, CString path )
 
 void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 {
-	int volinx, dummy;
-	CString volname, dir, subdir, rest;
+	int volinx;
+	CString volname, dir;
 	CHFVExplorerApp	*pApp;
-	hfs_item_type item;
-	long id = 0;
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 	if(path == "") return;
@@ -1251,32 +1061,37 @@ void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
 		return;
 	}
 
-	if(my_split_path( path, volname, &volinx, dir, mac )) {
-  if(preferredVolume>=0&&preferredVolume<m_hfs_count&&volname.CompareNoCase(m_volumes[preferredVolume].m_volume_name)==0)volinx=preferredVolume;
-		GetBrowserSession().Tree()->enable_selchange(1);
-		set_current_hitem( m_volumes[volinx].m_rootitem );
-		open_sub_directory( volinx, CNID_ROOT_ID, m_volumes[volinx].m_volume_name );
-		set_current_hitem( m_volumes[volinx].m_rootitem );
-
-		START_TIME_CONSUMING(1000);
-		id = CNID_ROOT_ID;
-		while(dir != "") {
-			(void)my_split_path( dir, subdir, &dummy, rest, mac );
-			if( !hfs_find_first( volinx, id, 0, subdir, &item, SEARCH_TYPE_FIND_NAME )) {
-				break;
-			}
-			if(item.catdatarec.cdrType != cdrDirRec) {
-				break;
-			}
-			id = item.catdatarec.u.d.dirDirID;
-			if(id) {
-				open_sub_directory( volinx, id, "" );
-				GetBrowserSession().Tree()->select_by_id( m_volumes[volinx].m_rootitem, volinx, id );
-			}
-			dir = rest;
-		}
-		END_TIME_CONSUMING;
-	}
+ if(!my_split_path(path,volname,&volinx,dir,mac))return;
+ if(preferredVolume>=0&&preferredVolume<m_hfs_count&&!m_volumes[preferredVolume].m_free&&
+    volname.CompareNoCase(m_volumes[preferredVolume].m_volume_name)==0)volinx=preferredVolume;
+ auto& slot=m_volumes[volinx];
+ auto& session=GetBrowserSession();
+ auto tree=session.Tree();
+ if(!slot.m_rootitem)return;
+ if(dir.IsEmpty()){
+  tree->enable_selchange(1);
+  set_current_hitem(slot.m_rootitem);
+  open_sub_directory(volinx,CNID_ROOT_ID,slot.m_volume_name);
+  return;
+ }
+ const std::string image=(LPCSTR)slot.m_file_name, relative=(LPCSTR)dir;
+ const auto showHidden=m_mac_show_invisibles!=0;
+ std::vector<MacBrowser::ClassicAncestor> route;
+ auto result=ShowStorageWaitJob([&](Storage::Job&){
+  VolumeCoord::Lease read({{VolumeCoord::ImageKey(image),VolumeCoord::Mode::Read}});
+  auto volume=MacBrowser::OpenClassic(image,":",false);
+  route=MacBrowser::ResolveClassicFolders(*volume,relative,showHidden);
+  return Storage::Result{};
+ },!session.Owner()->IsWindowVisible(),session.Owner());
+ if(result.code)return;
+ tree->enable_selchange(1);
+ set_current_hitem(slot.m_rootitem);
+ open_sub_directory(volinx,CNID_ROOT_ID,slot.m_volume_name);
+ set_current_hitem(slot.m_rootitem);
+ for(const auto& folder:route){
+  open_sub_directory(volinx,folder.id,"");
+  tree->select_by_id(slot.m_rootitem,volinx,folder.id);
+ }
 }
 
 void CHFVExplorerDoc::OnCleanDocument()
