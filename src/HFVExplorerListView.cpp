@@ -807,103 +807,36 @@ int CHFVExplorerListView::get_path(int index, CString& path)
     return !path.IsEmpty();
 }
 
-int ask_dir( char *new_name )
-{
-	CAskDir dlg;
-	int ret;
-
-	dlg.m_new_dir_name = CString(new_name);
-	ret = (dlg.DoModal() == IDOK);
-	if(ret) {
-		lstrcpy( new_name, dlg.m_new_dir_name.GetBuffer(_MAX_PATH) );
-	}
-	return(ret);
-}
-	
 BOOL CHFVExplorerListView::new_folder(void)
 {
- if(GetBrowserSession().MacBrowser().NewFolder())return TRUE;
- if(BackgroundCopies::Enabled()){
-  if(!BrowserDirectoryWritable())return FALSE;auto target=GetBrowserSession().MacBrowser().TargetFolder();char name[_MAX_PATH]="New Folder";
-  for(int attempt=1;attempt<50;++attempt){bool exists=false;for(int row=0;row<m_cl->GetItemCount();++row)exists|=m_cl->GetItemText(row,0).CompareNoCase(name)==0;if(!exists)break;wsprintf(name,"New Folder (%d)",attempt+1);}
-  if(!ask_dir(name))return FALSE;return GetBrowserSession().MacBrowser().CreateFolder(target,BrowserDirectory::FromAnsi(name));
- }
- if(BackgroundCopies::Active())return FALSE;
+ auto& session=GetBrowserSession();
+ auto& browser=session.MacBrowser();
+ if(browser.NewFolder())return TRUE;
  if(!BrowserDirectoryWritable())return FALSE;
-	CHFVExplorerApp	*pApp;
-	CTreeCtrl *tc;
-	HFVExplorerTreeView *tv;
-	HTREEITEM hItem;
-	BOOL ok = FALSE;
-	CString cs;
-	char destvolpath[_MAX_PATH];
-	char new_dir_name[_MAX_PATH];
-	char new_name[_MAX_PATH];
-	int len, volinx;
-	DWORD_PTR data;
 
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	tv = GetBrowserSession().Tree();
-	tc = tv->m_ct;
-	hItem = tc->GetSelectedItem();
-	data = tc->GetItemData( hItem );
-	volinx = tv->get_lparam_volinx( data );
-
-	if(tv->get_lparam_type(data) == LIST_HFS) {
-		cs = ((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_file_name;
-	} else {
-		cs = ((CHFVExplorerDoc*)m_pDocument)->m_fats[volinx].m_volume_name;
-	}
-	lstrcpy( destvolpath, cs.GetBuffer( _MAX_PATH ) );
-	cs.ReleaseBuffer();
-
-	int ismac;
-	cs = ((CHFVExplorerDoc*)m_pDocument)->get_directory( hItem, &ismac );
-	lstrcpy( new_dir_name, cs.GetBuffer( _MAX_PATH ) );
-	cs.ReleaseBuffer();
-	len = strlen(new_dir_name);
-
-	#define MAX_ATTEMPTS 50
-	if(ismac) {
-		int new_index = 0, i;
-		for( i=0; i<MAX_ATTEMPTS; i++ ) {
-			lstrcpy( new_name, "New Folder" );
-			if(i) {
-				// start (n) from (2)
-				wsprintf( &new_name[strlen(new_name)], " (%d)", i+1 );
-			}
-			if( !HFSIFACE_exists_split( volinx, destvolpath, new_dir_name, new_name )) {
-				break;
-			}
-		}
-		if(i == MAX_ATTEMPTS) lstrcpy( new_name, "New Folder (N)" );
-	} else {
-		lstrcpy( new_name, "New Folder" );
-	}
-	#undef MAX_ATTEMPTS
-
-	if(ask_dir( new_name ) == 0) return(0);
-
-	if(ismac) {
-		if(len && new_dir_name[len-1] != ':')
-			lstrcat( new_dir_name, ":" );
-		lstrcat( new_dir_name, new_name );
-	} else {
-		if(len && new_dir_name[len-1] != '\\')
-			lstrcat( new_dir_name, "\\" );
-		lstrcat( new_dir_name, new_name );
-	}
-
-	if(ismac) {
-		ok = (0 == HFSIFACE_mkdir( destvolpath, new_dir_name ));
-		if(ok) {
-			update_floppy_view(destvolpath);
-		}
-	} else {
-		ok = (0 != CreateDirectory(new_dir_name,NULL));
-		if(ok) update_current_view();
-	}
-	return(ok);
+ try{
+  const auto target=browser.TargetFolder();
+  CAskDir dialog(session.Owner());
+  dialog.m_new_dir_name="New Folder";
+  for(int suffix=2;suffix<=50;++suffix){
+   const auto proposed=VolumeCoord::Wide(dialog.m_new_dir_name.GetString());
+   bool exists=false;
+   for(int index=0;index<m_cl->GetItemCount();++index){
+    const auto* row=BrowserRowAt(index);
+    if(row&&CompareStringOrdinal(MacBrowser::Wide(row->entry.name).c_str(),-1,proposed.c_str(),-1,TRUE)==CSTR_EQUAL){
+     exists=true;
+     break;
+    }
+   }
+   if(!exists)break;
+   dialog.m_new_dir_name.Format("New Folder (%d)",suffix);
+  }
+  if(dialog.DoModal()!=IDOK)return FALSE;
+  return browser.CreateFolder(target,BrowserDirectory::FromAnsi(dialog.m_new_dir_name.GetString()));
+ }catch(const std::exception& error){
+  session.Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
+  return FALSE;
+ }
 }
 
 int fat_rename( char *pOldName, char *pNewName )

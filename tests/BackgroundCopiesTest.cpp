@@ -596,7 +596,7 @@ int RunBackgroundMetadataTest(const char* directory){
   FileOperations::InspectProperties inspect{legacy};auto initial=submit(inspect);Check(initial.classicProperties&&initial.writable,"classic inspect lost editable properties");legacy.expectedCatalogId=initial.entry.resolvedId;
   FileOperations::EditClassicProperties patch{legacy,FileOperations::FinderLabel{3}};submit(patch);auto changed=submit(inspect);Check((changed.properties.fdflags&14)==6&&((changed.properties.fdflags^initial.properties.fdflags)&~14)==0,"label update changed other flags");patch.change=FileOperations::FinderPosition{123,-25};submit(patch);changed=submit(inspect);Check(changed.properties.fdlocation.h==123&&changed.properties.fdlocation.v==-25&&(changed.properties.fdflags&14)==6,"position update lost label");
   FileOperations::EditClassicProperties edit{legacy,FileOperations::ClassicPropertyEdit{initial.properties,initial.properties}};auto& propertyEdit=std::get<FileOperations::ClassicPropertyEdit>(edit.change);propertyEdit.desired.fdflags|=HFS_FNDR_ISINVISIBLE;submit(edit,false);Check(submit(inspect).properties.fdlocation.h==123,"stale editor overwrote newer metadata");
-  FileOperations::CreateFolder mkdir{};mkdir.parent=legacy;mkdir.parent.SetClassic(mkdir.parent.ClassicImage(),"MetadataClassic:");mkdir.parent.expectedCatalogId=2;mkdir.name=u"Folder";submit(mkdir);{auto v=MacBrowser::OpenClassic((LPCSTR)classic,"MetadataClassic:",false);Check(Find(*v,u"Folder"),"classic folder missing");v->Close();}
+  FileOperations::CreateFolder mkdir{};mkdir.parent=legacy;mkdir.parent.SetClassic(mkdir.parent.ClassicImage(),"MetadataClassic:");mkdir.parent.expectedCatalogId=2;mkdir.name=u"Folder";submit(mkdir);submit(mkdir,false);{auto v=MacBrowser::OpenClassic((LPCSTR)classic,"MetadataClassic:",false);Check(Find(*v,u"Folder"),"classic folder missing");v->Close();}
   Check(MetadataDialogs::Show(legacy,frame),"open classic modeless editor");finished();properties=MetadataDialogs::Window();Check(IsWindow(properties)&&IsWindowEnabled(GetDlgItem(properties,IDC_PROP_TYPE)),"classic editor missing");SetDlgItemTextA(properties,IDC_PROP_NAME,"Edited");SetDlgItemTextA(properties,IDC_PROP_CREATOR,"TEST");SendMessage(properties,WM_COMMAND,IDOK,0);Check(BackgroundCopies::Active()&&!IsWindow(properties),"classic editor did not queue update");finished();Check(!BackgroundCopies::LastResult().code,"classic editor failed");auto renamed=legacy;renamed.SetClassic(renamed.ClassicImage(),"MetadataClassic:Edited");inspect.item=renamed;changed=submit(inspect);Check(changed.properties.cnid==initial.properties.cnid&&!memcmp(changed.properties.u.file.creator,"TEST",4)&&changed.properties.u.file.rsize==31&&changed.properties.u.file.dsize==8192,"classic metadata edit lost catalog identity/forks");
   // A duplicate rename must not apply its accompanying metadata change.
   edit.item=renamed;propertyEdit={changed.properties,changed.properties};strcpy_s(propertyEdit.desired.name,"Folder");memcpy(propertyEdit.desired.u.file.creator,"FAIL",4);submit(edit,false);Check(!memcmp(submit(inspect).properties.u.file.creator,"TEST",4),"failed metadata transaction changed creator");
@@ -627,9 +627,17 @@ int RunBackgroundMetadataTest(const char* directory){
    tree->GetTreeCtrl().SelectItem(mounted.m_rootitem);
    tree->enable_selchange(notifications);
    doc->open_sub_directory(index,2,mounted.m_volume_name);
-   mkdir.parent.SetClassic(device,mkdir.parent.ClassicPath());
+   mkdir.parent=surviving.MacBrowser().TargetFolder();
+   Check(mkdir.parent.IsPhysical()&&mkdir.parent.MediaGenerationKnown(),"folder creation lost its captured floppy generation");
+   auto swappedFolder=mkdir;
+   swappedFolder.parent.BindMediaGeneration(mkdir.parent.MediaGeneration()^1u);
+   swappedFolder.name=u"MustNotCreate";
+   const auto beforeFolder=disk.disk.media;
+   submit(swappedFolder,false);
+   Check(disk.disk.media==beforeFolder,"stale folder request changed floppy media");
    mkdir.name=u"Physical";
    submit(mkdir);
+   Until([&]{return Row(surviving,L"Physical")>=0;});
 
    Select(surviving,L"Edited");
    auto item=surviving.MacBrowser().CaptureItem(Row(surviving,L"Edited"));

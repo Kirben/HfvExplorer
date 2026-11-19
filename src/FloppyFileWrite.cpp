@@ -3,8 +3,6 @@
 #include "DirectFloppy.h"
 #include "ReadOnlyCdBackend.h"
 
-extern "C" void HFSIFACE_get_dir_flush(void);
-
 namespace {
 [[noreturn]] void ReportWriteFailure(const DirectFloppy& disk) {
  throw FloppyWriteFailure(disk.Error(),"Floppy write or verification failed (Windows error "+
@@ -13,7 +11,6 @@ namespace {
 }
 bool RunFloppyWrite(int drive,std::optional<DWORD> generation,const std::function<void()>& mutate)
 {
- HFSIFACE_get_dir_flush();
  physical_floppy_suspend(drive);
  FloppyWriteApi* api=nullptr;
 #ifdef HFV_FLOPPY_TESTING
@@ -31,7 +28,6 @@ bool RunFloppyWrite(int drive,std::optional<DWORD> generation,const std::functio
   if(disk.Error())ReportWriteFailure(disk);
   throw;
  }
- HFSIFACE_get_dir_flush();
  if(!disk.Finish())ReportWriteFailure(disk);
  return disk.WritesStarted();
 }

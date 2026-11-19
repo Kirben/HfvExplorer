@@ -21,7 +21,6 @@ extern "C" {
 #include "hfs/copyout.h"
 #include "hfs/copyin.h"
 #include "hfs/Copyhfs.h"
-void HFSIFACE_get_dir_flush(void);
 }
 namespace {
 // Error pointers in the old libraries can retain a default or a previous error.

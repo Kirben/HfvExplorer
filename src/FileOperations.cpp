@@ -22,7 +22,6 @@
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
-void HFSIFACE_get_dir_flush(void);
 
 }
 extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
@@ -67,10 +66,7 @@ void WriteWithMedia(const Location& item,const std::function<void()>& mutate){
   std::optional<DWORD> generation;
   if(item.MediaGenerationKnown())generation=item.MediaGeneration();
   RunFloppyWrite(item.Drive(),generation,mutate);
- }else{
-  mutate();
-  HFSIFACE_get_dir_flush();
- }
+ }else mutate();
 }
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,Storage::Job& job,Completion& completion){
  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> fresh(sources.size());
@@ -114,7 +110,6 @@ struct ExecutionPlan {
 Storage::Result CopyRequest(const OrdinaryCopy& request,const std::vector<MacBrowser::ForkSource>& routes,
                             Storage::Job& job,Completion& completion){
  Check(!request.sources.empty(),"Select a source file or folder");
- HFSIFACE_get_dir_flush();
  std::vector<std::string> snapshots;
  bool complete=false,inPlace=false;
  WriteWithMedia(request.destination,[&]{
