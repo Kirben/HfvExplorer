@@ -9,7 +9,7 @@
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
-#include "ApfsContainer.h"
+#include "ApfsVolume.h"
 #include "DiskPartitions.h"
 #include "DmgEncryption.h"
 #include "BrowserPresentation.h"
@@ -324,7 +324,7 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
     if(HfsPlus::Volume::Recognizes(*source))
         return FromHfsPlus(std::move(source),false,key,externalJournal);
     if(!externalJournal.empty())return {};
-    if(Apfs::Probe(*source))throw HfsPlus::Error("APFS container verified. APFS volume browsing is not available yet.");
+    if(auto apfs=Apfs::Open(source,key))return apfs;
     std::shared_ptr<HfsPlus::Source> disk(std::move(source));
     if(disk->Size()>=2048){
         const auto boot=HfsPlus::Disk::Read(*disk,0,512);
@@ -386,7 +386,7 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
         catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false,externalJournal.empty()?nullptr:externalJournal.c_str()), false,key,externalJournal); }
     }
     if(externalJournal.empty()){
-        if(Apfs::Probe(*source))throw HfsPlus::Error("APFS container verified. APFS volume browsing is not available yet.");
+        if(auto apfs=Apfs::Open(source,key))return apfs;
         if(auto optical=Optical::Open(source,key))return optical;
     }
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;

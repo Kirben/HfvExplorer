@@ -6,6 +6,9 @@
 #include "HfsPlusDisk.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
+#include "CopyProcess.h"
+#include "FileOperations.h"
+#include <algorithm>
 #include <cstdio>
 
 namespace {
@@ -116,6 +119,88 @@ void ObjectMapFixture(Memory& disk)
     }
     for(size_t block:{12,13,14})Seal(disk.bytes,block*size,size);
 }
+
+Memory BrowseFixture()
+{
+    auto disk=Raw();
+    constexpr size_t size=4096;
+    ObjectMapFixture(disk);
+    auto leaf=disk.bytes.data()+14*size;
+    Little(leaf+size-48,0,4);
+    Seal(disk.bytes,14*size,size);
+
+    auto apsb=disk.bytes.data()+37*size;
+    Header(apsb,1024,5,13);memcpy(apsb+32,"APSB",4);
+    Little(apsb+56,1,8);Little(apsb+116,2,4);
+    Little(apsb+128,24,8);Little(apsb+136,2048,8);Little(apsb+272,1,8);
+    memcpy(apsb+712,"APFS Fixture",13);
+    Seal(disk.bytes,37*size,size);
+
+    auto map=disk.bytes.data()+24*size;
+    Header(map,24,5,0x4000000b);
+    Little(map+40,0x40000002,4);Little(map+48,25,8);
+    auto mapRoot=map+size;
+    Header(mapRoot,25,5,0x40000002,11);
+    Little(mapRoot+32,7,2);Little(mapRoot+36,1,4);
+    Little(mapRoot+42,4,2);Little(mapRoot+44,16,2);Little(mapRoot+60,2048,8);Little(mapRoot+68,5,8);
+    auto end=mapRoot+size-40;
+    Little(mapRoot+58,16,2);Little(end-12,size,4);Little(end-8,26,8);
+    Little(end+4,size,4);Little(end+8,16,4);Little(end+12,16,4);
+    Seal(disk.bytes,24*size,size);Seal(disk.bytes,25*size,size);
+
+    auto catalog=mapRoot+size;
+    Header(catalog,2048,5,2,14);
+    Little(catalog+32,3,2);Little(catalog+36,8,4);Little(catalog+42,8*8,2);
+    end=catalog+size-40;
+    Little(end+4,size,4);
+    size_t keyOffset=0,valueOffset=0;
+    unsigned index=0;
+    auto record=[&](uint64_t id,unsigned type,Bytes key,Bytes value){
+        auto toc=catalog+56+index++*8;
+        Little(toc,keyOffset,2);Little(toc+2,8+key.size(),2);
+        auto start=catalog+56+8*8+keyOffset;
+        Little(start,id|(uint64_t(type)<<60),8);
+        if(!key.empty())memcpy(start+8,key.data(),key.size());
+        keyOffset+=8+key.size();
+        valueOffset+=value.size();
+        Little(toc+4,valueOffset,2);Little(toc+6,value.size(),2);
+        memcpy(end-valueOffset,value.data(),value.size());
+    };
+    auto inode=[&](uint64_t id,bool directory,uint64_t length){
+        Bytes value(directory?92:140);
+        Little(value.data()+8,id,8);Little(value.data()+56,1,4);
+        Little(value.data()+80,directory?0040755:0100644,2);
+        if(!directory){
+            Little(value.data()+92,1,2);Little(value.data()+94,44,2);
+            value[96]=8;Little(value.data()+98,40,2);
+            Little(value.data()+100,length,8);
+        }
+        record(id,3,{},std::move(value));
+    };
+    auto drec=[&](uint64_t directory,uint64_t id,const char* name){
+        const auto len=strlen(name)+1;
+        Bytes key(4+len),value(18);
+        Little(key.data(),len,4);memcpy(key.data()+4,name,len);
+        Little(value.data(),id,8);
+        record(directory,9,std::move(key),std::move(value));
+    };
+    auto extent=[&](uint64_t at,uint64_t block){
+        Bytes key(8),value(24);
+        Little(key.data(),at,8);
+        Little(value.data(),size,8);Little(value.data()+8,block,8);
+        record(330,8,std::move(key),std::move(value));
+    };
+    inode(2,true,0);drec(2,320,"Folder");
+    inode(320,true,0);drec(320,330,"Long \xc3\xa9.txt");
+    inode(330,false,2*size+7);extent(0,40);extent(size,0);
+    extent(2*size,42);
+    Little(catalog+44,keyOffset,2);
+    Seal(disk.bytes,26*size,size);
+    memset(disk.bytes.data()+40*size,'A',size);
+    memcpy(disk.bytes.data()+42*size,"last!!!",7);
+    return disk;
+}
+
 Memory Gpt(const Memory& raw,unsigned sector)
 {
     const size_t start=1024*1024;
@@ -203,17 +288,54 @@ int RunApfsContainerTest(const char* directory)
         ring.bytes[4*4096+64]^=1;
         Reject([&]{Apfs::Probe(ring);},"Container with no complete checkpoint was accepted");
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
-        const auto path=VolumeCoord::Wide(root+"raw.img");
+        auto browsable=Gpt(BrowseFixture(),4096);
+        const auto path=VolumeCoord::Wide(root+"apfs.img");
         {
-            auto image=CreateFormatOutput(path.c_str(),disk.Size());
-            image->Write(0,disk.bytes.data(),disk.bytes.size());image->Flush();image->Keep();
+            auto image=CreateFormatOutput(path.c_str(),browsable.Size());
+            image->Write(0,browsable.bytes.data(),browsable.bytes.size());image->Flush();image->Keep();
         }
-        bool recognized=false;
-        try{MacBrowser::OpenBrowserImage(path);}
-        catch(const Error& error){recognized=strstr(error.what(),"APFS container verified")!=nullptr;}
-        Check(recognized,"Open Volume did not distinguish APFS from an unknown image");
+
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Name()==u"APFS Fixture"&&!volume->Writable()&&!volume->CaseSensitive(),
+              "APFS image did not mount read-only through the normal browser");
+        const auto folders=volume->List();
+        Check(folders.size()==1&&folders.front().directory&&folders.front().name==u"Folder",
+              "APFS root directory was not listed");
+        const auto files=volume->List(folders.front().id);
+        Check(files.size()==1&&files.front().name==u"Long \u00e9.txt"&&files.front().forks[0].size==8199,
+              "APFS file name or size was misread");
+        Bytes bytes(4104);
+        volume->Read(files.front().id,0,4095,bytes.data(),bytes.size());
+        Check(bytes.front()=='A'&&std::all_of(bytes.begin()+1,bytes.begin()+4097,[](uint8_t b){return b==0;})&&
+              !memcmp(bytes.data()+4097,"last!!!",7),"APFS fragmented/sparse read returned incorrect bytes");
+        Reject([&]{volume->Remove(files.front().id);},"APFS read-only volume accepted a delete");
+        Reject([&]{volume->Read(files.front().id,0,8198,bytes.data(),2);},"APFS read accepted an out-of-range request");
+        const auto host=VolumeCoord::Wide(root+"export");
+        Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"Create APFS export folder");
+        FileOperations::Request request=FileOperations::OrdinaryCopy{
+            {FileOperations::Location::Mounted(volume,files.front().id)},FileOperations::Location::Windows(host)};
+        request.background=true;
+        CopyProcess::enabled=true;CopyProcess::lastProcess=0;
+        auto operation=FileOperations::Submit(std::move(request));
+        const auto start=GetTickCount();
+        while(!operation.Job()->done()){
+            Check(GetTickCount()-start<15000,"APFS worker copy timed out");
+            Sleep(5);
+        }
+        const auto copy=operation.Job()->result();
+        Check(!copy.code,copy.message.c_str());
+        Check(CopyProcess::lastProcess!=0,"APFS export did not use the subprocess");
+        auto target=MacBrowser::OpenWindows(host);
+        MacBrowser::Entry copied;
+        Check(target->FindChild(2,files.front().name,copied)&&copied.forks[0].size==8199,
+              "APFS copy did not publish the file with its full length");
+        Bytes exported(bytes.size());
+        target->Read(copied.id,0,4095,exported.data(),exported.size());
+        Check(exported==bytes,"APFS subprocess copy changed file data");
+        fprintf(report,"PASS: normal browser mount, UTF-8 names, sparse and fragmented data, worker export and read-only enforcement.\n");
         fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
     }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}
+    CopyProcess::enabled=false;
     fclose(report);
     return result;
 }
