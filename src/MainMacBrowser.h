@@ -15,12 +15,21 @@ class MainMacBrowser {
     struct State;
     std::unique_ptr<State> state_;
     int QueueImageOpen(const std::wstring&,const std::wstring&,
-        std::function<bool()> next={});
+        std::function<bool()> next={},std::shared_ptr<const Dmg::Password> password={},
+        std::string expectedImage={});
+#ifdef HFV_TESTING
+    std::function<std::shared_ptr<const Dmg::Password>(bool)> passwordPromptForTest_;
+#endif
     bool QueueNextImage(const std::shared_ptr<const std::vector<std::wstring>>&,size_t);
 public:
     ~MainMacBrowser();
     explicit MainMacBrowser(BrowserSession&);
     void ForgetTree();
+#ifdef HFV_TESTING
+    void SetPasswordPromptForTest(std::function<std::shared_ptr<const Dmg::Password>(bool)> prompt){
+        passwordPromptForTest_=std::move(prompt);
+    }
+#endif
     int OpenImage(const char *path);
     void OpenImages(std::vector<std::wstring> paths);
     int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});

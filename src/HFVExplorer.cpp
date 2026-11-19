@@ -391,6 +391,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3 && strcmp(__argv[1],"--verify-main-mac-browser")==0)ExitProcess(RunMainMacBrowserTest(__argv[2]));
  extern int RunFileMutationTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-file-mutations")==0)ExitProcess(RunFileMutationTest(__argv[2]));
+ extern int RunEncryptedDmgTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-encrypted-dmg"))ExitProcess(RunEncryptedDmgTest(__argv[2]));
  extern int RunDmgImageTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-dmg-image"))ExitProcess(RunDmgImageTest(__argv[2]));
  extern int RunOpticalBrowserTest(const char*);

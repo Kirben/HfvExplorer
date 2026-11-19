@@ -16,6 +16,7 @@
 #include "BrowserPresentation.h"
 #include "BrowserDirectory.h"
 #include "HfsPlusDialogs.h"
+#include "DmgEncryption.h"
 #include "HfsPlusCd.h"
 #include "StorageJobDialog.h"
 #include "own_ids.h"
@@ -51,6 +52,36 @@ bool FileDialog(BrowserSession& session_,std::wstring& path,bool save) {
     ofn.lpstrFilter=L"All files\0*.*\0\0";ofn.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?0:OFN_FILEMUSTEXIST);
     if(!(save?GetSaveFileNameW(&ofn):GetOpenFileNameW(&ofn)))return false;path=buffer;return true;
 }
+class ImagePasswordDialog final:public CDialog {
+    bool retry_;
+    void Clear() {
+        SetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,L"");
+        SendDlgItemMessage(IDC_DMG_PASSWORD,EM_EMPTYUNDOBUFFER,0,0);
+    }
+public:
+    std::shared_ptr<const Dmg::Password> password;
+    ImagePasswordDialog(CWnd* parent,bool retry):CDialog(IDD_DMG_PASSWORD,parent),retry_(retry){}
+    BOOL OnInitDialog()override{
+        CDialog::OnInitDialog();
+        BrowserPresentation::UnicodeEdit(m_hWnd,IDC_DMG_PASSWORD);
+        SendDlgItemMessage(IDC_DMG_PASSWORD,EM_SETLIMITTEXT,1023);
+        if(retry_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,L"The password did not unlock this image. Try again.");
+        GetDlgItem(IDC_DMG_PASSWORD)->SetFocus();
+        return FALSE;
+    }
+    void OnOK()override{
+        struct Text {
+            wchar_t value[1024]{};
+            ~Text(){SecureZeroMemory(value,sizeof(value));}
+        } text;
+        const auto size=GetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,text.value,int(std::size(text.value)));
+        try{password=std::make_shared<Dmg::Password>(std::wstring_view(text.value,size));}
+        catch(const std::exception& error){Clear();MessageBox(error.what(),"Unlock disk image",MB_ICONERROR);return;}
+        Clear();
+        CDialog::OnOK();
+    }
+    void OnCancel()override{Clear();CDialog::OnCancel();}
+};
 bool Hidden(BrowserSession& session_) {
 #ifdef HFV_TESTING
     return !session_.Owner()->IsWindowVisible();
@@ -425,12 +456,12 @@ void RememberImage(const std::wstring& path)
 }
 
 int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& externalJournal,
-    std::function<bool()> next)
+    std::function<bool()> next,std::shared_ptr<const Dmg::Password> password,std::string expectedImage)
 {
     using namespace BrowserNavigation;
     Request request{};
     request.intent=Intent::OpenImage;
-    request.image=ImageSource{path,externalJournal};
+    request.image=ImageSource{path,externalJournal,password,expectedImage};
 
     // A mounted root is still read on the navigation worker. Do not change the
     // tree selection until both opening and reading the root have succeeded.
@@ -448,6 +479,8 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             const auto key=VolumeCoord::ImageKey(source.path);
             result.listing.resourceKey=key;
             if(job.cancelled())throw Storage::Cancelled();
+            if(!source.expectedImage.empty()&&key!=source.expectedImage)
+                return Storage::Result{1,ERROR_MEDIA_CHANGED,"The disk image changed while waiting for its password."};
             try{
                 std::vector<VolumeCoord::Access> access{{key,VolumeCoord::Mode::Read}};
                 if(!source.externalJournal.empty())
@@ -455,7 +488,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 VolumeCoord::Lease lease(std::move(access));
                 auto volume=existing;
                 if(!volume||volume->ResourceKey()!=key)
-                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal);
+                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal,source.password.get());
                 if(!volume)return Storage::Result{1,ERROR_UNRECOGNIZED_VOLUME,"This file does not contain a supported disk image volume."};
                 result.listing.revision=VolumeCoord::Revision(key);
                 if(job.cancelled())throw Storage::Cancelled();
@@ -475,6 +508,9 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                     throw Storage::Cancelled();
                 }
                 result.payload=std::move(root);
+            }catch(const Dmg::PasswordRequired& error){
+                result.listing.resourceKey.clear();
+                result.payload=ImagePassword{error.retry,key};
             }catch(const HfsPlus::ExternalJournalRequired& error){
                 result.listing.resourceKey.clear();
                 result.payload=ExternalJournal{error.what()};
@@ -483,7 +519,21 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             }
             return Storage::Result{};
         },
-        [this,path,next](Result& result){
+        [this,path,externalJournal,next,password,expectedImage](Result& result){
+            if(auto* prompt=std::get_if<ImagePassword>(&result.payload)){
+                std::shared_ptr<const Dmg::Password> supplied;
+#ifdef HFV_TESTING
+                if(passwordPromptForTest_)supplied=passwordPromptForTest_(prompt->retry);
+                else
+#endif
+                if(!Hidden(session_)){
+                    ImagePasswordDialog dialog(session_.Owner(),prompt->retry);
+                    if(dialog.DoModal()==IDOK)supplied=std::move(dialog.password);
+                }
+                if(supplied)QueueImageOpen(path,externalJournal,next,std::move(supplied),prompt->image);
+                else if(next)next();
+                return;
+            }
             if(auto* prompt=std::get_if<ExternalJournal>(&result.payload)){
                 if(Hidden(session_)){
                     if(!next||!next())session_.RejectNavigation({},prompt->prompt);
@@ -491,7 +541,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 }
                 std::wstring journal;
                 if(SelectHfsPlusExternalJournal(session_.Owner(),journal,prompt->prompt))
-                    QueueImageOpen(path,journal,next);
+                    QueueImageOpen(path,journal,next,password,expectedImage);
                 else if(next)next();
                 return;
             }
@@ -510,7 +560,9 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             RememberImage(path);
             if(next)next();
         },
-        {},[this,path,externalJournal,next]{QueueImageOpen(path,externalJournal,next);},next);
+        {},[this,path,externalJournal,next,password,expectedImage]{
+            QueueImageOpen(path,externalJournal,next,password,expectedImage);
+        },next);
     return 1;
 }
 

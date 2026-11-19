@@ -173,6 +173,7 @@ class OpticalVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEnd
     std::string key_,kind_;
     std::u16string name_;
     MacBrowser::WorkerOrigin origin_;
+    const bool processLocal_;
     mutable std::mutex mutex_;
     std::vector<Node> nodes_;
     std::map<uint32_t,std::vector<uint32_t>> listings_;
@@ -196,7 +197,7 @@ class OpticalVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEnd
     [[noreturn]] static void ReadOnly() { throw HfsPlus::Error("Optical filesystems are read-only"); }
 public:
     OpticalVolume(std::unique_ptr<HfsPlus::Source> source,std::unique_ptr<Reader> reader,std::string key)
-        :source_(std::move(source)),reader_(std::move(reader)),key_(std::move(key)),kind_(reader_->Kind())
+        :source_(std::move(source)),reader_(std::move(reader)),key_(std::move(key)),kind_(reader_->Kind()),processLocal_(source_->ProcessLocal())
     {
         auto root=reader_->Root();
         root.entry.id=2;root.entry.parent=1;
@@ -215,6 +216,7 @@ public:
             origin_.generation=generation;
         }
     }
+    MacBrowser::WorkerExecution Execution()const override{MacBrowser::WorkerExecution result;result.processLocal=processLocal_;return result;}
     MacBrowser::WorkerOrigin WorkerDescription()const override{return origin_;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override {
         std::lock_guard<std::mutex> lock(mutex_);

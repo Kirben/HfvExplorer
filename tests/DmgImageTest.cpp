@@ -2,6 +2,16 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "DmgImage.h"
+#include "DmgEncryption.h"
+#include "BrowserSession.h"
+#include "HFVExplorer.h"
+#include "HFVExplorerDoc.h"
+#include "MainFrm.h"
+#include "MainMacBrowser.h"
+#include "StorageJobDialog.h"
+#include "WorkerEndpoint.h"
+#include "utils.h"
+#include <bcrypt.h>
 #include "HfsPlusDisk.h"
 #include "CopyProcess.h"
 #include "VolumeCoordinator.h"
@@ -216,4 +226,245 @@ int RunDmgImageTest(const char* directory)
     fclose(report);
     return status;
 }
+
+namespace {
+void Cng(NTSTATUS code,const char* error){Check(code>=0,error);}
+class TestAlgorithm {
+public:
+ BCRYPT_ALG_HANDLE handle=nullptr;
+ TestAlgorithm(const wchar_t* id,ULONG flags=0){
+  Cng(BCryptOpenAlgorithmProvider(&handle,id,nullptr,flags),"Initialize encryption fixture");
+ }
+ ~TestAlgorithm(){BCryptCloseAlgorithmProvider(handle,0);}
+ Bytes Object()const{
+  ULONG size=0,actual=0;
+  Cng(BCryptGetProperty(handle,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&size),
+                       sizeof(size),&actual,0),"Size fixture crypto object");
+  return Bytes(size);
+ }
+};
+Bytes EncryptBlock(const wchar_t* method,Bytes& key,Bytes iv,Bytes data,bool padding)
+{
+ TestAlgorithm algorithm(method);
+ auto object=algorithm.Object();
+ Cng(BCryptSetProperty(algorithm.handle,BCRYPT_CHAINING_MODE,
+     reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)),sizeof(BCRYPT_CHAIN_MODE_CBC),0),
+     "Set fixture cipher mode");
+ struct Key {BCRYPT_KEY_HANDLE h=nullptr;~Key(){if(h)BCryptDestroyKey(h);}} keyObject;
+ Cng(BCryptGenerateSymmetricKey(algorithm.handle,&keyObject.h,object.data(),ULONG(object.size()),
+     key.data(),ULONG(key.size()),0),"Load fixture encryption key");
+ Bytes encoded(data.size()+16);
+ ULONG written=0;
+ Cng(BCryptEncrypt(keyObject.h,data.data(),ULONG(data.size()),nullptr,iv.data(),ULONG(iv.size()),
+     encoded.data(),ULONG(encoded.size()),&written,padding?BCRYPT_BLOCK_PADDING:0),"Encrypt fixture bytes");
+ encoded.resize(written);
+ return encoded;
+}
+Bytes Envelope(const Bytes& raw,unsigned bits,bool aesWrap,const Dmg::Password& password)
+{
+ constexpr size_t chunk=512,record=96,begin=1536;
+ constexpr uint32_t aesId=0x80000001;
+ Bytes file(begin,0);
+ memcpy(file.data(),"encrcdsa",8);
+ P32(file.data()+8,2);P32(file.data()+12,16);P32(file.data()+16,5);
+ P32(file.data()+20,aesId);P32(file.data()+24,bits);
+ P32(file.data()+52,chunk);P64(file.data()+56,raw.size());P64(file.data()+64,begin);
+ P32(file.data()+72,1);
+ P32(file.data()+76,1);P64(file.data()+80,record);P64(file.data()+88,616);
+ auto keyRecord=file.data()+record;
+ Bytes salt(20,0x5b),iv(aesWrap?16:8,0),kek(24),aes(bits/8),hmac(20);
+ std::fill_n(iv.begin(),8,0x7c);
+ for(size_t i=0;i<aes.size();++i)aes[i]=uint8_t(0x8c+i);
+ for(size_t i=0;i<hmac.size();++i)hmac[i]=uint8_t(0x34+i);
+ TestAlgorithm sha(BCRYPT_SHA1_ALGORITHM,BCRYPT_ALG_HANDLE_HMAC_FLAG);
+ Cng(BCryptDeriveKeyPBKDF2(sha.handle,const_cast<PUCHAR>(password.Data()),password.Size(),
+     salt.data(),ULONG(salt.size()),1000,kek.data(),ULONG(kek.size()),0),"Derive fixture wrapping key");
+ auto blob=aes;
+ blob.insert(blob.end(),hmac.begin(),hmac.end());
+ blob.insert(blob.end(),{'C','K','I','E',0});
+ auto wrapped=EncryptBlock(aesWrap?BCRYPT_AES_ALGORITHM:BCRYPT_3DES_ALGORITHM,kek,iv,blob,true);
+ P32(keyRecord,0x67);P32(keyRecord+8,1000);
+ P32(keyRecord+12,uint32_t(salt.size()));memcpy(keyRecord+16,salt.data(),salt.size());
+ P32(keyRecord+48,8);memcpy(keyRecord+52,iv.data(),8);
+ P32(keyRecord+84,192);P32(keyRecord+88,aesWrap?aesId:17);P32(keyRecord+92,7);P32(keyRecord+96,6);
+ P32(keyRecord+100,uint32_t(wrapped.size()));memcpy(keyRecord+104,wrapped.data(),wrapped.size());
+ auto object=sha.Object();
+ for(size_t offset=0;offset<raw.size();offset+=chunk){
+  struct Hash {BCRYPT_HASH_HANDLE h=nullptr;~Hash(){if(h)BCryptDestroyHash(h);}} hash;
+  Cng(BCryptCreateHash(sha.handle,&hash.h,object.data(),ULONG(object.size()),hmac.data(),ULONG(hmac.size()),0),
+      "Initialize fixture IV synthesis");
+  uint8_t block[4];P32(block,uint32_t(offset/chunk));
+  Cng(BCryptHashData(hash.h,block,sizeof(block),0),"Hash fixture block number");
+  Bytes digest(20);
+  Cng(BCryptFinishHash(hash.h,digest.data(),ULONG(digest.size()),0),"Finish fixture IV");
+  digest.resize(16);
+  Bytes plain(chunk,0);
+  const auto count=(std::min)(chunk,raw.size()-offset);
+  memcpy(plain.data(),raw.data()+offset,count);
+  auto cipherText=EncryptBlock(BCRYPT_AES_ALGORITHM,aes,std::move(digest),std::move(plain),false);
+  file.insert(file.end(),cipherText.begin(),cipherText.end());
+ }
+ return file;
+}
+void NeedsPassword(std::unique_ptr<Source>& file,const Dmg::Password* password,bool retry)
+{
+ try{Dmg::Unlock(file,password);}
+ catch(const Dmg::PasswordRequired& required){
+  Check(required.retry==retry&&!file->ProcessLocal(),"Wrong password state or source changed after a failed unlock");
+  return;
+ }
+ throw HfsPlus::Error("Encrypted image did not request the password");
+}
+
+CString testHost;
+class EncryptedDmgDoc:public CHFVExplorerDoc{
+ DECLARE_DYNCREATE(EncryptedDmgDoc)
+public:
+ EncryptedDmgDoc():CHFVExplorerDoc(false){Mounts().AddWindows(testHost[0],DRIVE_FIXED,testHost);}
+};
+IMPLEMENT_DYNCREATE(EncryptedDmgDoc,CHFVExplorerDoc)
+class EncryptedDmgFrame:public CMainFrame{
+ DECLARE_DYNCREATE(EncryptedDmgFrame)
+public:
+ void LoadWindowPosition()override{}
+ void SaveWindowPosition()override{}
+ void ActivateFrame(int)override{}
+};
+IMPLEMENT_DYNCREATE(EncryptedDmgFrame,CMainFrame)
+
+void BrowserPrompt(const CString& root,const std::wstring& path,
+                   const std::shared_ptr<const Dmg::Password>& password)
+{
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ app.m_startup_hds=app.m_startup_floppies=app.m_startup_cds=FALSE;
+ app.m_dosicons=DI_NO_ICONS;
+ app.m_mac_window_mode=FALSE;
+ testHost=root;
+ app.InstallBrowserTemplate(RUNTIME_CLASS(EncryptedDmgDoc),RUNTIME_CLASS(EncryptedDmgFrame));
+ auto frame=app.CreateBrowser(FALSE);
+ Check(frame!=nullptr,"Create the hidden image browser");
+ struct Close {CMainFrame* frame;~Close(){if(frame->GetSafeHwnd())frame->DestroyWindow();}} close{frame};
+ auto& session=frame->GetBrowserSession();
+ Check(session.AwaitNavigationForTest()&&session.ListingAvailable(),"Open the initial Windows folder");
+ auto& browser=session.MacBrowser();
+ unsigned prompts=0;
+ browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
+  Check(!retry,"Initial encrypted DMG prompt was a retry");
+  ++prompts;
+  return {};
+ });
+ Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest()&&prompts==1&&
+       session.ListingAvailable()&&browser.TargetFolder().IsWindows(),"Cancelled password changed the browser listing");
+ browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
+  ++prompts;
+  Check(retry==(prompts==3),"Unexpected password retry state");
+  if(!retry)return std::make_shared<Dmg::Password>(L"wrong");
+  return password;
+ });
+ Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest()&&prompts==3&&
+       browser.Active()&&session.ListingAvailable()&&!browser.Writable()&&
+       session.WindowTitle().find(L"Encrypted fixture")!=std::wstring::npos,
+       "Encrypted DMG did not mount after a wrong password followed by the right one");
+ browser.SetPasswordPromptForTest({});
+}
+}
+
+int RunEncryptedDmgTest(const char* directory)
+{
+ if(!CreateDirectoryA(directory,nullptr))return 2;
+ const std::string root=directory;
+ FILE* report=fopen((root+"\\encrypted-dmg-report.txt").c_str(),"w");
+ if(!report)return 2;
+ int status=0;
+ InitializeStorageUi();
+ try{
+  const auto password=std::make_shared<const Dmg::Password>(L"fixture \u03a9");
+  const Dmg::Password wrong(L"incorrect");
+  Bytes plain(2601);
+  for(size_t i=0;i<plain.size();++i)plain[i]=uint8_t(i*113+i/512);
+  for(const auto aesWrap:{false,true}){
+   const auto path=Save(root+(aesWrap?"\\aes.dmg":"\\3des.dmg"),
+                        Envelope(plain,aesWrap?256:128,aesWrap,*password));
+   auto source=HfsPlus::OpenImage(path.c_str(),false);
+   NeedsPassword(source,nullptr,false);
+   NeedsPassword(source,&wrong,true);
+   Check(Dmg::Unlock(source,password.get())&&source->ProcessLocal()&&source->Size()==plain.size()&&
+         !source->Writable()&&source->WorkerFiles().empty(),"Unlock fixture in place without worker handles");
+   Check(Disk::Read(*source,499,2099)==Bytes(plain.begin()+499,plain.begin()+2598)&&
+         Disk::Read(*source,0,plain.size())==plain,"Encrypted DMG random or partial block reads differ");
+   Reject([&]{source->Write(0,plain.data(),1);},"Unlocked DMG accepted a write");
+   Reject([&]{Disk::Read(*source,plain.size()-5,10);},"Unlocked DMG allowed reading past plaintext size");
+  }
+  auto corrupt=Envelope(plain,128,true,*password);
+  P64(corrupt.data()+80,corrupt.size());
+  const auto badRecord=Save(root+"\\bad-record.dmg",corrupt);
+  Reject([&]{auto file=HfsPlus::OpenImage(badRecord.c_str(),false);Dmg::Unlock(file,password.get());},
+         "Out-of-bounds password record was accepted");
+  fprintf(report,"PASS: Password-required and wrong-password responses, Unicode passwords, AES-128/AES-256, AES/3DES wrapped keys, partial blocks, bounds and read-only access.\n");
+  fflush(report);
+
+  wchar_t nativePath[32768]{};
+  const auto length=GetEnvironmentVariableW(L"HFV_ENCRYPTED_DMG_FIXTURE",nativePath,ARRAYSIZE(nativePath));
+  if(length&&length<ARRAYSIZE(nativePath)){
+   auto source=HfsPlus::OpenImage(nativePath,false);
+   const Dmg::Password publishedFixturePassword(L"hunter2");
+   NeedsPassword(source,&wrong,true);
+   Check(Dmg::Unlock(source,&publishedFixturePassword)&&source->Size()==65536,"Unlock genuine macOS encrypted fixture");
+   const auto boot=Disk::Read(*source,0,512);
+   Check(boot[510]==0x55&&boot[511]==0xaa&&!memcmp(boot.data()+54,"FAT12",5),"Unexpected authentic DMG plaintext");
+   fprintf(report,"PASS: macOS hdiutil AES-128 encrypted fixture and wrong-password rejection.\n");
+   fflush(report);
+  }
+
+  auto rawPath=VolumeCoord::Wide(root+"\\plus.img");
+  const Bytes contents={'e','n','c','r','y','p','t','e','d'};
+  Bytes raw;
+  {
+   auto image=CreateImage(rawPath.c_str(),8*1024*1024);
+   Volume::Format(*image,u"Encrypted fixture",true);
+   Volume volume(*image,true);
+   volume.Put(2,u"Payload",contents.size(),1,[&](unsigned fork,uint64_t at,void* p,size_t n){
+    if(fork)memset(p,0x4d,n);else memcpy(p,contents.data()+at,n);
+   });
+   raw=Disk::Read(*image,0,size_t(image->Size()));
+  }
+  const auto packed=Pack({{{Zlib,0,raw.size()/SectorBytes,ZlibBlock(raw)}}},raw.size()/SectorBytes);
+  const auto path=Save(root+"\\compressed encrypted.dmg",Envelope(packed,256,true,*password));
+  BrowserPrompt(root.c_str(),path,password);
+  const auto volume=MacBrowser::OpenBrowserImage(path,{},password.get());
+  MacBrowser::Entry entry;
+  Check(volume&&volume->FindChild(2,u"Payload",entry)&&!volume->Writable()&&
+        MacBrowser::ExecutionFor(*volume).processLocal,"Open encrypted and compressed HFS+ in the browser");
+  const auto to=VolumeCoord::Wide(root+"\\export");
+  Check(CreateDirectoryW(to.c_str(),nullptr)!=FALSE,"Create encrypted export directory");
+  const auto source=FileOperations::Location::Mounted(volume,entry.id);
+  FileOperations::Request request=FileOperations::OrdinaryCopy{{source},FileOperations::Location::Windows(to)};
+  request.background=true;
+  CopyProcess::enabled=true;
+  CopyProcess::lastProcess=0;
+  Check(!FileOperations::InspectPlanForTest(request,volume->ResourceKey()).temporaryWorker,
+        "Encrypted image selected a temporary worker");
+  const auto op=FileOperations::Submit(std::move(request));
+  const auto start=GetTickCount();
+  while(!op.Job()->done()){
+   Check(GetTickCount()-start<15000,"Encrypted DMG export timed out");
+   Sleep(5);
+  }
+  const auto copied=op.Job()->result();
+  Check(!copied.code,copied.message.c_str());
+  Check(!CopyProcess::lastProcess&&op.Snapshot().complete,"Encrypted copy crossed the subprocess boundary");
+  const auto windows=MacBrowser::OpenWindows(to);
+  Check(windows->FindChild(2,u"Payload",entry)&&entry.forks[0].size==contents.size()&&entry.forks[1].size==1,
+        "Encrypted image export lost a fork");
+  Bytes output(contents.size());windows->Read(entry.id,0,0,output.data(),output.size());
+  uint8_t resource=0;windows->Read(entry.id,1,0,&resource,1);
+  Check(output==contents&&resource==0x4d,"Encrypted image export changed file contents");
+  fprintf(report,"PASS: Cancel and wrong-password retry in the normal image-opening path, layered encryption and compression, and both-fork background export without transferring keys.\n");
+ }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());status=1;}
+ CopyProcess::enabled=false;
+ ShutdownStorageUi();
+ fclose(report);
+ return status;
+}
+
 #endif

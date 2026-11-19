@@ -560,6 +560,10 @@ bool Persistent(const Location& item)
 {
  return item.IsMounted()&&ExecutionFor(*item.Volume()).Persistent();
 }
+bool ProcessLocal(const Location& item)
+{
+ return item.IsMounted()&&ExecutionFor(*item.Volume()).processLocal;
+}
 bool WindowsEndpoint(const Location& item)
 {
  return item.IsWindows()||(item.IsMounted()&&ExecutionFor(*item.Volume()).windowsPaths);
@@ -590,7 +594,8 @@ TransferExecution DescribeTransfer(const OrdinaryCopy& copy,bool background,bool
  for(const auto& source:copy.sources)Check(!source.IsNone(),"No source file location was supplied");
  const bool mountedRoute=Persistent(copy.destination)||(WindowsEndpoint(copy.destination)&&
       std::any_of(copy.sources.begin(),copy.sources.end(),Persistent));
- const bool handoff=temporary&&!mountedRoute;
+ const bool handoff=temporary&&!mountedRoute&&!ProcessLocal(copy.destination)&&
+     std::none_of(copy.sources.begin(),copy.sources.end(),ProcessLocal);
  TransferExecution plan{
   handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
   [&copy,background,handoff]{
@@ -626,7 +631,8 @@ TransferExecution DescribeTransfer(const LegacyConversion& copy,bool background,
  Check(copy.target==ConversionTarget::Folder||!copy.destination.IsMounted(),
        "A mounted conversion destination must be a folder");
  const auto mode=copy.source.IsWindows()?copy.options.input:copy.options.output;
- const bool handoff=temporary&&!(ConvertsWithMountedClassic(copy)&&mode&&strchr("ambt5rR",mode));
+ const bool handoff=temporary&&!ProcessLocal(copy.source)&&!ProcessLocal(copy.destination)&&
+     !(ConvertsWithMountedClassic(copy)&&mode&&strchr("ambt5rR",mode));
  return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
   [&copy,background,handoff]{
    std::vector<VolumeCoord::Access> access;
@@ -647,7 +653,7 @@ TransferExecution DescribeTransfer(const ExportFileFork& request,bool background
 {
  Check(!request.source.IsNone()&&request.output.IsWindows()&&
        (request.fork==ForkSelector::Data||request.fork==ForkSelector::Resource),"Invalid fork export request");
- const bool handoff=temporary&&!Persistent(request.source);
+ const bool handoff=temporary&&!Persistent(request.source)&&!ProcessLocal(request.source);
  return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
   [&request,background,handoff]{
    std::vector<VolumeCoord::Access> access;
@@ -663,7 +669,8 @@ TransferExecution DescribeTransfer(const ExportFileFork& request,bool background
 TransferExecution DescribeTransfer(const ImportResourceFork& request,bool background,bool temporary)
 {
  Check(!request.input.IsNone()&&(request.file.IsMounted()||request.file.IsWindows()),"Invalid resource import request");
- const bool handoff=temporary&&!(Persistent(request.file)&&WindowsEndpoint(request.input));
+ const bool handoff=temporary&&!ProcessLocal(request.file)&&!ProcessLocal(request.input)&&
+     !(Persistent(request.file)&&WindowsEndpoint(request.input));
  return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
   [&request,background,handoff]{
    std::vector<VolumeCoord::Access> access;
@@ -697,7 +704,7 @@ MutationPlan DescribeMutation(const RenameEntry& request,bool temporary)
        (request.source.IsMounted()&&request.parent.IsMounted()&&
         request.source.Volume()==request.parent.Volume()),
        "Rename must stay within the same mounted volume");
- return {RouteFor(temporary,Persistent(request.source)),
+ return {RouteFor(temporary,Persistent(request.source)||ProcessLocal(request.source)||ProcessLocal(request.parent)),
   [&request]{
    std::vector<VolumeCoord::Access> access;
    const auto path=HostPath(request.source);
@@ -719,7 +726,8 @@ MutationPlan DescribeMutation(const DeleteEntries& request,bool temporary)
  Check(!request.selection.empty(),"Select entries to delete");
  for(const auto& item:request.selection)
   Check(!item.IsNone(),"No source file location was supplied");
- return {RouteFor(temporary,std::all_of(request.selection.begin(),request.selection.end(),Persistent)),
+ return {RouteFor(temporary,std::all_of(request.selection.begin(),request.selection.end(),Persistent)||
+                  std::any_of(request.selection.begin(),request.selection.end(),ProcessLocal)),
   [&request]{
    std::vector<VolumeCoord::Access> access;
    for(const auto& item:request.selection)ReserveEndpoint(access,item,Mode::Write);
@@ -734,7 +742,7 @@ MutationPlan DescribeMutation(const DeleteEntries& request,bool temporary)
 MutationPlan DescribeMutation(const CreateFolder& request,bool temporary)
 {
  Check(!request.parent.IsNone()&&!request.name.empty(),"Choose a destination and folder name");
- return {RouteFor(temporary,Persistent(request.parent)),
+ return {RouteFor(temporary,Persistent(request.parent)||ProcessLocal(request.parent)),
   [&request]{
    std::vector<VolumeCoord::Access> access;
    ReserveChild(access,request.parent,request.name,false);
@@ -771,7 +779,8 @@ MutationPlan DescribeMutation(const CreateHardLink& request,bool temporary)
 {
  Check(!request.source.IsNone()&&!request.parent.IsNone()&&!request.name.empty(),
        "Choose a hard link source, destination and name");
- return {RouteFor(temporary,Persistent(request.source)&&Persistent(request.parent)),
+ return {RouteFor(temporary,(Persistent(request.source)&&Persistent(request.parent))||
+                  ProcessLocal(request.source)||ProcessLocal(request.parent)),
   [&request]{
    std::vector<VolumeCoord::Access> access;
    ReserveEndpoint(access,request.source,HostPath(request.source).empty()?Mode::Write:Mode::Read);
@@ -814,7 +823,8 @@ ExecutionPlan PlanOperation(const Request& request, bool inWorker=false){
  if(plan.transfer)plan.route=plan.transfer->route;
  else if(plan.mutation)plan.route=plan.mutation->route;
  else if(plan.metadata)
-  plan.route=RouteFor(temporary&&plan.metadata->temporaryForUnmounted,Persistent(*plan.metadata->item));
+  plan.route=RouteFor(temporary&&plan.metadata->temporaryForUnmounted,
+                     Persistent(*plan.metadata->item)||ProcessLocal(*plan.metadata->item));
  else throw std::logic_error("Missing file operation plan");
  plan.resources=BindResources(plan);
  return plan;

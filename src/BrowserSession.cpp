@@ -237,7 +237,9 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
             RejectNavigation(request.resource,"The search result changed or is hidden.");
             return;
         }
-        if(restoreOnError&&std::holds_alternative<BrowserNavigation::ExternalJournal>(result->payload))listingPending_=false;
+        if(restoreOnError&&(std::holds_alternative<BrowserNavigation::ExternalJournal>(result->payload)||
+                            std::holds_alternative<BrowserNavigation::ImagePassword>(result->payload)))
+            listingPending_=false;
         publish(*result);
         // A drive probe may hand off to another navigation (for example an HFS+ CD).
         if(Navigating())return;

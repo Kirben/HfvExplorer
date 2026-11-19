@@ -7,6 +7,7 @@
 #include "HfsPlusCd.h"
 #include "OpticalVolume.h"
 #include "DmgImage.h"
+#include "DmgEncryption.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
 #include <set>
@@ -22,6 +23,7 @@ class Plus final : public Volume, public WorkerEndpoint {
     std::unique_ptr<HfsPlus::Source> source_;
     std::unique_ptr<HfsPlus::Volume> volume_;
     std::atomic<bool> writable_;std::atomic<bool> usable_{true};
+    const bool processLocal_;
     std::u16string name_;bool caseSensitive_=false,hfsx_=false,journaled_=false,external_=false,expanded_=false;std::atomic<bool> canWrite_{false};
     mutable std::recursive_mutex mutex_;
     struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Plus& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
@@ -49,8 +51,8 @@ class Plus final : public Volume, public WorkerEndpoint {
     }
 public:
     Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key,std::wstring externalJournal)
-        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),resourceKey_(std::move(key)),externalJournal_(externalJournal) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();external_=volume_->ExternalJournal();expanded_=volume_->ExpandedTimes();canWrite_=volume_->Writable();if(!externalJournal.empty()&&volume_->ExternalJournal())journalDependency_.reset(new VolumeCoord::ImageDependency(ResourceKey(),externalJournal));}
-    WorkerExecution Execution()const override{WorkerExecution result;result.stableCatalogIds=true;return result;}
+        : source_(std::move(source)), volume_(new HfsPlus::Volume(*source_, write)), writable_(write),processLocal_(source_->ProcessLocal()),resourceKey_(std::move(key)),externalJournal_(externalJournal) {name_=volume_->Name();caseSensitive_=volume_->CaseSensitive();hfsx_=volume_->IsHfsX();journaled_=volume_->Journaled();external_=volume_->ExternalJournal();expanded_=volume_->ExpandedTimes();canWrite_=volume_->Writable();if(!externalJournal.empty()&&volume_->ExternalJournal())journalDependency_.reset(new VolumeCoord::ImageDependency(ResourceKey(),externalJournal));}
+    WorkerExecution Execution()const override{WorkerExecution result;result.stableCatalogIds=true;result.processLocal=processLocal_;return result;}
     WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;out.journal=externalJournal_;}else if(source_->MediaDrive()>=0){out.kind=WorkerOrigin::Cd;out.drive=source_->MediaDrive();uint32_t generation=0;out.generationKnown=source_->MediaGeneration(generation);out.generation=generation;}out.writable=writable_;return out;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
     void SuspendWorker()override{Call call(*this);usable_=false;volume_.reset();}
@@ -139,6 +141,7 @@ class Mfs final : public Volume, public WorkerEndpoint {
     }
     static std::string Encode(const std::u16string& name,unsigned maximum=255){std::string encoded,error;if(!MfsImage::EncodeName(Wide(name),encoded,error,maximum))throw HfsPlus::Error(error);return encoded;}
 public:
+    WorkerExecution Execution()const override{WorkerExecution result;result.processLocal=source_->ProcessLocal();return result;}
     explicit Mfs(std::unique_ptr<MfsSource> source,std::string key):source_(std::move(source)),resourceKey_(std::move(key)){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
     WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;}out.writable=source_->Writable();return out;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
@@ -279,6 +282,7 @@ class ReadOnlyMfsImage final : public MfsSource {
 public:
     explicit ReadOnlyMfsImage(std::shared_ptr<HfsPlus::Source> source):source_(std::move(source)){}
     uint64_t Length()const override{return source_->Size();}
+    bool ProcessLocal()const override{return source_->ProcessLocal();}
     bool ReadAt(uint64_t at,void* bytes,size_t count)override{source_->Read(at,bytes,count);return true;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
 };
@@ -297,11 +301,12 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
 }
 }
 
-static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent) {
+static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
-    if(Dmg::Unwrap(source))return OpenDmg(std::move(source),key,externalJournal);
+    const bool encrypted=Dmg::Unlock(source,password);
+    if(Dmg::Unwrap(source)||encrypted)return OpenDmg(std::move(source),key,externalJournal);
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
         if(persistent)
@@ -327,8 +332,9 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {
     return OpenImageImpl(path,externalJournal,false);
 }
-std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal) {
-    return OpenImageImpl(path,externalJournal,true);
+std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal,
+                                         const Dmg::Password* password) {
+    return OpenImageImpl(path,externalJournal,true,password);
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {
     uint16_t signature=0;

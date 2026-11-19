@@ -21,6 +21,7 @@ class Source {
     virtual ~Source() = default;
     virtual uint64_t Size() const = 0;
     virtual bool Writable() const = 0;
+    virtual bool ProcessLocal()const{return false;}
     virtual void Read(uint64_t, void *, size_t) = 0;
     virtual void Write(uint64_t, const void *, size_t) = 0;
     virtual void Flush() = 0;

@@ -24,6 +24,7 @@ struct WorkerExecution {
     bool windowsPaths = false;
     bool classicConversion = false;
     bool stableCatalogIds = false;
+    bool processLocal = false; // An unlocked source must stay in this process.
 
     bool Persistent() const { return placement == Placement::PersistentSession; }
 };

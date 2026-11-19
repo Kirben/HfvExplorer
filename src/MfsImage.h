@@ -13,6 +13,7 @@ public:
     virtual uint64_t Length() const = 0;
     virtual bool ReadAt(uint64_t offset,void* bytes,size_t length) = 0;
     virtual bool Writable()const{return false;}
+    virtual bool ProcessLocal()const{return false;}
     virtual bool WriteAt(uint64_t,const void*,size_t){return false;}
     virtual bool Flush(){return false;}
     virtual void DisableWrites(){}

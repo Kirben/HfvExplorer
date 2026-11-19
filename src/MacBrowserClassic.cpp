@@ -46,6 +46,7 @@ class Classic final : public Volume, public WorkerEndpoint {
     std::string image_;
     std::string resourceKey_;
     std::string imageIdentity_;
+    bool processLocal_=false;
     bool write_;bool suspended_=false;
     bool session_=false, markedDirty_=false, closeFailed_=false;
     void BeforeWrite() {
@@ -128,6 +129,7 @@ public:
     Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key):write_(false){
         resourceKey_=key;context_=LegacyEngine::ForVolume(key);LegacyEngine::Scope engine(context_);
         media_=std::move(source);
+        processLocal_=media_->ProcessLocal();
         cdDrive_=media_->MediaDrive();
         registration_.reset(new ReadOnlySources::Registration(media_));
         image_=registration_->Path();
@@ -139,7 +141,7 @@ public:
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
-    WorkerExecution Execution()const override{WorkerExecution out;out.classicConversion=cdDrive_>=0;out.stableCatalogIds=session_;return out;}
+    WorkerExecution Execution()const override{WorkerExecution out;out.classicConversion=cdDrive_>=0;out.stableCatalogIds=session_;out.processLocal=processLocal_;return out;}
     WorkerOrigin WorkerDescription()const override {
         LegacyEngine::Scope engine(context_);
         WorkerOrigin out;

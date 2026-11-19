@@ -245,6 +245,8 @@ public:
     Image(std::unique_ptr<Source> file,Layout layout):file_(std::move(file)),layout_(std::move(layout)){}
     uint64_t Size()const override{return layout_.bytes;}
     bool Writable()const override{return false;}
+    bool ProcessLocal()const override{return file_->ProcessLocal();}
+    ~Image()override{if(ProcessLocal()&&!bytes_.empty())SecureZeroMemory(bytes_.data(),bytes_.size());}
     void Flush()override{}
     void Write(uint64_t,const void*,size_t)override{throw Error("DMG images are read-only");}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return file_->WorkerFiles();}
