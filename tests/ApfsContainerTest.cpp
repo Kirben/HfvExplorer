@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "ApfsContainer.h"
+#include "ApfsTree.h"
 #include "HfsPlusDisk.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
@@ -85,6 +86,36 @@ Memory WithCheckpoints()
     return disk;
 }
 
+
+void Header(uint8_t* p,uint64_t oid,uint64_t tx,uint32_t type,uint32_t subtype=0)
+{
+    Little(p+8,oid,8);Little(p+16,tx,8);Little(p+24,type,4);Little(p+28,subtype,4);
+}
+void ObjectMapFixture(Memory& disk)
+{
+    constexpr size_t size=4096;
+    auto map=disk.bytes.data()+12*size;
+    Header(map,12,5,0x4000000b);
+    Little(map+40,0x40000002,4);Little(map+48,13,8);
+    auto root=map+size;
+    Header(root,13,5,0x40000002,11);
+    Little(root+32,5,2);Little(root+34,1,2);Little(root+36,1,4);
+    Little(root+42,4,2);Little(root+44,16,2);Little(root+60,1024,8);Little(root+68,1,8);
+    const auto end=root+size-40;
+    Little(root+58,8,2);Little(end-8,14,8);
+    Little(end+4,size,4);Little(end+8,16,4);Little(end+12,16,4);
+    auto leaf=root+size;
+    Header(leaf,14,5,0x40000003,11);
+    Little(leaf+32,6,2);Little(leaf+36,5,4);Little(leaf+42,20,2);Little(leaf+44,80,2);
+    for(unsigned i=0;i<5;++i){
+        auto key=leaf+76+i*16;
+        auto value=leaf+size-(i+1)*16;
+        Little(leaf+56+i*4,i*16,2);Little(leaf+58+i*4,(i+1)*16,2);
+        Little(key,i<3?1024:1029,8);Little(key+8,i<3?1+i*2:1+(i-3)*6,8);
+        Little(value,i==2?1:0,4);Little(value+4,size,4);Little(value+8,35+i,8);
+    }
+    for(size_t block:{12,13,14})Seal(disk.bytes,block*size,size);
+}
 Memory Gpt(const Memory& raw,unsigned sector)
 {
     const size_t start=1024*1024;
@@ -148,6 +179,19 @@ int RunApfsContainerTest(const char* directory)
             gpt.bytes[gpt.bytes.size()-sector+16]^=1;
             Reject([&]{Apfs::Probe(gpt);},"APFS probe ignored an invalid GPT backup");
         }
+        auto mapped=disk;
+        ObjectMapFixture(mapped);
+        // The object-map nodes belong to transaction 5; only leaf keys can be newer.
+        const Apfs::ObjectMap map(mapped,*found,12,5);
+        Check(!map.Lookup(1024)&&map.Lookup(1029)==38&&!map.Lookup(1030),
+              "APFS object map ignored a tombstone or selected a future version");
+        constexpr size_t leaf=14*4096;
+        Little(mapped.bytes.data()+leaf+58,0,2);Seal(mapped.bytes,leaf,4096);
+        Reject([&]{map.Lookup(1029);},"APFS object map accepted an invalid record range");
+        ObjectMapFixture(mapped);
+        Little(mapped.bytes.data()+13*4096+4096-48,13,8);Seal(mapped.bytes,13*4096,4096);
+        Reject([&]{map.Lookup(1029);},"APFS object map accepted a circular child reference");
+        fprintf(report,"PASS: APFS object-map index, object versions, tombstones, bounds and cycles.\n");
         auto ring=WithCheckpoints();
         auto checkpoint=Apfs::Probe(ring);
         Check(checkpoint&&checkpoint->transaction==7&&checkpoint->checkpointBlock==1,
