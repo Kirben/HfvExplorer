@@ -1,3 +1,5 @@
+#pragma once
+
 /*
  * HFVExplorer
  * Copyright (C) 1997-1998 by Anygraaf Oy

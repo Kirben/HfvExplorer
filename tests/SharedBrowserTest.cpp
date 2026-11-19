@@ -78,7 +78,7 @@ int RunSharedBrowserTest(const char* directory){
   BYTE* map=partitioned.data()+512;word(map,0x504d);number(map+4,1);number(map+8,128);number(map+12,unsigned(original.size()/512));memcpy(map+48,"Apple_HFS",9);
   CString mapped=root+"\\partitioned.dsk";{CFile file;check(file.Open(mapped,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create partitioned fixture");file.Write(partitioned.data(),UINT(partitioned.size()));}
   doc.m_volumes[0].close();doc.m_volumes[0].m_file_name=mapped;
-  auto mappedJob=ShowStorageWaitJob([&](Storage::Job&){auto rows=doc.read_classic_browser_directory(0,2,"Shared:",false,0);check(rows.rows.size()==3,"partitioned directory row count");return Storage::Result{};},true);
+  auto mappedJob=ShowStorageWaitJob([&](Storage::Job&){BrowserFolderReader reader({},&doc.GetBrowserSession().Mounts());auto rows=reader.read_classic_browser_directory(0,2,"Shared:",false,0);check(rows.rows.size()==3,"partitioned directory row count");return Storage::Result{};},true);
   check(!mappedJob.code&&load(mapped)==partitioned,"partitioned classic listing and unchanged source");
   {auto adapter=MacBrowser::OpenClassic((LPCSTR)mapped,"Shared:",false);check(adapter->List(2).size()==3,"partitioned classic transfer adapter");adapter->Close();}
   doc.m_volumes[0].close();doc.m_volumes[0].m_file_name=image;check(doc.m_volumes[0].open()!=0,"restore raw classic fixture");
