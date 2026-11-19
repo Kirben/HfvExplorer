@@ -6,6 +6,7 @@
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "OpticalVolume.h"
+#include "DmgImage.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
 #include <set>
@@ -272,10 +273,35 @@ std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable) {
        (!writable || !source->Open(path.c_str(),error,false)))throw HfsPlus::Error(error);
     return FromMfs(std::move(source),VolumeCoord::ImageKey(path));
 }
+namespace {
+class ReadOnlyMfsImage final : public MfsSource {
+    std::shared_ptr<HfsPlus::Source> source_;
+public:
+    explicit ReadOnlyMfsImage(std::shared_ptr<HfsPlus::Source> source):source_(std::move(source)){}
+    uint64_t Length()const override{return source_->Size();}
+    bool ReadAt(uint64_t at,void* bytes,size_t count)override{source_->Read(at,bytes,count);return true;}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
+};
+
+std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
+                                const std::wstring& externalJournal)
+{
+    if(HfsPlus::Volume::Recognizes(*source))
+        return FromHfsPlus(std::move(source),false,key,externalJournal);
+    if(!externalJournal.empty())return {};
+    if(auto optical=Optical::Open(source,key))return optical;
+    std::shared_ptr<HfsPlus::Source> disk(std::move(source));
+    auto mfs=std::make_unique<ReadOnlyMfsImage>(disk);
+    if(MfsImage::Recognizes(*mfs))return FromMfs(std::move(mfs),key);
+    return OpenClassicSource(std::move(disk),key);
+}
+}
+
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
-    auto source = HfsPlus::OpenImage(path.c_str(), false);
+    auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
+    if(Dmg::Unwrap(source))return OpenDmg(std::move(source),key,externalJournal);
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
         if(persistent)

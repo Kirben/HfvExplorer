@@ -132,8 +132,9 @@ public:
         registration_.reset(new ReadOnlySources::Registration(media_));
         image_=registration_->Path();
         uint32_t generation=0;
-        imageIdentity_=media_->MediaDrive()>=0 && media_->MediaGeneration(generation)?
-            key+":"+std::to_string(generation):key+":"+image_;
+        if(media_->MediaDrive()>=0 && media_->MediaGeneration(generation))
+            imageIdentity_=key+":"+std::to_string(generation);
+        else imageIdentity_=media_->WorkerFiles().empty()?key+":"+image_:key;
         volume_=hfs_mount(image_.data(),1,O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
@@ -149,6 +150,12 @@ public:
                 out.drive=media_->MediaDrive();
                 out.generationKnown=media_->MediaGeneration(generation);
                 out.generation=generation;
+            }else{
+                const auto files=media_->WorkerFiles();
+                if(!files.empty()){
+                    out.kind=WorkerOrigin::Image;
+                    out.path=files.front().first;
+                }
             }
             return out;
         }
@@ -172,7 +179,7 @@ public:
         registration_.reset();
         media_.reset();
     }
-    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{LegacyEngine::Scope engine(context_);if(registration_||!volume_||volume_->fd>=0x10000000)return {};auto file=_get_osfhandle(volume_->fd);if(file==-1)throw HfsPlus::Error("Cannot transfer classic image handle");return {{hostImage_.empty()?VolumeCoord::Wide(image_):hostImage_,uintptr_t(file)}};}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{LegacyEngine::Scope engine(context_);if(media_)return media_->WorkerFiles();if(registration_||!volume_||volume_->fd>=0x10000000)return {};auto file=_get_osfhandle(volume_->fd);if(file==-1)throw HfsPlus::Error("Cannot transfer classic image handle");return {{hostImage_.empty()?VolumeCoord::Wide(image_):hostImage_,uintptr_t(file)}};}
     void WorkerUncleanExit()override{LegacyEngine::Scope engine(context_);write_=false;}
     void SuspendWorker()override{LegacyEngine::Scope engine(context_);if(registration_)return;if(volume_){auto v=volume_;volume_=nullptr;suspended_=true;int closed=hfs_umount(v);if(closed)write_=false;Check(closed==0);}}
     void ResumeWorker()override{LegacyEngine::Scope engine(context_);if(!suspended_)return;volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image_.c_str()),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);suspended_=false;markedDirty_=false;}

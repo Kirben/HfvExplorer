@@ -39,3 +39,11 @@ when needed. Explicit conversions retain user metadata and refuse to consume a
 genuine resource fork. No APSL implementation was incorporated. Additional
 unmodified LZFSE/LZVN encoder files use the same pinned BSD-licensed revision;
 the existing MIT libzbitmap encoder is now built as well as its decoder.
+
+- `bzip2/`: bzip2 1.0.8, unmodified library sources under the bzip2 license.
+  Source: https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz.
+  License: bzip2/LICENSE and ../../licenses/bzip2.txt.
+- `xz/`: XZ Embedded, upstream commit `ae63ae3a36ed01724674e8f3d750dc47bf125410`.
+  Source: https://github.com/tukaani-project/xz-embedded.
+  The unmodified 0BSD decoder sources are built with CRC32, CRC64 and SHA-256
+  checks. License: xz/COPYING and ../../licenses/XZ-0BSD.txt.
