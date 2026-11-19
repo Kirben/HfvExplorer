@@ -16,7 +16,9 @@ public:
     struct Address {
         Kind kind;
         int index;
-        bool operator==(const Address& other) const { return kind == other.kind && index == other.index; }
+        uint64_t incarnation=0;
+        bool SameSlot(const Address& other) const { return kind==other.kind&&index==other.index; }
+        bool operator==(const Address& other) const { return SameSlot(other)&&incarnation==other.incarnation; }
     };
     struct Mount {
         std::shared_ptr<MacBrowser::Volume> volume;
@@ -26,6 +28,7 @@ public:
         std::wstring physicalPath,suffix;
         uint64_t physicalOffset=0;
         int sourceDrive=-1;
+        uint64_t incarnation=0;
     };
     struct Entry {
         Address address;
@@ -63,13 +66,23 @@ public:
         void ReplaceFrom(int index,ClassicSlots& source,int slot) {
             (*this)[index]=std::move(source[slot]);
         }
-    } classic;
-    CFATVolume windows[MAX_FAT_VOLUMES];
-    int classicCount=0,windowsCount=0;
-    uint64_t classicRevision[MAX_HFS_VOLUMES]{};
-    std::vector<Mount> mounted;
-
-    static std::optional<Address> FromTreeBinding(int type,int index);
+    };
+    int AddClassic(ClassicMount volume);
+    void RemoveClassic(int index);
+    void UpdateClassic(int index,const MacBrowser::ClassicMountInfo&);
+    void PublishClassic(int index,ClassicMount volume,uint64_t revision);
+    int AddWindows(char letter,UINT type);
+    void SetWindowsType(int index,UINT type);
+    int AddMounted(Mount mount);
+    void ReplaceMounted(int index,Mount mount);
+    void SetMountedSourceDrive(int index,int drive);
+    std::shared_ptr<MacBrowser::Volume> RemoveMounted(int index);
+    void ClearMounted(){mounted.clear();}
+    void ClearMountedRoots();
+    void SetRoot(Address,HTREEITEM);
+    const std::vector<Mount>& Mounted() const { return mounted; }
+    Address Bind(Address address) const;
+    bool IsBound(Address address) const;
     std::optional<Entry> Lookup(Address address) const;
     std::optional<Entry> FindWindowsDrive(int drive) const;
     std::optional<Entry> FindClassicVolume(const std::wstring& locator) const;
@@ -80,6 +93,16 @@ public:
     void ClearObserved(){observed_.clear();}
 
 private:
+    friend class CHFVExplorerDoc;
+    friend class BrowserFolderReader;
+    ClassicSlots classic;
+    CFATVolume windows[MAX_FAT_VOLUMES];
+    int classicCount=0,windowsCount=0;
+    uint64_t classicRevision[MAX_HFS_VOLUMES]{};
+    std::vector<Mount> mounted;
+    std::array<uint64_t,MAX_HFS_VOLUMES> classicIncarnation_{};
+    std::array<uint64_t,MAX_FAT_VOLUMES> windowsIncarnation_{};
+    uint64_t nextIncarnation_=1;
     std::array<uint64_t,26> mediaEpoch_{};
     std::array<std::optional<DWORD>,MAX_FAT_VOLUMES> windowsSerial_{};
     std::map<std::string,std::vector<Entry>> observed_;

@@ -352,8 +352,8 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   auto& control=tree->GetTreeCtrl();
   auto& volume=reader->Slots()[index];
   volume.m_rootitem=root;
-  m_volumes.ReplaceFrom(index,reader->Slots(),index);
-  m_classicRevision[index]=result.listing.revision;
+  session.Mounts().PublishClassic(index,std::move(volume),result.listing.revision);
+  tree->RenewBrowserMount(root);
   control.SetItemText(root,m_volumes[index].m_volume_name);
   const auto& shown=result.listing.folder.ClassicPath();
   auto target=item;
@@ -374,11 +374,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
     named=find&&id==0?find->folder.ClassicPath():std::string()]{
   if(!initial)return false;
   if(!named.empty())return NavigateNamedClassicFolder(named,index+1);
-  auto& volume=m_volumes[index];
-  volume.m_volume_name.Empty();
-  volume.m_file_name.Empty();
-  volume.m_free=1;
-  volume.m_rootitem=nullptr;
+  GetBrowserSession().Mounts().RemoveClassic(index);
   GetBrowserSession().Tree()->GetTreeCtrl().DeleteItem(root);
   return NavigateInitialFolder(index+1);
  });

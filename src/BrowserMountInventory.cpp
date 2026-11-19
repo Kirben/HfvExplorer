@@ -49,21 +49,140 @@ bool BrowserMountInventory::ClassicMount::update_if_needed(int ask)
  return open()!=0;
 }
 
-std::optional<BrowserMountInventory::Address> BrowserMountInventory::FromTreeBinding(int type,int index)
+int BrowserMountInventory::AddClassic(ClassicMount volume)
 {
- if(index<0)return {};
- switch(type){
- case LIST_FAT:return Address{Kind::WindowsDrive,index};
- case LIST_HFS:return Address{Kind::ClassicVolume,index};
- case LIST_MAC:return Address{Kind::MountedVolume,index};
- default:return {};
+ int index=0;
+ for(;index<classicCount;++index){
+  if(!classic.Find(index)||classic[index].m_free)break;
  }
+ if(index==MAX_HFS_VOLUMES)return -1;
+ volume.m_free=false;
+ classic[index]=std::move(volume);
+ classicRevision[index]=0;
+ classicIncarnation_[index]=++nextIncarnation_;
+ if(index==classicCount)++classicCount;
+ return index;
+}
+
+void BrowserMountInventory::RemoveClassic(int index)
+{
+ classic[index]=ClassicMount{};
+ classicRevision[index]=0;
+ classicIncarnation_[index]=++nextIncarnation_;
+}
+
+void BrowserMountInventory::UpdateClassic(int index,const MacBrowser::ClassicMountInfo& info)
+{
+ auto& slot=classic[index];
+ const auto previous=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
+ if(previous!=info.generation)classicIncarnation_[index]=++nextIncarnation_;
+ slot.ReadMount(info);
+}
+
+void BrowserMountInventory::PublishClassic(int index,ClassicMount volume,uint64_t revision)
+{
+ const auto& old=classic[index];
+ if(old.m_mediaGenerationKnown!=volume.m_mediaGenerationKnown||
+    (volume.m_mediaGenerationKnown&&old.m_mediaGeneration!=volume.m_mediaGeneration))
+    classicIncarnation_[index]=++nextIncarnation_;
+ classic[index]=std::move(volume);
+ classicRevision[index]=revision;
+}
+
+int BrowserMountInventory::AddWindows(char letter,UINT type)
+{
+ if(windowsCount>=MAX_FAT_VOLUMES)return -1;
+ int index=windowsCount++;
+ auto& drive=windows[index];
+ drive.m_letter=letter;
+ drive.m_volume_name.Format("%c:\\\\",letter);
+ SetWindowsType(index,type);
+ return index;
+}
+
+void BrowserMountInventory::SetWindowsType(int index,UINT type)
+{
+ auto& drive=windows[index];
+ if(drive.m_type!=type||!windowsIncarnation_[index]){
+  drive.m_type=type;
+  windowsSerial_[index].reset();
+  windowsIncarnation_[index]=++nextIncarnation_;
+ }
+}
+
+int BrowserMountInventory::AddMounted(Mount mount)
+{
+ mount.incarnation=++nextIncarnation_;
+ mounted.push_back(std::move(mount));
+ return int(mounted.size()-1);
+}
+
+void BrowserMountInventory::ReplaceMounted(int index,Mount mount)
+{
+ mount.incarnation=++nextIncarnation_;
+ mounted.at(index)=std::move(mount);
+}
+
+void BrowserMountInventory::SetMountedSourceDrive(int index,int drive)
+{
+ mounted.at(index).sourceDrive=drive;
+}
+
+std::shared_ptr<MacBrowser::Volume> BrowserMountInventory::RemoveMounted(int index)
+{
+ auto& mount=mounted.at(index);
+ mount.root=nullptr;
+ mount.incarnation=++nextIncarnation_;
+ return std::move(mount.volume);
+}
+
+void BrowserMountInventory::ClearMountedRoots()
+{
+ for(auto& mount:mounted)mount.root=nullptr;
+}
+
+void BrowserMountInventory::SetRoot(Address address,HTREEITEM root)
+{
+ if(!IsBound(address))return;
+ switch(address.kind){
+ case Kind::ClassicVolume:classic[address.index].m_rootitem=root;break;
+ case Kind::WindowsDrive:windows[address.index].m_rootitem=root;break;
+ case Kind::MountedVolume:mounted.at(address.index).root=root;break;
+ }
+}
+
+BrowserMountInventory::Address BrowserMountInventory::Bind(Address address) const
+{
+ const auto index=address.index;
+ address.incarnation=0;
+ if(index<0)return address;
+ switch(address.kind){
+ case Kind::ClassicVolume:
+  if(index<MAX_HFS_VOLUMES)address.incarnation=classicIncarnation_[index];
+  break;
+ case Kind::WindowsDrive:
+  if(index<MAX_FAT_VOLUMES)address.incarnation=windowsIncarnation_[index];
+  break;
+ case Kind::MountedVolume:
+  if(size_t(index)<mounted.size())address.incarnation=mounted[index].incarnation;
+  return address;
+ }
+ // Directly constructed test fixtures also get a stable handle.
+ if(!address.incarnation&&((address.kind==Kind::ClassicVolume&&index<MAX_HFS_VOLUMES)||
+    (address.kind==Kind::WindowsDrive&&index<MAX_FAT_VOLUMES)))address.incarnation=1;
+ return address;
+}
+
+bool BrowserMountInventory::IsBound(Address address) const
+{
+ const auto bound=Bind(address);
+ return bound.incarnation&&(!address.incarnation||address==bound);
 }
 
 std::optional<BrowserMountInventory::Entry> BrowserMountInventory::Lookup(Address address) const
 {
- if(address.index<0)return {};
- Entry entry{address};
+ if(!IsBound(address))return {};
+ Entry entry{Bind(address)};
  const auto index=address.index;
  switch(address.kind){
  case Kind::WindowsDrive:{
@@ -128,12 +247,13 @@ bool BrowserMountInventory::IsCurrent(const Entry& captured) const
 
 void BrowserMountInventory::Observe(Address address,const std::string& resource,std::optional<DWORD> windowsSerial)
 {
+ if(!IsBound(address))return;
  if(address.kind==Kind::WindowsDrive&&address.index>=0&&address.index<windowsCount)
   windowsSerial_[address.index]=windowsSerial;
  auto entry=Lookup(address);
  if(!entry||!entry->root||resource.empty())return;
  auto& known=observed_[resource];
- auto previous=std::find_if(known.begin(),known.end(),[&](const Entry& value){return value.address==address;});
+ auto previous=std::find_if(known.begin(),known.end(),[&](const Entry& value){return value.address.SameSlot(address);});
  if(previous==known.end())known.push_back(std::move(*entry));
  else *previous=std::move(*entry);
 }

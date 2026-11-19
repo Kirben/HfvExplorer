@@ -52,6 +52,7 @@ class HFVExplorerTreeView : public CTreeView
 
 public:
  BrowserSession& GetBrowserSession()const;
+ void RenewBrowserMount(HTREEITEM item);
  void BindBrowserFolder(HTREEITEM item,BrowserDirectory::Folder folder);
  const BrowserDirectory::Folder* BrowserFolderAt(HTREEITEM) const;
  BrowserSession* BrowserBinding()const{return m_browserSession;}

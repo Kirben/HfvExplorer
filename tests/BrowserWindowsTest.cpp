@@ -107,7 +107,27 @@ int RunBrowserWindowsTest(const char* directory){
         "legacy path adapter truncated a typed folder");
   tree->GetTreeCtrl().DeleteItem(child);
   Check(!tree->BrowserNode(data), "deleted tree binding remained accessible");
-  fprintf(report,"PASS: executable DPI awareness and system-DPI fallback.\n");
+  {
+   auto& inventory=sa.Mounts();
+   BrowserMountInventory::ClassicMount removable;
+   removable.m_file_name=host+"\\reused.dsk";
+   const auto index=inventory.AddClassic(removable);
+   const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,index};
+   const auto oldRoot=tree->initialize_volume(index,"Temporary classic",2,0,0,0,0);
+   inventory.SetRoot(address,oldRoot);
+   const auto oldNode=tree->BrowserNodeAt(oldRoot);
+   const auto oldMount=inventory.Lookup(address);
+   Check(oldNode&&oldMount&&inventory.IsCurrent(*oldMount),"initial mount was not bound to the tree");
+   const auto handle=oldNode->mount;
+   inventory.RemoveClassic(index);
+   Check(inventory.AddClassic(removable)==index,"classic inventory did not reuse the free slot");
+   inventory.SetRoot(address,oldRoot); // Even an identical path and root cannot revive the old handle.
+   Check(!inventory.IsCurrent(*oldMount)&&!inventory.Lookup(handle)&&!tree->BrowserNodeAt(oldRoot),
+        "reuse revived a stale navigation or tree binding");
+   tree->GetTreeCtrl().DeleteItem(oldRoot);
+   inventory.RemoveClassic(index);
+  }
+  fprintf(report,"PASS: executable DPI awareness, system-DPI fallback and stale mount handles.\n");
   a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==VolumeCoord::Wide(std::string((LPCSTR)host))+L" \u2014 HFVExplorer","startup Windows folder title was replaced by Untitled");Check(!a->IsWindowVisible(),"test unexpectedly displayed a browser");
   MenuState menu;menu.m_nID=ID_TOOLS_NEW_BROWSER;Check(a->OnCmdMsg(ID_TOOLS_NEW_BROWSER,CN_UPDATE_COMMAND_UI,&menu,nullptr)&&menu.enabled,"New browser has no enabled update handler");
   a->SendMessage(WM_COMMAND,ID_TOOLS_NEW_BROWSER);Check(app.m_browsers.size()==2,"New browser menu did not create an independent window");

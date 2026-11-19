@@ -359,6 +359,7 @@ void BrowserSession::PublishFolder(const BrowserDirectory::Snapshot& snapshot,HT
 
 void BrowserSession::Observe(std::string key,uint64_t revision,BrowserMountInventory::Address address,FileOperations::Location folder)
 {
+ address=mounts_.Bind(address);
  mounts_.Observe(address,key,folder.WindowsMediaSerial());
  current_={key,revision,address,std::move(folder)};
  Watch(key);seen_[key]=(std::max)(seen_[key],revision);

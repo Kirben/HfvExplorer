@@ -119,7 +119,8 @@ bool BrowserSession::OpenFolderRequest(BrowserSession& source,BrowserNavigation:
   }
   auto& volume=document_->m_volumes[index];
   if(!volume.m_rootitem)
-   volume.m_rootitem=tree_->initialize_volume(index,image.c_str(),2,volume.m_is_floppy,volume.m_is_cd,0,0);
+   mounts_.SetRoot({BrowserMountInventory::Kind::ClassicVolume,index},
+      tree_->initialize_volume(index,image.c_str(),2,volume.m_is_floppy,volume.m_is_cd,0,0));
   // Resolve the selected catalog ID in the new window before publishing it.
   request.intent=Intent::StartupFolder;
   request.folder.expectedResource=VolumeCoord::ImageKey(image);

@@ -150,49 +150,19 @@ int check_zero_size( char *lpszPathName )
 	return(ret);
 }
 
-int CHFVExplorerDoc::insert_volume( 
-	CString name, 
-	int is_floppy,
-	int is_cd,
-	int is_hd,
-	int is_removable )
+int CHFVExplorerDoc::insert_volume(CString name,int is_floppy,int is_cd,int is_hd,int is_removable)
 {
-	char *ppp = name.GetBuffer(_MAX_PATH);
-	if(!check_zero_size( ppp )) {
-		return(-1);
-	}
-
-	if(m_hfs_count < MAX_HFS_VOLUMES) {
-		int i = get_volume_index_by_filename( name );
-		if(i >= 0) { // already mounted
-			return(-1);
-		} else {
-			for(i=0; i<m_hfs_count; i++) {
-				if( m_volumes[i].m_free ) {
-					break;
-				}
-			}
-			m_volumes[i].m_file_name = name;
-			m_volumes[i].m_free = 0;
-			m_volumes[i].m_opened = 0;
-			m_volumes[i].m_mediaGenerationKnown = false;
-			m_volumes[i].m_volume_name = "";
-			m_volumes[i].m_rootitem = 0;
-			m_volumes[i].m_floppy_update_needed = 0;
-			m_volumes[i].m_is_floppy = is_floppy;
-			m_volumes[i].m_is_cd = is_cd;
-			m_volumes[i].m_is_hd = is_hd;
-			m_volumes[i].m_is_removable = is_removable;
-			if(i == m_hfs_count) {
-				m_hfs_count++;
-				return(m_hfs_count-1);
-			} else {
-				return(i);
-			}
-		}
-	} else {
-		return(-1);
-	}
+    const bool usable=check_zero_size(name.GetBuffer(_MAX_PATH))!=0;
+    name.ReleaseBuffer();
+    if(!usable)return -1;
+    if(get_volume_index_by_filename(name)>=0)return -1;
+    BrowserMountInventory::ClassicMount volume;
+    volume.m_file_name=name;
+    volume.m_is_floppy=is_floppy!=0;
+    volume.m_is_cd=is_cd!=0;
+    volume.m_is_hd=is_hd!=0;
+    volume.m_is_removable=is_removable!=0;
+    return GetBrowserSession().Mounts().AddClassic(std::move(volume));
 }
 
 void CHFVExplorerDoc::enum_volumes_ext( LPSTR mask, LPSTR ext )
@@ -337,18 +307,9 @@ void CHFVExplorerDoc::open_fat_directory(int index, LPSTR path, int list)
 
 #pragma optimize("",on)
 
-int CHFVExplorerDoc::insert_fat_volume( char letter, UINT type )
+int CHFVExplorerDoc::insert_fat_volume(char letter,UINT type)
 {
-	if(m_fat_count < MAX_FAT_VOLUMES) {
-		m_fats[m_fat_count].m_letter = letter;
-		m_fats[m_fat_count].m_type = type;
-		m_fats[m_fat_count].m_rootitem = 0;
-		m_fats[m_fat_count].m_volume_name.Format( "%c:\\", letter );
-		m_fat_count++;
-		return(m_fat_count-1);
-	} else {
-		return(-1);
-	}
+    return GetBrowserSession().Mounts().AddWindows(letter,type);
 }
 
 void CHFVExplorerDoc::enum_fat_volumes()
@@ -387,7 +348,6 @@ void CHFVExplorerDoc::update_invisible_attributes()
 
 CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
  :m_browserSession(new BrowserSession(this)),
-  m_classicRevision(GetBrowserSession().Mounts().classicRevision),
   m_volumes(GetBrowserSession().Mounts().classic),
   m_fats(GetBrowserSession().Mounts().windows),
   m_hfs_count(GetBrowserSession().Mounts().classicCount),
@@ -402,8 +362,6 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
 	update_invisible_attributes();
 
 
-	m_hfs_count = 0;
-	m_fat_count = 0;
 
 	if(discover){
 	char dir[_MAX_PATH+1];
@@ -707,17 +665,19 @@ void CHFVExplorerDoc::BuildBrowserRoots()
     tree->initialize_tree();
     for(int index=0;index<m_hfs_count;++index){
         auto& volume=m_volumes[index];
-        volume.m_rootitem=nullptr;
+        const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,index};
+        GetBrowserSession().Mounts().SetRoot(address,nullptr);
         if(volume.m_free)continue;
         CString label=volume.m_volume_name.IsEmpty()?volume.m_file_name:volume.m_volume_name;
-        volume.m_rootitem=tree->initialize_volume(index,label,CNID_ROOT_ID,volume.m_is_floppy,
-            volume.m_is_cd,volume.m_is_hd,volume.m_is_removable);
+        GetBrowserSession().Mounts().SetRoot(address,tree->initialize_volume(index,label,CNID_ROOT_ID,volume.m_is_floppy,
+            volume.m_is_cd,volume.m_is_hd,volume.m_is_removable));
     }
     for(int index=0;index<m_fat_count;++index){
         auto& drive=m_fats[index];
         if(drive.m_type==DRIVE_NO_ROOT_DIR)continue;
-        drive.m_rootitem=tree->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,
-            &drive.m_volume_name,toupper((unsigned char)drive.m_letter)<'C');
+        GetBrowserSession().Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,index},
+            tree->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,
+                &drive.m_volume_name,toupper((unsigned char)drive.m_letter)<'C'));
     }
 }
 

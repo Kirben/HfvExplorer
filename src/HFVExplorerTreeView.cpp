@@ -109,6 +109,7 @@ uint32_t BrowserTreeNode::CatalogId() const
 
 LPARAM HFVExplorerTreeView::StoreBrowserNode(BrowserTreeNode node)
 {
+    node.mount=GetBrowserSession().Mounts().Bind(node.mount);
     if (auto* folder = std::get_if<BrowserDirectory::Folder>(&node.value)) folder->location.directory = true;
     auto* stored = new BrowserTreeNode(std::move(node));
     const auto key = reinterpret_cast<DWORD_PTR>(stored);
@@ -127,7 +128,9 @@ LPARAM HFVExplorerTreeView::StoreBrowserNode(BrowserTreeNode node)
 
 const BrowserTreeNode* HFVExplorerTreeView::BrowserNode(DWORD_PTR data) const
 {
-    return m_pointer_slots.count(data) ? reinterpret_cast<const BrowserTreeNode*>(data) : nullptr;
+    if(!m_pointer_slots.count(data))return nullptr;
+    const auto* node=reinterpret_cast<const BrowserTreeNode*>(data);
+    return GetBrowserSession().Mounts().IsBound(node->mount)?node:nullptr;
 }
 
 const BrowserTreeNode* HFVExplorerTreeView::BrowserNodeAt(HTREEITEM item) const
@@ -613,6 +616,15 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 
 /////////////////////////////////////////////////////////////////////////////
 // HFVExplorerTreeView message handlers
+
+void HFVExplorerTreeView::RenewBrowserMount(HTREEITEM item)
+{
+    if(!item)return;
+    const auto data=m_ct->GetItemData(item);
+    if(!m_pointer_slots.count(data))return;
+    auto* node=reinterpret_cast<BrowserTreeNode*>(data);
+    node->mount=GetBrowserSession().Mounts().Bind(node->mount);
+}
 
 void HFVExplorerTreeView::BindBrowserFolder(HTREEITEM item, BrowserDirectory::Folder folder)
 {

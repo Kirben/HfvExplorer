@@ -302,8 +302,8 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
    tree->delete_subdir_contents(prepared.m_rootitem);
    control.SetItemText(prepared.m_rootitem,prepared.m_volume_name);
    tree->enable_selchange(enabled);
-   m_volumes.ReplaceFrom(mounted,reader->Slots(),0);
-   m_classicRevision[mounted]=snapshot.revision;
+   session.Mounts().PublishClassic(mounted,std::move(prepared),snapshot.revision);
+   tree->RenewBrowserMount(m_volumes[mounted].m_rootitem);
    PublishClassicFolder(mounted,m_volumes[mounted].m_rootitem,std::nullopt,snapshot);
    return;
   }
