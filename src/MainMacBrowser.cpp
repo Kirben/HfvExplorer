@@ -238,16 +238,6 @@ struct MainMacBrowser::State {
             Request request=find?*find:Request{Location::Mounted(volume,id),
                 (rebuild||reload)?Intent::RefreshFolder:Intent::SelectFolder,key};
             request.folder.directory=true;
-            struct MountedListing {
-                uint64_t free=0;
-                std::vector<uint32_t> ancestors;
-                std::wstring title;
-                std::vector<std::pair<uint32_t,std::vector<Entry>>> levels;
-                std::vector<Entry> entries;
-                bool mutableFolder=true;
-            };
-            auto listing=std::make_shared<MountedListing>();
-            listing->ancestors=ancestors;
             const auto& mount=mounts[index];
             const auto mountRoot=mount.root;
             const auto drive=mount.drive;
@@ -261,13 +251,15 @@ struct MainMacBrowser::State {
             };
             const bool showInvisible=App().m_show_invisible_mac!=FALSE;
             session_.Navigate(std::move(request),
-                [listing,readFolder,index,reload,drive,physicalPath,physicalOffset,showInvisible]
+                [ancestors,readFolder,reload,drive,physicalPath,physicalOffset,showInvisible]
                 (const Request& request,Result& result,Storage::Job& job){
                 if(job.cancelled())throw Storage::Cancelled();
                 try{
                     VolumeCoord::Lease access({{request.resource,VolumeCoord::Mode::Read}});
                     auto volume=request.folder.Volume();
                     auto id=request.folder.Id();
+                    MountedFolder listing;
+                    listing.ancestors=ancestors;
                     if(reload){
                         if(!physicalPath.empty())volume=Removable::Reopen(physicalPath,physicalOffset);
                         else if(drive>=0){
@@ -277,18 +269,20 @@ struct MainMacBrowser::State {
                     }
                     if(volume!=request.folder.Volume()){
                         id=2;
-                        listing->ancestors={2};
+                        listing.ancestors={2};
                     }
                     auto& snapshot=result.listing;
                     snapshot.resourceKey=volume->ResourceKey();
-                    readFolder(volume,id,snapshot.revision,listing->ancestors,listing->title,
-                        listing->levels,listing->entries,listing->free,listing->mutableFolder);
+                    readFolder(volume,id,snapshot.revision,listing.ancestors,listing.title,
+                        listing.levels,listing.entries,listing.free,listing.mutableFolder);
                     result.listing.folder.SetMounted(volume,id);
                     result.listing.folder.directory=true;
-                    FillListing(snapshot,listing->entries,volume->Supports(),showInvisible,listing->mutableFolder);
+                    FillListing(snapshot,listing.entries,volume->Supports(),showInvisible,listing.mutableFolder);
+                    result.payload=std::move(listing);
                 }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"This volume is busy"};}
                 return Storage::Result{};
-            }, [this,volume,listing,item,index,mountRoot,rebuild](Result& result){
+            }, [this,volume,item,index,mountRoot,rebuild](Result& result){
+                auto& listing=std::get<MountedFolder>(result.payload);
                 auto target=item;
                 auto mounted=result.listing.folder.Volume();
                 if(mounted!=volume){
@@ -301,8 +295,8 @@ struct MainMacBrowser::State {
                     if(!mounts[index].physicalPath.empty())
                         TreeText(session_,target,Wide(mounted->Name())+L" - "+mounts[index].suffix+L" [read-only]");
                 }
-                Publish(index,result.listing.folder.Id(),target,rebuild,false,mounted,result.listing.revision,listing->title,
-                    listing->levels,listing->entries,listing->free,listing->mutableFolder,listing->ancestors,&result.listing);
+                Publish(index,result.listing.folder.Id(),target,rebuild,false,mounted,result.listing.revision,listing.title,
+                    listing.levels,listing.entries,listing.free,listing.mutableFolder,listing.ancestors,&result.listing);
             },capturedMount,retry);
             return true;
         }
@@ -447,11 +441,9 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             break;
         }
 
-    struct RootListing {std::vector<Entry> entries;uint64_t free=0;};
-    auto root=std::make_shared<RootListing>();
     const bool showInvisible=App().m_show_invisible_mac!=FALSE;
     session_.Navigate(std::move(request),
-        [existing,root,showInvisible](const Request& request,Result& result,Storage::Job& job){
+        [existing,showInvisible](const Request& request,Result& result,Storage::Job& job){
             const auto& source=*request.image;
             const auto key=VolumeCoord::ImageKey(source.path);
             result.listing.resourceKey=key;
@@ -469,38 +461,41 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 if(job.cancelled())throw Storage::Cancelled();
                 BrowserDirectory::ObserveRead("image-root");
                 if(job.cancelled())throw Storage::Cancelled();
-                root->entries=volume->List(2);
-                root->free=volume->FreeBytes();
+                MountedFolder root;
+                root.entries=volume->List(2);
+                root.free=volume->FreeBytes();
                 auto folder=Location::Mounted(volume);
                 StorageLocation::ValidateMedia(folder);
                 StorageLocation::ValidateImage(source.path,key);
                 folder.directory=true;
                 result.listing.folder=std::move(folder);
-                State::FillListing(result.listing,root->entries,volume->Supports(),showInvisible,true);
+                State::FillListing(result.listing,root.entries,volume->Supports(),showInvisible,true);
                 if(job.cancelled()){
                     result.listing={};
                     throw Storage::Cancelled();
                 }
+                result.payload=std::move(root);
             }catch(const HfsPlus::ExternalJournalRequired& error){
                 result.listing.resourceKey.clear();
-                result.journalPrompt=error.what();
+                result.payload=ExternalJournal{error.what()};
             }catch(const VolumeCoord::Busy&){
                 return Storage::Result{1,ERROR_BUSY,"The image is busy."};
             }
             return Storage::Result{};
         },
-        [this,path,root,next](Result& result){
-            if(!result.journalPrompt.empty()){
+        [this,path,next](Result& result){
+            if(auto* prompt=std::get_if<ExternalJournal>(&result.payload)){
                 if(Hidden(session_)){
-                    if(!next||!next())session_.RejectNavigation({},result.journalPrompt);
+                    if(!next||!next())session_.RejectNavigation({},prompt->prompt);
                     return;
                 }
                 std::wstring journal;
-                if(SelectHfsPlusExternalJournal(session_.Owner(),journal,result.journalPrompt))
+                if(SelectHfsPlusExternalJournal(session_.Owner(),journal,prompt->prompt))
                     QueueImageOpen(path,journal,next);
                 else if(next)next();
                 return;
             }
+            auto& root=std::get<MountedFolder>(result.payload);
             const auto volume=result.listing.folder.Volume();
             auto match=std::find_if(state_->mounts.begin(),state_->mounts.end(),[&](const auto& mount){
                 return mount.volume&&mount.volume->ResourceKey()==volume->ResourceKey();
@@ -511,7 +506,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             }else index=int(match-state_->mounts.begin());
             if(!state_->mounts[index].root)state_->Root(index);
             state_->Publish(index,2,state_->mounts[index].root,false,false,volume,
-                result.listing.revision,Wide(volume->Name()),{},root->entries,root->free,true,{2},&result.listing);
+                result.listing.revision,Wide(volume->Name()),{},root.entries,root.free,true,{2},&result.listing);
             RememberImage(path);
             if(next)next();
         },

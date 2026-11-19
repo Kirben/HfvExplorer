@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "BrowserDirectory.h"
+#include "BrowserMountInventory.h"
+#include "PhysicalRemovable.h"
 #include "StorageWorker.h"
 
 namespace BrowserNavigation {
@@ -21,10 +23,26 @@ struct Request {
     bool tryNextStartupRoot=false;
 };
 
+struct ClassicFolder {
+    BrowserMountInventory::ClassicMount mount;
+    std::vector<MacBrowser::ClassicAncestor> ancestors;
+};
+struct FloppyFolder {BrowserMountInventory::ClassicMount mount;};
+struct OpticalMount {std::shared_ptr<MacBrowser::Volume> volume;};
+struct ExternalMounts {std::vector<Removable::Mounted> volumes;};
+struct ExternalJournal {std::string prompt;};
+struct MountedFolder {
+    uint64_t free=0;
+    std::vector<uint32_t> ancestors;
+    std::wstring title;
+    std::vector<std::pair<uint32_t,std::vector<MacBrowser::Entry>>> levels;
+    std::vector<MacBrowser::Entry> entries;
+    bool mutableFolder=true;
+};
+
 struct Result {
     BrowserDirectory::Snapshot listing;
-    Storage::Result status;
-    std::string journalPrompt;
+    std::variant<std::monostate,ClassicFolder,FloppyFolder,OpticalMount,ExternalMounts,MountedFolder,ExternalJournal> payload;
 };
 
 using Read = std::function<Storage::Result(const Request&, Result&, Storage::Job&)>;

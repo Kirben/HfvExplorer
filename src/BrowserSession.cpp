@@ -210,7 +210,6 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
                       selection=std::move(selection),restoreOnError,nextOnError=std::move(nextOnError)](const Storage::Result& status) mutable {
         const auto stillCurrent=[&]{return tree_->GetTreeCtrl().GetSelectedItem()==anchor && (!mount||mounts_.IsCurrent(*mount));};
         if(!stillCurrent())return;
-        result->status=status;
         if(status.error==ERROR_BUSY){
             const auto& key=result->listing.resourceKey.empty()?request.resource:result->listing.resourceKey;
             Defer(key,request.folder.IsClassic(),[this,anchor,mount,retry,restoreOnError]{
@@ -238,7 +237,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
             RejectNavigation(request.resource,"The search result changed or is hidden.");
             return;
         }
-        if(restoreOnError&&!result->journalPrompt.empty())listingPending_=false;
+        if(restoreOnError&&std::holds_alternative<BrowserNavigation::ExternalJournal>(result->payload))listingPending_=false;
         publish(*result);
         // A drive probe may hand off to another navigation (for example an HFS+ CD).
         if(Navigating())return;

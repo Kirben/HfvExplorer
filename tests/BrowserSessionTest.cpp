@@ -707,8 +707,11 @@ int RunBrowserSessionTest(const char* directory){
    const auto key=VolumeCoord::ImageKey(nextImage);
    PumpUntil([&]{return VolumeCoord::Available({{key,VolumeCoord::Mode::Write}});},"superseded image retained its lease");
    BrowserDirectory::testObserveRead={};
-   Check(Find(*session.List(),L"first.txt")>=0&&Find(*session.List(),L"Peer image")<0,
-         "superseded image replaced a newer folder selection");
+   const auto& mounts=session.Mounts().Mounted();
+   Check(Find(*session.List(),L"first.txt")>=0&&Find(*session.List(),L"Peer image")<0&&
+         std::none_of(mounts.begin(),mounts.end(),[&](const auto& mount){
+          return mount.volume&&_wcsicmp(mount.key.c_str(),nextImage.c_str())==0;
+         }),"superseded image published its listing or attached its mount");
 
    auto missing=VolumeCoord::Wide((LPCSTR)(root+"\\missing.dsk"));
    Check(session.MacBrowser().OpenImage(missing)==1,"queue missing image");
