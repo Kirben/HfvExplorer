@@ -1056,11 +1056,17 @@ bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!Selectio
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){const auto row=session_.List()->BrowserRowAt(i);if(row&&row->location.IsMounted())selected.push_back(state_->Item(i,false));}
     if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
     FileOperations::DeleteEntries request{std::move(selected)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
+bool MainMacBrowser::CanInspectProperties(int index) const
+{
+    if (index < 0 || !session_.ListingAvailable()) return false;
+    const auto row = session_.List()->BrowserRowAt(index);
+    return row && !row->location.IsNone() && !row->location.IsWindows();
+}
+
 bool MainMacBrowser::Properties(int index)
 {
-    const auto row=session_.List()->BrowserRowAt(index);
-    if(!session_.ListingAvailable()||!row||row->location.IsNone()||row->location.IsWindows())return false;
-    return MetadataDialogs::Show(row->location,session_.Owner());
+    if (!CanInspectProperties(index)) return false;
+    return MetadataDialogs::Show(session_.List()->BrowserRowAt(index)->location, session_.Owner());
 }
 BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
  BrowserTransfers::Selection out;if(!session_.ListingAvailable())return out;out.canMove=session_.List()->BrowserSelectionAllows(false);
@@ -1159,7 +1165,8 @@ bool MainMacBrowser::ContextMenu(CPoint point){
     menu.AppendMenu(MF_STRING|(Writable()&&BrowserTransfers::Any()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_STRING|(CanPasteHardLink()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE_HARD_LINK,"Paste hard &link...");menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING|(CanCreateFolder()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
     menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_OWN_DELETE,"&Delete");
-    menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"P&roperties...");
+    const int selectedRow = list.GetNextItem(-1, LVNI_SELECTED);
+    menu.AppendMenu(MF_STRING|(CanInspectProperties(selectedRow)?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"P&roperties...");
     UINT command=menu.TrackPopupMenu(TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,session_.Owner());
     int row=list.GetNextItem(-1,LVNI_SELECTED);
     switch(command){case ID_EDIT_COPY:Capture(false,false);break;case ID_EDIT_CUT:Capture(true,false);break;case ID_EDIT_PASTE:Paste();break;case ID_EDIT_PASTE_HARD_LINK:PasteHardLink();break;

@@ -553,6 +553,19 @@ int RunBackgroundMetadataTest(const char* directory){
   Check(session.MacBrowser().ShowTestFolder(mount,2),"show delayed Properties source");
   start(1);
   Select(session,L"File");
+  CMenu propertiesMenu;
+  Check(propertiesMenu.CreatePopupMenu() &&
+        propertiesMenu.AppendMenu(MF_STRING, ID_OWN_FILE_PROPERTIES, "Properties..."),
+        "create Properties menu");
+  auto propertiesEnabled = [&] {
+   frame->SendMessage(WM_INITMENUPOPUP, WPARAM(propertiesMenu.GetSafeHmenu()), 0);
+   return (propertiesMenu.GetMenuState(ID_OWN_FILE_PROPERTIES, MF_BYCOMMAND) & (MF_DISABLED | MF_GRAYED)) == 0;
+  };
+  Check(propertiesEnabled(), "frame disabled Properties for a selected HFS+ file");
+  session.List()->GetListCtrl().SetItemState(-1, 0, LVIS_SELECTED);
+  Check(!propertiesEnabled(), "frame enabled Properties without a selected row");
+  Select(session,L"File");
+  Check(propertiesEnabled(), "frame did not re-enable Properties after selection");
   BackgroundCopies::enabled=false;
   session.List()->SendMessage(WM_COMMAND,ID_OWN_FILE_PROPERTIES);
   BackgroundCopies::enabled=true;

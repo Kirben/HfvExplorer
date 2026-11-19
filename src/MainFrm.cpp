@@ -111,6 +111,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_UPDATE_COMMAND_UI_RANGE(ID_FILE_MAC_IMPORT,ID_FILE_MAC_IMPORT_RESOURCE,OnUpdateMacTransfer)
  ON_UPDATE_COMMAND_UI(ID_EDIT_CUT,OnUpdateMacEdit)
  ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE,OnUpdateMacEdit)
+ ON_UPDATE_COMMAND_UI(ID_OWN_FILE_PROPERTIES, OnUpdateItemProperties)
 	ON_COMMAND(ID_FILE_VOLUMEFROMFLOPPY, OnFileVolumefromfloppy)
 	ON_COMMAND(ID_FILE_VOLUMETOFLOPPY, OnFileVolumetofloppy)
 
@@ -1459,6 +1460,13 @@ void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
  }
  ui->Enable(enabled);
 }
+void CMainFrame::OnUpdateItemProperties(CCmdUI* ui)
+{
+    auto* list = m_browserSession ? m_browserSession->List() : nullptr;
+    const int selected = list ? list->GetListCtrl().GetNextItem(-1, LVNI_SELECTED) : -1;
+    ui->Enable(selected >= 0 && m_browserSession->MacBrowser().CanInspectProperties(selected));
+}
+
 void CMainFrame::OnUpdateMacEdit(CCmdUI* ui){
  auto& browser=GetBrowserSession().MacBrowser();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
  bool allowed=browser.Active()?(ui->m_nID==ID_EDIT_CUT?browser.SelectionWritable():browser.Writable()):
