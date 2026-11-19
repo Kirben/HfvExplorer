@@ -12,6 +12,7 @@
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
+#include "MediaDiscovery.h"
 #include "BrowserDirectory.h"
 #include "OptionsPage1.h"
 #include "utils.h"
@@ -37,7 +38,7 @@ class Fake:public Removable::Api {
  uintptr_t next=1;std::map<HANDLE,std::shared_ptr<Store>> handles;std::mutex mutex;
  std::shared_ptr<Store> Get(HANDLE h){auto i=handles.find(h);Check(i!=handles.end(),"Unknown simulated removable handle");return i->second;}
 public:
- std::vector<std::shared_ptr<Store>> devices;bool workerOnly=false,wrongThread=false,windowsReadable=false;unsigned enumerations=0;HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);std::atomic<bool> gate{false};
+ std::vector<std::shared_ptr<Store>> devices;bool workerOnly=false,wrongThread=false,windowsReadable=false;std::atomic<unsigned> enumerations{0};HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);std::atomic<bool> gate{false};
  ~Fake(){SetEvent(release);CloseHandle(entered);CloseHandle(release);}
  void Thread(){if(workerOnly&&GetCurrentThreadId()==StorageUi::state().thread)wrongThread=true;}
  std::shared_ptr<Store> Add(const wchar_t* name,std::shared_ptr<Bytes> bytes,STORAGE_BUS_TYPE bus=BusTypeUsb,bool removable=true){auto d=std::make_shared<Store>();d->device.path=name;d->device.label=name;d->device.bus=bus;d->device.removable=removable;d->geometry.bytes=bytes->size();d->segments[0]=std::move(bytes);devices.push_back(d);return d;}
@@ -68,13 +69,33 @@ public:void LoadWindowPosition()override{}void SaveWindowPosition()override{}voi
 IMPLEMENT_DYNCREATE(RemovableFrame,CMainFrame)
 unsigned MacRoots(BrowserSession& session){unsigned count=0;auto& tree=session.Tree()->GetTreeCtrl();for(auto item=tree.GetRootItem();item;item=tree.GetNextSiblingItem(item)){const auto* node=session.Tree()->BrowserNodeAt(item);if(node&&node->mount.kind!=BrowserMountInventory::Kind::WindowsDrive)++count;}return count;}
 int Row(BrowserSession& session,const wchar_t* name){auto& list=session.List()->GetListCtrl();for(int row=0;row<list.GetItemCount();++row){wchar_t text[512]{};LVITEMW item{};item.pszText=text;item.cchTextMax=ARRAYSIZE(text);SendMessageW(list.m_hWnd,LVM_GETITEMTEXTW,row,reinterpret_cast<LPARAM>(&item));if(!wcscmp(text,name))return row;}throw HfsPlus::Error("Missing removable browser row");}
+template<class Predicate>
+void Until(Predicate ready,const char* error)
+{
+ const auto start=GetTickCount();
+ while(!ready()){
+  Check(GetTickCount()-start<10000,error);
+  Pump();Sleep(1);
+ }
+}
 unsigned timerTicks=0;
 void CALLBACK Tick(HWND,UINT,UINT_PTR,DWORD){++timerTicks;}
 void OnWorker(std::function<void()> work){auto job=Storage::worker().submit([&](Storage::Job&){work();return Storage::Result{};});job->wait();Check(!job->result().code,job->result().message.c_str());}
 void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shared_ptr<Bytes> classic){
  auto api=std::make_shared<Fake>();auto device=api->Add(L"UI USB",plus,BusTypeUsb,false);api->Add(L"UI Zip",classic,BusTypeScsi,true);api->workerOnly=true;Removable::SetTestApi(api);browserHost=root.c_str();auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_startup_hds=FALSE;app.m_startup_floppies=app.m_startup_cds=FALSE;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;app.InstallBrowserTemplate(RUNTIME_CLASS(RemovableDoc),RUNTIME_CLASS(RemovableFrame));auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);Check(a&&b&&!a->IsWindowVisible()&&!b->IsWindowVisible(),"Hidden removable browser creation");auto& sa=a->GetBrowserSession();auto& sb=b->GetBrowserSession();Check(api->enumerations==0&&MacRoots(sa)==0,"Disabled removable startup option still scanned disks");
  {COptionsPage1 page;Check(page.Create(IDD_OPTIONS_PAGE_1,a)!=FALSE&&page.GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->IsWindowEnabled(),"Other Mac media startup control disabled");page.m_startup_hds=TRUE;page.UpdateData(FALSE);Check(page.IsDlgButtonChecked(IDC_OPTIONS_STARTUP_HDS)==BST_CHECKED,"Other Mac media checkbox binding");page.DestroyWindow();}
- a->SendMessage(WM_COMMAND,ID_FILE_SCAN_REMOVABLE);Check(api->enumerations==1&&MacRoots(sa)==2&&MacRoots(sb)==0,"Removable rescan command routed to another window");
+ api->gate=true;
+ a->SendMessage(WM_COMMAND,ID_FILE_SCAN_REMOVABLE);
+ Until([&]{return WaitForSingleObject(api->entered,0)==WAIT_OBJECT_0;},"manual scan did not reach the worker");
+ Check(a->IsWindowEnabled()&&MacRoots(sa)==0&&MacRoots(sb)==0,"slow scan blocked the browser or published early");
+ Check(sa.RefreshSelected()&&sa.AwaitNavigationForTest(),"browse an unrelated folder while detection is suspended");
+ const auto hostSelection=sa.Tree()->GetTreeCtrl().GetSelectedItem();
+ MediaDiscovery::Changed(DWORD(1)<<25);
+ SetEvent(api->release);
+ Until([&]{return MacRoots(sa)==2;},"scan did not recover after a media-change notification");
+ Check(api->enumerations==2&&MacRoots(sb)==0&&sa.Tree()->GetTreeCtrl().GetSelectedItem()==hostSelection,
+       "stale scan was published, or discovery changed the active listing");
+ ResetEvent(api->entered);ResetEvent(api->release);
  bool windowsRead=false;
  BrowserDirectory::testObserveRead=[&](const char* path){if(!_strnicmp(path,"Z:",2))windowsRead=true;};
  auto doc=sa.Document();
@@ -88,11 +109,21 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
        "Explicit Mac removable drive selection fell through to Windows enumeration");
  const auto selected=sa.Tree()->GetTreeCtrl().GetSelectedItem();
  a->SendMessage(WM_COMMAND,ID_FILE_SCAN_REMOVABLE);
- Check(api->enumerations==2&&sa.Tree()->GetTreeCtrl().GetSelectedItem()==selected&&
+ Until([&]{return api->enumerations==3&&!sa.MacBrowser().ApplyMediaChanges();},"manual rescan did not finish");
+ Check(sa.Tree()->GetTreeCtrl().GetSelectedItem()==selected&&
        MacRoots(sa)==2&&MacRoots(sb)==0&&Row(sa,L"Hello")>=0,
        "Manual scan replaced stable removable mounts or their selection");
  auto captured=sa.MacBrowser().CaptureItem(Row(sa,L"Hello"));OnWorker([&]{Verify(*captured.Volume());++device->generation;Reject([&]{captured.Volume()->List();},"Cached physical catalog survived media swap");});Check(sa.MacBrowser().Refresh()&&sa.AwaitNavigationForTest()&&Row(sa,L"Hello")>=0,"Physical refresh did not reopen changed media");OnWorker([&]{Reject([&]{captured.Volume()->Stat(captured.Id());},"Old clipboard source rebound to replaced media");});captured={};
- app.m_startup_hds=TRUE;auto c=app.CreateBrowser(FALSE);Check(c&&MacRoots(c->GetBrowserSession())==2&&api->enumerations>=2,"Enabled other-media startup option did not discover disks");c->DestroyWindow();app.m_startup_hds=FALSE;
+ app.m_startup_hds=TRUE;
+ auto c=app.CreateBrowser(FALSE),d=app.CreateBrowser(FALSE);
+ Check(c&&d,"create two browsers with startup scans");
+ auto& sc=c->GetBrowserSession();
+ auto& sd=d->GetBrowserSession();
+ Until([&]{return MacRoots(sc)==2&&MacRoots(sd)==2;},"startup scans did not discover the same media in both browsers");
+ Check(sc.AwaitNavigationForTest()&&sd.AwaitNavigationForTest()&&
+       sc.MacBrowser().TargetFolder().IsWindows()&&sd.MacBrowser().TargetFolder().IsWindows(),
+       "startup discovery switched one of the browsers to a Mac root");
+ c->DestroyWindow();d->DestroyWindow();app.m_startup_hds=FALSE;
  auto path=VolumeCoord::Wide(root+"\\ui-target.dsk");{auto s=HfsPlus::CreateImage(path.c_str(),16*1024*1024);HfsPlus::Volume::Format(*s,u"Copy target",true);}auto target=MacBrowser::OpenImage(path);int targetIndex=sb.MacBrowser().AttachTestVolume(target,"target");Check(sb.MacBrowser().ShowTestFolder(targetIndex,2),"Show target window");auto unrelatedPath=VolumeCoord::Wide(root+"\\unrelated.dsk");{auto s=HfsPlus::CreateImage(unrelatedPath.c_str(),8*1024*1024);HfsPlus::Volume::Format(*s,u"Unrelated",true);}auto unrelated=MacBrowser::OpenImage(unrelatedPath);auto unrelatedIndex=sb.MacBrowser().AttachTestVolume(unrelated,"unrelated");Check(sb.MacBrowser().ShowTestFolder(unrelatedIndex,2),"Show unrelated browser volume");
  {auto from=sa.MacBrowser().CaptureItem(Row(sa,L"Hello"));FileOperations::Request r;r.background=true;r.Copy().sources={from};r.Copy().destination.SetMounted(target,2);api->gate=true;auto op=FileOperations::Submit(r);auto start=GetTickCount();while(WaitForSingleObject(api->entered,0)!=WAIT_OBJECT_0){Pump();Sleep(1);Check(GetTickCount()-start<10000,"Wait for simulated removable spin-up");}a->DestroyWindow();a=nullptr;timerTicks=0;Check(SetTimer(b->m_hWnd,917,10,Tick)!=0,"Create responsiveness timer");start=GetTickCount();while(timerTicks<2){Pump();Sleep(1);Check(GetTickCount()-start<2000,"UI stopped during removable read");}KillTimer(b->m_hWnd,917);Check(sb.MacBrowser().Refresh(),"Unrelated volume could not browse during removable read");SetEvent(api->release);start=GetTickCount();while(!op.Job()->done()){Pump();Sleep(1);Check(GetTickCount()-start<15000,"Finish detached removable copy");}Check(!op.Job()->result().code,op.Job()->result().message.c_str());Verify(*target);}
  Check(!api->wrongThread,"Native removable access ran on UI thread");b->DestroyWindow();BrowserTransfers::Clear();Removable::SetTestApi({});auto start=GetTickCount();while(api->Active()){Pump();Sleep(1);Check(GetTickCount()-start<3000,"Removable handles outlived browsers and jobs");}

@@ -32,14 +32,3 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaScanJob(bool floppies,boo
   return probe(drive,floppy);
  });
 }
-std::vector<PhysicalVolume> ScanPhysicalMedia(bool floppies,bool cds) {
-#ifdef HFV_TESTING
- return {}; // Only explicitly injected probes may access media in test builds.
-#endif
- auto output=std::make_shared<std::vector<PhysicalVolume>>();
- auto result=ShowStorageWaitJob(ScanJob(floppies,cds,output,[](int drive,bool floppy,Storage::Job& job) {
-  return floppy?MediaDiscovery::Floppy(drive,job):bool(MediaDiscovery::Optical(drive,job));
- }));
- if(result.code)AfxMessageBox(result.message.empty()?"Could not scan removable media.":result.message.c_str(),MB_OK|MB_ICONERROR);
- return *output;
-}

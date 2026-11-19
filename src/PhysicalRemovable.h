@@ -44,5 +44,6 @@ std::shared_ptr<MacBrowser::Volume> Reopen(const std::wstring&,uint64_t offset);
 std::vector<Mounted> FromDriveRoot(const std::wstring&,Storage::Job* job=nullptr);
 #ifdef HFV_TESTING
 void SetTestApi(std::shared_ptr<Api>);
+bool HasTestApi();
 #endif
 }

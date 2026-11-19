@@ -255,45 +255,34 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
   try {
    if(job.cancelled())throw Storage::Cancelled();
    if(probeCd||probeRemovable){
-    if(probeRemovable){
-     if(type==DRIVE_REMOVABLE&&MediaDiscovery::Floppy(drive,job)){
-      VolumeCoord::Lease access({{deviceKey,VolumeCoord::Mode::Read}});
-      char image[MAX_PATH];get_floppy_volume_file_name(drive,image);
-      auto& volume=reader->Slots()[0];
-      volume.m_file_name=image;volume.m_is_floppy=1;volume.m_free=0;
-      std::shared_ptr<MacBrowser::Volume> backend;
-      try{backend=MacBrowser::OpenClassic(image,":",false);}catch(const HfsPlus::Error&){}
-      if(backend){
-       volume.ReadMount(MacBrowser::ReadClassicMountInfo(*backend));
-       reader->Revision(0)=VolumeCoord::Revision(deviceKey);
-       result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",finder,0,&job,backend.get());
-       result.folder=FileOperations::Location::Classic(image,(LPCSTR)(volume.m_volume_name+":"));
-       result.folder.directory=true;
-       result.folder.expectedCatalogId=2;
-       result.folder.expectedResource=deviceKey;
-       if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
-       StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
-       listing->floppy=true;
-       return Storage::Result{};
-      }
-     }
+    auto media=MediaDiscovery::ProbeDrive(drive,type,probeRemovable,probeRemovable,job);
+    if(media.floppy){
      VolumeCoord::Lease access({{deviceKey,VolumeCoord::Mode::Read}});
-     listing->removable=Removable::FromDriveRoot(listing->path,&job);
-     if(!listing->removable.empty()){
-      for(auto& mount:listing->removable)StorageLocation::ValidateMedia(FileOperations::Location::Mounted(mount.volume));
-      result.folder=FileOperations::Location::Mounted(listing->removable.front().volume);
-      result.folder.directory=true;
-      return Storage::Result{};
-     }
+     char image[MAX_PATH];get_floppy_volume_file_name(drive,image);
+     auto& volume=reader->Slots()[0];
+     volume.m_file_name=image;volume.m_is_floppy=1;volume.m_free=0;
+     volume.ReadMount(MacBrowser::ReadClassicMountInfo(*media.floppy));
+     reader->Revision(0)=VolumeCoord::Revision(deviceKey);
+     result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",finder,0,&job,media.floppy.get());
+     result.folder=FileOperations::Location::Classic(image,(LPCSTR)(volume.m_volume_name+":"));
+     result.folder.directory=true;
+     result.folder.expectedCatalogId=2;
+     result.folder.expectedResource=deviceKey;
+     if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
+     StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
+     listing->floppy=true;
+     return Storage::Result{};
     }
-    if(probeCd){
-     listing->cd=MediaDiscovery::Optical(drive,job);
-     if(listing->cd){
-      result.folder=FileOperations::Location::Mounted(listing->cd);
-      StorageLocation::ValidateMedia(result.folder);
-      result.folder.directory=true;
-      return Storage::Result{};
-     }
+    listing->cd=std::move(media.cd);
+    listing->removable=std::move(media.removable);
+    if(listing->cd||!listing->removable.empty()){
+     for(const auto& mount:listing->removable)
+      StorageLocation::ValidateMedia(FileOperations::Location::Mounted(mount.volume));
+     auto volume=listing->cd?listing->cd:listing->removable.front().volume;
+     result.folder=FileOperations::Location::Mounted(volume);
+     StorageLocation::ValidateMedia(result.folder);
+     result.folder.directory=true;
+     return Storage::Result{};
     }
    }
    if(job.cancelled())throw Storage::Cancelled();

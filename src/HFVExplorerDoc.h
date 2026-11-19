@@ -55,7 +55,6 @@ protected: // create from serialization only
 	CHFVExplorerDoc(bool discover = true);
 	DECLARE_DYNCREATE(CHFVExplorerDoc)
 	void OnCleanDocument();
-	void enum_floppies( void );
 	void set_floppy_volume_dirty( char *path );
 
 	BOOL find_volume_MDB();
@@ -79,7 +78,7 @@ protected: // create from serialization only
 	int get_volume_index_by_filename( CString name );
 	int get_volume_index_by_volumename( CString name );
 	int insert_volume( CString name, int is_floppy, int is_cd, int is_hd, int is_removable );
-	void enum_hfs_volumes(LPSTR mask,BOOL floppies);
+	void enum_hfs_volumes(LPSTR mask);
 	void enum_volumes_ext( LPSTR mask, LPSTR ext );
 	void open_parent_directory( unsigned long id );
 	CString get_directory( HTREEITEM hItem, int *pmac );

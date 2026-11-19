@@ -23,13 +23,13 @@ public:
     int OpenImage(const std::wstring &path,const std::wstring &externalJournal = {});
     bool HasCdRoot(int drive) const;
     void AdoptCd(int drive,const std::string& root,std::shared_ptr<MacBrowser::Volume>,bool select=true);
-    void ScanCds();
+    void ScanStartupDrives(bool floppies,bool cds);
     void AdoptRemovable(std::vector<Removable::Mounted>&,int drive=-1,bool select=true);
     void QueueMediaChanges(DWORD changed,DWORD arrived,bool rescan=false);
     void ScanMedia();
     bool ApplyMediaChanges();
     void ReconcileRemovable(std::vector<Removable::Mounted>&,int drive,const std::vector<std::wstring>& failed={});
-    bool ScanRemovable(bool silent=false,bool startupOnly=false);
+    void ScanRemovable(bool silent=false,bool startupOnly=false);
     void DetachTree();
     bool RebuildTree();
     void Clear();

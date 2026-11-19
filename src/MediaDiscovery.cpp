@@ -134,6 +134,37 @@ std::vector<Removable::Mounted> External(const Removable::Device& device,
               externalEpoch,job,[&]{return Removable::Open(device,api);});
 }
 
+DriveMedia ProbeDrive(int drive,UINT type,bool checkFloppy,bool checkExternal,Storage::Job& job)
+{
+ CheckDrive(drive);
+ Cancel(job);
+ DriveMedia media;
+ if(type==DRIVE_CDROM){
+  media.cd=Optical(drive,job);
+  return media;
+ }
+ if(type!=DRIVE_REMOVABLE&&type!=DRIVE_FIXED)return media;
+ const VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});
+ if(checkFloppy&&type==DRIVE_REMOVABLE&&Floppy(drive,job)){
+  char image[MAX_PATH];
+  get_floppy_volume_file_name(drive,image);
+  try{media.floppy=MacBrowser::OpenClassic(image,":",false);}
+  catch(const HfsPlus::Error&){}
+ }
+ if(!media.floppy&&checkExternal){
+  const wchar_t root[]={wchar_t(L'A'+drive),L':',L'\\',0};
+  media.removable=Removable::FromDriveRoot(root,&job);
+ }
+ Cancel(job);
+ return media;
+}
+
+uint64_t Generation()
+{
+ std::lock_guard lock(mutex);
+ return externalEpoch;
+}
+
 void Changed(DWORD driveMask)
 {
  if(!driveMask)return;

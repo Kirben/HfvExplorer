@@ -110,6 +110,7 @@ std::shared_ptr<Api> NativeApi(){
  static auto native=std::make_shared<WindowsApi>();return native;
 }
 #ifdef HFV_TESTING
+bool HasTestApi(){std::lock_guard<std::mutex> lock(testMutex);return bool(testApi);}
 void SetTestApi(std::shared_ptr<Api> api){std::lock_guard<std::mutex> lock(testMutex);testApi=std::move(api);}
 #endif
 struct Disk::Impl{std::shared_ptr<Api> api;HANDLE handle=INVALID_HANDLE_VALUE;Geometry geometry;DWORD generation=0,error=0;BYTE* buffer=nullptr;std::recursive_mutex mutex;std::list<uint64_t> ages;struct Page{Bytes bytes;std::list<uint64_t>::iterator age;};std::map<uint64_t,Page> pages;

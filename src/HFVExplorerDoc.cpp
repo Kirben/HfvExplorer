@@ -30,7 +30,6 @@
 #include "BrowserDirectory.h"
 #include "ClassicCatalog.h"
 #include "BrowserPresentation.h"
-#include "RefreshStorage.h"
 #include "MediaDiscovery.h"
 #include "StorageJobDialog.h"
 #include "HostFileSizes.h"
@@ -213,17 +212,8 @@ void CHFVExplorerDoc::enum_volumes_ext( LPSTR mask, LPSTR ext )
 	if(fh != INVALID_HANDLE_VALUE) FindClose( fh );
 }
 
-void CHFVExplorerDoc::enum_floppies(void)
+void CHFVExplorerDoc::enum_hfs_volumes(LPSTR mask)
 {
- for(const auto& media:ScanPhysicalMedia(true,false)) {
-  char path[MAX_PATH];get_floppy_volume_file_name(media.drive,path);
-  if(get_volume_index_by_filename(CString(path))<0)insert_volume(CString(path),1,0,0,0);
- }
-}
-void CHFVExplorerDoc::enum_hfs_volumes(LPSTR mask,BOOL floppies)
-{
-    if(floppies)enum_floppies();
-
 	// I don't want to say *.HF* here ...
 
 	enum_volumes_ext( mask, "HFV" );
@@ -421,7 +411,7 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
 	::GetModuleFileName( pApp->m_hInstance, dir, _MAX_PATH );
 	cuthere = strrchr( dir, '\\' );
 	if(cuthere) *cuthere = 0;
-	enum_hfs_volumes(dir,pApp->m_startup_floppies);
+	enum_hfs_volumes(dir);
 
 	enum_fat_volumes();
  }
@@ -814,7 +804,7 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR path)
     session.Tree()->enable_selchange(1);
     const bool restoring=session.MacBrowser().RebuildTree();
     if(app->m_startup_hds)session.MacBrowser().ScanRemovable(true,true);
-    if(app->m_startup_cds)session.MacBrowser().ScanCds();
+    session.MacBrowser().ScanStartupDrives(app->m_startup_floppies!=FALSE,app->m_startup_cds!=FALSE);
     if(explicitImage)return session.MacBrowser().OpenImage(path)>0;
     if(!restoring&&app->m_opendir.IsEmpty())NavigateInitialFolder();
     return TRUE;
