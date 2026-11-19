@@ -120,7 +120,7 @@ void ObjectMapFixture(Memory& disk)
     for(size_t block:{12,13,14})Seal(disk.bytes,block*size,size);
 }
 
-Memory BrowseFixture(bool attributes=false)
+Memory BrowseFixture(bool attributes=false,bool links=false)
 {
     auto disk=Raw();
     constexpr size_t size=4096;
@@ -150,7 +150,7 @@ Memory BrowseFixture(bool attributes=false)
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    const unsigned records=attributes?11:8;
+    const unsigned records=8+(attributes?3:0)+(links?5:0);
     Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
@@ -167,9 +167,9 @@ Memory BrowseFixture(bool attributes=false)
         Little(toc+4,valueOffset,2);Little(toc+6,value.size(),2);
         memcpy(end-valueOffset,value.data(),value.size());
     };
-    auto inode=[&](uint64_t id,bool directory,uint64_t length){
+    auto inode=[&](uint64_t id,bool directory,uint64_t length,bool linked=false){
         Bytes value(directory?92:140);
-        Little(value.data()+8,id,8);Little(value.data()+56,1,4);
+        Little(value.data()+8,id,8);Little(value.data()+56,linked?2:1,4);
         Little(value.data()+80,directory?0040755:0100644,2);
         if(!directory){
             Little(value.data()+92,1,2);Little(value.data()+94,44,2);
@@ -193,7 +193,8 @@ Memory BrowseFixture(bool attributes=false)
     };
     inode(2,true,0);drec(2,320,"Folder");
     inode(320,true,0);drec(320,330,"Long \xc3\xa9.txt");
-    inode(330,false,2*size+7);
+    if(links){drec(320,330,"Alias A");drec(320,340,"Alias B");drec(320,340,"Other");}
+    inode(330,false,2*size+7,links);
     auto xattr=[&](const char* name,uint16_t flags,const Bytes& data){
         const auto length=strlen(name)+1;
         Bytes key(2+length),value(4+data.size());
@@ -213,6 +214,7 @@ Memory BrowseFixture(bool attributes=false)
         extent(0,43,331);
         memcpy(disk.bytes.data()+43*size,"resource",8);
     }
+    if(links){inode(340,false,1,true);extent(0,42,340);}
     Little(catalog+44,keyOffset,2);
     Seal(disk.bytes,26*size,size);
     memset(disk.bytes.data()+40*size,'A',size);
@@ -315,6 +317,15 @@ int RunApfsContainerTest(const char* directory)
             Check(roots.size()>=1&&authentic->FindChild(2,u"many",many),"Independent APFS fixture lost its directory");
             const auto files=authentic->List(many.id);
             Check(files.size()==400,"Independent APFS fixture lost files across catalog nodes");
+            MacBrowser::Entry a,b;
+            Check(authentic->FindChild(2,u"hard_a.txt",a)&&authentic->FindChild(2,u"hard_b.txt",b)&&
+                  a.hardLink&&b.hardLink&&a.id!=b.id&&a.resolvedId==b.resolvedId,
+                  "APFS hard-linked names do not share the same inode identity");
+            const auto name=std::find_if(files.begin(),files.end(),[](const auto& file){return file.name==u"file_0222.txt";});
+            Check(name!=files.end()&&name->forks[0].size==10,"Independent APFS fixture lost a file size");
+            char data[10];
+            authentic->Read(name->id,0,0,data,sizeof(data));
+            Check(!memcmp(data,"entry 222\n",sizeof(data)),"Independent APFS file differed from expected data");
             fprintf(report,"PASS: macOS-generated APFS image and 400-file multi-node directory.\n");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
@@ -396,6 +407,28 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
         Check(restored==resource,"APFS transfer changed the resource fork");
         fprintf(report,"PASS: APFS embedded metadata and extent-backed resource fork preserved through copy to HFS Plus.\n");
+        auto linkedDisk=BrowseFixture(false,true);
+        const auto linkedPath=VolumeCoord::Wide(root+"linked.img");
+        {
+            auto image=CreateFormatOutput(linkedPath.c_str(),linkedDisk.Size());
+            image->Write(0,linkedDisk.bytes.data(),linkedDisk.bytes.size());image->Flush();image->Keep();
+        }
+        auto linked=MacBrowser::OpenBrowserImage(linkedPath);
+        Storage::Job linkCopy;
+        Check(MacBrowser::Copy(*linked,linked->List().at(0).id,*targetMac,2,linkCopy),
+              "APFS hard-link group copy did not complete");
+        MacBrowser::Entry targetFolder,aliasA,aliasB,other,first;
+        Check(targetMac->FindChild(2,u"Folder",targetFolder)&&
+              targetMac->FindChild(targetFolder.id,u"Alias A",aliasA)&&targetMac->FindChild(targetFolder.id,u"Alias B",aliasB)&&
+              targetMac->FindChild(targetFolder.id,HfsPlus::Normalize(withMetadata.name,false),first)&&
+              targetMac->FindChild(targetFolder.id,u"Other",other),"APFS hard-link names did not all copy");
+        Check(aliasA.linkCount==2&&aliasB.linkCount==2&&aliasA.resolvedId==first.resolvedId&&
+              aliasB.resolvedId==other.resolvedId&&aliasA.resolvedId!=aliasB.resolvedId,
+              "APFS copy conflated distinct hard-link groups");
+        char aByte=0,bByte=0;
+        targetMac->Read(aliasA.id,0,0,&aByte,1);targetMac->Read(aliasB.id,0,0,&bByte,1);
+        Check(aByte=='A'&&bByte=='l',"APFS hard-link groups lost independent file contents");
+        fprintf(report,"PASS: separate APFS hard-link groups retain file identity and contents through transfer.\n");
         fprintf(report,"PASS: normal browser mount, UTF-8 names, sparse and fragmented data, worker export and read-only enforcement.\n");
         fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
     }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}

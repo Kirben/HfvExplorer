@@ -4,7 +4,7 @@
 
 namespace VolumeSession {
 bool SharesMountedImage(const FileOperations::Location& source,const FileOperations::Location& destination);
-void PutFromMountedSource(MacBrowser::Volume&,uint32_t parent,const MacBrowser::Entry&,bool replace,
+uint32_t PutFromMountedSource(MacBrowser::Volume&,uint32_t parent,const MacBrowser::Entry&,bool replace,
                          std::function<void(unsigned,uint64_t,size_t)> progress);
 enum class ImageFormat { HfsPlus, Classic, Mfs };
 std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring &path, const std::string &key,

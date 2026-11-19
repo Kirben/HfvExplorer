@@ -229,6 +229,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::mutex mutex;
     struct Item {uint64_t oid,stream;Entry entry;AttributeRecords attributes;};
     std::map<uint32_t,Item> entries;
+    std::map<uint64_t,uint32_t> linkIdentities;
     std::map<uint32_t,std::vector<uint32_t>> listings;
     std::map<uint64_t,std::vector<Extent>> extents;
     uint64_t next=3;
@@ -254,7 +255,7 @@ public:
     {
         auto root=LoadInode(Catalog(*source,container,mounted),2);
         Check(root.entry.directory,"APFS root is not a directory");
-        root.entry.id=2;root.entry.parent=1;root.entry.name=mounted.name;
+        root.entry.id=2;root.entry.resolvedId=2;root.entry.parent=1;root.entry.name=mounted.name;
         entries.emplace(2,Item{2,root.stream,std::move(root.entry),std::move(root.attributes)});
         const auto files=source->WorkerFiles();
         if(!files.empty()){
@@ -309,6 +310,11 @@ public:
                 ids.reserve(children.size());
                 for(auto& child:children){
                     child.entry.id=uint32_t(next++);
+                    child.entry.resolvedId=child.entry.id;
+                    if(child.entry.hardLink){
+                        const auto first=linkIdentities.emplace(child.oid,child.entry.id);
+                        child.entry.resolvedId=first.first->second;
+                    }
                     ids.push_back(child.entry.id);
                     entries.emplace(child.entry.id,std::move(child));
                 }

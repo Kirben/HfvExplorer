@@ -227,7 +227,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         // child creates/renames can change its dates even on Skip/cancellation.
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
-        if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,std::make_pair(parent,entry.name));return complete;
+        if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,std::make_pair(parent,dst.Stat(id).name));return complete;
     }
     Check(!found || !existing.directory, "A folder blocks the destination file");
     if (found) {
@@ -252,8 +252,9 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         job.progress(progress);
         if(job.cancelled())throw Storage::Cancelled();
     };
+    uint32_t published=0;
     if(route==ForkSource::MountedWorker)
-        VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
+        published=VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
     else {
         Reader reader=[&](unsigned fork,uint64_t offset,void* p,size_t count){
             if(job.cancelled())throw Storage::Cancelled();
@@ -262,10 +263,10 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
             advance(fork,offset,count);
         };
         auto hostPath=plan.reader?std::wstring{}:src.HostPath(entry.id);
-        if(hostPath.empty())dst.Put(parent,outgoing,std::move(reader),found);
-        else dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
+        if(hostPath.empty())published=dst.Put(parent,outgoing,std::move(reader),found);
+        else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
-    if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
+    if(track)copies.emplace(key,std::make_pair(parent,dst.Stat(published).name));++progress.files; job.progress(progress); return true;
 }
 }
 std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key,std::shared_ptr<MfsCatalogIds> ids){return TrackWorkerVolume(std::make_shared<Mfs>(std::move(source),key,std::move(ids)));}

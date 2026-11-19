@@ -399,9 +399,9 @@ public:
                 if(progress)progress(offset,size);
             });
     }
-    void PutFromSource(uint32_t parent,const Entry& entry,bool replace,
+    uint32_t PutFromSource(uint32_t parent,const Entry& entry,bool replace,
                        std::function<void(unsigned,uint64_t,size_t)> progress) {
-        StreamPut(parent,entry,{},replace,0,entry.id,std::move(progress));
+        return StreamPut(parent,entry,{},replace,0,entry.id,std::move(progress));
     }
 private:
     uint32_t StreamPut(uint32_t parent, const Entry& entry, Reader reader, bool replace, uint32_t original,
@@ -815,8 +815,8 @@ bool SharesMountedImage(const Location& source,const Location& destination) {
            dynamic_cast<PersistentVolume*>(destination.Volume().get());
 }
 
-void PutFromMountedSource(Volume& volume,uint32_t parent,const Entry& entry,bool replace,
+uint32_t PutFromMountedSource(Volume& volume,uint32_t parent,const Entry& entry,bool replace,
                           std::function<void(unsigned,uint64_t,size_t)> progress) {
-    dynamic_cast<PersistentVolume&>(volume).PutFromSource(parent,entry,replace,std::move(progress));
+    return dynamic_cast<PersistentVolume&>(volume).PutFromSource(parent,entry,replace,std::move(progress));
 }
 } // namespace VolumeSession
