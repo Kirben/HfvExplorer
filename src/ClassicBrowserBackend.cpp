@@ -255,7 +255,6 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  if(y!=INT_MAX)snapshot.originY=y;
  OwnIcons(snapshot);
  if(opened)volume->Close();
- revisions_[volinx]=snapshot.revision;
  return snapshot;
 }
 
@@ -266,10 +265,10 @@ using MacBrowser::ClassicAncestor;
 bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,const BrowserNavigation::Request* find)
 {
  auto& session=GetBrowserSession();
- if((!find&&!session.UsesAsyncNavigation())||index<0||index>=m_hfs_count)return false;
+ if((!find&&!session.UsesAsyncNavigation())||index<0||index>=Mounts().ClassicCount())return false;
  auto tree=session.Tree();
  const auto item=tree->GetTreeCtrl().GetSelectedItem();
- auto& selected=m_volumes[index];
+ auto& selected=Mounts().ClassicAt(index);
  const auto root=selected.m_rootitem;
  if((!item&&!find)||!root||selected.m_free)return false;
  using namespace BrowserNavigation;
@@ -291,7 +290,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  if(!find&&selected.m_mediaGenerationKnown)
   request.folder.BindMediaGeneration(selected.m_mediaGeneration);
  auto reader=std::make_shared<BrowserFolderReader>(FolderOptions());
- auto& volume=reader->Slots()[index];
+ auto& volume=reader->ClassicState(index);
  volume.m_file_name=image;
  volume.m_is_floppy=selected.m_is_floppy;
  volume.m_is_cd=selected.m_is_cd;
@@ -311,13 +310,12 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   try{
    VolumeCoord::Lease lease({{request.resource,VolumeCoord::Mode::Read}});
    if(job.cancelled())throw Storage::Cancelled();
-   auto& volume=reader->Slots()[index];
+   auto& volume=reader->ClassicState(index);
    StorageLocation::ValidateImage(VolumeCoord::Wide(request.folder.ClassicImage()),request.resource);
    auto backend=MacBrowser::OpenClassic(request.folder.ClassicImage(),":",false);
    volume.ReadMount(MacBrowser::ReadClassicMountInfo(*backend));
    StorageLocation::ValidateClassicGeneration(request.folder,volume.m_mediaGenerationKnown?
        std::optional<DWORD>(volume.m_mediaGeneration):std::nullopt);
-   reader->Revision(index)=VolumeCoord::Revision(request.resource);
    auto id=request.folder.expectedCatalogId;
    if(!id&&request.intent==Intent::StartupFolder){
     const auto& path=request.folder.ClassicPath();
@@ -346,15 +344,14 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    StorageLocation::ValidateImage(VolumeCoord::Wide(result.listing.folder.ClassicImage()),request.resource);
    return Storage::Result{};
   }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
- },[this,reader,route,index,item,root,refresh,path,findResult=bool(find),parent](Result& result){
+ },[this,reader,route,index,item,root,refresh,path,findResult=bool(find),parent,mount](Result& result){
   auto& session=GetBrowserSession();
   auto tree=session.Tree();
   auto& control=tree->GetTreeCtrl();
-  auto& volume=reader->Slots()[index];
-  volume.m_rootitem=root;
-  session.Mounts().PublishClassic(index,std::move(volume),result.listing.revision);
+  auto& volume=reader->ClassicState(index);
+  if(!session.Mounts().PublishClassic(*mount,std::move(volume)))return;
   tree->RenewBrowserMount(root);
-  control.SetItemText(root,m_volumes[index].m_volume_name);
+  control.SetItemText(root,Mounts().ClassicAt(index).m_volume_name);
   const auto& shown=result.listing.folder.ClassicPath();
   auto target=item;
   const auto enabled=tree->SelectionNotificationsEnabled();

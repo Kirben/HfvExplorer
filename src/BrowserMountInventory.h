@@ -54,24 +54,26 @@ public:
     private:
         FILETIME modified_{};
     };
-    class ClassicSlots {
-        std::unique_ptr<ClassicMount> volumes_[MAX_HFS_VOLUMES];
-    public:
-        ClassicMount& operator[](int index) {
-            auto& volume=volumes_[index];
-            if(!volume)volume=std::make_unique<ClassicMount>();
-            return *volume;
-        }
-        const ClassicMount* Find(int index) const { return volumes_[index].get(); }
-        void ReplaceFrom(int index,ClassicSlots& source,int slot) {
-            (*this)[index]=std::move(source[slot]);
-        }
-    };
+    int ClassicCount() const {return classicCount;}
+    int WindowsCount() const {return windowsCount;}
+    const ClassicMount& ClassicAt(int index) const {return *classic.at(index);}
+    const CFATVolume& WindowsAt(int index) const {return windows.at(index);}
+    int FindWindowsSlot(char letter) const;
+    int FindClassicSlot(const CString& path) const;
+    void CloseClassic(int index);
+    void CloseClassicVolumes();
+    void MarkClassicDirty(int index);
+    void MarkClassicClean(int index);
+    bool RefreshClassic(int index,int ask);
+#ifdef HFV_TESTING
+    bool OpenClassicForTest(int index);
+    void SetClassicSourceForTest(int index,const CString& path,bool cd);
+#endif
     int AddClassic(ClassicMount volume);
     void RemoveClassic(int index);
     void UpdateClassic(int index,const MacBrowser::ClassicMountInfo&);
-    void PublishClassic(int index,ClassicMount volume,uint64_t revision);
-    int AddWindows(char letter,UINT type);
+    bool PublishClassic(const Entry& expected,ClassicMount volume);
+    int AddWindows(char letter,UINT type,CString path={});
     void SetWindowsType(int index,UINT type);
     int AddMounted(Mount mount);
     void ReplaceMounted(int index,Mount mount);
@@ -93,12 +95,9 @@ public:
     void ClearObserved(){observed_.clear();}
 
 private:
-    friend class CHFVExplorerDoc;
-    friend class BrowserFolderReader;
-    ClassicSlots classic;
-    CFATVolume windows[MAX_FAT_VOLUMES];
+    std::array<std::unique_ptr<ClassicMount>,MAX_HFS_VOLUMES> classic;
+    std::array<CFATVolume,MAX_FAT_VOLUMES> windows;
     int classicCount=0,windowsCount=0;
-    uint64_t classicRevision[MAX_HFS_VOLUMES]{};
     std::vector<Mount> mounted;
     std::array<uint64_t,MAX_HFS_VOLUMES> classicIncarnation_{};
     std::array<uint64_t,MAX_FAT_VOLUMES> windowsIncarnation_{};

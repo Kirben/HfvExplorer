@@ -14,13 +14,12 @@ public:
   int bitsPerPixel=1,windowsIcons=0,windowsIconTimeout=0;
  };
 
- explicit BrowserFolderReader(Options options,BrowserMountInventory* borrowed=nullptr);
+ explicit BrowserFolderReader(Options options);
  ~BrowserFolderReader();
  BrowserFolderReader(const BrowserFolderReader&)=delete;
  BrowserFolderReader& operator=(const BrowserFolderReader&)=delete;
 
- BrowserMountInventory::ClassicSlots& Slots(){return slots_;}
- uint64_t& Revision(int index){return revisions_[index];}
+ BrowserMountInventory::ClassicMount& ClassicState(int index){return slots_[index];}
  void SetOptions(Options options){options_=options;}
  BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr,MacBrowser::Volume* mounted=nullptr);
  BrowserDirectory::Snapshot read_windows_browser_directory(const std::wstring&,bool,Storage::Job&,std::optional<DWORD> expectedSerial={});
@@ -148,10 +147,7 @@ private:
  bool prepare_classic_browser_row(hfs_item_type*,CatDataRec*,int,BrowserDirectory::Row&);
  MacBrowser::Volume* artworkVolume_=nullptr;
  Options options_;
- BrowserMountInventory::ClassicSlots ownedSlots_;
- BrowserMountInventory::ClassicSlots& slots_;
- uint64_t ownedRevisions_[MAX_HFS_VOLUMES]{};
- uint64_t* revisions_;
+ std::map<int,BrowserMountInventory::ClassicMount> slots_;
  CPointerWordArray icons_;
  type_creator_link_t* hash_table[ICONTABLESIZE]{};
  int icons_in_cache=0,hash_file_ok=0,hash_file_impossible=0;

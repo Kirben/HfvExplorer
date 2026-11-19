@@ -144,7 +144,7 @@ struct MainMacBrowser::State {
         if(binding->mount.kind!=BrowserMountInventory::Kind::ClassicVolume)
             throw HfsPlus::Error("This item is not a destination folder");
         int mac=0;
-        auto& volume=session_.Document()->m_volumes[binding->mount.index];
+        auto& volume=session_.Document()->Mounts().ClassicAt(binding->mount.index);
         const auto id=binding->CatalogId();
         auto path=id==2?std::string(":"):std::string((LPCSTR)session_.Document()->get_directory(item,&mac));
         out.SetClassic(std::string((LPCSTR)volume.m_file_name),std::move(path));
@@ -391,7 +391,7 @@ struct MainMacBrowser::State {
 MainMacBrowser::MainMacBrowser(BrowserSession& session):session_(session),state_(new State(session)){}
 MainMacBrowser::~MainMacBrowser()=default;
 void MainMacBrowser::ForgetTree(){state_->media.Cancel();state_->restore.clear();session_.Mounts().ClearMountedRoots();}
-std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?tree->BrowserNodeAt(item):nullptr;if(!p)return {};if(p->LegacyType()==LIST_HFS&&p->mount.index>=0&&p->mount.index<doc->m_hfs_count)return doc->m_volumes[p->mount.index].m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->m_volumes[p->mount.index].m_file_name));if(p->LegacyType()==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return folder&&folder->location.IsWindows()?session_.ObservedWindowsKey(folder->location.WindowsPath()):std::string();}return {};}
+std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?tree->BrowserNodeAt(item):nullptr;if(!p)return {};if(p->LegacyType()==LIST_HFS&&p->mount.index>=0&&p->mount.index<doc->Mounts().ClassicCount())return doc->Mounts().ClassicAt(p->mount.index).m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->Mounts().ClassicAt(p->mount.index).m_file_name));if(p->LegacyType()==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return folder&&folder->location.IsWindows()?session_.ObservedWindowsKey(folder->location.WindowsPath()):std::string();}return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::Writable()const{int i;uint32_t id;return session_.ListingAvailable()&&state_->Selected(i,id)&&state_->folderMutable&&state_->mounts[i].volume->Supports().create;}
 bool MainMacBrowser::CanCreateFolder()const{int i;uint32_t id;return Writable()&&state_->Selected(i,id)&&state_->mounts[i].volume->Supports().createFolders;}
@@ -666,7 +666,7 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
   const char root[]={char('A'+drive),':','\\',0};
   char classicPath[MAX_PATH]{};
   get_floppy_volume_file_name(drive,classicPath);
-  const auto classicIndex=doc->get_volume_index_by_filename(classicPath);
+  const auto classicIndex=session_.Mounts().FindClassicSlot(classicPath);
   auto& control=tree->GetTreeCtrl();
   auto selected=control.GetSelectedItem();
   while(selected&&control.GetParentItem(selected))selected=control.GetParentItem(selected);
@@ -679,13 +679,11 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
    tree->delete_subdir_contents(item);
    if(remove)control.DeleteItem(item);
   };
-  int windows=-1;
-  for(int index=0;index<doc->m_fat_count;++index)
-   if(doc->m_fats[index].m_letter==root[0]){windows=index;break;}
+  int windows=session_.Mounts().FindWindowsSlot(root[0]);
   const bool present=update.Present();
   if(windows<0&&present)windows=doc->insert_fat_volume(root[0],update.type);
   if(windows>=0){
-   auto& slot=doc->m_fats[windows];
+   auto& slot=doc->Mounts().WindowsAt(windows);
    const bool replace=update.ReplaceWindows(slot.m_type);
    if(!update.rescan||replace)clearRoot(slot.m_rootitem,replace);
    const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::WindowsDrive,windows};
@@ -698,7 +696,7 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
   int floppy=classicIndex;
   if(floppy<0&&update.floppy)floppy=doc->insert_volume(classicPath,1,0,0,0);
   if(floppy>=0){
-   auto& slot=doc->m_volumes[floppy];
+   auto& slot=doc->Mounts().ClassicAt(floppy);
    const auto generation=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
    if(update.RefreshFloppy(slot.m_opened,generation))clearRoot(slot.m_rootitem,!update.floppy);
    if(update.floppy){
@@ -722,7 +720,7 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
   if(update.cd&&!HasCdRoot(drive))AdoptCd(drive,root,std::move(update.cd),false);
   if(update.UpdateExternal())ReconcileRemovable(update.removable,drive);
   if(affected){
-   control.SelectItem(windows>=0?doc->m_fats[windows].m_rootitem:nullptr);
+   control.SelectItem(windows>=0?doc->Mounts().WindowsAt(windows).m_rootitem:nullptr);
    session_.ClearCurrent();
    session_.SetLocationTitle({});
    session_.List()->initialize_volume("",0);
@@ -757,8 +755,8 @@ void MainMacBrowser::ScanStartupDrives(bool floppies,bool cds)
 #endif
     DWORD mask=0;
     const auto doc=session_.Document();
-    for(int index=0;index<doc->m_fat_count;++index){
-        const auto& entry=doc->m_fats[index];
+    for(int index=0;index<doc->Mounts().WindowsCount();++index){
+        const auto& entry=doc->Mounts().WindowsAt(index);
         const int drive=toupper(static_cast<unsigned char>(entry.m_letter))-'A';
         if(drive<0||drive>=26)continue;
         if((floppies&&entry.m_type==DRIVE_REMOVABLE)||(cds&&entry.m_type==DRIVE_CDROM))

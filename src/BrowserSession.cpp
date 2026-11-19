@@ -270,7 +270,7 @@ std::optional<FindScope> BrowserSession::CaptureFindScope()
     if(scope.origin.IsWindows()){
         const auto drive=scope.mount->drive;
         if(drive<0||drive>=26)return {};
-        const auto type=document_->m_fats[node->mount.index].m_type;
+        const auto type=document_->Mounts().WindowsAt(node->mount.index).m_type;
         scope.checkWindowsMedia=type==DRIVE_REMOVABLE||type==DRIVE_CDROM;
         scope.folderLabel=scope.origin.WindowsPath();
         scope.volumeLabel=std::wstring(1,wchar_t(L'A'+drive))+L":\\";
@@ -278,7 +278,7 @@ std::optional<FindScope> BrowserSession::CaptureFindScope()
         scope.volumeRoot.BindWindowsMediaSerial(scope.origin.WindowsMediaSerial());
     }else if(scope.origin.IsClassic()){
         scope.folderLabel=VolumeCoord::Wide(scope.origin.ClassicPath());
-        const auto& slot=document_->m_volumes[node->mount.index];
+        const auto& slot=document_->Mounts().ClassicAt(node->mount.index);
         const auto root=std::string(slot.m_volume_name.GetString())+":";
         scope.volumeLabel=VolumeCoord::Wide(root);
         scope.volumeRoot=FileOperations::Location::Classic(scope.origin.ClassicImage(),root);

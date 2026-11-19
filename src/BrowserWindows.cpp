@@ -117,7 +117,7 @@ bool BrowserSession::OpenFolderRequest(BrowserSession& source,BrowserNavigation:
    index=document_->insert_volume(image.c_str(),floppy,cd,0,0);
    if(index<0)return false;
   }
-  auto& volume=document_->m_volumes[index];
+  auto& volume=document_->Mounts().ClassicAt(index);
   if(!volume.m_rootitem)
    mounts_.SetRoot({BrowserMountInventory::Kind::ClassicVolume,index},
       tree_->initialize_volume(index,image.c_str(),2,volume.m_is_floppy,volume.m_is_cd,0,0));

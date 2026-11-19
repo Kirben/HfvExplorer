@@ -31,12 +31,10 @@ void Check(bool ok,const std::string& message)
 class TransferDoc:public CHFVExplorerDoc {
  DECLARE_DYNCREATE(TransferDoc)
 public:
+ using CHFVExplorerDoc::NavigateWindowsFolder;
  TransferDoc():CHFVExplorerDoc(false)
  {
-  m_fat_count=1;
-  m_fats[0].m_letter=host[0];
-  m_fats[0].m_type=DRIVE_FIXED;
-  m_fats[0].m_volume_name=host;
+  Mounts().AddWindows(host[0],DRIVE_FIXED,host);
  }
 };
 IMPLEMENT_DYNCREATE(TransferDoc,CHFVExplorerDoc)
@@ -149,10 +147,10 @@ void Refresh(BrowserSession& session)
 void Host(BrowserSession& session,const CString& path)
 {
  auto doc=session.Document();
- doc->m_fats[0].m_volume_name=path;
  Check(doc->OnOpenDocument(""),"rebuild browser host tree");
- session.Tree()->GetTreeCtrl().SelectItem(doc->m_fats[0].m_rootitem);
- Check(session.RefreshSelected()&&session.AwaitNavigationForTest(),"open host folder through browser navigation");
+ session.Tree()->GetTreeCtrl().SelectItem(doc->Mounts().WindowsAt(0).m_rootitem);
+ Check(static_cast<TransferDoc*>(doc)->NavigateWindowsFolder(0,std::string(path.GetString()))&&
+       session.AwaitNavigationForTest(),"open host folder through browser navigation");
 }
 
 template<class Predicate>

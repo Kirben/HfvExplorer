@@ -77,7 +77,7 @@ struct Panes {
  }
  ~Panes(){doc.GetBrowserSession().MacBrowser().Clear();tree.enable_selchange(0);list.list_clear();tree.Unbind();list.Bind(nullptr);list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();}
  BrowserSession& Session(){return doc.GetBrowserSession();}
- void Windows(const CString& path){doc.m_fat_count=1;doc.m_fats[0].m_letter=path[0];doc.m_fats[0].m_type=DRIVE_FIXED;doc.m_fats[0].m_volume_name=path;tree.enable_selchange(0);doc.m_fats[0].m_rootitem=tree.Host(path);tree.GetTreeCtrl().SelectItem(doc.m_fats[0].m_rootitem);tree.enable_selchange(1);Check(doc.NavigateWindowsFolder(0,std::string(path.GetString()))&&Session().AwaitNavigationForTest(),"open Windows fixture through navigation");}
+ void Windows(const CString& path){if(doc.Mounts().WindowsCount()==0)doc.Mounts().AddWindows(path[0],DRIVE_FIXED,path);tree.enable_selchange(0);doc.Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,0},tree.Host(path));tree.GetTreeCtrl().SelectItem(doc.Mounts().WindowsAt(0).m_rootitem);tree.enable_selchange(1);Check(doc.NavigateWindowsFolder(0,std::string(path.GetString()))&&Session().AwaitNavigationForTest(),"open Windows fixture through navigation");}
  void Classic(const CString& path,const char* filename,int slot=0){
   {CFile image;Check(image.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create session classic image");image.SetLength(2*1024*1024);}
   char label[]="Same",type[]="TEXT",app[]="APPL",creator[]="TEST";
@@ -88,9 +88,11 @@ struct Panes {
   Check(hfs_create(v,file.data(),type,creator)==0&&hfs_mkdir(v,folder)==0&&hfs_mkdir(v,nested)==0&&
         hfs_create(v,launcher.data(),app,creator)==0&&hfs_umount(v)==0,"populate session classic image");
   Check(doc.insert_volume(path,0,0,0,0)==slot,"register session classic volume");
-  auto& mounted=doc.m_volumes[slot];
-  mounted.m_volume_name="Same";Check(mounted.open()!=0,"open session classic volume");
-  tree.enable_selchange(0);mounted.m_rootitem=tree.Classic(slot);tree.GetTreeCtrl().SelectItem(mounted.m_rootitem);
+  Check(doc.Mounts().OpenClassicForTest(slot),"open session classic volume");
+  tree.enable_selchange(0);
+  const auto root=tree.Classic(slot);
+  doc.Mounts().SetRoot({BrowserMountInventory::Kind::ClassicVolume,slot},root);
+  tree.GetTreeCtrl().SelectItem(root);
   tree.enable_selchange(1);Check(doc.NavigateClassicFolder(slot,2)&&Session().AwaitNavigationForTest(),"open classic fixture through navigation");
  }
 };
@@ -248,9 +250,39 @@ void TestNavigation()
 }
 int RunBrowserSessionTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;CString root=directory;FILE* report=fopen(root+"\\browser-session-report.txt","w");if(!report)return 2;
+ setvbuf(report,nullptr,_IONBF,0);
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_mac_window_mode=0;app.m_dosicons=DI_NO_ICONS;app.m_show_invisible_mac=app.m_show_invisible_fat=1;InitializeStorageUi();
  int result=0;
  try{
+  {
+   using Kind=BrowserMountInventory::Kind;
+   BrowserMountInventory mounts;
+   BrowserMountInventory::ClassicMount before,after;
+   before.m_file_name="previous.dsk";
+   after.m_file_name="replacement.dsk";
+   before.m_volume_name=after.m_volume_name="Same name";
+   const auto index=mounts.AddClassic(before);
+   const auto old=mounts.Lookup({Kind::ClassicVolume,index});
+   Check(old.has_value(),"register a classic volume in the inventory");
+   mounts.RemoveClassic(index);
+   Check(mounts.AddClassic(after)==index,"classic mount did not reuse the free slot");
+   const auto current=mounts.Lookup({Kind::ClassicVolume,index});
+   Check(current&&current->address.incarnation!=old->address.incarnation&&
+         !mounts.IsCurrent(*old)&&!mounts.PublishClassic(*old,before),
+         "a delayed classic listing could publish into a reused slot");
+   mounts.SetRoot(old->address,reinterpret_cast<HTREEITEM>(1));
+   Check(!mounts.ClassicAt(index).m_rootitem&&mounts.PublishClassic(*current,after),
+         "a stale classic tree root survived slot reuse");
+   const auto drive=mounts.AddWindows('Y',DRIVE_REMOVABLE);
+   const auto priorDrive=mounts.FindWindowsDrive(24);
+   mounts.SetWindowsType(drive,DRIVE_NO_ROOT_DIR);
+   Check(mounts.FindWindowsSlot('y')==drive&&!mounts.FindWindowsDrive(24),
+         "retired Windows slot disappeared from drive reconciliation");
+   mounts.SetWindowsType(drive,DRIVE_REMOVABLE);
+   Check(priorDrive&&mounts.FindWindowsDrive(24)&&!mounts.IsCurrent(*priorDrive),
+         "a Windows drive replacement revived a stale mount address");
+   fprintf(report,"PASS: mount slot reuse rejects obsolete classic publications, tree roots and Windows drive addresses.\n");
+  }
   TestNavigation();
   {
    using namespace DocumentLaunch;
@@ -294,7 +326,7 @@ int RunBrowserSessionTest(const char* directory){
    auto& session=a.Session();
    auto& browser=session.MacBrowser();
    auto& control=a.tree.GetTreeCtrl();
-   const auto original=a.doc.m_fats[0].m_rootitem;
+   const auto original=a.doc.Mounts().WindowsAt(0).m_rootitem;
    const auto child=control.InsertItem("Unrelated folder",original);
    control.Expand(original,TVE_EXPAND);
    const auto selected=control.GetSelectedItem();
@@ -373,7 +405,6 @@ int RunBrowserSessionTest(const char* directory){
    Check(delayed->probes.load()==2&&!session.Mounts().FindWindowsDrive(24),
          "slow arrival republished a removed drive");
    browser.SetDriveTypeForTest({});
-   a.doc.m_fat_count=1;
    fprintf(report,"PASS: device notices probe only named drives, discard stale results, and preserve unrelated roots, expansion and file selection.\n");
   }
   {
@@ -425,7 +456,7 @@ int RunBrowserSessionTest(const char* directory){
    Check(session.RevealFindHit(hit),"queue stale Windows Find result");
    PumpUntil([&]{return !session.Navigating();},"stale Windows Find did not complete");
    Check(!session.ListingAvailable(),"a stale Windows Find result silently rebound to a replacement file");
-   a.tree.GetTreeCtrl().SelectItem(a.doc.m_fats[0].m_rootitem);
+   a.tree.GetTreeCtrl().SelectItem(a.doc.Mounts().WindowsAt(0).m_rootitem);
    Check(DeleteFileA(filename)&&RemoveDirectoryA(nested)&&RemoveDirectoryA(wa+"\\\\Nested"),
        "clean up the Windows Find fixture before the startup check");
   }
@@ -468,8 +499,8 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !b.Session().Navigating();},"second window did not open the Unicode folder");
    Check(Find(b.list,L"\u6587\u4ef6.txt")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==selected,
          "the second window changed the source selection or lost the Unicode folder");
-   b.tree.GetTreeCtrl().SelectItem(b.doc.m_fats[0].m_rootitem);
-   a.tree.GetTreeCtrl().SelectItem(a.doc.m_fats[0].m_rootitem);
+   b.tree.GetTreeCtrl().SelectItem(b.doc.Mounts().WindowsAt(0).m_rootitem);
+   a.tree.GetTreeCtrl().SelectItem(a.doc.Mounts().WindowsAt(0).m_rootitem);
    Check(DeleteFileW(file.c_str())&&RemoveDirectoryW(folder.c_str()),"clean up Unicode Find fixture");
    fprintf(report,"PASS: Unicode Windows Find opens the matching folder and selects the file.\n");
   }
@@ -485,24 +516,24 @@ int RunBrowserSessionTest(const char* directory){
   Check(a.Session().AwaitNavigationForTest(),"wait for named classic folder");
   Check(Find(a.list,L"third classic app")>=0&&Find(a.list,L"first classic app")<0,
         "nested classic folder resolution changed volumes or lost case-insensitive lookup");
-  a.tree.GetTreeCtrl().SelectItem(a.doc.m_volumes[0].m_rootitem);
+  a.tree.GetTreeCtrl().SelectItem(a.doc.Mounts().ClassicAt(0).m_rootitem);
   Check(a.Session().AwaitNavigationForTest(),"return to first classic image");
   fprintf(report,"PASS: shared classic HFS nested folder and launcher lookup on same-named volumes.\n");
   {
-   const CString image=a.doc.m_volumes[0].m_file_name;
+   const CString image=a.doc.Mounts().ClassicAt(0).m_file_name;
    const CString renamed=root+"\\temporarily-renamed.dsk";
-   Check(a.doc.m_volumes[0].freeBytes>0&&MoveFileA(image,renamed)&&MoveFileA(renamed,image),
+   Check(a.doc.Mounts().ClassicAt(0).freeBytes>0&&MoveFileA(image,renamed)&&MoveFileA(renamed,image),
         "classic browser mount should report free space and release its image handle after reading");
   }
 
-  auto classicRoot=a.doc.m_volumes[0].m_rootitem;
+  auto classicRoot=a.doc.Mounts().ClassicAt(0).m_rootitem;
   Check(a.Session().RefreshSelected()&&a.Session().Navigating()&&
         Find(a.list,L"first classic")>=0,"classic refresh did not retain the listing");
   PumpUntil([&]{return !a.Session().Navigating();},"classic refresh did not finish");
   Check(Find(a.list,L"first classic")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==classicRoot,
         "classic asynchronous read changed selection or lost its listing");
   {
-   const std::string image=(LPCSTR)a.doc.m_volumes[0].m_file_name;
+   const std::string image=(LPCSTR)a.doc.Mounts().ClassicAt(0).m_file_name;
    auto volume=hfs_mount(const_cast<char*>(image.c_str()),0,O_RDWR);
    char folder[]="Same:Nested",child[]="Same:Nested:found",type[]="TEXT",creator[]="TEST";
    Check(volume&&hfs_mkdir(volume,folder)==0&&hfs_create(volume,child,type,creator)==0&&hfs_umount(volume)==0,
@@ -566,16 +597,16 @@ int RunBrowserSessionTest(const char* directory){
   RemoveDirectory(folderA);
   RemoveDirectory(folderB);
   Check(folderA!=folderB,"launcher exports shared a temporary directory");
-  a.doc.m_volumes[0].close();b.doc.m_volumes[0].close();
+  a.doc.Mounts().CloseClassic(0);b.doc.Mounts().CloseClassic(0);
   Check(b.Session().MacBrowser().ShowTestFolder(ib,2),"restore B native view");
   bool refused=false;try{BrowserSession invalid;invalid.Attach(&a.owner,&b.tree,&a.list);}catch(const std::logic_error&){refused=true;}Check(refused,"pane binding stolen by another session");
   // Real splitter/frame creation, before MFC publishes m_pMainWnd.
   {Doc startup;Frame frame;CCreateContext context{};context.m_pCurrentDoc=&startup;context.m_pNewViewClass=RUNTIME_CLASS(CHFVExplorerView);
    app.m_pMainWnd=nullptr;Check(frame.LoadFrame(IDR_MAINFRAME,WS_OVERLAPPEDWINDOW,nullptr,&context)!=FALSE,"create real hidden browser frame");
    Check(!frame.IsWindowVisible()&&app.m_pMainWnd==nullptr&&startup.GetBrowserSession().Owner()==&frame,"startup frame/session binding");
-   app.m_startup_floppies=FALSE;startup.m_fat_count=2;
-   startup.m_fats[0].m_letter='Z';startup.m_fats[0].m_type=DRIVE_REMOVABLE;startup.m_fats[0].m_volume_name="Z:\\";
-   startup.m_fats[1].m_letter=wa[0];startup.m_fats[1].m_type=DRIVE_FIXED;startup.m_fats[1].m_volume_name=wa;
+   app.m_startup_floppies=FALSE;
+   startup.Mounts().AddWindows('Z',DRIVE_REMOVABLE,"Z:\\");
+   startup.Mounts().AddWindows(wa[0],DRIVE_FIXED,wa);
    app.m_startup_hds=FALSE;
    const auto invalid=root+"\\invalid-startup.dsk";
    {CFile file;Check(file.Open(invalid,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create invalid startup image");file.SetLength(512);}
@@ -587,32 +618,38 @@ int RunBrowserSessionTest(const char* directory){
    Check(startup.OnNewDocument()!=FALSE&&boot.Navigating()&&!boot.ListingAvailable(),"startup did not queue its first folder");
    PumpUntil([&]{return !boot.Navigating();},"startup Windows folder did not publish");
    BrowserDirectory::testObserveRead={};
-   Check(startup.m_volumes[0].m_free&&!probedRemovable&&
-         boot.Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_fats[1].m_rootitem,
+   Check(!startup.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,0})&&!probedRemovable&&
+         boot.Tree()->GetTreeCtrl().GetSelectedItem()==startup.Mounts().WindowsAt(1).m_rootitem,
          "startup did not skip the invalid image or probed the disabled floppy");
    Check(boot.List()->GetListCtrl().GetItemCount()==2,"real startup directory listing");
 #ifdef HFV_FLOPPY_TESTING
    {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
     auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
-    FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){for(int i=0;i<doc.m_hfs_count;++i)doc.m_volumes[i].close();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
-    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.m_fats[0].m_rootitem);
+    FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){doc.Mounts().CloseClassicVolumes();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
+    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.Mounts().WindowsAt(0).m_rootitem);
     PumpUntil([&]{return !startup.GetBrowserSession().Navigating();},"floppy navigation did not finish");
     BrowserDirectory::testObserveRead={};
     auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
-    Check(disk.opens>0&&!windowsProbe&&found&&startup.m_hfs_count==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==startup.m_volumes[0].m_rootitem,"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
+    Check(disk.opens>0&&!windowsProbe&&found&&startup.Mounts().ClassicCount()==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==startup.Mounts().ClassicAt(0).m_rootitem,"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
     const int row=Find(*session.List(),L"Readable");
     auto original=session.MacBrowser().CaptureItem(row);
     Check(original.IsPhysical()&&original.MediaGenerationKnown(),"floppy row did not bind its media generation");
-    auto& mounted=startup.m_volumes[0];
     const auto attachment=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,0});
     Check(attachment&&attachment->generation==original.MediaGeneration(),"inventory lost the floppy media generation");
-    ++mounted.m_mediaGeneration;
+    const auto& mounted=startup.Mounts().ClassicAt(0);
+    const MacBrowser::ClassicMountInfo replacement{mounted.m_volume_name.GetString(),mounted.freeBytes,
+        original.MediaGeneration()+1};
+    startup.Mounts().UpdateClassic(0,replacement);
     Check(!session.Mounts().IsCurrent(*attachment),"inventory accepted a mount with replaced media");
     auto stale=session.MacBrowser().CaptureItem(row);
-    --mounted.m_mediaGeneration;
-    Check(session.Mounts().IsCurrent(*attachment),"inventory lost the original mount");
+    auto restored=replacement;
+    restored.generation=original.MediaGeneration();
+    startup.Mounts().UpdateClassic(0,restored);
+    const auto current=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,0});
+    Check(current&&current->generation==attachment->generation&&!session.Mounts().IsCurrent(*attachment),
+          "restoring a media generation revived an obsolete mount address");
     session.NavigationMediaChanged(1u<<25);
-    Check(!session.Mounts().IsCurrent(*attachment),"media notice did not invalidate the captured mount");
+    Check(!session.Mounts().IsCurrent(*current),"media notice did not invalidate the captured mount");
     Check(stale.MediaGenerationKnown()&&stale.MediaGeneration()==original.MediaGeneration(),
           "a command rebound a published row to replacement floppy media");
     fprintf(report,"PASS: selecting a simulated Mac floppy with startup/automatic detection disabled mounts HFS and lists its file without attempting Windows folder enumeration.\n");
@@ -644,15 +681,12 @@ int RunBrowserSessionTest(const char* directory){
    Check(frame.LoadFrame(IDR_MAINFRAME,WS_OVERLAPPEDWINDOW,nullptr,&context)!=FALSE,"create image startup frame");
    auto& session=imageDocument.GetBrowserSession();
 
-   imageDocument.m_fat_count=1;
-   imageDocument.m_fats[0].m_letter=wa[0];
-   imageDocument.m_fats[0].m_type=DRIVE_FIXED;
-   imageDocument.m_fats[0].m_volume_name=wa;
+   imageDocument.Mounts().AddWindows(wa[0],DRIVE_FIXED,wa);
    Check(imageDocument.OnOpenDocument(CString(firstImage.c_str()))&&session.Navigating()&&
          !session.ListingAvailable()&&app.m_pMainWnd==nullptr,"command-line image did not schedule before showing frame");
    PumpUntil([&]{return !session.Navigating();},"startup image did not publish");
    Check(session.ListingAvailable()&&Find(*session.List(),L"Startup image")>=0&&
-         imageDocument.m_fats[0].m_rootitem,"startup image lost its root or the Windows tree");
+         imageDocument.Mounts().WindowsAt(0).m_rootitem,"startup image lost its root or the Windows tree");
 
    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
@@ -667,7 +701,7 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"image root read did not start");
    Check(Find(*session.List(),L"Startup image")>=0&&!session.ListingAvailable()&&frame.IsWindowEnabled(),
          "image opening replaced the previous listing or disabled the frame");
-   session.Tree()->GetTreeCtrl().SelectItem(imageDocument.m_fats[0].m_rootitem);
+   session.Tree()->GetTreeCtrl().SelectItem(imageDocument.Mounts().WindowsAt(0).m_rootitem);
    PumpUntil([&]{return !session.Navigating();},"folder selection waited for superseded image opening");
    SetEvent(release);
    const auto key=VolumeCoord::ImageKey(nextImage);

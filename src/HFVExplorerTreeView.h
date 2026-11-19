@@ -84,9 +84,9 @@ protected:
 		int is_removable );
 	HTREEITEM initialize_fat_volume( 
 		int volinx,
-		CString *plabel, 
+		const CString *plabel,
 		UINT type,
-		CString *ppath,
+		const CString *ppath,
 		BOOL is_floppy );
 	HTREEITEM tree_insert( 
 			HTREEITEM root_item,

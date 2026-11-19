@@ -73,8 +73,6 @@ protected: // create from serialization only
 #endif
 	CString FindClassicLauncher(const char* type,const char* creator,int preferredVolume);
 	void check_hfv_file_times(int ask);
-	int get_volume_index_by_filename( CString name );
-	int get_volume_index_by_volumename( CString name );
 	int insert_volume( CString name, int is_floppy, int is_cd, int is_hd, int is_removable );
 	void enum_hfs_volumes(LPSTR mask);
 	void enum_volumes_ext( LPSTR mask, LPSTR ext );
@@ -95,16 +93,7 @@ protected: // create from serialization only
 // Attributes
 public:
  BrowserSession& GetBrowserSession()const{return *m_browserSession;}
-    // The legacy filesystem routines use numbered slots in the session's inventory.
-    BrowserMountInventory::ClassicSlots& m_volumes;
-    CFATVolume (&m_fats)[MAX_FAT_VOLUMES];
-#ifdef HFV_TESTING
-    int& m_hfs_count;
-    int& m_fat_count;
-#else
-    const int& m_hfs_count;
-    const int& m_fat_count;
-#endif
+ BrowserMountInventory& Mounts() const {return GetBrowserSession().Mounts();}
 	int m_bits_per_pixel;
 	int m_mac_show_invisibles;
 	int m_pc_show_invisibles;

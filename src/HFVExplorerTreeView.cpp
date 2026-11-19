@@ -442,18 +442,15 @@ HTREEITEM HFVExplorerTreeView::initialize_volume(
 
 HTREEITEM HFVExplorerTreeView::initialize_fat_volume( 
 	int volinx,
-	CString *plabel, 
+	const CString *plabel,
 	UINT type,
-	CString *ppath,
+	const CString *ppath,
 	BOOL is_floppy
 )
 {
 	TV_INSERTSTRUCT ins;
-	LPSTR r, p;
 	HTREEITEM item;
 
-	r = plabel->GetBuffer(MAX_PATH-1);
-	p = ppath->GetBuffer(MAX_PATH-1);
 	ins.hParent = NULL;
 	ins.hInsertAfter = TVI_LAST;
 	switch( type ) {
@@ -478,15 +475,13 @@ HTREEITEM HFVExplorerTreeView::initialize_fat_volume(
 	}
 	
 	ins.item.iSelectedImage = ins.item.iImage;
-	ins.item.pszText = r;
-	auto location = FileOperations::Location::Windows(VolumeCoord::Wide(p));
+	ins.item.pszText = const_cast<LPSTR>(plabel->GetString());
+	auto location = FileOperations::Location::Windows(VolumeCoord::Wide(ppath->GetString()));
     location.directory = true;
     ins.item.lParam = StoreBrowserNode({{BrowserMountInventory::Kind::WindowsDrive, volinx},
                                        BrowserDirectory::Folder{std::move(location), type != DRIVE_CDROM}});
 	ins.item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_TEXT | TVIF_PARAM;
 	item = m_ct->InsertItem( &ins );
-	plabel->ReleaseBuffer();
-	ppath->ReleaseBuffer();
 	return(item);
 }
 
@@ -712,7 +707,7 @@ BOOL HFVExplorerTreeView::is_cd_item( HTREEITEM hItem )
    case LIST_MAC: return GetBrowserSession().MacBrowser().SelectedCdDrive()>=0;
 			case LIST_HFS:
 				volinx = get_lparam_volinx( dw );
-				if(((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_is_cd) result = TRUE;
+				if(((CHFVExplorerDoc*)m_pDocument)->Mounts().ClassicAt(volinx).m_is_cd) result = TRUE;
 				break;
 			case LIST_FAT:
 				char path[MAX_PATH];
@@ -758,7 +753,7 @@ void HFVExplorerTreeView::on_volume_changed( int volinx )
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	root = ((CHFVExplorerDoc*)m_pDocument)->m_volumes[volinx].m_rootitem;
+	root = ((CHFVExplorerDoc*)m_pDocument)->Mounts().ClassicAt(volinx).m_rootitem;
 	currdir = ((CHFVExplorerDoc*)m_pDocument)->get_directory( 0, &mac );
 	GetBrowserSession().Tree()->enable_selchange(0);
 	delete_subdir_contents( root );
@@ -783,7 +778,7 @@ void HFVExplorerTreeView::delete_by_path( LPCSTR path )
 {
 	HTREEITEM htree;
 
-	htree = tree_find_fat( m_volumes[pitem->volinx].m_rootitem, path );
+	htree = tree_find_fat( GetBrowserSession().Mounts().ClassicAt(pitem->volinx).m_rootitem, path );
 	if(htree) {
 		m_ct->DeleteItem(htree);
 	}

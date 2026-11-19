@@ -24,7 +24,7 @@ FileOperations::Operation Run(FileOperations::Request r,bool success=true,Storag
 void Delete(std::shared_ptr<Volume> v,uint32_t id){FileOperations::Request r = FileOperations::DeleteEntries{{Location(v,id)}};Run(r);}
 CString host;
 class LinkDoc:public CHFVExplorerDoc{DECLARE_DYNCREATE(LinkDoc)
-public:LinkDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=host[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=host;}};
+public:LinkDoc():CHFVExplorerDoc(false){Mounts().AddWindows(host[0],DRIVE_FIXED,host);}};
 IMPLEMENT_DYNCREATE(LinkDoc,CHFVExplorerDoc)
 class LinkFrame:public CMainFrame{DECLARE_DYNCREATE(LinkFrame)
 public:void LoadWindowPosition()override{}void SaveWindowPosition()override{}void ActivateFrame(int)override{}};

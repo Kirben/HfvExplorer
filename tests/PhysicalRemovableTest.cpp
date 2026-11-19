@@ -62,7 +62,7 @@ void Pump(){MSG m;while(PeekMessage(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_Q
 FileOperations::Operation Copy(std::shared_ptr<MacBrowser::Volume> source,std::shared_ptr<MacBrowser::Volume> target,bool success=true){FileOperations::Request r;r.background=true;FileOperations::Location from,to;from.SetMounted(source,Find(*source,2,u"Hello"));to.SetMounted(target,2);r.Copy().sources={from};r.Copy().destination=to;auto op=FileOperations::Submit(r);auto start=GetTickCount();while(!op.Job()->done()){if(!op.Job()->conflict().empty())op.Job()->resolve(Storage::ConflictChoice::Replace);Check(GetTickCount()-start<15000,"Removable copy timed out");Pump();Sleep(1);}Check((op.Job()->result().code==0)==success,op.Job()->result().message.c_str());return op;}
 CString browserHost;
 class RemovableDoc:public CHFVExplorerDoc{DECLARE_DYNCREATE(RemovableDoc)
-public:RemovableDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=browserHost[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=browserHost;}};
+public:RemovableDoc():CHFVExplorerDoc(false){Mounts().AddWindows(browserHost[0],DRIVE_FIXED,browserHost);}};
 IMPLEMENT_DYNCREATE(RemovableDoc,CHFVExplorerDoc)
 class RemovableFrame:public CMainFrame{DECLARE_DYNCREATE(RemovableFrame)
 public:void LoadWindowPosition()override{}void SaveWindowPosition()override{}void ActivateFrame(int)override{}};
@@ -102,9 +102,10 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
  bool windowsRead=false;
  BrowserDirectory::testObserveRead=[&](const char* path){if(!_strnicmp(path,"Z:",2))windowsRead=true;};
  auto doc=sa.Document();
- auto& drive=doc->m_fats[doc->m_fat_count++];
- drive.m_letter='Z';drive.m_type=DRIVE_REMOVABLE;drive.m_volume_name="Z:\\";
- drive.m_rootitem=sa.Tree()->initialize_fat_volume(doc->m_fat_count-1,&drive.m_volume_name,drive.m_type,&drive.m_volume_name,FALSE);
+ const auto index=doc->Mounts().AddWindows('Z',DRIVE_REMOVABLE,"Z:\\");
+ const auto& drive=doc->Mounts().WindowsAt(index);
+ doc->Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,index},
+     sa.Tree()->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,&drive.m_volume_name,FALSE));
  sa.Tree()->GetTreeCtrl().SelectItem(drive.m_rootitem);
  Check(sa.AwaitNavigationForTest(),"complete removable drive selection");
  BrowserDirectory::testObserveRead={};

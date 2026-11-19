@@ -19,7 +19,7 @@ void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}
 class BrowserWindowTestDoc:public CHFVExplorerDoc {
  DECLARE_DYNCREATE(BrowserWindowTestDoc)
 public:
- BrowserWindowTestDoc():CHFVExplorerDoc(false){m_fat_count=1;m_fats[0].m_letter=host[0];m_fats[0].m_type=DRIVE_FIXED;m_fats[0].m_volume_name=host;}
+ BrowserWindowTestDoc():CHFVExplorerDoc(false){Mounts().AddWindows(host[0],DRIVE_FIXED,host);}
  BOOL OnNewDocument()override{if(rejectNew)return FALSE;return CHFVExplorerDoc::OnNewDocument();}
 };
 IMPLEMENT_DYNCREATE(BrowserWindowTestDoc,CHFVExplorerDoc)

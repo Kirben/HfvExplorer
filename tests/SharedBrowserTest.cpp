@@ -55,9 +55,9 @@ int RunSharedBrowserTest(const char* directory){
    check(hfs_write(file,bytes.data(),ULONG(bytes.size()))==bytes.size()&&hfs_close(file)==0,"write classic file");
   }
   check(hfs_umount(volume)==0,"close classic fixture");auto original=load(image);
-  doc.m_hfs_count=1;doc.m_volumes[0].m_file_name=image;doc.m_volumes[0].m_volume_name="Shared";
-  auto opened=ShowStorageWaitJob([&](Storage::Job&){check(doc.m_volumes[0].open()!=0,"open classic browser volume");return Storage::Result{};},true);check(!opened.code,"classic volume read job");
-  doc.m_volumes[0].m_rootitem=tree.Hfs();tree.GetTreeCtrl().SelectItem(doc.m_volumes[0].m_rootitem);
+  check(doc.insert_volume(image,0,0,0,0)==0,"register shared classic image");
+  auto opened=ShowStorageWaitJob([&](Storage::Job&){check(doc.Mounts().OpenClassicForTest(0)!=0,"open classic browser volume");return Storage::Result{};},true);check(!opened.code,"classic volume read job");
+  doc.Mounts().SetRoot({BrowserMountInventory::Kind::ClassicVolume,0},tree.Hfs());tree.GetTreeCtrl().SelectItem(doc.Mounts().ClassicAt(0).m_rootitem);
   bool wrongThread=false;DWORD ui=GetCurrentThreadId();BrowserDirectory::testObserveRead=[&](const char*){wrongThread|=GetCurrentThreadId()==ui;Sleep(80);};storageUiTest={};
   doc.open_sub_directory(0,2,"Shared");BrowserDirectory::testObserveRead={};
   auto& control=list.GetListCtrl();check(control.GetItemCount()==3&&!wrongThread&&storageUiTest.timerTicks>0&&owner.IsWindowEnabled(),"slow classic snapshot stays on worker and restores owner");
@@ -77,13 +77,13 @@ int RunSharedBrowserTest(const char* directory){
   word(partitioned.data(),0x4552);word(partitioned.data()+2,512);number(partitioned.data()+4,unsigned(partitioned.size()/512));
   BYTE* map=partitioned.data()+512;word(map,0x504d);number(map+4,1);number(map+8,128);number(map+12,unsigned(original.size()/512));memcpy(map+48,"Apple_HFS",9);
   CString mapped=root+"\\partitioned.dsk";{CFile file;check(file.Open(mapped,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create partitioned fixture");file.Write(partitioned.data(),UINT(partitioned.size()));}
-  doc.m_volumes[0].close();doc.m_volumes[0].m_file_name=mapped;
-  auto mappedJob=ShowStorageWaitJob([&](Storage::Job&){BrowserFolderReader reader({},&doc.GetBrowserSession().Mounts());auto rows=reader.read_classic_browser_directory(0,2,"Shared:",false,0);check(rows.rows.size()==3,"partitioned directory row count");return Storage::Result{};},true);
+  doc.Mounts().SetClassicSourceForTest(0,mapped,false);tree.RenewBrowserMount(doc.Mounts().ClassicAt(0).m_rootitem);
+  auto mappedJob=ShowStorageWaitJob([&](Storage::Job&){BrowserFolderReader reader({});reader.ClassicState(0)=doc.Mounts().ClassicAt(0);auto rows=reader.read_classic_browser_directory(0,2,"Shared:",false,0);check(rows.rows.size()==3,"partitioned directory row count");return Storage::Result{};},true);
   check(!mappedJob.code&&load(mapped)==partitioned,"partitioned classic listing and unchanged source");
   {auto adapter=MacBrowser::OpenClassic((LPCSTR)mapped,"Shared:",false);check(adapter->List(2).size()==3,"partitioned classic transfer adapter");adapter->Close();}
-  doc.m_volumes[0].close();doc.m_volumes[0].m_file_name=image;check(doc.m_volumes[0].open()!=0,"restore raw classic fixture");
-  doc.m_volumes[0].m_is_cd=1;doc.open_sub_directory(0,2,"Shared");check(!list.BrowserDirectoryWritable(),"classic read-only backend capabilities lost");
-  doc.m_volumes[0].m_is_cd=0;
+  doc.Mounts().SetClassicSourceForTest(0,image,false);tree.RenewBrowserMount(doc.Mounts().ClassicAt(0).m_rootitem);check(doc.Mounts().OpenClassicForTest(0)!=0,"restore raw classic fixture");
+  doc.Mounts().SetClassicSourceForTest(0,image,true);tree.RenewBrowserMount(doc.Mounts().ClassicAt(0).m_rootitem);doc.open_sub_directory(0,2,"Shared");check(!list.BrowserDirectoryWritable(),"classic read-only backend capabilities lost");
+  doc.Mounts().SetClassicSourceForTest(0,image,false);tree.RenewBrowserMount(doc.Mounts().ClassicAt(0).m_rootitem);
   unsigned calls=0;BrowserDirectory::testObserveRead=[&](const char*){if(++calls==3)throw std::runtime_error("injected classic read error");};
   doc.open_sub_directory(0,2,"Shared");BrowserDirectory::testObserveRead={};check(control.GetItemCount()==0&&!list.BrowserDirectoryWritable()&&owner.IsWindowEnabled(),"failed classic snapshot published partial rows");
   doc.open_sub_directory(0,2,"Shared");check(control.GetItemCount()==3,"classic listing retry");
@@ -92,7 +92,7 @@ int RunSharedBrowserTest(const char* directory){
   host(windows+"\\Large",6ULL*1024*1024*1024,date);check(CreateDirectoryA(windows+"\\Folder",nullptr)!=FALSE,"create Windows folder");
   {auto target=MacBrowser::OpenWindows(std::wstring((LPCSTR)windows,(LPCSTR)windows+windows.GetLength()));MacBrowser::Entry e;e.name=u"Forked";e.forks[0].size=17;e.forks[1].size=32;memcpy(e.finder.data(),"TEXTTEST",8);
    target->Put(2,e,[](unsigned,uint64_t,void* data,size_t n){memset(data,0,n);},false);target->Close();}
-  doc.m_fat_count=1;doc.m_fats[0].m_letter=windows[0];doc.m_fats[0].m_type=DRIVE_FIXED;doc.m_fats[0].m_rootitem=tree.Windows(windows);tree.GetTreeCtrl().SelectItem(doc.m_fats[0].m_rootitem);
+  doc.Mounts().AddWindows(windows[0],DRIVE_FIXED,windows);doc.Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,0},tree.Windows(windows));tree.GetTreeCtrl().SelectItem(doc.Mounts().WindowsAt(0).m_rootitem);
   BrowserDirectory::testObserveRead=[&](const char*){wrongThread|=GetCurrentThreadId()==ui;Sleep(80);};storageUiTest={};
   app.m_pMainWnd=nullptr;
   doc.open_fat_directory(0,windows.GetBuffer(),1);windows.ReleaseBuffer();BrowserDirectory::testObserveRead={};
@@ -142,7 +142,7 @@ int RunSharedBrowserTest(const char* directory){
   fprintf(report,"PASS: shared classic HFS/Windows/native row model, exact byte/FILETIME sorting, 6 GiB host files, classic Finder metadata and operation paths, read-only classic browsing with byte-for-byte unchanged source, slow worker reads, atomic error publication, retry and owner restoration.\n");
   fprintf(report,"PASS: classic BinHex 5/MacBinary I export and Automatic import remain in the existing conversion backend. No physical devices or computer control used.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());BrowserDirectory::testObserveRead={};fclose(report);return 1;}
- BrowserDirectory::testObserveRead={};doc.m_volumes[0].close();tree.Bind(nullptr);list.Bind(nullptr);
+ BrowserDirectory::testObserveRead={};doc.Mounts().CloseClassicVolumes();tree.Bind(nullptr);list.Bind(nullptr);
  list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();app.m_pMainWnd=nullptr;
  fclose(report);return 0;
 }

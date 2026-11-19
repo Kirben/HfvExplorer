@@ -8,9 +8,7 @@
 #include "aspecial.h"
 #include "utils.h"
 
-BrowserFolderReader::BrowserFolderReader(Options options,BrowserMountInventory* borrowed)
- : options_(options),slots_(borrowed?borrowed->classic:ownedSlots_),
-   revisions_(borrowed?borrowed->classicRevision:ownedRevisions_)
+BrowserFolderReader::BrowserFolderReader(Options options):options_(options)
 {
  init_mac_icons();
 }

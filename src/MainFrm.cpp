@@ -1182,8 +1182,8 @@ MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
  auto tree=GetBrowserSession().Tree();HTREEITEM item=tree->m_ct->GetSelectedItem();if(!item)return {};
  DWORD_PTR data=tree->m_ct->GetItemData(item);int type=tree->get_lparam_type(data),index=tree->get_lparam_volinx(data);
  if(type==LIST_MAC){int drive=GetBrowserSession().MacBrowser().SelectedCdDrive();if(drive>=0)return {drive,DRIVE_CDROM};}
- if(type==LIST_HFS&&index>=0&&index<GetBrowserSession().Document()->m_hfs_count)return MacMediaControlTarget(GetBrowserSession().Document()->m_volumes[index].m_file_name);
- if(type==LIST_FAT&&index>=0&&index<GetBrowserSession().Document()->m_fat_count){auto& volume=GetBrowserSession().Document()->m_fats[index];return {toupper((unsigned char)volume.m_letter)-'A',volume.m_type};}
+ if(type==LIST_HFS&&index>=0&&index<GetBrowserSession().Document()->Mounts().ClassicCount())return MacMediaControlTarget(GetBrowserSession().Document()->Mounts().ClassicAt(index).m_file_name);
+ if(type==LIST_FAT&&index>=0&&index<GetBrowserSession().Document()->Mounts().WindowsCount()){auto& volume=GetBrowserSession().Document()->Mounts().WindowsAt(index);return {toupper((unsigned char)volume.m_letter)-'A',volume.m_type};}
  return {};
 }
 void CMainFrame::OnCdEjectEjectReload(int reload)
@@ -1205,9 +1205,9 @@ void CMainFrame::OnCdEjectEjectReload(int reload)
   auto volumes=session.MacBrowser().DetachCd(target.drive);
   released.insert(released.end(),volumes.begin(),volumes.end());
   auto doc=session.Document();
-  for(int i=0;i<doc->m_hfs_count;++i)
-   if(MacMediaControlTarget(doc->m_volumes[i].m_file_name).drive==target.drive)
-    doc->m_volumes[i].close();
+  for(int i=0;i<doc->Mounts().ClassicCount();++i)
+   if(MacMediaControlTarget(doc->Mounts().ClassicAt(i).m_file_name).drive==target.drive)
+    doc->Mounts().CloseClassic(i);
  }
  try{
   auto work=MakeMediaControlJob(target,reload!=0,nullptr,[released=std::move(released),target]{
@@ -1378,7 +1378,7 @@ void CMainFrame::OnToolsBurn()
   if(item){DWORD_PTR data=GetBrowserSession().Tree()->m_ct->GetItemData(item);
    if(GetBrowserSession().Tree()->get_lparam_type(data)==LIST_HFS){
     int index=GetBrowserSession().Tree()->get_lparam_volinx(data);
-    if(index>=0&&index<GetBrowserSession().Document()->m_hfs_count){auto& volume=GetBrowserSession().Document()->m_volumes[index];
+    if(index>=0&&index<GetBrowserSession().Document()->Mounts().ClassicCount()){auto& volume=GetBrowserSession().Document()->Mounts().ClassicAt(index);
      if(!volume.m_is_floppy&&!volume.m_is_cd&&!volume.m_is_hd&&!volume.m_is_removable)initial=volume.m_file_name;
     }
    }
@@ -1392,8 +1392,8 @@ void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) {ui->Enable(!StorageUi::busy(
 static void ReleaseFloppyForWrite(int drive,void* context)
 {
  CHFVExplorerDoc* document=(CHFVExplorerDoc*)context;
- for(int i=0;i<document->m_hfs_count;++i)
-  if(physical_floppy_path(document->m_volumes[i].m_file_name)==drive) document->m_volumes[i].close();
+ for(int i=0;i<document->Mounts().ClassicCount();++i)
+  if(physical_floppy_path(document->Mounts().ClassicAt(i).m_file_name)==drive) document->Mounts().CloseClassic(i);
 }
 void CMainFrame::OnFileVolumetofloppy()
 {

@@ -53,12 +53,11 @@ int BrowserMountInventory::AddClassic(ClassicMount volume)
 {
  int index=0;
  for(;index<classicCount;++index){
-  if(!classic.Find(index)||classic[index].m_free)break;
+  if(!classic[index]||classic[index]->m_free)break;
  }
  if(index==MAX_HFS_VOLUMES)return -1;
  volume.m_free=false;
- classic[index]=std::move(volume);
- classicRevision[index]=0;
+ classic[index]=std::make_unique<ClassicMount>(std::move(volume));
  classicIncarnation_[index]=++nextIncarnation_;
  if(index==classicCount)++classicCount;
  return index;
@@ -66,39 +65,87 @@ int BrowserMountInventory::AddClassic(ClassicMount volume)
 
 void BrowserMountInventory::RemoveClassic(int index)
 {
- classic[index]=ClassicMount{};
- classicRevision[index]=0;
+ *classic.at(index)=ClassicMount{};
  classicIncarnation_[index]=++nextIncarnation_;
 }
 
 void BrowserMountInventory::UpdateClassic(int index,const MacBrowser::ClassicMountInfo& info)
 {
- auto& slot=classic[index];
+ auto& slot=*classic.at(index);
  const auto previous=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
  if(previous!=info.generation)classicIncarnation_[index]=++nextIncarnation_;
  slot.ReadMount(info);
 }
 
-void BrowserMountInventory::PublishClassic(int index,ClassicMount volume,uint64_t revision)
+bool BrowserMountInventory::PublishClassic(const Entry& expected,ClassicMount volume)
 {
- const auto& old=classic[index];
+ if(expected.address.kind!=Kind::ClassicVolume||!IsCurrent(expected))return false;
+ const auto index=expected.address.index;
+ auto& old=*classic.at(index);
+ if(old.m_file_name.CompareNoCase(volume.m_file_name)!=0)return false;
+ volume.m_rootitem=old.m_rootitem;
  if(old.m_mediaGenerationKnown!=volume.m_mediaGenerationKnown||
     (volume.m_mediaGenerationKnown&&old.m_mediaGeneration!=volume.m_mediaGeneration))
     classicIncarnation_[index]=++nextIncarnation_;
- classic[index]=std::move(volume);
- classicRevision[index]=revision;
+ old=std::move(volume);
+ return true;
 }
 
-int BrowserMountInventory::AddWindows(char letter,UINT type)
+int BrowserMountInventory::AddWindows(char letter,UINT type,CString path)
 {
  if(windowsCount>=MAX_FAT_VOLUMES)return -1;
  int index=windowsCount++;
  auto& drive=windows[index];
  drive.m_letter=letter;
- drive.m_volume_name.Format("%c:\\\\",letter);
+ if(path.IsEmpty())path.Format("%c:\\\\",letter);
+ drive.m_volume_name=std::move(path);
  SetWindowsType(index,type);
  return index;
 }
+
+int BrowserMountInventory::FindWindowsSlot(char letter) const
+{
+ for(int index=0;index<windowsCount;++index)
+  if(toupper(static_cast<unsigned char>(windows[index].m_letter))==toupper(static_cast<unsigned char>(letter)))
+   return index;
+ return -1;
+}
+
+int BrowserMountInventory::FindClassicSlot(const CString& path) const
+{
+ for(int index=0;index<classicCount;++index)
+  if(const auto& slot=ClassicAt(index);!slot.m_free&&slot.m_file_name.CompareNoCase(path)==0)return index;
+ return -1;
+}
+
+void BrowserMountInventory::CloseClassic(int index){classic.at(index)->close();}
+void BrowserMountInventory::CloseClassicVolumes()
+{
+ for(int index=0;index<classicCount;++index)CloseClassic(index);
+}
+void BrowserMountInventory::MarkClassicDirty(int index){classic.at(index)->m_floppy_update_needed=true;}
+void BrowserMountInventory::MarkClassicClean(int index){classic.at(index)->update_time_stamp();}
+bool BrowserMountInventory::RefreshClassic(int index,int ask)
+{
+ auto& slot=*classic.at(index);
+ const auto before=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
+ if(!slot.update_if_needed(ask))return false;
+ const auto after=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
+ if(before!=after)classicIncarnation_[index]=++nextIncarnation_;
+ return true;
+}
+
+#ifdef HFV_TESTING
+bool BrowserMountInventory::OpenClassicForTest(int index){return classic.at(index)->open()!=0;}
+void BrowserMountInventory::SetClassicSourceForTest(int index,const CString& path,bool cd)
+{
+ auto& slot=*classic.at(index);
+ slot.close();
+ slot.m_file_name=path;
+ slot.m_is_cd=cd;
+ classicIncarnation_[index]=++nextIncarnation_;
+}
+#endif
 
 void BrowserMountInventory::SetWindowsType(int index,UINT type)
 {
@@ -145,7 +192,7 @@ void BrowserMountInventory::SetRoot(Address address,HTREEITEM root)
 {
  if(!IsBound(address))return;
  switch(address.kind){
- case Kind::ClassicVolume:classic[address.index].m_rootitem=root;break;
+ case Kind::ClassicVolume:classic.at(address.index)->m_rootitem=root;break;
  case Kind::WindowsDrive:windows[address.index].m_rootitem=root;break;
  case Kind::MountedVolume:mounted.at(address.index).root=root;break;
  }
@@ -167,9 +214,6 @@ BrowserMountInventory::Address BrowserMountInventory::Bind(Address address) cons
   if(size_t(index)<mounted.size())address.incarnation=mounted[index].incarnation;
   return address;
  }
- // Directly constructed test fixtures also get a stable handle.
- if(!address.incarnation&&((address.kind==Kind::ClassicVolume&&index<MAX_HFS_VOLUMES)||
-    (address.kind==Kind::WindowsDrive&&index<MAX_FAT_VOLUMES)))address.incarnation=1;
  return address;
 }
 
@@ -197,7 +241,7 @@ std::optional<BrowserMountInventory::Entry> BrowserMountInventory::Lookup(Addres
  }
  case Kind::ClassicVolume:{
   if(index>=classicCount)return {};
-  const auto* volume=classic.Find(index);
+  const auto* volume=classic[index].get();
   if(!volume||volume->m_free||volume->m_file_name.IsEmpty())return {};
   const auto* file=volume->m_file_name.GetString();
   entry.root=volume->m_rootitem;

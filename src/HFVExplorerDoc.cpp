@@ -73,16 +73,6 @@ void dbdb(char *s)
 	OutputDebugString( "\r\n" );
 }
 
-int CHFVExplorerDoc::get_volume_index_by_filename( CString name )
-{
-	int i;
-
-	for(i=0; i<m_hfs_count; i++) {
-		if( name.CompareNoCase( m_volumes[i].m_file_name ) == 0 ) return(i);
-	}
-	return(-1);
-}
-
 void CHFVExplorerDoc::set_floppy_volume_dirty( char *path )
 {
 	int inx, drive;
@@ -92,27 +82,15 @@ void CHFVExplorerDoc::set_floppy_volume_dirty( char *path )
 		if(is_floppy_by_index(drive)) {
 			get_floppy_volume_file_name( drive, name );
 			if(stricmp( name, path ) == 0) {
-				inx = get_volume_index_by_filename( CString(path) );
+				inx = Mounts().FindClassicSlot( CString(path) );
 				if(inx >= 0) {
-					m_volumes[inx].m_floppy_update_needed = TRUE;
+					Mounts().MarkClassicDirty(inx);
 				}
 				break;
 			}
 		}
 	}
 
-}
-
-int CHFVExplorerDoc::get_volume_index_by_volumename( CString name )
-{
-	int i;
-
-	for(i=0; i<m_hfs_count; i++) {
-		if(name.CompareNoCase( m_volumes[i].m_volume_name ) == 0 ) {
-			return(i);
-		}
-	}
-	return(-1);
 }
 
 int check_zero_size( char *lpszPathName )
@@ -155,7 +133,7 @@ int CHFVExplorerDoc::insert_volume(CString name,int is_floppy,int is_cd,int is_h
     const bool usable=check_zero_size(name.GetBuffer(_MAX_PATH))!=0;
     name.ReleaseBuffer();
     if(!usable)return -1;
-    if(get_volume_index_by_filename(name)>=0)return -1;
+    if(Mounts().FindClassicSlot(name)>=0)return -1;
     BrowserMountInventory::ClassicMount volume;
     volume.m_file_name=name;
     volume.m_is_floppy=is_floppy!=0;
@@ -347,11 +325,7 @@ void CHFVExplorerDoc::update_invisible_attributes()
 }
 
 CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
- :m_browserSession(new BrowserSession(this)),
-  m_volumes(GetBrowserSession().Mounts().classic),
-  m_fats(GetBrowserSession().Mounts().windows),
-  m_hfs_count(GetBrowserSession().Mounts().classicCount),
-  m_fat_count(GetBrowserSession().Mounts().windowsCount)
+ :m_browserSession(new BrowserSession(this))
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 
@@ -382,7 +356,7 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
 		m_bits_per_pixel = 1;
 	}
 #ifdef HFV_TESTING
-    folderReader_=std::make_unique<BrowserFolderReader>(FolderOptions(),&GetBrowserSession().Mounts());
+    folderReader_=std::make_unique<BrowserFolderReader>(FolderOptions());
 #endif
 }
 
@@ -474,7 +448,7 @@ void CHFVExplorerDoc::open_parent_directory(unsigned long id)
 					// open_fat_directory( volinx, dir );
 				}
 			} else {
-				GetBrowserSession().Tree()->select_by_id( m_volumes[volinx].m_rootitem, volinx, id );
+				GetBrowserSession().Tree()->select_by_id( Mounts().ClassicAt(volinx).m_rootitem, volinx, id );
 				open_sub_directory( volinx, id, "" );
 			}
 		}
@@ -506,7 +480,7 @@ CString CHFVExplorerDoc::get_directory (
 				volinx = GetBrowserSession().Tree()->get_lparam_volinx(dat);
 				id = GetBrowserSession().Tree()->get_lparam_id(dat);
 				return( GetBrowserSession().Tree()->get_directory_name(
-					m_volumes[volinx].m_rootitem, 
+					Mounts().ClassicAt(volinx).m_rootitem,
 					volinx, id ) );
 				break;
 			case LIST_FAT:
@@ -524,7 +498,7 @@ CString CHFVExplorerDoc::get_directory (
 void CHFVExplorerDoc::open_sub_directory(int index,unsigned long id,CString name)
 {
     auto& session=GetBrowserSession();
-    auto& volume=m_volumes[index];
+    auto& volume=Mounts().ClassicAt(index);
     auto tree=session.Tree();
     auto path=name.IsEmpty()?tree->get_directory_name(volume.m_rootitem,index,id):name;
     path+=":";
@@ -532,12 +506,15 @@ void CHFVExplorerDoc::open_sub_directory(int index,unsigned long id,CString name
     const auto finder=session.finderLayout;
     BrowserDirectory::Snapshot snapshot;
     session.ClearCurrent();
+    const auto capture=Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,index});
+    if(!capture)return;
     folderReader_->SetOptions(FolderOptions());
+    folderReader_->ClassicState(index)=volume;
     const auto result=ShowStorageWaitJob([&](Storage::Job& job){
         snapshot=folderReader_->read_classic_browser_directory(index,id,path,finder,parent,&job);
         return Storage::Result{};
     },true,session.Owner());
-    if(result.code){
+    if(result.code||!Mounts().PublishClassic(*capture,folderReader_->ClassicState(index))){
         session.List()->initialize_volume("",0);
         session.List()->SetBrowserCapabilities({});
         return;
@@ -612,8 +589,8 @@ void CHFVExplorerDoc::PublishClassicFolder(int volinx,HTREEITEM item,const std::
  auto title=VolumeCoord::Wide(path);
  if(!title.empty()&&title.back()==L':')title.pop_back();
  CString status;
- status.Format("Exploring \"%s\": %I64u kB free",path.c_str(),m_volumes[volinx].freeBytes/1024);
- const auto root=m_volumes[volinx].m_rootitem;
+ status.Format("Exploring \"%s\": %I64u kB free",path.c_str(),Mounts().ClassicAt(volinx).freeBytes/1024);
+ const auto root=Mounts().ClassicAt(volinx).m_rootitem;
  session.PublishFolder(snapshot,item,parent,std::move(title),status,[&](const BrowserDirectory::Row& row){
     CStringA name(MacBrowser::Wide(row.entry.name).c_str());
     return session.Tree()->tree_insert(root,volinx,const_cast<char*>(name.GetString()),row.entry.id,row.entry.parent);
@@ -631,11 +608,11 @@ CString CHFVExplorerDoc::FindClassicLauncher(const char* type,const char* creato
  struct Candidate {CString image, name;};
  std::vector<Candidate> candidates;
  const auto add=[&](int index){
-  const auto& slot=m_volumes[index];
+  const auto& slot=Mounts().ClassicAt(index);
   if(!slot.m_free&&!slot.m_file_name.IsEmpty())candidates.push_back({slot.m_file_name,slot.m_volume_name});
  };
- if(preferredVolume>=0&&preferredVolume<m_hfs_count)add(preferredVolume);
- for(int index=0;index<m_hfs_count;++index)
+ if(preferredVolume>=0&&preferredVolume<Mounts().ClassicCount())add(preferredVolume);
+ for(int index=0;index<Mounts().ClassicCount();++index)
   if(index!=preferredVolume)add(index);
  CString path;
  const bool showHidden=m_mac_show_invisibles!=0;
@@ -663,8 +640,8 @@ void CHFVExplorerDoc::BuildBrowserRoots()
 {
     auto tree=GetBrowserSession().Tree();
     tree->initialize_tree();
-    for(int index=0;index<m_hfs_count;++index){
-        auto& volume=m_volumes[index];
+    for(int index=0;index<Mounts().ClassicCount();++index){
+        auto& volume=Mounts().ClassicAt(index);
         const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,index};
         GetBrowserSession().Mounts().SetRoot(address,nullptr);
         if(volume.m_free)continue;
@@ -672,8 +649,9 @@ void CHFVExplorerDoc::BuildBrowserRoots()
         GetBrowserSession().Mounts().SetRoot(address,tree->initialize_volume(index,label,CNID_ROOT_ID,volume.m_is_floppy,
             volume.m_is_cd,volume.m_is_hd,volume.m_is_removable));
     }
-    for(int index=0;index<m_fat_count;++index){
-        auto& drive=m_fats[index];
+    for(int index=0;index<Mounts().WindowsCount();++index){
+        const auto& drive=Mounts().WindowsAt(index);
+        GetBrowserSession().Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,index},nullptr);
         if(drive.m_type==DRIVE_NO_ROOT_DIR)continue;
         GetBrowserSession().Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,index},
             tree->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,
@@ -684,8 +662,8 @@ void CHFVExplorerDoc::BuildBrowserRoots()
 bool CHFVExplorerDoc::NavigateInitialFolder(int firstClassic)
 {
     using namespace BrowserNavigation;
-    for(int index=firstClassic;index<m_hfs_count;++index){
-        const auto& volume=m_volumes[index];
+    for(int index=firstClassic;index<Mounts().ClassicCount();++index){
+        const auto& volume=Mounts().ClassicAt(index);
         if(volume.m_free||!volume.m_rootitem)continue;
         const auto image=std::string((LPCSTR)volume.m_file_name);
         Request request{};
@@ -699,8 +677,8 @@ bool CHFVExplorerDoc::NavigateInitialFolder(int firstClassic)
         if(NavigateClassicFolder(index,CNID_ROOT_ID,false,&request))return true;
     }
     // Starting a browser must not implicitly probe an empty floppy or CD.
-    for(int index=0;index<m_fat_count;++index)
-        if(m_fats[index].m_type==DRIVE_FIXED&&NavigateStartupDirectory((LPCSTR)m_fats[index].m_volume_name,false))
+    for(int index=0;index<Mounts().WindowsCount();++index)
+        if(Mounts().WindowsAt(index).m_type==DRIVE_FIXED&&NavigateStartupDirectory((LPCSTR)Mounts().WindowsAt(index).m_volume_name,false))
             return true;
     return false;
 }
@@ -714,8 +692,8 @@ bool CHFVExplorerDoc::NavigateStartupDirectory(const std::string& path,bool mac)
     if(mac)return NavigateNamedClassicFolder(path);
 
     if(path.size()<3||path[1]!=':'||path[2]!='\\')return false;
-    for(int index=0;index<m_fat_count;++index)
-        if(toupper((unsigned char)m_fats[index].m_letter)==toupper((unsigned char)path[0])&&m_fats[index].m_rootitem){
+    for(int index=0;index<Mounts().WindowsCount();++index)
+        if(toupper((unsigned char)Mounts().WindowsAt(index).m_letter)==toupper((unsigned char)path[0])&&Mounts().WindowsAt(index).m_rootitem){
             request.folder=FileOperations::Location::Windows(VolumeCoord::Wide(path));
             request.folder.directory=true;
             return NavigateWindowsFolder(index,path,false,&request);
@@ -728,7 +706,7 @@ bool CHFVExplorerDoc::NavigateNamedClassicFolder(const std::string& path,int fir
     using namespace BrowserNavigation;
     const auto volumeName=path.substr(0,path.find(':'));
     const auto queue=[&](int index,bool tryNext){
-        const auto& volume=m_volumes[index];
+        const auto& volume=Mounts().ClassicAt(index);
         if(volume.m_free||!volume.m_rootitem)return false;
         auto image=std::string((LPCSTR)volume.m_file_name);
         Request request{};
@@ -741,10 +719,10 @@ bool CHFVExplorerDoc::NavigateNamedClassicFolder(const std::string& path,int fir
         request.tryNextStartupRoot=tryNext;
         return NavigateClassicFolder(index,0,false,&request);
     };
-    if(preferred>=0&&preferred<m_hfs_count&&m_volumes[preferred].m_volume_name.CompareNoCase(volumeName.c_str())==0)
+    if(preferred>=0&&preferred<Mounts().ClassicCount()&&Mounts().ClassicAt(preferred).m_volume_name.CompareNoCase(volumeName.c_str())==0)
         return queue(preferred,false);
-    for(int index=first;index<m_hfs_count;++index){
-        const auto& volume=m_volumes[index];
+    for(int index=first;index<Mounts().ClassicCount();++index){
+        const auto& volume=Mounts().ClassicAt(index);
         if(volume.m_volume_name.IsEmpty()||volume.m_volume_name.CompareNoCase(volumeName.c_str())==0)
             if(queue(index,true))return true;
     }
@@ -786,7 +764,6 @@ void CHFVExplorerDoc::OnCleanDocument()
 {
  GetBrowserSession().MacBrowser().DetachTree();
 	CHFVExplorerApp	*pApp;
-	int i;
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 	if(GetBrowserSession().List())GetBrowserSession().List()->list_clear();
@@ -795,18 +772,16 @@ void CHFVExplorerDoc::OnCleanDocument()
 		GetBrowserSession().Tree()->enable_selchange(0);
 		GetBrowserSession().Tree()->tree_clear();
 	}
-	for( i=0; i<m_hfs_count; i++) {
-		m_volumes[i].close();
-	}
+	Mounts().CloseClassicVolumes();
 }
 
 void CHFVExplorerDoc::FinishBackgroundClose(){
- for(int i=0;i<m_hfs_count;++i)m_volumes[i].close();
+ Mounts().CloseClassicVolumes();
  GetBrowserSession().MacBrowser().Clear();
 }
 void CHFVExplorerDoc::OnCloseDocument()
 {
- bool physical=false;for(int i=0;i<m_hfs_count;++i)if(m_volumes[i].m_opened&&(m_volumes[i].m_is_cd||m_volumes[i].m_is_floppy)){physical=true;break;}
+ bool physical=false;for(int i=0;i<Mounts().ClassicCount();++i)if(Mounts().ClassicAt(i).m_opened&&(Mounts().ClassicAt(i).m_is_cd||Mounts().ClassicAt(i).m_is_floppy)){physical=true;break;}
  if(physical&&BackgroundCopies::Active()){
   // A device reader's final release can wait behind another thread's slow
   // read. Destroy the UI now, retaining only this viewless document for cleanup.
@@ -826,10 +801,35 @@ void CHFVExplorerDoc::OnCloseDocument()
 	CDocument::OnCloseDocument();
 }
 
-void CHFVExplorerDoc::check_hfv_file_times(int ask){
- for(int i=0;i<m_hfs_count;++i){auto& mounted=m_volumes[i];if(!mounted.m_opened)continue;auto key=VolumeCoord::ImageKey(std::string((LPCSTR)mounted.m_file_name));bool updated=false;
-  try{VolumeCoord::OperationLease access({{key,VolumeCoord::Mode::Write}});updated=mounted.update_if_needed(ask)!=FALSE;}catch(const VolumeCoord::Busy&){continue;}
-  if(updated)VolumeCoord::Changed({key});
+void CHFVExplorerDoc::check_hfv_file_times(int ask)
+{
+ auto& session=GetBrowserSession();
+ auto& mounts=session.Mounts();
+ for(int index=0;index<mounts.ClassicCount();++index){
+  const auto& slot=mounts.ClassicAt(index);
+  if(!slot.m_opened)continue;
+  const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,index};
+  const auto old=mounts.Bind(address);
+  const auto key=VolumeCoord::ImageKey(std::string(slot.m_file_name.GetString()));
+  try{
+   VolumeCoord::OperationLease access({{key,VolumeCoord::Mode::Write}});
+   if(!mounts.RefreshClassic(index,ask))continue;
+  }catch(const VolumeCoord::Busy&){continue;}
+  if(auto tree=session.Tree();tree&&slot.m_rootitem&&mounts.Bind(address).incarnation!=old.incarnation){
+   const auto root=slot.m_rootitem;
+   const auto enabled=tree->SelectionNotificationsEnabled();
+   tree->enable_selchange(0);
+   auto& control=tree->GetTreeCtrl();
+   for(auto at=control.GetSelectedItem();at;at=control.GetParentItem(at)){
+    if(at!=root)continue;
+    control.SelectItem(root);
+    break;
+   }
+   tree->delete_subdir_contents(root);
+   tree->RenewBrowserMount(root);
+   tree->enable_selchange(enabled);
+  }
+  VolumeCoord::Changed({key});
  }
 }
 
@@ -843,8 +843,8 @@ void CHFVExplorerDoc::set_hfs_volume_clean( char *path )
 {
 	int inx;
 
-	inx = get_volume_index_by_filename( CString(path) );
+	inx = Mounts().FindClassicSlot( CString(path) );
 	if(inx >= 0) {
-		m_volumes[inx].update_time_stamp();
+		Mounts().MarkClassicClean(inx);
 	}
 }
