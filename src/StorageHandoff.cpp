@@ -4,7 +4,6 @@
 #include "VolumeCoordinator.h"
 #include "ReadOnlyCdBackend.h"
 #include <algorithm>
-extern "C" void HFSIFACE_get_dir_flush(void);
 namespace MacBrowser {
 namespace {
 std::mutex mutex;
@@ -42,7 +41,6 @@ WorkerStorageHandoff::~WorkerStorageHandoff() {
 void WorkerStorageHandoff::Prepare(const std::vector<std::string>& keys,
                                    const std::vector<std::string>& writes) {
     auto volumes = WorkerVolumes(keys);
-    HFSIFACE_get_dir_flush();
     for (auto &volume : volumes)
         if (!volume->HostPath(2).empty())
             volume->ReleaseWorkerReaders(writes);
@@ -81,7 +79,6 @@ void WorkerStorageHandoff::Prepare(const std::vector<std::string>& keys,
 void WorkerStorageHandoff::Restore() {
     if (restored_) return;
     restored_ = true;
-    HFSIFACE_get_dir_flush();
     ImageHandleTransfer::Scope transferred(files_);
     std::string failures;
     auto attempt = [&](auto restore) {

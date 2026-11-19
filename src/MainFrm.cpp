@@ -1140,7 +1140,6 @@ void CMainFrame::OnCdEjectEjectReload(int reload)
  auto browsers=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers;for(auto browser:browsers)browser->GetBrowserSession().MacBrowser().ReleaseCd(target.drive);
  auto app=(CHFVExplorerApp*)AfxGetApp();auto document=GetBrowserSession().Document();
  auto result=ShowStorageWaitJob(MakeMediaControlJob(target,reload!=0,nullptr,[=]{
-  HFSIFACE_get_dir_flush();
   for(auto browser:browsers){auto doc=browser->GetBrowserSession().Document();for(int i=0;i<doc->m_hfs_count;++i){auto mounted=MacMediaControlTarget(doc->m_volumes[i].m_file_name);if(mounted.drive==target.drive)doc->m_volumes[i].close();}}
   native_media_suspend(target.drive);
  },held));
@@ -1314,7 +1313,6 @@ void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) {ui->Enable(!StorageUi::busy(
 static void ReleaseFloppyForWrite(int drive,void* context)
 {
  CHFVExplorerDoc* document=(CHFVExplorerDoc*)context;
- HFSIFACE_get_dir_flush();
  for(int i=0;i<document->m_hfs_count;++i)
   if(document->m_volumes[i].m_file.m_hfloppy && document->m_volumes[i].m_file.m_drive==drive) document->m_volumes[i].close();
 }

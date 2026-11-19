@@ -46,7 +46,6 @@
 #include "..\cache.h"
 
 #include "..\MacTypes.h"
-#include "..\itemtype.h"
 
 #include "interface.h"
 #include "copyin.h"
@@ -355,38 +354,6 @@ int HFSIFACE_delete( char *volpath, char *path )
 					hfs_perror(mac_path);
 					result = 1;
 				} else result = 0;
-				if (hfs_umount(vol) < 0 && result == 0) {
-					hfs_perror("Error closing HFS volume");
-					result = 1;
-				}
-			}
-			if(0 == HFSIFACE_umount( volpath )) {
-			}
-		}
-	}
-
-	return( result );
-}
-
-int HFSIFACE_mkdir( char *volpath, char *path )
-{
-	int volinx, result = 0;
-  hfsvol *vol;
-	char mac_path[_MAX_PATH];
-	
-	HFSIFACE_internal_init();
-	strcpy( mac_path, path );
-	pc_to_mac_charset(mac_path);
-
-	if(0 == HFSIFACE_mount( volpath )) {
-		volinx = path2volinx(volpath);
-		if(volinx	>= 0) {
-			vol = hfs_remount(hcwd_getvol(volinx), mount_flags(volpath));
-			if (vol != 0) {
-				if (hfs_mkdir(vol, mac_path) < 0) {
-					hfs_perror(mac_path);
-					result = 1;
-				}
 				if (hfs_umount(vol) < 0 && result == 0) {
 					hfs_perror("Error closing HFS volume");
 					result = 1;
@@ -1417,121 +1384,4 @@ int HFSIFACE_get_properties( char *volpath, char *path, hfsdirent *pent )
 		}
 	}
 	return( result );
-}
-
-// Speedup. This family is NOT reentrant!!!!
-static HFV_THREAD_LOCAL hfsvol *ff_vol = 0;
-static HFV_THREAD_LOCAL int ff_mounted = 0;
-static HFV_THREAD_LOCAL int ff_mounted2 = 0;
-static HFV_THREAD_LOCAL char ff_path[_MAX_PATH];
-static HFV_THREAD_LOCAL char ff_mac_path[_MAX_PATH];
-static HFV_THREAD_LOCAL hfsdir *ff_dir = 0;
-
-void ff_cleanup( void )
-{
-	if(ff_dir) {
-		hfs_closedir(ff_dir);
-		ff_dir = 0;
-	}
-	if(ff_mounted2) {
-		if (hfs_umount(ff_vol) < 0) {
-			// hfs_perror("Error closing HFS volume");
-		}
-		ff_mounted2 = 0;
-	}
-	if(ff_mounted) {
-		if(0 == HFSIFACE_umount( ff_path )) {
-		}
-		ff_mounted = 0;
-	}
-}
-
-int HFSIFACE_get_dir_next( hfs_item_type *pitem )
-{
-	int result = 1, looping = 1;
-	hfsdirent ent;
-	
-	HFSIFACE_internal_init();
-
-	// Loop to skip deleted items
-	while(looping) {
-		looping = 0;
-		if(hfs_readdir2(ff_dir, &ent, &pitem->catkeyrec, &pitem->catdatarec) >= 0) {
-			if(pitem->catkeyrec.ckrKeyLen == 0) {
-				looping = 1;
-			}
-			result = 0;
-		}	else {
-			result = 1;
-		}
-	}
-
-	if(result != 0) {int failure=errno;char* message=hfs_error;ff_cleanup();errno=failure;hfs_error=message;}
-	return( result );
-}
-
-void HFSIFACE_get_dir_flush( void )
-{
-	ff_cleanup();
-}
-
-int HFSIFACE_get_dir_first( char *volpath, char *path, hfs_item_type *pitem )
-{
-	int volinx, result = 1;
-	
-	if(ff_dir) return(-1);
-
-	HFSIFACE_internal_init();
-
-	strcpy( ff_path, volpath );
-	strcpy( ff_mac_path, path );
-	pc_to_mac_charset( ff_mac_path );
-
-	if(0 == HFSIFACE_mount( ff_path )) {
-		ff_mounted = 1;
-		volinx = path2volinx(ff_path);
-		if(volinx	>= 0) {
-			ff_vol = hfs_remount(hcwd_getvol(volinx), mount_flags(ff_path));
-			if (ff_vol != 0) {
-				ff_mounted2 = 1;
-				ff_dir = hfs_opendir( ff_vol, ff_mac_path );
-				if(ff_dir == 0) {
-					hfs_perror(path);
-					result = -1;
-				} else {
-					result = HFSIFACE_get_dir_next( pitem );
-				}
-			}
-		}
-	}
-	if(result != 0) {int failure=errno;char* message=hfs_error;ff_cleanup();errno=failure;hfs_error=message;}
-	return( result );
-}
-
-// dir_name does not end with a colon.
-BOOL HFSIFACE_exists_split( int volinx, char *volpath, char *dir_name, char *name )
-{
-	BOOL retval = FALSE;
-	hfs_item_type item;
-	int ret;
-	char d[_MAX_PATH];
-
-	memset( &item, 0, sizeof(item) );
-	item.volinx = volinx;
-	item.id = 0; // not needed
-
-	strcpy( d, dir_name );
-	strcat( d, ":" );
-
-	ret = HFSIFACE_get_dir_first( volpath, d, &item );
-	while (ret == 0) {
-		mac_to_pc_charset( item.catkeyrec.ckrCName );
-		if(stricmp((char *)item.catkeyrec.ckrCName,name) == 0) {
-			retval = TRUE;
-			break;
-		}
-		ret = HFSIFACE_get_dir_next( &item );
-	}
-	HFSIFACE_get_dir_flush();
-	return(retval);
 }

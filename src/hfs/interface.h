@@ -44,7 +44,6 @@ int HFSIFACE_copy(
 	int move_if_possible,
 	int *pwas_moved );
 int HFSIFACE_rename( char *volpath, char *oldname, char *newname );
-int HFSIFACE_mkdir( char *volpath, char *path );
 int HFSIFACE_take_delete_retained_change(void);
 int HFSIFACE_rmdir( char *volpath, char *path );
 int HFSIFACE_format( char *volpath, char *vname, hfv_size_t size, BOOL initialize );
@@ -56,7 +55,6 @@ int HFSIFACE_silencer( int shutup );
 
 int HFSIFACE_get_properties( char *volpath, char *path, hfsdirent *pent );
 
-BOOL HFSIFACE_exists_split( int volinx, char *volpath, char *dir_name, char *name );
 
 
 void make_companion_name( char *target, char *source, int fork );

@@ -32,16 +32,3 @@ typedef struct {
 	// CString *searchname;
 	char searchname[_MAX_PATH];
 } hfs_item_type;
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-int HFSIFACE_get_dir_first( char *volpath, char *path, hfs_item_type *pitem );
-int HFSIFACE_get_dir_next( hfs_item_type *pitem );
-// This must be called if breaking out of the get loop before completion
-void HFSIFACE_get_dir_flush( void );
-
-#ifdef __cplusplus
-}
-#endif
