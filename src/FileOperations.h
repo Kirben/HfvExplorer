@@ -135,6 +135,13 @@ public:
  const std::shared_ptr<Storage::Job>& Job()const{return job_;}
  Completion Snapshot()const;
 };
+struct TransferSettings {
+ LegacyCopyOptions conversion;
+ bool askImport=false,askExport=false;
+};
+// Preserve source order and group adjacent ordinary copies for shared progress.
+std::vector<Request> PlanTransfers(OrdinaryCopy, const TransferSettings&);
+
 // The queue/worker owns the request until execution finishes, independently of
 // the submitting browser or progress dialog. UI refresh is a separate consumer.
 Operation Submit(Request);

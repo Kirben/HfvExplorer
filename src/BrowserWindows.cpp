@@ -157,6 +157,15 @@ CDocument* CHFVExplorerApp::OpenDocumentFile(LPCTSTR path){
  }
  InstallBrowserTemplate();return m_browserTemplate->OpenDocumentFile(path);
 }
+#ifdef HFV_TESTING
+void CHFVExplorerApp::SeedRecentImageForTest(LPCTSTR path)
+{
+ // The routing test supplies its own MRU and needs no shell or profile access.
+ if(!m_pRecentFileList)m_pRecentFileList=new CRecentFileList(0,"Recent File List","File%d",10);
+ (*m_pRecentFileList)[0]=path;
+}
+#endif
+
 void CHFVExplorerApp::OpenRecentImage(UINT command,BrowserSession& session){
  if(StorageUi::busy()||StorageUi::state().sessionOpen||!m_pRecentFileList)return;
  const int index=int(command-ID_FILE_MRU_FILE1);

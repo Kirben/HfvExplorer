@@ -52,7 +52,7 @@ public:
  CMainFrame* ActiveBrowser() const;
  void OpenRecentImage(UINT command,BrowserSession&);
 #ifdef HFV_TESTING
- void InitRecentImagesForTest(){LoadStdProfileSettings(10);}
+ void SeedRecentImageForTest(LPCTSTR path);
 #endif
  void ForgetBrowser(CMainFrame*);
  CDocument* OpenDocumentFile(LPCTSTR path) override;

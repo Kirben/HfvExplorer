@@ -389,44 +389,26 @@ struct MainMacBrowser::State {
         },true,true);
         return true;
     }
-    bool Transfer(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed={}) {
-        if(target.IsClassic()){auto doc=session_.Document();auto path=target.ClassicImage();for(int n=0;n<doc->m_hfs_count;++n)if(!doc->m_volumes[n].m_file_name.IsEmpty()&&!_stricmp(Location::Classic(std::string((LPCSTR)doc->m_volumes[n].m_file_name),":").ClassicImage().c_str(),path.c_str()))doc->m_volumes[n].close();}
-        auto convertible=[](const Location& p){if(p.LegacyType()!=LIST_HFS)return true;auto n=p.ClassicImage().size();return n>=4&&p.ClassicImage()[n-4]=='.'&&(!_stricmp(p.ClassicImage().c_str()+n-3,"DSK")||!_strnicmp(p.ClassicImage().c_str()+n-3,"HF",2));};
-        auto classicImage=[](const Location& item){
-            return item.IsMounted()&&ExecutionFor(*item.Volume()).classicConversion;
-        };
-        auto legacyType=[&](const Location& item){return classicImage(item)?LIST_HFS:item.LegacyType();};
-        auto conversionEndpoint=[&](const Location& item){
-            if(!classicImage(item))return item;
-            if(const int drive=item.Volume()->CdDrive();drive>=0)
-                return Location::Physical(drive,FileOperations::ClassicMedia::Cd,":");
-            auto path=WorkerEndpoint::Find(*item.Volume())->WorkerDescription().path;
-            return Location::Classic((LPCSTR)CString(path.c_str()),":");
-        };
-        auto canConvert=[&](const Location& item){return classicImage(item)||(!item.Volume()&&convertible(item));};
-        bool legacy=canConvert(target)&&std::all_of(sources.begin(),sources.end(),canConvert)&&std::any_of(sources.begin(),sources.end(),[&](const Location& p){return legacyType(p)!=legacyType(target);});
-        bool complete=true;std::vector<FileOperations::Request> background;
-        if(legacy){
-         for(auto& source:sources){
-          FileOperations::Request request = FileOperations::OrdinaryCopy{{source}, target};
-          if (legacyType(source) != legacyType(target)) {
-              const bool ask = (legacyType(source)==LIST_HFS ? App().m_copyout_mode : App().m_copyin_mode) == 6;
-              request = FileOperations::LegacyConversion{
-                  conversionEndpoint(source), conversionEndpoint(target), source.directory, source.cut, ask,
-                  CaptureLegacyCopyOptions(HFSIFACE_copy_mode())};
-              request.Legacy().selection = FileOperations::ConversionSelection{source, target};
-          }
-          if(BackgroundCopies::Enabled())background.push_back(std::move(request));else if(!RunOperation(session_,std::move(request),true,!source.directory)){complete=false;break;}
-         }
-        }else{
-         FileOperations::Request request = FileOperations::OrdinaryCopy{sources, target};
-         if(BackgroundCopies::Enabled())background.push_back(std::move(request));else complete=RunOperation(session_,std::move(request),true,sources.size()==1&&!sources[0].directory);
+    bool Transfer(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed)
+    {
+        const FileOperations::TransferSettings settings{CaptureLegacyCopyOptions(HFSIFACE_copy_mode()),
+            App().m_copyin_mode==6,App().m_copyout_mode==6};
+        auto requests=FileOperations::PlanTransfers({sources,target},settings);
+        const bool single=sources.size()==1&&!sources.front().directory;
+        if(BackgroundCopies::Enabled())
+            return BackgroundCopies::Start(std::move(requests),session_.Owner(),single,std::move(completed));
+
+        bool complete=true;
+        for(auto& request:requests){
+            const auto* conversion=request.Conversion();
+            const bool singleOperation=conversion?!conversion->directory:single;
+            if(!RunOperation(session_,std::move(request),true,singleOperation)){
+                complete=false;
+                break;
+            }
         }
-        if(BackgroundCopies::Enabled()){if(!complete)return false;return BackgroundCopies::Start(std::move(background),session_.Owner(),sources.size()==1&&!sources[0].directory,std::move(completed));}
         if(completed)completed(complete);
-        if(session_.Tree()&&session_.List()){
-            session_.RefreshSelected();
-        }
+        session_.RefreshSelected();
         return complete;
     }
 };
@@ -465,8 +447,10 @@ void RememberImage(const std::wstring& path)
     if(!size)return;
     std::string ansi(size,0);
     BOOL lost=FALSE;
-    if(WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,ansi.data(),size,nullptr,&lost)&&!lost)
-        App().AddToRecentFileList(ansi.c_str());
+    if(size<=MAX_PATH&&WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,path.c_str(),-1,ansi.data(),size,nullptr,&lost)&&!lost){
+        try{App().AddToRecentFileList(ansi.c_str());}
+        catch(CException* error){error->Delete();} // Shell history is best effort after publication.
+    }
 }
 }
 
@@ -1062,7 +1046,7 @@ bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
     return false;
 }
 void MainMacBrowser::Import(){if(!Active()||!Writable())return;std::wstring path;if(!FileDialog(session_,path,false))return;
-    Location source;source.SetWindows(path);try{state_->Transfer({source},state_->Target());}catch(const std::exception& e){AfxMessageBox(e.what());}}
+    Location source=Location::Windows(path);try{TransferSelection({source},state_->Target());}catch(const std::exception& e){AfxMessageBox(e.what());}}
 void MainMacBrowser::ImportResource(){
     if(!Active()||!Writable())return;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return;
     const auto model=session_.List()->BrowserRowAt(row);if(!model||!model->location.IsMounted()||model->entry.directory)return;

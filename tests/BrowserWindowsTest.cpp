@@ -122,8 +122,7 @@ int RunBrowserWindowsTest(const char* directory){
   b->SendMessage(WM_COMMAND,ID_HFV_VIEW_LIST);Check(sa.finderLayout&&(sb.List()->GetStyle()&LVS_TYPEMASK)==LVS_LIST,"second frame command used first frame");
   a->SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);
   auto firstImage=host+"\\first.dsk",secondImage=host+"\\second.dsk";Image(firstImage,u"First");Image(secondImage,u"Second");
-  app.InitRecentImagesForTest();
-  app.AddToRecentFileList(firstImage);
+  app.SeedRecentImageForTest(firstImage);
   a->SendMessage(WM_COMMAND,ID_FILE_MRU_FILE1);
   Check(sa.AwaitNavigationForTest()&&sa.MacBrowser().Active(),"recent image command did not open in its originating browser");
   Check(!sb.MacBrowser().Active(),"recent image command opened in the other browser");

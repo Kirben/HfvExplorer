@@ -455,7 +455,7 @@ int RunBrowserTransfersTest(const char* directory)
   Check(!readOnly.TestDrop(sc,false,nullptr,-1,MK_CONTROL)&&!BackgroundCopies::Active(),"read-only destination accepted a drop");
 
   stage="classic HFS mounts and legacy conversion";
-  const auto ca=host+"\\classic-a.dsk",cb=host+"\\classic-b.dsk";
+  const auto ca=host+"\\classic-a.dsk",cb=host+"\\classic-b";
   FormatClassic(ca);
   FormatClassic(cb);
   auto d=app.CreateBrowser(FALSE),e=app.CreateBrowser(FALSE);
@@ -503,6 +503,44 @@ int RunBrowserTransfersTest(const char* directory)
   char bytes[5]{};
   classicTarget->Read(imported,0,0,bytes,5);
   Check(!memcmp(bytes,"hello",5),"Windows raw import bytes differ");
+
+  stage="mixed conversion pairs and extensionless classic image";
+  const auto classicMixed=Put(*classicTarget,2,u"Mixed Classic",47);
+  const auto nativeMixed=Put(*av,2,u"Mixed Native",52);
+  auto classicLocation=FileOperations::Location::Mounted(classicTarget,classicMixed);
+  const auto nativeLocation=FileOperations::Location::Mounted(av,nativeMixed);
+  const auto destination=sc.MacBrowser().TargetFolder();
+  const auto legacyLocation=FileOperations::Location::Classic((LPCSTR)cb,"Legacy:Mixed Classic");
+  const auto plan=FileOperations::PlanTransfers({{legacyLocation,nativeLocation,classicLocation},destination},
+      {CaptureLegacyCopyOptions('r'),false,true});
+  Check(plan.size()==3&&plan[0].Conversion()&&plan[0].Conversion()->askMode&&
+        plan[1].Get<FileOperations::OrdinaryCopy>()&&plan[2].Conversion()&&
+        plan[2].Conversion()->selection->source.Volume()==classicTarget,
+        "planner did not classify each typed endpoint without relying on an image suffix");
+  Success(Transfer([&]{return sc.MacBrowser().TransferSelection({classicLocation,nativeLocation},destination);}));
+  {
+   auto hostVolume=MacBrowser::OpenWindows(destination.WindowsPath());
+   const auto converted=Find(*hostVolume,2,u"Mixed Classic");
+   Check(converted&&hostVolume->Stat(converted).forks[1].size==0,"mixed batch dropped the raw classic export policy");
+   Verify(*hostVolume,2,u"Mixed Native",52);
+  }
+
+  stage="cancel planned conversion";
+  const auto cancelId=Put(*classicTarget,2,u"Do Not Export",53);
+  auto cancelSource=FileOperations::Location::Mounted(classicTarget,cancelId);
+  app.m_copyout_mode=6;
+  bool completed=true;
+  Check(sc.MacBrowser().TransferSelection({cancelSource},destination,[&](bool ok){completed=ok;}),
+        "could not enqueue Ask-mode classic export");
+  Until([]{return BackgroundCopies::ModeWindow()!=nullptr;},"Ask-mode export did not prompt");
+  Check(FileOperations::Pending().empty(),"conversion started before choosing a mode");
+  SendMessage(BackgroundCopies::ModeWindow(),WM_COMMAND,IDCANCEL,0);
+  Until([]{return !BackgroundCopies::Active();},"cancelled conversion did not finish");
+  app.m_copyout_mode=0;
+  Check(!completed&&GetFileAttributesA(source+"\\Do Not Export")==INVALID_FILE_ATTRIBUTES,
+        "conversion cancellation appeared to succeed or created a destination file");
+  Verify(*classicTarget,2,u"Do Not Export",53);
+  fprintf(report,"PASS: per-pair mixed transfer policy, extensionless classic image, and cancellation before conversion.\n");
 
   Check(app.m_browsers.size()==3,"unexpected browser collection");
   fprintf(report,"PASS: shared mounted workers, same-volume move and descendant rejection, clipboard lifetime, mixed paths, read-only policy, and same-label classic HFS with raw conversion. No physical media or desktop automation.\n");

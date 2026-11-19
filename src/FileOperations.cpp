@@ -370,16 +370,32 @@ void ValidateRequest(const Request& r){
   Check(!link->source.IsNone() && !link->parent.IsNone() && !link->name.empty(), "Choose a hard link source, destination and name");
  }
 }
+bool IsMountedClassic(const Location& item)
+{
+    return item.IsMounted()&&ExecutionFor(*item.Volume()).classicConversion;
+}
+
+bool IsClassicTransferEndpoint(const Location& item)
+{
+    return item.IsClassic()||IsMountedClassic(item);
+}
+
+Location ConversionEndpoint(const Location& item)
+{
+    if(!IsMountedClassic(item))return item;
+    if(const int drive=item.Volume()->CdDrive();drive>=0)
+        return Location::Physical(drive,ClassicMedia::Cd,":");
+    const auto path=WorkerEndpoint::Find(*item.Volume())->WorkerDescription().path;
+    return Location::Classic(Location::Windows(path).LegacyPath(),":");
+}
+
 bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
     if (!conversion.selection) return false;
-    auto classic = [](const Location& item) {
-        return item.IsMounted() && ExecutionFor(*item.Volume()).classicConversion;
-    };
     const auto& selection = *conversion.selection;
     if (conversion.source.IsWindows() && conversion.destination.IsClassic())
-        return selection.source.IsWindows() && classic(selection.folder);
+        return selection.source.IsWindows() && IsMountedClassic(selection.folder);
     if (conversion.source.IsClassic() && conversion.destination.IsWindows())
-        return classic(selection.source) && selection.folder.IsWindows();
+        return IsMountedClassic(selection.source) && selection.folder.IsWindows();
     return false;
 }
 ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
@@ -821,6 +837,34 @@ PlanAccessForTest InspectPlanForTest(const Request& request,const std::string& k
  return result;
 }
 #endif
+std::vector<Request> PlanTransfers(OrdinaryCopy copy,const TransferSettings& settings)
+{
+    std::vector<Request> requests;
+    OrdinaryCopy ordinary{{},copy.destination};
+    const bool destinationClassic=IsClassicTransferEndpoint(copy.destination);
+    const bool destinationWindows=copy.destination.IsWindows();
+    const auto flush=[&]{
+        if(ordinary.sources.empty())return;
+        requests.emplace_back(std::move(ordinary));
+        ordinary=OrdinaryCopy{{},copy.destination};
+    };
+    for(auto& source:copy.sources){
+        const bool importing=source.IsWindows()&&destinationClassic;
+        const bool exporting=IsClassicTransferEndpoint(source)&&destinationWindows;
+        if(!importing&&!exporting){
+            ordinary.sources.push_back(std::move(source));
+            continue;
+        }
+        flush();
+        LegacyConversion conversion{ConversionEndpoint(source),ConversionEndpoint(copy.destination),
+            source.directory,source.cut,importing?settings.askImport:settings.askExport,settings.conversion};
+        conversion.selection=ConversionSelection{std::move(source),copy.destination};
+        requests.emplace_back(std::move(conversion));
+    }
+    flush();
+    return requests;
+}
+
 Operation Submit(Request request){
  auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
  auto& queue=values->background?Storage::copyWorker():Storage::worker();
