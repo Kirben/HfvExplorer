@@ -6,7 +6,6 @@
 #include "BrowserPresentation.h"
 #include "CopyProcess.h"
 #include "VolumeSession.h"
-#include "CopyWorkerProtocol.h"
 #include "WorkerEndpoint.h"
 #include "TransferConversion.h"
 #include "TypeMappingSnapshot.h"
@@ -119,10 +118,16 @@ struct TransferExecution {
  std::function<Storage::Result(const std::vector<MacBrowser::ForkSource>&,Storage::Job&,Completion&)> run;
  std::function<void(Completion&)> markHandoff;
 };
+struct MutationPlan {
+ ExecutionRoute route;
+ std::function<std::vector<VolumeCoord::Access>()> bind;
+ std::function<Storage::Result(Storage::Job&,Completion&)> run;
+};
 struct ExecutionPlan {
  ExecutionRoute route=ExecutionRoute::Local;
  std::vector<VolumeCoord::Access> resources;
  std::optional<TransferExecution> transfer;
+ std::optional<MutationPlan> mutation;
  std::optional<MetadataPlan> metadata;
 };
 
@@ -525,29 +530,6 @@ bool IsClassicConversionEndpoint(const Location& item)
  return item.IsClassic()||(item.IsMounted()&&std::string_view(item.Volume()->Kind())=="HFS");
 }
 
-void ValidateRequest(const Request& r){
- Check(int(r.OperationKind())>=0&&int(r.OperationKind())<=int(Kind::SetCompression),"Unknown file operation");
- if (const auto* rename = r.Rename()) {
-  Check(!rename->source.IsNone(), "Select an entry to rename");
-  Check(!rename->name.empty(), "Enter a new name");
-  Check(rename->parent.IsNone() ||
-        (rename->source.IsMounted() && rename->parent.IsMounted() &&
-         rename->source.Volume() == rename->parent.Volume()),
-        "Rename must stay within the same mounted volume");
-  return;
- }
- if (const auto* deletion = r.Delete()) {
-  Check(!deletion->selection.empty(), "Select entries to delete");
-  for (const auto& item : deletion->selection)
-   Check(!item.IsNone(), "No source file location was supplied");
-  return;
- }
- if (const auto* folder = r.Get<CreateFolder>()) {
-  Check(!folder->parent.IsNone() && !folder->name.empty(), "Choose a destination and folder name");
- } else if (const auto* link = r.Get<CreateHardLink>()) {
-  Check(!link->source.IsNone() && !link->parent.IsNone() && !link->name.empty(), "Choose a hard link source, destination and name");
- }
-}
 bool IsMountedClassic(const Location& item)
 {
     return item.IsMounted()&&ExecutionFor(*item.Volume()).classicConversion;
@@ -694,62 +676,121 @@ TransferExecution DescribeTransfer(const ImportResourceFork& request,bool backgr
  };
 }
 
-ExecutionRoute SelectRoute(const Request& request,const MetadataPlan* metadata,bool temporary)
+ExecutionRoute RouteFor(bool temporary,bool staysMounted)
 {
-    if(!temporary)return ExecutionRoute::Local;
-    if(auto* rename=request.Rename(); rename&&Persistent(rename->source)) return ExecutionRoute::Local;
-    if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
-        std::all_of(deletion->selection.begin(),deletion->selection.end(),Persistent)) return ExecutionRoute::Local;
-    if(auto* folder=request.Get<CreateFolder>(); folder&&Persistent(folder->parent)) return ExecutionRoute::Local;
-    if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&Persistent(link->source)&&Persistent(link->parent)) return ExecutionRoute::Local;
-    if(metadata)return metadata->temporaryForUnmounted&&!Persistent(*metadata->item)
-        ?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local;
-    return CopyWorkerProtocol::SupportsOperation(request.OperationKind()) ? ExecutionRoute::TemporaryWorker : ExecutionRoute::Local;
+ return temporary&&!staysMounted?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local;
 }
+
+void ReserveChild(std::vector<VolumeCoord::Access>& access,const Location& parent,
+                  const std::u16string& name,bool companion)
+{
+ const auto path=HostPath(parent);
+ if(path.empty())access.push_back({Resource(parent),Mode::Write});
+ else AddPath(access,ChildPath(path,name),Mode::Write,companion);
+}
+
+MutationPlan DescribeMutation(const RenameEntry& request,bool temporary)
+{
+ Check(!request.source.IsNone(),"Select an entry to rename");
+ Check(!request.name.empty(),"Enter a new name");
+ Check(request.parent.IsNone()||
+       (request.source.IsMounted()&&request.parent.IsMounted()&&
+        request.source.Volume()==request.parent.Volume()),
+       "Rename must stay within the same mounted volume");
+ return {RouteFor(temporary,Persistent(request.source)),
+  [&request]{
+   std::vector<VolumeCoord::Access> access;
+   const auto path=HostPath(request.source);
+   if(path.empty())access.push_back({Resource(request.source),Mode::Write});
+   else{
+    AddPath(access,path,Mode::Write);
+    const auto parent=path.substr(0,path.find_last_of(L"\\/")+1);
+    const auto explicitParent=request.parent.IsNone()?std::wstring{}:HostPath(request.parent);
+    AddPath(access,ChildPath(explicitParent.empty()?parent:explicitParent,request.name),Mode::Write);
+   }
+   return access;
+  },
+  [&request](Storage::Job& job,Completion& result){return Mutate(&request,&request.source,1,job,result);}
+ };
+}
+
+MutationPlan DescribeMutation(const DeleteEntries& request,bool temporary)
+{
+ Check(!request.selection.empty(),"Select entries to delete");
+ for(const auto& item:request.selection)
+  Check(!item.IsNone(),"No source file location was supplied");
+ return {RouteFor(temporary,std::all_of(request.selection.begin(),request.selection.end(),Persistent)),
+  [&request]{
+   std::vector<VolumeCoord::Access> access;
+   for(const auto& item:request.selection)ReserveEndpoint(access,item,Mode::Write);
+   return access;
+  },
+  [&request](Storage::Job& job,Completion& result){
+   return Mutate(nullptr,request.selection.data(),request.selection.size(),job,result);
+  }
+ };
+}
+
+MutationPlan DescribeMutation(const CreateFolder& request,bool temporary)
+{
+ Check(!request.parent.IsNone()&&!request.name.empty(),"Choose a destination and folder name");
+ return {RouteFor(temporary,Persistent(request.parent)),
+  [&request]{
+   std::vector<VolumeCoord::Access> access;
+   ReserveChild(access,request.parent,request.name,false);
+   return access;
+  },
+  [&request](Storage::Job& job,Completion& result){return MakeFolder(request,job,result);}
+ };
+}
+
+Storage::Result RunHardLink(const CreateHardLink& request,Storage::Job& job,Completion& completion)
+{
+ auto source=Source(request.source);
+ auto target=Destination(request.parent);
+ Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&
+       source.first->ResourceKey()==target.first->ResourceKey(),
+       "Hard links require the same writable HFS+/HFSX volume");
+ Cancel(job);
+ Mark(completion,request.source);
+ MarkChild(completion,request.parent,request.name);
+ Storage::Progress progress;
+ progress.scanning=false;
+ progress.phase="Creating hard link";
+ progress.totalFiles=1;
+ job.progress(progress);
+ target.first->MakeHardLink(source.second,target.second,request.name);
+ progress.files=1;
+ job.progress(progress);
+ completion.complete=true;
+ completion.completed=1;
+ return {};
+}
+
+MutationPlan DescribeMutation(const CreateHardLink& request,bool temporary)
+{
+ Check(!request.source.IsNone()&&!request.parent.IsNone()&&!request.name.empty(),
+       "Choose a hard link source, destination and name");
+ return {RouteFor(temporary,Persistent(request.source)&&Persistent(request.parent)),
+  [&request]{
+   std::vector<VolumeCoord::Access> access;
+   ReserveEndpoint(access,request.source,HostPath(request.source).empty()?Mode::Write:Mode::Read);
+   ReserveChild(access,request.parent,request.name,true);
+   return access;
+  },
+  [&request](Storage::Job& job,Completion& result){return RunHardLink(request,job,result);}
+ };
+}
+
 // Windows path identities can change while a job is queued. Refresh only
 // the bindings at execution, using the same route and lease policy.
-std::vector<VolumeCoord::Access> BindResources(const Request& request,const ExecutionPlan& plan)
+std::vector<VolumeCoord::Access> BindResources(const ExecutionPlan& plan)
 {
  if(plan.transfer)return plan.transfer->bind();
+ if(plan.mutation)return plan.mutation->bind();
  std::vector<VolumeCoord::Access> access;
- auto reserveMutation = [&](const Location& item) {
-  auto path = HostPath(item);
-  if (path.empty()) access.push_back({Resource(item), Mode::Write});
-  else AddPath(access, path, Mode::Write);
-  return path;
- };
- if (const auto* rename = request.Rename()) {
-  auto path = reserveMutation(rename->source);
-  if (!path.empty()) {
-   auto parent = path.substr(0, path.find_last_of(L"\\/") + 1);
-   auto explicitParent = rename->parent.IsNone() ? std::wstring{} : HostPath(rename->parent);
-   AddPath(access, ChildPath(explicitParent.empty() ? parent : explicitParent, rename->name), Mode::Write);
-  }
-  return access;
- }
- if (const auto* deletion = request.Delete()) {
-  for (const auto& item : deletion->selection) reserveMutation(item);
-  return access;
- }
- if(plan.metadata){
-  const auto& metadata=*plan.metadata;
-  const auto& item=*metadata.item;
-  const auto path=HostPath(item);
-  if(path.empty())access.push_back({Resource(item),metadata.access});
-  else AddPath(access,path,metadata.access,metadata.includeCompanion);
-  return access;
- }
- auto reserveChild = [&](const Location& parent, const std::u16string& name, bool companions) {
-  auto path = HostPath(parent);
-  if (path.empty()) access.push_back({Resource(parent), Mode::Write});
-  else AddPath(access, ChildPath(path, name), Mode::Write, companions);
- };
- if(const auto* folder=request.Get<CreateFolder>()){
-  reserveChild(folder->parent,folder->name,false);
- }else if(const auto* link=request.Get<CreateHardLink>()){
-  ReserveEndpoint(access,link->source,HostPath(link->source).empty()?Mode::Write:Mode::Read);
-  reserveChild(link->parent,link->name,true);
- }
+ const auto& metadata=plan.metadata.value();
+ ReserveEndpoint(access,*metadata.item,metadata.access,metadata.includeCompanion);
  return access;
 }
 
@@ -760,14 +801,22 @@ ExecutionPlan PlanOperation(const Request& request, bool inWorker=false){
  else if(const auto* conversion=request.Conversion())plan.transfer=DescribeTransfer(*conversion,request.background,temporary);
  else if(const auto* output=request.Get<ExportFileFork>())plan.transfer=DescribeTransfer(*output,request.background,temporary);
  else if(const auto* input=request.Get<ImportResourceFork>())plan.transfer=DescribeTransfer(*input,request.background,temporary);
+ else if(const auto* rename=request.Rename())plan.mutation=DescribeMutation(*rename,temporary);
+ else if(const auto* deletion=request.Delete())plan.mutation=DescribeMutation(*deletion,temporary);
+ else if(const auto* folder=request.Get<CreateFolder>())plan.mutation=DescribeMutation(*folder,temporary);
+ else if(const auto* link=request.Get<CreateHardLink>())plan.mutation=DescribeMutation(*link,temporary);
  else if(const auto* metadata=request.Metadata()){
   plan.metadata=std::visit([](const auto& operation){
    Check(!operation.item.IsNone(),"Choose a location for the metadata operation");
    return DescribeMetadata(operation);
   },*metadata);
- }else ValidateRequest(request);
- plan.route=plan.transfer?plan.transfer->route:SelectRoute(request,plan.metadata?&*plan.metadata:nullptr,temporary);
- plan.resources=BindResources(request,plan);
+ }
+ if(plan.transfer)plan.route=plan.transfer->route;
+ else if(plan.mutation)plan.route=plan.mutation->route;
+ else if(plan.metadata)
+  plan.route=RouteFor(temporary&&plan.metadata->temporaryForUnmounted,Persistent(*plan.metadata->item));
+ else throw std::logic_error("Missing file operation plan");
+ plan.resources=BindResources(plan);
  return plan;
 }
 
@@ -923,10 +972,11 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
  return plan;
 }
 
-Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage::Job& job,Completion& completion){
- HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});Cancel(job);
+Storage::Result Execute(const ExecutionPlan& plan,Storage::Job& job,Completion& completion){
+ HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});
  Cancel(job);
- if(const auto* link=request.Get<CreateHardLink>()){auto source=Source(link->source);auto target=Destination(link->parent);Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,link->source);MarkChild(completion,link->parent,link->name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,link->name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
+ if(plan.transfer)return plan.transfer->run(plan.transfer->sources,job,completion);
+ if(plan.mutation)return plan.mutation->run(job,completion);
  if(plan.metadata){
   const auto started=GetTickCount64();
   for(;;){
@@ -946,12 +996,6 @@ Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage
   completion.completed=1;
   return {};
  }
- if(const auto* folder=request.Get<CreateFolder>())return MakeFolder(*folder,job,completion);
- if(plan.transfer)return plan.transfer->run(plan.transfer->sources,job,completion);
- if (const auto* rename = request.Rename())
-  return Mutate(rename, &rename->source, 1, job, completion);
- if (const auto* deletion = request.Delete())
-  return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
  throw std::logic_error("Missing file operation plan");
 }
 }
@@ -1068,7 +1112,7 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
   const auto plan=PlanOperation(request,true);
   LegacyEngine::Scope engine;
   VolumeCoord::Lease access(plan.resources);
-  result=Execute(request,plan,job,completion);
+  result=Execute(plan,job,completion);
  }
  catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
  catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
@@ -1134,10 +1178,10 @@ class PreparedOperation {
   LegacyEngine::Scope engine;
   // Bind again while keeping the queued reservation. The executor still
   // checks the typed selection identities before changing any entry.
-  const auto current=BindResources(request_,plan_);
+  const auto current=BindResources(plan_);
   VolumeCoord::OperationLease executionAccess(current);
   if(route==ExecutionRoute::Local)
-   return FileOperations::Execute(request_,plan_,job,completion);
+   return FileOperations::Execute(plan_,job,completion);
 
   std::vector<std::string> keys,writes;
   for(const auto& item:current){

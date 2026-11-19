@@ -900,6 +900,48 @@ int RunCopyProcessTest(const char *directory) {
                 Check(temporary.temporaryWorker && temporary.write && !temporary.read &&
                           !childPlan.temporaryWorker && childPlan.read && !childPlan.write,
                       "temporary worker planning did not reserve the handoff or prevent nested routing");
+                const auto mountedFile=Native(from,original.id);
+                const auto mountedRoot=Native(from);
+                const auto otherFile=Native(source,file);
+                const auto key=from->ResourceKey();
+                const auto folderKey=VolumeCoord::PathKey(hostFolder);
+                const auto oldPath=hostFolder+L"\\old.txt";
+                const auto newPath=hostFolder+L"\\new.txt";
+                const Request rename=RenameEntry{Location::Windows(oldPath),u"new.txt"};
+                for(const auto& path:{oldPath,newPath,hostFolder+L"\\%old.txt",hostFolder+L"\\%new.txt"}){
+                    const auto policy=InspectPlanForTest(rename,VolumeCoord::PathKey(path));
+                    const auto worker=InspectPlanForTest(rename,VolumeCoord::PathKey(path),true);
+                    Check(policy.temporaryWorker&&policy.write&&!policy.read&&
+                          !worker.temporaryWorker&&worker.write,
+                          "Windows rename did not reserve both names and their companions");
+                }
+                const auto mountedRename=InspectPlanForTest(RenameEntry{mountedFile,u"New name",mountedRoot},key);
+                Check(mountedRename.write&&!mountedRename.temporaryWorker,
+                      "mounted rename did not keep its persistent worker and write lease");
+                const Request deletion=DeleteEntries{{mountedFile,otherFile,Location::Windows(oldPath)}};
+                for(const auto& resource:{key,source->ResourceKey(),VolumeCoord::PathKey(oldPath),
+                                          VolumeCoord::PathKey(hostFolder+L"\\%old.txt")}){
+                    const auto policy=InspectPlanForTest(deletion,resource);
+                    Check(policy.temporaryWorker&&policy.write&&!policy.read,
+                          "mixed delete did not cover every selection and companion");
+                }
+                const auto mountedDelete=InspectPlanForTest(DeleteEntries{{mountedFile}},key);
+                Check(mountedDelete.write&&!mountedDelete.temporaryWorker,
+                      "mounted delete selected a temporary worker");
+                const Request folderRequest=CreateFolder{hostTarget,u"subfolder"};
+                const auto child=InspectPlanForTest(folderRequest,VolumeCoord::PathKey(hostFolder+L"\\subfolder"));
+                const auto parent=InspectPlanForTest(folderRequest,folderKey);
+                const auto companion=InspectPlanForTest(folderRequest,VolumeCoord::PathKey(hostFolder+L"\\%subfolder"));
+                const auto mountedFolder=InspectPlanForTest(CreateFolder{mountedRoot,u"subfolder"},key);
+                Check(child.temporaryWorker&&child.write&&!parent.write&&!companion.write&&
+                      mountedFolder.write&&!mountedFolder.temporaryWorker,
+                      "folder creation did not reserve only the Windows child or the mounted volume");
+                const auto link=InspectPlanForTest(FileOperations::CreateHardLink{mountedFile,mountedRoot,u"Link"},key);
+                const auto unmountedLink=InspectPlanForTest(FileOperations::CreateHardLink{otherFile,Native(source),u"Link"},
+                                                           source->ResourceKey());
+                Check(link.write&&!link.read&&!link.temporaryWorker&&unmountedLink.write&&unmountedLink.temporaryWorker,
+                      "hard link did not reserve its source for mutation or choose the expected worker");
+                fprintf(report,"PASS: typed rename, delete, folder and hard-link plans choose the expected worker and leases\n");
                 Request fork=ExportFileFork{Native(from,original.id),
                     Location::Windows(hostFolder+L"\\plan-fork.bin"),ForkSelector::Resource};
                 fork.background=true;
