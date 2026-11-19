@@ -24,7 +24,12 @@ constexpr uint64_t MaxCompressedChunk=64*1024*1024;
 enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Rle=0x81,Lzh=0x82,Adc=0x83,ShrinkWrap=0xf0,End=0xff };
 struct Fork {uint64_t at=0,length=0;};
 struct Forks {Fork data,resource;};
-struct Part {std::unique_ptr<Source> dataFile,resourceFile;Fork data;uint64_t start=0;};
+struct Part {
+    std::unique_ptr<Source> dataFile,resourceFile;
+    Fork data;
+    uint64_t start=0;
+    uint32_t checksum=0;
+};
 struct Chunk {uint64_t at,length,packedAt,packedLength;uint8_t type;};
 struct Layout {uint64_t length;uint32_t checksum;std::vector<Chunk> chunks;};
 
@@ -210,6 +215,7 @@ void DecodeRle(const Bytes& input,Bytes& output)
 struct Segment {
     unsigned number,count;
     std::array<uint8_t,16> group;
+    uint32_t checksum;
 };
 std::optional<Segment> SegmentInfo(Source& file,Fork resources)
 {
@@ -217,7 +223,7 @@ std::optional<Segment> SegmentInfo(Source& file,Fork resources)
     if(!record)return {};
     Check(record->length==24,"Invalid NDIF segment descriptor");
     const auto bytes=Disk::Read(file,record->at,24);
-    Segment result{U16(bytes.data()),U16(bytes.data()+2),{}};
+    Segment result{U16(bytes.data()),U16(bytes.data()+2),{},U32(bytes.data()+20)};
     memcpy(result.group.data(),bytes.data()+4,result.group.size());
     Check(result.number&&result.number<=result.count,"Invalid NDIF segment number");
     return result;
@@ -259,6 +265,7 @@ std::vector<Part> MoreParts(const Source& first,const Segment& lead)
         Check(!part.dataFile&&forks->data.length,"Duplicate or empty NDIF segment");
         part.dataFile=std::move(candidate);
         part.data=forks->data;
+        part.checksum=info->checksum;
     }while(FindNextFileW(handle,&data));
     for(size_t i=1;i<parts.size();++i)
         Check(bool(parts[i].dataFile),("Missing NDIF segment "+std::to_string(i+1)+" of "+std::to_string(parts.size())).c_str());
@@ -317,6 +324,25 @@ public:
     Image(std::vector<Part> parts,Layout layout):parts_(std::move(parts)),layout_(std::move(layout)){}
     uint64_t Size()const override{return layout_.length;}
     uint32_t ExpectedChecksum()const{return layout_.checksum;}
+    void VerifySegments(Storage::Job& job){
+        if(parts_.size()<2)return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        Bytes buffer(65536);
+        for(size_t i=0;i<parts_.size();++i){
+            const auto& part=parts_[i];
+            if(!part.checksum)continue;
+            uint32_t crc=UINT32_MAX;
+            for(uint64_t at=0;at<part.data.length;){
+                if(job.cancelled())throw Storage::Cancelled();
+                const auto n=size_t((std::min)(uint64_t(buffer.size()),part.data.length-at));
+                part.dataFile->Read(part.data.at+at,buffer.data(),n);
+                crc=Checksum(crc,buffer.data(),n);
+                at+=n;
+            }
+            Check(crc==part.checksum,("NDIF segment "+std::to_string(i+1)+
+                 " checksum mismatch. The output was discarded.").c_str());
+        }
+    }
     bool Writable()const override{return false;}
     bool ProcessLocal()const override{return parts_.front().dataFile->ProcessLocal();}
     void CheckMedia()override{
@@ -383,6 +409,12 @@ std::optional<uint32_t> ExpectedChecksum(const Source& source)
     return image->ExpectedChecksum();
 }
 
+
+void VerifySegmentChecksums(Source& source,Storage::Job& job)
+{
+    if(auto image=dynamic_cast<Image*>(&source))image->VerifySegments(job);
+}
+
 uint32_t Checksum(uint32_t running,const void* bytes,size_t count)
 {
     // NDIF shifts right with the normal polynomial and uses no final XOR.
@@ -418,6 +450,7 @@ bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
         if(segmented){
             Check(segment.has_value(),"Missing NDIF segment descriptor");
             parts=MoreParts(*input,*segment);
+            parts[0].checksum=segment->checksum;
         }
         parts[0].data=data;
         uint64_t total=0;

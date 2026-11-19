@@ -326,6 +326,7 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         else if(outputNdif)WriteNdif(stream,*output,current,progress,format==Output::CompressedNdif);
         else WriteDmg(stream,*output,current,progress);
         stream.Verify();
+        if(ndif)Ndif::VerifySegmentChecksums(*input,current);
         if(current.cancelled())throw Storage::Cancelled();
         output->PublishTo(destination);
         output->Keep();

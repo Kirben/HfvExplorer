@@ -211,7 +211,22 @@ int RunNdifImageTest(const char* directory)
         auto joined=open();
         Check(joined->WorkerFiles().size()==2&&Disk::Read(*joined,1024,512)==Bytes(512,'B'),
               "NDIF compressed chunk did not cross the physical segment boundary");
+        Storage::Job verifySegments;
+        Ndif::VerifySegmentChecksums(*joined,verifySegments);
         joined.reset();
+        auto wrongChecksum=segment(2);P32(wrongChecksum.data()+20,1);
+        const auto otherRoot=VolumeCoord::Wide(root+"bad-segment");
+        Check(CreateDirectoryW(otherRoot.c_str(),nullptr)!=FALSE,"Could not create checksum fixture directory");
+        const auto badPrimary=Save(root+"bad-segment\\lead.smi.bin",
+            Pack(Bytes(data.begin(),data.begin()+523),Resource(segmented,segment(1))));
+        Save(root+"bad-segment\\continuation.part.bin",Pack(Bytes(data.begin()+523,data.end()),Resource({},wrongChecksum)));
+        const auto badOutput=VolumeCoord::Wide(root+"bad-segment-extracted.img");
+        Storage::Job verifyBad;
+        bool rejected=false;
+        try{rejected=Dmg::Convert(badPrimary,badOutput,Dmg::Output::RawImage,verifyBad).code!=0;}
+        catch(const Error& error){rejected=strstr(error.what(),"segment 2 checksum")!=nullptr;}
+        Check(rejected&&GetFileAttributesW(badOutput.c_str())==INVALID_FILE_ATTRIBUTES,
+              "Bad NDIF segment checksum published extracted data");
         Save(root+"duplicate.part.bin",Pack(Bytes(data.begin()+523,data.end()),Resource({},segment(2))));
         Reject([&]{open();},"NDIF accepted duplicate segments");
         if(const auto real=_wgetenv(L"HFV_NDIF_SEGMENT_TEST_IMAGE")){
@@ -221,7 +236,7 @@ int RunNdifImageTest(const char* directory)
             Storage::Job job;
             const auto result=Dmg::Convert(real,dest,Dmg::Output::RawImage,job);
             Check(!result.code,result.message.c_str());
-            fprintf(report,"PASS: 13-part Apple Mac OS 8.1 update, including original logical checksum.\n");
+            fprintf(report,"PASS: 13-part Apple Mac OS 8.1 update, including original logical and per-segment checksums.\n");
         }
         fprintf(report,"PASS: NDIF segment identity, missing/duplicate rejection and a chunk crossing parts.\n");
         if(const auto fixture=_wgetenv(L"HFV_NDIF_SHRINKWRAP_TEST")){
