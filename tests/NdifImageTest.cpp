@@ -257,6 +257,29 @@ int RunNdifImageTest(const char* directory)
         Check(!extracted.code,extracted.message.c_str());
         auto result=HfsPlus::OpenImage(extractedPath.c_str(),false);
         Check(Disk::Read(*result,0,size_t(result->Size()))==volumeBytes,"NDIF raw conversion changed sectors");
+        Bytes patterns(512*512*2);
+        std::fill(patterns.begin(),patterns.begin()+512*512,'Q');
+        for(size_t i=512*512;i<patterns.size()-2048;++i)
+            patterns[i]=uint8_t((i/5+i/199+i*2)%251);
+        const auto inputPath=Save(root+"create-input.raw",patterns);
+        uint64_t storedSize=0;
+        for(auto format:{Dmg::Output::StoredNdif,Dmg::Output::CompressedNdif}){
+            const bool compressed=format==Dmg::Output::CompressedNdif;
+            const auto encoded=VolumeCoord::Wide(root+(compressed?"created-compressed.bin":"created-stored.bin"));
+            Storage::Job encode;
+            const auto created=Dmg::Convert(inputPath,encoded,format,encode);
+            Check(!created.code,created.message.c_str());
+            auto file=HfsPlus::OpenImage(encoded.c_str(),false);
+            if(compressed)Check(file->Size()<storedSize,"NDIF ADC creation did not compress the repeated data");
+            else storedSize=file->Size();
+            Check(Ndif::Unwrap(file)&&Disk::Read(*file,0,patterns.size())==patterns,
+                  "Generated NDIF did not match its source sectors");
+            const auto verified=VolumeCoord::Wide(root+(compressed?"verified-compressed.img":"verified-stored.img"));
+            Storage::Job decode;
+            const auto completed=Dmg::Convert(encoded,verified,Dmg::Output::RawImage,decode);
+            Check(!completed.code,completed.message.c_str());
+        }
+        fprintf(report,"PASS: generated stored and ADC-compressed MacBinary NDIF with exact round-trip and valid checksums.\n");
         auto badData=volumeBytes;
         badData.back()^=1;
         const auto badPath=Save(root+"corrupt.img.bin",Pack(badData,Resource(rawMap)));

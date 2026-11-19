@@ -6,6 +6,9 @@
 #include "HfsPlusDisk.h"
 #include "CommandStorage.h"
 #include <wincrypt.h>
+extern "C" {
+#include "hfs/macbinary.h"
+}
 #define Z_SOLO
 #define Z_PREFIX
 #include "compression/zlib/zlib.h"
@@ -164,6 +167,118 @@ void WriteDmg(ConversionInput& input,NewImage& output,Storage::Job& job,Storage:
     Append(output,footer.data(),footer.size());
 }
 
+
+Bytes EncodeAdc(const Bytes& input,size_t size)
+{
+    std::vector<size_t> recent(65536,SIZE_MAX);
+    Bytes output;
+    size_t literalAt=0;
+    const auto literals=[&](size_t end){
+        while(literalAt<end){
+            const auto count=(std::min)(size_t(128),end-literalAt);
+            output.push_back(uint8_t(0x80|(count-1)));
+            output.insert(output.end(),input.begin()+literalAt,input.begin()+literalAt+count);
+            literalAt+=count;
+        }
+    };
+    for(size_t at=0;at+3<=size;){
+        const auto hash=(uint32_t(input[at])*317+uint32_t(input[at+1])*149+input[at+2])&0xffff;
+        const auto previous=recent[hash];
+        recent[hash]=at;
+        if(previous==SIZE_MAX||at-previous>65536){++at;continue;}
+        const auto distance=at-previous-1;
+        const auto limit=(std::min)(size_t(67),size-at);
+        size_t length=0;
+        while(length<limit&&input[previous+length]==input[at+length])++length;
+        if(length<3||(length==3&&distance>=1024)){++at;continue;}
+        literals(at);
+        if(distance<1024&&length<=18){
+            output.push_back(uint8_t(((length-3)<<2)|(distance>>8)));
+        }else{
+            output.push_back(uint8_t(0x40|(length-4)));
+            output.push_back(uint8_t(distance>>8));
+        }
+        output.push_back(uint8_t(distance));
+        at+=length;
+        literalAt=at;
+        if(output.size()>=size)return {};
+    }
+    literals(size);
+    return output.size()<size?std::move(output):Bytes{};
+}
+
+Bytes NdifResource(const std::vector<Run>& runs,uint32_t sectors,uint32_t maxChunk,uint32_t packed,uint32_t checksum)
+{
+    constexpr uint32_t data=256,header=128,mapBytes=50;
+    const auto length=uint32_t(header+12*(runs.size()+1));
+    const auto mapAt=data+4+length;
+    Bytes out(mapAt+mapBytes);
+    auto p=out.data();
+    P32(p,data);P32(p+4,mapAt);P32(p+8,length+4);P32(p+12,mapBytes);
+    P32(p+data,length);
+    auto bcem=p+data+4;
+    P16(bcem,11);bcem[4]=10;memcpy(bcem+5,"Disk Image",10);
+    P32(bcem+68,sectors);P32(bcem+72,maxChunk);P32(bcem+80,checksum);
+    P32(bcem+124,uint32_t(runs.size()+1));
+    for(size_t i=0;i<runs.size();++i){
+        const auto& run=runs[i];
+        const auto row=bcem+header+i*12;
+        P32(row,(uint32_t(run.start/512)<<8)|run.type);
+        P32(row+4,uint32_t(run.offset));P32(row+8,uint32_t(run.packed));
+    }
+    const auto tail=bcem+header+runs.size()*12;
+    P32(tail,(sectors<<8)|0xff);P32(tail+4,packed);
+    const auto map=p+mapAt;
+    memcpy(map,p,16);P16(map+24,28);P16(map+26,50);
+    memcpy(map+30,"bcem",4);P16(map+36,10);
+    P16(map+38,128);P16(map+40,0xffff);
+    return out;
+}
+
+void WriteNdif(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress,bool compress)
+{
+    constexpr size_t unit=512*Sector;
+    constexpr uint64_t macBinaryHeader=128;
+    const auto length=input.Size();
+    Check(length&&!(length%Sector)&&length<0x80000000,
+          "NDIF creation requires complete 512-byte sectors and a disk under 2 GiB");
+    output.Resize(macBinaryHeader);
+    Buffer storage(input.ProcessLocal());
+    auto& plain=storage.bytes;
+    std::vector<Run> runs;
+    uint32_t checksum=UINT32_MAX;
+    for(uint64_t at=0;at<length;){
+        if(job.cancelled())throw Storage::Cancelled();
+        const auto count=size_t((std::min)(uint64_t(unit),length-at));
+        input.Read(at,plain.data(),count);
+        checksum=Ndif::Checksum(checksum,plain.data(),count);
+        const auto zero=std::all_of(plain.begin(),plain.begin()+count,[](uint8_t byte){return byte==0;});
+        auto packed=compress&&!zero?EncodeAdc(plain,count):Bytes{};
+        const auto type=zero?0u:packed.empty()?2u:0x83u;
+        const auto stored=zero?0:packed.empty()?count:packed.size();
+        const auto offset=zero?0:output.Size()-macBinaryHeader;
+        if(stored)Append(output,packed.empty()?plain.data():packed.data(),stored);
+        if(input.ProcessLocal()&&!packed.empty())SecureZeroMemory(packed.data(),packed.size());
+        runs.push_back({type,at,count,offset,stored});
+        at+=count;
+        progress.bytes=progress.processed=at;
+        job.progress(progress);
+    }
+    const auto dataBytes=uint32_t(output.Size()-macBinaryHeader);
+    const auto resource=NdifResource(runs,uint32_t(length/Sector),unit/Sector+1,dataBytes,checksum);
+    const auto aligned=[](uint64_t n){return (n+127)&~uint64_t(127);};
+    output.Resize(macBinaryHeader+aligned(dataBytes));
+    Append(output,resource.data(),resource.size());
+    output.Resize(aligned(output.Size()));
+    Bytes header(size_t(macBinaryHeader),0);
+    header[1]=10;memcpy(header.data()+2,"Disk Image",10);
+    memcpy(header.data()+65,compress?"hdcmddsk":"rohdddsk",8);
+    header[81]=1;
+    P32(header.data()+83,dataBytes);P32(header.data()+87,uint32_t(resource.size()));
+    macbinary_finish_header(header.data(),MacBinaryII);
+    output.Write(0,header.data(),header.size());
+}
+
 void WriteRaw(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress)
 {
     Buffer storage(input.ProcessLocal());
@@ -200,12 +315,15 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         auto output=HfsPlus::CreateStagedOutput(destination,512);
         output->Resize(0);
         Storage::Progress progress;
-        progress.phase=format==Output::RawImage?"Extracting raw disk image":"Creating compressed DMG";
+        const bool outputNdif=format==Output::StoredNdif||format==Output::CompressedNdif;
+        progress.phase=format==Output::RawImage?"Extracting raw disk image":
+                       outputNdif?"Creating NDIF disk image":"Creating compressed DMG";
         progress.totalBytes=input->Size();
         progress.scanning=false;
         progress.byteTransfer=true;
         ConversionInput stream(*input);
         if(format==Output::RawImage)WriteRaw(stream,*output,current,progress);
+        else if(outputNdif)WriteNdif(stream,*output,current,progress,format==Output::CompressedNdif);
         else WriteDmg(stream,*output,current,progress);
         stream.Verify();
         if(current.cancelled())throw Storage::Cancelled();
