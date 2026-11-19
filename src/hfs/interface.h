@@ -55,7 +55,6 @@ int HFSIFACE_umount(char *path);
 int HFSIFACE_silencer( int shutup );
 
 int HFSIFACE_get_properties( char *volpath, char *path, hfsdirent *pent );
-int HFSIFACE_set_properties( char *volpath, char *path, hfsdirent *pent );
 
 BOOL HFSIFACE_exists_split( int volinx, char *volpath, char *dir_name, char *name );
 

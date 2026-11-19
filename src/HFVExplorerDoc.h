@@ -69,7 +69,6 @@ protected: // create from serialization only
 	void CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL check_hds );
 	void CheckNewFloppy( int index );
 
-	int ignore_this( CObArray *parr, WIN32_FIND_DATA *fd );
 	void delete_cache();
 	int exists_icon_cache_file();
 	int delete_cache_OK();

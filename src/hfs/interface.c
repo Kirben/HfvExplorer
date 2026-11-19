@@ -1419,36 +1419,6 @@ int HFSIFACE_get_properties( char *volpath, char *path, hfsdirent *pent )
 	return( result );
 }
 
-int HFSIFACE_set_properties( char *volpath, char *path, hfsdirent *pent )
-{
-	int volinx, result = 1;
-  hfsvol *vol;
-	char mac_path[_MAX_PATH];
-	
-	HFSIFACE_internal_init();
-	strcpy( mac_path, path );
-	pc_to_mac_charset(mac_path);
-
-	if(0 == HFSIFACE_mount( volpath )) {
-		volinx = path2volinx(volpath);
-		if(volinx	>= 0) {
-			vol = hfs_remount(hcwd_getvol(volinx), mount_flags(volpath));
-			if (vol != 0) {
-				if (hfs_setattr(vol,mac_path, pent) >= 0) {
-					result = 0;
-				}
-				if (hfs_umount(vol) < 0 && result == 0) {
-					hfs_perror("Error closing HFS volume");
-					result = 1;
-				}
-			}
-			if(0 == HFSIFACE_umount( volpath )) {
-			}
-		}
-	}
-	return( result );
-}
-
 // Speedup. This family is NOT reentrant!!!!
 static HFV_THREAD_LOCAL hfsvol *ff_vol = 0;
 static HFV_THREAD_LOCAL int ff_mounted = 0;
