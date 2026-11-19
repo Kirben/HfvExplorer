@@ -25,8 +25,8 @@ namespace {
 void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}
 struct Doc:CHFVExplorerDoc {
  Doc():CHFVExplorerDoc(false){m_bAutoDelete=FALSE;}
- void AddIcon(unsigned type){local_icn_sharp_t small{},large{};small.icon=large.icon=reinterpret_cast<icn_sharp_hand>(1);insert_into_hash_table(type,'TEST',&small,&large);}
- bool HasIcon(unsigned type){return map_type_and_creator(type,'TEST',0)!=nullptr;}
+ void AddIcon(unsigned type){local_icn_sharp_t small{},large{};small.icon=large.icon=reinterpret_cast<icn_sharp_hand>(1);folderReader_->insert_into_hash_table(type,'TEST',&small,&large);}
+ bool HasIcon(unsigned type){return folderReader_->map_type_and_creator(type,'TEST',0)!=nullptr;}
 };
 struct Frame:CMainFrame {
  void LoadWindowPosition()override{}

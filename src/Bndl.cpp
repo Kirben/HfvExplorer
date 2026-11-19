@@ -21,7 +21,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 
-#include "HFVExplorerDoc.h"
+#include "BrowserFolderReader.h"
 #include "HFVExplorerListView.h"
 #include "CFATVolume.h"
 #include "special.h"
@@ -41,7 +41,7 @@
 
 enum { HASH_SIZE = ICONTABLESIZE };
 
-// Icon tables and file handles are owned by CHFVExplorerDoc.
+// Icon tables and file handles are owned by BrowserFolderReader.
 
 void dump_data( unsigned char *fname, unsigned char *p, int count )
 {
@@ -64,7 +64,7 @@ void dump_data( unsigned char *fname, unsigned char *p, int count )
 	}
 }
 
-void CHFVExplorerDoc::init_hash_table()
+void BrowserFolderReader::init_hash_table()
 {
   CString ini_name;
 	CFile *fp;
@@ -92,7 +92,7 @@ void CHFVExplorerDoc::init_hash_table()
 	load_hash_table();
 }
 
-int CHFVExplorerDoc::exists_icon_cache_file()
+int BrowserFolderReader::exists_icon_cache_file()
 {
 	CString name;
 	char *cname;
@@ -109,7 +109,7 @@ int CHFVExplorerDoc::exists_icon_cache_file()
 	return(ret);
 }
 
-int CHFVExplorerDoc::delete_cache_OK()
+int BrowserFolderReader::delete_cache_OK()
 {
 	CString name;
 	char *cname;
@@ -127,12 +127,12 @@ int CHFVExplorerDoc::delete_cache_OK()
 	return(ret);
 }
  
-int CHFVExplorerDoc::get_icon_cache_count()
+int BrowserFolderReader::get_icon_cache_count()
 {
 	return(icons_in_cache);
 }
 
-void CHFVExplorerDoc::get_icons_file_name( CString &name )
+void BrowserFolderReader::get_icons_file_name( CString &name )
 {
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
@@ -157,7 +157,7 @@ typedef struct {
 	OSType type, creator;
 } two_OSType;
 
-void CHFVExplorerDoc::load_hash_table()
+void BrowserFolderReader::load_hash_table()
 {
 	CString ini_name;
 	CFile *fp;
@@ -266,7 +266,7 @@ panic: // corrupted cache
 	GlobalFree( h32 );
 }
 
-void CHFVExplorerDoc::delete_cache()
+void BrowserFolderReader::delete_cache()
 {
 	CString name;
 	silent_close( &hash_file );
@@ -275,7 +275,7 @@ void CHFVExplorerDoc::delete_cache()
 	silent_delete( name );
 }
 
-void CHFVExplorerDoc::save_hash_table(
+void BrowserFolderReader::save_hash_table(
 	OSType type, 
 	OSType creator, 
 	local_icn_sharp_t *ip16,
@@ -355,7 +355,7 @@ void CHFVExplorerDoc::save_hash_table(
 	}
 }
 
-void CHFVExplorerDoc::clear_hash_table()
+void BrowserFolderReader::clear_hash_table()
 {
 	int i;
   struct type_creator_link_str *next;
@@ -379,7 +379,7 @@ void CHFVExplorerDoc::clear_hash_table()
 	delete_mask_bitmaps();
 }
 
-HANDLE CHFVExplorerDoc::
+HANDLE BrowserFolderReader::
 get_fref( int volinx, CatDataRec *pCDR, INTEGER id )
 {
 	HANDLE h = 0;
@@ -391,7 +391,7 @@ get_fref( int volinx, CatDataRec *pCDR, INTEGER id )
 	return(h);
 }
 
-HANDLE CHFVExplorerDoc::
+HANDLE BrowserFolderReader::
 get_fref( CFile *fp, unsigned long g_offset, INTEGER id )
 {
 	HANDLE h = 0;
@@ -403,7 +403,7 @@ get_fref( CFile *fp, unsigned long g_offset, INTEGER id )
 	return(h);
 }
 
-unsigned long CHFVExplorerDoc::
+unsigned long BrowserFolderReader::
 hash_func (OSType type, OSType creator)
 {
   unsigned long retval;
@@ -412,7 +412,7 @@ hash_func (OSType type, OSType creator)
   return retval;
 }
 
-type_creator_link_t ** CHFVExplorerDoc::
+type_creator_link_t ** BrowserFolderReader::
 hashpp (OSType type, OSType creator)
 {
   type_creator_link_t **retval;
@@ -435,7 +435,7 @@ hashpp (OSType type, OSType creator)
   return( retval );
 }
 
-int CHFVExplorerDoc::insert_into_hash_table (
+int BrowserFolderReader::insert_into_hash_table (
 	OSType type, 
 	OSType creator, 
 	local_icn_sharp_t *ip16,
@@ -484,7 +484,7 @@ void outss( char *s, int i )
 #define outs(s,i) 
 
 #pragma optimize("g",off)
-bndl_section_t *CHFVExplorerDoc::
+bndl_section_t *BrowserFolderReader::
 extract_bndl_section (bndl_t **bndl_h, ResType code)
 {
   bndl_section_t *retval;
@@ -534,7 +534,7 @@ outs( "retval", retval );
 }
 #pragma optimize("g",on)
 
-int CHFVExplorerDoc::
+int BrowserFolderReader::
 find_local_icon(
 	INTEGER local_id, 
 	local_icn_sharp_t 
@@ -549,7 +549,7 @@ find_local_icon(
   return retval;
 }
 
-void CHFVExplorerDoc::
+void BrowserFolderReader::
 process_bndl (
 	int volinx, 
 	CatDataRec *pCDR,
@@ -644,7 +644,7 @@ process_bndl (
 	}
 }
 
-void CHFVExplorerDoc::
+void BrowserFolderReader::
 process_bndl2 (
 	CFile *fp,
 	unsigned long g_offset,
@@ -730,7 +730,7 @@ process_bndl2 (
 	}
 }
 
-icn_sharp_hand CHFVExplorerDoc::
+icn_sharp_hand BrowserFolderReader::
 map_type_and_creator (
 	OSType type, 
 	OSType creator,
@@ -750,7 +750,7 @@ map_type_and_creator (
   return retval;
 }
 
-void CHFVExplorerDoc::process_bundle(
+void BrowserFolderReader::process_bundle(
 	int volinx, 
 	CatDataRec *pCDR,
 	unsigned long creator )
@@ -770,7 +770,7 @@ void CHFVExplorerDoc::process_bundle(
 }
 
 // here bundle is known to exist
-void CHFVExplorerDoc::process_bundle2 (
+void BrowserFolderReader::process_bundle2 (
 	CFile *fp,
 	unsigned long fork_start,
 	unsigned long creator )
@@ -856,7 +856,7 @@ void adjust_bw_buffer( unsigned char *p, int count )
 	*/
 }
 
-void CHFVExplorerDoc::create_cache_icon( 
+void BrowserFolderReader::create_cache_icon(
 	local_icn_sharp_t *dat,
 	int invert )
 {
@@ -896,7 +896,7 @@ void CHFVExplorerDoc::create_cache_icon(
 	}
 }
 
-void CHFVExplorerDoc::mac_load_icon2(
+void BrowserFolderReader::mac_load_icon2(
 	int volinx, 
 	CatDataRec *pCDR,
 	Integer id, 
@@ -914,7 +914,7 @@ void CHFVExplorerDoc::mac_load_icon2(
 	if(small) return;
 #endif
 
-	if(m_bits_per_pixel >= 8) {
+	if(options_.bitsPerPixel >= 8) {
 		dat->h = mac_load_any_resource ( 
 					volinx, pCDR,
 					dat->small ? (unsigned long)'ics8' :	(unsigned long)'icl8',
@@ -932,7 +932,7 @@ void CHFVExplorerDoc::mac_load_icon2(
 	create_cache_icon( dat, 1 );
 }
 
-void CHFVExplorerDoc::mac_load_icon3( 
+void BrowserFolderReader::mac_load_icon3(
 	CFile *fp,
 	unsigned long g_offset,
 	Integer id, 
@@ -950,7 +950,7 @@ void CHFVExplorerDoc::mac_load_icon3(
 	if(small) return;
 #endif
 
-	if(m_bits_per_pixel >= 8) {
+	if(options_.bitsPerPixel >= 8) {
 		dat->h = mac_load_any_resource2 ( 
 					fp, g_offset,
 					dat->small ? (unsigned long)'ics8' :	(unsigned long)'icl8',
@@ -968,7 +968,7 @@ void CHFVExplorerDoc::mac_load_icon3(
 }
 
 // do not hash, do not save to disk, DO add to memory cache
-void CHFVExplorerDoc::load_custom_icons( 
+void BrowserFolderReader::load_custom_icons(
 	int volinx, 
 	CatDataRec *pCDR,
 	HICON *phicon16, 
@@ -990,7 +990,7 @@ void CHFVExplorerDoc::load_custom_icons(
 	// if(ic32.icon) AfxMessageBox( "File has large 0xBFB9." );
 }
 
-void CHFVExplorerDoc::load_custom_icons( 
+void BrowserFolderReader::load_custom_icons(
 	CFile *fp,
 	unsigned long g_offset,
 	HICON *phicon16, 

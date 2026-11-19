@@ -28,7 +28,7 @@ extern "C" {
 #include <stdexcept>
 extern HICON get_dos_icon(CHFVExplorerApp*,char*,int);
 extern int is_afp_directory(char*);
-bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatDataRec* folderIcon, int finder_view_mode, BrowserDirectory::Row& row )
+bool BrowserFolderReader::prepare_classic_browser_row( hfs_item_type *pitem, CatDataRec* folderIcon, int finder_view_mode, BrowserDirectory::Row& row )
 {
 	int isdir;
 	hfv_size_t size_in_bytes;
@@ -45,7 +45,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatData
 
 	// Special handling for folder icon. Some folks don't
 	// put the invisible flag properly on.
-	if(!m_mac_show_invisibles) {
+	if(!options_.showMacHidden) {
 		if(strcmp((char *)pitem->catkeyrec.ckrCName,"Icon\x00D") == 0) {
 		 	return false;
 		}		
@@ -69,7 +69,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatData
 		if(isdir) {
 			strcpy( stype, "Folder" );
 			if(pitem->catdatarec.cdrType == cdrDirRec) {
-				if((pitem->catdatarec.u.d.dirUsrInfo.frFlags & fInvisible) && !m_mac_show_invisibles) {
+				if((pitem->catdatarec.u.d.dirUsrInfo.frFlags & fInvisible) && !options_.showMacHidden) {
 					return false;
 				}
 				finder_color = (pitem->catdatarec.u.d.dirUsrInfo.frFlags & kColorMask) >> 1;
@@ -94,7 +94,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatData
 			}
 
 		} else {
-			if((pitem->catdatarec.u.f.filUsrWds.fdFlags & fInvisible) && !m_mac_show_invisibles) {
+			if((pitem->catdatarec.u.f.filUsrWds.fdFlags & fInvisible) && !options_.showMacHidden) {
 				return false;
 			}
 
@@ -170,7 +170,7 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatData
         unsigned flags=isdir?pitem->catdatarec.u.d.dirUsrInfo.frFlags:pitem->catdatarec.u.f.filUsrWds.fdFlags;
         row.entry.finder[8]=BYTE(flags>>8);row.entry.finder[9]=BYTE(flags);
         row.icon16=hicon16;row.icon32=hicon32;row.point=p;row.initialized=is_inited!=0;row.finderMode=finder_view_mode;
-        auto& volume=m_volumes[pitem->volinx];DWORD attributes=(volume.m_is_cd||volume.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(volume.m_file_name);
+        auto& volume=slots_[pitem->volinx];DWORD attributes=(volume.m_is_cd||volume.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(volume.m_file_name);
         bool writable=!volume.m_is_cd&&(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY));
         row.capabilities.create=row.capabilities.rename=row.capabilities.remove=writable;
         return true;
@@ -178,12 +178,12 @@ bool CHFVExplorerDoc::prepare_classic_browser_row( hfs_item_type *pitem, CatData
     return false;
 }
 
-BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId,Storage::Job* job)
+BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(int volinx,long id,CString doc_name,bool finder,long parentId,Storage::Job* job)
 {
  BrowserDirectory::ObserveRead("classic-directory");
  BrowserDirectory::Snapshot snapshot;
  snapshot.capabilitiesKnown=true;
- auto& selected=m_volumes[volinx];
+ auto& selected=slots_[volinx];
  const std::string image=(LPCSTR)selected.m_file_name;
  const std::string directory=(LPCSTR)doc_name;
  snapshot.resourceKey=VolumeCoord::ImageKey(image);
@@ -191,10 +191,10 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
  snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
 
  // Finder artwork still uses the document's cached resource reader.
- if(m_classicRevision[volinx]!=snapshot.revision){
+ if(revisions_[volinx]!=snapshot.revision){
   selected.close();
   if(!selected.open())throw HfsPlus::Error("Cannot reload changed classic HFS metadata");
-  m_classicRevision[volinx]=snapshot.revision;
+  revisions_[volinx]=snapshot.revision;
  }
  const DWORD attributes=(selected.m_is_cd||selected.m_is_floppy)?INVALID_FILE_ATTRIBUTES:GetFileAttributesA(image.c_str());
  const bool writable=!selected.m_is_cd&&(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY));
@@ -237,6 +237,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
  }
  if(x!=INT_MAX)snapshot.originX=x;
  if(y!=INT_MAX)snapshot.originY=y;
+ OwnIcons(snapshot);
  return snapshot;
 }
 
@@ -280,16 +281,14 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  if(request.folder.IsPhysical())request.mediaDrive=request.folder.Drive();
  if(!find&&selected.m_mediaGenerationKnown)
   request.folder.BindMediaGeneration(selected.m_mediaGeneration);
- auto reader=std::shared_ptr<CHFVExplorerDoc>(new CHFVExplorerDoc(false));
- reader->m_mac_show_invisibles=m_mac_show_invisibles;
- auto& volume=reader->m_volumes[index];
+ auto reader=std::make_shared<BrowserFolderReader>(FolderOptions());
+ auto& volume=reader->Slots()[index];
  volume.m_file_name=image;
  volume.m_is_floppy=selected.m_is_floppy;
  volume.m_is_cd=selected.m_is_cd;
  volume.m_is_hd=selected.m_is_hd;
  volume.m_is_removable=selected.m_is_removable;
  volume.m_free=0;
- reader->m_hfs_count=index+1;
  const auto finder=session.finderLayout;
  auto route=std::make_shared<std::vector<ClassicAncestor>>();
  const auto mount=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,index});
@@ -303,12 +302,12 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   try{
    VolumeCoord::Lease lease({{request.resource,VolumeCoord::Mode::Read}});
    if(job.cancelled())throw Storage::Cancelled();
-   auto& volume=reader->m_volumes[index];
+   auto& volume=reader->Slots()[index];
    StorageLocation::ValidateImage(VolumeCoord::Wide(request.folder.ClassicImage()),request.resource);
    if(!volume.open())throw std::runtime_error("Cannot open the selected classic HFS volume");
    StorageLocation::ValidateClassicGeneration(request.folder,volume.m_mediaGenerationKnown?
        std::optional<DWORD>(volume.m_mediaGeneration):std::nullopt);
-   reader->m_classicRevision[index]=VolumeCoord::Revision(request.resource);
+   reader->Revision(index)=VolumeCoord::Revision(request.resource);
    auto id=request.folder.expectedCatalogId;
    const bool readRoute=request.intent!=Intent::SelectFolder;
    std::string directory=id==2?std::string((LPCSTR)volume.m_volume_name)+":":request.folder.ClassicPath();
@@ -327,16 +326,15 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
    StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
    StorageLocation::ValidateImage(VolumeCoord::Wide(result.folder.ClassicImage()),request.resource);
-   reader->CopyNavigationIcons(result.listing);
    return Storage::Result{};
   }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
  },[this,reader,route,index,item,root,refresh,path,findResult=bool(find),parent](Result& result){
   auto& session=GetBrowserSession();
   auto tree=session.Tree();
   auto& control=tree->GetTreeCtrl();
-  auto& volume=reader->m_volumes[index];
+  auto& volume=reader->Slots()[index];
   volume.m_rootitem=root;
-  m_volumes.ReplaceFrom(index,reader->m_volumes,index);
+  m_volumes.ReplaceFrom(index,reader->Slots(),index);
   m_classicRevision[index]=result.listing.revision;
   control.SetItemText(root,m_volumes[index].m_volume_name);
   const auto& shown=result.folder.ClassicPath();
