@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#pragma once
+#include "FileLocation.h"
+
+namespace StorageLocation {
+using FileOperations::Location;
+
+// A storage version and a removable-media identity are checked separately.
+bool RevisionCurrent(const std::string& resource, uint64_t revision);
+std::optional<DWORD> WindowsSerial(const std::wstring& path);
+void ValidateImage(const std::wstring& path, const std::string& expectedResource);
+void ValidateClassicGeneration(const Location&, std::optional<DWORD> observed);
+enum class FloppyProbe { OpenMount, FreshHandle };
+void ValidateMedia(const Location&, FloppyProbe = FloppyProbe::OpenMount);
+
+bool MatchesEntry(const Location&, const MacBrowser::Entry&);
+void ValidateFolderIdentity(const Location&, const MacBrowser::Entry&);
+
+struct ResolvedEntry {
+    std::shared_ptr<MacBrowser::Volume> volume;
+    uint32_t id;
+    MacBrowser::Entry entry;
+};
+// Callers acquire any operation lease before resolving. Read-only is the
+// default for opening a classic image or device.
+ResolvedEntry ResolveEntry(const Location&, bool writable = false);
+std::vector<uint8_t> ReadDataPrefix(const Location&, size_t maximum, bool& truncated, Storage::Job&);
+}

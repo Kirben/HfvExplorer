@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "BrowserPreview.h"
-#include "FileOperations.h"
+#include "StorageLocation.h"
 #include "VolumeCoordinator.h"
 
 namespace BrowserPreview {
@@ -71,7 +71,7 @@ void Request::Start(FileOperations::Location item, std::string key, bool mac, bo
     job_ = reader.submit([item = std::move(item), result = result_, mac, finderText](Storage::Job& job) {
         try {
             bool truncated = false;
-            const auto bytes = FileOperations::ReadDataPrefix(item, SampleLimit, truncated, job);
+            const auto bytes = StorageLocation::ReadDataPrefix(item, SampleLimit, truncated, job);
             *result = Decode(bytes, mac, finderText, truncated);
             return Storage::Result{};
         } catch (const VolumeCoord::Busy& error) {
@@ -88,7 +88,7 @@ void Request::Cancel() {
 }
 
 bool Request::Stale() const {
-    return !key_.empty() && VolumeCoord::Revision(key_) != revision_;
+    return !StorageLocation::RevisionCurrent(key_,revision_);
 }
 
 Request::State Request::Take(Text& text) {
@@ -96,7 +96,7 @@ Request::State Request::Take(Text& text) {
     const auto status = job_->result();
     job_.reset();
     auto result = std::move(result_);
-    if (Stale()) return State::Stale;
+    if (Stale() || status.error == ERROR_MEDIA_CHANGED) return State::Stale;
     if (status.error == ERROR_BUSY) return State::Busy;
     if (status.code) return State::Failed;
     if (!result->available) return State::Unavailable;

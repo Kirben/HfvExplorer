@@ -142,6 +142,7 @@ int RunTypedLocationsTest(const char *directory) {
             Check(weak.expired(), "Discarded locations retained backend");
         }
         for (auto location : {windows, image, clone, cd}) {
+            if (location.IsWindows()) location.BindWindowsMediaSerial(0);
             location.cut = true;
             location.directory = true;
             location.expectedIdentity = "identity";
@@ -156,7 +157,8 @@ int RunTypedLocationsTest(const char *directory) {
                       restored.expectedParent == 17,
                   "Typed wire round trip lost selection guards");
             if (location.IsWindows())
-                Check(restored.WindowsPath() == location.WindowsPath(), "Wire Windows path");
+                Check(restored.WindowsPath() == location.WindowsPath() &&
+                      restored.WindowsMediaSerial() == location.WindowsMediaSerial(), "Wire Windows path and media serial");
             else {
                 Check(restored.ClassicImage() == location.ClassicImage() &&
                           restored.ClassicPath() == location.ClassicPath(),

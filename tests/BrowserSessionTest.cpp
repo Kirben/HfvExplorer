@@ -271,9 +271,17 @@ int RunBrowserSessionTest(const char* directory){
    Check(CreateDirectoryA(wa+"\\Nested",nullptr)&&CreateDirectoryA(nested,nullptr),"create unexpanded Windows search folders");
    auto filename=nested+"\\reveal.txt";
    {CFile file;Check(file.Open(filename,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows search file");}
-   FindLocation scope;scope.directory=(LPCSTR)wa;
+   FindLocation scope;scope.directory=(LPCSTR)wa;scope.checkWindowsMedia=true;
    auto hit=SearchHit(scope,"reveal.txt");
    auto& session=a.Session();
+   Check(hit.destination.WindowsMediaSerial().has_value()&&
+         hit.destination.WindowsMediaSerial()==hit.reveal.WindowsMediaSerial(),"Find lost its captured Windows media identity");
+   auto swapped=hit;
+   swapped.destination.BindWindowsMediaSerial(*hit.destination.WindowsMediaSerial()^1u);
+   Check(session.RevealFindHit(swapped,0),"queue Find result for replaced media");
+   PumpUntil([&]{return !session.Navigating();},"Find media validation did not complete");
+   Check(!session.ListingAvailable()&&session.navigationErrorForTest.find("media changed")!=std::string::npos,
+         "Find reopened a folder on different Windows media");
    Check(session.RevealFindHit(hit,0),"queue Windows Find result");
    PumpUntil([&]{return !session.Navigating();},"Windows Find did not complete");
    Check(Selected(a.list,L"reveal.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==hit.destination.WindowsPath(),

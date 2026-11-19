@@ -39,6 +39,7 @@ struct Result {
   partial=partial || (outcome!=Outcome::Succeeded && (completed || evidence.RetainedChanges()));
  }
 };
+struct MediaChanged : std::runtime_error { using std::runtime_error::runtime_error; };
 class Cancelled : public std::exception {public:const char* what()const noexcept override{return "Storage job cancelled";}};
 class Job {
  mutable std::mutex mutex_;
@@ -105,6 +106,7 @@ class Worker {
    OutcomeEvidence evidence;
    try {result=entry.work(*entry.job);}
    catch(const Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
+   catch(const MediaChanged& error){result={1,ERROR_MEDIA_CHANGED,error.what()};}
    catch(const std::exception& error){result={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}
    catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected storage error"};}
    const auto progress=entry.job->progress();

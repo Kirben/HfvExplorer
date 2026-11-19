@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
+#include "StorageLocation.h"
 #include "MainMacBrowser.h"
 #include "BackgroundCopies.h"
 #include "DeviceWait.h"
@@ -90,16 +91,12 @@ void BrowserSession::CancelNavigation()
 namespace {
 bool MatchesNavigationEntry(const BrowserDirectory::Row& row, const FileOperations::Location& item)
 {
-    if (item.IsMounted()) return row.storageType==LIST_MAC && row.id==item.Id() &&
-        (item.expectedName.empty() || row.entry.name==item.expectedName) &&
-        (!item.expectedParent || row.entry.parent==item.expectedParent);
+    if (!StorageLocation::MatchesEntry(item,row.entry)) return false;
+    if (item.IsMounted()) return row.storageType==LIST_MAC && row.id==item.Id();
     if (item.IsClassic()) return row.storageType==LIST_HFS &&
-        (!item.expectedCatalogId || row.id==item.expectedCatalogId) &&
         !_stricmp(row.path.c_str(),item.ClassicPath().c_str());
-    return item.IsWindows() && row.storageType==LIST_FAT &&
-        !_wcsicmp((row.location.IsWindows()?row.location.WindowsPath():VolumeCoord::Wide(row.path)).c_str(),
-                  item.WindowsPath().c_str()) &&
-        (item.expectedIdentity.empty() || row.entry.identity==item.expectedIdentity);
+    return item.IsWindows() && row.storageType==LIST_FAT && row.location.IsWindows() &&
+        !_wcsicmp(row.location.WindowsPath().c_str(),item.WindowsPath().c_str());
 }
 }
 
@@ -163,7 +160,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
             return;
         }
         const auto& listing=result->listing;
-        if(!listing.resourceKey.empty() && listing.revision!=VolumeCoord::Revision(listing.resourceKey)){
+        if(!StorageLocation::RevisionCurrent(listing.resourceKey,listing.revision)){
             if(restoreOnError)listingPending_=false;
             retry();
             return;
@@ -205,7 +202,7 @@ bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)
 {
     using namespace BrowserNavigation;
     if(!tree_||!list_||!document_||hit.destination.IsNone())return false;
-    Request request{hit.destination,Intent::RevealFindHit,{},hit.reveal,hit.nativePath,hit.windowsMediaSerial};
+    Request request{hit.destination,Intent::RevealFindHit,{},hit.reveal,hit.nativePath};
     if(request.folder.IsMounted()){
         request.resource=request.folder.Volume()->ResourceKey();
         if(!hit.reveal.IsNone()&&!request.catalogRoute.empty())request.catalogRoute.pop_back();
@@ -328,6 +325,7 @@ void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot
         auto location=FileOperations::Location::Windows(snapshot.folderPath);
         location.directory=true;
         location.expectedIdentity=snapshot.folderIdentity;
+        location.BindWindowsMediaSerial(snapshot.windowsMediaSerial);
         tree_->BindBrowserFolder(tree_->GetTreeCtrl().GetSelectedItem(),{std::move(location),snapshot.capabilities.create});
     }else if(listing&&type==LIST_HFS){
         const auto& volume=document_->m_volumes[index];
