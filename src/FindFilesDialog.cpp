@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "DialogDpi.h"
 #include "resource.h"
 #include "FindFilesDialog.h"
 #include "BrowserPresentation.h"
@@ -30,12 +31,32 @@ public:
 };
 class ResultsDialog : public CDialog {
  const FindResults& results_;bool incomplete_;bool mac_;
+ UINT dpi_ = NativeDpi::Base;
+ NativeDpi::Measurement columns_[4];
+ LRESULT WindowProc(UINT message,WPARAM wParam,LPARAM lParam) override {
+  const UINT next=LOWORD(wParam);
+  if(message==NativeDpi::Changed&&next&&next!=dpi_){
+   auto* list=static_cast<CListCtrl*>(GetDlgItem(IDC_FIND_RESULTS));
+   if(list){
+    int widths[ARRAYSIZE(columns_)]{};
+    for(int i=0;i<ARRAYSIZE(columns_);++i)
+     widths[i]=columns_[i].Resize(list->GetColumnWidth(i),dpi_,next);
+    dpi_=next;
+    const auto result=CDialog::WindowProc(message,wParam,lParam);
+    for(int i=0;i<ARRAYSIZE(columns_);++i)list->SetColumnWidth(i,widths[i]);
+    return result;
+   }
+  }
+  return CDialog::WindowProc(message,wParam,lParam);
+ }
 public:
  FindHit selected;
  ResultsDialog(CWnd* owner,const FindResults& results,bool incomplete,bool mac):CDialog(IDD_FIND_RESULTS,owner),results_(results),incomplete_(incomplete),mac_(mac){INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES};InitCommonControlsEx(&controls);}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();auto list=(CListCtrl*)GetDlgItem(IDC_FIND_RESULTS);list->SetExtendedStyle(LVS_EX_FULLROWSELECT|LVS_EX_GRIDLINES);
-  CRect rect;list->GetClientRect(&rect);int width=rect.Width()-GetSystemMetrics(SM_CXVSCROLL)-4;
+  dpi_=NativeDpi::Window(m_hWnd);
+  CRect rect;list->GetClientRect(&rect);
+  int width=rect.Width()-NativeDpi::Metric(SM_CXVSCROLL,dpi_)-NativeDpi::Scale(4,dpi_);
   if(results_.utf8)list->SendMessage(CCM_SETUNICODEFORMAT,TRUE);
   list->InsertColumn(0,"Name",LVCFMT_LEFT,width*23/100);list->InsertColumn(1,"Containing folder",LVCFMT_LEFT,width*49/100);
   list->InsertColumn(2,mac_?"Bytes (both forks)":"Bytes",LVCFMT_RIGHT,width*18/100);list->InsertColumn(3,"Kind",LVCFMT_LEFT,width*10/100);
@@ -81,6 +102,16 @@ public:
 bool ProbeFindResultsDialog(CWnd* owner,const FindResults& results,bool mac){
  ResultsDialog dialog(owner,results,false,mac);if(!dialog.Create(IDD_FIND_RESULTS,owner))return false;
  bool ok=!dialog.IsWindowVisible();
+ auto& list=*static_cast<CListCtrl*>(dialog.GetDlgItem(IDC_FIND_RESULTS));
+ const UINT originalDpi=NativeDpi::Window(dialog.GetSafeHwnd());
+ const int column=list.GetColumnWidth(0);
+ RECT bounds{};
+ dialog.GetWindowRect(&bounds);
+ const UINT nextDpi=originalDpi*2;
+ dialog.SendMessage(NativeDpi::Changed,MAKEWPARAM(nextDpi,nextDpi),LPARAM(&bounds));
+ ok=ok&&list.GetColumnWidth(0)==2*column;
+ dialog.SendMessage(NativeDpi::Changed,MAKEWPARAM(originalDpi,originalDpi),LPARAM(&bounds));
+ ok=ok&&list.GetColumnWidth(0)==column;
  if(results.hits.empty())ok=ok&&!dialog.GetDlgItem(IDOK)->IsWindowEnabled();
  else{
   char text[MAX_PATH]={};NMLVDISPINFOA info={};info.hdr.hwndFrom=dialog.GetDlgItem(IDC_FIND_RESULTS)->GetSafeHwnd();info.hdr.idFrom=IDC_FIND_RESULTS;info.hdr.code=LVN_GETDISPINFOA;

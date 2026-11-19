@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "DialogDpi.h"
 #include "MetadataDialogs.h"
 #include "HFVExplorer.h"
 #include "resource.h"
@@ -49,7 +50,7 @@ class StorageSpinner : public CStatic {
   COLORREF background=GetSysColor(COLOR_3DFACE),accent=GetSysColor(COLOR_HIGHLIGHT);
   HBRUSH fill=CreateSolidBrush(background);FillRect(buffer,&bounds,fill);DeleteObject(fill);
   // Three-pixel null-pen ellipses can rasterize to no visible fill.
-  int dot=max(4,min(width,height)/7);double radius=min(width,height)*0.33;
+  int dot=max(NativeDpi::Scale(4,NativeDpi::Window(m_hWnd)),min(width,height)/7);double radius=min(width,height)*0.33;
   HGDIOBJ pen=SelectObject(buffer,GetStockObject(NULL_PEN));
   for(unsigned n=0;n<8;++n){
    unsigned strength=40+((n+8-frame_)%8)*30;
@@ -463,6 +464,7 @@ struct Batch {
     mode->m_copying_fname = CString(MacBrowser::Wide(pending.selection->source.expectedName).c_str());
    if (!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT, CWnd::GetDesktopWindow()))
     throw std::runtime_error("Cannot create copy mode window");
+   NativeDpi::CenterPopup(mode->GetSafeHwnd(),dialog->GetSafeHwnd());
    dialog->ShowWindow(SW_HIDE);
    if (!hidden)
     mode->ShowWindow(SW_SHOWNOACTIVATE);
@@ -509,6 +511,7 @@ bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancel
    [ptr](uint64_t id, Storage::ConflictChoice choice){ptr->controller.Resolve(id,choice);},
    [ptr](const char* message){ptr->controller.Fail(message);});
   if(!batch->dialog->Create(single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background operation progress");
+  NativeDpi::CenterPopup(batch->dialog->GetSafeHwnd(),owner?owner->GetSafeHwnd():nullptr);
   batch->hidden=hidden;batch->dialog->Planning();batch->Advance();
   batches.push_back(std::move(batch));return true;
  }catch(...){if(batch){batch->Cancel();if(auto job=batch->controller.Job())job->wait();}--active;throw;}
