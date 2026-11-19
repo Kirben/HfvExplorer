@@ -4,6 +4,8 @@
 #include "NdifImage.h"
 #include "NdifLzh.h"
 #include "DmgImage.h"
+#include "CopyProcess.h"
+#include "FileOperations.h"
 #include "TransferConversion.h"
 #include "ReadOnlyCdBackend.h"
 #include "HfsPlusDisk.h"
@@ -309,6 +311,13 @@ int RunNdifImageTest(const char* directory)
         const auto rawPath=VolumeCoord::Wide(root+"volume.raw");
         auto raw=CreateFormatOutput(rawPath.c_str(),8*1024*1024);
         HfsPlus::Volume::Format(*raw,u"NDIF Fixture",false);
+        const std::array<Bytes,2> forks{Bytes{'D','A','T','A'},Bytes{'R','S','R','C'}};
+        {
+            HfsPlus::Volume fixture(*raw,true);
+            fixture.Put(2,u"Both forks",4,4,[&](unsigned fork,uint64_t at,void* target,size_t size){
+                memcpy(target,forks[fork].data()+size_t(at),size);
+            });
+        }
         const auto volumeBytes=Disk::Read(*raw,0,size_t(raw->Size()));
         const auto sectors=uint32_t(raw->Size()/512);
         auto rawMap=Map(sectors,2);
@@ -362,6 +371,47 @@ int RunNdifImageTest(const char* directory)
         fprintf(report,"PASS: BinHex NDIF mount, fork CRCs and truncated carrier rejection.\n");
         auto mounted=MacBrowser::OpenBrowserImage(path);
         Check(mounted&&mounted->Name()==u"NDIF Fixture"&&!mounted->Writable(),"NDIF did not mount in the browser");
+        CopyProcess::enabled=true;
+        unsigned number=0;
+        std::vector<std::wstring> carriers{path,single,doublePath,streamPath,binHexPath};
+        if(const auto original=_wgetenv(L"HFV_NDIF_TEST_IMAGE"))carriers.emplace_back(original);
+        if(const auto multipart=_wgetenv(L"HFV_NDIF_SEGMENT_TEST_IMAGE"))carriers.emplace_back(multipart);
+        for(const auto& wrapped:carriers){
+            auto source=MacBrowser::OpenBrowserImage(wrapped);
+            const auto entries=source->List();
+            const auto selected=std::find_if(entries.begin(),entries.end(),[](const auto& item){
+                return !item.directory;
+            });
+            Check(selected!=entries.end(),"NDIF worker fixture has no files");
+            const auto file=*selected;
+            const auto dest=VolumeCoord::Wide(root+"export-"+std::to_string(number++));
+            Check(CreateDirectoryW(dest.c_str(),nullptr)!=FALSE,"Create NDIF worker destination");
+            FileOperations::Request request=FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(source,file.id)},FileOperations::Location::Windows(dest)};
+            request.background=true;
+            CopyProcess::lastProcess=0;
+            auto operation=FileOperations::Submit(std::move(request));
+            const auto start=GetTickCount();
+            while(!operation.Job()->done()){
+                Check(GetTickCount()-start<15000,"NDIF worker export timed out");
+                Sleep(5);
+            }
+            const auto copied=operation.Job()->result();
+            Check(!copied.code,copied.message.c_str());
+            Check(CopyProcess::lastProcess!=0,"NDIF export did not use the subprocess");
+            auto windows=MacBrowser::OpenWindows(dest);
+            const auto output=windows->List().at(0);
+            for(unsigned fork=0;fork<2;++fork){
+                Bytes bytes(size_t(file.forks[fork].size)),expected(bytes.size());
+                Check(output.forks[fork].size==bytes.size(),"NDIF export lost a fork");
+                if(!bytes.empty()){
+                    source->Read(file.id,fork,0,expected.data(),expected.size());
+                    windows->Read(output.id,fork,0,bytes.data(),bytes.size());
+                    Check(bytes==expected,"NDIF export changed a fork");
+                }
+            }
+        }
+        fprintf(report,"PASS: real copy-worker export from NDIF in all five fork carriers, preserving both forks.\n");
 
         const auto extractedPath=VolumeCoord::Wide(root+"extracted.img");
         Storage::Job extract;
@@ -422,6 +472,7 @@ int RunNdifImageTest(const char* directory)
         fprintf(report,"FAIL: %s\n",error.what());
         status=1;
     }
+    CopyProcess::enabled=false;
     fclose(report);
     return status;
 }
