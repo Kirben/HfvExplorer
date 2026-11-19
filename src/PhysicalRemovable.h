@@ -37,7 +37,7 @@ public:
 struct Partition {uint64_t offset=0,length=0;unsigned index=0;};
 std::vector<Partition> Partitions(HfsPlus::Source&,DWORD logicalSector);
 struct Mounted {Device device;Partition partition;std::shared_ptr<MacBrowser::Volume> volume;std::wstring label;};
-struct Discovery {std::vector<Mounted> volumes;std::vector<std::string> errors;};
+struct Discovery {std::vector<Mounted> volumes;std::vector<std::string> errors;std::vector<std::wstring> failedDevices;};
 std::vector<Mounted> Open(const Device&,std::shared_ptr<Api> api={});
 Discovery Scan(Storage::Job&,std::shared_ptr<Api> api={});
 std::shared_ptr<MacBrowser::Volume> Reopen(const std::wstring&,uint64_t offset);

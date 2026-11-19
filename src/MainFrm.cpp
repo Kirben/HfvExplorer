@@ -618,7 +618,6 @@ static void get_process_list( CDWordArray & plist )
 
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
- if(nIDEvent==9203){PostMessage(WM_APP+91);return;}
  if(nIDEvent==9202){
   if(!BackgroundCopies::Active()&&!StorageUi::busy()&&!StorageUi::state().sessionOpen){
    auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
@@ -786,22 +785,10 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
    m_browserSession->NavigationMediaChanged(notice->dbcv_unitmask);
    auto& browser=m_browserSession->MacBrowser();
    browser.QueueMediaChanges(notice->dbcv_unitmask,wParam==DBT_DEVICEARRIVAL?notice->dbcv_unitmask:0);
-   if(!m_mediaChangesPending){
-    m_mediaChangesPending=true;
-    SetTimer(9203,100,nullptr);
-    PostMessage(WM_APP+91);
-   }
    return TRUE;
   }
  }
  if(HfvDeviceWait::busy()&&(message==WM_COMMAND||message==WM_CLOSE))return 0;
- if(message==WM_APP+91&&m_mediaChangesPending){
-  if(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&!HfvDeviceWait::busy()){
-   m_mediaChangesPending=m_browserSession&&m_browserSession->MacBrowser().ApplyMediaChanges();
-   if(!m_mediaChangesPending)KillTimer(9203);
-  }
-  return 0;
- }
  if(message==our_child_registration)OnChildRegistration(wParam,lParam);
 	return CFrameWnd::WindowProc(message, wParam, lParam);
 }
