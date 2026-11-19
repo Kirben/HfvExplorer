@@ -9,9 +9,10 @@ struct Container {
     uint32_t blockSize;
     std::array<uint8_t,16> uuid;
     std::vector<uint64_t> volumes;
+    uint64_t checkpointBlock=0;
 };
 
-// Locate and validate the block-zero superblock of a raw or GPT APFS image.
+// Locate an APFS container and validate its latest complete contiguous checkpoint.
 std::optional<Container> Probe(HfsPlus::Source&);
 uint64_t ObjectChecksum(const HfsPlus::Bytes&);
 }

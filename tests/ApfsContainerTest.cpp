@@ -60,6 +60,31 @@ Memory Raw(unsigned blockSize=4096)
     Seal(disk.bytes,0,blockSize);
     return disk;
 }
+Memory WithCheckpoints()
+{
+    constexpr size_t size=4096;
+    auto disk=Raw();
+    auto bytes=disk.bytes.data();
+    Little(bytes+104,8,4);Little(bytes+108,8,4);
+    Little(bytes+112,1,8);Little(bytes+120,20,8);
+    Seal(disk.bytes,0,size);
+    const auto checkpoint=[&](unsigned mapSlot,unsigned superSlot,uint64_t transaction){
+        auto map=bytes+(mapSlot+1)*size;
+        Little(map+8,mapSlot+1,8);Little(map+16,transaction,8);Little(map+24,0x4000000c,4);
+        Little(map+32,1,4);Little(map+36,1,4);
+        Little(map+48,size,4);Little(map+64,800,8);Little(map+72,20,8);
+        Seal(disk.bytes,(mapSlot+1)*size,size);
+        auto super=bytes+(superSlot+1)*size;
+        memcpy(super,bytes,size);
+        Little(super+16,transaction,8);Little(super+136,mapSlot,4);Little(super+140,2,4);
+        Little(super+148,1,4);
+        Seal(disk.bytes,(superSlot+1)*size,size);
+    };
+    checkpoint(3,4,6);
+    checkpoint(7,0,7);
+    return disk;
+}
+
 Memory Gpt(const Memory& raw,unsigned sector)
 {
     const size_t start=1024*1024;
@@ -123,6 +148,17 @@ int RunApfsContainerTest(const char* directory)
             gpt.bytes[gpt.bytes.size()-sector+16]^=1;
             Reject([&]{Apfs::Probe(gpt);},"APFS probe ignored an invalid GPT backup");
         }
+        auto ring=WithCheckpoints();
+        auto checkpoint=Apfs::Probe(ring);
+        Check(checkpoint&&checkpoint->transaction==7&&checkpoint->checkpointBlock==1,
+              "Newest APFS checkpoint across the ring boundary was not selected");
+        ring.bytes[8*4096+64]^=1;
+        checkpoint=Apfs::Probe(ring);
+        Check(checkpoint&&checkpoint->transaction==6&&checkpoint->checkpointBlock==5,
+              "Incomplete newest APFS checkpoint did not fall back to the previous checkpoint");
+        ring.bytes[4*4096+64]^=1;
+        Reject([&]{Apfs::Probe(ring);},"Container with no complete checkpoint was accepted");
+        fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
         const auto path=VolumeCoord::Wide(root+"raw.img");
         {
             auto image=CreateFormatOutput(path.c_str(),disk.Size());
