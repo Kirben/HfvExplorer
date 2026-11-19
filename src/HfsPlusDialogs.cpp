@@ -9,6 +9,7 @@
 #include "StorageJobDialog.h"
 #include "ImageSize.h"
 #include "MfsImage.h"
+#include <algorithm>
 #include <commdlg.h>
 namespace {
 std::u16string U16(const std::wstring &s) { return std::u16string(s.begin(), s.end()); }
@@ -57,10 +58,12 @@ class NameDialog : public CDialog {
   public:
     std::wstring value;
     bool caseSensitive = false;
+    bool windows = false;
     explicit NameDialog(CWnd *p) : CDialog(IDD_HPLUS_NAME, p) {}
     BOOL OnInitDialog() override {
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd, IDC_HPLUS_NAME);
+        if(windows)SetWindowText("Rename");
         SetDlgItemTextW(m_hWnd, IDC_HPLUS_NAME, value.c_str());
         SendDlgItemMessage(IDC_HPLUS_NAME, EM_SETLIMITTEXT, 255);
         return TRUE;
@@ -68,7 +71,12 @@ class NameDialog : public CDialog {
     void OnOK() override {
         value = Text(m_hWnd, IDC_HPLUS_NAME);
         try {
-            HfsPlus::Normalize(U16(value), caseSensitive);
+            if(windows){
+                if(value.empty()||value==L"."||value==L".."||value.back()==L'.'||value.back()==L' '||
+                   value.find_first_of(L"<>:\"/\\|?*")!=value.npos||
+                   std::any_of(value.begin(),value.end(),[](wchar_t c){return c<32;}))
+                    throw HfsPlus::Error("Enter a valid Windows filename.");
+            }else HfsPlus::Normalize(U16(value), caseSensitive);
             CDialog::OnOK();
         } catch (const std::exception &e) {
             AfxMessageBox(e.what());
@@ -131,6 +139,10 @@ class FormatDialog : public CDialog {
 } // namespace
 bool SelectHfsPlusExternalJournal(CWnd* owner,std::wstring& path,const std::string& prompt){auto title=std::wstring(prompt.begin(),prompt.end());return FileDialog(owner->m_hWnd,path,false,L"External journal disk images\0*.img;*.dsk\0All files\0*.*\0\0",L"img",title.c_str());}
 void HfvUnicodeNameEdit(HWND parent,int id){UnicodeEdit(parent,id);}
+bool EditWindowsName(CWnd *parent, std::wstring &name) {
+ NameDialog dialog(parent);dialog.value=name;dialog.windows=true;
+ if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
+}
 bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
  NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;

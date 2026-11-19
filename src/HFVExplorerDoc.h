@@ -105,12 +105,13 @@ protected: // create from serialization only
 
     bool prepare_classic_browser_row(hfs_item_type*,CatDataRec*,int,BrowserDirectory::Row&);
     BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr);
-    BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&,std::optional<DWORD> expectedSerial={});
+    BrowserDirectory::Snapshot read_windows_browser_directory(int,const std::wstring&,bool,Storage::Job&,std::optional<DWORD> expectedSerial={});
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
     bool NavigateStartupDirectory(const std::string& path,bool mac);
     bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     void PublishClassicFolder(int index, uint32_t id, const std::string& path,
                               const BrowserDirectory::Snapshot&);
+    bool NavigateWindowsFolder(int index, const std::wstring& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&);
     void CopyNavigationIcons(BrowserDirectory::Snapshot&);

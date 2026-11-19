@@ -25,33 +25,24 @@ public:
  void progress(const std::string& path,bool force=false){
   if(job_.cancelled())throw Storage::Cancelled();
   DWORD now=GetTickCount();if(!force&&now-last_<100)return;last_=now;
-  Storage::Progress p;p.utf8=bool(request_.location.native);p.phase="Finding files";p.path=path;p.detail=std::to_string(output_.checked)+" entries checked; "+std::to_string(output_.hits.size())+" matches";job_.progress(p);
+  Storage::Progress p;p.utf8=output_.utf8;p.phase="Finding files";p.path=path;p.detail=std::to_string(output_.checked)+" entries checked; "+std::to_string(output_.hits.size())+" matches";job_.progress(p);
  }
  bool hit(const std::string& name,const std::string& parent,const std::string& full,bool folder,unsigned long long bytes,uint32_t parentId=0,uint32_t id=0){
   ++output_.checked;progress(parent);
   if((!folder||request_.includeFolders)&&FindNameMatches(name,request_.pattern,request_.caseSensitive)){
    if(output_.hits.size()>=request_.limit){output_.truncated=true;return false;}
    FindHit result{name,parent,full,bytes,folder};
-   if(request_.location.mac){
-    auto origin=request_.location.origin.IsClassic()?request_.location.origin:
-        FileOperations::Location::Classic(request_.location.volume,parent);
-    result.destination=origin;
-    result.destination.SetClassic(origin.ClassicImage(),parent);
-    result.reveal=origin;
-    result.reveal.SetClassic(origin.ClassicImage(),full);
-    result.destination.expectedCatalogId=parentId;
-    result.reveal.expectedCatalogId=id;
-    if(origin.MediaGenerationKnown()){
-     result.destination.BindMediaGeneration(origin.MediaGeneration());
-     result.reveal.BindMediaGeneration(origin.MediaGeneration());
-    }
-   }else{
-    result.destination=FileOperations::Location::Windows(VolumeCoord::Wide(parent));
-    result.reveal=FileOperations::Location::Windows(VolumeCoord::Wide(full));
-    result.destination.BindWindowsMediaSerial(windowsMediaSerial_);
-    result.reveal.BindWindowsMediaSerial(windowsMediaSerial_);
-    try{result.reveal.expectedIdentity=MacBrowser::DescribeWindowsFile(result.reveal.WindowsPath()).identity;}
-    catch(const std::exception&){++output_.unreadable;return true;}
+   const auto origin=request_.location.origin.IsClassic()?request_.location.origin:
+       FileOperations::Location::Classic(request_.location.volume,parent);
+   result.destination=origin;
+   result.destination.SetClassic(origin.ClassicImage(),parent);
+   result.reveal=origin;
+   result.reveal.SetClassic(origin.ClassicImage(),full);
+   result.destination.expectedCatalogId=parentId;
+   result.reveal.expectedCatalogId=id;
+   if(origin.MediaGenerationKnown()){
+    result.destination.BindMediaGeneration(origin.MediaGeneration());
+    result.reveal.BindMediaGeneration(origin.MediaGeneration());
    }
    result.destination.directory=true;
    result.reveal.directory=folder;
@@ -124,40 +115,61 @@ public:
   }
  }
  void windows(){
-  const std::string root=request_.location.directory;
-  auto media=FileOperations::Location::Windows(VolumeCoord::Wide(root));
+  output_.utf8=true;
+  const auto root=request_.location.origin.IsWindows()?request_.location.origin.WindowsPath():
+      VolumeCoord::Wide(request_.location.directory);
+  auto media=FileOperations::Location::Windows(root);
   if(request_.location.checkWindowsMedia){
-   windowsMediaSerial_=StorageLocation::WindowsSerial(media.WindowsPath());
+   windowsMediaSerial_=StorageLocation::WindowsSerial(root);
    if(!windowsMediaSerial_)throw Storage::MediaChanged("Cannot identify the Windows search media.");
    media.BindWindowsMediaSerial(windowsMediaSerial_);
   }
-  DWORD attributes=GetFileAttributesA(root.c_str());
+  const auto attributes=GetFileAttributesW(BrowserPresentation::WindowsPath(root).c_str());
   if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The selected search location is not an accessible Windows folder");
-  std::vector<Folder> pending={{root,0,0}};
+  const auto utf8=[](const std::wstring& text){return BrowserPresentation::Utf8(MacBrowser::U16(text));};
+  const auto pattern=BrowserPresentation::FromUtf8(request_.pattern);
+  struct WindowsFolder {std::wstring path;unsigned depth;};
+  std::vector<WindowsFolder> pending={{root,0}};
   while(!pending.empty()){
-   Folder folder=std::move(pending.back());pending.pop_back();progress(folder.path,true);
-   std::string prefix=folder.path+(folder.path.back()=='\\'?"":"\\"),mask=prefix+"*";
-   if(mask.size()>=MAX_PATH)throw std::runtime_error("A Windows search path exceeds the supported length");
-   WIN32_FIND_DATAA entry={};HANDLE handle=FindFirstFileA(mask.c_str(),&entry);
+   auto folder=std::move(pending.back());pending.pop_back();
+   const auto parent=utf8(folder.path);
+   progress(parent,true);
+   auto prefix=folder.path;
+   if(prefix.back()!=L'\\'&&prefix.back()!=L'/')prefix+=L'\\';
+   const auto mask=BrowserPresentation::WindowsPath(prefix+L"*");
+   WIN32_FIND_DATAW entry={};HANDLE handle=FindFirstFileW(mask.c_str(),&entry);
    if(handle==INVALID_HANDLE_VALUE){
     DWORD error=GetLastError();if(error==ERROR_FILE_NOT_FOUND)continue;
     if(folder.depth==0)throw std::runtime_error("Could not enumerate the selected Windows folder (Windows error "+std::to_string(error)+")");
     ++output_.unreadable;continue;
    }
    struct Close{HANDLE value;~Close(){FindClose(value);}} close={handle};
-   for(;;){
-    if(strcmp(entry.cFileName,".")&&strcmp(entry.cFileName,"..")){
-     bool isDirectory=(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;std::string full=prefix+entry.cFileName;
-     if(full.size()>=MAX_PATH)throw std::runtime_error("Search stopped because a Windows path exceeds the supported length");
-     unsigned long long size=(static_cast<unsigned long long>(entry.nFileSizeHigh)<<32)|entry.nFileSizeLow;
-     if(!hit(entry.cFileName,folder.path,full,isDirectory,isDirectory?0:size)){
-      StorageLocation::ValidateMedia(media);
-      return;
-     }
-     if(isDirectory&&request_.recursive&&!(entry.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))queued(pending,{full,folder.depth+1,0});
+   do {
+    const std::wstring name=entry.cFileName;
+    if(name==L"."||name==L"..")continue;
+    ++output_.checked;progress(parent);
+    const bool isDirectory=(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
+    const auto full=prefix+name;
+    if((!isDirectory||request_.includeFolders)&&FindNameMatches(name,pattern,request_.caseSensitive)){
+     if(output_.hits.size()>=request_.limit){output_.truncated=true;StorageLocation::ValidateMedia(media);return;}
+     const auto size=(uint64_t(entry.nFileSizeHigh)<<32)|entry.nFileSizeLow;
+     FindHit hit{utf8(name),parent,utf8(full),isDirectory?0:size,isDirectory};
+     hit.destination=FileOperations::Location::Windows(folder.path);
+     hit.destination.BindWindowsMediaSerial(windowsMediaSerial_);
+     hit.destination.directory=true;
+     hit.reveal=FileOperations::Location::Windows(full);
+     hit.reveal.BindWindowsMediaSerial(windowsMediaSerial_);
+     hit.reveal.directory=isDirectory;
+     try{hit.reveal.expectedIdentity=MacBrowser::DescribeWindowsFile(full).identity;}
+     catch(const std::exception&){++output_.unreadable;}
+     if(!hit.reveal.expectedIdentity.empty())output_.hits.push_back(std::move(hit));
     }
-    if(!FindNextFileA(handle,&entry)){DWORD error=GetLastError();if(error!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed (Windows error "+std::to_string(error)+")");break;}
-   }
+    if(isDirectory&&request_.recursive&&!(entry.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){
+     if(folder.depth>=128||pending.size()>=100000)throw std::runtime_error("Search folder limit reached");
+     pending.push_back({full,folder.depth+1});
+    }
+   }while(FindNextFileW(handle,&entry));
+   if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed (Windows error "+std::to_string(GetLastError())+")");
   }
   StorageLocation::ValidateMedia(media);
  }
@@ -192,14 +204,14 @@ bool FindNameMatches(std::string name,std::string pattern,bool caseSensitive){
 }
 std::function<Storage::Result(Storage::Job&)> MakeFindFilesJob(FindRequest request,std::shared_ptr<FindResults> results){
  return [=](Storage::Job& job)->Storage::Result {
-  if(!results||request.pattern.empty()||request.pattern.size()>(request.location.native?1020:255)||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
+  if(!results||request.pattern.empty()||request.pattern.size()>(request.location.UsesUnicode()?1020:255)||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
   if(job.cancelled())throw Storage::Cancelled();
   *results={};Search search(request,*results,job);
   try{if(request.location.native)search.native();else if(request.location.mac)search.mac();else search.windows();}
   catch(const Storage::Cancelled&){throw;}
   catch(const Storage::MediaChanged& error){return {1,ERROR_MEDIA_CHANGED,error.what()};}
   catch(const std::exception& error){return {1,ERROR_READ_FAULT,error.what()};}
-  std::sort(results->hits.begin(),results->hits.end(),[](const FindHit& a,const FindHit& b){int compared=_stricmp(a.name.c_str(),b.name.c_str());return compared?compared<0:a.path<b.path;});
+  std::sort(results->hits.begin(),results->hits.end(),[&](const FindHit& a,const FindHit& b){int compared=results->utf8?_wcsicmp(BrowserPresentation::FromUtf8(a.name).c_str(),BrowserPresentation::FromUtf8(b.name).c_str()):_stricmp(a.name.c_str(),b.name.c_str());return compared?compared<0:a.path<b.path;});
   search.progress(request.location.directory,true);return {};
  };
 }

@@ -25,7 +25,7 @@ extern "C" {
 void HFSIFACE_get_dir_flush(void);
 
 }
-extern int DeleteHostSelectionJob(const CString&,bool,Storage::Job*);
+extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
 namespace FileOperations {
 struct Operation::State {mutable std::mutex mutex;Completion completion;};
 struct Registry {
@@ -45,7 +45,6 @@ void MarkChild(Completion& c,const Location& folder,const std::u16string& name){
 void Cancel(Storage::Job& job){if(job.cancelled())throw Storage::Cancelled();}
 std::u16string Ansi(const std::string& s){int n=MultiByteToWideChar(CP_ACP,0,s.data(),int(s.size()),nullptr,0);std::wstring w(n,0);if(n)MultiByteToWideChar(CP_ACP,0,s.data(),int(s.size()),&w[0],n);return U16(w);}
 std::string Utf8(const std::u16string& text){auto w=Wide(text);int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);std::string out(n,0);if(n)WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),&out[0],n,nullptr,nullptr);return out;}
-bool Absolute(const std::string& p){return p.size()>=3&&((isalpha((unsigned char)p[0])&&p[1]==':'&&p[2]=='\\')||(p[0]=='\\'&&p[1]=='\\'));}
 std::pair<std::shared_ptr<Volume>,uint32_t> Source(const Location& value,bool mutate=false){
  auto entry=StorageLocation::ResolveEntry(value,mutate);
  return {std::move(entry.volume),entry.id};
@@ -182,11 +181,9 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
    if(item.IsClassic())WriteWithMedia(item,mutate);else mutate();
   }else if(item.IsWindows()){
    auto source=Source(item,true);Cancel(job);source.first->Close();
-   std::string path; // ANSI legacy path is retained verbatim.
-   int n=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.WindowsPath().c_str(),-1,nullptr,0,nullptr,nullptr);std::vector<char> converted(n);BOOL lost=FALSE;if(n)WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,item.WindowsPath().c_str(),-1,converted.data(),n,nullptr,&lost);Check(n&&!lost,"Windows path cannot be represented by the legacy backend");path=converted.data();Check(Absolute(path),"Use an absolute Windows path");
    Mark(completion,item);
    if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,rename->name);
-   }else if(!DeleteHostSelectionJob(CString(path.c_str()),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
+   }else if(!DeleteHostSelectionJob(item.WindowsPath(),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }
   ++completion.completed;++progress.files;job.progress(progress);
  }

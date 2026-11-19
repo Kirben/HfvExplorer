@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "VolumeCoordinator.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "DeviceWait.h"
@@ -230,6 +231,39 @@ HTREEITEM HFVExplorerTreeView::tree_fat_insert(
 	ins.item.state = 0;
 	ins.item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_TEXT | TVIF_PARAM;
 	return( m_ct->InsertItem( &ins ) );
+}
+
+HTREEITEM HFVExplorerTreeView::FindWindowsFolder(HTREEITEM root,const std::wstring& path)
+{
+ if(!root)return nullptr;
+ const auto* folder=BrowserFolderAt(root);
+ const auto* binding=reinterpret_cast<const lparam_struct*>(m_ct->GetItemData(root));
+ if(!binding||binding->type!=LIST_FAT)return nullptr;
+ auto existing=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(binding->path);
+ while(existing.size()>3&&existing.back()==L'\\')existing.pop_back();
+ if(!_wcsicmp(path.c_str(),existing.c_str()))return root;
+ if(existing.empty()||existing.size()>=path.size()||_wcsnicmp(path.c_str(),existing.c_str(),existing.size())||
+    (existing.back()!=L'\\'&&path[existing.size()]!=L'\\'))return nullptr;
+ for(auto child=m_ct->GetChildItem(root);child;child=m_ct->GetNextSiblingItem(child))
+  if(auto found=FindWindowsFolder(child,path))return found;
+ return nullptr;
+}
+
+HTREEITEM HFVExplorerTreeView::InsertWindowsFolder(HTREEITEM parent,int volume,const std::wstring& name,
+    const FileOperations::Location& location,bool writable)
+{
+ if(auto found=FindWindowsFolder(parent,location.WindowsPath()))return found;
+ TVINSERTSTRUCTW item{};
+ item.hParent=parent;
+ item.hInsertAfter=TVI_SORT;
+ item.item.mask=TVIF_IMAGE|TVIF_SELECTEDIMAGE|TVIF_TEXT|TVIF_PARAM;
+ item.item.iImage=item.item.iSelectedImage=11;
+ item.item.pszText=const_cast<wchar_t*>(name.c_str());
+ CStringA legacy(location.WindowsPath().c_str());
+ item.item.lParam=make_lparam(LIST_FAT,volume,0,const_cast<char*>(legacy.GetString()));
+ auto child=reinterpret_cast<HTREEITEM>(SendMessageW(m_ct->m_hWnd,TVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item)));
+ if(child)BindBrowserFolder(child,{location,writable});
+ return child;
 }
 
 void HFVExplorerTreeView::select_by_id( HTREEITEM root_item, int volinx, unsigned long id )
@@ -655,7 +689,9 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 						volinx = get_lparam_volinx( dw );
 						if(volinx >= 0) {
 							auto doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
-                            if(!doc->NavigateWindowsFolder(volinx,path))
+                            const auto* folder=BrowserFolderAt(hItem);
+                            const auto wide=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(path);
+                            if(!doc->NavigateWindowsFolder(volinx,wide))
                                 doc->open_fat_directory(volinx,path,1);
 
 						}

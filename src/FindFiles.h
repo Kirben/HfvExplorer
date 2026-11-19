@@ -4,7 +4,7 @@
 #include "FileLocation.h"
 #include <vector>
 namespace MacBrowser {class Volume;}
-struct FindLocation {bool mac=false;std::string volume,directory,root;int volumeIndex=-1;std::shared_ptr<MacBrowser::Volume> native;uint32_t nativeFolder=2;std::vector<uint32_t> nativePath;FileOperations::Location origin;bool checkWindowsMedia=false;};
+struct FindLocation {bool mac=false;std::string volume,directory,root;int volumeIndex=-1;std::shared_ptr<MacBrowser::Volume> native;uint32_t nativeFolder=2;std::vector<uint32_t> nativePath;FileOperations::Location origin;bool checkWindowsMedia=false; std::wstring windowsRoot; bool UsesUnicode() const { return native || !mac; }};
 struct FindRequest {FindLocation location;std::string pattern;bool recursive=true,caseSensitive=false,includeFolders=false;unsigned limit=10000;};
 struct FindHit {std::string name,parent,path;unsigned long long bytes=0;bool folder=false;std::vector<uint32_t> nativePath;
  FileOperations::Location destination, reveal;

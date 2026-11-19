@@ -63,7 +63,7 @@ std::wstring BrowserSession::WindowTitle()const{return locationTitle_.empty()?L"
 void BrowserSession::SetLocationTitle(std::wstring title){
  locationTitle_=std::move(title);UpdateWindowTitle();
 }
-std::string BrowserSession::ObservedWindowsKey(const std::string& path)const{return current_.type==LIST_FAT&&!_stricmp(current_.path.c_str(),path.c_str())?current_.key:std::string();}
+std::string BrowserSession::ObservedWindowsKey(const std::wstring& path)const{return current_.type==LIST_FAT&&!_wcsicmp(current_.windowsPath.c_str(),path.c_str())?current_.key:std::string();}
 void BrowserSession::ClearCurrent(){CancelNavigation();if(preview_)preview_->Clear();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::UsesAsyncNavigation() const
 {
@@ -122,7 +122,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
         current_.key==request.resource &&
         (request.folder.IsMounted()?current_.folder==request.folder.Id():
          request.folder.IsClassic()?current_.folder==request.folder.expectedCatalogId:
-         !_wcsicmp(VolumeCoord::Wide(current_.path).c_str(),request.folder.WindowsPath().c_str()))) {
+         !_wcsicmp(current_.windowsPath.c_str(),request.folder.WindowsPath().c_str()))) {
         auto& control=list_->GetListCtrl();
         for(int index=-1;(index=control.GetNextItem(index,LVNI_SELECTED))>=0;)
             if(const auto row=list_->BrowserRowAt(index);row&&!row->location.IsNone())
@@ -212,7 +212,7 @@ bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)
         request.resource=request.folder.expectedResource;
         return document_->NavigateClassicFolder(legacyVolume,request.folder.expectedCatalogId,false,&request);
     }
-    const auto path=request.folder.LegacyPath();
+    const auto& path=request.folder.WindowsPath();
     return document_->NavigateWindowsFolder(legacyVolume,path,false,&request);
 }
 
@@ -344,19 +344,20 @@ void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot
             list_->SortBrowserRows(FIELD_NAME, true);
         else
             list_->do_report_sort();
-        Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path);
+        Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path, snapshot.folderPath);
         if(preview_)preview_->RequestSelection();
     }
 }
 
-void BrowserSession::Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder,std::string path){
+void BrowserSession::Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder,std::string path,std::wstring windowsPath){
  if(document_&&index>=0&&((type==LIST_FAT&&index<document_->m_fat_count)||(type==LIST_HFS&&index<document_->m_hfs_count))){
   auto& known=roots_[key];auto found=std::find_if(known.begin(),known.end(),[&](const KnownRoot& r){return r.type==type&&r.index==index;});
   std::string origin=type==LIST_FAT?(LPCSTR)document_->m_fats[index].m_volume_name:(LPCSTR)document_->m_volumes[index].m_file_name;
   if(found==known.end())known.push_back({type,index,origin});else found->origin=origin;
  }
- current_={key,std::move(path),revision,type,index,folder};
- if(type==LIST_FAT||type==LIST_HFS){auto title=VolumeCoord::Wide(current_.path);if(type==LIST_HFS&&!title.empty()&&title.back()==L':')title.pop_back();SetLocationTitle(std::move(title));}
+ if(type==LIST_FAT&&windowsPath.empty())windowsPath=VolumeCoord::Wide(path);
+ current_={key,std::move(path),revision,type,index,folder,std::move(windowsPath)};
+ if(type==LIST_FAT||type==LIST_HFS){auto title=type==LIST_FAT?current_.windowsPath:VolumeCoord::Wide(current_.path);if(type==LIST_HFS&&!title.empty()&&title.back()==L':')title.pop_back();SetLocationTitle(std::move(title));}
  Watch(key);seen_[key]=(std::max)(seen_[key],revision);
  if(dirty_[key]<=revision)dirty_.erase(key);
  // Close the subscribe-after-read race without acknowledging a newer write.
@@ -400,13 +401,14 @@ void BrowserSession::RefreshLegacy(const Context& context){
  if(UsesAsyncNavigation()){
   auto item=tree_->GetTreeCtrl().GetSelectedItem();
   auto binding=item?reinterpret_cast<lparam_struct*>(tree_->GetTreeCtrl().GetItemData(item)):nullptr;
+  const auto* folder=tree_->BrowserFolderAt(item);
   if(!binding||binding->type!=context.type||binding->volinx!=context.index||
      (context.type==LIST_HFS&&uint32_t(binding->id)!=context.folder)||
-     (context.type==LIST_FAT&&_stricmp(binding->path,context.path.c_str())))return;
+     (context.type==LIST_FAT&&_wcsicmp(folder&&folder->location.IsWindows()?folder->location.WindowsPath().c_str():VolumeCoord::Wide(binding->path).c_str(),context.windowsPath.c_str())))return;
  }
  if(context.index<0||(context.type==LIST_FAT?context.index>=document_->m_fat_count:context.index>=document_->m_hfs_count))throw std::runtime_error("The volume is no longer attached");
  if(context.type==LIST_FAT){
-  if(document_->NavigateWindowsFolder(context.index,context.path,true))return;
+  if(document_->NavigateWindowsFolder(context.index,context.windowsPath,true))return;
   std::string path=context.path;auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Browse}});for(;;){DWORD a=GetFileAttributesA(path.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_DIRECTORY))break;DWORD error=GetLastError();if(error!=ERROR_PATH_NOT_FOUND&&error!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("The Windows folder is unavailable");auto slash=path.find_last_of('\\');if(slash==2&&path[1]==':'){path.resize(3);continue;}if(slash==path.npos||slash<3)throw std::runtime_error("The Windows folder no longer exists");path.resize(slash);}return Storage::Result{};},!owner_->IsWindowVisible(),owner_);
   if(result.code)throw std::runtime_error(result.message);
   auto item=tree_->tree_find_fat(document_->m_fats[context.index].m_rootitem,const_cast<char*>(path.c_str()));if(!item)item=document_->m_fats[context.index].m_rootitem;
