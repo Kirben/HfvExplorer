@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "DmgImage.h"
+#include "SparseDisk.h"
 #include "DmgEncryption.h"
 #include "NdifImage.h"
 #include "HfsPlusDisk.h"
@@ -314,9 +315,11 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
     return CommandStorage::Guard(std::move(access),[&](Storage::Job& current){
         auto input=HfsPlus::OpenImage(source.c_str(),false);
         const bool encrypted=Unlock(input,password);
-        const bool dmg=Unwrap(input);
-        const bool ndif=!dmg&&!encrypted&&Ndif::Unwrap(input,&current);
-        Check(format!=Output::RawImage||dmg||encrypted||ndif,"The input does not contain a DMG or NDIF disk image");
+        const bool sparse=SparseDisk::Unwrap(input);
+        const bool dmg=!sparse&&Unwrap(input);
+        const bool ndif=!sparse&&!dmg&&!encrypted&&Ndif::Unwrap(input,&current);
+        Check(format!=Output::RawImage||sparse||dmg||encrypted||ndif,
+              "The input does not contain a supported disk image container");
         auto output=HfsPlus::CreateStagedOutput(destination,512);
         output->Resize(0);
         Storage::Progress progress;

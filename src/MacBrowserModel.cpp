@@ -9,6 +9,7 @@
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
+#include "SparseDisk.h"
 #include "NdifImage.h"
 #include "ApfsVolume.h"
 #include "DiskPartitions.h"
@@ -336,7 +337,7 @@ std::shared_ptr<Volume> OpenLegacyDmgVolume(const std::shared_ptr<HfsPlus::Sourc
     return {};
 }
 
-std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
+std::shared_ptr<Volume> OpenReadOnlyImage(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
                                 const std::wstring& externalJournal,const char* unsupported="The DMG contains no supported filesystem")
 {
     if(HfsPlus::Volume::Recognizes(*source))
@@ -445,10 +446,12 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
     const bool encrypted=Dmg::Unlock(source,password);
-    if(Dmg::Unwrap(source)||encrypted)return OpenDmg(std::move(source),key,externalJournal);
+    if(SparseDisk::Unwrap(source))
+        return OpenReadOnlyImage(std::move(source),key,externalJournal,"The sparse image contains no supported filesystem");
+    if(Dmg::Unwrap(source)||encrypted)return OpenReadOnlyImage(std::move(source),key,externalJournal);
     if(externalJournal.empty()&&Ndif::Unwrap(source)){
         const auto selected=FindNdifVolume(*source);
-        if(!selected)return OpenDmg(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
+        if(!selected)return OpenReadOnlyImage(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
         source.reset();
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},selected->format));
         try{source=HfsPlus::OpenImage(path.c_str(),true);}
