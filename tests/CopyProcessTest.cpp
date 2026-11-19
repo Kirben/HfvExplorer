@@ -214,6 +214,55 @@ void TestVolumeSessionProtocol()
            "accepted an invalid compression method");
 }
 
+void TestMetadataPolicies(const std::shared_ptr<Volume>& volume,uint32_t id,bool temporary)
+{
+    const auto item=Native(volume,id);
+    const auto key=volume->ResourceKey();
+    const auto baseline=volume->GetAttributes(id);
+    Request inspect=InspectProperties{item};
+    inspect.background=true;
+    const auto readPlan=InspectPlanForTest(inspect,key);
+    Check(readPlan.read&&!readPlan.write&&!readPlan.temporaryWorker,"Properties should use a shared read lease");
+
+    auto desired=baseline;
+    desired[u"user.metadata-policy"]={5,7,9};
+    Request edit=EditAttributes{item,baseline,desired};
+    edit.background=true;
+    const auto writePlan=InspectPlanForTest(edit,key);
+    Check(!writePlan.read&&writePlan.write&&writePlan.temporaryWorker==temporary,"metadata edit reserved the wrong route or access");
+    CopyProcess::lastProcess=0;
+    std::optional<Operation> editing;
+    {
+        VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});
+        editing=Submit(edit);
+        auto reading=Submit(inspect);
+        Wait(reading);
+        Check(!reading.Job()->result().code&&reading.Snapshot().complete&&
+              reading.Snapshot().attributes==baseline&&!editing->Job()->done(),
+              "a metadata read should finish while an edit waits for the shared lease");
+    }
+    Wait(*editing);
+    Check(!editing->Job()->result().code&&editing->Snapshot().complete&&
+          bool(CopyProcess::lastProcess.load())==temporary&&volume->GetAttributes(id)==desired,
+          "metadata edit did not use its prepared route");
+
+    CopyProcess::lastProcess=0;
+    auto stale=Submit(edit);
+    Wait(stale);
+    Check(stale.Job()->result().code&&stale.Snapshot().affected.empty()&&
+          bool(CopyProcess::lastProcess.load())==temporary&&volume->GetAttributes(id)==desired,
+          "stale metadata edit reached storage or bypassed its expected route");
+    auto selection=item;
+    selection.expectedName=u"Obsolete name";
+    Request staleSelection=EditAttributes{selection,desired,baseline};
+    staleSelection.background=true;
+    auto rejected=Submit(staleSelection);
+    Wait(rejected);
+    Check(rejected.Job()->result().code&&rejected.Snapshot().affected.empty()&&volume->GetAttributes(id)==desired,
+          "metadata edit rebound a stale selection");
+    volume->SetAttributes(id,baseline);
+}
+
 void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstring& folder) {
     Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"mounted fork fixture directory");
     const auto pid=VolumeSession::VolumeSessionPidForTest(image);
@@ -588,6 +637,7 @@ int RunCopyProcessTest(const char *directory) {
               "worker directory traversal");
         Verify(*target, child.id);
         Check(target->GetAttributes(child.id) == attrs, "worker attributes");
+        TestMetadataPolicies(target,child.id,true);
         {
             const auto path=Wide(root+"\\interrupted-stream.dsk");
             {
@@ -597,6 +647,8 @@ int RunCopyProcessTest(const char *directory) {
             auto mounted=OpenBrowserImage(path);
             const auto id=Put(*mounted,2,u"Both forks");
             mounted->SetAttributes(id,attrs);
+            TestMetadataPolicies(mounted,id,false);
+            fprintf(report,"PASS: Properties shares a read lease, edits wait for write access, and both metadata routes reject stale edits and selections.\n");
             const auto pid=VolumeSession::VolumeSessionPidForTest(mounted);
             Check(pid!=0,"interrupted Put fixture requires a persistent worker");
             const auto original=mounted->Stat(id);

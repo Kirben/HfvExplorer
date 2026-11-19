@@ -104,10 +104,19 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  return true;
 }
 enum class ExecutionRoute { Local, TemporaryWorker };
+struct MetadataPlan {
+ // The immutable request owns this location and the handler's typed payload.
+ const Location* item;
+ VolumeCoord::Mode access;
+ bool temporaryForUnmounted;
+ bool includeCompanion;
+ std::function<void(Storage::Job&,Completion&)> execute;
+};
 struct ExecutionPlan {
  ExecutionRoute route=ExecutionRoute::Local;
  std::vector<VolumeCoord::Access> resources;
  std::vector<MacBrowser::ForkSource> copySources;
+ std::optional<MetadataPlan> metadata;
 };
 
 struct TransferPlan {
@@ -257,67 +266,249 @@ bool SameProperties(const hfsdirent& a,const hfsdirent& b){
  if(a.flags&HFS_ISDIR)return a.u.dir.valence==b.u.dir.valence&&a.u.dir.rect.top==b.u.dir.rect.top&&a.u.dir.rect.left==b.u.dir.rect.left&&a.u.dir.rect.bottom==b.u.dir.rect.bottom&&a.u.dir.rect.right==b.u.dir.rect.right;
  return a.u.file.dsize==b.u.file.dsize&&a.u.file.rsize==b.u.file.rsize&&!memcmp(a.u.file.type,b.u.file.type,4)&&!memcmp(a.u.file.creator,b.u.file.creator,4);
 }
-Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& completion){
- const auto* metadata = request.Metadata();
- const auto* folder = request.Get<CreateFolder>();
- Storage::Progress p;p.phase=request.OperationKind()==Kind::Inspect?"Reading properties":request.OperationKind()==Kind::CreateFolder?"Creating folder":"Updating properties";p.utf8=true;if(folder)p.path=Utf8(folder->name);if(metadata)if(auto* input=std::get_if<ImportAttributeValue>(metadata))p.path=Utf8(input->name);job.progress(p);
- if(auto* input=metadata?std::get_if<ImportAttributeValue>(metadata):nullptr){
-  auto source=Source(input->item);auto e=source.first->Stat(source.second);Check(!e.directory,"Attribute value must be a file");
-  auto bytes=HfsPlus::AttributeData::Snapshot(e.forks[0].size,[&](uint64_t at,void* p,size_t n){Cancel(job);source.first->Read(source.second,0,at,p,n);});Cancel(job);completion.attributes[input->name]=std::move(bytes);
- }else if(auto* output=metadata?std::get_if<ExportAttributeValue>(metadata):nullptr){
-  const auto& bytes=output->value;const auto& path=output->item.WindowsPath();HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create attribute output; choose a new filename");Mark(completion,output->item);
-  try{HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<bytes.size();){Cancel(job);auto n=size_t((std::min)(uint64_t(buffer.size()),bytes.size()-at));bytes.Read(at,buffer.data(),n);DWORD written=0;if(!WriteFile(file,buffer.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Attribute export write failed");at+=n;}Cancel(job);if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");CloseHandle(file);}catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
- }else if(folder){
-  const auto& item=folder->parent;
-  if(item.Volume()){auto source=Source(item);auto e=source.first->Stat(source.second);Cancel(job);Check(e.directory&&source.first->Supports().create&&source.first->Supports().createFolders&&(e.id==2||!e.protectedFile),"Cannot create a folder here");MarkChild(completion,item,folder->name);source.first->MakeDirectory(source.second,folder->name);}
-  else if(item.IsWindows()){StorageLocation::ValidateMedia(item);auto volume=OpenWindows(item.WindowsPath());auto e=volume->Stat(2);StorageLocation::ValidateFolderIdentity(item,e);Cancel(job);MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();}
-  else{Check(item.IsClassic(),"Invalid folder destination");StorageLocation::ValidateImage(VolumeCoord::Wide(item.ClassicImage()),item.expectedResource);WriteWithMedia(item,[&]{auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);auto e=volume->Stat(2);Cancel(job);Check(e.directory,"Destination is not a folder");if(item.expectedCatalogId)Check(e.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");MarkChild(completion,item,folder->name);volume->MakeDirectory(2,folder->name);volume->Close();});}
- }else{
-  const auto& item=std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);
-  const bool editingClassic=std::holds_alternative<EditClassicProperties>(*metadata);
-  auto update=[&]{
-  auto source=Source(item,item.IsClassic()&&editingClassic);completion.entry=source.first->Stat(source.second);completion.description=source.first->Description();completion.writable=source.first->Writable();completion.supportsAttributes=source.first->SupportsAttributes();completion.basicMetadata=source.first->SupportsBasicMetadata();completion.supportsCompression=source.first->SupportsCompression();
-  if(completion.supportsAttributes)completion.attributes=source.first->GetAttributes(source.second);Cancel(job);
-  if(auto* edit=std::get_if<ChangeCompression>(metadata)){
-   Check(completion.supportsCompression&&completion.writable,"This volume cannot change compression");auto& now=completion.entry;auto& old=edit->original;
-   Check(now.id==old.id&&now.parent==old.parent&&now.name==old.name&&now.modified==old.modified&&now.created==old.created&&now.finder==old.finder&&now.compressed==old.compressed&&now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size&&completion.attributes==edit->originalAttributes,"The file changed while Properties was open; reopen Properties");
-   Cancel(job);Mark(completion,item);p.phase=edit->method!=HfsPlus::Volume::CompressionMode::Uncompressed?"Compressing file":"Decompressing file";p.path=Utf8(now.name);p.byteTransfer=true;p.scanning=false;p.totalBytes=now.forks[0].size+now.forks[1].size;
-   source.first->SetCompressionMethod(source.second,edit->method,[&](uint64_t done,uint64_t total){Cancel(job);p.processed=p.bytes=done;p.totalBytes=total;job.progress(p);});completion.entry=source.first->Stat(source.second);
-  }
-  if(auto* edit=std::get_if<EditBasicMetadata>(metadata)){
-   Check(completion.basicMetadata&&completion.writable,"This format has no writable basic metadata editor");auto& now=completion.entry;auto& old=edit->original;
-   Check(now.id==old.id&&now.name==old.name&&now.version==old.version&&now.finder==old.finder&&now.created==old.created&&now.modified==old.modified&&now.protectedFile==old.protectedFile&&now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size,"Properties changed while the editor was open; reopen Properties");Cancel(job);Mark(completion,item);source.first->SetBasicMetadata(source.second,edit->desired);completion.entry=edit->desired;
-  }
-  if(auto* edit=std::get_if<EditAttributes>(metadata)){Check(completion.supportsAttributes&&completion.writable,"This item cannot store extended attributes");Check(completion.attributes==edit->original,"Attributes changed while Properties was open; reopen Properties before saving");Cancel(job);Mark(completion,item);source.first->SetAttributes(source.second,edit->desired);completion.attributes=edit->desired;}
+void MetadataProgress(Storage::Job& job,const char* phase,const std::u16string& name={})
+{
+ Storage::Progress progress;
+ progress.phase=phase;
+ progress.utf8=true;
+ if(!name.empty())progress.path=Utf8(name);
+ job.progress(progress);
+}
 
-  completion.classicProperties=source.first->GetClassicProperties(source.second,completion.properties);
-  if(completion.classicProperties&&item.IsClassic()&&!editingClassic)
-   completion.writable=IsFloppy(item)||(!item.IsPhysical()&&
-       (GetFileAttributesA(item.ClassicImage().c_str())&FILE_ATTRIBUTE_READONLY)==0);
-  if(auto* edit=std::get_if<EditClassicProperties>(metadata)){
-   Check(completion.classicProperties && completion.writable,"This item does not expose writable classic Finder properties");
-   auto current=completion.properties;
-   Check(!item.expectedCatalogId||uint32_t(current.cnid)==item.expectedCatalogId,"The selected HFS entry was replaced");Cancel(job);
-   auto changed=current;
-   if(auto* label=std::get_if<FinderLabel>(&edit->change)){Check(label->value>=0&&label->value<=7,"Invalid Finder label");changed.fdflags=short((changed.fdflags&~14)|(label->value<<1));}
-   else if(auto* position=std::get_if<FinderPosition>(&edit->change)){changed.fdlocation.h=position->x;changed.fdlocation.v=position->y;changed.fdflags&=~HFS_FNDR_HASBEENINITED;}
-   else{const auto& properties=std::get<ClassicPropertyEdit>(edit->change);Check(SameProperties(current,properties.original),"Properties changed while the editor was open; reopen Properties before applying changes");changed=properties.desired;
-    Check(changed.cnid==current.cnid&&changed.parid==current.parid&&((changed.flags^current.flags)&HFS_ISDIR)==0,"Catalog identity and item kind cannot be changed");
-    if(!(current.flags&HFS_ISDIR))Check(changed.u.file.dsize==current.u.file.dsize&&changed.u.file.rsize==current.u.file.rsize,"Fork lengths cannot be changed through Properties");
+std::pair<std::shared_ptr<Volume>,uint32_t> ReadProperties(const Location& item,bool editingClassic,
+                                                         Storage::Job& job,Completion& result)
+{
+ auto source=Source(item,item.IsClassic()&&editingClassic);
+ auto& [volume,id]=source;
+ result.entry=volume->Stat(id);
+ result.description=volume->Description();
+ result.writable=volume->Writable();
+ result.supportsAttributes=volume->SupportsAttributes();
+ result.basicMetadata=volume->SupportsBasicMetadata();
+ result.supportsCompression=volume->SupportsCompression();
+ if(result.supportsAttributes)result.attributes=volume->GetAttributes(id);
+ Cancel(job);
+ return source;
+}
+
+void ReadClassicProperties(const Location& item,Volume& volume,uint32_t id,bool editing,Completion& result)
+{
+ result.classicProperties=volume.GetClassicProperties(id,result.properties);
+ if(result.classicProperties&&item.IsClassic()&&!editing)
+  result.writable=IsFloppy(item)||(!item.IsPhysical()&&
+      (GetFileAttributesA(item.ClassicImage().c_str())&FILE_ATTRIBUTE_READONLY)==0);
+}
+
+using VolumeCoord::Mode;
+MetadataPlan ReadMetadata(const Location& item,std::function<void(Storage::Job&,Completion&)> execute)
+{
+ return {&item,Mode::Read,false,true,std::move(execute)};
+}
+MetadataPlan EditMetadata(const Location& item,std::function<void(Storage::Job&,Completion&)> execute)
+{
+ return {&item,Mode::Write,true,true,std::move(execute)};
+}
+
+MetadataPlan DescribeMetadata(const InspectProperties& inspect)
+{
+ return ReadMetadata(inspect.item,[&inspect](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Reading properties");
+  auto [volume,id]=ReadProperties(inspect.item,false,job,result);
+  ReadClassicProperties(inspect.item,*volume,id,false,result);
+ });
+}
+
+MetadataPlan DescribeMetadata(const ImportAttributeValue& input)
+{
+ Check(!input.name.empty(),"Enter an attribute name");
+ return ReadMetadata(input.item,[&input](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Updating properties",input.name);
+  auto [volume,id]=Source(input.item);
+  const auto entry=volume->Stat(id);
+  Check(!entry.directory,"Attribute value must be a file");
+  auto bytes=HfsPlus::AttributeData::Snapshot(entry.forks[0].size,[&](uint64_t at,void* out,size_t count){
+   Cancel(job);
+   volume->Read(id,0,at,out,count);
+  });
+  Cancel(job);
+  result.attributes[input.name]=std::move(bytes);
+ });
+}
+
+MetadataPlan DescribeMetadata(const ExportAttributeValue& output)
+{
+ Check(output.item.IsWindows(),"Choose a Windows output filename");
+ // Attribute data is a standalone export and never creates a companion file.
+ return {&output.item,Mode::Write,false,false,[&output](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Updating properties");
+  const auto& bytes=output.value;
+  const auto& path=output.item.WindowsPath();
+  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+  if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create attribute output; choose a new filename");
+  Mark(result,output.item);
+  try{
+   HfsPlus::Bytes buffer(65536);
+   for(uint64_t offset=0;offset<bytes.size();){
+    Cancel(job);
+    const auto count=size_t((std::min)(uint64_t(buffer.size()),bytes.size()-offset));
+    bytes.Read(offset,buffer.data(),count);
+    DWORD written=0;
+    if(!WriteFile(file,buffer.data(),DWORD(count),&written,nullptr)||written!=count)
+     throw Failure(GetLastError(),"Attribute export write failed");
+    offset+=count;
    }
    Cancel(job);
-   Mark(completion,item);
-   source.first->SetClassicProperties(source.second,changed);
+   if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");
+   CloseHandle(file);
+  }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
+ }};
+}
+
+MetadataPlan DescribeMetadata(const EditBasicMetadata& edit)
+{
+ return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Updating properties");
+  auto [volume,id]=ReadProperties(edit.item,false,job,result);
+  Check(result.basicMetadata&&result.writable,"This format has no writable basic metadata editor");
+  const auto& now=result.entry;
+  const auto& old=edit.original;
+  Check(now.id==old.id&&now.name==old.name&&now.version==old.version&&now.finder==old.finder&&
+        now.created==old.created&&now.modified==old.modified&&now.protectedFile==old.protectedFile&&
+        now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size,
+        "Properties changed while the editor was open; reopen Properties");
+  Cancel(job);
+  Mark(result,edit.item);
+  volume->SetBasicMetadata(id,edit.desired);
+  result.entry=edit.desired;
+  ReadClassicProperties(edit.item,*volume,id,false,result);
+ });
+}
+
+MetadataPlan DescribeMetadata(const EditAttributes& edit)
+{
+ return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Updating properties");
+  auto [volume,id]=ReadProperties(edit.item,false,job,result);
+  Check(result.supportsAttributes&&result.writable,"This item cannot store extended attributes");
+  Check(result.attributes==edit.original,"Attributes changed while Properties was open; reopen Properties before saving");
+  Cancel(job);
+  Mark(result,edit.item);
+  volume->SetAttributes(id,edit.desired);
+  result.attributes=edit.desired;
+  ReadClassicProperties(edit.item,*volume,id,false,result);
+ });
+}
+
+MetadataPlan DescribeMetadata(const ChangeCompression& edit)
+{
+ return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Updating properties");
+  auto [volume,id]=ReadProperties(edit.item,false,job,result);
+  Check(result.supportsCompression&&result.writable,"This volume cannot change compression");
+  const auto& now=result.entry;
+  const auto& old=edit.original;
+  Check(now.id==old.id&&now.parent==old.parent&&now.name==old.name&&now.modified==old.modified&&
+        now.created==old.created&&now.finder==old.finder&&now.compressed==old.compressed&&
+        now.forks[0].size==old.forks[0].size&&now.forks[1].size==old.forks[1].size&&
+        result.attributes==edit.originalAttributes,
+        "The file changed while Properties was open; reopen Properties");
+  Cancel(job);
+  Mark(result,edit.item);
+  Storage::Progress progress;
+  progress.phase=edit.method!=HfsPlus::Volume::CompressionMode::Uncompressed?"Compressing file":"Decompressing file";
+  progress.path=Utf8(now.name);
+  progress.utf8=progress.byteTransfer=true;
+  progress.scanning=false;
+  progress.totalBytes=now.forks[0].size+now.forks[1].size;
+  volume->SetCompressionMethod(id,edit.method,[&](uint64_t done,uint64_t total){
+   Cancel(job);
+   progress.processed=progress.bytes=done;
+   progress.totalBytes=total;
+   job.progress(progress);
+  });
+  result.entry=volume->Stat(id);
+  ReadClassicProperties(edit.item,*volume,id,false,result);
+ });
+}
+
+MetadataPlan DescribeMetadata(const EditClassicProperties& edit)
+{
+ return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
+  MetadataProgress(job,"Updating properties");
+  const auto& item=edit.item;
+  auto update=[&]{
+   auto [volume,id]=ReadProperties(item,true,job,result);
+   ReadClassicProperties(item,*volume,id,true,result);
+   Check(result.classicProperties&&result.writable,"This item does not expose writable classic Finder properties");
+   const auto current=result.properties;
+   Check(!item.expectedCatalogId||uint32_t(current.cnid)==item.expectedCatalogId,"The selected HFS entry was replaced");
+   Cancel(job);
+   auto changed=current;
+   if(auto* label=std::get_if<FinderLabel>(&edit.change)){
+    Check(label->value>=0&&label->value<=7,"Invalid Finder label");
+    changed.fdflags=short((changed.fdflags&~14)|(label->value<<1));
+   }else if(auto* position=std::get_if<FinderPosition>(&edit.change)){
+    changed.fdlocation.h=position->x;
+    changed.fdlocation.v=position->y;
+    changed.fdflags&=~HFS_FNDR_HASBEENINITED;
+   }else{
+    const auto& properties=std::get<ClassicPropertyEdit>(edit.change);
+    Check(SameProperties(current,properties.original),"Properties changed while the editor was open; reopen Properties before applying changes");
+    changed=properties.desired;
+    Check(changed.cnid==current.cnid&&changed.parid==current.parid&&((changed.flags^current.flags)&HFS_ISDIR)==0,
+          "Catalog identity and item kind cannot be changed");
+    if(!(current.flags&HFS_ISDIR))
+     Check(changed.u.file.dsize==current.u.file.dsize&&changed.u.file.rsize==current.u.file.rsize,
+           "Fork lengths cannot be changed through Properties");
+   }
+   Cancel(job);
+   Mark(result,item);
+   volume->SetClassicProperties(id,changed);
    Storage::OutcomeEvidence::NoteRetainedChange();
-   if(item.IsClassic())source.first->Close();
-  }
+   if(item.IsClassic())volume->Close();
   };
-  if(item.IsClassic()&&editingClassic)
-   WriteWithMedia(item,update);
-  else
-   update();
+  if(item.IsClassic())WriteWithMedia(item,update);
+  else update();
+ });
+}
+
+Storage::Result MakeFolder(const CreateFolder& folder,Storage::Job& job,Completion& completion)
+{
+ MetadataProgress(job,"Creating folder",folder.name);
+ const auto& item=folder.parent;
+ if(item.Volume()){
+  auto [volume,id]=Source(item);
+  const auto entry=volume->Stat(id);
+  Cancel(job);
+  Check(entry.directory&&volume->Supports().create&&volume->Supports().createFolders&&
+        (entry.id==2||!entry.protectedFile),"Cannot create a folder here");
+  MarkChild(completion,item,folder.name);
+  volume->MakeDirectory(id,folder.name);
+ }else if(item.IsWindows()){
+  StorageLocation::ValidateMedia(item);
+  auto volume=OpenWindows(item.WindowsPath());
+  StorageLocation::ValidateFolderIdentity(item,volume->Stat(2));
+  Cancel(job);
+  MarkChild(completion,item,folder.name);
+  volume->MakeDirectory(2,folder.name);
+  volume->Close();
+ }else{
+  Check(item.IsClassic(),"Invalid folder destination");
+  StorageLocation::ValidateImage(VolumeCoord::Wide(item.ClassicImage()),item.expectedResource);
+  WriteWithMedia(item,[&]{
+   auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);
+   const auto entry=volume->Stat(2);
+   Cancel(job);
+   Check(entry.directory,"Destination is not a folder");
+   if(item.expectedCatalogId)Check(entry.resolvedId==item.expectedCatalogId,"The destination HFS folder was replaced");
+   MarkChild(completion,item,folder.name);
+   volume->MakeDirectory(2,folder.name);
+   volume->Close();
+  });
  }
- completion.complete=true;completion.completed=1;return {};
+ completion.complete=true;
+ completion.completed=1;
+ return {};
 }
 std::string Resource(const Location& item){return item.ResourceKey();}
 void AddPath(std::vector<VolumeCoord::Access>& access,const std::wstring& path,VolumeCoord::Mode mode,bool companion=true){access.push_back({VolumeCoord::PathKey(path),mode});if(companion)access.push_back({VolumeCoord::PathKey(CompanionPath(path)),mode});}
@@ -342,15 +533,6 @@ void ValidateRequest(const Request& r){
   Check(!deletion->selection.empty(), "Select entries to delete");
   for (const auto& item : deletion->selection)
    Check(!item.IsNone(), "No source file location was supplied");
-  return;
- }
- if (const auto* metadata = r.Metadata()) {
-  const auto& item = std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);
-  Check(!item.IsNone(), "Choose a location for the metadata operation");
-  if (std::holds_alternative<ExportAttributeValue>(*metadata))
-   Check(item.IsWindows(), "Choose a Windows output filename");
-  if (auto* input = std::get_if<ImportAttributeValue>(metadata))
-   Check(!input->name.empty(), "Enter an attribute name");
   return;
  }
  if (const auto* copy = r.Get<OrdinaryCopy>()) {
@@ -390,7 +572,7 @@ bool ConvertsWithMountedClassic(const LegacyConversion& conversion)
            (IsMountedClassic(conversion.source)&&conversion.destination.IsWindows());
 }
 
-ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
+ExecutionRoute SelectRoute(const Request& request,const MetadataPlan* metadata,bool inWorker) {
     if (inWorker) return ExecutionRoute::Local;
 #ifdef HFV_TESTING
     if (!CopyProcess::enabled)
@@ -420,19 +602,15 @@ ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
         std::all_of(deletion->selection.begin(),deletion->selection.end(),persistent)) return ExecutionRoute::Local;
     if(auto* folder=request.Get<CreateFolder>(); folder&&persistent(folder->parent)) return ExecutionRoute::Local;
     if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&persistent(link->source)&&persistent(link->parent)) return ExecutionRoute::Local;
-    if(auto* metadata=request.Metadata()) {
-        if(auto* edit=std::get_if<EditBasicMetadata>(metadata); edit && persistent(edit->item)) return ExecutionRoute::Local;
-        if(auto* edit=std::get_if<EditClassicProperties>(metadata); edit && persistent(edit->item)) return ExecutionRoute::Local;
-        if(auto* attrs=std::get_if<EditAttributes>(metadata); attrs&&persistent(attrs->item)) return ExecutionRoute::Local;
-        if(auto* compression=std::get_if<ChangeCompression>(metadata);
-            compression&&persistent(compression->item)) return ExecutionRoute::Local;
-    }
+    if(metadata)return metadata->temporaryForUnmounted&&!persistent(*metadata->item)
+        ?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local;
     return CopyWorkerProtocol::SupportsOperation(request.OperationKind()) ? ExecutionRoute::TemporaryWorker : ExecutionRoute::Local;
 }
 // Windows path identities can change while a job is queued. Refresh only
 // the bindings at execution, using the same route and lease policy.
-std::vector<VolumeCoord::Access> BindResources(const Request& request, ExecutionRoute route){
- const bool handoff=route==ExecutionRoute::TemporaryWorker;
+std::vector<VolumeCoord::Access> BindResources(const Request& request,const ExecutionPlan& plan)
+{
+ const bool handoff=plan.route==ExecutionRoute::TemporaryWorker;
  using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
  auto reserveMutation = [&](const Location& item) {
   auto path = HostPath(item);
@@ -467,14 +645,12 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request, Execution
    access.push_back({conversion.destination.ResourceKey(),Mode::Write});
   return access;
  }
- if (const auto* metadata = request.Metadata()) {
-  const auto& item = std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);
-  const auto kind = request.OperationKind();
-  const bool read = kind == Kind::Inspect || kind == Kind::ReadAttributeFile;
-  auto path = HostPath(item);
-  auto mode = read ? Mode::Read : Mode::Write;
-  if (path.empty()) access.push_back({Resource(item), read && request.background ? Mode::Write : mode});
-  else AddPath(access, path, mode, kind != Kind::ExportAttribute);
+ if(plan.metadata){
+  const auto& metadata=*plan.metadata;
+  const auto& item=*metadata.item;
+  const auto path=HostPath(item);
+  if(path.empty())access.push_back({Resource(item),metadata.access});
+  else AddPath(access,path,metadata.access,metadata.includeCompanion);
   return access;
  }
  auto reserve = [&](const Location& item, Mode mode, bool companions = true) {
@@ -520,10 +696,16 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request, Execution
 }
 
 ExecutionPlan PlanOperation(const Request& request, bool inWorker=false){
- ValidateRequest(request);
- const auto route=SelectRoute(request,inWorker);
- ExecutionPlan plan{route,BindResources(request,route),{}};
- if(const auto* copy=request.Get<OrdinaryCopy>();copy&&route==ExecutionRoute::Local){
+ ExecutionPlan plan;
+ if(const auto* metadata=request.Metadata()){
+  plan.metadata=std::visit([](const auto& operation){
+   Check(!operation.item.IsNone(),"Choose a location for the metadata operation");
+   return DescribeMetadata(operation);
+  },*metadata);
+ }else ValidateRequest(request);
+ plan.route=SelectRoute(request,plan.metadata?&*plan.metadata:nullptr,inWorker);
+ plan.resources=BindResources(request,plan);
+ if(const auto* copy=request.Get<OrdinaryCopy>();copy&&plan.route==ExecutionRoute::Local){
   plan.copySources.reserve(copy->sources.size());
   for(const auto& source:copy->sources)
    plan.copySources.push_back(VolumeSession::SharesMountedImage(source,copy->destination)
@@ -688,7 +870,26 @@ Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage
  HfsPlus::AttributeReadScope attributeReads([&]{Cancel(job);});Cancel(job);
  Cancel(job);
  if(const auto* link=request.Get<CreateHardLink>()){auto source=Source(link->source);auto target=Destination(link->parent);Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&source.first->ResourceKey()==target.first->ResourceKey(),"Hard links require the same writable HFS+/HFSX volume");Cancel(job);Mark(completion,link->source);MarkChild(completion,link->parent,link->name);Storage::Progress progress;progress.scanning=false;progress.phase="Creating hard link";progress.totalFiles=1;job.progress(progress);target.first->MakeHardLink(source.second,target.second,link->name);progress.files=1;job.progress(progress);completion.complete=true;completion.completed=1;return {};}
- if(request.OperationKind()==Kind::CreateFolder||request.Metadata())return Metadata(request,job,completion);
+ if(plan.metadata){
+  const auto started=GetTickCount64();
+  for(;;){
+   Cancel(job);
+   try{
+    plan.metadata->execute(job,completion);
+    break;
+   }catch(const VolumeCoord::Busy&){
+    // A shared lease excludes writes, but some local engines can briefly
+    // reject a second reader while servicing a browser catalog call.
+    if(plan.metadata->access!=Mode::Read||GetTickCount64()-started>=2000)throw;
+    completion={};
+    Sleep(10);
+   }
+  }
+  completion.complete=true;
+  completion.completed=1;
+  return {};
+ }
+ if(const auto* folder=request.Get<CreateFolder>())return MakeFolder(*folder,job,completion);
  if(const auto* operation=request.Get<OrdinaryCopy>())return RunTransfer({*operation,{}},plan.copySources,job,completion);
  if(const auto* operation=request.Get<ExportFileFork>())return ExportFork(*operation,job,completion);
  if(const auto* operation=request.Get<ImportResourceFork>())return ReplaceResource(*operation,job,completion);
@@ -877,7 +1078,7 @@ class PreparedOperation {
   LegacyEngine::Scope engine;
   // Bind again while keeping the queued reservation. The executor still
   // checks the typed selection identities before changing any entry.
-  const auto current=BindResources(request_,route);
+  const auto current=BindResources(request_,plan_);
   VolumeCoord::OperationLease executionAccess(current);
   if(route==ExecutionRoute::Local)
    return FileOperations::Execute(request_,plan_,job,completion);
