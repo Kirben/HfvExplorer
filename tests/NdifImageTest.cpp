@@ -411,6 +411,47 @@ int RunNdifImageTest(const char* directory)
         auto mfsFile=HfsPlus::OpenImage(mfsPath.c_str(),false);
         RdWrCase(root,Disk::Read(*mfsFile,0,size_t(mfsFile->Size())),"MFS",true);
         fprintf(report,"PASS: HFS+, HFS and MFS in-place NDIF edits, exclusive writers, wrapper preservation and failed overwrite recovery.\n");
+        const auto partitionCase=[&](const char* name,HfsPlus::Source& source,bool readOnly){
+            const size_t start=readOnly?0:4096;
+            Bytes disk(start+size_t(source.Size()));
+            source.Read(0,disk.data()+start,size_t(source.Size()));
+            P16(disk.data(),0x4552);P16(disk.data()+2,512);
+            auto map=disk.data()+512;
+            P16(map,0x504d);P32(map+4,1);
+            P32(map+8,uint32_t(start/512));P32(map+12,uint32_t(source.Size()/512));
+            memcpy(map+48,"Apple_HFS",9);
+            const auto path=Save(root+name+".bin",Pack(disk,Resource(Map(uint32_t(disk.size()/512),0))));
+            {
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&volume->Writable()!=readOnly,"NDIF ignored partition write boundaries");
+                MacBrowser::Entry file;file.name=u"Inside Partition";file.forks[0].size=4;
+                const auto put=[&]{
+                    return volume->Put(2,file,[](unsigned,uint64_t at,void* bytes,size_t length){
+                        memcpy(bytes,"APM!"+size_t(at),length);
+                    },false);
+                };
+                if(readOnly)Reject(put,"NDIF allowed a write into the partition map");
+                else put();
+            }
+            if(!readOnly){
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                MacBrowser::Entry entry;
+                Check(volume->FindChild(2,u"Inside Partition",entry)&&entry.forks[0].size==4,
+                      "Partitioned NDIF edit did not persist");
+                char data[4];
+                volume->Read(entry.id,0,0,data,sizeof(data));
+                Check(!memcmp(data,"APM!",4),"Partitioned NDIF wrote the wrong data");
+            }
+            auto encoded=HfsPlus::OpenImage(path.c_str(),false);
+            Check(Ndif::Unwrap(encoded),"NDIF edit damaged its wrapper");
+            const auto count=readOnly?disk.size():start;
+            const auto unchanged=Disk::Read(*encoded,0,count);
+            Check(std::equal(unchanged.begin(),unchanged.end(),disk.begin()),"NDIF modified bytes outside its writable partition");
+        };
+        partitionCase("partitioned-classic",*classicFile,false);
+        partitionCase("partitioned-mfs",*mfsFile,false);
+        partitionCase("protected-partition",*mfsFile,true);
+        fprintf(report,"PASS: validated APM classic HFS and MFS partitions for NDIF writes, with map protection.\n");
         const auto sectors=uint32_t(raw->Size()/512);
         const auto rdwrMap=Resource(Map(sectors,0));
         const auto appleSingle=Save(root+"editable.as",Apple(volumeBytes,rdwrMap,true,true));

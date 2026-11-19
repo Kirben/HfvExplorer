@@ -303,23 +303,28 @@ public:
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
 };
 
-class ReadOnlyDiskSlice final : public HfsPlus::Source {
+class DiskSlice final : public HfsPlus::Source {
     std::shared_ptr<HfsPlus::Source> disk_;
     const uint64_t start_,size_;
+    const bool write_;
 public:
-    ReadOnlyDiskSlice(std::shared_ptr<HfsPlus::Source> disk,uint64_t start,uint64_t size)
-        :disk_(std::move(disk)),start_(start),size_(size){}
+    DiskSlice(std::shared_ptr<HfsPlus::Source> disk,uint64_t start,uint64_t size,bool write=false)
+        :disk_(std::move(disk)),start_(start),size_(size),write_(write){}
     uint64_t Size()const override{return size_;}
-    bool Writable()const override{return false;}
+    bool Writable()const override{return write_&&disk_->Writable();}
     bool ProcessLocal()const override{return disk_->ProcessLocal();}
     void CheckMedia()override{disk_->CheckMedia();}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return disk_->WorkerFiles();}
     void Read(uint64_t at,void* bytes,size_t count)override{
-        Check(HfsPlus::Disk::Range(at,count,size_),"Read outside the DMG partition");
+        Check(HfsPlus::Disk::Range(at,count,size_),"Read outside the disk partition");
         disk_->Read(start_+at,bytes,count);
     }
-    void Write(uint64_t,const void*,size_t)override{throw HfsPlus::Error("DMG images are read-only");}
-    void Flush()override{}
+    void Write(uint64_t at,const void* bytes,size_t count)override{
+        Check(Writable(),"The disk partition is read-only");
+        Check(HfsPlus::Disk::Range(at,count,size_),"Write outside the disk partition");
+        disk_->Write(start_+at,bytes,count);
+    }
+    void Flush()override{if(Writable())disk_->Flush();}
 };
 
 std::shared_ptr<Volume> OpenLegacyDmgVolume(const std::shared_ptr<HfsPlus::Source>& source,const std::string& key)
@@ -345,12 +350,12 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
         if(!partitions)partitions=DiskPartitions::ProbeApm(*disk,boot);
         if(partitions){
             for(const auto& partition:*partitions){
-                auto slice=std::make_shared<ReadOnlyDiskSlice>(disk,partition.offset,partition.length);
+                auto slice=std::make_shared<DiskSlice>(disk,partition.offset,partition.length);
                 if(auto legacy=OpenLegacyDmgVolume(slice,key))return legacy;
             }
         }else if(auto legacy=OpenLegacyDmgVolume(disk,key))return legacy;
     }
-    std::unique_ptr<HfsPlus::Source> opticalSource=std::make_unique<ReadOnlyDiskSlice>(disk,0,disk->Size());
+    std::unique_ptr<HfsPlus::Source> opticalSource=std::make_unique<DiskSlice>(disk,0,disk->Size());
     if(auto optical=Optical::Open(opticalSource,key))return optical;
     throw HfsPlus::Error(unsupported);
 }
@@ -358,28 +363,54 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
 
 
 // Resolve the filesystem inside an editable image before choosing its worker.
-static std::optional<VolumeSession::ImageFormat> NdifFormat(HfsPlus::Source& source)
+struct NdifVolume {
+    VolumeSession::ImageFormat format;
+    std::optional<DiskPartitions::MacPartition> partition;
+};
+
+static std::optional<NdifVolume> FindNdifVolume(HfsPlus::Source& source)
 {
     using F=VolumeSession::ImageFormat;
+    using namespace HfsPlus::Disk;
     if(!Ndif::IsEditable(source))return {};
-    if(HfsPlus::Volume::Recognizes(source))return F::NdifHfsPlus;
-    if(source.Size()>=1536){
-        const auto magic=HfsPlus::Disk::U16(HfsPlus::Disk::Read(source,1024,2).data());
+    if(HfsPlus::Volume::Recognizes(source))return NdifVolume{F::NdifHfsPlus,{}};
+    const auto legacy=[&](uint64_t start,uint64_t length)->std::optional<F>{
+        if(length<1536)return {};
+        const auto magic=HfsPlus::Disk::U16(Read(source,start+1024,2).data());
         if(magic==0x4244)return F::NdifClassic;
         if(magic==0xd2d7)return F::NdifMfs;
+        return {};
+    };
+    if(source.Size()>=2048){
+        const auto boot=Read(source,0,512);
+        auto partitions=DiskPartitions::ProbeGptImage(source,boot);
+        if(!partitions)partitions=DiskPartitions::ProbeApm(source,boot);
+        if(partitions){
+            for(const auto& partition:*partitions)
+                if(const auto format=legacy(partition.offset,partition.length))return NdifVolume{*format,partition};
+            return {};
+        }
     }
+    if(const auto format=legacy(0,source.Size()))return NdifVolume{*format,{}};
     return {};
 }
+
 std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source> source,const std::string& key)
 {
-    const auto format=NdifFormat(*source);
-    Check(format.has_value(),"The selected image no longer contains an editable NDIF volume");
-    const bool writable=source->Writable();
-    if(*format==VolumeSession::ImageFormat::NdifHfsPlus)
+    const auto selected=FindNdifVolume(*source);
+    Check(selected.has_value(),"The selected image no longer contains an editable NDIF volume");
+    if(selected->format==VolumeSession::ImageFormat::NdifHfsPlus){
+        const bool writable=source->Writable();
         return FromHfsPlus(std::move(source),writable,key);
-    if(*format==VolumeSession::ImageFormat::NdifClassic)
-        return OpenClassicSource(std::move(source),key,writable,true);
-    return FromMfs(std::make_unique<MfsDiskSource>(std::move(source),!writable),key);
+    }
+    std::shared_ptr<HfsPlus::Source> disk(std::move(source));
+    if(const auto& part=selected->partition)
+        disk=std::make_shared<DiskSlice>(disk,part->offset,part->length,!part->readOnly);
+    if(selected->format==VolumeSession::ImageFormat::NdifClassic){
+        const bool writable=disk->Writable();
+        return OpenClassicSource(std::move(disk),key,writable,true);
+    }
+    return FromMfs(std::make_unique<MfsDiskSource>(std::move(disk),false),key);
 }
 
 static std::shared_ptr<Volume> OpenTrackImages(
@@ -416,14 +447,16 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     const bool encrypted=Dmg::Unlock(source,password);
     if(Dmg::Unwrap(source)||encrypted)return OpenDmg(std::move(source),key,externalJournal);
     if(externalJournal.empty()&&Ndif::Unwrap(source)){
-        const auto format=NdifFormat(*source);
-        if(!format)return OpenDmg(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
+        const auto selected=FindNdifVolume(*source);
+        if(!selected)return OpenDmg(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
         source.reset();
-        if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},*format));
+        if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},selected->format));
         try{source=HfsPlus::OpenImage(path.c_str(),true);}
         catch(const HfsPlus::Error&){source=HfsPlus::OpenImage(path.c_str(),false);}
-        Check(VolumeCoord::ImageKey(path)==key&&Ndif::Unwrap(source)&&NdifFormat(*source)==format,
+        Check(VolumeCoord::ImageKey(path)==key&&Ndif::Unwrap(source),
               "The selected NDIF image changed while it was being opened");
+        const auto reopened=FindNdifVolume(*source);
+        Check(reopened&&reopened->format==selected->format,"The NDIF filesystem changed while it was being opened");
         return OpenEditableNdif(std::move(source),key);
     }
     if(externalJournal.empty())
