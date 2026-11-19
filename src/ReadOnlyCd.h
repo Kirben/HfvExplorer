@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <windows.h>
+#include <cstdint>
 #include "cache.h"
 #include "CdImageToc.h"
 
 // Byte-addressed, read-only view of the first classic HFS volume on a data CD.
-// All device commands are fixed READ(10)/READ CAPACITY(10) commands.
+// Device commands are limited to read operations.
 class ReadOnlyCd {
 public:
     ReadOnlyCd();
@@ -19,6 +20,7 @@ public:
     ULONGLONG ReadBegin()const{return readBegin_;}
     ULONGLONG ReadEnd()const{return readEnd_;}
     bool ReadBytes(ULONGLONG offset, DWORD count, void* buffer);
+    bool ReadRawTrack(const CdMedia::Track&,uint64_t offset,unsigned sectors,void* buffer);
     bool ReadVolume(ULONGLONG offset, DWORD count, void* buffer);
     HANDLE Handle() const { return handle_; }
     bool MediaGeneration(DWORD& out){if(!CheckIdentity()||!identity_)return false;out=generation_;return true;}

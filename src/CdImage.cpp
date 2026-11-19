@@ -16,7 +16,7 @@ public:
   if(!cd_.OpenDrive(drive)){error_=cd_.Error();reason="Could not open the data CD";return false;}
   DWORD before=0,after=0;
   if(!Verify(before)){reason="Could not establish CD media identity";return false;}
-  auto tracks=DataTracks();if(tracks.empty()){error_=ERROR_NOT_SUPPORTED;reason="The disc has no supported data tracks. Audio extraction is not included.";return false;}
+  auto tracks=DataTracks();if(tracks.empty()){error_=ERROR_NOT_SUPPORTED;reason="The disc has no supported cooked data tracks.";return false;}
   if(!SelectTrack(tracks.back().number,reason))return false;
   if(!Verify(after)){reason="CD media check failed while reading the table of contents";return false;}
   if(before!=after){error_=ERROR_MEDIA_CHANGED;reason="CD media changed while opening";return false;}

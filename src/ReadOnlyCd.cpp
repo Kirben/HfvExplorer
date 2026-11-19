@@ -58,7 +58,7 @@ bool ReadOnlyCd::EnsureScsiHandle() {
     if (fixture_) return false;
     if (scsiHandle_ != INVALID_HANDLE_VALUE) return true;
     // Windows requires both access rights for the pass-through IOCTL. The only
-    // commands issued on this handle are READ CAPACITY(10) and READ(10).
+    // commands issued on this handle are READ CAPACITY(10), READ(10) and READ CD.
     scsiHandle_ = HfvMediaOpen(devicePath_, GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     return scsiHandle_ != INVALID_HANDLE_VALUE;
@@ -88,6 +88,43 @@ bool ReadOnlyCd::ScsiRead(DWORD sector, WORD sectors, void* buffer) {
     if (!sendReadCommand(scsiHandle_, p, buffer, (DWORD)sectors * kSector)) return false;
     passThroughUsed_ = true; return true;
 }
+bool ReadOnlyCd::ReadRawTrack(const CdMedia::Track& track,uint64_t offset,unsigned sectors,void* buffer)
+{
+    using namespace CdMedia;
+    if(!scratch_||!buffer||!sectors||sectors>RawBatch||offset>track.sectors||sectors>track.sectors-offset||
+       track.start>UINT32_MAX||offset>UINT32_MAX-track.start||
+       sectors-1>UINT32_MAX-track.start-offset||
+       std::find(tracks_.begin(),tracks_.end(),track)==tracks_.end()){
+        error_=ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    if(!CheckIdentity())return false;
+    const auto lba=DWORD(track.start+offset);
+    const DWORD bytes=sectors*RawSectorBytes;
+    bool read=false;
+    if(EnsureScsiHandle()){
+        ScsiRequest packet{};
+        packet.request.CdbLength=12;
+        const auto command=RawReadCommand(lba,sectors,!track.data);
+        memcpy(packet.request.Cdb,command.data(),command.size());
+        read=sendReadCommand(scsiHandle_,packet,scratch_,bytes);
+    }
+    if(!read&&!track.data&&!fixture_){
+        RAW_READ_INFO request{};
+        request.DiskOffset.QuadPart=uint64_t(lba)*2048;
+        request.SectorCount=sectors;
+        request.TrackMode=CDDA;
+        DWORD returned=0;
+        read=HfvMediaControl(handle_,IOCTL_CDROM_RAW_READ,&request,sizeof(request),scratch_,bytes,&returned,nullptr);
+        if(read&&returned!=bytes){SetLastError(ERROR_READ_FAULT);read=false;}
+    }
+    if(!read){error_=GetLastError();if(!error_)error_=ERROR_NOT_SUPPORTED;return false;}
+    if(!CheckIdentity())return false;
+    memcpy(buffer,scratch_,bytes);
+    error_=0;
+    return true;
+}
+
 bool ReadOnlyCd::OpenDrive(int drive) {
     Close();
     if (drive < 0 || drive > 25) { error_ = ERROR_INVALID_PARAMETER; return false; }

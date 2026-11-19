@@ -1382,19 +1382,21 @@ BEGIN
  LTEXT "Please wait until the operation finishes.",IDC_STATIC,10,88,250,10
  PUSHBUTTON "Cancel",IDCANCEL,270,84,70,18
 END
-IDD_CD_IMAGE_SOURCE DIALOGEX 0,0,340,124
+IDD_CD_IMAGE_SOURCE DIALOGEX 0,0,340,131
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Dump CD to file"
 FONT 9, "Segoe UI"
 BEGIN
  LTEXT "CD drive:",IDC_STATIC,10,12,55,12
  COMBOBOX IDC_CDI_DRIVE,70,10,70,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
- LTEXT "Image file:",IDC_STATIC,10,40,55,12
- EDITTEXT IDC_CDI_PATH,70,38,190,14,ES_AUTOHSCROLL
- PUSHBUTTON "Browse...",IDC_CDI_BROWSE,270,37,60,16
- LTEXT "Saves a selected data track, including on mixed-mode or multisession discs. Audio tracks are excluded.",IDC_STATIC,10,65,320,24
- DEFPUSHBUTTON "Save image",IDOK,180,98,70,18
- PUSHBUTTON "Cancel",IDCANCEL,260,98,70,18
+ LTEXT "Format:",IDC_STATIC,10,37,55,12
+ COMBOBOX IDC_CDI_FORMAT,70,35,260,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ LTEXT "Output file:",IDC_STATIC,10,61,55,12
+ EDITTEXT IDC_CDI_PATH,70,58,190,14,ES_AUTOHSCROLL | WS_TABSTOP
+ PUSHBUTTON "Browse...",IDC_CDI_BROWSE,270,57,60,16
+ LTEXT "Audio extraction adds a track number to the filename when saving multiple tracks.",IDC_STATIC,10,83,320,18
+ DEFPUSHBUTTON "Save",IDOK,180,105,70,18
+ PUSHBUTTON "Cancel",IDCANCEL,260,105,70,18
 END
 
 IDD_CD_IMAGE_PROGRESS DIALOGEX 0,0,350,112
@@ -1544,11 +1546,11 @@ STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Choose CD data track"
 FONT 9,"Segoe UI"
 BEGIN
- LTEXT "Data track:",IDC_STATIC,10,12,65,12
+ LTEXT "Data track:",IDC_CDI_TRACK_LABEL,10,12,65,12
  COMBOBOX IDC_CDI_TRACK,80,10,260,110,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
  CONTROL "Save Mac volume only (omit other partitions)",IDC_CDI_MAC_ONLY,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,10,40,330,15
- LTEXT "A data-track image preserves its data sectors. A Mac-volume image contains only the Mac filesystem and is easier to reopen independently.",IDC_STATIC,10,65,330,31
- LTEXT "Audio, lead-in/lead-out and session gaps are not included.",IDC_STATIC,10,100,330,12
+ LTEXT "A data-track image preserves its data sectors. A Mac-volume image contains only the Mac filesystem and is easier to reopen independently.",IDC_CDI_TRACK_HINT,10,65,330,31
+ LTEXT "Audio, lead-in/lead-out and session gaps are not included.",IDC_CDI_TRACK_SCOPE,10,100,330,12
  DEFPUSHBUTTON "Save image",IDOK,190,120,70,18
  PUSHBUTTON "Cancel",IDCANCEL,270,120,70,18
 END

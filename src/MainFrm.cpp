@@ -658,7 +658,7 @@ void CMainFrame::OnFileOpenImage()
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return;
  auto& session=GetBrowserSession();
  CFileDialog dialog(TRUE,"DSK",nullptr,OFN_HIDEREADONLY|OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR,
-    "Disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42;*.iso;*.udf;*.dmg|All Files|*.*||",session.Owner());
+    "Disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42;*.iso;*.udf;*.dmg;*.cue;*.bin|All Files|*.*||",session.Owner());
  if(dialog.DoModal()==IDOK)session.Document()->OnOpenDocument(dialog.GetPathName());
 }
 void CMainFrame::OnOpenRecentImage(UINT command)
@@ -850,7 +850,8 @@ void CMainFrame::OnDropFiles(HDROP drop)
            !_wcsicmp(extension.c_str(),L".img")||!_wcsicmp(extension.c_str(),L".image")||
            !_wcsicmp(extension.c_str(),L".mfs")||!_wcsicmp(extension.c_str(),L".dc42")||
            !_wcsicmp(extension.c_str(),L".iso")||!_wcsicmp(extension.c_str(),L".udf")||
-           !_wcsicmp(extension.c_str(),L".dmg"))
+           !_wcsicmp(extension.c_str(),L".dmg")||!_wcsicmp(extension.c_str(),L".cue")||
+           !_wcsicmp(extension.c_str(),L".bin"))
             images.push_back(std::move(path));
     }
     DragFinish(drop);

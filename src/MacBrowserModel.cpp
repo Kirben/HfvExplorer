@@ -6,6 +6,8 @@
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
 #include "OpticalVolume.h"
+#include "CueImage.h"
+#include "HfsPlusDisk.h"
 #include "DmgImage.h"
 #include "DmgEncryption.h"
 #include "BrowserPresentation.h"
@@ -301,12 +303,41 @@ std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const st
 }
 }
 
+static std::shared_ptr<Volume> OpenTrackImages(
+    std::vector<std::unique_ptr<HfsPlus::Source>> tracks,const std::string& key)
+{
+    std::shared_ptr<Volume> optical;
+    std::exception_ptr invalid;
+    for(auto it=tracks.rbegin();it!=tracks.rend();++it){
+        auto& track=*it;
+        try{
+            if(HfsPlus::Volume::Recognizes(*track))
+                return FromHfsPlus(std::move(track),false,key);
+            if(track->Size()>=1536){
+                using namespace HfsPlus::Disk;
+                const auto boot=Read(*track,0,512);
+                const auto mdb=Read(*track,1024,2);
+                if(HfsPlus::Disk::U16(boot.data())==0x4552||HfsPlus::Disk::U16(mdb.data())==0x4244)
+                    return OpenClassicSource(std::move(track),key);
+            }
+            if(!optical)optical=Optical::Open(track,key);
+        }catch(const HfsPlus::Error&){
+            if(!invalid)invalid=std::current_exception();
+        }
+    }
+    if(optical)return optical;
+    if(invalid)std::rethrow_exception(invalid);
+    throw HfsPlus::Error("No supported data filesystem was found in the optical track image");
+}
+
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr) {
     DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
     const bool encrypted=Dmg::Unlock(source,password);
     if(Dmg::Unwrap(source)||encrypted)return OpenDmg(std::move(source),key,externalJournal);
+    if(externalJournal.empty())
+        if(auto tracks=CdMedia::OpenTrackImage(path,source,key))return OpenTrackImages(std::move(*tracks),key);
     if (HfsPlus::Volume::Recognizes(*source)) {
         source.reset();
         if(persistent)

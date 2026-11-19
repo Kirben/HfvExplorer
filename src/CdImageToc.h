@@ -4,14 +4,24 @@
 #include <winioctl.h>
 #include <ntddcdrm.h>
 #include <vector>
+#include <array>
 #include <map>
 #include <string>
 #include <algorithm>
 #include <functional>
 namespace CdMedia {
+constexpr DWORD RawSectorBytes=2352;
+constexpr unsigned RawBatch=16;
+
+// Fixed MMC READ CD command, requesting only the main channel.
+inline std::array<BYTE,12> RawReadCommand(DWORD lba,unsigned sectors,bool audio)
+{
+ return {0xbe,BYTE(audio?4:0),BYTE(lba>>24),BYTE(lba>>16),BYTE(lba>>8),BYTE(lba),
+         BYTE(sectors>>16),BYTE(sectors>>8),BYTE(sectors),BYTE(audio?0x10:0xf8),0,0};
+}
 struct Track {
- unsigned number=1,session=1;unsigned long long start=0,sectors=0;bool data=true;
- bool operator==(const Track& b)const{return number==b.number&&session==b.session&&start==b.start&&sectors==b.sectors&&data==b.data;}
+ unsigned number=1,session=1;unsigned long long start=0,sectors=0;bool data=true;unsigned control=0;
+ bool operator==(const Track& b)const{return number==b.number&&session==b.session&&start==b.start&&sectors==b.sectors&&data==b.data&&control==b.control;}
 };
 inline DWORD Lba(const BYTE* p){return (DWORD(p[0])<<24)|(DWORD(p[1])<<16)|(DWORD(p[2])<<8)|p[3];}
 inline bool MsfLba(const BYTE* p,unsigned long long& lba){if(p[1]>=60||p[2]>=75)return false;auto frames=(static_cast<unsigned long long>(p[0])*60+p[1])*75+p[2];if(frames<150)return false;lba=frames-150;return true;}
@@ -20,7 +30,7 @@ inline bool Basic(const CDROM_TOC& toc,DWORD returned,std::vector<Track>& tracks
  if(returned<FIELD_OFFSET(CDROM_TOC,TrackData)+2*sizeof(TRACK_DATA)||toc.FirstTrack<1||toc.LastTrack>99||toc.LastTrack<toc.FirstTrack)return fail();
  auto count=unsigned(toc.LastTrack-toc.FirstTrack+1);auto needed=FIELD_OFFSET(CDROM_TOC,TrackData)+(count+1)*sizeof(TRACK_DATA);
  unsigned declared=(unsigned(toc.Length[0])<<8)|toc.Length[1];if(returned<needed||(declared&&declared+2!=needed)||toc.TrackData[count].TrackNumber!=0xaa)return fail();
- for(unsigned i=0;i<count;++i){auto& t=toc.TrackData[i];auto start=Lba(t.Address),end=Lba(toc.TrackData[i+1].Address);if(t.TrackNumber!=toc.FirstTrack+i||end<=start)return fail();Track out;out.number=t.TrackNumber;out.start=start;out.sectors=static_cast<unsigned long long>(end)-start;out.data=(t.Control&4)!=0;tracks.push_back(out);}return true;
+ for(unsigned i=0;i<count;++i){auto& t=toc.TrackData[i];auto start=Lba(t.Address),end=Lba(toc.TrackData[i+1].Address);if(t.TrackNumber!=toc.FirstTrack+i||end<=start)return fail();Track out;out.number=t.TrackNumber;out.start=start;out.sectors=static_cast<unsigned long long>(end)-start;out.data=(t.Control&4)!=0;out.control=t.Control;tracks.push_back(out);}return true;
 }
 // Full TOC provides each completed session's lead-out. A next-session track
 // address alone is not a safe end for the previous session's data track.
@@ -33,7 +43,7 @@ inline bool Full(const void* bytes,DWORD returned,std::vector<Track>& tracks,std
   if(d.Point==0xa0){if(s.first||d.Msf[0]<1||d.Msf[0]>99)return fail();s.first=d.Msf[0];}
   else if(d.Point==0xa1){if(s.last||d.Msf[0]<1||d.Msf[0]>99)return fail();s.last=d.Msf[0];}
   else if(d.Point==0xa2){if(s.end||!MsfLba(d.Msf,s.end))return fail();}
-  else if(d.Point>=1&&d.Point<=99){Track t;t.number=d.Point;t.session=d.SessionNumber;t.data=(d.Control&4)!=0;if(!MsfLba(d.Msf,t.start)||!s.tracks.emplace(t.number,t).second)return fail();}
+  else if(d.Point>=1&&d.Point<=99){Track t;t.number=d.Point;t.session=d.SessionNumber;t.data=(d.Control&4)!=0;t.control=d.Control;if(!MsfLba(d.Msf,t.start)||!s.tracks.emplace(t.number,t).second)return fail();}
  }
  unsigned previousTrack=0;unsigned long long previousEnd=0;
  for(unsigned session=p[2];session<=p[3];++session){auto it=sessions.find(session);if(it==sessions.end())return fail();auto& s=it->second;
