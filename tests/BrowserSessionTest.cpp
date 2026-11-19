@@ -239,6 +239,13 @@ int RunBrowserSessionTest(const char* directory){
   Check(b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(a.list,L"First file")>=0&&Find(b.list,L"Second file")>=0,"native mount/row state leaked between sessions");
   auto selected=b.tree.GetTreeCtrl().GetSelectedItem();int row=Find(a.list,L"Folder");Check(a.Session().MacBrowser().Activate(row)&&Find(a.list,L"First child")>=0,"independent folder activation");
   Check(b.tree.GetTreeCtrl().GetSelectedItem()==selected&&Find(b.list,L"Second file")>=0,"navigation changed another window");
+  auto nestedSelection=a.tree.GetTreeCtrl().GetSelectedItem();
+  Check(b.Session().OpenFolderFrom(a.Session(),nestedSelection),"open a mounted folder in another browser");
+  PumpUntil([&]{return !b.Session().Navigating();},"second window did not open the mounted folder");
+  Check(Find(b.list,L"First child")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==nestedSelection&&
+        b.Session().MacBrowser().TargetFolder().Volume()==va,
+        "the second browser did not use the original mount and folder");
+  Check(b.Session().MacBrowser().ShowTestFolder(ib,2),"restore the second browser fixture");
   a.list.m_sorted_by_column=FIELD_SIZE;a.list.m_sort_is_ascending=false;a.Session().finderLayout=true;Check(b.list.m_sorted_by_column==FIELD_NAME&&b.list.m_sort_is_ascending&&!b.Session().finderLayout,"sort/layout state shared between windows");a.Session().finderLayout=false;
   a.list.GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);a.list.GetListCtrl().SetItemState(Find(a.list,L"First child"),LVIS_SELECTED,LVIS_SELECTED);
   Check(a.Session().MacBrowser().Capture(false,false),"capture session A selection");Check(a.Session().MacBrowser().TestClipboardCount()==1&&b.Session().MacBrowser().TestClipboardCount()==1,"shared clipboard lost the captured selection");
@@ -310,6 +317,13 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !session.Navigating();},"Unicode Find did not complete");
    Check(Selected(a.list,L"\u6587\u4ef6.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==folder,
          "Find did not select the Unicode folder and file");
+   const auto selected=a.tree.GetTreeCtrl().GetSelectedItem();
+   b.Windows(wa);
+   Check(b.Session().OpenFolderFrom(session,selected),"open typed Unicode folder in another window");
+   PumpUntil([&]{return !b.Session().Navigating();},"second window did not open the Unicode folder");
+   Check(Find(b.list,L"\u6587\u4ef6.txt")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==selected,
+         "the second window changed the source selection or lost the Unicode folder");
+   b.tree.GetTreeCtrl().SelectItem(b.doc.m_fats[0].m_rootitem);
    a.tree.GetTreeCtrl().SelectItem(a.doc.m_fats[0].m_rootitem);
    Check(DeleteFileW(file.c_str())&&RemoveDirectoryW(folder.c_str()),"clean up Unicode Find fixture");
    fprintf(report,"PASS: Unicode Windows Find opens the matching folder and selects the file.\n");

@@ -5,8 +5,10 @@
 #include "HFVExplorer.h"
 #include "HFVExplorerView.h"
 #include "BrowserSession.h"
+#include "MainMacBrowser.h"
 #include "BrowserLifetime.h"
 #include "DeviceWait.h"
+#include "VolumeCoordinator.h"
 #include <algorithm>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
@@ -75,6 +77,76 @@ void CHFVExplorerApp::ForgetBrowser(CMainFrame* frame){
  if(!m_browsers.empty()){ActivateBrowser(m_browsers.back());return;}
  // Leave m_pMainWnd until WM_NCDESTROY: MFC posts WM_QUIT for the last frame.
 }
+BrowserNavigation::Request BrowserSession::FolderRequest(HTREEITEM item)
+{
+ using namespace BrowserNavigation;
+ Request request{MacBrowser().TargetFolder(item),Intent::SelectFolder,{}};
+ if(request.folder.IsMounted()){
+  request.resource=request.folder.Volume()->ResourceKey();
+  auto& control=Tree()->GetTreeCtrl();
+  for(auto at=item;at;at=control.GetParentItem(at))
+   request.catalogRoute.push_back(MacBrowser().TargetFolder(at).Id());
+  std::reverse(request.catalogRoute.begin(),request.catalogRoute.end());
+ }
+ return request;
+}
+
+bool BrowserSession::OpenFolderFrom(BrowserSession& source,HTREEITEM item)
+{
+ return item&&OpenFolderRequest(source,source.FolderRequest(item));
+}
+
+bool BrowserSession::OpenFolderRequest(BrowserSession& source,BrowserNavigation::Request request)
+{
+ if(!document_||!tree_)return false;
+ using namespace BrowserNavigation;
+ if(request.folder.IsMounted())return MacBrowser().OpenMountedFolderFrom(source.MacBrowser(),request);
+ if(request.folder.IsWindows()){
+  const auto& path=request.folder.WindowsPath();
+  if(path.size()<3||path[1]!=L':')return false;
+  for(int drive=0;drive<document_->m_fat_count;++drive)
+   if(towupper(path[0])==toupper(static_cast<unsigned char>(document_->m_fats[drive].m_letter)))
+    return document_->NavigateWindowsFolder(drive,path,false,&request);
+ }
+ if(request.folder.IsClassic()){
+  const auto image=request.folder.ClassicImage();
+  int index=document_->get_volume_index_by_filename(image.c_str());
+  if(index<0){
+   const bool floppy=request.folder.IsPhysical()&&request.folder.Media()==FileOperations::ClassicMedia::Floppy;
+   const bool cd=request.folder.IsPhysical()&&request.folder.Media()==FileOperations::ClassicMedia::Cd;
+   index=document_->insert_volume(image.c_str(),floppy,cd,0,0);
+   if(index<0)return false;
+  }
+  auto& volume=document_->m_volumes[index];
+  if(!volume.m_rootitem)
+   volume.m_rootitem=tree_->initialize_volume(index,image.c_str(),2,volume.m_is_floppy,volume.m_is_cd,0,0);
+  // Resolve the selected catalog ID in the new window before publishing it.
+  request.intent=Intent::StartupFolder;
+  request.folder.expectedResource=VolumeCoord::ImageKey(image);
+  request.resource=request.folder.expectedResource;
+  return document_->NavigateClassicFolder(index,request.folder.expectedCatalogId,false,&request);
+ }
+ return false;
+}
+
+bool BrowserSession::OpenFolderInNewWindow(HTREEITEM item)
+{
+ if(!item)return false;
+ auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
+ try{
+  auto request=FolderRequest(item);
+  if(request.folder.IsNone())return false;
+  auto* frame=app.CreateBrowser();
+  if(!frame)return false;
+  if(frame->GetBrowserSession().OpenFolderRequest(*this,std::move(request)))return true;
+  frame->GetBrowserSession().RejectNavigation({},"Cannot open the selected folder in this window.");
+ }catch(const std::exception& error){
+  owner_->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
+  return false;
+ }
+ return false;
+}
+
 void CHFVExplorerApp::OnNewBrowser(){CreateBrowser();}
 void CHFVExplorerApp::OnUpdateNewBrowser(CCmdUI* ui){ui->Enable(!StorageUi::busy()&&!StorageUi::state().sessionOpen);}
 CDocument* CHFVExplorerApp::OpenDocumentFile(LPCTSTR path){

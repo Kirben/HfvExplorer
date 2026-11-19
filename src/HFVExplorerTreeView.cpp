@@ -158,7 +158,6 @@ int HFVExplorerTreeView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl )
 
 void HFVExplorerTreeView::destroy_pointers()
 {
-    m_browserFolders.clear();
 	int i, count = m_pointer_array.GetSize();
 	DWORD_PTR dw;
 	lparam_struct *p;
@@ -207,30 +206,6 @@ HTREEITEM HFVExplorerTreeView::tree_insert(
 	// m_ct->SelectItem( h );
 
 	return(hItem);
-}
-
-HTREEITEM HFVExplorerTreeView::tree_fat_insert( 
-	HTREEITEM root, 
-	int volinx, 
-	LPSTR name, 
-	LPSTR fpath )
-{
-	TV_INSERTSTRUCT ins;
-
-	HTREEITEM htree;
-	htree = tree_find_fat( root, fpath );
-	if(htree) return(htree);
-	
-	ins.hParent = root;
-	ins.hInsertAfter = TVI_SORT; // TVI_LAST;
-	ins.item.iImage = 11;
-	ins.item.iSelectedImage = 11;
-	ins.item.pszText = name;
-	ins.item.lParam = make_lparam( LIST_FAT, volinx, 0, fpath );
-	// ins.item.state = TVIS_EXPANDED;
-	ins.item.state = 0;
-	ins.item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_TEXT | TVIF_PARAM;
-	return( m_ct->InsertItem( &ins ) );
 }
 
 HTREEITEM HFVExplorerTreeView::FindWindowsFolder(HTREEITEM root,const std::wstring& path)
@@ -634,15 +609,15 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 
 void HFVExplorerTreeView::BindBrowserFolder(HTREEITEM item,BrowserDirectory::Folder folder)
 {
- if(item&&!folder.location.IsNone())m_browserFolders.insert_or_assign(item,std::move(folder));
+ if(item&&!folder.location.IsNone())
+  if(auto* binding=reinterpret_cast<lparam_struct*>(m_ct->GetItemData(item)))binding->folder=std::move(folder);
 }
 const BrowserDirectory::Folder* HFVExplorerTreeView::BrowserFolderAt(HTREEITEM item) const
 {
- auto folder=m_browserFolders.find(item);
- return folder==m_browserFolders.end()?nullptr:&folder->second;
+ const auto* binding=item?reinterpret_cast<const lparam_struct*>(m_ct->GetItemData(item)):nullptr;
+ return binding&&!binding->folder.location.IsNone()?&binding->folder:nullptr;
 }
 void HFVExplorerTreeView::OnDeleteItem(NMHDR* header,LRESULT* result){
- m_browserFolders.erase(reinterpret_cast<NMTREEVIEW*>(header)->itemOld.hItem);
  auto item=reinterpret_cast<NMTREEVIEW*>(header);DWORD_PTR key=DWORD_PTR(item->itemOld.lParam);auto found=m_pointer_slots.find(key);
  if(found!=m_pointer_slots.end()){INT_PTR slot=found->second;m_pointer_array.SetAt(slot,0);m_free_slots.push_back(slot);m_pointer_slots.erase(found);delete reinterpret_cast<lparam_struct*>(key);}
  *result=0;

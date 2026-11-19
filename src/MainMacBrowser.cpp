@@ -868,6 +868,24 @@ bool MainMacBrowser::Find(){
     return true;
 }
 
+bool MainMacBrowser::OpenMountedFolderFrom(const MainMacBrowser& source,const BrowserNavigation::Request& request)
+{
+ const auto& volume=request.folder.Volume();
+ auto existing=std::find_if(state_->mounts.begin(),state_->mounts.end(),[&](const State::Mount& mount){return mount.volume==volume;});
+ if(existing==state_->mounts.end()){
+  auto original=std::find_if(source.state_->mounts.begin(),source.state_->mounts.end(),[&](const State::Mount& mount){return mount.volume==volume;});
+  if(original==source.state_->mounts.end())return false;
+  auto mount=*original;
+  mount.root=nullptr;
+  state_->mounts.push_back(std::move(mount));
+  const auto index=int(state_->mounts.size()-1);
+  state_->Root(index);
+  return state_->Show(index,request.folder.Id(),state_->mounts[index].root,true,true,false,&request);
+ }
+ const auto index=int(existing-state_->mounts.begin());
+ return state_->Show(index,request.folder.Id(),existing->root,true,true,false,&request);
+}
+
 bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
 {
     const auto& volume=request.folder.Volume();

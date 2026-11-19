@@ -189,7 +189,7 @@ int RunMainMacBrowserTest(const char* directory){
         int ciIndex=browser.AttachTestVolume(insensitive,"hfsx-ci");Check(browser.ShowTestFolder(ciIndex,2)&&browser.Writable(),"case-insensitive HFSX in main panes");
         auto large=std::make_shared<LargeDisplay>();int largeIndex=browser.AttachTestVolume(large,"large");Check(browser.ShowTestFolder(largeIndex,2)&&lc.GetItemCount()==1,"large-fork display");
         wchar_t sizeText[100]{};LVITEMW sizeItem{};sizeItem.iSubItem=FIELD_SIZE;sizeItem.pszText=sizeText;sizeItem.cchTextMax=ARRAYSIZE(sizeText);SendMessageW(lc.m_hWnd,LVM_GETITEMTEXTW,0,reinterpret_cast<LPARAM>(&sizeItem));
-        auto rowData=reinterpret_cast<list_lparam_struct*>(lc.GetItemData(0));Check(std::wstring(sizeText)==L"8388608 KB"&&uint32_t(rowData->id)==0xfffffff0&&!browser.SelectionWritable()&&browser.CanExport(),"64-bit displayed fork sizes and unsigned catalog IDs");
+        auto rowData=list.BrowserRowAt(0);Check(std::wstring(sizeText)==L"8388608 KB"&&rowData&&uint32_t(rowData->id)==0xfffffff0&&!browser.SelectionWritable()&&browser.CanExport(),"64-bit displayed fork sizes and unsigned catalog IDs");
         auto media=std::make_shared<MemoryCd>(root+"\\target.dsk");auto unchanged=media->bytes;auto cd=FromHfsPlus(HfsPlus::OpenCd(3,media),false);
         media->workerOnly=true;media->delay=90;storageUiTest={};int cdIndex=browser.AttachTestVolume(cd,"cd");
         Check(browser.ShowTestFolder(cdIndex,2)&&!browser.Writable()&&storageUiTest.timerTicks>=2&&owner.IsWindowEnabled()&&!media->wrongThread,"slow CD metadata stays on worker and restores main owner");

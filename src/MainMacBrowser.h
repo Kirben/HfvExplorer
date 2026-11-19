@@ -57,6 +57,7 @@ public:
     bool Command(UINT);
     bool ContextMenu(CPoint);
     bool Find();
+    bool OpenMountedFolderFrom(const MainMacBrowser& source,const BrowserNavigation::Request& request);
     bool RevealFindHit(const BrowserNavigation::Request&);
     void Import();
     void ImportResource();
