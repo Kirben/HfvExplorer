@@ -309,6 +309,52 @@ void BrowserSplitter::ApplyDpi(UINT from, UINT to)
     dpi_ = to;
 }
 
+void BrowserToolbar::ApplyDpi(UINT dpi)
+{
+    const auto name = MAKEINTRESOURCE(IDR_MAINFRAME);
+    const auto instance = AfxFindResourceHandle(name, RT_BITMAP);
+    const auto resource = FindResource(instance, name, RT_BITMAP);
+    CBitmap source;
+    if (!resource || !source.Attach(AfxLoadSysColorBitmap(instance, resource))) return;
+    BITMAP bitmap{};
+    source.GetBitmap(&bitmap);
+    constexpr int imageWidth = 16, imageHeight = 15;
+    const int width = NativeDpi::Scale(imageWidth, dpi);
+    const int height = NativeDpi::Scale(imageHeight, dpi);
+    const int count = bitmap.bmWidth / imageWidth;
+
+    CClientDC client(this);
+    CDC input, output;
+    CBitmap scaled;
+    if (!input.CreateCompatibleDC(&client) || !output.CreateCompatibleDC(&client) ||
+        !scaled.CreateCompatibleBitmap(&client, count*width, height)) return;
+    const auto in = input.SelectObject(&source);
+    const auto out = output.SelectObject(&scaled);
+    output.SetStretchBltMode(COLORONCOLOR);
+    const BOOL resized = output.StretchBlt(0, 0, count*width, height, &input,
+        0, 0, bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
+    input.SelectObject(in);
+    output.SelectObject(out);
+    if (!resized) return;
+
+    const CSize oldButton = m_sizeButton, oldImage = m_sizeImage;
+    SetSizes(CSize(NativeDpi::Scale(23, dpi), NativeDpi::Scale(21, dpi)),
+        CSize(width, height));
+    if (SetBitmap(HBITMAP(scaled.GetSafeHandle()))) {
+        scaled.Detach();
+        dpi_ = dpi;
+    } else {
+        SetSizes(oldButton, oldImage);
+    }
+}
+
+LRESULT BrowserToolbar::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_SYSCOLORCHANGE && m_hInstImageWell == nullptr)
+        ApplyDpi(dpi_);
+    return CToolBar::WindowProc(message, wParam, lParam);
+}
+
 void CMainFrame::ApplyDpi(UINT dpi, const RECT* suggested)
 {
     if (!dpi) return;
@@ -319,10 +365,21 @@ void CMainFrame::ApplyDpi(UINT dpi, const RECT* suggested)
         m_wndSplitter2.ApplyDpi(previous, dpi);
         m_browserSession->List()->ApplyDpi(dpi);
         m_browserSession->Tree()->ApplyDpi(dpi);
+        m_browserSession->Preview()->ApplyDpi(dpi);
+        if (m_wndToolBar.GetSafeHwnd()) m_wndToolBar.ApplyDpi(dpi);
     }
     if (m_wndStatusBar.GetSafeHwnd()) {
         auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
         m_wndStatusBar.SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
+        if (previous != dpi) {
+            static_assert(ARRAYSIZE(indicators) == ARRAYSIZE(m_statusWidths));
+            for (int i = 0; i < ARRAYSIZE(indicators); ++i) {
+                UINT id, style;
+                int width;
+                m_wndStatusBar.GetPaneInfo(i, id, style, width);
+                m_wndStatusBar.SetPaneInfo(i, id, style, m_statusWidths[i].Resize(width, previous, dpi));
+            }
+        }
     }
     if (suggested) {
         SetWindowPos(nullptr, suggested->left, suggested->top,

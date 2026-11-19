@@ -73,15 +73,19 @@ void HFVExplorerTreeView::set_style( long style )
 void HFVExplorerTreeView::ApplyDpi(UINT dpi)
 {
     auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
+    const auto top = m_ct->GetFirstVisibleItem();
+    m_icons.Apply(dpi, [&](HIMAGELIST images) {
+        m_ct->SendMessage(TVM_SETIMAGELIST,TVSIL_NORMAL,LPARAM(images));
+    });
     m_ct->SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
+    if (top && top != m_ct->GetFirstVisibleItem()) m_ct->SelectSetFirstVisible(top);
 }
 
 void HFVExplorerTreeView::Initialize()
 {
 
 	tree_clear();
-	ASSERT(m_pimagelistSmall != NULL);
-	m_ct->SetImageList( m_pimagelistSmall, TVSIL_NORMAL );
+	m_ct->SendMessage(TVM_SETIMAGELIST,TVSIL_NORMAL,LPARAM(m_icons.Handle()));
 }
 
 LPARAM HFVExplorerTreeView::make_lparam( 
@@ -472,7 +476,7 @@ int HFVExplorerTreeView::initialize_tree()
 	tree_clear();
 	set_style( 0 );
 
-	m_ct->SetImageList( m_pimagelistSmall, TVSIL_NORMAL );
+	m_ct->SendMessage(TVM_SETIMAGELIST,TVSIL_NORMAL,LPARAM(m_icons.Handle()));
 
 	/*
 	TV_INSERTSTRUCT ins;
@@ -527,40 +531,32 @@ HFVExplorerTreeView::HFVExplorerTreeView()
 		(WPARAM)pApp->get_font(),
 		MAKELPARAM(TRUE,0) );
 
-	m_pimagelistSmall = new CImageList();
-
-	ASSERT(m_pimagelistSmall != NULL);
-
-	// for version 1.2.7 fixed TRUE -> ILC_MASK|ILC_COLOR24
-	m_pimagelistSmall->Create(16, 16, ILC_MASK|ILC_COLOR24, LISTICONCOUNT, LISTICONCOUNT);
-
-	// m_pimagelistSmall->Create(16, 16, TRUE, LISTICONCOUNT, LISTICONCOUNT);
-
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON1));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON2));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON3));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON4));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON5));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON6));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON51));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON52));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON53));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON54));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON55));
+    m_icons.Create(LISTICONCOUNT);
+	m_icons.Add(pApp->LoadIcon(IDI_ICON1));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON2));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON3));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON4));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON5));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON6));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON51));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON52));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON53));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON54));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON55));
 
 	// index==11
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON1_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON4_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON51_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON52_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON53_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON54_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON55_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON1_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON4_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON51_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON52_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON53_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON54_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON55_YELLOW));
 
 	// index==18
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON56));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON56));
 	// index==19
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON56_YELLOW));
+	m_icons.Add(pApp->LoadIcon(IDI_ICON56_YELLOW));
 }
 
 HFVExplorerTreeView::~HFVExplorerTreeView()
@@ -568,10 +564,7 @@ HFVExplorerTreeView::~HFVExplorerTreeView()
  if(m_browserSession)m_browserSession->Detach(this);
 	destroy_pointers();
 	m_selchange_enabled = 0;
-	if(m_pimagelistSmall) {
-		delete m_pimagelistSmall;
-		m_pimagelistSmall = 0;
-	}
+
 
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();

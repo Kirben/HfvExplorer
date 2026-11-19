@@ -109,7 +109,18 @@ int RunBrowserWindowsTest(const char* directory){
   auto change=[&](UINT dpi,const RECT& rectangle){
    a->SendMessage(NativeDpi::Changed,MAKEWPARAM(dpi,dpi),LPARAM(&rectangle));
   };
+  auto listIconSize=[](CListCtrl& control, int kind) {
+   int cx=0,cy=0;
+   const auto handle=reinterpret_cast<HIMAGELIST>(control.SendMessage(LVM_GETIMAGELIST,kind));
+   ImageList_GetIconSize(handle,&cx,&cy);
+   return CSize(cx,cy);
+  };
+  auto* toolbar=a->GetControlBar(AFX_IDW_TOOLBAR);
+  Check(toolbar!=nullptr,"browser toolbar was not created");
+  const auto previewButton=FindWindowExW(pane,nullptr,L"BUTTON",nullptr);
   change(96,original);
+  const auto button96=toolbar->SendMessage(TB_GETBUTTONSIZE);
+  Check(listIconSize(details,LVSIL_NORMAL)==CSize(32,32),"baseline browser icon size");
   const int originalWidth=details.GetColumnWidth(0);
   LOGFONT font96{},font144{};
   GetObject(HGDIOBJ(details.SendMessage(WM_GETFONT)),sizeof(font96),&font96);
@@ -120,12 +131,20 @@ int RunBrowserWindowsTest(const char* directory){
   a->GetWindowRect(&actual);
   Check(EqualRect(&actual,&suggested),"frame ignored the DPI rectangle");
   Check(details.GetColumnWidth(0)==NativeDpi::Scale(originalWidth,144),"details width at 150 percent");
+  Check(listIconSize(details,LVSIL_NORMAL)==CSize(48,48)&&listIconSize(details,LVSIL_SMALL)==CSize(24,24),
+        "browser image lists at 150 percent");
+  RECT previewBounds{};
+  Check(::GetWindowRect(previewButton,&previewBounds)&&previewBounds.right-previewBounds.left==72,
+        "preview button at 150 percent");
+  const auto button144=toolbar->SendMessage(TB_GETBUTTONSIZE);
+  Check(LOWORD(button144)>LOWORD(button96)&&HIWORD(button144)>HIWORD(button96),"toolbar buttons did not scale");
   Check(sb.List()->GetListCtrl().SendMessage(WM_GETFONT)==otherFont,"DPI change affected another browser");
   Check(details.GetItemState(previewItem,LVIS_SELECTED)!=0&&BrowserPresentation::Text(edit)==L"Caf\u00e9\r\n",
         "DPI change discarded a selected row or its preview");
   details.SetColumnWidth(0,253);
   for(int repeat=0;repeat<3;++repeat){
    change(192,suggested);
+   Check(listIconSize(details,LVSIL_NORMAL)==CSize(64,64),"browser image list at 200 percent");
    Check(details.GetColumnWidth(0)==NativeDpi::Scale(253,192,144),"user column width at 200 percent");
    change(96,original);
    Check(details.GetColumnWidth(0)==NativeDpi::Scale(253,96,144),"user column width at 100 percent");
@@ -134,6 +153,7 @@ int RunBrowserWindowsTest(const char* directory){
   }
   change(96,original);
   details.SetColumnWidth(0,originalWidth);
+  Check(listIconSize(details,LVSIL_NORMAL)==CSize(32,32),"browser image list return to 100 percent");
   fprintf(report,"PASS: DPI suggested rectangle, 96/144/192 layout, rounding, fonts and independent browser state.\n");
   const HWND hide=FindWindowExW(pane,nullptr,L"BUTTON",nullptr);
   Check(hide!=nullptr,"preview Hide button is missing");

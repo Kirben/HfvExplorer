@@ -48,11 +48,21 @@ public:
     void RecalcLayout() override;
 };
 
+class BrowserToolbar : public CToolBar {
+public:
+    void ApplyDpi(UINT dpi);
+protected:
+    LRESULT WindowProc(UINT,WPARAM,LPARAM) override;
+private:
+    UINT dpi_ = NativeDpi::Base;
+};
+
 class CMainFrame : public CFrameWnd
 {
  BrowserSession* m_browserSession=nullptr;
  bool m_restoreMaximized=false;
  UINT m_dpi=NativeDpi::Base;
+ NativeDpi::Measurement m_statusWidths[4];
  void ApplyDpi(UINT, const RECT*);
 protected: // create from serialization only
 	BrowserSplitter m_wndSplitter;
@@ -112,7 +122,7 @@ public:
 
 protected:  // control bar embedded members
 	CStatusBar  m_wndStatusBar;
-	CToolBar    m_wndToolBar;
+	BrowserToolbar m_wndToolBar;
 	UINT_PTR m_timer;
 	BOOL m_volcheck_enabled;
 	BOOL m_was_zoomed;

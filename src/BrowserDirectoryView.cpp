@@ -26,8 +26,16 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
         else if(!strcmp(type,"PREF")||!strcmp(type,"pref"))image=9;
         else if(!strcmp(type,"fdrp"))image=0;
     }
-    if(row.icon16||row.icon32){image=m_pimagelist->GetImageCount();
-        m_pimagelist->Add(row.icon32?row.icon32:row.icon16);m_pimagelistSmall->Add(row.icon16?row.icon16:row.icon32);}
+    if (row.icon16 || row.icon32) {
+        const auto first = m_largeImages.Count();
+        const int large = m_largeImages.Add(row.icon32 ? row.icon32 : row.icon16);
+        const int small = m_smallImages.Add(row.icon16 ? row.icon16 : row.icon32);
+        if (large >= 0 && large == small) image = large;
+        else {
+            m_largeImages.Trim(first);
+            m_smallImages.Trim(first);
+        }
+    }
     auto value=row;
     value.treeItem=tree;
     if(value.location.IsNone())GetBrowserSession().MacBrowser().BindRow(value);
@@ -48,7 +56,12 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
     if(GetBrowserSession().finderLayout&&row.storageType==LIST_HFS&&
        (row.initialized||is_inside_magic(row.point.x,row.point.y))&&!(row.point.x==-1&&row.point.y==-1))
-        m_cl->SetItemPosition(index,CPoint(unmagic(row.point.x)-m_mac_origo.x,unmagic(row.point.y)-m_mac_origo.y));
+    {
+        auto& axes = m_iconPositions[data];
+        CPoint point(axes.first.Resize(unmagic(row.point.x)-m_mac_origo.x, NativeDpi::Base,m_dpi),
+                     axes.second.Resize(unmagic(row.point.y)-m_mac_origo.y, NativeDpi::Base,m_dpi));
+        m_cl->SendMessage(LVM_SETITEMPOSITION32,index,LPARAM(&point));
+    }
     if(app.m_show_labels&&BrowserDirectory::Label(e))m_cl->SetItemState(index,INDEXTOOVERLAYMASK(BrowserDirectory::Label(e)),LVIS_OVERLAYMASK);
     ++m_item_count;return index;
 }

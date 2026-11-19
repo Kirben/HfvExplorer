@@ -31,6 +31,9 @@ class CHFVPreviewView : public CView {
     BrowserSession* session_ = nullptr;
     BrowserPreview::Request request_;
     HWND close_ = nullptr, text_ = nullptr;
+    UINT dpi_ = 96;
+    CFont font_;
+    int Pixels(int) const;
     bool enabled_ = false, selectionPending_ = false;
     int drive_ = -1;
     std::wstring name_, status_;
@@ -53,6 +56,7 @@ public:
     void BindBrowserSession(BrowserSession*);
     bool Enabled() const { return enabled_; }
     void EnablePreview(bool);
+    void ApplyDpi(UINT);
     void RequestSelection();
     void Clear();
     void MediaChanged(DWORD mask);
