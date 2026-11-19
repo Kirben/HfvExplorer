@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "FindFiles.h"
+#include "StorageLocation.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
 #include "BrowserPresentation.h"
@@ -47,7 +48,8 @@ public:
    }else{
     result.destination=FileOperations::Location::Windows(VolumeCoord::Wide(parent));
     result.reveal=FileOperations::Location::Windows(VolumeCoord::Wide(full));
-    result.windowsMediaSerial=windowsMediaSerial_;
+    result.destination.BindWindowsMediaSerial(windowsMediaSerial_);
+    result.reveal.BindWindowsMediaSerial(windowsMediaSerial_);
     try{result.reveal.expectedIdentity=MacBrowser::DescribeWindowsFile(result.reveal.WindowsPath()).identity;}
     catch(const std::exception&){++output_.unreadable;return true;}
    }
@@ -85,7 +87,7 @@ public:
  }
  void native(){
   auto volume=request_.location.native;output_.utf8=true;
-  volume->ValidateMedia();
+  StorageLocation::ValidateMedia(FileOperations::Location::Mounted(volume,request_.location.nativeFolder));
   struct NativeFolder {uint32_t id;std::string path;std::vector<uint32_t> route;std::set<uint32_t> ancestors;};
   auto entry=volume->Stat(request_.location.nativeFolder);
   auto route=request_.location.nativePath;if(route.empty())route.push_back(request_.location.nativeFolder);
@@ -116,12 +118,11 @@ public:
  }
  void windows(){
   const std::string root=request_.location.directory;
+  auto media=FileOperations::Location::Windows(VolumeCoord::Wide(root));
   if(request_.location.checkWindowsMedia){
-   const auto drive=root.substr(0,3);
-   DWORD serial=0;
-   if(!GetVolumeInformationA(drive.c_str(),nullptr,0,&serial,nullptr,nullptr,nullptr,0))
-    throw std::runtime_error("Cannot identify the Windows search media");
-   windowsMediaSerial_=serial;
+   windowsMediaSerial_=StorageLocation::WindowsSerial(media.WindowsPath());
+   if(!windowsMediaSerial_)throw Storage::MediaChanged("Cannot identify the Windows search media.");
+   media.BindWindowsMediaSerial(windowsMediaSerial_);
   }
   DWORD attributes=GetFileAttributesA(root.c_str());
   if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY))throw std::runtime_error("The selected search location is not an accessible Windows folder");
@@ -142,12 +143,16 @@ public:
      bool isDirectory=(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;std::string full=prefix+entry.cFileName;
      if(full.size()>=MAX_PATH)throw std::runtime_error("Search stopped because a Windows path exceeds the supported length");
      unsigned long long size=(static_cast<unsigned long long>(entry.nFileSizeHigh)<<32)|entry.nFileSizeLow;
-     if(!hit(entry.cFileName,folder.path,full,isDirectory,isDirectory?0:size))return;
+     if(!hit(entry.cFileName,folder.path,full,isDirectory,isDirectory?0:size)){
+      StorageLocation::ValidateMedia(media);
+      return;
+     }
      if(isDirectory&&request_.recursive&&!(entry.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))queued(pending,{full,folder.depth+1,0});
     }
     if(!FindNextFileA(handle,&entry)){DWORD error=GetLastError();if(error!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed (Windows error "+std::to_string(error)+")");break;}
    }
   }
+  StorageLocation::ValidateMedia(media);
  }
 };
 }
@@ -185,6 +190,7 @@ std::function<Storage::Result(Storage::Job&)> MakeFindFilesJob(FindRequest reque
   *results={};Search search(request,*results,job);
   try{if(request.location.native)search.native();else if(request.location.mac)search.mac();else search.windows();}
   catch(const Storage::Cancelled&){throw;}
+  catch(const Storage::MediaChanged& error){return {1,ERROR_MEDIA_CHANGED,error.what()};}
   catch(const std::exception& error){return {1,ERROR_READ_FAULT,error.what()};}
   std::sort(results->hits.begin(),results->hits.end(),[](const FindHit& a,const FindHit& b){int compared=_stricmp(a.name.c_str(),b.name.c_str());return compared?compared<0:a.path<b.path;});
   search.progress(request.location.directory,true);return {};

@@ -6,6 +6,7 @@
 namespace FileOperations {
 struct WindowsAddress {
     std::wstring path;
+    std::optional<DWORD> mediaSerial;
 };
 struct MountedAddress {
     std::shared_ptr<MacBrowser::Volume> volume;
@@ -49,6 +50,8 @@ class Location {
     const std::shared_ptr<MacBrowser::Volume> &Volume() const;
     uint32_t Id() const;
     const std::wstring &WindowsPath() const;
+    std::optional<DWORD> WindowsMediaSerial() const;
+    void BindWindowsMediaSerial(std::optional<DWORD>);
     const std::string &ClassicImage() const;
     const std::string &ClassicPath() const;
     int Drive() const;

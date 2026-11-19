@@ -107,7 +107,7 @@ protected: // create from serialization only
 
     bool prepare_classic_browser_row(hfs_item_type*,int,BrowserDirectory::Row&);
     BrowserDirectory::Snapshot read_classic_browser_directory(int,long,CString,bool,long,Storage::Job* job=nullptr);
-    BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&);
+    BrowserDirectory::Snapshot read_windows_browser_directory(int,const char*,bool,Storage::Job&,std::optional<DWORD> expectedSerial={});
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
     bool NavigateStartupDirectory(const std::string& path,bool mac);
     bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
@@ -116,7 +116,6 @@ protected: // create from serialization only
     bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&);
     void CopyNavigationIcons(BrowserDirectory::Snapshot&);
-    static void ValidateNavigationMedia(const CHFVVolume&);
 	void fat_walk( int volinx, LPSTR path, int list );
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );

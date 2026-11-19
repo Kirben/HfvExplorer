@@ -95,6 +95,15 @@ uint32_t Location::Id() const {
     Check(IsMounted(), "This location is not a mounted catalog entry");
     return std::get<MountedAddress>(address_).id;
 }
+std::optional<DWORD> Location::WindowsMediaSerial() const {
+    const auto windows = std::get_if<WindowsAddress>(&address_);
+    return windows ? windows->mediaSerial : std::nullopt;
+}
+
+void Location::BindWindowsMediaSerial(std::optional<DWORD> serial) {
+    std::get<WindowsAddress>(address_).mediaSerial = serial;
+}
+
 const std::wstring &Location::WindowsPath() const {
     Check(IsWindows(), "This location is not a Windows path");
     return std::get<WindowsAddress>(address_).path;

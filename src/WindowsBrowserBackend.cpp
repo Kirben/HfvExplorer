@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "LegacyEngine.h"
 #include "BrowserSession.h"
+#include "StorageLocation.h"
 #include "MainMacBrowser.h"
 #include "PhysicalRemovable.h"
 #include "Floppy.h"
@@ -46,7 +47,7 @@ bool IsCompanion(const std::wstring& directory,const std::wstring& leaf) {
 }
 
 BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
-    int volume,const char* directory,bool listing,Storage::Job& job)
+    int volume,const char* directory,bool listing,Storage::Job& job,std::optional<DWORD> expectedSerial)
 {
  if(!directory||!*directory)throw std::runtime_error("Select a Windows folder");
  BrowserDirectory::ObserveRead(directory);
@@ -57,11 +58,19 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
  // busy listings take the same lease and tolerate briefly locked children.
  const VolumeCoord::Lease access({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});
  snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
+ wchar_t root[MAX_PATH]{};
+ const auto driveType=GetVolumePathNameW(snapshot.folderPath.c_str(),root,ARRAYSIZE(root))?
+     GetDriveTypeW(root):UINT(DRIVE_UNKNOWN);
+ const bool writable=driveType!=DRIVE_CDROM;
+ auto media=FileOperations::Location::Windows(snapshot.folderPath);
+ if(expectedSerial) {
+  media.BindWindowsMediaSerial(expectedSerial);
+  StorageLocation::ValidateMedia(media);
+ }else if(driveType==DRIVE_REMOVABLE||driveType==DRIVE_CDROM)
+  media.BindWindowsMediaSerial(StorageLocation::WindowsSerial(snapshot.folderPath));
+ snapshot.windowsMediaSerial=media.WindowsMediaSerial();
  try{snapshot.folderIdentity=MacBrowser::DescribeWindowsFile(snapshot.folderPath).identity;}
  catch(const std::exception&){}
- wchar_t root[MAX_PATH]{};
- const bool writable=!GetVolumePathNameW(snapshot.folderPath.c_str(),root,ARRAYSIZE(root))||
-     GetDriveTypeW(root)!=DRIVE_CDROM;
  snapshot.capabilitiesKnown=true;
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
 
@@ -80,7 +89,10 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
  WIN32_FIND_DATAW info{};
  find.handle=FindFirstFileW((ioFolder+L"*").c_str(),&info);
  if(find.handle==INVALID_HANDLE_VALUE){
-  if(GetLastError()==ERROR_FILE_NOT_FOUND)return snapshot;
+  if(GetLastError()==ERROR_FILE_NOT_FOUND){
+   StorageLocation::ValidateMedia(media);
+   return snapshot;
+  }
   throw std::runtime_error("Cannot enumerate Windows folder");
  }
  do{
@@ -98,6 +110,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
   row.path=LegacyPath(path);
   if(row.path.empty()&&info.cAlternateFileName[0])row.path=LegacyPath(folder+info.cAlternateFileName);
   row.location=FileOperations::Location::Windows(path);
+  row.location.BindWindowsMediaSerial(snapshot.windowsMediaSerial);
   row.entry.name=MacBrowser::U16(leaf);
   row.entry.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
   if(!row.entry.directory)
@@ -147,6 +160,7 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_windows_browser_directory(
   job.progress(progress);
  }while(FindNextFileW(find.handle,&info));
  if(GetLastError()!=ERROR_NO_MORE_FILES)throw std::runtime_error("Windows folder enumeration failed");
+ StorageLocation::ValidateMedia(media);
  return snapshot;
 }
 void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& snapshot,
@@ -258,12 +272,12 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
       if(volume.open()){
        reader->m_classicRevision[0]=VolumeCoord::Revision(deviceKey);
        result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",reader->GetBrowserSession().finderLayout,0,&job);
-       ValidateNavigationMedia(volume);
        result.folder=FileOperations::Location::Classic(image,(LPCSTR)(volume.m_volume_name+":"));
        result.folder.directory=true;
        result.folder.expectedCatalogId=2;
        result.folder.expectedResource=deviceKey;
        if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
+       StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
        reader->CopyNavigationIcons(result.listing);
        listing->floppy=true;
        return Storage::Result{};
@@ -271,7 +285,7 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
      }
      listing->removable=Removable::FromDriveRoot(VolumeCoord::Wide(listing->path));
      if(!listing->removable.empty()){
-      for(auto& mount:listing->removable)mount.volume->ValidateMedia();
+      for(auto& mount:listing->removable)StorageLocation::ValidateMedia(FileOperations::Location::Mounted(mount.volume));
       result.folder=FileOperations::Location::Mounted(listing->removable.front().volume);
       result.folder.directory=true;
       return Storage::Result{};
@@ -280,8 +294,8 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
     if(probeCd){
      listing->cd=MacBrowser::OpenCdRoot(listing->path.c_str());
      if(listing->cd){
-      listing->cd->ValidateMedia();
       result.folder=FileOperations::Location::Mounted(listing->cd);
+      StorageLocation::ValidateMedia(result.folder);
       result.folder.directory=true;
       return Storage::Result{};
      }
@@ -300,19 +314,10 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, 
      path.resize(separator<=2?3:separator);
     }
    }
-   char driveRoot[]={char('A'+drive),':',char(92),0};
-   DWORD serial=0;
-   const bool checkSerial=(type==DRIVE_REMOVABLE||type==DRIVE_CDROM)&&
-      GetVolumeInformationA(driveRoot,nullptr,0,&serial,nullptr,nullptr,nullptr,0);
-   if(request.windowsMediaSerial&&(!checkSerial||serial!=*request.windowsMediaSerial))
-    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The Windows media changed since the search."};
-   result.listing=reader->read_windows_browser_directory(index,listing->path.c_str(),true,job);
-   if(checkSerial){
-    DWORD after=0;
-    if(!GetVolumeInformationA(driveRoot,nullptr,0,&after,nullptr,nullptr,nullptr,0)||serial!=after)
-     return Storage::Result{1,ERROR_MEDIA_CHANGED,"The selected media changed during navigation"};
-   }
+   result.listing=reader->read_windows_browser_directory(index,listing->path.c_str(),true,job,
+       request.folder.WindowsMediaSerial());
    result.folder.SetWindows(result.listing.folderPath);
+   result.folder.BindWindowsMediaSerial(result.listing.windowsMediaSerial);
    result.folder.expectedIdentity=result.listing.folderIdentity;
    reader->CopyNavigationIcons(result.listing);
   }catch(const VolumeCoord::Busy&){

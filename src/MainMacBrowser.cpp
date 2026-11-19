@@ -9,6 +9,7 @@
 #include "BackgroundCopies.h"
 #include "VolumeCoordinator.h"
 #include "BrowserSession.h"
+#include "StorageLocation.h"
 #include "BrowserPresentation.h"
 #include "BrowserDirectory.h"
 #include "FindFilesDialog.h"
@@ -241,7 +242,8 @@ struct MainMacBrowser::State {
             return true;
         };
         if(!reload&&!VolumeCoord::Readable(key))cached=restoreCached();
-        auto readFolder = [rebuild,savedPath,strict=bool(find)](const std::shared_ptr<Volume>& volume,
+        const auto selectedFolder=find?find->folder:Location::Mounted(volume,id);
+        auto readFolder = [rebuild,savedPath,strict=bool(find),selectedFolder](const std::shared_ptr<Volume>& volume,
             uint32_t& id,uint64_t& revision,std::vector<uint32_t>& ancestors,std::wstring& folderTitle,
             std::vector<std::pair<uint32_t,std::vector<Entry>>>& levels,std::vector<Entry>& entries,
             uint64_t& free,bool& mutableFolder) {
@@ -259,9 +261,14 @@ struct MainMacBrowser::State {
                 auto e=volume->Stat(ancestor);auto key=e.resolvedId?e.resolvedId:e.id;
                 if(!visited.insert(key).second)throw HfsPlus::Error("Cyclic directory hard link");
             }
-            auto currentFolder=volume->Stat(id);folderTitle=Wide(currentFolder.name);mutableFolder=(currentFolder.id==2||!currentFolder.protectedFile);
+            auto location=selectedFolder;
+            location.SetMounted(volume,id);
+            const auto currentFolder=StorageLocation::ResolveEntry(location).entry;
+            if(!currentFolder.directory)throw HfsPlus::Error("The selected entry is not a folder.");
+            folderTitle=Wide(currentFolder.name);
+            mutableFolder=(currentFolder.id==2||!currentFolder.protectedFile);
             entries=volume->List(id);free=volume->FreeBytes();
-            volume->ValidateMedia();
+            StorageLocation::ValidateMedia(location);
         };
         if(asynchronous && !cached){
             using namespace BrowserNavigation;
@@ -315,12 +322,6 @@ struct MainMacBrowser::State {
                     readFolder(volume,id,snapshot.revision,listing->ancestors,listing->title,
                         listing->levels,listing->entries,listing->free,listing->mutableFolder);
                     result.folder.SetMounted(volume,id);
-                    if(request.intent==Intent::RevealFindHit && !request.folder.expectedName.empty()){
-                        const auto entry=volume->Stat(id);
-                        if(entry.name!=request.folder.expectedName ||
-                           (request.folder.expectedParent&&entry.parent!=request.folder.expectedParent))
-                            return Storage::Result{1,ERROR_NOT_FOUND,"The search result folder changed."};
-                    }
                     FillListing(snapshot,listing->entries,index,volume->Supports(),showInvisible,listing->mutableFolder);
                 }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"This volume is busy"};}
                 return Storage::Result{};
@@ -538,10 +539,9 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 BrowserDirectory::ObserveRead("image-root");
                 root->entries=volume->List(2);
                 root->free=volume->FreeBytes();
-                volume->ValidateMedia();
-                if(VolumeCoord::ImageKey(source.path)!=key)
-                    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The selected image was replaced while opening it."};
                 result.folder=Location::Mounted(volume);
+                StorageLocation::ValidateMedia(result.folder);
+                StorageLocation::ValidateImage(source.path,key);
                 result.folder.directory=true;
                 State::FillListing(result.listing,root->entries,-1,volume->Supports(),showInvisible,true);
             }catch(const HfsPlus::ExternalJournalRequired& error){

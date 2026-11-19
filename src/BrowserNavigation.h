@@ -16,7 +16,6 @@ struct Request {
     std::string resource;
     FileOperations::Location reveal;
     std::vector<uint32_t> catalogRoute;
-    std::optional<DWORD> windowsMediaSerial;
     int mediaDrive=-1;
     std::optional<ImageSource> image;
     bool tryNextStartupRoot=false;

@@ -117,6 +117,8 @@ void EncodeEndpoint(Data &d, const Endpoint &e) {
         break;
     case Location::Kind::Windows:
         d.wide(l.WindowsPath());
+        d.put(l.WindowsMediaSerial().has_value());
+        if (const auto serial=l.WindowsMediaSerial()) d.put(*serial);
         break;
     case Location::Kind::ClassicImage:
         d.put(l.ClassicImage());
@@ -169,6 +171,7 @@ WireEndpoint ParseEndpoint(Data &d, bool allowMounted) {
         return endpoint;
     case Location::Kind::Windows:
         l.SetWindows(d.wide());
+        if (d.flag()) l.BindWindowsMediaSerial(CatalogNumber(d));
         return endpoint;
     case Location::Kind::ClassicImage: {
         auto image = d.text(), path = d.text();
@@ -332,7 +335,12 @@ Data EncodeRequest(const Request &request, HANDLE parent, unsigned testFault,
     if (testFault == 10) EncodeEndpoint(packet, sources.front());
     if (testFault != 11) EncodeEndpoint(packet, target);
 #ifdef HFV_TESTING
-    if (testFault == 12) packet.bytes.pop_back();
+    if (testFault == 12) {
+        // Truncate the Windows path itself, before the optional media serial.
+        Check(target.location.IsWindows(), "Missing Windows test endpoint");
+        const size_t trailer=sizeof(uint64_t)*(target.location.WindowsMediaSerial()?2:1);
+        packet.bytes.resize(packet.bytes.size()-trailer-1);
+    }
     if (testFault == 13) EncodeEndpoint(packet, target);
 #endif
     return packet;

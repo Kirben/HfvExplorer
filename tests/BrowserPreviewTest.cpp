@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "BrowserPreview.h"
 #include "FileOperations.h"
+#include "StorageLocation.h"
 #include "VolumeCoordinator.h"
 #include <atomic>
 #include <cstdio>
@@ -129,6 +130,21 @@ int RunBrowserPreviewTest(const char* directory) {
         BrowserPreview::Text text;
         Check(Await(request,text) == Request::State::Ready && text.content == L"Caf\u00e9\r\n",
               "read MacRoman data fork from a mounted HFSX volume");
+
+        auto windowsItem=Location::Windows(host);
+        const auto serial=StorageLocation::WindowsSerial(host);
+        Check(serial.has_value(),"identify Windows preview fixture media");
+        windowsItem.BindWindowsMediaSerial(*serial^1u);
+        request.Start(windowsItem,VolumeCoord::PathKey(host),false,false);
+        Check(Await(request,text)==Request::State::Stale,"preview accepted a replaced Windows volume");
+
+        auto folder=Location::Windows(VolumeCoord::Wide(root));
+        folder.BindWindowsMediaSerial(*serial^1u);
+        const auto creation=FileOperations::Submit(FileOperations::CreateFolder{folder,u"Wrong medium"});
+        Check(WaitForSingleObject(creation.Job()->event(),5000)==WAIT_OBJECT_0 &&
+              creation.Job()->result().error==ERROR_MEDIA_CHANGED &&
+              GetFileAttributesW((folder.WindowsPath()+L"\\\\Wrong medium").c_str())==INVALID_FILE_ATTRIBUTES,
+              "a write used a stale Windows media identity");
 
         auto slow = std::make_shared<SlowVolume>();
         Start(request, slow);

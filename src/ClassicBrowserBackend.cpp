@@ -5,7 +5,7 @@
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
 #include "BrowserSession.h"
-#include "ReadOnlyFloppy.h"
+#include "StorageLocation.h"
 #include "ReadOnlyCdBackend.h"
 #include "HFVExplorerListView.h"
 #include "BrowserDirectory.h"
@@ -296,20 +296,6 @@ BrowserDirectory::Snapshot CHFVExplorerDoc::read_classic_browser_directory(int v
 	return snapshot;
 }
 
-void CHFVExplorerDoc::ValidateNavigationMedia(const CHFVVolume& volume)
-{
- if(!volume.m_is_floppy||!volume.m_mediaGenerationKnown)return;
- const int drive=physical_floppy_path(volume.m_file_name);
- FloppyReadApi* api=nullptr;
-#ifdef HFV_FLOPPY_TESTING
- api=physical_floppy_test_api(drive);
- if(!api)throw std::runtime_error("The floppy is no longer attached");
-#endif
- ReadOnlyFloppy probe(api);
- if(!probe.OpenDrive(drive)||probe.Generation()!=volume.m_mediaGeneration)
-  throw std::runtime_error("The floppy changed during navigation");
-}
-
 namespace {
 struct ClassicAncestor { uint32_t id, parent; std::string name; };
 
@@ -401,12 +387,10 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    VolumeCoord::Lease lease({{request.resource,VolumeCoord::Mode::Read}});
    if(job.cancelled())throw Storage::Cancelled();
    auto& volume=reader->m_volumes[index];
-   if(VolumeCoord::ImageKey(request.folder.ClassicImage())!=request.resource)
-    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The classic HFS image was replaced."};
+   StorageLocation::ValidateImage(VolumeCoord::Wide(request.folder.ClassicImage()),request.resource);
    if(!volume.open())throw std::runtime_error("Cannot open the selected classic HFS volume");
-   if(request.folder.MediaGenerationKnown() &&
-      (!volume.m_mediaGenerationKnown||volume.m_mediaGeneration!=request.folder.MediaGeneration()))
-    return Storage::Result{1,ERROR_MEDIA_CHANGED,"The floppy changed. Select its drive to open the new disk."};
+   StorageLocation::ValidateClassicGeneration(request.folder,volume.m_mediaGenerationKnown?
+       std::optional<DWORD>(volume.m_mediaGeneration):std::nullopt);
    reader->m_classicRevision[index]=VolumeCoord::Revision(request.resource);
    auto id=request.folder.expectedCatalogId;
    const bool readRoute=request.intent!=Intent::SelectFolder;
@@ -424,7 +408,8 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    result.folder.SetClassic(request.folder.ClassicImage(),directory);
    result.folder.expectedCatalogId=id;
    if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
-   ValidateNavigationMedia(volume);
+   StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
+   StorageLocation::ValidateImage(VolumeCoord::Wide(result.folder.ClassicImage()),request.resource);
    reader->CopyNavigationIcons(result.listing);
    return Storage::Result{};
   }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
