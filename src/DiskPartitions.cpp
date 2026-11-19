@@ -10,7 +10,12 @@ uint32_t Le32(const uint8_t* p){return uint32_t(p[0])|uint32_t(p[1])<<8|uint32_t
 uint64_t Le64(const uint8_t* p){return Le32(p)|uint64_t(Le32(p+4))<<32;}
 uint32_t Crc(const Bytes& b){uint32_t crc=~0u;for(auto byte:b){crc^=byte;for(unsigned i=0;i<8;++i)crc=(crc>>1)^(0xedb88320u&uint32_t(-int(crc&1)));}return ~crc;}
 void Ranges(std::vector<std::pair<uint64_t,uint64_t>>& ranges){std::sort(ranges.begin(),ranges.end());for(size_t i=1;i<ranges.size();++i)B::Check(ranges[i-1].second<ranges[i].first,"Overlapping disk partitions");}
-bool MacType(const uint8_t* p){static const uint8_t type[]={0,0x53,0x46,0x48,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};return !memcmp(p,type,16);}
+bool MacType(const uint8_t* p,DiskPartitions::GptType type)
+{
+    constexpr uint8_t hfs[]={0,0x53,0x46,0x48,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};
+    constexpr uint8_t apfs[]={0xef,0x57,0x34,0x7c,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};
+    return !memcmp(p,type==DiskPartitions::GptType::AppleApfs?apfs:hfs,16);
+}
 }
 
 namespace DiskPartitions {
@@ -30,7 +35,7 @@ bool HasGptHeader(Source& source,uint32_t sector)
            !memcmp(B::Read(source,sector,8).data(),"EFI PART",8);
 }
 
-std::vector<MacPartition> ReadGptMacPartitions(Source& source,uint32_t sector)
+std::vector<MacPartition> ReadGptMacPartitions(Source& source,uint32_t sector,GptType type)
 {
     B::Check(sector>=512 && sector<=4096 && (sector&(sector-1))==0 && source.Size()%sector==0,
              "Invalid GPT sector geometry");
@@ -81,19 +86,19 @@ std::vector<MacPartition> ReadGptMacPartitions(Source& source,uint32_t sector)
         B::Check(std::any_of(id.begin(),id.end(),[](uint8_t value){return value!=0;}) &&
                  identifiers.insert(id).second,"Invalid or duplicate GPT partition UUID");
         ranges.emplace_back(begin,end);
-        if (MacType(entry))
+        if (MacType(entry,type))
             result.push_back({begin*sector,(end-begin+1)*sector,i+1,(Le64(entry+48)&(1ULL<<60))!=0});
     }
     Ranges(ranges);
     return result;
 }
 
-std::optional<std::vector<MacPartition>> ProbeGptImage(Source& source,const Bytes& boot)
+std::optional<std::vector<MacPartition>> ProbeGptImage(Source& source,const Bytes& boot,GptType type)
 {
     const bool small=HasGptHeader(source,512),large=HasGptHeader(source,4096);
     B::Check(!(small&&large),"Ambiguous GPT image sector size");
     if (small || large)
-        return ReadGptMacPartitions(source,small?512:4096);
+        return ReadGptMacPartitions(source,small?512:4096,type);
     B::Check(!HasProtectiveMbr(boot),"GPT image has no primary header at a supported sector size");
     return {};
 }

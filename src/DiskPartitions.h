@@ -12,11 +12,13 @@ struct MacPartition {
 
 bool HasProtectiveMbr(const HfsPlus::Bytes& boot);
 bool HasGptHeader(HfsPlus::Source&, uint32_t sector);
-// Validates the entire map, returning only Apple HFS-type partitions.
-std::vector<MacPartition> ReadGptMacPartitions(HfsPlus::Source&, uint32_t sector);
+enum class GptType { AppleHfs, AppleApfs };
+// Validates the entire map, returning the requested Apple partition type.
+std::vector<MacPartition> ReadGptMacPartitions(HfsPlus::Source&, uint32_t sector, GptType type=GptType::AppleHfs);
 // Returns Mac entries only, after validating every entry. A Mac partition that
 // overlaps the descriptor or map blocks cannot be mounted writable.
 std::optional<std::vector<MacPartition>> ProbeApm(HfsPlus::Source&, const HfsPlus::Bytes& boot);
 // A file has no reported sector geometry. A valid map may contain no Mac partitions.
-std::optional<std::vector<MacPartition>> ProbeGptImage(HfsPlus::Source&, const HfsPlus::Bytes& boot);
+std::optional<std::vector<MacPartition>> ProbeGptImage(HfsPlus::Source&, const HfsPlus::Bytes& boot,
+                                                        GptType type=GptType::AppleHfs);
 }

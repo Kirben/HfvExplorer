@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "stdafx.h"
+#ifdef HFV_TESTING
+#include "ApfsContainer.h"
+#include "HfsPlusDisk.h"
+#include "MacBrowserModel.h"
+#include "VolumeCoordinator.h"
+#include <cstdio>
+
+namespace {
+using namespace HfsPlus;
+using Disk::Check;
+class Memory final : public Source {
+public:
+    Bytes bytes;
+    explicit Memory(size_t size):bytes(size){}
+    uint64_t Size()const override{return bytes.size();}
+    bool Writable()const override{return false;}
+    void Flush()override{}
+    void Write(uint64_t,const void*,size_t)override{throw Error("The APFS probe attempted a write");}
+    void Read(uint64_t at,void* dest,size_t size)override{
+        Check(Disk::Range(at,size,bytes.size()),"Read outside APFS test image");
+        memcpy(dest,bytes.data()+at,size);
+    }
+};
+void Little(uint8_t* p,uint64_t value,unsigned bytes)
+{
+    for(unsigned i=0;i<bytes;++i)p[i]=uint8_t(value>>(i*8));
+}
+uint32_t Crc(const Bytes& bytes)
+{
+    uint32_t crc=~0u;
+    for(auto b:bytes){
+        crc^=b;
+        for(unsigned j=0;j<8;++j)crc=(crc>>1)^(0xedb88320u&uint32_t(-int(crc&1)));
+    }
+    return ~crc;
+}
+template<class F>void Reject(F work,const char* detail)
+{
+    try{work();}catch(const Error&){return;}
+    throw Error(detail);
+}
+void Seal(Bytes& disk,size_t offset,size_t blockSize)
+{
+    const auto first=disk.begin()+offset;
+    Bytes block(first,first+blockSize);
+    Little(disk.data()+offset,Apfs::ObjectChecksum(block),8);
+}
+Memory Raw(unsigned blockSize=4096)
+{
+    Memory disk(1024*1024);
+    auto p=disk.bytes.data();
+    Little(p+8,1,8);Little(p+16,5,8);Little(p+24,0x80000001,4);
+    memcpy(p+32,"NXSB",4);
+    Little(p+36,blockSize,4);Little(p+40,disk.Size()/blockSize,8);
+    Little(p+64,2,8);p[72]=42;
+    Little(p+160,12,8);Little(p+180,100,4);
+    Little(p+184,1024,8);Little(p+200,1029,8);
+    Seal(disk.bytes,0,blockSize);
+    return disk;
+}
+Memory Gpt(const Memory& raw,unsigned sector)
+{
+    const size_t start=1024*1024;
+    Memory disk(start+size_t(raw.Size())+sector*40);
+    const auto sectors=disk.Size()/sector;
+    auto boot=disk.bytes.data();
+    boot[510]=0x55;boot[511]=0xaa;boot[450]=0xee;
+    Little(boot+454,1,4);Little(boot+458,sectors-1,4);
+    Bytes table(sector);
+    const uint8_t guid[]={0xef,0x57,0x34,0x7c,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};
+    memcpy(table.data(),guid,sizeof(guid));table[16]=1;
+    Little(table.data()+32,start/sector,8);
+    Little(table.data()+40,(start+raw.Size())/sector-1,8);
+    for(bool backup:{false,true}){
+        const auto current=backup?sectors-1:1,entries=backup?sectors-2:2;
+        Bytes header(92);
+        memcpy(header.data(),"EFI PART",8);
+        Little(header.data()+8,0x10000,4);Little(header.data()+12,header.size(),4);
+        Little(header.data()+24,current,8);Little(header.data()+32,backup?1:sectors-1,8);
+        Little(header.data()+40,34,8);Little(header.data()+48,sectors-34,8);
+        header[56]=1;Little(header.data()+72,entries,8);
+        Little(header.data()+80,sector/128,4);Little(header.data()+84,128,4);
+        Little(header.data()+88,Crc(table),4);Little(header.data()+16,Crc(header),4);
+        memcpy(boot+current*sector,header.data(),header.size());
+        memcpy(boot+entries*sector,table.data(),table.size());
+    }
+    memcpy(boot+start,raw.bytes.data(),raw.bytes.size());
+    return disk;
+}
+}
+
+int RunApfsContainerTest(const char* directory)
+{
+    if(!CreateDirectoryA(directory,nullptr))return 2;
+    const auto root=std::string(directory)+"\\";
+    FILE* report=fopen((root+"apfs-container-report.txt").c_str(),"w");
+    if(!report)return 2;
+    int result=0;
+    try{
+        Memory unknown(4096);
+        Check(!Apfs::Probe(unknown),"Unrelated image recognized as APFS");
+        auto disk=Raw();
+        const auto found=Apfs::Probe(disk);
+        Check(found&&found->offset==0&&found->blockSize==4096&&found->blockCount==256&&
+              found->objectMap==12&&found->transaction==5&&found->uuid[0]==42&&
+              found->volumes==std::vector<uint64_t>{1024,1029},"Unexpected APFS geometry or volume IDs");
+        auto large=Raw(65536);
+        Check(Apfs::Probe(large)->blockSize==65536,"64 KiB APFS block size was rejected");
+        auto bad=disk;
+        bad.bytes[2048]^=1;
+        Reject([&]{Apfs::Probe(bad);},"Corrupt APFS checksum was accepted");
+        bad=disk;Little(bad.bytes.data()+40,UINT64_MAX,8);Seal(bad.bytes,0,4096);
+        Reject([&]{Apfs::Probe(bad);},"Out-of-bounds APFS geometry was accepted");
+        bad=disk;Little(bad.bytes.data()+192,1024,8);Seal(bad.bytes,0,4096);
+        Reject([&]{Apfs::Probe(bad);},"Duplicate APFS volume was accepted");
+        for(unsigned sector:{512,4096}){
+            auto gpt=Gpt(disk,sector);
+            auto container=Apfs::Probe(gpt);
+            Check(container&&container->offset==1024*1024&&container->volumes==found->volumes,
+                  "GPT APFS partition was not recognized");
+            gpt.bytes[gpt.bytes.size()-sector+16]^=1;
+            Reject([&]{Apfs::Probe(gpt);},"APFS probe ignored an invalid GPT backup");
+        }
+        const auto path=VolumeCoord::Wide(root+"raw.img");
+        {
+            auto image=CreateFormatOutput(path.c_str(),disk.Size());
+            image->Write(0,disk.bytes.data(),disk.bytes.size());image->Flush();image->Keep();
+        }
+        bool recognized=false;
+        try{MacBrowser::OpenBrowserImage(path);}
+        catch(const Error& error){recognized=strstr(error.what(),"APFS container verified")!=nullptr;}
+        Check(recognized,"Open Volume did not distinguish APFS from an unknown image");
+        fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
+    }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}
+    fclose(report);
+    return result;
+}
+#endif
