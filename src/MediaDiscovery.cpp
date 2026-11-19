@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "MediaDiscovery.h"
+#include "BrowserMountInventory.h"
+#include "CommandStorage.h"
+#include "WorkerEndpoint.h"
+#include <algorithm>
 #include "VolumeCoordinator.h"
 #include "ReadOnlyCdBackend.h"
 #include "floppy.h"
@@ -178,4 +182,130 @@ void Changed(DWORD driveMask)
  }
  changed.notify_all();
 }
+
+void UpdateController::Cancel()
+{
+ for(auto& entry:driveChanges_)if(entry.second.job)entry.second.job->cancel();
+ driveChanges_.clear();
+ if(externalScan_)externalScan_->job->cancel();
+ externalScan_.reset();
+}
+
+void UpdateController::ScanExternal(bool silent,bool startupOnly)
+{
+#ifdef HFV_TESTING
+ if(!Removable::HasTestApi())return;
+#endif
+ if(startupOnly&&removableScanned_)return;
+ removableScanned_=true;
+ if(auto& scan=externalScan_){
+  scan->silent=scan->silent&&silent;
+  return;
+ }
+ auto media=std::make_shared<Removable::Discovery>();
+ const auto generation=MediaDiscovery::Generation();
+ auto job=Storage::navigationWorker().submit([media](Storage::Job& job){
+  *media=Removable::Scan(job);
+  return Storage::Result{};
+ });
+ externalScan_=ExternalScan{media,std::move(job),generation,silent};
+ wake_(externalScan_->job);
+}
+void UpdateController::Queue(DWORD changed,DWORD arrived,bool rescan)
+{
+ for(int drive=0;drive<26;++drive){
+  const auto bit=DWORD(1)<<drive;
+  if(!(changed&bit))continue;
+  const auto [position,inserted]=driveChanges_.try_emplace(drive);
+  auto& pending=position->second;
+  if(rescan&&!inserted&&!pending.rescan)continue;
+  if(pending.job)pending.job->cancel();
+  pending={bool(arrived&bit),rescan,{},{}};
+ }
+}
+
+UpdateController::Status UpdateController::Apply(
+    bool startupFloppies,const ApplyDrive& applyDrive,const ApplyScan& applyScan)
+{
+ bool retry=false;
+ if(externalScan_&&externalScan_->job->done()){
+  auto scan=std::exchange(externalScan_,std::nullopt);
+  const auto result=scan->job->result();
+  if(scan->generation!=MediaDiscovery::Generation()||result.error==ERROR_MEDIA_CHANGED){
+   ScanExternal(scan->silent);
+  }else applyScan(*scan->media,scan->silent,result);
+ }
+ for(auto it=driveChanges_.begin();it!=driveChanges_.end();){
+  const auto drive=it->first;
+  auto& pending=it->second;
+  const auto key=VolumeCoord::DeviceKey(drive);
+  const char root[] = {char('A'+drive),':','\\',0};
+  char classicPath[MAX_PATH]{};
+  get_floppy_volume_file_name(drive,classicPath);
+  if(!pending.job){
+   if(!VolumeCoord::Readable(key)){retry=true;++it;continue;}
+   auto media=std::make_shared<DriveUpdate>(DriveUpdate{drive,pending.rescan});
+   const bool arrived=pending.arrived,rescan=pending.rescan;
+   const bool checkFloppy=rescan||mounts_.FindClassicVolume(VolumeCoord::Wide(classicPath)).has_value()||startupFloppies;
+   std::function<UINT(int)> driveType;
+#ifdef HFV_TESTING
+   driveType=testDriveType;
+#endif
+   pending.media=media;
+   pending.job=Storage::navigationWorker().submit(
+    [media,drive,arrived,rescan,checkFloppy,key,root=std::string(root),driveType](Storage::Job& job){
+     try{
+      const VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});
+      if(job.cancelled())throw Storage::Cancelled();
+      media->type=driveType?driveType(drive):GetDriveTypeA(root.c_str());
+      if(!arrived)return Storage::Result{};
+      auto found=MediaDiscovery::ProbeDrive(drive,media->type,checkFloppy,!rescan,job);
+      media->cd=std::move(found.cd);
+      media->removable=std::move(found.removable);
+      if(found.floppy)media->floppy=MacBrowser::ReadClassicMountInfo(*found.floppy);
+     }catch(const VolumeCoord::Busy&){return CommandStorage::Busy();}
+     catch(const MacBrowser::DetectedVolumeError&){/* Explicit selection reports mount errors. */}
+     catch(const HfsPlus::Error&){/* Keep the Windows drive available. */}
+     return Storage::Result{};
+    });
+   wake_(pending.job);
+   ++it;continue;
+  }
+  if(!pending.job->done()){++it;continue;}
+  const auto result=pending.job->result();
+  if(result.error==ERROR_BUSY){pending.job.reset();retry=true;++it;continue;}
+  if(result.code){it=driveChanges_.erase(it);continue;}
+  std::vector<VolumeCoord::Access> resources{{key,VolumeCoord::Mode::Write}};
+  for(const auto& mount:mounts_.Mounted())
+   if(mount.volume&&(mount.drive==drive||mount.sourceDrive==drive))
+    resources.push_back({mount.volume->ResourceKey(),VolumeCoord::Mode::Write});
+  std::shared_ptr<VolumeCoord::Lease> access;
+  try{access=std::make_shared<VolumeCoord::Lease>(std::move(resources));}
+  catch(const VolumeCoord::Busy&){retry=true;++it;continue;}
+
+  auto media=std::move(pending.media);
+  it=driveChanges_.erase(it);
+  applyDrive(*media,std::move(access));
+ }
+ return retry?Status::Retry:Pending()?Status::Working:Status::Idle;
+}
+
+ExternalChange ClassifyExternal(const MacBrowser::Volume& current,const std::wstring& path,
+    int sourceDrive,const MacBrowser::Volume* found,int scannedDrive,const std::vector<std::wstring>& failed)
+{
+ if(found){
+  if(&current==found)return ExternalChange::Reuse;
+  const auto oldEndpoint=MacBrowser::WorkerEndpoint::Find(current);
+  const auto newEndpoint=MacBrowser::WorkerEndpoint::Find(*found);
+  const auto before=oldEndpoint?oldEndpoint->WorkerDescription():MacBrowser::WorkerOrigin{};
+  const auto after=newEndpoint?newEndpoint->WorkerDescription():MacBrowser::WorkerOrigin{};
+  return before.generationKnown&&after.generationKnown&&before.generation==after.generation&&before.path==after.path
+   ?ExternalChange::Reuse:ExternalChange::Remove;
+ }
+ const bool driveAlias=path.size()==6&&path[5]==L':';
+ const bool keep=scannedDrive>=0?sourceDrive!=scannedDrive:
+    driveAlias||std::find(failed.begin(),failed.end(),path)!=failed.end();
+ return keep?ExternalChange::Keep:ExternalChange::Remove;
+}
+
 }

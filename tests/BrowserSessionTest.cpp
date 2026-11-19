@@ -341,6 +341,37 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !browser.MediaUpdatesPending();},"targeted drive removal did not finish",false);
    Check(!session.Mounts().FindWindowsDrive(24)&&control.GetSelectedItem()==selected&&Selected(a.list,L"first.txt"),
          "targeted removal cleared another drive or its listing");
+   auto count=std::make_shared<std::atomic<unsigned>>(0);
+   browser.SetDriveTypeForTest([count](int){++*count;return UINT(DRIVE_RAMDISK);});
+   {
+    VolumeCoord::Lease busy({{VolumeCoord::DeviceKey(24),VolumeCoord::Mode::Write}});
+    session.NavigationMediaChanged(mask);
+    browser.QueueMediaChanges(mask,mask);
+    Check(browser.ApplyMediaChanges()==MainMacBrowser::MediaUpdate::Retry&&
+          count->load()==0&&!session.Mounts().FindWindowsDrive(24),
+          "busy device launched a probe or published a mount");
+   }
+   PumpUntil([&]{return !browser.MediaUpdatesPending();},"busy drive was not retried after release");
+   Check(count->load()==1&&session.Mounts().FindWindowsDrive(24),"retry lost or duplicated device arrival");
+
+   auto delayed=std::make_shared<Gate>();
+   browser.SetDriveTypeForTest([delayed](int){
+    if(++delayed->probes==1){
+     SetEvent(delayed->entered);
+     WaitForSingleObject(delayed->release,5000);
+     return UINT(DRIVE_RAMDISK);
+    }
+    return UINT(DRIVE_NO_ROOT_DIR);
+   });
+   session.NavigationMediaChanged(mask);
+   browser.QueueMediaChanges(mask,mask);
+   PumpUntil([&]{return WaitForSingleObject(delayed->entered,0)==WAIT_OBJECT_0;},"slow arrival did not reach its probe");
+   session.NavigationMediaChanged(mask);
+   browser.QueueMediaChanges(mask,0);
+   SetEvent(delayed->release);
+   PumpUntil([&]{return !browser.MediaUpdatesPending();},"removal did not supersede a slow arrival");
+   Check(delayed->probes.load()==2&&!session.Mounts().FindWindowsDrive(24),
+         "slow arrival republished a removed drive");
    browser.SetDriveTypeForTest({});
    a.doc.m_fat_count=1;
    fprintf(report,"PASS: device notices probe only named drives, discard stale results, and preserve unrelated roots, expansion and file selection.\n");

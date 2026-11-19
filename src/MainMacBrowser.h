@@ -5,10 +5,13 @@
 class CHFVExplorerListView;
 class BrowserSession;
 namespace Removable { struct Mounted; }
+namespace MediaDiscovery { struct DriveUpdate; }
+namespace VolumeCoord { class Lease; }
 namespace BrowserNavigation { struct Request; }
 namespace BrowserDirectory { struct Row; struct Folder; }
 class MainMacBrowser {
     BrowserSession& session_;
+    void PublishDriveUpdate(MediaDiscovery::DriveUpdate&,std::shared_ptr<VolumeCoord::Lease>);
     struct State;
     std::unique_ptr<State> state_;
     int QueueImageOpen(const std::wstring&,const std::wstring&,
