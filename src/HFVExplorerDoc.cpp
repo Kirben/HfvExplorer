@@ -1976,18 +1976,7 @@ void CHFVExplorerDoc::CheckNewFloppy( int index )
 
 void CHFVExplorerDoc::OnViewRefresh() 
 {
- if(GetBrowserSession().MacBrowser().Refresh())return;
- if(GetBrowserSession().UsesAsyncNavigation()){
-  auto& tree=GetBrowserSession().Tree()->GetTreeCtrl();
-  auto selected=tree.GetSelectedItem();
-  auto binding=selected?reinterpret_cast<lparam_struct*>(tree.GetItemData(selected)):nullptr;
-  if(binding&&binding->type==LIST_FAT){
-   const auto* folder=GetBrowserSession().Tree()->BrowserFolderAt(selected);
-   const auto path=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(binding->path);
-   if(NavigateWindowsFolder(binding->volinx,path,true))return;
-  }
-  if(binding&&binding->type==LIST_HFS&&NavigateClassicFolder(binding->volinx,uint32_t(binding->id),true))return;
- }
+ if(GetBrowserSession().RefreshSelected())return;
  if(BackgroundCopies::Active()){
   CheckNewMedia(TRUE,TRUE,TRUE);
   auto tree=GetBrowserSession().Tree();auto item=tree->GetTreeCtrl().GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->GetTreeCtrl().GetItemData(item)):nullptr;

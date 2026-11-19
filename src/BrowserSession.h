@@ -31,7 +31,9 @@ class BrowserSession {
  std::function<void(const Storage::Result&)> navigationReady_;
  void CompleteNavigation();
  void ProcessChanges();
- void RefreshLegacy(const Context&);
+ void RefreshSynchronously(const Context&);
+ std::vector<FileOperations::Location> CaptureListingSelection() const;
+ void RestoreListingSelection(const std::vector<FileOperations::Location>&,bool reveal);
  BrowserNavigation::Request FolderRequest(HTREEITEM item);
  bool OpenFolderRequest(BrowserSession& source,BrowserNavigation::Request request);
 
@@ -66,13 +68,15 @@ public:
     void PresentDirectory(const BrowserDirectory::Snapshot&, int type, int index,
         uint32_t folder, const std::string& path, bool listing,
         const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder);
+    void PrepareFolderPresentation(HTREEITEM item,const CString& parentLabel,bool hasParent);
+    bool RefreshSelected(bool afterMutation=false);
     void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={},std::wstring windowsPath={},std::optional<DWORD> windowsSerial={});
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
     void CancelNavigation();
     void NavigationMediaChanged(DWORD driveMask);
     void Navigate(BrowserNavigation::Request, BrowserNavigation::Read,
-        BrowserNavigation::Publish, std::function<bool()> mountCurrent,
+        BrowserNavigation::Publish, std::optional<BrowserMountInventory::Entry> mount,
         std::function<void()> retry, std::function<bool()> nextOnError={});
     bool OpenFolderInNewWindow(HTREEITEM item);
     bool OpenFolderFrom(BrowserSession& source,HTREEITEM item);

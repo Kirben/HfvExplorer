@@ -264,13 +264,15 @@ int RunBrowserSessionTest(const char* directory){
    BrowserDirectory::testObserveRead=[=](const char* path){
     if(wa.CompareNoCase(path)==0){SetEvent(entered);WaitForSingleObject(release,5000);}
    };
-   Check(a.doc.NavigateWindowsFolder(0,(LPCSTR)wa,true),"queue asynchronous Windows folder refresh");
+   a.list.GetListCtrl().SetItemState(-1,0,LVIS_SELECTED|LVIS_FOCUSED);
+   a.list.GetListCtrl().SetItemState(Find(a.list,L"first.txt"),LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
+   Check(session.RefreshSelected(),"queue asynchronous Windows folder refresh through the shared entry point");
    PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"Windows worker read did not start");
    Check(session.Navigating()&&a.owner.IsWindowEnabled()&&Find(a.list,L"first.txt")>=0,
          "slow Windows refresh disabled its window or cleared the listing");
    SetEvent(release);
    PumpUntil([&]{return !session.Navigating();},"Windows refresh did not finish");
-   Check(Find(a.list,L"first.txt")>=0&&session.ListingAvailable(),"Windows refresh did not publish its listing");
+   Check(Selected(a.list,L"first.txt")&&session.ListingAvailable(),"Windows refresh did not publish its listing and restore selection");
    session.asyncNavigationForTest=false;
   }
   {
@@ -333,7 +335,7 @@ int RunBrowserSessionTest(const char* directory){
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
   a.Session().asyncNavigationForTest=true;
   auto classicRoot=a.doc.m_volumes[0].m_rootitem;
-  Check(a.doc.NavigateClassicFolder(0,2,true)&&a.Session().Navigating()&&
+  Check(a.Session().RefreshSelected()&&a.Session().Navigating()&&
         Find(a.list,L"first classic")>=0,"classic refresh did not retain the listing");
   PumpUntil([&]{return !a.Session().Navigating();},"classic refresh did not finish");
   Check(Find(a.list,L"first classic")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==classicRoot,

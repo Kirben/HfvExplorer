@@ -293,7 +293,6 @@ struct MainMacBrowser::State {
             const auto physicalOffset=mount.physicalOffset;
             const auto capturedMount=session_.Mounts().Lookup({BrowserMountInventory::Kind::MountedVolume,index});
             if(!capturedMount)return false;
-            const auto mountCurrent=[this,capturedMount]{return session_.Mounts().IsCurrent(*capturedMount);};
             const auto retry=[this,index,id,item,rebuild,reload,found=find?std::optional<Request>(*find):std::nullopt]{
                 Show(index,id,item,rebuild,true,reload,found?&*found:nullptr);
             };
@@ -337,7 +336,7 @@ struct MainMacBrowser::State {
                 }
                 Publish(index,result.folder.Id(),target,rebuild,false,mounted,result.listing.revision,listing->title,
                     listing->levels,listing->entries,listing->free,listing->mutableFolder,listing->ancestors,&result.listing);
-            },mountCurrent,retry);
+            },capturedMount,retry);
             return true;
         }
         if(!cached && session_.Defer(key,mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);}))return true;
@@ -389,10 +388,7 @@ struct MainMacBrowser::State {
         if(id!=2)TreeText(session_,item,folderTitle);
         // Replace only this directory's child nodes, never unrelated volumes.
         for(HTREEITEM child=control.GetChildItem(item);child;){auto next=control.GetNextSiblingItem(child);control.DeleteItem(child);child=next;}
-        auto list = session_.List();
-        list->list_clear();
-        list->destroy_pointers();
-        list->initialize_volume("", id == 2 ? 0 : ID_GOTO_PARENT);
+        session_.PrepareFolderPresentation(item,"",id!=2);
         BrowserDirectory::Snapshot snapshot;
         if(!prepared){
             snapshot.resourceKey=key;
@@ -409,7 +405,7 @@ struct MainMacBrowser::State {
             });
         session_.SetLocationTitle(id==2?Wide(volume->Name()):Wide(volume->Name())+L":"+folderTitle);
         current=index;folder=id;folderMutable=!cached&&mutableFolder;
-        control.SelectItem(item);control.EnsureVisible(item);tree->enable_selchange(enabled);
+        tree->enable_selchange(enabled);
         if(session_.Status()){CString status;status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
             session_.Status()->SetPaneText(0,status);}
         if(cached)session_.Defer(key,false,[this,index,id]{
@@ -584,7 +580,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             RememberImage(path);
             if(next)next();
         },
-        []{return true;},[this,path,externalJournal,next]{QueueImageOpen(path,externalJournal,next);},next);
+        {},[this,path,externalJournal,next]{QueueImageOpen(path,externalJournal,next);},next);
     return 1;
 }
 
