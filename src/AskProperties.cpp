@@ -20,6 +20,7 @@
 
 #include "afx.h"
 #include "stdafx.h"
+#include "DialogDpi.h"
 #include "HFVExplorer.h"
 #include "AskProperties.h"
 
@@ -179,8 +180,6 @@ void CAskProperties::OnPropIsdir()
 
 BOOL CAskProperties::OnInitDialog() 
 {
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-
 	CDialog::OnInitDialog();
 
 	if(m_isdir) {
@@ -194,13 +193,23 @@ BOOL CAskProperties::OnInitDialog()
 	}
 	CenterWindow();
 
-	if(pApp->get_font()) {
-		::SendMessage( 
-			GetDlgItem(IDC_PROP_NAME)->GetSafeHwnd(), 
-			WM_SETFONT,
-			(WPARAM)pApp->get_font(),
-			MAKELPARAM(TRUE,0) );
-	}
+    NativeDpi::KeepDialogControlFont(::GetDlgItem(m_hWnd, IDC_PROP_NAME));
+    ApplyNameFont(NativeDpi::Window(m_hWnd));
 
 	return TRUE;
+}
+
+void CAskProperties::ApplyNameFont(UINT dpi)
+{
+    if (auto name = GetDlgItem(IDC_PROP_NAME)) {
+        auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
+        name->SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
+    }
+}
+
+LRESULT CAskProperties::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
+{
+    const auto result = CDialog::WindowProc(message, wParam, lParam);
+    if (message == NativeDpi::Changed) ApplyNameFont(LOWORD(wParam));
+    return result;
 }

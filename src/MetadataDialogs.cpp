@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "DialogDpi.h"
 #include "HFVExplorer.h"
 #include "AskProperties.h"
 #include "MetadataDialogs.h"
@@ -79,7 +80,7 @@ struct AttributesDialog:CDialog,DialogActivity {
  void OnOK()override{if(!state->writable||state->importing)return;FileOperations::EditAttributes request{state->source,state->original,state->desired};if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();}
  void OnCancel()override{DestroyWindow();}
 };
-void PresentAttributes(FileOperations::Location source,const FileOperations::Completion& value,bool hidden){CollectClosed();auto dialog=std::make_unique<AttributesDialog>(std::move(source),value,hidden);if(!dialog->Create(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create attribute editor");if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));}
+void PresentAttributes(FileOperations::Location source,const FileOperations::Completion& value,bool hidden,HWND anchor){CollectClosed();auto dialog=std::make_unique<AttributesDialog>(std::move(source),value,hidden);if(!dialog->Create(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create attribute editor");NativeDpi::CenterPopup(dialog->GetSafeHwnd(),anchor);if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));}
 struct Summary:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
  FileOperations::Completion value;FileOperations::Location source;bool hidden;
@@ -92,7 +93,7 @@ struct Summary:CDialog,DialogActivity {
  auto combo=static_cast<CComboBox*>(GetDlgItem(IDC_COMPRESSION_METHOD));
  for(const char* label:{"Uncompressed","zlib","LZVN","LZFSE","LZBITMAP","Stored (no size reduction)","Legacy stored (inline, up to 3786 bytes)"})combo->AddString(label);
  combo->SetCurSel(e.compressed?0:1);combo->EnableWindow(compression&&value.writable&&!e.protectedFile&&e.readError.empty());return TRUE;}
- BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_ATTR_OPEN){PresentAttributes(source,value,hidden);return TRUE;}
+ BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_ATTR_OPEN){PresentAttributes(source,value,hidden,m_hWnd);return TRUE;}
  if(LOWORD(wp)==IDC_FILE_COMPRESSION){using Mode=HfsPlus::Volume::CompressionMode;const Mode methods[]={Mode::Uncompressed,Mode::Zlib,Mode::Lzvn,Mode::Lzfse,Mode::Lzbitmap,Mode::Stored,Mode::StoredInline};auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);if(selected<0||selected>=ARRAYSIZE(methods))return TRUE;FileOperations::ChangeCompression request{source,value.entry,value.attributes,methods[selected]};if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();return TRUE;}return CDialog::OnCommand(wp,lp);}
  void PostNcDestroy()override{source={};value={};CDialog::PostNcDestroy();}
  void OnOK()override{DestroyWindow();}void OnCancel()override{DestroyWindow();}
@@ -291,12 +292,12 @@ struct Editor:CAskProperties,DialogActivity {
  void PostNcDestroy()override{source={};original={};CAskProperties::PostNcDestroy();}
  void OnCancel()override{DestroyWindow();}
 };
-void Present(FileOperations::Location source,const FileOperations::Completion& value,bool hidden){
+void Present(FileOperations::Location source,const FileOperations::Completion& value,bool hidden,HWND anchor){
  CollectClosed();
  std::unique_ptr<CDialog> dialog;
  if(value.basicMetadata&&!value.entry.directory)dialog.reset(new MfsEditor(std::move(source),value,hidden));else if(value.classicProperties&&value.writable)dialog.reset(new Editor(std::move(source),value,hidden));else dialog.reset(new Summary(std::move(source),value,hidden));
  UINT resource=value.basicMetadata&&!value.entry.directory?IDD_MFS_PROPERTIES:value.classicProperties&&value.writable?IDD_HFS_ITEM_PROPERTIES:IDD_METADATA_SUMMARY;
- if(!dialog->Create(resource,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create Properties window");if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));
+ if(!dialog->Create(resource,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create Properties window");NativeDpi::CenterPopup(dialog->GetSafeHwnd(),anchor);if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));
 }
 }
 bool Show(FileOperations::Location source,CWnd* owner){
@@ -305,7 +306,8 @@ bool Show(FileOperations::Location source,CWnd* owner){
  hidden=owner&&!owner->IsWindowVisible();
 #endif
  FileOperations::InspectProperties request{source};
- return BackgroundCopies::Start({request},owner,true,{},[source,hidden](const FileOperations::Completion& value){Present(source,value,hidden);});
+ const HWND anchor=owner?owner->GetSafeHwnd():nullptr;
+ return BackgroundCopies::Start({request},owner,true,{},[source,hidden,anchor](const FileOperations::Completion& value){Present(source,value,hidden,anchor);});
 }
 void Shutdown(){for(auto& window:windows)if(IsWindow(window->GetSafeHwnd()))window->DestroyWindow();CollectClosed();}
 #ifdef HFV_TESTING

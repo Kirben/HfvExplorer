@@ -89,6 +89,8 @@ protected:
 	//{{AFX_MSG(CAskProperties)
 	afx_msg void OnPropIsdir();
 	virtual BOOL OnInitDialog();
+    LRESULT WindowProc(UINT, WPARAM, LPARAM) override;
+    void ApplyNameFont(UINT dpi);
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()
 };
