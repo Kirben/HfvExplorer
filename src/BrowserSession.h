@@ -19,6 +19,7 @@ struct FindHit;
 class BrowserSession {
  struct Notifications;
  std::unique_ptr<Notifications> notifications_;
+ std::shared_ptr<void> completionLifetime_;
  VolumeCoord::Subscription subscription_;
  struct Context {
      std::string key;
@@ -60,6 +61,15 @@ public:
     void Detach(CHFVPreviewView*);
     void DetachPanes();
     void StopNotifications();
+    void InvalidateStorageCompletions(){completionLifetime_.reset();}
+    // Background completion handlers run on the UI thread. They cannot be
+    // redirected to another window or survive detaching the originating panes.
+    template<class Action> auto WhileOpen(Action action) {
+        if(!completionLifetime_&&owner_&&tree_&&list_)completionLifetime_=std::make_shared<int>(0);
+        return [this,lifetime=std::weak_ptr<void>(completionLifetime_),action=std::move(action)](auto&&... args) mutable {
+            if(!lifetime.expired())action(*this,std::forward<decltype(args)>(args)...);
+        };
+    }
     CHFVExplorerDoc* Document()const{return document_;}
     HFVExplorerTreeView* Tree()const{return tree_;}
     CHFVExplorerListView* List()const{return list_;}

@@ -2,7 +2,9 @@
 #include "stdafx.h"
 #include "FloppyWriteDialog.h"
 #include "FloppyWriter.h"
-#include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
+#include "BrowserSession.h"
+#include "LegacyEngine.h"
 #include "MediaCommands.h"
 #include "ReadOnlyFloppy.h"
 #include "ReadOnlyCdBackend.h"
@@ -47,26 +49,77 @@ std::function<Storage::Result(Storage::Job&)> MakeFloppyWriteJob(int drive,std::
  };
  if(drive<0||drive>25)return work;auto key=VolumeCoord::DeviceKey(drive);return CommandStorage::Guard({{key,VolumeCoord::Mode::Write}},work,{key},held);
 }
-void WriteFloppyImage(CWnd* owner,int drive,const std::vector<BYTE>& image,const char* description){
- if(!ValidateFloppyHfs(image)){AfxMessageBox("A validated 1.44 MB HFS image is required.");return;}
- DWORD generation=0;
- auto ready=ShowStorageWaitJob(CommandStorage::Guard({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}},
-  [&](Storage::Job&){
+std::function<Storage::Result(Storage::Job&)> MakeFloppyPreparationJob(
+    int drive,FloppyImageInput source,std::shared_ptr<PreparedFloppyImage> prepared)
+{
+ return [drive,source=std::move(source),prepared=std::move(prepared)](Storage::Job& job){
+  if(drive<0||drive>=26)return Storage::Result{1,ERROR_BAD_DEVICE,"Invalid floppy drive."};
+  std::vector<VolumeCoord::Access> access{{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}};
+  const auto* image=std::get_if<ExistingFloppyImage>(&source);
+  if(image){
+   const auto path=VolumeCoord::Wide(image->path);
+   access.push_back({VolumeCoord::ImageKey(path),VolumeCoord::Mode::Read});
+   access.push_back({VolumeCoord::PathKey(path),VolumeCoord::Mode::Read});
+  }
+  return CommandStorage::Guard(std::move(access),[&](Storage::Job&){
+   PreparedFloppyImage input;
+   std::string error;
+   if(image){
+    if(!LoadFloppyHfs(image->path.c_str(),input.bytes,error))
+     return Storage::Result{1,ERROR_READ_FAULT,error};
+   }else{
+    LegacyEngine::Scope engine;
+    if(!PrepareFloppyHfs(std::get<NewFloppyImage>(source).label.c_str(),input.bytes,error))
+     return Storage::Result{1,ERROR_WRITE_FAULT,error};
+   }
+   if(job.cancelled())throw Storage::Cancelled();
    FloppyReadApi* api=nullptr;
 #ifdef HFV_FLOPPY_TESTING
    api=physical_floppy_test_api(drive);
    if(!api)return Storage::Result{1,ERROR_NOT_SUPPORTED,"No simulated floppy is attached."};
 #endif
    ReadOnlyFloppy floppy(api);
-   if(!floppy.OpenDrive(drive))return Storage::Result{1,floppy.Error(),"Could not identify the selected floppy. Insert a 1.44 MB disk and try again."};
-   generation=floppy.Generation();
+   if(!floppy.OpenDrive(drive))return Storage::Result{1,floppy.Error(),
+        "Could not identify the selected floppy. Insert a 1.44 MB disk and try again."};
+   if(floppy.MediaSize()!=input.bytes.size())return Storage::Result{1,ERROR_NOT_SUPPORTED,
+        "Insert a 1.44 MB disk and try again."};
+   if(job.cancelled())throw Storage::Cancelled();
+   input.generation=floppy.Generation();
+   *prepared=std::move(input);
    return Storage::Result{};
-  }),!owner->IsWindowVisible(),owner);
- if(ready.code){owner->MessageBox(ready.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);return;}
- CString question;question.Format("ERASE ALL DATA on floppy drive %c:?\r\n\r\n%s\r\n\r\nAll 1,474,560 bytes will be written and read back for verification.",'A'+drive,description);
- if(owner->MessageBox(question,"HFVExplorer",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
- const auto started=MediaCommands::Start(*owner,drive,"Writing floppy","Floppy write",
-  [&](CommandStorage::Reservation held){return MakeFloppyWriteJob(drive,image,nullptr,std::move(held),generation);});
- if(started.code)owner->MessageBox(started.message.c_str(),"HFVExplorer",
-    MB_OK|(started.error==ERROR_BUSY?MB_ICONINFORMATION:MB_ICONERROR));
+  })(job);
+ };
+}
+
+bool StartFloppyWrite(BrowserSession& session,int drive,FloppyImageInput source)
+{
+ auto* image=std::get_if<ExistingFloppyImage>(&source);
+ if(image){
+  try{image->path=FileOperations::Location::Image(image->path,":").ClassicImage();}
+  catch(const std::exception& error){
+   session.Owner()->MessageBox(error.what(),"Prepare floppy write",MB_OK|MB_ICONERROR);
+   return false;
+  }
+ }
+ const auto description=image?image->path:std::string("Format a new HFS volume");
+ auto prepared=std::make_shared<PreparedFloppyImage>();
+ auto complete=session.WhileOpen([drive,description,prepared](BrowserSession& origin,const Storage::Result& ready){
+  if(ready.code)return;
+  auto begin=origin.WhileOpen([drive,prepared](BrowserSession& browser){
+   auto& owner=*browser.Owner();
+   const auto started=MediaCommands::Start(owner,drive,"Writing floppy","Floppy write",
+    [&](CommandStorage::Reservation held){
+     return MakeFloppyWriteJob(drive,std::move(prepared->bytes),nullptr,std::move(held),prepared->generation);
+    });
+   if(started.code)owner.MessageBox(started.message.c_str(),"HFVExplorer",
+       MB_OK|(started.error==ERROR_BUSY?MB_ICONINFORMATION:MB_ICONERROR));
+  });
+  CString question;
+  question.Format("ERASE ALL DATA on floppy drive %c:?\r\n\r\n%s\r\n\r\nAll 1,474,560 bytes will be written and read back for verification.",
+       'A'+drive,description.c_str());
+  if(origin.Owner()->MessageBox(question,"HFVExplorer",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES)
+   begin();
+ });
+ return BackgroundCopies::StartStorageResult(MakeFloppyPreparationJob(drive,std::move(source),prepared),
+    session.Owner(),"Preparing floppy write","Prepare floppy write",std::move(complete),{true});
 }

@@ -17,7 +17,7 @@ public:
         std::function<void(bool)> completed = {},
         std::function<void(const FileOperations::Completion&)> observed = {});
     using Work = std::function<Storage::Result(Storage::Job&)>;
-    JobController(Work work,std::function<void(bool)> completed = {});
+    JobController(Work work,std::function<void(const Storage::Result&)> completed);
     Step Advance();
     const FileOperations::LegacyConversion* PendingMode() const;
     void ChooseMode(const ModeChoice&);
@@ -37,6 +37,7 @@ private:
     Work work_;
     std::shared_ptr<Storage::Job> task_;
     std::function<void(bool)> completed_;
+    std::function<void(const Storage::Result&)> storageCompleted_;
     std::function<void(const FileOperations::Completion&)> observed_;
     FileOperations::Completion snapshot_;
     Storage::Result result_;

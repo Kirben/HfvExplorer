@@ -10,6 +10,9 @@ struct StorageJobOptions {
 };
 bool StartStorage(std::function<Storage::Result(Storage::Job&)>,CWnd* owner,const char* title,
                   const char* operation,std::function<void(bool)> completed={},StorageJobOptions options={});
+using StorageCompletion=std::function<void(const Storage::Result&)>;
+bool StartStorageResult(std::function<Storage::Result(Storage::Job&)>,CWnd* owner,const char* title,
+                        const char* operation,StorageCompletion completed,StorageJobOptions options={});
 void TransferOwner(HWND closing,HWND replacement);
 void CancelAll();void Shutdown();
 #ifdef HFV_TESTING

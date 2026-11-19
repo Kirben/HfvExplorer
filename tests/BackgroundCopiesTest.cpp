@@ -16,6 +16,8 @@
 #include "CdImage.h"
 #include "CdBurn.h"
 #include "FloppyWriteDialog.h"
+#include "ClassicFormatCommand.h"
+#include "FindFilesDialog.h"
 #include "MediaCommands.h"
 #include "RefreshStorage.h"
 #include "StorageJobDialog.h"
@@ -819,6 +821,75 @@ int RunPerVolumeCommandsTest(const char* directory){
   CString classic=host+"\\classic.dsk";{CFile file;Check(file.Open(classic,CFile::modeCreate|CFile::modeWrite),"create incremental image");file.SetLength(4*1024*1024);}char label[]="Incremental";Check(hfs_format(const_cast<char*>((LPCSTR)classic),0,label)==0,"format incremental image");HTREEITEM original=session.Tree()->m_ct->GetRootItem();Check(doc->OnOpenDocument(classic)&&IsWindow(frame->GetSafeHwnd())&&session.Tree()->m_ct->GetItemData(original)!=0&&BackgroundCopies::Active(),"classic image opening rebuilt/closed unrelated mounts");Check(session.MacBrowser().ShowTestFolder(idle,2),"idle image lost after classic open");Check(doc->OnOpenDocument(newImage),"open newly formatted native image");
   Check(doc->OnOpenDocument(host+"\\busy-a.dsk")&&BackgroundCopies::Active(),"busy image selection did not defer");SetEvent(stalled.release);Until([]{return !BackgroundCopies::Active();});Until([&]{return session.MacBrowser().Active()&&Row(session,L"Slow")>=0;});Check(Find(*b,u"Slow")&&FileOperations::Pending().empty()&&VolumeCoord::Available({{a->ResourceKey(),VolumeCoord::Mode::Write},{b->ResourceKey(),VolumeCoord::Mode::Write}}),"policy changes corrupted copy or leaked reservations");
   fprintf(report,"PASS: scans skip only busy drives; opening unrelated classic/native images preserves existing roots and a busy image opens after its job completes. Original copy data and cleanup remain intact. No real hardware or computer control used.\n");
+
+  struct PendingRead {
+   std::shared_ptr<Gate> gate=std::make_shared<Gate>();
+   PendingRead(std::wstring target,DWORD uiThread){
+    VolumeCoord::SetPathLookupObserver([gate=gate,target=std::move(target),uiThread](const auto& path){
+     if(path!=target||WaitForSingleObject(gate->entered,0)==WAIT_OBJECT_0)return;
+     Check(GetCurrentThreadId()!=uiThread,"background command bound a path on the UI thread");
+     SetEvent(gate->entered);
+     Check(WaitForSingleObject(gate->release,15000)==WAIT_OBJECT_0,"command path gate timed out");
+    });
+   }
+   ~PendingRead(){SetEvent(gate->release);VolumeCoord::SetPathLookupObserver({});}
+   void Entered(){Until([&]{return WaitForSingleObject(gate->entered,0)==WAIT_OBJECT_0;});}
+   void Release(){SetEvent(gate->release);}
+  };
+  const auto uiThread=GetCurrentThreadId();
+  const std::string formatPath=std::string(host.GetString())+"\\background-format.dsk";
+  {
+   PendingRead format(VolumeCoord::Wide(formatPath),uiThread);
+   const auto enteredPath=std::string(host.GetString())+"\\.\\background-format.dsk";
+   Check(StartClassicFormat(session,{enteredPath,"Background HFS",2*1024*1024}),"start classic image format");
+   format.Entered();
+   Host(second,host);
+   Check(frame->IsWindowEnabled()&&other->IsWindowEnabled()&&second.ListingAvailable()&&!StorageUi::busy(),
+         "formatting blocked an unrelated browser");
+   format.Release();
+   Until([&]{return !BackgroundCopies::Active()&&!session.Navigating();});
+   Check(!BackgroundCopies::LastResult().code&&session.WindowTitle().find(L"Background HFS")!=std::wstring::npos&&
+         second.MacBrowser().TargetFolder().IsWindows(),"formatted image did not open in its originating browser");
+  }
+  Check(StartClassicFormat(session,{formatPath,"Unwanted",4*1024*1024}),"submit existing image as a format target");
+  Until([]{return !BackgroundCopies::Active();});
+  Check(BackgroundCopies::LastResult().code&&session.WindowTitle().find(L"Background HFS")!=std::wstring::npos,
+        "background format replaced an existing image");
+
+  const auto folder=std::string(host.GetString())+"\\find-background";
+  Check(CreateDirectoryA(folder.c_str(),nullptr),"create background search scope");
+  {CFile file;Check(file.Open((folder+"\\Needle.txt").c_str(),CFile::modeCreate|CFile::modeWrite),"create search match");}
+  FindRequest search;
+  search.scope.origin=FileOperations::Location::Windows(VolumeCoord::Wide(folder));
+  search.pattern="Needle";
+  unsigned results=0;
+  auto receive=[&](BrowserSession& owner,std::shared_ptr<const FindResults> found,const Storage::Result& result){
+   Check(&owner==&session&&!result.code&&found->hits.size()==1,"search result went to a different browser or folder");
+   ++results;
+  };
+  {
+   PendingRead read(VolumeCoord::Wide(folder),uiThread);
+   Check(StartFindSearch(session,search,receive),"start background Find Files");
+   read.Entered();
+   Host(second,host);
+   Check(BackgroundCopies::Active()&&other->IsWindowEnabled()&&second.ListingAvailable()&&results==0,
+         "slow Find Files blocked browsing elsewhere");
+   read.Release();
+   Until([&]{return !BackgroundCopies::Active();});
+   Check(results==1,"the originating browser did not receive the completed search");
+  }
+  {
+   PendingRead read(VolumeCoord::Wide(folder),uiThread);
+   Check(StartFindSearch(session,search,receive),"start search before closing its browser");
+   read.Entered();
+   const auto closing=frame->GetSafeHwnd();
+   frame->SendMessage(WM_CLOSE);
+   Check(!IsWindow(closing)&&other->IsWindowEnabled(),"active search prevented independent window closure");
+   read.Release();
+   Until([]{return !BackgroundCopies::Active();});
+   Check(results==1&&second.ListingAvailable(),"closed browser search published to another window");
+  }
+  fprintf(report,"PASS: classic format and Find Files run without blocking another browser; results go to their origin and are suppressed after it closes.\n");
  }catch(const std::exception& error){fprintf(report,"FAIL: %s; last copy: %s\n",error.what(),BackgroundCopies::LastResult().message.c_str());result=1;}
  SetEvent(stalled.release);BackgroundCopies::CancelAll();FileOperations::CancelPending();Until([]{return !BackgroundCopies::Active();});ShutdownStorageUi();BackgroundCopies::enabled=false;while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
 }

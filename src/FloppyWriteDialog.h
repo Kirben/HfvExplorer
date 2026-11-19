@@ -4,7 +4,17 @@
 #include "CommandStorage.h"
 #include <vector>
 #include <optional>
-class CWnd;
+#include <variant>
+class BrowserSession;
 class FloppyWriteApi;
 std::function<Storage::Result(Storage::Job&)> MakeFloppyWriteJob(int drive,std::vector<BYTE> image,FloppyWriteApi* api=nullptr,CommandStorage::Reservation held={},std::optional<DWORD> generation={});
-void WriteFloppyImage(CWnd* owner,int drive,const std::vector<BYTE>& image,const char* description);
+struct NewFloppyImage {std::string label;};
+struct ExistingFloppyImage {std::string path;};
+using FloppyImageInput=std::variant<NewFloppyImage,ExistingFloppyImage>;
+struct PreparedFloppyImage {
+ std::vector<BYTE> bytes;
+ DWORD generation=0;
+};
+std::function<Storage::Result(Storage::Job&)> MakeFloppyPreparationJob(int drive,FloppyImageInput,
+                                               std::shared_ptr<PreparedFloppyImage>);
+bool StartFloppyWrite(BrowserSession&,int drive,FloppyImageInput);

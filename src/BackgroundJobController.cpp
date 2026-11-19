@@ -10,8 +10,8 @@ JobController::JobController(std::vector<FileOperations::Request> requests,
     : requests_(std::move(requests)), completed_(std::move(completed)), observed_(std::move(observed))
 {}
 
-JobController::JobController(Work work,std::function<void(bool)> completed)
-    : work_(std::move(work)), completed_(std::move(completed)) {}
+JobController::JobController(Work work,std::function<void(const Storage::Result&)> completed)
+    : work_(std::move(work)), storageCompleted_(std::move(completed)) {}
 
 std::shared_ptr<Storage::Job> JobController::Job() const
 {
@@ -154,12 +154,14 @@ void JobController::Finish()
     requests_.clear();
     work_ = {};
     auto completed = std::move(completed_);
+    auto storageCompleted=std::move(storageCompleted_);
     auto observed = std::move(observed_);
     auto snapshot = std::move(snapshot_);
     if (completed)
         completed(success);
     if (success && observed)
         observed(snapshot);
+    if(storageCompleted)storageCompleted(result_);
 }
 
 }

@@ -33,6 +33,7 @@
 #include "MediaDiscovery.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriteDialog.h"
+#include "ClassicFormatCommand.h"
 #include "FloppyWriter.h"
 #include "charset.h"
 #include "FloppyImage.h"
@@ -1032,31 +1033,17 @@ int read_floppy( int drive, char *path )
 
 void CMainFrame::OnFileNewHfsPlus() {FormatHfsPlusImage(this,GetBrowserSession());}
 
-void CMainFrame::OnFileNewvolume() 
+void CMainFrame::OnFileNewvolume()
 {
-	char volpath[MAX_PATH];
-	char vname[MAX_PATH];
-	CHFVExplorerApp	*pApp;
-	hfv_size_t size; int init;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	*volpath = 0;
-	*vname = 0;
-	int floppyDrive=-1;
- if(!ask_new_volume(volpath,vname,&size,&init,&floppyDrive))return;
- if(floppyDrive>=0){
-  std::vector<BYTE> image;std::string error;
-  pc_to_mac_charset((unsigned char*)vname);
-  if(!PrepareFloppyHfs(vname,image,error)){AfxMessageBox(error.c_str());return;}
-  WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume");
-  return;
- }
-
- auto wide=VolumeCoord::Wide(volpath);auto formatted=ShowStorageJob(CommandStorage::Guard(CommandStorage::ImageWrite(wide),[=](Storage::Job&){LegacyEngine::Scope engine;return HFSIFACE_format(const_cast<char*>(volpath),const_cast<char*>(vname),size,init)==0?Storage::Result{}:Storage::Result{1,ERROR_WRITE_FAULT,"Could not format the selected image"};},{VolumeCoord::ImageKey(wide),VolumeCoord::PathKey(wide)}),"Format HFS image",false,false,false,this);
- if(formatted.code){AfxMessageBox(formatted.message.c_str());return;}
-
-    GetBrowserSession().Document()->OnOpenDocument(volpath);
+ char path[MAX_PATH]{},label[MAX_PATH]{};
+ hfv_size_t size;
+ int initialize,drive=-1;
+ if(!ask_new_volume(path,label,&size,&initialize,&drive))return;
+ auto& browser=GetBrowserSession();
+ if(drive>=0){
+  pc_to_mac_charset(reinterpret_cast<unsigned char*>(label));
+  StartFloppyWrite(browser,drive,NewFloppyImage{label});
+ }else StartClassicFormat(browser,{path,label,size});
 }
 
 hfv_size_t get_file_size( const char *volpath )
@@ -1312,6 +1299,7 @@ BOOL CMainFrame::OnQueryOpen()
 void CMainFrame::OnClose() 
 {
  if(BackgroundCopies::Active()&&static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()<=1){
+  GetBrowserSession().InvalidateStorageCompletions();
   BackgroundCopies::CancelAll();
   SetTimer(9201,100,nullptr);if(GetBrowserSession().Status())GetBrowserSession().Status()->SetPaneText(0,"Closing after copy cleanup finishes...");return;
  }
@@ -1368,12 +1356,11 @@ void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) {ui->Enable(!StorageUi::busy(
 
 void CMainFrame::OnFileVolumetofloppy()
 {
- CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
- CAskVolumeToFloppy dialog(this);dialog.to_floppy=TRUE;dialog.m_caption="Write a volume file to floppy";
+ CAskVolumeToFloppy dialog(this);
+ dialog.to_floppy=TRUE;
+ dialog.m_caption="Write a volume file to floppy";
  if(dialog.DoModal()!=IDOK)return;
- std::vector<BYTE> image;std::string error;
- auto loaded=ShowStorageWaitJob(CommandStorage::Guard({{VolumeCoord::ImageKey(std::string((LPCSTR)dialog.m_volname)),VolumeCoord::Mode::Read}},[&](Storage::Job&){return LoadFloppyHfs(dialog.m_volname,image,error)?Storage::Result{}:Storage::Result{1,ERROR_READ_FAULT,error};}));if(loaded.code){AfxMessageBox(loaded.message.c_str());return;}
- WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname);
+ StartFloppyWrite(GetBrowserSession(),dialog.m_drive,ExistingFloppyImage{dialog.m_volname.GetString()});
 }
 
 void CMainFrame::OnToolsFind()
@@ -1384,9 +1371,7 @@ void CMainFrame::OnToolsFind()
  try{scope=session.CaptureFindScope();}
  catch(const std::exception&){}
  if(!scope){AfxMessageBox("Select a folder or volume to search first.");return;}
- FindHit selected;
- if(ShowFindFilesDialog(this,std::move(*scope),selected)&&!session.RevealFindHit(selected))
-  session.RejectNavigation({},"The search volume is no longer attached.");
+ ShowFindFilesDialog(session,std::move(*scope));
 }
 
 BOOL CMainFrame::PreTranslateMessage(MSG* message){

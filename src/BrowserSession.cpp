@@ -388,17 +388,19 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
     tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
 void BrowserSession::StopNotifications(){
+ InvalidateStorageCompletions();
  CancelNavigation();if(preview_)preview_->Clear();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
  if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);notifications_->KillTimer(Notifications::MediaRetry);}
 }
 void BrowserSession::DetachPanes(){
+    InvalidateStorageCompletions();
     ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
     browser_->ForgetTree();
     if(tree_)tree_->BindBrowserSession(nullptr);if(list_)list_->BindBrowserSession(nullptr);if(preview_)preview_->BindBrowserSession(nullptr);
     tree_=nullptr;list_=nullptr;preview_=nullptr;owner_=nullptr;status_=nullptr;
 }
-void BrowserSession::Detach(HFVExplorerTreeView* view){if(tree_==view){CancelNavigation();tree_=nullptr;browser_->ForgetTree();}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
-void BrowserSession::Detach(CHFVExplorerListView* view){if(list_==view){CancelNavigation();list_=nullptr;}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
+void BrowserSession::Detach(HFVExplorerTreeView* view){if(tree_==view){InvalidateStorageCompletions();CancelNavigation();tree_=nullptr;browser_->ForgetTree();}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
+void BrowserSession::Detach(CHFVExplorerListView* view){if(list_==view){InvalidateStorageCompletions();CancelNavigation();list_=nullptr;}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
 void BrowserSession::Detach(CHFVPreviewView* view){if(preview_==view)preview_=nullptr;if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
 BrowserSession& CHFVExplorerListView::GetBrowserSession()const{
     if(m_browserSession)return *m_browserSession;

@@ -2,4 +2,7 @@
 #pragma once
 #include "FindFiles.h"
 class CWnd;
-bool ShowFindFilesDialog(CWnd* owner,FindScope scope,FindHit& selected);
+class BrowserSession;
+using FindCompletion=std::function<void(BrowserSession&,std::shared_ptr<const FindResults>,const Storage::Result&)>;
+bool StartFindSearch(BrowserSession&,FindRequest,FindCompletion);
+void ShowFindFilesDialog(BrowserSession&,FindScope);

@@ -8,6 +8,7 @@
 #include "AskNewVolume.h"
 #include "AskVolumeToFloppy.h"
 #include "FloppyWriteDialog.h"
+#include "ReadOnlyCdBackend.h"
 #include "FloppyWriter.h"
 #include "FakeFloppy.h"
 extern "C" {
@@ -135,6 +136,37 @@ int RunFloppyMenuTest(const char* directory){
   require(menu.GetMenuState(32810,MF_BYCOMMAND)==0xffffffff&&menu.GetMenuState(ID_FILE_NEWVOLUME,MF_BYCOMMAND)!=0xffffffff,"duplicate Tools formatter absent and File formatter retained");
   std::vector<BYTE> formatted;std::string why;require(PrepareFloppyHfs("DialogTest",formatted,why),"prepare original dialog format image");
   AfxGetApp()->m_pMainWnd=&owner;InitializeStorageUi();storageUiTest={};
+#ifdef HFV_FLOPPY_TESTING
+  {
+   readonly_cd_backend_init();
+   FakeFloppy media(formatted);
+   media.changeCount=41;
+   require(readonly_floppy_attach_api(25,&media),"install simulated preparation drive");
+   struct Detach {~Detach(){readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}} detach;
+   const auto path=root+"\\prepared-source.dsk";
+   {CFile file;require(file.Open(path.c_str(),CFile::modeWrite|CFile::modeCreate),"write prep source");
+    file.Write(formatted.data(),UINT(formatted.size()));}
+   auto prepared=std::make_shared<PreparedFloppyImage>();
+   auto work=MakeFloppyPreparationJob(25,ExistingFloppyImage{path},prepared);
+   {
+    VolumeCoord::Lease occupied({{VolumeCoord::DeviceKey(25),VolumeCoord::Mode::Write}});
+    auto busy=Storage::worker().submit(work);
+    busy->wait();
+    require(busy->result().error==ERROR_BUSY&&media.opens==0&&prepared->bytes.empty(),"busy preparation opened the floppy");
+   }
+   auto loaded=Storage::worker().submit(work);
+   loaded->wait();
+   require(!loaded->result().code&&prepared->bytes==formatted&&prepared->generation==41&&
+           media.readOnly&&media.opens==media.closes&&media.media==formatted,
+           "preparation did not stage source bytes and capture the floppy generation read-only");
+   auto generated=std::make_shared<PreparedFloppyImage>();
+   auto format=Storage::worker().submit(MakeFloppyPreparationJob(25,NewFloppyImage{"Background floppy"},generated));
+   format->wait();
+   require(!format->result().code&&ValidateFloppyHfs(generated->bytes)&&generated->generation==41&&media.media==formatted,
+           "generated floppy image touched physical media before confirmation");
+   fprintf(report,"PASS: floppy preparation validates copied or generated images, captures media generation and leaves writes for confirmation.\n");
+  }
+#endif
   DialogWriterTest writer;writer.delay=1;
   auto written=ShowStorageJob(MakeFloppyWriteJob(1,formatted,&writer),"Hidden original floppy writer",true,true,false);
   require(written.code==0&&writer.disk.media==formatted&&writer.writes==160&&writer.formats==0&&!writer.locked&&writer.disk.opens==writer.disk.closes,"original format/write worker verifies full image, accepts unsupported flush and does not low-level format");

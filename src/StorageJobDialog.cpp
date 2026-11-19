@@ -423,7 +423,7 @@ struct Batch {
        std::function<void(const FileOperations::Completion&)> observed)
      : controller(std::move(requests), std::move(completed), std::move(observed)) {}
 
- Batch(JobController::Work work,std::function<void(bool)> completed)
+ Batch(JobController::Work work,StorageCompletion completed)
      : controller(std::move(work),std::move(completed)) {}
 
  bool Advance() {
@@ -539,6 +539,11 @@ bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single
 }
 bool StartStorage(JobController::Work work,CWnd* owner,const char* title,
                   const char* operation,std::function<void(bool)> completed,StorageJobOptions options){
+ return StartStorageResult(std::move(work),owner,title,operation,
+  [completed=std::move(completed)](const Storage::Result& result){if(completed)completed(!result.code);},options);
+}
+bool StartStorageResult(JobController::Work work,CWnd* owner,const char* title,
+                        const char* operation,StorageCompletion completed,StorageJobOptions options){
  return StartBatch(std::make_unique<Batch>(std::move(work),std::move(completed)),
                    owner,true,options.cancellable,title,operation,options.successMessage);
 }
