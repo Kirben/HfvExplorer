@@ -9,7 +9,6 @@ extern "C" {
 
 class MediaImageSource;
 namespace MacBrowser {
-struct WorkerOrigin;
 struct DetectedVolumeError : HfsPlus::Error { using HfsPlus::Error::Error; };
 struct Fork { uint64_t size = 0; };
 // Presentation and transfer data: deliberately independent of catalog layouts,
@@ -51,11 +50,8 @@ public:
     virtual const char *Kind() const = 0;
     virtual std::string Description() const { return Kind(); }
     virtual bool Writable() const = 0;
-    virtual bool WorkerWritesSafe() const { return Writable(); }
-    virtual bool HasPersistentWorker() const { return false; }
     virtual bool Journaled() const { return false; }
     virtual int CdDrive() const { return -1; }
-    virtual std::string WorkerEntryIdentity(const std::string& identity) const { return identity; }
     virtual Capabilities Supports() const {
         Capabilities out; out.create = out.rename = out.remove = Writable(); return out;
     }
@@ -63,12 +59,6 @@ public:
     virtual uint64_t FreeBytes() const = 0;
     virtual void Reload() {}
     virtual void Close() {}
-    virtual WorkerOrigin WorkerDescription()const;
-    virtual std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const{return {};}
-    virtual void SuspendWorker() {}
-    virtual void ResumeWorker(){Reload();}
-    virtual void WorkerUncleanExit(){}
-    virtual void ReleaseWorkerReaders(const std::vector<std::string>&){}
     virtual void ValidateMedia() {}
     virtual void ReleaseMedia() {} // Explicit physical-media release, including idle clipboard references.
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}

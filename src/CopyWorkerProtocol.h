@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "FileOperations.h"
-#include "StorageHandoff.h"
+#include "WorkerEndpoint.h"
 
 namespace CopyWorkerProtocol {
 using FileOperations::Location;

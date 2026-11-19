@@ -71,14 +71,14 @@ void Verify(Volume &v, uint32_t id, uint64_t size = 300000, BYTE bias = 0) {
 }
 // Keep the real source session, but intercept fork reads to exercise failures
 // after the destination worker has already begun staging an overwrite.
-class InterruptedSource : public Volume {
+class InterruptedSource : public Volume, public WorkerEndpoint {
     std::shared_ptr<Volume> source_;
     std::function<void()> interrupt_;
     unsigned reads_ = 0;
 public:
     InterruptedSource(std::shared_ptr<Volume> source, std::function<void()> interrupt)
         : source_(std::move(source)), interrupt_(std::move(interrupt)) {}
-    bool HasPersistentWorker() const override { return source_->HasPersistentWorker(); }
+    WorkerExecution Execution() const override { return ExecutionFor(*source_); }
     std::string ResourceKey() const override { return source_->ResourceKey(); }
     std::u16string Name() const override { return source_->Name(); }
     const char* Kind() const override { return source_->Kind(); }
@@ -535,7 +535,7 @@ int RunCopyProcessTest(const char *directory) {
             }
             auto from = OpenBrowserImage(fromPath), to = OpenBrowserImage(toPath);
             Entry original, copied;
-            Check(from->HasPersistentWorker() && to->HasPersistentWorker() &&
+            Check(ExecutionFor(*from).Persistent() && ExecutionFor(*to).Persistent() &&
                       from->FindChild(2,u"Persistent payload",original) &&
                       to->FindChild(2,u"Persistent payload",copied),
                   "persistent copy fixture could not browse");
@@ -686,6 +686,9 @@ int RunCopyProcessTest(const char *directory) {
             const auto hostFile=Location::Windows(hostFolder+L"\\Persistent payload");
             {
                 auto host=OpenWindows(hostFolder);
+                const auto execution=ExecutionFor(*host);
+                Check(execution.windowsPaths&&!execution.Persistent()&&!execution.stableCatalogIds,
+                      "Windows endpoints advertised a catalog or a persistent worker");
                 Put(*host,2,u"Persistent payload",4096,71);
             }
             const auto uploadFolder=to->MakeDirectory(2,u"Windows imports");
@@ -708,6 +711,11 @@ int RunCopyProcessTest(const char *directory) {
             const auto download=OrdinaryCopy{{Native(from,original.id)},hostTarget};
             {
                 Request planned=download;planned.background=true;
+                const auto mountedExecution=ExecutionFor(*from);
+                const auto localExecution=ExecutionFor(*source);
+                Check(mountedExecution.Persistent()&&mountedExecution.stableCatalogIds&&
+                      !mountedExecution.classicConversion&&!localExecution.Persistent()&&localExecution.stableCatalogIds,
+                      "HFS+ catalog identity was tied to worker placement");
                 auto exportPlan=InspectPlanForTest(planned,from->ResourceKey());
                 Check(exportPlan.read && !exportPlan.write && !exportPlan.temporaryWorker && !exportPlan.sameMount,
                       "background mounted export plan did not share source reads");
@@ -847,7 +855,8 @@ int RunCopyProcessTest(const char *directory) {
             }
             auto classic = OpenBrowserImage(Wide(path));
             auto alias = OpenBrowserImage(Wide(path));
-            Check(classic && classic == alias && classic->HasPersistentWorker() && classic->Writable() &&
+            Check(classic && classic == alias && ExecutionFor(*classic).Persistent() &&
+                      ExecutionFor(*classic).classicConversion && !ExecutionFor(*classic).stableCatalogIds && classic->Writable() &&
                       classic->Name() == u"Classic" && !classic->SupportsAttributes(),
                   "classic image did not share a writable persistent mount");
             Entry sentinel;
@@ -987,7 +996,7 @@ int RunCopyProcessTest(const char *directory) {
             }
             TestMountedForkJobs(classic,Wide(root+"\\fork-classic"));
             fprintf(report,"PASS: mounted HFS, HFS+ and HFSX fork selectors and cancellation preserve original forks, Finder metadata and worker PID\n");
-            classic->SuspendWorker();
+            WorkerEndpoint::Find(*classic)->SuspendWorker();
             std::weak_ptr<Volume> previousMount=classic;
             alias.reset();
             classic.reset();
@@ -1073,7 +1082,7 @@ int RunCopyProcessTest(const char *directory) {
             const auto path=Wide(root+(dc42?"\\persistent-mfs.dc42":"\\persistent-mfs.img"));
             { auto seed=MfsImageFixture(path,dc42); Put(*seed,2,u"Mounted payload",4096,71); }
             auto volume=OpenBrowserImage(path);
-            Check(volume && volume->HasPersistentWorker() && volume->Writable() &&
+            Check(volume && ExecutionFor(*volume).Persistent() && volume->Writable() &&
                       !volume->Supports().createFolders && volume->SupportsBasicMetadata(),
                   "MFS writable persistent mount capabilities");
             const auto pid=VolumeSession::VolumeSessionPidForTest(volume);
@@ -1112,7 +1121,7 @@ int RunCopyProcessTest(const char *directory) {
                           updated.version==7 && VolumeSession::VolumeSessionPidForTest(shared)==pid,
                       "mounted MFS metadata or version lookup restarted the worker");
             }
-            volume->SuspendWorker();
+            WorkerEndpoint::Find(*volume)->SuspendWorker();
             std::weak_ptr<Volume> previous=volume;
             volume.reset();
             Until([&]{return previous.expired();});
@@ -1334,7 +1343,7 @@ int RunCopyProcessTest(const char *directory) {
             v.UseExternalJournal(uuid);
         }
         auto external = OpenBrowserImage(extPath, journal);
-        Check(external->HasPersistentWorker(), "External journal image did not get a worker session");
+        Check(ExecutionFor(*external).Persistent(), "External journal image did not get a worker session");
         roundtrip.Copy().destination = Native(external);
         Pass(Submit(roundtrip));
         Check(external->FindChild(2, u"Plain", child), "external journal worker output");

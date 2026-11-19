@@ -60,7 +60,9 @@ Endpoint Capture(const Location &location) {
         out.location.SetWindows(host);
         return out;
     }
-    out.origin = location.Volume()->WorkerDescription();
+    const auto* endpoint=WorkerEndpoint::Find(*location.Volume());
+    Check(endpoint!=nullptr,"This storage backend cannot be transferred to the copy worker");
+    out.origin = endpoint->WorkerDescription();
     if (out.origin.kind == WorkerOrigin::Classic) {
         int n = WideCharToMultiByte(CP_ACP, 0, out.origin.path.c_str(), -1, nullptr, 0, nullptr, nullptr);
         Check(n > 0, "Invalid classic worker path");
@@ -83,8 +85,8 @@ Endpoint Capture(const Location &location) {
           "The selected entry was renamed before the operation started");
     Check(!location.expectedParent || location.expectedParent == selected.parent,
           "The selected entry was moved before the operation started");
-    if (!strcmp(location.Volume()->Kind(), "HFS+") || !strcmp(location.Volume()->Kind(), "HFSX")) {
-        selected.identity=location.Volume()->WorkerEntryIdentity(selected.identity);
+    if (endpoint->Execution().stableCatalogIds) {
+        selected.identity=endpoint->WorkerEntryIdentity(selected.identity);
         out.path.push_back(selected);
         return out;
     }
@@ -92,7 +94,7 @@ Endpoint Capture(const Location &location) {
     for (uint32_t id = location.Id(); id != 2;) {
         Check(ancestors.size() < 128 && ancestors.insert(id).second, "Invalid copy-worker source ancestry");
         auto entry = location.Volume()->Stat(id);
-        entry.identity = location.Volume()->WorkerEntryIdentity(entry.identity);
+        entry.identity = endpoint->WorkerEntryIdentity(entry.identity);
         out.path.push_back(entry);
         id = entry.parent;
     }
@@ -126,7 +128,8 @@ std::shared_ptr<Volume> OpenOrigin(const WorkerOrigin &o) {
         volume = Removable::Reopen(o.path, o.offset);
     Check(bool(volume), "Cannot reopen selected volume in the copy worker");
     if (o.generationKnown) {
-        auto now = volume->WorkerDescription();
+        const auto* endpoint=WorkerEndpoint::Find(*volume);
+        auto now=endpoint?endpoint->WorkerDescription():WorkerOrigin{};
         if (o.kind == WorkerOrigin::Classic) {
             auto media = Location::Classic(AnsiPath(o.path), ":");
             CaptureMedia(media);
@@ -156,7 +159,7 @@ Location ResolveEndpoint(WireEndpoint endpoint, WorkerMounts &mounts) {
         found = mounts.volumes.emplace(key.bytes, OpenOrigin(origin)).first;
     auto volume = found->second;
     uint32_t id = 2;
-    bool stable = !strcmp(volume->Kind(), "HFS+") || !strcmp(volume->Kind(), "HFSX");
+    const bool stable=ExecutionFor(*volume).stableCatalogIds;
     Check(!stable || path.size() == 1, "Invalid stable catalog endpoint");
     for (auto &segment : path) {
         bool matched = false;
@@ -307,7 +310,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
             // The shared transfer engine already has typed endpoints. Only
             // the older converter needs names expressed as legacy HFS paths.
             if ((mode && strchr("ambt5", mode)) || captured.origin.kind != WorkerOrigin::Image ||
-                !captured.location.IsMounted() || strcmp(captured.location.Volume()->Kind(), "HFS"))
+                !captured.location.IsMounted() || !ExecutionFor(*captured.location.Volume()).classicConversion)
                 return Capture(original).location;
             std::string path(":");
             for (const auto& segment : captured.path) {
@@ -641,11 +644,10 @@ int Child(const char *inputText, const char *outputText) {
                         writableMounts.push_back(mounted.second);
                 result = FileOperations::ExecuteInWorker(request, job, completion);
                 for (auto &volume : writableMounts) {
-                    if (!volume->WorkerWritesSafe()) safe = false;
-                    if (!strcmp(volume->Kind(), "HFS")) {
-                        try { volume->Close(); }
-                        catch (const std::exception&) { safe = false; }
-                    }
+                    try {
+                        auto* endpoint=WorkerEndpoint::Find(*volume);
+                        if (!(endpoint?endpoint->FinishWorkerWrite(*volume):volume->Writable())) safe=false;
+                    } catch (const std::exception&) { safe=false; }
                 }
             } catch (const std::exception &error) {
                 result = {1, ERROR_UNHANDLED_EXCEPTION, error.what()};

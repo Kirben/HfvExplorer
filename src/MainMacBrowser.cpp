@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
-#include "StorageHandoff.h"
+#include "WorkerEndpoint.h"
 #include "MetadataDialogs.h"
 #include "PhysicalRemovable.h"
 #include "HFVExplorer.h"
@@ -229,7 +229,7 @@ struct MainMacBrowser::State {
             for(auto node=find->catalogRoute.rbegin();node!=find->catalogRoute.rend();++node)
                 savedPath.push_back({*node,{}});
         }
-        const bool canCache=volume->HasPersistentWorker();
+        const bool canCache=ExecutionFor(*volume).Persistent();
         bool cached=false;
         auto restoreCached=[&]{
             if(!canCache || rebuild)return false;
@@ -378,7 +378,7 @@ struct MainMacBrowser::State {
         const BrowserDirectory::Snapshot* prepared=nullptr)
     {
         const auto key=volume->ResourceKey();
-        const bool canCache=volume->HasPersistentWorker();
+        const bool canCache=ExecutionFor(*volume).Persistent();
         if(canCache&&!cached)RememberFolder({volume,revision,id,ancestors,folderTitle,entries,free});
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         if(rebuild){
@@ -425,15 +425,14 @@ struct MainMacBrowser::State {
         if(target.IsClassic()){auto doc=session_.Document();auto path=target.ClassicImage();for(int n=0;n<doc->m_hfs_count;++n)if(!doc->m_volumes[n].m_file_name.IsEmpty()&&!_stricmp(Location::Classic(std::string((LPCSTR)doc->m_volumes[n].m_file_name),":").ClassicImage().c_str(),path.c_str()))doc->m_volumes[n].close();}
         auto convertible=[](const Location& p){if(p.LegacyType()!=LIST_HFS)return true;auto n=p.ClassicImage().size();return n>=4&&p.ClassicImage()[n-4]=='.'&&(!_stricmp(p.ClassicImage().c_str()+n-3,"DSK")||!_strnicmp(p.ClassicImage().c_str()+n-3,"HF",2));};
         auto classicImage=[](const Location& item){
-            return item.IsMounted()&&!strcmp(item.Volume()->Kind(),"HFS")&&
-                (item.Volume()->HasPersistentWorker()||item.Volume()->CdDrive()>=0);
+            return item.IsMounted()&&ExecutionFor(*item.Volume()).classicConversion;
         };
         auto legacyType=[&](const Location& item){return classicImage(item)?LIST_HFS:item.LegacyType();};
         auto conversionEndpoint=[&](const Location& item){
             if(!classicImage(item))return item;
             if(const int drive=item.Volume()->CdDrive();drive>=0)
                 return Location::Physical(drive,FileOperations::ClassicMedia::Cd,":");
-            auto path=item.Volume()->WorkerDescription().path;
+            auto path=WorkerEndpoint::Find(*item.Volume())->WorkerDescription().path;
             return Location::Classic((LPCSTR)CString(path.c_str()),":");
         };
         auto canConvert=[&](const Location& item){return classicImage(item)||(!item.Volume()&&convertible(item));};
@@ -734,7 +733,7 @@ bool MainMacBrowser::Refresh(){int i;uint32_t id;if(!state_->Selected(i,id))retu
         ForgetFolders(mount.volume);
         return state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem(),mount.drive<0&&mount.physicalPath.empty(),true,true);
     }
-    if(mount.volume->HasPersistentWorker()&&!VolumeCoord::Readable(mount.volume->ResourceKey()))
+    if(ExecutionFor(*mount.volume).Persistent()&&!VolumeCoord::Readable(mount.volume->ResourceKey()))
         return state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem());
     if(session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();}))return true;
     ForgetFolders(mount.volume);

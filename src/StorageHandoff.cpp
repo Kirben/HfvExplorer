@@ -9,7 +9,13 @@ namespace {
 std::mutex mutex;
 std::vector<std::weak_ptr<Volume>> volumes;
 } // namespace
-WorkerOrigin Volume::WorkerDescription() const { return {}; }
+WorkerEndpoint* WorkerEndpoint::Find(Volume& volume) { return dynamic_cast<WorkerEndpoint*>(&volume); }
+const WorkerEndpoint* WorkerEndpoint::Find(const Volume& volume) { return dynamic_cast<const WorkerEndpoint*>(&volume); }
+WorkerExecution ExecutionFor(const Volume& volume) {
+    const auto* endpoint = WorkerEndpoint::Find(volume);
+    return endpoint ? endpoint->Execution() : WorkerExecution{};
+}
+bool WorkerEndpoint::FinishWorkerWrite(Volume& volume) { return volume.Writable(); }
 std::shared_ptr<Volume> TrackWorkerVolume(std::shared_ptr<Volume> volume) {
     std::lock_guard<std::mutex> lock(mutex);
     volumes.erase(std::remove_if(volumes.begin(), volumes.end(),
@@ -41,11 +47,18 @@ WorkerStorageHandoff::~WorkerStorageHandoff() {
 void WorkerStorageHandoff::Prepare(const std::vector<std::string>& keys,
                                    const std::vector<std::string>& writes) {
     auto volumes = WorkerVolumes(keys);
-    for (auto &volume : volumes)
-        if (!volume->HostPath(2).empty())
-            volume->ReleaseWorkerReaders(writes);
-    for (auto &volume : volumes)
-        for (auto &file : volume->WorkerFiles()) {
+    for (auto& volume : volumes)
+        if (auto* endpoint = WorkerEndpoint::Find(*volume); endpoint && endpoint->Execution().windowsPaths)
+            endpoint->ReleaseWorkerReaders(writes);
+
+    std::vector<std::shared_ptr<Volume>> toSuspend;
+    for (auto& volume : volumes) {
+        auto* endpoint = WorkerEndpoint::Find(*volume);
+        if (!endpoint) continue;
+        const auto files = endpoint->WorkerFiles();
+        if (!files.empty() || endpoint->WorkerDescription().kind == WorkerOrigin::Classic)
+            toSuspend.push_back(volume);
+        for (const auto& file : files) {
             auto existing =
                 std::find_if(files_.begin(), files_.end(), [&](const ImageHandleTransfer::File &p) {
                     return ImageHandleTransfer::Canonical(p.path) ==
@@ -64,12 +77,11 @@ void WorkerStorageHandoff::Prepare(const std::vector<std::string>& keys,
                 throw;
             }
         }
+    }
     // Capture every handle before closing any classic mounts shared by adapters.
-    for (auto &volume : volumes) {
-        if (!volume->WorkerFiles().empty() || volume->WorkerDescription().kind == WorkerOrigin::Classic) {
-            suspended_.push_back(volume);
-            volume->SuspendWorker();
-        }
+    for (auto& volume : toSuspend) {
+        suspended_.push_back(volume);
+        WorkerEndpoint::Find(*volume)->SuspendWorker();
     }
     for (int drive = 0; drive < 26; ++drive)
         if (std::find(keys.begin(), keys.end(), VolumeCoord::DeviceKey(drive)) != keys.end())
@@ -93,8 +105,8 @@ void WorkerStorageHandoff::Restore() {
         }
     };
     if (unclean_)
-        for (auto& volume : suspended_) attempt([&] { volume->WorkerUncleanExit(); });
-    for (auto& volume : suspended_) attempt([&] { volume->ResumeWorker(); });
+        for (auto& volume : suspended_) attempt([&] { WorkerEndpoint::Find(*volume)->WorkerUncleanExit(); });
+    for (auto& volume : suspended_) attempt([&] { WorkerEndpoint::Find(*volume)->ResumeWorker(); });
     if (!failures.empty())
         throw HfsPlus::Error("Copy worker finished, but browser storage could not be reopened: " + failures);
 }

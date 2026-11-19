@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "WorkerEndpoint.h"
 #include "HFVExplorer.h"
 #include "BackgroundCopies.h"
 #include "BrowserSession.h"
@@ -134,7 +135,7 @@ std::shared_ptr<MacBrowser::Volume> Mount(BrowserSession& session,const CString&
 {
  Check(session.MacBrowser().OpenImage(Wide(path))==1,"open browser image fixture");
  auto volume=session.MacBrowser().TargetFolder().Volume();
- Check(volume&&volume->HasPersistentWorker(),"browser image is not owned by a persistent worker");
+ Check(volume&&MacBrowser::ExecutionFor(*volume).Persistent(),"browser image is not owned by a persistent worker");
  return volume;
 }
 
