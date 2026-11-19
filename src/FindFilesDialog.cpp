@@ -9,23 +9,30 @@ namespace {
 class FindOptions : public CDialog {
 public:
  FindRequest request;
- FindOptions(CWnd* owner,FindLocation location):CDialog(IDD_FIND_FILES,owner){request.location=std::move(location);}
+ FindOptions(CWnd* owner,FindScope scope):CDialog(IDD_FIND_FILES,owner){request.scope=std::move(scope);}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();CheckDlgButton(IDC_FIND_RECURSIVE,BST_CHECKED);
-  if(request.location.UsesUnicode()){BrowserPresentation::UnicodeEdit(m_hWnd,IDC_FIND_PATTERN);BrowserPresentation::UnicodeControl(m_hWnd,IDC_FIND_SCOPE,L"STATIC");SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(request.location.directory).c_str());}else SetDlgItemText(IDC_FIND_SCOPE,request.location.directory.c_str());
+  if(request.UsesUnicode())BrowserPresentation::UnicodeEdit(m_hWnd,IDC_FIND_PATTERN);
+  BrowserPresentation::UnicodeControl(m_hWnd,IDC_FIND_SCOPE,L"STATIC");
+  SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,request.scope.folderLabel.c_str());
+  GetDlgItem(IDC_FIND_WHOLE)->EnableWindow(!request.scope.volumeRoot.IsNone());
   ((CEdit*)GetDlgItem(IDC_FIND_PATTERN))->LimitText(255);GetDlgItem(IDC_FIND_PATTERN)->SetFocus();return FALSE;
  }
  BOOL OnCommand(WPARAM w,LPARAM l) override {
-  if(LOWORD(w)==IDC_FIND_WHOLE){auto text=IsDlgButtonChecked(IDC_FIND_WHOLE)?request.location.root:request.location.directory;if(request.location.UsesUnicode())SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,BrowserPresentation::FromUtf8(text).c_str());else SetDlgItemText(IDC_FIND_SCOPE,text.c_str());return TRUE;}
+  if(LOWORD(w)==IDC_FIND_WHOLE){
+   const auto& text=IsDlgButtonChecked(IDC_FIND_WHOLE)?request.scope.volumeLabel:request.scope.folderLabel;
+   SetDlgItemTextW(m_hWnd,IDC_FIND_SCOPE,text.c_str());
+   return TRUE;
+  }
   return CDialog::OnCommand(w,l);
  }
  void OnOK() override {
   auto widePattern=BrowserPresentation::Text(::GetDlgItem(m_hWnd,IDC_FIND_PATTERN));
   if(widePattern.empty()){AfxMessageBox("Enter a filename, part of a name, or a wildcard pattern.");return;}
-  CString pattern;if(!request.location.UsesUnicode())GetDlgItemText(IDC_FIND_PATTERN,pattern);
-  request.pattern=request.location.UsesUnicode()?BrowserPresentation::Utf8(std::u16string(widePattern.begin(),widePattern.end())):std::string((LPCSTR)pattern);request.recursive=IsDlgButtonChecked(IDC_FIND_RECURSIVE)!=0;
+  CString pattern;if(!request.UsesUnicode())GetDlgItemText(IDC_FIND_PATTERN,pattern);
+  request.pattern=request.UsesUnicode()?BrowserPresentation::Utf8(std::u16string(widePattern.begin(),widePattern.end())):std::string((LPCSTR)pattern);request.recursive=IsDlgButtonChecked(IDC_FIND_RECURSIVE)!=0;
   request.caseSensitive=IsDlgButtonChecked(IDC_FIND_CASE)!=0;request.includeFolders=IsDlgButtonChecked(IDC_FIND_FOLDERS)!=0;
-  if(IsDlgButtonChecked(IDC_FIND_WHOLE)){request.location.directory=request.location.root;if(!request.location.mac)request.location.origin.SetWindows(request.location.windowsRoot);if(request.location.native){request.location.nativeFolder=2;request.location.nativePath={2};}}
+  request.wholeVolume=IsDlgButtonChecked(IDC_FIND_WHOLE)==BST_CHECKED;
   CDialog::OnOK();
  }
 };
@@ -124,12 +131,12 @@ bool ProbeFindResultsDialog(CWnd* owner,const FindResults& results,bool mac){
  dialog.DestroyWindow();return ok;
 }
 #endif
-bool ShowFindFilesDialog(CWnd* owner,FindLocation location,FindHit& selected){
- FindOptions options(owner,std::move(location));if(options.DoModal()!=IDOK)return false;
+bool ShowFindFilesDialog(CWnd* owner,FindScope scope,FindHit& selected){
+ FindOptions options(owner,std::move(scope));if(options.DoModal()!=IDOK)return false;
  auto results=std::make_shared<FindResults>();auto result=ShowStorageJob(MakeFindFilesJob(options.request,results),"Finding files",false,true,true);
  if(result.error==ERROR_CANCELLED)return false;
  if(result.code)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
  if(result.code&&results->hits.empty())return false;
- ResultsDialog dialog(owner,*results,result.code!=0,options.request.location.mac);if(dialog.DoModal()!=IDOK)return false;
+ ResultsDialog dialog(owner,*results,result.code!=0,!options.request.Origin().IsWindows());if(dialog.DoModal()!=IDOK)return false;
  selected=std::move(dialog.selected);return true;
 }

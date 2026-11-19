@@ -212,22 +212,74 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
     if(status_)status_->SetPaneText(0,openingImage?"Opening image...":"Loading folder...");
 }
 
-bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)
+std::optional<FindScope> BrowserSession::CaptureFindScope()
+{
+    if(!ListingAvailable()||!tree_||!document_)return {};
+    const auto item=tree_->GetTreeCtrl().GetSelectedItem();
+    const auto* node=tree_->BrowserNodeAt(item);
+    if(!node)return {};
+    FindScope scope;
+    scope.mount=mounts_.Lookup(node->mount);
+    if(!scope.mount)return {};
+    const auto* folder=node->Folder();
+    if(!folder||folder->location.IsNone())return {};
+    scope.origin=folder->location;
+    if(scope.origin.IsWindows()){
+        const auto drive=scope.mount->drive;
+        if(drive<0||drive>=26)return {};
+        const auto type=document_->m_fats[node->mount.index].m_type;
+        scope.checkWindowsMedia=type==DRIVE_REMOVABLE||type==DRIVE_CDROM;
+        scope.folderLabel=scope.origin.WindowsPath();
+        scope.volumeLabel=std::wstring(1,wchar_t(L'A'+drive))+L":\\";
+        scope.volumeRoot=FileOperations::Location::Windows(scope.volumeLabel);
+        scope.volumeRoot.BindWindowsMediaSerial(scope.origin.WindowsMediaSerial());
+    }else if(scope.origin.IsClassic()){
+        scope.folderLabel=VolumeCoord::Wide(scope.origin.ClassicPath());
+        const auto& slot=document_->m_volumes[node->mount.index];
+        const auto root=std::string(slot.m_volume_name.GetString())+":";
+        scope.volumeLabel=VolumeCoord::Wide(root);
+        scope.volumeRoot=FileOperations::Location::Classic(scope.origin.ClassicImage(),root);
+        scope.volumeRoot.expectedResource=scope.origin.expectedResource;
+        if(scope.origin.MediaGenerationKnown())scope.volumeRoot.BindMediaGeneration(scope.origin.MediaGeneration());
+    }else{
+        scope.volumeRoot=FileOperations::Location::Mounted(scope.origin.Volume(),2);
+        auto& control=tree_->GetTreeCtrl();
+        for(auto at=item;at;at=control.GetParentItem(at)){
+            const auto* ancestor=tree_->BrowserNodeAt(at);
+            if(!ancestor||!(ancestor->mount==node->mount))return {};
+            scope.catalogRoute.push_back(ancestor->CatalogId());
+            wchar_t text[1024]{};
+            TVITEMW label{};
+            label.mask=TVIF_TEXT;
+            label.hItem=at;
+            label.pszText=text;
+            label.cchTextMax=ARRAYSIZE(text);
+            SendMessageW(control.GetSafeHwnd(),TVM_GETITEMW,0,reinterpret_cast<LPARAM>(&label));
+            scope.volumeLabel=text;
+            scope.folderLabel=scope.folderLabel.empty()?scope.volumeLabel:scope.volumeLabel+L"/"+scope.folderLabel;
+        }
+        std::reverse(scope.catalogRoute.begin(),scope.catalogRoute.end());
+    }
+    scope.volumeRoot.directory=true;
+    return scope;
+}
+
+bool BrowserSession::RevealFindHit(const FindHit& hit)
 {
     using namespace BrowserNavigation;
-    if(!tree_||!list_||!document_||hit.destination.IsNone())return false;
+    if(!tree_||!list_||!document_||hit.destination.IsNone()||!hit.mount||!mounts_.IsCurrent(*hit.mount))return false;
     Request request{hit.destination,Intent::RevealFindHit,{},hit.reveal,hit.nativePath};
     if(request.folder.IsMounted()){
         request.resource=request.folder.Volume()->ResourceKey();
         if(!hit.reveal.IsNone()&&!request.catalogRoute.empty())request.catalogRoute.pop_back();
         return browser_->RevealFindHit(request);
     }
+    const auto index=hit.mount->address.index;
     if(request.folder.IsClassic()){
         request.resource=request.folder.expectedResource;
-        return document_->NavigateClassicFolder(legacyVolume,request.folder.expectedCatalogId,false,&request);
+        return document_->NavigateClassicFolder(index,request.folder.expectedCatalogId,false,&request);
     }
-    const auto& path=request.folder.WindowsPath();
-    return document_->NavigateWindowsFolder(legacyVolume,path,false,&request);
+    return document_->NavigateWindowsFolder(index,request.folder.WindowsPath(),false,&request);
 }
 
 void BrowserSession::NavigationMediaChanged(DWORD driveMask)

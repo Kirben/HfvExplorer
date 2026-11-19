@@ -136,7 +136,7 @@ int RunMainMacBrowserTest(const char* directory){
         Storage::Job mfsCopy;Check(Copy(*mfs,mfsEntries[0].id,*target,2,mfsCopy),"MFS both-fork copy into shared writable adapter");
         auto mfsCopied=target->Stat(Find(*target,2,u"Read Me"));Check(mfsCopied.forks[0].size==2536&&mfsCopied.forks[1].size==1177,"MFS fork lengths retained");
         for(unsigned fork=0;fork<2;++fork){std::vector<uint8_t> a(size_t(mfsCopied.forks[fork].size)),b(a.size());mfs->Read(mfsEntries[0].id,fork,0,a.data(),a.size());target->Read(mfsCopied.id,fork,0,b.data(),b.size());Check(a==b,"MFS fork bytes retained");}
-        FindRequest request;request.location.native=source;request.location.nativeFolder=2;request.location.nativePath={2};request.location.directory="Unified";
+        FindRequest request;request.scope.origin=FileOperations::Location::Mounted(source);request.scope.catalogRoute={2};
         request.pattern=BrowserPresentation::Utf8(u"\u65e5\u672c");auto results=std::make_shared<FindResults>();Storage::Job search;
         auto searchResult=MakeFindFilesJob(request,results)(search);
         Check(searchResult.code==0&&results->utf8&&results->hits.size()==1&&results->hits[0].nativePath==std::vector<uint32_t>({2,folder,file}),"Unicode search and ID navigation routes");

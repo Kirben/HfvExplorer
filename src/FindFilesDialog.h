@@ -2,4 +2,4 @@
 #pragma once
 #include "FindFiles.h"
 class CWnd;
-bool ShowFindFilesDialog(CWnd* owner,FindLocation location,FindHit& selected);
+bool ShowFindFilesDialog(CWnd* owner,FindScope scope,FindHit& selected);

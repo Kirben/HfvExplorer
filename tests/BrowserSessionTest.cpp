@@ -98,8 +98,10 @@ class NavigationFixture : public Fixture {
 public:
  HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
  std::atomic<bool> changed{false};
+ std::atomic<unsigned> statReads{0};
  explicit NavigationFixture(const std::u16string& name):Fixture(name){}
  ~NavigationFixture(){CloseHandle(entered);}
+ MacBrowser::Entry Stat(uint32_t id)override{++statReads;return Fixture::Stat(id);}
  std::vector<MacBrowser::Entry> List(uint32_t id)override{
   if(id!=3)return {Stat(3),Stat(4)};
   SetEvent(entered);
@@ -121,11 +123,11 @@ void PumpUntil(Predicate ready,const char* message)
  }
 }
 
-FindHit SearchHit(FindLocation location,const char* pattern)
+FindHit SearchHit(FindScope scope,const char* pattern)
 {
  Storage::Job job;
  auto results=std::make_shared<FindResults>();
- const auto status=MakeFindFilesJob({std::move(location),pattern},results)(job);
+ const auto status=MakeFindFilesJob({std::move(scope),pattern},results)(job);
  Check(!status.code&&results->hits.size()==1,"search fixture did not return one typed hit");
  return results->hits.front();
 }
@@ -176,6 +178,12 @@ void TestNavigation()
  hit.reveal.expectedName=u"Slow child";
  hit.reveal.expectedParent=3;
  hit.nativePath={2,3,5};
+ const auto beforeCapture=slow->statReads.load();
+ const auto scope=session.CaptureFindScope();
+ Check(slow->statReads.load()==beforeCapture,"capturing Find accessed the mounted catalog");
+ Check(scope&&scope->mount&&scope->origin.Volume()==slow&&scope->catalogRoute==std::vector<uint32_t>{2},
+       "mounted Find did not capture its current tree and mount");
+ hit.mount=scope->mount;
  Check(session.RevealFindHit(hit),"queue typed mounted Find result");
  PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;},"mounted Find read never started");
  tree.SelectItem(quickRoot);
@@ -211,6 +219,7 @@ void TestNavigation()
  session.NavigationMediaChanged(1u<<24);
  Check(session.Navigating(),"an unrelated media notification cancelled navigation");
  session.NavigationMediaChanged(1u<<25);
+ Check(!session.RevealFindHit(hit),"a Find hit from a prior media epoch was accepted");
  SetEvent(slow->gate);
  PumpUntil([&]{return VolumeCoord::Available({{slow->ResourceKey(),VolumeCoord::Mode::Write}});},"cancelled device navigation retained its lease");
  Check(!session.Navigating()&&!session.ListingAvailable()&&Find(first.list,L"Slow file")>=0,
@@ -357,25 +366,28 @@ int RunBrowserSessionTest(const char* directory){
    Check(CreateDirectoryA(wa+"\\Nested",nullptr)&&CreateDirectoryA(nested,nullptr),"create unexpanded Windows search folders");
    auto filename=nested+"\\reveal.txt";
    {CFile file;Check(file.Open(filename,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create Windows search file");}
-   FindLocation scope;scope.directory=(LPCSTR)wa;scope.checkWindowsMedia=true;
-   auto hit=SearchHit(scope,"reveal.txt");
    auto& session=a.Session();
+   auto scope=session.CaptureFindScope();
+   Check(scope.has_value(),"capture Windows search scope");
+   scope->checkWindowsMedia=true;
+   auto hit=SearchHit(*scope,"reveal.txt");
    Check(hit.destination.WindowsMediaSerial().has_value()&&
          hit.destination.WindowsMediaSerial()==hit.reveal.WindowsMediaSerial(),"Find lost its captured Windows media identity");
    auto swapped=hit;
    swapped.destination.BindWindowsMediaSerial(*hit.destination.WindowsMediaSerial()^1u);
-   Check(session.RevealFindHit(swapped,0),"queue Find result for replaced media");
+   Check(session.RevealFindHit(swapped),"queue Find result for replaced media");
    PumpUntil([&]{return !session.Navigating();},"Find media validation did not complete");
    Check(!session.ListingAvailable()&&session.navigationErrorForTest.find("media changed")!=std::string::npos,
          "Find reopened a folder on different Windows media");
-   Check(session.RevealFindHit(hit,0),"queue Windows Find result");
+   Check(session.RevealFindHit(hit),"queue Windows Find result");
    PumpUntil([&]{return !session.Navigating();},"Windows Find did not complete");
    Check(Selected(a.list,L"reveal.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==hit.destination.WindowsPath(),
        "Windows Find did not materialize its folder path and select its file");
    auto copy=filename+".replacement";
    {CFile file;Check(file.Open(copy,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacement search file");}
    Check(MoveFileExA(copy,filename,MOVEFILE_REPLACE_EXISTING)!=FALSE,"replace the Windows search result");
-   Check(session.RevealFindHit(hit,0),"queue stale Windows Find result");
+   hit.mount=session.Mounts().Lookup(hit.mount->address);
+   Check(session.RevealFindHit(hit),"queue stale Windows Find result");
    PumpUntil([&]{return !session.Navigating();},"stale Windows Find did not complete");
    Check(!session.ListingAvailable(),"a stale Windows Find result silently rebound to a replacement file");
    a.tree.GetTreeCtrl().SelectItem(a.doc.m_fats[0].m_rootitem);
@@ -388,11 +400,13 @@ int RunBrowserSessionTest(const char* directory){
    Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"create Unicode Find folder");
    auto handle=CreateFileW(file.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
    Check(handle!=INVALID_HANDLE_VALUE,"create Unicode Find file");CloseHandle(handle);
-   FindLocation scope;scope.origin=FileOperations::Location::Windows(VolumeCoord::Wide((LPCSTR)wa));
-   auto hit=SearchHit(scope,"\xe6\x96\x87\xe4\xbb\xb6.*");
    auto& session=a.Session();
+   Check(session.AwaitNavigationForTest(),"finish Windows root navigation before Find");
+   const auto scope=session.CaptureFindScope();
+   Check(scope.has_value(),"capture Unicode search scope");
+   auto hit=SearchHit(*scope,"\xe6\x96\x87\xe4\xbb\xb6.*");
    Check(hit.destination.WindowsPath()==folder&&hit.reveal.WindowsPath()==file,"Find changed a Unicode location");
-   Check(session.RevealFindHit(hit,0),"queue Unicode Find result");
+   Check(session.RevealFindHit(hit),"queue Unicode Find result");
    PumpUntil([&]{return !session.Navigating();},"Unicode Find did not complete");
    Check(Selected(a.list,L"\u6587\u4ef6.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==folder,
          "Find did not select the Unicode folder and file");
@@ -458,10 +472,10 @@ int RunBrowserSessionTest(const char* directory){
    char folder[]="Same:Nested",child[]="Same:Nested:found",type[]="TEXT",creator[]="TEST";
    Check(volume&&hfs_mkdir(volume,folder)==0&&hfs_create(volume,child,type,creator)==0&&hfs_umount(volume)==0,
        "create unexpanded classic Find fixture");
-   FindLocation scope;scope.mac=true;scope.directory="Same:";scope.volume=image;
-   scope.origin=a.Session().MacBrowser().TargetFolder();
-   auto hit=SearchHit(scope,"found");
-   Check(a.Session().RevealFindHit(hit,0),"queue classic Find result");
+   const auto scope=a.Session().CaptureFindScope();
+   Check(scope.has_value(),"capture classic HFS search scope");
+   auto hit=SearchHit(*scope,"found");
+   Check(a.Session().RevealFindHit(hit),"queue classic Find result");
    PumpUntil([&]{return !a.Session().Navigating();},"classic Find did not complete");
    Check(Selected(a.list,L"found"),("classic Find did not select the result: "+
        a.Session().navigationErrorForTest+" (listing available "+std::to_string(a.Session().ListingAvailable())+
@@ -471,7 +485,7 @@ int RunBrowserSessionTest(const char* directory){
    volume=hfs_mount(const_cast<char*>(image.c_str()),0,O_RDWR);
    Check(volume&&hfs_delete(volume,child)==0&&hfs_create(volume,child,type,creator)==0&&hfs_umount(volume)==0,
        "replace classic Find fixture at the same path");
-   Check(a.Session().RevealFindHit(hit,0),"queue replaced classic Find result");
+   Check(a.Session().RevealFindHit(hit),"queue replaced classic Find result");
    PumpUntil([&]{return !a.Session().Navigating();},"replaced classic Find did not complete");
    Check(!a.Session().ListingAvailable()&&!a.Session().navigationErrorForTest.empty(),
        "Find rebound the classic catalog ID to a replacement file");

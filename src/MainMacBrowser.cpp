@@ -15,7 +15,6 @@
 #include "StorageLocation.h"
 #include "BrowserPresentation.h"
 #include "BrowserDirectory.h"
-#include "FindFilesDialog.h"
 #include "HfsPlusDialogs.h"
 #include "HfsPlusCd.h"
 #include "StorageJobDialog.h"
@@ -1025,19 +1024,6 @@ bool MainMacBrowser::Paste(){try{return BrowserTransfers::Paste(session_);}catch
 bool MainMacBrowser::Command(UINT id){if(!Active())return false;
     if(id>=ID_OWN_WITH_MAC_FIRST&&id<ID_OWN_FILE_PROPERTIES)return true; // Classic emulator/file-type actions do not apply.
     if(id>=ID_OWN_MAP_THIS&&id<=ID_OWN_SHORTCUT_WINDOWS)return true;return false;}
-bool MainMacBrowser::Find(){
-    int index;uint32_t folder;if(!state_->Selected(index,folder))return false;
-    FindLocation location;location.mac=true;location.native=state_->mounts[index].volume;location.nativeFolder=folder;
-    location.root=BrowserPresentation::Utf8(location.native->Name());location.directory=location.root;
-    for(auto item=session_.Tree()->m_ct->GetSelectedItem();item;item=session_.Tree()->m_ct->GetParentItem(item)){
-        auto p=session_.Tree()->BrowserNodeAt(item);if(p&&p->LegacyType()==LIST_MAC)location.nativePath.insert(location.nativePath.begin(),uint32_t(p->CatalogId()));}
-    Run(session_,[&](Storage::Job&){for(size_t n=1;n<location.nativePath.size();++n)location.directory+="/"+BrowserPresentation::Utf8(location.native->Stat(location.nativePath[n]).name);});
-    FindHit found;if(!ShowFindFilesDialog(session_.Owner(),location,found))return true;
-    if(!session_.RevealFindHit(found))
-        session_.RejectNavigation(location.native->ResourceKey(),"The search volume is no longer attached.");
-    return true;
-}
-
 bool MainMacBrowser::OpenMountedFolderFrom(const MainMacBrowser& source,const BrowserNavigation::Request& request)
 {
  const auto& volume=request.folder.Volume();

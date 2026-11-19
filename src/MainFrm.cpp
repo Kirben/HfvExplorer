@@ -1409,25 +1409,12 @@ void CMainFrame::OnToolsFind()
 {
  auto& session=GetBrowserSession();
  if(!session.ListingAvailable())return;
- if(session.MacBrowser().Find())return;
- if(!GetBrowserSession().Document()||!GetBrowserSession().Tree())return;
- HTREEITEM item=GetBrowserSession().Tree()->m_ct->GetSelectedItem();
- if(!item){AfxMessageBox("Select a folder or volume to search first.");return;}
- DWORD_PTR data=GetBrowserSession().Tree()->m_ct->GetItemData(item);int type=GetBrowserSession().Tree()->get_lparam_type(data),index=GetBrowserSession().Tree()->get_lparam_volinx(data);
- int mac=0;CString path=GetBrowserSession().Document()->get_directory(item,&mac);FindLocation location;
- location.mac=mac!=0;location.directory=(LPCSTR)path;location.volumeIndex=index;
- try{location.origin=session.MacBrowser().TargetFolder(item);}
- catch(const std::exception&){AfxMessageBox("Select a folder or volume to search first.");return;}
- if(location.origin.IsNone()){AfxMessageBox("Select a folder or volume to search first.");return;}
- if(type==LIST_HFS&&index>=0&&index<GetBrowserSession().Document()->m_hfs_count){location.volume=(LPCSTR)GetBrowserSession().Document()->m_volumes[index].m_file_name;location.root=(LPCSTR)(GetBrowserSession().Document()->m_volumes[index].m_volume_name+":");}
- else if(type==LIST_FAT&&index>=0&&index<GetBrowserSession().Document()->m_fat_count){auto& drive=session.Document()->m_fats[index];location.root=std::string(1,drive.m_letter)+":\\";
-  location.mac=false;location.windowsRoot=VolumeCoord::Wide(location.root);
-  location.directory=BrowserPresentation::Utf8(MacBrowser::U16(location.origin.WindowsPath()));
-  location.checkWindowsMedia=drive.m_type==DRIVE_REMOVABLE||drive.m_type==DRIVE_CDROM;
- }
- else {AfxMessageBox("Select a folder or volume to search first.");return;}
- FindHit selected;if(!ShowFindFilesDialog(this,location,selected))return;
- if(!session.RevealFindHit(selected,index))
+ std::optional<FindScope> scope;
+ try{scope=session.CaptureFindScope();}
+ catch(const std::exception&){}
+ if(!scope){AfxMessageBox("Select a folder or volume to search first.");return;}
+ FindHit selected;
+ if(ShowFindFilesDialog(this,std::move(*scope),selected)&&!session.RevealFindHit(selected))
   session.RejectNavigation({},"The search volume is no longer attached.");
 }
 

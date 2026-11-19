@@ -6,6 +6,7 @@ namespace BrowserDirectory { struct Row; struct Snapshot; }
 #include "VolumeCoordinator.h"
 #include "BrowserNavigation.h"
 #include "BrowserMountInventory.h"
+#include "FindFiles.h"
 namespace Storage { class Job; struct Result; }
 class CHFVExplorerDoc;
 class HFVExplorerTreeView;
@@ -84,7 +85,8 @@ public:
         std::function<void()> retry, std::function<bool()> nextOnError={});
     bool OpenFolderInNewWindow(HTREEITEM item);
     bool OpenFolderFrom(BrowserSession& source,HTREEITEM item);
-    bool RevealFindHit(const FindHit&,int legacyVolume=-1);
+    std::optional<FindScope> CaptureFindScope();
+    bool RevealFindHit(const FindHit&);
     bool UsesAsyncNavigation() const;
     void ScheduleMediaUpdates();
     bool Navigating() const { return bool(navigation_); }

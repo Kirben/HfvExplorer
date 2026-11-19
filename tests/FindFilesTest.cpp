@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "FindFiles.h"
+#include "VolumeCoordinator.h"
 #include "MacBrowserModel.h"
 #include "StorageJobDialog.h"
 #include "FloppyWriter.h"
@@ -43,21 +44,24 @@ int RunFindFilesTest(const char* directory){
    check(hfs_write(file,"HELLO",5)==5&&hfs_setfork(file,1)==0&&hfs_write(file,"RSRC",4)==4&&hfs_close(file)==0,"write both fixture forks");
   }
   check(hfs_umount(volume)==0,"finish HFS fixture");auto original=load(image);
-  FindRequest mac;mac.location={true,image,"FindMac:","FindMac:",0};mac.pattern="*.txt";
+  FindRequest mac;mac.scope.origin=FileOperations::Location::Classic(image,"FindMac:");mac.scope.volumeRoot=mac.scope.origin;mac.pattern="*.txt";
   auto recursive=execute(mac);check(recursive.first->result().code==0&&recursive.second->hits.size()==2&&recursive.second->hits[0].bytes==9,"recursive HFS names, both-fork size and sorted matches");
-  mac.location.directory="FindMac:Folder";mac.pattern="read";check(execute(mac).second->hits.size()==2,"selected HFS folder scope");
+  mac.scope.origin=FileOperations::Location::Classic(image,"FindMac:Folder");mac.pattern="read";check(execute(mac).second->hits.size()==2,"selected HFS folder scope");
+  mac.wholeVolume=true;mac.pattern="Root.txt";
+  check(execute(mac).second->hits.size()==1,"whole-volume search used the selected nested folder");
+  mac.wholeVolume=false;mac.pattern="read";
   mac.recursive=false;check(execute(mac).second->hits.size()==1,"nonrecursive HFS search");
   mac.recursive=true;mac.caseSensitive=true;check(execute(mac).second->hits.size()==1,"case-sensitive HFS search");
   mac.caseSensitive=false;mac.pattern="Deep";mac.includeFolders=true;auto folders=execute(mac);check(folders.second->hits.size()==1&&folders.second->hits[0].folder&&folders.second->hits[0].parent=="FindMac:Folder","folder-name search and containing-folder path");
-  mac.location.directory="FindMac:";mac.pattern="*";mac.includeFolders=false;mac.limit=1;auto capped=execute(mac);check(capped.first->result().code==0&&capped.second->hits.size()==1&&capped.second->truncated,"result limit is bounded and reported");
+  mac.scope.origin=FileOperations::Location::Classic(image,"FindMac:");mac.pattern="*";mac.includeFolders=false;mac.limit=1;auto capped=execute(mac);check(capped.first->result().code==0&&capped.second->hits.size()==1&&capped.second->truncated,"result limit is bounded and reported");
   mac.limit=10000;mac.pattern="";check(execute(mac).first->result().error==ERROR_INVALID_PARAMETER,"empty pattern rejected");
-  mac.pattern="*";mac.location.directory="FindMac:Missing";check(execute(mac).first->result().code!=0,"missing HFS search folder reported");
+  mac.pattern="*";mac.scope.origin=FileOperations::Location::Classic(image,"FindMac:Missing");check(execute(mac).first->result().code!=0,"missing HFS search folder reported");
   check(load(image)==original,"HFS searches never modify source image");
   std::string host=root+"\\host",nested=host+"\\Nested";check(CreateDirectoryA(host.c_str(),nullptr)&&CreateDirectoryA(nested.c_str(),nullptr),"create Windows folders");
   save(host+"\\ReadMe",{'R'});save(nested+"\\readme.txt",{'T'});
   std::string large=host+"\\Large.bin";HANDLE big=CreateFileA(large.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);DWORD ignored=0;LARGE_INTEGER size;size.QuadPart=0x100000025ULL;
   check(big!=INVALID_HANDLE_VALUE&&DeviceIoControl(big,FSCTL_SET_SPARSE,nullptr,0,nullptr,0,&ignored,nullptr)&&SetFilePointerEx(big,size,nullptr,FILE_BEGIN)&&SetEndOfFile(big),"create sparse >4-GiB metadata fixture");CloseHandle(big);
-  FindRequest windows;windows.location={false,"",host,host,0};windows.pattern="read";
+  FindRequest windows;windows.scope.origin=FileOperations::Location::Windows(VolumeCoord::Wide(host));windows.pattern="read";
   auto win=execute(windows);check(win.first->result().code==0&&win.second->hits.size()==2,"recursive Windows name search");
   windows.recursive=false;check(execute(windows).second->hits.size()==1,"nonrecursive Windows name search");
   windows.recursive=true;windows.pattern="Large";auto bigResult=execute(windows);check(bigResult.second->hits.size()==1&&bigResult.second->hits[0].bytes==0x100000025ULL,"Windows size retains high 32 bits without reading file contents");
@@ -71,7 +75,7 @@ int RunFindFilesTest(const char* directory){
         "common Windows match limit and typed location");
   {
    auto mounted=MacBrowser::OpenClassic(image,"FindMac:",false);
-   FindRequest scoped;scoped.location.mac=true;scoped.location.native=mounted;scoped.location.directory="FindMac";
+   FindRequest scoped;scoped.scope.origin=FileOperations::Location::Mounted(mounted);
    scoped.pattern="read";scoped.limit=1;
    auto cappedMounted=execute(scoped);
    check(cappedMounted.first->result().code==0&&cappedMounted.second->hits.size()==1&&
@@ -80,9 +84,9 @@ int RunFindFilesTest(const char* directory){
          "common mounted match limit and typed catalog route");
    mounted->Close();
   }
-  windows.location.directory=root+"\\Missing";check(execute(windows).first->result().code!=0,"missing Windows search folder reported");
+  windows.scope.origin=FileOperations::Location::Windows(VolumeCoord::Wide(root+"\\Missing"));check(execute(windows).first->result().code!=0,"missing Windows search folder reported");
   readonly_cd_backend_init();char physical[64];get_floppy_volume_file_name(25,physical);FakeFloppy fake(original);check(readonly_floppy_attach_api(25,&fake),"attach read-only search floppy");
-  mac.location={true,physical,"FindMac:","FindMac:",0};mac.pattern="read";auto physicalResult=execute(mac);
+  mac.scope.origin=FileOperations::Location::Classic(physical,"FindMac:");mac.pattern="read";auto physicalResult=execute(mac);
   check(physicalResult.first->result().code==0&&physicalResult.second->hits.size()==2&&fake.readOnly&&fake.media==original&&fake.opens==fake.closes,"native floppy adapter search is read-only and closes handles");
   fake.readError=ERROR_NOT_READY;check(execute(mac).first->result().code!=0,"device read errors reported without false successful empty result");fake.readError=0;
   check(readonly_floppy_attach_api(25,nullptr),"detach search floppy");

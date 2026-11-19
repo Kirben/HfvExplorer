@@ -47,9 +47,9 @@ class Search {
 public:
  Search(const FindRequest& request,FindResults& output,Storage::Job& job)
  :request_(request),output_(output),job_(job),
-  widePattern_(request.location.UsesUnicode()?BrowserPresentation::FromUtf8(request.pattern):std::wstring())
+  widePattern_(request.UsesUnicode()?BrowserPresentation::FromUtf8(request.pattern):std::wstring())
  {
-  output_.utf8=request.location.UsesUnicode();
+  output_.utf8=request.UsesUnicode();
  }
 
  void progress(const std::string& path,bool force=false){
@@ -78,6 +78,7 @@ private:
   FindHit hit{child.name,parent.path,child.folder.path,child.bytes,directory,child.folder.route};
   if(directory&&reveal.IsMounted())hit.destination=std::move(reveal);
   else{hit.destination=parent.location;hit.reveal=std::move(reveal);}
+  hit.mount=request_.scope.mount;
   output_.hits.push_back(std::move(hit));
   return true;
  }
@@ -108,14 +109,15 @@ private:
 
 public:
  void mac(){
-  auto start=request_.location.directory;
+  auto origin=request_.Origin();
+  auto start=origin.ClassicPath();
   if(start.find(':')==std::string::npos)start+=':';
-  auto origin=request_.location.origin.IsClassic()?request_.location.origin:
-      Location::Classic(request_.location.volume,start);
   StorageLocation::ValidateImage(VolumeCoord::Wide(origin.ClassicImage()),origin.expectedResource);
   auto volume=MacBrowser::OpenClassic(origin.ClassicImage(),start,false);
   StorageLocation::ValidateMedia(origin);
-  origin.SetClassic(origin.ClassicImage(),start);
+  const auto root=volume->Stat(2);
+  if(origin.expectedCatalogId&&root.resolvedId!=origin.expectedCatalogId)
+   throw Storage::MediaChanged("The selected classic HFS folder was replaced.");
   origin.directory=true;
   std::set<uint32_t> visited;
   walk({start,origin},[&](Folder& folder,auto emit){
@@ -131,6 +133,7 @@ public:
     auto full=folder.path+(folder.path.back()==':'?"":":")+name;
     auto location=origin;
     location.SetClassic(origin.ClassicImage(),full);
+    if(origin.MediaGenerationKnown())location.BindMediaGeneration(origin.MediaGeneration());
     location.expectedCatalogId=entry.resolvedId;
     location.directory=entry.directory;
     if(!emit({std::move(name),{std::move(full),std::move(location),entry.id},BrowserDirectory::Bytes(entry)}))return false;
@@ -142,13 +145,22 @@ public:
  }
 
  void native(){
-  auto volume=request_.location.native;
-  auto origin=Location::Mounted(volume,request_.location.nativeFolder);
+  auto origin=request_.Origin();
+  auto volume=origin.Volume();
   StorageLocation::ValidateMedia(origin);
   const auto root=volume->Stat(origin.Id());
+  if(!root.directory||!StorageLocation::MatchesEntry(origin,root))
+   throw Storage::MediaChanged("The selected search folder changed.");
   origin.directory=true;
-  auto route=request_.location.nativePath;if(route.empty())route.push_back(origin.Id());
-  walk({request_.location.directory,origin,root.id,0,std::move(route),{root.resolvedId?root.resolvedId:root.id}},
+  auto route=request_.wholeVolume?std::vector<uint32_t>{2}:request_.scope.catalogRoute;
+  if(route.empty())route={origin.Id()};
+  std::string label;
+  for(const auto id:route){
+   if(job_.cancelled())throw Storage::Cancelled();
+   if(!label.empty())label+=':';
+   label+=BrowserPresentation::Utf8(id==root.id?root.name:volume->Stat(id).name);
+  }
+  walk({std::move(label),origin,root.id,0,std::move(route),{root.resolvedId?root.resolvedId:root.id}},
       [&](const Folder& folder,auto emit){
    for(const auto& entry:volume->List(folder.cursor)){
     auto name=BrowserPresentation::Utf8(entry.name);
@@ -171,10 +183,9 @@ public:
  }
 
  void windows(){
-  const auto root=request_.location.origin.IsWindows()?request_.location.origin.WindowsPath():
-      VolumeCoord::Wide(request_.location.directory);
-  auto origin=request_.location.origin.IsWindows()?request_.location.origin:Location::Windows(root);
-  if(request_.location.checkWindowsMedia&&!origin.WindowsMediaSerial()){
+  auto origin=request_.Origin();
+  const auto& root=origin.WindowsPath();
+  if(request_.scope.checkWindowsMedia&&!origin.WindowsMediaSerial()){
    auto serial=StorageLocation::WindowsSerial(root);
    if(!serial)throw Storage::MediaChanged("Cannot identify the Windows search media.");
    origin.BindWindowsMediaSerial(serial);
@@ -183,6 +194,7 @@ public:
   const auto attributes=GetFileAttributesW(BrowserPresentation::WindowsPath(root).c_str());
   if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY))
    throw std::runtime_error("The selected search location is not an accessible Windows folder");
+  if(!origin.expectedIdentity.empty())StorageLocation::ValidateFolderIdentity(origin,MacBrowser::DescribeWindowsFile(root));
   origin.directory=true;
   walk({Utf8(root),origin},[&](const Folder& folder,auto emit){
    auto prefix=folder.location.WindowsPath();
@@ -242,14 +254,21 @@ bool FindNameMatches(std::string name,std::string pattern,bool caseSensitive){
 }
 std::function<Storage::Result(Storage::Job&)> MakeFindFilesJob(FindRequest request,std::shared_ptr<FindResults> results){
  return [=](Storage::Job& job)->Storage::Result {
-  if(!results||request.pattern.empty()||request.pattern.size()>(request.location.UsesUnicode()?1020:255)||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
+  if(!results||request.pattern.empty()||request.pattern.size()>(request.UsesUnicode()?1020:255)||!request.limit)return {1,ERROR_INVALID_PARAMETER,"Enter a name or wildcard pattern of 1 to 255 characters."};
+  if(request.Origin().IsNone())return {1,ERROR_INVALID_PARAMETER,"Select a folder or volume to search."};
   if(job.cancelled())throw Storage::Cancelled();
   *results={};Search search(request,*results,job);
-  try{if(request.location.native)search.native();else if(request.location.mac)search.mac();else search.windows();}
+  try{
+   const auto& origin=request.Origin();
+   const VolumeCoord::Lease read({{origin.ResourceKey(),origin.IsWindows()?VolumeCoord::Mode::Browse:VolumeCoord::Mode::Read}});
+   if(origin.IsMounted())search.native();
+   else if(origin.IsClassic())search.mac();
+   else search.windows();
+  }
   catch(const Storage::Cancelled&){throw;}
   catch(const Storage::MediaChanged& error){return {1,ERROR_MEDIA_CHANGED,error.what()};}
   catch(const std::exception& error){return {1,ERROR_READ_FAULT,error.what()};}
   std::sort(results->hits.begin(),results->hits.end(),[&](const FindHit& a,const FindHit& b){int compared=results->utf8?_wcsicmp(BrowserPresentation::FromUtf8(a.name).c_str(),BrowserPresentation::FromUtf8(b.name).c_str()):_stricmp(a.name.c_str(),b.name.c_str());return compared?compared<0:a.path<b.path;});
-  search.progress(request.location.directory,true);return {};
+  return {};
  };
 }

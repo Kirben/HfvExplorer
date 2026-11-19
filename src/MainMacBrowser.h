@@ -58,7 +58,6 @@ public:
     bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&,std::function<void(bool)> completed={});
     bool Command(UINT);
     bool ContextMenu(CPoint);
-    bool Find();
     bool OpenMountedFolderFrom(const MainMacBrowser& source,const BrowserNavigation::Request& request);
     bool RevealFindHit(const BrowserNavigation::Request&);
     void Import();
