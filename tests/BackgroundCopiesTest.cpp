@@ -1102,7 +1102,77 @@ int RunExtendedAttributesTest(const char* directory){
   {auto make=[&](const char* name){auto path=VolumeCoord::Wide(std::string((LPCSTR)host)+"\\"+name);{auto image=HfsPlus::CreateImage(path.c_str(),512ULL<<20);HfsPlus::Volume::Format(*image,u"Streamed",true,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);}return MacBrowser::OpenImage(path);};auto large=make("large-source.dsk"),back=make("large-target.dsk");
    auto pattern=[](uint64_t at,void* p,size_t n){memset(p,0,n);if(at==0&&n)static_cast<BYTE*>(p)[0]=0x83;};HfsPlus::Attributes values{{u"user.BigA",HfsPlus::AttributeData::Snapshot((70ULL<<20)+5,pattern)},{u"user.BigB",HfsPlus::AttributeData::Snapshot((70ULL<<20)+9,pattern)},{std::u16string(100,u'\u00e9'),{1,2,3}}};for(unsigned i=0;i<600;++i){auto name=std::u16string(116,u'x')+MacBrowser::U16(std::to_wstring(i));values[name]={uint8_t(i)};}
    MacBrowser::Entry metadata;metadata.name=u"Large metadata";metadata.attributesKnown=true;metadata.attributes=values;auto id=large->Put(2,metadata,[](unsigned,uint64_t,void*,size_t){},false);copy(*large,id,*pc);auto windowsId=Find(*pc,metadata.name);Check(pc->GetAttributes(windowsId)==values,"Large AppleDouble streaming export changed attributes");copy(*pc,windowsId,*back);Check(back->GetAttributes(Find(*back,metadata.name))==values,"Large AppleDouble streaming import changed attributes");
-   HfsPlus::Attributes tooLong{{std::u16string(127,u'\u4e00'),{1}}};metadata.name=u"Invalid name";metadata.attributes=tooLong;bool refused=false;try{pc->Put(2,metadata,[](unsigned,uint64_t,void*,size_t){},false);}catch(const std::exception&){refused=true;}Check(refused&&!Find(*pc,metadata.name),"AppleDouble byte-name field overflow was not refused before publication");
+   HfsPlus::Attributes longName{{std::u16string(127,u'\u4e00'),{1}}};
+   metadata.name=u"Long attribute name";metadata.attributes=longName;
+   const auto longNameId=pc->Put(2,metadata,[](unsigned,uint64_t,void*,size_t){},false);
+   Check(pc->GetAttributes(longNameId)==longName,"Long UTF-8 attribute name was lost in the companion");
+  }
+  {
+   const auto root=VolumeCoord::Wide((LPCSTR)windows);
+   const uint64_t boundary=1ULL<<32;
+   auto sparse=[&](uint64_t length,uint8_t value,uint64_t offset,void* bytes,size_t size){
+    memset(bytes,0,size);
+    if(offset<=length-8&&length-8-offset<size)
+     static_cast<uint8_t*>(bytes)[length-8-offset]=value;
+   };
+   for(auto length:{boundary-16,boundary+137}){
+    MacBrowser::Entry e;e.name=length<boundary?u"Standard large fork":u"Wide resource fork";
+    e.forks[0].size=4;e.forks[1].size=length;e.finder[0]=0x7f;
+    const auto id=pc->Put(2,e,[&](unsigned f,uint64_t at,void* p,size_t n){
+      if(f)sparse(length,0x71,at,p,n);else memset(p,'D',n);
+    },false);
+    Check(pc->Stat(id).forks[1].size==length&&pc->Stat(id).finder==e.finder,"Windows truncated a large resource fork");
+    uint8_t tail[8]{};
+    pc->Read(id,1,length-8,tail,sizeof(tail));
+    Check(tail[0]==0x71&&tail[7]==0,"Readback of large resource fork failed");
+    pc->Close();
+    const auto companion=root+L"\\%"+MacBrowser::Wide(e.name);
+    auto disk=HfsPlus::OpenImage(companion.c_str(),false);
+    const auto signature=HfsPlus::Disk::Read(*disk,0,8);
+    if(length<boundary)
+     Check(HfsPlus::Disk::U32(signature.data())==0x00051607&&disk->Size()>boundary,
+           "Standard AppleDouble unnecessarily rejected an end offset above 4 GiB");
+    else
+     Check(!memcmp(signature.data(),"HFVAD641",8),"Oversize fork did not use the 64-bit companion");
+    disk.reset();
+    if(length>boundary){
+     pc->SetAttributes(id,{{u"user.WithLargeFork",{1,2,3}}});
+     Check(pc->GetAttributes(id).at(u"user.WithLargeFork")==HfsPlus::AttributeData({1,2,3}),
+           "Failed to stage metadata with large resource fork");
+     pc->Read(id,1,length-8,tail,sizeof(tail));
+     Check(tail[0]==0x71&&tail[7]==0,"Metadata edit damaged the large resource fork");
+    }
+    pc->Close();
+    pc->Remove(id);
+   }
+   MacBrowser::Entry e;e.name=u"Wide attribute";e.forks[0].size=3;e.attributesKnown=true;
+   const auto length=boundary+23;
+   e.attributes.emplace(u"user.Huge",HfsPlus::AttributeData::Snapshot(length,[&](uint64_t at,void* p,size_t n){
+       sparse(length,0xc3,at,p,n);
+   }));
+   const auto id=pc->Put(2,e,[](unsigned,uint64_t,void* p,size_t n){memset(p,'a',n);},false);
+   const auto restored=pc->GetAttributes(id).at(u"user.Huge");
+   uint8_t last[8]{};
+   restored.Read(length-8,last,sizeof(last));
+   Check(restored.size()==length&&restored.FileBacked()&&last[0]==0xc3&&last[7]==0,
+         "64-bit companion did not preserve the huge attribute");
+   pc->Close();
+   const auto companion=root+L"\\%Wide attribute";
+   {
+    const auto handle=CreateFileW(companion.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    Check(handle!=INVALID_HANDLE_VALUE,"Open wide companion corruption fixture");
+    LARGE_INTEGER at{};at.QuadPart=64;uint8_t bad[8]{};DWORD written=0;
+    const bool changed=SetFilePointerEx(handle,at,nullptr,FILE_BEGIN)&&WriteFile(handle,bad,sizeof(bad),&written,nullptr)&&written==sizeof(bad);
+    CloseHandle(handle);
+    Check(changed,"Write invalid wide companion extent");
+   }
+   bool rejected=false;
+   try{pc->GetAttributes(id);}catch(const HfsPlus::Error&){rejected=true;}
+   Check(rejected,"Wide companion accepted an attribute overlapping its header");
+   Check(DeleteFileW(companion.c_str())&&DeleteFileW((root+L"\\Wide attribute").c_str()),
+         "Remove the intentionally corrupted test pair");
+   fprintf(report,"PASS: standard AppleDouble can end above 4 GiB. Wide companions preserve resource forks and streamed attributes above 4 GiB, metadata edits and sparse tails, and reject corrupt extents.\n");
+   fflush(report);
   }
   {MacBrowser::Entry e;e.name=u"ExternalChange";e.forks[0].size=3;auto id=pc->Put(2,e,[](unsigned,uint64_t,void* p,size_t n){memset(p,'A',n);},false);pc->Close();auto path=std::wstring(VolumeCoord::Wide((LPCSTR)windows))+L"\\ExternalChange",saved=path+L"-saved";bool replaced=false,failed=false;try{pc->Put(2,e,[&](unsigned,uint64_t,void* p,size_t n){if(!replaced){Check(MoveFileW(path.c_str(),saved.c_str()),"replace staged destination");HANDLE h=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);Check(h!=INVALID_HANDLE_VALUE,"create external replacement");DWORD wrote=0;Check(WriteFile(h,"EXTERNAL",8,&wrote,nullptr)&&wrote==8,"write external replacement");CloseHandle(h);replaced=true;}memset(p,'B',n);},true);}catch(const std::exception&){failed=true;}pc->Close();HANDLE h=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);char bytes[8]{};DWORD got=0;Check(h!=INVALID_HANDLE_VALUE&&ReadFile(h,bytes,8,&got,nullptr)&&got==8&&!memcmp(bytes,"EXTERNAL",8)&&failed,"Staged copy overwrote an external replacement");CloseHandle(h);}
   {struct Reset{~Reset(){MacBrowser::windowsPublicationFault={};}}reset;auto root=VolumeCoord::Wide((LPCSTR)windows);
