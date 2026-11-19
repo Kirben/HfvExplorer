@@ -48,6 +48,7 @@ public:
     bool RenameWindowsItem(int row);
     FileOperations::Location CaptureItem(int row);
     bool Delete(bool confirm);
+    bool CanInspectProperties(int row) const;
     bool Properties(int row);
     bool Capture(bool cut, bool append);
     bool Paste();
