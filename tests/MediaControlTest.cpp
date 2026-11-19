@@ -3,6 +3,9 @@
 #include "stdafx.h"
 #include "MediaControl.h"
 #include "StorageJobDialog.h"
+#include "DeviceWait.h"
+#include "BackgroundCopies.h"
+#include "BrowserFolderReader.h"
 #include <stdexcept>
 #include <vector>
 #include "FakeFloppy.h"
@@ -52,8 +55,39 @@ int RunMediaControlTest(const char* directory){
   descriptor=fhook_open(path,O_RDONLY);check(descriptor>=0&&fhook_read(descriptor,bytes,1)==1,"drive can reopen after failed eject or reload");fhook_close(descriptor);readonly_cd_backend_final();check(readonly_floppy_attach_api(25,nullptr),"detach media suspend fixture");
   CWnd owner;check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden media control owner",WS_OVERLAPPED,0,0,100,100,nullptr,0)!=FALSE,"hidden owner");AfxGetApp()->m_pMainWnd=&owner;InitializeStorageUi();storageUiTest={};
   FakeControl slow;slow.delay=250;auto result=ShowStorageWaitJob(MakeMediaControlJob({3,DRIVE_CDROM},true,&slow),true);
-  check(result.code==0&&storageUiTest.timerTicks>=2&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled(),"responsive media control and owner restoration");owner.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;
-  fprintf(report,"PASS: physical-only selection, own-reader release, CD/removable access, lock/dismount/eject order, empty-tray reload/eject, busy/unsupported/access/drive-change/close errors, balanced cleanup and responsive wait/owner restoration. All media controls simulated.\n");
+  check(result.code==0&&storageUiTest.timerTicks>=2&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled(),"responsive media control and owner restoration");  CWnd other;
+  check(other.CreateEx(0,AfxRegisterWndClass(0),"Other hidden browser",WS_OVERLAPPED,0,0,100,100,nullptr,0)!=FALSE,"second hidden browser");
+  FakeControl background;
+  background.delay=450;
+  const auto device=VolumeCoord::DeviceKey(3);
+  const std::vector<VolumeCoord::Access> access{{device,VolumeCoord::Mode::Write}};
+  auto reservation=std::make_shared<VolumeCoord::Lease>(access);
+  bool completed=false,success=false;
+  auto work=MakeMediaControlJob({3,DRIVE_CDROM},true,&background,{},std::move(reservation));
+  check(BackgroundCopies::StartStorage(std::move(work),&owner,"Reloading media","Reload",
+      [&](bool ok){completed=true;success=ok;}),"start background media command");
+  check(!VolumeCoord::Available(access)&&owner.IsWindowEnabled()&&other.IsWindowEnabled()&&!StorageUi::busy(),
+        "background media command disables only its device");
+  BrowserFolderReader reader({});
+  BrowserDirectory::Snapshot listing;
+  const auto parent=VolumeCoord::Wide(directory).substr(0,VolumeCoord::Wide(directory).find_last_of(L"\\/"));
+  auto browsed=ShowStorageWaitJob([&](Storage::Job& job){
+   listing=reader.read_windows_browser_directory(0,parent,true,job);
+   return Storage::Result{};
+  },true,&other);
+  check(!browsed.code&&!listing.rows.empty()&&!completed,"second browser can list an unrelated folder during reload");
+  BackgroundCopies::TransferOwner(owner.GetSafeHwnd(),other.GetSafeHwnd());
+  owner.DestroyWindow();
+  const auto started=GetTickCount();
+  while(!completed&&GetTickCount()-started<5000){
+   MSG message{};
+   while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessage(&message);}
+   Sleep(1);
+  }
+  check(completed&&success&&VolumeCoord::Available(access)&&!BackgroundCopies::Active()&&other.IsWindowEnabled(),
+        "completion releases the device and survives closing the original owner");
+  other.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;
+  fprintf(report,"PASS: physical-only selection, own-reader release, CD/removable access, lock/dismount/eject order, empty-tray reload/eject, busy/unsupported/access/drive-change/close errors, balanced cleanup, responsive wait/owner restoration, and modeless reload with a same-device reservation, concurrent folder browsing and independent owner closure. All media controls simulated.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());fclose(report);return 1;}
  fclose(report);return 0;
 }

@@ -16,6 +16,8 @@ public:
     JobController(std::vector<FileOperations::Request> requests,
         std::function<void(bool)> completed = {},
         std::function<void(const FileOperations::Completion&)> observed = {});
+    using Work = std::function<Storage::Result(Storage::Job&)>;
+    JobController(Work work,std::function<void(bool)> completed = {});
     Step Advance();
     const FileOperations::LegacyConversion* PendingMode() const;
     void ChooseMode(const ModeChoice&);
@@ -32,6 +34,8 @@ private:
     std::vector<FileOperations::Request> requests_;
     size_t next_ = 0;
     std::unique_ptr<FileOperations::Operation> operation_;
+    Work work_;
+    std::shared_ptr<Storage::Job> task_;
     std::function<void(bool)> completed_;
     std::function<void(const FileOperations::Completion&)> observed_;
     FileOperations::Completion snapshot_;

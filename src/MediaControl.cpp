@@ -45,6 +45,7 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaControlJob(MediaControlTa
   if(!reload){
    DWORD error=0;
    for(int attempt=0;attempt<20;++attempt){
+    if(job.cancelled())throw Storage::Cancelled();
     if(os->Control(volume.handle,FSCTL_LOCK_VOLUME)){volume.locked=true;break;}
     error=GetLastError();if(error!=ERROR_ACCESS_DENIED&&error!=ERROR_SHARING_VIOLATION&&error!=ERROR_LOCK_VIOLATION)break;
     if(attempt<19)os->Pause();
