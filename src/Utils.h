@@ -37,7 +37,6 @@ unsigned long string_to_long( unsigned char *s );
 void negate_buffer( unsigned char *p, int count );
 // Explorer-style: if old DOS name: NAME5678.EXT -> Name5678.ext
 void dos_lfn( unsigned char *name );
-void dos_lfn_fdata( WIN32_FIND_DATA *fd );
 void rotate_buffer( unsigned char *p, int bytes, int small );
 
 // file name, pc

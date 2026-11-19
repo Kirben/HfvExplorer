@@ -503,23 +503,6 @@ HICON get_dos_icon( CHFVExplorerApp *pApp, char *p, int iconMode )
 	return( hicon );
 }
 
-int CHFVExplorerDoc::ignore_this( CObArray *parr, WIN32_FIND_DATA *fd ) 
-{
-	int i, count = parr->GetSize();
-	char *name = fd->cFileName;
-
-	if(fd->dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) {
-		if(!m_pc_show_invisibles) {
-			return(1);
-		}
-	}
-	for(i=0; i<count; i++) {
-		CString *s = (CString*)parr->GetAt( i );
-		if(s->CompareNoCase(name) == 0) return(1);
-	}
-	return(0);
-}
-
 #pragma optimize("g",off)
 /*
 void CHFVExplorerDoc::finder_dat_walk( int volinx, LPSTR path, int list )

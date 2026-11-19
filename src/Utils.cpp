@@ -136,22 +136,6 @@ void dos_lfn( unsigned char *name )
 	}
 }
 
-void dos_lfn_fdata( WIN32_FIND_DATA *fd )
-{
-	int len, i;
-	char *name;
-
-	if(!*fd->cAlternateFileName) { // this is enough
-	// if(strcmp(fd->cFileName,fd->cAlternateFileName) == 0) {
-		name = fd->cFileName;
-		len = strlen((char *)name);
-		name[0] = toupper(name[0]);
-		for(i=1; i<len; i++) {
-			name[i] = tolower(name[i]);
-		}
-	}
-}
-
 void long_to_string( unsigned long u, unsigned char *s )
 {
 	s[0] = (unsigned char)( (u & 0xFF000000ul) >> 24 );
