@@ -148,6 +148,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
   BrowserDirectory::ObserveRead(ansiPath.empty()?display.c_str():ansiPath.c_str());
   row.location.directory=row.entry.directory;
   row.location.expectedIdentity=row.entry.identity;
+  row.location.requiresWindowsIdentity=true;
   row.accessKey=VolumeCoord::ObservedPathKey(snapshot.resourceKey,leaf,row.entry.identity,row.entry.directory);
   snapshot.rows.push_back(std::move(row));
   Storage::Progress progress;

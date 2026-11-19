@@ -81,6 +81,7 @@ class Location {
     const std::string &LegacyVolume() const;
     std::string LegacyPath() const;
     bool cut = false, directory = false;
+    bool requiresWindowsIdentity = false;
     uint32_t expectedCatalogId = 0, expectedParent = 0;
     std::string expectedIdentity, expectedResource;
     std::u16string expectedName;

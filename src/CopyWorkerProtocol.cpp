@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "CopyWorkerProtocol.h"
+#include "StorageLocation.h"
 
 namespace CopyWorkerProtocol {
 using namespace FileOperations;
@@ -104,6 +105,7 @@ WorkerOrigin DecodeOrigin(Data &d) {
 }
 void EncodeEndpoint(Data &d, const Endpoint &e) {
     const auto &l = e.location;
+    StorageLocation::RequireCapturedIdentity(l);
     d.put(uint64_t(l.kind()));
     d.put(l.cut);
     d.put(l.directory);

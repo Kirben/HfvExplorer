@@ -11,6 +11,7 @@ std::optional<DWORD> WindowsSerial(const std::wstring& path);
 void ValidateImage(const std::wstring& path, const std::string& expectedResource);
 void ValidateClassicGeneration(const Location&, std::optional<DWORD> observed);
 enum class FloppyProbe { OpenMount, FreshHandle };
+void RequireCapturedIdentity(const Location&);
 void ValidateMedia(const Location&, FloppyProbe = FloppyProbe::OpenMount);
 
 bool MatchesEntry(const Location&, const MacBrowser::Entry&);

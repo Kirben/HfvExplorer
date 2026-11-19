@@ -932,13 +932,9 @@ bool MainMacBrowser::PasteHardLink(){
 bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!CanCreateFolder())return true;
  auto target=state_->Target();std::wstring name=L"New Folder";
  if(EditHfsPlusName(session_.Owner(),name,target.Volume()->CaseSensitive())){CreateFolder(target,U16(name));if(!BackgroundCopies::Enabled())Refresh();}return true;}
-FileOperations::Location MainMacBrowser::CaptureItem(int row){
- auto item=state_->Item(row,false);
- if(item.LegacyType()==LIST_FAT&&item.expectedIdentity.empty()){
-  if(!Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{VolumeCoord::PathKey(item.WindowsPath()),VolumeCoord::Mode::Read}});item.expectedIdentity=DescribeWindowsFile(item.WindowsPath()).identity;}))throw HfsPlus::Error("Cannot identify the selected Windows entry");
-  if(item.expectedIdentity.empty())throw HfsPlus::Error("Cannot safely identify the selected Windows entry");
- }
- return item;
+FileOperations::Location MainMacBrowser::CaptureItem(int row)
+{
+ return state_->Item(row,false);
 }
 bool MainMacBrowser::RenameItem(int row,const std::u16string& name,bool checkLock){
  auto item=CaptureItem(row);FileOperations::RenameEntry request{item, name, {}, checkLock};
@@ -981,8 +977,6 @@ BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
  if(cut&&!out.canMove)return out;
  auto& list=session_.List()->GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){if(session_.List()->BrowserRowAt(row))out.items.push_back(state_->Item(row,cut));}
- bool missing=false;for(auto& item:out.items)missing|=item.LegacyType()==LIST_FAT&&item.expectedIdentity.empty();
- if(missing&&!Run(session_,[&](Storage::Job&){for(auto& item:out.items)if(item.LegacyType()==LIST_FAT&&item.expectedIdentity.empty()){VolumeCoord::Lease read({{VolumeCoord::PathKey(item.WindowsPath()),VolumeCoord::Mode::Read}});item.expectedIdentity=MacBrowser::DescribeWindowsFile(item.WindowsPath()).identity;}}))out.items.clear();
  return out;
 }
 FileOperations::Location MainMacBrowser::TargetFolder(HTREEITEM item){return state_->Target(item);}

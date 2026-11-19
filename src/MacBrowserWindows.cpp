@@ -221,7 +221,10 @@ class Windows final : public Volume, public WorkerEndpoint {
         if(!e.directory)e.forks[0].size=(uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
         Double d;if(AppleDouble(Companion(p),d)){
             Check(!e.directory||!d.size,"Directory companion contains unexpected resource data; it was preserved");
-            if(!e.directory)e.forks[1].size=d.size;e.finder=d.finder;e.identity+="/"+identity(Companion(p));
+            if(!e.directory)e.forks[1].size=d.size;e.finder=d.finder;
+            const auto companion=identity(Companion(p));
+            if(e.identity.empty()||companion.empty())e.identity.clear();
+            else e.identity+="/"+companion;
         }
         return e;
     }

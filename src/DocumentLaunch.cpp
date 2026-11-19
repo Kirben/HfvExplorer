@@ -8,6 +8,7 @@
 #include "CopyProgress.h"
 #include "LauncherWriteBack.h"
 #include "FileOperations.h"
+#include "StorageLocation.h"
 #include "FileTypeMapping.h"
 #include "StorageJobDialog.h"
 #include "own_ids.h"
@@ -954,6 +955,7 @@ int Launchers::do_make_shortcut( CString application, CString creator, Target em
 
 bool Launchers::Run()
 {
+ StorageLocation::RequireCapturedIdentity(request_.selection);
  char typeBytes[5]{},creatorBytes[5]{};
  memcpy(typeBytes,request_.entry.finder.data(),4);memcpy(creatorBytes,request_.entry.finder.data()+4,4);
  CString type(typeBytes),creator(creatorBytes),program;

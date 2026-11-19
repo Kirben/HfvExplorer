@@ -50,8 +50,15 @@ void ValidateClassicGeneration(const Location& location, std::optional<DWORD> ob
         throw Storage::MediaChanged("The selected media changed. Select its drive again.");
 }
 
+void RequireCapturedIdentity(const Location& location)
+{
+    if(location.IsWindows()&&location.requiresWindowsIdentity&&location.expectedIdentity.empty())
+        throw HfsPlus::Error("The original Windows entry could not be identified. Refresh the folder and select it again.");
+}
+
 void ValidateMedia(const Location& location, FloppyProbe probe) {
     if (location.IsWindows()) {
+        RequireCapturedIdentity(location);
         const auto serial=location.WindowsMediaSerial();
         if (serial && WindowsSerial(location.WindowsPath())!=serial)
             throw Storage::MediaChanged("The selected Windows media changed.");

@@ -441,6 +441,50 @@ int RunBrowserTransfersTest(const char* directory)
   Success(Paste(*b,Choice::Replace));
   Check(Find(*bv,2,u"sample.txt")!=0,"Windows-to-native shared paste failed");
 
+  stage="Windows selection with unavailable identity";
+  {
+   const auto path=source+"\\locked.txt";
+   const auto wide=Wide(path);
+   const auto handle=CreateFileW(wide.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr);
+   Check(handle!=INVALID_HANDLE_VALUE,"create locked-file fixture");
+   struct Lock {HANDLE value;~Lock(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}} locked{handle};
+   Host(sc,source);
+   const auto row=sc.List()->BrowserRowAt(Row(sc,L"locked.txt"));
+   Check(row&&row->location.IsWindows()&&row->location.requiresWindowsIdentity,"Windows row had no capture guard");
+   BrowserDirectory::Snapshot snapshot;
+   snapshot.folder=sc.MacBrowser().TargetFolder();
+   snapshot.resourceKey=VolumeCoord::PathKey(snapshot.folder.WindowsPath());
+   snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
+   snapshot.capabilitiesKnown=true;
+   snapshot.capabilities.create=snapshot.capabilities.remove=snapshot.capabilities.rename=true;
+   snapshot.rows.push_back(*row);
+   // File-attribute opens can succeed even during a sharing denial. Exercise
+   // the enumeration fallback explicitly while the data handle is locked.
+   snapshot.rows.front().entry.identity.clear();
+   snapshot.rows.front().location.expectedIdentity.clear();
+   sc.PublishFolder(snapshot,sc.Tree()->GetTreeCtrl().GetSelectedItem(),{},Wide(source),"",
+       [](const BrowserDirectory::Row&){return HTREEITEM{};});
+   Select(sc,L"locked.txt");
+   storageUiTest={};
+   c->SendMessage(WM_COMMAND,ID_EDIT_CUT);
+   const auto captured=BrowserTransfers::Snapshot();
+   Check(captured.items.size()==1&&captured.items.front().cut&&captured.items.front().expectedIdentity.empty()&&
+         storageUiTest.dialogCreations==0,"capturing a locked Windows row opened storage UI or rebound its identity");
+   Host(sc,dest);
+   CloseHandle(locked.value);locked.value=INVALID_HANDLE_VALUE;
+   const auto replacement=source+"\\replacement.txt";
+   {CFile file;Check(file.Open(replacement,CFile::modeWrite|CFile::modeCreate),"create replacement Windows entry");file.Write("new",3);}
+   Check(MoveFileExA(replacement,path,MOVEFILE_REPLACE_EXISTING)!=FALSE,"replace the unverified selection");
+   Check(Paste(*b).code!=0&&GetFileAttributesA(path)!=INVALID_FILE_ATTRIBUTES&&
+         !Find(*bv,2,u"locked.txt"),"an unverified Cut rebound to a same-name replacement after navigation");
+   auto request=FileOperations::RenameEntry{captured.items.front(),u"renamed.txt"};
+   auto rename=FileOperations::Submit(request);
+   Check(WaitForSingleObject(rename.Job()->event(),10000)==WAIT_OBJECT_0&&rename.Job()->result().code&&
+         GetFileAttributesA(source+"\\renamed.txt")==INVALID_FILE_ATTRIBUTES,
+         "worker rename accepted the unverified entry");
+  }
+  fprintf(report,"PASS: selecting a locked Windows file stays responsive and unverified selections cannot bind to a replacement.\n");
+
   Put(*av,2,u"ReadOnly",72);
   const auto readOnlyIndex=sc.MacBrowser().AttachTestVolume(std::make_shared<ReadOnly>(av),"read-only");
   Check(sc.MacBrowser().ShowTestFolder(readOnlyIndex,2),"show read-only fixture");
