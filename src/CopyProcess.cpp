@@ -94,6 +94,9 @@ Endpoint Capture(const Location &location) {
     for (uint32_t id = location.Id(); id != 2;) {
         Check(ancestors.size() < 128 && ancestors.insert(id).second, "Invalid copy-worker source ancestry");
         auto entry = location.Volume()->Stat(id);
+        // Browser catalog IDs can depend on which folders the parent has opened.
+        // A reopened worker matches the full path and on-disk identity instead.
+        entry.resolvedId = 0;
         entry.identity = endpoint->WorkerEntryIdentity(entry.identity);
         out.path.push_back(entry);
         id = entry.parent;

@@ -227,6 +227,30 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
     return disk;
 }
 
+
+Memory SecondVolume()
+{
+    auto disk=BrowseFixture();
+    constexpr size_t size=4096;
+    auto block=[&](size_t index){return disk.bytes.data()+index*size;};
+    memcpy(block(38),block(37),size);
+    Header(block(38),1029,5,13);
+    Little(block(38)+128,27,8);
+    memcpy(block(27),block(24),size);
+    Header(block(27),27,5,0x4000000b);
+    Little(block(27)+48,28,8);
+    memcpy(block(28),block(25),size);
+    Header(block(28),28,5,0x40000002,11);
+    Little(block(28)+size-48,29,8);
+    memcpy(block(29),block(26),size);
+    const auto end=block(29)+size-40;
+    const auto extent=end-Apfs::Le16(block(29)+56+5*8+4);
+    Little(extent+8,44,8);
+    block(44)[0]='B';
+    for(size_t i:{27,28,29,38})Seal(disk.bytes,i*size,size);
+    return disk;
+}
+
 Memory Gpt(const Memory& raw,unsigned sector)
 {
     const size_t start=1024*1024;
@@ -464,6 +488,46 @@ int RunApfsContainerTest(const char* directory)
         Check(std::all_of(decoded.begin(),decoded.end(),[](uint8_t b){return b=='C';}),
               "APFS inline zlib crossed 64 KiB incorrectly");
         fprintf(report,"PASS: bounded APFS inline decmpfs decoding beyond 64 KiB.\n");
+        auto multiple=SecondVolume();
+        const auto multiPath=VolumeCoord::Wide(root+"multi-volume.img");
+        {
+            auto image=CreateFormatOutput(multiPath.c_str(),multiple.Size());
+            image->Write(0,multiple.bytes.data(),multiple.bytes.size());image->Flush();image->Keep();
+        }
+        auto container=MacBrowser::OpenBrowserImage(multiPath);
+        const auto volumes=container->List();
+        Check(container->Name()==u"APFS Container"&&volumes.size()==2&&volumes[0].name==u"APFS Fixture"&&
+              volumes[1].name==u"APFS Fixture (2)"&&volumes[0].id!=volumes[1].id,
+              "APFS container did not expose both volumes with unambiguous names");
+        uint32_t second=0;
+        for(size_t i=0;i<volumes.size();++i){
+            const auto folder=container->List(volumes[i].id).at(0);
+            const auto file=container->List(folder.id).at(0);
+            char data=0;
+            container->Read(file.id,0,0,&data,1);
+            Check(data=='A'+i,"APFS reused an extent from another volume with the same stream ID");
+            if(i==1)second=file.id;
+        }
+        const auto multiTarget=VolumeCoord::Wide(root+"multi-export");
+        Check(CreateDirectoryW(multiTarget.c_str(),nullptr)!=FALSE,"Create APFS multi-volume export folder");
+        FileOperations::Request routed=FileOperations::OrdinaryCopy{
+            {FileOperations::Location::Mounted(container,second)},FileOperations::Location::Windows(multiTarget)};
+        routed.background=true;
+        CopyProcess::lastProcess=0;
+        auto multiCopy=FileOperations::Submit(std::move(routed));
+        const auto multiStart=GetTickCount();
+        while(!multiCopy.Job()->done()){
+            Check(GetTickCount()-multiStart<15000,"APFS multi-volume worker copy timed out");
+            Sleep(5);
+        }
+        const auto multiResult=multiCopy.Job()->result();
+        Check(!multiResult.code,multiResult.message.c_str());
+        auto multiExports=MacBrowser::OpenWindows(multiTarget);
+        const auto secondCopy=multiExports->List().at(0);
+        char secondData=0;
+        multiExports->Read(secondCopy.id,0,0,&secondData,1);
+        Check(CopyProcess::lastProcess&&secondData=='B',"APFS copy worker reopened the wrong volume");
+        fprintf(report,"PASS: same-named volumes, overlapping APFS object IDs and export from the second volume.\n");
         fprintf(report,"PASS: normal browser mount, UTF-8 names, sparse and fragmented data, worker export and read-only enforcement.\n");
         fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
     }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}

@@ -4,6 +4,6 @@
 
 namespace MacBrowser {class Volume;}
 namespace Apfs {
-// Open the first supported live volume in a recognized read-only container.
+// Open supported live volumes in a recognized read-only container.
 std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<HfsPlus::Source>&,const std::string& key);
 }

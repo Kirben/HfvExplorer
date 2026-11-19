@@ -218,17 +218,20 @@ std::vector<Extent> Extents(const Catalog& catalog,const Container& container,ui
 class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::unique_ptr<Source> source;
     const Container container;
-    const Mounted mounted;
+    const std::vector<Mounted> mounts;
+    std::u16string label;
+    bool caseSensitive=true;
     const std::string key;
     const bool processLocal;
     MacBrowser::WorkerOrigin origin;
     std::mutex mutex;
-    struct Item {uint64_t oid,stream;Entry entry;AttributeRecords attributes;};
+    struct Item {size_t mount;uint64_t oid,stream;Entry entry;AttributeRecords attributes;};
+    using Address=std::pair<size_t,uint64_t>;
     std::map<uint32_t,Item> entries;
-    std::map<uint64_t,uint32_t> linkIdentities;
+    std::map<Address,uint32_t> linkIdentities;
     std::map<uint32_t,std::vector<uint32_t>> listings;
-    std::map<uint64_t,std::vector<Extent>> extents;
-    std::map<uint64_t,std::unique_ptr<HfsPlus::Compression>> compressed;
+    std::map<Address,std::vector<Extent>> extents;
+    std::map<Address,std::unique_ptr<HfsPlus::Compression>> compressed;
     uint64_t next=3;
 
     Item& At(uint32_t id){
@@ -244,7 +247,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
         source->CheckMedia();
         return result;
     }
-    Inode LoadInode(const Catalog& catalog,uint64_t oid){
+    Inode LoadInode(const Catalog& catalog,size_t mount,uint64_t oid){
         auto inode=ReadInode(catalog,oid);
         const auto found=inode.attributes.find(CompressionAttribute);
         if(!inode.entry.compressed&&found==inode.attributes.end())return inode;
@@ -253,7 +256,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
             Check(!inode.entry.directory&&found!=inode.attributes.end()&&found->second.size>=16,
                   "Missing or unsupported APFS compression attribute");
             Bytes header(16);
-            ReadAttribute(found->second,0,header.data(),header.size());
+            ReadAttribute(mount,found->second,0,header.data(),header.size());
             const HfsPlus::Compression descriptor(std::move(header),inode.entry.forks[1].size,{});
             inode.entry.forks[0].size=descriptor.Size();
             if(descriptor.UsesResource()){
@@ -265,24 +268,59 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     }
     [[noreturn]] static void ReadOnly(){throw Error("APFS is read-only");}
 public:
-    Volume(std::unique_ptr<Source> s,Container c,Mounted v,std::string resource)
-        :source(std::move(s)),container(std::move(c)),mounted(std::move(v)),key(std::move(resource)),
+    Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource)
+        :source(std::move(s)),container(std::move(c)),mounts(std::move(volumes)),key(std::move(resource)),
          processLocal(source->ProcessLocal())
     {
-        auto root=LoadInode(Catalog(*source,container,mounted),2);
-        Check(root.entry.directory,"APFS root is not a directory");
-        root.entry.id=2;root.entry.resolvedId=2;root.entry.parent=1;root.entry.name=mounted.name;
-        entries.emplace(2,Item{2,root.stream,std::move(root.entry),std::move(root.attributes)});
+        std::vector<Item> roots;
+        std::exception_ptr failure;
+        for(size_t i=0;i<mounts.size();++i){
+            const auto& mount=mounts[i];
+            try{
+                auto root=LoadInode(Catalog(*source,container,mount),i,2);
+                Check(root.entry.directory,"APFS root is not a directory");
+                root.entry.name=mount.name;
+                root.entry.identity=key+":"+std::to_string(mount.oid)+":"+std::to_string(mount.xid);
+                roots.push_back({i,2,root.stream,std::move(root.entry),std::move(root.attributes)});
+            }catch(const Error&){if(!failure)failure=std::current_exception();}
+        }
+        if(roots.empty())std::rethrow_exception(failure);
+        if(roots.size()==1){
+            auto& root=roots.front();
+            label=root.entry.name;
+            caseSensitive=mounts[root.mount].sensitive;
+            root.entry.id=root.entry.resolvedId=2;root.entry.parent=1;
+            entries.emplace(2,std::move(root));
+        }else{
+            label=u"APFS Container";
+            Entry root;
+            root.id=root.resolvedId=2;root.parent=1;root.directory=true;root.name=label;root.identity=key;
+            entries.emplace(2,Item{0,0,0,std::move(root),{}});
+            std::vector<uint32_t> ids;
+            std::set<std::u16string> names;
+            for(auto& item:roots){
+                const auto name=item.entry.name;
+                for(unsigned suffix=2;!names.insert(item.entry.name).second;++suffix){
+                    const auto number=std::to_string(suffix);
+                    item.entry.name=name+u" ("+std::u16string(number.begin(),number.end())+u")";
+                }
+                const auto id=uint32_t(next++);
+                item.entry.id=item.entry.resolvedId=id;item.entry.parent=2;
+                ids.push_back(id);
+                entries.emplace(id,std::move(item));
+            }
+            listings.emplace(2,std::move(ids));
+        }
         const auto files=source->WorkerFiles();
         if(!files.empty()){
             origin.kind=MacBrowser::WorkerOrigin::Image;
             origin.path=files.front().first;
         }
     }
-    std::u16string Name()const override{return mounted.name;}
+    std::u16string Name()const override{return label;}
     std::string ResourceKey()const override{return key;}
     const char* Kind()const override{return "APFS";}
-    bool CaseSensitive()const override{return mounted.sensitive;}
+    bool CaseSensitive()const override{return caseSensitive;}
     bool Writable()const override{return false;}
     uint64_t FreeBytes()const override{return 0;}
     bool SupportsAttributes()const override{return true;}
@@ -299,6 +337,7 @@ public:
             if(!listings.count(parent)){
                 std::vector<Item> children;
                 std::set<std::u16string> names;
+                const auto& mounted=mounts[folder.mount];
                 const Catalog catalog(*source,container,mounted);
                 catalog.VisitRecords(folder.oid,9,[&](Record record){
                     const size_t header=mounted.hashedNames?12:10;
@@ -307,7 +346,7 @@ public:
                     Check(record.key.size-header==nameLength,"Invalid APFS directory record name length");
                     const auto oid=Le64(record.value.data);
                     Check(oid>2&&oid<=IdMask,"Invalid APFS directory record inode");
-                    auto inode=LoadInode(catalog,oid);
+                    auto inode=LoadInode(catalog,folder.mount,oid);
                     auto name=Apfs::Name(record.key.data+header,nameLength);
                     Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos&&names.insert(name).second,
                           "Invalid or duplicate APFS directory name");
@@ -319,7 +358,7 @@ public:
                     entry.parent=parent;entry.name=std::move(name);
                     entry.identity=key+":"+std::to_string(mounted.oid)+":"+std::to_string(mounted.xid)+":"+
                                    std::to_string(folder.oid)+":"+std::to_string(oid);
-                    children.push_back({oid,inode.stream,std::move(entry),std::move(inode.attributes)});
+                    children.push_back({folder.mount,oid,inode.stream,std::move(entry),std::move(inode.attributes)});
                 });
                 Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
                 std::vector<uint32_t> ids;
@@ -328,7 +367,7 @@ public:
                     child.entry.id=uint32_t(next++);
                     child.entry.resolvedId=child.entry.id;
                     if(child.entry.hardLink){
-                        const auto first=linkIdentities.emplace(child.oid,child.entry.id);
+                        const auto first=linkIdentities.emplace(Address{child.mount,child.oid},child.entry.id);
                         child.entry.resolvedId=first.first->second;
                     }
                     ids.push_back(child.entry.id);
@@ -342,41 +381,47 @@ public:
         });
     }
     Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
-    void ReadStream(uint64_t stream,uint64_t at,void* data,size_t size){
-            if(!size)return;
-            Check(stream!=0,"Missing APFS stream identifier");
-            auto it=extents.find(stream);
-            if(it==extents.end())
-                it=extents.emplace(stream,Extents(Catalog(*source,container,mounted),container,stream)).first;
-            const auto& list=it->second;
-            auto run=std::lower_bound(list.begin(),list.end(),at,[](const Extent& extent,uint64_t offset){
-                return extent.offset+extent.length<=offset;
-            });
-            auto out=static_cast<uint8_t*>(data);
-            while(size){
-                Check(run!=list.end()&&run->offset<=at,"Missing APFS file extent");
-                const auto within=at-run->offset;
-                const auto take=size_t(std::min<uint64_t>(size,run->length-within));
-                if(run->block)source->Read(container.offset+run->block*container.blockSize+within,out,take);
-                else memset(out,0,take);
-                at+=take;out+=take;size-=take;++run;
-            }
+private:
+    void ReadStream(size_t mount,uint64_t stream,uint64_t at,void* data,size_t size){
+        if(!size)return;
+        Check(stream!=0,"Missing APFS stream identifier");
+        const Address address{mount,stream};
+        auto it=extents.find(address);
+        if(it==extents.end()){
+            const Catalog catalog(*source,container,mounts[mount]);
+            it=extents.emplace(address,Extents(catalog,container,stream)).first;
+        }
+        const auto& list=it->second;
+        auto run=std::lower_bound(list.begin(),list.end(),at,[](const Extent& extent,uint64_t offset){
+            return extent.offset+extent.length<=offset;
+        });
+        auto out=static_cast<uint8_t*>(data);
+        while(size){
+            Check(run!=list.end()&&run->offset<=at,"Missing APFS file extent");
+            const auto within=at-run->offset;
+            const auto take=size_t(std::min<uint64_t>(size,run->length-within));
+            if(run->block)source->Read(container.offset+run->block*container.blockSize+within,out,take);
+            else memset(out,0,take);
+            at+=take;out+=take;size-=take;++run;
+        }
     }
-    void ReadAttribute(const Attribute& attribute,uint64_t at,void* data,size_t size){
+    void ReadAttribute(size_t mount,const Attribute& attribute,uint64_t at,void* data,size_t size){
         Check(Range(at,size,attribute.size),"Invalid APFS attribute range");
         if(!size)return;
-        if(attribute.stream)ReadStream(attribute.stream,at,data,size);
+        if(attribute.stream)ReadStream(mount,attribute.stream,at,data,size);
         else memcpy(data,attribute.embedded.data()+size_t(at),size);
     }
+public:
     Attributes GetAttributes(uint32_t id)override{
         return Access([&]{
             Attributes out;
-            for(const auto& pair:At(id).attributes){
+            const auto& file=At(id);
+            for(const auto& pair:file.attributes){
                 if(pair.first==FinderInfo||pair.first==ResourceFork||pair.first==CompressionAttribute)continue;
                 const auto& attr=pair.second;
                 if(attr.stream)
                     out.emplace(pair.first,AttributeData::Snapshot(attr.size,[&](uint64_t at,void* data,size_t size){
-                        ReadAttribute(attr,at,data,size);
+                        ReadAttribute(file.mount,attr,at,data,size);
                     },true));
                 else out.emplace(pair.first,AttributeData(attr.embedded));
             }
@@ -390,25 +435,26 @@ public:
             Check(fork<2&&!entry.directory&&Range(at,size,entry.forks[fork].size),"Invalid APFS fork range");
             if(!entry.readError.empty())throw Error(entry.readError);
             if(size){
-                if(fork==1)ReadAttribute(file.attributes.at(ResourceFork),at,data,size);
+                if(fork==1)ReadAttribute(file.mount,file.attributes.at(ResourceFork),at,data,size);
                 else if(entry.compressed){
-                    auto decoder=compressed.find(file.oid);
+                    const Address address{file.mount,file.oid};
+                    auto decoder=compressed.find(address);
                     if(decoder==compressed.end()){
                         const auto attr=file.attributes.find(ResourceFork);
                         const auto resource=attr==file.attributes.end()?Attribute{}:attr->second;
-                        auto reader=[this,resource](uint64_t offset,void* bytes,size_t length){
-                            ReadAttribute(resource,offset,bytes,length);
+                        auto reader=[this,resource,mount=file.mount](uint64_t offset,void* bytes,size_t length){
+                            ReadAttribute(mount,resource,offset,bytes,length);
                         };
                         const auto& attribute=file.attributes.at(CompressionAttribute);
                         // The shared codecs accept compressed units up to 128 KiB.
                         Check(attribute.size<=131072+16,"APFS compression attribute exceeds supported unit size");
                         Bytes encoded(size_t(attribute.size));
-                        ReadAttribute(attribute,0,encoded.data(),encoded.size());
-                        decoder=compressed.emplace(file.oid,std::make_unique<HfsPlus::Compression>(
+                        ReadAttribute(file.mount,attribute,0,encoded.data(),encoded.size());
+                        decoder=compressed.emplace(address,std::make_unique<HfsPlus::Compression>(
                             std::move(encoded),resource.size,std::move(reader))).first;
                     }
                     Check(decoder->second->Read(at,data,size)==size,"Short APFS compressed read");
-                }else ReadStream(file.stream,at,data,size);
+                }else ReadStream(file.mount,file.stream,at,data,size);
             }
             return true;
         });
@@ -426,17 +472,16 @@ std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const s
     if(!container)return {};
     Check(!container->volumes.empty(),"The APFS container has no volumes");
     const ObjectMap map(*source,*container,container->objectMap,container->transaction);
-    std::optional<Mounted> volume;
+    std::vector<Mounted> volumes;
     std::exception_ptr problem;
     for(const auto oid:container->volumes){
         try{
             const auto block=map.Lookup(oid);
             Check(block.has_value(),"Missing APFS volume mapping");
-            volume=ReadVolume(*source,*container,oid,*block);
-            break;
+            volumes.push_back(ReadVolume(*source,*container,oid,*block));
         }catch(const Error&){if(!problem)problem=std::current_exception();}
     }
-    if(!volume)std::rethrow_exception(problem);
-    return std::make_shared<Volume>(std::move(source),std::move(*container),std::move(*volume),key);
+    if(volumes.empty())std::rethrow_exception(problem);
+    return std::make_shared<Volume>(std::move(source),std::move(*container),std::move(volumes),key);
 }
 }
