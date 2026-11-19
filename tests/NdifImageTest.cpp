@@ -223,6 +223,27 @@ int RunNdifImageTest(const char* directory)
             fprintf(report,"PASS: 13-part Apple Mac OS 8.1 update, including original logical checksum.\n");
         }
         fprintf(report,"PASS: NDIF segment identity, missing/duplicate rejection and a chunk crossing parts.\n");
+        if(const auto fixture=_wgetenv(L"HFV_NDIF_SHRINKWRAP_TEST")){
+            auto file=HfsPlus::OpenImage(fixture,false);
+            const auto packed=Disk::Read(*file,0,size_t(file->Size()));
+            auto sw=Map(128,2);P32(sw.data()+72,128);
+            Row(sw,0,0,0xf0,0,uint32_t(packed.size()));Row(sw,1,128,0xff,0,0);
+            std::unique_ptr<Source> image=std::make_unique<Memory>(Pack(packed,Resource(sw)));
+            Check(Ndif::Unwrap(image),"NDIF ShrinkWrap sample did not open");
+            const auto output=Disk::Read(*image,0,65536);
+            uint32_t crc=UINT32_MAX;
+            for(const auto byte:output){
+                crc^=byte;
+                for(unsigned i=0;i<8;++i)crc=(crc>>1)^((crc&1)?0xedb88320u:0);
+            }
+            Check(~crc==0x93a5e340,"NDIF ShrinkWrap output differs from the published checksum");
+            auto damaged=packed;damaged.resize(40);P32(damaged.data(),0x28000000);
+            Row(sw,0,0,0xf0,0,uint32_t(damaged.size()));
+            image=std::make_unique<Memory>(Pack(damaged,Resource(sw)));
+            Check(Ndif::Unwrap(image),"Truncated ShrinkWrap fixture did not reach the codec");
+            Reject([&]{Disk::Read(*image,0,65536);},"NDIF accepted a truncated ShrinkWrap stream");
+            fprintf(report,"PASS: NDIF ShrinkWrap SIT2 sample, plus truncated stream rejection.\n");
+        }
         auto invalid=bcem;
         Row(invalid,2,1,0x83,512,24);
         std::unique_ptr<Source> input=std::make_unique<Memory>(Pack(data,Resource(invalid)));

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "NdifImage.h"
 #include "NdifKenCode.h"
+#include "NdifShrinkWrap.h"
 #include "TransferConversion.h"
 #include "DmgImage.h"
 #include "HfsPlusDisk.h"
@@ -19,7 +20,7 @@ constexpr uint64_t Sector=512;
 constexpr auto HeaderBytes=128u;
 constexpr auto ChunkBytes=12u;
 constexpr uint64_t MaxCompressedChunk=64*1024*1024;
-enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Rle=0x81,Adc=0x83,End=0xff };
+enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Rle=0x81,Adc=0x83,ShrinkWrap=0xf0,End=0xff };
 struct Fork {uint64_t at=0,length=0;};
 struct Forks {Fork data,resource;};
 struct Part {std::unique_ptr<Source> dataFile,resourceFile;Fork data;uint64_t start=0;};
@@ -154,7 +155,7 @@ Layout Map(Source& input,Fork map,Fork data)
                 Check(sector<sectors,"Empty NDIF chunk");
                 if(type==Zero)Check(!packed,"Zero NDIF chunk contains data");
                 else{
-                    Check(type==Raw||type==KenCode||type==Rle||type==Adc,"Unsupported NDIF chunk encoding");
+                    Check(type==Raw||type==KenCode||type==Rle||type==Adc||type==ShrinkWrap,"Unsupported NDIF chunk encoding");
                     Check(packed&&Range(at,packed,data.length-base),"NDIF chunk exceeds its data fork");
                 }
                 out.chunks.push_back({sector*Sector,0,data.at+base+at,packed,type});
@@ -349,6 +350,7 @@ public:
                     Bytes decoded(size_t(chunk->length));
                     if(chunk->type==KenCode)DecodeKenCode(packed,decoded);
                     else if(chunk->type==Rle)DecodeRle(packed,decoded);
+                    else if(chunk->type==ShrinkWrap)DecodeShrinkWrap(packed,decoded);
                     else Check(Dmg::DecodeAppleDataCompression(packed,decoded),"Corrupt NDIF ADC data");
                     decoded_=std::move(decoded);
                     cached_=index;
