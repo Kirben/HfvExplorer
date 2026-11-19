@@ -5,6 +5,50 @@
 #include "ftypes.h"
 #include <algorithm>
 
+void BrowserMountInventory::ClassicMount::ReadMount(const MacBrowser::ClassicMountInfo& info)
+{
+ m_volume_name=info.label.c_str();
+ freeBytes=info.freeBytes;
+ m_mediaGenerationKnown=info.generation.has_value();
+ m_mediaGeneration=info.generation.value_or(0);
+ update_time_stamp();
+ m_opened=true;
+}
+
+int BrowserMountInventory::ClassicMount::open()
+{
+ m_opened=false;
+ if(m_file_name.IsEmpty())return false;
+ try{
+  auto volume=MacBrowser::OpenClassic(m_file_name.GetString(),":",false);
+  ReadMount(MacBrowser::ReadClassicMountInfo(*volume));
+ }catch(const HfsPlus::Error&){return false;}
+ return true;
+}
+
+void BrowserMountInventory::ClassicMount::update_time_stamp()
+{
+ WIN32_FILE_ATTRIBUTE_DATA status{};
+ if(!m_is_floppy&&!m_is_cd&&GetFileAttributesExA(m_file_name,GetFileExInfoStandard,&status))
+  modified_=status.ftLastWriteTime;
+}
+
+bool BrowserMountInventory::ClassicMount::update_if_needed(int ask)
+{
+ if(m_is_cd)return false;
+ if(m_is_floppy){
+  if(!m_floppy_update_needed)return false;
+  m_floppy_update_needed=false;
+  return open()!=0;
+ }
+ WIN32_FILE_ATTRIBUTE_DATA status{};
+ if(!GetFileAttributesExA(m_file_name,GetFileExInfoStandard,&status)||
+    CompareFileTime(&status.ftLastWriteTime,&modified_)==0)return false;
+ if(ask&&AfxMessageBox("Contents of volume \""+m_volume_name+"\" have changed. Reload now?",MB_YESNO)==IDNO&&
+    AfxMessageBox("Not reloading will cause data integrity problems. Reload?",MB_YESNO)==IDNO)return false;
+ return open()!=0;
+}
+
 std::optional<BrowserMountInventory::Address> BrowserMountInventory::FromTreeBinding(int type,int index)
 {
  if(index<0)return {};

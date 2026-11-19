@@ -18,6 +18,7 @@ int hfs_recognizes_image(char*);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
 #include "ClassicCatalog.h"
+#include "ReadOnlyCdBackend.h"
 namespace MacBrowser {
 namespace {
 void Check(bool ok) { if (!ok) throw HfsPlus::Error(hfs_error ? hfs_error : "Classic HFS operation failed"); }
@@ -237,6 +238,29 @@ public:
         if(hfs_stat(dst->volume_,const_cast<char*>(name.c_str()),&to)==0&&from.cnid==to.cnid)
             throw HfsPlus::Error("Source and destination are the same classic HFS entry");
     }
+    ClassicMountInfo MountInfo() {
+        LegacyEngine::Scope engine(context_);
+        hfsvolent info{};
+        Check(volume_&&hfs_vstat(volume_,&info)==0);
+        mac_to_pc_charset(reinterpret_cast<unsigned char*>(info.name));
+        ClassicMountInfo result{info.name,info.freebytes,{}};
+        const auto drive=physical_floppy_path(image_.c_str());
+        DWORD generation=0;
+        if(drive>=0&&physical_floppy_generation(drive,&generation))
+            result.generation=generation;
+        return result;
+    }
+
+    void SelectCatalogFolder(const std::string& directory) {
+        LegacyEngine::Scope engine(context_);
+        auto colon=directory.find(':');
+        std::string path=colon==directory.npos?":":directory.substr(colon);
+        while(path.size()>1&&path.back()==':')path.pop_back();
+        pc_to_mac_charset(reinterpret_cast<unsigned char*>(path.data()));
+        Check(Describe(path,2).directory);
+        paths_[2]=std::move(path);
+    }
+
     std::vector<ClassicAncestor> Ancestors(uint32_t id) {
         LegacyEngine::Scope engine(context_);
         RootScope scope(volume_);
@@ -447,6 +471,12 @@ std::vector<ClassicAncestor> ReadClassicAncestors(Volume& volume,uint32_t id) {
     auto classic=dynamic_cast<Classic*>(&volume);
     if(!classic)throw HfsPlus::Error("A classic HFS catalog is required");
     return classic->Ancestors(id);
+}
+ClassicMountInfo ReadClassicMountInfo(Volume& volume) {
+    return dynamic_cast<Classic&>(volume).MountInfo();
+}
+void SelectClassicCatalogFolder(Volume& volume,const std::string& path) {
+    dynamic_cast<Classic&>(volume).SelectCatalogFolder(path);
 }
 std::vector<ClassicAncestor> ResolveClassicFolders(Volume& volume,const std::string& relative,bool showHidden) {
     return dynamic_cast<Classic&>(volume).ResolveFolders(relative,showHidden);

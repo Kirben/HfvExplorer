@@ -363,6 +363,12 @@ int RunBrowserSessionTest(const char* directory){
         "nested classic folder resolution changed volumes or lost case-insensitive lookup");
   a.tree.GetTreeCtrl().SelectItem(a.doc.m_volumes[0].m_rootitem);
   fprintf(report,"PASS: shared classic HFS nested folder and launcher lookup on same-named volumes.\n");
+  {
+   const CString image=a.doc.m_volumes[0].m_file_name;
+   const CString renamed=root+"\\temporarily-renamed.dsk";
+   Check(a.doc.m_volumes[0].freeBytes>0&&MoveFileA(image,renamed)&&MoveFileA(renamed,image),
+        "classic browser mount should report free space and release its image handle after reading");
+  }
   a.Session().asyncNavigationForTest=true;
   auto classicRoot=a.doc.m_volumes[0].m_rootitem;
   Check(a.Session().RefreshSelected()&&a.Session().Navigating()&&

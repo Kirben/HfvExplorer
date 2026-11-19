@@ -463,11 +463,20 @@ void BrowserSession::RefreshSynchronously(const Context& context){
  }
  if(context.type!=LIST_HFS)return;
  auto& mounted=document_->m_volumes[context.index];std::string path;
- auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Read}});mounted.close();if(!mounted.open())throw std::runtime_error("The HFS volume could not be reopened");
-  auto volume=hfs_mount(const_cast<char*>((LPCSTR)mounted.m_file_name),1,O_RDONLY);if(!volume)throw std::runtime_error(hfs_error?hfs_error:"The HFS volume is unavailable");struct Close{hfsvol* v;~Close(){hfs_umount(v);}}close{volume};
-  long id=long(context.folder);if(hfs_setcwd(volume,id)<0)id=2;std::vector<std::string> names;std::set<long> visited;
-  while(id!=2){if(!visited.insert(id).second)throw std::runtime_error("Cyclic HFS folder path");char name[32]{};if(hfs_dirinfo(volume,&id,name)<0){names.clear();break;}mac_to_pc_charset(reinterpret_cast<unsigned char*>(name));names.push_back(name);}
-  document_->m_classicRevision[context.index]=VolumeCoord::Revision(context.key);path=(LPCSTR)mounted.m_volume_name;path+=':';for(auto at=names.rbegin();at!=names.rend();++at){path+=*at;path+=':';}return Storage::Result{};
+ auto result=ShowStorageWaitJob([&](Storage::Job&){
+  VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Read}});
+  auto volume=MacBrowser::OpenClassic(mounted.m_file_name.GetString(),":",false);
+  const auto info=MacBrowser::ReadClassicMountInfo(*volume);
+  auto location=FileOperations::Location::Classic(mounted.m_file_name.GetString(),context.path);
+  if(mounted.m_mediaGenerationKnown)location.BindMediaGeneration(mounted.m_mediaGeneration);
+  StorageLocation::ValidateClassicGeneration(location,info.generation);
+  mounted.ReadMount(info);
+  path=info.label+":";
+  std::vector<MacBrowser::ClassicAncestor> route;
+  try{route=MacBrowser::ReadClassicAncestors(*volume,context.folder);}catch(const HfsPlus::Error&){}
+  for(const auto& step:route)path+=step.name+":";
+  document_->m_classicRevision[context.index]=VolumeCoord::Revision(context.key);
+  return Storage::Result{};
  },!owner_->IsWindowVisible(),owner_);if(result.code)throw std::runtime_error(result.message);
  bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);tree_->GetTreeCtrl().SelectItem(mounted.m_rootitem);tree_->delete_subdir_contents(mounted.m_rootitem);tree_->enable_selchange(enabled);
  document_->open_sub_directory(context.index,2,mounted.m_volume_name);document_->my_chdir(path.c_str(),1,context.index);

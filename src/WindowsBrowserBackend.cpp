@@ -261,9 +261,12 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
       char image[MAX_PATH];get_floppy_volume_file_name(drive,image);
       auto& volume=reader->Slots()[0];
       volume.m_file_name=image;volume.m_is_floppy=1;volume.m_free=0;
-      if(volume.open()){
+      std::shared_ptr<MacBrowser::Volume> backend;
+      try{backend=MacBrowser::OpenClassic(image,":",false);}catch(const HfsPlus::Error&){}
+      if(backend){
+       volume.ReadMount(MacBrowser::ReadClassicMountInfo(*backend));
        reader->Revision(0)=VolumeCoord::Revision(deviceKey);
-       result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",finder,0,&job);
+       result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",finder,0,&job,backend.get());
        result.folder=FileOperations::Location::Classic(image,(LPCSTR)(volume.m_volume_name+":"));
        result.folder.directory=true;
        result.folder.expectedCatalogId=2;

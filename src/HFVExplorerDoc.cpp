@@ -178,7 +178,6 @@ int CHFVExplorerDoc::insert_volume(
 			m_volumes[i].m_free = 0;
 			m_volumes[i].m_opened = 0;
 			m_volumes[i].m_volume_name = "";
-			m_volumes[i].m_file_opened = 0;
 			m_volumes[i].m_rootitem = 0;
 			m_volumes[i].m_floppy_update_needed = 0;
 			m_volumes[i].m_is_floppy = is_floppy;
@@ -558,6 +557,11 @@ void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
  folderReader_->SetOptions(FolderOptions());
  auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=folderReader_->read_classic_browser_directory(volinx,id,path,finder,parent,&job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
  if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
+ if(id==2){
+  auto& mounted=m_volumes[volinx];
+  path=mounted.m_volume_name+":";
+  if(mounted.m_rootitem)GetBrowserSession().Tree()->GetTreeCtrl().SetItemText(mounted.m_rootitem,mounted.m_volume_name);
+ }
  PublishClassicFolder(volinx,uint32_t(id),(LPCSTR)path,snapshot);
 }
 
@@ -618,8 +622,8 @@ void CHFVExplorerDoc::PublishClassicFolder(int volinx,uint32_t id,const std::str
  }
  apply_browser_directory(snapshot, LIST_HFS, volinx, id, path, true);
  if(auto status=GetBrowserSession().Status()){
-  CString message;const auto& mdb=m_volumes[volinx].m_MDB;
-  message.Format("Exploring \"%s\": %I64u kB free",path.c_str(),hfv_size_t(mdb.drFreeBks)*mdb.drAlBlkSiz/1024);
+  CString message;
+  message.Format("Exploring \"%s\": %I64u kB free",path.c_str(),m_volumes[volinx].freeBytes/1024);
   status->SetPaneText(0,message);
  }
 }
@@ -678,7 +682,7 @@ void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString 
 			msg.Format( 
 				"Exploring \"%s\": %I64u kB free",
 				dirname, 
-				(hfv_size_t)m_volumes[volinx].m_MDB.drFreeBks * m_volumes[volinx].m_MDB.drAlBlkSiz / 1024 );
+				m_volumes[volinx].freeBytes/1024 );
 		}
 		GetBrowserSession().Status()->SetPaneText( 0, msg );
 	}
@@ -929,7 +933,6 @@ BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
 			} else {
 				// m_hfs_count--;
 				m_volumes[i].m_volume_name = "";
-				m_volumes[i].m_file_opened = 0;
 				m_volumes[i].m_file_name = "";
 				m_volumes[i].m_free = 1;
 				m_volumes[i].m_rootitem = 0;

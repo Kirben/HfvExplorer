@@ -1313,7 +1313,7 @@ static void ReleaseFloppyForWrite(int drive,void* context)
 {
  CHFVExplorerDoc* document=(CHFVExplorerDoc*)context;
  for(int i=0;i<document->m_hfs_count;++i)
-  if(document->m_volumes[i].m_file.m_hfloppy && document->m_volumes[i].m_file.m_drive==drive) document->m_volumes[i].close();
+  if(physical_floppy_path(document->m_volumes[i].m_file_name)==drive) document->m_volumes[i].close();
 }
 void CMainFrame::OnFileVolumetofloppy()
 {
