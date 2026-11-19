@@ -1150,70 +1150,10 @@ void CHFVExplorerDoc::check_hfv_file_times(int ask){
  }
 }
 
-void CHFVExplorerDoc::CheckNewMedia( BOOL check_floppies, BOOL check_cds, BOOL check_hds)
+void CHFVExplorerDoc::OnViewRefresh()
 {
- StorageAction storageAction;
-	int mac;
-
-	CString currdir = get_directory( 0, &mac );
-	if(check_floppies)enum_floppies();
-	OnOpenDocument("");
- if(check_cds) GetBrowserSession().MacBrowser().ScanCds();
- if(check_hds)GetBrowserSession().MacBrowser().ScanRemovable(true);
-
-	if(currdir != "") my_chdir( currdir, mac );
-}
-
-void CHFVExplorerDoc::CheckNewFloppy( int index )
-{
- StorageAction storageAction;
-	char name[_MAX_PATH];
-
-	if(is_floppy_by_index(index)) {
-		enum_floppies();
-		OnOpenDocument("");
-		get_floppy_volume_file_name( index, name );
-	}
-}
-
-void CHFVExplorerDoc::OnViewRefresh() 
-{
- if(GetBrowserSession().RefreshSelected())return;
- if(BackgroundCopies::Active()){
-  CheckNewMedia(TRUE,TRUE,TRUE);
-  auto tree=GetBrowserSession().Tree();auto item=tree->GetTreeCtrl().GetSelectedItem();auto p=item?reinterpret_cast<lparam_struct*>(tree->GetTreeCtrl().GetItemData(item)):nullptr;
-  if(p&&p->type==LIST_FAT){std::string path=p->path;open_fat_directory(p->volinx,const_cast<char*>(path.c_str()),1);}
-  else if(p&&p->type==LIST_HFS){auto key=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[p->volinx].m_file_name));if(VolumeCoord::Readable(key))VolumeCoord::Changed({key});else open_sub_directory(p->volinx,p->id,"");}return;
- }
-	CheckNewMedia( TRUE, TRUE, TRUE);
-
-	/*
-	char xx[30];
-	int fa = ::GetProfileInt("Test","fa",0);
-	int fb = ::GetProfileInt("Test","fb",0);
-
-	fa++;
-	if(fa > 15) {
-		fa=0; 
-		fb++;
-		if(fb > 15) {
-			fa = fb = 0;
-		}
-	}
-	sprintf( xx, "%d",fa);
-	::WriteProfileString("Test","fa",xx);
-	sprintf( xx, "%d",fb);
-	::WriteProfileString("Test","fb",xx);
-	sprintf( xx, "%d,%d",fa,fb);
-	AfxMessageBox( xx );
-
-	clear_hash_table();
-	delete_cache();
-	int mac;
-	CString currdir = get_directory( 0, &mac );
-	OnOpenDocument("") ;
-	if(currdir != "") my_chdir( currdir, mac );
-	*/
+ auto& session=GetBrowserSession();
+ if(!session.RefreshSelected())session.MacBrowser().ScanMedia();
 }
 
 void CHFVExplorerDoc::set_hfs_volume_clean( char *path )

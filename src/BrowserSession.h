@@ -82,6 +82,7 @@ public:
     bool OpenFolderFrom(BrowserSession& source,HTREEITEM item);
     bool RevealFindHit(const FindHit&,int legacyVolume=-1);
     bool UsesAsyncNavigation() const;
+    void ScheduleMediaUpdates();
     bool Navigating() const { return bool(navigation_); }
     bool ListingAvailable() const { return !listingPending_; }
     void RejectNavigation(const std::string& key,const std::string& message);

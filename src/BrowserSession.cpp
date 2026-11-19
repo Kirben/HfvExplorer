@@ -23,6 +23,11 @@ struct BrowserSession::Notifications:public CWnd {
  explicit Notifications(BrowserSession& value):session(value){if(!CreateEx(0,AfxRegisterWndClass(0),"HFV volume notifications",0,0,0,0,0,HWND_MESSAGE,nullptr))throw std::runtime_error("Cannot create volume notification mailbox");}
  ~Notifications(){if(GetSafeHwnd())DestroyWindow();}
  LRESULT WindowProc(UINT message,WPARAM w,LPARAM l)override{
+  if(message==WM_TIMER&&w==4){
+   if(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&!HfvDeviceWait::busy()&&
+      !session.MacBrowser().ApplyMediaChanges())KillTimer(4);
+   return 0;
+  }
   if(message==WM_TIMER&&w==3){session.CompleteNavigation();return 0;}
   if(message==WM_TIMER&&w==2){
    if(!session.owner_||!session.tree_||!session.list_){session.deferred_={};KillTimer(2);return 0;}
@@ -72,6 +77,11 @@ bool BrowserSession::UsesAsyncNavigation() const
 #else
     return owner_ != nullptr;
 #endif
+}
+
+void BrowserSession::ScheduleMediaUpdates()
+{
+ if(notifications_)notifications_->SetTimer(4,60,nullptr);
 }
 
 void BrowserSession::CancelNavigation()
