@@ -351,8 +351,8 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
   if(findResult||_wcsicmp(shown.c_str(),path.c_str())){
    destination=tree->FindWindowsFolder(root,shown);
    if(!destination&&findResult){
-    auto binding=reinterpret_cast<lparam_struct*>(control.GetItemData(root));
-    auto prefix=binding?VolumeCoord::Wide(binding->path):std::wstring();
+    const auto* folder=tree->BrowserFolderAt(root);
+    auto prefix=folder&&folder->location.IsWindows()?folder->location.WindowsPath():std::wstring();
     while(prefix.size()>3&&prefix.back()=='\\')prefix.pop_back();
     if(prefix.empty()||_wcsnicmp(shown.c_str(),prefix.c_str(),prefix.size())||
        (shown.size()>prefix.size()&&prefix.back()!='\\'&&shown[prefix.size()]!='\\'))

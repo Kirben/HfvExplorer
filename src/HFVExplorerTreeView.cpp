@@ -88,51 +88,69 @@ void HFVExplorerTreeView::Initialize()
 	m_ct->SendMessage(TVM_SETIMAGELIST,TVSIL_NORMAL,LPARAM(m_icons.Handle()));
 }
 
-LPARAM HFVExplorerTreeView::make_lparam( 
-	int type,
-	int volinx, 
-	long id,
-	LPSTR path )
+int BrowserTreeNode::LegacyType() const
 {
-	lparam_struct *p = new lparam_struct;
-	if(!p) return(0);
-	INT_PTR slot;
- if(m_free_slots.empty()){slot=m_pointer_array.GetSize();m_pointer_array.Add((DWORD_PTR)p);}
- else{slot=m_free_slots.back();m_free_slots.pop_back();m_pointer_array.SetAt(slot,(DWORD_PTR)p);}
- m_pointer_slots[(DWORD_PTR)p]=slot;
-	p->type = type;
-	p->volinx = volinx;
-	p->id = id;
-	if(path && *path) {
-		strncpy( p->path, path, MAX_PATH-1 );
-		p->path[MAX_PATH-1] = 0;
-	} else {
-		p->path[0] = 0;
-	}
-	return( (LPARAM)p );
+    using Kind = BrowserMountInventory::Kind;
+    switch (mount.kind) {
+    case Kind::WindowsDrive: return LIST_FAT;
+    case Kind::ClassicVolume: return LIST_HFS;
+    case Kind::MountedVolume: return LIST_MAC;
+    }
+    return LIST_UNKNOWN;
 }
 
-int HFVExplorerTreeView::get_lparam_volinx( LPARAM lparam )
+uint32_t BrowserTreeNode::CatalogId() const
 {
-	lparam_struct *p = (lparam_struct *)lparam;
-	if(!p) return(-1);
-	// if(p->type != LIST_HFS) return(-1);
-	return( p->volinx );
+    if (const auto* catalog = std::get_if<ClassicTreeFolder>(&value))
+        return catalog->catalogId;
+    const auto& location = std::get<BrowserDirectory::Folder>(value).location;
+    return location.IsMounted() ? location.Id() : location.expectedCatalogId;
 }
 
-int HFVExplorerTreeView::get_lparam_id( LPARAM lparam )
+LPARAM HFVExplorerTreeView::StoreBrowserNode(BrowserTreeNode node)
 {
-	lparam_struct *p = (lparam_struct *)lparam;
-	if(!p) return(0);
-	// if(p->type != LIST_HFS) return(-1);
-	return( p->id );
+    if (auto* folder = std::get_if<BrowserDirectory::Folder>(&node.value)) folder->location.directory = true;
+    auto* stored = new BrowserTreeNode(std::move(node));
+    const auto key = reinterpret_cast<DWORD_PTR>(stored);
+    INT_PTR slot;
+    if (m_free_slots.empty()) {
+        slot = m_pointer_array.GetSize();
+        m_pointer_array.Add(key);
+    } else {
+        slot = m_free_slots.back();
+        m_free_slots.pop_back();
+        m_pointer_array.SetAt(slot, key);
+    }
+    m_pointer_slots[key] = slot;
+    return LPARAM(key);
 }
 
-int HFVExplorerTreeView::get_lparam_type( LPARAM lparam )
+const BrowserTreeNode* HFVExplorerTreeView::BrowserNode(DWORD_PTR data) const
 {
-	lparam_struct *p = (lparam_struct *)lparam;
-	if(!p) return(LIST_UNKNOWN);
-	return( p->type );
+    return m_pointer_slots.count(data) ? reinterpret_cast<const BrowserTreeNode*>(data) : nullptr;
+}
+
+const BrowserTreeNode* HFVExplorerTreeView::BrowserNodeAt(HTREEITEM item) const
+{
+    return item ? BrowserNode(m_ct->GetItemData(item)) : nullptr;
+}
+
+int HFVExplorerTreeView::get_lparam_volinx(LPARAM data)
+{
+    const auto* node = BrowserNode(data);
+    return node ? node->mount.index : -1;
+}
+
+int HFVExplorerTreeView::get_lparam_id(LPARAM data)
+{
+    const auto* node = BrowserNode(data);
+    return node ? int(node->CatalogId()) : 0;
+}
+
+int HFVExplorerTreeView::get_lparam_type(LPARAM data)
+{
+    const auto* node = BrowserNode(data);
+    return node ? node->LegacyType() : LIST_UNKNOWN;
 }
 
 int HFVExplorerTreeView::get_htree_type( HTREEITEM htree )
@@ -142,32 +160,30 @@ int HFVExplorerTreeView::get_htree_type( HTREEITEM htree )
 	return(get_lparam_type( dat ));
 }
 
-int HFVExplorerTreeView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl )
+int HFVExplorerTreeView::get_lparam_path(LPARAM data, LPSTR path, int capacity)
 {
-	lparam_struct *p = (lparam_struct *)lparam;
-
-	*lpstr = 0;
-	if(!p) return(0);
-	if(p->path && *p->path) {
-		int len = max(maxl,MAX_PATH-1);
-		strncpy( lpstr, p->path, len );
-		lpstr[len] = 0;
-		return(1);
-	} else {
-		return(0);
-	}
+    if (!path || capacity <= 0) return 0;
+    *path = 0;
+    const auto* node = BrowserNode(data);
+    const auto* folder = node ? node->Folder() : nullptr;
+    if (!folder || !folder->location.IsWindows()) return 0;
+    BOOL substituted = FALSE;
+    if (WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, folder->location.WindowsPath().c_str(), -1,
+                            path, capacity, nullptr, &substituted) && !substituted) return 1;
+    *path = 0;
+    return 0;
 }
 
 void HFVExplorerTreeView::destroy_pointers()
 {
 	int i, count = m_pointer_array.GetSize();
 	DWORD_PTR dw;
-	lparam_struct *p;
+	BrowserTreeNode *p;
 
 	for(i=0; i<count; i++) {
 		dw = m_pointer_array.GetAt( i );
 		if(dw) {
-			p = (lparam_struct *)dw;
+			p = (BrowserTreeNode *)dw;
 			delete p;
 		}
 	}
@@ -198,7 +214,7 @@ HTREEITEM HFVExplorerTreeView::tree_insert(
 	ins.item.iImage = 0;
 	ins.item.iSelectedImage = 0;
 	ins.item.pszText = name;
-	ins.item.lParam = make_lparam( LIST_HFS, volinx, id, 0 );
+	ins.item.lParam = StoreBrowserNode({{BrowserMountInventory::Kind::ClassicVolume, volinx}, ClassicTreeFolder{uint32_t(id)}});
 	// ins.item.state = TVIS_EXPANDED;
 	ins.item.state = 0;
 	ins.item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_TEXT | TVIF_PARAM;
@@ -214,9 +230,8 @@ HTREEITEM HFVExplorerTreeView::FindWindowsFolder(HTREEITEM root,const std::wstri
 {
  if(!root)return nullptr;
  const auto* folder=BrowserFolderAt(root);
- const auto* binding=reinterpret_cast<const lparam_struct*>(m_ct->GetItemData(root));
- if(!binding||binding->type!=LIST_FAT)return nullptr;
- auto existing=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(binding->path);
+ if(!folder||!folder->location.IsWindows())return nullptr;
+ auto existing=folder->location.WindowsPath();
  while(existing.size()>3&&existing.back()==L'\\')existing.pop_back();
  if(!_wcsicmp(path.c_str(),existing.c_str()))return root;
  if(existing.empty()||existing.size()>=path.size()||_wcsnicmp(path.c_str(),existing.c_str(),existing.size())||
@@ -236,11 +251,9 @@ HTREEITEM HFVExplorerTreeView::InsertWindowsFolder(HTREEITEM parent,int volume,c
  item.item.mask=TVIF_IMAGE|TVIF_SELECTEDIMAGE|TVIF_TEXT|TVIF_PARAM;
  item.item.iImage=item.item.iSelectedImage=11;
  item.item.pszText=const_cast<wchar_t*>(name.c_str());
- CStringA legacy(location.WindowsPath().c_str());
- item.item.lParam=make_lparam(LIST_FAT,volume,0,const_cast<char*>(legacy.GetString()));
- auto child=reinterpret_cast<HTREEITEM>(SendMessageW(m_ct->m_hWnd,TVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item)));
- if(child)BindBrowserFolder(child,{location,writable});
- return child;
+ item.item.lParam=StoreBrowserNode({{BrowserMountInventory::Kind::WindowsDrive, volume},
+                                   BrowserDirectory::Folder{location,writable}});
+ return reinterpret_cast<HTREEITEM>(SendMessageW(m_ct->m_hWnd,TVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item)));
 }
 
 void HFVExplorerTreeView::select_by_id( HTREEITEM root_item, int volinx, unsigned long id )
@@ -413,7 +426,7 @@ HTREEITEM HFVExplorerTreeView::initialize_volume(
 	}
 	ins.item.iSelectedImage = ins.item.iImage;
 	ins.item.pszText = r;
-	ins.item.lParam = make_lparam( LIST_HFS, volinx, id, 0 );
+	ins.item.lParam = StoreBrowserNode({{BrowserMountInventory::Kind::ClassicVolume, volinx}, ClassicTreeFolder{uint32_t(id)}});
 	ins.item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_TEXT | TVIF_PARAM;
 	item = m_ct->InsertItem( &ins );
 	root_name.ReleaseBuffer();
@@ -463,7 +476,10 @@ HTREEITEM HFVExplorerTreeView::initialize_fat_volume(
 	
 	ins.item.iSelectedImage = ins.item.iImage;
 	ins.item.pszText = r;
-	ins.item.lParam = make_lparam( LIST_FAT, volinx, 0, p );
+	auto location = FileOperations::Location::Windows(VolumeCoord::Wide(p));
+    location.directory = true;
+    ins.item.lParam = StoreBrowserNode({{BrowserMountInventory::Kind::WindowsDrive, volinx},
+                                       BrowserDirectory::Folder{std::move(location), type != DRIVE_CDROM}});
 	ins.item.mask = TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_TEXT | TVIF_PARAM;
 	item = m_ct->InsertItem( &ins );
 	plabel->ReleaseBuffer();
@@ -598,19 +614,24 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 /////////////////////////////////////////////////////////////////////////////
 // HFVExplorerTreeView message handlers
 
-void HFVExplorerTreeView::BindBrowserFolder(HTREEITEM item,BrowserDirectory::Folder folder)
+void HFVExplorerTreeView::BindBrowserFolder(HTREEITEM item, BrowserDirectory::Folder folder)
 {
- if(item&&!folder.location.IsNone())
-  if(auto* binding=reinterpret_cast<lparam_struct*>(m_ct->GetItemData(item)))binding->folder=std::move(folder);
+    const auto* node = BrowserNodeAt(item);
+    if (!node || folder.location.IsNone()) return;
+    if (folder.location.IsClassic() && !folder.location.expectedCatalogId)
+        folder.location.expectedCatalogId = node->CatalogId();
+    const_cast<BrowserTreeNode*>(node)->value = std::move(folder);
 }
+
 const BrowserDirectory::Folder* HFVExplorerTreeView::BrowserFolderAt(HTREEITEM item) const
 {
- const auto* binding=item?reinterpret_cast<const lparam_struct*>(m_ct->GetItemData(item)):nullptr;
- return binding&&!binding->folder.location.IsNone()?&binding->folder:nullptr;
+    const auto* node = BrowserNodeAt(item);
+    return node ? node->Folder() : nullptr;
 }
+
 void HFVExplorerTreeView::OnDeleteItem(NMHDR* header,LRESULT* result){
  auto item=reinterpret_cast<NMTREEVIEW*>(header);DWORD_PTR key=DWORD_PTR(item->itemOld.lParam);auto found=m_pointer_slots.find(key);
- if(found!=m_pointer_slots.end()){INT_PTR slot=found->second;m_pointer_array.SetAt(slot,0);m_free_slots.push_back(slot);m_pointer_slots.erase(found);delete reinterpret_cast<lparam_struct*>(key);}
+ if(found!=m_pointer_slots.end()){INT_PTR slot=found->second;m_pointer_array.SetAt(slot,0);m_free_slots.push_back(slot);m_pointer_slots.erase(found);delete reinterpret_cast<BrowserTreeNode*>(key);}
  *result=0;
 }
 void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult) 
@@ -649,19 +670,15 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
                             doc->open_sub_directory(volinx,id,"");
 					}
 					break;
-				case LIST_FAT:
-					char path[MAX_PATH];
-					if(get_lparam_path( dw, path, MAX_PATH-1 ) && m_pDocument) {
-						volinx = get_lparam_volinx( dw );
-						if(volinx >= 0) {
-							auto doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
-                            const auto* folder=BrowserFolderAt(hItem);
-                            const auto wide=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(path);
-                            if(!doc->NavigateWindowsFolder(volinx,wide))
-                                doc->open_fat_directory(volinx,path,1);
-
-						}
-					}
+                case LIST_FAT:
+                    if (const auto* folder = BrowserFolderAt(hItem); folder && folder->location.IsWindows() && m_pDocument) {
+                        auto* doc = static_cast<CHFVExplorerDoc*>(m_pDocument);
+                        volinx = get_lparam_volinx(dw);
+                        if (!doc->NavigateWindowsFolder(volinx, folder->location.WindowsPath())) {
+                            char path[MAX_PATH];
+                            if (get_lparam_path(dw, path, MAX_PATH)) doc->open_fat_directory(volinx, path, 1);
+                        }
+                    }
 					break;
 			}
 		}

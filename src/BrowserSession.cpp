@@ -457,20 +457,21 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
 {
  if(!document_||!tree_)return false;
  const auto item=tree_->GetTreeCtrl().GetSelectedItem();
- const auto* binding=item?reinterpret_cast<const lparam_struct*>(tree_->GetTreeCtrl().GetItemData(item)):nullptr;
+ const auto* binding=tree_->BrowserNodeAt(item);
  if(!binding)return false;
- const auto address=BrowserMountInventory::FromTreeBinding(binding->type,binding->volinx);
- if(!address||!mounts_.Lookup(*address))return false;
- if(afterMutation&&(current_.type!=binding->type||current_.index!=binding->volinx))return false;
- if(address->kind==BrowserMountInventory::Kind::MountedVolume)
+ const auto address=binding->mount;
+ if(!mounts_.Lookup(address))return false;
+ if(afterMutation&&(current_.type!=binding->LegacyType()||current_.index!=address.index))return false;
+ if(address.kind==BrowserMountInventory::Kind::MountedVolume)
   return afterMutation?browser_->RefreshForChange(current_.key):browser_->Refresh();
- if(address->kind==BrowserMountInventory::Kind::WindowsDrive){
+ if(address.kind==BrowserMountInventory::Kind::WindowsDrive){
   const auto* folder=tree_->BrowserFolderAt(item);
-  const auto path=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(binding->path);
+  if(!folder||!folder->location.IsWindows())return false;
+  const auto& path=folder->location.WindowsPath();
   if(afterMutation&&_wcsicmp(path.c_str(),current_.windowsPath.c_str()))return false;
-  return document_->NavigateWindowsFolder(address->index,path,true);
+  return document_->NavigateWindowsFolder(address.index,path,true);
  }
- const auto id=uint32_t(binding->id);
+ const auto id=binding->CatalogId();
  if(afterMutation&&id!=current_.folder)return false;
- return document_->NavigateClassicFolder(address->index,id,true);
+ return document_->NavigateClassicFolder(address.index,id,true);
 }

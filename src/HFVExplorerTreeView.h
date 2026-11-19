@@ -29,13 +29,22 @@
 #include <vector>
 
 #include "BrowserDirectory.h"
-typedef struct {
-	int type;
-	long id;
-	int volinx;
-	char path[MAX_PATH];
-    BrowserDirectory::Folder folder;
-} lparam_struct;
+#include "BrowserMountInventory.h"
+
+struct ClassicTreeFolder {
+    uint32_t catalogId;
+};
+
+struct BrowserTreeNode {
+    BrowserMountInventory::Address mount;
+    std::variant<BrowserDirectory::Folder, ClassicTreeFolder> value;
+
+    int LegacyType() const;
+    uint32_t CatalogId() const;
+    const BrowserDirectory::Folder* Folder() const {
+        return std::get_if<BrowserDirectory::Folder>(&value);
+    }
+};
 class BrowserSession;
 class HFVExplorerTreeView : public CTreeView
 {
@@ -92,11 +101,9 @@ protected:
 	unsigned long get_parent_id( HTREEITEM root_item, int volinx, unsigned long id );
 	void expand_dir( HTREEITEM root_item, int volinx, unsigned long parent ) ;
 	int initialize_tree();
-	LPARAM make_lparam( 
-		int type,
-		int volinx, 
-		long id,
-		LPSTR path );
+    LPARAM StoreBrowserNode(BrowserTreeNode node);
+    const BrowserTreeNode* BrowserNode(DWORD_PTR data) const;
+    const BrowserTreeNode* BrowserNodeAt(HTREEITEM item) const;
 	int get_lparam_volinx( LPARAM lparam );
 	int get_lparam_id( LPARAM lparam );
 	int get_lparam_type( LPARAM lparam );

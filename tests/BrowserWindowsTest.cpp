@@ -91,6 +91,22 @@ int RunBrowserWindowsTest(const char* directory){
   Check(sa.AwaitNavigationForTest(),"startup folder completion");
   HWND ah=a->GetSafeHwnd();
   CheckDpiAwareness(ah);
+  auto* tree = sa.Tree();
+  const auto windowsRoot = tree->GetTreeCtrl().GetRootItem();
+  const auto* root = tree->BrowserNodeAt(windowsRoot);
+  Check(root && root->Folder() && root->Folder()->location.IsWindows(), "Windows root lacks a typed location");
+  auto path = root->Folder()->location.WindowsPath();
+  if (path.back() != L'\\') path += L'\\';
+  path += std::wstring(280, L'x') + L"\u65e5";
+  const auto child = tree->InsertWindowsFolder(windowsRoot, root->mount.index, L"DPI fixture",
+      FileOperations::Location::Windows(path), true);
+  Check(child && tree->FindWindowsFolder(windowsRoot, path) == child, "tree lost a long Unicode path");
+  char legacy[8] = {};
+  const auto data = tree->GetTreeCtrl().GetItemData(child);
+  Check(!tree->get_lparam_path(data, legacy, sizeof(legacy)) && !legacy[0],
+        "legacy path adapter truncated a typed folder");
+  tree->GetTreeCtrl().DeleteItem(child);
+  Check(!tree->BrowserNode(data), "deleted tree binding remained accessible");
   fprintf(report,"PASS: executable DPI awareness and system-DPI fallback.\n");
   a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==VolumeCoord::Wide(std::string((LPCSTR)host))+L" \u2014 HFVExplorer","startup Windows folder title was replaced by Untitled");Check(!a->IsWindowVisible(),"test unexpectedly displayed a browser");
   MenuState menu;menu.m_nID=ID_TOOLS_NEW_BROWSER;Check(a->OnCmdMsg(ID_TOOLS_NEW_BROWSER,CN_UPDATE_COMMAND_UI,&menu,nullptr)&&menu.enabled,"New browser has no enabled update handler");

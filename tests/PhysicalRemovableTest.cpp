@@ -66,7 +66,7 @@ IMPLEMENT_DYNCREATE(RemovableDoc,CHFVExplorerDoc)
 class RemovableFrame:public CMainFrame{DECLARE_DYNCREATE(RemovableFrame)
 public:void LoadWindowPosition()override{}void SaveWindowPosition()override{}void ActivateFrame(int)override{}};
 IMPLEMENT_DYNCREATE(RemovableFrame,CMainFrame)
-unsigned MacRoots(BrowserSession& session){unsigned count=0;auto& tree=session.Tree()->GetTreeCtrl();for(auto item=tree.GetRootItem();item;item=tree.GetNextSiblingItem(item)){auto p=reinterpret_cast<lparam_struct*>(tree.GetItemData(item));if(p&&p->type==LIST_MAC)++count;}return count;}
+unsigned MacRoots(BrowserSession& session){unsigned count=0;auto& tree=session.Tree()->GetTreeCtrl();for(auto item=tree.GetRootItem();item;item=tree.GetNextSiblingItem(item)){const auto* node=session.Tree()->BrowserNodeAt(item);if(node&&node->mount.kind!=BrowserMountInventory::Kind::WindowsDrive)++count;}return count;}
 int Row(BrowserSession& session,const wchar_t* name){auto& list=session.List()->GetListCtrl();for(int row=0;row<list.GetItemCount();++row){wchar_t text[512]{};LVITEMW item{};item.pszText=text;item.cchTextMax=ARRAYSIZE(text);SendMessageW(list.m_hWnd,LVM_GETITEMTEXTW,row,reinterpret_cast<LPARAM>(&item));if(!wcscmp(text,name))return row;}throw HfsPlus::Error("Missing removable browser row");}
 unsigned timerTicks=0;
 void CALLBACK Tick(HWND,UINT,UINT_PTR,DWORD){++timerTicks;}
