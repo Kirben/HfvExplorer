@@ -99,6 +99,42 @@ int RunBrowserWindowsTest(const char* directory){
    if(!previewReady)Sleep(10);
   }
   Check(previewReady,"selection notification did not publish the native text preview");
+  auto& details=sa.List()->GetListCtrl();
+  const auto otherFont=sb.List()->GetListCtrl().SendMessage(WM_GETFONT);
+  RECT original{}, suggested{};
+  a->GetWindowRect(&original);
+  suggested=original;
+  suggested.right+=25;
+  suggested.bottom+=15;
+  auto change=[&](UINT dpi,const RECT& rectangle){
+   a->SendMessage(NativeDpi::Changed,MAKEWPARAM(dpi,dpi),LPARAM(&rectangle));
+  };
+  change(96,original);
+  const int originalWidth=details.GetColumnWidth(0);
+  LOGFONT font96{},font144{};
+  GetObject(HGDIOBJ(details.SendMessage(WM_GETFONT)),sizeof(font96),&font96);
+  change(144,suggested);
+  GetObject(HGDIOBJ(details.SendMessage(WM_GETFONT)),sizeof(font144),&font144);
+  Check(font96.lfHeight<0&&font144.lfHeight==NativeDpi::Scale(font96.lfHeight,144),"list font at 150 percent");
+  RECT actual{};
+  a->GetWindowRect(&actual);
+  Check(EqualRect(&actual,&suggested),"frame ignored the DPI rectangle");
+  Check(details.GetColumnWidth(0)==NativeDpi::Scale(originalWidth,144),"details width at 150 percent");
+  Check(sb.List()->GetListCtrl().SendMessage(WM_GETFONT)==otherFont,"DPI change affected another browser");
+  Check(details.GetItemState(previewItem,LVIS_SELECTED)!=0&&BrowserPresentation::Text(edit)==L"Caf\u00e9\r\n",
+        "DPI change discarded a selected row or its preview");
+  details.SetColumnWidth(0,253);
+  for(int repeat=0;repeat<3;++repeat){
+   change(192,suggested);
+   Check(details.GetColumnWidth(0)==NativeDpi::Scale(253,192,144),"user column width at 200 percent");
+   change(96,original);
+   Check(details.GetColumnWidth(0)==NativeDpi::Scale(253,96,144),"user column width at 100 percent");
+   change(144,suggested);
+   Check(details.GetColumnWidth(0)==253,"round trips drifted from the user column width");
+  }
+  change(96,original);
+  details.SetColumnWidth(0,originalWidth);
+  fprintf(report,"PASS: DPI suggested rectangle, 96/144/192 layout, rounding, fonts and independent browser state.\n");
   const HWND hide=FindWindowExW(pane,nullptr,L"BUTTON",nullptr);
   Check(hide!=nullptr,"preview Hide button is missing");
   SendMessage(pane,WM_COMMAND,MAKEWPARAM(GetDlgCtrlID(hide),BN_CLICKED),reinterpret_cast<LPARAM>(hide));

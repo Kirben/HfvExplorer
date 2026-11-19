@@ -23,6 +23,7 @@
 #endif
 
 #include <vector>
+#include <map>
 #include "resource.h"       // main symbols
 #include "HFVExplorerListView.h"
 #include "HFVExplorerTreeView.h"
@@ -65,8 +66,8 @@ public:
 	void kill_childs();
 	void add_child( HWND hi );
 	BOOL EnableTimer( BOOL onoff );
-	HFONT get_font();
-	void set_font( char *name, int ps );
+	HFONT get_font(UINT dpi = 96);
+	void ClearBrowserFonts();
 
 	CString m_opendir;
 	HWND m_parent_hwnd;
@@ -85,7 +86,7 @@ public:
 	int m_copyout_mode, m_copyin_mode, m_copyin_appledouble;
 	CString m_version;
 	CString m_prevVersion;
-	HFONT m_hfont;
+	std::map<UINT, HFONT> m_browserFonts;
 	BOOL	m_is_font_sjis; /* noda */
 
 	int m_next_icon_index;

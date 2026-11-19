@@ -191,13 +191,7 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 		return -1;      // fail to create
 	}
 
-	if(pApp->get_font()) {
-		::SendMessage( 
-			m_wndStatusBar.GetSafeHwnd(),
-			WM_SETFONT,
-			(WPARAM)pApp->get_font(),
-			MAKELPARAM(TRUE,0) );
-	}
+    ApplyDpi(NativeDpi::Window(m_hWnd), nullptr);
 
 	// TODO: Remove this if you don't want tool tips or a resizeable toolbar
 	m_wndToolBar.SetBarStyle(m_wndToolBar.GetBarStyle() |
@@ -304,6 +298,40 @@ BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext)
 	// return CFrameWnd::OnCreateClient(lpcs, pContext);
 }
 
+void BrowserSplitter::ApplyDpi(UINT from, UINT to)
+{
+    if (!m_pColInfo || !m_pRowInfo) return;
+    auto& first = m_nCols > 1 ? m_pColInfo[0] : m_pRowInfo[0];
+    first.nIdealSize = firstPane_.Resize(first.nIdealSize, from, to);
+    m_cxSplitter = m_cySplitter = NativeDpi::Scale(7, to);
+    m_cxSplitterGap = m_cySplitterGap = m_cxSplitter;
+    m_cxBorder = m_cyBorder = NativeDpi::Scale(2, to);
+    dpi_ = to;
+}
+
+void CMainFrame::ApplyDpi(UINT dpi, const RECT* suggested)
+{
+    if (!dpi) return;
+    const UINT previous = m_dpi;
+    m_dpi = dpi;
+    if (m_browserSession && previous != dpi) {
+        m_wndSplitter.ApplyDpi(previous, dpi);
+        m_wndSplitter2.ApplyDpi(previous, dpi);
+        m_browserSession->List()->ApplyDpi(dpi);
+        m_browserSession->Tree()->ApplyDpi(dpi);
+    }
+    if (m_wndStatusBar.GetSafeHwnd()) {
+        auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
+        m_wndStatusBar.SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
+    }
+    if (suggested) {
+        SetWindowPos(nullptr, suggested->left, suggested->top,
+            suggested->right-suggested->left, suggested->bottom-suggested->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    RecalcLayout();
+}
+
 void PreviewSplitter::ShowPreview(CWnd& pane, bool visible)
 {
     // Keep the second static pane alive, but omit its row and splitter bar
@@ -312,8 +340,8 @@ void PreviewSplitter::ShowPreview(CWnd& pane, bool visible)
     if(visible) {
         CRect rect;
         GetClientRect(rect);
-        const int preferred=rect.Width()<510 ? 230 : 168;
-        SetRowInfo(0,(std::max)(64,rect.Height()-(std::min)(preferred,rect.Height()/2)),0);
+        const int preferred=NativeDpi::Scale(rect.Width()<NativeDpi::Scale(510,dpi_) ? 230 : 168,dpi_);
+        SetRowInfo(0,(std::max)(NativeDpi::Scale(64,dpi_),rect.Height()-(std::min)(preferred,rect.Height()/2)),0);
         SetRowInfo(1,0,0);
     }
     pane.ShowWindow(visible ? SW_SHOWNA : SW_HIDE);
@@ -326,7 +354,7 @@ void PreviewSplitter::RecalcLayout()
         CRect rect;
         GetClientRect(rect);
         auto& first=m_pRowInfo[0].nIdealSize;
-        first=(std::min)(first,(std::max)(24,rect.Height()-(std::min)(116,rect.Height()/2)));
+        first=(std::min)(first,(std::max)(NativeDpi::Scale(24,dpi_),rect.Height()-(std::min)(NativeDpi::Scale(116,dpi_),rect.Height()/2)));
     }
     CSplitterWnd::RecalcLayout();
 }
@@ -766,6 +794,10 @@ void CMainFrame::OnChildRegistration(WPARAM wParam, LPARAM lParam)
 
 LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) 
 {
+ if(message==NativeDpi::Changed){
+  ApplyDpi(LOWORD(wParam),reinterpret_cast<const RECT*>(lParam));
+  return 0;
+ }
  if((message==WM_COMMAND||message==WM_CLOSE)&&(StorageUi::busy()||StorageUi::state().sessionOpen))return 0;
  if(message==WM_SYSCOMMAND&&(wParam&0xfff0)==SC_CLOSE){
   if(StorageUi::busy()||StorageUi::state().sessionOpen)return 0;
@@ -1169,7 +1201,8 @@ void CMainFrame::SaveWindowPosition(void)
 		pApp->WriteProfileInt("WindowPosition","Maximized",zoomed);
 		if(!zoomed) {
 			GetWindowRect(&r);
-			pApp->WriteProfileInt("WindowPosition","x",r.left);
+			pApp->WriteProfileInt("WindowPosition","Dpi",m_dpi);
+            pApp->WriteProfileInt("WindowPosition","x",r.left);
 			pApp->WriteProfileInt("WindowPosition","y",r.top);
 			pApp->WriteProfileInt("WindowPosition","cx",r.right - r.left);
 			pApp->WriteProfileInt("WindowPosition","cy",r.bottom - r.top);
@@ -1194,7 +1227,12 @@ void CMainFrame::LoadWindowPosition(void)
 
  m_restoreMaximized=zoomed!=0;
  // Position now, show only after document initialization/registration.
- SetWindowPos(NULL,x,y,cx,cy,SWP_NOZORDER|SWP_NOACTIVATE);
+ const int saved = pApp->GetProfileInt("WindowPosition","Dpi",NativeDpi::Base);
+ const UINT from = saved > 0 ? UINT(saved) : NativeDpi::Base;
+ // Move first so DPI can follow the target monitor before scaling the saved size.
+ SetWindowPos(nullptr,x,y,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
+ SetWindowPos(nullptr,0,0,NativeDpi::Scale(cx,m_dpi,from),
+    NativeDpi::Scale(cy,m_dpi,from),SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
 }
 
 void CMainFrame::OnEditCopy() 
