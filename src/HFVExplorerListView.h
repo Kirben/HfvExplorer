@@ -23,7 +23,8 @@
 
 // #define PARENTIDFLAG 0xFFFF8000ul
 
-#include "NativeDpi.h"
+#include "DpiImageList.h"
+#include <map>
 #include "ftypes.h"
 #include "HostOffsets.h"
 #include "BrowserDirectory.h"
@@ -123,14 +124,15 @@ public:
 	int FillList();
 	int Initialize();
     void ApplyDpi(UINT);
-    UINT DisplayDpi() const { return m_dpi; }
 private:
     UINT m_dpi = NativeDpi::Base;
     NativeDpi::Measurement m_columns[7];
+    int m_builtinIconCount = 0;
+    std::map<LPARAM, std::pair<NativeDpi::Measurement,NativeDpi::Measurement>> m_iconPositions;
 public:
 	void set_style( long style );
-	CImageList *m_pimagelist;
-	CImageList *m_pimagelistSmall;
+	NativeDpi::ImageList m_largeImages{32,7};
+	NativeDpi::ImageList m_smallImages{16,7};
 	int m_item_count;
 	int list_clear();
 	int initialize_volume( CString root_name, unsigned long id );

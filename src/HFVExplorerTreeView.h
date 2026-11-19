@@ -20,6 +20,7 @@
 
 #ifndef _TREEVIEW_INCLUDED
 #define _TREEVIEW_INCLUDED
+#include "DpiImageList.h"
 /////////////////////////////////////////////////////////////////////////////
 // HFVExplorerTreeView view
 
@@ -108,7 +109,7 @@ protected:
 	void mode_changed( void );
 
 	int m_selchange_enabled;
-	CImageList *m_pimagelistSmall;
+	NativeDpi::ImageList m_icons{16};
 
 protected:
 	CPointerWordArray m_pointer_array;

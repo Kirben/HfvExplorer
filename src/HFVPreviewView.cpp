@@ -74,9 +74,7 @@ int CHFVPreviewView::OnCreate(LPCREATESTRUCT create) {
                            ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|ES_NOHIDESEL,
                            0,0,0,0,m_hWnd,reinterpret_cast<HMENU>(UINT_PTR(PreviewTextId)),nullptr,nullptr);
     if (!close_ || !text_) return -1;
-    const auto font = GetStockObject(DEFAULT_GUI_FONT);
-    SendMessageW(close_, WM_SETFONT, WPARAM(font), FALSE);
-    SendMessageW(text_, WM_SETFONT, WPARAM(font), FALSE);
+    ApplyDpi(NativeDpi::Window(m_hWnd));
     return 0;
 }
 
@@ -192,19 +190,38 @@ void CHFVPreviewView::SetText(const std::wstring& status, const std::wstring& te
     Invalidate();
 }
 
+int CHFVPreviewView::Pixels(int value) const {
+    return NativeDpi::Scale(value, dpi_);
+}
+
+void CHFVPreviewView::ApplyDpi(UINT dpi) {
+    dpi_ = dpi;
+    CFont replacement;
+    if (replacement.CreateFont(-Pixels(12), 0, 0, 0, FW_NORMAL,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, 0, 0, "Segoe UI")) {
+        SendMessageW(close_, WM_SETFONT, WPARAM(replacement.GetSafeHandle()), FALSE);
+        SendMessageW(text_, WM_SETFONT, WPARAM(replacement.GetSafeHandle()), FALSE);
+        font_.DeleteObject();
+        font_.Attach(replacement.Detach());
+    }
+    Layout();
+    Invalidate();
+}
+
 CRect CHFVPreviewView::TextRect() const {
     CRect bounds;
     GetClientRect(bounds);
-    const auto left = bounds.Width() < SmallWidth ? Margin : bounds.Width()*43/100;
-    const auto top = bounds.Width() < SmallWidth ? 2*Margin + Line*(3 + int(details_.size())) : 2*Margin + 2*Line;
-    return CRect(left, top, (std::max<LONG>)(left,bounds.right-Margin), (std::max<LONG>)(top,bounds.bottom-Margin));
+    const bool narrow = bounds.Width() < Pixels(SmallWidth);
+    const auto left = narrow ? Pixels(Margin) : bounds.Width()*43/100;
+    const auto top = narrow ? Pixels(2*Margin + Line*(3 + int(details_.size()))) : Pixels(2*Margin + 2*Line);
+    return CRect(left, top, (std::max<LONG>)(left,bounds.right-Pixels(Margin)), (std::max<LONG>)(top,bounds.bottom-Pixels(Margin)));
 }
 
 void CHFVPreviewView::Layout() {
     if (!close_ || !text_) return;
     CRect bounds;
     GetClientRect(bounds);
-    ::MoveWindow(close_, (std::max<LONG>)(0,bounds.right-Margin-48), 5, 48, 23, TRUE);
+    ::MoveWindow(close_, (std::max<LONG>)(0,bounds.right-Pixels(Margin+48)), Pixels(5), Pixels(48), Pixels(23), TRUE);
     const auto text = TextRect();
     ::MoveWindow(text_, text.left, text.top, text.Width(), text.Height(), TRUE);
 }
@@ -220,19 +237,19 @@ void CHFVPreviewView::OnDraw(CDC* dc) {
     GetClientRect(bounds);
     dc->FillSolidRect(bounds, GetSysColor(COLOR_WINDOW));
     dc->SetBkMode(TRANSPARENT);
-    auto oldFont = SelectObject(dc->GetSafeHdc(), GetStockObject(DEFAULT_GUI_FONT));
+    auto oldFont = SelectObject(dc->GetSafeHdc(), font_.GetSafeHandle());
     dc->SetTextColor(GetSysColor(COLOR_WINDOWTEXT));
     DrawLine(*dc, name_.empty() ? L"Preview" : L"Preview  \x2014  " + name_,
-             CRect(Margin, 5, bounds.right-2*Margin-48, 5+Line));
+             CRect(Pixels(Margin), Pixels(5), bounds.right-Pixels(2*Margin+48), Pixels(5+Line)));
     const auto text = TextRect();
-    const auto right = bounds.Width() < SmallWidth ? bounds.right-Margin : text.left-Margin;
-    int y = Margin + Line;
+    const auto right = bounds.Width() < Pixels(SmallWidth) ? bounds.right-Pixels(Margin) : text.left-Pixels(Margin);
+    int y = Pixels(Margin + Line);
     for (const auto& detail : details_) {
-        DrawLine(*dc, detail.first, CRect(Margin,y,Margin+88,y+Line));
-        DrawLine(*dc, detail.second, CRect(Margin+90,y,right,y+Line));
-        y += Line;
+        DrawLine(*dc, detail.first, CRect(Pixels(Margin),y,Pixels(Margin+88),y+Pixels(Line)));
+        DrawLine(*dc, detail.second, CRect(Pixels(Margin+90),y,right,y+Pixels(Line)));
+        y += Pixels(Line);
     }
-    DrawLine(*dc, status_, CRect(text.left,text.top-Line-2,text.right,text.top-2));
+    DrawLine(*dc, status_, CRect(text.left,text.top-Pixels(Line+2),text.right,text.top-Pixels(2)));
     SelectObject(dc->GetSafeHdc(),oldFont);
 }
 

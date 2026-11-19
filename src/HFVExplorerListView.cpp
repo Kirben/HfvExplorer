@@ -138,7 +138,6 @@ void CHFVExplorerListView::destroy_pointers()
 }
 
 #define LISTICONCOUNT 12
-#define MAXEXTRAIMAGES 200
 
 CHFVExplorerListView::CHFVExplorerListView()
 {
@@ -156,74 +155,55 @@ CHFVExplorerListView::CHFVExplorerListView()
 	m_dragging = 0;
 
 	m_item_count = 0;
-	m_pimagelist = new CImageList();		
-	m_pimagelistSmall = new CImageList();
-
-	ASSERT(m_pimagelist != NULL && m_pimagelistSmall != NULL);
-
-	// for version 1.2.7 fixed TRUE -> ILC_MASK|ILC_COLOR24
-	m_pimagelist->Create(32, 32, ILC_MASK|ILC_COLOR24, LISTICONCOUNT, MAXEXTRAIMAGES);
-	m_pimagelistSmall->Create(16, 16, ILC_MASK|ILC_COLOR24, LISTICONCOUNT, MAXEXTRAIMAGES);
-
+    m_largeImages.Create(LISTICONCOUNT);
+    m_smallImages.Create(LISTICONCOUNT);
 	CreatePalette();
 
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON1));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON2));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON3));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON4));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON5));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON6));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON7));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON8));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON9));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON10));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON11));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON12));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_ICON1_YELLOW));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_PROJECT_2));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_PROJECT_1));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_PERSONAL));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_COOL));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_IN_PROGRESS));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_HOT));
-	m_pimagelist->Add(pApp->LoadIcon(IDI_LABEL_ESSENTIAL));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON1));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON2));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON3));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON4));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON5));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON6));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON7));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON8));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON9));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON10));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON11));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON12));
+	m_largeImages.Add(pApp->LoadIcon(IDI_ICON1_YELLOW));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_PROJECT_2));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_PROJECT_1));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_PERSONAL));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_COOL));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_IN_PROGRESS));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_HOT));
+	m_largeImages.Add(pApp->LoadIcon(IDI_LABEL_ESSENTIAL));
 
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON1));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON2));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON3));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON4));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON5));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON6));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON7));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON8));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON9));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON10));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON11));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON12));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_ICON1_YELLOW));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_PROJECT_2));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_PROJECT_1));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_PERSONAL));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_COOL));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_IN_PROGRESS));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_HOT));
-	m_pimagelistSmall->Add(pApp->LoadIcon(IDI_LABEL_ESSENTIAL));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON1));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON2));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON3));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON4));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON5));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON6));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON7));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON8));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON9));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON10));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON11));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON12));
+	m_smallImages.Add(pApp->LoadIcon(IDI_ICON1_YELLOW));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_PROJECT_2));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_PROJECT_1));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_PERSONAL));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_COOL));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_IN_PROGRESS));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_HOT));
+	m_smallImages.Add(pApp->LoadIcon(IDI_LABEL_ESSENTIAL));
 
-	m_pimagelist->SetOverlayImage( 13, 1 );
-	m_pimagelist->SetOverlayImage( 14, 2 );
-	m_pimagelist->SetOverlayImage( 15, 3 );
-	m_pimagelist->SetOverlayImage( 16, 4 );
-	m_pimagelist->SetOverlayImage( 17, 5 );
-	m_pimagelist->SetOverlayImage( 18, 6 );
-	m_pimagelist->SetOverlayImage( 19, 7 );
-
-	m_pimagelistSmall->SetOverlayImage( 13, 1 );
-	m_pimagelistSmall->SetOverlayImage( 14, 2 );
-	m_pimagelistSmall->SetOverlayImage( 15, 3 );
-	m_pimagelistSmall->SetOverlayImage( 16, 4 );
-	m_pimagelistSmall->SetOverlayImage( 17, 5 );
-	m_pimagelistSmall->SetOverlayImage( 18, 6 );
-	m_pimagelistSmall->SetOverlayImage( 19, 7 );
+    m_largeImages.SetOverlays();
+    m_smallImages.SetOverlays();
+    m_builtinIconCount = m_largeImages.Count();
 
 	m_pOldPalette = NULL;
 
@@ -234,14 +214,6 @@ CHFVExplorerListView::~CHFVExplorerListView()
 {
  CancelBrowserDrag();
  if(m_browserSession)m_browserSession->Detach(this);
-	if(m_pimagelist) {
-		delete m_pimagelist;
-		m_pimagelist = 0;
-	}
-	if(m_pimagelistSmall) {
-		delete m_pimagelistSmall;
-		m_pimagelistSmall = 0;
-	}
 	destroy_pointers();
 }
 
@@ -249,6 +221,25 @@ void CHFVExplorerListView::ApplyDpi(UINT dpi)
 {
     if (m_dpi == dpi) return;
     auto& app = *static_cast<CHFVExplorerApp*>(AfxGetApp());
+    CancelBrowserDrag();
+    const auto style = m_cl->GetStyle() & LVS_TYPEMASK;
+    const int top = style == LVS_REPORT ? m_cl->GetTopIndex() : -1;
+    std::vector<std::pair<int,CPoint>> positions;
+    if (GetBrowserSession().finderLayout && (style == LVS_ICON || style == LVS_SMALLICON)) {
+        for (int i = 0; i < m_cl->GetItemCount(); ++i) {
+            CPoint point;
+            if (!m_cl->GetItemPosition(i, &point)) continue;
+            auto& axes = m_iconPositions[m_cl->GetItemData(i)];
+            positions.emplace_back(i, CPoint(axes.first.Resize(point.x, m_dpi, dpi),
+                axes.second.Resize(point.y, m_dpi, dpi)));
+        }
+    }
+    m_largeImages.Apply(dpi, [&](HIMAGELIST images) {
+        m_cl->SendMessage(LVM_SETIMAGELIST,LVSIL_NORMAL,LPARAM(images));
+    });
+    m_smallImages.Apply(dpi, [&](HIMAGELIST images) {
+        m_cl->SendMessage(LVM_SETIMAGELIST,LVSIL_SMALL,LPARAM(images));
+    });
     auto* header = m_cl->GetHeaderCtrl();
     if (header) {
         for (int i = 0; i < header->GetItemCount() && i < ARRAYSIZE(m_columns); ++i) {
@@ -258,6 +249,14 @@ void CHFVExplorerListView::ApplyDpi(UINT dpi)
     }
     m_cl->SendMessage(WM_SETFONT, WPARAM(app.get_font(dpi)), TRUE);
     m_dpi = dpi;
+    if (!positions.empty())
+        for (const auto& position : positions)
+            m_cl->SendMessage(LVM_SETITEMPOSITION32, position.first, LPARAM(&position.second));
+    if (top > 0 && top != m_cl->GetTopIndex()) {
+        CRect item;
+        if (m_cl->GetItemRect(0, &item, LVIR_BOUNDS))
+            m_cl->Scroll(CSize(0, (top-m_cl->GetTopIndex())*item.Height()));
+    }
 }
 
 int CHFVExplorerListView::Initialize()
@@ -271,7 +270,7 @@ int CHFVExplorerListView::Initialize()
 	// m_cl->SetBkColor( m_bkcolor );
 
 	list_clear();
-	ASSERT(m_pimagelist != NULL && m_pimagelistSmall != NULL);
+    m_cl->ModifyStyle(0, LVS_SHAREIMAGELISTS);
 	lvcolumn.mask = LVCF_FMT | LVCF_SUBITEM | LVCF_TEXT | LVCF_WIDTH;
 	lvcolumn.fmt = LVCFMT_LEFT;
 	lvcolumn.pszText = "Name";
@@ -452,6 +451,9 @@ int CHFVExplorerListView::list_clear()
     m_parentRowData=0;
     if(GetBrowserSession().Preview()&&IsWindow(GetBrowserSession().Preview()->GetSafeHwnd()))GetBrowserSession().Preview()->Clear();
 	m_cl->DeleteAllItems();
+    m_largeImages.Trim(m_builtinIconCount);
+    m_smallImages.Trim(m_builtinIconCount);
+    m_iconPositions.clear();
  destroy_pointers();m_directory_capabilities_known=false;
 	m_item_count = 0;
 	return(1);
@@ -523,8 +525,8 @@ BrowserDirectory::Row row;row.storageType=LIST_FAT;row.volume=volinx;row.path=fu
 
 int CHFVExplorerListView::FillList()
 {
-	m_cl->SetImageList(m_pimagelist, LVSIL_NORMAL);
-	m_cl->SetImageList(m_pimagelistSmall, LVSIL_SMALL);
+    m_cl->SendMessage(LVM_SETIMAGELIST,LVSIL_NORMAL,LPARAM(m_largeImages.Handle()));
+    m_cl->SendMessage(LVM_SETIMAGELIST,LVSIL_SMALL,LPARAM(m_smallImages.Handle()));
 	return(1);
 }
 
@@ -1692,11 +1694,11 @@ void CHFVExplorerListView::PlaceDraggedIcons(CSize displacement)
     std::vector<FileOperations::Request> requests;
     for(const auto& icon:m_dragIcons){
         const auto position=icon.position+displacement;
-        m_cl->SetItemPosition(icon.index,position);
+        m_cl->SendMessage(LVM_SETITEMPOSITION32,icon.index,LPARAM(&position));
         if(session.finderLayout&&icon.location.IsClassic()){
             const FileOperations::FinderPosition finder{
-                short(position.x-FINDER_MAGIC_OFFSET+m_mac_origo.x),
-                short(position.y-FINDER_MAGIC_OFFSET+m_mac_origo.y)};
+                short(NativeDpi::Scale(position.x,NativeDpi::Base,m_dpi)-FINDER_MAGIC_OFFSET+m_mac_origo.x),
+                short(NativeDpi::Scale(position.y,NativeDpi::Base,m_dpi)-FINDER_MAGIC_OFFSET+m_mac_origo.y)};
             requests.emplace_back(FileOperations::EditClassicProperties{icon.location,finder});
         }
     }
