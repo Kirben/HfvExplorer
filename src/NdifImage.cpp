@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "NdifImage.h"
 #include "NdifKenCode.h"
+#include "TransferConversion.h"
 #include "DmgImage.h"
 #include "HfsPlusDisk.h"
 #include <windows.h>
@@ -228,6 +229,36 @@ std::vector<Part> MoreParts(const Source& first,const Segment& lead)
     return parts;
 }
 
+
+class BinHexForks final : public Source {
+    std::unique_ptr<Source> origin_;
+    MacBrowser::Reader read_;
+    uint64_t data_,resource_;
+public:
+    BinHexForks(MacBrowser::Reader reader,uint64_t data,uint64_t resource)
+        :read_(std::move(reader)),data_(data),resource_(resource){}
+    void Pin(std::unique_ptr<Source> origin){origin_=std::move(origin);}
+    uint64_t Size()const override{return data_+resource_;}
+    bool Writable()const override{return false;}
+    bool ProcessLocal()const override{return origin_&&origin_->ProcessLocal();}
+    void CheckMedia()override{if(origin_)origin_->CheckMedia();}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{
+        return origin_?origin_->WorkerFiles():std::vector<std::pair<std::wstring,uintptr_t>>{};
+    }
+    void Write(uint64_t,const void*,size_t)override{throw Error("BinHex NDIF images are read-only");}
+    void Flush()override{}
+    void Read(uint64_t offset,void* bytes,size_t count)override{
+        Check(Range(offset,count,Size())&&(!count||bytes),"Read outside BinHex forks");
+        auto out=static_cast<uint8_t*>(bytes);
+        if(offset<data_&&count){
+            const auto take=size_t((std::min)(uint64_t(count),data_-offset));
+            read_(0,offset,out,take);
+            offset+=take;count-=take;out+=take;
+        }
+        if(count)read_(1,offset-data_,out,count);
+    }
+};
+
 class Image final : public Source {
     std::vector<Part> parts_;
     Layout layout_;
@@ -331,9 +362,10 @@ uint32_t Checksum(uint32_t running,const void* bytes,size_t count)
     return running;
 }
 
-bool Unwrap(std::unique_ptr<Source>& input)
+bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
 {
-    auto install=[&](Fork data,Source& metadata,Fork resource,std::unique_ptr<Source> companion={}){
+    auto install=[&](Fork data,Source& metadata,Fork resource,std::unique_ptr<Source> companion={},
+                     std::unique_ptr<BinHexForks> decoded={}){
         const auto map=Resource(metadata,resource,"bcem");
         const auto segment=SegmentInfo(metadata,resource);
         if(!map){
@@ -356,7 +388,10 @@ bool Unwrap(std::unique_ptr<Source>& input)
             total+=part.data.length;
         }
         auto layout=Map(metadata,*map,{0,total});
-        parts[0].dataFile=std::move(input);
+        if(decoded){
+            decoded->Pin(std::move(input));
+            parts[0].dataFile=std::move(decoded);
+        }else parts[0].dataFile=std::move(input);
         parts[0].resourceFile=std::move(companion);
         input=std::make_unique<Image>(std::move(parts),std::move(layout));
         return true;
@@ -366,6 +401,13 @@ bool Unwrap(std::unique_ptr<Source>& input)
     }
     if(auto forks=AppleContainer(*input,0x00051600)){
         if(install(forks->data,*input,forks->resource))return true;
+    }
+    MacBrowser::Entry transport;
+    if(auto reader=TransferConversion::ReadBinHex(*input,transport,job)){
+        const auto length=transport.forks[0].size,resource=transport.forks[1].size;
+        auto decoded=std::make_unique<BinHexForks>(std::move(reader),length,resource);
+        auto& source=*decoded;
+        if(install({0,length},source,{length,resource},{},std::move(decoded)))return true;
     }
     const auto files=input->WorkerFiles();
     if(files.empty())return false;

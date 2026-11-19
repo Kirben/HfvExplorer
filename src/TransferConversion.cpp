@@ -248,42 +248,47 @@ struct BinSession {
     }
 };
 
-Reader BinHex(bool importing, Volume& volume, Entry& entry, Storage::Job& job) {
+Reader DecodeBinHex(Spool& input,Entry& entry,Storage::Job* job) {
     auto output = std::make_shared<Spool>();
+    input.Seek(0);
+    BinSession session{true};
+    BinCheck(bh_open(input.Descriptor()) == 0);
+    session.active = true;
+    const auto read = [](void* bytes, int count) { BinCheck(bh_read(bytes, count) == count); };
+    uint8_t length = 0, name[64]{}, fields[18]{};
+    read(&length, 1);
+    Check(length > 0 && length <= 63, "Invalid BinHex filename length");
+    read(name, length + 1);
+    Check(name[length] == 0, "Invalid BinHex filename terminator");
+    entry.name = MacName(name, length);
+    read(fields, sizeof(fields));
+    BinCheck(bh_readcrc() == 0);
+    entry.finder = {};
+    memcpy(entry.finder.data(), fields, 10);
+    entry.forks[0].size = Long(fields + 10);
+    entry.forks[1].size = Long(fields + 14);
+    std::vector<uint8_t> block(65536);
+    for (unsigned fork = 0; fork < 2; ++fork) {
+        for (uint64_t remaining = entry.forks[fork].size; remaining;) {
+            if(job)Cancel(*job);
+            auto size = int((std::min)(remaining, uint64_t(block.size())));
+            read(block.data(), size);
+            output->Write(block.data(), size);
+            remaining -= size;
+        }
+        BinCheck(bh_readcrc() == 0);
+    }
+    BinCheck(session.Finish() == 0);
+    return ReadSpool(output, entry.forks[0].size);
+}
+
+Reader BinHex(bool importing, Volume& volume, Entry& entry, Storage::Job& job) {
     if (importing) {
         Spool input;
         Stream(volume, entry.id, 0, entry.forks[0].size, job, [&](auto bytes, auto n) { input.Write(bytes, n); });
-        input.Seek(0);
-        BinSession session{true};
-        BinCheck(bh_open(input.Descriptor()) == 0);
-        session.active = true;
-        const auto read = [](void* bytes, int count) { BinCheck(bh_read(bytes, count) == count); };
-        uint8_t length = 0, name[64]{}, fields[18]{};
-        read(&length, 1);
-        Check(length > 0 && length <= 63, "Invalid BinHex filename length");
-        read(name, length + 1);
-        Check(name[length] == 0, "Invalid BinHex filename terminator");
-        entry.name = MacName(name, length);
-        read(fields, sizeof(fields));
-        BinCheck(bh_readcrc() == 0);
-        entry.finder = {};
-        memcpy(entry.finder.data(), fields, 10);
-        entry.forks[0].size = Long(fields + 10);
-        entry.forks[1].size = Long(fields + 14);
-        std::vector<uint8_t> block(65536);
-        for (unsigned fork = 0; fork < 2; ++fork) {
-            for (uint64_t remaining = entry.forks[fork].size; remaining;) {
-                Cancel(job);
-                auto size = int((std::min)(remaining, uint64_t(block.size())));
-                read(block.data(), size);
-                output->Write(block.data(), size);
-                remaining -= size;
-            }
-            BinCheck(bh_readcrc() == 0);
-        }
-        BinCheck(session.Finish() == 0);
-        return ReadSpool(output, entry.forks[0].size);
+        return DecodeBinHex(input,entry,&job);
     }
+    auto output = std::make_shared<Spool>();
     auto name = EncodedName(entry.name, 63);
     Check(entry.forks[0].size <= UINT32_MAX && entry.forks[1].size <= UINT32_MAX,
           "File size exceeds BinHex fork fields");
@@ -312,6 +317,26 @@ Reader BinHex(bool importing, Volume& volume, Entry& entry, Storage::Job& job) {
 }
 
 bool ContainerMode(char mode) { return mode=='m'||mode=='5'||mode=='3'||mode=='b'; }
+
+MacBrowser::Reader ReadBinHex(HfsPlus::Source& source,MacBrowser::Entry& entry,Storage::Job* job)
+{
+    constexpr char signature[]="(This file must be converted with BinHex 4.0)";
+    HfsPlus::Bytes probe(size_t((std::min)(source.Size(),uint64_t(512))));
+    if(probe.size()<sizeof(signature)-1)return {};
+    source.Read(0,probe.data(),probe.size());
+    if(std::search(probe.begin(),probe.end(),signature,signature+sizeof(signature)-1)==probe.end())return {};
+    Spool input;
+    HfsPlus::Bytes block(65536);
+    for(uint64_t at=0;at<source.Size();){
+        if(job)Cancel(*job);
+        const auto count=size_t((std::min)(uint64_t(block.size()),source.Size()-at));
+        source.Read(at,block.data(),count);
+        input.Write(block.data(),count);
+        at+=count;
+    }
+    return DecodeBinHex(input,entry,job);
+}
+
 bool Supported(char mode) { return ContainerMode(mode)||mode=='t'; }
 
 bool RecognizesContainer(char mode,Volume& volume,const Entry& entry)

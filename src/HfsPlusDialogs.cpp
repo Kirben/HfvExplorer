@@ -425,7 +425,7 @@ void ConvertDmgImage(BrowserSession& session)
     auto parent=session.Owner();
     std::wstring source,destination;
     if(!FileDialog(parent->m_hWnd,source,false,
-        L"Disk images\0*.dmg;*.img;*.dsk;*.hfv;*.hfs;*.iso;*.smi;*.bin\0All files\0*.*\0\0",nullptr,
+        L"Disk images\0*.dmg;*.img;*.dsk;*.hfv;*.hfs;*.iso;*.smi;*.bin;*.hqx;*.as\0All files\0*.*\0\0",nullptr,
         L"Choose a disk image to convert"))return;
     DWORD type=1;
     if(!FileDialog(parent->m_hWnd,destination,true,

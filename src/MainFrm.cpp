@@ -659,7 +659,7 @@ void CMainFrame::OnFileOpenImage()
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return;
  auto& session=GetBrowserSession();
  CFileDialog dialog(TRUE,"DSK",nullptr,OFN_HIDEREADONLY|OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR,
-    "Disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42;*.iso;*.udf;*.dmg;*.cue;*.bin;*.smi|All Files|*.*||",session.Owner());
+    "Disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42;*.iso;*.udf;*.dmg;*.cue;*.bin;*.smi;*.hqx;*.as|All Files|*.*||",session.Owner());
  if(dialog.DoModal()==IDOK)session.Document()->OnOpenDocument(dialog.GetPathName());
 }
 void CMainFrame::OnOpenRecentImage(UINT command)

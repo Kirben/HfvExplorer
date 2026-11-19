@@ -3,6 +3,7 @@
 #ifdef HFV_TESTING
 #include "NdifImage.h"
 #include "DmgImage.h"
+#include "TransferConversion.h"
 #include "ReadOnlyCdBackend.h"
 #include "HfsPlusDisk.h"
 #include "MacBrowserModel.h"
@@ -248,6 +249,33 @@ int RunNdifImageTest(const char* directory)
                   "NDIF AppleSingle, AppleDouble or named resource fork did not mount");
         }
         fprintf(report,"PASS: AppleSingle, AppleDouble and NTFS AFP_Resource NDIF images opened read-only.\n");
+        const auto carrier=VolumeCoord::Wide(root+"carrier.raw");
+        {
+            auto target=CreateFormatOutput(carrier.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*target,u"Carrier",false);
+            HfsPlus::Volume volume(*target,true);
+            volume.Put(2,u"Wrapped disk",volumeBytes.size(),resource.size(),[&](unsigned fork,uint64_t at,void* bytes,size_t n){
+                memcpy(bytes,(fork?resource:volumeBytes).data()+size_t(at),n);
+            });
+            target->Keep();
+        }
+        auto carrierVolume=MacBrowser::OpenImage(carrier);
+        auto forkEntry=carrierVolume->List().at(0);
+        Storage::Job encodeBinHex;
+        auto encoded=TransferConversion::Adapt('b',false,*carrierVolume,forkEntry,encodeBinHex);
+        Bytes binhex(size_t(forkEntry.forks[0].size));
+        for(size_t at=0;at<binhex.size();){
+            const auto count=(std::min)(size_t(65536),binhex.size()-at);
+            encoded(0,at,binhex.data()+at,count);
+            at+=count;
+        }
+        const auto binHexPath=Save(root+"volume.smi.hqx",binhex);
+        auto fromBinHex=MacBrowser::OpenBrowserImage(binHexPath);
+        Check(fromBinHex&&fromBinHex->Name()==u"NDIF Fixture"&&!fromBinHex->Writable(),"NDIF in BinHex was not detected");
+        binhex.resize(binhex.size()-12);
+        std::unique_ptr<Source> damaged=std::make_unique<Memory>(std::move(binhex));
+        Reject([&]{Ndif::Unwrap(damaged);},"NDIF accepted an incomplete BinHex resource fork");
+        fprintf(report,"PASS: BinHex NDIF mount, fork CRCs and truncated carrier rejection.\n");
         auto mounted=MacBrowser::OpenBrowserImage(path);
         Check(mounted&&mounted->Name()==u"NDIF Fixture"&&!mounted->Writable(),"NDIF did not mount in the browser");
 

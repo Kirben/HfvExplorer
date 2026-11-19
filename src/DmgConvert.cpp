@@ -310,7 +310,7 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         auto input=HfsPlus::OpenImage(source.c_str(),false);
         const bool encrypted=Unlock(input,password);
         const bool dmg=Unwrap(input);
-        const bool ndif=!dmg&&!encrypted&&Ndif::Unwrap(input);
+        const bool ndif=!dmg&&!encrypted&&Ndif::Unwrap(input,&current);
         Check(format!=Output::RawImage||dmg||encrypted||ndif,"The input does not contain a DMG or NDIF disk image");
         auto output=HfsPlus::CreateStagedOutput(destination,512);
         output->Resize(0);
