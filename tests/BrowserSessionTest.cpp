@@ -367,6 +367,16 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !a.Session().Navigating();},"classic startup folder did not publish");
    Check(Find(a.list,L"found")>=0&&Find(b.list,L"second classic")>=0,
          "classic startup path opened the wrong folder or volume");
+   {
+    Panes mirror;
+    const auto sourceFolder=a.tree.GetTreeCtrl().GetSelectedItem();
+    Check(mirror.Session().OpenFolderFrom(a.Session(),sourceFolder),"open classic folder in another mount inventory");
+    PumpUntil([&]{return !mirror.Session().Navigating();},"second classic browser did not finish");
+    const auto original=a.Session().Mounts().FindClassicVolume(VolumeCoord::Wide(image));
+    const auto duplicate=mirror.Session().Mounts().FindClassicVolume(VolumeCoord::Wide(image));
+    Check(original&&duplicate&&original->root!=duplicate->root&&Find(mirror.list,L"found")>=0&&
+          a.tree.GetTreeCtrl().GetSelectedItem()==sourceFolder,"classic mount inventory shared tree or selection state");
+   }
    a.tree.GetTreeCtrl().SelectItem(classicRoot);
    PumpUntil([&]{return !a.Session().Navigating();},"return to classic root after startup folder");
   }
@@ -431,9 +441,15 @@ int RunBrowserSessionTest(const char* directory){
     auto original=session.MacBrowser().CaptureItem(row);
     Check(original.IsPhysical()&&original.MediaGenerationKnown(),"floppy row did not bind its media generation");
     auto& mounted=startup.m_volumes[0];
+    const auto attachment=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,0});
+    Check(attachment&&attachment->generation==original.MediaGeneration(),"inventory lost the floppy media generation");
     ++mounted.m_mediaGeneration;
+    Check(!session.Mounts().IsCurrent(*attachment),"inventory accepted a mount with replaced media");
     auto stale=session.MacBrowser().CaptureItem(row);
     --mounted.m_mediaGeneration;
+    Check(session.Mounts().IsCurrent(*attachment),"inventory lost the original mount");
+    session.NavigationMediaChanged(1u<<25);
+    Check(!session.Mounts().IsCurrent(*attachment),"media notice did not invalidate the captured mount");
     Check(stale.MediaGenerationKnown()&&stale.MediaGeneration()==original.MediaGeneration(),
           "a command rebound a published row to replacement floppy media");
     fprintf(report,"PASS: selecting a simulated Mac floppy with startup/automatic detection disabled mounts HFS and lists its file without attempting Windows folder enumeration.\n");

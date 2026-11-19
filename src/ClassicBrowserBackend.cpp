@@ -292,10 +292,9 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  reader->m_hfs_count=index+1;
  const auto finder=session.finderLayout;
  auto route=std::make_shared<std::vector<ClassicAncestor>>();
- const auto mountCurrent=[this,index,root,image]{
-  return index<m_hfs_count&&!m_volumes[index].m_free&&m_volumes[index].m_rootitem==root&&
-         m_volumes[index].m_file_name==image;
- };
+ const auto mount=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,index});
+ if(!mount)return false;
+ const auto mountCurrent=[this,mount]{return GetBrowserSession().Mounts().IsCurrent(*mount);};
  const auto retry=[this,index,id,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
   if(!NavigateClassicFolder(index,id,refresh,found?&*found:nullptr))
    GetBrowserSession().RejectNavigation(found?found->resource:std::string(),"The classic HFS volume changed.");

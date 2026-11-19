@@ -5,6 +5,7 @@
 namespace BrowserDirectory { struct Row; struct Snapshot; }
 #include "VolumeCoordinator.h"
 #include "BrowserNavigation.h"
+#include "BrowserMountInventory.h"
 namespace Storage { class Job; struct Result; }
 class CHFVExplorerDoc;
 class HFVExplorerTreeView;
@@ -19,8 +20,7 @@ class BrowserSession {
  std::unique_ptr<Notifications> notifications_;
  VolumeCoord::Subscription subscription_;
  struct Context {std::string key,path;uint64_t revision=0;int type=0,index=-1;uint32_t folder=2;std::wstring windowsPath;};
- struct KnownRoot{int type,index;std::string origin;};
- std::map<std::string,std::vector<KnownRoot>> roots_;
+ BrowserMountInventory mounts_;
  Context current_;
  std::map<std::string,uint64_t> seen_,dirty_;
  bool refreshing_=false,listingPending_=false;
@@ -60,11 +60,13 @@ public:
     CWnd* Owner()const{return owner_;}
     CStatusBar* Status()const{return status_;}
     MainMacBrowser& MacBrowser()const{return *browser_;}
+    BrowserMountInventory& Mounts(){return mounts_;}
+    const BrowserMountInventory& Mounts()const{return mounts_;}
     void Watch(const std::string&);
     void PresentDirectory(const BrowserDirectory::Snapshot&, int type, int index,
         uint32_t folder, const std::string& path, bool listing,
         const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder);
-    void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={},std::wstring windowsPath={});
+    void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={},std::wstring windowsPath={},std::optional<DWORD> windowsSerial={});
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
     void CancelNavigation();

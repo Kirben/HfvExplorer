@@ -113,9 +113,9 @@ void ForgetFolders(const std::shared_ptr<Volume>& volume) {
 }
 struct MainMacBrowser::State {
     BrowserSession& session_;
-    explicit State(BrowserSession& session):session_(session){}
-    struct Mount {std::shared_ptr<Volume> volume;std::wstring key;HTREEITEM root=nullptr;int drive=-1;std::wstring physicalPath,suffix;uint64_t physicalOffset=0;};
-    std::vector<Mount> mounts;bool removableScanned=false;
+    explicit State(BrowserSession& session):session_(session),mounts(session.Mounts().mounted){}
+    using Mount=BrowserMountInventory::Mount;
+    std::vector<Mount>& mounts;bool removableScanned=false;
 
     int current=-1;uint32_t folder=2;bool showing=false,folderMutable=true;
     std::vector<uint32_t> restore;
@@ -291,9 +291,9 @@ struct MainMacBrowser::State {
             request.mediaDrive=drive;
             const auto physicalPath=mount.physicalPath;
             const auto physicalOffset=mount.physicalOffset;
-            const auto mountCurrent=[this,index,volume,mountRoot]{
-                return index>=0&&size_t(index)<mounts.size()&&mounts[index].root==mountRoot&&mounts[index].volume==volume;
-            };
+            const auto capturedMount=session_.Mounts().Lookup({BrowserMountInventory::Kind::MountedVolume,index});
+            if(!capturedMount)return false;
+            const auto mountCurrent=[this,capturedMount]{return session_.Mounts().IsCurrent(*capturedMount);};
             const auto retry=[this,index,id,item,rebuild,reload,found=find?std::optional<Request>(*find):std::nullopt]{
                 Show(index,id,item,rebuild,true,reload,found?&*found:nullptr);
             };

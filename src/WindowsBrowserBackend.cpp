@@ -247,9 +247,9 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
  request.folder.directory=true;
  request.mediaDrive=drive;
  request.resource=deviceKey.empty()?session.ObservedWindowsKey(path):deviceKey;
- const auto mountCurrent=[this,index,root,drive]{
-  return index<m_fat_count&&m_fats[index].m_rootitem==root&&toupper((unsigned char)m_fats[index].m_letter)-'A'==drive;
- };
+ const auto mount=session.Mounts().Lookup({BrowserMountInventory::Kind::WindowsDrive,index});
+ if(!mount)return false;
+ const auto mountCurrent=[this,mount]{return GetBrowserSession().Mounts().IsCurrent(*mount);};
  const auto retry=[this,index,path,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
   NavigateWindowsFolder(index,path,refresh,found?&*found:nullptr);
  };
