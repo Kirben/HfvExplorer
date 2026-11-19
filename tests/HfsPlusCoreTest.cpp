@@ -387,9 +387,51 @@ void fragmentedCatalog(Volume::FormatKind kind = Volume::FormatKind::HfsPlus) {
         must(v.List().size() == 3, "Reopen modified fragmented catalog");
     }
 }
+void writeApmEntry(Memory& image, unsigned block, unsigned index, unsigned count,
+                   uint32_t firstBlock, uint32_t blocks, const char* type) {
+    auto entry = image.bytes.data() + uint64_t(index) * block;
+    Disk::P16(entry, 0x504d);
+    Disk::P32(entry + 4, count);
+    Disk::P32(entry + 8, firstBlock);
+    Disk::P32(entry + 12, blocks);
+    memcpy(entry + 48, type, strlen(type) + 1);
+}
+
+void unsafeApm(const Memory& raw) {
+    constexpr uint32_t offset = 4096;
+    Memory overlapping(raw.bytes.size() + offset);
+    memcpy(overlapping.bytes.data() + offset, raw.bytes.data(), raw.bytes.size());
+    // The first entry looks valid on its own. The later non-Mac entry overlaps it.
+    writeApmEntry(overlapping, 512, 1, 2, offset / 512, uint32_t(raw.Size() / 512), "Apple_HFS");
+    writeApmEntry(overlapping, 512, 2, 2, offset / 512 + 32, 1, "Apple_UNIX_SVR2");
+    const auto originalOverlap = overlapping.bytes;
+    fails([&] { Volume volume(overlapping, true); }, "Writable open accepted overlapping Apple partitions");
+    must(overlapping.writes == 0 && overlapping.bytes == originalOverlap,
+         "Rejection of overlapping Apple partitions wrote into the image");
+
+    Memory coveringMap(raw.bytes.size() + offset);
+    memcpy(coveringMap.bytes.data() + offset, raw.bytes.data(), raw.bytes.size());
+    Disk::P16(coveringMap.bytes.data(), 0x4552);
+    Disk::P16(coveringMap.bytes.data() + 2, offset);
+    // The map entry is in the partition's unused boot area. There is no
+    // Apple_partition_map entry to reveal this overlap as an ordinary range.
+    writeApmEntry(coveringMap, offset, 1, 1, 1, uint32_t(raw.Size() / offset), "Apple_HFS");
+    const auto originalMap = coveringMap.bytes;
+    {
+        Volume volume(coveringMap);
+        must(!volume.Writable() && volume.List().size() == 2,
+             "Map-overlapping volume could not be opened read-only");
+        fails([&] { volume.MakeDirectory(2, u"Blocked"); }, "Read-only volume accepted a write");
+    }
+    fails([&] { Volume volume(coveringMap, true); }, "Writable open accepted Apple partition map sectors");
+    must(coveringMap.writes == 0 && coveringMap.bytes == originalMap,
+         "Map-overlapping partition modified the disk image");
+}
+
 void containers() {
     Memory raw(16 * 1024 * 1024);
     Volume::Format(raw, u"Containers", true);
+    unsafeApm(raw);
     Memory apm(raw.bytes.size() + 4096);
     memcpy(apm.bytes.data() + 4096, raw.bytes.data(), raw.bytes.size());
     auto p = apm.bytes.data();

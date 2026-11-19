@@ -90,20 +90,25 @@ uint64_t Locate(Source &s, uint64_t &length, bool write = false) {
     if (s.Size() < 2048)
         return UINT64_MAX;
     auto dd = Disk::Read(s, 0, 512);
-    if (auto partitions = DiskPartitions::ProbeGptImage(s, dd)) {
-        for (const auto& partition : *partitions) {
+    auto locatePartition = [&](const std::vector<DiskPartitions::MacPartition>& partitions,
+                               const char* readOnlyError) -> uint64_t {
+        for (const auto& partition : partitions) {
             if (partition.length < 2048)
                 continue;
             const auto header = Disk::Read(s, partition.offset + 1024, 4);
             const auto sig = U16(header.data()), version = U16(header.data() + 2);
             if ((sig == 0x482b && version == 4) || (sig == 0x4858 && version == 5)) {
-                Check(!write || !partition.readOnly, "GPT partition is marked read-only");
+                Check(!write || !partition.readOnly, readOnlyError);
                 length = partition.length;
                 return partition.offset;
             }
         }
         return UINT64_MAX;
-    }
+    };
+    if (auto partitions = DiskPartitions::ProbeGptImage(s, dd))
+        return locatePartition(*partitions, "GPT partition is marked read-only");
+    if (auto partitions = DiskPartitions::ProbeApm(s, dd))
+        return locatePartition(*partitions, "Apple partition overlaps the partition map and is read-only");
     auto vh = Disk::Read(s, 1024, 512);
     uint16_t sig = U16(vh.data());
     if (sig == 0x482b || sig == 0x4858)
@@ -116,32 +121,6 @@ uint64_t Locate(Source &s, uint64_t &length, bool write = false) {
             auto embedded = Disk::Read(s, b + 1024, 2);
             Check(U16(embedded.data()) != 0x4858, "HFSX must not be embedded in an HFS wrapper");
             return b;
-        }
-    }
-    uint32_t step = U16(dd.data()) == 0x4552 ? U16(dd.data() + 2) : 512;
-    if (step < 512 || step > 4096 || (step & (step - 1)))
-        return UINT64_MAX;
-    if (!Range(step, 512, s.Size()))
-        return UINT64_MAX;
-    auto first = Disk::Read(s, step, 512);
-    if (U16(first.data()) != 0x504d)
-        return UINT64_MAX;
-    uint32_t count = U32(first.data() + 4);
-    Check(count && count <= 4096, "Invalid Apple partition count");
-    for (uint32_t i = 1; i <= count; ++i) {
-        Check(Range(uint64_t(i) * step, 512, s.Size()), "Truncated Apple partition map");
-        auto p = Disk::Read(s, uint64_t(i) * step, 512);
-        if (U16(p.data()) != 0x504d)
-            throw Error("Invalid Apple partition entry");
-        if (memcmp(p.data() + 48, "Apple_HFS", 10) && memcmp(p.data() + 48, "Apple_HFSX", 11))
-            continue;
-        uint64_t base = uint64_t(U32(p.data() + 8)) * step, n = uint64_t(U32(p.data() + 12)) * step;
-        if (n < 2048 || !Range(base, n, s.Size()))
-            continue;
-        auto h = Disk::Read(s, base + 1024, 512);
-        if (U16(h.data()) == 0x482b || U16(h.data()) == 0x4858) {
-            length = n;
-            return base;
         }
     }
     return UINT64_MAX;
