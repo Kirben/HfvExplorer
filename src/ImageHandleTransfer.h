@@ -45,11 +45,19 @@ inline HANDLE Open(const wchar_t *path, bool write) {
     if (!Current())
         return INVALID_HANDLE_VALUE;
     auto canonical = Canonical(path);
+    // NTFS gives named streams the same file ID as the default data stream.
+    // Match them by name, so an inherited disk image cannot shadow its streams.
+    const auto namedStream = [](const std::wstring& name) {
+        const auto separator = name.find_last_of(L"\\/");
+        return separator != std::wstring::npos && name.find(L':', separator + 1) != std::wstring::npos;
+    };
+    const bool isStream = namedStream(canonical);
     BY_HANDLE_FILE_INFORMATION wanted{};
     bool have = false;
     for (const auto &file : *Current()) {
-        bool same = canonical == Canonical(file.path);
-        if (!same) {
+        const auto transferred = Canonical(file.path);
+        bool same = canonical == transferred;
+        if (!same && !isStream && !namedStream(transferred)) {
             if (!have) {
                 HANDLE h = CreateFileW(path, FILE_READ_ATTRIBUTES,
                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,

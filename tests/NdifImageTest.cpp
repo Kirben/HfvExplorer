@@ -93,12 +93,13 @@ void Row(Bytes& map,unsigned i,uint32_t start,uint8_t type,uint32_t at,uint32_t 
 }
 
 
-Bytes Apple(const Bytes& data,const Bytes& resource,bool single)
+Bytes Apple(const Bytes& data,const Bytes& resource,bool single,bool rdwr=false,bool locked=false)
 {
-    const auto first=single?50u:38u;
-    Bytes packed(first+(single?data.size():0)+resource.size());
+    const unsigned entries=(single?2:1)+(rdwr?2:0);
+    const auto first=26+entries*12;
+    Bytes packed(first+(single?data.size():0)+resource.size()+(rdwr?36:0));
     auto p=packed.data();
-    P32(p,single?0x00051600:0x00051607);P32(p+4,0x00020000);P16(p+24,single?2:1);
+    P32(p,single?0x00051600:0x00051607);P32(p+4,0x00020000);P16(p+24,uint16_t(entries));
     unsigned offset=26;
     if(single){
         P32(p+offset,1);P32(p+offset+4,first);P32(p+offset+8,uint32_t(data.size()));
@@ -108,6 +109,15 @@ Bytes Apple(const Bytes& data,const Bytes& resource,bool single)
     const auto start=first+(single?data.size():0);
     P32(p+offset,2);P32(p+offset+4,uint32_t(start));P32(p+offset+8,uint32_t(resource.size()));
     memcpy(p+start,resource.data(),resource.size());
+    if(rdwr){
+        const auto info=uint32_t(start+resource.size());
+        offset+=12;
+        P32(p+offset,9);P32(p+offset+4,info);P32(p+offset+8,32);
+        memcpy(p+info,"dimgddsk",8);
+        offset+=12;
+        P32(p+offset,10);P32(p+offset+4,info+32);P32(p+offset+8,4);
+        P32(p+info+32,locked?1:0);
+    }
     return packed;
 }
 
@@ -402,6 +412,39 @@ int RunNdifImageTest(const char* directory)
         RdWrCase(root,Disk::Read(*mfsFile,0,size_t(mfsFile->Size())),"MFS",true);
         fprintf(report,"PASS: HFS+, HFS and MFS in-place NDIF edits, exclusive writers, wrapper preservation and failed overwrite recovery.\n");
         const auto sectors=uint32_t(raw->Size()/512);
+        const auto rdwrMap=Resource(Map(sectors,0));
+        const auto appleSingle=Save(root+"editable.as",Apple(volumeBytes,rdwrMap,true,true));
+        auto appleDouble=Save(root+"editable.img",volumeBytes);
+        auto sidecar=Apple({},rdwrMap,false,true);
+        const auto sidecarPath=Save(root+"._editable.img",sidecar);
+        const auto nativePath=Save(root+"editable-ntfs.img",volumeBytes);
+        const auto saveStream=[&](const wchar_t* name,const Bytes& bytes){
+            const auto handle=CreateFileW((nativePath+name).c_str(),GENERIC_WRITE,0,nullptr,
+                                          CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+            Check(handle!=INVALID_HANDLE_VALUE,"Cannot write the NTFS writable NDIF fixture");
+            DWORD actual=0;
+            const bool okay=WriteFile(handle,bytes.data(),DWORD(bytes.size()),&actual,nullptr)!=FALSE;
+            CloseHandle(handle);
+            Check(okay&&actual==bytes.size(),"Cannot save the NTFS writable NDIF fixture");
+        };
+        saveStream(L":AFP_Resource",rdwrMap);
+        Bytes afp(60);
+        memcpy(afp.data(),"AFP",3);afp[6]=1;memcpy(afp.data()+16,"dimgddsk",8);
+        saveStream(L":AFP_AfpInfo",afp);
+        for(const auto& path:{appleSingle,appleDouble,nativePath}){
+            auto volume=MacBrowser::OpenBrowserImage(path);
+            Check(volume&&volume->Writable(),"Preserved Finder metadata did not enable the NDIF editor");
+            volume->MakeDirectory(2,u"NDIF edits");
+            volume.reset();
+            volume=MacBrowser::OpenBrowserImage(path);
+            MacBrowser::Entry present;
+            Check(volume->FindChild(2,u"NDIF edits",present),"Companion NDIF edit did not survive reopening");
+        }
+        auto untouched=HfsPlus::OpenImage(sidecarPath.c_str(),false);
+        Check(Disk::Read(*untouched,0,sidecar.size())==sidecar,"NDIF edit changed its AppleDouble companion");
+        const auto lockedApple=Save(root+"locked.as",Apple(volumeBytes,rdwrMap,true,true,true));
+        Check(!MacBrowser::OpenBrowserImage(lockedApple)->Writable(),"AppleSingle lock did not disable NDIF writes");
+        fprintf(report,"PASS: AppleSingle, AppleDouble and NTFS NDIF editing with preserved Finder metadata.\n");
         auto rawMap=Map(sectors,2);
         Row(rawMap,0,0,2,0,uint32_t(volumeBytes.size()));Row(rawMap,1,sectors,0xff,0,0);
         P32(rawMap.data()+80,Ndif::Checksum(UINT32_MAX,volumeBytes.data(),volumeBytes.size()));

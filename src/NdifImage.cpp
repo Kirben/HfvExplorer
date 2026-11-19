@@ -29,6 +29,7 @@ struct Part {
     Fork data;
     uint64_t start=0;
     uint32_t checksum=0;
+    std::unique_ptr<Source> finderFile;
 };
 struct Chunk {uint64_t at,length,packedAt,packedLength;uint8_t type;};
 struct Layout {uint64_t length;uint32_t checksum;std::vector<Chunk> chunks;};
@@ -65,6 +66,7 @@ std::optional<Forks> AppleContainer(Source& source,uint32_t magic)
     const auto entries=Disk::Read(source,26,size_t(bytes));
     const auto first=26+bytes;
     Forks forks;
+    Fork finder,attributes;
     std::set<uint32_t> ids;
     std::vector<std::pair<uint64_t,uint64_t>> ranges;
     for(size_t i=0;i<entries.size();i+=12){
@@ -75,11 +77,19 @@ std::optional<Forks> AppleContainer(Source& source,uint32_t magic)
         if(length)ranges.emplace_back(at,at+length);
         if(id==1)forks.data={at,length};
         if(id==2)forks.resource={at,length};
+        if(id==9)finder={at,length};
+        if(id==10)attributes={at,length};
     }
     std::sort(ranges.begin(),ranges.end());
     for(size_t i=1;i<ranges.size();++i)
         if(ranges[i-1].second>ranges[i].first)return {};
     if(magic==0x00051607&&ids.count(1))return {};
+    if(version==0x20000&&finder.length>=32){
+        const auto info=Disk::Read(source,finder.at,8);
+        const bool unlocked=!ids.count(10)||(attributes.length==4&&
+                            U32(Disk::Read(source,attributes.at,4).data())==0);
+        forks.writableType=unlocked&&!memcmp(info.data(),"dimgddsk",8);
+    }
     return forks;
 }
 
@@ -355,6 +365,7 @@ public:
         for(const auto& part:parts_){
             part.dataFile->CheckMedia();
             if(part.resourceFile)part.resourceFile->CheckMedia();
+            if(part.finderFile)part.finderFile->CheckMedia();
         }
     }
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{
@@ -366,6 +377,7 @@ public:
         for(const auto& part:parts_){
             add(*part.dataFile);
             if(part.resourceFile)add(*part.resourceFile);
+            if(part.finderFile)add(*part.finderFile);
         }
         return files;
     }
@@ -458,7 +470,7 @@ uint32_t Checksum(uint32_t running,const void* bytes,size_t count)
 bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
 {
     auto install=[&](Fork data,Source& metadata,Fork resource,std::unique_ptr<Source> companion={},
-                     std::unique_ptr<BinHexForks> decoded={},bool writableType=false){
+                     std::unique_ptr<BinHexForks> decoded={},bool writableType=false,std::unique_ptr<Source> finder={}){
         const auto map=Resource(metadata,resource,"bcem");
         const auto segment=SegmentInfo(metadata,resource);
         if(!map){
@@ -497,6 +509,7 @@ bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
             parts[0].dataFile=std::move(decoded);
         }else parts[0].dataFile=std::move(input);
         parts[0].resourceFile=std::move(companion);
+        parts[0].finderFile=std::move(finder);
         input=std::make_unique<Image>(std::move(parts),std::move(layout),direct);
         return true;
     };
@@ -512,7 +525,7 @@ bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
         }
     }
     if(auto forks=AppleContainer(*input,0x00051600)){
-        if(install(forks->data,*input,forks->resource))return true;
+        if(install(forks->data,*input,forks->resource,{},{},forks->writableType))return true;
     }
     MacBrowser::Entry transport;
     if(auto reader=TransferConversion::ReadBinHex(*input,transport,job)){
@@ -527,14 +540,21 @@ bool Unwrap(std::unique_ptr<Source>& input,Storage::Job* job)
     if(auto stream=OptionalFile(path+L":AFP_Resource")){
         const auto size=stream->Size();
         auto& resource=*stream;
-        if(install({0,input->Size()},resource,{0,size},std::move(stream)))return true;
+        bool writableType=false;
+        auto finder=OptionalFile(path+L":AFP_AfpInfo");
+        if(finder&&finder->Size()==60){
+            const auto info=Disk::Read(*finder,0,60);
+            constexpr unsigned char header[]={'A','F','P',0,0,0,1,0};
+            writableType=!memcmp(info.data(),header,sizeof(header))&&!memcmp(info.data()+16,"dimgddsk",8);
+        }
+        if(install({0,input->Size()},resource,{0,size},std::move(stream),{},writableType,std::move(finder)))return true;
     }
     const auto split=path.find_last_of(L"\\/");
     const auto fileName=split==std::wstring::npos?0:split+1;
     if(auto sidecar=OptionalFile(path.substr(0,fileName)+L"._"+path.substr(fileName))){
         if(const auto forks=AppleContainer(*sidecar,0x00051607)){
             auto& resource=*sidecar;
-            return install({0,input->Size()},resource,forks->resource,std::move(sidecar));
+            return install({0,input->Size()},resource,forks->resource,std::move(sidecar),{},forks->writableType);
         }
     }
     return false;
