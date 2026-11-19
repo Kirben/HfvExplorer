@@ -2,6 +2,7 @@
 // On-disk structures are decoded explicitly, following Apple TN1150. No native
 // structs, compiler packing assumptions, or third-party filesystem engine.
 #include "HfsPlusDisk.h"
+#include "DiskPartitions.h"
 #include "HfsPlusBTree.h"
 #include "HfsPlusCompression.h"
 #include "HfsPlusTime.h"
@@ -84,10 +85,25 @@ void ForkStage(View &v, const Fork &f, uint32_t bs, const Bytes &data) {
     }
     Check(pos == data.size(), "Metadata fork is too short");
 }
-uint64_t Locate(Source &s, uint64_t &length) {
+uint64_t Locate(Source &s, uint64_t &length, bool write = false) {
     length = s.Size();
     if (s.Size() < 2048)
         return UINT64_MAX;
+    auto dd = Disk::Read(s, 0, 512);
+    if (auto partitions = DiskPartitions::ProbeGptImage(s, dd)) {
+        for (const auto& partition : *partitions) {
+            if (partition.length < 2048)
+                continue;
+            const auto header = Disk::Read(s, partition.offset + 1024, 4);
+            const auto sig = U16(header.data()), version = U16(header.data() + 2);
+            if ((sig == 0x482b && version == 4) || (sig == 0x4858 && version == 5)) {
+                Check(!write || !partition.readOnly, "GPT partition is marked read-only");
+                length = partition.length;
+                return partition.offset;
+            }
+        }
+        return UINT64_MAX;
+    }
     auto vh = Disk::Read(s, 1024, 512);
     uint16_t sig = U16(vh.data());
     if (sig == 0x482b || sig == 0x4858)
@@ -102,7 +118,6 @@ uint64_t Locate(Source &s, uint64_t &length) {
             return b;
         }
     }
-    auto dd = Disk::Read(s, 0, 512);
     uint32_t step = U16(dd.data()) == 0x4552 ? U16(dd.data() + 2) : 512;
     if (step < 512 || step > 4096 || (step & (step - 1)))
         return UINT64_MAX;
@@ -320,7 +335,7 @@ struct Volume::Impl {
     uint32_t fileMetadata = 0, directoryMetadata = 0;
     explicit Impl(Source &s, bool w) : source(s), view(s), journal(view), write(w) {
         Check(!w || s.Writable(), "Cannot open a read-only image for writing");
-        view.base = Locate(s, view.length);
+        view.base = Locate(s, view.length, w);
         Check(view.base != UINT64_MAX, "No HFS+ volume found");
         LoadHeader();
         // A relocated journal can be discovered through either committed redo

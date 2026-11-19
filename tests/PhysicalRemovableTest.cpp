@@ -57,7 +57,120 @@ void Verify(MacBrowser::Volume& v){auto id=Find(v,2,u"Hello");auto e=v.Stat(id);
 void Little(uint8_t* p,uint64_t n,unsigned bytes){for(unsigned i=0;i<bytes;++i)p[i]=uint8_t(n>>(i*8));}
 uint32_t Crc(const Bytes& b){uint32_t crc=~0u;for(auto x:b){crc^=x;for(unsigned j=0;j<8;++j)crc=(crc>>1)^(0xedb88320u&uint32_t(-int(crc&1)));}return ~crc;}
 std::shared_ptr<Store> Apm(Fake& api,std::shared_ptr<Bytes> classic,std::shared_ptr<Bytes> plus){auto d=api.Add(L"Zip APM",std::make_shared<Bytes>(2048),BusTypeScsi,true);uint64_t base=4ULL*1024*1024*1024+65536,next=base+classic->size()+65536;d->geometry.bytes=next+plus->size();auto& head=*d->segments[0];B::P16(head.data(),0x4552);B::P16(head.data()+2,512);B::P32(head.data()+4,uint32_t(d->geometry.bytes/512));for(unsigned i=0;i<3;++i){auto p=head.data()+(i+1)*512;B::P16(p,0x504d);B::P32(p+4,3);B::P32(p+8,uint32_t(i==0?1:(i==1?base:next)/512));B::P32(p+12,uint32_t(i==0?3:(i==1?classic->size():plus->size())/512));strcpy(reinterpret_cast<char*>(p+48),i==0?"Apple_partition_map":"Apple_HFS");}d->segments[base]=classic;d->segments[next]=plus;return d;}
-std::shared_ptr<Store> Gpt(Fake& api,std::shared_ptr<Bytes> plus,DWORD sector){auto d=api.Add((L"USB GPT "+std::to_wstring(sector)).c_str(),std::make_shared<Bytes>(512),BusTypeUsb,false);d->geometry.sector=sector;d->geometry.bytes=plus->size()+2*1024*1024;auto sectors=d->geometry.bytes/sector;auto& boot=*d->segments[0];boot[510]=0x55;boot[511]=0xaa;boot[450]=0xee;Little(boot.data()+454,1,4);Little(boot.data()+458,sectors-1,4);auto table=std::make_shared<Bytes>(512);static const uint8_t type[]={0,0x53,0x46,0x48,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};memcpy(table->data(),type,16);(*table)[16]=1;auto start=1024*1024/sector;Little(table->data()+32,start,8);Little(table->data()+40,start+plus->size()/sector-1,8);for(bool backup:{false,true}){auto h=std::make_shared<Bytes>(sector);memcpy(h->data(),"EFI PART",8);Little(h->data()+8,0x10000,4);Little(h->data()+12,92,4);Little(h->data()+24,backup?sectors-1:1,8);Little(h->data()+32,backup?1:sectors-1,8);Little(h->data()+40,34,8);Little(h->data()+48,sectors-34,8);(*h)[56]=9;Little(h->data()+72,backup?sectors-2:2,8);Little(h->data()+80,4,4);Little(h->data()+84,128,4);Little(h->data()+88,Crc(*table),4);Little(h->data()+16,Crc(Bytes(h->begin(),h->begin()+92)),4);d->segments[(backup?sectors-1:1)*sector]=h;d->segments[(backup?sectors-2:2)*sector]=std::make_shared<Bytes>(*table);}d->segments[1024*1024]=plus;return d;}
+std::shared_ptr<Store> Gpt(Fake& api,std::shared_ptr<Bytes> plus,DWORD sector,uint64_t base=1024*1024){auto d=api.Add((L"USB GPT "+std::to_wstring(sector)).c_str(),std::make_shared<Bytes>(512),BusTypeUsb,false);d->geometry.sector=sector;d->geometry.bytes=base+plus->size()+1024*1024;auto sectors=d->geometry.bytes/sector;auto& boot=*d->segments[0];boot[510]=0x55;boot[511]=0xaa;boot[450]=0xee;Little(boot.data()+454,1,4);Little(boot.data()+458,sectors-1,4);auto table=std::make_shared<Bytes>(512);static const uint8_t type[]={0,0x53,0x46,0x48,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};memcpy(table->data(),type,16);(*table)[16]=1;auto start=base/sector;Little(table->data()+32,start,8);Little(table->data()+40,start+plus->size()/sector-1,8);for(bool backup:{false,true}){auto h=std::make_shared<Bytes>(sector);memcpy(h->data(),"EFI PART",8);Little(h->data()+8,0x10000,4);Little(h->data()+12,92,4);Little(h->data()+24,backup?sectors-1:1,8);Little(h->data()+32,backup?1:sectors-1,8);Little(h->data()+40,34,8);Little(h->data()+48,sectors-34,8);(*h)[56]=9;Little(h->data()+72,backup?sectors-2:2,8);Little(h->data()+80,4,4);Little(h->data()+84,128,4);Little(h->data()+88,Crc(*table),4);Little(h->data()+16,Crc(Bytes(h->begin(),h->begin()+92)),4);d->segments[(backup?sectors-1:1)*sector]=h;d->segments[(backup?sectors-2:2)*sector]=std::make_shared<Bytes>(*table);}d->segments[base]=plus;return d;}
+void UpdateGptTable(Store& image,const Bytes& table)
+{
+ const auto sector=image.geometry.sector;
+ const auto sectors=image.geometry.bytes/sector;
+ for(bool backup:{false,true}){
+  const auto lba=backup?sectors-1:1;
+  auto header=std::make_shared<Bytes>(*image.segments.at(lba*sector));
+  Little(header->data()+88,Crc(table),4);
+  Little(header->data()+16,0,4);
+  Little(header->data()+16,Crc(Bytes(header->begin(),header->begin()+92)),4);
+  image.segments[lba*sector]=std::move(header);
+  image.segments[(backup?sectors-2:2)*sector]=std::make_shared<Bytes>(table);
+ }
+}
+
+std::wstring SaveGptImage(const std::string& path,const Store& image)
+{
+ const auto wide=VolumeCoord::Wide(path);
+ auto file=HfsPlus::CreateFormatOutput(wide.c_str(),image.geometry.bytes);
+ for(const auto& [offset,bytes]:image.segments)
+  file->Write(offset,bytes->data(),bytes->size());
+ file->Flush();
+ file->Keep();
+ return wide;
+}
+
+std::wstring GptImages(const std::string& root,const Store& gpt,const std::shared_ptr<Bytes>& hfsPlus,const std::shared_ptr<Bytes>& hfsx)
+{
+ auto layout=gpt;
+ layout.segments[1024*1024]=hfsPlus;
+ const auto sector=layout.geometry.sector;
+ auto table=*layout.segments.at(2*sector);
+ // Put an unrelated partition before the HFS+ entry.
+ memcpy(table.data()+128,table.data(),128);
+ table[0]=0xda;
+ table[16]=2;
+ const auto neighbor=1024*1024-2*sector;
+ Little(table.data()+32,neighbor/sector,8);
+ Little(table.data()+40,neighbor/sector+1,8);
+ layout.segments[neighbor]=std::make_shared<Bytes>(2*sector,0x5a);
+ UpdateGptTable(layout,table);
+ const auto path=SaveGptImage(root+"\\GPT 512.img",layout);
+ {
+  const auto volume=MacBrowser::OpenBrowserImage(path);
+  Check(volume&&volume->Writable()&&!strcmp(volume->Kind(),"HFS+")&&volume->Journaled()&&
+        MacBrowser::ExecutionFor(*volume).Persistent(),"Open journaled HFS+ from GPT on its persistent worker");
+  Verify(*volume);
+  const auto id=volume->MakeDirectory(2,u"GPT folder");
+  volume->Rename(id,2,u"GPT edited");
+  Check(Find(*volume,2,u"GPT edited")==id,"GPT rename did not update the worker catalog");
+ }
+ {
+  const auto volume=MacBrowser::OpenImage(path);
+  Check(volume&&volume->Writable(),"Reopen the modified GPT volume");
+  Find(*volume,2,u"GPT edited");
+  Verify(*volume);
+ }
+ {
+  auto image=HfsPlus::OpenImage(path.c_str(),false);
+  Check(image->Size()==layout.geometry.bytes,"GPT write changed the disk image length");
+  for(const auto& [offset,bytes]:layout.segments)
+   if(offset!=1024*1024)
+    Check(B::Read(*image,offset,bytes->size())==*bytes,"GPT write changed partition tables or neighboring data");
+ }
+ auto bad=layout;
+ const auto last=bad.geometry.bytes-sector;
+ bad.segments[last]=std::make_shared<Bytes>(*bad.segments.at(last));
+ (*bad.segments[last])[16]^=1;
+ const auto corrupt=SaveGptImage(root+"\\bad backup GPT.img",bad);
+ Reject([&]{MacBrowser::OpenImage(corrupt);},"GPT image accepted a corrupt backup header");
+
+ bad=layout;
+ auto overlapping=table;
+ Little(overlapping.data()+40,1024*1024/sector,8);
+ UpdateGptTable(bad,overlapping);
+ const auto overlap=SaveGptImage(root+"\\overlapping GPT.img",bad);
+ Reject([&]{MacBrowser::OpenImage(overlap);},"GPT image accepted overlapping partitions");
+
+ bad=layout;
+ auto undersized=table;
+ Little(undersized.data()+128+40,1024*1024/sector+7,8);
+ UpdateGptTable(bad,undersized);
+ const auto shortPartition=SaveGptImage(root+"\\short partition GPT.img",bad);
+ Reject([&]{MacBrowser::OpenImage(shortPartition);},"HFS+ geometry escaped the declared partition");
+
+ auto locked=table;
+ Little(locked.data()+128+48,1ULL<<60,8);
+ bad=layout;
+ UpdateGptTable(bad,locked);
+ const auto readOnly=SaveGptImage(root+"\\read-only GPT.img",bad);
+ {
+  const auto volume=MacBrowser::OpenBrowserImage(readOnly);
+  Check(volume&&!volume->Writable(),"GPT read-only partition flag was ignored");
+  Verify(*volume);
+  Reject([&]{volume->MakeDirectory(2,u"Forbidden");},"Read-only partition allowed a catalog write");
+ }
+ Fake large;
+ const auto gpt4=Gpt(large,hfsx,4096,(4ULL<<30)+1024*1024);
+ const auto largePath=SaveGptImage(root+"\\GPT 4096 large.img",*gpt4);
+ {
+  const auto volume=MacBrowser::OpenBrowserImage(largePath);
+  Check(volume&&volume->Writable()&&volume->CaseSensitive()&&!strcmp(volume->Kind(),"HFSX"),
+        "4096-byte GPT partition beyond 4 GiB did not retain HFSX case mode");
+  Verify(*volume);
+  volume->MakeDirectory(2,u"Above 4 GiB");
+ }
+ {
+  const auto volume=MacBrowser::OpenImage(largePath);
+  Check(volume!=nullptr,"Reopen the large-sector GPT image");
+  Find(*volume,2,u"Above 4 GiB");
+ }
+ return path;
+}
 void Pump(){MSG m;while(PeekMessage(&m,nullptr,0,0,PM_REMOVE))if(m.message!=WM_QUIT){TranslateMessage(&m);DispatchMessage(&m);}}
 FileOperations::Operation Copy(std::shared_ptr<MacBrowser::Volume> source,std::shared_ptr<MacBrowser::Volume> target,bool success=true){FileOperations::Request r;r.background=true;FileOperations::Location from,to;from.SetMounted(source,Find(*source,2,u"Hello"));to.SetMounted(target,2);r.Copy().sources={from};r.Copy().destination=to;auto op=FileOperations::Submit(r);auto start=GetTickCount();while(!op.Job()->done()){if(!op.Job()->conflict().empty())op.Job()->resolve(Storage::ConflictChoice::Replace);Check(GetTickCount()-start<15000,"Removable copy timed out");Pump();Sleep(1);}Check((op.Job()->result().code==0)==success,op.Job()->result().message.c_str());return op;}
 CString browserHost;
@@ -81,7 +194,7 @@ void Until(Predicate ready,const char* error)
 unsigned timerTicks=0;
 void CALLBACK Tick(HWND,UINT,UINT_PTR,DWORD){++timerTicks;}
 void OnWorker(std::function<void()> work){auto job=Storage::worker().submit([&](Storage::Job&){work();return Storage::Result{};});job->wait();Check(!job->result().code,job->result().message.c_str());}
-void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shared_ptr<Bytes> classic){
+void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shared_ptr<Bytes> classic,const std::wstring& gptImage){
  auto api=std::make_shared<Fake>();auto device=api->Add(L"UI USB",plus,BusTypeUsb,false);api->Add(L"UI Zip",classic,BusTypeScsi,true);api->workerOnly=true;Removable::SetTestApi(api);browserHost=root.c_str();auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_startup_hds=FALSE;app.m_startup_floppies=app.m_startup_cds=FALSE;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;app.InstallBrowserTemplate(RUNTIME_CLASS(RemovableDoc),RUNTIME_CLASS(RemovableFrame));auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);Check(a&&b&&!a->IsWindowVisible()&&!b->IsWindowVisible(),"Hidden removable browser creation");auto& sa=a->GetBrowserSession();auto& sb=b->GetBrowserSession();Check(api->enumerations==0&&MacRoots(sa)==0,"Disabled removable startup option still scanned disks");
  {COptionsPage1 page;Check(page.Create(IDD_OPTIONS_PAGE_1,a)!=FALSE&&page.GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->IsWindowEnabled(),"Other Mac media startup control disabled");page.m_startup_hds=TRUE;page.UpdateData(FALSE);Check(page.IsDlgButtonChecked(IDC_OPTIONS_STARTUP_HDS)==BST_CHECKED,"Other Mac media checkbox binding");page.DestroyWindow();}
  Check(sa.AwaitNavigationForTest()&&sa.MacBrowser().TargetFolder().IsWindows(),"load initial Windows folder before testing scan overlap");
@@ -130,6 +243,13 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
  c->DestroyWindow();d->DestroyWindow();app.m_startup_hds=FALSE;
  auto path=VolumeCoord::Wide(root+"\\ui-target.dsk");{auto s=HfsPlus::CreateImage(path.c_str(),16*1024*1024);HfsPlus::Volume::Format(*s,u"Copy target",true);}auto target=MacBrowser::OpenImage(path);int targetIndex=sb.MacBrowser().AttachTestVolume(target,"target");Check(sb.MacBrowser().ShowTestFolder(targetIndex,2),"Show target window");auto unrelatedPath=VolumeCoord::Wide(root+"\\unrelated.dsk");{auto s=HfsPlus::CreateImage(unrelatedPath.c_str(),8*1024*1024);HfsPlus::Volume::Format(*s,u"Unrelated",true);}auto unrelated=MacBrowser::OpenImage(unrelatedPath);auto unrelatedIndex=sb.MacBrowser().AttachTestVolume(unrelated,"unrelated");Check(sb.MacBrowser().ShowTestFolder(unrelatedIndex,2),"Show unrelated browser volume");
  {auto from=sa.MacBrowser().CaptureItem(Row(sa,L"Hello"));FileOperations::Request r;r.background=true;r.Copy().sources={from};r.Copy().destination.SetMounted(target,2);api->gate=true;auto op=FileOperations::Submit(r);auto start=GetTickCount();while(WaitForSingleObject(api->entered,0)!=WAIT_OBJECT_0){Pump();Sleep(1);Check(GetTickCount()-start<10000,"Wait for simulated removable spin-up");}a->DestroyWindow();a=nullptr;timerTicks=0;Check(SetTimer(b->m_hWnd,917,10,Tick)!=0,"Create responsiveness timer");start=GetTickCount();while(timerTicks<2){Pump();Sleep(1);Check(GetTickCount()-start<2000,"UI stopped during removable read");}KillTimer(b->m_hWnd,917);Check(sb.MacBrowser().Refresh(),"Unrelated volume could not browse during removable read");SetEvent(api->release);start=GetTickCount();while(!op.Job()->done()){Pump();Sleep(1);Check(GetTickCount()-start<15000,"Finish detached removable copy");}Check(!op.Job()->result().code,op.Job()->result().message.c_str());Verify(*target);}
+ Check(sb.MacBrowser().OpenImage(gptImage)==1&&sb.AwaitNavigationForTest()&&
+       Row(sb,L"GPT edited")>=0&&sb.MacBrowser().Writable(),"Normal browser image opening missed the GPT partition");
+ auto exportPath=root+"\\gpt-export";
+ Check(CreateDirectoryA(exportPath.c_str(),nullptr),"Create GPT export folder");
+ const auto exportTarget=MacBrowser::OpenWindows(VolumeCoord::Wide(exportPath));
+ Copy(sb.MacBrowser().TargetFolder().Volume(),exportTarget);
+ Verify(*exportTarget);
  Check(!api->wrongThread,"Native removable access ran on UI thread");b->DestroyWindow();BrowserTransfers::Clear();Removable::SetTestApi({});auto start=GetTickCount();while(api->Active()){Pump();Sleep(1);Check(GetTickCount()-start<3000,"Removable handles outlived browsers and jobs");}
 }
 
@@ -147,6 +267,8 @@ int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directo
  {auto source=std::make_shared<Removable::Disk>(raw->device,api);ReadOnlySources::Registration registration(source);Check(fhook_open(registration.Path().c_str(),O_RDWR)<0&&errno==EROFS,"Classic stream allowed a writable mount");auto fd=fhook_open(registration.Path().c_str(),O_RDONLY);Check(fd>=0&&fhook_lseek(fd,0,SEEK_END)==source->Size()&&fhook_write(fd,"x",1)<0&&errno==EROFS&&fhook_close(fd)==0,"Classic source hooks violated read-only/seek contract");}
  Removable::SetTestApi(api);api->windowsReadable=true;Check(Removable::FromDriveRoot(L"Z:\\").empty(),"Windows-readable volume was hijacked");api->windowsReadable=false;auto direct=Removable::FromDriveRoot(L"Z:\\");Check(direct.size()==1,"Explicit Windows drive selection missed Mac media");Verify(*direct[0].volume);direct.clear();Storage::Job scan;auto discovery=Removable::Scan(scan,api);Check(!discovery.errors.empty()&&discovery.volumes.size()>=7,"One failed device aborted discovery");discovery.volumes.clear();
  fprintf(report,"PASS: 64-bit reads/cache hits, cached/during-read media swaps, short reads, missing change counters, access denial, handle cleanup, GPT checksum/APM bounds checks, Windows-volume fallback and per-device discovery errors. No device writes or physical hardware.\n");
- Check(api->Active()==0,"Core removable tests leaked device handles");BrowserChecks(root,plus[0],classic);fprintf(report,"PASS: restored startup checkbox, manual scan command routing, disabled/enabled startup detection, normal drive selection, media-change refresh, stale clipboard refusal, responsive unrelated browsing and copy completion after closing its source window; all device I/O remained on workers.\n");
+ const auto gptImage=GptImages(root,*gpt,plus[0],plus[1]);
+ fprintf(report,"PASS: GPT images open on persistent workers and support writes/reopen at 512/4096-byte sector sizes and above 4 GiB. GPT metadata and neighboring data remain intact. Invalid CRCs, overlaps and partition bounds are rejected; read-only flags disable writes.\n");
+ Check(api->Active()==0,"Core removable tests leaked device handles");BrowserChecks(root,plus[0],classic,gptImage);fprintf(report,"PASS: restored startup checkbox, manual scan command routing, disabled/enabled startup detection, normal drive selection, media-change refresh, stale clipboard refusal, responsive unrelated browsing and copy completion after closing its source window; all device I/O remained on workers.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());result=1;}BrowserDirectory::testObserveRead={};auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());auto frames=app.m_browsers;for(auto frame:frames)if(IsWindow(frame->GetSafeHwnd()))frame->DestroyWindow();Removable::SetTestApi({});ShutdownStorageUi();readonly_cd_backend_final();fclose(report);return result;}
 #endif
