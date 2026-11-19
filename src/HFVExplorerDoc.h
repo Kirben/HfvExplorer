@@ -29,9 +29,6 @@
 
 // #define USE_FILE_MAPPING
 
-#define MAX_HFS_VOLUMES 50
-#define MAX_FAT_VOLUMES 50
-
 #include "mactypes.h"
 #include "CFATVolume.h"
 
@@ -53,7 +50,7 @@ class CHFVExplorerDoc : public CDocument
  bool browserOpened_=false;
  int BuildBrowserRoots(int preferred, bool readClassic=true);
  bool NavigateInitialFolder(int firstClassic=0);
- uint64_t m_classicRevision[MAX_HFS_VOLUMES]{};
+ uint64_t (&m_classicRevision)[MAX_HFS_VOLUMES];
  type_creator_link_t* hash_table[ICONTABLESIZE]{};
  int icons_in_cache=0,hash_file_ok=0,hash_file_impossible=0;
  bool hash_file_writable=false;
@@ -244,21 +241,11 @@ protected: // create from serialization only
 // Attributes
 public:
  BrowserSession& GetBrowserSession()const{return *m_browserSession;}
-    class VolumeSlots {
-        std::unique_ptr<CHFVVolume> volumes_[MAX_HFS_VOLUMES];
-    public:
-        CHFVVolume& operator[](int index) {
-            auto& volume = volumes_[index];
-            if (!volume) volume = std::make_unique<CHFVVolume>();
-            return *volume;
-        }
-        void ReplaceFrom(int index, VolumeSlots& source, int slot) {
-            volumes_[index].swap(source.volumes_[slot]);
-        }
-    } m_volumes;
-	CFATVolume m_fats[MAX_FAT_VOLUMES];
-	int m_hfs_count;
-	int m_fat_count;
+    // The legacy filesystem routines use numbered slots in the session's inventory.
+    BrowserMountInventory::ClassicSlots& m_volumes;
+    CFATVolume (&m_fats)[MAX_FAT_VOLUMES];
+    int& m_hfs_count;
+    int& m_fat_count;
 	int m_bits_per_pixel;
 	int m_mac_show_invisibles;
 	int m_pc_show_invisibles;

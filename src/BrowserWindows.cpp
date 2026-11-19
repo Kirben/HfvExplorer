@@ -104,13 +104,13 @@ bool BrowserSession::OpenFolderRequest(BrowserSession& source,BrowserNavigation:
  if(request.folder.IsWindows()){
   const auto& path=request.folder.WindowsPath();
   if(path.size()<3||path[1]!=L':')return false;
-  for(int drive=0;drive<document_->m_fat_count;++drive)
-   if(towupper(path[0])==toupper(static_cast<unsigned char>(document_->m_fats[drive].m_letter)))
-    return document_->NavigateWindowsFolder(drive,path,false,&request);
+  if(auto mount=mounts_.FindWindowsDrive(towupper(path[0])-L'A'))
+   return document_->NavigateWindowsFolder(mount->address.index,path,false,&request);
  }
  if(request.folder.IsClassic()){
   const auto image=request.folder.ClassicImage();
-  int index=document_->get_volume_index_by_filename(image.c_str());
+  const auto attached=mounts_.FindClassicVolume(VolumeCoord::Wide(image));
+  int index=attached?attached->address.index:-1;
   if(index<0){
    const bool floppy=request.folder.IsPhysical()&&request.folder.Media()==FileOperations::ClassicMedia::Floppy;
    const bool cd=request.folder.IsPhysical()&&request.folder.Media()==FileOperations::ClassicMedia::Cd;

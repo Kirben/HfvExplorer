@@ -670,7 +670,13 @@ void CHFVExplorerDoc::update_invisible_attributes()
 	m_pc_show_invisibles = pApp->m_show_invisible_fat;
 }
 
-CHFVExplorerDoc::CHFVExplorerDoc(bool discover):m_browserSession(new BrowserSession(this))
+CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
+ :m_browserSession(new BrowserSession(this)),
+  m_classicRevision(GetBrowserSession().Mounts().classicRevision),
+  m_volumes(GetBrowserSession().Mounts().classic),
+  m_fats(GetBrowserSession().Mounts().windows),
+  m_hfs_count(GetBrowserSession().Mounts().classicCount),
+  m_fat_count(GetBrowserSession().Mounts().windowsCount)
 {
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 

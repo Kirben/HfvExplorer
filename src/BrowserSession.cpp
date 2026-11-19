@@ -218,6 +218,7 @@ bool BrowserSession::RevealFindHit(const FindHit& hit,int legacyVolume)
 
 void BrowserSession::NavigationMediaChanged(DWORD driveMask)
 {
+    mounts_.MediaChanged(driveMask);
     if(preview_)preview_->MediaChanged(driveMask);
     if(navigationMediaDrive_<0 || !(driveMask&(DWORD(1)<<navigationMediaDrive_)))return;
     CancelNavigation();
@@ -273,11 +274,11 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
     tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
 void BrowserSession::StopNotifications(){
- CancelNavigation();if(preview_)preview_->Clear();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
+ CancelNavigation();if(preview_)preview_->Clear();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
  if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);}
 }
 void BrowserSession::DetachPanes(){
-    ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();roots_.clear();
+    ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
     browser_->ForgetTree();
     if(tree_)tree_->BindBrowserSession(nullptr);if(list_)list_->BindBrowserSession(nullptr);if(preview_)preview_->BindBrowserSession(nullptr);
     tree_=nullptr;list_=nullptr;preview_=nullptr;owner_=nullptr;status_=nullptr;
@@ -344,17 +345,14 @@ void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot
             list_->SortBrowserRows(FIELD_NAME, true);
         else
             list_->do_report_sort();
-        Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path, snapshot.folderPath);
+        Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path, snapshot.folderPath, snapshot.windowsMediaSerial);
         if(preview_)preview_->RequestSelection();
     }
 }
 
-void BrowserSession::Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder,std::string path,std::wstring windowsPath){
- if(document_&&index>=0&&((type==LIST_FAT&&index<document_->m_fat_count)||(type==LIST_HFS&&index<document_->m_hfs_count))){
-  auto& known=roots_[key];auto found=std::find_if(known.begin(),known.end(),[&](const KnownRoot& r){return r.type==type&&r.index==index;});
-  std::string origin=type==LIST_FAT?(LPCSTR)document_->m_fats[index].m_volume_name:(LPCSTR)document_->m_volumes[index].m_file_name;
-  if(found==known.end())known.push_back({type,index,origin});else found->origin=origin;
- }
+void BrowserSession::Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder,std::string path,std::wstring windowsPath,std::optional<DWORD> windowsSerial){
+ if(const auto address=BrowserMountInventory::FromTreeBinding(type,index))
+  mounts_.Observe(*address,key,windowsSerial);
  if(type==LIST_FAT&&windowsPath.empty())windowsPath=VolumeCoord::Wide(path);
  current_={key,std::move(path),revision,type,index,folder,std::move(windowsPath)};
  if(type==LIST_FAT||type==LIST_HFS){auto title=type==LIST_FAT?current_.windowsPath:VolumeCoord::Wide(current_.path);if(type==LIST_HFS&&!title.empty()&&title.back()==L':')title.pop_back();SetLocationTitle(std::move(title));}
@@ -369,11 +367,11 @@ void BrowserSession::ProcessChanges(){
  // Inactive legacy roots are lazily refilled next time they are selected. Do
  // not leave old child paths pointing at renamed/deleted directories.
  if(document_){bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);
-  for(auto& key:changed)for(auto& root:roots_[key]){
-   if(current_.key==key&&current_.type==root.type&&current_.index==root.index)continue;
-   HTREEITEM item=nullptr;
-   if(root.type==LIST_FAT&&root.index<document_->m_fat_count&&!_stricmp(root.origin.c_str(),document_->m_fats[root.index].m_volume_name))item=document_->m_fats[root.index].m_rootitem;
-   if(root.type==LIST_HFS&&root.index<document_->m_hfs_count&&!_stricmp(root.origin.c_str(),document_->m_volumes[root.index].m_file_name))item=document_->m_volumes[root.index].m_rootitem;
+  const auto active=BrowserMountInventory::FromTreeBinding(current_.type,current_.index);
+  for(const auto& key:changed)for(const auto& root:mounts_.Observed(key)){
+   if(root.address.kind==BrowserMountInventory::Kind::MountedVolume||
+      (current_.key==key&&active&&root.address==*active)||!mounts_.IsCurrent(root))continue;
+   const auto item=root.root;
    bool selected=false;for(auto at=tree_->GetTreeCtrl().GetSelectedItem();at;at=tree_->GetTreeCtrl().GetParentItem(at))if(at==item)selected=true;
    if(item&&!selected)tree_->delete_subdir_contents(item);
   }tree_->enable_selchange(enabled);
