@@ -1146,6 +1146,15 @@ int RunCopyProcessTest(const char *directory) {
                 const auto exportRoot=Location::Windows(exportDir);
                 LegacyConversion mappedExport{Native(classic,mappedId),exportRoot};
                 mappedExport.options.output='r';
+                Request converted=mappedExport;
+                converted.background=true;
+                const auto sharedConversion=InspectPlanForTest(converted,classic->ResourceKey());
+                Check(sharedConversion.read&&!sharedConversion.write&&!sharedConversion.temporaryWorker,
+                      "converted mounted export did not keep a shared read lease");
+                converted.Legacy().move=true;
+                const auto cutConversion=InspectPlanForTest(converted,classic->ResourceKey());
+                Check(cutConversion.write&&!cutConversion.read&&!cutConversion.temporaryWorker,
+                      "converted Cut did not retain its source write lease");
                 mappedExport.target=ConversionTarget::Folder;
                 auto mappingExport=Submit(mappedExport);Wait(mappingExport);
                 const auto mappedPath=Location::Windows(exportDir+L"\\Mapped raw.hfvx");

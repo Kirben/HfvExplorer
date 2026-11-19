@@ -112,10 +112,17 @@ struct MetadataPlan {
  bool includeCompanion;
  std::function<void(Storage::Job&,Completion&)> execute;
 };
+struct TransferExecution {
+ ExecutionRoute route;
+ std::vector<MacBrowser::ForkSource> sources;
+ std::function<std::vector<VolumeCoord::Access>()> bind;
+ std::function<Storage::Result(const std::vector<MacBrowser::ForkSource>&,Storage::Job&,Completion&)> run;
+ std::function<void(Completion&)> markHandoff;
+};
 struct ExecutionPlan {
  ExecutionRoute route=ExecutionRoute::Local;
  std::vector<VolumeCoord::Access> resources;
- std::vector<MacBrowser::ForkSource> copySources;
+ std::optional<TransferExecution> transfer;
  std::optional<MetadataPlan> metadata;
 };
 
@@ -535,23 +542,8 @@ void ValidateRequest(const Request& r){
    Check(!item.IsNone(), "No source file location was supplied");
   return;
  }
- if (const auto* copy = r.Get<OrdinaryCopy>()) {
-  Check(!copy->sources.empty() && !copy->destination.IsNone(), "Choose sources and a copy destination");
-  for (const auto& source : copy->sources) Check(!source.IsNone(), "No source file location was supplied");
- } else if (const auto* legacy = r.Conversion()) {
-  Check((legacy->source.IsWindows()||IsClassicConversionEndpoint(legacy->source))&&
-        (legacy->destination.IsWindows()||IsClassicConversionEndpoint(legacy->destination)),
-        "Choose compatible conversion endpoints");
-  Check(legacy->target==ConversionTarget::Folder||!legacy->destination.IsMounted(),
-        "A mounted conversion destination must be a folder");
- } else if (const auto* folder = r.Get<CreateFolder>()) {
+ if (const auto* folder = r.Get<CreateFolder>()) {
   Check(!folder->parent.IsNone() && !folder->name.empty(), "Choose a destination and folder name");
- } else if (const auto* exportFork = r.Get<ExportFileFork>()) {
-  Check(!exportFork->source.IsNone() && exportFork->output.IsWindows() &&
-        (exportFork->fork == ForkSelector::Data || exportFork->fork == ForkSelector::Resource), "Invalid fork export request");
- } else if (const auto* importFork = r.Get<ImportResourceFork>()) {
-  Check(!importFork->input.IsNone() && (importFork->file.IsMounted() || importFork->file.IsWindows()),
-        "Invalid resource import request");
  } else if (const auto* link = r.Get<CreateHardLink>()) {
   Check(!link->source.IsNone() && !link->parent.IsNone() && !link->name.empty(), "Choose a hard link source, destination and name");
  }
@@ -572,37 +564,145 @@ bool ConvertsWithMountedClassic(const LegacyConversion& conversion)
            (IsMountedClassic(conversion.source)&&conversion.destination.IsWindows());
 }
 
-ExecutionRoute SelectRoute(const Request& request,const MetadataPlan* metadata,bool inWorker) {
-    if (inWorker) return ExecutionRoute::Local;
+bool CanUseTemporaryWorker(bool inWorker)
+{
+    if(inWorker)return false;
 #ifdef HFV_TESTING
-    if (!CopyProcess::enabled)
-        return ExecutionRoute::Local;
+    return CopyProcess::enabled;
+#else
+    return true;
 #endif
-    auto persistent=[](const Location& item) { return item.IsMounted() && ExecutionFor(*item.Volume()).Persistent(); };
-    auto windows=[](const Location& item) {
-        return item.IsWindows() || (item.IsMounted() && ExecutionFor(*item.Volume()).windowsPaths);
-    };
-    if (const auto* copy=request.Get<OrdinaryCopy>()) {
-        // A mounted destination can stage inputs from any supported source.
-        // For Windows exports, stream a mixed selection when at least one
-        // source is mounted, so exporting another item does not suspend it.
-        if(persistent(copy->destination) || (windows(copy->destination)&&
-           std::any_of(copy->sources.begin(),copy->sources.end(),persistent)))
-            return ExecutionRoute::Local;
-    }
-    if (auto* conversion = request.Conversion(); conversion && ConvertsWithMountedClassic(*conversion)) {
-        const char mode = conversion->source.IsWindows() ? conversion->options.input : conversion->options.output;
-        if (mode && strchr("ambt5rR", mode)) return ExecutionRoute::Local;
-    }
-    if (auto* output=request.Get<ExportFileFork>(); output && persistent(output->source)) return ExecutionRoute::Local;
-    if (auto* input=request.Get<ImportResourceFork>(); input && persistent(input->file) && windows(input->input))
-        return ExecutionRoute::Local;
-    if(auto* rename=request.Rename(); rename&&persistent(rename->source)) return ExecutionRoute::Local;
+}
+
+bool Persistent(const Location& item)
+{
+ return item.IsMounted()&&ExecutionFor(*item.Volume()).Persistent();
+}
+bool WindowsEndpoint(const Location& item)
+{
+ return item.IsWindows()||(item.IsMounted()&&ExecutionFor(*item.Volume()).windowsPaths);
+}
+
+void ReserveEndpoint(std::vector<VolumeCoord::Access>& access,const Location& item,Mode mode,bool companions=true)
+{
+ const auto path=HostPath(item);
+ if(path.empty())access.push_back({Resource(item),mode});
+ else AddPath(access,path,mode,companions);
+}
+
+void ReserveTransferSource(std::vector<VolumeCoord::Access>& access,const Location& source,
+                           bool background,bool handoff,bool windowsExport=false)
+{
+ // Mounted Windows exports can coexist with other readers.
+ const bool sharedExport=windowsExport&&Persistent(source)&&!handoff;
+ const auto mode=source.cut||(HostPath(source).empty()&&!sharedExport&&(background||handoff))
+    ?Mode::Write:Mode::Read;
+ ReserveEndpoint(access,source,mode);
+}
+
+TransferPlan PlanConversion(const LegacyConversion&);
+
+TransferExecution DescribeTransfer(const OrdinaryCopy& copy,bool background,bool temporary)
+{
+ Check(!copy.sources.empty()&&!copy.destination.IsNone(),"Choose sources and a copy destination");
+ for(const auto& source:copy.sources)Check(!source.IsNone(),"No source file location was supplied");
+ const bool mountedRoute=Persistent(copy.destination)||(WindowsEndpoint(copy.destination)&&
+      std::any_of(copy.sources.begin(),copy.sources.end(),Persistent));
+ const bool handoff=temporary&&!mountedRoute;
+ TransferExecution plan{
+  handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
+  [&copy,background,handoff]{
+   std::vector<VolumeCoord::Access> access;
+   const auto path=HostPath(copy.destination);
+   for(const auto& source:copy.sources)ReserveTransferSource(access,source,background,handoff,!path.empty());
+   if(path.empty())access.push_back({Resource(copy.destination),Mode::Write});
+   else for(const auto& source:copy.sources){
+    const auto name=SourceName(source);
+    if(name.empty()){AddPath(access,path,Mode::Write,false);break;}
+    AddPath(access,ChildPath(path,name),Mode::Write);
+   }
+   return access;
+  },
+  [&copy](const auto& sources,Storage::Job& job,Completion& result){return RunTransfer({copy,{}},sources,job,result);},
+  [&copy](Completion& result){
+   Mark(result,copy.destination);
+   for(const auto& source:copy.sources)if(source.cut)Mark(result,source);
+  }
+ };
+ if(!handoff)
+  for(const auto& source:copy.sources)
+   plan.sources.push_back(VolumeSession::SharesMountedImage(source,copy.destination)
+                         ?ForkSource::MountedWorker:ForkSource::Stream);
+ return plan;
+}
+
+TransferExecution DescribeTransfer(const LegacyConversion& copy,bool background,bool temporary)
+{
+ Check((copy.source.IsWindows()||IsClassicConversionEndpoint(copy.source))&&
+       (copy.destination.IsWindows()||IsClassicConversionEndpoint(copy.destination)),
+       "Choose compatible conversion endpoints");
+ Check(copy.target==ConversionTarget::Folder||!copy.destination.IsMounted(),
+       "A mounted conversion destination must be a folder");
+ const auto mode=copy.source.IsWindows()?copy.options.input:copy.options.output;
+ const bool handoff=temporary&&!(ConvertsWithMountedClassic(copy)&&mode&&strchr("ambt5rR",mode));
+ return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
+  [&copy,background,handoff]{
+   std::vector<VolumeCoord::Access> access;
+   const bool sharedExport=IsMountedClassic(copy.source)&&copy.destination.IsWindows()&&!handoff;
+   if(copy.source.IsWindows())AddPath(access,copy.source.WindowsPath(),copy.move?Mode::Write:Mode::Read);
+   else access.push_back({Resource(copy.source),copy.move||(!sharedExport&&(background||handoff))
+       ?Mode::Write:Mode::Read});
+   if(copy.destination.IsWindows())access.push_back({VolumeCoord::LegacyOutputKey(copy.destination.WindowsPath()),Mode::Write});
+   else access.push_back({Resource(copy.destination),Mode::Write});
+   return access;
+  },
+  [&copy](const auto&,Storage::Job& job,Completion& result){return RunTransfer(PlanConversion(copy),{},job,result);},
+  [&copy](Completion& result){Mark(result,copy.destination);if(copy.move)Mark(result,copy.source);}
+ };
+}
+
+TransferExecution DescribeTransfer(const ExportFileFork& request,bool background,bool temporary)
+{
+ Check(!request.source.IsNone()&&request.output.IsWindows()&&
+       (request.fork==ForkSelector::Data||request.fork==ForkSelector::Resource),"Invalid fork export request");
+ const bool handoff=temporary&&!Persistent(request.source);
+ return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
+  [&request,background,handoff]{
+   std::vector<VolumeCoord::Access> access;
+   ReserveTransferSource(access,request.source,background,handoff,true);
+   ReserveEndpoint(access,request.output,Mode::Write,false);
+   return access;
+  },
+  [&request](const auto&,Storage::Job& job,Completion& result){return ExportFork(request,job,result);},
+  [&request](Completion& result){Mark(result,request.output);}
+ };
+}
+
+TransferExecution DescribeTransfer(const ImportResourceFork& request,bool background,bool temporary)
+{
+ Check(!request.input.IsNone()&&(request.file.IsMounted()||request.file.IsWindows()),"Invalid resource import request");
+ const bool handoff=temporary&&!(Persistent(request.file)&&WindowsEndpoint(request.input));
+ return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
+  [&request,background,handoff]{
+   std::vector<VolumeCoord::Access> access;
+   ReserveTransferSource(access,request.input,background,handoff);
+   ReserveEndpoint(access,request.file,Mode::Write);
+   return access;
+  },
+  [&request](const auto&,Storage::Job& job,Completion& result){return ReplaceResource(request,job,result);},
+  [&request](Completion& result){Mark(result,request.file);}
+ };
+}
+
+ExecutionRoute SelectRoute(const Request& request,const MetadataPlan* metadata,bool temporary)
+{
+    if(!temporary)return ExecutionRoute::Local;
+    if(auto* rename=request.Rename(); rename&&Persistent(rename->source)) return ExecutionRoute::Local;
     if(auto* deletion=request.Delete(); deletion&&!deletion->selection.empty() &&
-        std::all_of(deletion->selection.begin(),deletion->selection.end(),persistent)) return ExecutionRoute::Local;
-    if(auto* folder=request.Get<CreateFolder>(); folder&&persistent(folder->parent)) return ExecutionRoute::Local;
-    if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&persistent(link->source)&&persistent(link->parent)) return ExecutionRoute::Local;
-    if(metadata)return metadata->temporaryForUnmounted&&!persistent(*metadata->item)
+        std::all_of(deletion->selection.begin(),deletion->selection.end(),Persistent)) return ExecutionRoute::Local;
+    if(auto* folder=request.Get<CreateFolder>(); folder&&Persistent(folder->parent)) return ExecutionRoute::Local;
+    if(auto* link=request.Get<FileOperations::CreateHardLink>(); link&&Persistent(link->source)&&Persistent(link->parent)) return ExecutionRoute::Local;
+    if(metadata)return metadata->temporaryForUnmounted&&!Persistent(*metadata->item)
         ?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local;
     return CopyWorkerProtocol::SupportsOperation(request.OperationKind()) ? ExecutionRoute::TemporaryWorker : ExecutionRoute::Local;
 }
@@ -610,8 +710,8 @@ ExecutionRoute SelectRoute(const Request& request,const MetadataPlan* metadata,b
 // the bindings at execution, using the same route and lease policy.
 std::vector<VolumeCoord::Access> BindResources(const Request& request,const ExecutionPlan& plan)
 {
- const bool handoff=plan.route==ExecutionRoute::TemporaryWorker;
- using VolumeCoord::Mode;std::vector<VolumeCoord::Access> access;
+ if(plan.transfer)return plan.transfer->bind();
+ std::vector<VolumeCoord::Access> access;
  auto reserveMutation = [&](const Location& item) {
   auto path = HostPath(item);
   if (path.empty()) access.push_back({Resource(item), Mode::Write});
@@ -631,20 +731,6 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request,const Exec
   for (const auto& item : deletion->selection) reserveMutation(item);
   return access;
  }
- if(request.OperationKind()==Kind::LegacyCopy){
-  const auto& conversion=request.Legacy();
-  const bool sharedExport=IsMountedClassic(conversion.source)&&conversion.destination.IsWindows()&&!handoff;
-  if(conversion.source.IsWindows())
-   AddPath(access,conversion.source.WindowsPath(),conversion.move?Mode::Write:Mode::Read);
-  else
-   access.push_back({conversion.source.ResourceKey(),
-       (conversion.move||(!sharedExport&&(request.background||handoff)))?Mode::Write:Mode::Read});
-  if(conversion.destination.IsWindows())
-   access.push_back({VolumeCoord::LegacyOutputKey(conversion.destination.WindowsPath()),Mode::Write});
-  else
-   access.push_back({conversion.destination.ResourceKey(),Mode::Write});
-  return access;
- }
  if(plan.metadata){
   const auto& metadata=*plan.metadata;
   const auto& item=*metadata.item;
@@ -653,64 +739,35 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request,const Exec
   else AddPath(access,path,metadata.access,metadata.includeCompanion);
   return access;
  }
- auto reserve = [&](const Location& item, Mode mode, bool companions = true) {
-  auto path = HostPath(item);
-  if (path.empty()) access.push_back({Resource(item), mode});
-  else AddPath(access, path, mode, companions);
- };
  auto reserveChild = [&](const Location& parent, const std::u16string& name, bool companions) {
   auto path = HostPath(parent);
   if (path.empty()) access.push_back({Resource(parent), Mode::Write});
   else AddPath(access, ChildPath(path, name), Mode::Write, companions);
  };
- auto reserveCopySource = [&](const Location& source, bool windowsExport = false) {
-  // Retain an image read lease for the full export, excluding writers
-  // while allowing the browser to use the mounted session.
-  const bool sharedExport=windowsExport && source.IsMounted() && ExecutionFor(*source.Volume()).Persistent() && !handoff;
-  const auto mode = source.cut || (HostPath(source).empty() && !sharedExport &&
-      (request.background || handoff)) ? Mode::Write : Mode::Read;
-  reserve(source, mode);
- };
- if (const auto* copy = request.Get<OrdinaryCopy>()) {
-  auto path = HostPath(copy->destination);
-  for (const auto& source : copy->sources) reserveCopySource(source,!path.empty());
-  if (path.empty()) access.push_back({Resource(copy->destination), Mode::Write});
-  else for (const auto& source : copy->sources) {
-   auto name = SourceName(source);
-   if (name.empty()) { AddPath(access, path, Mode::Write, false); break; }
-   AddPath(access, ChildPath(path, name), Mode::Write);
-  }
- } else if (const auto* folder = request.Get<CreateFolder>()) {
-  reserveChild(folder->parent, folder->name, false);
- } else if (const auto* link = request.Get<CreateHardLink>()) {
-  reserve(link->source, HostPath(link->source).empty() ? Mode::Write : Mode::Read);
-  reserveChild(link->parent, link->name, true);
- } else if (const auto* exportFork = request.Get<ExportFileFork>()) {
-  reserveCopySource(exportFork->source,true);
-  reserve(exportFork->output, Mode::Write, false);
- } else if (const auto* importFork = request.Get<ImportResourceFork>()) {
-  reserveCopySource(importFork->input);
-  reserve(importFork->file, Mode::Write);
+ if(const auto* folder=request.Get<CreateFolder>()){
+  reserveChild(folder->parent,folder->name,false);
+ }else if(const auto* link=request.Get<CreateHardLink>()){
+  ReserveEndpoint(access,link->source,HostPath(link->source).empty()?Mode::Write:Mode::Read);
+  reserveChild(link->parent,link->name,true);
  }
  return access;
 }
 
 ExecutionPlan PlanOperation(const Request& request, bool inWorker=false){
  ExecutionPlan plan;
- if(const auto* metadata=request.Metadata()){
+ const bool temporary=CanUseTemporaryWorker(inWorker);
+ if(const auto* copy=request.Get<OrdinaryCopy>())plan.transfer=DescribeTransfer(*copy,request.background,temporary);
+ else if(const auto* conversion=request.Conversion())plan.transfer=DescribeTransfer(*conversion,request.background,temporary);
+ else if(const auto* output=request.Get<ExportFileFork>())plan.transfer=DescribeTransfer(*output,request.background,temporary);
+ else if(const auto* input=request.Get<ImportResourceFork>())plan.transfer=DescribeTransfer(*input,request.background,temporary);
+ else if(const auto* metadata=request.Metadata()){
   plan.metadata=std::visit([](const auto& operation){
    Check(!operation.item.IsNone(),"Choose a location for the metadata operation");
    return DescribeMetadata(operation);
   },*metadata);
  }else ValidateRequest(request);
- plan.route=SelectRoute(request,plan.metadata?&*plan.metadata:nullptr,inWorker);
+ plan.route=plan.transfer?plan.transfer->route:SelectRoute(request,plan.metadata?&*plan.metadata:nullptr,temporary);
  plan.resources=BindResources(request,plan);
- if(const auto* copy=request.Get<OrdinaryCopy>();copy&&plan.route==ExecutionRoute::Local){
-  plan.copySources.reserve(copy->sources.size());
-  for(const auto& source:copy->sources)
-   plan.copySources.push_back(VolumeSession::SharesMountedImage(source,copy->destination)
-       ?MacBrowser::ForkSource::MountedWorker:MacBrowser::ForkSource::Stream);
- }
  return plan;
 }
 
@@ -890,14 +947,12 @@ Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage
   return {};
  }
  if(const auto* folder=request.Get<CreateFolder>())return MakeFolder(*folder,job,completion);
- if(const auto* operation=request.Get<OrdinaryCopy>())return RunTransfer({*operation,{}},plan.copySources,job,completion);
- if(const auto* operation=request.Get<ExportFileFork>())return ExportFork(*operation,job,completion);
- if(const auto* operation=request.Get<ImportResourceFork>())return ReplaceResource(*operation,job,completion);
+ if(plan.transfer)return plan.transfer->run(plan.transfer->sources,job,completion);
  if (const auto* rename = request.Rename())
   return Mutate(rename, &rename->source, 1, job, completion);
  if (const auto* deletion = request.Delete())
   return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
- return RunTransfer(PlanConversion(request.Legacy()),{},job,completion);
+ throw std::logic_error("Missing file operation plan");
 }
 }
 Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> job):state_(std::move(state)),job_(std::move(job)){}
@@ -1027,9 +1082,10 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
 #ifdef HFV_TESTING
 PlanAccessForTest InspectPlanForTest(const Request& request,const std::string& key,bool inWorker){
  const auto plan=PlanOperation(request,inWorker);
- const auto local=std::count(plan.copySources.begin(),plan.copySources.end(),MacBrowser::ForkSource::MountedWorker);
+ const auto local=plan.transfer?std::count(plan.transfer->sources.begin(),plan.transfer->sources.end(),
+     MacBrowser::ForkSource::MountedWorker):0;
  PlanAccessForTest result{plan.route==ExecutionRoute::TemporaryWorker,local!=0,false,false,
-                          size_t(local),plan.copySources.size()-local};
+                          size_t(local),plan.transfer?plan.transfer->sources.size()-local:0};
  for(const auto& access:plan.resources)if(access.key==key){
   result.read|=access.mode==VolumeCoord::Mode::Read;
   result.write|=access.mode==VolumeCoord::Mode::Write;
@@ -1088,17 +1144,7 @@ class PreparedOperation {
    keys.push_back(item.key);
    if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);
   }
-  if(const auto* copy=request_.Get<OrdinaryCopy>()){
-   Mark(completion,copy->destination);
-   for(const auto& source:copy->sources)if(source.cut)Mark(completion,source);
-  }else if(const auto* legacy=request_.Conversion()){
-   Mark(completion,legacy->destination);
-   if(legacy->move)Mark(completion,legacy->source);
-  }else if(const auto* output=request_.Get<ExportFileFork>()){
-   Mark(completion,output->output);
-  }else if(const auto* input=request_.Get<ImportResourceFork>()){
-   Mark(completion,input->file);
-  }
+  if(plan_.transfer)plan_.transfer->markHandoff(completion);
   return CopyProcess::Run(request_,job,completion,keys,writes);
  }
 
