@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "NdifImage.h"
+#include "NdifLzh.h"
 #include "DmgImage.h"
 #include "TransferConversion.h"
 #include "ReadOnlyCdBackend.h"
@@ -243,6 +244,27 @@ int RunNdifImageTest(const char* directory)
             Check(Ndif::Unwrap(image),"Truncated ShrinkWrap fixture did not reach the codec");
             Reject([&]{Disk::Read(*image,0,65536);},"NDIF accepted a truncated ShrinkWrap stream");
             fprintf(report,"PASS: NDIF ShrinkWrap SIT2 sample, plus truncated stream rejection.\n");
+        }
+        if(const auto fixture=_wgetenv(L"HFV_NDIF_LZH_TEST")){
+            auto file=HfsPlus::OpenImage(fixture,false);
+            unsigned cases=0;
+            constexpr size_t bytes=20960;
+            for(uint64_t at=0;at<file->Size();){
+                const auto size=U32(Disk::Read(*file,at,4).data());
+                at+=4;
+                auto packed=Disk::Read(*file,at,size);
+                at+=size;
+                const auto expected=Disk::Read(*file,at,bytes);
+                at+=bytes;
+                Bytes expanded(bytes);
+                Ndif::DecodeLzh(packed,expanded);
+                Check(expanded==expected,"Apple LZH fixture disagrees with its separately decoded RLE copy");
+                packed.resize(1);
+                Reject([&]{Ndif::DecodeLzh(packed,expanded);},"Apple LZH accepted truncated input");
+                ++cases;
+            }
+            Check(cases>0,"No Apple LZH fixtures were checked");
+            fprintf(report,"PASS: %u Apple DART LZH chunks matched the corresponding RLE chunks byte-for-byte.\n",cases);
         }
         auto invalid=bcem;
         Row(invalid,2,1,0x83,512,24);
