@@ -311,7 +311,20 @@ Reader BinHex(bool importing, Volume& volume, Entry& entry, Storage::Job& job) {
 }
 }
 
-bool Supported(char mode) { return mode == 'm' || mode == '5' || mode == '3' || mode == 'b' || mode == 't'; }
+bool ContainerMode(char mode) { return mode=='m'||mode=='5'||mode=='3'||mode=='b'; }
+bool Supported(char mode) { return ContainerMode(mode)||mode=='t'; }
+
+bool RecognizesContainer(char mode,Volume& volume,const Entry& entry)
+{
+    std::array<uint8_t,128> header{};
+    const auto bytes=size_t((std::min)(entry.forks[0].size,uint64_t(header.size())));
+    if(!bytes)return false;
+    volume.Read(entry.id,0,0,header.data(),bytes);
+    if(mode=='m')return bytes==header.size()&&macbinary_version(header.data())!=0;
+    constexpr std::string_view preamble="(This file must be converted with BinHex 4.0)";
+    const std::string_view text(reinterpret_cast<const char*>(header.data()),bytes);
+    return text.find(preamble)!=text.npos;
+}
 
 Reader Adapt(char mode, bool importing, Volume& source, Entry& entry, Storage::Job& job) {
     if (entry.directory) return {};

@@ -1661,6 +1661,55 @@ int RunCopyProcessTest(const char *directory) {
                 Verify(*classic, record.id, 4096);
             }
         }
+        for(auto kind:{HfsPlus::Volume::FormatKind::HfsPlus,HfsPlus::Volume::FormatKind::HfsXCaseSensitive}){
+            const auto format=std::to_string(int(kind));
+            const auto imagePath=Wide(root+"\\native-conversion-"+format+".dsk");
+            { auto file=HfsPlus::CreateImage(imagePath.c_str(),16*1024*1024);
+              HfsPlus::Volume::Format(*file,u"Native conversion",true,kind); }
+            auto mounted=MacBrowser::OpenBrowserImage(imagePath);
+            const auto id=Put(*mounted,2,u"Native source",4096);
+            const auto folder=mounted->MakeDirectory(2,u"Imported");
+            const auto exportPath=Wide(root+"\\native-conversion-"+format);
+            Check(CreateDirectoryW(exportPath.c_str(),nullptr)!=FALSE,"Create transfer output folder");
+            const auto exportRoot=Location::Windows(exportPath);
+            for(char mode:{'5','m','3','b'}){
+                const auto subName=U16(Wide(std::string("Mode ")+mode));
+                const auto sub=mounted->MakeDirectory(folder,subName);
+                const auto subRoot=Location::Mounted(mounted,sub);
+                LegacyCopyOptions options;
+                options.output=mode;
+                auto transfers=PlanTransfers({{Location::Mounted(mounted,id)},exportRoot},{options,false,false});
+                Check(transfers.size()==1&&transfers[0].Conversion()&&
+                      !InspectPlanForTest(transfers[0],mounted->ResourceKey()).temporaryWorker,
+                      "Native container export did not use the retained volume");
+                Pass(Submit(transfers[0]));
+                const auto carrier=exportPath+(mode=='b'?L"\\Native source.hqx":L"\\Native source.bin");
+                options.input='a';
+                transfers=PlanTransfers({{Location::Windows(carrier)},subRoot},{options,false,false});
+                Check(transfers.size()==1&&transfers[0].Conversion(),"Native automatic import bypassed the container adapter");
+                Pass(Submit(transfers[0]));
+                Entry imported;
+                Check(mounted->FindChild(sub,u"Native source",imported),"Native decoded file missing");
+                Verify(*mounted,imported.id,4096);
+                Check(DeleteFileW(carrier.c_str())!=FALSE,"Remove test carrier before next mode");
+            }
+            const auto ordinary=exportPath+L"\\ordinary.bin";
+            {
+                auto output=HfsPlus::CreateFormatOutput(ordinary.c_str(),4);
+                output->Write(0,"data",4);
+                output->Keep();
+            }
+            LegacyCopyOptions automatic;
+            automatic.input='a';
+            auto transfers=PlanTransfers({{Location::Windows(ordinary)},Location::Mounted(mounted,folder)},
+                                         {automatic,false,false});
+            Pass(Submit(transfers[0]));
+            Entry ordinaryFile;
+            Check(mounted->FindChild(folder,u"ordinary.bin",ordinaryFile)&&ordinaryFile.forks[0].size==4,
+                  "Native automatic mode treated an ordinary .bin as MacBinary");
+        }
+        fprintf(report,"PASS: HFS+ and HFSX convert MacBinary I/II/III and BinHex with both forks on retained image sessions.\n");
+
         Entry text;
         text.name = u"Lines";
         text.forks[0].size = 4;

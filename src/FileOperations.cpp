@@ -540,6 +540,17 @@ bool IsClassicConversionEndpoint(const Location& item)
  return item.IsClassic()||(item.IsMounted()&&std::string_view(item.Volume()->Kind())=="HFS");
 }
 
+bool IsNativeMac(const Location& item)
+{
+    if(!item.IsMounted())return false;
+    const std::string_view kind=item.Volume()->Kind();
+    return kind=="HFS+"||kind=="HFSX";
+}
+bool ConversionEndpoint(const Location& item)
+{
+    return IsClassicConversionEndpoint(item)||IsNativeMac(item);
+}
+
 bool IsMountedClassic(const Location& item)
 {
     return item.IsMounted()&&ExecutionFor(*item.Volume()).classicConversion;
@@ -635,18 +646,20 @@ TransferExecution DescribeTransfer(const OrdinaryCopy& copy,bool background,bool
 
 TransferExecution DescribeTransfer(const LegacyConversion& copy,bool background,bool temporary)
 {
- Check((copy.source.IsWindows()||IsClassicConversionEndpoint(copy.source))&&
-       (copy.destination.IsWindows()||IsClassicConversionEndpoint(copy.destination)),
+ Check((copy.source.IsWindows()||ConversionEndpoint(copy.source))&&
+       (copy.destination.IsWindows()||ConversionEndpoint(copy.destination)),
        "Choose compatible conversion endpoints");
  Check(copy.target==ConversionTarget::Folder||!copy.destination.IsMounted(),
        "A mounted conversion destination must be a folder");
  const auto mode=copy.source.IsWindows()?copy.options.input:copy.options.output;
- const bool handoff=temporary&&!ProcessLocal(copy.source)&&!ProcessLocal(copy.destination)&&
+ const bool native=IsNativeMac(copy.source)||IsNativeMac(copy.destination);
+ const bool handoff=temporary&&!ProcessLocal(copy.source)&&!ProcessLocal(copy.destination)&&!native&&
      !(ConvertsWithMountedClassic(copy)&&mode&&strchr("ambt53rR",mode));
  return {handoff?ExecutionRoute::TemporaryWorker:ExecutionRoute::Local,{},
   [&copy,background,handoff]{
    std::vector<VolumeCoord::Access> access;
-   const bool sharedExport=IsMountedClassic(copy.source)&&copy.destination.IsWindows()&&!handoff;
+   const bool sharedExport=(IsMountedClassic(copy.source)||IsNativeMac(copy.source))&&
+       copy.destination.IsWindows()&&!handoff;
    if(copy.source.IsWindows())AddPath(access,copy.source.WindowsPath(),copy.move?Mode::Write:Mode::Read);
    else access.push_back({Resource(copy.source),copy.move||(!sharedExport&&(background||handoff))
        ?Mode::Write:Mode::Read});
@@ -884,8 +897,9 @@ Reader AdaptRawClassic(Volume& source, Entry& entry, bool importing, bool resour
 }
 
 TransferPlan PlanConversion(const LegacyConversion& conversion) {
- const bool importing=conversion.source.IsWindows() && IsClassicConversionEndpoint(conversion.destination);
- const bool exporting=IsClassicConversionEndpoint(conversion.source) && conversion.destination.IsWindows();
+ const bool importing=conversion.source.IsWindows() && ConversionEndpoint(conversion.destination);
+ const bool exporting=ConversionEndpoint(conversion.source) && conversion.destination.IsWindows();
+ const bool native=IsNativeMac(conversion.source)||IsNativeMac(conversion.destination);
  const bool translating=importing||exporting;
  const char mode=importing?conversion.options.input:conversion.options.output;
  const bool raw=translating&&(mode=='r'||mode=='R');
@@ -945,7 +959,7 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
  TransferPlan plan{OrdinaryCopy{{std::move(sourceLocation)},std::move(folder)},{}};
  if(!translating&&outputName.empty())return plan;
  const bool appledouble=conversion.options.appledouble;
- plan.adapter=[translating,importing,exporting,mode,raw,appledouble,mappings=std::move(mappings),outputName=std::move(outputName)]
+ plan.adapter=[translating,importing,exporting,native,mode,raw,appledouble,mappings=std::move(mappings),outputName=std::move(outputName)]
      (Volume& volume,Entry& entry,Storage::Job& active,bool root) -> Reader {
   if(!translating){
    if(root&&!outputName.empty())entry.name=outputName;
@@ -963,6 +977,10 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
     const auto dot=entry.name.rfind(u'.');
     const auto suffix=dot==entry.name.npos ? std::wstring{} : Wide(entry.name.substr(dot));
     if(paired) selected='&';
+    else if(native){
+     const auto format=!_wcsicmp(suffix.c_str(),L".hqx")?'b':!_wcsicmp(suffix.c_str(),L".bin")?'m':'&';
+     selected=format!='&'&&TransferConversion::RecognizesContainer(format,volume,entry)?format:'&';
+    }
     else if(!_wcsicmp(suffix.c_str(),L".hqx")) selected='b';
     else if(!_wcsicmp(suffix.c_str(),L".bin")) selected='m';
     else if(!_wcsicmp(suffix.c_str(),L".txt") || !_wcsicmp(suffix.c_str(),L".c") ||
@@ -971,7 +989,8 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
      selected='r';
      memcpy(entry.finder.data(),"????UNIX",8);
     }
-   } else if(!memcmp(entry.finder.data(),"TEXT",4) || !memcmp(entry.finder.data(),"ttro",4)) selected='t';
+   } else if(native)selected='&';
+   else if(!memcmp(entry.finder.data(),"TEXT",4) || !memcmp(entry.finder.data(),"ttro",4)) selected='t';
    else selected=entry.forks[1].size ? 'm' : 'r';
   }
   const bool explicitName=root&&!outputName.empty();
@@ -1176,7 +1195,13 @@ std::vector<Request> PlanTransfers(OrdinaryCopy copy,const TransferSettings& set
     for(auto& source:copy.sources){
         const bool importing=source.IsWindows()&&destinationClassic;
         const bool exporting=IsClassicTransferEndpoint(source)&&destinationWindows;
-        if(!importing&&!exporting){
+        // Native transfers keep their ordinary fork-preserving behavior unless
+        // a container mode is configured, or Automatic detects an import.
+        const bool nativeImport=source.IsWindows()&&IsNativeMac(copy.destination)&&!settings.askImport&&
+            (TransferConversion::ContainerMode(settings.conversion.input)||settings.conversion.input=='a');
+        const bool nativeExport=IsNativeMac(source)&&destinationWindows&&!settings.askExport&&
+            TransferConversion::ContainerMode(settings.conversion.output);
+        if(!importing&&!exporting&&!nativeImport&&!nativeExport){
             ordinary.sources.push_back(std::move(source));
             continue;
         }
