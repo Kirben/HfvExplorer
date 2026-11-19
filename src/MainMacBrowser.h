@@ -25,7 +25,9 @@ public:
     bool HasCdRoot(int drive) const;
     void AdoptCd(int drive,const std::string& root,std::shared_ptr<MacBrowser::Volume>,bool asynchronous,bool select=true);
     void ScanCds();
-    void AdoptRemovable(std::vector<Removable::Mounted>&,bool asynchronous);
+    void AdoptRemovable(std::vector<Removable::Mounted>&,bool asynchronous,int drive=-1,bool select=true);
+    void QueueMediaChanges(DWORD changed,DWORD arrived);
+    bool ApplyMediaChanges();
     bool ScanRemovable(bool silent=false,bool startupOnly=false);
     int OpenRemovableRoot(const char* root);
     void DetachTree();
@@ -71,6 +73,7 @@ public:
     std::vector<std::shared_ptr<MacBrowser::Volume>> DetachCd(int drive);
     void Sort(int column, bool ascending);
 #ifdef HFV_TESTING
+    void SetDriveTypeForTest(std::function<UINT(int)>);
     size_t TestClipboardCount()const;
     int AttachTestVolume(std::shared_ptr<MacBrowser::Volume>, const char *key,int drive=-1);
     bool ShowTestFolder(int index, uint32_t id);

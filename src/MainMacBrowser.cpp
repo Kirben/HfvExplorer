@@ -4,6 +4,8 @@
 #include "MetadataDialogs.h"
 #include "PhysicalRemovable.h"
 #include "MediaDiscovery.h"
+#include "CommandStorage.h"
+#include "floppy.h"
 #include "HFVExplorer.h"
 #include "MainMacBrowser.h"
 #include "FileOperations.h"
@@ -117,6 +119,27 @@ struct MainMacBrowser::State {
     explicit State(BrowserSession& session):session_(session),mounts(session.Mounts().mounted){}
     using Mount=BrowserMountInventory::Mount;
     std::vector<Mount>& mounts;bool removableScanned=false;
+
+    struct DriveMedia {
+        UINT type=DRIVE_NO_ROOT_DIR;
+        std::shared_ptr<Volume> cd;
+        std::vector<Removable::Mounted> removable;
+        std::optional<MacBrowser::ClassicMountInfo> floppy;
+    };
+    struct DriveChange {
+        bool arrived=false;
+        std::shared_ptr<DriveMedia> media;
+        std::shared_ptr<Storage::Job> job;
+    };
+    std::map<int,DriveChange> driveChanges;
+#ifdef HFV_TESTING
+    std::function<UINT(int)> driveTypeForTest;
+#endif
+    ~State(){CancelDriveChanges();}
+    void CancelDriveChanges(){
+        for(auto& entry:driveChanges)if(entry.second.job)entry.second.job->cancel();
+        driveChanges.clear();
+    }
 
     int current=-1;uint32_t folder=2;bool showing=false,folderMutable=true;
     std::vector<uint32_t> restore;
@@ -638,13 +661,13 @@ int MainMacBrowser::OpenRemovableRoot(const char* root){
  std::vector<Removable::Mounted> found;auto wide=FromAnsi(root);auto result=ShowStorageWaitJob([&](Storage::Job& job){found=Removable::FromDriveRoot(wide,&job);return Storage::Result{};},Hidden(session_),session_.Owner());
  if(result.code){session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});if(!Hidden(session_))session_.Owner()->MessageBox(result.message.c_str(),"Reading Mac removable disk",MB_OK|MB_ICONERROR);return -1;}
  if(found.empty())return 0;
- AdoptRemovable(found,false);
+ AdoptRemovable(found,false,toupper(static_cast<unsigned char>(root[0]))-'A');
  return 1;
 }
-void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,bool asynchronous){
+void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,bool asynchronous,int drive,bool select){
  int selected=-1;
- for(auto& v:found){auto key=VolumeCoord::Wide(v.volume->ResourceKey());int slot=-1;for(size_t i=0;i<state_->mounts.size();++i)if(state_->mounts[i].key==key){slot=int(i);break;}if(slot<0){slot=int(state_->mounts.size());state_->mounts.push_back({v.volume,key,nullptr,-1});}auto& mount=state_->mounts[slot];mount.volume=v.volume;mount.physicalPath=v.device.path;mount.physicalOffset=v.partition.offset;mount.suffix=v.label;if(!mount.root)state_->Root(slot);if(selected<0)selected=slot;}
- if(selected<0)return;
+ for(auto& v:found){auto key=VolumeCoord::Wide(v.volume->ResourceKey());int slot=-1;for(size_t i=0;i<state_->mounts.size();++i)if(state_->mounts[i].key==key){slot=int(i);break;}if(slot<0){slot=int(state_->mounts.size());state_->mounts.push_back({v.volume,key,nullptr,-1});}auto& mount=state_->mounts[slot];mount.volume=v.volume;mount.physicalPath=v.device.path;mount.physicalOffset=v.partition.offset;mount.suffix=v.label;if(drive>=0)mount.sourceDrive=drive;if(!mount.root)state_->Root(slot);if(selected<0)selected=slot;}
+ if(selected<0||!select)return;
  auto item=state_->mounts[selected].root;
  if(asynchronous){
   auto tree=session_.Tree();auto enabled=tree->SelectionNotificationsEnabled();
@@ -652,6 +675,154 @@ void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,bool 
  }
  state_->Show(selected,2,item,false,asynchronous);
 }
+void MainMacBrowser::QueueMediaChanges(DWORD changed,DWORD arrived)
+{
+ for(int drive=0;drive<26;++drive){
+  const auto bit=DWORD(1)<<drive;
+  if(!(changed&bit))continue;
+  auto& pending=state_->driveChanges[drive];
+  if(pending.job)pending.job->cancel();
+  pending={bool(arrived&bit),{},{}};
+ }
+}
+
+bool MainMacBrowser::ApplyMediaChanges()
+{
+ auto tree=session_.Tree();
+ auto doc=session_.Document();
+ if(!tree||!session_.List()||!doc)return !state_->driveChanges.empty();
+ for(auto it=state_->driveChanges.begin();it!=state_->driveChanges.end();){
+  const auto drive=it->first;
+  auto& pending=it->second;
+  const auto key=VolumeCoord::DeviceKey(drive);
+  const char root[] = {char('A'+drive),':','\\',0};
+  char classicPath[MAX_PATH]{};
+  get_floppy_volume_file_name(drive,classicPath);
+  const auto classicIndex=doc->get_volume_index_by_filename(classicPath);
+  if(!pending.job){
+   if(!VolumeCoord::Readable(key)){++it;continue;}
+   auto media=std::make_shared<State::DriveMedia>();
+   const bool arrived=pending.arrived;
+   const bool checkFloppy=classicIndex>=0||App().m_startup_floppies;
+   std::function<UINT(int)> driveType;
+#ifdef HFV_TESTING
+   driveType=state_->driveTypeForTest;
+#endif
+   pending.media=media;
+   pending.job=Storage::navigationWorker().submit(
+    [media,drive,arrived,checkFloppy,key,root=std::string(root),image=std::string(classicPath),driveType](Storage::Job& job){
+     std::optional<VolumeCoord::Lease> read;
+     try{read.emplace(std::vector<VolumeCoord::Access>{{key,VolumeCoord::Mode::Read}});}
+     catch(const VolumeCoord::Busy&){return CommandStorage::Busy();}
+     if(job.cancelled())throw Storage::Cancelled();
+     media->type=driveType?driveType(drive):GetDriveTypeA(root.c_str());
+     if(job.cancelled())throw Storage::Cancelled();
+     if(!arrived)return Storage::Result{};
+     if(media->type==DRIVE_CDROM){
+      try{media->cd=MediaDiscovery::Optical(drive,job);}catch(const MacBrowser::DetectedVolumeError&){}
+     }else if(media->type==DRIVE_REMOVABLE||media->type==DRIVE_FIXED){
+      if(checkFloppy&&media->type==DRIVE_REMOVABLE&&MediaDiscovery::Floppy(drive,job)){
+       try{
+        auto volume=MacBrowser::OpenClassic(image,":",false);
+        media->floppy=MacBrowser::ReadClassicMountInfo(*volume);
+       }catch(const HfsPlus::Error&){}
+      }
+      if(!media->floppy){
+       try{media->removable=Removable::FromDriveRoot(VolumeCoord::Wide(root),&job);}
+       catch(const VolumeCoord::Busy&){return CommandStorage::Busy();}
+       catch(const HfsPlus::Error&){}
+      }
+     }
+     return Storage::Result{};
+    });
+   ++it;continue;
+  }
+  if(!pending.job->done()){++it;continue;}
+  const auto result=pending.job->result();
+  if(result.error==ERROR_BUSY){pending.job.reset();++it;continue;}
+  if(result.code){it=state_->driveChanges.erase(it);continue;}
+  std::vector<VolumeCoord::Access> resources{{key,VolumeCoord::Mode::Write}};
+  for(const auto& mount:state_->mounts)
+   if(mount.volume&&(mount.drive==drive||mount.sourceDrive==drive))
+    resources.push_back({mount.volume->ResourceKey(),VolumeCoord::Mode::Write});
+  CommandStorage::Reservation access;
+  try{access=std::make_shared<VolumeCoord::Lease>(std::move(resources));}
+  catch(const VolumeCoord::Busy&){++it;continue;}
+
+  // Publish only this drive and keep the other tree handles and listings intact.
+  auto media=std::move(pending.media);
+  it=state_->driveChanges.erase(it);
+  auto& control=tree->GetTreeCtrl();
+  auto selected=control.GetSelectedItem();
+  while(selected&&control.GetParentItem(selected))selected=control.GetParentItem(selected);
+  const auto enabled=tree->SelectionNotificationsEnabled();
+  tree->enable_selchange(0);
+  bool affected=false;
+  const auto clearRoot=[&](HTREEITEM& item,bool remove){
+   if(!item)return;
+   affected|=selected==item;
+   tree->delete_subdir_contents(item);
+   if(remove){control.DeleteItem(item);item=nullptr;}
+  };
+  int windows=-1;
+  for(int index=0;index<doc->m_fat_count;++index)
+   if(doc->m_fats[index].m_letter==root[0]){windows=index;break;}
+  const bool present=media->type>=DRIVE_REMOVABLE&&media->type<=DRIVE_RAMDISK;
+  if(windows<0&&present)windows=doc->insert_fat_volume(root[0],media->type);
+  if(windows>=0){
+   auto& slot=doc->m_fats[windows];
+   clearRoot(slot.m_rootitem,!present||media->type!=slot.m_type);
+   slot.m_type=present?media->type:DRIVE_NO_ROOT_DIR;
+   if(present&&!slot.m_rootitem)
+    slot.m_rootitem=tree->initialize_fat_volume(windows,&slot.m_volume_name,slot.m_type,&slot.m_volume_name,drive<2);
+  }
+
+  int floppy=classicIndex;
+  if(floppy<0&&media->floppy)floppy=doc->insert_volume(classicPath,1,0,0,0);
+  if(floppy>=0){
+   auto& slot=doc->m_volumes[floppy];
+   clearRoot(slot.m_rootitem,!media->floppy);
+   if(media->floppy){
+    slot.ReadMount(*media->floppy);
+    if(!slot.m_rootitem)slot.m_rootitem=tree->initialize_volume(floppy,slot.m_volume_name,2,1,0,0,0);
+    else control.SetItemText(slot.m_rootitem,slot.m_volume_name);
+   }else{
+    slot.close();slot.m_free=true;slot.m_file_name.Empty();slot.m_volume_name.Empty();
+   }
+  }
+
+  std::vector<std::shared_ptr<Volume>> released;
+  for(auto& mount:state_->mounts){
+   if(!mount.volume||(mount.drive!=drive&&mount.sourceDrive!=drive))continue;
+   if(mount.volume==media->cd)continue;
+   if(std::any_of(media->removable.begin(),media->removable.end(),[&](const auto& found){return found.volume==mount.volume;}))continue;
+   clearRoot(mount.root,true);
+   released.push_back(std::move(mount.volume));
+  }
+  if(media->cd&&!HasCdRoot(drive))AdoptCd(drive,root,std::move(media->cd),true,false);
+  if(!media->removable.empty())AdoptRemovable(media->removable,true,drive,false);
+  if(affected){
+   control.SelectItem(windows>=0?doc->m_fats[windows].m_rootitem:nullptr);
+   session_.ClearCurrent();
+   session_.SetLocationTitle({});
+   session_.List()->initialize_volume("",0);
+   session_.List()->SetBrowserCapabilities({});
+  }
+  tree->enable_selchange(enabled);
+  if(!released.empty()){
+   Storage::navigationWorker().submit([released=std::move(released),access=std::move(access)](Storage::Job&){
+    for(const auto& volume:released)volume->ReleaseMedia();
+    return Storage::Result{};
+   });
+  }
+ }
+ return !state_->driveChanges.empty();
+}
+
+#ifdef HFV_TESTING
+void MainMacBrowser::SetDriveTypeForTest(std::function<UINT(int)> probe){state_->driveTypeForTest=std::move(probe);}
+#endif
+
 int MainMacBrowser::OpenCd(const char* root) {
     int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;
     if(HasCdRoot(drive))return 0; // Windows side stays selectable.
@@ -772,7 +943,7 @@ void MainMacBrowser::RebuildTree(){for(size_t i=0;i<state_->mounts.size();++i)st
             for(auto child=session_.Tree()->m_ct->GetChildItem(item);child;child=session_.Tree()->m_ct->GetNextSiblingItem(child)){
                 auto p=reinterpret_cast<lparam_struct*>(session_.Tree()->m_ct->GetItemData(child));if(uint32_t(p->id)==*at){item=child;state_->Show(i,*at,item);break;}}}}
 }
-void MainMacBrowser::Clear(){session_.CancelNavigation();state_->mounts.clear();state_->current=-1;}
+void MainMacBrowser::Clear(){session_.CancelNavigation();state_->CancelDriveChanges();state_->mounts.clear();state_->current=-1;}
 bool MainMacBrowser::Activate(int row){auto model=session_.List()->BrowserRowAt(row);
     if(!model||!model->location.IsMounted())return false;if(!session_.ListingAvailable())return true;if(model->entry.directory){auto item=model->treeItem;if(!item)return true;session_.Tree()->m_ct->SelectItem(item);Select(session_.Tree()->m_ct->GetItemData(item));}
     else{auto& list=session_.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);Export(0);}return true;}

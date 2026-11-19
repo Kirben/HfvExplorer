@@ -324,7 +324,7 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
   auto tree=session.Tree();
   auto& control=tree->GetTreeCtrl();
   if(listing->cd){session.MacBrowser().AdoptCd(drive,CStringA(path.c_str()).GetString(),std::move(listing->cd),true);return;}
-  if(!listing->removable.empty()){session.MacBrowser().AdoptRemovable(listing->removable,true);return;}
+  if(!listing->removable.empty()){session.MacBrowser().AdoptRemovable(listing->removable,true,drive);return;}
   auto& snapshot=result.listing;
   if(listing->floppy){
    auto& prepared=reader->Slots()[0];

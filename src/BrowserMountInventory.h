@@ -25,6 +25,7 @@ public:
         int drive=-1;
         std::wstring physicalPath,suffix;
         uint64_t physicalOffset=0;
+        int sourceDrive=-1;
     };
     struct Entry {
         Address address;
