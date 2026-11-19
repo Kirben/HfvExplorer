@@ -52,36 +52,6 @@ bool FileDialog(BrowserSession& session_,std::wstring& path,bool save) {
     ofn.lpstrFilter=L"All files\0*.*\0\0";ofn.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(save?0:OFN_FILEMUSTEXIST);
     if(!(save?GetSaveFileNameW(&ofn):GetOpenFileNameW(&ofn)))return false;path=buffer;return true;
 }
-class ImagePasswordDialog final:public CDialog {
-    bool retry_;
-    void Clear() {
-        SetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,L"");
-        SendDlgItemMessage(IDC_DMG_PASSWORD,EM_EMPTYUNDOBUFFER,0,0);
-    }
-public:
-    std::shared_ptr<const Dmg::Password> password;
-    ImagePasswordDialog(CWnd* parent,bool retry):CDialog(IDD_DMG_PASSWORD,parent),retry_(retry){}
-    BOOL OnInitDialog()override{
-        CDialog::OnInitDialog();
-        BrowserPresentation::UnicodeEdit(m_hWnd,IDC_DMG_PASSWORD);
-        SendDlgItemMessage(IDC_DMG_PASSWORD,EM_SETLIMITTEXT,1023);
-        if(retry_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,L"The password did not unlock this image. Try again.");
-        GetDlgItem(IDC_DMG_PASSWORD)->SetFocus();
-        return FALSE;
-    }
-    void OnOK()override{
-        struct Text {
-            wchar_t value[1024]{};
-            ~Text(){SecureZeroMemory(value,sizeof(value));}
-        } text;
-        const auto size=GetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,text.value,int(std::size(text.value)));
-        try{password=std::make_shared<Dmg::Password>(std::wstring_view(text.value,size));}
-        catch(const std::exception& error){Clear();MessageBox(error.what(),"Unlock disk image",MB_ICONERROR);return;}
-        Clear();
-        CDialog::OnOK();
-    }
-    void OnCancel()override{Clear();CDialog::OnCancel();}
-};
 bool Hidden(BrowserSession& session_) {
 #ifdef HFV_TESTING
     return !session_.Owner()->IsWindowVisible();
@@ -526,10 +496,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 if(passwordPromptForTest_)supplied=passwordPromptForTest_(prompt->retry);
                 else
 #endif
-                if(!Hidden(session_)){
-                    ImagePasswordDialog dialog(session_.Owner(),prompt->retry);
-                    if(dialog.DoModal()==IDOK)supplied=std::move(dialog.password);
-                }
+                if(!Hidden(session_))supplied=PromptDmgPassword(session_.Owner(),prompt->retry);
                 if(supplied)QueueImageOpen(path,externalJournal,next,std::move(supplied),prompt->image);
                 else if(next)next();
                 return;

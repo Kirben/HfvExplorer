@@ -39,11 +39,14 @@ std::unique_ptr<Source> OpenImage(const wchar_t *, bool write, const wchar_t *ex
 std::unique_ptr<Source> CreateImage(const wchar_t *, uint64_t size, const wchar_t *externalJournal = nullptr);
 class NewImage : public Source {
 public:
+    virtual void Resize(uint64_t) = 0;
+    virtual void PublishTo(const std::wstring&) = 0;
     virtual void Keep() noexcept = 0;
     virtual bool Discard() noexcept = 0;
 };
 // Owns a newly created file and deletes it by handle unless kept.
 std::unique_ptr<NewImage> CreateFormatOutput(const wchar_t*,uint64_t size,const wchar_t* externalJournal=nullptr);
+std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size);
 std::string InitializeExternalJournalImage(Source&);
 std::string CreateExternalJournalImage(const wchar_t*,uint64_t size = 64ULL*1024*1024);
 struct Extent {

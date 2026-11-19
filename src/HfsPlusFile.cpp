@@ -80,6 +80,25 @@ class Image final : public NewImage {
             CloseHandle(file_);
         }
     }
+    void Resize(uint64_t size) override {
+        Disk::Check(writable_&&discard_&&size<=INT64_MAX,"Cannot resize this image output");
+        LARGE_INTEGER at;at.QuadPart=size;
+        Disk::Check(SetFilePointerEx(file_,at,nullptr,FILE_BEGIN)&&SetEndOfFile(file_),
+                    "Cannot resize the image output");
+        size_=size;
+    }
+    void PublishTo(const std::wstring& destination) override {
+        Disk::Check(discard_&&destination.size()<=32767,"Invalid image publication path");
+        Flush();
+        const auto nameBytes=destination.size()*sizeof(wchar_t);
+        const auto bytes=offsetof(FILE_RENAME_INFO,FileName)+nameBytes+sizeof(wchar_t);
+        Bytes buffer((std::max)(bytes,sizeof(FILE_RENAME_INFO)),0);
+        auto rename=reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+        rename->FileNameLength=DWORD(nameBytes);
+        memcpy(rename->FileName,destination.data(),nameBytes);
+        Disk::Check(SetFileInformationByHandle(file_,FileRenameInfo,rename,DWORD(buffer.size()))!=FALSE,
+                    "Cannot publish the image. The destination may already exist.");
+    }
     void Keep() noexcept override {discard_=false;}
     bool Discard() noexcept override {
         if(!discard_)return true;
@@ -155,6 +174,18 @@ std::unique_ptr<NewImage> CreateFormatOutput(const wchar_t* path,uint64_t size,c
  return std::make_unique<Image>(path,true,size,journal,true);
 }
 
+std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size)
+{
+    Disk::Check(GetFileAttributesW(destination.c_str())==INVALID_FILE_ATTRIBUTES&&
+                GetLastError()==ERROR_FILE_NOT_FOUND,"An image output already exists or its folder is unavailable");
+    const auto parent=destination.substr(0,destination.find_last_of(L"\\/")+1);
+    GUID guid{};
+    Disk::Check(SUCCEEDED(CoCreateGuid(&guid)),"Cannot create a temporary image name");
+    wchar_t name[40]{};
+    Disk::Check(StringFromGUID2(guid,name,40)!=0,"Cannot create a temporary image name");
+    const auto temporary=parent+L".hfv-image-"+name+L".tmp";
+    return CreateFormatOutput(temporary.c_str(),size);
+}
 std::string InitializeExternalJournalImage(Source& file)
 {
  const auto size=file.Size();

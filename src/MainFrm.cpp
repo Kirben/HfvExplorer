@@ -110,6 +110,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_WM_DROPFILES()
 	ON_COMMAND(ID_FILE_NEWVOLUME, OnFileNewvolume)
  ON_COMMAND(ID_FILE_NEWHFSPLUS, OnFileNewHfsPlus)
+ ON_COMMAND(ID_FILE_CONVERT_DMG, OnFileConvertDmg)
  ON_UPDATE_COMMAND_UI_RANGE(ID_FILE_MAC_IMPORT,ID_FILE_MAC_IMPORT_RESOURCE,OnUpdateMacTransfer)
  ON_UPDATE_COMMAND_UI(ID_EDIT_CUT,OnUpdateMacEdit)
  ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE,OnUpdateMacEdit)
@@ -1035,6 +1036,7 @@ int read_floppy( int drive, char *path )
 
 
 void CMainFrame::OnFileNewHfsPlus() {FormatHfsPlusImage(this,GetBrowserSession());}
+void CMainFrame::OnFileConvertDmg() {ConvertDmgImage(GetBrowserSession());}
 
 void CMainFrame::OnFileNewvolume()
 {

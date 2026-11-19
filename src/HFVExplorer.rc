@@ -111,6 +111,7 @@ BEGIN
     BEGIN
         MENUITEM "Format &new volume...",       ID_FILE_NEWVOLUME
         MENUITEM "Format Mac image...", ID_FILE_NEWHFSPLUS
+        MENUITEM "Convert disk image...", ID_FILE_CONVERT_DMG
         MENUITEM "&Open volume...\tCtrl+O",     ID_FILE_OPEN
         MENUITEM "Check for Mac removable disks", ID_FILE_SCAN_REMOVABLE
         MENUITEM "Import file...", ID_FILE_MAC_IMPORT

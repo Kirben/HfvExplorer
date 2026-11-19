@@ -121,6 +121,62 @@ Bytes Pack(const std::vector<Map>& maps,uint64_t sectors)
     file.insert(file.end(),footer.begin(),footer.end());
     return file;
 }
+Bytes FrontHeader(Bytes file)
+{
+    Bytes footer(file.end()-512,file.end());
+    file.resize(file.size()-512);
+    for(size_t field:{24,40,216})
+        if(U64(footer.data()+field+8))P64(footer.data()+field,U64(footer.data()+field)+512);
+    file.insert(file.begin(),footer.begin(),footer.end());
+    return file;
+}
+Bytes ResourceImage(const Bytes& contents)
+{
+    constexpr size_t data=256,map=204+2*40+data+4,mapBytes=50;
+    Bytes fork(map+mapBytes);
+    P32(fork.data(),data);P32(fork.data()+4,map);
+    P32(fork.data()+8,map-data);P32(fork.data()+12,mapBytes);
+    memcpy(fork.data()+map,fork.data(),16);
+    auto typeMap=fork.data()+map;
+    P16(typeMap+24,28);P16(typeMap+26,mapBytes);
+    memcpy(typeMap+30,"blkx",4);P16(typeMap+36,10);
+    P16(typeMap+38,128);P16(typeMap+40,0xffff);
+    P32(fork.data()+data,map-data-4);
+    auto mish=fork.data()+data+4;
+    memcpy(mish,"mish",4);P32(mish+4,1);P64(mish+16,contents.size()/512);
+    P32(mish+200,2);P32(mish+204,Raw);
+    P64(mish+220,contents.size()/512);P64(mish+236,contents.size());
+    P32(mish+244,UINT32_MAX);
+    auto file=contents;
+    file.insert(file.end(),fork.begin(),fork.end());
+    Bytes footer(512);
+    memcpy(footer.data(),"koly",4);P32(footer.data()+4,4);P32(footer.data()+8,512);
+    P64(footer.data()+32,contents.size());
+    P64(footer.data()+40,contents.size());P64(footer.data()+48,fork.size());
+    P64(footer.data()+492,contents.size()/512);
+    file.insert(file.end(),footer.begin(),footer.end());
+    return file;
+}
+std::pair<Bytes,Bytes> Segments(const Bytes& whole,size_t cut)
+{
+    const auto footer=whole.data()+whole.size()-512;
+    const auto at=U64(footer+24),length=U64(footer+32),xml=U64(footer+216);
+    Check(cut>0&&cut<length,"Invalid DMG fixture segment size");
+    Bytes first(whole.begin()+at,whole.begin()+at+cut);
+    Bytes second(whole.begin()+at+cut,whole.begin()+at+length);
+    second.insert(second.end(),whole.begin()+xml,whole.end()-512);
+    Bytes trailer(footer,footer+512);
+    trailer[64]=0xab;
+    P64(trailer.data()+24,0);P32(trailer.data()+60,2);
+    P32(trailer.data()+56,1);P64(trailer.data()+32,cut);
+    P64(trailer.data()+216,0);P64(trailer.data()+224,0);
+    first.insert(first.end(),trailer.begin(),trailer.end());
+    P32(trailer.data()+56,2);P64(trailer.data()+16,cut);P64(trailer.data()+32,length-cut);
+    P64(trailer.data()+216,length-cut);P64(trailer.data()+224,U64(footer+224));
+    second.insert(second.end(),trailer.begin(),trailer.end());
+    return {std::move(first),std::move(second)};
+}
+
 std::wstring Save(const std::string& path,const Bytes& file)
 {
     auto name=VolumeCoord::Wide(path);
@@ -175,8 +231,54 @@ int RunDmgImageTest(const char* directory)
         Reject([&]{auto bad=Open(corrupt);bad->Read(0,tail.data(),tail.size());},"Truncated compressed run was accepted");
         auto underfilled=Save(root+"\\short-output.dmg",Pack({{{Xz,0,2,XzBlock()}}},2));
         Reject([&]{auto bad=Open(underfilled);bad->Read(0,tail.data(),tail.size());},"Short decoder output was accepted");
-        fprintf(report,"PASS: UDIF XML, raw, zero, ADC, zlib, bzip2, LZFSE and XZ runs, multiple relative block maps, reads across boundaries and rejection of malformed input.\n");
+        const Bytes sample(SectorBytes,'S');
+        auto older=ResourceImage(sample);
+        auto resource=Open(Save(root+"\\resource-fork.dmg",older));
+        Check(Disk::Read(*resource,0,sample.size())==sample,"Read resource-fork DMG map");
+        auto front=Open(Save(root+"\\front-header.dmg",FrontHeader(older)));
+        Check(Disk::Read(*front,0,sample.size())==sample,"Read leading UDIF header");
+        const auto forkAt=U64(older.data()+older.size()-512+40);
+        const auto resMap=U32(older.data()+forkAt+4);
+        P32(older.data()+forkAt+resMap+42,0x00ffffff);
+        Reject([&]{Open(Save(root+"\\bad-resource.dmg",older));},"Out-of-bounds resource reference was accepted");
+
+        const auto [part1,part2]=Segments(Pack({{{Zlib,0,1,ZlibBlock(sample)}}},1),3);
+        const auto firstPart=Save(root+"\\split.dmg",part1);
+        Reject([&]{Open(firstPart);},"Split DMG opened with a missing segment");
+        auto badPart=part2;
+        badPart[badPart.size()-512+64]^=1;
+        Save(root+"\\bad-split.dmg",part1);
+        Save(root+"\\bad-split.002.dmgpart",badPart);
+        Reject([&]{Open(VolumeCoord::Wide(root+"\\bad-split.dmg"));},"Split DMG accepted a different segment identifier");
+        const auto segment=Save(root+"\\split.002.dmgpart",part2);
+        Reject([&]{Open(segment);},"A later split segment opened by itself");
+        auto split=Open(firstPart);
+        Check(Disk::Read(*split,0,sample.size())==sample&&split->WorkerFiles().size()==2,
+              "Compressed run split across files read incorrectly");
+        fprintf(report,"PASS: XML and resource-fork maps, leading and trailing UDIF headers, split compression runs, missing/wrong segments, all codecs and malformed input.\n");
         fflush(report);
+
+        const auto mfsPath=Save(root+"\\mfs-volume.img",Bytes(400*1024));
+        {
+            MfsImageSource mfs;
+            std::string error;
+            Check(mfs.Open(mfsPath.c_str(),error,true),"Open raw MFS fixture output");
+            Check(MfsImage::Format(mfs,"MFS in DMG",400*1024,false,error),"Format MFS fixture");
+        }
+        auto rawMfs=HfsPlus::OpenImage(mfsPath.c_str(),false);
+        constexpr uint32_t partition=4096;
+        Bytes partitioned(partition+size_t(rawMfs->Size()));
+        rawMfs->Read(0,partitioned.data()+partition,size_t(rawMfs->Size()));
+        P16(partitioned.data(),0x4552);P16(partitioned.data()+2,512);
+        auto map=partitioned.data()+512;
+        P16(map,0x504d);P32(map+4,1);P32(map+8,partition/512);P32(map+12,uint32_t(rawMfs->Size()/512));
+        memcpy(map+48,"Apple_MFS",9);
+        const auto sectors=partitioned.size()/SectorBytes;
+        const auto mfsDmg=Save(root+"\\partitioned-mfs.dmg",Pack({{{Raw,0,sectors,std::move(partitioned)}}},sectors));
+        auto mfs=MacBrowser::OpenBrowserImage(mfsDmg);
+        Check(mfs&&mfs->Name()==u"MFS in DMG"&&!mfs->Writable(),
+              "DMG did not find the MFS volume inside its validated partition");
+        fprintf(report,"PASS: MFS browsing from an APM partition inside a DMG.\n");
 
         const auto rawPath=VolumeCoord::Wide(root+"\\volume.img");
         const Bytes data={'H','F','S','+',' ','i','n',' ','D','M','G'};
@@ -190,11 +292,39 @@ int RunDmgImageTest(const char* directory)
             });
             raw=Disk::Read(*image,0,size_t(image->Size()));
         }
+        const auto createdPath=VolumeCoord::Wide(root+"\\created.dmg");
+        const auto extractedPath=VolumeCoord::Wide(root+"\\unpacked.img");
+        Storage::Job create,extract;
+        Check(!Dmg::Convert(rawPath,createdPath,Dmg::Output::CompressedDmg,create).code,
+              "Create compressed DMG");
+        const auto reopened=MacBrowser::OpenBrowserImage(createdPath);
+        MacBrowser::Entry made;
+        Check(reopened&&reopened->FindChild(2,u"Fixture",made)&&made.forks[1].size==1,
+              "Created DMG could not be mounted with both forks");
+        Check(!Dmg::Convert(createdPath,extractedPath,Dmg::Output::RawImage,extract).code,
+              "Extract compressed DMG");
+        auto unpacked=HfsPlus::OpenImage(extractedPath.c_str(),false);
+        Check(unpacked->Size()==raw.size()&&Disk::Read(*unpacked,0,raw.size())==raw,
+              "Compressed DMG round-trip changed raw disk bytes");
+        Reject([&]{Dmg::Convert(rawPath,createdPath,Dmg::Output::CompressedDmg,create);},
+               "DMG conversion overwrote an existing output");
+        const auto cancelled=VolumeCoord::Wide(root+"\\cancelled.dmg");
+        Storage::Job stop;
+        stop.transport([&](const Storage::Progress&){stop.cancel();},{});
+        bool stopped=false;
+        try{Dmg::Convert(rawPath,cancelled,Dmg::Output::CompressedDmg,stop);}
+        catch(const Storage::Cancelled&){stopped=true;}
+        Check(stopped&&GetFileAttributesW(cancelled.c_str())==INVALID_FILE_ATTRIBUTES,
+              "Cancelled DMG conversion published an output");
+        fprintf(report,"PASS: native DMG creation and raw extraction, byte-for-byte round-trip, both forks, no overwrite and cancellation.\n");
         const size_t boundary=64*1024;
         Bytes head(raw.begin(),raw.begin()+boundary);
         Bytes body(raw.begin()+boundary,raw.end());
-        const auto path=Save(root+"\\browser.dmg",Pack({{{Zlib,0,head.size()/SectorBytes,ZlibBlock(head)},
-                                              {Raw,head.size()/SectorBytes,body.size()/SectorBytes,std::move(body)}}},raw.size()/SectorBytes));
+        const auto parts=Segments(Pack({{{Zlib,0,head.size()/SectorBytes,ZlibBlock(head)},
+                                         {Raw,head.size()/SectorBytes,body.size()/SectorBytes,std::move(body)}}},
+                                       raw.size()/SectorBytes),65536);
+        const auto path=Save(root+"\\browser.dmg",parts.first);
+        Save(root+"\\browser.002.dmgpart",parts.second);
         auto volume=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry entry;
         Check(volume&&!volume->Writable()&&volume->Name()==u"DMG fixture"&&volume->FindChild(2,u"Fixture",entry),
@@ -306,6 +436,39 @@ Bytes Envelope(const Bytes& raw,unsigned bits,bool aesWrap,const Dmg::Password& 
  }
  return file;
 }
+Bytes LegacyEnvelope(const Bytes& plain,const Dmg::Password& password)
+{
+    auto modern=Envelope(plain,128,false,password);
+    Bytes file(modern.begin()+1536,modern.end());
+    Bytes trailer(1276),salt(20,0x5b),kek(24),aes(16),hmac(20);
+    for(size_t i=0;i<aes.size();++i)aes[i]=uint8_t(0x8c+i);
+    for(size_t i=0;i<hmac.size();++i)hmac[i]=uint8_t(0x34+i);
+    TestAlgorithm sha(BCRYPT_SHA1_ALGORITHM,BCRYPT_ALG_HANDLE_HMAC_FLAG);
+    Cng(BCryptDeriveKeyPBKDF2(sha.handle,const_cast<PUCHAR>(password.Data()),password.Size(),
+         salt.data(),ULONG(salt.size()),1000,kek.data(),ULONG(kek.size()),0),"Derive legacy DMG fixture key");
+    const auto putKey=[&](size_t at,const Bytes& key){
+        Bytes iv(8,0x92),data(4);
+        data.insert(data.end(),key.begin(),key.end());
+        const auto inner=EncryptBlock(BCRYPT_3DES_ALGORITHM,kek,iv,std::move(data),true);
+        iv.insert(iv.end(),inner.begin(),inner.end());
+        std::reverse(iv.begin(),iv.end());
+        const auto wrapped=EncryptBlock(BCRYPT_3DES_ALGORITHM,kek,{0x4a,0xdd,0xa2,0x2c,0x79,0xe8,0x21,0x05},
+                                        std::move(iv),true);
+        P32(trailer.data()+at,uint32_t(wrapped.size()));
+        memcpy(trailer.data()+at+4,wrapped.data(),wrapped.size());
+    };
+    P32(trailer.data()+16,512);P32(trailer.data()+20,17);P32(trailer.data()+24,7);
+    P32(trailer.data()+28,6);P32(trailer.data()+32,192);P32(trailer.data()+36,8);
+    P32(trailer.data()+40,0x67);P64(trailer.data()+44,1000);P32(trailer.data()+52,uint32_t(salt.size()));
+    memcpy(trailer.data()+56,salt.data(),salt.size());
+    P32(trailer.data()+88,16);P32(trailer.data()+92,5);P32(trailer.data()+96,0x80000001);
+    P32(trailer.data()+100,128);
+    putKey(136,aes);putKey(436,hmac);
+    P64(trailer.data()+1256,plain.size());P32(trailer.data()+1264,1);
+    memcpy(trailer.data()+1268,"cdsaencr",8);
+    file.insert(file.end(),trailer.begin(),trailer.end());
+    return file;
+}
 void NeedsPassword(std::unique_ptr<Source>& file,const Dmg::Password* password,bool retry)
 {
  try{Dmg::Unlock(file,password);}
@@ -395,6 +558,13 @@ int RunEncryptedDmgTest(const char* directory)
    Reject([&]{source->Write(0,plain.data(),1);},"Unlocked DMG accepted a write");
    Reject([&]{Disk::Read(*source,plain.size()-5,10);},"Unlocked DMG allowed reading past plaintext size");
   }
+  const auto old=Save(root+"\\version-1.dmg",LegacyEnvelope(plain,*password));
+  auto legacy=HfsPlus::OpenImage(old.c_str(),false);
+  NeedsPassword(legacy,nullptr,false);
+  NeedsPassword(legacy,&wrong,true);
+  Check(Dmg::Unlock(legacy,password.get())&&legacy->ProcessLocal()&&
+        Disk::Read(*legacy,0,plain.size())==plain,"Read a legacy v1 encrypted DMG");
+  fprintf(report,"PASS: v1 trailing encryption header, 3DES key unwrap, wrong password and partial payload block.\n");
   auto corrupt=Envelope(plain,128,true,*password);
   P64(corrupt.data()+80,corrupt.size());
   const auto badRecord=Save(root+"\\bad-record.dmg",corrupt);
@@ -431,6 +601,13 @@ int RunEncryptedDmgTest(const char* directory)
   const auto packed=Pack({{{Zlib,0,raw.size()/SectorBytes,ZlibBlock(raw)}}},raw.size()/SectorBytes);
   const auto path=Save(root+"\\compressed encrypted.dmg",Envelope(packed,256,true,*password));
   BrowserPrompt(root.c_str(),path,password);
+  const auto extracted=VolumeCoord::Wide(root+"\\decrypted.img");
+  Storage::Job convert;
+  Check(!Dmg::Convert(path,extracted,Dmg::Output::RawImage,convert,password.get()).code,
+        "Convert encrypted DMG into a raw image");
+  auto decrypted=HfsPlus::OpenImage(extracted.c_str(),false);
+  Check(decrypted->Size()==raw.size()&&Disk::Read(*decrypted,0,raw.size())==raw,
+        "Raw conversion changed encrypted image data");
   const auto volume=MacBrowser::OpenBrowserImage(path,{},password.get());
   MacBrowser::Entry entry;
   Check(volume&&volume->FindChild(2,u"Payload",entry)&&!volume->Writable()&&

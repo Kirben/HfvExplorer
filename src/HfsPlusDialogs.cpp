@@ -6,6 +6,10 @@
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
+#include "DmgImage.h"
+#include "DmgEncryption.h"
+#include "StorageLocation.h"
+#include <optional>
 #include "StorageJobDialog.h"
 #include "BackgroundCopies.h"
 #include "ImageHandleTransfer.h"
@@ -41,7 +45,7 @@ void UnicodeEdit(HWND parent, int id) {
     SendMessage(control, WM_SETFONT, font, TRUE);
     SetWindowPos(control, previous, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
-bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter, const wchar_t *extension,const wchar_t* title=nullptr) {
+bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter, const wchar_t *extension,const wchar_t* title=nullptr,DWORD* fileType=nullptr) {
     wchar_t buffer[32768] = {};
     wcsncpy_s(buffer, path.c_str(), _TRUNCATE);
     OPENFILENAMEW ofn = {sizeof(ofn)};
@@ -49,13 +53,45 @@ bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = 32768;
     ofn.lpstrFilter = filter;
+    ofn.nFilterIndex = 1;
     ofn.lpstrDefExt = extension;
     ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? 0 : OFN_FILEMUSTEXIST);
     if (!(save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn)))
         return false;
     path = buffer;
+    if(fileType)*fileType=ofn.nFilterIndex;
     return true;
 }
+class ImagePasswordDialog final:public CDialog {
+    bool retry_;
+    void Clear() {
+        SetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,L"");
+        SendDlgItemMessage(IDC_DMG_PASSWORD,EM_EMPTYUNDOBUFFER,0,0);
+    }
+public:
+    std::shared_ptr<const Dmg::Password> password;
+    ImagePasswordDialog(CWnd* parent,bool retry):CDialog(IDD_DMG_PASSWORD,parent),retry_(retry){}
+    BOOL OnInitDialog()override{
+        CDialog::OnInitDialog();
+        UnicodeEdit(m_hWnd,IDC_DMG_PASSWORD);
+        SendDlgItemMessage(IDC_DMG_PASSWORD,EM_SETLIMITTEXT,1023);
+        if(retry_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,L"The password did not unlock this image. Try again.");
+        GetDlgItem(IDC_DMG_PASSWORD)->SetFocus();
+        return FALSE;
+    }
+    void OnOK()override{
+        struct Text {
+            wchar_t value[1024]{};
+            ~Text(){SecureZeroMemory(value,sizeof(value));}
+        } text;
+        const auto size=GetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,text.value,int(std::size(text.value)));
+        try{password=std::make_shared<Dmg::Password>(std::wstring_view(text.value,size));}
+        catch(const std::exception& error){Clear();MessageBox(error.what(),"Unlock disk image",MB_ICONERROR);return;}
+        Clear();
+        CDialog::OnOK();
+    }
+    void OnCancel()override{Clear();CDialog::OnCancel();}
+};
 class NameDialog : public CDialog {
   public:
     std::wstring value;
@@ -352,3 +388,51 @@ int RunHfsPlusUiTest(const char *directory) {
     return 0;
 }
 #endif
+
+std::shared_ptr<const Dmg::Password> PromptDmgPassword(CWnd* parent,bool retry)
+{
+    ImagePasswordDialog dialog(parent,retry);
+    if(dialog.DoModal()!=IDOK)return {};
+    return std::move(dialog.password);
+}
+namespace {
+struct DmgConversion {
+    std::wstring source,destination;
+    Dmg::Output format;
+    std::string expectedImage;
+};
+void StartDmgConversion(BrowserSession& session,DmgConversion paths,
+                        std::shared_ptr<const Dmg::Password> password={})
+{
+    auto prompt=std::make_shared<std::optional<bool>>();
+    auto complete=session.WhileOpen([paths,prompt](BrowserSession& origin,const Storage::Result& result){
+        if(result.code)return;
+        if(*prompt){
+            if(auto supplied=PromptDmgPassword(origin.Owner(),**prompt))
+                StartDmgConversion(origin,paths,std::move(supplied));
+        }
+    });
+    BackgroundCopies::StartStorageResult([paths,prompt,password](Storage::Job& job){
+        StorageLocation::ValidateImage(paths.source,paths.expectedImage);
+        try{return Dmg::Convert(paths.source,paths.destination,paths.format,job,password.get());}
+        catch(const Dmg::PasswordRequired& error){*prompt=error.retry;return Storage::Result{};}
+    },session.Owner(),"Converting disk image","Convert disk image",std::move(complete),{true});
+}
+}
+
+void ConvertDmgImage(BrowserSession& session)
+{
+    auto parent=session.Owner();
+    std::wstring source,destination;
+    if(!FileDialog(parent->m_hWnd,source,false,
+        L"Disk images\0*.dmg;*.img;*.dsk;*.hfv;*.hfs;*.iso\0All files\0*.*\0\0",nullptr,
+        L"Choose a disk image to convert"))return;
+    DWORD type=1;
+    if(!FileDialog(parent->m_hWnd,destination,true,
+        L"Compressed DMG\0*.dmg\0Raw disk image\0*.img\0\0",nullptr,
+        L"Save converted disk image",&type))return;
+    const auto name=destination.substr(destination.find_last_of(L"\\/")+1);
+    if(name.find(L'.')==name.npos)destination+=type==1?L".dmg":L".img";
+    const auto format=type==1?Dmg::Output::CompressedDmg:Dmg::Output::RawImage;
+    StartDmgConversion(session,{source,destination,format,VolumeCoord::ImageKey(source)});
+}

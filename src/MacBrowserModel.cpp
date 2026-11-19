@@ -9,6 +9,7 @@
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
+#include "DiskPartitions.h"
 #include "DmgEncryption.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
@@ -288,17 +289,55 @@ public:
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
 };
 
+class ReadOnlyDiskSlice final : public HfsPlus::Source {
+    std::shared_ptr<HfsPlus::Source> disk_;
+    const uint64_t start_,size_;
+public:
+    ReadOnlyDiskSlice(std::shared_ptr<HfsPlus::Source> disk,uint64_t start,uint64_t size)
+        :disk_(std::move(disk)),start_(start),size_(size){}
+    uint64_t Size()const override{return size_;}
+    bool Writable()const override{return false;}
+    bool ProcessLocal()const override{return disk_->ProcessLocal();}
+    void CheckMedia()override{disk_->CheckMedia();}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return disk_->WorkerFiles();}
+    void Read(uint64_t at,void* bytes,size_t count)override{
+        Check(HfsPlus::Disk::Range(at,count,size_),"Read outside the DMG partition");
+        disk_->Read(start_+at,bytes,count);
+    }
+    void Write(uint64_t,const void*,size_t)override{throw HfsPlus::Error("DMG images are read-only");}
+    void Flush()override{}
+};
+
+std::shared_ptr<Volume> OpenLegacyDmgVolume(const std::shared_ptr<HfsPlus::Source>& source,const std::string& key)
+{
+    auto mfs=std::make_unique<ReadOnlyMfsImage>(source);
+    if(MfsImage::Recognizes(*mfs))return FromMfs(std::move(mfs),key);
+    if(source->Size()>=1536&&HfsPlus::Disk::U16(HfsPlus::Disk::Read(*source,1024,2).data())==0x4244)
+        return OpenClassicSource(source,key);
+    return {};
+}
+
 std::shared_ptr<Volume> OpenDmg(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
                                 const std::wstring& externalJournal)
 {
     if(HfsPlus::Volume::Recognizes(*source))
         return FromHfsPlus(std::move(source),false,key,externalJournal);
     if(!externalJournal.empty())return {};
-    if(auto optical=Optical::Open(source,key))return optical;
     std::shared_ptr<HfsPlus::Source> disk(std::move(source));
-    auto mfs=std::make_unique<ReadOnlyMfsImage>(disk);
-    if(MfsImage::Recognizes(*mfs))return FromMfs(std::move(mfs),key);
-    return OpenClassicSource(std::move(disk),key);
+    if(disk->Size()>=2048){
+        const auto boot=HfsPlus::Disk::Read(*disk,0,512);
+        auto partitions=DiskPartitions::ProbeGptImage(*disk,boot);
+        if(!partitions)partitions=DiskPartitions::ProbeApm(*disk,boot);
+        if(partitions){
+            for(const auto& partition:*partitions){
+                auto slice=std::make_shared<ReadOnlyDiskSlice>(disk,partition.offset,partition.length);
+                if(auto legacy=OpenLegacyDmgVolume(slice,key))return legacy;
+            }
+        }else if(auto legacy=OpenLegacyDmgVolume(disk,key))return legacy;
+    }
+    std::unique_ptr<HfsPlus::Source> opticalSource=std::make_unique<ReadOnlyDiskSlice>(disk,0,disk->Size());
+    if(auto optical=Optical::Open(opticalSource,key))return optical;
+    throw HfsPlus::Error("The DMG contains no supported filesystem");
 }
 }
 

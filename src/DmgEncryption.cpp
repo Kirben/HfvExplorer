@@ -157,17 +157,75 @@ Layout Parse(Source& source)
     return result;
 }
 
-bool UnwrapKey(Record& record,const Password& password,size_t keyBytes,Sensitive& plain)
+void Derive(const Password& password,Bytes& salt,uint32_t iterations,Sensitive& derived)
 {
     Algorithm algorithm(BCRYPT_SHA1_ALGORITHM,BCRYPT_ALG_HANDLE_HMAC_FLAG);
-    Sensitive derived(24);
     Crypto(BCryptDeriveKeyPBKDF2(algorithm.handle,const_cast<PUCHAR>(password.Data()),password.Size(),
-           record.salt.data(),ULONG(record.salt.size()),record.iterations,derived.bytes.data(),
+           salt.data(),ULONG(salt.size()),iterations,derived.bytes.data(),
            ULONG(derived.bytes.size()),0),"Cannot derive the DMG password key");
+}
+
+bool UnwrapKey(Record& record,const Password& password,size_t keyBytes,Sensitive& plain)
+{
+    Sensitive derived(24);
+    Derive(password,record.salt,record.iterations,derived);
     Cipher cipher(record.method==Aes?BCRYPT_AES_ALGORITHM:BCRYPT_3DES_ALGORITHM,derived.bytes.data(),24);
     ULONG written=0;
     return cipher.Decrypt(record.wrapped,plain.bytes,record.iv.data(),ULONG(record.iv.size()),true,written)&&
            written>=keyBytes+25&&!memcmp(plain.bytes.data()+keyBytes+20,"CKIE\0",5);
+}
+
+// v1 uses two padded 3DES CBC layers. The reversed inner ciphertext
+// begins with its own IV and the plaintext key follows a four-byte prefix.
+bool LegacyKey(Cipher& cipher,Bytes wrapped,uint8_t* key,size_t keyBytes)
+{
+    uint8_t outerIv[]{0x4a,0xdd,0xa2,0x2c,0x79,0xe8,0x21,0x05};
+    Sensitive inner(wrapped.size()),plain(wrapped.size());
+    ULONG size=0;
+    if(!cipher.Decrypt(wrapped,inner.bytes,outerIv,sizeof(outerIv),true,size)||size<16||size%8)
+        return false;
+    std::reverse(inner.bytes.begin(),inner.bytes.begin()+size);
+    Bytes payload(inner.bytes.begin()+8,inner.bytes.begin()+size);
+    uint8_t iv[8];
+    memcpy(iv,inner.bytes.data(),sizeof(iv));
+    if(!cipher.Decrypt(payload,plain.bytes,iv,sizeof(iv),true,size)||size!=keyBytes+4)
+        return false;
+    memcpy(key,plain.bytes.data()+4,keyBytes);
+    return true;
+}
+
+Layout UnlockLegacy(Source& source,const Password* password,Sensitive& key)
+{
+    constexpr size_t trailerBytes=1276;
+    Check(source.Size()>=trailerBytes,"Truncated version 1 encrypted DMG");
+    const auto trailer=Disk::Read(source,source.Size()-trailerBytes,trailerBytes);
+    const auto p=trailer.data();
+    const auto bytes=U64(p+1256);
+    const auto block=U32(p+16),bits=U32(p+100),saltBytes=U32(p+52);
+    const auto iterations=U64(p+44);
+    Check(U32(p+1264)==1&&U32(p+20)==TripleDes&&U32(p+24)==7&&U32(p+28)==6&&U32(p+32)==192&&
+          U32(p+36)==8&&U32(p+40)==Pbkdf2&&U32(p+88)==16&&U32(p+92)==5&&U32(p+96)==Aes&&
+          (bits==128||bits==256),"Unsupported version 1 encrypted DMG format");
+    Check(bytes&&bytes<=INT64_MAX&&block>=512&&block<=1024*1024&&block%16==0&&
+          (bytes-1)/block<=UINT32_MAX&&Range(0,(bytes+15)&~uint64_t(15),source.Size()-trailerBytes)&&
+          saltBytes&&saltBytes<=32&&iterations&&iterations<=10000000,
+          "Invalid version 1 encrypted DMG bounds");
+    const auto wrapped=[&](size_t at){
+        const auto size=U32(p+at);
+        Check(size>=24&&size<=256&&size%8==0,"Invalid legacy DMG wrapped key length");
+        return Bytes(p+at+4,p+at+4+size);
+    };
+    auto aes=wrapped(136),hmac=wrapped(436);
+    if(!password)throw PasswordRequired(false);
+    Bytes salt(p+56,p+56+saltBytes);
+    Sensitive derived(24);
+    Derive(*password,salt,uint32_t(iterations),derived);
+    Cipher cipher(BCRYPT_3DES_ALGORITHM,derived.bytes.data(),24);
+    const auto keyBytes=bits/8;
+    if(!LegacyKey(cipher,std::move(aes),key.bytes.data(),keyBytes)||
+       !LegacyKey(cipher,std::move(hmac),key.bytes.data()+keyBytes,20))
+        throw PasswordRequired(true);
+    return {0,bytes,block,keyBytes,{}};
 }
 
 class Image final:public Source {
@@ -225,8 +283,11 @@ bool Unlock(std::unique_ptr<HfsPlus::Source>& source,const Password* password)
     const auto magic=Disk::Read(*source,0,8);
     if(memcmp(magic.data(),"encrcdsa",8)){
         const auto tail=Disk::Read(*source,source->Size()-8,8);
-        Check(memcmp(tail.data(),"cdsaencr",8)!=0,"Legacy version 1 encrypted DMG images are unsupported");
-        return false;
+        if(memcmp(tail.data(),"cdsaencr",8))return false;
+        Sensitive key(32+20);
+        auto layout=UnlockLegacy(*source,password,key);
+        source=std::make_unique<Image>(std::move(source),layout,key);
+        return true;
     }
     auto layout=Parse(*source);
     if(!password)throw PasswordRequired(false);

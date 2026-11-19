@@ -85,33 +85,15 @@ class StagedFile {
     std::unique_ptr<HfsPlus::NewImage> file_;
     uint64_t written_=0;
 public:
-    StagedFile(std::wstring final,uint64_t bytes):final_(std::move(final)){
-        Check(GetFileAttributesW(final_.c_str())==INVALID_FILE_ATTRIBUTES&&
-              GetLastError()==ERROR_FILE_NOT_FOUND,"An optical output already exists or its folder is unavailable");
-        const auto parent=final_.substr(0,final_.find_last_of(L"\\/")+1);
-        GUID guid{};
-        Check(SUCCEEDED(CoCreateGuid(&guid)),"Cannot create a temporary optical image name");
-        wchar_t name[40]{};
-        Check(StringFromGUID2(guid,name,ARRAYSIZE(name))!=0,"Cannot create a temporary optical image name");
-        const auto temporary=parent+L".hfv-optical-"+name+L".tmp";
-        file_=HfsPlus::CreateFormatOutput(temporary.c_str(),bytes);
-    }
+    StagedFile(std::wstring final,uint64_t bytes):final_(std::move(final)),
+        file_(HfsPlus::CreateStagedOutput(final_,bytes)){}
     void Write(const void* src,size_t size){
         file_->Write(written_,src,size);
         written_+=size;
     }
     void Publish(){
         Check(written_==file_->Size(),"The optical output is incomplete");
-        file_->Flush();
-        const auto nameBytes=final_.size()*sizeof(wchar_t);
-        const auto bytes=offsetof(FILE_RENAME_INFO,FileName)+nameBytes+sizeof(wchar_t);
-        std::vector<uint8_t> buffer((std::max)(bytes,sizeof(FILE_RENAME_INFO)),0);
-        auto rename=reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
-        rename->FileNameLength=DWORD(nameBytes);
-        memcpy(rename->FileName,final_.data(),nameBytes);
-        const auto handle=HANDLE(file_->WorkerFiles().front().second);
-        Check(SetFileInformationByHandle(handle,FileRenameInfo,rename,DWORD(buffer.size()))!=FALSE,
-              "Cannot publish optical output. The destination may already exist.");
+        file_->PublishTo(final_);
     }
     void Keep(){file_->Keep();}
 };

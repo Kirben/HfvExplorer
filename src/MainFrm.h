@@ -162,6 +162,7 @@ protected:
 	afx_msg void OnDropFiles(HDROP hDropInfo);
 	afx_msg void OnFileNewvolume();
  afx_msg void OnFileNewHfsPlus();
+ afx_msg void OnFileConvertDmg();
 	afx_msg void OnFileVolumefromfloppy();
 	afx_msg void OnFileVolumetofloppy();
 	afx_msg void OnToolsDumpcddebug();
