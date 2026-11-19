@@ -31,7 +31,6 @@ class BrowserSession {
  std::function<void(const Storage::Result&)> navigationReady_;
  void CompleteNavigation();
  void ProcessChanges();
- void RefreshSynchronously(const Context&);
  std::vector<FileOperations::Location> CaptureListingSelection() const;
  void RestoreListingSelection(const std::vector<FileOperations::Location>&,bool reveal);
  BrowserNavigation::Request FolderRequest(HTREEITEM item);
@@ -92,7 +91,7 @@ public:
  void UpdateWindowTitle()const;
  bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false,bool keepListing=false);
 #ifdef HFV_TESTING
-    bool asyncNavigationForTest=false;
+    bool AwaitNavigationForTest();
     std::string navigationErrorForTest;
     unsigned notificationRefreshes=0,notificationErrors=0;
 #endif

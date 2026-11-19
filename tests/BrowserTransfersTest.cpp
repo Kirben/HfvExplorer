@@ -65,6 +65,7 @@ int Row(BrowserSession& session,const wchar_t* name)
 
 void Select(BrowserSession& session,const wchar_t* name)
 {
+ Check(session.AwaitNavigationForTest()&&session.ListingAvailable(),"selection listing is still loading");
  const auto index=Row(session,name);
  auto& list=session.List()->GetListCtrl();
  if(index<0){
@@ -133,7 +134,7 @@ void FormatClassic(const CString& path)
 
 std::shared_ptr<MacBrowser::Volume> Mount(BrowserSession& session,const CString& path)
 {
- Check(session.MacBrowser().OpenImage(Wide(path))==1,"open browser image fixture");
+ Check(session.MacBrowser().OpenImage(Wide(path))==1&&session.AwaitNavigationForTest(),"open browser image fixture");
  auto volume=session.MacBrowser().TargetFolder().Volume();
  Check(volume&&MacBrowser::ExecutionFor(*volume).Persistent(),"browser image is not owned by a persistent worker");
  return volume;
@@ -141,7 +142,7 @@ std::shared_ptr<MacBrowser::Volume> Mount(BrowserSession& session,const CString&
 
 void Refresh(BrowserSession& session)
 {
- Check(session.MacBrowser().Refresh(),"refresh mounted browser fixture");
+ Check(session.MacBrowser().Refresh()&&session.AwaitNavigationForTest(),"refresh mounted browser fixture");
 }
 
 void Host(BrowserSession& session,const CString& path)
@@ -150,7 +151,7 @@ void Host(BrowserSession& session,const CString& path)
  doc->m_fats[0].m_volume_name=path;
  Check(doc->OnOpenDocument(""),"rebuild browser host tree");
  session.Tree()->GetTreeCtrl().SelectItem(doc->m_fats[0].m_rootitem);
- doc->open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);
+ Check(session.RefreshSelected()&&session.AwaitNavigationForTest(),"open host folder through browser navigation");
 }
 
 template<class Predicate>
@@ -189,6 +190,8 @@ Storage::Result Transfer(Start start,Choice choice=Choice::None)
 
 Storage::Result Paste(CMainFrame& frame,Choice choice=Choice::None)
 {
+ auto& session=frame.GetBrowserSession();
+ Check(session.AwaitNavigationForTest()&&session.ListingAvailable(),"paste destination is still loading");
  return Transfer([&]{frame.SendMessage(WM_COMMAND,ID_EDIT_PASTE);return true;},choice);
 }
 
@@ -355,7 +358,7 @@ int RunBrowserTransfersTest(const char* directory)
   Refresh(sa);
   Select(sa,L"Outer");
   BrowserTransfers::Drag descendant(sa);
-  Check(Mount(sb,ap)==av&&sb.MacBrowser().Activate(Row(sb,L"Outer")),"two browsers did not share the same image mount");
+  Check(Mount(sb,ap)==av&&sb.MacBrowser().Activate(Row(sb,L"Outer"))&&sb.AwaitNavigationForTest(),"two browsers did not share the same image mount");
   const auto innerRow=Row(sb,L"Inner");
   Check(innerRow>=0&&Transfer([&]{return descendant.TestDrop(sb,false,nullptr,innerRow,MK_CONTROL);}).code,
         "cross-window descendant copy was accepted");
@@ -409,7 +412,7 @@ int RunBrowserTransfersTest(const char* directory)
         "drag survived destruction of its source window");
   const auto after=bv->MakeDirectory(2,u"After close");
   Refresh(sb);
-  Check(sb.MacBrowser().Activate(Row(sb,L"After close")),"show post-close folder");
+  Check(sb.MacBrowser().Activate(Row(sb,L"After close"))&&sb.AwaitNavigationForTest(),"show post-close folder");
   Success(Paste(*b));
   Verify(*bv,after,u"Payload");
 

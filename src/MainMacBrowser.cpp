@@ -608,27 +608,10 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
     return 1;
 }
 
-int MainMacBrowser::OpenImage(const std::wstring& path,const std::wstring& externalJournal) {
-    const auto wide=AbsoluteImagePath(path);
-    if(session_.UsesAsyncNavigation())return QueueImageOpen(wide,externalJournal);
-#ifndef HFV_TESTING
-    return -1;
-#else
-    for(size_t i=0;i<state_->mounts.size();++i)if(!_wcsicmp(wide.c_str(),state_->mounts[i].key.c_str())){
-        if(!state_->mounts[i].root)state_->Root(int(i));state_->Show(int(i),2,state_->mounts[i].root);return 1;}
-    auto key=VolumeCoord::ImageKey(wide);if(session_.Defer(key,false,[this,wide,externalJournal]{OpenImage(wide,externalJournal);}))return 1;
-    std::shared_ptr<Volume> volume;std::string journalPrompt;bool ok=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});try{volume=MacBrowser::OpenBrowserImage(wide,externalJournal);}catch(const HfsPlus::ExternalJournalRequired& e){journalPrompt=e.what();}});
-    if(ok&&!journalPrompt.empty()){
-        if(Hidden(session_))return -1;
-        std::wstring external;if(!SelectHfsPlusExternalJournal(session_.Owner(),external,journalPrompt))return -1;
-        ok=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read},{VolumeCoord::ImageKey(external),VolumeCoord::Mode::Read}});volume=MacBrowser::OpenBrowserImage(wide,external);});
-    }
-    if(!ok)return -1;if(!volume)return 0;
-    for(size_t n=0;n<state_->mounts.size();++n)if(state_->mounts[n].volume&&state_->mounts[n].volume->ResourceKey()==volume->ResourceKey()){state_->Show(int(n),2,state_->mounts[n].root);return 1;}
-    state_->mounts.push_back({volume,wide,nullptr,-1});int i=int(state_->mounts.size()-1);state_->Root(i);state_->Show(i,2,state_->mounts[i].root);
-    RememberImage(wide);
-    return 1;
-#endif
+int MainMacBrowser::OpenImage(const std::wstring& path,const std::wstring& externalJournal)
+{
+    if(!session_.UsesAsyncNavigation())return -1;
+    return QueueImageOpen(AbsoluteImagePath(path),externalJournal);
 }
 
 bool MainMacBrowser::QueueNextImage(const std::shared_ptr<const std::vector<std::wstring>>& batch,size_t index)
@@ -975,22 +958,15 @@ void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<V
 }
 bool MainMacBrowser::Select(LPARAM data){auto p=reinterpret_cast<lparam_struct*>(data);if(!p||p->type!=LIST_MAC)return false;
     state_->Show(p->volinx,uint32_t(p->id),session_.Tree()->m_ct->GetSelectedItem(),false,state_->UseAsyncNavigation());return true;}
-bool MainMacBrowser::Refresh(){int i;uint32_t id;if(!state_->Selected(i,id))return false;
-    auto& mount=state_->mounts[i];
-    if(state_->UseAsyncNavigation()){
-        ForgetFolders(mount.volume);
-        return state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem(),mount.drive<0&&mount.physicalPath.empty(),true,true);
-    }
-    if(ExecutionFor(*mount.volume).Persistent()&&!VolumeCoord::Readable(mount.volume->ResourceKey()))
-        return state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem());
-    if(session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();}))return true;
+bool MainMacBrowser::Refresh()
+{
+    int index;
+    uint32_t id;
+    if(!state_->Selected(index,id))return false;
+    const auto& mount=state_->mounts[index];
     ForgetFolders(mount.volume);
-    bool ready=Run(session_,[&](Storage::Job&){VolumeCoord::Lease read({{mount.volume->ResourceKey(),VolumeCoord::Mode::Read}});if(!mount.physicalPath.empty())mount.volume=Removable::Reopen(mount.physicalPath,mount.physicalOffset);else if(mount.drive>=0){auto fresh=MacBrowser::OpenCd(mount.drive);if(!fresh)throw HfsPlus::Error("No supported Mac disc is present");mount.volume=std::move(fresh);}else mount.volume->Reload();});
-    if(!ready){if(readBusy){session_.Defer(mount.volume->ResourceKey(),mount.drive>=0,[this]{Refresh();},true);return true;}if(mount.drive>=0){ReleaseCd(mount.drive);return false;}session_.List()->initialize_volume("",0);return true;}
-    if(!mount.physicalPath.empty()){id=2;TreeText(session_,mount.root,Wide(mount.volume->Name())+L" - "+mount.suffix+L" [read-only]");state_->Show(i,2,mount.root);}
-    else if(mount.drive>=0){id=2;state_->Show(i,2,mount.root);}
-    else if(!state_->Show(i,id,session_.Tree()->m_ct->GetSelectedItem())&&id!=2)state_->Show(i,2,mount.root);
-    return true;
+    const bool rebuild=mount.drive<0&&mount.physicalPath.empty();
+    return state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),rebuild,true,true);
 }
 bool MainMacBrowser::RefreshForChange(const std::string& key){
  int index;uint32_t id;if(!state_->Selected(index,id)||state_->mounts[index].volume->ResourceKey()!=key)return false;
@@ -1026,7 +1002,13 @@ void MainMacBrowser::RebuildTree(){for(size_t i=0;i<state_->mounts.size();++i)st
 }
 void MainMacBrowser::Clear(){session_.CancelNavigation();state_->CancelDriveChanges();state_->mounts.clear();state_->current=-1;}
 bool MainMacBrowser::Activate(int row){auto model=session_.List()->BrowserRowAt(row);
-    if(!model||!model->location.IsMounted())return false;if(!session_.ListingAvailable())return true;if(model->entry.directory){auto item=model->treeItem;if(!item)return true;session_.Tree()->m_ct->SelectItem(item);Select(session_.Tree()->m_ct->GetItemData(item));}
+    if(!model||!model->location.IsMounted())return false;if(!session_.ListingAvailable())return true;if(model->entry.directory){
+     auto item=model->treeItem;if(!item)return true;
+     auto tree=session_.Tree();
+     const auto enabled=tree->SelectionNotificationsEnabled();
+     tree->enable_selchange(0);tree->m_ct->SelectItem(item);tree->enable_selchange(enabled);
+     Select(tree->m_ct->GetItemData(item));
+    }
     else{auto& list=session_.List()->GetListCtrl();list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);Export(0);}return true;}
 bool MainMacBrowser::CreateFolder(const FileOperations::Location& target,const std::u16string& name){
  FileOperations::CreateFolder request{target,name};return RunOperation(session_,std::move(request),false,true);
@@ -1189,5 +1171,10 @@ bool MainMacBrowser::ContextMenu(CPoint point){
 #ifdef HFV_TESTING
 size_t MainMacBrowser::TestClipboardCount()const{return BrowserTransfers::Snapshot().items.size();}
 int MainMacBrowser::AttachTestVolume(std::shared_ptr<Volume> volume,const char* key,int drive){state_->mounts.push_back({volume,FromAnsi(key),nullptr,drive});int i=int(state_->mounts.size()-1);state_->Root(i);return i;}
-bool MainMacBrowser::ShowTestFolder(int index,uint32_t id){return state_->Show(index,id,state_->mounts.at(index).root);}
+bool MainMacBrowser::ShowTestFolder(int index,uint32_t id)
+{
+ const auto& mount=state_->mounts.at(index);
+ if(!state_->Show(index,id,mount.root,false,true))return false;
+ return !session_.Navigating()||session_.AwaitNavigationForTest();
+}
 #endif

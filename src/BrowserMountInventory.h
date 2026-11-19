@@ -61,7 +61,7 @@ public:
         }
         const ClassicMount* Find(int index) const { return volumes_[index].get(); }
         void ReplaceFrom(int index,ClassicSlots& source,int slot) {
-            volumes_[index].swap(source.volumes_[slot]);
+            (*this)[index]=std::move(source[slot]);
         }
     } classic;
     CFATVolume windows[MAX_FAT_VOLUMES];
