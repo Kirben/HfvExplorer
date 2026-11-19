@@ -27,19 +27,18 @@
 #include <unordered_map>
 #include <vector>
 
+#include "BrowserDirectory.h"
 typedef struct {
 	int type;
 	long id;
 	int volinx;
 	char path[MAX_PATH];
+    BrowserDirectory::Folder folder;
 } lparam_struct;
-
-#include "BrowserDirectory.h"
 class BrowserSession;
 class HFVExplorerTreeView : public CTreeView
 {
  BrowserSession* m_browserSession=nullptr;
- std::map<HTREEITEM,BrowserDirectory::Folder> m_browserFolders;
 
 public:
  BrowserSession& GetBrowserSession()const;
@@ -83,11 +82,6 @@ protected:
 			LPSTR name, 
 			unsigned long id, 
 			unsigned long parent_id );
-	HTREEITEM tree_fat_insert( 
-		HTREEITEM root, 
-		int volinx, 
-		LPSTR name, 
-		LPSTR fpath );
 	HTREEITEM find_item( int volinx, HTREEITEM root, unsigned long id );
 	HTREEITEM tree_find_fat( HTREEITEM root_item, LPSTR path );
     HTREEITEM FindWindowsFolder(HTREEITEM root,const std::wstring& path);

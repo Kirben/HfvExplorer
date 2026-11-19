@@ -76,154 +76,77 @@ bool HiddenOperationProgress(CWnd* owner){
 
 #define NCOLUMNS 6
 
-LPARAM CHFVExplorerListView::make_lparam( 
-	int type,
-	int volinx, 
-	long id,
-	LPSTR path,
-	int isdir,
-	HTREEITEM htree,
-	HICON icon32,
-	HICON icon16,
-	unsigned long creation_date_lo, 
-	unsigned long creation_date_hi,
-	unsigned long modification_date_lo, 
-	unsigned long modification_date_hi )
+LPARAM CHFVExplorerListView::StoreRow(BrowserDirectory::Row row)
 {
-	list_lparam_struct *p = new list_lparam_struct;
-	if(!p) return(0);
-	m_pointer_array->Add( (DWORD_PTR)p );
-	p->type = type;
-	p->volinx = volinx;
-	p->id = id;
-	p->isdir = isdir;
-	p->htree = htree;
-	p->icon16 = icon16;
-	p->icon32 = icon32;
-	p->creation_date_lo = creation_date_lo;
-	p->creation_date_hi = creation_date_hi;
-	p->modification_date_lo = modification_date_lo;
-	p->modification_date_hi = modification_date_hi;
-	if(path && *path) {
-		strncpy( p->path, path, MAX_PATH-1 );
-		p->path[MAX_PATH-1] = 0;
-	} else {
-		p->path[0] = 0;
-	}
-	return( (LPARAM)p );
+ const auto key=LPARAM(m_browser_rows.size()+1);
+ m_browser_rows.emplace(key,std::move(row));
+ return key;
 }
 
-HICON CHFVExplorerListView::get_lparam_icon16( LPARAM lparam )
+const BrowserDirectory::Row* CHFVExplorerListView::BoundRow(LPARAM key) const
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	return( p->icon16 );
+ const auto found=m_browser_rows.find(key);
+ return found==m_browser_rows.end()?nullptr:&found->second;
 }
 
-HICON CHFVExplorerListView::get_lparam_icon32( LPARAM lparam )
+HICON CHFVExplorerListView::get_lparam_icon16(LPARAM key)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	return( p->icon32 );
+ const auto* row=BoundRow(key);
+ return row?(row->icon16?row->icon16:row->icon32):nullptr;
 }
 
-long CHFVExplorerListView::get_lparam_id( LPARAM lparam )
+HICON CHFVExplorerListView::get_lparam_icon32(LPARAM key)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	return( p->id );
+ const auto* row=BoundRow(key);
+ return row?(row->icon32?row->icon32:row->icon16):nullptr;
 }
 
-int CHFVExplorerListView::get_lparam_isdir( LPARAM lparam )
+long CHFVExplorerListView::get_lparam_id(LPARAM key)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	return( p->isdir );
+ const auto* row=BoundRow(key);
+ return row?long(row->id):0;
 }
 
-int CHFVExplorerListView:: get_inx_isdir(int inx)
+int CHFVExplorerListView::get_lparam_isdir(LPARAM key)
 {
-	DWORD_PTR dat = m_cl->GetItemData( inx );
-	if(!dat) return(-1);
-	return(get_lparam_isdir(dat));
+ const auto* row=BoundRow(key);
+ return row&&row->entry.directory;
 }
 
-int CHFVExplorerListView::get_lparam_volinx( LPARAM lparam )
+int CHFVExplorerListView::get_inx_isdir(int index)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(-1);
-	return( p->volinx );
+ const auto* row=BoundRow(m_cl->GetItemData(index));
+ return row?int(row->entry.directory):-1;
 }
 
-int CHFVExplorerListView::get_lparam_type( LPARAM lparam )
+int CHFVExplorerListView::get_lparam_volinx(LPARAM key)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(LIST_UNKNOWN);
-	return( p->type );
+ const auto* row=BoundRow(key);
+ return row?row->volume:-1;
 }
 
-int CHFVExplorerListView::get_lparam_modification( LPARAM lparam, DWORD *lo, DWORD *hi )
+int CHFVExplorerListView::get_lparam_type(LPARAM key)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	*lo = p->modification_date_lo;
-	*hi = p->modification_date_hi;
-	return(1);
+ const auto* row=BoundRow(key);
+ return row?row->storageType:LIST_UNKNOWN;
 }
 
-int CHFVExplorerListView::get_lparam_creation( LPARAM lparam, DWORD *lo, DWORD *hi )
+int CHFVExplorerListView::get_inx_type(int index)
 {
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	*lo = p->creation_date_lo;
-	*hi = p->creation_date_hi;
-	return(1);
+ const auto* row=BoundRow(m_cl->GetItemData(index));
+ return row?(row->storageType==LIST_SPEC?LIST_SPEC:row->location.LegacyType()):-1;
 }
 
-int CHFVExplorerListView:: get_inx_type(int inx)
+HTREEITEM CHFVExplorerListView::get_lparam_htree(LPARAM key)
 {
-    if(const auto row=BrowserRowAt(inx))return row->location.LegacyType();
-    const auto data=m_cl->GetItemData(inx);
-    return data&&get_lparam_type(data)==LIST_SPEC?LIST_SPEC:-1;
-}
-
-HTREEITEM CHFVExplorerListView::get_lparam_htree( LPARAM lparam )
-{
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	return( p->htree );
-}
-
-int CHFVExplorerListView::get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl )
-{
-	list_lparam_struct *p = (list_lparam_struct *)lparam;
-	if(!p) return(0);
-	if(p->path && *p->path) {
-		int len = max(maxl,MAX_PATH-1);
-		strncpy( lpstr, p->path, len );
-		lpstr[len] = 0;
-		return(1);
-	} else {
-		return(0);
-	}
+ const auto* row=BoundRow(key);
+ return row?row->treeItem:nullptr;
 }
 
 void CHFVExplorerListView::destroy_pointers()
 {
-    m_editing_item=-1;
+ m_editing_item=-1;
  m_browser_rows.clear();
-	int i, count = m_pointer_array->GetSize();
-	DWORD_PTR dw;
-	list_lparam_struct *p;
-
-	for(i=0; i<count; i++) {
-		dw = m_pointer_array->GetAt( i );
-		if(dw) {
-			p = (list_lparam_struct *)dw;
-			delete p;
-		}
-	}
-	m_pointer_array->RemoveAll();
 }
 
 #define LISTICONCOUNT 12
@@ -242,8 +165,6 @@ CHFVExplorerListView::CHFVExplorerListView()
 
 	m_cl = &this->GetListCtrl();
 
-	m_pointer_array = new CPointerWordArray;
-	m_pointer_array->SetSize( 400, 50 );
 	m_dragging = 0;
 
 	m_item_count = 0;
@@ -334,7 +255,6 @@ CHFVExplorerListView::~CHFVExplorerListView()
 		m_pimagelistSmall = 0;
 	}
 	destroy_pointers();
-	delete m_pointer_array;
 }
 
 int CHFVExplorerListView::Initialize()
@@ -510,7 +430,8 @@ int CHFVExplorerListView::initialize_volume( CString root_name, unsigned long id
 		lvitem.iSubItem = 0;
 		lvitem.pszText = buf;
 		lvitem.iImage = 2;
-		lvitem.lParam = (LPARAM)make_lparam( LIST_SPEC, 0, id, "", 1, 0, 0, 0, 0, 0, 0, 0 );
+		BrowserDirectory::Row command;command.storageType=LIST_SPEC;command.id=id;command.entry.directory=true;
+        lvitem.lParam=StoreRow(std::move(command));
 		lvitem.state = LVIS_FOCUSED | LVIS_SELECTED;
 		lvitem.stateMask = LVIS_FOCUSED | LVIS_SELECTED;
 		iActualItem = m_cl->InsertItem(&lvitem);
@@ -893,7 +814,6 @@ int CHFVExplorerListView::do_rename(
     location.SetClassic(source.ClassicImage(),changed);
     if(source.MediaGenerationKnown())location.BindMediaGeneration(source.MediaGeneration());
    }else location.SetWindows(VolumeCoord::Wide(changed));}
-  auto binding=reinterpret_cast<list_lparam_struct*>(ds);if(changed.size()<sizeof(binding->path))strcpy(binding->path,changed.c_str());
  }
 
  if(source.LegacyType()==LIST_HFS)update_floppy_view(const_cast<char*>(source.ClassicImage().c_str()));
@@ -901,33 +821,6 @@ int CHFVExplorerListView::do_rename(
 	return(result);
 }
 
-
-int CHFVExplorerListView::new_bowser_on( CString start_dir )
-{
-	CHFVExplorerApp	*pApp;
-	char modulex[MAX_PATH];
-	HINSTANCE hi;
-	LPSTR p, dir = NULL;
-	char params[MAX_PATH];
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	GetModuleFileName( pApp->m_hInstance, modulex, MAX_PATH-1 );
-	p = start_dir.GetBuffer(MAX_PATH);
-	wsprintf( params, "\"@!%Iu %s\"", (UINT_PTR)static_cast<CMainFrame*>(GetBrowserSession().Owner())->m_hWnd, p );
-	start_dir.ReleaseBuffer();
-	hi = ShellExecute( this->m_hWnd, "open", modulex, params, dir, SW_SHOW );
-	if( hi <= (HINSTANCE)32 ) {
-		CString errstr;
-		get_execute_error_string( hi, errstr );
-		AfxMessageBox( "Could not start \"" + 
-			CString(modulex) + "\":\n" + errstr + ".", MB_OK | MB_ICONSTOP );
-		return(0);
-	//} else {
-	//	pApp->add_child( hi );
-	}
-	return(1);
-}
 
 void make_configur_path( char *cmd, CString *ppath, CString &creator )
 {
@@ -2167,12 +2060,7 @@ void CHFVExplorerListView::go_up( int control )
 		hItem = GetBrowserSession().Tree()->GetTreeCtrl().GetParentItem( hItem );
 		if(hItem) {
 			if(control) {
-				CString where;
-				int ismac;
-				where = ((CHFVExplorerDoc*)m_pDocument)->get_directory(hItem, &ismac);
-				if(where != "") {
-					new_bowser_on( where );
-				}
+				GetBrowserSession().OpenFolderInNewWindow(hItem);
 			} else {
 				GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( hItem );
 				GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( hItem );
@@ -2183,7 +2071,12 @@ void CHFVExplorerListView::go_up( int control )
 
 void CHFVExplorerListView::activate_list_item( int inx, int control, int make_shortcut ) 
 {
- if(GetBrowserSession().MacBrowser().Activate(inx))return;
+ if(!control&&GetBrowserSession().MacBrowser().Activate(inx))return;
+ if(control){
+  const auto* folder=BrowserRowAt(inx);
+  if(folder&&folder->entry.directory&&folder->treeItem&&!make_shortcut){GetBrowserSession().OpenFolderInNewWindow(folder->treeItem);return;}
+  if(GetBrowserSession().MacBrowser().Activate(inx))return;
+ }
 	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
 	CString name, type, creator, host_program;
     if(!GetBrowserSession().ListingAvailable())return;
@@ -2213,12 +2106,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 		HTREEITEM hItem = row->treeItem;
 		if(hItem) {
 			if(control) {
-				CString where;
-				int ismac;
-				where = ((CHFVExplorerDoc*)m_pDocument)->get_directory(hItem, &ismac);
-				if(where != "") {
-					new_bowser_on( where );
-				}
+				GetBrowserSession().OpenFolderInNewWindow(hItem);
 			} else {
 				GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( hItem );
 				GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( hItem );
@@ -2345,7 +2233,10 @@ void CHFVExplorerListView::update_current_view()
 	if(tv->get_lparam_path( dw, path, MAX_PATH ) && m_pDocument) {
 		volinx = tv->get_lparam_volinx( dw );
 		if(volinx >= 0) {
-			((CHFVExplorerDoc*)m_pDocument)->open_fat_directory( volinx, path, 1 );
+			auto* doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
+            const auto* folder=tv->BrowserFolderAt(htree);
+            if(!folder||!folder->location.IsWindows()||!doc->NavigateWindowsFolder(volinx,folder->location.WindowsPath(),true))
+                doc->open_fat_directory(volinx,path,1);
 		}
 	}
 }

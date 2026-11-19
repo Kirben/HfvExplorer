@@ -27,19 +27,6 @@
 #include "HostOffsets.h"
 #include "BrowserDirectory.h"
 
-typedef struct {
-	int type;
-	long id;
-	int volinx;
-	int isdir;
-	char path[MAX_PATH];
-	HTREEITEM htree;
-	HICON icon16;
-	HICON icon32;
-	unsigned long creation_date_lo, creation_date_hi;
-	unsigned long modification_date_lo, modification_date_hi;
-} list_lparam_struct;
-
 #define FIELD_NAME		0
 #define FIELD_SIZE		1
 #define FIELD_CREATED 2
@@ -94,7 +81,6 @@ protected:
 	void CreatePalette();
 
 	CListCtrl *m_cl;
-	CPointerWordArray *m_pointer_array;
 	// COLORREF m_bkcolor;
 	CImageList* m_drag_list;
 	int m_dragging;
@@ -127,7 +113,6 @@ public:
 	void set_cursor_by_type( int control );
 	void update_floppy_view( char *volpath );
 
-	int new_bowser_on( CString start_dir );
 	void update_current_view();
 	int get_inx_type(int inx);
 	int get_inx_isdir(int inx);
@@ -189,30 +174,15 @@ public:
 	void activate_list_item( int inx, int control, int make_shortcut );
 	int initialize_list();
 
-	LPARAM make_lparam( 
-		int type,
-		int volinx, 
-		long id,
-		LPSTR path,
-		int isdir,
-		HTREEITEM htree,
-		HICON hicon32,
-		HICON hicon16,
-		unsigned long creation_date_lo, 
-		unsigned long creation_date_hi,
-		unsigned long modification_date_lo, 
-		unsigned long modification_date_hi
-		);
+    LPARAM StoreRow(BrowserDirectory::Row row);
+    const BrowserDirectory::Row* BoundRow(LPARAM key) const;
 	long get_lparam_id( LPARAM lparam );
 	int get_lparam_type( LPARAM lparam );
 	int get_lparam_isdir( LPARAM lparam );
-	int get_lparam_path( LPARAM lparam, LPSTR lpstr, int maxl );
 	HTREEITEM get_lparam_htree( LPARAM lparam );
 	HICON get_lparam_icon32( LPARAM lparam );
 	HICON get_lparam_icon16( LPARAM lparam );
 	int get_lparam_volinx( LPARAM lparam );
-	int get_lparam_modification( LPARAM lparam, DWORD *lo, DWORD *hi );
-	int get_lparam_creation( LPARAM lparam, DWORD *lo, DWORD *hi );
 
 	int get_path( int inx, CString &doc_name );
 	int do_open_with( int document, CString app_name, int mac, CString creator );

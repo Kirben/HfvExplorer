@@ -28,17 +28,14 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     }
     if(row.icon16||row.icon32){image=m_pimagelist->GetImageCount();
         m_pimagelist->Add(row.icon32?row.icon32:row.icon16);m_pimagelistSmall->Add(row.icon16?row.icon16:row.icon32);}
-    uint64_t created=row.storageType==LIST_FAT?row.created:e.created,modified=row.storageType==LIST_FAT?row.modified:e.modified;
-    auto data=make_lparam(row.storageType,row.volume,long(row.id),const_cast<char*>(row.path.c_str()),e.directory,tree,
-        row.icon32?row.icon32:row.icon16,row.icon16?row.icon16:row.icon32,DWORD(created),DWORD(created>>32),DWORD(modified),DWORD(modified>>32));
+    auto value=row;
+    value.treeItem=tree;
+    if(value.location.IsNone())GetBrowserSession().MacBrowser().BindRow(value);
+    const auto data=StoreRow(std::move(value));
     LVITEMW item{};item.mask=LVIF_TEXT|LVIF_IMAGE|LVIF_PARAM;item.iItem=m_item_count;item.pszText=const_cast<wchar_t*>(name.c_str());item.iImage=image;item.lParam=data;
     if(!m_cl->GetItemCount()){item.mask|=LVIF_STATE;item.state=item.stateMask=LVIS_FOCUSED|LVIS_SELECTED;}
     int index=int(SendMessageW(m_cl->m_hWnd,LVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item)));
-    if(index<0)return index;
-    auto& value=m_browser_rows[data];
-    value=row;
-    value.treeItem=tree;
-    if(value.location.IsNone())GetBrowserSession().MacBrowser().BindRow(value);
+    if(index<0){m_browser_rows.erase(data);return index;}
     std::wstring size=e.directory?(row.countKnown?std::to_wstring(row.directoryItems)+L" items":L"Folder"):
         std::to_wstring(BrowserDirectory::Bytes(e)/1024+(BrowserDirectory::Bytes(e)%1024!=0))+L" KB";
     if(!e.readError.empty())size=L"Unreadable";
@@ -56,8 +53,8 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     ++m_item_count;return index;
 }
 const BrowserDirectory::Row* CHFVExplorerListView::BrowserRowAt(int row)const{
- auto key=LPARAM(GetListCtrl().GetItemData(row));auto found=m_browser_rows.find(key);
- return found==m_browser_rows.end()?nullptr:&found->second;
+ const auto* binding=BoundRow(GetListCtrl().GetItemData(row));
+ return binding&&binding->storageType!=LIST_SPEC?binding:nullptr;
 }
 bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{
  if(!GetBrowserSession().ListingAvailable())return false;
@@ -92,10 +89,10 @@ void CHFVExplorerListView::SortBrowserRows(int column,bool ascending){
     CancelBrowserDrag();
     struct Context {const std::map<LPARAM,BrowserDirectory::Row>* rows;int column;bool ascending;} context{&m_browser_rows,column,ascending};
     auto compare=[](LPARAM left,LPARAM right,LPARAM raw)->int {
-        auto& c=*reinterpret_cast<Context*>(raw);auto a=reinterpret_cast<list_lparam_struct*>(left),b=reinterpret_cast<list_lparam_struct*>(right);
-        if(!a||!b)return a?1:b?-1:0;
-        if(a->type==LIST_SPEC||b->type==LIST_SPEC)return a->type==b->type?0:a->type==LIST_SPEC?-1:1;
+        auto& c=*reinterpret_cast<Context*>(raw);
         auto x=c.rows->find(left),y=c.rows->find(right);if(x==c.rows->end()||y==c.rows->end())return 0;
+        const bool a=x->second.storageType==LIST_SPEC,b=y->second.storageType==LIST_SPEC;
+        if(a||b)return a==b?0:a?-1:1;
         return BrowserDirectory::Compare(x->second,y->second,c.column,c.ascending);
     };
     m_cl->SortItems(compare,reinterpret_cast<DWORD_PTR>(&context));

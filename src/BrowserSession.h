@@ -32,6 +32,8 @@ class BrowserSession {
  void CompleteNavigation();
  void ProcessChanges();
  void RefreshLegacy(const Context&);
+ BrowserNavigation::Request FolderRequest(HTREEITEM item);
+ bool OpenFolderRequest(BrowserSession& source,BrowserNavigation::Request request);
 
     CHFVExplorerDoc* document_;
     std::unique_ptr<MainMacBrowser> browser_;
@@ -70,6 +72,8 @@ public:
     void Navigate(BrowserNavigation::Request, BrowserNavigation::Read,
         BrowserNavigation::Publish, std::function<bool()> mountCurrent,
         std::function<void()> retry, std::function<bool()> nextOnError={});
+    bool OpenFolderInNewWindow(HTREEITEM item);
+    bool OpenFolderFrom(BrowserSession& source,HTREEITEM item);
     bool RevealFindHit(const FindHit&,int legacyVolume=-1);
     bool UsesAsyncNavigation() const;
     bool Navigating() const { return bool(navigation_); }
