@@ -223,8 +223,7 @@ public:
     bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {
         if (!Classic()) return false;
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id);
-        Call(SessionCommandCode::GetClassicProperties, std::move(args), false, [&] {
+        Call(SessionCommandCode::GetClassicProperties, Protocol::Encode(Protocol::CatalogItem{id}), false, [&] {
             auto result = Response(SessionBytes);
             entry = DecodeClassic(result); result.end();
         });
@@ -238,10 +237,8 @@ public:
     }
     bool FindMfs(uint32_t parent,const std::u16string& name,std::optional<unsigned> version,Entry& found) {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args;args.put(parent);args.u16(name);args.put(version.has_value());
-        if(version)args.put(*version);
         bool exists=false;
-        Call(SessionCommandCode::FindMfs,std::move(args),false,[&]{
+        Call(SessionCommandCode::FindMfs,Protocol::Encode(Protocol::FindMfsRequest{parent,name,version}),false,[&]{
             auto packet=Response(SessionBytes);
             exists=packet.flag();packet.end();
             if(exists)found=ReadEntry();
@@ -251,13 +248,11 @@ public:
     bool SupportsBasicMetadata()const override{return Mfs();}
     void SetBasicMetadata(uint32_t id,const Entry& entry)override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args;args.put(id);EncodeEntry(args,entry);
-        Simple(SessionCommandCode::SetBasicMetadata,std::move(args),true);
+        Simple(SessionCommandCode::SetBasicMetadata,Protocol::EncodeBasicMetadata(id,entry),true);
     }
     void SetClassicProperties(uint32_t id, const hfsdirent& entry) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id); EncodeClassic(args, entry);
-        Simple(SessionCommandCode::SetClassicProperties, std::move(args), true);
+        Simple(SessionCommandCode::SetClassicProperties,Protocol::EncodeClassicProperties(id,entry),true);
     }
     std::string WorkerEntryIdentity(const std::string& identity) const override {
         auto separator = identity.find('/');
@@ -346,9 +341,8 @@ public:
     }
     HfsPlus::Attributes GetAttributes(uint32_t id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id);
         AttributeSets sets;
-        Call(SessionCommandCode::Attributes, std::move(args), false, [&] {
+        Call(SessionCommandCode::Attributes, Protocol::Encode(Protocol::CatalogItem{id}), false, [&] {
             auto packet = Response(AttributeSet);
             ReceiveAttributes(worker_->output.value, packet, sets);
             Check(sets[0].has_value(), "Missing volume attributes");
@@ -357,13 +351,12 @@ public:
     }
     void SetAttributes(uint32_t id, const HfsPlus::Attributes& attributes) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id);
-        Call(SessionCommandCode::SetAttributes, std::move(args), true, [] {}, &attributes);
+        Call(SessionCommandCode::SetAttributes, Protocol::Encode(Protocol::CatalogItem{id}), true, [] {}, &attributes);
     }
     void SetCompressionMethod(uint32_t id, HfsPlus::Volume::CompressionMode method,
                               std::function<void(uint64_t,uint64_t)> progress) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id); args.put(uint64_t(method));
+        auto args=Protocol::Encode(Protocol::CompressionRequest{id,method});
         std::exception_ptr stopped;
         try {
             Call(SessionCommandCode::Compression, std::move(args), true, [&] {
@@ -373,7 +366,7 @@ public:
                     if (message == SessionResult) ReadResult(packet); // Early failure.
                     if (message == SessionBytes) { packet.end(); break; }
                     Check(message == SessionProgress, "Unexpected volume compression response");
-                    auto done = packet.get(), total = packet.get(); packet.end();
+                    const auto [done,total]=Protocol::DecodeCompressionProgress(packet);
                     try { if (progress) progress(done,total); }
                     catch (...) { stopped = std::current_exception(); }
                     Send(worker_->input.value, stopped ? Cancel : SessionContinue);
@@ -390,9 +383,8 @@ public:
     }
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(parent); args.u16(name);
         uint32_t id = 0;
-        Call(SessionCommandCode::MakeDirectory, std::move(args), true, [&] {
+        Call(SessionCommandCode::MakeDirectory,Protocol::Encode(Protocol::DirectoryName{parent,name}),true,[&] {
             auto packet = Response(SessionBytes); id = uint32_t(packet.get()); packet.end();
         });
         return id;
@@ -415,9 +407,7 @@ private:
     uint32_t StreamPut(uint32_t parent, const Entry& entry, Reader reader, bool replace, uint32_t original,
                        uint32_t source,std::function<void(unsigned,uint64_t,size_t)> localProgress) {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args;
-        args.put(parent); args.put(replace); args.put(entry.attributesKnown); args.put(original); args.put(source);
-        EncodeEntry(args, entry);
+        auto args=Protocol::EncodePut({parent,replace,entry.attributesKnown,original,source},entry);
         uint32_t id = 0;
         std::exception_ptr sourceFailure;
         try {
@@ -437,11 +427,7 @@ private:
                         break;
                     }
                     Check(message == SessionReadRequest && !sourceFailure, "Unexpected fork transfer response");
-                    const auto fork = packet.get(), offset = packet.get(), size = packet.get();
-                    packet.end();
-                    Check(fork <= 1 && size && size <= Protocol::ReadLimit, "Invalid fork transfer range");
-                    const auto length = fork ? entry.forks[1].size : entry.forks[0].size;
-                    Check(offset <= length && size <= length - offset, "Fork transfer exceeds source length");
+                    const auto [fork,offset,size]=Protocol::DecodeForkRange(packet,entry);
                     const bool localRead = source || (original && !fork);
                     Data bytes;
                     try {
@@ -472,17 +458,12 @@ public:
     void ValidateEntry(const Entry& entry) const override {
         auto& self = const_cast<PersistentVolume&>(*this);
         std::lock_guard<std::mutex> lock(self.mutex_);
-        Data args;
-        EncodeEntry(args, entry);
-        self.Call(SessionCommandCode::ValidateEntry, std::move(args), false, [] {}, &entry.attributes);
+        self.Call(SessionCommandCode::ValidateEntry,Protocol::EncodeEntryCheck(entry),false,[]{},&entry.attributes);
     }
     void FinalizeDirectory(uint32_t id, const Entry& desired, const Entry& expected, bool merge) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args;
-        args.put(id); args.put(merge); args.put(desired.attributesKnown);
-        EncodeEntry(args, desired);
-        EncodeEntry(args, expected);
-        Call(SessionCommandCode::FinalizeDirectory, std::move(args), true, [] {}, &desired.attributes);
+        auto args=Protocol::EncodeDirectoryUpdate({id,merge,desired.attributesKnown},desired,expected);
+        Call(SessionCommandCode::FinalizeDirectory,std::move(args),true,[]{},&desired.attributes);
     }
     bool CanMoveFrom(const Volume& source) const override {
         return &source == this && Writable() && !Mfs();
@@ -501,25 +482,25 @@ public:
     }
     void Remove(uint32_t id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id); Simple(SessionCommandCode::Remove, std::move(args), true);
+        Simple(SessionCommandCode::Remove, Protocol::Encode(Protocol::CatalogItem{id}), true);
     }
     uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(source); args.put(parent); args.u16(name); args.put(replace);
         uint32_t id = 0;
-        Call(SessionCommandCode::HardLink, std::move(args), true, [&] {
+        auto args=Protocol::Encode(Protocol::HardLinkRequest{source,parent,name,replace});
+        Call(SessionCommandCode::HardLink,std::move(args),true,[&] {
             auto packet = Response(SessionBytes); id = uint32_t(packet.get()); packet.end();
         });
         return id;
     }
     void ValidateRemoval(uint32_t id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id); Simple(SessionCommandCode::ValidateRemoval, std::move(args), false);
+        Simple(SessionCommandCode::ValidateRemoval, Protocol::Encode(Protocol::CatalogItem{id}), false);
     }
     void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent) override {
         if (target.ResourceKey()!=key_) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id); args.put(parent); Simple(SessionCommandCode::ValidateCopy, std::move(args), false);
+        Simple(SessionCommandCode::ValidateCopy,Protocol::Encode(Protocol::CopyCheck{id,parent}),false);
     }
 #ifdef HFV_TESTING
     DWORD Pid() const { std::lock_guard<std::mutex> lock(mutex_); return worker_ ? worker_->pid : 0; }
@@ -536,8 +517,53 @@ public:
 #endif
 };
 
+uint32_t WriteStream(HANDLE input,HANDLE output,Volume& volume,Protocol::PutRequest request,
+                     SessionCommandCode command)
+{
+    const auto& header=request.header;
+    const auto parent=header.parent,original=header.original,source=header.source;
+    auto& entry=request.entry;
+    if(source){
+        const auto current=volume.Stat(source);
+        Check(!current.directory && current.parent!=parent &&
+              current.forks[0].size==entry.forks[0].size && current.forks[1].size==entry.forks[1].size,
+              "The same-image fork source changed");
+    }
+    if (original) {
+        const auto current = volume.Stat(original);
+        Check(!current.directory && current.parent == parent &&
+              current.name == entry.name && current.forks[0].size == entry.forks[0].size,
+              "The file changed before resource fork replacement");
+    }
+#ifdef HFV_TESTING
+    const bool crashMfs=command==SessionCommandCode::TestCrashPut && !strcmp(volume.Kind(),"MFS");
+    struct CrashMfs {
+        explicit CrashMfs(bool enabled){MfsImageSource::crashAfterSectorWrite=enabled;}
+        ~CrashMfs(){MfsImageSource::crashAfterSectorWrite=false;}
+    } crashGuard(crashMfs);
+#endif
+    auto read = [&](unsigned fork, uint64_t offset, void* out, size_t size) {
+#ifdef HFV_TESTING
+        if (command == SessionCommandCode::TestCrashPut && !crashMfs && (fork || offset)) ExitProcess(80);
+#endif
+        auto* buffer = static_cast<uint8_t*>(out);
+        while (size) {
+            const auto count = (std::min)(size, Protocol::ReadLimit);
+            const auto localSource = source ? source : !fork ? original : 0;
+            if (localSource) volume.Read(localSource, fork, offset, buffer, count);
+            Send(output,SessionReadRequest,Protocol::Encode(Protocol::ForkRange{fork,offset,count}));
+            Data bytes;
+            const auto reply=Receive(input,bytes);
+            if(!Protocol::DecodeForkReply(reply,bytes,count,localSource!=0))throw Storage::Cancelled();
+            if(!localSource)memcpy(buffer,bytes.bytes.data(),count);
+            offset += count; buffer += count; size -= count;
+        }
+    };
+    return original ? volume.PutResourceReplacement(original, entry, std::move(read), {})
+                             : volume.Put(parent, entry, std::move(read), header.replace);
+}
+
 void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
-    using Protocol::CatalogNumber;
     auto writeNumber = [&](uint64_t value) {
         Data packet; packet.put(value); Send(output, SessionBytes, std::move(packet));
     };
@@ -580,18 +606,19 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             case SessionCommandCode::Attributes: {
-                auto id = CatalogNumber(packet); packet.end();
-                auto values = volume.GetAttributes(id);
+                auto values=volume.GetAttributes(Protocol::DecodeItem(packet).id);
                 Storage::Job transfer;
                 SendAttributes(output, 0, values, transfer);
                 break;
             }
             case SessionCommandCode::SetAttributes: {
-                auto id = CatalogNumber(packet); packet.end(); volume.SetAttributes(id, *attributes[0]); break;
+                volume.SetAttributes(Protocol::DecodeItem(packet).id,*attributes[0]);
+                break;
             }
             case SessionCommandCode::MakeDirectory: {
-                auto parent = CatalogNumber(packet); auto name = packet.u16(); packet.end();
-                writeNumber(volume.MakeDirectory(parent, name)); break;
+                const auto request=Protocol::DecodeDirectoryName(packet);
+                writeNumber(volume.MakeDirectory(request.parent,request.name));
+                break;
             }
 #ifdef HFV_TESTING
             case SessionCommandCode::TestCrashRename:
@@ -605,23 +632,21 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             case SessionCommandCode::Remove: {
-                auto id = CatalogNumber(packet); packet.end(); volume.Remove(id); break;
+                volume.Remove(Protocol::DecodeItem(packet).id);
+                break;
             }
             case SessionCommandCode::HardLink: {
-                auto id = CatalogNumber(packet), parent = CatalogNumber(packet);
-                auto name = packet.u16(); auto replace = packet.flag(); packet.end();
-                writeNumber(volume.MakeHardLink(id, parent, name, replace)); break;
+                const auto request=Protocol::DecodeHardLink(packet);
+                writeNumber(volume.MakeHardLink(request.source,request.parent,request.name,request.replace));
+                break;
             }
             case SessionCommandCode::Compression: {
-                auto id = CatalogNumber(packet); auto method = packet.get(); packet.end();
-                using Mode = HfsPlus::Volume::CompressionMode;
-                Check(method <= uint64_t(Mode::StoredInline), "Invalid volume compression method");
-                volume.SetCompressionMethod(id, Mode(method), [&](uint64_t done, uint64_t total) {
-                    Data progress; progress.put(done); progress.put(total);
-                    Send(output, SessionProgress, std::move(progress));
-                    Data answer; auto decision = Receive(input, answer); answer.end();
-                    if (decision == Cancel) throw Storage::Cancelled();
-                    Check(decision == SessionContinue, "Invalid volume compression decision");
+                const auto request=Protocol::DecodeCompression(packet);
+                volume.SetCompressionMethod(request.id,request.method,[&](uint64_t done,uint64_t total){
+                    Send(output,SessionProgress,Protocol::Encode(Protocol::CompressionProgress{done,total}));
+                    Data answer;
+                    const auto decision=Receive(input,answer);
+                    if(!Protocol::DecodeContinue(decision,answer))throw Storage::Cancelled();
                 });
                 Send(output, SessionBytes);
                 break;
@@ -630,93 +655,40 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             case SessionCommandCode::TestCrashPut:
 #endif
             case SessionCommandCode::Put: {
-                const auto parent = CatalogNumber(packet);
-                const auto replace = packet.flag(), attributesKnown = packet.flag();
-                const auto original = CatalogNumber(packet), source = CatalogNumber(packet);
-                Check(!original||!source,"Conflicting in-worker fork sources");
-                auto entry = DecodeEntry(packet); packet.end();
-                entry.attributesKnown = attributesKnown;
-                entry.attributes = std::move(*attributes[0]);
-                if(source){
-                    const auto current=volume.Stat(source);
-                    Check(entry.id==source && !current.directory && current.parent!=parent &&
-                          current.forks[0].size==entry.forks[0].size && current.forks[1].size==entry.forks[1].size,
-                          "The same-image fork source changed");
-                }
-                if (original) {
-                    const auto current = volume.Stat(original);
-                    Check(replace && entry.id == original && !current.directory && current.parent == parent &&
-                          current.name == entry.name && current.forks[0].size == entry.forks[0].size,
-                          "The file changed before resource fork replacement");
-                }
-#ifdef HFV_TESTING
-                const bool crashMfs=command==SessionCommandCode::TestCrashPut && !strcmp(volume.Kind(),"MFS");
-                struct CrashMfs {
-                    explicit CrashMfs(bool enabled){MfsImageSource::crashAfterSectorWrite=enabled;}
-                    ~CrashMfs(){MfsImageSource::crashAfterSectorWrite=false;}
-                } crashGuard(crashMfs);
-#endif
-                auto read = [&](unsigned fork, uint64_t offset, void* out, size_t size) {
-#ifdef HFV_TESTING
-                    if (command == SessionCommandCode::TestCrashPut && !crashMfs && (fork || offset)) ExitProcess(80);
-#endif
-                    auto* buffer = static_cast<uint8_t*>(out);
-                    while (size) {
-                        const auto count = (std::min)(size, Protocol::ReadLimit);
-                        const auto localSource = source ? source : !fork ? original : 0;
-                        if (localSource) volume.Read(localSource, fork, offset, buffer, count);
-                        Data range; range.put(fork); range.put(offset); range.put(count);
-                        Send(output, SessionReadRequest, std::move(range));
-                        Data bytes;
-                        const auto reply = Receive(input, bytes);
-                        if (reply == Cancel) { bytes.end(); throw Storage::Cancelled(); }
-                        if (localSource) {
-                            Check(reply == SessionContinue, "Invalid in-worker fork response");
-                            bytes.end();
-                        } else {
-                            Check(reply == SessionBytes && bytes.bytes.size() == count, "Invalid fork transfer data");
-                            memcpy(buffer, bytes.bytes.data(), count);
-                        }
-                        offset += count; buffer += count; size -= count;
-                    }
-                };
-                const auto id = original ? volume.PutResourceReplacement(original, entry, std::move(read), {})
-                                         : volume.Put(parent, entry, std::move(read), replace);
-                writeNumber(id);
+                auto request=Protocol::DecodePut(packet);
+                request.entry.attributes=std::move(*attributes[0]);
+                writeNumber(WriteStream(input,output,volume,std::move(request),command));
                 break;
             }
             case SessionCommandCode::FinalizeDirectory: {
-                const auto id = CatalogNumber(packet);
-                const auto merge = packet.flag(), attributesKnown = packet.flag();
-                auto desired = DecodeEntry(packet);
-                auto expected = DecodeEntry(packet); packet.end();
-                desired.attributesKnown = attributesKnown;
-                desired.attributes = std::move(*attributes[0]);
-                volume.FinalizeDirectory(id, desired, expected, merge);
+                auto request=Protocol::DecodeDirectoryUpdate(packet);
+                request.desired.attributes=std::move(*attributes[0]);
+                volume.FinalizeDirectory(request.header.id,request.desired,request.expected,request.header.merge);
                 break;
             }
             case SessionCommandCode::ValidateEntry: {
-                auto entry = DecodeEntry(packet); packet.end();
+                auto entry=Protocol::DecodeEntryCheck(packet);
                 entry.attributes = std::move(*attributes[0]);
                 volume.ValidateEntry(entry);
                 break;
             }
             case SessionCommandCode::FindMfs: {
-                const auto parent=CatalogNumber(packet);
-                Entry selector,found;
-                selector.name=packet.u16();
-                const auto byVersion=packet.flag();
-                if(byVersion)selector.version=CatalogNumber(packet);
-                packet.end();
-                const auto exists=byVersion?volume.FindTransferChild(parent,selector,found)
-                                           :volume.FindChild(parent,selector.name,found);
+                auto request=Protocol::DecodeFindMfs(packet);
+                Entry found;
+                bool exists;
+                if(request.version){
+                    Entry selector;
+                    selector.name=std::move(request.name);
+                    selector.version=*request.version;
+                    exists=volume.FindTransferChild(request.parent,selector,found);
+                }else exists=volume.FindChild(request.parent,request.name,found);
                 writeNumber(exists);
                 if(exists)writeEntry(found);
                 break;
             }
             case SessionCommandCode::SetBasicMetadata: {
-                const auto id=CatalogNumber(packet);auto entry=DecodeEntry(packet);packet.end();
-                volume.SetBasicMetadata(id,entry);
+                const auto request=Protocol::DecodeBasicMetadata(packet);
+                volume.SetBasicMetadata(request.id,request.entry);
                 break;
             }
             case SessionCommandCode::CloseClassic:
@@ -726,22 +698,25 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 SessionReply(output);
                 return;
             case SessionCommandCode::GetClassicProperties: {
-                auto id = CatalogNumber(packet); packet.end();
+                const auto id=Protocol::DecodeItem(packet).id;
                 hfsdirent entry{};
                 Check(volume.GetClassicProperties(id, entry), "Classic Finder properties are unavailable");
                 Data result; EncodeClassic(result, entry);
                 Send(output, SessionBytes, std::move(result)); break;
             }
             case SessionCommandCode::SetClassicProperties: {
-                auto id = CatalogNumber(packet); auto entry = DecodeClassic(packet); packet.end();
-                volume.SetClassicProperties(id, entry); break;
+                const auto request=Protocol::DecodeClassicProperties(packet);
+                volume.SetClassicProperties(request.id,request.properties);
+                break;
             }
             case SessionCommandCode::ValidateRemoval: {
-                auto id = CatalogNumber(packet); packet.end(); volume.ValidateRemoval(id); break;
+                volume.ValidateRemoval(Protocol::DecodeItem(packet).id);
+                break;
             }
             case SessionCommandCode::ValidateCopy: {
-                auto id = CatalogNumber(packet), parent = CatalogNumber(packet);
-                packet.end(); volume.ValidateCopyTo(id, volume, parent); break;
+                const auto request=Protocol::DecodeCopyCheck(packet);
+                volume.ValidateCopyTo(request.id,volume,request.parent);
+                break;
             }
             }
             SessionReply(output);

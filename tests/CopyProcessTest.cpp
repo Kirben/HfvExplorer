@@ -175,6 +175,43 @@ void TestVolumeSessionProtocol()
            "accepted oversized read request");
     reject([]{auto data=Protocol::Encode(Protocol::Reply{3,"",Storage::Rollback::None});Protocol::DecodeReply(data);},
            "accepted invalid session reply");
+
+    Entry entry;
+    entry.id=42;
+    entry.name=u"Both forks \u03a9";
+    entry.forks[0].size=300000;
+    entry.forks[1].size=71;
+    auto put=Protocol::EncodePut({2,true,true,42,0},entry);
+    const auto decodedPut=Protocol::DecodePut(put);
+    Check(decodedPut.header.original==42&&decodedPut.header.replace&&decodedPut.entry.attributesKnown&&
+          decodedPut.entry.name==entry.name&&decodedPut.entry.forks[1].size==71,"Put header round trip");
+    reject([&]{auto data=Protocol::EncodePut({2,true,true,42,42},entry);Protocol::DecodePut(data);},
+           "accepted conflicting Put sources");
+    reject([&]{auto data=Protocol::EncodePut({2,false,false,42,0},entry);Protocol::DecodePut(data);},
+           "accepted resource replacement with overwrite disabled");
+    reject([&]{auto data=Protocol::EncodePut({2,true,false,0,91},entry);Protocol::DecodePut(data);},
+           "accepted a Put source that disagrees with the entry ID");
+    reject([&]{auto data=Protocol::EncodePut({2,true,false,0,0},entry);data.bytes.pop_back();Protocol::DecodePut(data);},
+           "accepted a truncated Put metadata header");
+    reject([&]{auto data=Protocol::EncodePut({2,true,false,0,0},entry);data.put(0);Protocol::DecodePut(data);},
+           "accepted trailing Put payload data");
+    reject([&]{auto data=Protocol::Encode(Protocol::ForkRange{1,70,2});Protocol::DecodeForkRange(data,entry);},
+           "accepted a fork range beyond the declared resource fork");
+    reject([&]{auto data=Protocol::Encode(Protocol::ForkRange{0,UINT64_MAX,1});Protocol::DecodeForkRange(data,entry);},
+           "accepted an overflowing fork range");
+    reject([]{Data data;data.bytes.resize(7);Protocol::DecodeForkReply(CopyWorkerProtocol::SessionBytes,data,8,false);},
+           "accepted interrupted fork data as a complete frame");
+    reject([]{Data data;data.put(0);Protocol::DecodeForkReply(CopyWorkerProtocol::Cancel,data,8,false);},
+           "accepted a cancellation frame containing data");
+    reject([]{Data data;Protocol::DecodeForkReply(CopyWorkerProtocol::SessionContinue,data,8,false);},
+           "accepted a local continuation for an external fork");
+    Data empty;
+    Check(!Protocol::DecodeForkReply(CopyWorkerProtocol::Cancel,empty,8,false),"empty cancellation changed");
+    auto update=Protocol::EncodeDirectoryUpdate({42,true,true},entry,entry);
+    update.bytes.pop_back();
+    reject([&]{Protocol::DecodeDirectoryUpdate(update);},"accepted truncated expected folder metadata");
+    reject([]{Data data;data.put(42);data.put(UINT64_MAX);Protocol::DecodeCompression(data);},
+           "accepted an invalid compression method");
 }
 
 void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstring& folder) {
@@ -551,6 +588,38 @@ int RunCopyProcessTest(const char *directory) {
               "worker directory traversal");
         Verify(*target, child.id);
         Check(target->GetAttributes(child.id) == attrs, "worker attributes");
+        {
+            const auto path=Wide(root+"\\interrupted-stream.dsk");
+            {
+                auto image=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+                HfsPlus::Volume::Format(*image,u"Interrupted stream",true);
+            }
+            auto mounted=OpenBrowserImage(path);
+            const auto id=Put(*mounted,2,u"Both forks");
+            mounted->SetAttributes(id,attrs);
+            const auto pid=VolumeSession::VolumeSessionPidForTest(mounted);
+            Check(pid!=0,"interrupted Put fixture requires a persistent worker");
+            const auto original=mounted->Stat(id);
+            const auto free=mounted->FreeBytes();
+            bool sentPrefix=false,interrupted=false;
+            try{
+                mounted->Put(2,original,[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
+                    if(fork||offset)throw HfsPlus::Error("Injected source interruption");
+                    sentPrefix=true;
+                    memset(bytes,0xe4,count);
+                },true);
+            }catch(const HfsPlus::Error& error){
+                interrupted=std::string(error.what())=="Injected source interruption";
+            }
+            Entry retained;
+            Check(sentPrefix&&interrupted&&mounted->FindChild(2,original.name,retained)&&
+                  retained.id==original.id&&mounted->FreeBytes()==free&&
+                  VolumeSession::VolumeSessionPidForTest(mounted)==pid,
+                  "interrupted Put lost its destination or restarted the mounted worker");
+            Verify(*mounted,retained.id);
+            Check(mounted->GetAttributes(retained.id)==attrs,"interrupted Put changed destination attributes");
+            fprintf(report,"PASS: interrupted streamed replacement preserves both forks, attributes, free space and the mounted worker.\n");
+        }
         fprintf(report, "PASS: child process, journaled HFS+ to HFSX, recursive forks and attributes, parent "
                         "engines restored\n");
         auto again = Submit(request);
