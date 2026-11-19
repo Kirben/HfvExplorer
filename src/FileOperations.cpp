@@ -3,6 +3,7 @@
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "StorageLocation.h"
+#include "BrowserPresentation.h"
 #include "CopyProcess.h"
 #include "VolumeSession.h"
 #include "CopyWorkerProtocol.h"
@@ -328,8 +329,8 @@ void ValidateRequest(const Request& r){
   Check(!copy->sources.empty() && !copy->destination.IsNone(), "Choose sources and a copy destination");
   for (const auto& source : copy->sources) Check(!source.IsNone(), "No source file location was supplied");
  } else if (const auto* legacy = r.Conversion()) {
-  legacy->source.LegacyVolume(); legacy->source.LegacyPath();
-  legacy->destination.LegacyVolume(); legacy->destination.LegacyPath();
+  Check((legacy->source.IsWindows()||legacy->source.IsClassic())&&
+        (legacy->destination.IsWindows()||legacy->destination.IsClassic()),"Choose compatible conversion endpoints");
   if (legacy->selection)
    Check(!legacy->selection->source.IsNone() &&
          (legacy->selection->folder.IsWindows() || legacy->selection->folder.IsClassic() ||
@@ -535,50 +536,83 @@ Reader AdaptRawClassic(Volume& source, Entry& entry, bool importing, bool resour
  };
 }
 
-std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion, Storage::Job& job,
-                                              Completion& completion) {
+Storage::Result CopyConverted(const LegacyConversion& conversion, Storage::Job& job, Completion& completion) {
  const bool importing=conversion.source.IsWindows() && conversion.destination.IsClassic();
  const bool exporting=conversion.source.IsClassic() && conversion.destination.IsWindows();
- if(!importing && !exporting) return {};
- char mode=importing ? conversion.options.input : conversion.options.output;
- const bool mounted=ConvertsWithMountedClassic(conversion);
- const bool raw=mounted && (mode=='r' || mode=='R');
- if(!TransferConversion::Supported(mode) && mode!='a' && !raw) return {};
+ const bool translating=importing||exporting;
+ const char mode=importing?conversion.options.input:conversion.options.output;
+ const bool raw=translating&&(mode=='r'||mode=='R');
+ if(translating)Check(TransferConversion::Supported(mode)||mode=='a'||raw,"Unsupported file conversion mode");
  const auto mappings=raw?TypeMappings::Capture():TypeMappings::Snapshot{};
  auto sourceLocation=conversion.selection ? conversion.selection->source : conversion.source;
  sourceLocation.cut=conversion.move;
- auto source=Source(sourceLocation);
+ if(sourceLocation.IsClassic()&&conversion.directory){
+  auto path=sourceLocation.ClassicPath();
+  if(path.back()==':'&&path.find(':')!=path.size()-1){
+   const auto generation=sourceLocation.MediaGenerationKnown()?std::optional<DWORD>(sourceLocation.MediaGeneration()):std::nullopt;
+   path.pop_back();
+   sourceLocation.SetClassic(sourceLocation.ClassicImage(),std::move(path));
+   if(generation)sourceLocation.BindMediaGeneration(*generation);
+  }
+ }
  Location folder=conversion.selection ? conversion.selection->folder : conversion.destination;
  std::u16string outputName;
- if(!conversion.selection && exporting) {
+ if(!conversion.selection && folder.IsWindows()) {
   auto path=folder.WindowsPath();
-  auto flags=GetFileAttributesW(path.c_str());
+  const auto flags=GetFileAttributesW(BrowserPresentation::WindowsPath(path).c_str());
+  if(flags==INVALID_FILE_ATTRIBUTES){
+   const auto error=GetLastError();
+   if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)
+    throw Failure(error,"Cannot inspect the Windows copy destination");
+  }
   if(flags==INVALID_FILE_ATTRIBUTES || !(flags&FILE_ATTRIBUTE_DIRECTORY)) {
    auto end=path.find_last_of(L"\\/");
    outputName=U16(path.substr(end+1));
+   const auto serial=folder.WindowsMediaSerial();
    folder.SetWindows(path.substr(0,end+1));
+   folder.BindWindowsMediaSerial(serial);
   }
- } else if(!conversion.selection && importing) {
+ } else if(!conversion.selection && folder.IsClassic()) {
   auto path=folder.ClassicPath();
   if(path.back()!=':') {
    auto image=folder.ClassicImage();
-   hfsdirent entry{};
-   if(HFSIFACE_get_properties(&image[0],&path[0],&entry)!=0 || !(entry.flags&HFS_ISDIR)) {
-    const auto end=path.find_last_of(':');
-    outputName=Ansi(path.substr(end+1));
-    folder.SetClassic(std::move(image),path.substr(0,end+1));
-    if(conversion.destination.MediaGenerationKnown())
-     folder.BindMediaGeneration(conversion.destination.MediaGeneration());
+   const auto end=path.find_last_of(':');
+   const auto parentPath=path.substr(0,end+1);
+   StorageLocation::ValidateImage(VolumeCoord::Wide(image),folder.expectedResource);
+   auto parent=OpenClassic(image,parentPath,false);
+   StorageLocation::ValidateMedia(folder);
+   Entry child;
+   auto leaf=Ansi(path.substr(end+1));
+   const bool isDirectory=parent->FindChild(2,leaf,child)&&child.directory;
+   parent->Close();
+   if(!isDirectory){
+    outputName=std::move(leaf);
+    const auto generation=folder.MediaGenerationKnown()?std::optional<DWORD>(folder.MediaGeneration()):std::nullopt;
+    folder.SetClassic(std::move(image),parentPath);
+    if(generation)folder.BindMediaGeneration(*generation);
    }
   }
  }
+ if(!translating&&outputName.empty())
+  return CopyRequest(OrdinaryCopy{{sourceLocation},folder},{},job,completion);
+
+ auto source=Source(sourceLocation);
  std::vector<std::string> snapshots;
  bool complete=false;
  WriteWithMedia(folder,[&]{
- if(!IsFloppy(folder))StorageLocation::ValidateMedia(folder);
+ StorageLocation::ValidateMedia(folder);
+ if(folder.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(folder.ClassicImage()),folder.expectedResource);
  auto target=Destination(folder);
- if(conversion.move) snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job,bool(sourceLocation.Volume())));
+ const auto destinationEntry=target.first->Stat(target.second);
+ Check(destinationEntry.directory,"The copy destination is not a folder");
+ if(folder.IsClassic()&&folder.expectedCatalogId)
+  Check(destinationEntry.resolvedId==folder.expectedCatalogId,"The destination folder was replaced");
+ if(conversion.move)snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job,bool(sourceLocation.Volume())));
  TransferAdapter adapt=[&](Volume& volume,Entry& entry,Storage::Job& active,bool root) {
+  if(!translating){
+   if(root&&!outputName.empty())entry.name=outputName;
+   return Reader{};
+  }
   char selected=mode;
   bool paired=false;
   if(importing && (selected=='a' || raw) && conversion.options.appledouble && !entry.directory) {
@@ -602,10 +636,12 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
    } else if(!memcmp(entry.finder.data(),"TEXT",4) || !memcmp(entry.finder.data(),"ttro",4)) selected='t';
    else selected=entry.forks[1].size ? 'm' : 'r';
   }
+  const bool explicitName=root&&!outputName.empty();
+  if(explicitName&&raw&&exporting)entry.name=outputName;
   Reader reader;
   if(raw && !entry.directory && !paired) reader=AdaptRawClassic(volume,entry,importing,mode=='R',mappings);
   else if(TransferConversion::Supported(selected)) reader=TransferConversion::Adapt(selected,importing,volume,entry,active);
-  if(root && !outputName.empty()) entry.name=outputName;
+  if(explicitName&&!(raw&&exporting))entry.name=outputName;
   else if(exporting) {
    for(auto& c:entry.name) {
     if(c<32) c=u'-';
@@ -622,6 +658,7 @@ std::optional<Storage::Result> CopyConverted(const LegacyConversion& conversion,
  if(!folder.Volume())target.first->Close();
  if(!sourceLocation.Volume())source.first->Close();
  });
+ StorageLocation::ValidateMedia(sourceLocation,StorageLocation::FloppyProbe::FreshHandle);
  if(complete && conversion.move) DeleteMovedSources({sourceLocation},snapshots,job,completion);
  completion.complete=complete;
  completion.completed=job.progress().files;
@@ -642,58 +679,7 @@ Storage::Result Execute(const Request& request,const ExecutionPlan& plan,Storage
   return Mutate(rename, &rename->source, 1, job, completion);
  if (const auto* deletion = request.Delete())
   return Mutate(nullptr, deletion->selection.data(), deletion->selection.size(), job, completion);
- const auto& legacy = request.Legacy();
- if(legacy.source.IsWindows())StorageLocation::ValidateMedia(legacy.source);
- if(legacy.destination.IsWindows())StorageLocation::ValidateMedia(legacy.destination);
- if(auto converted=CopyConverted(legacy,job,completion))return *converted;
- // Legacy containers cannot carry arbitrary attributes/ACLs. Preflight the
- // complete selection before converters can create partial output.
- auto noLostMetadata=[&](MacBrowser::Volume& volume,uint32_t root){
-  if(!volume.SupportsAttributes())return;
-  std::set<uint32_t> ancestors;
-  std::function<void(uint32_t,unsigned)> walk=[&](uint32_t id,unsigned depth){
-   Cancel(job);Check(depth<=128&&ancestors.insert(id).second,"Recursive conversion source");
-   Check(volume.GetAttributes(id).empty(),"Legacy conversion cannot preserve extended attributes or Mac ACLs; use an HFS+/HFSX or Windows both-fork copy");
-   auto entry=volume.Stat(id);Check(!legacy.destination.IsClassic()||!entry.datesValid||(entry.created<=UINT32_MAX&&entry.modified<=UINT32_MAX),"Classic HFS conversion cannot preserve dates after February 2040; source retained");if(entry.directory)for(auto& child:volume.List(id))walk(child.id,depth+1);
-   ancestors.erase(id);
-  };
-  walk(root,0);
- };
- if(!legacy.selection&&request.Legacy().source.IsWindows()){
-  auto source=MacBrowser::ResolveWindowsFile(request.Legacy().source.WindowsPath());
-  noLostMetadata(*source.first,source.second);source.first->Close();
- }
- const bool mountedClassic=legacy.selection &&
-    ((legacy.source.IsClassic() && legacy.selection->source.IsMounted()) ||
-     (legacy.destination.IsClassic() && legacy.selection->folder.IsMounted()));
- if(legacy.selection){
-  // Captured paths/identities never depend on another window's volume indexes.
-  auto source=Source(legacy.selection->source);noLostMetadata(*source.first,source.second);
-  if(legacy.move&&mountedClassic)Check(source.first->Writable(),"A cut source is read-only");
-  auto& folder=legacy.selection->folder;
-  auto target=folder.IsMounted()?Destination(folder):
-    std::make_pair(folder.IsWindows()?OpenWindows(folder.WindowsPath()):OpenClassic(folder.ClassicImage(),folder.ClassicPath(),false),uint32_t(2));
-  if(folder.IsMounted())Check(target.first->Writable(),"The destination is read-only");
-  StorageLocation::ValidateMedia(folder);source.first->ValidateCopyTo(source.second,*target.first,target.second);
-  source.first->Close();target.first->Close();
- }
-  Mark(completion,request.Legacy().destination);if(request.Legacy().move)Mark(completion,request.Legacy().source);
- auto sourceLocation=!legacy.selection?request.Legacy().source:legacy.selection->source;sourceLocation.cut=request.Legacy().move;
- bool physicalMove=request.Legacy().move&&((sourceLocation.IsClassic()&&physical_floppy_path(sourceLocation.ClassicImage().c_str())>=0)||physical_floppy_path(request.Legacy().destination.LegacyVolume().c_str())>=0);
- std::vector<std::string> snapshots;auto options=request.Legacy().options;options.targetGenerationKnown=request.Legacy().destination.MediaGenerationKnown();options.targetGeneration=options.targetGenerationKnown?request.Legacy().destination.MediaGeneration():0;
- if(physicalMove){auto source=Source(sourceLocation);snapshots.push_back(MacBrowser::Snapshot(*source.first,source.second,job));if(!sourceLocation.Volume())source.first->Close();options.verifyFloppy=true;}
- std::shared_ptr<Volume> mediaGuard;if(request.Legacy().source.MediaGenerationKnown()){mediaGuard=OpenClassic(request.Legacy().source.ClassicImage(),":",false);StorageLocation::ValidateMedia(request.Legacy().source);}
- struct ClassicSessionMounts {
-  int previous;
-  explicit ClassicSessionMounts(bool enabled):previous(hfs_session_mounts(enabled)){}
-  ~ClassicSessionMounts(){hfs_session_mounts(previous);}
- } classicMounts(mountedClassic);
- auto result=MakeCopyJob(request.Legacy().source.LegacyVolume(),request.Legacy().source.LegacyPath(),request.Legacy().destination.LegacyVolume(),request.Legacy().destination.LegacyPath(),request.Legacy().directory,physicalMove?0:request.Legacy().move,options)(job);
- if(mediaGuard)mediaGuard->Close();
- completion.completed=job.progress().files;bool copied=!result.code&&!job.progress().skipped;
- if(physicalMove&&copied){DeleteMovedSources({sourceLocation},snapshots,job,completion);result.moved=true;}
- completion.complete=copied;
- return result;
+ return CopyConverted(request.Legacy(),job,completion);
 }
 }
 Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> job):state_(std::move(state)),job_(std::move(job)){}

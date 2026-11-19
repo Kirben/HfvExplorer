@@ -22,6 +22,7 @@ extern "C" {
 #include "hfs/copyin.h"
 #include "hfs/Copyhfs.h"
 }
+#ifdef HFV_TESTING
 namespace {
 // Error pointers in the old libraries can retain a default or a previous error.
 bool usefulError(const char* text) {return text&&*text&&_stricmp(text,"no error");}
@@ -139,7 +140,9 @@ std::vector<char> buffer(const std::string& text) {
  std::vector<char> value(MAX_PATH);memcpy(value.data(),text.c_str(),text.size()+1);return value;
 }
 }
+#endif
 LegacyCopyOptions CaptureLegacyCopyOptions(char output){LegacyCopyOptions options;int ad;HFSIFACE_copy_settings(&options.output,&options.input,&ad);options.output=output;options.appledouble=ad!=0;return options;}
+#ifdef HFV_TESTING
 std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sv,std::string source,std::string tv,std::string target,int directory,int move,char mode){
  return MakeCopyJob(std::move(sv),std::move(source),std::move(tv),std::move(target),directory,move,CaptureLegacyCopyOptions(mode));
 }
@@ -195,6 +198,7 @@ std::function<Storage::Result(Storage::Job&)> MakeCopyJob(std::string sourceVolu
  std::vector<VolumeCoord::Access> access{{from,move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read},{to,VolumeCoord::Mode::Write}};if(!macVolume(sourceVolume)){auto path=VolumeCoord::Wide(source);auto at=path.find_last_of(L"\\/");auto companion=path.substr(0,at+1)+L"%"+path.substr(at+1);access.push_back({VolumeCoord::PathKey(companion),move?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read});}
  return CommandStorage::Guard(access,work,{to});
 }
+#endif
 bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Location& source,CString& output)
 {
  output.Empty();
