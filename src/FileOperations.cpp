@@ -21,7 +21,7 @@
 #include <set>
 #include <string_view>
 #include <fcntl.h>
-#include <atomic>
+#include <optional>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
@@ -864,34 +864,108 @@ std::vector<Request> PlanTransfers(OrdinaryCopy copy,const TransferSettings& set
     return requests;
 }
 
-Operation Submit(Request request){
- auto state=std::make_shared<Operation::State>();auto values=std::make_shared<const Request>(std::move(request));
- auto& queue=values->background?Storage::copyWorker():Storage::worker();
- auto access=std::make_shared<std::unique_ptr<VolumeCoord::Lease>>();
- struct PendingPlan {std::atomic<bool> ready{false};ExecutionPlan execution;Storage::Result error;};auto plan=std::make_shared<PendingPlan>();
- auto planning=queue.submit([plan,values](Storage::Job& job){try{if(job.cancelled())throw Storage::Cancelled();plan->execution=PlanOperation(*values);}catch(const Storage::Cancelled&){plan->error={1,ERROR_CANCELLED,"Cancelled while identifying Windows paths"};}catch(const std::exception& error){plan->error={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}catch(...){plan->error={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected path planning failure"};}plan->ready.store(true,std::memory_order_release);return Storage::Result{};});
- auto job=queue.submit([state,values,access,plan](Storage::Job& job){Completion completion;Storage::Result result;Storage::OutcomeEvidence evidence;hfs_take_rollback();HFSIFACE_take_delete_retained_change();
-  try{Cancel(job);if(plan->error.code){result=plan->error;}else{if(!*access)throw VolumeCoord::Busy();LegacyEngine::Scope engine;
-   const auto route=plan->execution.route;
-   const auto current=BindResources(*values,route);
-   VolumeCoord::OperationLease currentPaths(current);
-   if(route==ExecutionRoute::TemporaryWorker){std::vector<std::string> keys,writes;for(auto& item:current){keys.push_back(item.key);if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);}if(auto* copy=values->Get<OrdinaryCopy>()){Mark(completion,copy->destination);for(auto& item:copy->sources)if(item.cut)Mark(completion,item);}else if(auto* legacy=values->Conversion()){Mark(completion,legacy->destination);if(legacy->move)Mark(completion,legacy->source);}else if(auto* output=values->Get<ExportFileFork>())Mark(completion,output->output);else if(auto* input=values->Get<ImportResourceFork>())Mark(completion,input->file);result=CopyProcess::Run(*values,job,completion,keys,writes);}else result=Execute(*values,plan->execution,job,completion);}
+namespace {
+class PreparedOperation {
+ const Request request_;
+ ExecutionPlan plan_;
+ Storage::Result preparationError_;
+ std::optional<VolumeCoord::Lease> reservation_;
+
+ Storage::Result RunReserved(Storage::Job& job,Completion& completion)
+ {
+  const auto route=plan_.route;
+  LegacyEngine::Scope engine;
+  // Bind again while keeping the queued reservation. The executor still
+  // checks the typed selection identities before changing any entry.
+  const auto current=BindResources(request_,route);
+  VolumeCoord::OperationLease executionAccess(current);
+  if(route==ExecutionRoute::Local)
+   return FileOperations::Execute(request_,plan_,job,completion);
+
+  std::vector<std::string> keys,writes;
+  for(const auto& item:current){
+   keys.push_back(item.key);
+   if(item.mode==VolumeCoord::Mode::Write)writes.push_back(item.key);
   }
-  catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
+  if(const auto* copy=request_.Get<OrdinaryCopy>()){
+   Mark(completion,copy->destination);
+   for(const auto& source:copy->sources)if(source.cut)Mark(completion,source);
+  }else if(const auto* legacy=request_.Conversion()){
+   Mark(completion,legacy->destination);
+   if(legacy->move)Mark(completion,legacy->source);
+  }else if(const auto* output=request_.Get<ExportFileFork>()){
+   Mark(completion,output->output);
+  }else if(const auto* input=request_.Get<ImportResourceFork>()){
+   Mark(completion,input->file);
+  }
+  return CopyProcess::Run(request_,job,completion,keys,writes);
+ }
+
+public:
+ explicit PreparedOperation(Request request):request_(std::move(request)){}
+ bool Background() const {return request_.background;}
+
+ void Prepare(Storage::Job& job)
+ {
+  try{Cancel(job);plan_=PlanOperation(request_);}
+  catch(const Storage::Cancelled&){preparationError_={1,ERROR_CANCELLED,"Cancelled while identifying Windows paths"};}
+  catch(const std::exception& error){preparationError_={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}
+  catch(...){preparationError_={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected path planning failure"};}
+ }
+
+ bool TryReserve(const Storage::Job& job)
+ {
+  if(job.cancelled()||preparationError_.code)return true;
+  try{reservation_.emplace(plan_.resources);return true;}
+  catch(const VolumeCoord::Busy&){return !Background();}
+ }
+
+ Storage::Result Run(Storage::Job& job,Completion& completion)
+ {
+  Storage::Result result;
+  Storage::OutcomeEvidence evidence;
+  hfs_take_rollback();
+  HFSIFACE_take_delete_retained_change();
+  try{
+   Cancel(job);
+   if(preparationError_.code)result=std::move(preparationError_);
+   else{
+    if(!reservation_)throw VolumeCoord::Busy();
+    result=RunReserved(job,completion);
+   }
+  }
+  catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}
+  catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
   catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
   catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}
-  catch(const Failure& e){result={1,e.error,e.what()};}catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
+  catch(const Failure& e){result={1,e.error,e.what()};}
+  catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
+
+  reservation_.reset();
   FinalizeOutcome(result,completion,job,evidence);
   std::vector<std::string> changed;
-  for(auto& item:completion.affected)changed.push_back(item.resourceKey);
-  access->reset();VolumeCoord::Changed(changed);
-  {std::lock_guard<std::mutex> lock(state->mutex);state->completion=std::move(completion);}return result;
- },[access,plan,values](const std::shared_ptr<Storage::Job>& job){
-  if(!plan->ready.load(std::memory_order_acquire))return false;
-  if(job->cancelled()||plan->error.code)return true;
-  try{access->reset(new VolumeCoord::Lease(plan->execution.resources));return true;}catch(const VolumeCoord::Busy&){return !values->background;}
- });
+  for(const auto& item:completion.affected)changed.push_back(item.resourceKey);
+  VolumeCoord::Changed(changed);
+  return result;
+ }
+};
+}
+
+Operation Submit(Request request){
+ auto state=std::make_shared<Operation::State>();
+ auto operation=std::make_shared<PreparedOperation>(std::move(request));
+ auto& queue=operation->Background()?Storage::copyWorker():Storage::worker();
+ auto job=queue.submitPrepared(
+  [operation](Storage::Job& job){operation->Prepare(job);},
+  [operation](const std::shared_ptr<Storage::Job>& job){return operation->TryReserve(*job);},
+  [state,operation](Storage::Job& job){
+   Completion completion;
+   auto result=operation->Run(job,completion);
+   std::lock_guard<std::mutex> lock(state->mutex);
+   state->completion=std::move(completion);
+   return result;
+  });
  {auto& registry=Registry::Get();std::lock_guard<std::mutex> lock(registry.mutex);
   registry.entries.erase(std::remove_if(registry.entries.begin(),registry.entries.end(),[](const Registry::Entry& e){auto job=e.job.lock();return !job||job->done();}),registry.entries.end());
   registry.entries.push_back({state,job});}

@@ -1528,6 +1528,9 @@ int RunCopyProcessTest(const char *directory) {
                   WorkerTransport::lastExitCode == 74 && interrupted.Job()->result().rollback == Storage::Rollback::Unverified,
               "Expected the worker to exit inside its write hook");
         CopyProcess::fault = 0;
+        Check(VolumeCoord::Available({{source->ResourceKey(),VolumeCoord::Mode::Write},
+                                      {target->ResourceKey(),VolumeCoord::Mode::Write}}),
+              "completion after a worker crash retained a volume reservation");
         Check(source->Stat(slow).forks[0].size == 2 * 1024 * 1024, "worker crash retained source");
         Check(source->Writable() && target->Writable() &&
                   !source->List(2).empty() && !target->List(2).empty(),

@@ -104,7 +104,15 @@ public:
  }
 };
 class Worker {
- struct Entry {std::shared_ptr<Job> job;std::function<Result(Job&)> work;std::function<bool(const std::shared_ptr<Job>&)> ready;};
+ using Work=std::function<Result(Job&)>;
+ using Ready=std::function<bool(const std::shared_ptr<Job>&)>;
+ using Prepare=std::function<void(Job&)>;
+ struct Entry {
+  std::shared_ptr<Job> job;
+  Work work;
+  Ready ready;
+  Prepare prepare;
+ };
  std::mutex mutex_;std::condition_variable condition_;std::deque<Entry> queue_;bool stopping_=false;
  std::vector<std::thread> threads_;
  void loop() {
@@ -117,7 +125,7 @@ class Worker {
      if(queue_.empty()&&stopping_)return;
      auto found=queue_.end();
      for(auto it=queue_.begin();it!=queue_.end();++it){
-      try{if(!it->ready||it->ready(it->job)){found=it;break;}}
+      try{if(it->prepare||!it->ready||it->ready(it->job)){found=it;break;}}
       catch(const std::exception& error){readinessError=Result{1,ERROR_UNHANDLED_EXCEPTION,error.what()};found=it;break;}
      }
      if(found!=queue_.end()){entry=std::move(*found);queue_.erase(found);break;}
@@ -129,7 +137,23 @@ class Worker {
    if(entry.job->done())continue;
    Result result;
    OutcomeEvidence evidence;
-   try {result=entry.work(*entry.job);}
+   try {
+    if(entry.prepare){
+     auto prepare=std::move(entry.prepare);
+     entry.prepare=nullptr;
+     prepare(*entry.job);
+     // Preparation may do I/O. Publish the prepared entry under the
+     // scheduler lock only after that I/O is complete.
+     {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if(stopping_)entry.job->cancel();
+      queue_.push_front(std::move(entry));
+     }
+     condition_.notify_all();
+     continue;
+    }
+    result=entry.work(*entry.job);
+   }
    catch(const Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
    catch(const MediaChanged& error){result={1,ERROR_MEDIA_CHANGED,error.what()};}
    catch(const std::exception& error){result={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}
@@ -143,9 +167,12 @@ public:
  explicit Worker(unsigned count=1){try{for(unsigned i=0;i<count;++i)threads_.emplace_back([this]{loop();});}catch(...){shutdown();throw;}}
  void shutdown(){ {std::lock_guard<std::mutex> lock(mutex_);stopping_=true;for(auto& e:queue_)e.job->cancel();}condition_.notify_all();for(auto& thread:threads_)if(thread.joinable())thread.join();}
  ~Worker(){shutdown();}
- std::shared_ptr<Job> submit(std::function<Result(Job&)> work,std::function<bool(const std::shared_ptr<Job>&)> ready={}) {
+ std::shared_ptr<Job> submit(Work work,Ready ready={}) {
+  return submitPrepared({},std::move(ready),std::move(work));
+ }
+ std::shared_ptr<Job> submitPrepared(Prepare prepare,Ready ready,Work work) {
   auto job=std::make_shared<Job>();
-  {std::lock_guard<std::mutex> lock(mutex_);if(stopping_)throw std::runtime_error("Storage worker is shutting down");queue_.push_back({job,std::move(work),std::move(ready)});}
+  {std::lock_guard<std::mutex> lock(mutex_);if(stopping_)throw std::runtime_error("Storage worker is shutting down");queue_.push_back({job,std::move(work),std::move(ready),std::move(prepare)});}
   condition_.notify_all();return job;
  }
 };

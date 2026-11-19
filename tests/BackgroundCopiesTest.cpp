@@ -866,6 +866,52 @@ int RunWindowsPathCoordinationTest(const char* directory){
   queued.push_back(remove(a+"\\Held",false));queued.push_back(remove(a+"\\%Held",false));queued.push_back(remove(a,true));queued.push_back(remove(input+"\\Held",false));queued.push_back(remove(staged,false));for(auto& op:queued)Check(!op.Job()->done(),"conflicting Windows operation ran during copy");
   FileOperations::Request finalIndependent;finalIndependent = FileOperations::CreateFolder{};finalIndependent.background=true;finalIndependent.Get<FileOperations::CreateFolder>()->parent.SetWindows(wide(b));finalIndependent.Get<FileOperations::CreateFolder>()->name=u"QueueStillRuns";auto skippedQueue=FileOperations::Submit(finalIndependent);Until([&]{return skippedQueue.Job()->done();});Check(!skippedQueue.Job()->result().code&&BackgroundCopies::Active(),"conflicts starved unrelated Windows work");
   for(auto& op:queued)op.Job()->cancel();for(auto& op:queued)Until([&]{return op.Job()->done();});SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});VolumeCoord::SetPathLookupObserver({});Check(!BackgroundCopies::LastResult().code&&exists(a+"\\Held")&&exists(a+"\\%Held")&&exists(input+"\\Held"),"copy or canceled conflicts lost data");Until([&]{return Row(left,L"Held")>=0;});Check(!IsWindow(heldProgress)&&FileOperations::Pending().empty()&&VolumeCoord::Available({{VolumeCoord::PathKey(wide(a)),VolumeCoord::Mode::Write},{VolumeCoord::PathKey(wide(input)),VolumeCoord::Mode::Write}}),"Windows completion leaked locks/progress");
+  {
+   const auto sourcePath=wide(input+"\\Held");
+   const auto movedPath=wide(input+"\\StaleRename");
+   const auto replacementPath=wide(input+"\\Replacement");
+   auto location=FileOperations::Location::Windows(sourcePath);
+   location.expectedIdentity=MacBrowser::DescribeWindowsFile(sourcePath).identity;
+   location.requiresWindowsIdentity=true;
+   Check(!location.expectedIdentity.empty(),"capture Windows rename identity");
+   const auto key=VolumeCoord::PathKey(sourcePath);
+   const auto destination=VolumeCoord::PathKey(movedPath);
+   std::optional<VolumeCoord::Lease> occupied;
+   occupied.emplace(std::vector<VolumeCoord::Access>{{key,VolumeCoord::Mode::Write}});
+   auto lookups=std::make_shared<std::atomic<unsigned>>(0);
+   VolumeCoord::SetPathLookupObserver([movedPath,lookups](const std::wstring& path){
+    if(path==movedPath)++*lookups;
+   });
+   FileOperations::Request rename=FileOperations::RenameEntry{location,u"StaleRename"};
+   rename.background=true;
+   auto cancelled=FileOperations::Submit(rename);
+   queued.push_back(cancelled);
+   Until([&]{return lookups->load()==1;});
+   Check(!cancelled.Job()->done(),"prepared rename bypassed its reservation");
+   cancelled.Job()->cancel();
+   Until([&]{return cancelled.Job()->done();});
+   Check(cancelled.Job()->result().error==ERROR_CANCELLED&&lookups->load()==1&&
+         exists(input+"\\Held")&&!exists(input+"\\StaleRename"),
+         "cancelled prepared rename entered execution");
+
+   auto stale=FileOperations::Submit(rename);
+   queued.push_back(stale);
+   Until([&]{return lookups->load()==2;});
+   Check(!stale.Job()->done(),"second prepared rename bypassed its reservation");
+   {CFile replacement;Check(replacement.Open(input+"\\Replacement",CFile::modeCreate|CFile::modeWrite),"create Windows replacement");
+    replacement.Write("new",3);}
+   Check(MoveFileExW(replacementPath.c_str(),sourcePath.c_str(),MOVEFILE_REPLACE_EXISTING)!=FALSE,
+         "replace reserved Windows selection externally");
+   occupied.reset();
+   Until([&]{return stale.Job()->done();});
+   VolumeCoord::SetPathLookupObserver({});
+   Check(stale.Job()->result().code&&lookups->load()>=3&&
+         MacBrowser::DescribeWindowsFile(sourcePath).forks[0].size==3&&
+         !exists(input+"\\StaleRename")&&
+         VolumeCoord::Available({{key,VolumeCoord::Mode::Write},{destination,VolumeCoord::Mode::Write}}),
+         "path rebinding accepted a stale selection or retained its reservation");
+   fprintf(report,"PASS: the same queued job can cancel before execution; a replaced Windows selection fails after rebinding and releases its leases.\n");
+  }
   fprintf(report,"PASS: real same-drive background copies share a reader and finish independently; sibling rename/delete/new-folder jobs finish and refresh during a stalled copy; unrelated browser refresh stays unchanged; source/destination/resource-companion/staging/parent conflicts queue and cancel without starving unrelated work.\n");
   for(bool failure:{true,false}){gate.Reset();auto failSource=MacBrowser::ResolveWindowsFile(wide(input+"\\Fail"));auto stalled=std::make_shared<GatedWindows>(failSource.first,gate);stalled->fail=failure;request.Copy().sources.front().SetMounted(stalled,failSource.second);request.Copy().sources.front().expectedName=u"Fail";request.Copy().destination.expectedIdentity=MacBrowser::DescribeWindowsFile(wide(a)).identity;Check(BackgroundCopies::Start({request},first,true),"start failed/canceled Windows copy");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});auto progress=BackgroundCopies::DialogWindow();if(!failure)SendMessage(progress,WM_COMMAND,IDCANCEL,0);Host(left,b);SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Check(BackgroundCopies::LastResult().code&&(!failure?BackgroundCopies::LastResult().error==ERROR_CANCELLED:true)&&!exists(a+"\\Fail")&&!exists(a+"\\%Fail")&&exists(input+"\\Fail")&&first->IsWindowEnabled(),"failed/canceled Windows copy published output or lost source");if(IsWindow(progress))SendMessage(progress,WM_COMMAND,IDCANCEL,0);Check(VolumeCoord::Available({{VolumeCoord::PathKey(wide(a)),VolumeCoord::Mode::Write},{VolumeCoord::PathKey(wide(input)),VolumeCoord::Mode::Write}}),"failed Windows copy retained reservations");}
   find=FindFirstFileA(a+"\\HFV*.tmp",&temporary);Check(find==INVALID_HANDLE_VALUE,"Windows rollback left staging files");if(find!=INVALID_HANDLE_VALUE)FindClose(find);
