@@ -120,7 +120,7 @@ void ObjectMapFixture(Memory& disk)
     for(size_t block:{12,13,14})Seal(disk.bytes,block*size,size);
 }
 
-Memory BrowseFixture()
+Memory BrowseFixture(bool attributes=false)
 {
     auto disk=Raw();
     constexpr size_t size=4096;
@@ -132,8 +132,8 @@ Memory BrowseFixture()
     auto apsb=disk.bytes.data()+37*size;
     Header(apsb,1024,5,13);memcpy(apsb+32,"APSB",4);
     Little(apsb+56,1,8);Little(apsb+116,2,4);
-    Little(apsb+128,24,8);Little(apsb+136,2048,8);Little(apsb+272,1,8);
-    memcpy(apsb+712,"APFS Fixture",13);
+    Little(apsb+128,24,8);Little(apsb+136,2048,8);Little(apsb+264,1,8);
+    memcpy(apsb+704,"APFS Fixture",13);
     Seal(disk.bytes,37*size,size);
 
     auto map=disk.bytes.data()+24*size;
@@ -150,7 +150,8 @@ Memory BrowseFixture()
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    Little(catalog+32,3,2);Little(catalog+36,8,4);Little(catalog+42,8*8,2);
+    const unsigned records=attributes?11:8;
+    Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
     size_t keyOffset=0,valueOffset=0;
@@ -158,7 +159,7 @@ Memory BrowseFixture()
     auto record=[&](uint64_t id,unsigned type,Bytes key,Bytes value){
         auto toc=catalog+56+index++*8;
         Little(toc,keyOffset,2);Little(toc+2,8+key.size(),2);
-        auto start=catalog+56+8*8+keyOffset;
+        auto start=catalog+56+records*8+keyOffset;
         Little(start,id|(uint64_t(type)<<60),8);
         if(!key.empty())memcpy(start+8,key.data(),key.size());
         keyOffset+=8+key.size();
@@ -184,16 +185,34 @@ Memory BrowseFixture()
         Little(value.data(),id,8);
         record(directory,9,std::move(key),std::move(value));
     };
-    auto extent=[&](uint64_t at,uint64_t block){
+    auto extent=[&](uint64_t at,uint64_t block,uint64_t stream=330){
         Bytes key(8),value(24);
         Little(key.data(),at,8);
         Little(value.data(),size,8);Little(value.data()+8,block,8);
-        record(330,8,std::move(key),std::move(value));
+        record(stream,8,std::move(key),std::move(value));
     };
     inode(2,true,0);drec(2,320,"Folder");
     inode(320,true,0);drec(320,330,"Long \xc3\xa9.txt");
-    inode(330,false,2*size+7);extent(0,40);extent(size,0);
-    extent(2*size,42);
+    inode(330,false,2*size+7);
+    auto xattr=[&](const char* name,uint16_t flags,const Bytes& data){
+        const auto length=strlen(name)+1;
+        Bytes key(2+length),value(4+data.size());
+        Little(key.data(),length,2);memcpy(key.data()+2,name,length);
+        Little(value.data(),flags,2);Little(value.data()+2,data.size(),2);
+        memcpy(value.data()+4,data.data(),data.size());
+        record(330,4,std::move(key),std::move(value));
+    };
+    if(attributes){
+        Bytes stream(48);
+        Little(stream.data(),331,8);Little(stream.data()+8,8,8);Little(stream.data()+16,size,8);
+        xattr("com.apple.ResourceFork",1,stream);
+        xattr("user.example",2,Bytes{1,2,3});
+    }
+    extent(0,40);extent(size,0);extent(2*size,42);
+    if(attributes){
+        extent(0,43,331);
+        memcpy(disk.bytes.data()+43*size,"resource",8);
+    }
     Little(catalog+44,keyOffset,2);
     Seal(disk.bytes,26*size,size);
     memset(disk.bytes.data()+40*size,'A',size);
@@ -288,6 +307,16 @@ int RunApfsContainerTest(const char* directory)
         ring.bytes[4*4096+64]^=1;
         Reject([&]{Apfs::Probe(ring);},"Container with no complete checkpoint was accepted");
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
+        if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
+            const auto authentic=MacBrowser::OpenBrowserImage(fixture);
+            Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
+            const auto roots=authentic->List();
+            MacBrowser::Entry many;
+            Check(roots.size()>=1&&authentic->FindChild(2,u"many",many),"Independent APFS fixture lost its directory");
+            const auto files=authentic->List(many.id);
+            Check(files.size()==400,"Independent APFS fixture lost files across catalog nodes");
+            fprintf(report,"PASS: macOS-generated APFS image and 400-file multi-node directory.\n");
+        }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");
         {
@@ -332,6 +361,41 @@ int RunApfsContainerTest(const char* directory)
         Bytes exported(bytes.size());
         target->Read(copied.id,0,4095,exported.data(),exported.size());
         Check(exported==bytes,"APFS subprocess copy changed file data");
+        const auto withFork=BrowseFixture(true);
+        const auto withForkPath=VolumeCoord::Wide(root+"attributes.img");
+        {
+            auto image=CreateFormatOutput(withForkPath.c_str(),withFork.Size());
+            image->Write(0,withFork.bytes.data(),withFork.bytes.size());image->Flush();image->Keep();
+        }
+        auto macFile=MacBrowser::OpenBrowserImage(withForkPath);
+        auto folder=macFile->List().at(0);
+        auto withMetadata=macFile->List(folder.id).at(0);
+        auto attributes=macFile->GetAttributes(withMetadata.id);
+        Check(attributes.size()==1&&attributes.at(u"user.example")==AttributeData{1,2,3},
+              "APFS embedded attribute was not preserved");
+        Check(withMetadata.forks[1].size==8,"APFS resource-fork stream was not discovered");
+        Bytes resource(8);
+        macFile->Read(withMetadata.id,1,0,resource.data(),resource.size());
+        Check(!memcmp(resource.data(),"resource",8),"APFS resource fork was read incorrectly");
+        const auto output=VolumeCoord::Wide(root+"metadata.hfs");
+        auto image=CreateFormatOutput(output.c_str(),8*1024*1024);
+        HfsPlus::Volume::Format(*image,u"Destination",false);
+        image->Keep();image.reset();
+        auto targetMac=MacBrowser::OpenImage(output);
+        Storage::Job job;
+        Check(MacBrowser::Copy(*macFile,withMetadata.id,*targetMac,2,job),"APFS copy with attributes failed");
+        MacBrowser::Entry preserved;
+        const auto targets=targetMac->List();
+        Check(targets.size()==1,"APFS transfer did not publish exactly one file");
+        preserved=targets.front();
+        Check(preserved.name==HfsPlus::Normalize(withMetadata.name,targetMac->CaseSensitive()),"APFS transfer changed its name");
+        Check(preserved.forks[1].size==8,"APFS transfer lost the resource fork");
+        const auto copiedAttributes=targetMac->GetAttributes(preserved.id);
+        Check(copiedAttributes==attributes,"APFS transfer lost the extended attribute");
+        Bytes restored(8);
+        targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
+        Check(restored==resource,"APFS transfer changed the resource fork");
+        fprintf(report,"PASS: APFS embedded metadata and extent-backed resource fork preserved through copy to HFS Plus.\n");
         fprintf(report,"PASS: normal browser mount, UTF-8 names, sparse and fragmented data, worker export and read-only enforcement.\n");
         fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
     }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}

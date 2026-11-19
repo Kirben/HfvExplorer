@@ -45,10 +45,10 @@ Mounted ReadVolume(Source& source,const Container& container,uint64_t oid,uint64
     const auto p=block.data();
     Check(!memcmp(p+32,"APSB",4),"Missing APFS volume signature");
     const auto incompatible=Le64(p+56);
-    Check(Le64(p+272)&1,"Encrypted APFS volumes are unsupported");
+    Check(Le64(p+264)&1,"Encrypted APFS volumes are unsupported");
     Check(!(incompatible&~uint64_t(0x0b)),"Unsupported APFS volume features");
     Check(Le32(p+116)==2&&Le64(p+128)&&Le64(p+136),"Unsupported APFS filesystem tree");
-    constexpr size_t nameOffset=712,nameLimit=256;
+    constexpr size_t nameOffset=704,nameLimit=256;
     const auto end=static_cast<const uint8_t*>(memchr(p+nameOffset,0,nameLimit));
     Check(end!=nullptr,"Unterminated APFS volume name");
     return {oid,Le64(p+16),Le64(p+128),Le64(p+136),!(incompatible&1),bool(incompatible&9),
@@ -98,9 +98,47 @@ public:
     }
 };
 
+
+constexpr auto ResourceFork=u"com.apple.ResourceFork";
+constexpr auto FinderInfo=u"com.apple.FinderInfo";
+constexpr auto Compression=u"com.apple.decmpfs";
+struct Attribute {
+    uint64_t size=0,stream=0;
+    Bytes embedded;
+};
+using AttributeRecords=std::map<std::u16string,Attribute>;
+AttributeRecords ReadAttributes(const Catalog& catalog,uint64_t oid)
+{
+    AttributeRecords attributes;
+    catalog.VisitRecords(oid,4,[&](Record record){
+        Check(record.key.size>=10&&record.value.size>=4,"Truncated APFS attribute");
+        const auto length=Le16(record.key.data+8);
+        Check(length==record.key.size-10,"Invalid APFS attribute name length");
+        auto name=Name(record.key.data+10,length);
+        const auto p=record.value.data;
+        const auto flags=Le16(p),size=Le16(p+2);
+        Check(size==record.value.size-4&&!(flags&~7u),"Invalid APFS attribute value");
+        Attribute attribute;
+        switch(flags&3){
+        case 1:
+            Check(size==48&&Le64(p+4),"Invalid APFS attribute data stream");
+            attribute.stream=Le64(p+4);
+            attribute.size=Le64(p+12);
+            break;
+        case 2:
+            attribute.size=size;
+            attribute.embedded.assign(p+4,p+4+size);
+            break;
+        default: throw Error("Unsupported APFS attribute storage");
+        }
+        Check(attributes.emplace(std::move(name),std::move(attribute)).second,"Duplicate APFS attribute");
+    });
+    return attributes;
+}
 struct Inode {
     uint64_t stream=0;
     Entry entry;
+    AttributeRecords attributes;
 };
 Inode LoadInode(const Catalog& catalog,uint64_t oid)
 {
@@ -146,13 +184,19 @@ Inode LoadInode(const Catalog& catalog,uint64_t oid)
         Check(used==at-first||used==at-inodeSize-4,"Invalid APFS extended-field size");
     });
     Check(found,"Missing APFS file inode");
-    if(!out.entry.directory&&out.entry.readError.empty()){
-        catalog.VisitRecords(oid,4,[&](Record record){
-            constexpr char fork[]="com.apple.ResourceFork";
-            Check(record.key.size>=10,"Truncated APFS attribute key");
-            if(record.key.size==10+sizeof(fork)&&!memcmp(record.key.data+10,fork,sizeof(fork)))
-                out.entry.readError="APFS resource forks are unsupported";
-        });
+    out.attributes=ReadAttributes(catalog,oid);
+    if(auto found=out.attributes.find(FinderInfo);found!=out.attributes.end()){
+        const auto& value=found->second;
+        Check(!value.stream&&value.size==out.entry.finder.size(),"Invalid APFS Finder attribute");
+        memcpy(out.entry.finder.data(),value.embedded.data(),value.embedded.size());
+    }
+    if(auto found=out.attributes.find(ResourceFork);found!=out.attributes.end()){
+        Check(!out.entry.directory,"APFS directory unexpectedly contains a resource fork");
+        out.entry.forks[1].size=found->second.size;
+    }
+    if(out.attributes.count(Compression)){
+        out.entry.compressed=true;
+        out.entry.readError="APFS compressed files are unsupported";
     }
     return out;
 }
@@ -183,7 +227,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     const bool processLocal;
     MacBrowser::WorkerOrigin origin;
     std::mutex mutex;
-    struct Item {uint64_t oid,stream;Entry entry;};
+    struct Item {uint64_t oid,stream;Entry entry;AttributeRecords attributes;};
     std::map<uint32_t,Item> entries;
     std::map<uint32_t,std::vector<uint32_t>> listings;
     std::map<uint64_t,std::vector<Extent>> extents;
@@ -211,7 +255,7 @@ public:
         auto root=LoadInode(Catalog(*source,container,mounted),2);
         Check(root.entry.directory,"APFS root is not a directory");
         root.entry.id=2;root.entry.parent=1;root.entry.name=mounted.name;
-        entries.emplace(2,Item{2,root.stream,std::move(root.entry)});
+        entries.emplace(2,Item{2,root.stream,std::move(root.entry),std::move(root.attributes)});
         const auto files=source->WorkerFiles();
         if(!files.empty()){
             origin.kind=MacBrowser::WorkerOrigin::Image;
@@ -224,9 +268,7 @@ public:
     bool CaseSensitive()const override{return mounted.sensitive;}
     bool Writable()const override{return false;}
     uint64_t FreeBytes()const override{return 0;}
-    MacBrowser::Capabilities Supports()const override{
-        auto out=MacBrowser::Volume::Supports();out.resourceForks=false;return out;
-    }
+    bool SupportsAttributes()const override{return true;}
     MacBrowser::WorkerExecution Execution()const override{
         MacBrowser::WorkerExecution out;out.processLocal=processLocal;return out;
     }
@@ -260,7 +302,7 @@ public:
                     entry.parent=parent;entry.name=std::move(name);
                     entry.identity=key+":"+std::to_string(mounted.oid)+":"+std::to_string(mounted.xid)+":"+
                                    std::to_string(folder.oid)+":"+std::to_string(oid);
-                    children.push_back({oid,inode.stream,std::move(entry)});
+                    children.push_back({oid,inode.stream,std::move(entry),std::move(inode.attributes)});
                 });
                 Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
                 std::vector<uint32_t> ids;
@@ -278,16 +320,12 @@ public:
         });
     }
     Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
-    void Read(uint32_t id,unsigned fork,uint64_t at,void* data,size_t size)override{
-        Access([&]{
-            const auto& file=At(id);
-            const auto& entry=file.entry;
-            Check(fork<2&&!entry.directory&&Range(at,size,entry.forks[fork].size),"Invalid APFS fork range");
-            if(!entry.readError.empty())throw Error(entry.readError);
-            if(!size)return true;
-            auto it=extents.find(file.stream);
+    void ReadStream(uint64_t stream,uint64_t at,void* data,size_t size){
+            if(!size)return;
+            Check(stream!=0,"Missing APFS stream identifier");
+            auto it=extents.find(stream);
             if(it==extents.end())
-                it=extents.emplace(file.stream,Extents(Catalog(*source,container,mounted),container,file.stream)).first;
+                it=extents.emplace(stream,Extents(Catalog(*source,container,mounted),container,stream)).first;
             const auto& list=it->second;
             auto run=std::lower_bound(list.begin(),list.end(),at,[](const Extent& extent,uint64_t offset){
                 return extent.offset+extent.length<=offset;
@@ -300,6 +338,38 @@ public:
                 if(run->block)source->Read(container.offset+run->block*container.blockSize+within,out,take);
                 else memset(out,0,take);
                 at+=take;out+=take;size-=take;++run;
+            }
+    }
+    void ReadAttribute(const Attribute& attribute,uint64_t at,void* data,size_t size){
+        Check(Range(at,size,attribute.size),"Invalid APFS attribute range");
+        if(!size)return;
+        if(attribute.stream)ReadStream(attribute.stream,at,data,size);
+        else memcpy(data,attribute.embedded.data()+size_t(at),size);
+    }
+    Attributes GetAttributes(uint32_t id)override{
+        return Access([&]{
+            Attributes out;
+            for(const auto& pair:At(id).attributes){
+                if(pair.first==FinderInfo||pair.first==ResourceFork||pair.first==Compression)continue;
+                const auto& attr=pair.second;
+                if(attr.stream)
+                    out.emplace(pair.first,AttributeData::Snapshot(attr.size,[&](uint64_t at,void* data,size_t size){
+                        ReadAttribute(attr,at,data,size);
+                    },true));
+                else out.emplace(pair.first,AttributeData(attr.embedded));
+            }
+            return out;
+        });
+    }
+    void Read(uint32_t id,unsigned fork,uint64_t at,void* data,size_t size)override{
+        Access([&]{
+            const auto& file=At(id);
+            const auto& entry=file.entry;
+            Check(fork<2&&!entry.directory&&Range(at,size,entry.forks[fork].size),"Invalid APFS fork range");
+            if(!entry.readError.empty())throw Error(entry.readError);
+            if(size){
+                if(fork==0)ReadStream(file.stream,at,data,size);
+                else ReadAttribute(file.attributes.at(ResourceFork),at,data,size);
             }
             return true;
         });
