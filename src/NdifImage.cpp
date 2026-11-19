@@ -21,7 +21,7 @@ enum ChunkType : uint8_t { Zero=0,Raw=2,Adc=0x83,End=0xff };
 struct Fork {uint64_t at=0,length=0;};
 struct Forks {Fork data,resource;};
 struct Chunk {uint64_t at,length,packedAt,packedLength;uint8_t type;};
-struct Layout {uint64_t length;std::vector<Chunk> chunks;};
+struct Layout {uint64_t length;uint32_t checksum;std::vector<Chunk> chunks;};
 
 std::optional<Forks> MacBinary(Source& input)
 {
@@ -130,7 +130,7 @@ Layout Map(Source& input,Fork map,Fork data)
     const uint64_t sectors=U32(p+68),maxChunk=U32(p+72),base=U32(p+76),count=U32(p+124);
     Check(sectors&&sectors<=0xffffff&&base<=data.length&&count>=2&&count<=sectors+1&&
           count*ChunkBytes==map.length-HeaderBytes,"Invalid NDIF block map geometry");
-    Layout out{sectors*Sector,{}};
+    Layout out{sectors*Sector,U32(p+80),{}};
     constexpr unsigned Batch=1024;
     out.chunks.reserve(size_t(count-1));
     for(uint64_t index=0;index<count;){
@@ -177,6 +177,7 @@ public:
     Image(std::unique_ptr<Source> input,std::unique_ptr<Source> metadata,Layout layout)
         :input_(std::move(input)),metadata_(std::move(metadata)),layout_(std::move(layout)){}
     uint64_t Size()const override{return layout_.length;}
+    uint32_t ExpectedChecksum()const{return layout_.checksum;}
     bool Writable()const override{return false;}
     bool ProcessLocal()const override{return input_->ProcessLocal();}
     void CheckMedia()override{
@@ -222,6 +223,32 @@ public:
         }
     }
 };
+}
+
+
+std::optional<uint32_t> ExpectedChecksum(const Source& source)
+{
+    const auto image=dynamic_cast<const Image*>(&source);
+    if(!image||!image->ExpectedChecksum())return {};
+    return image->ExpectedChecksum();
+}
+
+uint32_t Checksum(uint32_t running,const void* bytes,size_t count)
+{
+    // NDIF shifts right with the normal polynomial and uses no final XOR.
+    static constexpr auto table=[]{
+        std::array<uint32_t,256> result{};
+        for(uint32_t i=0;i<result.size();++i){
+            uint32_t value=i;
+            for(unsigned bit=0;bit<8;++bit)
+                value=(value>>1)^((value&1)?0x04c11db7u:0);
+            result[i]=value;
+        }
+        return result;
+    }();
+    const auto data=static_cast<const uint8_t*>(bytes);
+    for(size_t i=0;i<count;++i)running=(running>>8)^table[(running^data[i])&255];
+    return running;
 }
 
 bool Unwrap(std::unique_ptr<Source>& input)

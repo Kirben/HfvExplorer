@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "NdifImage.h"
+#include "DmgImage.h"
 #include "ReadOnlyCdBackend.h"
 #include "HfsPlusDisk.h"
 #include "MacBrowserModel.h"
@@ -148,6 +149,7 @@ int RunNdifImageTest(const char* directory)
         const auto sectors=uint32_t(raw->Size()/512);
         auto rawMap=Map(sectors,2);
         Row(rawMap,0,0,2,0,uint32_t(volumeBytes.size()));Row(rawMap,1,sectors,0xff,0,0);
+        P32(rawMap.data()+80,Ndif::Checksum(UINT32_MAX,volumeBytes.data(),volumeBytes.size()));
         auto path=Save(root+"volume.img.bin",Pack(volumeBytes,Resource(rawMap)));
         const auto resource=Resource(rawMap);
         auto single=Save(root+"volume.as",Apple(volumeBytes,resource,true));
@@ -170,11 +172,36 @@ int RunNdifImageTest(const char* directory)
         auto mounted=MacBrowser::OpenBrowserImage(path);
         Check(mounted&&mounted->Name()==u"NDIF Fixture"&&!mounted->Writable(),"NDIF did not mount in the browser");
 
+        const auto extractedPath=VolumeCoord::Wide(root+"extracted.img");
+        Storage::Job extract;
+        const auto extracted=Dmg::Convert(path,extractedPath,Dmg::Output::RawImage,extract);
+        Check(!extracted.code,extracted.message.c_str());
+        auto result=HfsPlus::OpenImage(extractedPath.c_str(),false);
+        Check(Disk::Read(*result,0,size_t(result->Size()))==volumeBytes,"NDIF raw conversion changed sectors");
+        auto badData=volumeBytes;
+        badData.back()^=1;
+        const auto badPath=Save(root+"corrupt.img.bin",Pack(badData,Resource(rawMap)));
+        const auto unpublished=VolumeCoord::Wide(root+"should-not-exist.img");
+        Storage::Job badJob;
+        bool refused=false;
+        try{refused=Dmg::Convert(badPath,unpublished,Dmg::Output::RawImage,badJob).code!=0;}
+        catch(const Error& error){refused=strstr(error.what(),"checksum")!=nullptr;}
+        Check(refused&&GetFileAttributesW(unpublished.c_str())==INVALID_FILE_ATTRIBUTES,
+              "NDIF checksum error published a file");
+        fprintf(report,"PASS: NDIF raw conversion is byte-exact and checksum failures leave no published output.\n");
+
         if(const auto authentic=_wgetenv(L"HFV_NDIF_TEST_IMAGE")){
             auto apple=MacBrowser::OpenBrowserImage(authentic);
             Check(apple&&std::string(apple->Kind())=="HFS"&&!apple->Writable()&&!apple->List().empty(),
                   "Apple Disk Copy self-mounting image could not be browsed");
-            fprintf(report,"PASS: Apple Disk Copy 6.3.3 self-mounting image opened as classic HFS.\n");
+            const auto converted=VolumeCoord::Wide(root+"apple.dmg");
+            Storage::Job convert;
+            const auto done=Dmg::Convert(authentic,converted,Dmg::Output::CompressedDmg,convert);
+            Check(!done.code,done.message.c_str());
+            const auto reopened=MacBrowser::OpenBrowserImage(converted);
+            Check(reopened&&reopened->Name()==apple->Name()&&reopened->List().size()==apple->List().size(),
+                  "Apple NDIF did not survive conversion to compressed DMG");
+            fprintf(report,"PASS: Apple Disk Copy 6.3.3 self-mounting image mounted and passed its original checksum during DMG conversion.\n");
         }
         fprintf(report,"PASS: NDIF MacBinary I/II/III, stored/zero/ADC runs, chunk bounds, malformed streams and normal browser routing.\n");
     }catch(const std::exception& error){

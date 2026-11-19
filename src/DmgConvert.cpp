@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "DmgImage.h"
 #include "DmgEncryption.h"
+#include "NdifImage.h"
 #include "HfsPlusDisk.h"
 #include "CommandStorage.h"
 #include <wincrypt.h>
@@ -16,6 +17,24 @@ using namespace HfsPlus::Disk;
 constexpr uint32_t Zero=0, Raw=1, Deflate=0x80000005, End=UINT32_MAX;
 constexpr size_t Chunk=1024*1024, Sector=512, MapHeader=204, RunBytes=40;
 constexpr size_t MaxMap=16*1024*1024;
+
+
+class ConversionInput {
+    Source& source_;
+    const std::optional<uint32_t> expected_;
+    uint32_t checksum_=UINT32_MAX;
+public:
+    explicit ConversionInput(Source& source):source_(source),expected_(Ndif::ExpectedChecksum(source)){}
+    uint64_t Size()const{return source_.Size();}
+    bool ProcessLocal()const{return source_.ProcessLocal();}
+    void Read(uint64_t at,void* out,size_t count){
+        source_.Read(at,out,count);
+        if(expected_)checksum_=Ndif::Checksum(checksum_,out,count);
+    }
+    void Verify()const{
+        Check(!expected_||checksum_==*expected_,"NDIF image checksum mismatch. The output was discarded.");
+    }
+};
 
 struct Buffer {
     Bytes bytes=Bytes(Chunk);
@@ -72,7 +91,7 @@ void Append(NewImage& output,const void* bytes,size_t size)
     output.Write(at,bytes,size);
 }
 
-void WriteDmg(Source& input,NewImage& output,Storage::Job& job,Storage::Progress& progress)
+void WriteDmg(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress)
 {
     const auto length=input.Size();
     Check(length&&length%Sector==0,"DMG creation requires a raw image made of complete 512-byte sectors");
@@ -145,7 +164,7 @@ void WriteDmg(Source& input,NewImage& output,Storage::Job& job,Storage::Progress
     Append(output,footer.data(),footer.size());
 }
 
-void WriteRaw(Source& input,NewImage& output,Storage::Job& job,Storage::Progress& progress)
+void WriteRaw(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress)
 {
     Buffer storage(input.ProcessLocal());
     auto& buffer=storage.bytes;
@@ -176,7 +195,8 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         auto input=HfsPlus::OpenImage(source.c_str(),false);
         const bool encrypted=Unlock(input,password);
         const bool dmg=Unwrap(input);
-        Check(format!=Output::RawImage||dmg||encrypted,"The input does not contain a DMG disk image");
+        const bool ndif=!dmg&&!encrypted&&Ndif::Unwrap(input);
+        Check(format!=Output::RawImage||dmg||encrypted||ndif,"The input does not contain a DMG or NDIF disk image");
         auto output=HfsPlus::CreateStagedOutput(destination,512);
         output->Resize(0);
         Storage::Progress progress;
@@ -184,8 +204,10 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         progress.totalBytes=input->Size();
         progress.scanning=false;
         progress.byteTransfer=true;
-        if(format==Output::RawImage)WriteRaw(*input,*output,current,progress);
-        else WriteDmg(*input,*output,current,progress);
+        ConversionInput stream(*input);
+        if(format==Output::RawImage)WriteRaw(stream,*output,current,progress);
+        else WriteDmg(stream,*output,current,progress);
+        stream.Verify();
         if(current.cancelled())throw Storage::Cancelled();
         output->PublishTo(destination);
         output->Keep();
