@@ -59,11 +59,9 @@ bool Hidden(BrowserSession& session_) {
     return false;
 #endif
 }
-bool readBusy=false;
 bool Run(BrowserSession& session_,std::function<void(Storage::Job&)> work,bool copy=false,bool single=false) {
     auto body=[&](Storage::Job& job){try{work(job);return Storage::Result{};}catch(const VolumeCoord::Busy& e){return Storage::Result{1,ERROR_BUSY,e.what()};}};
     auto result=copy?ShowStorageJob(body,"Copying files",Hidden(session_),single,true,session_.Owner()):ShowStorageWaitJob(body,Hidden(session_),session_.Owner());
-    readBusy=result.error==ERROR_BUSY;
     if(result.code&&result.error!=ERROR_BUSY&&result.error!=ERROR_CANCELLED&&!Hidden(session_)&&!session_.Refreshing())AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
     return result.code==0;
 }
@@ -141,7 +139,7 @@ struct MainMacBrowser::State {
         driveChanges.clear();
     }
 
-    int current=-1;uint32_t folder=2;bool showing=false,folderMutable=true;
+    int current=-1;uint32_t folder=2;bool folderMutable=true;
     std::vector<uint32_t> restore;
     bool Selected(int& mount,uint32_t& id,HTREEITEM item=nullptr)const {
         if(!session_.Tree()||!session_.List()||!IsWindow(session_.Tree()->GetSafeHwnd())||!IsWindow(session_.List()->GetSafeHwnd()))return false;if(!item)item=session_.Tree()->m_ct->GetSelectedItem();if(!item)return false;
@@ -229,14 +227,8 @@ struct MainMacBrowser::State {
         if(!m.volume->Writable())label+=L" [read-only]";
         m.root=Insert(index,2,nullptr,label,true);
     }
-    bool UseAsyncNavigation() const {
-        return session_.UsesAsyncNavigation();
-    }
-    bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool asynchronous=false,bool reload=false,const BrowserNavigation::Request* find=nullptr) {
+    bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool reload=false,const BrowserNavigation::Request* find=nullptr) {
         session_.CancelNavigation();
-        if(showing)return true;
-        auto title=Wide(mounts.at(index).volume->Name());if(id!=2&&item){wchar_t leaf[1024]{};TVITEMW value{};value.mask=TVIF_TEXT;value.hItem=item;value.pszText=leaf;value.cchTextMax=ARRAYSIZE(leaf);if(SendMessageW(session_.Tree()->m_ct->m_hWnd,TVM_GETITEMW,0,reinterpret_cast<LPARAM>(&value)))title+=L":"+std::wstring(leaf);}
-        if(!asynchronous)session_.SetLocationTitle(std::move(title));
         auto volume=mounts.at(index).volume;
         const auto key=volume->ResourceKey();
         uint64_t revision=0;std::wstring folderTitle;std::vector<std::pair<uint32_t,std::vector<Entry>>> levels;std::vector<Entry> entries;uint64_t free=0;bool mutableFolder=true;
@@ -261,7 +253,7 @@ struct MainMacBrowser::State {
         };
         if(!reload&&!VolumeCoord::Readable(key))cached=restoreCached();
         const auto selectedFolder=find?find->folder:Location::Mounted(volume,id);
-        auto readFolder = [rebuild,savedPath,strict=bool(find),selectedFolder](const std::shared_ptr<Volume>& volume,
+        auto readFolder = [rebuild,savedPath,strict=find&&find->intent!=BrowserNavigation::Intent::RefreshFolder,selectedFolder](const std::shared_ptr<Volume>& volume,
             uint32_t& id,uint64_t& revision,std::vector<uint32_t>& ancestors,std::wstring& folderTitle,
             std::vector<std::pair<uint32_t,std::vector<Entry>>>& levels,std::vector<Entry>& entries,
             uint64_t& free,bool& mutableFolder) {
@@ -288,7 +280,7 @@ struct MainMacBrowser::State {
             entries=volume->List(id);free=volume->FreeBytes();
             StorageLocation::ValidateMedia(location);
         };
-        if(asynchronous && !cached){
+        if(!cached){
             using namespace BrowserNavigation;
             Request request=find?*find:Request{Location::Mounted(volume,id),
                 (rebuild||reload)?Intent::RefreshFolder:Intent::SelectFolder,key};
@@ -312,7 +304,7 @@ struct MainMacBrowser::State {
             const auto capturedMount=session_.Mounts().Lookup({BrowserMountInventory::Kind::MountedVolume,index});
             if(!capturedMount)return false;
             const auto retry=[this,index,id,item,rebuild,reload,found=find?std::optional<Request>(*find):std::nullopt]{
-                Show(index,id,item,rebuild,true,reload,found?&*found:nullptr);
+                Show(index,id,item,rebuild,reload,found?&*found:nullptr);
             };
             const bool showInvisible=App().m_show_invisible_mac!=FALSE;
             session_.Navigate(std::move(request),
@@ -357,24 +349,7 @@ struct MainMacBrowser::State {
             },capturedMount,retry);
             return true;
         }
-        if(!cached && session_.Defer(key,mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);}))return true;
-        session_.ClearCurrent();showing=true;struct Done{bool& flag;~Done(){flag=false;}}done{showing};
-        if(!cached && !Run(session_,[&](Storage::Job&){
-            VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});
-            readFolder(volume,id,revision,ancestors,folderTitle,levels,entries,free,mutableFolder);
-        })){
-            if(readBusy){
-                cached=restoreCached();
-                if(!cached){session_.Defer(key,mounts.at(index).drive>=0,[this,index,id,item,rebuild]{Show(index,id,item,rebuild);},true);return true;}
-            }
-            if(!cached){
-                auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
-                auto root=mounts[index].root;for(auto child=tree->m_ct->GetChildItem(root);child;){auto next=tree->m_ct->GetNextSiblingItem(child);tree->m_ct->DeleteItem(child);child=next;}
-                tree->m_ct->SelectItem(root);tree->enable_selchange(enabled);
-                session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});current=index;folder=2;folderMutable=false;return false;
-            }
-        }
-        return Publish(index,id,item,rebuild,cached,volume,revision,folderTitle,levels,entries,free,mutableFolder,ancestors);
+        return Publish(index,id,item,rebuild,true,volume,revision,folderTitle,levels,entries,free,mutableFolder,ancestors);
     }
     static void FillListing(BrowserDirectory::Snapshot& snapshot,const std::vector<Entry>& entries,
         int index,const MacBrowser::Capabilities& capabilities,bool showInvisible,bool mutableFolder)
@@ -430,7 +405,7 @@ struct MainMacBrowser::State {
             int selected;uint32_t selectedId;
             if(Selected(selected,selectedId) && selected==index && selectedId==id){
                 StorageQuietRefresh quiet;
-                Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),true,UseAsyncNavigation());
+                Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),true);
             }
         },true,true);
         return true;
@@ -471,8 +446,7 @@ struct MainMacBrowser::State {
         if(BackgroundCopies::Enabled()){if(!complete)return false;return BackgroundCopies::Start(std::move(background),session_.Owner(),sources.size()==1&&!sources[0].directory,std::move(completed));}
         if(completed)completed(complete);
         if(session_.Tree()&&session_.List()){
-            if(target.LegacyType()==LIST_HFS)session_.Document()->OnOpenDocument("");
-            else if(target.LegacyType()==LIST_MAC)session_.MacBrowser().Refresh();else session_.List()->update_current_view();
+            session_.RefreshSelected();
         }
         return complete;
     }
@@ -630,23 +604,12 @@ bool MainMacBrowser::ScanRemovable(bool silent,bool startupOnly){
  if(!silent&&!snapshot.errors.empty()&&!Hidden(session_)){std::string message="Some removable disks could not be read:\r\n";for(size_t i=0;i<snapshot.errors.size()&&i<8;++i)message+="\r\n"+snapshot.errors[i];session_.Owner()->MessageBox(message.c_str(),"Checking Mac removable disks",MB_OK|MB_ICONINFORMATION);}
  return true;
 }
-int MainMacBrowser::OpenRemovableRoot(const char* root){
- std::vector<Removable::Mounted> found;auto wide=FromAnsi(root);auto result=ShowStorageWaitJob([&](Storage::Job& job){found=Removable::FromDriveRoot(wide,&job);return Storage::Result{};},Hidden(session_),session_.Owner());
- if(result.code){session_.List()->initialize_volume("",0);session_.List()->SetBrowserCapabilities({});if(!Hidden(session_))session_.Owner()->MessageBox(result.message.c_str(),"Reading Mac removable disk",MB_OK|MB_ICONERROR);return -1;}
- if(found.empty())return 0;
- AdoptRemovable(found,false,toupper(static_cast<unsigned char>(root[0]))-'A');
- return 1;
-}
-void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,bool asynchronous,int drive,bool select){
+void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,int drive,bool select){
  int selected=-1;
  for(auto& v:found){auto key=VolumeCoord::Wide(v.volume->ResourceKey());int slot=-1;for(size_t i=0;i<state_->mounts.size();++i)if(state_->mounts[i].key==key){slot=int(i);break;}if(slot<0){slot=int(state_->mounts.size());state_->mounts.push_back({v.volume,key,nullptr,-1});}auto& mount=state_->mounts[slot];mount.volume=v.volume;mount.physicalPath=v.device.path;mount.physicalOffset=v.partition.offset;mount.suffix=v.label;if(drive>=0)mount.sourceDrive=drive;if(!mount.root)state_->Root(slot);if(selected<0)selected=slot;}
  if(selected<0||!select)return;
  auto item=state_->mounts[selected].root;
- if(asynchronous){
-  auto tree=session_.Tree();auto enabled=tree->SelectionNotificationsEnabled();
-  tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(item);tree->enable_selchange(enabled);
- }
- state_->Show(selected,2,item,false,asynchronous);
+ state_->Show(selected,2,item);
 }
 void MainMacBrowser::ReconcileRemovable(std::vector<Removable::Mounted>& found,int drive,
                                        const std::vector<std::wstring>& failed)
@@ -692,7 +655,7 @@ void MainMacBrowser::ReconcileRemovable(std::vector<Removable::Mounted>& found,i
    if(replacement!=found.end())found.erase(replacement);
   }
  }
- AdoptRemovable(found,true,drive,false);
+ AdoptRemovable(found,drive,false);
  if(affected){
   session_.ClearCurrent();
   session_.SetLocationTitle({});
@@ -857,7 +820,7 @@ bool MainMacBrowser::ApplyMediaChanges()
    clearRoot(mount.root,true);
    released.push_back(std::move(mount.volume));
   }
-  if(media->cd&&!HasCdRoot(drive))AdoptCd(drive,root,std::move(media->cd),true,false);
+  if(media->cd&&!HasCdRoot(drive))AdoptCd(drive,root,std::move(media->cd),false);
   if(!rescan||!present)ReconcileRemovable(media->removable,drive);
   if(affected){
    control.SelectItem(windows>=0?doc->m_fats[windows].m_rootitem:nullptr);
@@ -881,15 +844,6 @@ bool MainMacBrowser::ApplyMediaChanges()
 void MainMacBrowser::SetDriveTypeForTest(std::function<UINT(int)> probe){state_->driveTypeForTest=std::move(probe);}
 #endif
 
-int MainMacBrowser::OpenCd(const char* root) {
-    int drive=HfsPlus::CdDriveFromRoot(root);if(drive<0)return 0;
-    if(HasCdRoot(drive))return 0; // Windows side stays selectable.
-    bool detected=false,busy=false;std::shared_ptr<Volume> volume;auto result=ShowStorageWaitJob([&](Storage::Job& job){try{volume=MediaDiscovery::Optical(drive,job);}catch(const VolumeCoord::Busy&){busy=true;}catch(const MacBrowser::DetectedVolumeError&){detected=true;throw;}return Storage::Result{};},Hidden(session_),session_.Owner());
-    if(busy){std::string saved=root;auto doc=session_.Document();int index=-1;for(int n=0;n<doc->m_fat_count;++n)if(toupper((unsigned char)doc->m_fats[n].m_letter)-'A'==drive){index=n;break;}session_.Defer(VolumeCoord::DeviceKey(drive),true,[this,index,saved]{if(index>=0)session_.Document()->open_fat_directory(index,const_cast<char*>(saved.c_str()),1);else OpenCd(saved.c_str());},true);return 1;}
-    if(result.code){if(detected){if(!Hidden(session_))AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return -1;}return 0;}if(!volume)return 0;
-    AdoptCd(drive,root,std::move(volume),false);
-    return 1;
-}
 bool MainMacBrowser::HasCdRoot(int drive)const{
  return std::any_of(state_->mounts.begin(),state_->mounts.end(),
     [&](const auto& mount){return mount.drive==drive&&mount.root;});
@@ -933,25 +887,21 @@ void MainMacBrowser::ScanCds() {
     for(auto& probe:probes)if(probe.changed){
         if(probe.existing)ReleaseCd(probe.drive);
         if(probe.replacement&&!HasCdRoot(probe.drive))
-            AdoptCd(probe.drive,probe.root,std::move(probe.replacement),false,false);
+            AdoptCd(probe.drive,probe.root,std::move(probe.replacement),false);
     }
 #endif
 }
 
-void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<Volume> volume,bool asynchronous,bool select){
+void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<Volume> volume,bool select){
  state_->mounts.push_back({std::move(volume),FromAnsi(root.c_str()),nullptr,drive});
  int index=int(state_->mounts.size()-1);
  state_->Root(index);
  if(!select)return;
  auto item=state_->mounts[index].root;
- if(asynchronous){
-  auto tree=session_.Tree();auto enabled=tree->SelectionNotificationsEnabled();
-  tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(item);tree->enable_selchange(enabled);
- }
- state_->Show(index,2,item,false,asynchronous);
+ state_->Show(index,2,item);
 }
 bool MainMacBrowser::Select(LPARAM data){auto p=session_.Tree()->BrowserNode(data);if(!p||p->LegacyType()!=LIST_MAC)return false;
-    state_->Show(p->mount.index,uint32_t(p->CatalogId()),session_.Tree()->m_ct->GetSelectedItem(),false,state_->UseAsyncNavigation());return true;}
+    state_->Show(p->mount.index,uint32_t(p->CatalogId()),session_.Tree()->m_ct->GetSelectedItem(),false);return true;}
 bool MainMacBrowser::Refresh()
 {
     int index;
@@ -960,13 +910,13 @@ bool MainMacBrowser::Refresh()
     const auto& mount=state_->mounts[index];
     ForgetFolders(mount.volume);
     const bool rebuild=mount.drive<0&&mount.physicalPath.empty();
-    return state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),rebuild,true,true);
+    return state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),rebuild,true);
 }
 bool MainMacBrowser::RefreshForChange(const std::string& key){
  int index;uint32_t id;if(!state_->Selected(index,id)||state_->mounts[index].volume->ResourceKey()!=key)return false;
  // Read the ancestry, ancestor directories and current listing under one read
  // lease, then rebuild the affected tree path and list in a single UI batch.
- if(!state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),true,state_->UseAsyncNavigation()))throw HfsPlus::Error("Cannot refresh the changed volume");return true;
+ if(!state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),true))throw HfsPlus::Error("Cannot refresh the changed volume");return true;
 }
 void MainMacBrowser::ReleaseCd(int drive){
     bool present=false;for(const auto& mount:state_->mounts)present|=mount.drive==drive&&bool(mount.volume);if(!present)return;
@@ -988,11 +938,21 @@ void MainMacBrowser::DetachTree(){state_->restore.clear();int i;uint32_t id;if(s
     state_->current=i;for(auto item=session_.Tree()->m_ct->GetSelectedItem();item;item=session_.Tree()->m_ct->GetParentItem(item)){
         auto p=session_.Tree()->BrowserNodeAt(item);if(p&&p->LegacyType()==LIST_MAC)state_->restore.push_back(uint32_t(p->CatalogId()));}}
     for(auto& mount:state_->mounts)mount.root=nullptr;}
-void MainMacBrowser::RebuildTree(){for(size_t i=0;i<state_->mounts.size();++i)state_->Root(int(i));
-    if(!state_->restore.empty()&&state_->current>=0){int i=state_->current;auto item=state_->mounts[i].root;
-        for(auto at=state_->restore.rbegin();at!=state_->restore.rend();++at){if(*at==2){state_->Show(i,2,item);continue;}
-            for(auto child=session_.Tree()->m_ct->GetChildItem(item);child;child=session_.Tree()->m_ct->GetNextSiblingItem(child)){
-                auto p=session_.Tree()->BrowserNodeAt(child);if(uint32_t(p->CatalogId())==*at){item=child;state_->Show(i,*at,item);break;}}}}
+bool MainMacBrowser::RebuildTree()
+{
+    for(size_t i=0;i<state_->mounts.size();++i)state_->Root(int(i));
+    auto route=std::move(state_->restore);
+    const auto index=state_->current;
+    if(route.empty()||index<0||size_t(index)>=state_->mounts.size())return false;
+    const auto& mount=state_->mounts[index];
+    if(!mount.root)return false;
+    BrowserNavigation::Request request{};
+    request.folder=Location::Mounted(mount.volume,route.front());
+    request.folder.directory=true;
+    request.intent=BrowserNavigation::Intent::RefreshFolder;
+    request.resource=mount.volume->ResourceKey();
+    request.catalogRoute.assign(route.rbegin(),route.rend());
+    return state_->Show(index,request.folder.Id(),mount.root,true,false,&request);
 }
 void MainMacBrowser::Clear(){session_.CancelNavigation();state_->CancelDriveChanges();state_->mounts.clear();state_->current=-1;}
 bool MainMacBrowser::Activate(int row){auto model=session_.List()->BrowserRowAt(row);
@@ -1115,10 +1075,10 @@ bool MainMacBrowser::OpenMountedFolderFrom(const MainMacBrowser& source,const Br
   state_->mounts.push_back(std::move(mount));
   const auto index=int(state_->mounts.size()-1);
   state_->Root(index);
-  return state_->Show(index,request.folder.Id(),state_->mounts[index].root,true,true,false,&request);
+  return state_->Show(index,request.folder.Id(),state_->mounts[index].root,true,false,&request);
  }
  const auto index=int(existing-state_->mounts.begin());
- return state_->Show(index,request.folder.Id(),existing->root,true,true,false,&request);
+ return state_->Show(index,request.folder.Id(),existing->root,true,false,&request);
 }
 
 bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
@@ -1128,7 +1088,7 @@ bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
         const auto& mount=state_->mounts[index];
         if(!mount.root||mount.volume!=volume)continue;
         auto anchor=session_.Tree()->GetTreeCtrl().GetSelectedItem();
-        return state_->Show(int(index),request.folder.Id(),anchor,true,true,false,&request);
+        return state_->Show(int(index),request.folder.Id(),anchor,true,false,&request);
     }
     return false;
 }
@@ -1172,7 +1132,7 @@ int MainMacBrowser::AttachTestVolume(std::shared_ptr<Volume> volume,const char* 
 bool MainMacBrowser::ShowTestFolder(int index,uint32_t id)
 {
  const auto& mount=state_->mounts.at(index);
- if(!state_->Show(index,id,mount.root,false,true))return false;
+ if(!state_->Show(index,id,mount.root))return false;
  return !session_.Navigating()||session_.AwaitNavigationForTest();
 }
 #endif

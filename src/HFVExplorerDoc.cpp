@@ -39,7 +39,6 @@
 #include "HFVExplorerDoc.h"
 #include "HFVExplorerListView.h"
 #include "CFATVolume.h"
-#include "special.h"
 #include "utils.h"
 #include "hfs\libhfs\hfs.h"
 #include "hfs\interface.h"
@@ -318,13 +317,33 @@ int is_afp_directory( char *path )
 	return(result);
 }
 
-void CHFVExplorerDoc::fat_walk(int volinx,LPSTR path,int list){
- auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());BrowserDirectory::Snapshot snapshot;std::string directory=path;
- folderReader_->SetOptions(FolderOptions());
- auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=folderReader_->read_windows_browser_directory(volinx,VolumeCoord::Wide(directory),list!=0,job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
- if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
- apply_browser_directory(snapshot, LIST_FAT, volinx, 2, directory, list != 0);
+#ifdef HFV_TESTING
+void CHFVExplorerDoc::open_fat_directory(int index, LPSTR path, int list)
+{
+    auto& session=GetBrowserSession();
+    const std::string directory=path;
+    if(list){
+        session.ClearCurrent();
+        auto parent=directory;
+        const auto separator=parent.find_last_of('\\');
+        const bool root=is_fat_root_directory(path)!=0;
+        if(root||separator==parent.npos)parent.clear();
+        else parent.resize(separator==2?3:separator);
+        session.PrepareFolderPresentation(session.Tree()->GetTreeCtrl().GetSelectedItem(),parent.c_str(),!root);
+    }
+    BrowserDirectory::Snapshot snapshot;
+    folderReader_->SetOptions(FolderOptions());
+    const auto result=ShowStorageWaitJob([&](Storage::Job& job){
+        snapshot=folderReader_->read_windows_browser_directory(index,VolumeCoord::Wide(directory),list!=0,job);
+        return Storage::Result{};
+    },true,GetBrowserSession().Owner());
+    if(result.code){
+        session.List()->SetBrowserCapabilities({});
+        return;
+    }
+    apply_browser_directory(snapshot,LIST_FAT,index,2,directory,list!=0);
 }
+#endif
 
 #pragma optimize("",on)
 
@@ -414,12 +433,16 @@ CHFVExplorerDoc::CHFVExplorerDoc(bool discover)
 	} else {
 		m_bits_per_pixel = 1;
 	}
+#ifdef HFV_TESTING
     folderReader_=std::make_unique<BrowserFolderReader>(FolderOptions(),&GetBrowserSession().Mounts());
+#endif
 }
 
 CHFVExplorerDoc::~CHFVExplorerDoc()
 {
+#ifdef HFV_TESTING
  folderReader_.reset();
+#endif
  m_browserSession.reset();
 }
 
@@ -549,22 +572,37 @@ CString CHFVExplorerDoc::get_directory (
 	return("");
 }
 
-void CHFVExplorerDoc::new_hfs_walk(int volinx,long id,CString searchname){
- auto pApp=static_cast<CHFVExplorerApp*>(AfxGetApp());
- CString path=searchname.IsEmpty()?GetBrowserSession().Tree()->get_directory_name(m_volumes[volinx].m_rootitem,volinx,id):searchname;path+=":";
- long parent=GetBrowserSession().Tree()->get_parent_id(m_volumes[volinx].m_rootitem,volinx,id);
- BrowserDirectory::Snapshot snapshot;
- const auto finder=GetBrowserSession().finderLayout;
- folderReader_->SetOptions(FolderOptions());
- auto result=ShowStorageWaitJob([&](Storage::Job& job){snapshot=folderReader_->read_classic_browser_directory(volinx,id,path,finder,parent,&job);return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());
- if(result.code){GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Refreshing())throw std::runtime_error(result.message);if(GetBrowserSession().Owner()->IsWindowVisible())AfxMessageBox(result.message.c_str());return;}
- if(id==2){
-  auto& mounted=m_volumes[volinx];
-  path=mounted.m_volume_name+":";
-  if(mounted.m_rootitem)GetBrowserSession().Tree()->GetTreeCtrl().SetItemText(mounted.m_rootitem,mounted.m_volume_name);
- }
- PublishClassicFolder(volinx,uint32_t(id),(LPCSTR)path,snapshot);
+#ifdef HFV_TESTING
+void CHFVExplorerDoc::open_sub_directory(int index,unsigned long id,CString name)
+{
+    auto& session=GetBrowserSession();
+    auto& volume=m_volumes[index];
+    auto tree=session.Tree();
+    auto path=name.IsEmpty()?tree->get_directory_name(volume.m_rootitem,index,id):name;
+    path+=":";
+    const auto parent=tree->get_parent_id(volume.m_rootitem,index,id);
+    const auto finder=session.finderLayout;
+    BrowserDirectory::Snapshot snapshot;
+    session.ClearCurrent();
+    folderReader_->SetOptions(FolderOptions());
+    const auto result=ShowStorageWaitJob([&](Storage::Job& job){
+        snapshot=folderReader_->read_classic_browser_directory(index,id,path,finder,parent,&job);
+        return Storage::Result{};
+    },true,session.Owner());
+    if(result.code){
+        session.List()->initialize_volume("",0);
+        session.List()->SetBrowserCapabilities({});
+        return;
+    }
+    if(id==CNID_ROOT_ID){
+        path=volume.m_volume_name+":";
+        tree->GetTreeCtrl().SetItemText(volume.m_rootitem,volume.m_volume_name);
+    }
+    const auto item=tree->find_item(index,volume.m_rootitem,id);
+    session.PrepareFolderPresentation(item,parent?tree->get_directory_name(volume.m_rootitem,index,parent):CString(),parent!=0);
+    PublishClassicFolder(index,uint32_t(id),static_cast<LPCSTR>(path),snapshot);
 }
+#endif
 
 void CHFVExplorerDoc::PublishClassicFolder(int volinx,uint32_t id,const std::string& path,
     const BrowserDirectory::Snapshot& snapshot)
@@ -630,120 +668,7 @@ void CHFVExplorerDoc::PublishClassicFolder(int volinx,uint32_t id,const std::str
 }
 
 
-void CHFVExplorerDoc::open_sub_directory( int volinx, unsigned long id, CString partial_name )
-{
- if(id==configurations_id)GetBrowserSession().SetLocationTitle(L"Configurations");
- else if(volinx>=0&&volinx<m_hfs_count){CString path=GetBrowserSession().Tree()->get_directory_name(m_volumes[volinx].m_rootitem,volinx,id);if(path.IsEmpty())path=m_volumes[volinx].m_volume_name;GetBrowserSession().SetLocationTitle(VolumeCoord::Wide(std::string((LPCSTR)path)));}
- if(volinx>=0&&volinx<m_hfs_count&&GetBrowserSession().Defer(VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name)),true,[this,volinx,id,partial_name]{open_sub_directory(volinx,id,partial_name);}))return;
- GetBrowserSession().ClearCurrent();
- StorageAction storageAction;
-	unsigned long parent_link_id = 0;
-	CHFVExplorerApp	*pApp;
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	CString dirname;
 
-	if(id == configurations_id) {
-		GetBrowserSession().List()->initialize_volume( "", 0 );
-	} else {
-		int i;
-  if(!m_volumes[volinx].m_opened){
-   auto key=VolumeCoord::ImageKey(std::string((LPCSTR)m_volumes[volinx].m_file_name));auto owner=GetBrowserSession().Owner();
-   auto result=ShowStorageWaitJob([&](Storage::Job&){LegacyEngine::Scope engine;VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});if(!m_volumes[volinx].open())throw std::runtime_error("Cannot reopen the selected Mac volume");return Storage::Result{};},!owner->IsWindowVisible(),owner);
-   if(result.code){GetBrowserSession().List()->list_clear();GetBrowserSession().List()->SetBrowserCapabilities({});if(GetBrowserSession().Status())GetBrowserSession().Status()->SetPaneText(0,result.message.c_str());return;}
-   if(m_volumes[volinx].m_rootitem)GetBrowserSession().Tree()->m_ct->SetItemText(m_volumes[volinx].m_rootitem,m_volumes[volinx].m_volume_name);
-  }
-		parent_link_id = GetBrowserSession().Tree()->get_parent_id( m_volumes[volinx].m_rootitem, volinx, id );
-
-		for(i=1; i<=2; i++) {
-			int old_icon_count = folderReader_->get_icon_cache_count();
-			if(parent_link_id) {
-				GetBrowserSession().Tree()->expand_dir( m_volumes[volinx].m_rootitem,
-									volinx, parent_link_id );
-				GetBrowserSession().List()->initialize_volume(
-					GetBrowserSession().Tree()->get_directory_name( m_volumes[volinx].m_rootitem, volinx, parent_link_id ),
-					ID_GOTO_PARENT );
-			} else {
-				GetBrowserSession().List()->initialize_volume( "", 0 );
-			}
-			new_hfs_walk( volinx, id, partial_name );
-			if( old_icon_count == folderReader_->get_icon_cache_count()) break;
-			// else new items in directory. walk again to ensure proper icons.
-		}
-		if(partial_name != "") 
-			dirname = partial_name;
-		else
-			dirname = GetBrowserSession().Tree()->get_directory_name( m_volumes[volinx].m_rootitem, volinx, id );
-	}
-
-	if(GetBrowserSession().Status()) {
-		CString msg;
-		if(id == configurations_id) {
-			msg = "Exploring Configurations";
-		} else {
-			msg.Format( 
-				"Exploring \"%s\": %I64u kB free",
-				dirname, 
-				m_volumes[volinx].freeBytes/1024 );
-		}
-		GetBrowserSession().Status()->SetPaneText( 0, msg );
-	}
-}
-
-#pragma optimize("",off)
-void CHFVExplorerDoc::open_fat_directory( int volinx, LPSTR path, int list )
-{
- if(list&&path)GetBrowserSession().SetLocationTitle(VolumeCoord::Wide(std::string(path)));
- if(list&&volinx>=0&&volinx<m_fat_count){std::string saved=path;auto type=m_fats[volinx].m_type;
-  if((type==DRIVE_REMOVABLE||type==DRIVE_CDROM)&&GetBrowserSession().Defer(VolumeCoord::DeviceKey(toupper((unsigned char)path[0])-'A'),true,[this,volinx,saved,list]{open_fat_directory(volinx,const_cast<char*>(saved.c_str()),list);}))return;
- }
- if(list)GetBrowserSession().ClearCurrent();
- StorageAction storageAction;
- // Startup discovery is optional; explicit drive selection must identify Mac
- // media before handing an unrecognized filesystem to Windows enumeration.
- if(list&&volinx>=0&&volinx<m_fat_count&&m_fats[volinx].m_type==DRIVE_REMOVABLE&&is_fat_root_directory(path)){
-  int drive=toupper((unsigned char)path[0])-'A';bool present=false;
-  auto owner=GetBrowserSession().Owner();
-  bool becameBusy=false;auto probe=ShowStorageWaitJob([&](Storage::Job& job){try{present=MediaDiscovery::Floppy(drive,job);}catch(const VolumeCoord::Busy&){becameBusy=true;}return Storage::Result{};},!owner->IsWindowVisible(),owner);
-  if(becameBusy){std::string saved=path;GetBrowserSession().Defer(VolumeCoord::DeviceKey(drive),true,[this,volinx,saved,list]{open_fat_directory(volinx,const_cast<char*>(saved.c_str()),list);},true);return;}
-  if(!probe.code&&present){
-   char image[MAX_PATH];get_floppy_volume_file_name(drive,image);int index=get_volume_index_by_filename(CString(image));
-   if(index<0)index=insert_volume(CString(image),1,0,0,0);
-   bool opened=false;
-   if(index>=0){auto mounted=ShowStorageWaitJob([&](Storage::Job&){try{VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});opened=m_volumes[index].open()!=0;}catch(const VolumeCoord::Busy&){becameBusy=true;}return Storage::Result{};},!owner->IsWindowVisible(),owner);
-    if(becameBusy){std::string saved=path;GetBrowserSession().Defer(VolumeCoord::DeviceKey(drive),true,[this,volinx,saved,list]{open_fat_directory(volinx,const_cast<char*>(saved.c_str()),list);},true);return;}
-    if(!mounted.code&&opened){auto tree=GetBrowserSession().Tree();auto& volume=m_volumes[index];
-     if(!volume.m_rootitem)volume.m_rootitem=tree->initialize_volume(index,volume.m_volume_name,CNID_ROOT_ID,1,0,0,0);
-     bool enabled=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(volume.m_rootitem);tree->enable_selchange(enabled);
-     open_sub_directory(index,CNID_ROOT_ID,volume.m_volume_name);return;
-    }
-   }
-  }
- }
- if(list&&volinx>=0&&volinx<m_fat_count&&is_fat_root_directory(path)&&(m_fats[volinx].m_type==DRIVE_REMOVABLE||m_fats[volinx].m_type==DRIVE_FIXED))if(GetBrowserSession().MacBrowser().OpenRemovableRoot(path)!=0)return;
-	CHFVExplorerApp	*pApp;
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	dbdb("open_fat_directory");
-	if(list) {
-		if(is_fat_root_directory(path)) {
-			GetBrowserSession().List()->initialize_volume( "", 0 );
-			// GetBrowserSession().List()->initialize_volume( "", ID_GOTO_PARENT );
-		} else {
-			// Remove the last subdir
-			char buf[_MAX_PATH], *p;
-			strcpy( buf, path );
-			p = strrchr( buf, '\\' );
-			if(p) {
-				if( p[-1] == ':' ) p++;
-				*p = 0;
-			}
-			GetBrowserSession().List()->initialize_volume( buf, ID_GOTO_PARENT );
-		}
-	}
-	// After the read-only Mac browser closes, keep the Windows side of hybrids available.
-	if(list && GetBrowserSession().MacBrowser().OpenCd(path) != 0) return;
-	fat_walk( volinx, path, list );
-	dbdb("open_fat_directory END");
-}
 #pragma optimize("",on)
 
 // must be modified to search fat volumes too
@@ -781,7 +706,7 @@ CString CHFVExplorerDoc::FindClassicLauncher(const char* type,const char* creato
  return path;
 }
 
-int CHFVExplorerDoc::BuildBrowserRoots(int preferred,bool readClassic)
+void CHFVExplorerDoc::BuildBrowserRoots()
 {
     auto tree=GetBrowserSession().Tree();
     tree->initialize_tree();
@@ -789,17 +714,9 @@ int CHFVExplorerDoc::BuildBrowserRoots(int preferred,bool readClassic)
         auto& volume=m_volumes[index];
         volume.m_rootitem=nullptr;
         if(volume.m_free)continue;
-        const bool ready=readClassic&&VolumeCoord::Readable(VolumeCoord::ImageKey(std::string((LPCSTR)volume.m_file_name)));
-        if(ready&&!volume.open()){
-            volume.m_volume_name.Empty();
-            volume.m_file_name.Empty();
-            volume.m_free=1;
-            continue;
-        }
         CString label=volume.m_volume_name.IsEmpty()?volume.m_file_name:volume.m_volume_name;
         volume.m_rootitem=tree->initialize_volume(index,label,CNID_ROOT_ID,volume.m_is_floppy,
             volume.m_is_cd,volume.m_is_hd,volume.m_is_removable);
-        if(preferred<0&&(!readClassic||ready))preferred=index;
     }
     for(int index=0;index<m_fat_count;++index){
         auto& drive=m_fats[index];
@@ -807,7 +724,6 @@ int CHFVExplorerDoc::BuildBrowserRoots(int preferred,bool readClassic)
         drive.m_rootitem=tree->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,
             &drive.m_volume_name,toupper((unsigned char)drive.m_letter)<'C');
     }
-    return preferred;
 }
 
 bool CHFVExplorerDoc::NavigateInitialFolder(int firstClassic)
@@ -840,21 +756,8 @@ bool CHFVExplorerDoc::NavigateStartupDirectory(const std::string& path,bool mac)
     if(path.empty()||path.size()>=MAX_PATH)return false;
     Request request{};
     request.intent=Intent::StartupFolder;
-    if(mac){
-        const auto volumeName=path.substr(0,path.find(':'));
-        for(int index=0;index<m_hfs_count;++index){
-            const auto& volume=m_volumes[index];
-            if(volume.m_free||!volume.m_rootitem||volume.m_volume_name.CompareNoCase(volumeName.c_str()))continue;
-            auto image=std::string((LPCSTR)volume.m_file_name);
-            request.folder=FileOperations::Location::Classic(image,path.find(':')==path.npos?path+":":path);
-            request.folder.directory=true;
-            request.folder.expectedResource=VolumeCoord::ImageKey(image);
-            request.resource=request.folder.expectedResource;
-            if(volume.m_mediaGenerationKnown)request.folder.BindMediaGeneration(volume.m_mediaGeneration);
-            return NavigateClassicFolder(index,0,false,&request);
-        }
-        return false;
-    }
+    if(mac)return NavigateNamedClassicFolder(path);
+
     if(path.size()<3||path[1]!=':'||path[2]!='\\')return false;
     for(int index=0;index<m_fat_count;++index)
         if(toupper((unsigned char)m_fats[index].m_letter)==toupper((unsigned char)path[0])&&m_fats[index].m_rootitem){
@@ -865,238 +768,63 @@ bool CHFVExplorerDoc::NavigateStartupDirectory(const std::string& path,bool mac)
     return false;
 }
 
-BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR lpszPathName)
+bool CHFVExplorerDoc::NavigateNamedClassicFolder(const std::string& path,int first,int preferred)
+{
+    using namespace BrowserNavigation;
+    const auto volumeName=path.substr(0,path.find(':'));
+    const auto queue=[&](int index,bool tryNext){
+        const auto& volume=m_volumes[index];
+        if(volume.m_free||!volume.m_rootitem)return false;
+        auto image=std::string((LPCSTR)volume.m_file_name);
+        Request request{};
+        request.intent=Intent::StartupFolder;
+        request.folder=FileOperations::Location::Classic(image,path.find(':')==path.npos?path+":":path);
+        request.folder.directory=true;
+        request.folder.expectedResource=VolumeCoord::ImageKey(image);
+        request.resource=request.folder.expectedResource;
+        if(volume.m_mediaGenerationKnown)request.folder.BindMediaGeneration(volume.m_mediaGeneration);
+        request.tryNextStartupRoot=tryNext;
+        return NavigateClassicFolder(index,0,false,&request);
+    };
+    if(preferred>=0&&preferred<m_hfs_count&&m_volumes[preferred].m_volume_name.CompareNoCase(volumeName.c_str())==0)
+        return queue(preferred,false);
+    for(int index=first;index<m_hfs_count;++index){
+        const auto& volume=m_volumes[index];
+        if(volume.m_volume_name.IsEmpty()||volume.m_volume_name.CompareNoCase(volumeName.c_str())==0)
+            if(queue(index,true))return true;
+    }
+    return false;
+}
+
+BOOL CHFVExplorerDoc::OnOpenDocument(LPCTSTR path)
 {
     auto& session=GetBrowserSession();
     const bool first=!browserOpened_;
+    const bool explicitImage=path&&*path;
+    if(!first&&explicitImage)return session.MacBrowser().OpenImage(path)>0;
+
+    const auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
     browserOpened_=true;
-    if(first&&session.UsesAsyncNavigation()){
-        const auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());
-        const bool explicitImage=lpszPathName&&*lpszPathName;
-        const bool namedClassicFolder=!explicitImage&&!app->m_opendir.IsEmpty()&&app->m_opendir.Mid(1,2)!=":\\";
-        session.Tree()->enable_selchange(0);
-        BuildBrowserRoots(-1,namedClassicFolder);
-        session.Tree()->enable_selchange(1);
-        if(app->m_startup_hds)session.MacBrowser().ScanRemovable(true,true);
-        if(app->m_startup_cds)session.MacBrowser().ScanCds();
-        if(explicitImage)return session.MacBrowser().OpenImage(lpszPathName)>0;
-        if(app->m_opendir.IsEmpty())NavigateInitialFolder();
-        return TRUE;
+    if(!first){
+        session.ClearCurrent();
+        OnCleanDocument();
     }
-	int native=session.MacBrowser().OpenImage(lpszPathName);
- if(native)return native>0;
- if(BackgroundCopies::Active()&&GetBrowserSession().Tree()->m_ct->GetRootItem()){
-  // Extend the tree without closing mounted readers used by other jobs.
-  auto tree=GetBrowserSession().Tree();auto app=static_cast<CHFVExplorerApp*>(AfxGetApp());int selected=-1;
-  if(lpszPathName&&*lpszPathName){std::string path=lpszPathName;auto key=VolumeCoord::ImageKey(path);if(GetBrowserSession().Defer(key,true,[this,path]{OnOpenDocument(path.c_str());}))return TRUE;
-   selected=get_volume_index_by_filename(CString(path.c_str()));if(selected<0)selected=insert_volume(CString(path.c_str()),0,0,0,0);if(selected<0)return FALSE;
-  }
-  for(int i=0;i<m_hfs_count;++i){auto& mounted=m_volumes[i];if(mounted.m_free||mounted.m_rootitem)continue;auto key=VolumeCoord::ImageKey(std::string((LPCSTR)mounted.m_file_name));
-   bool ready=false;if(VolumeCoord::Readable(key)){auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{key,VolumeCoord::Mode::Read}});ready=mounted.open()!=FALSE;return Storage::Result{};},!GetBrowserSession().Owner()->IsWindowVisible(),GetBrowserSession().Owner());if(result.code)ready=false;}
-   CString label=mounted.m_volume_name;if(label.IsEmpty())label=mounted.m_file_name;mounted.m_rootitem=tree->initialize_volume(i,label,CNID_ROOT_ID,mounted.m_is_floppy,mounted.m_is_cd,mounted.m_is_hd,mounted.m_is_removable);
-   if(i==selected&&!ready&&VolumeCoord::Readable(key))return FALSE;
-  }
-  if(selected>=0){auto& mounted=m_volumes[selected];open_sub_directory(selected,CNID_ROOT_ID,mounted.m_volume_name);app->AddToRecentFileList(lpszPathName);}return TRUE;
- }
- StorageAction storageAction;
-
-	int i;
-	int param_is_volume = 0;
-	CHFVExplorerApp	*pApp;
-	int showme = -1;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	GetBrowserSession().Tree()->enable_selchange(0);
-
-	OnCleanDocument();
-	// if (!CDocument::OnOpenDocument(lpszPathName)) return FALSE;
-
-	if(lpszPathName && *lpszPathName ) {
-		param_is_volume = is_extension( (char *)lpszPathName, ".HF*" );
-		param_is_volume |= is_extension( (char *)lpszPathName, ".DSK" );
-        param_is_volume |= is_extension((char *)lpszPathName,".IMG") || is_extension((char *)lpszPathName,".HFS") || is_extension((char *)lpszPathName,".ISO");
-	}
-
-	if(param_is_volume) {
-		i = insert_volume( CString(lpszPathName), 0, 0, 0, 0 );
-		if(i >= 0) {
-			if(m_volumes[i].open()) {
-				m_volumes[i].m_rootitem = 
-					GetBrowserSession().Tree()->initialize_volume(
-						i, m_volumes[i].m_volume_name, 
-						CNID_ROOT_ID, 
-						m_volumes[i].m_is_floppy,
-						m_volumes[i].m_is_cd,
-						m_volumes[i].m_is_hd,
-						m_volumes[i].m_is_removable);
-				pApp->AddToRecentFileList(lpszPathName);
-				if(showme < 0) showme = i;
-			} else {
-				// m_hfs_count--;
-				m_volumes[i].m_volume_name = "";
-				m_volumes[i].m_file_name = "";
-				m_volumes[i].m_free = 1;
-				m_volumes[i].m_rootitem = 0;
-				m_volumes[i].m_opened = 0;
-			}
-		}
-	} 
-
-    showme=BuildBrowserRoots(showme);
-
-	if(showme >= 0) {
-		open_sub_directory( showme, CNID_ROOT_ID, m_volumes[showme].m_volume_name );
-	}
-
-	GetBrowserSession().Tree()->enable_selchange(1);
-	// if(m_hfs_count && m_volumes[0].m_rootitem) {
- if(showme>=0)set_current_hitem(m_volumes[showme].m_rootitem);
- else{
-  // With Mac floppy discovery disabled, A: can be the first tree root.
-  // Initial selection must not probe an empty removable/CD drive implicitly.
-  HTREEITEM startupRoot=nullptr;
-  for(int i=0;i<m_fat_count;++i)if(m_fats[i].m_type==DRIVE_FIXED){startupRoot=m_fats[i].m_rootitem;break;}
-  if(startupRoot)set_current_hitem(startupRoot);
- }
-
-	
- GetBrowserSession().MacBrowser().RebuildTree();
- if(pApp->m_startup_hds)GetBrowserSession().MacBrowser().ScanRemovable(true,true);
- if(pApp->m_startup_cds)GetBrowserSession().MacBrowser().ScanCds();
-	return(1);
+    session.Tree()->enable_selchange(0);
+    BuildBrowserRoots();
+    session.Tree()->enable_selchange(1);
+    const bool restoring=session.MacBrowser().RebuildTree();
+    if(app->m_startup_hds)session.MacBrowser().ScanRemovable(true,true);
+    if(app->m_startup_cds)session.MacBrowser().ScanCds();
+    if(explicitImage)return session.MacBrowser().OpenImage(path)>0;
+    if(!restoring&&app->m_opendir.IsEmpty())NavigateInitialFolder();
+    return TRUE;
 }
 
-int CHFVExplorerDoc::my_split_path( CString path, CString &volname, int *volinx, CString &dir, int mac ) 
+void CHFVExplorerDoc::my_chdir(CString path,int mac,int preferredVolume)
 {
-	int i, inx;
-	inx = path.Find( mac ? ':' : '\\' );
-	if(inx < 0) {
-		volname = path;
-		dir = "";
-	} else {
-		volname = path.Left( inx );
-		dir = path.Right( path.GetLength() - inx - 1 );
-	}
-	for( i=0; i<m_hfs_count; i++ ) {
-		if(volname.CompareNoCase(m_volumes[i].m_volume_name) == 0) {
-			*volinx = i;
-			return(1);
-		}
-	}
-	return(0);
-}
-
-void CHFVExplorerDoc::build_pc_tree( int volinx, CString path )
-{
-	char *p, *start;
-	int first = 1;
-	char subpath[MAX_PATH];
-	int i;
-	HTREEITEM htree;
-	CHFVExplorerApp	*pApp;
-
-	dbdb( "build_pc_tree");
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	start = path.GetBuffer(MAX_PATH);
-	p = start;
-	p = strchr( p, '\\' );
-	htree = m_fats[volinx].m_rootitem;
-
-	while(p) {
-		strcpy( subpath, start );
-		i = p - start;
-		if(first) i++; // root dir backlash
-		first = 0;
-		subpath[i] = 0;
-		open_fat_directory( volinx, subpath, 1 ); // ZAPZAP 0
-		htree = GetBrowserSession().Tree()->tree_find_fat( htree, subpath );
-		if(htree) {
-			GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( htree );
-			GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( htree );
-		}
-		p = strchr( p+1, '\\' );
-	}
-	GetBrowserSession().Tree()->enable_selchange(1);
-	htree = GetBrowserSession().Tree()->tree_find_fat( htree, start );
-	if(htree) {
-		GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( htree );
-		GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( htree );
-	}
-	path.ReleaseBuffer();
-	dbdb( "build_pc_tree END");
-}
-
-void CHFVExplorerDoc::my_chdir( CString path, int mac, int preferredVolume )
-{
-	int volinx;
-	CString volname, dir;
-	CHFVExplorerApp	*pApp;
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	if(path == "") return;
-
-	if(!GetBrowserSession().Tree()) return;
-
-	if(!mac) {
-		int i, volinx = -1;
-		int save_view_dos_icons = pApp->m_dosicons;
-		pApp->m_dosicons = DI_NO_ICONS;
-
-		for( i=0; i<m_fat_count; i++) {
-			HTREEITEM htree;
-			LPSTR r = path.GetBuffer(MAX_PATH);
-			htree = GetBrowserSession().Tree()->tree_find_fat(m_fats[i].m_rootitem,r);
-			path.ReleaseBuffer();
-			if(htree) {
-				GetBrowserSession().Tree()->enable_selchange(1);
-				GetBrowserSession().Tree()->GetTreeCtrl().EnsureVisible( htree );
-				pApp->m_dosicons = save_view_dos_icons;
-				GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( htree );
-				return;
-			}
-			if(toupper(*path) == toupper(m_fats[i].m_letter)) volinx = i;
-		}
-		pApp->m_dosicons = save_view_dos_icons;
-		if(volinx >= 0) {
-			GetBrowserSession().Tree()->GetTreeCtrl().SelectItem( m_fats[volinx].m_rootitem );
-			build_pc_tree( volinx, path );
-		}
-		return;
-	}
-
- if(!my_split_path(path,volname,&volinx,dir,mac))return;
- if(preferredVolume>=0&&preferredVolume<m_hfs_count&&!m_volumes[preferredVolume].m_free&&
-    volname.CompareNoCase(m_volumes[preferredVolume].m_volume_name)==0)volinx=preferredVolume;
- auto& slot=m_volumes[volinx];
- auto& session=GetBrowserSession();
- auto tree=session.Tree();
- if(!slot.m_rootitem)return;
- if(dir.IsEmpty()){
-  tree->enable_selchange(1);
-  set_current_hitem(slot.m_rootitem);
-  open_sub_directory(volinx,CNID_ROOT_ID,slot.m_volume_name);
-  return;
- }
- const std::string image=(LPCSTR)slot.m_file_name, relative=(LPCSTR)dir;
- const auto showHidden=m_mac_show_invisibles!=0;
- std::vector<MacBrowser::ClassicAncestor> route;
- auto result=ShowStorageWaitJob([&](Storage::Job&){
-  VolumeCoord::Lease read({{VolumeCoord::ImageKey(image),VolumeCoord::Mode::Read}});
-  auto volume=MacBrowser::OpenClassic(image,":",false);
-  route=MacBrowser::ResolveClassicFolders(*volume,relative,showHidden);
-  return Storage::Result{};
- },!session.Owner()->IsWindowVisible(),session.Owner());
- if(result.code)return;
- tree->enable_selchange(1);
- set_current_hitem(slot.m_rootitem);
- open_sub_directory(volinx,CNID_ROOT_ID,slot.m_volume_name);
- set_current_hitem(slot.m_rootitem);
- for(const auto& folder:route){
-  open_sub_directory(volinx,folder.id,"");
-  tree->select_by_id(slot.m_rootitem,volinx,folder.id);
- }
+    if(path.IsEmpty()||!GetBrowserSession().Tree())return;
+    if(mac)NavigateNamedClassicFolder((LPCSTR)path,0,preferredVolume);
+    else NavigateStartupDirectory((LPCSTR)path,false);
 }
 
 void CHFVExplorerDoc::OnCleanDocument()

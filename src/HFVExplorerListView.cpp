@@ -776,32 +776,6 @@ void CHFVExplorerListView::OnLButtonDblClk(UINT nFlags, CPoint point)
 }
 
 #pragma optimize("g",off)
-void CHFVExplorerListView::update_current_view()
-{
- if(GetBrowserSession().MacBrowser().Refresh())return;
-	CHFVExplorerApp	*pApp;
-	CTreeCtrl *tc;
-	HFVExplorerTreeView *tv;
-	HTREEITEM htree;
-	int volinx;
-	char path[MAX_PATH];
-
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	tv = GetBrowserSession().Tree();
-	tc = tv->m_ct;
-
-	htree = tc->GetSelectedItem();
-	DWORD_PTR dw = tc->GetItemData( htree );
-	if(tv->get_lparam_path( dw, path, MAX_PATH ) && m_pDocument) {
-		volinx = tv->get_lparam_volinx( dw );
-		if(volinx >= 0) {
-			auto* doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
-            const auto* folder=tv->BrowserFolderAt(htree);
-            if(!folder||!folder->location.IsWindows()||!doc->NavigateWindowsFolder(volinx,folder->location.WindowsPath(),true))
-                doc->open_fat_directory(volinx,path,1);
-		}
-	}
-}
 #pragma optimize("",on)
 
 /*
@@ -941,7 +915,7 @@ void CHFVExplorerListView::try_delete_selected_items( BOOL confirm )
  auto result=ShowSubmittedStorageJob(operation.Job(),"Deleting files",HiddenOperationProgress(GetBrowserSession().Owner()),false,true,GetBrowserSession().Owner());
  if(result.code&&result.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
  bool host=false;for(auto& source:selected){if(source.LegacyType()==LIST_HFS)update_floppy_view(const_cast<char*>(source.ClassicImage().c_str()));else host=true;}
- if(host)update_current_view();
+ if(host)GetBrowserSession().RefreshSelected();
 
 }
 #pragma optimize("",on)

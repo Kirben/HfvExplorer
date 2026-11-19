@@ -43,11 +43,14 @@ class CHFVExplorerDoc : public CDocument
  friend class BrowserSession;
  std::unique_ptr<BrowserSession> m_browserSession;
  bool browserOpened_=false;
- int BuildBrowserRoots(int preferred, bool readClassic=true);
+ void BuildBrowserRoots();
+ bool NavigateNamedClassicFolder(const std::string& path,int first=0,int preferred=-1);
  bool NavigateInitialFolder(int firstClassic=0);
  uint64_t (&m_classicRevision)[MAX_HFS_VOLUMES];
 protected: // create from serialization only
+#ifdef HFV_TESTING
     std::unique_ptr<BrowserFolderReader> folderReader_;
+#endif
     BrowserFolderReader::Options FolderOptions() const;
 	CHFVExplorerDoc(bool discover = true);
 	DECLARE_DYNCREATE(CHFVExplorerDoc)
@@ -58,7 +61,6 @@ protected: // create from serialization only
 	BOOL find_volume_MDB();
 	void hfs_init();
 
-	void new_hfs_walk( int volinx, long id, CString searchname );
 
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
     bool NavigateStartupDirectory(const std::string& path,bool mac);
@@ -68,10 +70,10 @@ protected: // create from serialization only
     bool NavigateWindowsFolder(int index, const std::wstring& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&,HTREEITEM item);
-	void fat_walk( int volinx, LPSTR path, int list );
+#ifdef HFV_TESTING
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );
-	void build_pc_tree( int volinx, CString path );
+#endif
 	CString FindClassicLauncher(const char* type,const char* creator,int preferredVolume);
 	void check_hfv_file_times(int ask);
 	int get_volume_index_by_filename( CString name );
@@ -81,7 +83,6 @@ protected: // create from serialization only
 	void enum_volumes_ext( LPSTR mask, LPSTR ext );
 	void open_parent_directory( unsigned long id );
 	CString get_directory( HTREEITEM hItem, int *pmac );
-	int my_split_path( CString path, CString &volname, int *volinx, CString &dir, int mac );
 	void my_chdir( CString path, int mac, int preferredVolume = -1 );
 	void set_current_hitem( HTREEITEM hItem );
 	HTREEITEM get_current_hitem();

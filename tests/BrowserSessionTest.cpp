@@ -415,6 +415,8 @@ int RunBrowserSessionTest(const char* directory){
         a.doc.FindClassicLauncher("APPL","TEST",0)=="Same:Apps:Tools:first classic app",
         "classic launcher resolution lost the originating same-named volume");
   a.doc.my_chdir("Same:apps:tools:",1,1);
+  Check(a.Session().Navigating()&&Find(a.list,L"third classic")>=0,"classic path open did not retain its previous listing");
+  Check(a.Session().AwaitNavigationForTest(),"wait for named classic folder");
   Check(Find(a.list,L"third classic app")>=0&&Find(a.list,L"first classic app")<0,
         "nested classic folder resolution changed volumes or lost case-insensitive lookup");
   a.tree.GetTreeCtrl().SelectItem(a.doc.m_volumes[0].m_rootitem);
@@ -562,7 +564,8 @@ int RunBrowserSessionTest(const char* directory){
     HfsPlus::Volume::Format(*image,fixture.second,true);
     image.reset();
     auto volume=MacBrowser::OpenImage(fixture.first);
-    volume->MakeDirectory(2,fixture.second);
+    const auto child=volume->MakeDirectory(2,fixture.second);
+    volume->MakeDirectory(child,u"Restored nested folder");
     volume->Close();
    }
 
@@ -594,7 +597,7 @@ int RunBrowserSessionTest(const char* directory){
    BrowserDirectory::testObserveRead=[=](const char* tag){
     if(!strcmp(tag,"image-root")){SetEvent(entered);WaitForSingleObject(release,5000);}
    };
-   Check(session.MacBrowser().OpenImage(nextImage)==1,"queue a delayed image open");
+   Check(imageDocument.OnOpenDocument(CString(nextImage.c_str())),"queue a delayed image open through the document");
    PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"image root read did not start");
    Check(Find(*session.List(),L"Startup image")>=0&&!session.ListingAvailable()&&frame.IsWindowEnabled(),
          "image opening replaced the previous listing or disabled the frame");
@@ -616,6 +619,20 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !session.Navigating();},"image batch did not complete");
    Check(session.ListingAvailable()&&Find(*session.List(),L"Peer image")>=0,"image batch stopped at an invalid image");
 
+   const auto peerRow=Find(*session.List(),L"Peer image");
+   Check(peerRow>=0&&session.MacBrowser().Activate(peerRow)&&session.AwaitNavigationForTest(),
+         "browse the nested mounted folder before rebuilding the tree");
+   const auto nested=Find(*session.List(),L"Restored nested folder");
+   Check(nested>=0&&session.MacBrowser().Activate(nested)&&session.AwaitNavigationForTest(),
+         "browse the second mounted tree level");
+   const auto before=session.MacBrowser().TargetFolder();
+   Check(before.IsMounted()&&before.Id()!=2&&imageDocument.OnOpenDocument("")&&session.Navigating(),
+         "mounted tree restoration did not queue navigation");
+   PumpUntil([&]{return !session.Navigating();},"mounted tree restoration did not complete");
+   const auto after=session.MacBrowser().TargetFolder();
+   Check(after.IsMounted()&&after.Volume()==before.Volume()&&after.Id()==before.Id(),
+         "mounted tree restoration selected the wrong folder");
+
    const auto startupPath=wa+"\\StartupFolder";
    Check(CreateDirectoryA(startupPath,nullptr)!=FALSE,"create unexpanded Windows startup folder");
    {CFile file;Check(file.Open(startupPath+"\\Marker",CFile::modeCreate|CFile::modeWrite)!=FALSE,"create startup folder marker");}
@@ -624,7 +641,7 @@ int RunBrowserSessionTest(const char* directory){
    Check(Find(*session.List(),L"Marker")>=0&&session.MacBrowser().TargetFolder().IsWindows(),
          "named Windows startup path did not materialize the containing tree");
    frame.DestroyWindow();
-   fprintf(report,"PASS: pre-show image open, stale image rejection, previous listing on failure, and multi-image continuation.\n");
+   fprintf(report,"PASS: pre-show and subsequent image opens, stale image rejection, previous listing on failure, multi-image continuation and typed mounted tree restoration.\n");
   }
   app.m_pMainWnd=&b.owner;
   first.reset();Check(app.m_pMainWnd==&b.owner&&b.doc.HasIcon('BBBB')&&b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(b.list,L"Second file")>=0,"closing A invalidated session B");

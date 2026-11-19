@@ -455,7 +455,7 @@ void BrowserSession::RestoreListingSelection(const std::vector<FileOperations::L
 
 bool BrowserSession::RefreshSelected(bool afterMutation)
 {
- if(!document_||!tree_)return false;
+ if(!tree_)return false;
  const auto item=tree_->GetTreeCtrl().GetSelectedItem();
  const auto* binding=tree_->BrowserNodeAt(item);
  if(!binding)return false;
@@ -464,6 +464,7 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
  if(afterMutation&&(current_.type!=binding->LegacyType()||current_.index!=address.index))return false;
  if(address.kind==BrowserMountInventory::Kind::MountedVolume)
   return afterMutation?browser_->RefreshForChange(current_.key):browser_->Refresh();
+ if(!document_)return false;
  if(address.kind==BrowserMountInventory::Kind::WindowsDrive){
   const auto* folder=tree_->BrowserFolderAt(item);
   if(!folder||!folder->location.IsWindows())return false;

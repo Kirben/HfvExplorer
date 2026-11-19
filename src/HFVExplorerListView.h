@@ -115,7 +115,6 @@ public:
 	void set_cursor_by_type( int control );
 	void update_floppy_view( char *volpath );
 
-	void update_current_view();
 	int get_inx_type(int inx);
 	int get_inx_isdir(int inx);
 	void try_delete_selected_items( BOOL confirm );

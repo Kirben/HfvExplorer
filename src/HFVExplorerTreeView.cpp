@@ -638,51 +638,29 @@ void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult)
 {
  if(GetBrowserSession().List() && GetBrowserSession().List()->IsDragging()){*pResult=0;return;}
  if(StorageUi::busy()){*pResult=0;return;}
-	HTREEITEM hItem;
-	unsigned long id = 0;
-	CString name;
-	NM_TREEVIEW* pNMTreeView = (NM_TREEVIEW*)pNMHDR;
-	int volinx, type;
+    auto& session=GetBrowserSession();
+    if(!SelectionNotificationsEnabled()){*pResult=0;return;}
+    session.CancelNavigation();
 
-	if(!m_selchange_enabled) return;
-	GetBrowserSession().CancelNavigation();
-
-	enable_selchange(0);
-
-	CHFVExplorerApp	*pApp;
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	hItem = pNMTreeView->itemNew.hItem;
-	if( hItem ) {
-		DWORD_PTR dw = m_ct->GetItemData( hItem );
-		if(dw) {
-			type = get_lparam_type( dw );
-			switch(type) {
-    case LIST_MAC: GetBrowserSession().MacBrowser().Select(dw); break;
-				case LIST_HFS:
-				case LIST_SPEC:
-					id = get_lparam_id( dw );
-					volinx = get_lparam_volinx( m_ct->GetItemData( hItem ) );
-					name = m_ct->GetItemText( hItem );
-					if(id != 0 && name != "" && m_pDocument) {
-						auto doc=static_cast<CHFVExplorerDoc*>(m_pDocument);
-                        if(type!=LIST_HFS||!doc->NavigateClassicFolder(volinx,uint32_t(id)))
-                            doc->open_sub_directory(volinx,id,"");
-					}
-					break;
-                case LIST_FAT:
-                    if (const auto* folder = BrowserFolderAt(hItem); folder && folder->location.IsWindows() && m_pDocument) {
-                        auto* doc = static_cast<CHFVExplorerDoc*>(m_pDocument);
-                        volinx = get_lparam_volinx(dw);
-                        if (!doc->NavigateWindowsFolder(volinx, folder->location.WindowsPath())) {
-                            char path[MAX_PATH];
-                            if (get_lparam_path(dw, path, MAX_PATH)) doc->open_fat_directory(volinx, path, 1);
-                        }
-                    }
-					break;
-			}
-		}
-	}
+    const auto item=reinterpret_cast<NM_TREEVIEW*>(pNMHDR)->itemNew.hItem;
+    const auto* node=BrowserNodeAt(item);
+    if(node&&m_pDocument){
+        auto& doc=*static_cast<CHFVExplorerDoc*>(m_pDocument);
+        enable_selchange(0);
+        const auto address=node->mount;
+        switch(address.kind){
+        case BrowserMountInventory::Kind::MountedVolume:
+            session.MacBrowser().Select(m_ct->GetItemData(item));
+            break;
+        case BrowserMountInventory::Kind::ClassicVolume:
+            doc.NavigateClassicFolder(address.index,node->CatalogId());
+            break;
+        case BrowserMountInventory::Kind::WindowsDrive:
+            if(const auto* folder=node->Folder())
+                doc.NavigateWindowsFolder(address.index,folder->location.WindowsPath());
+            break;
+        }
+    }
 
 	enable_selchange(1);
 

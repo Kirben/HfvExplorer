@@ -265,7 +265,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  using namespace BrowserNavigation;
  CString directory=tree->get_directory_name(root,index,id);
  if(directory.IsEmpty())directory=selected.m_volume_name;
- if(directory.IsEmpty()&&!find)return false;
+ if(directory.IsEmpty()&&!find&&id!=2)return false;
  std::string path=(LPCSTR)directory;
  path+=':';
  const auto parent=tree->get_parent_id(root,index,id);
@@ -309,6 +309,12 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
        std::optional<DWORD>(volume.m_mediaGeneration):std::nullopt);
    reader->Revision(index)=VolumeCoord::Revision(request.resource);
    auto id=request.folder.expectedCatalogId;
+   if(!id&&request.intent==Intent::StartupFolder){
+    const auto& path=request.folder.ClassicPath();
+    const auto name=path.substr(0,path.find(':'));
+    if(volume.m_volume_name.CompareNoCase(name.c_str())!=0)
+     return Storage::Result{1,ERROR_PATH_NOT_FOUND,"The requested classic HFS volume was not found."};
+   }
    const bool readRoute=request.intent!=Intent::SelectFolder;
    std::string directory=id==2?std::string((LPCSTR)volume.m_volume_name)+":":request.folder.ClassicPath();
    if(readRoute&&id!=2){
@@ -358,8 +364,10 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   const auto parentPath=parentId?tree->get_directory_name(root,index,parentId):CString();
   session.PrepareFolderPresentation(target,parentPath,parentId!=0);
   PublishClassicFolder(index,result.folder.expectedCatalogId,shown,result.listing);
- },mount,retry,[this,index,root,initial=find&&find->tryNextStartupRoot]{
+ },mount,retry,[this,index,root,initial=find&&find->tryNextStartupRoot,
+    named=find&&id==0?find->folder.ClassicPath():std::string()]{
   if(!initial)return false;
+  if(!named.empty())return NavigateNamedClassicFolder(named,index+1);
   auto& volume=m_volumes[index];
   volume.m_volume_name.Empty();
   volume.m_file_name.Empty();
