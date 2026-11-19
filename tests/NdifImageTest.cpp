@@ -177,6 +177,20 @@ int RunNdifImageTest(const char* directory)
         Check(Ndif::Unwrap(kenSource),"Truncated NDIF KenCode fixture did not reach the codec");
         Reject([&]{Disk::Read(*kenSource,0,512);},"NDIF accepted truncated KenCode data");
         fprintf(report,"PASS: NDIF KenCode literals, overlapping copies and truncated stream rejection.\n");
+        auto rle=Map(1,2);
+        const Bytes inputRle{0xff,0x01,'R','L',0,1,'E','!'};
+        Row(rle,0,0,0x81,0,uint32_t(inputRle.size()));Row(rle,1,1,0xff,0,0);
+        std::unique_ptr<Source> rleSource=std::make_unique<Memory>(Pack(inputRle,Resource(rle)));
+        Check(Ndif::Unwrap(rleSource),"NDIF RLE did not open");
+        const auto repeated=Disk::Read(*rleSource,0,512);
+        for(size_t i=0;i<510;i+=2)
+            Check(repeated[i]=='R'&&repeated[i+1]=='L',"NDIF RLE word repetition differed");
+        Check(repeated[510]=='E'&&repeated[511]=='!',"NDIF RLE literal differs");
+        auto badRle=inputRle;badRle[1]=0xff;badRle[0]=0xfe;
+        rleSource=std::make_unique<Memory>(Pack(badRle,Resource(rle)));
+        Check(Ndif::Unwrap(rleSource),"Oversized NDIF RLE fixture did not reach its codec");
+        Reject([&]{Disk::Read(*rleSource,0,512);},"NDIF accepted an oversized RLE run");
+        fprintf(report,"PASS: NDIF RLE word runs and decoding bounds.\n");
         auto segmented=bcem;P32(segmented.data()+84,1);
         const auto segment=[](unsigned part){
             Bytes meta(24);

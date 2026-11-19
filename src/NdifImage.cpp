@@ -19,7 +19,7 @@ constexpr uint64_t Sector=512;
 constexpr auto HeaderBytes=128u;
 constexpr auto ChunkBytes=12u;
 constexpr uint64_t MaxCompressedChunk=64*1024*1024;
-enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Adc=0x83,End=0xff };
+enum ChunkType : uint8_t { Zero=0,Raw=2,KenCode=0x80,Rle=0x81,Adc=0x83,End=0xff };
 struct Fork {uint64_t at=0,length=0;};
 struct Forks {Fork data,resource;};
 struct Part {std::unique_ptr<Source> dataFile,resourceFile;Fork data;uint64_t start=0;};
@@ -154,7 +154,7 @@ Layout Map(Source& input,Fork map,Fork data)
                 Check(sector<sectors,"Empty NDIF chunk");
                 if(type==Zero)Check(!packed,"Zero NDIF chunk contains data");
                 else{
-                    Check(type==Raw||type==KenCode||type==Adc,"Unsupported NDIF chunk encoding");
+                    Check(type==Raw||type==KenCode||type==Rle||type==Adc,"Unsupported NDIF chunk encoding");
                     Check(packed&&Range(at,packed,data.length-base),"NDIF chunk exceeds its data fork");
                 }
                 out.chunks.push_back({sector*Sector,0,data.at+base+at,packed,type});
@@ -164,12 +164,38 @@ Layout Map(Source& input,Fork map,Fork data)
     }
     for(const auto& chunk:out.chunks){
         if(chunk.type==Raw)Check(chunk.length==chunk.packedLength,"Incorrect NDIF raw chunk length");
-        if(chunk.type==Adc||chunk.type==KenCode)Check(chunk.length<=maxChunk*Sector&&chunk.length<=MaxCompressedChunk&&
+        if(chunk.type!=Raw&&chunk.type!=Zero)Check(chunk.length<=maxChunk*Sector&&chunk.length<=MaxCompressedChunk&&
                                 chunk.packedLength<=MaxCompressedChunk,"Invalid NDIF compressed chunk size");
     }
     return out;
 }
 
+
+
+void DecodeRle(const Bytes& input,Bytes& output)
+{
+    size_t at=0,produced=0;
+    while(at<input.size()){
+        Check(Range(at,2,input.size()),"Truncated NDIF RLE control word");
+        const auto encoded=U16(input.data()+at);
+        const bool repeated=(encoded&0x8000)!=0;
+        const size_t length=2*(repeated?0x10000u-encoded:encoded);
+        at+=2;
+        if(!length)continue;
+        const auto packed=repeated?2:length;
+        Check(Range(at,packed,input.size())&&Range(produced,length,output.size()),
+              "NDIF RLE run exceeds its chunk");
+        if(repeated){
+            for(size_t i=0;i<length;i+=2){
+                output[produced+i]=input[at];
+                output[produced+i+1]=input[at+1];
+            }
+        }else memcpy(output.data()+produced,input.data()+at,length);
+        at+=packed;
+        produced+=length;
+    }
+    Check(produced==output.size(),"Incomplete NDIF RLE chunk");
+}
 
 struct Segment {
     unsigned number,count;
@@ -322,6 +348,7 @@ public:
                     ReadPacked(chunk->packedAt,packed.data(),packed.size());
                     Bytes decoded(size_t(chunk->length));
                     if(chunk->type==KenCode)DecodeKenCode(packed,decoded);
+                    else if(chunk->type==Rle)DecodeRle(packed,decoded);
                     else Check(Dmg::DecodeAppleDataCompression(packed,decoded),"Corrupt NDIF ADC data");
                     decoded_=std::move(decoded);
                     cached_=index;
