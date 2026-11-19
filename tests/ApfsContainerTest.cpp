@@ -8,6 +8,7 @@
 #include "VolumeCoordinator.h"
 #include "CopyProcess.h"
 #include "FileOperations.h"
+#include "DmgImage.h"
 #include <algorithm>
 #include <cstdio>
 
@@ -528,6 +529,17 @@ int RunApfsContainerTest(const char* directory)
         multiExports->Read(secondCopy.id,0,0,&secondData,1);
         Check(CopyProcess::lastProcess&&secondData=='B',"APFS copy worker reopened the wrong volume");
         fprintf(report,"PASS: same-named volumes, overlapping APFS object IDs and export from the second volume.\n");
+        const auto dmgPath=VolumeCoord::Wide(root+"apfs.dmg");
+        Storage::Job convert;
+        const auto wrapped=Dmg::Convert(path,dmgPath,Dmg::Output::CompressedDmg,convert);
+        Check(!wrapped.code,wrapped.message.c_str());
+        auto dmg=MacBrowser::OpenBrowserImage(dmgPath);
+        Check(dmg&&dmg->Name()==u"APFS Fixture"&&!dmg->Writable(),"APFS GPT container did not reopen in compressed DMG");
+        const auto dmgItem=dmg->List(dmg->List().at(0).id).at(0);
+        Bytes fromDmg(bytes.size());
+        dmg->Read(dmgItem.id,0,4095,fromDmg.data(),fromDmg.size());
+        Check(fromDmg==bytes,"APFS file bytes differed through the compressed DMG reader");
+        fprintf(report,"PASS: APFS inside a compressed DMG with a GPT partition table.\n");
         fprintf(report,"PASS: normal browser mount, UTF-8 names, sparse and fragmented data, worker export and read-only enforcement.\n");
         fprintf(report,"PASS: raw APFS, 4/64 KiB blocks, APFS GPT with 512/4096-byte sectors, geometry and checksum validation, duplicate volume refusal and normal open routing.\n");
     }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());result=1;}
