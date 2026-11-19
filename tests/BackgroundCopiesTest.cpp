@@ -16,6 +16,7 @@
 #include "CdImage.h"
 #include "CdBurn.h"
 #include "FloppyWriteDialog.h"
+#include "MediaCommands.h"
 #include "RefreshStorage.h"
 #include "StorageJobDialog.h"
 #include "HfsPlusDisk.h"
@@ -723,7 +724,7 @@ int RunPerVolumeCommandsTest(const char* directory){
   app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto frame=app.CreateBrowser(FALSE);Check(frame!=nullptr,"create command-policy browser");auto a=Image(host+"\\busy-a.dsk"),b=Image(host+"\\busy-b.dsk"),c=Image(host+"\\idle.dsk");auto slow=std::make_shared<Slow>(a,stalled);auto id=Put(*a,u"Slow");FileOperations::Request copy;FileOperations::Location from,to;from.SetMounted(slow,id);to.SetMounted(b);copy.Copy().sources={from};copy.Copy().destination=to;Check(BackgroundCopies::Start({copy},frame,true),"start policy copy");Until([&]{return WaitForSingleObject(stalled.entered,0)==WAIT_OBJECT_0;});
   auto& session=frame->GetBrowserSession();int idle=session.MacBrowser().AttachTestVolume(c,"idle"),busy=session.MacBrowser().AttachTestVolume(slow,"busy");Check(session.MacBrowser().ShowTestFolder(idle,2),"browse idle volume");
   for(UINT command:{UINT(ID_FILE_OPEN),UINT(ID_VIEW_OPTIONS),UINT(ID_FILE_NEWVOLUME),UINT(ID_FILE_NEWHFSPLUS),UINT(ID_TOOLS_BURN),UINT(ID_TOOLS_DUMPCDDEBUG),UINT(ID_FILE_VOLUMETOFLOPPY),UINT(ID_FILE_VOLUMEFROMFLOPPY),UINT(ID_TOOLS_FIND),UINT(ID_VIEW_MAC_WINDOW)})Check(frame->CommandAllowed(command),"unrelated command still globally disabled");
-  auto other=app.CreateBrowser(FALSE);Check(other!=nullptr,"create independent command browser");auto& second=other->GetBrowserSession();int busySecond=second.MacBrowser().AttachTestVolume(slow,"busy-second");auto tree=second.Tree();HTREEITEM busyRoot=nullptr;for(auto item=tree->m_ct->GetRootItem();item;item=tree->m_ct->GetNextSiblingItem(item)){const auto* node=tree->BrowserNodeAt(item);if(node&&node->mount.kind==BrowserMountInventory::Kind::ClassicVolume&&node->mount.index==busySecond){busyRoot=item;break;}}Check(busyRoot!=nullptr,"find busy root");tree->enable_selchange(0);tree->m_ct->SelectItem(busyRoot);tree->enable_selchange(1);Check(!second.List()->StorageSelectionAvailable()&&session.List()->StorageSelectionAvailable()&&!other->CommandAllowed(ID_TOOLS_FIND)&&!other->CommandAllowed(ID_VIEW_MAC_WINDOW)&&frame->CommandAllowed(ID_TOOLS_FIND),"selected-volume command routing leaked across windows");Check(other->CommandAllowed(ID_VIEW_OPTIONS)&&other->CommandAllowed(ID_FILE_OPEN),"target picker/settings depend on busy selection");
+  auto other=app.CreateBrowser(FALSE);Check(other!=nullptr,"create independent command browser");auto& second=other->GetBrowserSession();int busySecond=second.MacBrowser().AttachTestVolume(slow,"busy-second");auto tree=second.Tree();HTREEITEM busyRoot=nullptr;for(auto item=tree->m_ct->GetRootItem();item;item=tree->m_ct->GetNextSiblingItem(item)){const auto* node=tree->BrowserNodeAt(item);if(node&&node->mount.kind==BrowserMountInventory::Kind::MountedVolume&&node->mount.index==busySecond){busyRoot=item;break;}}Check(busyRoot!=nullptr,"find busy root");tree->enable_selchange(0);tree->m_ct->SelectItem(busyRoot);tree->enable_selchange(1);Check(!second.List()->StorageSelectionAvailable()&&session.List()->StorageSelectionAvailable()&&!other->CommandAllowed(ID_TOOLS_FIND)&&!other->CommandAllowed(ID_VIEW_MAC_WINDOW)&&frame->CommandAllowed(ID_TOOLS_FIND),"selected-volume command routing leaked across windows");Check(other->CommandAllowed(ID_VIEW_OPTIONS)&&other->CommandAllowed(ID_FILE_OPEN),"target picker/settings depend on busy selection");
   struct Menu:CCmdUI{bool enabled=false;void Enable(BOOL value)override{enabled=value!=FALSE;}void SetCheck(int)override{}void SetRadio(BOOL)override{}}menu;
   // Physical command UI reflects readers as well as writers. No real drive is opened.
   auto doc=session.Document();
@@ -757,9 +758,39 @@ int RunPerVolumeCommandsTest(const char* directory){
 #ifdef HFV_FLOPPY_TESTING
   std::vector<BYTE> bytes;std::string why;Check(PrepareFloppyHfs("PolicyFloppy",bytes,why),"prepare policy floppy");TestFloppy disk(bytes);auto write=MakeFloppyWriteJob(24,bytes,&disk);reservation=std::make_unique<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{device24,VolumeCoord::Mode::Read}});blocked=run(write);Check(blocked.error==ERROR_BUSY&&!disk.disk.opens&&!disk.writes,"floppy format touched busy device");Check(!run(MakeFloppyWriteJob(25,bytes,&disk)).code&&disk.writes&&!disk.locked,"unrelated floppy write/verify failed");reservation.reset();
   const auto writesBefore=disk.writes;
-  auto replaced=run(MakeFloppyWriteJob(25,bytes,&disk,{},disk.disk.changeCount+1));
-  Check(replaced.error==ERROR_MEDIA_CHANGED&&disk.writes==writesBefore&&!disk.locked,
-        "queued floppy write accepted a disk that replaced the confirmed media");
+  const auto confirmed=disk.disk.changeCount;
+  ++disk.disk.changeCount;
+  auto rediscovery=std::make_shared<std::atomic<unsigned>>(0);
+  auto probe=[rediscovery](int drive){
+   Check(drive==25,"media completion probed an unrelated drive");
+   ++*rediscovery;
+   return UINT(DRIVE_RAMDISK);
+  };
+  session.MacBrowser().SetDriveTypeForTest(probe);
+  second.MacBrowser().SetDriveTypeForTest(probe);
+  unsigned launches=0;
+  auto confirmedWrite=[&](CommandStorage::Reservation held){
+   ++launches;
+   return MakeFloppyWriteJob(25,bytes,&disk,std::move(held),confirmed);
+  };
+  reservation=std::make_unique<VolumeCoord::Lease>(
+      std::vector<VolumeCoord::Access>{{device25,VolumeCoord::Mode::Read}});
+  Check(MediaCommands::Start(*frame,25,"Write test","Write",confirmedWrite).error==ERROR_BUSY&&
+        launches==0&&rediscovery->load()==0,"busy command invalidated the drive or constructed a worker");
+  reservation.reset();
+  Check(!MediaCommands::Start(*frame,25,"Write test","Write",confirmedWrite).code,"queue coordinated floppy write");
+  Until([&]{return rediscovery->load()==2&&!session.MacBrowser().MediaUpdatesPending()&&
+        !second.MacBrowser().MediaUpdatesPending();});
+  const auto firstRecovery=session.Mounts().FindWindowsDrive(25);
+  const auto secondRecovery=second.Mounts().FindWindowsDrive(25);
+  Check(BackgroundCopies::LastResult().error==ERROR_MEDIA_CHANGED&&launches==1&&
+        disk.writes==writesBefore&&!disk.locked&&firstRecovery&&firstRecovery->root&&
+        secondRecovery&&secondRecovery->root&&
+        VolumeCoord::Available({{device25,VolumeCoord::Mode::Write}}),
+        "floppy swap reached the writer or prevented browser recovery");
+  session.MacBrowser().SetDriveTypeForTest({});
+  second.MacBrowser().SetDriveTypeForTest({});
+  fprintf(report,"PASS: media lifecycle rejects a busy command, detects a disk swapped after confirmation, and reconciles the drive in both browsers after failure.\n");
   fprintf(report,"PASS: simulated floppy format/write checks reader reservations before opening the device; an unrelated floppy completes write/readback and unlocks during the stalled copy.\n");
 #endif
   CString cdFixture=host+"\\idle-cd.dsk";{auto image=HfsPlus::CreateImage(VolumeCoord::Wide((LPCSTR)cdFixture).c_str(),8*1024*1024);HfsPlus::Volume::Format(*image,u"IdleCD",true);}

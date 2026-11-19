@@ -37,6 +37,7 @@
 #include "charset.h"
 #include "FloppyImage.h"
 #include "MediaControl.h"
+#include "MediaCommands.h"
 #include "ReadOnlyCdBackend.h"
 #include "CdImageDialog.h"
 #include "CdBurnDialog.h"
@@ -1028,7 +1029,6 @@ int read_floppy( int drive, char *path )
 	return(ok);
 }
 
-static void ReleaseFloppyForWrite(int drive,void* context);
 
 void CMainFrame::OnFileNewHfsPlus() {FormatHfsPlusImage(this,GetBrowserSession());}
 
@@ -1049,7 +1049,7 @@ void CMainFrame::OnFileNewvolume()
   std::vector<BYTE> image;std::string error;
   pc_to_mac_charset((unsigned char*)vname);
   if(!PrepareFloppyHfs(vname,image,error)){AfxMessageBox(error.c_str());return;}
-  WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume",ReleaseFloppyForWrite,GetBrowserSession().Document());
+  WriteFloppyImage(this,floppyDrive,image,"Format a new HFS volume");
   return;
  }
 
@@ -1190,35 +1190,12 @@ void CMainFrame::OnCdEjectEjectReload(int reload)
 {
  const auto target=SelectedMediaControlTarget();
  if(!CanControlMedia(target))return;
- const auto key=VolumeCoord::DeviceKey(target.drive);
- CommandStorage::Reservation held;
- try{
-  held=std::make_shared<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{key,VolumeCoord::Mode::Write}});
- }catch(const VolumeCoord::Busy&){return;}
-
- const auto mask=DWORD(1)<<target.drive;
- MediaDiscovery::Changed(mask);
- std::vector<std::shared_ptr<MacBrowser::Volume>> released;
- for(auto browser:static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers){
-  auto& session=browser->GetBrowserSession();
-  session.NavigationMediaChanged(mask);
-  auto volumes=session.MacBrowser().DetachCd(target.drive);
-  released.insert(released.end(),volumes.begin(),volumes.end());
-  auto doc=session.Document();
-  for(int i=0;i<doc->Mounts().ClassicCount();++i)
-   if(MacMediaControlTarget(doc->Mounts().ClassicAt(i).m_file_name).drive==target.drive)
-    doc->Mounts().CloseClassic(i);
- }
- try{
-  auto work=MakeMediaControlJob(target,reload!=0,nullptr,[released=std::move(released),target]{
-   for(auto& volume:released)volume->ReleaseMedia();
-   native_media_suspend(target.drive);
-  },std::move(held));
-  BackgroundCopies::StartStorage(std::move(work),this,reload?"Reloading media":"Ejecting media",
-    reload?"Reload":"Eject");
- }catch(const std::exception& error){
-  MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
- }
+ const auto started=MediaCommands::Start(*this,target.drive,reload?"Reloading media":"Ejecting media",
+    reload?"Reload":"Eject",[&](CommandStorage::Reservation held){
+     return MakeMediaControlJob(target,reload!=0,nullptr,{},std::move(held));
+    });
+ if(started.code)MessageBox(started.message.c_str(),"HFVExplorer",
+     MB_OK|(started.error==ERROR_BUSY?MB_ICONINFORMATION:MB_ICONERROR));
 }
 
 void CMainFrame::OnCdEjectEject() 
@@ -1389,12 +1366,6 @@ void CMainFrame::OnToolsBurn()
 
 void CMainFrame::OnUpdatePhysicalMedia(CCmdUI* ui) {ui->Enable(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&CommandAllowed(ui->m_nID));}
 
-static void ReleaseFloppyForWrite(int drive,void* context)
-{
- CHFVExplorerDoc* document=(CHFVExplorerDoc*)context;
- for(int i=0;i<document->Mounts().ClassicCount();++i)
-  if(physical_floppy_path(document->Mounts().ClassicAt(i).m_file_name)==drive) document->Mounts().CloseClassic(i);
-}
 void CMainFrame::OnFileVolumetofloppy()
 {
  CHFVExplorerApp* app=(CHFVExplorerApp*)AfxGetApp();
@@ -1402,7 +1373,7 @@ void CMainFrame::OnFileVolumetofloppy()
  if(dialog.DoModal()!=IDOK)return;
  std::vector<BYTE> image;std::string error;
  auto loaded=ShowStorageWaitJob(CommandStorage::Guard({{VolumeCoord::ImageKey(std::string((LPCSTR)dialog.m_volname)),VolumeCoord::Mode::Read}},[&](Storage::Job&){return LoadFloppyHfs(dialog.m_volname,image,error)?Storage::Result{}:Storage::Result{1,ERROR_READ_FAULT,error};}));if(loaded.code){AfxMessageBox(loaded.message.c_str());return;}
- WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname,ReleaseFloppyForWrite,GetBrowserSession().Document());
+ WriteFloppyImage(this,dialog.m_drive,image,dialog.m_volname);
 }
 
 void CMainFrame::OnToolsFind()
