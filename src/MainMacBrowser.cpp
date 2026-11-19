@@ -184,35 +184,6 @@ struct MainMacBrowser::State {
     }
     Location Target(HTREEITEM item=nullptr) { return Folder(item).location; }
 
-    void BindRow(BrowserDirectory::Row& row,const std::string& resourceKey) {
-        auto& out=row.location;
-        out.directory=row.entry.directory;
-        out.expectedIdentity=row.entry.identity;
-        if(row.storageType==LIST_MAC){
-            auto& mount=mounts.at(row.volume);
-            out.SetMounted(mount.volume,row.id);
-            row.mediaDrive=mount.drive;
-            row.accessKey=mount.volume->ResourceKey();
-            out.expectedName=row.entry.name;
-            out.expectedParent=row.entry.parent;
-        }else if(row.storageType==LIST_FAT&&(out.IsWindows()||!row.path.empty())){
-            if(!out.IsWindows())out.SetWindows(FromAnsi(row.path));
-            if(out.WindowsPath().size()>=2 && out.WindowsPath()[1]==L':') {
-                const auto drive=towupper(out.WindowsPath()[0]);
-                if(drive>=L'A'&&drive<=L'Z')row.mediaDrive=drive-L'A';
-            }
-            if(row.accessKey.empty())row.accessKey=resourceKey;
-        }else if(row.storageType==LIST_HFS&&!row.path.empty()){
-            auto& volume=session_.Document()->m_volumes[row.volume];
-            out.SetClassic(std::string((LPCSTR)volume.m_file_name),row.path);
-            out.expectedCatalogId=row.id;
-            out.expectedResource=resourceKey.empty()?VolumeCoord::ImageKey(out.ClassicImage()):resourceKey;
-            row.accessKey=out.expectedResource;
-            if(out.IsPhysical())row.mediaDrive=out.Drive();
-            if(volume.m_mediaGenerationKnown)out.BindMediaGeneration(volume.m_mediaGeneration);
-        }
-    }
-
     Location Item(int row,bool cut) {
         if(!session_.ListingAvailable())throw HfsPlus::Error("Wait for the selected folder to load");
         const auto model=session_.List()->BrowserRowAt(row);
@@ -339,13 +310,14 @@ struct MainMacBrowser::State {
                     snapshot.resourceKey=volume->ResourceKey();
                     readFolder(volume,id,snapshot.revision,listing->ancestors,listing->title,
                         listing->levels,listing->entries,listing->free,listing->mutableFolder);
-                    result.folder.SetMounted(volume,id);
-                    FillListing(snapshot,listing->entries,index,volume->Supports(),showInvisible,listing->mutableFolder);
+                    result.listing.folder.SetMounted(volume,id);
+                    result.listing.folder.directory=true;
+                    FillListing(snapshot,listing->entries,volume->Supports(),showInvisible,listing->mutableFolder);
                 }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"This volume is busy"};}
                 return Storage::Result{};
             }, [this,volume,listing,item,index,mountRoot,rebuild](Result& result){
                 auto target=item;
-                auto mounted=result.folder.Volume();
+                auto mounted=result.listing.folder.Volume();
                 if(mounted!=volume){
                     ForgetFolders(volume);
                     mounts[index].volume=mounted;
@@ -353,7 +325,7 @@ struct MainMacBrowser::State {
                     if(!mounts[index].physicalPath.empty())
                         TreeText(session_,target,Wide(mounted->Name())+L" - "+mounts[index].suffix+L" [read-only]");
                 }
-                Publish(index,result.folder.Id(),target,rebuild,false,mounted,result.listing.revision,listing->title,
+                Publish(index,result.listing.folder.Id(),target,rebuild,false,mounted,result.listing.revision,listing->title,
                     listing->levels,listing->entries,listing->free,listing->mutableFolder,listing->ancestors,&result.listing);
             },capturedMount,retry);
             return true;
@@ -361,7 +333,7 @@ struct MainMacBrowser::State {
         return Publish(index,id,item,rebuild,true,volume,revision,folderTitle,levels,entries,free,mutableFolder,ancestors);
     }
     static void FillListing(BrowserDirectory::Snapshot& snapshot,const std::vector<Entry>& entries,
-        int index,const MacBrowser::Capabilities& capabilities,bool showInvisible,bool mutableFolder)
+        const MacBrowser::Capabilities& capabilities,bool showInvisible,bool mutableFolder)
     {
         snapshot.capabilities=capabilities;
         snapshot.capabilitiesKnown=true;
@@ -370,7 +342,7 @@ struct MainMacBrowser::State {
         snapshot.rows.reserve(entries.size());
         for(const auto& entry:entries)
             if(showInvisible||!((uint16_t(entry.finder[8])<<8|entry.finder[9])&0x4000))
-                snapshot.rows.push_back(BrowserDirectory::FromMac(entry,index,capabilities));
+                snapshot.rows.push_back(BrowserDirectory::FromMac(entry,snapshot.folder.Volume(),capabilities));
     }
     bool Publish(int index,uint32_t id,HTREEITEM item,bool rebuild,bool cached,
         const std::shared_ptr<Volume>& volume,uint64_t revision,const std::wstring& folderTitle,
@@ -390,26 +362,24 @@ struct MainMacBrowser::State {
         if(id!=2)TreeText(session_,item,folderTitle);
         // Replace only this directory's child nodes, never unrelated volumes.
         for(HTREEITEM child=control.GetChildItem(item);child;){auto next=control.GetNextSiblingItem(child);control.DeleteItem(child);child=next;}
-        session_.PrepareFolderPresentation(item,"",id!=2);
         BrowserDirectory::Snapshot snapshot;
         if(!prepared){
             snapshot.resourceKey=key;
             snapshot.revision=revision;
-            FillListing(snapshot,entries,index,volume->Supports(),App().m_show_invisible_mac!=FALSE,!cached&&mutableFolder);
+            snapshot.folder=Location::Mounted(volume,id);
+            snapshot.folder.directory=true;
+            FillListing(snapshot,entries,volume->Supports(),App().m_show_invisible_mac!=FALSE,!cached&&mutableFolder);
             prepared=&snapshot;
         }
-        auto location=Location::Mounted(volume,id);
-        location.directory=true;
-        tree->BindBrowserFolder(item,{std::move(location),prepared->capabilities.create});
-        session_.PresentDirectory(*prepared, LIST_MAC, index, id, {}, true,
+        CString status;
+        status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
+        const auto title=id==2?Wide(volume->Name()):Wide(volume->Name())+L":"+folderTitle;
+        session_.PublishFolder(*prepared,item,id==2?std::nullopt:std::optional<std::wstring>(L""),title,status,
             [&](const BrowserDirectory::Row& row) {
-                return Insert(index, row.id, item, Wide(row.entry.name));
+                return Insert(index,row.location.Id(),item,Wide(row.entry.name));
             });
-        session_.SetLocationTitle(id==2?Wide(volume->Name()):Wide(volume->Name())+L":"+folderTitle);
         current=index;folder=id;folderMutable=!cached&&mutableFolder;
         tree->enable_selchange(enabled);
-        if(session_.Status()){CString status;status.Format("%s%s - %I64u bytes free",volume->Kind(),volume->Writable()?"":" (read-only)",free);
-            session_.Status()->SetPaneText(0,status);}
         if(cached)session_.Defer(key,false,[this,index,id]{
             int selected;uint32_t selectedId;
             if(Selected(selected,selectedId) && selected==index && selectedId==id){
@@ -540,11 +510,11 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 BrowserDirectory::ObserveRead("image-root");
                 root->entries=volume->List(2);
                 root->free=volume->FreeBytes();
-                result.folder=Location::Mounted(volume);
-                StorageLocation::ValidateMedia(result.folder);
+                result.listing.folder=Location::Mounted(volume);
+                StorageLocation::ValidateMedia(result.listing.folder);
                 StorageLocation::ValidateImage(source.path,key);
-                result.folder.directory=true;
-                State::FillListing(result.listing,root->entries,-1,volume->Supports(),showInvisible,true);
+                result.listing.folder.directory=true;
+                State::FillListing(result.listing,root->entries,volume->Supports(),showInvisible,true);
             }catch(const HfsPlus::ExternalJournalRequired& error){
                 result.listing.resourceKey.clear();
                 result.journalPrompt=error.what();
@@ -565,7 +535,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 else if(next)next();
                 return;
             }
-            const auto volume=result.folder.Volume();
+            const auto volume=result.listing.folder.Volume();
             auto match=std::find_if(state_->mounts.begin(),state_->mounts.end(),[&](const auto& mount){
                 return mount.volume&&mount.volume->ResourceKey()==volume->ResourceKey();
             });
@@ -575,7 +545,6 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 state_->mounts.push_back({volume,path,nullptr,-1});
             }else index=int(match-state_->mounts.begin());
             if(!state_->mounts[index].root)state_->Root(index);
-            for(auto& row:result.listing.rows)row.volume=index;
             state_->Publish(index,2,state_->mounts[index].root,false,false,volume,
                 result.listing.revision,Wide(volume->Name()),{},root->entries,root->free,true,{2},&result.listing);
             RememberImage(path);
@@ -1034,7 +1003,6 @@ BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
 }
 FileOperations::Location MainMacBrowser::TargetFolder(HTREEITEM item){return state_->Target(item);}
 BrowserDirectory::Folder MainMacBrowser::DescribeFolder(HTREEITEM item){return state_->Folder(item);}
-void MainMacBrowser::BindRow(BrowserDirectory::Row& row,const std::string& key){state_->BindRow(row,key);}
 bool MainMacBrowser::TransferSelection(const std::vector<Location>& sources,const Location& target,std::function<void(bool)> completed){
  try{return !sources.empty()&&state_->Transfer(sources,target,std::move(completed));}catch(const std::exception& e){
 #ifdef HFV_TESTING

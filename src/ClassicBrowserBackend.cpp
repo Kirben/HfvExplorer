@@ -157,8 +157,7 @@ bool BrowserFolderReader::prepare_classic_browser_row( hfs_item_type *pitem, Cat
 		}
 
 
-        row.storageType=LIST_HFS;row.volume=pitem->volinx;row.id=uint32_t(id);row.parent=uint32_t(pitem->id);
-        row.entry.id=row.id;row.entry.parent=row.parent;row.entry.resolvedId=row.id;
+        row.entry.id=uint32_t(id);row.entry.parent=uint32_t(pitem->id);row.entry.resolvedId=row.entry.id;
         row.entry.name=BrowserDirectory::FromAnsi((char*)pitem->catkeyrec.ckrCName);row.entry.directory=isdir!=0;
         row.entry.created=creation_date;row.entry.modified=modification_date;row.entry.datesValid=true;
         row.created=BrowserDirectory::MacTime(creation_date);row.modified=BrowserDirectory::MacTime(modification_date);
@@ -204,6 +203,11 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
   selected.ReadMount(info);
   if(id==2)directory=std::string(selected.m_volume_name.GetString())+":";
  }
+ snapshot.folder=FileOperations::Location::Classic(image,directory);
+ snapshot.folder.directory=true;
+ snapshot.folder.expectedCatalogId=uint32_t(id);
+ snapshot.folder.expectedResource=snapshot.resourceKey;
+ if(selected.m_mediaGenerationKnown)snapshot.folder.BindMediaGeneration(selected.m_mediaGeneration);
  auto records=MacBrowser::ReadClassicCatalog(*volume,job);
  snapshot.finderMode=FINDER_VIEW_MODE_ICON;
  if(finder&&parentId){
@@ -233,7 +237,13 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
   BrowserDirectory::Row row;
   if(!prepare_classic_browser_row(&item,record.folderIcon?&folderIcon:nullptr,snapshot.finderMode,row))
    continue;
-  row.path=directory+(directory.empty()||directory.back()!=':'?":":"")+name;
+  row.location=FileOperations::Location::Classic(image,
+      directory+(directory.empty()||directory.back()!=':'?":":"")+name);
+  row.location.directory=row.entry.directory;
+  row.location.expectedCatalogId=row.entry.id;
+  row.location.expectedResource=snapshot.resourceKey;
+  if(snapshot.folder.MediaGenerationKnown())row.location.BindMediaGeneration(snapshot.folder.MediaGeneration());
+  row.accessKey=snapshot.resourceKey;
   if(finder&&(row.point.x!=-1||row.point.y!=-1)&&
      (row.initialized||is_inside_magic(row.point.x,row.point.y))){
    x=(std::min)(x,unmagic(row.point.x));
@@ -332,11 +342,8 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    result.listing=reader->read_classic_browser_directory(index,id,directory.c_str(),finder,parentId,&job,backend.get());
    if(result.listing.resourceKey!=request.resource)
     return Storage::Result{1,ERROR_MEDIA_CHANGED,"The classic HFS image was replaced."};
-   result.folder.SetClassic(request.folder.ClassicImage(),directory);
-   result.folder.expectedCatalogId=id;
-   if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
-   StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
-   StorageLocation::ValidateImage(VolumeCoord::Wide(result.folder.ClassicImage()),request.resource);
+   StorageLocation::ValidateMedia(result.listing.folder,StorageLocation::FloppyProbe::FreshHandle);
+   StorageLocation::ValidateImage(VolumeCoord::Wide(result.listing.folder.ClassicImage()),request.resource);
    return Storage::Result{};
   }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"Classic HFS volume busy"};}
  },[this,reader,route,index,item,root,refresh,path,findResult=bool(find),parent](Result& result){
@@ -348,7 +355,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   m_volumes.ReplaceFrom(index,reader->Slots(),index);
   m_classicRevision[index]=result.listing.revision;
   control.SetItemText(root,m_volumes[index].m_volume_name);
-  const auto& shown=result.folder.ClassicPath();
+  const auto& shown=result.listing.folder.ClassicPath();
   auto target=item;
   const auto enabled=tree->SelectionNotificationsEnabled();
   tree->enable_selchange(0);
@@ -362,8 +369,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   tree->enable_selchange(enabled);
   const auto parentId=route->empty()?parent:route->back().parent;
   const auto parentPath=parentId?tree->get_directory_name(root,index,parentId):CString();
-  session.PrepareFolderPresentation(target,parentPath,parentId!=0);
-  PublishClassicFolder(index,result.folder.expectedCatalogId,shown,result.listing);
+  PublishClassicFolder(index,target,parentId?std::optional<std::wstring>(VolumeCoord::Wide((LPCSTR)parentPath)):std::nullopt,result.listing);
  },mount,retry,[this,index,root,initial=find&&find->tryNextStartupRoot,
     named=find&&id==0?find->folder.ClassicPath():std::string()]{
   if(!initial)return false;

@@ -84,11 +84,14 @@ void OnWorker(std::function<void()> work){auto job=Storage::worker().submit([&](
 void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shared_ptr<Bytes> classic){
  auto api=std::make_shared<Fake>();auto device=api->Add(L"UI USB",plus,BusTypeUsb,false);api->Add(L"UI Zip",classic,BusTypeScsi,true);api->workerOnly=true;Removable::SetTestApi(api);browserHost=root.c_str();auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());app.m_startup_hds=FALSE;app.m_startup_floppies=app.m_startup_cds=FALSE;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;app.InstallBrowserTemplate(RUNTIME_CLASS(RemovableDoc),RUNTIME_CLASS(RemovableFrame));auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);Check(a&&b&&!a->IsWindowVisible()&&!b->IsWindowVisible(),"Hidden removable browser creation");auto& sa=a->GetBrowserSession();auto& sb=b->GetBrowserSession();Check(api->enumerations==0&&MacRoots(sa)==0,"Disabled removable startup option still scanned disks");
  {COptionsPage1 page;Check(page.Create(IDD_OPTIONS_PAGE_1,a)!=FALSE&&page.GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->IsWindowEnabled(),"Other Mac media startup control disabled");page.m_startup_hds=TRUE;page.UpdateData(FALSE);Check(page.IsDlgButtonChecked(IDC_OPTIONS_STARTUP_HDS)==BST_CHECKED,"Other Mac media checkbox binding");page.DestroyWindow();}
+ Check(sa.AwaitNavigationForTest()&&sa.MacBrowser().TargetFolder().IsWindows(),"load initial Windows folder before testing scan overlap");
  api->gate=true;
  a->SendMessage(WM_COMMAND,ID_FILE_SCAN_REMOVABLE);
  Until([&]{return WaitForSingleObject(api->entered,0)==WAIT_OBJECT_0;},"manual scan did not reach the worker");
  Check(a->IsWindowEnabled()&&MacRoots(sa)==0&&MacRoots(sb)==0,"slow scan blocked the browser or published early");
- Check(sa.RefreshSelected()&&sa.AwaitNavigationForTest(),"browse an unrelated folder while detection is suspended");
+ Check(sa.RefreshSelected(),"queue refresh of the unrelated folder during discovery");
+ const bool refreshed=sa.AwaitNavigationForTest();
+ Check(refreshed,sa.navigationErrorForTest.empty()?"browse an unrelated folder while detection is suspended":sa.navigationErrorForTest.c_str());
  const auto hostSelection=sa.Tree()->GetTreeCtrl().GetSelectedItem();
  MediaDiscovery::Changed(DWORD(1)<<25);
  SetEvent(api->release);

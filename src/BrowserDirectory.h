@@ -22,9 +22,8 @@ struct Row {
     HTREEITEM treeItem=nullptr;
     MacBrowser::Entry entry;
     MacBrowser::Capabilities capabilities;
-    int storageType = LIST_MAC, volume = -1, mediaDrive = -1;
-    uint32_t id = 0, parent = 0;
-    std::string path,accessKey;
+    bool parentLink=false;
+    std::string accessKey;
     uint64_t created = 0, modified = 0, directoryItems = 0;
     bool countKnown = false, initialized = false;
     POINT point{-1,-1};
@@ -34,8 +33,7 @@ struct Row {
 };
 struct Snapshot {
     std::string resourceKey;uint64_t revision=0;
-    std::wstring folderPath;std::string folderIdentity;
-    std::optional<DWORD> windowsMediaSerial;
+    FileOperations::Location folder;
     std::vector<Row> rows;
     MacBrowser::Capabilities capabilities;
     bool capabilitiesKnown=false;
@@ -63,8 +61,15 @@ inline uint64_t Bytes(const MacBrowser::Entry& e) {
     return UINT64_MAX-e.forks[0].size<e.forks[1].size?UINT64_MAX:e.forks[0].size+e.forks[1].size;
 }
 inline unsigned Label(const MacBrowser::Entry& e) { return ((unsigned(e.finder[8])<<8|e.finder[9])>>1)&7; }
-inline Row FromMac(const MacBrowser::Entry& e,int volume,MacBrowser::Capabilities caps) {
-    Row row;row.entry=e;row.volume=volume;row.id=e.id;row.parent=e.parent;row.capabilities=caps;
+inline Row FromMac(const MacBrowser::Entry& e,const std::shared_ptr<MacBrowser::Volume>& volume,
+                   MacBrowser::Capabilities caps) {
+    Row row;row.entry=e;row.capabilities=caps;
+    row.location=FileOperations::Location::Mounted(volume,e.id);
+    row.location.directory=e.directory;
+    row.location.expectedIdentity=e.identity;
+    row.location.expectedName=e.name;
+    row.location.expectedParent=e.parent;
+    row.accessKey=volume->ResourceKey();
     if(e.protectedFile||!e.readError.empty())row.capabilities.create=row.capabilities.rename=row.capabilities.remove=false;
     if(e.datesValid){row.created=MacTime(e.created);row.modified=MacTime(e.modified);}return row;
 }
@@ -79,7 +84,7 @@ inline int Compare(const Row& a,const Row& b,int column,bool ascending) {
     else if(column==6)result=number(Label(a.entry),Label(b.entry));
     auto compareName=[&](BOOL ignore){return CompareStringOrdinal(reinterpret_cast<const wchar_t*>(a.entry.name.data()),int(a.entry.name.size()),reinterpret_cast<const wchar_t*>(b.entry.name.data()),int(b.entry.name.size()),ignore)-CSTR_EQUAL;};
     if(!result)result=compareName(TRUE);if(!result)result=compareName(FALSE);
-    if(!result)result=number(a.entry.version,b.entry.version);if(!result)result=number(a.id,b.id);
+    if(!result)result=number(a.entry.version,b.entry.version);if(!result)result=number(a.entry.id,b.entry.id);
     return ascending?result:-result;
 }
 inline std::wstring DateText(uint64_t ticks) {

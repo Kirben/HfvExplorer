@@ -22,7 +22,6 @@ struct Request {
 };
 
 struct Result {
-    FileOperations::Location folder;
     BrowserDirectory::Snapshot listing;
     Storage::Result status;
     std::string journalPrompt;

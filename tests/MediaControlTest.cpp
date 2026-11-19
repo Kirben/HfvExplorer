@@ -72,7 +72,7 @@ int RunMediaControlTest(const char* directory){
   BrowserDirectory::Snapshot listing;
   const auto parent=VolumeCoord::Wide(directory).substr(0,VolumeCoord::Wide(directory).find_last_of(L"\\/"));
   auto browsed=ShowStorageWaitJob([&](Storage::Job& job){
-   listing=reader.read_windows_browser_directory(0,parent,true,job);
+   listing=reader.read_windows_browser_directory(parent,true,job);
    return Storage::Result{};
   },true,&other);
   check(!browsed.code&&!listing.rows.empty()&&!completed,"second browser can list an unrelated folder during reload");

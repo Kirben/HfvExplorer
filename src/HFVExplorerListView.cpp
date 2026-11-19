@@ -98,7 +98,7 @@ HICON CHFVExplorerListView::get_lparam_icon32(LPARAM key)
 long CHFVExplorerListView::get_lparam_id(LPARAM key)
 {
  const auto* row=BoundRow(key);
- return row?long(row->id):0;
+ return row?long(row->entry.id):0;
 }
 
 int CHFVExplorerListView::get_lparam_isdir(LPARAM key)
@@ -116,13 +116,13 @@ int CHFVExplorerListView::get_inx_isdir(int index)
 int CHFVExplorerListView::get_lparam_type(LPARAM key)
 {
  const auto* row=BoundRow(key);
- return row?row->storageType:LIST_UNKNOWN;
+ return row?(row->parentLink?LIST_SPEC:row->location.LegacyType()):LIST_UNKNOWN;
 }
 
 int CHFVExplorerListView::get_inx_type(int index)
 {
  const auto* row=BoundRow(m_cl->GetItemData(index));
- return row?(row->storageType==LIST_SPEC?LIST_SPEC:row->location.LegacyType()):-1;
+ return row?(row->parentLink?LIST_SPEC:row->location.LegacyType()):-1;
 }
 
 HTREEITEM CHFVExplorerListView::get_lparam_htree(LPARAM key)
@@ -400,45 +400,33 @@ int is_mac_path( CString &name )
 	return(i);
 }
 
-int CHFVExplorerListView::initialize_volume( CString root_name, unsigned long id )
+int CHFVExplorerListView::initialize_volume(CString root_name,unsigned long id)
 {
-	LV_ITEM	lvitem;
-	int iActualItem;
-	LPSTR buf;
+    InitializeFolderRows(id?std::optional<std::wstring>(VolumeCoord::Wide((LPCSTR)root_name)):std::nullopt,
+        root_name.IsEmpty()||is_mac_path(root_name));
+    return 1;
+}
 
-	list_clear();
+void CHFVExplorerListView::InitializeFolderRows(const std::optional<std::wstring>& parent,bool mac)
+{
+    list_clear();
+    if(!parent||(mac&&GetBrowserSession().finderLayout))return;
 
-	if(id) {
-		 // call by value
-		if(GetBrowserSession().finderLayout) {
-			if(root_name == "" || is_mac_path(root_name)) {
-				// In mac windowed mode, no up puttons.
-				return(1);
-			}
-		}
-
-		if(root_name == "") {
-			root_name = "Root folder";
-		} else {
-			root_name = " ..up to " + root_name;
-		}
-		buf = root_name.GetBuffer( MAX_PATH );
-		lvitem.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM | LVIF_STATE;
-		lvitem.iItem = m_item_count;
-		lvitem.iSubItem = 0;
-		lvitem.pszText = buf;
-		lvitem.iImage = 2;
-		BrowserDirectory::Row command;command.storageType=LIST_SPEC;command.id=id;command.entry.directory=true;
-        lvitem.lParam=StoreRow(std::move(command));
-		lvitem.state = LVIS_FOCUSED | LVIS_SELECTED;
-		lvitem.stateMask = LVIS_FOCUSED | LVIS_SELECTED;
-		iActualItem = m_cl->InsertItem(&lvitem);
-        if(iActualItem>=0&&id==ID_GOTO_PARENT)m_parentRowData=lvitem.lParam;
-		m_item_count++;
-		root_name.ReleaseBuffer();
-	}
-
-	return(1);
+    auto label=parent->empty()?std::wstring(L"Root folder"):L" ..up to "+*parent;
+    BrowserDirectory::Row command;
+    command.parentLink=true;
+    command.entry.id=ID_GOTO_PARENT;
+    command.entry.directory=true;
+    LVITEMW item{};
+    item.mask=LVIF_TEXT|LVIF_IMAGE|LVIF_PARAM|LVIF_STATE;
+    item.pszText=label.data();
+    item.iImage=2;
+    item.lParam=StoreRow(std::move(command));
+    item.state=item.stateMask=LVIS_FOCUSED|LVIS_SELECTED;
+    if(SendMessageW(m_cl->m_hWnd,LVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&item))>=0){
+        m_parentRowData=item.lParam;
+        ++m_item_count;
+    }else m_browser_rows.erase(item.lParam);
 }
 
 int CHFVExplorerListView::initialize_list()
@@ -468,61 +456,6 @@ void CHFVExplorerListView::set_origo( int x, int y )
 	m_mac_origo.y = y;
 	// m_mac_origo.x = 0;
 	// m_mac_origo.y = 0;
-}
-
-int CHFVExplorerListView::list_insert(
-		LPSTR name, 
-		int isdir, 
-		hfv_size_t size_in_bytes,
-		unsigned long creation_date,
-		unsigned long modification_date,
-		char *stype,
-		char *screator,
-		unsigned long id,
-		HICON hicon32,
-		HICON hicon16,
-		HTREEITEM htree,
-		int volinx,
-		LPPOINT ppoint,
-		BOOL is_inited,
-		int finder_view_mode,
-		int finder_color, int storageType, int *insertedRow
-)
-{
-BrowserDirectory::Row row;row.storageType=storageType;row.volume=volinx;row.id=uint32_t(id);
- row.entry.id=row.id;row.entry.name=BrowserDirectory::FromAnsi(name);row.entry.directory=isdir!=0;
- row.entry.created=creation_date;row.entry.modified=modification_date;row.entry.datesValid=true;
- row.created=BrowserDirectory::MacTime(creation_date);row.modified=BrowserDirectory::MacTime(modification_date);
- if(isdir){row.countKnown=true;row.directoryItems=size_in_bytes;}else row.entry.forks[0].size=size_in_bytes;
- memcpy(row.entry.finder.data(),stype,(std::min)(size_t(4),strlen(stype)));
- memcpy(row.entry.finder.data()+4,screator,(std::min)(size_t(4),strlen(screator)));
- row.entry.finder[9]=BYTE(finder_color<<1);row.icon16=hicon16;row.icon32=hicon32;
- if(ppoint)row.point=*ppoint;row.initialized=is_inited!=FALSE;row.finderMode=finder_view_mode;
- int result=InsertBrowserRow(row,htree);if(insertedRow)*insertedRow=result;return result>=0;
-}
-
-int CHFVExplorerListView::list_fat_insert(
-		LPSTR name, 
-		int isdir, 
-		hfv_size_t size_in_bytes,
-		FILETIME *creation_date,
-		FILETIME *modification_date,
-		HICON hicon16,
-		HICON hicon32,
-		char *stype,
-		char *screator,
-		LPSTR fullpath,
-		HTREEITEM htree,
-		int volinx
-)
-{
-BrowserDirectory::Row row;row.storageType=LIST_FAT;row.volume=volinx;row.path=fullpath;
- row.entry.name=BrowserDirectory::FromAnsi(name);row.entry.directory=isdir!=0;
- row.created=BrowserDirectory::Ticks(*creation_date);row.modified=BrowserDirectory::Ticks(*modification_date);
- if(isdir){row.countKnown=true;row.directoryItems=size_in_bytes;}else row.entry.forks[0].size=size_in_bytes;
- memcpy(row.entry.finder.data(),stype,(std::min)(size_t(4),strlen(stype)));
- memcpy(row.entry.finder.data()+4,screator,(std::min)(size_t(4),strlen(screator)));
- row.icon16=hicon16;row.icon32=hicon32;return InsertBrowserRow(row,htree)>=0;
 }
 
 int CHFVExplorerListView::FillList()
@@ -663,7 +596,7 @@ int CHFVExplorerListView::do_rename(
  auto operation=FileOperations::Submit(std::move(request));auto outcome=ShowSubmittedStorageJob(operation.Job(),"Renaming",HiddenOperationProgress(GetBrowserSession().Owner()),true,true,GetBrowserSession().Owner());
  const bool result=outcome.code==0;if(outcome.code&&outcome.error!=ERROR_CANCELLED&&!HiddenOperationProgress(GetBrowserSession().Owner()))GetBrowserSession().Owner()->MessageBox(outcome.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
  if(result){std::string changed=oldPath;auto pos=changed.find_last_of(source.LegacyType()==LIST_HFS?':':'\\');if(pos!=std::string::npos)changed.resize(pos+1);changed+=new_name;
-  auto found=m_browser_rows.find(LPARAM(ds));if(found!=m_browser_rows.end()){found->second.path=changed;found->second.entry.name=BrowserDirectory::FromAnsi(new_name);
+  auto found=m_browser_rows.find(LPARAM(ds));if(found!=m_browser_rows.end()){found->second.entry.name=BrowserDirectory::FromAnsi(new_name);
    auto& location=found->second.location;
    if(source.IsClassic()){
     location.SetClassic(source.ClassicImage(),changed);
@@ -714,7 +647,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
     const auto binding=row?0:m_cl->GetItemData(inx);
     if(!row&&(!binding||get_lparam_type(binding)!=LIST_SPEC))return;
     const int entry_type=row?row->location.LegacyType():LIST_SPEC;
-    const auto id=row?row->id:get_lparam_id(binding);
+    const auto id=row?row->entry.id:get_lparam_id(binding);
     int emulator=control<0?-control:0;
 
 	if(entry_type == LIST_SPEC) {
@@ -750,10 +683,12 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
     request.entry=row->entry;
     request.icons=row->ownedIcons;
     request.small=row->icon16;request.large=row->icon32;
-    request.classicSlot=row->volume;
     request.target=DocumentLaunch::FromMenuCommand(emulator);
     request.shortcut=make_shortcut!=FALSE;
     auto& session=GetBrowserSession();
+    const auto* node=session.Tree()->BrowserNodeAt(session.Tree()->GetTreeCtrl().GetSelectedItem());
+    if(row->location.IsClassic()&&node&&node->mount.kind==BrowserMountInventory::Kind::ClassicVolume)
+        request.classicSlot=node->mount.index;
     try{request.selection=session.MacBrowser().CaptureItem(inx);}
     catch(const std::exception& error){session.Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return;}
     DocumentLaunch::Launch(session,std::move(request));

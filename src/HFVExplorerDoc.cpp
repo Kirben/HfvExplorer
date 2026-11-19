@@ -319,19 +319,19 @@ void CHFVExplorerDoc::open_fat_directory(int index, LPSTR path, int list)
         const bool root=is_fat_root_directory(path)!=0;
         if(root||separator==parent.npos)parent.clear();
         else parent.resize(separator==2?3:separator);
-        session.PrepareFolderPresentation(session.Tree()->GetTreeCtrl().GetSelectedItem(),parent.c_str(),!root);
+        session.PrepareFolderPresentation(session.Tree()->GetTreeCtrl().GetSelectedItem(),root?std::nullopt:std::optional<std::wstring>(VolumeCoord::Wide(parent)),false);
     }
     BrowserDirectory::Snapshot snapshot;
     folderReader_->SetOptions(FolderOptions());
     const auto result=ShowStorageWaitJob([&](Storage::Job& job){
-        snapshot=folderReader_->read_windows_browser_directory(index,VolumeCoord::Wide(directory),list!=0,job);
+        snapshot=folderReader_->read_windows_browser_directory(VolumeCoord::Wide(directory),list!=0,job);
         return Storage::Result{};
     },true,GetBrowserSession().Owner());
     if(result.code){
         session.List()->SetBrowserCapabilities({});
         return;
     }
-    apply_browser_directory(snapshot,LIST_FAT,index,2,directory,list!=0);
+    PublishWindowsFolder(index,snapshot,session.Tree()->GetTreeCtrl().GetSelectedItem());
 }
 #endif
 
@@ -589,12 +589,12 @@ void CHFVExplorerDoc::open_sub_directory(int index,unsigned long id,CString name
         tree->GetTreeCtrl().SetItemText(volume.m_rootitem,volume.m_volume_name);
     }
     const auto item=tree->find_item(index,volume.m_rootitem,id);
-    session.PrepareFolderPresentation(item,parent?tree->get_directory_name(volume.m_rootitem,index,parent):CString(),parent!=0);
-    PublishClassicFolder(index,uint32_t(id),static_cast<LPCSTR>(path),snapshot);
+    const auto label=parent?std::optional<std::wstring>(VolumeCoord::Wide((LPCSTR)tree->get_directory_name(volume.m_rootitem,index,parent))):std::nullopt;
+    PublishClassicFolder(index,item,label,snapshot);
 }
 #endif
 
-void CHFVExplorerDoc::PublishClassicFolder(int volinx,uint32_t id,const std::string& path,
+void CHFVExplorerDoc::PublishClassicFolder(int volinx,HTREEITEM item,const std::optional<std::wstring>& parent,
     const BrowserDirectory::Snapshot& snapshot)
 {
  int finder_view_mode=snapshot.finderMode;
@@ -649,12 +649,17 @@ void CHFVExplorerDoc::PublishClassicFolder(int volinx,uint32_t id,const std::str
 		}
   GetBrowserSession().List()->set_origo(snapshot.originX,snapshot.originY);
  }
- apply_browser_directory(snapshot, LIST_HFS, volinx, id, path, true);
- if(auto status=GetBrowserSession().Status()){
-  CString message;
-  message.Format("Exploring \"%s\": %I64u kB free",path.c_str(),m_volumes[volinx].freeBytes/1024);
-  status->SetPaneText(0,message);
- }
+ auto& session=GetBrowserSession();
+ const auto& path=snapshot.folder.ClassicPath();
+ auto title=VolumeCoord::Wide(path);
+ if(!title.empty()&&title.back()==L':')title.pop_back();
+ CString status;
+ status.Format("Exploring \"%s\": %I64u kB free",path.c_str(),m_volumes[volinx].freeBytes/1024);
+ const auto root=m_volumes[volinx].m_rootitem;
+ session.PublishFolder(snapshot,item,parent,std::move(title),status,[&](const BrowserDirectory::Row& row){
+    CStringA name(MacBrowser::Wide(row.entry.name).c_str());
+    return session.Tree()->tree_insert(root,volinx,const_cast<char*>(name.GetString()),row.entry.id,row.entry.parent);
+ });
 }
 
 

@@ -55,7 +55,6 @@ public:
     BrowserTransfers::Selection SelectedItems(bool cut);
     FileOperations::Location TargetFolder(HTREEITEM item=nullptr);
     BrowserDirectory::Folder DescribeFolder(HTREEITEM item=nullptr);
-    void BindRow(BrowserDirectory::Row&,const std::string& resourceKey={});
     bool TransferSelection(const std::vector<FileOperations::Location>&,const FileOperations::Location&,std::function<void(bool)> completed={});
     bool Command(UINT);
     bool ContextMenu(CPoint);

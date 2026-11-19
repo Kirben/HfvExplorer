@@ -16,8 +16,8 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     const auto& e=row.entry;auto name=MacBrowser::Wide(e.name);
     if(e.version)name+=L" [version "+std::to_wstring(e.version)+L"]";
     char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);
-    int image=e.directory?(row.storageType==LIST_FAT?12:0):(row.storageType==LIST_FAT?1:8);
-    if(row.storageType!=LIST_FAT&&!e.directory){
+    int image=e.directory?(row.location.IsWindows()?12:0):(row.location.IsWindows()?1:8);
+    if(!row.location.IsWindows()&&!e.directory){
         if(!strcmp(type,"APPL"))image=4;
         else if(!strcmp(type,"FFIL")||!strcmp(type,"ffil")||!strcmp(type,"tfil"))image=6;
         else if(!strcmp(type,"DFIL")||!strcmp(type,"dfil"))image=10;
@@ -38,7 +38,6 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     }
     auto value=row;
     value.treeItem=tree;
-    if(value.location.IsNone())GetBrowserSession().MacBrowser().BindRow(value);
     const auto data=StoreRow(std::move(value));
     LVITEMW item{};item.mask=LVIF_TEXT|LVIF_IMAGE|LVIF_PARAM;item.iItem=m_item_count;item.pszText=const_cast<wchar_t*>(name.c_str());item.iImage=image;item.lParam=data;
     if(!m_cl->GetItemCount()){item.mask|=LVIF_STATE;item.state=item.stateMask=LVIS_FOCUSED|LVIS_SELECTED;}
@@ -54,7 +53,7 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
     BrowserPresentation::Cell(m_cl->m_hWnd,index,FIELD_CREATOR,MacBrowser::Wide(BrowserDirectory::FromAnsi(creator)));
     BrowserPresentation::Cell(m_cl->m_hWnd,index,FIELD_LABEL,MacBrowser::Wide(BrowserDirectory::FromAnsi(get_label_text(BrowserDirectory::Label(e)))));
     auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
-    if(GetBrowserSession().finderLayout&&row.storageType==LIST_HFS&&
+    if(GetBrowserSession().finderLayout&&row.location.IsClassic()&&
        (row.initialized||is_inside_magic(row.point.x,row.point.y))&&!(row.point.x==-1&&row.point.y==-1))
     {
         auto& axes = m_iconPositions[data];
@@ -67,7 +66,7 @@ int CHFVExplorerListView::InsertBrowserRow(const BrowserDirectory::Row& row,HTRE
 }
 const BrowserDirectory::Row* CHFVExplorerListView::BrowserRowAt(int row)const{
  const auto* binding=BoundRow(GetListCtrl().GetItemData(row));
- return binding&&binding->storageType!=LIST_SPEC?binding:nullptr;
+ return binding&&!binding->parentLink?binding:nullptr;
 }
 bool CHFVExplorerListView::StorageSelectionAvailable(bool exclusive)const{
  if(!GetBrowserSession().ListingAvailable())return false;
@@ -104,7 +103,7 @@ void CHFVExplorerListView::SortBrowserRows(int column,bool ascending){
     auto compare=[](LPARAM left,LPARAM right,LPARAM raw)->int {
         auto& c=*reinterpret_cast<Context*>(raw);
         auto x=c.rows->find(left),y=c.rows->find(right);if(x==c.rows->end()||y==c.rows->end())return 0;
-        const bool a=x->second.storageType==LIST_SPEC,b=y->second.storageType==LIST_SPEC;
+        const bool a=x->second.parentLink,b=y->second.parentLink;
         if(a||b)return a==b?0:a?-1:1;
         return BrowserDirectory::Compare(x->second,y->second,c.column,c.ascending);
     };

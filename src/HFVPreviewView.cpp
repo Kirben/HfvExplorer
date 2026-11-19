@@ -121,7 +121,17 @@ void CHFVPreviewView::ReadSelection() {
     const auto row = control.GetSelectedCount() == 1 ?
         list->BrowserRowAt(control.GetNextItem(-1, LVNI_SELECTED)) : nullptr;
     if (!row || row->location.IsNone()) { Clear(); return; }
-    drive_ = row->mediaDrive;
+    const auto& location=row->location;
+    drive_=-1;
+    if(location.IsPhysical())drive_=location.Drive();
+    else if(location.IsMounted())drive_=location.Volume()->CdDrive();
+    else if(location.IsWindows()){
+        const auto& path=location.WindowsPath();
+        if(path.size()>1&&path[1]==L':'){
+            const auto letter=towupper(path[0]);
+            if(letter>=L'A'&&letter<=L'Z')drive_=letter-L'A';
+        }
+    }
     const auto& entry = row->entry;
     name_ = MacBrowser::Wide(entry.name);
     const bool mac = !row->location.IsWindows();

@@ -36,7 +36,7 @@ struct BrowserSession::Notifications:public CWnd {
   }
   if((message==VolumeCoord::Notification&&w==session.subscription_.Id())||(message==WM_TIMER&&w==1)){
    auto list=session.List();bool editing=list&&IsWindow(list->GetSafeHwnd())&&(list->GetListCtrl().GetEditControl()||list->IsDragging());
-   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||session.Navigating()||editing||(!session.current_.key.empty()&&!VolumeCoord::Available({{session.current_.key,session.current_.type==LIST_FAT?VolumeCoord::Mode::Browse:VolumeCoord::Mode::Read}}))){SetTimer(1,75,nullptr);return 0;}
+   if(StorageUi::busy()||StorageUi::state().sessionOpen||session.refreshing_||session.Navigating()||editing||(!session.current_.key.empty()&&!VolumeCoord::Available({{session.current_.key,session.current_.folder.IsWindows()?VolumeCoord::Mode::Browse:VolumeCoord::Mode::Read}}))){SetTimer(1,75,nullptr);return 0;}
    KillTimer(1);session.ProcessChanges();return 0;
   }
   return CWnd::WindowProc(message,w,l);
@@ -68,7 +68,7 @@ std::wstring BrowserSession::WindowTitle()const{return locationTitle_.empty()?L"
 void BrowserSession::SetLocationTitle(std::wstring title){
  locationTitle_=std::move(title);UpdateWindowTitle();
 }
-std::string BrowserSession::ObservedWindowsKey(const std::wstring& path)const{return current_.type==LIST_FAT&&!_wcsicmp(current_.windowsPath.c_str(),path.c_str())?current_.key:std::string();}
+std::string BrowserSession::ObservedWindowsKey(const std::wstring& path)const{return current_.folder.IsWindows()&&!_wcsicmp(current_.folder.WindowsPath().c_str(),path.c_str())?current_.key:std::string();}
 void BrowserSession::ClearCurrent(){CancelNavigation();if(preview_)preview_->Clear();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::UsesAsyncNavigation() const
 {
@@ -117,18 +117,22 @@ void BrowserSession::CancelNavigation()
 }
 
 namespace {
-bool MatchesNavigationEntry(const BrowserDirectory::Row& row, const FileOperations::Location& item,
-                            const FileOperations::Location* folder=nullptr)
+bool SameFolder(const FileOperations::Location& a,const FileOperations::Location& b)
 {
-    if (!StorageLocation::MatchesEntry(item,row.entry)) return false;
-    if (item.IsMounted()) return row.storageType==LIST_MAC && row.id==item.Id();
-    const auto& media=row.location.IsNone()&&folder?*folder:row.location;
-    if(item.MediaGenerationKnown()&&(!media.MediaGenerationKnown()||media.MediaGeneration()!=item.MediaGeneration()))return false;
-    if(item.WindowsMediaSerial()&&media.WindowsMediaSerial()!=item.WindowsMediaSerial())return false;
-    if (item.IsClassic()) return row.storageType==LIST_HFS &&
-        !_stricmp(row.path.c_str(),item.ClassicPath().c_str());
-    return item.IsWindows() && row.storageType==LIST_FAT && row.location.IsWindows() &&
-        !_wcsicmp(row.location.WindowsPath().c_str(),item.WindowsPath().c_str());
+ if(a.IsMounted()&&b.IsMounted())return a.Volume()==b.Volume()&&a.Id()==b.Id();
+ if(a.IsClassic()&&b.IsClassic())return a.expectedCatalogId==b.expectedCatalogId;
+ return a.IsWindows()&&b.IsWindows()&&!_wcsicmp(a.WindowsPath().c_str(),b.WindowsPath().c_str());
+}
+
+bool MatchesNavigationEntry(const BrowserDirectory::Row& row,const FileOperations::Location& item)
+{
+ if(!StorageLocation::MatchesEntry(item,row.entry))return false;
+ const auto& location=row.location;
+ if(item.MediaGenerationKnown()&&(!location.MediaGenerationKnown()||location.MediaGeneration()!=item.MediaGeneration()))return false;
+ if(item.WindowsMediaSerial()&&location.WindowsMediaSerial()!=item.WindowsMediaSerial())return false;
+ if(item.IsMounted())return location.IsMounted()&&location.Id()==item.Id();
+ if(item.IsClassic())return location.IsClassic()&&!_stricmp(location.ClassicPath().c_str(),item.ClassicPath().c_str());
+ return item.IsWindows()&&location.IsWindows()&&!_wcsicmp(location.WindowsPath().c_str(),item.WindowsPath().c_str());
 }
 }
 
@@ -147,14 +151,12 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
 #endif
     const auto anchor=tree_->GetTreeCtrl().GetSelectedItem();
     auto result=std::make_shared<BrowserNavigation::Result>();
-    result->folder=request.folder;
+    result->listing.folder=request.folder;
 
     std::vector<FileOperations::Location> selection;
     if (request.intent==BrowserNavigation::Intent::RefreshFolder &&
         current_.key==request.resource &&
-        (request.folder.IsMounted()?current_.folder==request.folder.Id():
-         request.folder.IsClassic()?current_.folder==request.folder.expectedCatalogId:
-         !_wcsicmp(current_.windowsPath.c_str(),request.folder.WindowsPath().c_str()))) {
+        SameFolder(current_.folder,request.folder)) {
         selection=CaptureListingSelection();
     }
 
@@ -189,7 +191,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
             return;
         }
         if(!request.reveal.IsNone() && std::none_of(listing.rows.begin(),listing.rows.end(),
-            [&](const auto& row){return MatchesNavigationEntry(row,request.reveal,&result->folder);})){
+            [&](const auto& row){return MatchesNavigationEntry(row,request.reveal);})){
             RejectNavigation(request.resource,"The search result changed or is hidden.");
             return;
         }
@@ -197,8 +199,8 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
         publish(*result);
         // A drive probe may hand off to another navigation (for example an HFS+ CD).
         if(Navigating())return;
-        if(restoreOnError&&result->folder.IsNone())listingPending_=false;
-        if(request.folder.IsMounted() && result->folder.Volume()!=request.folder.Volume())selection.clear();
+        if(restoreOnError&&result->listing.folder.IsNone())listingPending_=false;
+        if(request.folder.IsMounted() && result->listing.folder.Volume()!=request.folder.Volume())selection.clear();
         if(!request.reveal.IsNone())selection={request.reveal};
         RestoreListingSelection(selection,!request.reveal.IsNone());
 #ifdef HFV_TESTING
@@ -316,7 +318,7 @@ BrowserSession& CMainFrame::GetBrowserSession()const{
 }
 
 void BrowserSession::Watch(const std::string& key){subscription_.Watch(key);}
-void BrowserSession::PrepareFolderPresentation(HTREEITEM item,const CString& parentLabel,bool hasParent)
+void BrowserSession::PrepareFolderPresentation(HTREEITEM item,const std::optional<std::wstring>& parent,bool mac)
 {
  auto& control=tree_->GetTreeCtrl();
  const auto enabled=tree_->SelectionNotificationsEnabled();
@@ -326,61 +328,39 @@ void BrowserSession::PrepareFolderPresentation(HTREEITEM item,const CString& par
   control.EnsureVisible(item);
  }
  tree_->enable_selchange(enabled);
- list_->initialize_volume(parentLabel,hasParent?ID_GOTO_PARENT:0);
+ list_->InitializeFolderRows(parent,mac);
 }
 
-void BrowserSession::PresentDirectory(const BrowserDirectory::Snapshot& snapshot,
-    int type, int index, uint32_t folder, const std::string& path, bool listing,
+void BrowserSession::PublishFolder(const BrowserDirectory::Snapshot& snapshot,HTREEITEM item,
+    const std::optional<std::wstring>& parent,std::wstring title,const CString& status,
     const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder)
 {
+    const auto* node=tree_->BrowserNodeAt(item);
+    if(!node||snapshot.folder.IsNone())throw std::logic_error("Folder result has no browser mount");
+    const auto address=node->mount;
     BrowserPresentation::Batch treeBatch(tree_->GetTreeCtrl().m_hWnd);
-    BrowserPresentation::Batch listBatch(list_->GetListCtrl().m_hWnd, true);
-    if (listing) {
-        listingPending_ = false;
-        if (snapshot.capabilitiesKnown)
-            list_->SetBrowserCapabilities(snapshot.capabilities);
-    }
-    for (auto row : snapshot.rows) {
-        browser_->BindRow(row,snapshot.resourceKey);
-        HTREEITEM child = row.entry.directory ? addFolder(row) : nullptr;
+    BrowserPresentation::Batch listBatch(list_->GetListCtrl().m_hWnd,true);
+    PrepareFolderPresentation(item,parent,!snapshot.folder.IsWindows());
+    if(snapshot.capabilitiesKnown)list_->SetBrowserCapabilities(snapshot.capabilities);
+    for(const auto& row:snapshot.rows){
+        const auto child=row.entry.directory?addFolder(row):nullptr;
         if(child)tree_->BindBrowserFolder(child,{row.location,row.capabilities.create});
-        if (listing)
-            list_->InsertBrowserRow(row, child);
+        list_->InsertBrowserRow(row,child);
     }
-    if(listing&&type==LIST_FAT&&!snapshot.folderPath.empty()){
-        auto location=FileOperations::Location::Windows(snapshot.folderPath);
-        location.directory=true;
-        location.expectedIdentity=snapshot.folderIdentity;
-        location.BindWindowsMediaSerial(snapshot.windowsMediaSerial);
-        tree_->BindBrowserFolder(tree_->GetTreeCtrl().GetSelectedItem(),{std::move(location),snapshot.capabilities.create});
-    }else if(listing&&type==LIST_HFS){
-        const auto& volume=document_->m_volumes[index];
-        const auto item=tree_->find_item(index,volume.m_rootitem,folder);
-        if(item){
-            auto location=FileOperations::Location::Classic((LPCSTR)volume.m_file_name,folder==2?":":path);
-            location.directory=true;
-            location.expectedCatalogId=folder;
-            location.expectedResource=snapshot.resourceKey;
-            if(volume.m_mediaGenerationKnown)location.BindMediaGeneration(volume.m_mediaGeneration);
-            tree_->BindBrowserFolder(item,{std::move(location),snapshot.capabilities.create});
-        }
-    }
-    if (listing) {
-        if (type == LIST_MAC)
-            list_->SortBrowserRows(FIELD_NAME, true);
-        else
-            list_->do_report_sort();
-        Observe(snapshot.resourceKey, snapshot.revision, type, index, folder, path, snapshot.folderPath, snapshot.windowsMediaSerial);
-        if(preview_)preview_->RequestSelection();
-    }
+    tree_->BindBrowserFolder(item,{snapshot.folder,snapshot.capabilities.create});
+    if(snapshot.folder.IsMounted())list_->SortBrowserRows(FIELD_NAME,true);
+    else list_->do_report_sort();
+    Observe(snapshot.resourceKey,snapshot.revision,address,snapshot.folder);
+    SetLocationTitle(std::move(title));
+    if(status_)status_->SetPaneText(0,status);
+    listingPending_=false;
+    if(preview_)preview_->RequestSelection();
 }
 
-void BrowserSession::Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder,std::string path,std::wstring windowsPath,std::optional<DWORD> windowsSerial){
- if(const auto address=BrowserMountInventory::FromTreeBinding(type,index))
-  mounts_.Observe(*address,key,windowsSerial);
- if(type==LIST_FAT&&windowsPath.empty())windowsPath=VolumeCoord::Wide(path);
- current_={key,std::move(path),revision,type,index,folder,std::move(windowsPath)};
- if(type==LIST_FAT||type==LIST_HFS){auto title=type==LIST_FAT?current_.windowsPath:VolumeCoord::Wide(current_.path);if(type==LIST_HFS&&!title.empty()&&title.back()==L':')title.pop_back();SetLocationTitle(std::move(title));}
+void BrowserSession::Observe(std::string key,uint64_t revision,BrowserMountInventory::Address address,FileOperations::Location folder)
+{
+ mounts_.Observe(address,key,folder.WindowsMediaSerial());
+ current_={key,revision,address,std::move(folder)};
  Watch(key);seen_[key]=(std::max)(seen_[key],revision);
  if(dirty_[key]<=revision)dirty_.erase(key);
  // Close the subscribe-after-read race without acknowledging a newer write.
@@ -392,7 +372,7 @@ void BrowserSession::ProcessChanges(){
  // Inactive legacy roots are lazily refilled next time they are selected. Do
  // not leave old child paths pointing at renamed/deleted directories.
  if(document_){bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);
-  const auto active=BrowserMountInventory::FromTreeBinding(current_.type,current_.index);
+  const auto& active=current_.mount;
   for(const auto& key:changed)for(const auto& root:mounts_.Observed(key)){
    if(root.address.kind==BrowserMountInventory::Kind::MountedVolume||
       (current_.key==key&&active&&root.address==*active)||!mounts_.IsCurrent(root))continue;
@@ -461,7 +441,7 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
  if(!binding)return false;
  const auto address=binding->mount;
  if(!mounts_.Lookup(address))return false;
- if(afterMutation&&(current_.type!=binding->LegacyType()||current_.index!=address.index))return false;
+ if(afterMutation&&(!current_.mount||!(*current_.mount==address)))return false;
  if(address.kind==BrowserMountInventory::Kind::MountedVolume)
   return afterMutation?browser_->RefreshForChange(current_.key):browser_->Refresh();
  if(!document_)return false;
@@ -469,10 +449,10 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
   const auto* folder=tree_->BrowserFolderAt(item);
   if(!folder||!folder->location.IsWindows())return false;
   const auto& path=folder->location.WindowsPath();
-  if(afterMutation&&_wcsicmp(path.c_str(),current_.windowsPath.c_str()))return false;
+  if(afterMutation&&_wcsicmp(path.c_str(),current_.folder.WindowsPath().c_str()))return false;
   return document_->NavigateWindowsFolder(address.index,path,true);
  }
  const auto id=binding->CatalogId();
- if(afterMutation&&id!=current_.folder)return false;
+ if(afterMutation&&id!=current_.folder.expectedCatalogId)return false;
  return document_->NavigateClassicFolder(address.index,id,true);
 }

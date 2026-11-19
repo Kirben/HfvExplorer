@@ -19,7 +19,12 @@ class BrowserSession {
  struct Notifications;
  std::unique_ptr<Notifications> notifications_;
  VolumeCoord::Subscription subscription_;
- struct Context {std::string key,path;uint64_t revision=0;int type=0,index=-1;uint32_t folder=2;std::wstring windowsPath;};
+ struct Context {
+     std::string key;
+     uint64_t revision=0;
+     std::optional<BrowserMountInventory::Address> mount;
+     FileOperations::Location folder;
+ };
  BrowserMountInventory mounts_;
  Context current_;
  std::map<std::string,uint64_t> seen_,dirty_;
@@ -64,12 +69,12 @@ public:
     BrowserMountInventory& Mounts(){return mounts_;}
     const BrowserMountInventory& Mounts()const{return mounts_;}
     void Watch(const std::string&);
-    void PresentDirectory(const BrowserDirectory::Snapshot&, int type, int index,
-        uint32_t folder, const std::string& path, bool listing,
+    void PublishFolder(const BrowserDirectory::Snapshot&,HTREEITEM item,
+        const std::optional<std::wstring>& parent,std::wstring title,const CString& status,
         const std::function<HTREEITEM(const BrowserDirectory::Row&)>& addFolder);
-    void PrepareFolderPresentation(HTREEITEM item,const CString& parentLabel,bool hasParent);
+    void PrepareFolderPresentation(HTREEITEM item,const std::optional<std::wstring>& parent,bool mac);
     bool RefreshSelected(bool afterMutation=false);
-    void Observe(std::string key,uint64_t revision,int type,int index,uint32_t folder=2,std::string path={},std::wstring windowsPath={},std::optional<DWORD> windowsSerial={});
+    void Observe(std::string key,uint64_t revision,BrowserMountInventory::Address,FileOperations::Location);
     bool Refreshing()const{return refreshing_;}
     void ClearCurrent();
     void CancelNavigation();

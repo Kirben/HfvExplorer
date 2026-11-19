@@ -61,14 +61,13 @@ protected: // create from serialization only
 	void hfs_init();
 
 
-    void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
     bool NavigateStartupDirectory(const std::string& path,bool mac);
     bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
-    void PublishClassicFolder(int index, uint32_t id, const std::string& path,
+    void PublishClassicFolder(int index, HTREEITEM item, const std::optional<std::wstring>& parent,
                               const BrowserDirectory::Snapshot&);
     bool NavigateWindowsFolder(int index, const std::wstring& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
     bool NavigateWindowsFolder(int index, const std::string& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
-    void PublishWindowsFolder(int index, const std::string& path, const BrowserDirectory::Snapshot&,HTREEITEM item);
+    void PublishWindowsFolder(int index, const BrowserDirectory::Snapshot&,HTREEITEM item);
 #ifdef HFV_TESTING
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );

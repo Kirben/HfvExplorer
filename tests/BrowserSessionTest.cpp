@@ -396,6 +396,23 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !session.Navigating();},"Unicode Find did not complete");
    Check(Selected(a.list,L"\u6587\u4ef6.txt")&&session.MacBrowser().TargetFolder().WindowsPath()==folder,
          "Find did not select the Unicode folder and file");
+   const auto child=folder+L"\\Child";
+   Check(CreateDirectoryW(child.c_str(),nullptr)!=FALSE,"create child of a Unicode folder");
+   Check(session.RefreshSelected()&&session.AwaitNavigationForTest()&&Selected(a.list,L"\u6587\u4ef6.txt"),
+         "refresh lost the Unicode selection");
+   const auto childRow=a.list.BrowserRowAt(Find(a.list,L"Child"));
+   Check(childRow&&childRow->treeItem,"published child has no typed tree binding");
+   a.tree.GetTreeCtrl().SelectItem(childRow->treeItem);
+   Check(session.AwaitNavigationForTest(),"open the child of the Unicode folder");
+   wchar_t label[1024]{};
+   LVITEMW cell{};
+   cell.pszText=label;
+   cell.cchTextMax=ARRAYSIZE(label);
+   SendMessageW(a.list.GetListCtrl().GetSafeHwnd(),LVM_GETITEMTEXTW,0,reinterpret_cast<LPARAM>(&cell));
+   Check(std::wstring(label)==L" ..up to "+folder,"parent row lost its Unicode path");
+   Check(RemoveDirectoryW(child.c_str())&&session.RefreshSelected()&&session.AwaitNavigationForTest()&&
+         session.MacBrowser().TargetFolder().WindowsPath()==folder,
+         "refresh after external deletion did not publish the Unicode parent");
    const auto selected=a.tree.GetTreeCtrl().GetSelectedItem();
    b.Windows(wa);
    Check(b.Session().OpenFolderFrom(session,selected),"open typed Unicode folder in another window");

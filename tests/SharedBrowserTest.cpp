@@ -62,11 +62,11 @@ int RunSharedBrowserTest(const char* directory){
   doc.open_sub_directory(0,2,"Shared");BrowserDirectory::testObserveRead={};
   auto& control=list.GetListCtrl();check(control.GetItemCount()==3&&!wrongThread&&storageUiTest.timerTicks>0&&owner.IsWindowEnabled(),"slow classic snapshot stays on worker and restores owner");
   int larger=find(control,L"A larger"),smaller=find(control,L"Z smaller");check(larger>=0&&smaller>=0,"classic rows in shared renderer");
-  auto model=list.BrowserRowAt(larger);check(model&&model->storageType==LIST_HFS&&model->entry.forks[0].size==2600&&model->entry.finder[0]=='T',"classic normalized bytes/type/binding");
+  auto model=list.BrowserRowAt(larger);check(model&&model->location.IsClassic()&&model->entry.forks[0].size==2600&&model->entry.finder[0]=='T',"classic normalized bytes/type/binding");
   CString source;check(list.get_path(larger,source)&&source=="Shared:A larger","classic conversion path binding");
   auto classicItem = doc.GetBrowserSession().MacBrowser().CaptureItem(larger);
   check(classicItem.IsClassic() && classicItem.ClassicPath()==(LPCSTR)source &&
-        classicItem.expectedCatalogId==model->id, "classic command did not use the published browser row");
+        classicItem.expectedCatalogId==model->entry.id, "classic command did not use the published browser row");
   list.SortBrowserRows(FIELD_SIZE,true);check(text(control,0)==L"Folder"&&text(control,1)==L"Z smaller","exact classic byte sorting within identical displayed KB");
   check(load(image)==original,"browsing classic image modified source bytes");
   // The first HFS partition is numbered one; raw images remain supported too.

@@ -45,34 +45,34 @@ bool IsCompanion(const std::wstring& directory,const std::wstring& leaf) {
 }
 
 BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
-    int volume,const std::wstring& directory,bool listing,Storage::Job& job,std::optional<DWORD> expectedSerial)
+    const std::wstring& directory,bool listing,Storage::Job& job,std::optional<DWORD> expectedSerial)
 {
  if(directory.empty())throw std::runtime_error("Select a Windows folder");
  BrowserDirectory::ObserveRead(BrowserPresentation::Utf8(MacBrowser::U16(directory)).c_str());
  BrowserDirectory::Snapshot snapshot;
- snapshot.folderPath=directory;
- snapshot.resourceKey=VolumeCoord::PathKey(snapshot.folderPath);
+ snapshot.folder=FileOperations::Location::Windows(directory);
+ snapshot.folder.directory=true;
+ snapshot.resourceKey=VolumeCoord::PathKey(directory);
  // Browsing the folder can overlap a write to a child file. Both idle and
  // busy listings take the same lease and tolerate briefly locked children.
  const VolumeCoord::Lease access({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});
  snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
  wchar_t root[MAX_PATH]{};
- const auto driveType=GetVolumePathNameW(snapshot.folderPath.c_str(),root,ARRAYSIZE(root))?
+ const auto driveType=GetVolumePathNameW(directory.c_str(),root,ARRAYSIZE(root))?
      GetDriveTypeW(root):UINT(DRIVE_UNKNOWN);
  const bool writable=driveType!=DRIVE_CDROM;
- auto media=FileOperations::Location::Windows(snapshot.folderPath);
+ auto& media=snapshot.folder;
  if(expectedSerial) {
   media.BindWindowsMediaSerial(expectedSerial);
   StorageLocation::ValidateMedia(media);
  }else if(driveType==DRIVE_REMOVABLE||driveType==DRIVE_CDROM)
-  media.BindWindowsMediaSerial(StorageLocation::WindowsSerial(snapshot.folderPath));
- snapshot.windowsMediaSerial=media.WindowsMediaSerial();
- try{snapshot.folderIdentity=MacBrowser::DescribeWindowsFile(snapshot.folderPath).identity;}
+  media.BindWindowsMediaSerial(StorageLocation::WindowsSerial(directory));
+ try{media.expectedIdentity=MacBrowser::DescribeWindowsFile(directory).identity;}
  catch(const std::exception&){}
  snapshot.capabilitiesKnown=true;
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
 
- auto folder=snapshot.folderPath;
+ auto folder=directory;
  if(folder.back()!=L'\\'&&folder.back()!=L'/')folder+=L'\\';
  auto ioFolder=BrowserPresentation::WindowsPath(folder);
  if(ioFolder.back()!=L'\\')ioFolder+=L'\\';
@@ -100,14 +100,12 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
      IsCompanion(ioFolder,leaf))continue;
 
   BrowserDirectory::Row row;
-  row.storageType=LIST_FAT;
-  row.volume=volume;
   row.capabilities=snapshot.capabilities;
   const auto path=folder+leaf;
-  row.path=LegacyPath(path);
-  if(row.path.empty()&&info.cAlternateFileName[0])row.path=LegacyPath(folder+info.cAlternateFileName);
+  auto ansiPath=LegacyPath(path);
+  if(ansiPath.empty()&&info.cAlternateFileName[0])ansiPath=LegacyPath(folder+info.cAlternateFileName);
   row.location=FileOperations::Location::Windows(path);
-  row.location.BindWindowsMediaSerial(snapshot.windowsMediaSerial);
+  row.location.BindWindowsMediaSerial(media.WindowsMediaSerial());
   row.entry.name=MacBrowser::U16(leaf);
   row.entry.directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
   if(!row.entry.directory)
@@ -119,7 +117,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
 
   const auto finderFlags=HfsPlus::Disk::U16(row.entry.finder.data()+8);
   if(!options_.showMacHidden&&(finderFlags&fInvisible))continue;
-  if(listing&&!row.entry.directory&&!row.path.empty()) {
+  if(listing&&!row.entry.directory&&!ansiPath.empty()) {
    auto ansiLeaf=LegacyPath(leaf);
    const bool hasFinder=std::any_of(row.entry.finder.begin(),row.entry.finder.end(),[](uint8_t byte){return byte!=0;});
    if(!ansiFolder.empty()&&!ansiLeaf.empty()&&ansiFolder.size()+ansiLeaf.size()+1<MAX_PATH) {
@@ -137,7 +135,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
    }
    if(!row.icon16&&!row.icon32) {
     const int mode=deadline&&LONG(GetTickCount()-deadline)>=0?DI_NO_ICONS:options_.windowsIcons;
-    const auto icon=get_dos_icon(&app,row.path.data(),mode);
+    const auto icon=get_dos_icon(&app,ansiPath.data(),mode);
     if(icon&&icon!=(HICON)1) {
      row.ownedIcons=std::make_shared<BrowserDirectory::OwnedIcons>();
      row.ownedIcons->small=row.ownedIcons->large=icon;
@@ -147,7 +145,9 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
   }
 
   const auto display=BrowserPresentation::Utf8(row.entry.name);
-  BrowserDirectory::ObserveRead(row.path.empty()?display.c_str():row.path.c_str());
+  BrowserDirectory::ObserveRead(ansiPath.empty()?display.c_str():ansiPath.c_str());
+  row.location.directory=row.entry.directory;
+  row.location.expectedIdentity=row.entry.identity;
   row.accessKey=VolumeCoord::ObservedPathKey(snapshot.resourceKey,leaf,row.entry.identity,row.entry.directory);
   snapshot.rows.push_back(std::move(row));
   Storage::Progress progress;
@@ -161,21 +161,6 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
  OwnIcons(snapshot);
  return snapshot;
 }
-void CHFVExplorerDoc::apply_browser_directory(const BrowserDirectory::Snapshot& snapshot,
-    int type, int index, uint32_t folder, const std::string& path, bool listing){
- auto& session = GetBrowserSession();
- auto tree = session.Tree();
- HTREEITEM root = tree->GetTreeCtrl().GetSelectedItem();
- session.PresentDirectory(snapshot, type, index, folder, path, listing,
-    [&](const BrowserDirectory::Row& row) {
-  auto name=MacBrowser::Wide(row.entry.name);int n=WideCharToMultiByte(CP_ACP,0,name.c_str(),-1,nullptr,0,nullptr,nullptr);std::string ansi(n,0);
-  if(n)WideCharToMultiByte(CP_ACP,0,name.c_str(),-1,&ansi[0],n,nullptr,nullptr);
-  if(row.storageType==LIST_HFS)
-   return tree->tree_insert(m_volumes[row.volume].m_rootitem,row.volume,const_cast<char*>(ansi.c_str()),row.id,row.parent);
-  return tree->InsertWindowsFolder(root,row.volume,name,row.location,row.capabilities.create);
- });
-}
-
 void BrowserFolderReader::OwnIcons(BrowserDirectory::Snapshot& snapshot)
 {
  for (auto& row : snapshot.rows) {
@@ -192,20 +177,16 @@ void BrowserFolderReader::OwnIcons(BrowserDirectory::Snapshot& snapshot)
  }
 }
 
-void CHFVExplorerDoc::PublishWindowsFolder(int index, const std::string& path,
-    const BrowserDirectory::Snapshot& snapshot,HTREEITEM item)
+void CHFVExplorerDoc::PublishWindowsFolder(int index,const BrowserDirectory::Snapshot& snapshot,HTREEITEM item)
 {
- auto& session = GetBrowserSession();
- auto parent = path;
- auto separator = path.find_last_of('\\');
- const bool root = is_fat_root_directory(const_cast<char*>(path.c_str())) != 0;
- if (!root && separator != path.npos)
-  parent.resize(separator == 2 ? 3 : separator);
- else
-  parent.clear();
- session.PrepareFolderPresentation(item,parent.c_str(),!root);
- apply_browser_directory(snapshot, LIST_FAT, index, 2, path, true);
- if(auto status=session.Status())status->SetPaneText(0,path.c_str());
+ auto& session=GetBrowserSession();
+ const auto& path=snapshot.folder.WindowsPath();
+ std::optional<std::wstring> parent;
+ const auto separator=path.find_last_of(L'\\');
+ if(path.size()>3&&separator!=path.npos)parent=path.substr(0,separator==2?3:separator);
+ session.PublishFolder(snapshot,item,parent,path,CStringA(path.c_str()),[&](const BrowserDirectory::Row& row){
+  return session.Tree()->InsertWindowsFolder(item,index,MacBrowser::Wide(row.entry.name),row.location,row.capabilities.create);
+ });
 }
 
 bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::string& path, bool refresh, const BrowserNavigation::Request* find)
@@ -264,12 +245,7 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
      volume.ReadMount(MacBrowser::ReadClassicMountInfo(*media.floppy));
      reader->Revision(0)=VolumeCoord::Revision(deviceKey);
      result.listing=reader->read_classic_browser_directory(0,2,volume.m_volume_name+":",finder,0,&job,media.floppy.get());
-     result.folder=FileOperations::Location::Classic(image,(LPCSTR)(volume.m_volume_name+":"));
-     result.folder.directory=true;
-     result.folder.expectedCatalogId=2;
-     result.folder.expectedResource=deviceKey;
-     if(volume.m_mediaGenerationKnown)result.folder.BindMediaGeneration(volume.m_mediaGeneration);
-     StorageLocation::ValidateMedia(result.folder,StorageLocation::FloppyProbe::FreshHandle);
+     StorageLocation::ValidateMedia(result.listing.folder,StorageLocation::FloppyProbe::FreshHandle);
      listing->floppy=true;
      return Storage::Result{};
     }
@@ -279,9 +255,9 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
      for(const auto& mount:listing->removable)
       StorageLocation::ValidateMedia(FileOperations::Location::Mounted(mount.volume));
      auto volume=listing->cd?listing->cd:listing->removable.front().volume;
-     result.folder=FileOperations::Location::Mounted(volume);
-     StorageLocation::ValidateMedia(result.folder);
-     result.folder.directory=true;
+     result.listing.folder=FileOperations::Location::Mounted(volume);
+     StorageLocation::ValidateMedia(result.listing.folder);
+     result.listing.folder.directory=true;
      return Storage::Result{};
     }
    }
@@ -298,11 +274,8 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
      path.resize(separator<=2?3:separator);
     }
    }
-   result.listing=reader->read_windows_browser_directory(index,listing->path,true,job,
+   result.listing=reader->read_windows_browser_directory(listing->path,true,job,
        request.folder.WindowsMediaSerial());
-   result.folder.SetWindows(result.listing.folderPath);
-   result.folder.BindWindowsMediaSerial(result.listing.windowsMediaSerial);
-   result.folder.expectedIdentity=result.listing.folderIdentity;
   }catch(const VolumeCoord::Busy&){
    if(deviceKey.empty())result.listing.resourceKey=VolumeCoord::PathKey(listing->path);
    return Storage::Result{1, ERROR_BUSY, "Volume busy"};
@@ -330,12 +303,10 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
    tree->enable_selchange(enabled);
    m_volumes.ReplaceFrom(mounted,reader->Slots(),0);
    m_classicRevision[mounted]=snapshot.revision;
-   for(auto& row:snapshot.rows)row.volume=mounted;
-   session.PrepareFolderPresentation(m_volumes[mounted].m_rootitem,"",false);
-   PublishClassicFolder(mounted,2,std::string((LPCSTR)m_volumes[mounted].m_volume_name)+":",snapshot);
+   PublishClassicFolder(mounted,m_volumes[mounted].m_rootitem,std::nullopt,snapshot);
    return;
   }
-  const auto& shown=result.folder.WindowsPath();
+  const auto& shown=result.listing.folder.WindowsPath();
   auto destination=item;
   if(findResult||_wcsicmp(shown.c_str(),path.c_str())){
    destination=tree->FindWindowsFolder(root,shown);
@@ -363,7 +334,7 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
    if(!destination)destination=root;
   }
   if(refresh)tree->delete_subdir_contents(destination);
-  PublishWindowsFolder(index,CStringA(shown.c_str()).GetString(),snapshot,destination);
+  PublishWindowsFolder(index,snapshot,destination);
  },mount,retry);
  return true;
 }

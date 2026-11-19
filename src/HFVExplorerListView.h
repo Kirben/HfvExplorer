@@ -135,6 +135,7 @@ public:
 	int m_item_count;
 	int list_clear();
 	int initialize_volume( CString root_name, unsigned long id );
+    void InitializeFolderRows(const std::optional<std::wstring>& parent,bool mac);
     void SetBrowserCapabilities(MacBrowser::Capabilities caps){m_directory_capabilities=caps;m_directory_capabilities_known=true;}
     bool BrowserDirectoryWritable()const{return !m_directory_capabilities_known||m_directory_capabilities.create;}
     bool BrowserSelectionAllows(bool rename)const;
@@ -150,38 +151,7 @@ public:
 #ifdef HFV_TESTING
     void PlaceSelectedIconsForTest(CSize displacement);
 #endif
-	int list_insert( 
-		LPSTR name, 
-		int isdir, 
-		hfv_size_t size_in_bytes,
-		unsigned long creation_date,
-		unsigned long modification_date,
-		char *stype,
-		char *screator,
-		unsigned long id,
-		HICON hicon32,
-		HICON hicon16,
-		HTREEITEM htree,
-		int volinx,
-		LPPOINT ppoint,
-		BOOL is_inited,
-		int finder_view_mode,
-		int finder_color,
-        int storageType = LIST_HFS, int *insertedRow = nullptr
-	);
-	int list_fat_insert(
-			LPSTR name, 
-			int isdir, 
-			hfv_size_t size_in_bytes,
-			FILETIME *creation_date,
-			FILETIME *modification_date,
-			HICON hicon16,
-			HICON hicon32,
-			char *stype,
-			char *screator,
-			LPSTR fullpath,
-			HTREEITEM htree,
-			int volinx );
+
 	void activate_list_item( int inx, int control, int make_shortcut );
 	int initialize_list();
 
