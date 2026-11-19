@@ -9,6 +9,7 @@
 #include "VolumeCoordinator.h"
 #include <map>
 #include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
 #include <vector>
 #include <stdio.h>
 #include <stdexcept>
@@ -82,6 +83,26 @@ int RunCdImageTest(const char* directory){
   storageUiTest={};storageUiTest.cancelOnTimer=true;auto uiCancelSource=std::make_shared<FakeCdImage>();uiCancelSource->delay=100;
   auto uiCancel=ShowStorageJob(MakeCdImageJob(3,root+"\\ui-cancel.iso",uiCancelSource),"Hidden cancel CD image",true,true,true);
   check(uiCancel.error==ERROR_CANCELLED&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled()&&GetFileAttributesA((root+"\\ui-cancel.iso").c_str())==INVALID_FILE_ATTRIBUTES,"Cancel button cancels between reads, removes partial image and restores owner");noTemporary(root);
+  storageUiTest={};storageUiTest.cancelOnTimer=true;
+  auto background=std::make_shared<FakeCdImage>();background->delay=100;
+  const auto backgroundPath=root+"\\background-cancel.iso";
+  check(BackgroundCopies::StartStorage(MakeCdImageJob(3,backgroundPath,background),&owner,
+       "Hidden background image","CD image dump",{},{true}),"start modeless CD dump");
+  check(BackgroundCopies::Active()&&owner.IsWindowEnabled(),"CD dump disabled its browser");
+  const auto progress=BackgroundCopies::DialogWindow();
+  const auto started=GetTickCount();
+  while(BackgroundCopies::Active()&&GetTickCount()-started<5000){
+   MSG message{};
+   while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){if(message.message!=WM_QUIT)DispatchMessage(&message);}
+   Sleep(1);
+  }
+  check(!BackgroundCopies::Active()&&BackgroundCopies::LastResult().error==ERROR_CANCELLED&&
+        !storageUiTest.disabledDuring&&owner.IsWindowEnabled()&&
+        VolumeCoord::Available({{VolumeCoord::DeviceKey(3),VolumeCoord::Mode::Write}})&&
+        GetFileAttributesA(backgroundPath.c_str())==INVALID_FILE_ATTRIBUTES,
+        "modeless CD dump cancellation left an image, lock or disabled browser");
+  if(IsWindow(progress))SendMessage(progress,WM_CLOSE,0,0);
+  noTemporary(root);
   owner.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;
   fprintf(report,"PASS: complete-sector CD image dump, partition-map byte fidelity, exact progress, read/short-read errors, media changes including final check, unsupported media, overwrite/skip/cancel, replacement publication, destination race/errors, partial cleanup, slow responsive dialog, Cancel button and pre-close owner restoration; all CD sources simulated.\n");
  }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());fclose(report);return 1;}catch(CException* error){char text[512];error->GetErrorMessage(text,sizeof(text));fprintf(report,"FAIL: %s\n",text);error->Delete();fclose(report);return 1;}

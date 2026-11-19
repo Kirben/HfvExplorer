@@ -2,6 +2,7 @@
 #pragma once
 #include "ReadOnlyFloppy.h"
 #include <vector>
+#include <optional>
 #include <string>
 
 class FloppyWriteApi : public FloppyReadApi {
@@ -22,7 +23,7 @@ public:
     // only tracks whose bytes differ. No low-level format in this mode.
     bool WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks=false,
                     FloppyProgress progress=nullptr,void* context=nullptr,
-                    const std::vector<BYTE>* expectedOriginal=nullptr);
+                    const std::vector<BYTE>* expectedOriginal=nullptr,std::optional<DWORD> expectedGeneration={});
     DWORD Error() const {return error_;}
     DWORD FlushError() const {return flushError_;}
     bool WritesStarted() const {return writesStarted_;}
