@@ -235,13 +235,27 @@ Bytes NdifResource(const std::vector<Run>& runs,uint32_t sectors,uint32_t maxChu
     return out;
 }
 
+constexpr uint64_t macBinaryHeader=128;
+
+void FinishNdif(NewImage& output,uint32_t dataBytes,const Bytes& resource,const char* type,bool locked)
+{
+    const auto aligned=[](uint64_t n){return (n+127)&~uint64_t(127);};
+    output.Resize(macBinaryHeader+aligned(dataBytes));
+    Append(output,resource.data(),resource.size());
+    output.Resize(aligned(output.Size()));
+    Bytes header(size_t(macBinaryHeader),0);
+    header[1]=10;memcpy(header.data()+2,"Disk Image",10);
+    memcpy(header.data()+65,type,8);
+    header[81]=locked?1:0;
+    P32(header.data()+83,dataBytes);P32(header.data()+87,uint32_t(resource.size()));
+    macbinary_finish_header(header.data(),MacBinaryII);
+    output.Write(0,header.data(),header.size());
+}
+
 void WriteNdif(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress,bool compress)
 {
     constexpr size_t unit=512*Sector;
-    constexpr uint64_t macBinaryHeader=128;
     const auto length=input.Size();
-    Check(length&&!(length%Sector)&&length<0x80000000,
-          "NDIF creation requires complete 512-byte sectors and a disk under 2 GiB");
     output.Resize(macBinaryHeader);
     Buffer storage(input.ProcessLocal());
     auto& plain=storage.bytes;
@@ -266,30 +280,21 @@ void WriteNdif(ConversionInput& input,NewImage& output,Storage::Job& job,Storage
     }
     const auto dataBytes=uint32_t(output.Size()-macBinaryHeader);
     const auto resource=NdifResource(runs,uint32_t(length/Sector),unit/Sector+1,dataBytes,checksum);
-    const auto aligned=[](uint64_t n){return (n+127)&~uint64_t(127);};
-    output.Resize(macBinaryHeader+aligned(dataBytes));
-    Append(output,resource.data(),resource.size());
-    output.Resize(aligned(output.Size()));
-    Bytes header(size_t(macBinaryHeader),0);
-    header[1]=10;memcpy(header.data()+2,"Disk Image",10);
-    memcpy(header.data()+65,compress?"hdcmddsk":"rohdddsk",8);
-    header[81]=1;
-    P32(header.data()+83,dataBytes);P32(header.data()+87,uint32_t(resource.size()));
-    macbinary_finish_header(header.data(),MacBinaryII);
-    output.Write(0,header.data(),header.size());
+    FinishNdif(output,dataBytes,resource,compress?"hdcmddsk":"rohdddsk",true);
 }
 
-void WriteRaw(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress)
+void WriteRaw(ConversionInput& input,NewImage& output,Storage::Job& job,Storage::Progress& progress,
+              uint64_t start=0)
 {
     Buffer storage(input.ProcessLocal());
     auto& buffer=storage.bytes;
-    output.Resize(input.Size());
+    output.Resize(start+input.Size());
     for(uint64_t at=0;at<input.Size();){
         if(job.cancelled())throw Storage::Cancelled();
         const auto bytes=size_t((std::min)(uint64_t(buffer.size()),input.Size()-at));
         input.Read(at,buffer.data(),bytes);
         if(std::any_of(buffer.begin(),buffer.begin()+bytes,[](auto b){return b!=0;}))
-            output.Write(at,buffer.data(),bytes);
+            output.Write(start+at,buffer.data(),bytes);
         at+=bytes;
         progress.bytes=progress.processed=at;
         job.progress(progress);
@@ -315,7 +320,10 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         auto output=HfsPlus::CreateStagedOutput(destination,512);
         output->Resize(0);
         Storage::Progress progress;
-        const bool outputNdif=format==Output::StoredNdif||format==Output::CompressedNdif;
+        const bool editable=format==Output::EditableNdif;
+        const bool outputNdif=editable||format==Output::StoredNdif||format==Output::CompressedNdif;
+        if(outputNdif)Check(input->Size()&&!(input->Size()%Sector)&&input->Size()<0x80000000,
+                            "NDIF creation requires complete 512-byte sectors and a disk under 2 GiB");
         progress.phase=format==Output::RawImage?"Extracting raw disk image":
                        outputNdif?"Creating NDIF disk image":"Creating compressed DMG";
         progress.totalBytes=input->Size();
@@ -323,7 +331,13 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         progress.byteTransfer=true;
         ConversionInput stream(*input);
         if(format==Output::RawImage)WriteRaw(stream,*output,current,progress);
-        else if(outputNdif)WriteNdif(stream,*output,current,progress,format==Output::CompressedNdif);
+        else if(editable){
+            WriteRaw(stream,*output,current,progress,macBinaryHeader);
+            const auto bytes=uint32_t(stream.Size());
+            const auto sectors=bytes/uint32_t(Sector);
+            const std::vector<Run> runs{{2,0,bytes,0,bytes}};
+            FinishNdif(*output,bytes,NdifResource(runs,sectors,sectors,bytes,0),"dimgddsk",false);
+        }else if(outputNdif)WriteNdif(stream,*output,current,progress,format==Output::CompressedNdif);
         else WriteDmg(stream,*output,current,progress);
         stream.Verify();
         if(ndif)Ndif::VerifySegmentChecksums(*input,current);

@@ -429,12 +429,12 @@ void ConvertDmgImage(BrowserSession& session)
         L"Choose a disk image to convert"))return;
     DWORD type=1;
     if(!FileDialog(parent->m_hWnd,destination,true,
-        L"Compressed DMG\0*.dmg\0Raw disk image\0*.img\0NDIF (compressed, MacBinary)\0*.bin\0NDIF (uncompressed, MacBinary)\0*.bin\0\0",nullptr,
+        L"Compressed DMG\0*.dmg\0Raw disk image\0*.img\0NDIF (compressed, MacBinary)\0*.bin\0NDIF (uncompressed, MacBinary)\0*.bin\0NDIF (read/write, MacBinary)\0*.bin\0\0",nullptr,
         L"Save converted disk image",&type))return;
     const auto name=destination.substr(destination.find_last_of(L"\\/")+1);
     if(name.find(L'.')==name.npos)destination+=type==1?L".dmg":type==2?L".img":L".bin";
     constexpr Dmg::Output formats[]={Dmg::Output::CompressedDmg,Dmg::Output::RawImage,
-                                     Dmg::Output::CompressedNdif,Dmg::Output::StoredNdif};
+                                     Dmg::Output::CompressedNdif,Dmg::Output::StoredNdif,Dmg::Output::EditableNdif};
     if(type<1||type>_countof(formats))return;
     const auto format=formats[type-1];
     StartDmgConversion(session,{source,destination,format,VolumeCoord::ImageKey(source)});

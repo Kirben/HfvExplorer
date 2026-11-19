@@ -567,6 +567,38 @@ int RunNdifImageTest(const char* directory)
             Check(!completed.code,completed.message.c_str());
         }
         fprintf(report,"PASS: generated stored and ADC-compressed MacBinary NDIF with exact round-trip and valid checksums.\n");
+        const auto source=Save(root+"editable-source.raw",volumeBytes);
+        const auto createdRdWr=VolumeCoord::Wide(root+"created-rdwr.bin");
+        Storage::Job createRdWr;
+        const auto resultRdWr=Dmg::Convert(source,createdRdWr,Dmg::Output::EditableNdif,createRdWr);
+        Check(!resultRdWr.code,resultRdWr.message.c_str());
+        {
+            auto encoded=HfsPlus::OpenImage(createdRdWr.c_str(),false);
+            Check(Ndif::Unwrap(encoded)&&Ndif::IsEditable(*encoded)&&!Ndif::ExpectedChecksum(*encoded)&&
+                  Disk::Read(*encoded,0,volumeBytes.size())==volumeBytes,"Created RdWr sectors differ from the source");
+        }
+        {
+            auto volume=MacBrowser::OpenBrowserImage(createdRdWr);
+            Check(volume&&volume->Writable(),"Created RdWr could not mount writable");
+            volume->MakeDirectory(2,u"Created writable");
+        }
+        {
+            auto volume=MacBrowser::OpenBrowserImage(createdRdWr);
+            MacBrowser::Entry entry;
+            Check(volume->FindChild(2,u"Created writable",entry),"Created RdWr edit did not persist");
+            auto original=HfsPlus::OpenImage(source.c_str(),false);
+            Check(Disk::Read(*original,0,volumeBytes.size())==volumeBytes,"Creating and editing RdWr changed the source");
+        }
+        const auto cancelledRdWr=VolumeCoord::Wide(root+"cancelled-rdwr.bin");
+        Storage::Job cancelRdWr;
+        cancelRdWr.transport([&](const Storage::Progress&){cancelRdWr.cancel();},{});
+        bool stopped=false;
+        try{stopped=Dmg::Convert(source,cancelledRdWr,Dmg::Output::EditableNdif,cancelRdWr).code!=0;}
+        catch(const Storage::Cancelled&){stopped=true;}
+        Check(stopped&&GetFileAttributesW(cancelledRdWr.c_str())==INVALID_FILE_ATTRIBUTES,
+              "Cancelled RdWr creation published an image");
+        fprintf(report,"PASS: created RdWr image round-trip, writable reopen, unchanged source and cancelled publication.\n");
+
         auto badData=volumeBytes;
         badData.back()^=1;
         const auto badPath=Save(root+"corrupt.img.bin",Pack(badData,Resource(rawMap)));
