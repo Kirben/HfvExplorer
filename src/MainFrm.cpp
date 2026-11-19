@@ -1114,23 +1114,37 @@ MediaControlTarget CMainFrame::SelectedMediaControlTarget() const
 }
 void CMainFrame::OnCdEjectEjectReload(int reload)
 {
- auto target=SelectedMediaControlTarget();if(!CanControlMedia(target))return;
- CommandStorage::Reservation held;try{held=std::make_shared<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{VolumeCoord::DeviceKey(target.drive),VolumeCoord::Mode::Write}});}catch(const VolumeCoord::Busy&){return;}
+ const auto target=SelectedMediaControlTarget();
+ if(!CanControlMedia(target))return;
+ const auto key=VolumeCoord::DeviceKey(target.drive);
+ CommandStorage::Reservation held;
+ try{
+  held=std::make_shared<VolumeCoord::Lease>(std::vector<VolumeCoord::Access>{{key,VolumeCoord::Mode::Write}});
+ }catch(const VolumeCoord::Busy&){return;}
+
  const auto mask=DWORD(1)<<target.drive;
  MediaDiscovery::Changed(mask);
- auto browsers=static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers;
- for(auto browser:browsers){
-  browser->GetBrowserSession().NavigationMediaChanged(mask);
-  browser->GetBrowserSession().MacBrowser().ReleaseCd(target.drive);
+ std::vector<std::shared_ptr<MacBrowser::Volume>> released;
+ for(auto browser:static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers){
+  auto& session=browser->GetBrowserSession();
+  session.NavigationMediaChanged(mask);
+  auto volumes=session.MacBrowser().DetachCd(target.drive);
+  released.insert(released.end(),volumes.begin(),volumes.end());
+  auto doc=session.Document();
+  for(int i=0;i<doc->m_hfs_count;++i)
+   if(MacMediaControlTarget(doc->m_volumes[i].m_file_name).drive==target.drive)
+    doc->m_volumes[i].close();
  }
- auto app=(CHFVExplorerApp*)AfxGetApp();auto document=GetBrowserSession().Document();
- auto result=ShowStorageWaitJob(MakeMediaControlJob(target,reload!=0,nullptr,[=]{
-  for(auto browser:browsers){auto doc=browser->GetBrowserSession().Document();for(int i=0;i<doc->m_hfs_count;++i){auto mounted=MacMediaControlTarget(doc->m_volumes[i].m_file_name);if(mounted.drive==target.drive)doc->m_volumes[i].close();}}
-  native_media_suspend(target.drive);
- },held));
- held.reset();
- if(result.code)AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);
- m_deviceChangeDeferred=false;PostMessage(WM_COMMAND,ID_VIEW_REFRESH);
+ try{
+  auto work=MakeMediaControlJob(target,reload!=0,nullptr,[released=std::move(released),target]{
+   for(auto& volume:released)volume->ReleaseMedia();
+   native_media_suspend(target.drive);
+  },std::move(held));
+  BackgroundCopies::StartStorage(std::move(work),this,reload?"Reloading media":"Ejecting media",
+    reload?"Reload":"Eject");
+ }catch(const std::exception& error){
+  MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
+ }
 }
 
 void CMainFrame::OnCdEjectEject() 

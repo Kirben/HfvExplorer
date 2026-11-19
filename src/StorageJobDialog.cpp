@@ -420,6 +420,9 @@ struct Batch {
        std::function<void(const FileOperations::Completion&)> observed)
      : controller(std::move(requests), std::move(completed), std::move(observed)) {}
 
+ Batch(JobController::Work work,std::function<void(bool)> completed)
+     : controller(std::move(work),std::move(completed)) {}
+
  bool Advance() {
   if (mode) {
    if (!mode->ready)
@@ -485,6 +488,28 @@ struct Batch {
  }
 };
 std::vector<std::unique_ptr<Batch>> batches;
+bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancellable,const char* title,const char* operation){
+ batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->controller.Finished()&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
+ auto ptr=batch.get();
+ ++active;
+ try{
+  bool hidden=false;
+#ifdef HFV_TESTING
+  hidden=owner&&!owner->IsWindowVisible();
+#endif
+  // Desktop owner: never disables or binds the lifetime to a browser frame.
+  batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),title,hidden,CWnd::GetDesktopWindow(),false,false,single,cancellable,true));
+  batch->dialog->Operation(operation);
+  batch->dialog->ProgressOwner(owner?owner->GetSafeHwnd():nullptr);
+  batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{return ptr->Finish();},
+   [ptr]{ptr->Cancel();},
+   [ptr](uint64_t id, Storage::ConflictChoice choice){ptr->controller.Resolve(id,choice);},
+   [ptr](const char* message){ptr->controller.Fail(message);});
+  if(!batch->dialog->Create(single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background operation progress");
+  batch->hidden=hidden;batch->dialog->Planning();batch->Advance();
+  batches.push_back(std::move(batch));return true;
+ }catch(...){if(batch){batch->Cancel();if(auto job=batch->controller.Job())job->wait();}--active;throw;}
+}
 }
 bool Enabled(){
 #ifdef HFV_TESTING
@@ -496,31 +521,18 @@ bool Enabled(){
 bool Active(){return active.load()!=0;}
 bool Start(std::vector<FileOperations::Request> requests,CWnd* owner,bool single,std::function<void(bool)> completed,std::function<void(const FileOperations::Completion&)> observed){
  if(requests.empty())return false;
- batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->controller.Finished()&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
  auto kind=requests.front().OperationKind();
  auto batch=std::make_unique<Batch>(std::move(requests),std::move(completed),std::move(observed));
- auto ptr=batch.get();bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
+ bool mutation=kind!=FileOperations::Kind::Copy&&kind!=FileOperations::Kind::LegacyCopy&&kind!=FileOperations::Kind::ExportFork&&kind!=FileOperations::Kind::ReplaceResource;
  const char* title=kind==FileOperations::Kind::CreateHardLink?"Creating hard link":kind==FileOperations::Kind::SetCompression?"Changing file compression":kind==FileOperations::Kind::Rename?"Renaming files":kind==FileOperations::Kind::Delete?"Deleting files":kind==FileOperations::Kind::CreateFolder?"Creating folder":kind==FileOperations::Kind::Inspect?"Reading properties":kind==FileOperations::Kind::SetAttributes?"Updating extended attributes":kind==FileOperations::Kind::ReadAttributeFile?"Reading attribute value":kind==FileOperations::Kind::ExportAttribute?"Exporting attribute":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Updating properties":kind==FileOperations::Kind::ReplaceResource?"Importing resource fork":"Copying files";
  const char* operation=kind==FileOperations::Kind::CreateHardLink?"Hard-link creation":kind==FileOperations::Kind::SetCompression?"Compression change":kind==FileOperations::Kind::Rename?"Rename":kind==FileOperations::Kind::Delete?"Delete":kind==FileOperations::Kind::CreateFolder?"Folder creation":kind==FileOperations::Kind::Inspect?"Properties read":kind==FileOperations::Kind::SetAttributes?"Attribute update":kind==FileOperations::Kind::ReadAttributeFile?"Attribute read":kind==FileOperations::Kind::ExportAttribute?"Attribute export":(kind==FileOperations::Kind::SetProperties||kind==FileOperations::Kind::SetBasicMetadata)?"Properties update":kind==FileOperations::Kind::ReplaceResource?"Resource import":"Copy";
  if(mutation)single=true;
- ++active;
- try{
-  bool hidden=false;
-#ifdef HFV_TESTING
-  hidden=owner&&!owner->IsWindowVisible();
-#endif
-  // Desktop owner: never disables or binds the lifetime to a browser frame.
-  batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),title,hidden,CWnd::GetDesktopWindow(),false,false,single,true,true));
-  batch->dialog->Operation(operation);
-  batch->dialog->ProgressOwner(owner?owner->GetSafeHwnd():nullptr);
-  batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{return ptr->Finish();},
-   [ptr]{ptr->Cancel();},
-   [ptr](uint64_t id, Storage::ConflictChoice choice){ptr->controller.Resolve(id,choice);},
-   [ptr](const char* message){ptr->controller.Fail(message);});
-  if(!batch->dialog->Create(single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background copy progress");
-  batch->hidden=hidden;batch->dialog->Planning();batch->Advance();
-  batches.push_back(std::move(batch));return true;
- }catch(...){if(batch){batch->Cancel();if(auto job=batch->controller.Job())job->wait();}--active;throw;}
+ return StartBatch(std::move(batch),owner,single,true,title,operation);
+}
+bool StartStorage(JobController::Work work,CWnd* owner,const char* title,
+                  const char* operation,std::function<void(bool)> completed){
+ return StartBatch(std::make_unique<Batch>(std::move(work),std::move(completed)),
+                   owner,true,false,title,operation);
 }
 void TransferOwner(HWND closing,HWND replacement){
  for(auto& batch:batches)if(batch->dialog->ProgressOwner()==closing)batch->dialog->ProgressOwner(replacement);

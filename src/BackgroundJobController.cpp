@@ -10,9 +10,12 @@ JobController::JobController(std::vector<FileOperations::Request> requests,
     : requests_(std::move(requests)), completed_(std::move(completed)), observed_(std::move(observed))
 {}
 
+JobController::JobController(Work work,std::function<void(bool)> completed)
+    : work_(std::move(work)), completed_(std::move(completed)) {}
+
 std::shared_ptr<Storage::Job> JobController::Job() const
 {
-    return operation_ ? operation_->Job() : nullptr;
+    return operation_ ? operation_->Job() : task_;
 }
 
 const FileOperations::LegacyConversion* JobController::PendingMode() const
@@ -25,25 +28,40 @@ const FileOperations::LegacyConversion* JobController::PendingMode() const
 
 void JobController::CollectResult()
 {
-    auto job = operation_->Job();
+    auto job = Job();
     auto previous = std::move(result_);
     result_ = job->result();
     result_.completed += previous.completed;
     result_.skipped += previous.skipped;
     result_.rollback = (std::max)(previous.rollback, result_.rollback);
     result_.partial = result_.partial || previous.partial;
-    snapshot_ = operation_->Snapshot();
-    complete_ = complete_ && !result_.code && snapshot_.complete;
-    cancelled_ = cancelled_ || job->cancelled() || result_.code;
-    operation_.reset();
+    if (operation_) {
+        snapshot_ = operation_->Snapshot();
+        complete_ = complete_ && snapshot_.complete;
+        cancelled_ = cancelled_ || job->cancelled();
+        operation_.reset();
+    } else {
+        task_.reset();
+        // A device request can complete after cancellation is requested.
+        cancelled_ = result_.error == ERROR_CANCELLED;
+    }
+    complete_ = complete_ && !result_.code;
+    cancelled_ = cancelled_ || result_.code;
 }
 
 JobController::Step JobController::Advance()
 {
     if (finished_)
         return Step::Finished;
-    if (operation_) {
-        auto job = operation_->Job();
+    if (work_ && !cancelled_) {
+        task_ = Storage::copyWorker().submit([work=std::move(work_)](Storage::Job& job) mutable {
+            auto run=std::move(work);
+            return run(job);
+        });
+        work_ = {};
+        return Step::Started;
+    }
+    if (auto job = Job()) {
         if (!job->done())
             return Step::Running;
         CollectResult();
@@ -134,6 +152,7 @@ void JobController::Finish()
     finished_ = true;
     bool success = complete_ && !cancelled_ && next_ == requests_.size();
     requests_.clear();
+    work_ = {};
     auto completed = std::move(completed_);
     auto observed = std::move(observed_);
     auto snapshot = std::move(snapshot_);

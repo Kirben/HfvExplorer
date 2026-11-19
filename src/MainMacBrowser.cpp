@@ -749,11 +749,17 @@ bool MainMacBrowser::RefreshForChange(const std::string& key){
 void MainMacBrowser::ReleaseCd(int drive){
     bool present=false;for(const auto& mount:state_->mounts)present|=mount.drive==drive&&bool(mount.volume);if(!present)return;
     std::unique_ptr<VolumeCoord::OperationLease> access;try{access.reset(new VolumeCoord::OperationLease({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Write}}));}catch(const VolumeCoord::Busy&){return;}
+    auto released=DetachCd(drive);
+    Run(session_,[&](Storage::Job&){for(auto& volume:released)volume->ReleaseMedia();released.clear();});
+}
+
+std::vector<std::shared_ptr<Volume>> MainMacBrowser::DetachCd(int drive){
+    if(!session_.Tree()||!session_.List())return {};
     bool selected=SelectedCdDrive()==drive;std::vector<std::shared_ptr<Volume>> released;
     auto tree=session_.Tree();bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
     for(auto& mount:state_->mounts)if(mount.drive==drive&&mount.volume){if(mount.root)tree->m_ct->DeleteItem(mount.root);mount.root=nullptr;released.push_back(std::move(mount.volume));}
     tree->enable_selchange(enabled);if(selected){session_.ClearCurrent();session_.SetLocationTitle({});session_.List()->initialize_volume("",0);}
-    Run(session_,[&](Storage::Job&){for(auto& volume:released)volume->ReleaseMedia();released.clear();});
+    return released;
 }
 
 void MainMacBrowser::DetachTree(){state_->restore.clear();int i;uint32_t id;if(state_->Selected(i,id)){

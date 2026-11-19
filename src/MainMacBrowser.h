@@ -68,6 +68,7 @@ public:
     bool CanExport() const;
     int SelectedCdDrive() const;
     void ReleaseCd(int drive);
+    std::vector<std::shared_ptr<MacBrowser::Volume>> DetachCd(int drive);
     void Sort(int column, bool ascending);
 #ifdef HFV_TESTING
     size_t TestClipboardCount()const;
