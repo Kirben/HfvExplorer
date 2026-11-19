@@ -27,8 +27,7 @@ bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Lo
  }
 
  auto target=FileOperations::Location::Windows(VolumeCoord::Wide(std::string(static_cast<LPCSTR>(folder))));
- FileOperations::LegacyConversion conversion{source,target,false,false,false,CaptureLegacyCopyOptions('r')};
- conversion.selection=FileOperations::ConversionSelection{source,target};
+ FileOperations::LegacyConversion conversion{source,target,false,false,false,CaptureLegacyCopyOptions('r'),FileOperations::ConversionTarget::Folder};
  auto operation=FileOperations::Submit(FileOperations::Request(std::move(conversion)));
  auto result=ShowSubmittedStorageJob(operation.Job(),"Copying from Macintosh",!owner->IsWindowVisible(),true,true,owner);
  if(result.code){

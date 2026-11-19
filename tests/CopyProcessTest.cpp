@@ -914,9 +914,9 @@ int RunCopyProcessTest(const char *directory) {
                     // Windows folder names are case-insensitive.
                     const auto output=mode=='R'?folder+L"-resource":folder;
                     Check(CreateDirectoryW(output.c_str(),nullptr)!=FALSE,"classic export mode fixture folder");
-                    LegacyConversion conversion{Location::Classic(path,":"),Location::Windows(output)};
+                    LegacyConversion conversion{Native(classic,mode=='t'?textId:renamed.id),Location::Windows(output)};
                     conversion.options.output=mode;
-                    conversion.selection=ConversionSelection{Native(classic,mode=='t'?textId:renamed.id),Location::Windows(output)};
+                    conversion.target=ConversionTarget::Folder;
                     CopyProcess::lastProcess=0;
                     auto exported=Submit(conversion);
                     Wait(exported);
@@ -935,9 +935,9 @@ int RunCopyProcessTest(const char *directory) {
                     }
                     const auto exportedFile=Location::Windows(output+L"\\"+file.cFileName);
                     const auto importFolder=classic->MakeDirectory(targetFolder,u"Import "+std::u16string(1,char16_t(mode))+(mode=='R'?u" resource":u""));
-                    LegacyConversion import{exportedFile,Location::Classic(path,":")};
+                    LegacyConversion import{exportedFile,Native(classic,importFolder)};
                     import.options.input=mode;
-                    import.selection=ConversionSelection{exportedFile,Native(classic,importFolder)};
+                    import.target=ConversionTarget::Folder;
                     auto imported=Submit(import);
                     Wait(imported);
                     if(imported.Job()->result().code)throw HfsPlus::Error(imported.Job()->result().message);
@@ -976,17 +976,17 @@ int RunCopyProcessTest(const char *directory) {
                     memcpy(output,"data"+at,size);
                 },false);
                 const auto exportRoot=Location::Windows(exportDir);
-                LegacyConversion mappedExport{Location::Classic(path,":"),exportRoot};
+                LegacyConversion mappedExport{Native(classic,mappedId),exportRoot};
                 mappedExport.options.output='r';
-                mappedExport.selection=ConversionSelection{Native(classic,mappedId),exportRoot};
+                mappedExport.target=ConversionTarget::Folder;
                 auto mappingExport=Submit(mappedExport);Wait(mappingExport);
                 const auto mappedPath=Location::Windows(exportDir+L"\\Mapped raw.hfvx");
                 Check(!mappingExport.Job()->result().code &&
                           GetFileAttributesW(mappedPath.WindowsPath().c_str())!=INVALID_FILE_ATTRIBUTES,
                       "mounted raw export did not apply the mapped extension");
-                LegacyConversion mappedImport{mappedPath,Location::Classic(path,":")};
+                LegacyConversion mappedImport{mappedPath,Native(classic,targetFolder)};
                 mappedImport.options.input='r';
-                mappedImport.selection=ConversionSelection{mappedPath,Native(classic,targetFolder)};
+                mappedImport.target=ConversionTarget::Folder;
                 auto mappingImport=Submit(mappedImport);Wait(mappingImport);
                 Entry mapped;
                 Check(!mappingImport.Job()->result().code && classic->FindChild(targetFolder,u"Mapped raw",mapped) &&

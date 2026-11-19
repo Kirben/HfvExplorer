@@ -164,7 +164,7 @@ int RunCopyProgressTest(const char* directory) {
    assertReplaced(Request(OrdinaryCopy{{source},destination}));
    LegacyConversion conversion{source,destination,false,true,false,CaptureLegacyCopyOptions('r')};
    conversion.options.input='r';
-   conversion.selection=ConversionSelection{source,destination};
+   conversion.target=ConversionTarget::Folder;
    assertReplaced(Request(std::move(conversion)));
    auto verify=MacBrowser::OpenClassic(image.GetString(),"CopyTest:Folder:Nested:",false);
    MacBrowser::Entry created;

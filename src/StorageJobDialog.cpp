@@ -453,15 +453,17 @@ struct Batch {
    return true;
   case JobController::Step::ChooseMode:
    const auto& pending = *controller.PendingMode();
-   int direction = pending.destination.IsClassic() ? 0 : 1;
+   int direction = pending.destination.IsWindows() ? 1 : 0;
    dialog->Planning();
    mode = std::make_unique<ModeDialog>(hidden);
    mode->m_outcopy = direction;
    mode->m_copy_mode = lastMode[direction];
    mode->m_appledouble = lastAd < 0 ? static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble : lastAd;
-   mode->m_copying_fname = pending.source.LegacyPath().c_str();
-   if (pending.selection && pending.selection->source.IsMounted())
-    mode->m_copying_fname = CString(MacBrowser::Wide(pending.selection->source.expectedName).c_str());
+   if(pending.source.IsMounted())
+    mode->m_copying_fname=pending.source.expectedName.empty()?CString("Selected file"):CString(MacBrowser::Wide(pending.source.expectedName).c_str());
+   else if(pending.source.IsWindows())
+    mode->m_copying_fname=CString(pending.source.WindowsPath().c_str());
+   else mode->m_copying_fname=pending.source.ClassicPath().c_str();
    if (!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT, CWnd::GetDesktopWindow()))
     throw std::runtime_error("Cannot create copy mode window");
    NativeDpi::CenterPopup(mode->GetSafeHwnd(),dialog->GetSafeHwnd());

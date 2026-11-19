@@ -69,7 +69,7 @@ JobController::Step JobController::Advance()
     if (cancelled_ || next_ == requests_.size())
         return Step::Finished;
     if (const auto* conversion = PendingMode()) {
-        int direction = conversion->destination.IsClassic() ? 0 : 1;
+        int direction = conversion->destination.IsWindows() ? 1 : 0;
         if (!all_[direction])
             return Step::ChooseMode;
         auto& pending = requests_[next_].Legacy();
@@ -92,7 +92,7 @@ void JobController::ChooseMode(const ModeChoice& choice)
     const auto* conversion = PendingMode();
     if (!conversion)
         return;
-    int direction = conversion->destination.IsClassic() ? 0 : 1;
+    int direction = conversion->destination.IsWindows() ? 1 : 0;
     auto& pending = requests_[next_].Legacy();
     const char modes[] = "ambtrRx5";
     char value = choice.selection >= 0 && choice.selection < 8 ? modes[choice.selection] : 'a';

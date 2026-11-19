@@ -234,6 +234,19 @@ int RunTypedLocationsTest(const char *directory) {
             auto trailing = encoded;
             trailing.bytes.push_back(0);
             Reject([&] { DecodeRequest(trailing); }, "Trailing request bytes accepted");
+            const LegacyConversion conversion{sources.front().location,target.location,
+                false,false,false,{},ConversionTarget::Folder};
+            auto converted=EncodeRequest(conversion,parent,0,sources,target);
+            auto conversionRequest=DecodeRequest(converted);
+            Check(conversionRequest.legacy&&conversionRequest.legacy->target==ConversionTarget::Folder&&
+                  conversionRequest.sources.size()==1&&conversionRequest.target.kind==target.location.kind(),
+                  "conversion did not round-trip its sole endpoint pair");
+            auto missingConversion=EncodeRequest(conversion,parent,0,{},target);
+            Reject([&]{DecodeRequest(missingConversion);},"conversion accepted a missing source");
+            auto extraConversion=EncodeRequest(conversion,parent,0,{sources.front(),sources.front()},target);
+            Reject([&]{DecodeRequest(extraConversion);},"conversion accepted a second source");
+            auto targetlessConversion=EncodeRequest(conversion,parent,0,sources,Endpoint{});
+            Reject([&]{DecodeRequest(targetlessConversion);},"conversion accepted a missing destination");
             DWORD frame[] = {DWORD(Protocol::protocol), DWORD(Protocol::RequestPacket), DWORD(encoded.bytes.size())};
             Check(Protocol::ValidateFrame(frame) == Protocol::RequestPacket, "Valid request frame rejected");
             ++frame[0];

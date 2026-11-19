@@ -207,11 +207,11 @@ Request ResolveRequest(WireRequest wire, WorkerMounts &mounts, AttributeSets& at
             sources.push_back(ResolveEndpoint(std::move(endpoint), mounts));
         return OrdinaryCopy{std::move(sources), std::move(target)};
     }
-    if (wire.legacy) {
-        if (!wire.sources.empty())
-            wire.legacy->selection = ConversionSelection{
-                ResolveEndpoint(std::move(wire.sources.front()), mounts), std::move(target)};
-        return std::move(*wire.legacy);
+    if(wire.legacy){
+        auto source=ResolveEndpoint(std::move(wire.sources.front()),mounts);
+        const auto& conversion=*wire.legacy;
+        return LegacyConversion{std::move(source),std::move(target),conversion.directory,conversion.move,
+                                false,conversion.options,conversion.target};
     }
     if (wire.kind == Kind::CreateFolder)
         return CreateFolder{std::move(target), std::move(wire.name)};
@@ -278,10 +278,8 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         for (const auto& source : copy->sources) sources.push_back(Capture(source));
         target = Capture(copy->destination);
     } else if (auto* legacy = request.Conversion()) {
-        if (legacy->selection) {
-            sources.push_back(Capture(legacy->selection->source));
-            target = Capture(legacy->selection->folder);
-        }
+        sources.push_back(Capture(legacy->source));
+        target=Capture(legacy->destination);
     } else if (auto* output = request.Get<ExportFileFork>()) {
         sources.push_back(Capture(output->source));
         target = Capture(output->output);
@@ -301,11 +299,6 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
     } else if (auto* metadata = request.Metadata()) {
         sources.push_back(Capture(std::visit([](const auto& edit) -> const Location& { return edit.item; },
                                             *metadata)));
-    }
-    auto execution = request;
-    if (request.OperationKind() == Kind::LegacyCopy) {
-        execution.Legacy().source=Capture(request.Legacy().source).location;
-        execution.Legacy().destination=Capture(request.Legacy().destination).location;
     }
     WorkerStorageHandoff handoff;
     Storage::Result result;
@@ -351,7 +344,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     Send(worker.input.value, Mapping, std::move(d));
                 }
         }
-        if (auto* metadata = execution.Metadata()) {
+        if (auto* metadata = request.Metadata()) {
             if (auto* edit = std::get_if<EditAttributes>(metadata)) {
                 SendAttributes(worker.input.value, 0, edit->original, job);
                 SendAttributes(worker.input.value, 1, edit->desired, job);
@@ -359,7 +352,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                 SendAttributes(worker.input.value, 0, compression->originalAttributes, job);
         }
         Send(worker.input.value, RequestPacket,
-             EncodeRequest(execution, worker.parent.value, testFault, sources, target));
+             EncodeRequest(request, worker.parent.value, testFault, sources, target));
         requestSent = true;
         bool cancelled = false, finished = false;
         while (!finished) {

@@ -39,6 +39,7 @@ typedef int (*ftype_read)(int, void *, unsigned int);
 typedef int (*ftype_write)(int, const void *, unsigned int);
 typedef hfv_offset_t (*ftype_lseek)(int, hfv_offset_t, int);
 
+int fhook_stat_image(const char* path,struct _stat64* st);
 int fhook_open_image(const char *path, int flags, ...);
 extern ftype_stat fhook_stat;
 extern ftype_open fhook_open;

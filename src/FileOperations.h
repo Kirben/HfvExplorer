@@ -14,12 +14,12 @@ struct OrdinaryCopy {
  std::vector<Location> sources;
  Location destination;
 };
-struct ConversionSelection { Location source, folder; };
+enum class ConversionTarget { NamedPath, Folder };
 struct LegacyConversion {
  Location source, destination;
  bool directory=false, move=false, askMode=false;
  LegacyCopyOptions options;
- std::optional<ConversionSelection> selection;
+ ConversionTarget target=ConversionTarget::NamedPath;
 };
 struct RenameEntry {
  Location source;

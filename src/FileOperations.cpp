@@ -19,6 +19,7 @@
 #include "charset.h"
 #include <algorithm>
 #include <set>
+#include <string_view>
 #include <fcntl.h>
 #include <atomic>
 extern "C" {
@@ -321,6 +322,11 @@ Storage::Result Metadata(const Request& request,Storage::Job& job,Completion& co
 std::string Resource(const Location& item){return item.ResourceKey();}
 void AddPath(std::vector<VolumeCoord::Access>& access,const std::wstring& path,VolumeCoord::Mode mode,bool companion=true){access.push_back({VolumeCoord::PathKey(path),mode});if(companion)access.push_back({VolumeCoord::PathKey(CompanionPath(path)),mode});}
 std::u16string SourceName(const Location& item){if(!item.expectedName.empty())return item.expectedName;auto path=HostPath(item);if(!path.empty())return U16(path.substr(path.find_last_of(L"\\/")+1));if(item.IsClassic()&&!item.ClassicPath().empty())return Ansi(item.ClassicPath().substr(item.ClassicPath().find_last_of(':')+1));return {};}
+bool IsClassicConversionEndpoint(const Location& item)
+{
+ return item.IsClassic()||(item.IsMounted()&&std::string_view(item.Volume()->Kind())=="HFS");
+}
+
 void ValidateRequest(const Request& r){
  Check(int(r.OperationKind())>=0&&int(r.OperationKind())<=int(Kind::SetCompression),"Unknown file operation");
  if (const auto* rename = r.Rename()) {
@@ -351,13 +357,11 @@ void ValidateRequest(const Request& r){
   Check(!copy->sources.empty() && !copy->destination.IsNone(), "Choose sources and a copy destination");
   for (const auto& source : copy->sources) Check(!source.IsNone(), "No source file location was supplied");
  } else if (const auto* legacy = r.Conversion()) {
-  Check((legacy->source.IsWindows()||legacy->source.IsClassic())&&
-        (legacy->destination.IsWindows()||legacy->destination.IsClassic()),"Choose compatible conversion endpoints");
-  if (legacy->selection)
-   Check(!legacy->selection->source.IsNone() &&
-         (legacy->selection->folder.IsWindows() || legacy->selection->folder.IsClassic() ||
-          (legacy->selection->folder.IsMounted() && !strcmp(legacy->selection->folder.Volume()->Kind(),"HFS"))),
-         "Invalid conversion selection");
+  Check((legacy->source.IsWindows()||IsClassicConversionEndpoint(legacy->source))&&
+        (legacy->destination.IsWindows()||IsClassicConversionEndpoint(legacy->destination)),
+        "Choose compatible conversion endpoints");
+  Check(legacy->target==ConversionTarget::Folder||!legacy->destination.IsMounted(),
+        "A mounted conversion destination must be a folder");
  } else if (const auto* folder = r.Get<CreateFolder>()) {
   Check(!folder->parent.IsNone() && !folder->name.empty(), "Choose a destination and folder name");
  } else if (const auto* exportFork = r.Get<ExportFileFork>()) {
@@ -380,24 +384,12 @@ bool IsClassicTransferEndpoint(const Location& item)
     return item.IsClassic()||IsMountedClassic(item);
 }
 
-Location ConversionEndpoint(const Location& item)
+bool ConvertsWithMountedClassic(const LegacyConversion& conversion)
 {
-    if(!IsMountedClassic(item))return item;
-    if(const int drive=item.Volume()->CdDrive();drive>=0)
-        return Location::Physical(drive,ClassicMedia::Cd,":");
-    const auto path=WorkerEndpoint::Find(*item.Volume())->WorkerDescription().path;
-    return Location::Classic(Location::Windows(path).LegacyPath(),":");
+    return (conversion.source.IsWindows()&&IsMountedClassic(conversion.destination))||
+           (IsMountedClassic(conversion.source)&&conversion.destination.IsWindows());
 }
 
-bool ConvertsWithMountedClassic(const LegacyConversion& conversion) {
-    if (!conversion.selection) return false;
-    const auto& selection = *conversion.selection;
-    if (conversion.source.IsWindows() && conversion.destination.IsClassic())
-        return selection.source.IsWindows() && IsMountedClassic(selection.folder);
-    if (conversion.source.IsClassic() && conversion.destination.IsWindows())
-        return IsMountedClassic(selection.source) && selection.folder.IsWindows();
-    return false;
-}
 ExecutionRoute SelectRoute(const Request& request, bool inWorker) {
     if (inWorker) return ExecutionRoute::Local;
 #ifdef HFV_TESTING
@@ -463,10 +455,17 @@ std::vector<VolumeCoord::Access> BindResources(const Request& request, Execution
  }
  if(request.OperationKind()==Kind::LegacyCopy){
   const auto& conversion=request.Legacy();
-  const bool sharedExport=ConvertsWithMountedClassic(conversion) &&
-                          conversion.destination.IsWindows() && !handoff;
-  if(request.Legacy().source.IsWindows())AddPath(access,request.Legacy().source.WindowsPath(),request.Legacy().move?Mode::Write:Mode::Read);else access.push_back({sharedExport?conversion.selection->source.ResourceKey():conversion.source.ResourceKey(),(conversion.move||(!sharedExport&&(request.background||handoff)))?Mode::Write:Mode::Read});
-  if(request.Legacy().destination.IsWindows())access.push_back({VolumeCoord::LegacyOutputKey(request.Legacy().destination.WindowsPath()),Mode::Write});else access.push_back({request.Legacy().destination.ResourceKey(),Mode::Write});return access;
+  const bool sharedExport=IsMountedClassic(conversion.source)&&conversion.destination.IsWindows()&&!handoff;
+  if(conversion.source.IsWindows())
+   AddPath(access,conversion.source.WindowsPath(),conversion.move?Mode::Write:Mode::Read);
+  else
+   access.push_back({conversion.source.ResourceKey(),
+       (conversion.move||(!sharedExport&&(request.background||handoff)))?Mode::Write:Mode::Read});
+  if(conversion.destination.IsWindows())
+   access.push_back({VolumeCoord::LegacyOutputKey(conversion.destination.WindowsPath()),Mode::Write});
+  else
+   access.push_back({conversion.destination.ResourceKey(),Mode::Write});
+  return access;
  }
  if (const auto* metadata = request.Metadata()) {
   const auto& item = std::visit([](const auto& value) -> const Location& { return value.item; }, *metadata);
@@ -575,14 +574,14 @@ Reader AdaptRawClassic(Volume& source, Entry& entry, bool importing, bool resour
 }
 
 TransferPlan PlanConversion(const LegacyConversion& conversion) {
- const bool importing=conversion.source.IsWindows() && conversion.destination.IsClassic();
- const bool exporting=conversion.source.IsClassic() && conversion.destination.IsWindows();
+ const bool importing=conversion.source.IsWindows() && IsClassicConversionEndpoint(conversion.destination);
+ const bool exporting=IsClassicConversionEndpoint(conversion.source) && conversion.destination.IsWindows();
  const bool translating=importing||exporting;
  const char mode=importing?conversion.options.input:conversion.options.output;
  const bool raw=translating&&(mode=='r'||mode=='R');
  if(translating)Check(TransferConversion::Supported(mode)||mode=='a'||raw,"Unsupported file conversion mode");
  auto mappings=raw?TypeMappings::Capture():TypeMappings::Snapshot{};
- auto sourceLocation=conversion.selection ? conversion.selection->source : conversion.source;
+ auto sourceLocation=conversion.source;
  sourceLocation.cut=conversion.move;
  if(sourceLocation.IsClassic()&&conversion.directory){
   auto path=sourceLocation.ClassicPath();
@@ -594,9 +593,9 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
    if(generation)sourceLocation.BindMediaGeneration(*generation);
   }
  }
- Location folder=conversion.selection ? conversion.selection->folder : conversion.destination;
+ Location folder=conversion.destination;
  std::u16string outputName;
- if(!conversion.selection && folder.IsWindows()) {
+ if(conversion.target==ConversionTarget::NamedPath && folder.IsWindows()) {
   auto path=folder.WindowsPath();
   const auto flags=GetFileAttributesW(BrowserPresentation::WindowsPath(path).c_str());
   if(flags==INVALID_FILE_ATTRIBUTES){
@@ -611,7 +610,7 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
    folder.SetWindows(path.substr(0,end+1));
    folder.BindWindowsMediaSerial(serial);
   }
- } else if(!conversion.selection && folder.IsClassic()) {
+ } else if(conversion.target==ConversionTarget::NamedPath && folder.IsClassic()) {
   auto path=folder.ClassicPath();
   Check(!path.empty(),"The classic HFS destination path is empty");
   if(path.back()!=':') {
@@ -856,10 +855,10 @@ std::vector<Request> PlanTransfers(OrdinaryCopy copy,const TransferSettings& set
             continue;
         }
         flush();
-        LegacyConversion conversion{ConversionEndpoint(source),ConversionEndpoint(copy.destination),
-            source.directory,source.cut,importing?settings.askImport:settings.askExport,settings.conversion};
-        conversion.selection=ConversionSelection{std::move(source),copy.destination};
-        requests.emplace_back(std::move(conversion));
+        const bool directory=source.directory;
+        const bool move=source.cut;
+        requests.emplace_back(LegacyConversion{std::move(source),copy.destination,directory,move,
+            importing?settings.askImport:settings.askExport,settings.conversion,ConversionTarget::Folder});
     }
     flush();
     return requests;

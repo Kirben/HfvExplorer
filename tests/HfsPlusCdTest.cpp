@@ -399,10 +399,8 @@ int RunHfsPlusCdTest(const char *directory) {
             check(CreateDirectoryW(exportFolder.c_str(),nullptr)!=FALSE,"create classic CD export directory");
             const auto target=FileOperations::Location::Windows(exportFolder);
             FileOperations::LegacyConversion conversion{
-                FileOperations::Location::Physical(3,FileOperations::ClassicMedia::Cd,":"),
-                target,false,false,false,{'m','a'}};
-            conversion.selection=FileOperations::ConversionSelection{
-                FileOperations::Location::Mounted(cd,file.id),target};
+                FileOperations::Location::Mounted(cd,file.id),
+                target,false,false,false,{'m','a'},FileOperations::ConversionTarget::Folder};
             auto copy=FileOperations::Submit(conversion);
             check(WaitForSingleObject(copy.Job()->event(),10000)==WAIT_OBJECT_0 &&
                   !copy.Job()->result().code &&

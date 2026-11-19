@@ -153,11 +153,10 @@ uint32_t CatalogNumber(Data &d) {
     Check(value <= UINT32_MAX, "Catalog identifier exceeds its field width");
     return uint32_t(value);
 }
-WireEndpoint ParseEndpoint(Data &d, bool allowMounted) {
+WireEndpoint ParseEndpoint(Data &d,bool allowMounted) {
     auto tag = d.get();
     Check(tag <= uint64_t(Location::Kind::ClassicMedia), "Invalid typed worker location");
-    Check(allowMounted || tag != uint64_t(Location::Kind::Mounted),
-          "Legacy conversion cannot carry a mounted backend");
+    Check(allowMounted||tag!=uint64_t(Location::Kind::Mounted),"Unexpected mounted worker location");
     WireEndpoint endpoint;
     endpoint.kind = Location::Kind(tag);
     auto& l = endpoint.location;
@@ -291,10 +290,9 @@ static void EncodeSettings(Data &d, const Request &r, HANDLE parent, unsigned fa
     d.put(uint64_t(r.OperationKind()));
     if (auto* output = r.Get<ExportFileFork>()) d.put(uint64_t(output->fork));
     if (const auto* legacy = r.Conversion()) {
-        EncodeEndpoint(d, Endpoint{legacy->source, {}, {}});
-        EncodeEndpoint(d, Endpoint{legacy->destination, {}, {}});
         d.put(legacy->directory);
         d.put(legacy->move);
+        d.put(legacy->target==FileOperations::ConversionTarget::Folder);
         d.put(uint8_t(legacy->options.output));
         d.put(uint8_t(legacy->options.input));
         d.put(legacy->options.appledouble);
@@ -354,13 +352,10 @@ WireRequest DecodeRequest(Data &d) {
           "Invalid worker operation");
     wire.kind = Kind(kind);
     if (wire.kind == Kind::LegacyCopy) {
-        LegacyConversion legacy;
-        legacy.source = ParseEndpoint(d, false).location;
-        legacy.destination = ParseEndpoint(d, false).location;
-        Check((legacy.source.IsWindows()||legacy.source.IsClassic())&&
-              (legacy.destination.IsWindows()||legacy.destination.IsClassic()),"Invalid conversion endpoints");
-        legacy.directory = d.flag();
-        legacy.move = d.flag();
+        WireConversion legacy;
+        legacy.directory=d.flag();
+        legacy.move=d.flag();
+        legacy.target=d.flag()?FileOperations::ConversionTarget::Folder:FileOperations::ConversionTarget::NamedPath;
         auto output = d.get(), input = d.get();
         Check(output <= UINT8_MAX && input <= UINT8_MAX, "Invalid conversion mode");
         legacy.options.output = char(output);
@@ -410,7 +405,6 @@ WireRequest DecodeRequest(Data &d) {
     wire.fault = CatalogNumber(d);
     auto count = d.get();
     if (wire.kind == Kind::Copy) Check(count > 0, "Copy requires a source");
-    else if (wire.kind == Kind::LegacyCopy) Check(count <= 1, "Invalid conversion source count");
     else if (wire.kind == Kind::Delete) Check(count > 0, "Delete requires a selection");
     else if (wire.kind == Kind::CreateFolder) Check(!count, "Folder creation has no source");
     else Check(count == 1, wire.kind == Kind::ExportFork || wire.kind == Kind::ReplaceResource ?
@@ -431,9 +425,9 @@ WireRequest DecodeRequest(Data &d) {
         Check(wire.target.kind != Address::None, "Missing copy destination");
         break;
     case Kind::LegacyCopy:
-        Check(count == 0 ? wire.target.kind == Address::None :
-              wire.target.kind == Address::Windows || wire.target.kind == Address::ClassicImage ||
-                  wire.target.kind == Address::ClassicMedia || wire.target.kind == Address::Mounted, "Invalid conversion selection");
+        Check(wire.target.kind!=Address::None,"Missing conversion destination");
+        Check(wire.target.kind!=Address::Mounted||wire.legacy->target==FileOperations::ConversionTarget::Folder,
+              "A mounted conversion destination must be a folder");
         break;
     case Kind::ExportFork:
         Check(wire.target.kind == Address::Windows, "Fork export requires a Windows output file");

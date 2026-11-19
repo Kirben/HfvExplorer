@@ -98,11 +98,16 @@ struct WireEndpoint {
     uint32_t selectedId = 0;
     std::vector<Entry> path;
 };
+struct WireConversion {
+    bool directory=false,move=false;
+    FileOperations::ConversionTarget target=FileOperations::ConversionTarget::NamedPath;
+    LegacyCopyOptions options;
+};
 struct WireRequest {
     Kind kind = Kind::Copy;
     HANDLE parent = nullptr;
     unsigned fault = 0;
-    std::optional<LegacyConversion> legacy;
+    std::optional<WireConversion> legacy;
     ForkSelector fork = ForkSelector::Data;
     std::u16string name;
     bool checkNameLock = true;

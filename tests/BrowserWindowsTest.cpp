@@ -440,7 +440,16 @@ int RunBrowserWindowsTest(const char* directory){
   b->SendMessage(WM_COMMAND,ID_TOOLS_NEW_BROWSER);Check(app.m_browsers.size()==2,"remaining window cannot create another browser");
   // Explicit File/Exit closes the full collection; a title-bar close does not.
   b->SendMessage(WM_COMMAND,ID_APP_EXIT);Check(app.m_browsers.empty()&&!IsWindow(bh)&&app.m_pMainWnd==nullptr&&app.ActiveBrowser()==nullptr,"File Exit did not close the remaining browser collection");
-  MSG quit{};Check(PeekMessage(&quit,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE)!=FALSE,"last window did not terminate the message loop");
+  // WM_QUIT may be synthesized only after the remaining posted messages drain.
+  bool quit=false;
+  const auto exitStart=GetTickCount64();
+  while(!quit&&GetTickCount64()-exitStart<2000){
+   MSG message{};
+   if(!PeekMessage(&message,nullptr,0,0,PM_REMOVE)){Sleep(1);continue;}
+   if(message.message==WM_QUIT)quit=true;
+   else DispatchMessage(&message);
+  }
+  Check(quit,"last window did not terminate the message loop");
   fprintf(report,"PASS: independent real hidden top-level frames/documents/panes; New browser menu and Ctrl+Enter; view/layout and image-open command routing; per-window disk/folder and Unicode captions, startup and MFC title-update persistence; busy/failed-creation guards; closing newest and first/main windows without WM_QUIT; surviving browser refresh/new commands; explicit File Exit and final-window shutdown. No hardware access or computer control.\n");
  }catch(const std::exception& e){fprintf(report,"FAIL: %s\n",e.what());result=1;}
  catch(CException* e){char text[512]{};e->GetErrorMessage(text,ARRAYSIZE(text));fprintf(report,"FAIL: MFC exception: %s\n",text);e->Delete();result=1;}

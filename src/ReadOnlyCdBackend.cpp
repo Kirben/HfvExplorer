@@ -6,6 +6,7 @@
 #include "DirectFloppy.h"
 #include "ReadOnlySource.h"
 #include "ImageHandleTransfer.h"
+#include "ClassicImagePath.h"
 #include <io.h>
 #include <fcntl.h>
 #include "floppy.h"
@@ -57,7 +58,7 @@ bool ensureFloppy(int drive) {
 bool virtualFd(int fd) { return fd >= kFdBase && fd < kFdBase + kFdCount; }
 int hookedStat(const char* path, struct _stat64* st) {
     if (ReadOnlySources::IsPath(path)||pathDrive(path) >= 0) { errno = ENOENT; return -1; }
-    return _stat64(path, st);
+    return fhook_stat_image(path,st);
 }
 int hookedOpen(const char* path, int flags, ...) {
     if(ReadOnlySources::IsPath(path)){
@@ -66,7 +67,24 @@ int hookedOpen(const char* path, int flags, ...) {
     }
     int drive = pathDrive(path);
     if (drive < 0) {
-        if(!(flags&(_O_CREAT|_O_TRUNC|_O_APPEND))){try{int n=MultiByteToWideChar(CP_ACP,0,path,-1,nullptr,0);std::wstring wide(n,0);MultiByteToWideChar(CP_ACP,0,path,-1,&wide[0],n);HANDLE h=ImageHandleTransfer::Open(wide.c_str(),(flags&(_O_RDWR|_O_WRONLY))!=0);if(h!=INVALID_HANDLE_VALUE){int fd=_open_osfhandle(intptr_t(h),flags|_O_BINARY);if(fd<0)CloseHandle(h);return fd;}}catch(...){errno=EACCES;return -1;}}
+        if(!(flags&(_O_CREAT|_O_TRUNC|_O_APPEND))){
+            try{
+                std::wstring wide;
+                if(ClassicImagePath::IsEncoded(path))wide=ClassicImagePath::Decode(path);
+                else{
+                    const auto count=MultiByteToWideChar(CP_ACP,0,path,-1,nullptr,0);
+                    if(count<=0){errno=EINVAL;return -1;}
+                    wide.resize(count);
+                    MultiByteToWideChar(CP_ACP,0,path,-1,wide.data(),count);
+                }
+                const auto handle=ImageHandleTransfer::Open(wide.c_str(),(flags&(_O_RDWR|_O_WRONLY))!=0);
+                if(handle!=INVALID_HANDLE_VALUE){
+                    const auto fd=_open_osfhandle(intptr_t(handle),flags|_O_BINARY);
+                    if(fd<0)CloseHandle(handle);
+                    return fd;
+                }
+            }catch(...){errno=EACCES;return -1;}
+        }
         if (flags & _O_CREAT) { va_list ap; va_start(ap, flags); int mode = va_arg(ap,int); va_end(ap); return fhook_open_image(path,flags,mode); }
         return fhook_open_image(path, flags);
     }

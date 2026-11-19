@@ -10,6 +10,7 @@
 #include "MainMacBrowser.h"
 #include "HfsPlusDisk.h"
 #include "StorageJobDialog.h"
+#include "CopyProcess.h"
 #include "VolumeSession.h"
 #include "utils.h"
 #include <cstdio>
@@ -506,7 +507,12 @@ int RunBrowserTransfersTest(const char* directory)
   Check(d&&e,"create classic browser frames");
   auto& sd=d->GetBrowserSession();
   auto& se=e->GetBrowserSession();
-  auto classicSource=Mount(sd,ca),classicTarget=Mount(se,cb);
+  const auto unicodeClassic=Wide(host)+L"\\classic-\u65e5\u672c";
+  Check(MoveFileW(Wide(cb).c_str(),unicodeClassic.c_str())!=FALSE,"rename classic image to a Unicode path");
+  auto classicSource=Mount(sd,ca);
+  Check(se.MacBrowser().OpenImage(unicodeClassic)==1&&se.AwaitNavigationForTest(),"open Unicode classic image");
+  auto classicTarget=se.MacBrowser().TargetFolder().Volume();
+  Check(classicTarget&&MacBrowser::ExecutionFor(*classicTarget).Persistent(),"Unicode classic image did not use a persistent worker");
   const auto classicId=Put(*classicSource,2,u"LegacyFile",61);
   Put(*classicTarget,2,u"LegacyFile",99);
   Refresh(sd);
@@ -559,7 +565,7 @@ int RunBrowserTransfersTest(const char* directory)
       {CaptureLegacyCopyOptions('r'),false,true});
   Check(plan.size()==3&&plan[0].Conversion()&&plan[0].Conversion()->askMode&&
         plan[1].Get<FileOperations::OrdinaryCopy>()&&plan[2].Conversion()&&
-        plan[2].Conversion()->selection->source.Volume()==classicTarget,
+        plan[2].Conversion()->source.Volume()==classicTarget,
         "planner did not classify each typed endpoint without relying on an image suffix");
   Success(Transfer([&]{return sc.MacBrowser().TransferSelection({classicLocation,nativeLocation},destination);}));
   {
@@ -568,6 +574,34 @@ int RunBrowserTransfersTest(const char* directory)
    Check(converted&&hostVolume->Stat(converted).forks[1].size==0,"mixed batch dropped the raw classic export policy");
    Verify(*hostVolume,2,u"Mixed Native",52);
   }
+
+  stage="Unicode conversion through a temporary worker";
+  {
+   const auto exported=Wide(dest)+L"\\worker-export";
+   Check(CreateDirectoryW(exported.c_str(),nullptr)!=FALSE,"create worker export destination");
+   const FileOperations::Request conversion=FileOperations::LegacyConversion{
+       classicLocation,FileOperations::Location::Windows(exported),false,false,false,
+       CaptureLegacyCopyOptions('r'),FileOperations::ConversionTarget::Folder};
+   const auto sourceKey=classicLocation.ResourceKey();
+   const auto outputKey=VolumeCoord::LegacyOutputKey(exported);
+   auto job=Storage::copyWorker().submit([conversion,sourceKey,outputKey](Storage::Job& job){
+    VolumeCoord::Lease lease({{sourceKey,VolumeCoord::Mode::Write},{outputKey,VolumeCoord::Mode::Write}});
+    FileOperations::Completion completion;
+    return CopyProcess::Run(conversion,job,completion,{sourceKey,outputKey},{outputKey});
+   });
+   Check(WaitForSingleObject(job->event(),15000)==WAIT_OBJECT_0,"temporary conversion worker timed out");
+   Success(job->result());
+   Check(GetFileAttributesW((exported+L"\\Mixed Classic").c_str())!=INVALID_FILE_ATTRIBUTES,
+         "worker did not export the typed Unicode-image selection");
+  }
+
+  stage="stale converted source";
+  Refresh(se);
+  auto staleConversion=se.MacBrowser().CaptureItem(Row(se,L"Mixed Classic"));
+  classicTarget->Rename(classicMixed,2,u"Renamed before copy");
+  Check(Transfer([&]{return sc.MacBrowser().TransferSelection({staleConversion},destination);}).code!=0,
+        "typed conversion accepted a stale source name");
+  Verify(*classicTarget,2,u"Renamed before copy",47);
 
   stage="cancel planned conversion";
   const auto cancelId=Put(*classicTarget,2,u"Do Not Export",53);
@@ -584,7 +618,7 @@ int RunBrowserTransfersTest(const char* directory)
   Check(!completed&&GetFileAttributesA(source+"\\Do Not Export")==INVALID_FILE_ATTRIBUTES,
         "conversion cancellation appeared to succeed or created a destination file");
   Verify(*classicTarget,2,u"Do Not Export",53);
-  fprintf(report,"PASS: per-pair mixed transfer policy, extensionless classic image, and cancellation before conversion.\n");
+  fprintf(report,"PASS: per-pair mixed policy, Unicode classic image through both worker routes, stale source rejection, and conversion cancellation.\n");
 
   Check(app.m_browsers.size()==3,"unexpected browser collection");
   fprintf(report,"PASS: shared mounted workers, same-volume move and descendant rejection, clipboard lifetime, mixed paths, read-only policy, and same-label classic HFS with raw conversion. No physical media or desktop automation.\n");
