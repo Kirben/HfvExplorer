@@ -181,28 +181,8 @@ public:
 	int get_lparam_isdir( LPARAM lparam );
 	HTREEITEM get_lparam_htree( LPARAM lparam );
 	HICON get_lparam_icon32( LPARAM lparam );
-	HICON get_lparam_icon16( LPARAM lparam );
-	int get_lparam_volinx( LPARAM lparam );
 
 	int get_path( int inx, CString &doc_name );
-	int do_open_with( int document, CString app_name, int mac, CString creator );
-	int do_open_with_pc( CString document, CString application );
-	int do_open_with_mac( CString document, CString application, CString creator );
-	int write_text_file( LPSTR name, LPSTR txt );
-	void get_vmac_launcher_name( char *name );
-	void add_link_tail( char *lpszPathLink, char *id );
-	int check_shortcut_installation( int emulator );
-	int do_make_shortcut( int doc_inx, CString application, CString creator, int emulator, int make_shortcut );
-	int do_make_shortcut_windows( int doc_inx, CString application, CString creator, int make_shortcut );
-	int do_make_shortcut_vmac( int doc_inx, CString application, CString creator, int make_shortcut );
-	int do_make_shortcut_e_win32( int doc_inx, CString application, CString creator, int make_shortcut );
-	int do_make_shortcut_e_dos( int doc_inx, CString application, CString creator, int make_shortcut );
-	int do_make_shortcut_ss( int doc_inx, CString application, CString creator, int make_shortcut );
-	int do_make_shortcut_fusion( int doc_inx, CString application, CString creator, int make_shortcut );
-	int save_icon( int doc_inx, LPSTR lpszIconFile, int is_doc );
-	void get_icons_folder_name( char *name );
-	int make_icon_name( LPSTR lpszIconFile );
-	int make_e_dos_param_file_name( LPSTR lpszParamsFile );
 
 	void destroy_pointers();
 
