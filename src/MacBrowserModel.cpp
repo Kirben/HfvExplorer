@@ -121,17 +121,16 @@ class Mfs final : public Volume, public WorkerEndpoint {
     struct Call {VolumeCoord::BackendRead lease;std::unique_lock<std::recursive_mutex> lock;explicit Call(const Mfs& v):lease(v.ResourceKey()),lock(v.mutex_,std::try_to_lock){if(!lock.owns_lock())throw VolumeCoord::Busy();}};
     std::string resourceKey_;
     std::map<uint32_t,size_t> entries_;
-    std::map<uint32_t,uint32_t> uiIds_;
-    uint32_t nextUi_=3;
+    std::shared_ptr<MfsCatalogIds> ids_;
     std::atomic<bool> usable_{true},writable_{false};
     std::atomic<uint64_t> free_{0};
     std::shared_ptr<const std::u16string> name_;
     void Sync(){
-        entries_.clear();for(size_t i=0;i<image_.Entries().size();++i){auto id=image_.Entries()[i].id;auto found=uiIds_.find(id);if(found==uiIds_.end()){Check(nextUi_!=UINT32_MAX,"MFS browser IDs exhausted");found=uiIds_.emplace(id,nextUi_++).first;}entries_[found->second]=i;}
+        entries_.clear();for(size_t i=0;i<image_.Entries().size();++i){auto id=image_.Entries()[i].id;auto found=ids_->byFile.find(id);if(found==ids_->byFile.end()){Check(ids_->next!=UINT32_MAX,"MFS browser IDs exhausted");found=ids_->byFile.emplace(id,ids_->next++).first;}entries_[found->second]=i;}
         std::atomic_store(&name_,std::make_shared<const std::u16string>(U16(MfsDisplayName(image_.VolumeName()))));free_=image_.FreeBytes();writable_=image_.Writable();
     }
     Entry EntryAt(size_t i){
-        const auto& in=image_.Entries().at(i);Entry e;e.id=uiIds_.at(in.id);e.resolvedId=in.id;e.parent=2;e.name=U16(MfsDisplayName(in.name));e.version=in.version;e.protectedFile=(in.flags&1)!=0;
+        const auto& in=image_.Entries().at(i);Entry e;e.id=ids_->byFile.at(in.id);e.resolvedId=in.id;e.parent=2;e.name=U16(MfsDisplayName(in.name));e.version=in.version;e.protectedFile=(in.flags&1)!=0;
         e.created=in.created;e.modified=in.modified;e.datesValid=true;memcpy(e.finder.data(),in.finderInfo,16);for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].length;
         e.identity=std::to_string(in.id)+":"+std::to_string(in.created)+":"+std::to_string(in.version);return e;
     }
@@ -144,7 +143,7 @@ class Mfs final : public Volume, public WorkerEndpoint {
     static std::string Encode(const std::u16string& name,unsigned maximum=255){std::string encoded,error;if(!MfsImage::EncodeName(Wide(name),encoded,error,maximum))throw HfsPlus::Error(error);return encoded;}
 public:
     WorkerExecution Execution()const override{WorkerExecution result;result.processLocal=source_->ProcessLocal();return result;}
-    explicit Mfs(std::unique_ptr<MfsSource> source,std::string key):source_(std::move(source)),resourceKey_(std::move(key)){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
+    explicit Mfs(std::unique_ptr<MfsSource> source,std::string key,std::shared_ptr<MfsCatalogIds> ids):source_(std::move(source)),resourceKey_(std::move(key)),ids_(ids?std::move(ids):std::make_shared<MfsCatalogIds>()){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
     WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;}out.writable=source_->Writable();return out;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
     void WorkerUncleanExit()override{source_->DisableWrites();writable_=false;}
@@ -175,7 +174,7 @@ public:
     uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw HfsPlus::Error("MFS is flat and has no subdirectories");}
     uint32_t Put(uint32_t parent,const Entry& e,Reader reader,bool overwrite)override{
         Check(parent==2,"MFS has no subdirectories");ValidateEntry(e);MfsEntry raw;raw.name=Encode(e.name);raw.version=BYTE(e.version);raw.flags=BYTE(0x80|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);raw.datesValid=e.datesValid;memcpy(raw.finderInfo,e.finder.data(),16);for(unsigned f=0;f<2;++f)raw.forks[f].length=uint32_t(e.forks[f].size);uint32_t id=0;
-        Mutate([&]{return image_.Put(raw,reader,overwrite,id);});Call call(*this);return uiIds_.at(id);
+        Mutate([&]{return image_.Put(raw,reader,overwrite,id);});Call call(*this);return ids_->byFile.at(id);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{Check(parent==2&&id!=2,"MFS files remain in the volume root");auto encoded=Encode(name);Mutate([&]{return image_.Rename(image_.Entries().at(entries_.at(id)).id,encoded);});}
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
@@ -267,7 +266,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }
 }
-std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key){return TrackWorkerVolume(std::make_shared<Mfs>(std::move(source),key));}
+std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key,std::shared_ptr<MfsCatalogIds> ids){return TrackWorkerVolume(std::make_shared<Mfs>(std::move(source),key,std::move(ids)));}
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
     return TrackWorkerVolume(std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal)));
 }

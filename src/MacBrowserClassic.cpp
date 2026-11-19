@@ -126,18 +126,18 @@ public:
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
-    Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key):write_(false){
+    Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable):write_(write),session_(stable){
         resourceKey_=key;context_=LegacyEngine::ForVolume(key);LegacyEngine::Scope engine(context_);
         media_=std::move(source);
         processLocal_=media_->ProcessLocal();
         cdDrive_=media_->MediaDrive();
-        registration_.reset(new ReadOnlySources::Registration(media_));
+        registration_.reset(new ReadOnlySources::Registration(media_,write_));
         image_=registration_->Path();
         uint32_t generation=0;
-        if(media_->MediaDrive()>=0 && media_->MediaGeneration(generation))
+        if((session_||media_->MediaDrive()>=0) && media_->MediaGeneration(generation))
             imageIdentity_=key+":"+std::to_string(generation);
         else imageIdentity_=media_->WorkerFiles().empty()?key+":"+image_:key;
-        volume_=hfs_mount(image_.data(),1,O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
+        volume_=(session_?hfs_mount_session:hfs_mount)(image_.data(),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
@@ -512,6 +512,6 @@ bool RecognizesClassicImage(const std::wstring& path) {
 std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path,bool writable) {
     return TrackWorkerVolume(std::make_shared<Classic>(ClassicImagePath::Encode(path),":",writable,true,path));
 }
-std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key));}
+std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key,write,stable));}
 std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return TrackWorkerVolume(std::make_shared<Classic>(image,path,write));}
 }

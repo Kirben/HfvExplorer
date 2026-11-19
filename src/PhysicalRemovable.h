@@ -5,7 +5,19 @@
 namespace Removable {
 struct Device {std::wstring path,label;DWORD number=MAXDWORD;STORAGE_BUS_TYPE bus=BusTypeUnknown;bool removable=false,hotplug=false;};
 struct Geometry {uint64_t bytes=0;DWORD sector=512;bool floppy=false;};
-// There is intentionally no write, format or arbitrary device-control method.
+struct Partition {
+ uint64_t offset=0,length=0;unsigned index=0;bool readOnly=false;
+ bool operator==(const Partition& value)const {
+  return offset==value.offset&&length==value.length&&index==value.index&&readOnly==value.readOnly;
+ }
+};
+class WriteAccess {
+public:
+ virtual ~WriteAccess()=default;
+ virtual HANDLE Handle()const=0;
+ virtual bool Write(uint64_t,DWORD,const void*,DWORD&)=0;
+ virtual bool Flush()=0;
+};
 class Api {
 public:
  virtual ~Api()=default;
@@ -17,16 +29,24 @@ public:
  virtual bool Verify(HANDLE,DWORD& generation)=0;
  virtual bool Read(HANDLE,uint64_t offset,DWORD bytes,void*,DWORD& returned)=0;
  virtual void Close(HANDLE)=0;
+ virtual bool CanWrite(const Device&)const{return false;}
+ virtual std::unique_ptr<WriteAccess> LockForWrite(const Device&,const Partition&){
+  SetLastError(ERROR_WRITE_PROTECT);
+  return {};
+ }
 };
 std::shared_ptr<Api> NativeApi();
 bool Eligible(const Device&);
 class Disk final:public HfsPlus::Source {
  struct Impl;std::unique_ptr<Impl> p_;
 public:
- Disk(const Device&,std::shared_ptr<Api>);
+ Disk(const Device&,std::shared_ptr<Api>,const Partition* writePartition=nullptr);
+ void DropCache();
+ bool WriteFenced()const;
+ bool WasWritten()const;
  ~Disk();
  uint64_t Size()const override;
- bool Writable()const override{return false;}
+ bool Writable()const override;
  void Read(uint64_t,void*,size_t)override;
  void Write(uint64_t,const void*,size_t)override;
  void Flush()override;
@@ -34,7 +54,6 @@ public:
  const Geometry& MediaGeometry()const;
  DWORD Generation()const;
 };
-struct Partition {uint64_t offset=0,length=0;unsigned index=0;};
 std::vector<Partition> Partitions(HfsPlus::Source&,DWORD logicalSector);
 struct Mounted {Device device;Partition partition;std::shared_ptr<MacBrowser::Volume> volume;std::wstring label;};
 struct Discovery {std::vector<Mounted> volumes;std::vector<std::string> errors;std::vector<std::wstring> failedDevices;};

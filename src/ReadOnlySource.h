@@ -6,7 +6,7 @@ namespace ReadOnlySources {
 class Registration {
  std::string path_;
 public:
- explicit Registration(std::shared_ptr<HfsPlus::Source>);
+ explicit Registration(std::shared_ptr<HfsPlus::Source>,bool writable=false);
  ~Registration();
  Registration(const Registration&)=delete;
  const std::string& Path()const{return path_;}

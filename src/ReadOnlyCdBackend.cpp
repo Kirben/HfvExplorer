@@ -62,8 +62,11 @@ int hookedStat(const char* path, struct _stat64* st) {
 }
 int hookedOpen(const char* path, int flags, ...) {
     if(ReadOnlySources::IsPath(path)){
-        if(flags&(_O_CREAT|_O_TRUNC|_O_APPEND|_O_WRONLY|_O_RDWR)){errno=EROFS;return -1;}auto source=ReadOnlySources::Find(path);if(!source){errno=ENOENT;return -1;}
-        try{source->CheckMedia();}catch(...){errno=EIO;return -1;}auto d=std::make_shared<Descriptor>();d->source=std::move(source);std::lock_guard<std::mutex> slots(descriptorMutex);for(int n=0;n<kFdCount;++n)if(!descriptors[n]){descriptors[n]=d;return kFdBase+n;}errno=EMFILE;return -1;
+        auto source=ReadOnlySources::Find(path);
+        if(!source){errno=ENOENT;return -1;}
+        const bool writable=(flags&_O_RDWR)!=0;
+        if((flags&(_O_CREAT|_O_TRUNC|_O_APPEND|_O_WRONLY))||(writable&&!source->Writable())){errno=EROFS;return -1;}
+        try{source->CheckMedia();}catch(...){errno=EIO;return -1;}auto d=std::make_shared<Descriptor>();d->source=std::move(source);d->writable=writable;std::lock_guard<std::mutex> slots(descriptorMutex);for(int n=0;n<kFdCount;++n)if(!descriptors[n]){descriptors[n]=d;return kFdBase+n;}errno=EMFILE;return -1;
     }
     int drive = pathDrive(path);
     if (drive < 0) {
@@ -119,6 +122,9 @@ int hookedSync(int fd) {
     std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if(d&&descriptor(fd)!=d){errno=EBADF;return -1;}
     if(!d){if(virtualFd(fd)){errno=EBADF;return -1;}return _commit(fd);}
+    if(d->source&&d->writable){
+        try{d->source->Flush();return 0;}catch(...){errno=EIO;return -1;}
+    }
     if(!d->direct||!d->writable){errno=EROFS;return -1;}
     auto disk=DirectFloppy::Current(d->drive);
     if(!disk){errno=EBADF;return -1;}
@@ -143,6 +149,11 @@ int hookedWrite(int fd, const void* buffer, unsigned count) {
     auto d=descriptor(fd);
     std::unique_lock<std::recursive_mutex> device;if(d)device=std::unique_lock<std::recursive_mutex>(descriptorLock(d));
     if(d&&descriptor(fd)!=d){errno=EBADF;return -1;}
+    if(d&&d->source&&d->writable){
+        if(count>INT_MAX){errno=EINVAL;return -1;}
+        try{d->source->Write(uint64_t(d->position),buffer,count);d->position+=count;return int(count);}
+        catch(...){errno=EIO;return -1;}
+    }
     if(d&&d->direct&&d->writable){auto disk=DirectFloppy::Current(d->drive);if(!disk){errno=EBADF;return -1;}if(count>INT_MAX||!disk->Write(d->position,count,buffer)){errno=EIO;return -1;}d->position+=count;return count;}
     if (virtualFd(fd)) { errno=EROFS; return -1; }
     return _write(fd,buffer,count);

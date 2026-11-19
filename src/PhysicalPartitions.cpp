@@ -107,17 +107,23 @@ std::vector<Partition> Partitions(Source& source,DWORD sector){
  std::vector<Partition> result;
  if(DiskPartitions::HasProtectiveMbr(boot)||DiskPartitions::HasGptHeader(source,sector)){
   for(const auto& partition:DiskPartitions::ReadGptMacPartitions(source,sector))
-   result.push_back({partition.offset,partition.length,partition.index});
+   result.push_back({partition.offset,partition.length,partition.index,partition.readOnly});
   return result;
  }
- bool appleMbr=false;
- if(boot[510]==0x55&&boot[511]==0xaa)
-  for(unsigned n=0;n<4;++n)appleMbr|=boot[450+n*16]==0xaf;
+ bool appleMbr=false,otherMbr=false;
+ if(boot[510]==0x55&&boot[511]==0xaa){
+  for(unsigned n=0;n<4;++n){
+   const auto entry=boot.data()+446+n*16;
+   appleMbr|=entry[4]==0xaf;
+   const auto start=uint64_t(Le32(entry+8))*sector,length=uint64_t(Le32(entry+12))*sector;
+   otherMbr|=(entry[0]==0||entry[0]==0x80)&&entry[4]&&start>=sector&&length&&B::Range(start,length,source.Size());
+  }
+ }
  if(B::U16(boot.data())==0x4552){
   auto step=B::U16(boot.data()+2);B::Check(step>=512&&step<=4096&&(step&(step-1))==0&&source.Size()>=uint64_t(step)+512,"Invalid Apple partition block size");auto first=B::Read(source,step,512);B::Check(B::U16(first.data())==0x504d,"Missing Apple partition map");auto count=B::U32(first.data()+4);B::Check(count&&count<=4096&&uint64_t(count)*step<=source.Size()-512,"Invalid Apple partition count");std::vector<std::pair<uint64_t,uint64_t>> ranges;
-  for(uint32_t i=1;i<=count;++i){auto entry=B::Read(source,uint64_t(i)*step,512);B::Check(B::U16(entry.data())==0x504d&&B::U32(entry.data()+4)==count,"Inconsistent Apple partition map");uint64_t start=uint64_t(B::U32(entry.data()+8))*step,length=uint64_t(B::U32(entry.data()+12))*step;if(!length)continue;B::Check(B::Range(start,length,source.Size()),"Apple partition lies outside removable disk");ranges.emplace_back(start,start+length-1);std::string type(reinterpret_cast<const char*>(entry.data()+48),32);type.resize(type.find('\0')==type.npos?type.size():type.find('\0'));while(!type.empty()&&type.back()==' ')type.pop_back();if(type=="Apple_HFS"||type=="Apple_HFSX"||type=="Apple_MFS")result.push_back({start,length,i});}Ranges(ranges);return result;
+  for(uint32_t i=1;i<=count;++i){auto entry=B::Read(source,uint64_t(i)*step,512);B::Check(B::U16(entry.data())==0x504d&&B::U32(entry.data()+4)==count,"Inconsistent Apple partition map");uint64_t start=uint64_t(B::U32(entry.data()+8))*step,length=uint64_t(B::U32(entry.data()+12))*step;if(!length)continue;B::Check(B::Range(start,length,source.Size()),"Apple partition lies outside removable disk");ranges.emplace_back(start,start+length-1);std::string type(reinterpret_cast<const char*>(entry.data()+48),32);type.resize(type.find('\0')==type.npos?type.size():type.find('\0'));while(!type.empty()&&type.back()==' ')type.pop_back();if(type=="Apple_HFS"||type=="Apple_HFSX"||type=="Apple_MFS")result.push_back({start,length,i,start<(uint64_t(count)+1)*step});}Ranges(ranges);return result;
  }
  if(appleMbr){std::vector<std::pair<uint64_t,uint64_t>> ranges;for(unsigned i=0;i<4;++i){auto p=boot.data()+446+i*16;auto type=p[4];uint64_t start=uint64_t(Le32(p+8))*sector,length=uint64_t(Le32(p+12))*sector;if(!type||!length)continue;B::Check(start>=sector&&B::Range(start,length,source.Size()),"MBR partition lies outside removable disk");ranges.emplace_back(start,start+length-1);if(type==0xaf)result.push_back({start,length,i+1});}Ranges(ranges);return result;}
- result.push_back({0,source.Size(),0});return result;
+ result.push_back({0,source.Size(),0,otherMbr});return result;
 }
 }

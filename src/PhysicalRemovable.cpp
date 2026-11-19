@@ -11,13 +11,69 @@
 #include <mutex>
 #include <list>
 #include <cwctype>
+#include <cstddef>
+#include <atomic>
+#include <limits>
+#include "StorageOutcome.h"
 namespace Removable {
 namespace {
 using namespace HfsPlus;
 void Check(bool ok,const char* message){if(!ok)throw Error(message);}
 std::string Utf8(const std::wstring& s){return BrowserPresentation::Utf8(MacBrowser::U16(s));}
-[[noreturn]]void IoError(const char* stage,DWORD error){if(!error)error=ERROR_IO_DEVICE;throw Error(std::string(stage)+" (Windows error "+std::to_string(error)+"). "+(error==ERROR_ACCESS_DENIED?"Windows may require running HFVExplorer as administrator for raw disk reads.":error==ERROR_MEDIA_CHANGED?"The media changed; refresh the drive before continuing.":"Refresh or reconnect the removable drive before trying again."));}
+[[noreturn]]void IoError(const char* stage,DWORD error){if(!error)error=ERROR_IO_DEVICE;if(error==ERROR_MEDIA_CHANGED)throw Storage::MediaChanged("Removable media changed; refresh the drive");throw Error(std::string(stage)+" (Windows error "+std::to_string(error)+"). "+(error==ERROR_ACCESS_DENIED?"Windows may require running HFVExplorer as administrator for raw disk access.":error==ERROR_MEDIA_CHANGED?"The media changed; refresh the drive before continuing.":"Refresh or reconnect the removable drive before trying again."));}
 bool Root(const std::wstring& path){return path.size()==3&&path[1]==L':'&&(path[2]==L'\\'||path[2]==L'/')&&towupper(path[0])>=L'A'&&towupper(path[0])<=L'Z';}
+class NativeWriteAccess final:public WriteAccess {
+    HANDLE disk_=INVALID_HANDLE_VALUE;
+    std::vector<HANDLE> volumes_;
+public:
+    ~NativeWriteAccess(){
+        if(disk_!=INVALID_HANDLE_VALUE)CloseHandle(disk_);
+        // Closing the owning handles releases FSCTL_LOCK_VOLUME.
+        for(const auto volume:volumes_)CloseHandle(volume);
+    }
+    HANDLE Handle()const override{return disk_;}
+    void OwnDisk(HANDLE h){disk_=h;}
+    void OwnVolume(HANDLE h){volumes_.push_back(h);}
+    bool Write(uint64_t offset,DWORD n,const void* data,DWORD& done)override{
+        LARGE_INTEGER at;at.QuadPart=LONGLONG(offset);
+        return HfvMediaSeek(disk_,at,nullptr,FILE_BEGIN)&&WriteFile(disk_,data,n,&done,nullptr);
+    }
+    bool Flush()override{return FlushFileBuffers(disk_)!=FALSE;}
+};
+
+#ifndef HFV_TESTING
+struct VolumeHandle {
+    HANDLE value=INVALID_HANDLE_VALUE;
+    ~VolumeHandle(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}
+};
+bool Overlaps(HANDLE volume,const Device& disk,const Partition& part)
+{
+    const auto capacity=FIELD_OFFSET(VOLUME_DISK_EXTENTS,Extents)+1024*sizeof(DISK_EXTENT);
+    std::vector<uint8_t> bytes(capacity);
+    DWORD got=0;
+    const auto extents=reinterpret_cast<const VOLUME_DISK_EXTENTS*>(bytes.data());
+    if(!HfvMediaControl(volume,IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,nullptr,0,bytes.data(),
+                        DWORD(bytes.size()),&got,nullptr)){
+        STORAGE_DEVICE_NUMBER number{};
+        if(HfvMediaControl(volume,IOCTL_STORAGE_GET_DEVICE_NUMBER,nullptr,0,&number,sizeof(number),&got,nullptr)&&
+           got>=sizeof(number)&&number.DeviceType!=FILE_DEVICE_DISK)return false;
+        IoError("Cannot determine the Windows volume extents before locking",GetLastError());
+    }
+    constexpr size_t base=offsetof(VOLUME_DISK_EXTENTS,Extents);
+    Check(got>=base&&got<=bytes.size()&&extents->NumberOfDiskExtents<=(got-base)/sizeof(DISK_EXTENT),
+          "Invalid Windows volume extent information");
+    for(DWORD i=0;i<extents->NumberOfDiskExtents;++i){
+        const auto& extent=extents->Extents[i];
+        if(extent.DiskNumber!=disk.number)continue;
+        const auto start=extent.StartingOffset.QuadPart,length=extent.ExtentLength.QuadPart;
+        Check(start>=0&&length>0&&uint64_t(length)<=UINT64_MAX-uint64_t(start),
+              "Invalid Windows partition extent");
+        if(uint64_t(start)<part.offset+part.length&&part.offset<uint64_t(start)+uint64_t(length))return true;
+    }
+    return false;
+}
+#endif
+
 class WindowsApi final:public Api {
  bool Describe(HANDLE handle,Device& d){
   STORAGE_PROPERTY_QUERY query{};query.PropertyId=StorageDeviceProperty;query.QueryType=PropertyStandardQuery;STORAGE_DESCRIPTOR_HEADER header{};DWORD got=0;
@@ -68,6 +124,54 @@ public:
   GET_LENGTH_INFORMATION length{};if(HfvMediaControl(h,IOCTL_DISK_GET_LENGTH_INFO,nullptr,0,&length,sizeof(length),&got,nullptr)&&got>=sizeof(length)&&length.Length.QuadPart>0)out.bytes=uint64_t(length.Length.QuadPart);
   else if(out.floppy&&geo.Cylinders.QuadPart==80&&geo.TracksPerCylinder==2&&geo.SectorsPerTrack<=36)out.bytes=uint64_t(geo.Cylinders.QuadPart)*geo.TracksPerCylinder*geo.SectorsPerTrack*geo.BytesPerSector;else return false;return true;
  }
+ bool CanWrite(const Device& device)const override{return device.number!=MAXDWORD&&Eligible(device);}
+ std::unique_ptr<WriteAccess> LockForWrite(const Device& d,const Partition& part)override{
+#ifdef HFV_TESTING
+  (void)d;(void)part;SetLastError(ERROR_NOT_SUPPORTED);return {};
+#else
+  Check(CanWrite(d),"Windows cannot uniquely identify this removable disk for writing");
+  auto lock=std::make_unique<NativeWriteAccess>();
+  auto disk=HfvDeviceWait::invoke([&]{
+      return CreateFileW(d.path.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                        FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH,nullptr);
+  },INVALID_HANDLE_VALUE);
+  if(disk==INVALID_HANDLE_VALUE)IoError("Cannot obtain exclusive raw write access",GetLastError());
+  lock->OwnDisk(disk);
+  Device actual;
+  Check(Describe(disk,actual)&&actual.number==d.number,"The selected removable disk was replaced");
+  DWORD ignored=0;
+  if(!HfvMediaControl(disk,IOCTL_DISK_IS_WRITABLE,nullptr,0,nullptr,0,&ignored,nullptr))
+      IoError("Windows refused writes to the removable disk",GetLastError());
+  wchar_t name[MAX_PATH];
+  HANDLE scan=FindFirstVolumeW(name,ARRAYSIZE(name));
+  if(scan==INVALID_HANDLE_VALUE)IoError("Cannot enumerate Windows volumes before locking the disk",GetLastError());
+  struct FindGuard{HANDLE value;~FindGuard(){FindVolumeClose(value);}} done{scan};
+  do{
+      std::wstring root=name;
+      if(GetDriveTypeW(root.c_str())==DRIVE_CDROM)continue;
+      Check(!root.empty()&&root.back()==L'\\',"Invalid Windows volume name");
+      root.pop_back();
+      {
+          VolumeHandle metadata{MetadataOpen(root)};
+          if(metadata.value==INVALID_HANDLE_VALUE)
+              IoError("Cannot inspect a Windows volume before locking the disk",GetLastError());
+          if(!Overlaps(metadata.value,d,part))continue;
+      }
+      VolumeHandle volume{HfvDeviceWait::invoke([&]{
+          return CreateFileW(root.c_str(),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,
+                            nullptr,OPEN_EXISTING,0,nullptr);
+      },INVALID_HANDLE_VALUE)};
+      if(volume.value==INVALID_HANDLE_VALUE)IoError("Cannot open the matching Windows volume for locking",GetLastError());
+      Check(Overlaps(volume.value,d,part),"Windows volume changed before it could be locked");
+      if(!HfvMediaControl(volume.value,FSCTL_LOCK_VOLUME,nullptr,0,nullptr,0,&ignored,nullptr))
+          IoError("Cannot lock the matching Windows volume; close other programs using it",GetLastError());
+      lock->OwnVolume(volume.value);
+      volume.value=INVALID_HANDLE_VALUE;
+  }while(FindNextVolumeW(scan,name,ARRAYSIZE(name)));
+  if(GetLastError()!=ERROR_NO_MORE_FILES)IoError("Cannot finish enumerating Windows volumes",GetLastError());
+  return lock;
+#endif
+ }
  bool Verify(HANDLE h,DWORD& generation)override{DWORD got=0;if(!HfvMediaControl(h,IOCTL_STORAGE_CHECK_VERIFY,nullptr,0,&generation,sizeof(generation),&got,nullptr))return false;if(got<sizeof(generation)){SetLastError(ERROR_NOT_SUPPORTED);return false;}return true;}
  bool Read(HANDLE h,uint64_t offset,DWORD bytes,void* p,DWORD& got)override{LARGE_INTEGER at;at.QuadPart=LONGLONG(offset);return HfvMediaSeek(h,at,nullptr,FILE_BEGIN)&&HfvMediaRead(h,p,bytes,&got,nullptr);}
  void Close(HANDLE h)override{CloseHandle(h);}
@@ -75,30 +179,285 @@ public:
 #ifdef HFV_TESTING
 std::mutex testMutex;std::shared_ptr<Api> testApi;
 #endif
+using MacBrowser::Entry;
+using MacBrowser::Reader;
 class Slice final:public Source {
- std::shared_ptr<Source> source_;uint64_t offset_,length_;
-public:Slice(std::shared_ptr<Source> source,uint64_t offset,uint64_t length):source_(std::move(source)),offset_(offset),length_(length){Check(HfsPlus::Disk::Range(offset,length,source_->Size()),"Partition lies outside removable disk");}
- uint64_t Size()const override{return length_;}bool Writable()const override{return false;}
- void Read(uint64_t at,void* p,size_t n)override{Check(HfsPlus::Disk::Range(at,n,length_),"Read outside removable partition");source_->Read(offset_+at,p,n);}
- void Write(uint64_t,const void*,size_t)override{throw Error("Physical removable disks are read-only");}void Flush()override{throw Error("Physical removable disks are read-only");}void CheckMedia()override{source_->CheckMedia();}
+    std::shared_ptr<Disk> disk_;
+    Partition part_;
+    void Bound(uint64_t at,size_t n)const {
+        Check(HfsPlus::Disk::Range(at,n,part_.length),"Access outside the removable partition");
+    }
+public:
+    Slice(std::shared_ptr<Disk> disk,Partition part):disk_(std::move(disk)),part_(part){}
+    uint64_t Size()const override{return part_.length;}
+    bool Writable()const override{return disk_->Writable();}
+    bool MediaGeneration(uint32_t& generation)const override{generation=disk_->Generation();return true;}
+    void Read(uint64_t at,void* p,size_t n)override{Bound(at,n);disk_->Read(part_.offset+at,p,n);}
+    void Write(uint64_t at,const void* p,size_t n)override{Bound(at,n);disk_->Write(part_.offset+at,p,n);}
+    void Flush()override{disk_->Flush();}
+    void CheckMedia()override{disk_->CheckMedia();}
 };
-class MfsMedia final:public MfsSource{std::shared_ptr<Source> source_;public:explicit MfsMedia(std::shared_ptr<Source> s):source_(std::move(s)){}uint64_t Length()const override{return source_->Size();}bool ReadAt(uint64_t at,void* p,size_t n)override{source_->Read(at,p,n);return true;}};
-class SharedSource final:public Source{std::shared_ptr<Source> source_;public:explicit SharedSource(std::shared_ptr<Source> s):source_(std::move(s)){}uint64_t Size()const override{return source_->Size();}bool Writable()const override{return false;}void Read(uint64_t at,void* p,size_t n)override{source_->Read(at,p,n);}void Write(uint64_t,const void*,size_t)override{throw Error("Physical removable disks are read-only");}void Flush()override{throw Error("Physical removable disks are read-only");}void CheckMedia()override{source_->CheckMedia();}};
+class MfsMedia final:public MfsSource{
+    std::unique_ptr<Slice> source_;
+    bool disabled_=false;
+public:
+    explicit MfsMedia(std::unique_ptr<Slice> s):source_(std::move(s)){}
+    uint64_t Length()const override{return source_->Size();}
+    bool Writable()const override{return !disabled_&&source_->Writable();}
+    void DisableWrites()override{disabled_=true;}
+    bool ReadAt(uint64_t at,void* p,size_t n)override{source_->Read(at,p,n);return true;}
+    bool WriteAt(uint64_t at,const void* p,size_t n)override{
+        if(!Writable())return false;
+        try{source_->Write(at,p,n);return true;}catch(...){return false;}
+    }
+    bool Flush()override{try{source_->Flush();return true;}catch(...){return false;}}
+};
+std::shared_ptr<MacBrowser::Volume> OpenPartition(const std::shared_ptr<Disk>& disk,Partition part,
+        const std::string& key,const std::shared_ptr<MacBrowser::MfsCatalogIds>& ids){
+    if(part.length<2048)return {};
+    auto slice=std::make_unique<Slice>(disk,part);
+    if(Volume::Recognizes(*slice))return MacBrowser::FromHfsPlus(std::move(slice),disk->Writable(),key);
+    auto signature=HfsPlus::Disk::Read(*slice,1024,512);
+    if(HfsPlus::Disk::U16(signature.data())==0x4244){
+        if(disk->MediaGeometry().floppy)return {};
+        return MacBrowser::OpenClassicSource(std::move(slice),key,disk->Writable(),true);
+    }
+    auto source=std::make_unique<MfsMedia>(std::move(slice));
+    if(MfsImage::Recognizes(*source))return MacBrowser::FromMfs(std::move(source),key,ids);
+    return {};
+}
+struct WriteFence {std::atomic<bool> tripped{false};};
+std::shared_ptr<WriteFence> FenceFor(const std::string& device,DWORD generation){
+    static std::mutex mutex;
+    static std::map<std::pair<std::string,DWORD>,std::weak_ptr<WriteFence>> fences;
+    std::lock_guard<std::mutex> guard(mutex);
+    for(auto i=fences.begin();i!=fences.end();){
+        if(i->second.expired())i=fences.erase(i);else ++i;
+    }
+    auto& item=fences[{device,generation}];
+    auto fence=item.lock();
+    if(!fence)item=fence=std::make_shared<WriteFence>();
+    return fence;
+}
 class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
- MacBrowser::WorkerOrigin workerOrigin_;
- std::shared_ptr<MacBrowser::Volume> backend_;std::shared_ptr<Source> source_;std::string key_,kind_,description_;std::u16string name_;uint64_t free_;bool sensitive_,attributes_,stableCatalogIds_;MacBrowser::Capabilities capabilities_;std::recursive_mutex mutex_;
- template<class F>auto Call(F work)->decltype(work()){VolumeCoord::BackendRead lease(key_);std::lock_guard<std::recursive_mutex> lock(mutex_);Check(bool(backend_),"Removable disk was released; refresh it");source_->CheckMedia();try{auto value=work();source_->CheckMedia();return value;}catch(...){auto failure=std::current_exception();source_->CheckMedia();std::rethrow_exception(failure);}}
-public:MediaVolume(std::shared_ptr<MacBrowser::Volume> v,std::shared_ptr<Source> s,std::string key,MacBrowser::WorkerOrigin origin):workerOrigin_(std::move(origin)),backend_(std::move(v)),source_(std::move(s)),key_(std::move(key)){name_=backend_->Stat(2).name;kind_=backend_->Kind();description_=backend_->Description()+", physical removable disk (read-only)";free_=backend_->FreeBytes();sensitive_=backend_->CaseSensitive();attributes_=backend_->SupportsAttributes();stableCatalogIds_=MacBrowser::ExecutionFor(*backend_).stableCatalogIds;capabilities_=backend_->Supports();capabilities_.create=capabilities_.rename=capabilities_.remove=false;}
- MacBrowser::WorkerExecution Execution()const override{MacBrowser::WorkerExecution out;out.stableCatalogIds=stableCatalogIds_;return out;}
- MacBrowser::WorkerOrigin WorkerDescription()const override{return workerOrigin_;}
- std::string ResourceKey()const override{return key_;}std::u16string Name()const override{return name_;}const char* Kind()const override{return kind_.c_str();}std::string Description()const override{return description_;}bool Writable()const override{return false;}bool CaseSensitive()const override{return sensitive_;}uint64_t FreeBytes()const override{return free_;}
- MacBrowser::Capabilities Supports()const override{return capabilities_;}bool SupportsAttributes()const override{return attributes_;}
- std::vector<MacBrowser::Entry> List(uint32_t id)override{return Call([&]{auto entries=backend_->List(id);for(auto& e:entries)e.identity=key_+":"+e.identity;return entries;});}MacBrowser::Entry Stat(uint32_t id)override{return Call([&]{auto e=backend_->Stat(id);e.identity=key_+":"+e.identity;return e;});}
- HfsPlus::Attributes GetAttributes(uint32_t id)override{return Call([&]{return backend_->GetAttributes(id);});}
- void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{Call([&]{backend_->Read(id,f,at,p,n);return true;});}
- uint32_t MakeDirectory(uint32_t,const std::u16string&)override{throw Error("Physical removable disks are read-only");}uint32_t Put(uint32_t,const MacBrowser::Entry&,MacBrowser::Reader,bool)override{throw Error("Physical removable disks are read-only");}void Rename(uint32_t,uint32_t,const std::u16string&)override{throw Error("Physical removable disks are read-only");}void Remove(uint32_t)override{throw Error("Physical removable disks are read-only");}
- void ValidateMedia()override{Call([]{return true;});}
- void Reload()override{Call([&]{backend_->Reload();return true;});}void ReleaseMedia()override{std::lock_guard<std::recursive_mutex> lock(mutex_);backend_.reset();source_.reset();}
+    const Device device_;
+    const Partition partition_;
+    const std::shared_ptr<Api> api_;
+    const std::string key_,diskKey_;
+    std::shared_ptr<Disk> disk_;
+    std::shared_ptr<MacBrowser::Volume> backend_;
+    const std::shared_ptr<MacBrowser::MfsCatalogIds> ids_;
+    const std::u16string name_;
+    const std::string kind_,description_;
+    const bool sensitive_,attributes_,stableCatalogIds_,journaled_,links_,compression_,metadata_;
+    const MacBrowser::Capabilities capabilities_;
+    const bool processLocal_;
+    std::atomic<bool> released_{false};
+    const std::shared_ptr<WriteFence> fence_;
+    std::atomic<uint64_t> free_;
+    uint64_t revision_;
+    const DWORD generation_;
+    bool active_=false;
+    mutable std::recursive_mutex mutex_;
+
+    void Refresh(bool force=false){
+        Check(bool(disk_),"Removable disk was released; refresh it");
+        disk_->CheckMedia();
+        auto revision=VolumeCoord::Revision(key_);
+        if(!active_&&(force||!backend_||revision_!=revision)){
+            disk_->DropCache();
+            auto reopened=OpenPartition(disk_,partition_,key_,ids_);
+            if(!reopened||kind_!=reopened->Kind())
+                throw Storage::MediaChanged("Removable partition changed; refresh the drive");
+            backend_=std::move(reopened);
+            free_=backend_->FreeBytes();
+            revision_=revision;
+        }
+    }
+    template<class F>auto Call(F work)const->decltype(work()){
+        VolumeCoord::BackendRead lease(key_);
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        const_cast<MediaVolume*>(this)->Refresh();
+        auto result=work();
+        disk_->CheckMedia();
+        return result;
+    }
+    template<class F>void Change(F work){WithMediaWrite(work);}
+    static bool WriteCandidate(const Disk& disk,const Device& device,const Partition& part,const Api& api){
+        const auto& g=disk.MediaGeometry();
+        return !g.floppy&&!part.readOnly&&part.offset%g.sector==0&&part.length%g.sector==0&&api.CanWrite(device);
+    }
+    std::string Identity(const std::string& identity)const{
+        return key_+":"+std::to_string(generation_)+":"+identity;
+    }
+    Entry DestinationEntry(Entry entry)const{
+        auto& expected=entry.expectedDestinationIdentity;
+        const auto prefix=Identity("");
+        if(expected.compare(0,prefix.size(),prefix)==0)expected.erase(0,prefix.size());
+        return entry;
+    }
+public:
+    MediaVolume(const Device& device,Partition partition,std::shared_ptr<Api> api,
+                std::shared_ptr<Disk> disk,std::shared_ptr<MacBrowser::Volume> backend,
+                std::string key,std::shared_ptr<MacBrowser::MfsCatalogIds> ids)
+        :device_(device),partition_(partition),api_(std::move(api)),key_(std::move(key)),
+         diskKey_(device.number==MAXDWORD?"removable-disk:"+Utf8(device.path):
+                  "removable-disk:"+std::to_string(device.number)),
+         disk_(std::move(disk)),backend_(std::move(backend)),ids_(std::move(ids)),name_(backend_->Name()),
+         kind_(backend_->Kind()),description_(backend_->Description()),sensitive_(backend_->CaseSensitive()),
+         attributes_(backend_->SupportsAttributes()),stableCatalogIds_(MacBrowser::ExecutionFor(*backend_).stableCatalogIds),
+         journaled_(backend_->Journaled()),links_(backend_->SupportsHardLinks()),compression_(backend_->SupportsCompression()),
+         metadata_(backend_->SupportsBasicMetadata()),capabilities_(backend_->Supports()),
+         processLocal_(WriteCandidate(*disk_,device_,partition_,*api_)),
+         fence_(FenceFor(diskKey_,disk_->Generation())),
+         free_(backend_->FreeBytes()),revision_(VolumeCoord::Revision(key_)),generation_(disk_->Generation()){}
+
+    void WithMediaWrite(const std::function<void()>& work)override{
+        Check(Writable(),"Physical removable partition is read-only");
+        VolumeCoord::OperationLease lease({{key_,VolumeCoord::Mode::Write},{diskKey_,VolumeCoord::Mode::Write}});
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        Check(Writable(),"Physical removable partition is read-only");
+        Refresh();
+        if(active_){work();return;}
+
+        auto writer=std::make_shared<Disk>(device_,api_,&partition_);
+        const auto& old=disk_->MediaGeometry();
+        const auto& locked=writer->MediaGeometry();
+        if(writer->Generation()!=generation_||old.sector!=locked.sector||old.bytes!=locked.bytes)
+            throw Storage::MediaChanged("Removable media changed before writing; refresh the drive");
+        const auto partitions=Partitions(*writer,locked.sector);
+        if(std::find(partitions.begin(),partitions.end(),partition_)==partitions.end())
+            throw Storage::MediaChanged("Removable partition changed before writing; refresh the drive");
+        disk_->CheckMedia();
+        writer->CheckMedia();
+
+        auto reader=disk_;
+        auto readBackend=backend_;
+        std::exception_ptr failure;
+        try{
+            auto writable=OpenPartition(writer,partition_,key_,ids_);
+            Check(writable&&kind_==writable->Kind()&&writable->Writable(),
+                  "The removable filesystem could not be opened for writing");
+            disk_=writer;
+            backend_=std::move(writable);
+            active_=true;
+            work();
+        }catch(...){failure=std::current_exception();}
+        if(active_){
+            try{backend_->Close();}catch(...){if(!failure)failure=std::current_exception();}
+            backend_=std::move(readBackend);
+            disk_=std::move(reader);
+            active_=false;
+        }
+        try{writer->CheckMedia();}catch(...){if(!failure)failure=std::current_exception();}
+        if(writer->WriteFenced())fence_->tripped=true;
+        const bool changed=writer->WasWritten();
+        writer.reset();
+        if(changed){
+            backend_.reset();
+            disk_->DropCache();
+            VolumeCoord::Changed({key_});
+            if(!failure)Refresh();
+        }
+        if(failure)std::rethrow_exception(failure);
+    }
+
+    MacBrowser::WorkerExecution Execution()const override{
+        MacBrowser::WorkerExecution out;
+        out.classicConversion=kind_=="HFS";
+        out.stableCatalogIds=stableCatalogIds_;
+        out.processLocal=processLocal_;
+        return out;
+    }
+    MacBrowser::WorkerOrigin WorkerDescription()const override{
+        MacBrowser::WorkerOrigin out;
+        out.kind=MacBrowser::WorkerOrigin::Removable;
+        out.path=device_.path;
+        out.offset=partition_.offset;
+        out.generationKnown=true;
+        out.generation=generation_;
+        return out;
+    }
+    std::string ResourceKey()const override{return key_;}
+    std::u16string Name()const override{return name_;}
+    const char* Kind()const override{return kind_.c_str();}
+    std::string Description()const override{return description_+(Writable()?", physical removable disk":", physical removable disk (read-only)");}
+    bool Writable()const override{return processLocal_&&!released_&&!fence_->tripped;}
+    bool CaseSensitive()const override{return sensitive_;}
+    bool Journaled()const override{return journaled_;}
+    uint64_t FreeBytes()const override{return free_;}
+    MacBrowser::Capabilities Supports()const override{
+        auto result=capabilities_;
+        result.create=result.rename=result.remove=Writable();
+        return result;
+    }
+    bool SupportsAttributes()const override{return attributes_;}
+    bool SupportsHardLinks()const override{return links_;}
+    bool SupportsCompression()const override{return compression_;}
+    bool SupportsBasicMetadata()const override{return metadata_;}
+    std::vector<Entry> List(uint32_t id)override{return Call([&]{
+        auto entries=backend_->List(id);
+        for(auto& entry:entries)entry.identity=Identity(entry.identity);
+        return entries;
+    });}
+    Entry Stat(uint32_t id)override{return Call([&]{auto entry=backend_->Stat(id);entry.identity=Identity(entry.identity);return entry;});}
+    bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found)override{return Call([&]{
+        if(!backend_->FindTransferChild(parent,entry,found))return false;
+        found.identity=Identity(found.identity);
+        return true;
+    });}
+    HfsPlus::Attributes GetAttributes(uint32_t id)override{return Call([&]{return backend_->GetAttributes(id);});}
+    void SetAttributes(uint32_t id,const HfsPlus::Attributes& attrs)override{Change([&]{backend_->SetAttributes(id,attrs);});}
+    bool GetClassicProperties(uint32_t id,hfsdirent& e)override{return Call([&]{return backend_->GetClassicProperties(id,e);});}
+    void SetClassicProperties(uint32_t id,const hfsdirent& e)override{Change([&]{backend_->SetClassicProperties(id,e);});}
+    void SetBasicMetadata(uint32_t id,const Entry& e)override{Change([&]{backend_->SetBasicMetadata(id,e);});}
+    void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress)override{
+        Change([&]{backend_->SetCompressionMethod(id,method,std::move(progress));});
+    }
+    void Read(uint32_t id,unsigned f,uint64_t at,void* p,size_t n)override{Call([&]{backend_->Read(id,f,at,p,n);return true;});}
+    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
+        uint32_t id=0;Change([&]{id=backend_->MakeDirectory(parent,name);});return id;
+    }
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& entry)override{
+        uint32_t id=0;Change([&]{id=backend_->MakeDirectoryWithAttributes(parent,entry);});return id;
+    }
+    void FinalizeDirectory(uint32_t id,const Entry& source,const Entry& original,bool merge)override{
+        Change([&]{backend_->FinalizeDirectory(id,source,original,merge);});
+    }
+    uint32_t Put(uint32_t parent,const Entry& entry,Reader read,bool replace)override{
+        uint32_t id=0;Change([&]{id=backend_->Put(parent,DestinationEntry(entry),std::move(read),replace);});return id;
+    }
+    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{Change([&]{backend_->Rename(id,parent,name);});}
+    void Remove(uint32_t id)override{Change([&]{backend_->Remove(id);});}
+    uint32_t MakeHardLink(uint32_t id,uint32_t parent,const std::u16string& name,bool replace)override{
+        uint32_t result=0;Change([&]{result=backend_->MakeHardLink(id,parent,name,replace);});return result;
+    }
+    void ValidateEntry(const Entry& entry)const override{Call([&]{backend_->ValidateEntry(entry);return true;});}
+    void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool root)override{
+        Call([&]{backend_->ValidateCopyNames(parent,entries,root);return true;});
+    }
+    void ValidateCopyTo(uint32_t id,MacBrowser::Volume& target,uint32_t parent)override{
+        if(target.ResourceKey()==key_)Call([&]{backend_->ValidateCopyTo(id,*backend_,parent);return true;});
+    }
+    void ValidateRemoval(uint32_t id)override{
+        Check(Writable(),"Physical removable partition is read-only");
+        Call([&]{if(active_)backend_->ValidateRemoval(id);else Check(id!=2&&!backend_->Stat(id).protectedFile,
+              "The removable entry is locked");return true;});
+    }
+    bool CanMoveFrom(const MacBrowser::Volume& source)const override{return kind_!="MFS"&&source.ResourceKey()==key_;}
+    void MoveHere(MacBrowser::Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{
+        Check(CanMoveFrom(source),"Move must stay on the same removable partition");
+        Rename(id,parent,entry.name);
+    }
+    void ValidateMedia()override{Call([]{return true;});}
+    void Reload()override{Call([&]{Refresh(true);return true;});}
+    void ReleaseMedia()override{
+        VolumeCoord::OperationLease lease({{key_,VolumeCoord::Mode::Write}});
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        Check(!active_,"The removable disk is being written");
+        released_=true;
+        backend_.reset();disk_.reset();
+    }
 };
 std::string Key(const Device& d,const Partition& p){auto path=d.path;for(auto& c:path)c=wchar_t(towupper(c));return "removable:"+Utf8(path)+"@"+std::to_string(p.offset)+"+"+std::to_string(p.length);}
 }
@@ -113,22 +472,144 @@ std::shared_ptr<Api> NativeApi(){
 bool HasTestApi(){std::lock_guard<std::mutex> lock(testMutex);return bool(testApi);}
 void SetTestApi(std::shared_ptr<Api> api){std::lock_guard<std::mutex> lock(testMutex);testApi=std::move(api);}
 #endif
-struct Disk::Impl{std::shared_ptr<Api> api;HANDLE handle=INVALID_HANDLE_VALUE;Geometry geometry;DWORD generation=0,error=0;BYTE* buffer=nullptr;std::recursive_mutex mutex;std::list<uint64_t> ages;struct Page{Bytes bytes;std::list<uint64_t>::iterator age;};std::map<uint64_t,Page> pages;
- ~Impl(){if(handle!=INVALID_HANDLE_VALUE)api->Close(handle);if(buffer)VirtualFree(buffer,0,MEM_RELEASE);}
- [[noreturn]]void Fail(const char* stage,DWORD e){error=e?e:ERROR_IO_DEVICE;pages.clear();ages.clear();IoError(stage,error);}
- void Verify(){if(error)IoError("Removable disk is no longer valid",error);DWORD now=0;if(!api->Verify(handle,now))Fail("Cannot verify removable media",GetLastError());if(now!=generation)Fail("Removable media changed",ERROR_MEDIA_CHANGED);}
+struct Disk::Impl {
+ std::shared_ptr<Api> api;
+ std::unique_ptr<WriteAccess> write;
+ HANDLE handle=INVALID_HANDLE_VALUE;
+ Geometry geometry;
+ DWORD generation=0,error=0;
+ BYTE *buffer=nullptr,*original=nullptr,*desired=nullptr;
+ Partition allowed;
+ bool attempted=false;
+ std::recursive_mutex mutex;
+ std::list<uint64_t> ages;
+ struct Page{Bytes bytes;std::list<uint64_t>::iterator age;};
+ std::map<uint64_t,Page> pages;
+
+ ~Impl(){
+  if(write)write.reset();else if(handle!=INVALID_HANDLE_VALUE)api->Close(handle);
+  for(auto p:{buffer,original,desired})if(p)VirtualFree(p,0,MEM_RELEASE);
+ }
+ void Clear(){pages.clear();ages.clear();}
+ [[noreturn]]void Fail(const char* stage,DWORD e){error=e?e:ERROR_IO_DEVICE;Clear();IoError(stage,error);}
+ void Verify(){
+  if(error==ERROR_MEDIA_CHANGED)throw Storage::MediaChanged("Removable media changed; refresh the drive");
+  if(error)IoError("Removable disk is no longer valid",error);
+  DWORD now=0;
+  if(!api->Verify(handle,now))Fail("Cannot verify removable media",GetLastError());
+  if(now!=generation){
+   error=ERROR_MEDIA_CHANGED;Clear();throw Storage::MediaChanged("Removable media changed; refresh the drive");
+  }
+ }
+ bool Replace(uint64_t at,DWORD bytes,const BYTE* value){
+  Verify();
+  DWORD got=0;
+  if(!write->Write(at,bytes,value,got)||got!=bytes)return false;
+  Verify();
+  if(!write->Flush())return false;
+  Verify();
+  if(!api->Read(handle,at,bytes,buffer,got)||got!=bytes)return false;
+  Verify();
+  return memcmp(buffer,value,bytes)==0;
+ }
 };
-Disk::Disk(const Device& d,std::shared_ptr<Api> api):p_(new Impl){Check(Eligible(d),"This device is not external/removable");p_->api=std::move(api);p_->handle=p_->api->Open(d,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_RANDOM_ACCESS);if(p_->handle==INVALID_HANDLE_VALUE)IoError("Cannot open removable disk for reading",GetLastError());if(!p_->api->GetGeometry(p_->handle,p_->geometry))IoError("Cannot determine removable disk geometry",GetLastError());auto& g=p_->geometry;Check(g.bytes>=2048&&g.bytes<=INT64_MAX&&g.sector>=512&&g.sector<=4096&&(g.sector&(g.sector-1))==0&&g.bytes%g.sector==0,"Unsupported removable disk geometry");if(!p_->api->Verify(p_->handle,p_->generation))IoError("Cannot establish removable media identity",GetLastError());p_->buffer=static_cast<BYTE*>(VirtualAlloc(nullptr,65536,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));Check(p_->buffer!=nullptr,"Cannot allocate removable read buffer");}
-Disk::~Disk()=default;uint64_t Disk::Size()const{return p_->geometry.bytes;}const Geometry& Disk::MediaGeometry()const{return p_->geometry;}DWORD Disk::Generation()const{return p_->generation;}
+Disk::Disk(const Device& d,std::shared_ptr<Api> api,const Partition* target):p_(new Impl){
+ Check(Eligible(d),"This device is not external/removable");
+ p_->api=std::move(api);
+ if(target){
+  p_->allowed=*target;
+  p_->write=p_->api->LockForWrite(d,*target);
+  if(!p_->write)IoError("Cannot lock the removable disk for writing",GetLastError());
+  p_->handle=p_->write->Handle();
+ }else p_->handle=p_->api->Open(d,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_RANDOM_ACCESS);
+ if(p_->handle==INVALID_HANDLE_VALUE)IoError("Cannot open removable disk",GetLastError());
+ if(!p_->api->GetGeometry(p_->handle,p_->geometry))IoError("Cannot determine removable disk geometry",GetLastError());
+ const auto& g=p_->geometry;
+ Check(g.bytes>=2048&&g.bytes<=INT64_MAX&&g.sector>=512&&g.sector<=4096&&
+       (g.sector&(g.sector-1))==0&&g.bytes%g.sector==0,"Unsupported removable disk geometry");
+ if(target)Check(!g.floppy&&!target->readOnly&&HfsPlus::Disk::Range(target->offset,target->length,g.bytes)&&
+                 !(target->offset%g.sector)&&!(target->length%g.sector),
+                 "The removable partition is read-only or is not aligned for verified writes");
+ if(!p_->api->Verify(p_->handle,p_->generation))IoError("Cannot establish removable media identity",GetLastError());
+ const auto allocate=[](){return static_cast<BYTE*>(VirtualAlloc(nullptr,65536,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));};
+ p_->buffer=allocate();
+ if(target){p_->original=allocate();p_->desired=allocate();}
+ Check(p_->buffer&&(!target||(p_->original&&p_->desired)),"Cannot allocate removable disk buffers");
+}
+Disk::~Disk()=default;
+uint64_t Disk::Size()const{return p_->geometry.bytes;}
+const Geometry& Disk::MediaGeometry()const{return p_->geometry;}
+DWORD Disk::Generation()const{return p_->generation;}
+bool Disk::Writable()const{return p_->write!=nullptr;}
+bool Disk::WriteFenced()const{return p_->error!=0;}
+bool Disk::WasWritten()const{return p_->attempted;}
+void Disk::DropCache(){std::lock_guard<std::recursive_mutex> lock(p_->mutex);p_->Clear();}
 void Disk::CheckMedia(){std::lock_guard<std::recursive_mutex> lock(p_->mutex);p_->Verify();}
-void Disk::Write(uint64_t,const void*,size_t){throw Error("Physical removable disks are read-only");}void Disk::Flush(){throw Error("Physical removable disks are read-only");}
+void Disk::Flush(){
+ std::lock_guard<std::recursive_mutex> lock(p_->mutex);
+ Check(Writable(),"Physical removable disk is read-only");
+ // Each write already completed an ordered flush and direct readback.
+ p_->Verify();
+}
+void Disk::Write(uint64_t at,const void* input,size_t size){
+ std::lock_guard<std::recursive_mutex> lock(p_->mutex);
+ Check(Writable(),"Physical removable disk is read-only");
+ const auto& allowed=p_->allowed;
+ Check(at>=allowed.offset&&HfsPlus::Disk::Range(at-allowed.offset,size,allowed.length)&&(!size||input),
+       "Write outside the locked removable partition");
+ p_->Verify();
+ const auto sector=p_->geometry.sector;
+ auto data=static_cast<const BYTE*>(input);
+ while(size){
+  const auto start=at/sector*sector;
+  const auto skip=DWORD(at-start);
+  const auto n=DWORD((std::min)(size,size_t(65536-skip)));
+  const auto bytes=(skip+n+sector-1)/sector*sector;
+  DWORD got=0;
+  if(!p_->api->Read(p_->handle,start,bytes,p_->original,got)||got!=bytes)
+      p_->Fail("Cannot read original removable sectors before writing",ERROR_READ_FAULT);
+  p_->Verify();
+  memcpy(p_->desired,p_->original,bytes);
+  memcpy(p_->desired+skip,data,n);
+  if(memcmp(p_->desired,p_->original,bytes)!=0){
+   p_->Clear();
+   p_->attempted=true;
+   bool good=false;
+   std::exception_ptr failure;
+   try{good=p_->Replace(start,bytes,p_->desired);}catch(...){failure=std::current_exception();}
+   if(!good){
+    bool restored=false;
+    if(!p_->error)try{restored=p_->Replace(start,bytes,p_->original);}catch(...){}
+    Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Unverified);
+    if(failure)std::rethrow_exception(failure);
+    if(!restored)p_->Fail("Removable write could not be verified or restored",ERROR_WRITE_FAULT);
+    IoError("Removable write failed verification; the affected sectors were restored",ERROR_WRITE_FAULT);
+   }
+  }
+  data+=n;at+=n;size-=n;
+ }
+}
 void Disk::Read(uint64_t at,void* output,size_t size){std::lock_guard<std::recursive_mutex> lock(p_->mutex);p_->Verify();Check(Disk::Size()>=at&&size<=Disk::Size()-at&&(!size||output),"Read outside removable disk");auto out=static_cast<BYTE*>(output);while(size){uint64_t page=at/65536*65536;auto found=p_->pages.find(page);if(found==p_->pages.end()){DWORD bytes=DWORD((std::min)(uint64_t(65536),Size()-page)),got=0;if(!p_->api->Read(p_->handle,page,bytes,p_->buffer,got))p_->Fail("Removable disk read failed",GetLastError());if(got!=bytes)p_->Fail("Short removable disk read",ERROR_READ_FAULT);p_->Verify();if(p_->pages.size()>=64){p_->pages.erase(p_->ages.back());p_->ages.pop_back();}p_->ages.push_front(page);Impl::Page value;value.bytes.assign(p_->buffer,p_->buffer+bytes);value.age=p_->ages.begin();found=p_->pages.emplace(page,std::move(value)).first;}else{p_->ages.splice(p_->ages.begin(),p_->ages,found->second.age);found->second.age=p_->ages.begin();}auto skip=size_t(at-page),n=(std::min)(size,found->second.bytes.size()-skip);memcpy(out,found->second.bytes.data()+skip,n);out+=n;at+=n;size-=n;}p_->Verify();}
-std::vector<Mounted> Open(const Device& device,std::shared_ptr<Api> api){if(!api)api=NativeApi();auto disk=std::make_shared<Disk>(device,api);std::vector<Mounted> result;for(auto partition:Partitions(*disk,disk->MediaGeometry().sector)){auto slice=std::make_shared<Slice>(disk,partition.offset,partition.length);if(slice->Size()<2048)continue;auto signature=HfsPlus::Disk::Read(*slice,1024,512);auto key=Key(device,partition);std::shared_ptr<MacBrowser::Volume> backend;
-  if(Volume::Recognizes(*slice))backend=MacBrowser::FromHfsPlus(std::unique_ptr<Source>(new SharedSource(slice)),false,key);
-  else if(HfsPlus::Disk::U16(signature.data())==0x4244){if(disk->MediaGeometry().floppy)continue;backend=MacBrowser::OpenClassicSource(slice,key);}
-  else {std::unique_ptr<MfsSource> source(new MfsMedia(slice));if(MfsImage::Recognizes(*source))backend=MacBrowser::FromMfs(std::move(source),key);}
-  if(!backend)continue;Mounted mounted;mounted.device=device;mounted.partition=partition;MacBrowser::WorkerOrigin origin;origin.kind=MacBrowser::WorkerOrigin::Removable;origin.path=device.path;origin.offset=partition.offset;origin.generationKnown=true;origin.generation=disk->Generation();mounted.volume=MacBrowser::TrackWorkerVolume(std::make_shared<MediaVolume>(std::move(backend),slice,key,origin));mounted.label=device.label;if(partition.index)mounted.label+=L", partition "+std::to_wstring(partition.index);result.push_back(std::move(mounted));}
- disk->CheckMedia();return result;
+std::vector<Mounted> Open(const Device& device,std::shared_ptr<Api> api){
+    if(!api)api=NativeApi();
+    auto disk=std::make_shared<Disk>(device,api);
+    std::vector<Mounted> result;
+    for(const auto& partition:Partitions(*disk,disk->MediaGeometry().sector)){
+        auto key=Key(device,partition);
+        auto ids=std::make_shared<MacBrowser::MfsCatalogIds>();
+        auto backend=OpenPartition(disk,partition,key,ids);
+        if(!backend)continue;
+        Mounted mounted;
+        mounted.device=device;
+        mounted.partition=partition;
+        mounted.volume=MacBrowser::TrackWorkerVolume(std::make_shared<MediaVolume>(
+            device,partition,api,disk,std::move(backend),key,std::move(ids)));
+        mounted.label=device.label;
+        if(partition.index)mounted.label+=L", partition "+std::to_wstring(partition.index);
+        result.push_back(std::move(mounted));
+    }
+    disk->CheckMedia();
+    return result;
 }
 Discovery Scan(Storage::Job& job,std::shared_ptr<Api> api){if(!api)api=NativeApi();Discovery result;auto devices=api->Enumerate();std::set<std::wstring> seen;for(auto& device:devices){if(job.cancelled())throw Storage::Cancelled();if(!Eligible(device)||!seen.insert(device.path).second)continue;Storage::Progress progress;progress.phase="Checking Mac removable disks";progress.path=Utf8(device.label);progress.utf8=true;job.progress(progress);try{auto volumes=MediaDiscovery::External(device,api,job);result.volumes.insert(result.volumes.end(),volumes.begin(),volumes.end());}catch(const Storage::MediaChanged&){throw;}catch(const Storage::Cancelled&){throw;}catch(const std::exception& e){result.failedDevices.push_back(device.path);result.errors.push_back(Utf8(device.label)+": "+e.what());}}return result;}
 std::vector<Mounted> FromDriveRoot(const std::wstring& root,Storage::Job* job){if(!Root(root))return {};auto api=NativeApi();if(api->WindowsReadableRoot(root))return {};Device device;if(!api->FromRoot(root,device))return {};return job?MediaDiscovery::External(device,api,*job):Open(device,api);}

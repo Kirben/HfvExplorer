@@ -68,7 +68,15 @@ void WriteWithMedia(const Location& item,const std::function<void()>& mutate){
   std::optional<DWORD> generation;
   if(item.MediaGenerationKnown())generation=item.MediaGeneration();
   RunFloppyWrite(item.Drive(),generation,mutate);
- }else mutate();
+  return;
+ }
+ if(auto volume=item.Volume()){
+  if(auto endpoint=MacBrowser::WorkerEndpoint::Find(*volume)){
+   endpoint->WithMediaWrite(mutate);
+   return;
+  }
+ }
+ mutate();
 }
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,Storage::Job& job,Completion& completion){
  std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> fresh(sources.size());
@@ -219,7 +227,7 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
     }
     if(item.IsClassic())volume.Close();
    };
-   if(item.IsClassic())WriteWithMedia(item,mutate);else mutate();
+   WriteWithMedia(item,mutate);
   }else if(item.IsWindows()){
    auto source=Source(item,true);Cancel(job);source.first->Close();
    Mark(completion,item);
@@ -489,13 +497,15 @@ Storage::Result MakeFolder(const CreateFolder& folder,Storage::Job& job,Completi
  MetadataProgress(job,"Creating folder",folder.name);
  const auto& item=folder.parent;
  if(item.Volume()){
-  auto [volume,id]=Source(item);
-  const auto entry=volume->Stat(id);
-  Cancel(job);
-  Check(entry.directory&&volume->Supports().create&&volume->Supports().createFolders&&
-        (entry.id==2||!entry.protectedFile),"Cannot create a folder here");
-  MarkChild(completion,item,folder.name);
-  volume->MakeDirectory(id,folder.name);
+  WriteWithMedia(item,[&]{
+   auto [volume,id]=Source(item);
+   const auto entry=volume->Stat(id);
+   Cancel(job);
+   Check(entry.directory&&volume->Supports().create&&volume->Supports().createFolders&&
+         (entry.id==2||!entry.protectedFile),"Cannot create a folder here");
+   MarkChild(completion,item,folder.name);
+   volume->MakeDirectory(id,folder.name);
+  });
  }else if(item.IsWindows()){
   StorageLocation::ValidateMedia(item);
   auto volume=OpenWindows(item.WindowsPath());
@@ -754,22 +764,24 @@ MutationPlan DescribeMutation(const CreateFolder& request,bool temporary)
 
 Storage::Result RunHardLink(const CreateHardLink& request,Storage::Job& job,Completion& completion)
 {
- auto source=Source(request.source);
- auto target=Destination(request.parent);
- Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&
-       source.first->ResourceKey()==target.first->ResourceKey(),
-       "Hard links require the same writable HFS+/HFSX volume");
- Cancel(job);
- Mark(completion,request.source);
- MarkChild(completion,request.parent,request.name);
- Storage::Progress progress;
- progress.scanning=false;
- progress.phase="Creating hard link";
- progress.totalFiles=1;
- job.progress(progress);
- target.first->MakeHardLink(source.second,target.second,request.name);
- progress.files=1;
- job.progress(progress);
+ WriteWithMedia(request.parent,[&]{
+  auto source=Source(request.source);
+  auto target=Destination(request.parent);
+  Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&
+        source.first->ResourceKey()==target.first->ResourceKey(),
+        "Hard links require the same writable HFS+/HFSX volume");
+  Cancel(job);
+  Mark(completion,request.source);
+  MarkChild(completion,request.parent,request.name);
+  Storage::Progress progress;
+  progress.scanning=false;
+  progress.phase="Creating hard link";
+  progress.totalFiles=1;
+  job.progress(progress);
+  target.first->MakeHardLink(source.second,target.second,request.name);
+  progress.files=1;
+  job.progress(progress);
+ });
  completion.complete=true;
  completion.completed=1;
  return {};
@@ -992,7 +1004,10 @@ Storage::Result Execute(const ExecutionPlan& plan,Storage::Job& job,Completion& 
   for(;;){
    Cancel(job);
    try{
-    plan.metadata->execute(job,completion);
+    auto execute=[&]{plan.metadata->execute(job,completion);};
+    if(plan.metadata->access==Mode::Write&&plan.metadata->item->IsMounted())
+     WriteWithMedia(*plan.metadata->item,execute);
+    else execute();
     break;
    }catch(const VolumeCoord::Busy&){
     // A shared lease excludes writes, but some local engines can briefly

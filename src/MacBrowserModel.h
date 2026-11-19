@@ -2,6 +2,7 @@
 #pragma once
 #include "HfsPlus.h"
 #include "MfsImage.h"
+#include <map>
 #include "StorageWorker.h"
 extern "C" {
 #include "hfs/libhfs/hfs.h"
@@ -115,8 +116,13 @@ Entry DescribeWindowsFile(const std::wstring &path);
 std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring &path);
 bool WindowsResourceCompanion(const std::wstring &path);
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
-std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key);
-std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource>,const std::string& key);
+std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key,bool write=false,bool stable=false);
+struct MfsCatalogIds {
+    std::map<uint32_t,uint32_t> byFile;
+    uint32_t next=3;
+};
+std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource>,const std::string& key,
+                                std::shared_ptr<MfsCatalogIds> ids={});
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
 std::shared_ptr<Volume> OpenMfsImage(const std::wstring&, bool writable);
 bool RecognizesClassicImage(const std::wstring&);

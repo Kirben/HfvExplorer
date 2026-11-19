@@ -9,6 +9,7 @@
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "FileOperations.h"
+#include "StorageOutcome.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
@@ -33,23 +34,88 @@ std::shared_ptr<Bytes> Plus(const std::string& path,HfsPlus::Volume::FormatKind 
 std::shared_ptr<Bytes> Classic(const std::string& path){CFile f;Check(f.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"Create Zip fixture");f.SetLength(4*1024*1024);f.Close();char label[]="Zip Classic";Check(hfs_format(const_cast<char*>(path.c_str()),0,label)==0,"Format Zip fixture");auto v=hfs_mount(const_cast<char*>(path.c_str()),0,O_RDWR);char name[]="Zip Classic:Hello",type[]="TEXT",creator[]="TEST";Check(v&&hfs_create(v,name,type,creator)==0,"Create classic fixture file");auto file=hfs_open(v,name);Check(file!=nullptr,"Open classic fixture file");for(unsigned fork=0;fork<2;++fork){Bytes bytes(fork?723:5003);Payload(fork,0,bytes.data(),bytes.size());Check(hfs_setfork(file,fork)==0&&hfs_write(file,bytes.data(),unsigned(bytes.size()))==bytes.size(),"Write classic fixture forks");}Check(hfs_close(file)==0&&hfs_umount(v)==0,"Close classic fixture");return Load(path);}
 class MfsMemory:public MfsSource{public:Bytes bytes=Bytes(1474560);uint64_t Length()const override{return bytes.size();}bool Writable()const override{return true;}bool ReadAt(uint64_t at,void* p,size_t n)override{if(!B::Range(at,n,bytes.size()))return false;memcpy(p,bytes.data()+at,n);return true;}bool WriteAt(uint64_t at,const void* p,size_t n)override{if(!B::Range(at,n,bytes.size()))return false;memcpy(bytes.data()+at,p,n);return true;}bool Flush()override{return true;}};
 std::shared_ptr<Bytes> Mfs(){MfsMemory memory;std::string error;Check(MfsImage::Format(memory,"MFS",1474560,false,error),error.c_str());MfsImage v;Check(v.Open(memory),"Open MFS fixture");MfsEntry e;e.name="Hello";e.forks[0].length=5003;e.forks[1].length=723;uint32_t id=0;Check(v.Put(e,Payload,false,id),"Populate MFS fixture");return std::make_shared<Bytes>(std::move(memory.bytes));}
-struct Store{Removable::Device device;Removable::Geometry geometry;std::map<uint64_t,std::shared_ptr<Bytes>> segments;DWORD generation=7,error=0;bool shortRead=false,noIdentity=false,changeAfterRead=false,pattern=false;unsigned opens=0,closes=0,reads=0,checks=0;};
+struct Store{Removable::Device device;Removable::Geometry geometry;std::map<uint64_t,std::shared_ptr<Bytes>> segments;DWORD generation=7,error=0;bool shortRead=false,noIdentity=false,changeAfterRead=false,pattern=false;bool writable=false,locked=false,denyLock=false,swapAtLock=false,swapOnWrite=false;
+ bool corruptReadback=false,pendingReadback=false,failFlush=false;
+ unsigned opens=0,closes=0,reads=0,checks=0,locks=0,writes=0,flushes=0;
+ Removable::Partition target;};
 class Fake:public Removable::Api {
+ class Locked final:public Removable::WriteAccess {
+  Fake& api_;
+  HANDLE handle_;
+ public:
+  Locked(Fake& api,HANDLE handle):api_(api),handle_(handle){}
+  ~Locked(){
+   {std::lock_guard<std::mutex> guard(api_.mutex);api_.Get(handle_)->locked=false;}
+   api_.Close(handle_);
+  }
+  HANDLE Handle()const override{return handle_;}
+  bool Write(uint64_t at,DWORD n,const void* data,DWORD& got)override{
+   std::lock_guard<std::mutex> guard(api_.mutex);
+   auto store=api_.Get(handle_);
+   Check(store->locked,"Simulated write escaped exclusive access");
+   Check(at%store->geometry.sector==0&&n%store->geometry.sector==0&&
+         reinterpret_cast<uintptr_t>(data)%store->geometry.sector==0,"Unaligned removable write");
+   const auto& part=store->target;
+   Check(at>=part.offset&&B::Range(at-part.offset,n,part.length),"Simulated write escaped its locked partition");
+   if(store->swapOnWrite){
+    store->swapOnWrite=false;
+    ++store->generation;
+    SetLastError(ERROR_MEDIA_CHANGED);
+    return false;
+   }
+   auto segment=store->segments.at(part.offset);
+   memcpy(segment->data()+at-part.offset,data,n);
+   got=n;
+   ++store->writes;
+   store->pendingReadback=true;
+   return true;
+  }
+  bool Flush()override{
+   std::lock_guard<std::mutex> guard(api_.mutex);
+   auto store=api_.Get(handle_);
+   ++store->flushes;
+   return !store->failFlush;
+  }
+ };
  uintptr_t next=1;std::map<HANDLE,std::shared_ptr<Store>> handles;std::mutex mutex;
  std::shared_ptr<Store> Get(HANDLE h){auto i=handles.find(h);Check(i!=handles.end(),"Unknown simulated removable handle");return i->second;}
 public:
  std::vector<std::shared_ptr<Store>> devices;bool workerOnly=false,wrongThread=false,windowsReadable=false;std::atomic<unsigned> enumerations{0};HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);std::atomic<bool> gate{false};
  ~Fake(){SetEvent(release);CloseHandle(entered);CloseHandle(release);}
  void Thread(){if(workerOnly&&GetCurrentThreadId()==StorageUi::state().thread)wrongThread=true;}
- std::shared_ptr<Store> Add(const wchar_t* name,std::shared_ptr<Bytes> bytes,STORAGE_BUS_TYPE bus=BusTypeUsb,bool removable=true){auto d=std::make_shared<Store>();d->device.path=name;d->device.label=name;d->device.bus=bus;d->device.removable=removable;d->geometry.bytes=bytes->size();d->segments[0]=std::move(bytes);devices.push_back(d);return d;}
+ std::shared_ptr<Store> Add(const wchar_t* name,std::shared_ptr<Bytes> bytes,STORAGE_BUS_TYPE bus=BusTypeUsb,bool removable=true){auto d=std::make_shared<Store>();d->device.path=name;d->device.label=name;d->device.bus=bus;d->device.removable=removable;d->device.number=DWORD(100+devices.size());d->geometry.bytes=bytes->size();d->segments[0]=std::move(bytes);devices.push_back(d);return d;}
  std::vector<Removable::Device> Enumerate()override{Thread();++enumerations;std::vector<Removable::Device> out;for(auto& d:devices)out.push_back(d->device);return out;}
  bool FromRoot(const std::wstring& root,Removable::Device& out)override{Thread();if(root!=L"Z:\\"||devices.empty())return false;out=devices.front()->device;return true;}
  bool WindowsReadableRoot(const std::wstring&)override{Thread();return windowsReadable;}
  HANDLE Open(const Removable::Device& d,DWORD access,DWORD sharing,DWORD flags)override{Thread();Check(access==GENERIC_READ&&sharing==(FILE_SHARE_READ|FILE_SHARE_WRITE)&&flags==FILE_FLAG_RANDOM_ACCESS,"Removable transport requested writable/unsafe open");std::lock_guard<std::mutex> lock(mutex);for(auto& s:devices)if(s->device.path==d.path){if(s->error==ERROR_ACCESS_DENIED){SetLastError(s->error);return INVALID_HANDLE_VALUE;}++s->opens;auto h=reinterpret_cast<HANDLE>(next++);handles[h]=s;return h;}SetLastError(ERROR_DEVICE_NOT_CONNECTED);return INVALID_HANDLE_VALUE;}
  bool GetGeometry(HANDLE h,Removable::Geometry& g)override{Thread();std::lock_guard<std::mutex> lock(mutex);g=Get(h)->geometry;return true;}
  bool Verify(HANDLE h,DWORD& generation)override{Thread();if(gate.exchange(false)){SetEvent(entered);Check(WaitForSingleObject(release,15000)==WAIT_OBJECT_0,"Release simulated removable spin-up");}std::lock_guard<std::mutex> lock(mutex);auto s=Get(h);++s->checks;if(s->error||s->noIdentity){SetLastError(s->error?s->error:ERROR_NOT_SUPPORTED);return false;}generation=s->generation;return true;}
- bool Read(HANDLE h,uint64_t at,DWORD bytes,void* p,DWORD& got)override{Thread();std::lock_guard<std::mutex> lock(mutex);auto s=Get(h);Check(at%s->geometry.sector==0&&bytes%s->geometry.sector==0&&reinterpret_cast<uintptr_t>(p)%s->geometry.sector==0,"Unaligned physical removable read");Check(B::Range(at,bytes,s->geometry.bytes),"Read outside simulated media");++s->reads;memset(p,0,bytes);if(s->pattern)for(DWORD i=0;i<bytes;++i)static_cast<uint8_t*>(p)[i]=uint8_t((at+i)*13+((at+i)>>32));for(auto& part:s->segments){auto begin=(std::max)(at,part.first),end=(std::min)(at+bytes,part.first+part.second->size());if(begin<end)memcpy(static_cast<uint8_t*>(p)+begin-at,part.second->data()+begin-part.first,size_t(end-begin));}got=s->shortRead?bytes-1:bytes;if(s->changeAfterRead){s->changeAfterRead=false;++s->generation;}return true;}
+ bool Read(HANDLE h,uint64_t at,DWORD bytes,void* p,DWORD& got)override{Thread();std::lock_guard<std::mutex> lock(mutex);auto s=Get(h);Check(at%s->geometry.sector==0&&bytes%s->geometry.sector==0&&reinterpret_cast<uintptr_t>(p)%s->geometry.sector==0,"Unaligned physical removable read");Check(B::Range(at,bytes,s->geometry.bytes),"Read outside simulated media");++s->reads;memset(p,0,bytes);if(s->pattern)for(DWORD i=0;i<bytes;++i)static_cast<uint8_t*>(p)[i]=uint8_t((at+i)*13+((at+i)>>32));for(auto& part:s->segments){auto begin=(std::max)(at,part.first),end=(std::min)(at+bytes,part.first+part.second->size());if(begin<end)memcpy(static_cast<uint8_t*>(p)+begin-at,part.second->data()+begin-part.first,size_t(end-begin));}got=s->shortRead?bytes-1:bytes;
+ if(s->pendingReadback&&s->locked){
+  s->pendingReadback=false;
+  if(s->corruptReadback){s->corruptReadback=false;static_cast<uint8_t*>(p)[0]^=1;}
+ }
+ if(s->changeAfterRead){s->changeAfterRead=false;++s->generation;}return true;}
  void Close(HANDLE h)override{std::lock_guard<std::mutex> lock(mutex);auto s=Get(h);++s->closes;handles.erase(h);}
+ bool CanWrite(const Removable::Device& device)const override{
+  for(auto& store:devices)if(store->device.path==device.path)return store->writable;
+  return false;
+ }
+ std::unique_ptr<Removable::WriteAccess> LockForWrite(const Removable::Device& device,
+                                                       const Removable::Partition& part)override{
+  std::shared_ptr<Store> target;
+  {
+   std::lock_guard<std::mutex> guard(mutex);
+   for(auto& store:devices)if(store->device.path==device.path)target=store;
+   Check(bool(target)&&target->writable,"Invalid simulated writable disk");
+   if(target->locked||target->denyLock){SetLastError(ERROR_SHARING_VIOLATION);return {};}
+   target->locked=true;
+   target->target=part;
+   ++target->locks;
+   if(target->swapAtLock){target->swapAtLock=false;++target->generation;}
+  }
+  return std::make_unique<Locked>(*this,Open(device,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_RANDOM_ACCESS));
+ }
  unsigned Active(){std::lock_guard<std::mutex> lock(mutex);return unsigned(handles.size());}
 };
 uint32_t Find(MacBrowser::Volume& v,uint32_t p,const std::u16string& n){MacBrowser::Entry e;Check(v.FindChild(p,n,e),"Missing removable fixture entry");return e.id;}
@@ -71,6 +137,117 @@ void UpdateGptTable(Store& image,const Bytes& table)
   image.segments[lba*sector]=std::move(header);
   image.segments[(backup?sectors-2:2)*sector]=std::make_shared<Bytes>(table);
  }
+}
+
+void WritableMedia(const std::string& root,const std::shared_ptr<Bytes>& classic,
+                   const std::shared_ptr<Bytes>& plus,const std::shared_ptr<Bytes>& hfsx,
+                   const std::shared_ptr<Bytes>& mfs){
+ auto api=std::make_shared<Fake>();
+ auto zip=Apm(*api,std::make_shared<Bytes>(*classic),std::make_shared<Bytes>(*plus));
+ auto external=Gpt(*api,std::make_shared<Bytes>(*hfsx),4096);
+ auto raw=api->Add(L"MFS removable",std::make_shared<Bytes>(*mfs));
+ for(const auto& drive:{zip,external,raw})drive->writable=true;
+ auto zipMounts=Removable::Open(zip->device,api);
+ auto gptMounts=Removable::Open(external->device,api);
+ auto mfsMounts=Removable::Open(raw->device,api);
+ Check(zipMounts.size()==2&&gptMounts.size()==1&&mfsMounts.size()==1,"Discover writable test partitions");
+ auto verifyWrite=[&](const Removable::Mounted& selected,bool flat){
+  auto volume=selected.volume;
+  Check(volume->Writable()&&MacBrowser::ExecutionFor(*volume).processLocal,"Writable disk did not use retained local backend");
+  auto drive=*std::find_if(api->devices.begin(),api->devices.end(),
+      [&](const auto& device){return device->device.path==selected.device.path;});
+  auto others=Removable::Open(selected.device,api);
+  auto observer=std::find_if(others.begin(),others.end(),[&](const auto& mount){return mount.partition==selected.partition;})->volume;
+  const auto id=Find(*volume,2,u"Hello");
+  const auto observerId=Find(*observer,2,u"Hello");
+  std::map<uint64_t,Bytes> neighbors;
+  for(const auto& [offset,bytes]:drive->segments)
+   if(offset!=selected.partition.offset)neighbors.emplace(offset,*bytes);
+   volume->Rename(id,2,u"Original");
+  Check(Find(*observer,2,u"Original")==observerId,"Second mount retained its old catalog after a write");
+  auto descriptor=volume->Stat(id);
+  descriptor.name=u"Hello";
+  auto written=volume->Put(2,descriptor,Payload,false);
+  Verify(*volume);
+  volume->Remove(id);
+  if(!flat){auto folder=volume->MakeDirectory(2,u"New folder");volume->Remove(folder);}
+  Verify(*observer);
+  Check(Find(*volume,2,u"Hello")==written,"Writable filesystem IDs did not survive reopening");
+  for(const auto& [offset,bytes]:neighbors)
+   Check(*drive->segments.at(offset)==bytes,"Written filesystem modified an adjacent partition or disk map");
+  Check(drive->writes>0&&drive->flushes>=drive->writes&&!drive->locked,"Write session skipped flush or leaked its lock");
+ };
+ verifyWrite(zipMounts[0],false);
+ verifyWrite(zipMounts[1],false);
+ verifyWrite(gptMounts[0],false);
+ verifyWrite(mfsMounts[0],true);
+
+ // A second raw writer must fail, and an intervening swap must precede every write.
+ auto selected=gptMounts[0];
+ const auto before=external->writes;
+ auto table=*external->segments.at(2*external->geometry.sector);
+ Little(table.data()+48,1ULL<<60,8);
+ UpdateGptTable(*external,table);
+ Reject([&]{selected.volume->MakeDirectory(2,u"Changed map");},"An edited partition table was accepted without reopening");
+ auto readOnly=Removable::Open(external->device,api).front();
+ Check(!readOnly.volume->Writable()&&external->writes==before,"A physical GPT read-only flag was ignored");
+ Little(table.data()+48,0,8);
+ UpdateGptTable(*external,table);
+ {
+  Removable::Disk writer(external->device,api,&selected.partition);
+  Reject([&]{selected.volume->MakeDirectory(2,u"Locked");},"A conflicting raw writer was accepted");
+  Check(external->writes==before,"Lock failure modified sectors");
+  const uint8_t byte=0x5a;
+  Reject([&]{writer.Write(selected.partition.offset-1,&byte,1);},"Cross-partition write was accepted");
+ }
+ external->swapAtLock=true;
+ Reject([&]{selected.volume->MakeDirectory(2,u"Swapped");},"A media swap during locking was accepted");
+ Check(!external->locked&&external->writes==before,"Media swap before writing modified sectors");
+
+ auto fixture=api->Add(L"Readback fault",std::make_shared<Bytes>(*plus));
+ fixture->writable=true;
+ auto target=Removable::Open(fixture->device,api).front();
+ const Bytes old=*fixture->segments.at(0);
+ {
+  Removable::Disk writer(fixture->device,api,&target.partition);
+  const uint8_t byte=0x5a;
+  Storage::OutcomeEvidence evidence;
+  fixture->corruptReadback=true;
+  Reject([&]{writer.Write(29,&byte,1);},"Mismatching readback was reported as success");
+  Check(*fixture->segments.at(0)==old&&evidence.RollbackState()==Storage::Rollback::Restored,
+        "Readback mismatch did not verify restoration of the original sectors");
+  fixture->swapOnWrite=true;
+  const auto attempts=fixture->writes;
+  Reject([&]{writer.Write(29,&byte,1);},"A swap during a write was accepted");
+  Check(writer.WriteFenced()&&fixture->writes==attempts,"Recovery wrote to swapped media");
+ }
+ target=Removable::Open(fixture->device,api).front();
+ auto observer=Removable::Open(fixture->device,api).front();
+ const auto host=root+"\\cut-source";
+ Check(CreateDirectoryA(host.c_str(),nullptr),"Create simulated Cut source folder");
+ auto source=MacBrowser::OpenWindows(VolumeCoord::Wide(host));
+ MacBrowser::Entry file;file.name=u"Retain me";file.forks[0].size=2049;
+ auto id=source->Put(2,file,Payload,false);
+ FileOperations::Request request;
+ request.Copy().sources={FileOperations::Location::Mounted(source,id)};
+ request.Copy().sources.front().cut=true;
+ request.Copy().destination=FileOperations::Location::Mounted(target.volume,2);
+ request.Copy().sources.front().cut=false;
+ auto copied=FileOperations::Submit(request);
+ copied.Job()->wait();
+ Check(!copied.Job()->result().code,copied.Job()->result().message.c_str());
+ const auto received=Find(*target.volume,2,file.name);
+ Bytes readback(file.forks[0].size),expected(readback.size());
+ Payload(0,0,expected.data(),expected.size());
+ target.volume->Read(received,0,0,readback.data(),readback.size());
+ Check(readback==expected,"File operation did not write the removable destination");
+ target.volume->Remove(received);
+ request.Copy().sources.front().cut=true;
+ fixture->failFlush=true;
+ auto operation=FileOperations::Submit(request);
+ operation.Job()->wait();
+ Check(operation.Job()->result().code&&operation.Job()->result().rollback!=Storage::Rollback::None&&
+       Find(*source,2,file.name)==id&&!target.volume->Writable()&&!observer.volume->Writable()&&!fixture->locked,"An unverified Cut deleted its source, left writes enabled, or leaked the lock");
 }
 
 std::wstring SaveGptImage(const std::string& path,const Store& image)
@@ -256,7 +433,7 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
 }
 int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;FILE* report=fopen((root+"\\physical-removable-report.txt").c_str(),"w");if(!report)return 2;int result=0;InitializeStorageUi();readonly_cd_backend_init();try{
  auto api=std::make_shared<Fake>();auto classic=Classic(root+"\\classic.dsk"),mfs=Mfs();std::vector<std::shared_ptr<Bytes>> plus;for(auto kind:{HfsPlus::Volume::FormatKind::HfsPlus,HfsPlus::Volume::FormatKind::HfsXCaseSensitive,HfsPlus::Volume::FormatKind::HfsXCaseInsensitive})plus.push_back(Plus(root+"\\plus"+std::to_string(plus.size())+".dsk",kind));auto raw=api->Add(L"USB raw",plus[0],BusTypeUsb,false);auto zip=api->Add(L"Zip",classic,BusTypeScsi,true);api->Add(L"USB MFS",mfs)->geometry.floppy=true;auto apm=Apm(*api,classic,plus[1]);auto gpt=Gpt(*api,plus[2],512),gpt4=Gpt(*api,plus[0],4096);auto internal=api->Add(L"Internal SATA",classic,BusTypeSata,false);Check(!Removable::Eligible(internal->device),"Internal fixed disk was eligible");
- for(auto& d:api->devices)if(Removable::Eligible(d->device)){auto volumes=Removable::Open(d->device,api);Check(volumes.size()==(d==apm?2:1),"Mac removable partition discovery");for(auto& mounted:volumes){auto v=mounted.volume;const auto execution=MacBrowser::ExecutionFor(*v);const std::string kind=v->Kind();Check(execution.stableCatalogIds==(kind=="HFS+"||kind=="HFSX")&&!execution.Persistent()&&!execution.classicConversion,"removable worker changed catalog identity policy");Check(!v->Writable()&&!v->Supports().create&&!v->Supports().rename&&!v->Supports().remove,"Physical removable media exposed writes");Verify(*v);Reject([&]{v->MakeDirectory(2,u"Unsafe");},"Physical folder creation allowed");Reject([&]{v->Remove(Find(*v,2,u"Hello"));},"Physical delete allowed");auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(root));Copy(v,target);Verify(*target);if(std::string(v->Kind())=="HFS")Check(v->Name()==u"Zip Classic","Classic removable volume name");}}
+ for(auto& d:api->devices)if(Removable::Eligible(d->device)){auto volumes=Removable::Open(d->device,api);Check(volumes.size()==(d==apm?2:1),"Mac removable partition discovery");for(auto& mounted:volumes){auto v=mounted.volume;const auto execution=MacBrowser::ExecutionFor(*v);const std::string kind=v->Kind();Check(execution.stableCatalogIds==(kind!="MFS")&&!execution.Persistent(),"removable worker changed catalog identity policy");Check(!v->Writable()&&!v->Supports().create&&!v->Supports().rename&&!v->Supports().remove,"Physical removable media exposed writes");Verify(*v);Reject([&]{v->MakeDirectory(2,u"Unsafe");},"Physical folder creation allowed");Reject([&]{v->Remove(Find(*v,2,u"Hello"));},"Physical delete allowed");auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(root));Copy(v,target);Verify(*target);if(std::string(v->Kind())=="HFS")Check(v->Name()==u"Zip Classic","Classic removable volume name");}}
  Check(internal->opens==0,"Internal fixed disk was opened");fprintf(report,"PASS: raw classic HFS/MFS/HFS+/both HFSX, compressed/shared files, multi-partition APM above 4 GiB, GPT with 512/4096-byte logical sectors, both-fork export and read-only operation enforcement; internal fixed disks excluded.\n");fflush(report);
  {auto sparse=api->Add(L"Large USB",std::make_shared<Bytes>(0));sparse->segments.clear();sparse->geometry.bytes=5ULL*1024*1024*1024;sparse->pattern=true;Removable::Disk disk(sparse->device,api);Bytes b(1003);uint64_t at=4ULL*1024*1024*1024+137;disk.Read(at,b.data(),b.size());for(size_t i=0;i<b.size();++i)Check(b[i]==uint8_t((at+i)*13+((at+i)>>32)),"Read beyond 4 GiB wrapped");auto reads=sparse->reads;disk.Read(at,b.data(),b.size());Check(sparse->reads==reads,"Removable read cache missed");Reject([&]{disk.Write(0,b.data(),b.size());},"Physical transport write allowed");Reject([&]{disk.Flush();},"Physical transport flush allowed");++sparse->generation;Reject([&]{disk.Read(at,b.data(),b.size());},"Cached media swap was not rejected");Reject([&]{disk.Read(at,b.data(),b.size());},"Changed media did not latch invalid");}
  for(unsigned mode=0;mode<4;++mode){auto d=api->Add((L"Fault "+std::to_wstring(mode)).c_str(),classic);if(mode==0)d->noIdentity=true;else if(mode==1)d->error=ERROR_ACCESS_DENIED;if(mode<2){auto closes=d->closes;Reject([&]{Removable::Open(d->device,api);},"Missing media identity/access denial accepted");Check(mode==1||d->closes==closes+1,"Failed open leaked handle");}else{Removable::Disk disk(d->device,api);if(mode==2)d->shortRead=true;else d->changeAfterRead=true;Bytes bytes(512,0x77);Reject([&]{disk.Read(0,bytes.data(),bytes.size());},"Short read/media swap during I/O accepted");Check(std::all_of(bytes.begin(),bytes.end(),[](uint8_t b){return b==0x77;}),"Unverified read reached caller");}}
@@ -267,6 +444,9 @@ int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directo
  {auto source=std::make_shared<Removable::Disk>(raw->device,api);ReadOnlySources::Registration registration(source);Check(fhook_open(registration.Path().c_str(),O_RDWR)<0&&errno==EROFS,"Classic stream allowed a writable mount");auto fd=fhook_open(registration.Path().c_str(),O_RDONLY);Check(fd>=0&&fhook_lseek(fd,0,SEEK_END)==source->Size()&&fhook_write(fd,"x",1)<0&&errno==EROFS&&fhook_close(fd)==0,"Classic source hooks violated read-only/seek contract");}
  Removable::SetTestApi(api);api->windowsReadable=true;Check(Removable::FromDriveRoot(L"Z:\\").empty(),"Windows-readable volume was hijacked");api->windowsReadable=false;auto direct=Removable::FromDriveRoot(L"Z:\\");Check(direct.size()==1,"Explicit Windows drive selection missed Mac media");Verify(*direct[0].volume);direct.clear();Storage::Job scan;auto discovery=Removable::Scan(scan,api);Check(!discovery.errors.empty()&&discovery.volumes.size()>=7,"One failed device aborted discovery");discovery.volumes.clear();
  fprintf(report,"PASS: 64-bit reads/cache hits, cached/during-read media swaps, short reads, missing change counters, access denial, handle cleanup, GPT checksum/APM bounds checks, Windows-volume fallback and per-device discovery errors. No device writes or physical hardware.\n");
+ WritableMedia(root,classic,plus[0],plus[1],mfs);
+ fprintf(report,"PASS: exclusive removable writes for classic HFS and HFS+ in APM, HFSX in 4096-byte GPT and raw MFS. Separate mounts refreshed. Partition boundaries and neighboring data were preserved. Lock conflicts, media swaps, verification mismatch and failed Cut were handled safely.\n");
+ fflush(report);
  const auto gptImage=GptImages(root,*gpt,plus[0],plus[1]);
  fprintf(report,"PASS: GPT images open on persistent workers and support writes/reopen at 512/4096-byte sector sizes and above 4 GiB. GPT metadata and neighboring data remain intact. Invalid CRCs, overlaps and partition bounds are rejected; read-only flags disable writes.\n");
  Check(api->Active()==0,"Core removable tests leaked device handles");BrowserChecks(root,plus[0],classic,gptImage);fprintf(report,"PASS: restored startup checkbox, manual scan command routing, disabled/enabled startup detection, normal drive selection, media-change refresh, stale clipboard refusal, responsive unrelated browsing and copy completion after closing its source window; all device I/O remained on workers.\n");
