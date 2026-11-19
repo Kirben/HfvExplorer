@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "CopyProcess.h"
 #include "VolumeSession.h"
+#include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "TypeMappingSnapshot.h"
 #include "StorageHandoff.h"
@@ -130,6 +131,50 @@ void TestWorkerTransport() {
     bool rejected=false;
     try { Receive(input.value,packet); } catch (const HfsPlus::Error&) { rejected=true; }
     Check(rejected,"shared transport accepted an oversized frame");
+}
+
+void TestVolumeSessionProtocol()
+{
+    namespace Protocol=VolumeSessionProtocol;
+    using Protocol::Command;
+    using CopyWorkerProtocol::Data;
+    const auto roundTrip=[](Command command,const auto& request){
+        auto packet=Protocol::EncodeCommand(command,Protocol::Encode(request));
+        Check(Protocol::DecodeCommand(packet,false,false)==command,"volume command changed during encoding");
+        return packet;
+    };
+    auto list=roundTrip(Command::List,Protocol::ListRequest{2});
+    Check(Protocol::DecodeList(list).parent==2,"volume List parent changed");
+    auto stat=roundTrip(Command::Stat,Protocol::StatRequest{UINT32_MAX});
+    Check(Protocol::DecodeStat(stat).id==UINT32_MAX,"volume Stat lost a full-width catalog ID");
+    auto rename=roundTrip(Command::Rename,Protocol::RenameRequest{42,2,u"Renamed \u03a9"});
+    const auto decoded=Protocol::DecodeRename(rename);
+    Check(decoded.id==42&&decoded.parent==2&&decoded.name==u"Renamed \u03a9","volume Rename endpoints changed");
+    auto read=roundTrip(Command::Read,Protocol::ReadRequest{42,1,UINT64_C(0x100000000),Protocol::ReadLimit});
+    const auto range=Protocol::DecodeRead(read);
+    Check(range.fork==1&&range.offset==UINT64_C(0x100000000)&&range.count==Protocol::ReadLimit,
+          "volume Read lost its fork or wide range");
+
+    const auto reject=[](const auto& decode,const char* message){
+        bool rejected=false;
+        try{decode();}catch(const HfsPlus::Error&){rejected=true;}
+        Check(rejected,message);
+    };
+    reject([]{Data data;data.put(1000);Protocol::DecodeCommand(data,false,false);},"accepted unknown volume opcode");
+    reject([]{auto data=Protocol::EncodeCommand(Command::Put,{});Protocol::DecodeCommand(data,false,false);},
+           "accepted missing streamed attributes");
+    reject([]{auto data=Protocol::EncodeCommand(Command::List,{});Protocol::DecodeCommand(data,false,true);},
+           "accepted unexpected secondary attributes");
+    reject([]{Data data;data.put(UINT64_C(0x100000000));Protocol::DecodeStat(data);},"accepted a wider catalog number");
+    reject([]{Data data;data.put(2);data.put(3);Protocol::DecodeList(data);},"accepted trailing List bytes");
+    reject([]{auto data=Protocol::Encode(Protocol::RenameRequest{42,2,u"Name"});data.bytes.pop_back();Protocol::DecodeRename(data);},
+           "accepted truncated UTF-16 rename payload");
+    reject([]{auto data=Protocol::Encode(Protocol::ReadRequest{42,2,0,1});Protocol::DecodeRead(data);},
+           "accepted invalid read fork");
+    reject([]{auto data=Protocol::Encode(Protocol::ReadRequest{42,0,0,Protocol::ReadLimit+1});Protocol::DecodeRead(data);},
+           "accepted oversized read request");
+    reject([]{auto data=Protocol::Encode(Protocol::Reply{3,"",Storage::Rollback::None});Protocol::DecodeReply(data);},
+           "accepted invalid session reply");
 }
 
 void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstring& folder) {
@@ -475,6 +520,8 @@ int RunCopyProcessTest(const char *directory) {
     CopyProcess::enabled = true;
     try {
         TestWorkerTransport();
+        TestVolumeSessionProtocol();
+        fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {
             bool rejected = false;

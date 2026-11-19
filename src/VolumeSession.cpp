@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "VolumeSession.h"
+#include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
@@ -13,11 +14,8 @@ using namespace MacBrowser;
 using namespace CopyWorkerProtocol;
 using namespace WorkerTransport;
 namespace {
-enum class SessionCommandCode {
-    Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
-    HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory, ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindMfs, SetBasicMetadata, TestCrashRename, TestCrashPut
-};
-constexpr size_t sessionReadLimit = 256 * 1024;
+namespace Protocol=VolumeSessionProtocol;
+using SessionCommandCode=Protocol::Command;
 #ifdef HFV_TESTING
 std::atomic<HANDLE> readPauseEntered{nullptr}, readPauseRelease{nullptr};
 std::atomic<HANDLE> writePauseEntered{nullptr}, writePauseRelease{nullptr};
@@ -32,9 +30,7 @@ void PauseForTest(const std::atomic<HANDLE>& entered,const std::atomic<HANDLE>& 
 
 void SessionReply(HANDLE output, unsigned code = 0, const std::string& error = {},
                   Storage::Rollback rollback = Storage::Rollback::None) {
-    Data result;
-    result.put(code); result.put(error); result.put(uint64_t(rollback));
-    Send(output, SessionResult, std::move(result));
+    Send(output,SessionResult,Protocol::Encode(Protocol::Reply{code,error,rollback}));
 }
 
 class SessionError : public HfsPlus::Error {
@@ -89,14 +85,10 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         }
     }
     void ReadResult(Data& packet) {
-            auto code = packet.get();
-            auto error = packet.text();
-            auto rollback = packet.get();
-            packet.end();
-            Check(code <= 2 && rollback <= uint64_t(Storage::Rollback::Failed), "Invalid volume session result");
-            RecordRollback(Storage::Rollback(rollback));
-            if (code == 2) throw HfsPlus::ExternalJournalRequired(error);
-            if (code == 1) throw SessionError(error);
+        const auto reply=Protocol::DecodeReply(packet);
+        RecordRollback(reply.rollback);
+        if(reply.code==2)throw HfsPlus::ExternalJournalRequired(reply.error);
+        if(reply.code==1)throw SessionError(reply.error);
     }
     Data Response(Message expected) {
         Data packet;
@@ -110,9 +102,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
               const HfsPlus::Attributes* attributes = nullptr) {
         Ready();
         try {
-            Data request;
-            request.put(uint64_t(command));
-            request.bytes.insert(request.bytes.end(), data.bytes.begin(), data.bytes.end());
+            auto request=Protocol::EncodeCommand(command,data);
             if (attributes) {
                 Storage::Job transfer;
                 SendAttributes(worker_->input.value, 0, *attributes, transfer);
@@ -317,9 +307,8 @@ public:
     }
     std::vector<Entry> List(uint32_t parent) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(parent);
         std::vector<Entry> entries;
-        Call(SessionCommandCode::List, std::move(args), false, [&] {
+        Call(SessionCommandCode::List,Protocol::Encode(Protocol::ListRequest{parent}),false,[&] {
             auto packet = Response(SessionBytes); auto count = packet.get(); packet.end();
             Check(count <= UINT32_MAX, "Invalid volume directory count");
             for (uint64_t i = 0; i < count; ++i) entries.push_back(ReadEntry());
@@ -328,23 +317,21 @@ public:
     }
     Entry Stat(uint32_t id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id);
         Entry entry;
-        Call(SessionCommandCode::Stat, std::move(args), false, [&] { entry = ReadEntry(); });
+        Call(SessionCommandCode::Stat,Protocol::Encode(Protocol::StatRequest{id}),false,[&]{entry=ReadEntry();});
         return entry;
     }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t bytes) override {
         auto output = static_cast<uint8_t*>(out);
         uint64_t generation=0;
         do {
-            const auto count = (std::min)(bytes, sessionReadLimit);
+            const auto count = (std::min)(bytes, Protocol::ReadLimit);
             {
                 // Leave the pipe available for browsing between fork chunks.
                 std::lock_guard<std::mutex> lock(mutex_);
                 Check(!generation || generation == generation_, "The mounted volume changed during a fork read");
                 generation=generation_;
-                Data args; args.put(id); args.put(fork); args.put(offset); args.put(count);
-                Call(SessionCommandCode::Read, std::move(args), false, [&] {
+                Call(SessionCommandCode::Read,Protocol::Encode(Protocol::ReadRequest{id,fork,offset,count}),false,[&] {
                     auto packet = Response(SessionBytes);
                     Check(packet.bytes.size() == count, "Short volume session read");
                     if (count) memcpy(output, packet.bytes.data(), count);
@@ -452,7 +439,7 @@ private:
                     Check(message == SessionReadRequest && !sourceFailure, "Unexpected fork transfer response");
                     const auto fork = packet.get(), offset = packet.get(), size = packet.get();
                     packet.end();
-                    Check(fork <= 1 && size && size <= sessionReadLimit, "Invalid fork transfer range");
+                    Check(fork <= 1 && size && size <= Protocol::ReadLimit, "Invalid fork transfer range");
                     const auto length = fork ? entry.forks[1].size : entry.forks[0].size;
                     Check(offset <= length && size <= length - offset, "Fork transfer exceeds source length");
                     const bool localRead = source || (original && !fork);
@@ -506,12 +493,11 @@ public:
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        Data args; args.put(id); args.put(parent); args.u16(name);
         auto command = SessionCommandCode::Rename;
 #ifdef HFV_TESTING
         if (crashRename_) { crashRename_ = false; command = SessionCommandCode::TestCrashRename; }
 #endif
-        Simple(command, std::move(args), true);
+        Simple(command,Protocol::Encode(Protocol::RenameRequest{id,parent,name}),true);
     }
     void Remove(uint32_t id) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -551,11 +537,7 @@ public:
 };
 
 void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
-    auto number = [](Data& packet) {
-        auto value = packet.get();
-        Check(value <= UINT32_MAX, "Invalid volume session catalog number");
-        return uint32_t(value);
-    };
+    using Protocol::CatalogNumber;
     auto writeNumber = [&](uint64_t value) {
         Data packet; packet.put(value); Send(output, SessionBytes, std::move(packet));
     };
@@ -571,79 +553,67 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             message = Receive(input, packet);
         }
         Check(message == SessionCommand, "Invalid volume session command frame");
-        auto opcode = packet.get();
-    #ifdef HFV_TESTING
-        constexpr auto maximumCommand = SessionCommandCode::TestCrashPut;
-#else
-        constexpr auto maximumCommand = SessionCommandCode::SetBasicMetadata;
-#endif
-        Check(opcode <= uint64_t(maximumCommand), "Invalid volume session command");
-        auto command = SessionCommandCode(opcode);
-        const bool carriesAttributes = command == SessionCommandCode::SetAttributes ||
-            command == SessionCommandCode::Put || command == SessionCommandCode::TestCrashPut ||
-            command == SessionCommandCode::FinalizeDirectory ||
-            command == SessionCommandCode::ValidateEntry;
-        Check(attributes[0].has_value() == carriesAttributes && !attributes[1],
-              "Unexpected volume session attributes");
+        const auto command=Protocol::DecodeCommand(packet,attributes[0].has_value(),attributes[1].has_value());
         Storage::OutcomeEvidence evidence;
         hfs_take_rollback();
         try {
             switch (command) {
             case SessionCommandCode::Root: packet.end(); writeNumber(volume.FreeBytes()); break;
             case SessionCommandCode::List: {
-                auto id = number(packet); packet.end();
-                auto entries = volume.List(id);
+                const auto request=Protocol::DecodeList(packet);
+                auto entries=volume.List(request.parent);
                 writeNumber(entries.size());
                 for (const auto& entry : entries) writeEntry(entry);
                 break;
             }
             case SessionCommandCode::Stat: {
-                auto id = number(packet); packet.end(); writeEntry(volume.Stat(id)); break;
+                const auto request=Protocol::DecodeStat(packet);
+                writeEntry(volume.Stat(request.id));
+                break;
             }
             case SessionCommandCode::Read: {
-                auto id = number(packet), fork = number(packet);
-                auto offset = packet.get(), size = packet.get(); packet.end();
-                Check(fork <= 1 && size <= sessionReadLimit, "Invalid volume read range");
-                Data bytes; bytes.bytes.resize(size_t(size));
-                volume.Read(id, fork, offset, bytes.bytes.data(), bytes.bytes.size());
+                const auto request=Protocol::DecodeRead(packet);
+                Data bytes;
+                bytes.bytes.resize(size_t(request.count));
+                volume.Read(request.id,request.fork,request.offset,bytes.bytes.data(),bytes.bytes.size());
                 Send(output, SessionBytes, std::move(bytes));
                 break;
             }
             case SessionCommandCode::Attributes: {
-                auto id = number(packet); packet.end();
+                auto id = CatalogNumber(packet); packet.end();
                 auto values = volume.GetAttributes(id);
                 Storage::Job transfer;
                 SendAttributes(output, 0, values, transfer);
                 break;
             }
             case SessionCommandCode::SetAttributes: {
-                auto id = number(packet); packet.end(); volume.SetAttributes(id, *attributes[0]); break;
+                auto id = CatalogNumber(packet); packet.end(); volume.SetAttributes(id, *attributes[0]); break;
             }
             case SessionCommandCode::MakeDirectory: {
-                auto parent = number(packet); auto name = packet.u16(); packet.end();
+                auto parent = CatalogNumber(packet); auto name = packet.u16(); packet.end();
                 writeNumber(volume.MakeDirectory(parent, name)); break;
             }
 #ifdef HFV_TESTING
             case SessionCommandCode::TestCrashRename:
 #endif
             case SessionCommandCode::Rename: {
-                auto id = number(packet), parent = number(packet);
-                auto name = packet.u16(); packet.end(); volume.Rename(id, parent, name);
+                const auto request=Protocol::DecodeRename(packet);
+                volume.Rename(request.id,request.parent,request.name);
 #ifdef HFV_TESTING
                 if (command == SessionCommandCode::TestCrashRename) ExitProcess(79);
 #endif
                 break;
             }
             case SessionCommandCode::Remove: {
-                auto id = number(packet); packet.end(); volume.Remove(id); break;
+                auto id = CatalogNumber(packet); packet.end(); volume.Remove(id); break;
             }
             case SessionCommandCode::HardLink: {
-                auto id = number(packet), parent = number(packet);
+                auto id = CatalogNumber(packet), parent = CatalogNumber(packet);
                 auto name = packet.u16(); auto replace = packet.flag(); packet.end();
                 writeNumber(volume.MakeHardLink(id, parent, name, replace)); break;
             }
             case SessionCommandCode::Compression: {
-                auto id = number(packet); auto method = packet.get(); packet.end();
+                auto id = CatalogNumber(packet); auto method = packet.get(); packet.end();
                 using Mode = HfsPlus::Volume::CompressionMode;
                 Check(method <= uint64_t(Mode::StoredInline), "Invalid volume compression method");
                 volume.SetCompressionMethod(id, Mode(method), [&](uint64_t done, uint64_t total) {
@@ -660,9 +630,9 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             case SessionCommandCode::TestCrashPut:
 #endif
             case SessionCommandCode::Put: {
-                const auto parent = number(packet);
+                const auto parent = CatalogNumber(packet);
                 const auto replace = packet.flag(), attributesKnown = packet.flag();
-                const auto original = number(packet), source = number(packet);
+                const auto original = CatalogNumber(packet), source = CatalogNumber(packet);
                 Check(!original||!source,"Conflicting in-worker fork sources");
                 auto entry = DecodeEntry(packet); packet.end();
                 entry.attributesKnown = attributesKnown;
@@ -692,7 +662,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
 #endif
                     auto* buffer = static_cast<uint8_t*>(out);
                     while (size) {
-                        const auto count = (std::min)(size, sessionReadLimit);
+                        const auto count = (std::min)(size, Protocol::ReadLimit);
                         const auto localSource = source ? source : !fork ? original : 0;
                         if (localSource) volume.Read(localSource, fork, offset, buffer, count);
                         Data range; range.put(fork); range.put(offset); range.put(count);
@@ -716,7 +686,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             case SessionCommandCode::FinalizeDirectory: {
-                const auto id = number(packet);
+                const auto id = CatalogNumber(packet);
                 const auto merge = packet.flag(), attributesKnown = packet.flag();
                 auto desired = DecodeEntry(packet);
                 auto expected = DecodeEntry(packet); packet.end();
@@ -732,11 +702,11 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             case SessionCommandCode::FindMfs: {
-                const auto parent=number(packet);
+                const auto parent=CatalogNumber(packet);
                 Entry selector,found;
                 selector.name=packet.u16();
                 const auto byVersion=packet.flag();
-                if(byVersion)selector.version=number(packet);
+                if(byVersion)selector.version=CatalogNumber(packet);
                 packet.end();
                 const auto exists=byVersion?volume.FindTransferChild(parent,selector,found)
                                            :volume.FindChild(parent,selector.name,found);
@@ -745,7 +715,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             case SessionCommandCode::SetBasicMetadata: {
-                const auto id=number(packet);auto entry=DecodeEntry(packet);packet.end();
+                const auto id=CatalogNumber(packet);auto entry=DecodeEntry(packet);packet.end();
                 volume.SetBasicMetadata(id,entry);
                 break;
             }
@@ -756,21 +726,21 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 SessionReply(output);
                 return;
             case SessionCommandCode::GetClassicProperties: {
-                auto id = number(packet); packet.end();
+                auto id = CatalogNumber(packet); packet.end();
                 hfsdirent entry{};
                 Check(volume.GetClassicProperties(id, entry), "Classic Finder properties are unavailable");
                 Data result; EncodeClassic(result, entry);
                 Send(output, SessionBytes, std::move(result)); break;
             }
             case SessionCommandCode::SetClassicProperties: {
-                auto id = number(packet); auto entry = DecodeClassic(packet); packet.end();
+                auto id = CatalogNumber(packet); auto entry = DecodeClassic(packet); packet.end();
                 volume.SetClassicProperties(id, entry); break;
             }
             case SessionCommandCode::ValidateRemoval: {
-                auto id = number(packet); packet.end(); volume.ValidateRemoval(id); break;
+                auto id = CatalogNumber(packet); packet.end(); volume.ValidateRemoval(id); break;
             }
             case SessionCommandCode::ValidateCopy: {
-                auto id = number(packet), parent = number(packet);
+                auto id = CatalogNumber(packet), parent = CatalogNumber(packet);
                 packet.end(); volume.ValidateCopyTo(id, volume, parent); break;
             }
             }
