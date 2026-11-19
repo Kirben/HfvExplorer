@@ -246,13 +246,17 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     };
     if(route==ForkSource::MountedWorker)
         VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
-    else
-        dst.Put(parent,outgoing,[&](unsigned fork,uint64_t offset,void* p,size_t count){
+    else {
+        Reader reader=[&](unsigned fork,uint64_t offset,void* p,size_t count){
             if(job.cancelled())throw Storage::Cancelled();
             if(plan.reader)plan.reader(fork,offset,p,count);
             else src.Read(entry.id,fork,offset,p,count);
             advance(fork,offset,count);
-        },found);
+        };
+        auto hostPath=plan.reader?std::wstring{}:src.HostPath(entry.id);
+        if(hostPath.empty())dst.Put(parent,outgoing,std::move(reader),found);
+        else dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
+    }
     if(track)copies.emplace(key,std::make_pair(parent,entry.name));++progress.files; job.progress(progress); return true;
 }
 }

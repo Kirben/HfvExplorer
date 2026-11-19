@@ -54,6 +54,44 @@ struct FileVersion {
  std::string Identity()const{const auto& a=info;return std::to_string(a.dwVolumeSerialNumber)+":"+std::to_string(a.nFileIndexHigh)+":"+std::to_string(a.nFileIndexLow)+":"+std::to_string(a.ftLastWriteTime.dwHighDateTime)+":"+std::to_string(a.ftLastWriteTime.dwLowDateTime);}
  void Verify(const std::wstring& path)const{Check(Matches(path),"Destination changed during staging/publication; replacement was refused");}
 };
+void CopyNamedStreams(const std::wstring& source,const std::wstring& staged,const Entry& entry,Storage::Job& job)
+{
+    FileVersion version(source);
+    const auto slash=entry.identity.find('/');
+    Check(version.Present()&&version.Identity()==entry.identity.substr(0,slash),
+          "Windows source changed before copying its alternate data streams");
+
+    WIN32_FIND_STREAM_DATA stream{};
+    HANDLE search=FindFirstStreamW(source.c_str(),FindStreamInfoStandard,&stream,0);
+    if(search==INVALID_HANDLE_VALUE){
+        const auto error=GetLastError();
+        Check(error==ERROR_HANDLE_EOF||error==ERROR_INVALID_PARAMETER||error==ERROR_NOT_SUPPORTED,
+              "Cannot enumerate Windows alternate data streams");
+        return;
+    }
+    struct Close {HANDLE search;~Close(){FindClose(search);}} close{search};
+    std::vector<uint8_t> buffer;
+    do{
+        if(job.cancelled())throw Storage::Cancelled();
+        const std::wstring name=stream.cStreamName;
+        if(name==L"::$DATA")continue;
+        File input(source+name,GENERIC_READ,OPEN_EXISTING);
+        File output(staged+name,GENERIC_WRITE,CREATE_NEW);
+        const auto size=input.Size();
+        if(buffer.empty())buffer.resize(1024*1024);
+        for(uint64_t offset=0;offset<size;){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto count=size_t((std::min)(uint64_t(buffer.size()),size-offset));
+            input.Read(offset,buffer.data(),count);
+            output.Write(buffer.data(),count);
+            offset+=count;
+        }
+        output.Flush();
+    }while(FindNextStreamW(search,&stream));
+    Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot enumerate Windows alternate data streams");
+    version.Verify(source);
+}
+
 struct DirectoryLease {
  HANDLE handle;std::string identity;
  explicit DirectoryLease(const std::wstring& path):handle(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)){Check(handle!=INVALID_HANDLE_VALUE,"Cannot protect destination folder during publication");BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(handle,&info)||!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){CloseHandle(handle);throw HfsPlus::Error("Destination folder was replaced or became a directory link");}identity=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow)+":";}
@@ -315,6 +353,15 @@ public:
         Check(CreateDirectoryW(path.c_str(), nullptr) != FALSE, "Cannot create Windows folder"); return Id(path);
     }
     uint32_t Put(uint32_t parent, const Entry &e, Reader read, bool replace) override {
+        return PutFile(parent,e,std::move(read),replace,{},nullptr);
+    }
+    uint32_t PutFromHost(uint32_t parent,const Entry& e,Reader read,bool replace,
+                         const std::wstring& source,Storage::Job& job) override {
+        return PutFile(parent,e,std::move(read),replace,source,&job);
+    }
+private:
+    uint32_t PutFile(uint32_t parent,const Entry& e,Reader read,bool replace,
+                     const std::wstring& source,Storage::Job* job) {
         Leaf(e.name);Leaf(u"%"+e.name); Check(e.forks[1].size <= UINT32_MAX - 82, "Resource fork is too large for AppleDouble export; export the raw fork instead");
         auto root = Path(parent), path = Child(root,Wide(e.name)), companion = Companion(path);
         if(!e.name.empty()&&e.name[0]==u'%'&&e.name.size()>1){Double owned;auto owner=Child(root,Wide(e.name.substr(1)));Check(GetFileAttributesW(owner.c_str())==INVALID_FILE_ATTRIBUTES||!AppleDouble(path,owned),"The destination is another item's metadata companion; it was preserved");}
@@ -341,14 +388,18 @@ public:
                     rsrc = std::make_unique<File>(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
                     header.Write(*rsrc);
                 }
+                Publication("before-data-write");
                 std::vector<uint8_t> buffer(1024*1024);
                 for (unsigned f=0; f<2; ++f) for (uint64_t at=0; at<e.forks[f].size;) {
                     size_t n=size_t((std::min)(uint64_t(buffer.size()),e.forks[f].size-at));
                     read(f,at,buffer.data(),n); (f ? *rsrc : data).Write(buffer.data(),n); at+=n;
                 }
-                data.Dates(e);data.Flush();
+                if(!job)data.Dates(e);
+                Publication("before-data-flush");data.Flush();
                 if (rsrc) { rsrc->Dates(e); rsrc->Flush(); }
             }
+            if(job)CopyNamedStreams(source,staged,e,*job);
+            if(job&&e.datesValid){File data(staged,GENERIC_WRITE,OPEN_EXISTING);data.Dates(e);data.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
             newData.reset(new FileVersion(staged));if (withCompanion) newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
             if (existed) { backup=Temp(root);reserve(backup); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true;original.Verify(backup); }

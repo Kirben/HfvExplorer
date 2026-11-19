@@ -3,7 +3,7 @@
 #include "stdafx.h"
 #include "MacBrowserModel.h"
 #include "FileOperations.h"
-#include "CopyProgress.h"
+#include "TransferFixture.h"
 #include "VolumeCoordinator.h"
 #include "StorageJobDialog.h"
 #include "HfsPlusDisk.h"
@@ -33,7 +33,7 @@ void NewTree(Volume& target,uint32_t parent,const Tree& source){auto root=Find(t
 void Pump(){MSG message;while(PeekMessage(&message,nullptr,0,0,PM_REMOVE))if(message.message!=WM_QUIT){TranslateMessage(&message);DispatchMessage(&message);}}
 FileOperations::Operation Copy(std::shared_ptr<Volume> source,uint32_t id,std::shared_ptr<Volume> target,bool success=true,bool move=false,Storage::ConflictChoice choice=Storage::ConflictChoice::Replace){FileOperations::Request request;request.background=true;FileOperations::Location from;from.SetMounted(source,id);from.cut=move;request.Copy().sources={from};request.Copy().destination.SetMounted(target,2);auto op=FileOperations::Submit(request);DWORD start=GetTickCount();while(!op.Job()->done()){if(!op.Job()->conflict().empty())op.Job()->resolve(choice);if(GetTickCount()-start>30000){op.Job()->cancel();throw HfsPlus::Error("Folder copy timeout");}Pump();Sleep(1);}Check((op.Job()->result().code==0)==success,op.Job()->result().message.c_str());return op;}
 std::shared_ptr<Storage::Job> Legacy(const std::string& fromVolume,const std::string& from,const std::string& toVolume,const std::string& to,bool success=true,bool move=false,Storage::ConflictChoice choice=Storage::ConflictChoice::Replace){
- auto job=Storage::worker().submit(MakeCopyJob(fromVolume,from,toVolume,to,1,move,'m'));DWORD start=GetTickCount();while(!job->done()){if(!job->conflict().empty())job->resolve(choice);Check(GetTickCount()-start<30000,"Legacy folder copy timeout");Pump();Sleep(1);}Check((job->result().code==0)==success,job->result().message.c_str());return job;
+ auto job=TransferFixture::Submit(fromVolume,from,toVolume,to,1,move,'m');DWORD start=GetTickCount();while(!job->done()){if(!job->conflict().empty())job->resolve(choice);Check(GetTickCount()-start<30000,"Legacy folder copy timeout");Pump();Sleep(1);}Check((job->result().code==0)==success,job->result().message.c_str());return job;
 }
 void Personalize(Volume& target,uint32_t id,unsigned seed,bool attrs=true){auto expected=target.Stat(id),e=expected;e.finder=Finder(seed);e.created=3000000000+seed;e.modified=3000000123+seed;e.datesValid=true;e.attributes=attrs?Attributes(seed):HfsPlus::Attributes{};e.attributesKnown=true;target.FinalizeDirectory(id,e,expected,false);}
 struct FaultSource:Volume{
@@ -71,7 +71,7 @@ int RunFolderMetadataTest(const char* directory){
   directoryMetadataFault=[](const char* phase){if(!strcmp(phase,"directory-dates-written"))throw HfsPlus::Error("Injected legacy folder metadata failure");};Legacy(conversionPath,"Folders:Folder",root+"\\legacy-windows",root+"\\legacy-windows",false,true);directoryMetadataFault={};conversion=MacBrowser::OpenClassic(conversionPath,"Folders:",true);NewTree(*conversion,2,legacySource);conversion->Close();
   Legacy(conversionPath,"Folders:Folder",root+"\\legacy-windows",root+"\\legacy-windows",true,true,Storage::ConflictChoice::Skip);conversion=MacBrowser::OpenClassic(conversionPath,"Folders:",true);NewTree(*conversion,2,legacySource);conversion->Close();
   conversion=MacBrowser::OpenClassic(conversionPath,"Folders:",true);Entry companionName;companionName.name=u"%Folder";companionName.forks[0].size=3;conversion->Put(2,companionName,[](unsigned,uint64_t,void* p,size_t n){memset(p,9,n);},false);conversion->Close();
-  auto companionJob=Storage::worker().submit(MakeCopyJob(conversionPath,"Folders:%Folder",root+"\\legacy-windows",root+"\\legacy-windows",0,0,'r'));Check(WaitForSingleObject(companionJob->event(),15000)==WAIT_OBJECT_0,"Owned companion conversion timeout");Check(companionJob->result().code!=0,"Legacy raw copy overwrote an owned folder companion");Equal(*legacyPc,legacyRoot,retainedLegacy);
+  auto companionJob=TransferFixture::Submit(conversionPath,"Folders:%Folder",root+"\\legacy-windows",root+"\\legacy-windows",0,0,'r');Check(WaitForSingleObject(companionJob->event(),15000)==WAIT_OBJECT_0,"Owned companion conversion timeout");Check(companionJob->result().code!=0,"Legacy raw copy overwrote an owned folder companion");Equal(*legacyPc,legacyRoot,retainedLegacy);
   auto movedPc=Windows(root+"\\legacy-moved");movedPc->Close();auto moved=Legacy(conversionPath,"Folders:Folder",root+"\\legacy-moved",root+"\\legacy-moved",true,true);Check(moved->result().moved,"Successful converted folder move not marked moved");conversion=MacBrowser::OpenClassic(conversionPath,"Folders:",true);Check(!Find(*conversion,2,u"Folder"),"Successful converted folder move retained source");conversion->Close();
   fprintf(report,"PASS: legacy MacBinary folder export/import, existing-folder merges, full Finder32 and dates; finalization errors and Skip retain complete move source; successful folder move removes source only after metadata finalization.\n");
   fprintf(report,"PASS: recursive, nested and empty folder Finder32/date/attribute/ACL preservation in HFS+, both HFSX modes, Windows companions and classic HFS; Windows reimport, file overwrite, merge metadata retention and Skip/move source retention; source-only folder metadata does not block representable merges.\n");

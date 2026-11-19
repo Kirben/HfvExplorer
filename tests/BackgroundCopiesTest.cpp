@@ -25,7 +25,7 @@
 #include "utils.h"
 #include "FloppyWriter.h"
 #include "DirectFloppy.h"
-#include "CopyProgress.h"
+#include "TransferFixture.h"
 #include "LegacyEngine.h"
 extern "C" {
 #include "hfs/libhfs/hfs.h"
@@ -360,7 +360,7 @@ int RunIndependentStorageTest(const char* directory){
   {auto a=MacBrowser::OpenClassic((LPCSTR)aPath,"SameLabel:",true);Put(*a,u"Input");a->Close();auto b=MacBrowser::OpenClassic((LPCSTR)bPath,"SameLabel:",true);Put(*b,u"Embedded");b->Close();}
   // Build a real converter fixture; concurrent raw and MacBinary imports must
   // retain distinct settings, callbacks, replacement paths and mount tables.
-  CString binary=host+"\\fixture.bin";Storage::Job fixture;auto outcome=MakeCopyJob((LPCSTR)bPath,"SameLabel:Embedded",(LPCSTR)host,(LPCSTR)binary,0,0,'m')(fixture);Check(!outcome.code,"build MacBinary concurrency fixture");
+  CString binary=host+"\\fixture.bin";Storage::Job fixture;auto outcome=TransferFixture::Work((LPCSTR)bPath,"SameLabel:Embedded",(LPCSTR)host,(LPCSTR)binary,0,0,'m')(fixture);Check(!outcome.code,"build MacBinary concurrency fixture");
   CString input=host+"\\Input";{CFile f;Check(f.Open(input,CFile::modeCreate|CFile::modeWrite),"create raw import fixture");f.Write("RAW CONTENT",11);}
   auto request=[&](const CString& path,const CString& source,char mode){FileOperations::Request r;r = FileOperations::LegacyConversion{};r.background=true;r.Legacy().source=FileOperations::Location::FromLegacy((LPCSTR)host,(LPCSTR)source);r.Legacy().destination=FileOperations::Location::FromLegacy((LPCSTR)path,"SameLabel:");r.Legacy().options.input=mode;r.Legacy().options.output='r';r.Legacy().options.appledouble=false;return r;};
   jobs.push_back(FileOperations::Submit(request(aPath,input,'r')));Until([&]{return !jobs.front().Job()->conflict().empty();});
