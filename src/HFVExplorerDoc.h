@@ -33,12 +33,6 @@
 #include "mactypes.h"
 #include "CFATVolume.h"
 
-#define SEARCH_TYPE_ID			0
-#define SEARCH_TYPE_FILES		1
-#define SEARCH_TYPE_FOLDERS 2
-#define SEARCH_TYPE_ALL			3
-#define SEARCH_TYPE_THISFOLDER	4
-#define SEARCH_TYPE_FIND_NAME		6
 
 #define ID_GOTO_PARENT 0x12345678
 
@@ -52,7 +46,6 @@ class CHFVExplorerDoc : public CDocument
  int BuildBrowserRoots(int preferred, bool readClassic=true);
  bool NavigateInitialFolder(int firstClassic=0);
  uint64_t (&m_classicRevision)[MAX_HFS_VOLUMES];
- CHFVFile* speed_fp=nullptr;
 protected: // create from serialization only
     std::unique_ptr<BrowserFolderReader> folderReader_;
     BrowserFolderReader::Options FolderOptions() const;
@@ -69,16 +62,6 @@ protected: // create from serialization only
 
 	void new_hfs_walk( int volinx, long id, CString searchname );
 
-	BOOL hfs_find_item( LongInt node_index, hfs_item_type *pitem );
-	BOOL hfs_find_first( 
-		int volinx,
-		long id, 
-		long id2, 
-		CString searchname,
-		hfs_item_type *pitem, 
-		int stype );
-	BOOL hfs_find_next( hfs_item_type *pitem );
-
     void apply_browser_directory(const BrowserDirectory::Snapshot&,int,int,uint32_t,const std::string&,bool);
     bool NavigateStartupDirectory(const std::string& path,bool mac);
     bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
@@ -91,7 +74,7 @@ protected: // create from serialization only
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );
 	void build_pc_tree( int volinx, CString path );
-	CString hfs_find_match( LPSTR type, LPSTR creator, int prefered_volinx );
+	CString FindClassicLauncher(const char* type,const char* creator,int preferredVolume);
 	void check_hfv_file_times(int ask);
 	int get_volume_index_by_filename( CString name );
 	int get_volume_index_by_volumename( CString name );

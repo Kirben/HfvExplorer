@@ -26,6 +26,8 @@ namespace {
 void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}
 struct Doc:CHFVExplorerDoc {
  Doc():CHFVExplorerDoc(false){m_bAutoDelete=FALSE;}
+ using CHFVExplorerDoc::FindClassicLauncher;
+ using CHFVExplorerDoc::my_chdir;
  void AddIcon(unsigned type){local_icn_sharp_t small{},large{};small.icon=large.icon=reinterpret_cast<icn_sharp_hand>(1);folderReader_->insert_into_hash_table(type,'TEST',&small,&large);}
  bool HasIcon(unsigned type){return folderReader_->map_type_and_creator(type,'TEST',0)!=nullptr;}
 };
@@ -37,7 +39,7 @@ struct Frame:CMainFrame {
 struct Tree:HFVExplorerTreeView {
  void Init(Doc& doc){m_pDocument=&doc;Initialize();enable_selchange(1);}
  HTREEITEM Host(const CString& path){CString label="Windows",copy=path;return initialize_fat_volume(0,&label,DRIVE_FIXED,&copy,FALSE);}
- HTREEITEM Classic(){return initialize_volume(0,"Same",2,0,0,0,0);}
+ HTREEITEM Classic(int slot){return initialize_volume(slot,"Same",2,0,0,0,0);}
  void Unbind(){m_pDocument=nullptr;}
  void PostNcDestroy()override{}
 };
@@ -75,14 +77,20 @@ struct Panes {
  ~Panes(){doc.GetBrowserSession().MacBrowser().Clear();tree.enable_selchange(0);list.list_clear();tree.Unbind();list.Bind(nullptr);list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();}
  BrowserSession& Session(){return doc.GetBrowserSession();}
  void Windows(const CString& path){doc.m_fat_count=1;doc.m_fats[0].m_letter=path[0];doc.m_fats[0].m_type=DRIVE_FIXED;tree.enable_selchange(0);doc.m_fats[0].m_rootitem=tree.Host(path);tree.GetTreeCtrl().SelectItem(doc.m_fats[0].m_rootitem);tree.enable_selchange(1);doc.open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);}
- void Classic(const CString& path,const char* filename){
+ void Classic(const CString& path,const char* filename,int slot=0){
   {CFile image;Check(image.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create session classic image");image.SetLength(2*1024*1024);}
-  char label[]="Same",type[]="TEXT",creator[]="TEST";Check(hfs_format(const_cast<char*>((LPCSTR)path),0,label)==0,"format session classic image");
+  char label[]="Same",type[]="TEXT",app[]="APPL",creator[]="TEST";
+  Check(hfs_format(const_cast<char*>((LPCSTR)path),0,label)==0,"format session classic image");
   auto v=hfs_mount(const_cast<char*>((LPCSTR)path),0,O_RDWR);Check(v!=nullptr,"mount session classic image");std::string file="Same:";file+=filename;
-  Check(hfs_create(v,&file[0],type,creator)==0&&hfs_umount(v)==0,"populate session classic image");
-  Check(doc.insert_volume(path,0,0,0,0)==0,"register session classic volume");
-  doc.m_volumes[0].m_volume_name="Same";Check(doc.m_volumes[0].open()!=0,"open session classic volume");
-  tree.enable_selchange(0);doc.m_volumes[0].m_rootitem=tree.Classic();tree.GetTreeCtrl().SelectItem(doc.m_volumes[0].m_rootitem);tree.enable_selchange(1);doc.open_sub_directory(0,2,"Same");
+  char folder[]="Same:Apps",nested[]="Same:Apps:Tools";
+  auto launcher=std::string(nested)+":"+filename+" app";
+  Check(hfs_create(v,file.data(),type,creator)==0&&hfs_mkdir(v,folder)==0&&hfs_mkdir(v,nested)==0&&
+        hfs_create(v,launcher.data(),app,creator)==0&&hfs_umount(v)==0,"populate session classic image");
+  Check(doc.insert_volume(path,0,0,0,0)==slot,"register session classic volume");
+  auto& mounted=doc.m_volumes[slot];
+  mounted.m_volume_name="Same";Check(mounted.open()!=0,"open session classic volume");
+  tree.enable_selchange(0);mounted.m_rootitem=tree.Classic(slot);tree.GetTreeCtrl().SelectItem(mounted.m_rootitem);
+  tree.enable_selchange(1);doc.open_sub_directory(slot,2,"Same");
  }
 };
 class NavigationFixture : public Fixture {
@@ -346,6 +354,15 @@ int RunBrowserSessionTest(const char* directory){
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"first.txt")>=0,"startup before global main-window assignment");
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
+  a.Classic(root+"\\third.dsk","third classic",1);
+  Check(a.doc.FindClassicLauncher("APPL","TEST",1)=="Same:Apps:Tools:third classic app"&&
+        a.doc.FindClassicLauncher("APPL","TEST",0)=="Same:Apps:Tools:first classic app",
+        "classic launcher resolution lost the originating same-named volume");
+  a.doc.my_chdir("Same:apps:tools:",1,1);
+  Check(Find(a.list,L"third classic app")>=0&&Find(a.list,L"first classic app")<0,
+        "nested classic folder resolution changed volumes or lost case-insensitive lookup");
+  a.tree.GetTreeCtrl().SelectItem(a.doc.m_volumes[0].m_rootitem);
+  fprintf(report,"PASS: shared classic HFS nested folder and launcher lookup on same-named volumes.\n");
   a.Session().asyncNavigationForTest=true;
   auto classicRoot=a.doc.m_volumes[0].m_rootitem;
   Check(a.Session().RefreshSelected()&&a.Session().Navigating()&&

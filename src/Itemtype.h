@@ -23,14 +23,6 @@
 typedef struct {
 	CatKeyRec catkeyrec;
 	CatDataRec catdatarec;
-	// internals
-	int search_type;
 	LongInt id;
-	LongInt id2;
 	int volinx;
-	int index_to_found;
-	int index_found;
-	int next_index;
-	// CString *searchname;
-	char searchname[_MAX_PATH];
 } hfs_item_type;

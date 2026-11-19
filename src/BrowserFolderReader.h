@@ -5,6 +5,7 @@
 #include "itemtype.h"
 #include "bndl.h"
 
+namespace MacBrowser { class Volume; }
 class BrowserFolderReader {
 public:
  struct Options {
@@ -144,6 +145,7 @@ public:
 private:
  static void OwnIcons(BrowserDirectory::Snapshot&);
  bool prepare_classic_browser_row(hfs_item_type*,CatDataRec*,int,BrowserDirectory::Row&);
+ MacBrowser::Volume* artworkVolume_=nullptr;
  Options options_;
  BrowserMountInventory::ClassicSlots ownedSlots_;
  BrowserMountInventory::ClassicSlots& slots_;
