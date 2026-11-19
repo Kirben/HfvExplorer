@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "WorkerEndpoint.h"
+#include "MediaDiscovery.h"
 #include "HfsPlusCd.h"
 #include "MacBrowserModel.h"
 #include "FileOperations.h"
@@ -420,6 +421,41 @@ int RunHfsPlusCdTest(const char *directory) {
             shortened->Read(file.id,1,512,tail.data(),tail.size());
             payload(1,512,expected.data(),expected.size());
             check(tail==expected,"shortened classic CD returned wrong resource bytes");
+            for(bool swap:{false,true}){
+                const int drive=20;
+                MediaDiscovery::Changed(1u<<drive);
+                struct Signal {
+                    HANDLE handle=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+                    ~Signal(){if(handle)CloseHandle(handle);}
+                    bool Wait()const{return WaitForSingleObject(handle,5000)==WAIT_OBJECT_0;}
+                    void Set()const{SetEvent(handle);}
+                } entered,joined,release;
+                check(entered.handle&&joined.handle&&release.handle,"create discovery test events");
+                std::atomic<int> opens{0};
+                std::shared_ptr<MacBrowser::Volume> left,right;
+                auto probe=[&]{
+                    ++opens;entered.Set();
+                    check(release.Wait(),"shared optical test probe was not released");
+                    return shortened;
+                };
+                Storage::Worker workers(2);
+                auto first=workers.submit([&](Storage::Job& job){left=MediaDiscovery::Optical(drive,job,probe);return Storage::Result{};});
+                const bool started=entered.Wait();
+                auto second=workers.submit([&](Storage::Job& job){
+                    job.transport([&](const Storage::Progress&){joined.Set();},{});
+                    right=MediaDiscovery::Optical(drive,job,probe);return Storage::Result{};
+                });
+                const bool shared=joined.Wait();
+                if(swap)MediaDiscovery::Changed(1u<<drive);
+                release.Set();first->wait();second->wait();
+                check(started&&shared&&opens==1,"two browser probes reopened one spinning-up CD");
+                if(swap)check(!left&&!right&&first->result().error==ERROR_MEDIA_CHANGED&&
+                              second->result().error==ERROR_MEDIA_CHANGED,"an old probe survived a media notification");
+                else check(left==shortened&&right==left&&!first->result().code&&!second->result().code,
+                           "the second browser did not receive the shared optical result");
+                MediaDiscovery::Changed(1u<<drive);
+            }
+            fprintf(report,"PASS: concurrent optical probes share one open and a device notification invalidates both results.\n");
             fprintf(report,"PASS: classic HFS CD selection, read-only shared volume, both forks, Finder metadata and media-change invalidation.\n");
         }
         owner.DestroyWindow();

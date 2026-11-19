@@ -5,6 +5,7 @@
 #include "StorageLocation.h"
 #include "MainMacBrowser.h"
 #include "PhysicalRemovable.h"
+#include "MediaDiscovery.h"
 #include "Floppy.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
@@ -254,9 +255,9 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
   try {
    if(job.cancelled())throw Storage::Cancelled();
    if(probeCd||probeRemovable){
-    VolumeCoord::Lease access({{deviceKey,VolumeCoord::Mode::Read}});
     if(probeRemovable){
-     if(type==DRIVE_REMOVABLE&&is_hfs_floppy_present(drive)){
+     if(type==DRIVE_REMOVABLE&&MediaDiscovery::Floppy(drive,job)){
+      VolumeCoord::Lease access({{deviceKey,VolumeCoord::Mode::Read}});
       char image[MAX_PATH];get_floppy_volume_file_name(drive,image);
       auto& volume=reader->Slots()[0];
       volume.m_file_name=image;volume.m_is_floppy=1;volume.m_free=0;
@@ -273,7 +274,8 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
        return Storage::Result{};
       }
      }
-     listing->removable=Removable::FromDriveRoot(listing->path);
+     VolumeCoord::Lease access({{deviceKey,VolumeCoord::Mode::Read}});
+     listing->removable=Removable::FromDriveRoot(listing->path,&job);
      if(!listing->removable.empty()){
       for(auto& mount:listing->removable)StorageLocation::ValidateMedia(FileOperations::Location::Mounted(mount.volume));
       result.folder=FileOperations::Location::Mounted(listing->removable.front().volume);
@@ -282,7 +284,7 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
      }
     }
     if(probeCd){
-     listing->cd=MacBrowser::OpenCdRoot(CStringA(listing->path.c_str()).GetString());
+     listing->cd=MediaDiscovery::Optical(drive,job);
      if(listing->cd){
       result.folder=FileOperations::Location::Mounted(listing->cd);
       StorageLocation::ValidateMedia(result.folder);
