@@ -93,7 +93,7 @@ bool TestHfsPlusMainCdBrowser(std::unique_ptr<HfsPlus::Source> source,CWnd* owne
         auto mounted=ShowStorageWaitJob([&](Storage::Job&){volume=MacBrowser::FromHfsPlus(std::move(source),false);return Storage::Result{};},true);
         Check(!mounted.code,"mount CD for main browser");int index=browser.AttachTestVolume(volume,"cd-main-test");
         Check(browser.ShowTestFolder(index,2)&&!browser.Writable()&&owner->IsWindowEnabled(),"read-only main CD controls");
-        changeMedia();valid=!browser.ShowTestFolder(index,2)&&list.GetListCtrl().GetItemCount()==0&&owner->IsWindowEnabled();
+        changeMedia();valid=!browser.ShowTestFolder(index,2)&&!session.ListingAvailable()&&!browser.CanExport()&&owner->IsWindowEnabled();
     }catch(const std::exception&){valid=false;}
     browser.Clear();if(list.m_hWnd)list.DestroyWindow();if(tree.m_hWnd)tree.DestroyWindow();
     return valid;
@@ -161,9 +161,9 @@ int RunMainMacBrowserTest(const char* directory){
         Reject([&]{Find(*source,2,u"Slow failed import");},"failed import left a catalog entry");
         auto& browser=session.MacBrowser();int index=browser.AttachTestVolume(source,"source");Check(browser.ShowTestFolder(index,2),"show source root in main panes");
         auto& lc=list.GetListCtrl();int folderRow=-1;for(int i=0;i<lc.GetItemCount();++i)if(Text(lc,i)==L"Folder")folderRow=i;
-        Check(folderRow>=0&&browser.Activate(folderRow),"main list folder activation");bool found=false;for(int i=0;i<lc.GetItemCount();++i)found|=Text(lc,i)==Wide(unicode);
+        Check(folderRow>=0&&browser.Activate(folderRow)&&session.AwaitNavigationForTest(),"main list folder activation");bool found=false;for(int i=0;i<lc.GetItemCount();++i)found|=Text(lc,i)==Wide(unicode);
         Check(found&&browser.Active()&&browser.Writable(),"main list retained full Unicode filename and writable state");
-        Check(browser.Refresh()&&owner.IsWindowEnabled(),"main browser refresh and owner restoration");
+        Check(browser.Refresh()&&session.AwaitNavigationForTest()&&owner.IsWindowEnabled(),"main browser refresh and owner restoration");
         app.m_show_invisible_mac=1;int mfsIndex=browser.AttachTestVolume(mfs,"mfs");Check(browser.ShowTestFolder(mfsIndex,2)&&browser.Writable()&&!browser.CanCreateFolder(),"MFS uses the main panes with writable flat actions");
         bool longMfs=false;for(int row=0;row<lc.GetItemCount();++row)longMfs|=Text(lc,row).size()==255;Check(longMfs,"long MFS name in main list");
         // Exercise the actual existing Copy/Paste and Delete command entry points.
@@ -172,15 +172,15 @@ int RunMainMacBrowserTest(const char* directory){
         Check(copyRow>=0,"source clipboard row");lc.SetItemState(-1,0,LVIS_SELECTED);lc.SetItemState(copyRow,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);list.edit_copy();
         uint32_t clipboardFolder=target->MakeDirectory(2,u"Clipboard");int clipboardIndex=browser.AttachTestVolume(target,"clipboard-target");Check(browser.ShowTestFolder(clipboardIndex,2),"target root");
         int folderRow2=-1;for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Clipboard")folderRow2=row;
-        Check(folderRow2>=0&&browser.Activate(folderRow2),"target folder navigation");storageUiTest={};list.edit_paste();
+        Check(folderRow2>=0&&browser.Activate(folderRow2)&&session.AwaitNavigationForTest(),"target folder navigation");storageUiTest={};list.edit_paste();session.AwaitNavigationForTest();
         Verify(*target,Find(*target,clipboardFolder,u"Short"));Check(owner.IsWindowEnabled(),"copy command restored main owner");
         for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Short"){lc.SetItemState(-1,0,LVIS_SELECTED);lc.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);break;}
         list.try_delete_selected_items(FALSE);Reject([&]{Find(*target,clipboardFolder,u"Short");},"Delete command did not remove selected native file");Verify(*source,shortFile);
         uint32_t moved=source->Put(2,File(u"Move me"),Payload(),false);Check(browser.ShowTestFolder(index,2),"source move root");
         for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Move me"){lc.SetItemState(-1,0,LVIS_SELECTED);lc.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);break;}
         list.edit_cut();Check(browser.ShowTestFolder(clipboardIndex,2),"move target root");
-        for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Clipboard"){browser.Activate(row);break;}
-        list.edit_paste();Reject([&]{source->Stat(moved);},"cut source was not removed after committed copy");Verify(*target,Find(*target,clipboardFolder,u"Move me"));
+        for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Clipboard"){Check(browser.Activate(row)&&session.AwaitNavigationForTest(),"open Clipboard target");break;}
+        list.edit_paste();session.AwaitNavigationForTest();Reject([&]{source->Stat(moved);},"cut source was not removed after committed copy");Verify(*target,Find(*target,clipboardFolder,u"Move me"));
         fprintf(report,"PASS: existing main-list Copy, Paste and Delete commands use the shared adapter and restore the owner.\n");
         target->Put(2,File(u"Readme"),Payload(),false);target->Put(2,File(u"README"),Payload(),false);
         int xIndex=browser.AttachTestVolume(target,"hfsx");Check(browser.ShowTestFolder(xIndex,2)&&browser.Writable(),"HFSX in main panes");
@@ -192,8 +192,8 @@ int RunMainMacBrowserTest(const char* directory){
         auto rowData=list.BrowserRowAt(0);Check(std::wstring(sizeText)==L"8388608 KB"&&rowData&&uint32_t(rowData->id)==0xfffffff0&&!browser.SelectionWritable()&&browser.CanExport(),"64-bit displayed fork sizes and unsigned catalog IDs");
         auto media=std::make_shared<MemoryCd>(root+"\\target.dsk");auto unchanged=media->bytes;auto cd=FromHfsPlus(HfsPlus::OpenCd(3,media),false);
         media->workerOnly=true;media->delay=90;storageUiTest={};int cdIndex=browser.AttachTestVolume(cd,"cd");
-        Check(browser.ShowTestFolder(cdIndex,2)&&!browser.Writable()&&storageUiTest.timerTicks>=2&&owner.IsWindowEnabled()&&!media->wrongThread,"slow CD metadata stays on worker and restores main owner");
-        ++media->generation;Check(!browser.ShowTestFolder(cdIndex,2)&&lc.GetItemCount()==0&&owner.IsWindowEnabled()&&media->bytes==unchanged,"changed CD invalidates main list without writes");
+        Check(browser.ShowTestFolder(cdIndex,2)&&!browser.Writable()&&owner.IsWindowEnabled()&&!media->wrongThread,"slow CD metadata stays on worker and restores main owner");
+        ++media->generation;Check(!browser.ShowTestFolder(cdIndex,2)&&!session.ListingAvailable()&&!browser.CanExport()&&owner.IsWindowEnabled()&&media->bytes==unchanged,"changed CD invalidates main list without writes");
         fprintf(report,"PASS: both HFSX comparison modes, 64-bit fork-size presentation, full-width catalog IDs, slow read-only CD metadata, media-change invalidation and owner restoration in main panes.\n");
         auto featurePath=W(root+"\\..\\feature-links.dsk");
         if(GetFileAttributesW(featurePath.c_str())!=INVALID_FILE_ATTRIBUTES){

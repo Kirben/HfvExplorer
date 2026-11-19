@@ -59,6 +59,7 @@ int RunBrowserWindowsTest(const char* directory){
  try{
   app.InstallBrowserTemplate(RUNTIME_CLASS(BrowserWindowTestDoc),RUNTIME_CLASS(BrowserWindowTestFrame));
   auto a=app.CreateBrowser(FALSE);Check(a&&app.m_browsers.size()==1&&app.m_pMainWnd==a,"first browser registration");auto& sa=a->GetBrowserSession();
+  Check(sa.AwaitNavigationForTest(),"startup folder completion");
   HWND ah=a->GetSafeHwnd();a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==VolumeCoord::Wide(std::string((LPCSTR)host))+L" \u2014 HFVExplorer","startup Windows folder title was replaced by Untitled");Check(!a->IsWindowVisible(),"test unexpectedly displayed a browser");
   MenuState menu;menu.m_nID=ID_TOOLS_NEW_BROWSER;Check(a->OnCmdMsg(ID_TOOLS_NEW_BROWSER,CN_UPDATE_COMMAND_UI,&menu,nullptr)&&menu.enabled,"New browser has no enabled update handler");
   a->SendMessage(WM_COMMAND,ID_TOOLS_NEW_BROWSER);Check(app.m_browsers.size()==2,"New browser menu did not create an independent window");
@@ -76,10 +77,10 @@ int RunBrowserWindowsTest(const char* directory){
   app.InitRecentImagesForTest();
   app.AddToRecentFileList(firstImage);
   a->SendMessage(WM_COMMAND,ID_FILE_MRU_FILE1);
-  Check(sa.MacBrowser().Active(),"recent image command did not open in its originating browser");
+  Check(sa.AwaitNavigationForTest()&&sa.MacBrowser().Active(),"recent image command did not open in its originating browser");
   Check(!sb.MacBrowser().Active(),"recent image command opened in the other browser");
   app.ActivateBrowser(b);Check(app.OpenDocumentFile(secondImage)==sb.Document(),"image open did not target second browser");
-  Check(sa.MacBrowser().Active()&&sb.MacBrowser().Active(),"opening an image cleared another browser");
+  Check(sb.AwaitNavigationForTest()&&sa.MacBrowser().Active()&&sb.MacBrowser().Active(),"opening an image cleared another browser");
   Check(!sa.Preview()->Enabled()&&!sb.Preview()->Enabled(),"preview should start hidden");
   a->SendMessage(WM_COMMAND,ID_VIEW_PREVIEW_PANE);
   Check(sa.Preview()->Enabled()&&(sa.Preview()->GetStyle()&WS_VISIBLE)&&!sb.Preview()->Enabled(),
@@ -104,13 +105,13 @@ int RunBrowserWindowsTest(const char* directory){
   Check(!sa.Preview()->Enabled()&&!(sa.Preview()->GetStyle()&WS_VISIBLE)&&!sb.Preview()->Enabled(),
         "Hide did not close only the originating preview pane");
   a->OnUpdateFrameTitle(TRUE);b->OnUpdateFrameTitle(TRUE);Check(Caption(a)==L"First \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","disk captions leaked between frames or MFC restored Untitled");
-  Check(sa.MacBrowser().Activate(Find(sa,L"Cafe \u65e5\u672c")),"open Unicode title folder");Check(Caption(a)==L"First:Cafe \u65e5\u672c \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","Unicode folder caption or frame isolation failed");Check(sa.MacBrowser().ShowTestFolder(0,2),"restore title test root");
+  Check(sa.MacBrowser().Activate(Find(sa,L"Cafe \u65e5\u672c")),"open Unicode title folder");Check(sa.AwaitNavigationForTest()&&Caption(a)==L"First:Cafe \u65e5\u672c \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","Unicode folder caption or frame isolation failed");Check(sa.MacBrowser().ShowTestFolder(0,2),"restore title test root");
   sa.List()->GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);sb.List()->GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);
   app.ActivateBrowser(b);a->SendMessage(WM_COMMAND,ID_EDIT_SELECT_ALL);
   Check(sa.List()->GetListCtrl().GetSelectedCount()==sa.List()->GetListCtrl().GetItemCount()&&sa.List()->GetListCtrl().GetItemCount()>=2&&sb.List()->GetListCtrl().GetSelectedCount()==0,"selection command used another window's list");
-  Check(sa.MacBrowser().Activate(Find(sa,L"One"))&&Find(sa,L"One")<0&&Find(sb,L"One")>=0,"native folder navigation leaked between real frames");
+  Check(sa.MacBrowser().Activate(Find(sa,L"One"))&&sa.AwaitNavigationForTest()&&Find(sa,L"One")<0&&Find(sb,L"One")>=0,"native folder navigation leaked between real frames");
   app.ActivateBrowser(b);a->SendMessage(WM_COMMAND,ID_VIEW_REFRESH);
-  Check(Find(sa,L"One")<0&&Find(sb,L"One")>=0,"refresh command lost a window's current folder");a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==L"First:One \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","refresh changed the current folder caption");
+  Check(sa.AwaitNavigationForTest()&&Find(sa,L"One")<0&&Find(sb,L"One")>=0,"refresh command lost a window's current folder");a->OnUpdateFrameTitle(TRUE);Check(Caption(a)==L"First:One \u2014 HFVExplorer"&&Caption(b)==L"Second \u2014 HFVExplorer","refresh changed the current folder caption");
   bool bothDisabled=false;
   auto wait=ShowStorageJob([&](Storage::Job&){for(int n=0;n<100;++n){if(!IsWindowEnabled(ah)&&!IsWindowEnabled(bh)){bothDisabled=true;break;}Sleep(5);}return Storage::Result{};},"Hidden multiwindow operation",true,true,false,a);
   Check(wait.code==0&&bothDisabled&&a->IsWindowEnabled()&&b->IsWindowEnabled(),"storage progress did not disable/restore all browser frames");
@@ -122,13 +123,20 @@ int RunBrowserWindowsTest(const char* directory){
   Check(IsWindow(ah)&&app.m_browsers.size()==2,"nested close/new command ran during storage access");
   auto previousMain=app.m_pMainWnd;rejectNew=true;Check(app.CreateBrowser(FALSE)==nullptr,"injected failed initialization succeeded");rejectNew=false;
   Check(app.m_browsers.size()==2&&app.m_pMainWnd==previousMain&&IsWindow(ah)&&IsWindow(bh),"failed browser creation damaged existing windows");NoQuit();
-  // Exercise the actual resource accelerator, not a duplicate command ID.
-  app.ActivateBrowser(a);MSG key{};key.hwnd=ah;key.message=WM_KEYDOWN;key.wParam=VK_RETURN;BYTE prior[256]{},state[256]{};GetKeyboardState(prior);memcpy(state,prior,sizeof state);state[VK_CONTROL]=0x80;SetKeyboardState(state);
-  bool translated=TranslateAccelerator(ah,LoadAccelerators(AfxGetResourceHandle(),MAKEINTRESOURCE(IDR_MAINFRAME)),&key)!=0;SetKeyboardState(prior);
-  Check(translated&&app.m_browsers.size()==3,"Ctrl+Enter is not wired to New browser");auto c=app.m_browsers.back();HWND ch=c->GetSafeHwnd();
+  // Verify the accelerator in the shipping resource without altering host keyboard state.
+  auto accelerators=LoadAccelerators(AfxGetResourceHandle(),MAKEINTRESOURCE(IDR_MAINFRAME));
+  std::vector<ACCEL> keys(CopyAcceleratorTable(accelerators,nullptr,0));
+  CopyAcceleratorTable(accelerators,keys.data(),int(keys.size()));
+  const auto shortcut=std::find_if(keys.begin(),keys.end(),[](const ACCEL& key){
+   return key.key==VK_RETURN&&key.cmd==ID_TOOLS_NEW_BROWSER&&(key.fVirt&(FVIRTKEY|FCONTROL))==(FVIRTKEY|FCONTROL);
+  });
+  Check(shortcut!=keys.end(),"Ctrl+Enter is not wired to New browser");
+  a->SendMessage(WM_COMMAND,MAKEWPARAM(shortcut->cmd,1));
+  Check(app.m_browsers.size()==3,"accelerator command did not open a browser");
+  auto c=app.m_browsers.back();HWND ch=c->GetSafeHwnd();
   c->SendMessage(WM_CLOSE);Check(!IsWindow(ch)&&IsWindow(ah)&&IsWindow(bh)&&app.m_browsers.size()==2,"closing the newest window closed another browser");NoQuit();
   const auto sharedPath=VolumeCoord::Wide(std::string((LPCSTR)firstImage));
-  Check(sa.MacBrowser().ShowTestFolder(0,2)&&sb.MacBrowser().OpenImage(sharedPath)==1,
+  Check(sa.MacBrowser().ShowTestFolder(0,2)&&sb.MacBrowser().OpenImage(sharedPath)==1&&sb.AwaitNavigationForTest(),
         "open one image in both browsers");
   auto firstSelection=sa.MacBrowser().CaptureItem(Find(sa,L"One"));
   auto peerSelection=sb.MacBrowser().CaptureItem(Find(sb,L"One"));
@@ -169,7 +177,7 @@ int RunBrowserWindowsTest(const char* directory){
               !VolumeCoord::Available({{shared->ResourceKey(),VolumeCoord::Mode::Write}}),
          "background export did not share reads while excluding writers");
    const auto start=GetTickCount();
-   const bool navigated=sb.MacBrowser().Activate(Find(sb,L"Two")) && Find(sb,L"Peer listing")>=0;
+   const bool navigated=sb.MacBrowser().Activate(Find(sb,L"Two")) && sb.AwaitNavigationForTest() && Find(sb,L"Peer listing")>=0;
    const bool stillCopying=!exportJob.Job()->done();
    VolumeSession::PauseVolumeReadForTest(nullptr,nullptr);
    SetEvent(pause.release);
@@ -191,7 +199,7 @@ int RunBrowserWindowsTest(const char* directory){
    fprintf(report,"PASS: second hidden browser navigates the same mounted image during a paused export, with writers excluded and worker PID unchanged.\n");
   }
   {
-   Check(sa.MacBrowser().Activate(Find(sa,L"One")) && Find(sa,L"Slow payload")>=0,
+   Check(sa.MacBrowser().Activate(Find(sa,L"One")) && sa.AwaitNavigationForTest() && Find(sa,L"Slow payload")>=0,
          "first browser did not cache the import destination");
    const auto directory=sharedPath.substr(0,sharedPath.find_last_of(L'\\'));
    const auto filename=directory+L"\\Import payload";
@@ -233,12 +241,13 @@ int RunBrowserWindowsTest(const char* directory){
     Check(WaitForSingleObject(pause.entered,10000)==WAIT_OBJECT_0&&!VolumeCoord::Readable(shared->ResourceKey()),
           "import did not pause with exclusive image access");
     if(!cancel){
-     Check(sb.MacBrowser().Activate(Find(sb,L"Uncached"))&&status().Find("Waiting for")>=0&&!pause.job->done(),
+     Check(sb.MacBrowser().Activate(Find(sb,L"Uncached"))&&sb.AwaitNavigationForTest()&&!sb.ListingAvailable()&&
+           status().Find("Showing the last folder listing")>=0&&!pause.job->done(),
            "uncached folder did not wait for the import");
      Check(sb.MacBrowser().ShowTestFolder(1,2),"cached root could not replace the deferred navigation");
     }
     const auto priorRefresh=sa.notificationRefreshes;
-    Check(sb.MacBrowser().Activate(Find(sb,L"One"))&&Find(sb,L"Slow payload")>=0&&
+    Check(sb.MacBrowser().Activate(Find(sb,L"One"))&&sb.AwaitNavigationForTest()&&Find(sb,L"Slow payload")>=0&&
               status().Find("Showing the last folder listing")>=0&&!sb.MacBrowser().Writable()&&
               (Find(sb,L"Import payload")>=0)==cancel&&!pause.job->done(),
           "peer did not display the other browser's committed listing during import");
@@ -282,7 +291,7 @@ int RunBrowserWindowsTest(const char* directory){
   Check(WaitForSingleObject(refused.Job()->event(),10000)==WAIT_OBJECT_0&&refused.Job()->result().code&&
         refused.Job()->result().rollback==Storage::Rollback::Unverified,
         "lost rename reply was not reported as unverified");
-  Check(sa.MacBrowser().Refresh()&&sb.MacBrowser().Refresh()&&Find(sa,L"Committed before crash")>=0&&
+  Check(sa.MacBrowser().Refresh()&&sb.MacBrowser().Refresh()&&sa.AwaitNavigationForTest()&&sb.AwaitNavigationForTest()&&Find(sa,L"Committed before crash")>=0&&
         Find(sb,L"Committed before crash")>=0&&VolumeSession::VolumeSessionPidForTest(shared)!=pid&&shared->Writable(),
         "refresh did not recover both browsers after a worker crash");
   oldSelection.expectedName.clear();
@@ -292,7 +301,7 @@ int RunBrowserWindowsTest(const char* directory){
   auto fresh=sa.MacBrowser().CaptureItem(Find(sa,L"Committed before crash"));
   auto retry=FileOperations::Submit(FileOperations::RenameEntry{fresh,u"Recovered rename"});
   Check(WaitForSingleObject(retry.Job()->event(),10000)==WAIT_OBJECT_0&&!retry.Job()->result().code&&
-        sa.MacBrowser().Refresh()&&Find(sa,L"Recovered rename")>=0,
+        sa.MacBrowser().Refresh()&&sa.AwaitNavigationForTest()&&Find(sa,L"Recovered rename")>=0,
         "fresh selection could not write after journal recovery");
   fprintf(report,"PASS: two browsers share one persistent worker, rename refreshes both without remounting, "
                  "worker crash requires refresh, stale selections are rejected and fresh writes succeed.\n");

@@ -28,6 +28,8 @@ struct Doc:CHFVExplorerDoc {
  Doc():CHFVExplorerDoc(false){m_bAutoDelete=FALSE;}
  using CHFVExplorerDoc::FindClassicLauncher;
  using CHFVExplorerDoc::my_chdir;
+ using CHFVExplorerDoc::NavigateWindowsFolder;
+ using CHFVExplorerDoc::NavigateClassicFolder;
  void AddIcon(unsigned type){local_icn_sharp_t small{},large{};small.icon=large.icon=reinterpret_cast<icn_sharp_hand>(1);folderReader_->insert_into_hash_table(type,'TEST',&small,&large);}
  bool HasIcon(unsigned type){return folderReader_->map_type_and_creator(type,'TEST',0)!=nullptr;}
 };
@@ -49,7 +51,7 @@ int Find(CHFVExplorerListView& list,const wchar_t* name){for(int row=0;row<list.
 class Fixture:public MacBrowser::Volume {
  std::u16string name_;
 public:
- bool fail=false,slow=false,wrongThread=false,ownerOnly=false;CWnd* owner=nullptr;CWnd* other=nullptr;HANDLE gate=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+ bool fail=false,wrongThread=false;HANDLE gate=CreateEvent(nullptr,TRUE,FALSE,nullptr);
  ~Fixture(){CloseHandle(gate);}
  explicit Fixture(const std::u16string& name):name_(name){}
  std::u16string Name()const override{return name_;}
@@ -57,7 +59,6 @@ public:
  MacBrowser::Entry Stat(uint32_t id)override{MacBrowser::Entry e;e.id=id;e.parent=id==2?1:id==5?3:2;e.name=id==2?name_:id==3?u"Folder":id==4?name_+u" file":name_+u" child";e.directory=id==2||id==3;return e;}
  std::vector<MacBrowser::Entry> List(uint32_t id)override{
   wrongThread|=GetCurrentThreadId()==StorageUi::state().thread;
-  if(slow){Check(WaitForSingleObject(gate,10000)==WAIT_OBJECT_0,"Session read was not released by UI timers");ownerOnly=owner&&!owner->IsWindowEnabled()&&other&&other->IsWindowEnabled();}
   if(fail)throw HfsPlus::Error("Injected session read failure");return id==2?std::vector<MacBrowser::Entry>{Stat(3),Stat(4)}:std::vector<MacBrowser::Entry>{Stat(5)};
  }
  void Read(uint32_t,unsigned,uint64_t,void*,size_t)override{throw HfsPlus::Error("Not a content test");}
@@ -76,7 +77,7 @@ struct Panes {
  }
  ~Panes(){doc.GetBrowserSession().MacBrowser().Clear();tree.enable_selchange(0);list.list_clear();tree.Unbind();list.Bind(nullptr);list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();}
  BrowserSession& Session(){return doc.GetBrowserSession();}
- void Windows(const CString& path){doc.m_fat_count=1;doc.m_fats[0].m_letter=path[0];doc.m_fats[0].m_type=DRIVE_FIXED;tree.enable_selchange(0);doc.m_fats[0].m_rootitem=tree.Host(path);tree.GetTreeCtrl().SelectItem(doc.m_fats[0].m_rootitem);tree.enable_selchange(1);doc.open_fat_directory(0,const_cast<char*>((LPCSTR)path),1);}
+ void Windows(const CString& path){doc.m_fat_count=1;doc.m_fats[0].m_letter=path[0];doc.m_fats[0].m_type=DRIVE_FIXED;doc.m_fats[0].m_volume_name=path;tree.enable_selchange(0);doc.m_fats[0].m_rootitem=tree.Host(path);tree.GetTreeCtrl().SelectItem(doc.m_fats[0].m_rootitem);tree.enable_selchange(1);Check(doc.NavigateWindowsFolder(0,std::string(path.GetString()))&&Session().AwaitNavigationForTest(),"open Windows fixture through navigation");}
  void Classic(const CString& path,const char* filename,int slot=0){
   {CFile image;Check(image.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create session classic image");image.SetLength(2*1024*1024);}
   char label[]="Same",type[]="TEXT",app[]="APPL",creator[]="TEST";
@@ -90,7 +91,7 @@ struct Panes {
   auto& mounted=doc.m_volumes[slot];
   mounted.m_volume_name="Same";Check(mounted.open()!=0,"open session classic volume");
   tree.enable_selchange(0);mounted.m_rootitem=tree.Classic(slot);tree.GetTreeCtrl().SelectItem(mounted.m_rootitem);
-  tree.enable_selchange(1);doc.open_sub_directory(slot,2,"Same");
+  tree.enable_selchange(1);Check(doc.NavigateClassicFolder(slot,2)&&Session().AwaitNavigationForTest(),"open classic fixture through navigation");
  }
 };
 class NavigationFixture : public Fixture {
@@ -150,7 +151,7 @@ void TestNavigation()
  auto& tree=first.tree.GetTreeCtrl();
  auto slowRoot=tree.GetSelectedItem();
  auto child=tree.GetChildItem(slowRoot);
- session.asyncNavigationForTest=true;
+
  tree.SelectItem(child);
  PumpUntil([&]{return WaitForSingleObject(slow->entered,0)==WAIT_OBJECT_0;}, "slow folder never started");
  Check(session.Navigating()&&Find(first.list,L"Slow file")>=0&&first.owner.IsWindowEnabled(),
@@ -221,7 +222,7 @@ void TestNavigation()
   auto& window=pane.Session();
   int mount=window.MacBrowser().AttachTestVolume(closing,"closing");
   Check(window.MacBrowser().ShowTestFolder(mount,2),"open closing fixture");
-  window.asyncNavigationForTest=true;
+
   auto& control=pane.tree.GetTreeCtrl();
   control.SelectItem(control.GetChildItem(control.GetSelectedItem()));
   PumpUntil([&]{return WaitForSingleObject(closing->entered,0)==WAIT_OBJECT_0;},"closing read never started");
@@ -254,11 +255,11 @@ int RunBrowserSessionTest(const char* directory){
   auto first=std::make_unique<Panes>();Panes second;auto& a=*first;auto& b=second;
   // Keep the MFC main-window pointer on B while issuing commands to A.
   app.m_pMainWnd=&b.owner;
-  auto va=std::make_shared<Fixture>(u"First"),vb=std::make_shared<Fixture>(u"Second");va->owner=&a.owner;va->other=&b.owner;va->slow=true;
+  auto va=std::make_shared<Fixture>(u"First"),vb=std::make_shared<Fixture>(u"Second");
   int ia=a.Session().MacBrowser().AttachTestVolume(va,"same-key"),ib=b.Session().MacBrowser().AttachTestVolume(vb,"same-key");
-  storageUiTest={};storageUiTest.releaseAfterTwoTimers=va->gate;Check(a.Session().MacBrowser().ShowTestFolder(ia,2)&&va->ownerOnly&&!va->wrongThread&&storageUiTest.timerTicks>0,"session A worker/owner routing used global window B");storageUiTest.releaseAfterTwoTimers=nullptr;va->slow=false;
+  Check(a.Session().MacBrowser().ShowTestFolder(ia,2)&&!va->wrongThread&&a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled(),"session A navigation blocked another window or used the UI thread");
   Check(b.Session().MacBrowser().ShowTestFolder(ib,2)&&Find(a.list,L"First file")>=0&&Find(b.list,L"Second file")>=0,"native mount/row state leaked between sessions");
-  auto selected=b.tree.GetTreeCtrl().GetSelectedItem();int row=Find(a.list,L"Folder");Check(a.Session().MacBrowser().Activate(row)&&Find(a.list,L"First child")>=0,"independent folder activation");
+  auto selected=b.tree.GetTreeCtrl().GetSelectedItem();int row=Find(a.list,L"Folder");Check(a.Session().MacBrowser().Activate(row)&&a.Session().AwaitNavigationForTest()&&Find(a.list,L"First child")>=0,"independent folder activation");
   Check(b.tree.GetTreeCtrl().GetSelectedItem()==selected&&Find(b.list,L"Second file")>=0,"navigation changed another window");
   auto nestedSelection=a.tree.GetTreeCtrl().GetSelectedItem();
   Check(b.Session().OpenFolderFrom(a.Session(),nestedSelection),"open a mounted folder in another browser");
@@ -270,7 +271,7 @@ int RunBrowserSessionTest(const char* directory){
   a.list.m_sorted_by_column=FIELD_SIZE;a.list.m_sort_is_ascending=false;a.Session().finderLayout=true;Check(b.list.m_sorted_by_column==FIELD_NAME&&b.list.m_sort_is_ascending&&!b.Session().finderLayout,"sort/layout state shared between windows");a.Session().finderLayout=false;
   a.list.GetListCtrl().SetItemState(-1,0,LVIS_SELECTED);a.list.GetListCtrl().SetItemState(Find(a.list,L"First child"),LVIS_SELECTED,LVIS_SELECTED);
   Check(a.Session().MacBrowser().Capture(false,false),"capture session A selection");Check(a.Session().MacBrowser().TestClipboardCount()==1&&b.Session().MacBrowser().TestClipboardCount()==1,"shared clipboard lost the captured selection");
-  va->fail=true;Check(!a.Session().MacBrowser().ShowTestFolder(ia,2)&&!a.list.BrowserDirectoryWritable()&&Find(b.list,L"Second file")>=0&&a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled(),"session failure affected another window or owner");va->fail=false;
+  va->fail=true;Check(!a.Session().MacBrowser().ShowTestFolder(ia,2)&&!a.Session().ListingAvailable()&&Find(b.list,L"Second file")>=0&&a.owner.IsWindowEnabled()&&b.owner.IsWindowEnabled(),"session failure affected another window or owner");va->fail=false;
   Check(a.Session().MacBrowser().ShowTestFolder(ia,2),"session error retry");
   a.doc.AddIcon('AAAA');b.doc.AddIcon('BBBB');Check(a.doc.HasIcon('AAAA')&&!a.doc.HasIcon('BBBB')&&b.doc.HasIcon('BBBB'),"classic Finder icon tables are shared");
   CString wa=root+"\\first",wb=root+"\\second";Check(CreateDirectoryA(wa,nullptr)&&CreateDirectoryA(wb,nullptr),"create host fixtures");
@@ -333,7 +334,7 @@ int RunBrowserSessionTest(const char* directory){
   }
   {
    auto& session=a.Session();
-   session.asyncNavigationForTest=true;
+
    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
    struct Cleanup{HANDLE entered,release;~Cleanup(){SetEvent(release);BrowserDirectory::testObserveRead={};CloseHandle(release);CloseHandle(entered);}} cleanup{entered,release};
@@ -349,7 +350,7 @@ int RunBrowserSessionTest(const char* directory){
    SetEvent(release);
    PumpUntil([&]{return !session.Navigating();},"Windows refresh did not finish");
    Check(Selected(a.list,L"first.txt")&&session.ListingAvailable(),"Windows refresh did not publish its listing and restore selection");
-   session.asyncNavigationForTest=false;
+
   }
   {
    auto nested=wa+"\\Nested\\Deep";
@@ -417,6 +418,7 @@ int RunBrowserSessionTest(const char* directory){
   Check(Find(a.list,L"third classic app")>=0&&Find(a.list,L"first classic app")<0,
         "nested classic folder resolution changed volumes or lost case-insensitive lookup");
   a.tree.GetTreeCtrl().SelectItem(a.doc.m_volumes[0].m_rootitem);
+  Check(a.Session().AwaitNavigationForTest(),"return to first classic image");
   fprintf(report,"PASS: shared classic HFS nested folder and launcher lookup on same-named volumes.\n");
   {
    const CString image=a.doc.m_volumes[0].m_file_name;
@@ -424,7 +426,7 @@ int RunBrowserSessionTest(const char* directory){
    Check(a.doc.m_volumes[0].freeBytes>0&&MoveFileA(image,renamed)&&MoveFileA(renamed,image),
         "classic browser mount should report free space and release its image handle after reading");
   }
-  a.Session().asyncNavigationForTest=true;
+
   auto classicRoot=a.doc.m_volumes[0].m_rootitem;
   Check(a.Session().RefreshSelected()&&a.Session().Navigating()&&
         Find(a.list,L"first classic")>=0,"classic refresh did not retain the listing");
@@ -473,7 +475,7 @@ int RunBrowserSessionTest(const char* directory){
    a.tree.GetTreeCtrl().SelectItem(classicRoot);
    PumpUntil([&]{return !a.Session().Navigating();},"return to classic root after startup folder");
   }
-  a.Session().asyncNavigationForTest=false;
+
   fprintf(report,"PASS: typed Windows and classic HFS Find materialize an unexpanded folder, reveal the file, and reject a replacement at the same path.\n");
   auto launchA=a.Session().MacBrowser().CaptureItem(Find(a.list,L"first classic"));
   auto launchB=b.Session().MacBrowser().CaptureItem(Find(b.list,L"second classic"));
@@ -511,7 +513,7 @@ int RunBrowserSessionTest(const char* directory){
    {CFile file;Check(file.Open(invalid,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create invalid startup image");file.SetLength(512);}
    Check(startup.insert_volume(invalid,0,0,0,0)==0,"add invalid discovered image before fixed startup root");
    auto& boot=startup.GetBrowserSession();
-   boot.asyncNavigationForTest=true;
+
    bool probedRemovable=false;
    BrowserDirectory::testObserveRead=[&](const char* path){probedRemovable|=std::string(path).find("Z:")==0;};
    Check(startup.OnNewDocument()!=FALSE&&boot.Navigating()&&!boot.ListingAvailable(),"startup did not queue its first folder");
@@ -525,7 +527,7 @@ int RunBrowserSessionTest(const char* directory){
    {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
     auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
     FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){for(int i=0;i<doc.m_hfs_count;++i)doc.m_volumes[i].close();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
-    app.m_disable_autofloppy=TRUE;startup.GetBrowserSession().asyncNavigationForTest=true;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.m_fats[0].m_rootitem);
+    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.m_fats[0].m_rootitem);
     PumpUntil([&]{return !startup.GetBrowserSession().Navigating();},"floppy navigation did not finish");
     BrowserDirectory::testObserveRead={};
     auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
@@ -572,7 +574,7 @@ int RunBrowserSessionTest(const char* directory){
    app.m_pMainWnd=nullptr;
    Check(frame.LoadFrame(IDR_MAINFRAME,WS_OVERLAPPEDWINDOW,nullptr,&context)!=FALSE,"create image startup frame");
    auto& session=imageDocument.GetBrowserSession();
-   session.asyncNavigationForTest=true;
+
    imageDocument.m_fat_count=1;
    imageDocument.m_fats[0].m_letter=wa[0];
    imageDocument.m_fats[0].m_type=DRIVE_FIXED;

@@ -72,12 +72,30 @@ std::string BrowserSession::ObservedWindowsKey(const std::wstring& path)const{re
 void BrowserSession::ClearCurrent(){CancelNavigation();if(preview_)preview_->Clear();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::UsesAsyncNavigation() const
 {
-#ifdef HFV_TESTING
-    return owner_ && (asyncNavigationForTest || owner_->IsWindowVisible());
-#else
-    return owner_ != nullptr;
-#endif
+ return owner_!=nullptr;
 }
+
+#ifdef HFV_TESTING
+bool BrowserSession::AwaitNavigationForTest()
+{
+ const auto started=GetTickCount64();
+ while(Navigating()){
+  if(GetTickCount64()-started>15000)
+   throw std::runtime_error("Timed out waiting for browser navigation");
+  MSG message{};
+  while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){
+   if(message.message==WM_QUIT){
+    PostQuitMessage(int(message.wParam));
+    throw std::runtime_error("Browser quit while waiting for navigation");
+   }
+   TranslateMessage(&message);
+   DispatchMessage(&message);
+  }
+  Sleep(1);
+ }
+ return navigationErrorForTest.empty();
+}
+#endif
 
 void BrowserSession::ScheduleMediaUpdates()
 {
@@ -446,11 +464,6 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
  if(afterMutation&&(current_.type!=binding->type||current_.index!=binding->volinx))return false;
  if(address->kind==BrowserMountInventory::Kind::MountedVolume)
   return afterMutation?browser_->RefreshForChange(current_.key):browser_->Refresh();
- if(!UsesAsyncNavigation()){
-  if(!afterMutation)return false;
-  RefreshSynchronously(current_);
-  return true;
- }
  if(address->kind==BrowserMountInventory::Kind::WindowsDrive){
   const auto* folder=tree_->BrowserFolderAt(item);
   const auto path=folder&&folder->location.IsWindows()?folder->location.WindowsPath():VolumeCoord::Wide(binding->path);
@@ -460,34 +473,4 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
  const auto id=uint32_t(binding->id);
  if(afterMutation&&id!=current_.folder)return false;
  return document_->NavigateClassicFolder(address->index,id,true);
-}
-
-void BrowserSession::RefreshSynchronously(const Context& context){
- if(context.index<0||(context.type==LIST_FAT?context.index>=document_->m_fat_count:context.index>=document_->m_hfs_count))throw std::runtime_error("The volume is no longer attached");
- if(context.type==LIST_FAT){
-  std::string path=context.path;auto result=ShowStorageWaitJob([&](Storage::Job&){VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Browse}});for(;;){DWORD a=GetFileAttributesA(path.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_DIRECTORY))break;DWORD error=GetLastError();if(error!=ERROR_PATH_NOT_FOUND&&error!=ERROR_FILE_NOT_FOUND)throw std::runtime_error("The Windows folder is unavailable");auto slash=path.find_last_of('\\');if(slash==2&&path[1]==':'){path.resize(3);continue;}if(slash==path.npos||slash<3)throw std::runtime_error("The Windows folder no longer exists");path.resize(slash);}return Storage::Result{};},!owner_->IsWindowVisible(),owner_);
-  if(result.code)throw std::runtime_error(result.message);
-  auto item=tree_->tree_find_fat(document_->m_fats[context.index].m_rootitem,const_cast<char*>(path.c_str()));if(!item)item=document_->m_fats[context.index].m_rootitem;
-  bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);tree_->GetTreeCtrl().SelectItem(item);tree_->delete_subdir_contents(item);tree_->enable_selchange(enabled);
-  document_->open_fat_directory(context.index,const_cast<char*>(path.c_str()),1);return;
- }
- if(context.type!=LIST_HFS)return;
- auto& mounted=document_->m_volumes[context.index];std::string path;
- auto result=ShowStorageWaitJob([&](Storage::Job&){
-  VolumeCoord::Lease read({{context.key,VolumeCoord::Mode::Read}});
-  auto volume=MacBrowser::OpenClassic(mounted.m_file_name.GetString(),":",false);
-  const auto info=MacBrowser::ReadClassicMountInfo(*volume);
-  auto location=FileOperations::Location::Classic(mounted.m_file_name.GetString(),context.path);
-  if(mounted.m_mediaGenerationKnown)location.BindMediaGeneration(mounted.m_mediaGeneration);
-  StorageLocation::ValidateClassicGeneration(location,info.generation);
-  mounted.ReadMount(info);
-  path=info.label+":";
-  std::vector<MacBrowser::ClassicAncestor> route;
-  try{route=MacBrowser::ReadClassicAncestors(*volume,context.folder);}catch(const HfsPlus::Error&){}
-  for(const auto& step:route)path+=step.name+":";
-  document_->m_classicRevision[context.index]=VolumeCoord::Revision(context.key);
-  return Storage::Result{};
- },!owner_->IsWindowVisible(),owner_);if(result.code)throw std::runtime_error(result.message);
- bool enabled=tree_->m_selchange_enabled!=0;tree_->enable_selchange(0);tree_->GetTreeCtrl().SelectItem(mounted.m_rootitem);tree_->delete_subdir_contents(mounted.m_rootitem);tree_->enable_selchange(enabled);
- document_->open_sub_directory(context.index,2,mounted.m_volume_name);document_->my_chdir(path.c_str(),1,context.index);
 }
