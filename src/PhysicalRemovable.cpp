@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "PhysicalRemovable.h"
+#include "ApfsVolume.h"
 #include "MediaDiscovery.h"
 #include "StorageHandoff.h"
 #include "HfsPlusDisk.h"
@@ -222,6 +223,10 @@ std::shared_ptr<MacBrowser::Volume> OpenPartition(const std::shared_ptr<Disk>& d
         if(disk->MediaGeometry().floppy)return {};
         return MacBrowser::OpenClassicSource(std::move(slice),key,disk->Writable(),true);
     }
+    if(!memcmp(HfsPlus::Disk::Read(*slice,32,4).data(),"NXSB",4)){
+        std::unique_ptr<Source> apfsSource(std::move(slice));
+        return Apfs::Open(apfsSource,key);
+    }
     auto source=std::make_unique<MfsMedia>(std::move(slice));
     if(MfsImage::Recognizes(*source))return MacBrowser::FromMfs(std::move(source),key,ids);
     return {};
@@ -308,7 +313,7 @@ public:
          attributes_(backend_->SupportsAttributes()),stableCatalogIds_(MacBrowser::ExecutionFor(*backend_).stableCatalogIds),
          journaled_(backend_->Journaled()),links_(backend_->SupportsHardLinks()),compression_(backend_->SupportsCompression()),
          metadata_(backend_->SupportsBasicMetadata()),capabilities_(backend_->Supports()),
-         processLocal_(WriteCandidate(*disk_,device_,partition_,*api_)),
+         processLocal_(kind_!="APFS"&&WriteCandidate(*disk_,device_,partition_,*api_)),
          fence_(FenceFor(diskKey_,disk_->Generation())),
          free_(backend_->FreeBytes()),revision_(VolumeCoord::Revision(key_)),generation_(disk_->Generation()){}
 

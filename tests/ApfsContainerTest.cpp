@@ -258,6 +258,11 @@ Memory Gpt(const Memory& raw,unsigned sector)
 }
 }
 
+Bytes ApfsRemovableFixture(unsigned sector)
+{
+    return sector?Gpt(BrowseFixture(),sector).bytes:BrowseFixture().bytes;
+}
+
 int RunApfsContainerTest(const char* directory)
 {
     if(!CreateDirectoryA(directory,nullptr))return 2;

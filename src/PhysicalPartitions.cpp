@@ -22,7 +22,7 @@ std::vector<Partition> Partitions(Source& source,DWORD sector){
  auto boot=B::Read(source,0,512);
  std::vector<Partition> result;
  if(DiskPartitions::HasProtectiveMbr(boot)||DiskPartitions::HasGptHeader(source,sector)){
-  for(const auto& partition:DiskPartitions::ReadGptMacPartitions(source,sector))
+  for(const auto& partition:DiskPartitions::ReadGptMacPartitions(source,sector,DiskPartitions::GptType::AppleFilesystems))
    result.push_back({partition.offset,partition.length,partition.index,partition.readOnly});
   return result;
  }

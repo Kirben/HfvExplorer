@@ -12,7 +12,7 @@ struct MacPartition {
 
 bool HasProtectiveMbr(const HfsPlus::Bytes& boot);
 bool HasGptHeader(HfsPlus::Source&, uint32_t sector);
-enum class GptType { AppleHfs, AppleApfs };
+enum class GptType { AppleHfs, AppleApfs, AppleFilesystems };
 // Validates the entire map, returning the requested Apple partition type.
 std::vector<MacPartition> ReadGptMacPartitions(HfsPlus::Source&, uint32_t sector, GptType type=GptType::AppleHfs);
 // Returns Mac entries only, after validating every entry. A Mac partition that

@@ -431,7 +431,35 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
 }
 
 }
+
+HfsPlus::Bytes ApfsRemovableFixture(unsigned sector);
+void ApfsRemovableTest(FILE* report)
+{
+    auto api=std::make_shared<Fake>();
+    for(unsigned sector:{0,512,4096}){
+        const auto label=L"APFS "+std::to_wstring(sector);
+        auto disk=api->Add(label.c_str(),std::make_shared<Bytes>(ApfsRemovableFixture(sector)));
+        disk->geometry.sector=sector?sector:512;
+        disk->writable=true;
+        auto mounted=Removable::Open(disk->device,api);
+        Check(mounted.size()==1,"APFS removable partition not discovered");
+        auto& volume=*mounted.front().volume;
+        Check(std::string(volume.Kind())=="APFS"&&!volume.Writable(),
+              "APFS on a write-capable USB disk was not read-only");
+        const auto folder=volume.List().at(0);
+        const auto entry=volume.List(folder.id).at(0);
+        char value=0;
+        volume.Read(entry.id,0,0,&value,1);
+        Check(value=='A',"APFS removable file read returned wrong data");
+        Reject([&]{volume.Remove(entry.id);},"APFS removable file removal succeeded");
+        Check(!disk->writes&&!disk->locks,"APFS tried to open a writable device");
+        ++disk->generation;
+        Reject([&]{volume.List();},"APFS accepted changed physical media");
+    }
+    fprintf(report,"PASS: raw and GPT APFS on 512/4096-byte fake removable transports, read-only and media replacement.\n");
+}
 int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;FILE* report=fopen((root+"\\physical-removable-report.txt").c_str(),"w");if(!report)return 2;int result=0;InitializeStorageUi();readonly_cd_backend_init();try{
+ ApfsRemovableTest(report);
  auto api=std::make_shared<Fake>();auto classic=Classic(root+"\\classic.dsk"),mfs=Mfs();std::vector<std::shared_ptr<Bytes>> plus;for(auto kind:{HfsPlus::Volume::FormatKind::HfsPlus,HfsPlus::Volume::FormatKind::HfsXCaseSensitive,HfsPlus::Volume::FormatKind::HfsXCaseInsensitive})plus.push_back(Plus(root+"\\plus"+std::to_string(plus.size())+".dsk",kind));auto raw=api->Add(L"USB raw",plus[0],BusTypeUsb,false);auto zip=api->Add(L"Zip",classic,BusTypeScsi,true);api->Add(L"USB MFS",mfs)->geometry.floppy=true;auto apm=Apm(*api,classic,plus[1]);auto gpt=Gpt(*api,plus[2],512),gpt4=Gpt(*api,plus[0],4096);auto internal=api->Add(L"Internal SATA",classic,BusTypeSata,false);Check(!Removable::Eligible(internal->device),"Internal fixed disk was eligible");
  for(auto& d:api->devices)if(Removable::Eligible(d->device)){auto volumes=Removable::Open(d->device,api);Check(volumes.size()==(d==apm?2:1),"Mac removable partition discovery");for(auto& mounted:volumes){auto v=mounted.volume;const auto execution=MacBrowser::ExecutionFor(*v);const std::string kind=v->Kind();Check(execution.stableCatalogIds==(kind!="MFS")&&!execution.Persistent(),"removable worker changed catalog identity policy");Check(!v->Writable()&&!v->Supports().create&&!v->Supports().rename&&!v->Supports().remove,"Physical removable media exposed writes");Verify(*v);Reject([&]{v->MakeDirectory(2,u"Unsafe");},"Physical folder creation allowed");Reject([&]{v->Remove(Find(*v,2,u"Hello"));},"Physical delete allowed");auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(root));Copy(v,target);Verify(*target);if(std::string(v->Kind())=="HFS")Check(v->Name()==u"Zip Classic","Classic removable volume name");}}
  Check(internal->opens==0,"Internal fixed disk was opened");fprintf(report,"PASS: raw classic HFS/MFS/HFS+/both HFSX, compressed/shared files, multi-partition APM above 4 GiB, GPT with 512/4096-byte logical sectors, both-fork export and read-only operation enforcement; internal fixed disks excluded.\n");fflush(report);

@@ -14,7 +14,9 @@ bool MacType(const uint8_t* p,DiskPartitions::GptType type)
 {
     constexpr uint8_t hfs[]={0,0x53,0x46,0x48,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};
     constexpr uint8_t apfs[]={0xef,0x57,0x34,0x7c,0,0,0xaa,0x11,0xaa,0x11,0,0x30,0x65,0x43,0xec,0xac};
-    return !memcmp(p,type==DiskPartitions::GptType::AppleApfs?apfs:hfs,16);
+    using DiskPartitions::GptType;
+    return (type!=GptType::AppleApfs&&!memcmp(p,hfs,sizeof(hfs)))||
+           (type!=GptType::AppleHfs&&!memcmp(p,apfs,sizeof(apfs)));
 }
 }
 
