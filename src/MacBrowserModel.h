@@ -104,7 +104,7 @@ public:
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {},std::wstring externalJournal = {});
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal = {}); // null = unrecognized
 std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal = {});
-std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = no recognized Mac filesystem
+std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = no recognized filesystem
 // Drive roots only; unrecognized/unreadable media falls back, recognized mount errors propagate.
 std::shared_ptr<Volume> OpenCdRoot(const char *root,
     std::function<UINT(const char *)> driveType = {},

@@ -456,7 +456,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 auto volume=existing;
                 if(!volume||volume->ResourceKey()!=key)
                     volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal);
-                if(!volume)return Storage::Result{1,ERROR_UNRECOGNIZED_VOLUME,"This file does not contain a supported Mac volume."};
+                if(!volume)return Storage::Result{1,ERROR_UNRECOGNIZED_VOLUME,"This file does not contain a supported disk image volume."};
                 result.listing.revision=VolumeCoord::Revision(key);
                 if(job.cancelled())throw Storage::Cancelled();
                 BrowserDirectory::ObserveRead("image-root");

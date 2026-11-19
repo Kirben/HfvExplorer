@@ -5,6 +5,7 @@
 #include "VolumeSession.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
+#include "OpticalVolume.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
 #include <set>
@@ -282,6 +283,8 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
         try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true,externalJournal.empty()?nullptr:externalJournal.c_str()), true,key,externalJournal); }
         catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false,externalJournal.empty()?nullptr:externalJournal.c_str()), false,key,externalJournal); }
     }
+    if(externalJournal.empty())
+        if(auto optical=Optical::Open(source,key))return optical;
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);
     if (!MfsImage::Recognizes(*mfs)) {
@@ -308,7 +311,7 @@ std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> me
     try {
         if (HfsPlus::Volume::Recognizes(*source)) return FromHfsPlus(std::move(source),false,key);
         if (signature==0x4244) return OpenClassicSource(std::move(source),key);
-        return {};
+        return Optical::Open(source,key);
     } catch (const std::exception &e) { throw DetectedVolumeError(e.what()); }
 }
 std::shared_ptr<Volume> OpenCdRoot(const char *root,

@@ -658,7 +658,7 @@ void CMainFrame::OnFileOpenImage()
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return;
  auto& session=GetBrowserSession();
  CFileDialog dialog(TRUE,"DSK",nullptr,OFN_HIDEREADONLY|OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR,
-    "Mac disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42|All Files|*.*||",session.Owner());
+    "Disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42;*.iso;*.udf|All Files|*.*||",session.Owner());
  if(dialog.DoModal()==IDOK)session.Document()->OnOpenDocument(dialog.GetPathName());
 }
 void CMainFrame::OnOpenRecentImage(UINT command)
@@ -848,7 +848,8 @@ void CMainFrame::OnDropFiles(HDROP drop)
         const auto extension=path.substr(dot);
         if(!_wcsicmp(extension.c_str(),L".dsk")||!_wcsnicmp(extension.c_str(),L".hf",3)||
            !_wcsicmp(extension.c_str(),L".img")||!_wcsicmp(extension.c_str(),L".image")||
-           !_wcsicmp(extension.c_str(),L".mfs")||!_wcsicmp(extension.c_str(),L".dc42"))
+           !_wcsicmp(extension.c_str(),L".mfs")||!_wcsicmp(extension.c_str(),L".dc42")||
+           !_wcsicmp(extension.c_str(),L".iso")||!_wcsicmp(extension.c_str(),L".udf"))
             images.push_back(std::move(path));
     }
     DragFinish(drop);

@@ -4,6 +4,7 @@
 #include "HfsPlusDisk.h"
 #include "CdImage.h"
 #include "CdMacProbe.h"
+#include "OpticalVolume.h"
 namespace HfsPlus {
 int CdDriveFromRoot(const char *path) {
     if (!path || !path[0] || path[1] != ':' ||
@@ -41,6 +42,7 @@ class Cd final : public Source {
             Fail("Cannot establish CD media identity", media_->Error());
         auto tracks=media_->DataTracks();Disk::Check(!tracks.empty(),"The disc has no data tracks");
         auto latest=tracks.back();bool matched=false;
+        std::optional<unsigned> opticalTrack;
         if(macSignature)*macSignature=0;
         for(auto it=tracks.rbegin();it!=tracks.rend();++it){
             if(!media_->SelectTrack(it->number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;
@@ -56,8 +58,13 @@ class Cd final : public Source {
                 matched=true;
                 break;
             }
+            if(macSignature&&!opticalTrack&&Optical::Recognizes(*this))
+                opticalTrack=it->number;
         }
-        if(!matched){if(!media_->SelectTrack(latest.number,reason))Fail(reason.c_str(),media_->Error());size_=media_->Size();base_=0;}
+        if(!matched){
+            if(!media_->SelectTrack(opticalTrack.value_or(latest.number),reason))Fail(reason.c_str(),media_->Error());
+            size_=media_->Size();base_=0;
+        }
     }
     ~Cd() override { media_->Close(); }
     int MediaDrive()const override{return drive_;}
@@ -89,7 +96,7 @@ class Cd final : public Source {
             p += count;
         }
     }
-    void Write(uint64_t, const void *, size_t) override { throw Error("HFS+ / HFSX CDs are read-only"); }
+    void Write(uint64_t, const void *, size_t) override { throw Error("Optical discs are read-only"); }
     void Flush() override {} // no write or flush request is issued to the device
 };
 } // namespace
