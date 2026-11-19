@@ -69,6 +69,25 @@ void Row(Bytes& map,unsigned i,uint32_t start,uint8_t type,uint32_t at,uint32_t 
     P32(row,(start<<8)|type);P32(row+4,at);P32(row+8,length);
 }
 
+
+Bytes Apple(const Bytes& data,const Bytes& resource,bool single)
+{
+    const auto first=single?50u:38u;
+    Bytes packed(first+(single?data.size():0)+resource.size());
+    auto p=packed.data();
+    P32(p,single?0x00051600:0x00051607);P32(p+4,0x00020000);P16(p+24,single?2:1);
+    unsigned offset=26;
+    if(single){
+        P32(p+offset,1);P32(p+offset+4,first);P32(p+offset+8,uint32_t(data.size()));
+        memcpy(p+first,data.data(),data.size());
+        offset+=12;
+    }
+    const auto start=first+(single?data.size():0);
+    P32(p+offset,2);P32(p+offset+4,uint32_t(start));P32(p+offset+8,uint32_t(resource.size()));
+    memcpy(p+start,resource.data(),resource.size());
+    return packed;
+}
+
 template<class F>void Reject(F fn,const char* why)
 {
     try{fn();}catch(const Error&){return;}
@@ -130,6 +149,24 @@ int RunNdifImageTest(const char* directory)
         auto rawMap=Map(sectors,2);
         Row(rawMap,0,0,2,0,uint32_t(volumeBytes.size()));Row(rawMap,1,sectors,0xff,0,0);
         auto path=Save(root+"volume.img.bin",Pack(volumeBytes,Resource(rawMap)));
+        const auto resource=Resource(rawMap);
+        auto single=Save(root+"volume.as",Apple(volumeBytes,resource,true));
+        auto doublePath=Save(root+"sidecar.img",volumeBytes);
+        Save(root+"._sidecar.img",Apple({},resource,false));
+        auto streamPath=Save(root+"stream.img",volumeBytes);
+        auto stream=CreateFileW((streamPath+L":AFP_Resource").c_str(),GENERIC_WRITE,0,
+                                nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        Check(stream!=INVALID_HANDLE_VALUE,"Cannot create the NTFS resource-fork fixture");
+        DWORD wrote=0;
+        const bool saved=WriteFile(stream,resource.data(),DWORD(resource.size()),&wrote,nullptr)!=FALSE;
+        CloseHandle(stream);
+        Check(saved&&wrote==resource.size(),"Cannot write the NTFS resource-fork fixture");
+        for(const auto& location:{single,doublePath,streamPath}){
+            auto image=MacBrowser::OpenBrowserImage(location);
+            Check(image&&image->Name()==u"NDIF Fixture"&&!image->Writable(),
+                  "NDIF AppleSingle, AppleDouble or named resource fork did not mount");
+        }
+        fprintf(report,"PASS: AppleSingle, AppleDouble and NTFS AFP_Resource NDIF images opened read-only.\n");
         auto mounted=MacBrowser::OpenBrowserImage(path);
         Check(mounted&&mounted->Name()==u"NDIF Fixture"&&!mounted->Writable(),"NDIF did not mount in the browser");
 

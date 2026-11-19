@@ -2,6 +2,7 @@
 #include "NdifImage.h"
 #include "DmgImage.h"
 #include "HfsPlusDisk.h"
+#include <windows.h>
 #include <mutex>
 #include <optional>
 extern "C" {
@@ -37,6 +38,47 @@ std::optional<Forks> MacBinary(Source& input)
         return {};
     }
     return Forks{{data,length},{resourceAt,resource}};
+}
+
+
+std::optional<Forks> AppleContainer(Source& source,uint32_t magic)
+{
+    if(source.Size()<26)return {};
+    const auto h=Disk::Read(source,0,26);
+    const auto version=U32(h.data()+4);
+    if(U32(h.data())!=magic||(version!=0x10000&&version!=0x20000))return {};
+    const uint64_t bytes=uint64_t(U16(h.data()+24))*12;
+    if(!Range(26,bytes,source.Size()))return {};
+    const auto entries=Disk::Read(source,26,size_t(bytes));
+    const auto first=26+bytes;
+    Forks forks;
+    std::set<uint32_t> ids;
+    std::vector<std::pair<uint64_t,uint64_t>> ranges;
+    for(size_t i=0;i<entries.size();i+=12){
+        const auto p=entries.data()+i;
+        const auto id=U32(p);
+        const uint64_t at=U32(p+4),length=U32(p+8);
+        if(!ids.insert(id).second||!Range(at,length,source.Size())||(length&&at<first))return {};
+        if(length)ranges.emplace_back(at,at+length);
+        if(id==1)forks.data={at,length};
+        if(id==2)forks.resource={at,length};
+    }
+    std::sort(ranges.begin(),ranges.end());
+    for(size_t i=1;i<ranges.size();++i)
+        if(ranges[i-1].second>ranges[i].first)return {};
+    if(magic==0x00051607&&ids.count(1))return {};
+    return forks;
+}
+
+std::unique_ptr<Source> OptionalFile(const std::wstring& path)
+{
+    // An NTFS stream and an AppleDouble companion are both optional.
+    const auto handle=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,
+                                 FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                                 nullptr,OPEN_EXISTING,0,nullptr);
+    if(handle==INVALID_HANDLE_VALUE)return {};
+    CloseHandle(handle);
+    return HfsPlus::OpenImage(path.c_str(),false);
 }
 
 std::optional<Fork> BlockMap(Source& input,Fork resource)
@@ -126,18 +168,29 @@ Layout Map(Source& input,Fork map,Fork data)
 }
 
 class Image final : public Source {
-    std::unique_ptr<Source> input_;
+    std::unique_ptr<Source> input_,metadata_;
     Layout layout_;
     std::mutex mutex_;
     size_t cached_=SIZE_MAX;
     Bytes decoded_;
 public:
-    Image(std::unique_ptr<Source> input,Layout layout):input_(std::move(input)),layout_(std::move(layout)){}
+    Image(std::unique_ptr<Source> input,std::unique_ptr<Source> metadata,Layout layout)
+        :input_(std::move(input)),metadata_(std::move(metadata)),layout_(std::move(layout)){}
     uint64_t Size()const override{return layout_.length;}
     bool Writable()const override{return false;}
     bool ProcessLocal()const override{return input_->ProcessLocal();}
-    void CheckMedia()override{input_->CheckMedia();}
-    auto WorkerFiles()const -> std::vector<std::pair<std::wstring,uintptr_t>> override{return input_->WorkerFiles();}
+    void CheckMedia()override{
+        input_->CheckMedia();
+        if(metadata_)metadata_->CheckMedia();
+    }
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{
+        auto files=input_->WorkerFiles();
+        if(metadata_){
+            const auto companion=metadata_->WorkerFiles();
+            files.insert(files.end(),companion.begin(),companion.end());
+        }
+        return files;
+    }
     void Write(uint64_t,const void*,size_t)override{throw Error("NDIF images are read-only");}
     void Flush()override{}
     void Read(uint64_t offset,void* bytes,size_t count)override{
@@ -173,12 +226,35 @@ public:
 
 bool Unwrap(std::unique_ptr<Source>& input)
 {
-    auto forks=MacBinary(*input);
-    if(!forks)return false;
-    const auto map=BlockMap(*input,forks->resource);
-    if(!map)return false;
-    auto layout=Map(*input,*map,forks->data);
-    input=std::make_unique<Image>(std::move(input),std::move(layout));
-    return true;
+    auto install=[&](Fork data,Source& metadata,Fork resource,std::unique_ptr<Source> companion={}){
+        const auto map=BlockMap(metadata,resource);
+        if(!map)return false;
+        auto layout=Map(metadata,*map,data);
+        input=std::make_unique<Image>(std::move(input),std::move(companion),std::move(layout));
+        return true;
+    };
+    if(auto forks=MacBinary(*input)){
+        if(install(forks->data,*input,forks->resource))return true;
+    }
+    if(auto forks=AppleContainer(*input,0x00051600)){
+        if(install(forks->data,*input,forks->resource))return true;
+    }
+    const auto files=input->WorkerFiles();
+    if(files.empty())return false;
+    const auto& path=files.front().first;
+    if(auto stream=OptionalFile(path+L":AFP_Resource")){
+        const auto size=stream->Size();
+        auto& resource=*stream;
+        if(install({0,input->Size()},resource,{0,size},std::move(stream)))return true;
+    }
+    const auto split=path.find_last_of(L"\\/");
+    const auto fileName=split==std::wstring::npos?0:split+1;
+    if(auto sidecar=OptionalFile(path.substr(0,fileName)+L"._"+path.substr(fileName))){
+        if(const auto forks=AppleContainer(*sidecar,0x00051607)){
+            auto& resource=*sidecar;
+            return install({0,input->Size()},resource,forks->resource,std::move(sidecar));
+        }
+    }
+    return false;
 }
 }
