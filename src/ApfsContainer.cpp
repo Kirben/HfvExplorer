@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsContainer.h"
+#include "ApfsCatalogWrite.h"
 #include "DiskPartitions.h"
 #include "HfsPlusDisk.h"
 #include "StorageWorker.h"
@@ -210,7 +211,6 @@ PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
             Check(Le64(object.data())==ObjectChecksum(object)&&Le64(object.data()+8)==oid&&
                   Le64(object.data()+16)==current.transaction&&Le32(object.data()+24)==type&&
                   Le32(object.data()+28)==subtype,"Invalid APFS checkpoint object");
-            Stamp(object,transaction);
             plan.objects.push_back({*relative,std::move(object)});
             Store(map,at+32,Slot(data,uint64_t(dataStart)+*relative),8);
         }
@@ -224,7 +224,6 @@ PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
     Store(plan.superblock,132,(uint64_t(dataStart)+data.used)%data.capacity,4);
     Store(plan.superblock,136,descStart,4);
     Store(plan.superblock,144,dataStart,4);
-    Stamp(plan.superblock,transaction);
     return plan;
 }
 }
@@ -258,7 +257,8 @@ std::optional<Container> Probe(Source& source)
     return ReadContainer(source,0,source.Size());
 }
 
-uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job& job)
+namespace {
+uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const std::u16string* directory)
 {
     if(job.cancelled())throw Storage::Cancelled();
     Check(source.Writable(),"An exclusive writable APFS image is required");
@@ -269,12 +269,27 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
     Check(!current->offset&&current->checkpointBlock&&!current->keybagBlock&&!current->keybagBlocks&&
           current->volumes.size()==1&&source.Size()==current->blockCount*current->blockSize,
           "Checkpoint writes require a raw single-volume APFS image with a contiguous checkpoint ring");
-    const auto plan=PlanCheckpoint(source,*current);
+    auto plan=PlanCheckpoint(source,*current);
+    std::vector<CheckpointBlockWrite> changedBlocks;
+    if(directory){
+        const auto object=[&](uint64_t oid) -> Bytes& {
+            const auto found=std::find_if(plan.objects.begin(),plan.objects.end(),[&](const auto& entry){
+                return Le64(entry.bytes.data()+8)==oid;
+            });
+            Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
+            return found->bytes;
+        };
+        changedBlocks=PrepareRootDirectory(source,*current,plan.transaction,plan.superblock,object,*directory);
+    }
+    Stamp(plan.superblock,plan.transaction);
     auto write=[&](uint64_t block,const uint8_t* bytes){
         if(job.cancelled())throw Storage::Cancelled();
         source.Write(block*plan.blockSize,bytes,plan.blockSize);
     };
-    for(const auto& object:plan.objects){
+    source.CheckMedia();
+    for(const auto& block:changedBlocks)write(block.block,block.bytes.data());
+    for(auto& object:plan.objects){
+        Stamp(object.bytes,plan.transaction);
         for(size_t i=0;i<object.bytes.size()/plan.blockSize;++i){
             const auto block=Slot(plan.data,uint64_t(plan.data.index)+object.index+i);
             write(block,object.bytes.data()+i*plan.blockSize);
@@ -296,5 +311,16 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
         throw CheckpointPublicationUncertain(std::string("APFS checkpoint publication may have completed: ")+error.what());
     }
     return plan.transaction;
+}
+}
+
+uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job& job)
+{
+    return Commit(source,expected,job,nullptr);
+}
+
+uint64_t CreateRootDirectory(Source& source,const Container& expected,const std::u16string& name,Storage::Job& job)
+{
+    return Commit(source,expected,job,&name);
 }
 }

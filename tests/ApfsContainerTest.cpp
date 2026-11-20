@@ -187,6 +187,61 @@ void CheckpointWrites(const std::string& root,FILE* report)
     Check(volume&&volume->Name()==u"Checkpoint fixture"&&volume->List().empty(),
           "The browser could not reopen a checkpointed image");
     fprintf(report,"PASS: APFS checkpoint publication, previous-state recovery at every write/flush boundary, cancellation, stale detection, and descriptor/data ring wrap.\n");
+
+    CheckpointFaultImage created(original);
+    const auto start=Apfs::Probe(created);
+    Check(Apfs::CreateRootDirectory(created,*start,u"New Folder",controlJob)==2&&reopen(created)==2,
+          "APFS catalog transaction did not publish its checkpoint");
+    for(unsigned step=1;step<=created.event;++step){
+        CheckpointFaultImage attempt(original);
+        attempt.failAt=step;
+        attempt.fault=step==created.event||step==created.event-2?Fault::FailedFlush:Fault::TornWrite;
+        Reject([&]{Apfs::CreateRootDirectory(attempt,*start,u"New Folder",controlJob);},
+               "Injected APFS catalog interruption succeeded");
+        Check(reopen(attempt)==1,"Interrupted APFS directory creation published a new checkpoint");
+        auto memory=std::make_unique<Memory>(attempt.durable.size());
+        memory->bytes=attempt.durable;
+        std::unique_ptr<Source> source=std::move(memory);
+        const auto old=Apfs::Open(source,"apfs-checkpoint-fault");
+        Check(old&&old->List().empty()&&old->Name()==u"Checkpoint fixture",
+              "Interrupted APFS directory creation made the previous catalog unreadable");
+    }
+    const auto output=VolumeCoord::Wide(root+"checkpoint-directory.img");
+    {
+        auto image=CreateFormatOutput(output.c_str(),imageSize);
+        image->Write(0,created.durable.data(),created.durable.size());
+        image->Keep();
+    }
+    auto changed=MacBrowser::OpenBrowserImage(output);
+    MacBrowser::Entry folder;
+    Check(changed&&changed->List().size()==1&&changed->FindChild(2,u"new folder",folder)&&
+          folder.name==u"New Folder"&&folder.directory&&changed->List(folder.id).empty(),
+          "New APFS directory was not found on reopen");
+    const auto state=Apfs::Probe(created);
+    const auto eventsAfter=created.event;
+    Reject([&]{Apfs::CreateRootDirectory(created,*start,u"Stale",controlJob);},
+           "A stale catalog mutation was accepted");
+    Reject([&]{Apfs::CreateRootDirectory(created,*state,u"Another",controlJob);},
+           "An APFS volume outside this writer's scope accepted a mutation");
+    Check(created.event==eventsAfter,"Unsupported APFS catalog write modified the image");
+    CheckpointFaultImage invalidName(original);
+    Reject([&]{Apfs::CreateRootDirectory(invalidName,*start,u"Bad/Name",controlJob);},
+           "An illegal APFS directory name was accepted");
+    Check(!invalidName.event&&invalidName.durable==original,"Invalid APFS name modified the image");
+
+    auto badBitmap=original;
+    const auto map=badBitmap.data()+4096;
+    const auto spaceBlock=Apfs::Le64(map+112);
+    const auto space=badBitmap.data()+spaceBlock*4096;
+    const auto cib=Apfs::Le64(space+Apfs::Le32(space+80));
+    const auto bitmap=Apfs::Le64(badBitmap.data()+cib*4096+64);
+    // Mark the existing container object map free in a damaged allocation bitmap.
+    badBitmap[bitmap*4096+start->objectMap/8]&=uint8_t(~(1u<<(start->objectMap%8)));
+    CheckpointFaultImage wrongAllocation(badBitmap);
+    Reject([&]{Apfs::CreateRootDirectory(wrongAllocation,*start,u"Must not exist",controlJob);},
+           "The APFS allocator trusted a free bit for a live metadata block");
+    Check(!wrongAllocation.event&&wrongAllocation.durable==badBitmap,"Invalid APFS allocation wrote to the image");
+    fprintf(report,"PASS: APFS allocation, copy-on-write catalog and object maps, first directory, and fault recovery.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)

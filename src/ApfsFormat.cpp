@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsFormat.h"
+#include "ApfsWriteDisk.h"
 #include "ApfsContainer.h"
 #include "HfsPlusDisk.h"
 #include "StorageWorker.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
-#include <string_view>
 #pragma comment(lib,"bcrypt.lib")
 
 namespace Apfs {
@@ -18,19 +18,11 @@ namespace {
 // Apple File System Reference: the empty container has two object maps, a
 // catalog, extent and snapshot trees, and one complete checkpoint. The space
 // manager accounts for all reserved areas even when they contain only zeros.
-constexpr uint64_t Block=4096,Chunk=8*Block,ChunksPerCib=(Block-40)/32,CibsPerCab=(Block-40)/8;
+using namespace WriterDisk;
+constexpr uint64_t Chunk=8*Block,ChunksPerCib=(Block-40)/32,CibsPerCab=(Block-40)/8;
 constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000,Tx=1;
 constexpr uint64_t SpaceId=1024,ReaperId=1025,VolumeId=1026,CatalogId=1027,PoolQueueId=1028,MainQueueId=1029;
 constexpr uint64_t DescBase=1,DescBlocks=8,DataBase=DescBase+DescBlocks,PoolBitmapVersions=16;
-
-uint64_t DivideUp(uint64_t value,uint64_t unit){return value/unit+(value%unit!=0);}
-
-void Put(uint8_t* at,uint64_t value,unsigned width)
-{
-    for(unsigned i=0;i<width;++i)at[i]=uint8_t(value>>(i*8));
-}
-
-void Set(Bytes& bytes,size_t at,uint64_t value,unsigned width){Put(bytes.data()+at,value,width);}
 
 uint64_t MainQueueLimit(uint64_t blocks)
 {
@@ -64,94 +56,6 @@ struct Layout {
               "APFS image size exceeds the supported space-manager geometry");
     }
 };
-
-struct Record {Bytes key,value;};
-
-Bytes Node(const std::vector<Record>& records,uint32_t flags,unsigned keyWidth=0,unsigned valueWidth=0)
-{
-    constexpr size_t Header=56,Footer=40,End=Block-Footer;
-    const bool fixed=keyWidth!=0;
-    const size_t tocSize=fixed?(Block-Header)/(4+keyWidth+valueWidth)*4:32*8;
-    const size_t keyStart=Header+tocSize;
-    Bytes node(Block);
-    Set(node,32,fixed?7:3,2);
-    Set(node,36,records.size(),4);
-    Set(node,42,tocSize,2);
-    Set(node,48,UINT16_MAX,2);
-    Set(node,52,UINT16_MAX,2);
-    size_t keys=0,values=0,longestKey=keyWidth,longestValue=valueWidth;
-    for(size_t i=0;i<records.size();++i){
-        const auto& record=records[i];
-        const size_t toc=Header+i*(fixed?4:8);
-        values+=record.value.size();
-        Set(node,toc,keys,2);
-        if(fixed){
-            Set(node,toc+2,values,2);
-        }else{
-            Set(node,toc+2,record.key.size(),2);
-            Set(node,toc+4,values,2);
-            Set(node,toc+6,record.value.size(),2);
-        }
-        std::copy(record.key.begin(),record.key.end(),node.begin()+keyStart+keys);
-        std::copy(record.value.begin(),record.value.end(),node.begin()+End-values);
-        keys+=record.key.size();
-        longestKey=(std::max)(longestKey,record.key.size());
-        longestValue=(std::max)(longestValue,record.value.size());
-    }
-    Set(node,44,keys,2);
-    Set(node,46,End-keyStart-keys-values,2);
-    Set(node,End,flags,4);
-    Set(node,End+4,Block,4);
-    Set(node,End+8,keyWidth,4);
-    Set(node,End+12,valueWidth,4);
-    Set(node,End+16,longestKey,4);
-    Set(node,End+20,longestValue,4);
-    Set(node,End+24,records.size(),8);
-    Set(node,End+32,1,8);
-    return node;
-}
-
-uint32_t DirectoryHash(std::string_view name)
-{
-    // APFS hashes normalized UTF-32LE. These two fixed system names are ASCII.
-    uint32_t crc=UINT32_MAX;
-    for(const auto c:name){
-        crc^=uint8_t(c);
-        for(unsigned bit=0;bit<32;++bit)crc=(crc>>1)^((crc&1)?0x82f63b78u:0);
-    }
-    return (crc&0x3fffff)<<10;
-}
-
-Record DirectoryEntry(std::string_view name,uint64_t inode,uint64_t now)
-{
-    Record entry{Bytes(13+name.size()),Bytes(18)};
-    Set(entry.key,0,(uint64_t(9)<<60)|1,8);
-    Set(entry.key,8,DirectoryHash(name)|(name.size()+1),4);
-    std::copy(name.begin(),name.end(),entry.key.begin()+12);
-    Set(entry.value,0,inode,8);
-    Set(entry.value,8,now,8);
-    Set(entry.value,16,4,2);
-    return entry;
-}
-
-Record DirectoryInode(std::string_view name,uint64_t inode,uint64_t now)
-{
-    const size_t nameSpace=size_t(DivideUp(name.size()+1,8)*8);
-    Record record{Bytes(8),Bytes(100+nameSpace)};
-    Set(record.key,0,(uint64_t(3)<<60)|inode,8);
-    Set(record.value,0,1,8);
-    Set(record.value,8,inode,8);
-    for(size_t field:{16,24,32,40})Set(record.value,field,now,8);
-    Set(record.value,48,0x8000,8);
-    Set(record.value,80,0040755,2);
-    Set(record.value,92,1,2);
-    Set(record.value,94,nameSpace,2);
-    record.value[96]=4;
-    record.value[97]=2;
-    Set(record.value,98,name.size()+1,2);
-    std::copy(name.begin(),name.end(),record.value.begin()+100);
-    return record;
-}
 
 void RandomUuid(Bytes& bytes,size_t at)
 {
@@ -192,7 +96,7 @@ class Formatter {
         Set(mapping.key,8,Tx,8);
         Set(mapping.value,4,Block,4);
         Set(mapping.value,8,physical,8);
-        WriteObject(at+1,Node({std::move(mapping)},0x10,16,16),at+1,Physical|2,11);
+        WriteObject(at+1,EncodeLeaf({std::move(mapping)},0x10,16,16),at+1,Physical|2,11);
     }
     void Volume(){
         Bytes volume(Block);
@@ -230,9 +134,9 @@ class Formatter {
         }
         catalog.push_back(DirectoryInode("root",2,now));
         catalog.push_back(DirectoryInode("private-dir",3,now));
-        WriteObject(layout.catalog,Node(catalog,0x40),CatalogId,2,14);
-        WriteObject(layout.extents,Node({},0x50),layout.extents,Physical|2,15);
-        WriteObject(layout.snapshots,Node({},0x50),layout.snapshots,Physical|2,16);
+        WriteObject(layout.catalog,EncodeLeaf(catalog,0x40),CatalogId,2,14);
+        WriteObject(layout.extents,EncodeLeaf({},0x50),layout.extents,Physical|2,15);
+        WriteObject(layout.snapshots,EncodeLeaf({},0x50),layout.snapshots,Physical|2,16);
         ObjectMap(layout.volumeMap,CatalogId,layout.catalog,false);
     }
     void UsedRange(uint64_t address,uint64_t allocated){
@@ -314,8 +218,8 @@ class Formatter {
         UsedRange(l.pool,l.used);
         UsedRange(l.poolBitmap,l.mainBitmaps+l.cibs+l.cabs);
         WriteObject(DataBase+1,std::move(space),SpaceId,Ephemeral|5);
-        WriteObject(DataBase+1+l.spaceBlocks,Node({},0x0c,16,8),PoolQueueId,Ephemeral|2,9);
-        WriteObject(DataBase+2+l.spaceBlocks,Node({},0x0c,16,8),MainQueueId,Ephemeral|2,9);
+        WriteObject(DataBase+1+l.spaceBlocks,EncodeLeaf({},0x0c,16,8),PoolQueueId,Ephemeral|2,9);
+        WriteObject(DataBase+2+l.spaceBlocks,EncodeLeaf({},0x0c,16,8),MainQueueId,Ephemeral|2,9);
     }
     void Checkpoint(){
         Bytes reaper(Block);
