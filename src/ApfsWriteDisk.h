@@ -20,15 +20,24 @@ inline void Set(Bytes& bytes,size_t at,uint64_t value,unsigned width){Put(bytes.
 
 struct Record {Bytes key,value;};
 
-inline Bytes EncodeLeaf(const std::vector<Record>& records,uint32_t flags,unsigned keyWidth=0,unsigned valueWidth=0)
+inline constexpr size_t NodeHeader=56,TreeFooter=40;
+inline size_t VariableToc(size_t count){return size_t((std::max)(uint64_t(1),DivideUp(count,32))*32*8);}
+inline bool FitsCatalogLeaf(size_t count,size_t recordBytes)
 {
-    constexpr size_t Header=56,Footer=40,End=Block-Footer;
+    return NodeHeader+VariableToc(count)+recordBytes<=Block-TreeFooter;
+}
+
+inline Bytes EncodeNode(const std::vector<Record>& records,uint32_t flags,bool root,unsigned level,
+                        unsigned keyWidth=0,unsigned valueWidth=0)
+{
+    const size_t end=Block-(root?TreeFooter:0);
     const bool fixed=keyWidth!=0;
-    const size_t tocSize=fixed?(Block-Header)/(4+keyWidth+valueWidth)*4:32*8;
-    const size_t keyStart=Header+tocSize;
-    Check(records.size()<=tocSize/(fixed?4:8),"APFS leaf record table is full");
+    const size_t tocSize=fixed?(Block-NodeHeader)/(4+keyWidth+valueWidth)*4:VariableToc(records.size());
+    const size_t keyStart=NodeHeader+tocSize;
+    Check(keyStart<=end&&records.size()<=tocSize/(fixed?4:8),"APFS node record table is full");
     Bytes node(Block);
-    Set(node,32,fixed?7:3,2);
+    Set(node,32,(root?1:0)|(level?0:2)|(fixed?4:0),2);
+    Set(node,34,level,2);
     Set(node,36,records.size(),4);
     Set(node,42,tocSize,2);
     Set(node,48,UINT16_MAX,2);
@@ -36,11 +45,11 @@ inline Bytes EncodeLeaf(const std::vector<Record>& records,uint32_t flags,unsign
     size_t keys=0,values=0,longestKey=keyWidth,longestValue=valueWidth;
     for(size_t i=0;i<records.size();++i){
         const auto& record=records[i];
-        const size_t toc=Header+i*(fixed?4:8);
+        const size_t toc=NodeHeader+i*(fixed?4:8);
         const bool ghost=record.value.empty()&&fixed&&(flags&4);
         Check(!fixed||(record.key.size()==keyWidth&&(ghost||record.value.size()==valueWidth)),
               "Invalid fixed-width APFS leaf record");
-        Check(keys+values+record.key.size()+record.value.size()<=End-keyStart,"APFS leaf is full");
+        Check(keys+values+record.key.size()+record.value.size()<=end-keyStart,"APFS leaf is full");
         values+=record.value.size();
         Set(node,toc,keys,2);
         if(fixed){
@@ -51,22 +60,28 @@ inline Bytes EncodeLeaf(const std::vector<Record>& records,uint32_t flags,unsign
             Set(node,toc+6,record.value.size(),2);
         }
         std::copy(record.key.begin(),record.key.end(),node.begin()+keyStart+keys);
-        std::copy(record.value.begin(),record.value.end(),node.begin()+End-values);
+        std::copy(record.value.begin(),record.value.end(),node.begin()+end-values);
         keys+=record.key.size();
         longestKey=(std::max)(longestKey,record.key.size());
         longestValue=(std::max)(longestValue,record.value.size());
     }
     Set(node,44,keys,2);
-    Set(node,46,End-keyStart-keys-values,2);
-    Set(node,End,flags,4);
-    Set(node,End+4,Block,4);
-    Set(node,End+8,keyWidth,4);
-    Set(node,End+12,valueWidth,4);
-    Set(node,End+16,longestKey,4);
-    Set(node,End+20,longestValue,4);
-    Set(node,End+24,records.size(),8);
-    Set(node,End+32,1,8);
+    Set(node,46,end-keyStart-keys-values,2);
+    if(!root)return node;
+    Set(node,end,flags,4);
+    Set(node,end+4,Block,4);
+    Set(node,end+8,keyWidth,4);
+    Set(node,end+12,valueWidth,4);
+    Set(node,end+16,longestKey,4);
+    Set(node,end+20,longestValue,4);
+    Set(node,end+24,records.size(),8);
+    Set(node,end+32,1,8);
     return node;
+}
+
+inline Bytes EncodeLeaf(const std::vector<Record>& records,uint32_t flags,unsigned keyWidth=0,unsigned valueWidth=0)
+{
+    return EncodeNode(records,flags,true,0,keyWidth,valueWidth);
 }
 
 inline uint32_t DirectoryHash(std::string_view name,bool fold=false)

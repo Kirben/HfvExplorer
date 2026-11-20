@@ -730,6 +730,100 @@ void MultiCibWrites(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS multiple chunk-info blocks, second-CIB allocation, and reuse of unchanged CIBs.\n");
 }
 
+void SplitCatalogWrites(const std::string& root,FILE* report)
+{
+    const auto path=VolumeCoord::Wide(root+"checkpoint-split-catalog.img");
+    auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
+    Storage::Job job;
+    Apfs::Format(*image,u"Split catalog fixture",false,job);
+    const auto initial=Disk::Read(*image,0,size_t(image->Size()));
+    CheckpointFaultImage disk(initial);
+    const auto catalogLevel=[](Source& source,const Apfs::Container& checkpoint){
+        const auto volumeId=checkpoint.volumes.front();
+        const Apfs::ObjectMap containerMap(source,checkpoint,checkpoint.objectMap,checkpoint.transaction);
+        const auto volumeAddress=containerMap.Lookup(volumeId);
+        Check(volumeAddress.has_value(),"Missing APFS test volume mapping");
+        const auto volume=Apfs::ReadObject(source,checkpoint,*volumeAddress,volumeId,checkpoint.transaction,13);
+        const auto rootId=Apfs::Le64(volume.data()+136);
+        const Apfs::ObjectMap volumeMap(source,checkpoint,Apfs::Le64(volume.data()+128),checkpoint.transaction);
+        const auto address=volumeMap.Lookup(rootId);
+        Check(address.has_value(),"Missing APFS test catalog mapping");
+        const Apfs::Node node(Apfs::ReadObject(source,checkpoint,*address,rootId,checkpoint.transaction,2,14),true,{});
+        return node.Level();
+    };
+    const auto open=[](const CheckpointFaultImage& candidate){
+        auto memory=std::make_unique<Memory>(candidate.durable.size());
+        memory->bytes=candidate.durable;
+        std::unique_ptr<Source> source=std::move(memory);
+        return Apfs::Open(source,"apfs-split-catalog");
+    };
+    Memory payload(4096+11);
+    for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i>>8)+i*11);
+    const auto add=[&](Source& target,const Apfs::Container& checkpoint,size_t index,const std::u16string& name){
+        if(index%5==0)return Apfs::CreateFile(target,checkpoint,2,name,payload,job);
+        return Apfs::CreateDirectory(target,checkpoint,2,name,job);
+    };
+
+    std::vector<std::u16string> names;
+    bool split=false;
+    for(size_t i=0;i<40;++i){
+        std::u16string name=u"Catalog entry ";
+        name+=char16_t(u'A'+i/26);
+        name+=char16_t(u'A'+i%26);
+        name+=std::u16string(90,char16_t(u'a'+i%26));
+        const auto checkpoint=Apfs::Probe(disk);
+        Check(checkpoint.has_value(),"Missing APFS checkpoint before catalog insertion");
+        Bytes previous;
+        if(!split)previous=disk.durable;
+        const auto firstEvent=disk.event;
+        Check(add(disk,*checkpoint,i,name)==checkpoint->transaction+1,"APFS catalog insertion failed");
+        const auto current=Apfs::Probe(disk);
+        Check(current.has_value(),"Missing APFS checkpoint after catalog insertion");
+        if(!split&&catalogLevel(disk,*current)){
+            split=true;
+            const auto events=disk.event-firstEvent;
+            for(unsigned step=1;step<=events;++step){
+                CheckpointFaultImage attempt(previous);
+                attempt.failAt=step;
+                attempt.fault=step==events||step==events-2?
+                    CheckpointFaultImage::Fault::FailedFlush:CheckpointFaultImage::Fault::TornWrite;
+                Reject([&]{add(attempt,*checkpoint,i,name);},"Injected APFS split interruption succeeded");
+                Memory durable(attempt.durable.size());
+                durable.bytes=attempt.durable;
+                const auto selected=Apfs::Probe(durable);
+                const auto old=open(attempt);
+                MacBrowser::Entry entry;
+                const auto oldLevel=selected?catalogLevel(durable,*selected):UINT_MAX;
+                const auto oldEntries=old?old->List().size():SIZE_MAX;
+                const auto appeared=old&&old->FindChild(2,name,entry);
+                Check(selected&&selected->transaction==checkpoint->transaction&&oldLevel==0&&oldEntries==i&&!appeared,
+                      ("Interrupted APFS catalog split at step "+std::to_string(step)+
+                      " of "+std::to_string(events)+" selected transaction "+
+                      std::to_string(selected?selected->transaction:0)+", expected "+
+                      std::to_string(checkpoint->transaction)+", level "+std::to_string(oldLevel)+
+                      ", "+std::to_string(oldEntries)+" records, expected "+std::to_string(i)).c_str());
+            }
+        }
+        names.push_back(std::move(name));
+    }
+    const auto mounted=open(disk);
+    Check(split&&mounted&&mounted->List().size()==names.size(),"The APFS split catalog did not reopen");
+    for(size_t i=0;i<names.size();++i){
+        MacBrowser::Entry entry;
+        const bool isFile=i%5==0;
+        Check(mounted->FindChild(2,names[i],entry)&&entry.directory!=isFile,"An APFS leaf lost a catalog entry");
+        if(isFile){
+            Bytes readback(payload.bytes.size());
+            mounted->Read(entry.id,0,0,readback.data(),readback.size());
+            Check(readback==payload.bytes,"APFS file data changed after a catalog split");
+        }
+    }
+    image->Write(0,disk.durable.data(),disk.durable.size());
+    image->Flush();
+    image->Keep();
+    fprintf(report,"PASS: APFS catalog growth past one leaf, cross-leaf lookup and data, and interrupted splits.\n");
+}
+
 Memory Raw(unsigned blockSize=4096)
 {
     Memory disk(1024*1024);
@@ -1082,6 +1176,7 @@ int RunApfsContainerTest(const char* directory)
         CheckpointWrites(root,report);
         MultiChunkWrites(root,report);
         MultiCibWrites(root,report);
+        SplitCatalogWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
