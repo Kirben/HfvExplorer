@@ -825,7 +825,7 @@ public:
         Check(entry.readError.empty()&&
               !entry.hardLink&&!entry.compressed&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
-        ValidateEmbeddedAttributes(entry.attributes);
+        ValidateWritableAttributes(entry.attributes);
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
             CatalogTimestamp(entry.modified);
@@ -913,7 +913,7 @@ public:
         });
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{
-        ValidateEmbeddedAttributes(attributes);
+        ValidateWritableAttributes(attributes);
         WriteMount([&]{
             Check(id!=2,"APFS root attribute editing is unavailable");
             const auto& item=At(id);
@@ -922,7 +922,7 @@ public:
             const auto parentOid=At(parent).oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetEmbeddedAttributes(*source,container,parentOid,oid,attributes,job);
+                return SetCatalogAttributes(*source,container,parentOid,oid,attributes,job);
             });
         });
     }

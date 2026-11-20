@@ -61,13 +61,15 @@ struct DataStreamWrite {
     HfsPlus::Source& input;
     uint64_t size;
     std::vector<DataRun> runs;
+    uint64_t id=0;
 };
 struct CatalogWritePlan {
     std::vector<CheckpointBlockWrite> metadata;
+    std::vector<std::unique_ptr<HfsPlus::Source>> attributeInputs;
     std::vector<DataStreamWrite> streams;
 };
 void AssignDataRuns(std::vector<DataStreamWrite>&,const std::vector<DataRun>&);
-void ValidateEmbeddedAttributes(const HfsPlus::Attributes&);
+void ValidateWritableAttributes(const HfsPlus::Attributes&);
 uint64_t CatalogTimestamp(uint64_t secondsSince1904);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);
 uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);

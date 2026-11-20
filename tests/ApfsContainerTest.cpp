@@ -1324,7 +1324,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-streamed-resource.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-streamed-attributes.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1340,7 +1340,9 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     file.forks[0].size=5;
     file.forks[1].size=9003;
     folder.name=u"Folder";
-    folder.attributes={{u"user.folder",{0,7}}};
+    folder.attributes={{u"user.folder",Bytes(5001,0xa7)}};
+    file.attributes.emplace(u"user.large",Bytes(13019,0x71));
+    file.attributes.emplace(u"user.second",Bytes(3804,0xf5));
     Bytes acl(68);
     Disk::P32(acl.data(),0x012cc16d);
     Disk::P32(acl.data()+36,1);
@@ -1396,6 +1398,8 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         MacBrowser::Entry copiedFolder,copiedFile;
         auto edited=file.attributes;
         edited.erase(u"user.sample");
+        edited.erase(u"user.large");
+        edited[u"user.second"]=Bytes(8165,0xa3);
         edited.erase(u"com.apple.system.Security");
         edited[u"user.new"]={9,8,7};
         mounted->SetAttributes(id,edited);
@@ -1434,8 +1438,8 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
               "APFS recursive copy lost embedded attributes");
         auto oversized=file;
         oversized.name=u"Oversized attribute";
-        oversized.attributes={{u"user.large",Bytes(3804)}};
-        Reject([&]{mounted->Put(parent,oversized,contents,false);},"APFS accepted an attribute requiring a stream");
+        oversized.attributes={{std::u16string(128,u'x'),Bytes(3804)}};
+        Reject([&]{mounted->Put(parent,oversized,contents,false);},"APFS accepted an oversized attribute name");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
@@ -1445,7 +1449,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
               mounted->List(foundFolder.id).size()==1,"APFS Finder information did not survive reopening");
         Check(mounted->GetAttributes(foundFolder.id)==folder.attributes&&
               mounted->GetAttributes(foundFile.id)==file.attributes,
-              "APFS embedded folder or file attributes did not survive reopening");
+              "APFS embedded and streamed folder or file attributes did not survive reopening");
         std::array<char,5> data{};
         mounted->Read(foundFile.id,0,0,data.data(),data.size());
         Check(std::string(data.begin(),data.end())=="abcde","APFS Finder information changed the data fork");
