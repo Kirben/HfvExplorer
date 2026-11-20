@@ -386,6 +386,31 @@ int RunApfsContainerTest(const char* directory)
                       "Independent APFS compressed contents differed from expected");
             fprintf(report,"PASS: macOS-generated APFS image and 400-file multi-node directory.\n");
         }
+        // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
+        if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){
+            const auto checkLocked=[](MacBrowser::Volume& container,const std::u16string& name){
+                MacBrowser::Entry locked;
+                Check(container.FindChild(2,name,locked)&&locked.directory&&!locked.readError.empty()&&
+                      container.PropertiesDetails(locked.id)=="This APFS volume is encrypted and locked",
+                      "Encrypted APFS volume did not appear as a locked volume");
+                Reject([&]{container.List(locked.id);},"Encrypted APFS catalog was read before unlocking");
+            };
+            const auto mixed=MacBrowser::OpenBrowserImage(std::wstring(fixtures)+L"\\apfs-encrypted.sparseimage");
+            Check(mixed&&mixed->List().size()==2,"Expected both volumes of the encrypted APFS fixture");
+            checkLocked(*mixed,u"SECRETVOL");
+            MacBrowser::Entry plain,docs,file;
+            Check(mixed->FindChild(2,u"PLAINVOL",plain)&&mixed->FindChild(plain.id,u"docs",docs)&&
+                  mixed->FindChild(docs.id,u"pattern.bin",file)&&file.forks[0].size==262144,
+                  "Locked APFS volume blocked its readable sibling");
+            Bytes pattern(262144);
+            mixed->Read(file.id,0,0,pattern.data(),pattern.size());
+            for(size_t i=0;i<pattern.size();++i)
+                Check(pattern[i]==(i*131+17)%253,"Unexpected contents in the readable sibling APFS volume");
+            const auto converted=MacBrowser::OpenBrowserImage(std::wstring(fixtures)+L"\\apfs-converted.sparseimage");
+            Check(converted&&converted->List().size()==1,"Expected the single converted APFS volume");
+            checkLocked(*converted,u"CONVVOL");
+            fprintf(report,"PASS: macOS-generated encrypted APFS volumes appear locked, with readable siblings still accessible.\n");
+        }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");
         {

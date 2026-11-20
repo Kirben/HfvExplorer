@@ -36,7 +36,7 @@ uint64_t Date(const uint8_t* p)
 }
 struct Mounted {
     uint64_t oid,xid,map,tree;
-    bool sensitive,hashedNames;
+    bool sensitive,hashedNames,locked;
     std::u16string name;
 };
 
@@ -46,13 +46,15 @@ Mounted ReadVolume(Source& source,const Container& container,uint64_t oid,uint64
     const auto p=block.data();
     Check(!memcmp(p+32,"APSB",4),"Missing APFS volume signature");
     const auto incompatible=Le64(p+56);
-    Check(Le64(p+264)&1,"Encrypted APFS volumes are unsupported");
-    Check(!(incompatible&~uint64_t(0x0b)),"Unsupported APFS volume features");
-    Check(Le32(p+116)==2&&Le64(p+128)&&Le64(p+136),"Unsupported APFS filesystem tree");
+    const bool locked=!(Le64(p+264)&1);
+    if(!locked){
+        Check(!(incompatible&~uint64_t(0x0b)),"Unsupported APFS volume features");
+        Check(Le32(p+116)==2&&Le64(p+128)&&Le64(p+136),"Unsupported APFS filesystem tree");
+    }
     constexpr size_t nameOffset=704,nameLimit=256;
     const auto end=static_cast<const uint8_t*>(memchr(p+nameOffset,0,nameLimit));
     Check(end!=nullptr,"Unterminated APFS volume name");
-    return {oid,Le64(p+16),Le64(p+128),Le64(p+136),!(incompatible&1),bool(incompatible&9),
+    return {oid,Le64(p+16),Le64(p+128),Le64(p+136),!(incompatible&1),bool(incompatible&9),locked,
             Name(p+nameOffset,size_t(end-(p+nameOffset))+1)};
 }
 
@@ -104,6 +106,7 @@ constexpr auto ResourceFork=u"com.apple.ResourceFork";
 constexpr auto FinderInfo=u"com.apple.FinderInfo";
 constexpr auto CompressionAttribute=u"com.apple.decmpfs";
 constexpr auto SymlinkAttribute=u"com.apple.fs.symlink";
+constexpr auto LockedMessage="This APFS volume is encrypted and locked";
 struct Attribute {
     uint64_t size=0,stream=0;
     Bytes embedded;
@@ -288,7 +291,13 @@ public:
         for(size_t i=0;i<mounts.size();++i){
             const auto& mount=mounts[i];
             try{
-                auto root=LoadInode(Catalog(*source,container,mount),i,2);
+                Inode root;
+                if(mount.locked){
+                    root.entry.directory=true;
+                    root.entry.readError=LockedMessage;
+                }else{
+                    root=LoadInode(Catalog(*source,container,mount),i,2);
+                }
                 Check(root.entry.directory,"APFS root is not a directory");
                 root.entry.name=mount.name;
                 root.entry.identity=MacBrowser::EntryIdentity(key+":"+std::to_string(mount.oid),mount.xid);
@@ -296,7 +305,7 @@ public:
             }catch(const Error&){if(!failure)failure=std::current_exception();}
         }
         if(roots.empty())std::rethrow_exception(failure);
-        if(roots.size()==1){
+        if(roots.size()==1&&!mounts[roots.front().mount].locked){
             auto& root=roots.front();
             label=root.entry.name;
             caseSensitive=mounts[root.mount].sensitive;
@@ -353,6 +362,7 @@ public:
                 std::vector<Item> children;
                 std::set<std::u16string> names;
                 const auto& mounted=mounts[folder.mount];
+                Check(!mounted.locked,LockedMessage);
                 const Catalog catalog(*source,container,mounted);
                 catalog.VisitRecords(folder.oid,9,[&](Record record){
                     const size_t header=mounted.hashedNames?12:10;
@@ -449,6 +459,7 @@ public:
     std::string PropertiesDetails(uint32_t id)override{
         return Access([&]() -> std::string {
             const auto& file=At(id);
+            if(file.oid==2&&mounts[file.mount].locked)return LockedMessage;
             if(!file.symlink)return {};
             const auto target=file.attributes.find(SymlinkAttribute);
             constexpr size_t maxDisplayedPath=4096;
