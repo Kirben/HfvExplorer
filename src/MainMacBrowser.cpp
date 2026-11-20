@@ -20,6 +20,7 @@
 #include "BrowserDirectory.h"
 #include "HfsPlusDialogs.h"
 #include "DmgEncryption.h"
+#include "ApfsVolume.h"
 #include "HfsPlusCd.h"
 #include "StorageJobDialog.h"
 #include "own_ids.h"
@@ -353,7 +354,8 @@ struct MainMacBrowser::State {
         const auto root=Insert(index,2,nullptr,label,true);
         session_.SetMountRoot({BrowserMountInventory::Kind::MountedVolume,index},root);
     }
-    bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool reload=false,const BrowserNavigation::Request* find=nullptr) {
+    bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool reload=false,
+              const BrowserNavigation::Request* find=nullptr,std::shared_ptr<const Dmg::Password> apfsPassword={}) {
         session_.CancelNavigation();
         auto volume=mounts.at(index).volume;
         const auto key=volume->ResourceKey();
@@ -419,12 +421,12 @@ struct MainMacBrowser::State {
             const auto physicalOffset=mount.physicalOffset;
             const auto capturedMount=session_.Mounts().Lookup({BrowserMountInventory::Kind::MountedVolume,index});
             if(!capturedMount)return false;
-            const auto retry=[this,index,id,item,rebuild,reload,found=find?std::optional<Request>(*find):std::nullopt]{
-                Show(index,id,item,rebuild,reload,found?&*found:nullptr);
+            const auto retry=[this,index,id,item,rebuild,reload,apfsPassword,found=find?std::optional<Request>(*find):std::nullopt]{
+                Show(index,id,item,rebuild,reload,found?&*found:nullptr,apfsPassword);
             };
             const bool showInvisible=App().m_show_invisible_mac!=FALSE;
             session_.Navigate(std::move(request),
-                [ancestors,readFolder,reload,drive,physicalPath,physicalOffset,showInvisible]
+                [ancestors,readFolder,reload,drive,physicalPath,physicalOffset,showInvisible,apfsPassword]
                 (const Request& request,Result& result,Storage::Job& job){
                 if(job.cancelled())throw Storage::Cancelled();
                 try{
@@ -446,15 +448,29 @@ struct MainMacBrowser::State {
                     }
                     auto& snapshot=result.listing;
                     snapshot.resourceKey=volume->ResourceKey();
+                    if(apfsPassword)Apfs::Unlock(*volume,id,*apfsPassword);
                     readFolder(volume,id,snapshot.revision,listing.ancestors,listing.title,
                         listing.levels,listing.entries,listing.free,listing.mutableFolder);
                     result.listing.folder.SetMounted(volume,id);
                     result.listing.folder.directory=true;
                     FillListing(snapshot,listing.entries,volume->Supports(),showInvisible,listing.mutableFolder);
                     result.payload=std::move(listing);
+                }catch(const Apfs::LockedVolume& locked){
+                    result.listing.resourceKey.clear();
+                    result.payload=ApfsUnlock{locked.retry};
                 }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"This volume is busy"};}
                 return Storage::Result{};
-            }, [this,volume,item,index,mountRoot,rebuild](Result& result){
+            }, [this,volume,item,index,id,mountRoot,rebuild,capturedMount](Result& result){
+                if(const auto* prompt=std::get_if<ApfsUnlock>(&result.payload)){
+                    auto supplied=session_.MacBrowser().ImageCredentials(Dmg::UnlockMethod::Password,prompt->retry);
+                    if(!session_.Mounts().IsCurrent(*capturedMount)||session_.Tree()->GetTreeCtrl().GetSelectedItem()!=item)
+                        return;
+                    if(supplied.password)Show(index,id,item,false,false,nullptr,std::move(supplied.password));
+                    else if(const auto parent=session_.Tree()->GetTreeCtrl().GetParentItem(item))
+                        session_.Tree()->GetTreeCtrl().SelectItem(parent);
+                    else session_.RejectNavigation({},"The APFS volume remains locked.");
+                    return;
+                }
                 auto& listing=std::get<MountedFolder>(result.payload);
                 auto target=item;
                 auto mounted=result.listing.folder.Volume();
@@ -597,6 +613,14 @@ void RememberImage(const std::wstring& path)
 }
 }
 
+Dmg::Credentials MainMacBrowser::ImageCredentials(Dmg::UnlockMethod method,bool retry)
+{
+#ifdef HFV_TESTING
+    if(passwordPromptForTest_)return {passwordPromptForTest_(retry),{}};
+#endif
+    return Hidden(session_)?Dmg::Credentials{}:PromptDmgCredentials(session_.Owner(),method,retry);
+}
+
 int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& externalJournal,
     std::function<bool()> next,Dmg::Credentials credentials,std::string expectedImage)
 {
@@ -663,12 +687,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
         },
         [this,path,externalJournal,next,credentials,expectedImage](Result& result){
             if(auto* prompt=std::get_if<ImageUnlock>(&result.payload)){
-                Dmg::Credentials supplied;
-#ifdef HFV_TESTING
-                if(passwordPromptForTest_)supplied.password=passwordPromptForTest_(prompt->retry);
-                else
-#endif
-                if(!Hidden(session_))supplied=PromptDmgCredentials(session_.Owner(),prompt->method,prompt->retry);
+                auto supplied=ImageCredentials(prompt->method,prompt->retry);
                 if(supplied)QueueImageOpen(path,externalJournal,next,std::move(supplied),prompt->image);
                 else if(next)next();
                 return;

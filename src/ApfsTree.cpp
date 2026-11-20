@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsTree.h"
+#include "ApfsCrypto.h"
 #include "HfsPlusDisk.h"
 #include <algorithm>
 
@@ -9,15 +10,16 @@ using Disk::Check;
 using Disk::Range;
 
 Bytes ReadObject(Source& source,const Container& container,uint64_t block,uint64_t oid,
-                 uint64_t transaction,uint32_t type,uint32_t subtype,bool physical)
+                 uint64_t transaction,uint32_t type,uint32_t subtype,bool physical,const VolumeCipher* cipher)
 {
     Check(block&&block<container.blockCount,"APFS object lies outside its container");
     auto bytes=Disk::Read(source,container.offset+block*container.blockSize,container.blockSize);
+    if(cipher)cipher->Decrypt(block*(container.blockSize/512),bytes.data(),bytes.size());
     const auto p=bytes.data();
     Check(Le64(p)==ObjectChecksum(bytes),"APFS object checksum mismatch");
     const uint32_t storage=physical?0x40000000:0;
     Check(Le64(p+8)==oid&&Le64(p+16)&&Le64(p+16)<=transaction&&
-          Le32(p+24)==(storage|type)&&Le32(p+28)==subtype,"Invalid APFS object header");
+          Le32(p+24)==(storage|type|(cipher?0x10000000:0))&&Le32(p+28)==subtype,"Invalid APFS object header");
     return bytes;
 }
 
@@ -74,9 +76,18 @@ ObjectMap::ObjectMap(Source& s,const Container& c,uint64_t block,uint64_t tx)
     const auto object=ReadObject(source,container,block,block,transaction,11,0,true);
     Check(Le32(object.data()+40)==0x40000002,"Unsupported APFS object-map tree type");
     tree=Le64(object.data()+48);
+    changingEncryption=(Le32(object.data()+32)&0x0e)!=0;
 }
 
 std::optional<uint64_t> ObjectMap::Lookup(uint64_t oid)const
+{
+    const auto mapping=Find(oid);
+    if(!mapping)return {};
+    Check(!mapping->encrypted,"Unexpected encrypted APFS object mapping");
+    return mapping->block;
+}
+
+std::optional<ObjectMap::Mapping> ObjectMap::Find(uint64_t oid)const
 {
     using Key=std::pair<uint64_t,uint64_t>;
     const Key sought{oid,transaction};
@@ -109,11 +120,11 @@ std::optional<uint64_t> ObjectMap::Lookup(uint64_t oid)const
         if(match.first!=oid)return {};
         const auto flags=Le32(value);
         if(flags&1)return {};
-        Check(!(flags&~2u)&&Le32(value+4)==container.blockSize,
+        Check(!(flags&~6u)&&Le32(value+4)==container.blockSize,
               "Unsupported APFS object-map value");
         const auto physical=Le64(value+8);
         Check(physical&&physical<container.blockCount,"APFS object mapping lies outside the container");
-        return physical;
+        return Mapping{physical,bool(flags&4)};
     }
 }
 }

@@ -14,12 +14,14 @@ struct View {
 struct Record {
     View key,value;
 };
+class VolumeCipher;
 struct TreeLayout {
     uint32_t keySize=0,valueSize=0;
 };
 
 HfsPlus::Bytes ReadObject(HfsPlus::Source&,const Container&,uint64_t block,uint64_t oid,
-                          uint64_t transaction,uint32_t type,uint32_t subtype=0,bool physical=false);
+                          uint64_t transaction,uint32_t type,uint32_t subtype=0,bool physical=false,
+                          const VolumeCipher* cipher=nullptr);
 
 class Node {
 public:
@@ -39,11 +41,15 @@ private:
 class ObjectMap {
 public:
     ObjectMap(HfsPlus::Source&,const Container&,uint64_t block,uint64_t transaction);
+    struct Mapping {uint64_t block;bool encrypted;};
+    std::optional<Mapping> Find(uint64_t oid)const;
+    bool ChangingEncryption()const{return changingEncryption;}
     // Look up the last mapping at or before the selected transaction.
     std::optional<uint64_t> Lookup(uint64_t oid)const;
 private:
     HfsPlus::Source& source;
     const Container& container;
     uint64_t tree,transaction;
+    bool changingEncryption=false;
 };
 }

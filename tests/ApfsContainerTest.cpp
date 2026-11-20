@@ -9,6 +9,9 @@
 #include "CopyProcess.h"
 #include "FileOperations.h"
 #include "DmgImage.h"
+#include "DmgEncryption.h"
+#include "ApfsVolume.h"
+#include "WorkerEndpoint.h"
 #include <algorithm>
 #include <cstdio>
 
@@ -410,6 +413,57 @@ int RunApfsContainerTest(const char* directory)
             Check(converted&&converted->List().size()==1,"Expected the single converted APFS volume");
             checkLocked(*converted,u"CONVVOL");
             fprintf(report,"PASS: macOS-generated encrypted APFS volumes appear locked, with readable siblings still accessible.\n");
+            for(const bool convertedVolume:{false,true}){
+                const auto& opened=convertedVolume?converted:mixed;
+                MacBrowser::Entry lockedRoot;
+                Check(opened->FindChild(2,convertedVolume?u"CONVVOL":u"SECRETVOL",lockedRoot),
+                      "Missing locked APFS volume");
+                const Dmg::Password wrong(L"wrong-password");
+                bool retry=false;
+                try{Apfs::Unlock(*opened,lockedRoot.id,wrong);}
+                catch(const Apfs::LockedVolume& result){retry=result.retry;}
+                Check(retry&&!opened->Stat(lockedRoot.id).readError.empty(),
+                      "An incorrect password changed the locked APFS volume");
+                const Dmg::Password password(convertedVolume?L"qnxprobe-apfs-convert":L"qnxprobe-apfs-test");
+                Apfs::Unlock(*opened,lockedRoot.id,password);
+                Check(!opened->Writable()&&MacBrowser::ExecutionFor(*opened).processLocal&&
+                      opened->Stat(lockedRoot.id).readError.empty()&&
+                      opened->Stat(lockedRoot.id).identity==lockedRoot.identity,
+                      "Decrypted APFS mount did not keep its identity and stay local and read-only");
+                const auto rootId=lockedRoot.id;
+                MacBrowser::Entry docs,patternFile;
+                Check(opened->FindChild(rootId,u"docs",docs)&&
+                      opened->FindChild(docs.id,u"pattern.bin",patternFile)&&patternFile.forks[0].size==262144,
+                      "Decrypted APFS catalog is missing the test file");
+                Bytes decoded(262144);
+                opened->Read(patternFile.id,0,0,decoded.data(),decoded.size());
+                for(size_t i=0;i<decoded.size();++i)
+                    Check(decoded[i]==(i*131+17)%253,"Decrypted APFS bytes differ");
+                Bytes slice(1500);
+                opened->Read(patternFile.id,0,505,slice.data(),slice.size());
+                Check(std::equal(slice.begin(),slice.end(),decoded.begin()+505),
+                      "Unaligned decrypted APFS read differs");
+                if(!convertedVolume){
+                    const auto to=VolumeCoord::Wide(root+"encrypted-export");
+                    Check(CreateDirectoryW(to.c_str(),nullptr)!=FALSE,"Create the APFS export directory");
+                    FileOperations::Request request=FileOperations::OrdinaryCopy{
+                        {FileOperations::Location::Mounted(opened,patternFile.id)},FileOperations::Location::Windows(to)};
+                    request.background=true;
+                    CopyProcess::enabled=true;
+                    CopyProcess::lastProcess=0;
+                    Check(!FileOperations::InspectPlanForTest(request,opened->ResourceKey()).temporaryWorker,
+                          "A temporary worker was selected for encrypted APFS");
+                    const auto copy=FileOperations::Submit(std::move(request));
+                    Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,
+                          "Encrypted APFS export timed out");
+                    const auto result=copy.Job()->result();
+                    Check(!result.code&&!CopyProcess::lastProcess,result.message.c_str());
+                    const auto file=HfsPlus::OpenImage((to+L"\\pattern.bin").c_str(),false);
+                    Check(file->Size()==decoded.size()&&Disk::Read(*file,0,decoded.size())==decoded,
+                          "Encrypted APFS export did not match the plaintext");
+                }
+            }
+            fprintf(report,"PASS: APFS software password unlock, wrong-password rejection, complete and unaligned reads, and process-local export.\n");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");

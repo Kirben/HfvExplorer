@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsVolume.h"
 #include "ApfsTree.h"
+#include "ApfsCrypto.h"
 #include "HfsPlusDisk.h"
 #include "HfsPlusCompression.h"
 #include "MacBrowserModel.h"
@@ -36,8 +37,10 @@ uint64_t Date(const uint8_t* p)
 }
 struct Mounted {
     uint64_t oid,xid,map,tree;
-    bool sensitive,hashedNames,locked;
+    bool sensitive,hashedNames,locked,softwareEncryption;
     std::u16string name;
+    std::array<uint8_t,16> uuid;
+    std::shared_ptr<const VolumeCipher> cipher;
 };
 
 Mounted ReadVolume(Source& source,const Container& container,uint64_t oid,uint64_t physical)
@@ -54,8 +57,12 @@ Mounted ReadVolume(Source& source,const Container& container,uint64_t oid,uint64
     constexpr size_t nameOffset=704,nameLimit=256;
     const auto end=static_cast<const uint8_t*>(memchr(p+nameOffset,0,nameLimit));
     Check(end!=nullptr,"Unterminated APFS volume name");
-    return {oid,Le64(p+16),Le64(p+128),Le64(p+136),!(incompatible&1),bool(incompatible&9),locked,
-            Name(p+nameOffset,size_t(end-(p+nameOffset))+1)};
+    const bool software=(Le64(p+264)&8)&&!Le64(p+976)&&
+        !(incompatible&~uint64_t(0x0f))&&Le32(p+116)==2&&Le64(p+128)&&Le64(p+136);
+    Mounted mount{oid,Le64(p+16),Le64(p+128),Le64(p+136),!(incompatible&1),bool(incompatible&9),
+                  locked,software,Name(p+nameOffset,size_t(end-(p+nameOffset))+1),{},{}};
+    memcpy(mount.uuid.data(),p+240,mount.uuid.size());
+    return mount;
 }
 
 class Catalog {
@@ -68,9 +75,11 @@ class Catalog {
               std::set<uint64_t>& seen,const Visit& visit)const
     {
         Check(seen.insert(oid).second,"Repeated APFS filesystem node");
-        const auto block=map.Lookup(oid);
-        Check(block.has_value(),"Missing APFS filesystem node");
-        const Node node(ReadObject(source,container,*block,oid,volume.xid,root?2:3,14),root,layout);
+        const auto mapping=map.Find(oid);
+        Check(mapping.has_value(),"Missing APFS filesystem node");
+        Check(!mapping->encrypted||volume.cipher,"Missing APFS filesystem decryption key");
+        const Node node(ReadObject(source,container,mapping->block,oid,volume.xid,root?2:3,14,false,
+                                   mapping->encrypted?volume.cipher.get():nullptr),root,layout);
         Check(node.Level()<64&&(root||node.Level()==level),"Invalid APFS filesystem tree level");
         uint64_t previous=0,child=0;
         for(size_t i=0;i<node.Count();++i){
@@ -204,20 +213,22 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
     return out;
 }
 
-struct Extent {uint64_t offset,length,block;};
-std::vector<Extent> Extents(const Catalog& catalog,const Container& container,uint64_t stream)
+struct Extent {uint64_t offset,length,block,cryptoId;};
+std::vector<Extent> Extents(const Catalog& catalog,const Container& container,uint64_t stream,bool decrypted)
 {
     std::vector<Extent> out;
     catalog.VisitRecords(stream,8,[&](Record record){
         Check(record.key.size==16&&record.value.size==24,"Invalid APFS file extent");
         const auto offset=Le64(record.key.data+8),encoded=Le64(record.value.data);
         const auto length=encoded&ExtentLengthMask,block=Le64(record.value.data+8);
-        Check(length&&!(encoded&~ExtentLengthMask)&&offset<=UINT64_MAX-length&&
+        const auto flags=encoded>>56;
+        // macOS marks software-encrypted runs with bit 0 in the extent flags.
+        Check((flags==0||(flags==1&&decrypted))&&length&&offset<=UINT64_MAX-length&&
               !(offset%container.blockSize)&&!(length%container.blockSize)&&
               Range(block,length/container.blockSize,container.blockCount)&&
               (out.empty()||out.back().offset+out.back().length<=offset),
               "Overlapping or unsupported APFS file extent");
-        out.push_back({offset,length,block});
+        out.push_back({offset,length,block,Le64(record.value.data+16)});
     });
     return out;
 }
@@ -225,7 +236,7 @@ std::vector<Extent> Extents(const Catalog& catalog,const Container& container,ui
 class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::unique_ptr<Source> source;
     const Container container;
-    const std::vector<Mounted> mounts;
+    std::vector<Mounted> mounts;
     std::u16string label;
     bool caseSensitive=true;
     const std::string key;
@@ -284,7 +295,9 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
 public:
     Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource)
         :source(std::move(s)),container(std::move(c)),mounts(std::move(volumes)),key(std::move(resource)),
-         processLocal(source->ProcessLocal())
+         processLocal(source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
+             return mount.locked;
+         }))
     {
         std::vector<Item> roots;
         std::exception_ptr failure;
@@ -352,8 +365,38 @@ public:
         MacBrowser::WorkerExecution out;out.processLocal=processLocal;return out;
     }
     MacBrowser::WorkerOrigin WorkerDescription()const override{return origin;}
-    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source->WorkerFiles();}
+    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{
+        return processLocal?std::vector<std::pair<std::wstring,uintptr_t>>{}:source->WorkerFiles();
+    }
     void ValidateMedia()override{Access([]{return true;});}
+    void Unlock(uint32_t id,const Dmg::Password& password){
+        Access([&]{
+            auto& item=At(id);
+            Check(item.oid==2,"Select an encrypted APFS volume");
+            auto& mount=mounts[item.mount];
+            if(!mount.locked)return true; // Another window may have unlocked the shared mount.
+            Check(mount.softwareEncryption,"This APFS volume does not support software unlocking");
+            const ObjectMap map(*source,container,mount.map,mount.xid);
+            Check(!map.ChangingEncryption(),"APFS volume encryption is changing");
+            auto unlocked=mount;
+            unlocked.cipher=UnlockSoftwareVolume(*source,container,mount.uuid,password);
+            if(!unlocked.cipher)throw LockedVolume(true);
+            auto root=ReadInode(Catalog(*source,container,unlocked),2);
+            Check(root.entry.directory,"Invalid decrypted APFS root");
+            root.entry.id=item.entry.id;
+            root.entry.resolvedId=item.entry.resolvedId;
+            root.entry.parent=item.entry.parent;
+            root.entry.name=item.entry.name;
+            root.entry.identity=item.entry.identity;
+            source->CheckMedia();
+            item.entry=std::move(root.entry);
+            item.attributes=std::move(root.attributes);
+            item.stream=root.stream;
+            mount.cipher=std::move(unlocked.cipher);
+            mount.locked=false;
+            return true;
+        });
+    }
     std::vector<Entry> List(uint32_t parent)override{
         return Access([&]{
             auto& folder=At(parent);
@@ -362,7 +405,10 @@ public:
                 std::vector<Item> children;
                 std::set<std::u16string> names;
                 const auto& mounted=mounts[folder.mount];
-                Check(!mounted.locked,LockedMessage);
+                if(mounted.locked){
+                    Check(mounted.softwareEncryption,"This APFS volume does not support software unlocking");
+                    throw LockedVolume();
+                }
                 const Catalog catalog(*source,container,mounted);
                 catalog.VisitRecords(folder.oid,9,[&](Record record){
                     const size_t header=mounted.hashedNames?12:10;
@@ -426,6 +472,30 @@ public:
         return false;
     }
 private:
+    void ReadEncryptedExtent(const VolumeCipher& cipher,const Extent& extent,uint64_t within,uint8_t* out,size_t size){
+        constexpr size_t sectorSize=512;
+        const auto sectorsPerBlock=container.blockSize/sectorSize;
+        Check(extent.cryptoId<=(UINT64_MAX-extent.length/sectorSize)/sectorsPerBlock,
+              "Invalid APFS extent encryption address");
+        const auto firstSector=extent.cryptoId*sectorsPerBlock;
+        const auto base=container.offset+extent.block*container.blockSize;
+        std::array<uint8_t,sectorSize> sector;
+        while(size){
+            const auto index=within/sectorSize,skip=size_t(within%sectorSize);
+            size_t take;
+            if(!skip&&size>=sectorSize){
+                take=size-size%sectorSize;
+                source->Read(base+within,out,take);
+                cipher.Decrypt(firstSector+index,out,take);
+            }else{
+                take=(std::min)(sectorSize-skip,size);
+                source->Read(base+index*sectorSize,sector.data(),sector.size());
+                cipher.Decrypt(firstSector+index,sector.data(),sector.size());
+                memcpy(out,sector.data()+skip,take);
+            }
+            within+=take;out+=take;size-=take;
+        }
+    }
     void ReadStream(size_t mount,uint64_t stream,uint64_t at,void* data,size_t size){
         if(!size)return;
         Check(stream!=0,"Missing APFS stream identifier");
@@ -433,7 +503,7 @@ private:
         auto it=extents.find(address);
         if(it==extents.end()){
             const Catalog catalog(*source,container,mounts[mount]);
-            it=extents.emplace(address,Extents(catalog,container,stream)).first;
+            it=extents.emplace(address,Extents(catalog,container,stream,bool(mounts[mount].cipher))).first;
         }
         const auto& list=it->second;
         auto run=std::lower_bound(list.begin(),list.end(),at,[](const Extent& extent,uint64_t offset){
@@ -444,8 +514,9 @@ private:
             Check(run!=list.end()&&run->offset<=at,"Missing APFS file extent");
             const auto within=at-run->offset;
             const auto take=size_t(std::min<uint64_t>(size,run->length-within));
-            if(run->block)source->Read(container.offset+run->block*container.blockSize+within,out,take);
-            else memset(out,0,take);
+            if(!run->block)memset(out,0,take);
+            else if(const auto& cipher=mounts[mount].cipher)ReadEncryptedExtent(*cipher,*run,within,out,take);
+            else source->Read(container.offset+run->block*container.blockSize+within,out,take);
             at+=take;out+=take;size-=take;++run;
         }
     }
@@ -536,6 +607,16 @@ public:
     void Rename(uint32_t,uint32_t,const std::u16string&)override{ReadOnly();}
     void Remove(uint32_t)override{ReadOnly();}
 };
+}
+
+LockedVolume::LockedVolume(bool again)
+    :HfsPlus::Error(again?"The password did not unlock the APFS volume":LockedMessage),retry(again){}
+
+void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password)
+{
+    const auto apfs=dynamic_cast<Volume*>(&volume);
+    Check(apfs!=nullptr,"Select an encrypted APFS volume");
+    apfs->Unlock(id,password);
 }
 
 std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const std::string& key)

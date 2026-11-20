@@ -32,6 +32,8 @@ Container Superblock(const Bytes& block,uint64_t offset,uint64_t length)
           "Invalid APFS container object header");
     Container result{offset,blocks,Le64(data+16),Le64(data+160),blockSize,{},{}};
     memcpy(result.uuid.data(),data+72,result.uuid.size());
+    result.keybagBlock=Le64(data+1296);
+    result.keybagBlocks=Le64(data+1304);
     Check(result.transaction&&result.objectMap&&result.objectMap<blocks,"Invalid APFS container object map");
     const auto capacity=Le32(data+180);
     Check(capacity<=MaxVolumes,"APFS volume table exceeds its superblock");

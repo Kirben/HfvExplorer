@@ -741,6 +741,37 @@ void BrowserPrompt(const CString& root,std::initializer_list<std::wstring> paths
         "Encrypted image did not mount after a wrong password followed by the right one");
   browser.SetPasswordPromptForTest({});
  }
+ if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){
+  const auto path=std::wstring(fixtures)+L"\\apfs-encrypted.sparseimage";
+  Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest(),"Open the locked APFS container in the browser");
+  const auto containerTitle=session.WindowTitle();
+  const auto activateLocked=[&]{
+   const auto& rows=session.List()->GetListCtrl();
+   for(int row=0;row<rows.GetItemCount();++row){
+    const auto model=session.List()->BrowserRowAt(row);
+    if(model&&model->entry.name==u"SECRETVOL")return browser.Activate(row);
+   }
+   return false;
+  };
+  unsigned prompts=0;
+  browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
+   Check(!retry,"Initial APFS unlock was a retry");
+   ++prompts;
+   return {};
+  });
+  Check(activateLocked()&&session.AwaitNavigationForTest()&&prompts==1&&
+        session.ListingAvailable()&&session.WindowTitle()==containerTitle,
+        "Cancelled APFS unlock did not return to the container");
+  browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
+   ++prompts;
+   Check(retry==(prompts==3),"Unexpected APFS password retry state");
+   return std::make_shared<Dmg::Password>(retry?L"qnxprobe-apfs-test":L"wrong");
+  });
+  Check(activateLocked()&&session.AwaitNavigationForTest()&&prompts==3&&session.ListingAvailable()&&
+        session.WindowTitle().find(L"SECRETVOL")!=std::wstring::npos,
+        "The APFS browser did not enter the selected volume after a successful retry");
+  browser.SetPasswordPromptForTest({});
+ }
 }
 }
 

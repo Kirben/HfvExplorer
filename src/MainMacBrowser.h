@@ -15,6 +15,7 @@ class MainMacBrowser {
     void PublishDriveUpdate(MediaDiscovery::DriveUpdate&,std::shared_ptr<VolumeCoord::Lease>);
     struct State;
     std::unique_ptr<State> state_;
+    Dmg::Credentials ImageCredentials(Dmg::UnlockMethod,bool retry);
     int QueueImageOpen(const std::wstring&,const std::wstring&,
         std::function<bool()> next={},Dmg::Credentials credentials={},
         std::string expectedImage={});
