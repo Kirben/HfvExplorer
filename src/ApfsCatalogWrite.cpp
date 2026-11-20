@@ -1827,6 +1827,20 @@ CatalogWritePlan PrepareCatalogMutation(
                 if(insert==catalog.end()&&(existingHash>hash||(existingHash==hash&&existing>replacement)))insert=entry;
             }
             catalog.insert(insert,std::move(record));
+            const auto parentInode=(uint64_t(3)<<60)|properties->parent;
+            bool updatedParent=false;
+            for(auto& entry:catalog){
+                if(entry.key.size()!=8||Le64(entry.key.data())!=parentInode)continue;
+                auto& value=entry.value;
+                Check(!updatedParent&&value.size()>=92&&(Le16(value.data()+80)&0170000)==0040000,
+                      "Invalid APFS rename parent inode");
+                Check(!(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
+                      "Unlock the APFS folder before renaming its entries");
+                Set(value,24,time,8);
+                Set(value,32,time,8);
+                updatedParent=true;
+            }
+            Check(updatedParent,"APFS rename parent inode was not found");
         }
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
