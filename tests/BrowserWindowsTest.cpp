@@ -686,7 +686,7 @@ int RunBrowserWindowsTest(const char* directory){
    Check(MetadataDialogs::Show(folderItem,a),"open APFS folder Properties");
    finishProperties();
    const auto summary=MetadataDialogs::Window();
-   Check(summary&&BrowserPresentation::Text(GetDlgItem(summary,IDC_ATTR_OPEN))==L"Finder information...",
+   Check(summary&&BrowserPresentation::Text(GetDlgItem(summary,IDC_ATTR_OPEN))==L"Edit metadata...",
          "APFS Properties did not expose the Finder information editor");
    SendMessage(summary,WM_COMMAND,IDC_ATTR_OPEN,0);
    const auto editor=MetadataDialogs::Window();
@@ -698,12 +698,20 @@ int RunBrowserWindowsTest(const char* directory){
    for(unsigned i=1;i<31;++i)finder+=L"00 ";
    finder+=L"A5";
    SetDlgItemTextW(editor,IDC_MFS_FINDER,finder.c_str());
+   SYSTEMTIME modified{};
+   modified.wYear=2050;modified.wMonth=2;modified.wDay=3;modified.wHour=4;modified.wMinute=5;modified.wSecond=6;
+   Check(SendDlgItemMessageW(editor,IDC_MFS_MODIFIED,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&modified)),
+         "APFS date picker rejected a valid date after 2040");
+   FILETIME fileTime{};
+   Check(SystemTimeToFileTime(&modified,&fileTime),"could not encode APFS test date");
+   const auto expectedModified=((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)/10000000ULL-9561628800ULL;
    SendMessage(editor,WM_COMMAND,IDOK,0);
    finishProperties();
    Check(!BackgroundCopies::LastResult().code&&mount->Stat(treeCopyRoot.id).finder[31]==0xa5&&
+         mount->Stat(treeCopyRoot.id).modified==expectedModified&&
          !IsWindow(editor)&&a->IsWindowEnabled(),"APFS Finder editor did not apply or restore the browser");
    MetadataDialogs::Shutdown();
-   fprintf(report,"PASS: APFS Properties routes to a working Finder information editor for folders.\n");
+   fprintf(report,"PASS: APFS Properties routes to a working Finder information and timestamp editor for folders.\n");
    fprintf(report,"PASS: recursive APFS folder copy, source timestamps, and destination dates after completed, skipped and cancelled merges.\n");
   }
   // Make the first frame the MFC main window before closing it: this is the

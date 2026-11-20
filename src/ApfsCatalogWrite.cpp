@@ -537,6 +537,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(inode,16,CatalogTimestamp(dates->created),8);
         Set(inode,24,CatalogTimestamp(dates->modified),8);
     };
+    const auto editDates=[&](Bytes& inode){
+        if(metadata->dates.created)Set(inode,16,CatalogTimestamp(*metadata->dates.created),8);
+        if(metadata->dates.modified)Set(inode,24,CatalogTimestamp(*metadata->dates.modified),8);
+    };
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
     // APFS orders equal-hash directory keys by their stored names.
@@ -712,7 +716,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         auto& inode=records[link.inodeRecord].value;
         if(metadata&&!metadata->finder){
             Check(link.kind==CatalogKind::Directory,"APFS folder timestamps require a directory");
-            copyDates(inode);
+            editDates(inode);
             Set(inode,32,time,8);
             return records;
         }
@@ -747,7 +751,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             copyDates(updated.value);
         }
         inode=std::move(updated.value);
-        if(metadata)return records;
+        if(metadata){
+            editDates(inode);
+            return records;
+        }
         if(replace){
             streamAt=link.inodeRecord+1;
             const auto first=records.begin()+streamAt;
@@ -867,7 +874,6 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
-    if(const auto* metadata=std::get_if<CatalogMetadata>(&request))dates=metadata->dates;
     CatalogWritePlan plan;
     plan.input=replace?&replace->data:create?create->data:nullptr;
     plan.dataSize=plan.input?plan.input->Size():0;

@@ -33,7 +33,7 @@ struct CatalogReplaceData {
 };
 struct CatalogMetadata {
     uint64_t parent,inode;
-    std::optional<FileDates> dates;
+    TimestampEdits dates;
     const FinderBytes* finder=nullptr;
 };
 using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata>;

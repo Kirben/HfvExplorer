@@ -888,15 +888,18 @@ public:
             const auto& item=At(id);
             const auto& current=item.entry;
             Check(id!=2&&current.name==desired.name&&current.directory==desired.directory&&
-                  current.created==desired.created&&current.modified==desired.modified&&
                   current.version==desired.version&&current.protectedFile==desired.protectedFile,
-                  "APFS Properties can only change Finder information on files and folders");
-            if(current.finder==desired.finder)return;
+                  "APFS Properties can only change Finder information and timestamps on files and folders");
+            Check(current.datesValid==desired.datesValid,"APFS timestamps cannot be removed");
+            TimestampEdits dates;
+            if(current.created!=desired.created)dates.created=desired.created;
+            if(current.modified!=desired.modified)dates.modified=desired.modified;
+            if(current.finder==desired.finder&&!dates.created&&!dates.modified)return;
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetFinderInfo(*source,container,parentOid,oid,desired.finder,job);
+                return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,job);
             });
         });
     }

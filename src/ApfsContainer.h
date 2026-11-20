@@ -34,8 +34,11 @@ uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint6
                                 Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr);
 uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job&);
-uint64_t SetFinderInfo(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                       const FinderBytes&,Storage::Job&);
+struct TimestampEdits {
+    std::optional<uint64_t> created,modified;
+};
+uint64_t SetEntryProperties(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
+                            const FinderBytes&,TimestampEdits,Storage::Job&);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
 
 // Stream a data fork from a separate source into a newly created file.

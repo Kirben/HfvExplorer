@@ -82,7 +82,7 @@ struct AttributesDialog:CDialog,DialogActivity {
  void OnCancel()override{DestroyWindow();}
 };
 void PresentAttributes(FileOperations::Location source,const FileOperations::Completion& value,bool hidden,HWND anchor){CollectClosed();auto dialog=std::make_unique<AttributesDialog>(std::move(source),value,hidden);if(!dialog->Create(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create attribute editor");NativeDpi::CenterPopup(dialog->GetSafeHwnd(),anchor);if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));}
-void PresentFinderInfo(FileOperations::Location,const MacBrowser::Entry&,bool,HWND);
+void PresentApfsProperties(FileOperations::Location,const MacBrowser::Entry&,bool,HWND);
 bool IsApfs(const FileOperations::Location& source)
 {
  const auto volume=source.Volume();
@@ -92,19 +92,19 @@ struct Summary:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
  FileOperations::Completion value;FileOperations::Location source;bool hidden;
  Summary(FileOperations::Location s,const FileOperations::Completion& v,bool h):CDialog(IDD_METADATA_SUMMARY,CWnd::GetDesktopWindow()),value(v),source(std::move(s)),hidden(h){}
- bool EditFinderInfo()const{return value.capabilities.CanEditBasicMetadata()&&value.entry.id!=2&&IsApfs(source);}
+ bool CanEditApfsProperties()const{return value.capabilities.CanEditBasicMetadata()&&value.entry.id!=2&&IsApfs(source);}
  BOOL OnInitDialog()override{CDialog::OnInitDialog();for(int id:{IDC_CP_PHASE,IDC_CP_FILE,IDC_CP_STATUS})BrowserPresentation::UnicodeControl(m_hWnd,id,L"STATIC");auto e=value.entry;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,MacBrowser::Wide(e.name).c_str());
  auto description=BrowserPresentation::FromUtf8(value.description)+(value.capabilities.writable?L"":L" (read-only)");SetDlgItemTextW(m_hWnd,IDC_CP_FILE,description.c_str());
- auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";if(e.hardLink)sizes+=L"\r\nHard links: "+std::to_wstring(e.linkCount);if(!value.details.empty())sizes+=L"\r\n"+BrowserPresentation::FromUtf8(value.details);SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow((value.capabilities.attributes||EditFinderInfo())?SW_SHOW:SW_HIDE);
- if(EditFinderInfo())SetDlgItemText(IDC_ATTR_OPEN,"Finder information...");
+ auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";if(e.hardLink)sizes+=L"\r\nHard links: "+std::to_wstring(e.linkCount);if(!value.details.empty())sizes+=L"\r\n"+BrowserPresentation::FromUtf8(value.details);SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow((value.capabilities.attributes||CanEditApfsProperties())?SW_SHOW:SW_HIDE);
+ if(CanEditApfsProperties())SetDlgItemText(IDC_ATTR_OPEN,"Edit metadata...");
  bool compression=value.capabilities.compression&&!e.directory;GetDlgItem(IDC_FILE_COMPRESSION)->ShowWindow(compression?SW_SHOW:SW_HIDE);GetDlgItem(IDC_FILE_COMPRESSION)->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());SetDlgItemText(IDC_FILE_COMPRESSION,e.compressed?"Decompress":"Compress");
  for(int id:{IDC_COMPRESSION_LABEL,IDC_COMPRESSION_METHOD})GetDlgItem(id)->ShowWindow(compression?SW_SHOW:SW_HIDE);
  auto combo=static_cast<CComboBox*>(GetDlgItem(IDC_COMPRESSION_METHOD));
  for(const char* label:{"Uncompressed","zlib","LZVN","LZFSE","LZBITMAP","Stored (no size reduction)","Legacy stored (inline, up to 3786 bytes)"})combo->AddString(label);
  combo->SetCurSel(e.compressed?0:1);combo->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());return TRUE;}
  BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_ATTR_OPEN){
-  if(EditFinderInfo()){
-   PresentFinderInfo(source,value.entry,hidden,m_hWnd);
+  if(CanEditApfsProperties()){
+   PresentApfsProperties(source,value.entry,hidden,m_hWnd);
    DestroyWindow();
   }else PresentAttributes(source,value,hidden,m_hWnd);
   return TRUE;
@@ -130,6 +130,37 @@ HfsPlus::Bytes ParseFinderInfo(const std::wstring& text,size_t length)
  return bytes;
 }
 
+constexpr uint64_t MacEpochInFileTimeSeconds=9561628800ULL;
+void SetMetadataDate(HWND window,int id,uint64_t value)
+{
+ if(value>UINT64_MAX/10000000ULL-MacEpochInFileTimeSeconds)
+  throw HfsPlus::Error("Date is outside the calendar range");
+ ULARGE_INTEGER ticks;
+ ticks.QuadPart=(value+MacEpochInFileTimeSeconds)*10000000ULL;
+ FILETIME file{ticks.LowPart,ticks.HighPart};
+ SYSTEMTIME time{};
+ if(!FileTimeToSystemTime(&file,&time))
+  throw HfsPlus::Error("Date is outside the calendar range");
+ SendDlgItemMessageW(window,id,DTM_SETFORMATW,0,reinterpret_cast<LPARAM>(L"yyyy-MM-dd HH:mm:ss"));
+ SendDlgItemMessageW(window,id,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&time));
+}
+uint64_t MetadataDate(HWND window,int id)
+{
+ SYSTEMTIME time{};
+ if(SendDlgItemMessageW(window,id,DTM_GETSYSTEMTIME,0,reinterpret_cast<LPARAM>(&time))!=GDT_VALID)
+  throw HfsPlus::Error("Choose a valid date");
+ FILETIME file{};
+ if(!SystemTimeToFileTime(&time,&file))
+  throw HfsPlus::Error("Invalid date");
+ ULARGE_INTEGER ticks;
+ ticks.LowPart=file.dwLowDateTime;
+ ticks.HighPart=file.dwHighDateTime;
+ const auto seconds=ticks.QuadPart/10000000ULL;
+ if(seconds<MacEpochInFileTimeSeconds)
+  throw HfsPlus::Error("Dates must be in 1904 or later");
+ return seconds-MacEpochInFileTimeSeconds;
+}
+
 struct ApfsEditor:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
  FileOperations::Location source;
@@ -148,11 +179,15 @@ struct ApfsEditor:CDialog,DialogActivity {
    hex+=byte;
   }
   SetDlgItemTextW(m_hWnd,IDC_MFS_FINDER,hex.c_str());
+  SetMetadataDate(m_hWnd,IDC_MFS_CREATED,original.created);
+  SetMetadataDate(m_hWnd,IDC_MFS_MODIFIED,original.modified);
   return TRUE;
  }
  void OnOK()override{
   try{
    auto desired=original;
+   desired.created=MetadataDate(m_hWnd,IDC_MFS_CREATED);
+   desired.modified=MetadataDate(m_hWnd,IDC_MFS_MODIFIED);
    const auto bytes=ParseFinderInfo(Text(m_hWnd,IDC_MFS_FINDER),desired.finder.size());
    std::copy(bytes.begin(),bytes.end(),desired.finder.begin());
    const FileOperations::EditBasicMetadata request{source,original,std::move(desired)};
@@ -168,7 +203,7 @@ struct ApfsEditor:CDialog,DialogActivity {
  void OnCancel()override{DestroyWindow();}
 };
 
-void PresentFinderInfo(FileOperations::Location source,const MacBrowser::Entry& entry,bool hidden,HWND anchor)
+void PresentApfsProperties(FileOperations::Location source,const MacBrowser::Entry& entry,bool hidden,HWND anchor)
 {
  CollectClosed();
  auto editor=std::make_unique<ApfsEditor>(std::move(source),entry,hidden);
@@ -183,9 +218,12 @@ struct MfsEditor:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
  FileOperations::Location source;MacBrowser::Entry original;bool hidden,writable;
  MfsEditor(FileOperations::Location s,const FileOperations::Completion& value,bool h):CDialog(IDD_MFS_PROPERTIES,CWnd::GetDesktopWindow()),source(std::move(s)),original(value.entry),hidden(h),writable(value.capabilities.CanEditBasicMetadata()){}
- void SetDate(int id,uint32_t value){ULARGE_INTEGER ticks;ticks.QuadPart=(uint64_t(value)+9561628800ULL)*10000000ULL;FILETIME file{ticks.LowPart,ticks.HighPart};SYSTEMTIME time{};FileTimeToSystemTime(&file,&time);SendDlgItemMessageW(m_hWnd,id,DTM_SETFORMATW,0,reinterpret_cast<LPARAM>(L"yyyy-MM-dd HH:mm:ss"));SendDlgItemMessage(id,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&time));}
- uint32_t Date(int id){SYSTEMTIME time{};if(SendDlgItemMessage(id,DTM_GETSYSTEMTIME,0,reinterpret_cast<LPARAM>(&time))!=GDT_VALID)throw HfsPlus::Error("Choose a valid date");FILETIME file{};if(!SystemTimeToFileTime(&time,&file))throw HfsPlus::Error("Invalid date");ULARGE_INTEGER ticks;ticks.LowPart=file.dwLowDateTime;ticks.HighPart=file.dwHighDateTime;auto seconds=ticks.QuadPart/10000000ULL;if(seconds<9561628800ULL||seconds-9561628800ULL>UINT32_MAX)throw HfsPlus::Error("MFS dates must be between 1904 and February 2040");return uint32_t(seconds-9561628800ULL);}
- BOOL OnInitDialog()override{CDialog::OnInitDialog();HfvUnicodeNameEdit(m_hWnd,IDC_HPLUS_NAME);SetDlgItemTextW(m_hWnd,IDC_HPLUS_NAME,MacBrowser::Wide(original.name).c_str());SendDlgItemMessage(IDC_HPLUS_NAME,EM_SETLIMITTEXT,255);SetDlgItemInt(IDC_MFS_VERSION,original.version,FALSE);CheckDlgButton(IDC_MFS_LOCKED,original.protectedFile?BST_CHECKED:BST_UNCHECKED);SetDate(IDC_MFS_CREATED,original.created);SetDate(IDC_MFS_MODIFIED,original.modified);std::wstring hex;for(unsigned i=0;i<16;++i){wchar_t b[4];swprintf_s(b,L"%02X ",original.finder[i]);hex+=b;}SetDlgItemTextW(m_hWnd,IDC_MFS_FINDER,hex.c_str());for(int id:{IDC_HPLUS_NAME,IDC_MFS_VERSION,IDC_MFS_LOCKED,IDC_MFS_CREATED,IDC_MFS_MODIFIED,IDC_MFS_FINDER,IDOK})GetDlgItem(id)->EnableWindow(writable);return TRUE;}
+ uint32_t Date(int id){
+  const auto seconds=MetadataDate(m_hWnd,id);
+  if(seconds>UINT32_MAX)throw HfsPlus::Error("MFS dates must be between 1904 and February 2040");
+  return uint32_t(seconds);
+ }
+ BOOL OnInitDialog()override{CDialog::OnInitDialog();HfvUnicodeNameEdit(m_hWnd,IDC_HPLUS_NAME);SetDlgItemTextW(m_hWnd,IDC_HPLUS_NAME,MacBrowser::Wide(original.name).c_str());SendDlgItemMessage(IDC_HPLUS_NAME,EM_SETLIMITTEXT,255);SetDlgItemInt(IDC_MFS_VERSION,original.version,FALSE);CheckDlgButton(IDC_MFS_LOCKED,original.protectedFile?BST_CHECKED:BST_UNCHECKED);SetMetadataDate(m_hWnd,IDC_MFS_CREATED,original.created);SetMetadataDate(m_hWnd,IDC_MFS_MODIFIED,original.modified);std::wstring hex;for(unsigned i=0;i<16;++i){wchar_t b[4];swprintf_s(b,L"%02X ",original.finder[i]);hex+=b;}SetDlgItemTextW(m_hWnd,IDC_MFS_FINDER,hex.c_str());for(int id:{IDC_HPLUS_NAME,IDC_MFS_VERSION,IDC_MFS_LOCKED,IDC_MFS_CREATED,IDC_MFS_MODIFIED,IDC_MFS_FINDER,IDOK})GetDlgItem(id)->EnableWindow(writable);return TRUE;}
  void OnOK()override{if(!writable)return;try{auto entry=original;std::string encoded,error;if(!MfsImage::EncodeName(Text(m_hWnd,IDC_HPLUS_NAME),encoded,error))throw HfsPlus::Error(error);entry.name=MacBrowser::U16(MfsDisplayName(encoded));auto text=Text(m_hWnd,IDC_MFS_VERSION);wchar_t* end=nullptr;auto version=wcstoul(text.c_str(),&end,10);if(text.empty()||*end||version>255)throw HfsPlus::Error("MFS file version must be 0-255");entry.version=version;entry.protectedFile=IsDlgButtonChecked(IDC_MFS_LOCKED)==BST_CHECKED;entry.created=Date(IDC_MFS_CREATED);entry.modified=Date(IDC_MFS_MODIFIED);entry.datesValid=true;
   const auto bytes=ParseFinderInfo(Text(m_hWnd,IDC_MFS_FINDER),16);std::copy(bytes.begin(),bytes.end(),entry.finder.begin());FileOperations::EditBasicMetadata request{source,original,std::move(entry)};if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();
  }catch(const std::exception& error){::MessageBoxA(m_hWnd,error.what(),"MFS properties",MB_OK|MB_ICONERROR);}}

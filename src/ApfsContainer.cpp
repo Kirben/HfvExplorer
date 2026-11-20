@@ -364,14 +364,14 @@ uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_
 uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job& job)
 {
-    const CatalogMutation request=CatalogMetadata{parent,inode,dates};
+    const CatalogMutation request=CatalogMetadata{parent,inode,{dates.created,dates.modified}};
     return Commit(source,expected,job,&request);
 }
 
-uint64_t SetFinderInfo(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                       const FinderBytes& finder,Storage::Job& job)
+uint64_t SetEntryProperties(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
+                       const FinderBytes& finder,TimestampEdits dates,Storage::Job& job)
 {
-    const CatalogMutation request=CatalogMetadata{parent,inode,{},&finder};
+    const CatalogMutation request=CatalogMetadata{parent,inode,dates,&finder};
     return Commit(source,expected,job,&request);
 }
 

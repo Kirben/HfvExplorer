@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-finder-properties-info.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-timestamp-properties.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1385,31 +1385,38 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         };
         auto desired=current;
         desired.finder[31]=0x5a;
+        desired.modified=5000000123ULL;
         const auto saved=submit(current,desired);
         Check(!saved.code,saved.message.c_str());
         const auto fresh=mounted->Stat(current.id);
         Check(fresh.finder==desired.finder&&fresh.identity==current.identity&&
-              fresh.created==current.created&&fresh.modified==current.modified,
-              "APFS Properties changed identity or timestamps");
+              fresh.created==current.created&&fresh.modified==desired.modified,
+              "APFS Properties did not update only the requested metadata");
         auto stale=current;
         stale.finder[31]=0x55;
         Check(submit(current,stale).code&&mounted->Stat(current.id).finder==desired.finder,
               "A stale APFS Properties edit overwrote fresh Finder information");
+        auto invalidDate=fresh;
+        invalidDate.created=UINT64_MAX;
+        Check(submit(fresh,invalidDate).code&&mounted->Stat(current.id).created==fresh.created,
+              "APFS Properties accepted an out-of-range date");
         auto forbidden=fresh;
         forbidden.name=u"Unexpected rename";
         Check(submit(fresh,forbidden).code&&mounted->Stat(current.id).name==current.name,
               "APFS Finder editor unexpectedly changed the file name");
         auto desiredFolder=parent;
         desiredFolder.finder={};
+        desiredFolder.created=1000000000;
         const auto cleared=submit(parent,desiredFolder);
-        Check(!cleared.code&&mounted->Stat(parent.id).finder==desiredFolder.finder,
+        Check(!cleared.code&&mounted->Stat(parent.id).finder==desiredFolder.finder&&
+              mounted->Stat(parent.id).created==desiredFolder.created&&mounted->Stat(parent.id).modified==parent.modified,
               "APFS folder Properties did not clear Finder information");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry parent,current;
         Check(mounted&&mounted->FindChild(2,u"Renamed Folder",parent)&&parent.finder==Apfs::FinderBytes{}&&
-              mounted->FindChild(parent.id,file.name,current)&&current.finder[31]==0x5a,
+              mounted->FindChild(parent.id,file.name,current)&&current.finder[31]==0x5a&&current.modified==5000000123ULL,
               "APFS Properties did not survive reopening");
         std::array<char,5> data{};
         mounted->Read(current.id,0,0,data.data(),data.size());
@@ -1427,7 +1434,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
            "APFS Finder metadata test did not inject a write failure");
     CheckpointFaultImage reopened(fault.durable);
     Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted Finder metadata write");
-    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, stale Properties edits, and interrupted writes.\n");
+    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, and interrupted writes.\n");
 }
 
 void UnicodeCatalogNames(const std::string& root,FILE* report)
