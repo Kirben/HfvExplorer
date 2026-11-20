@@ -1857,9 +1857,11 @@ CatalogWritePlan PrepareCatalogMutation(
     std::set<uint64_t> retiredStreams;
     std::vector<OwnedRecord> catalog;
     if(externalCreate){
-        Check(create->kind==CatalogKind::Directory&&create->parent>=2&&create->parent!=3&&
-              create->parent<nextId&&!input&&!resource&&!attributes&&!dates&&!create->finder&&!create->locked,
-              "External APFS creation requires an empty folder with default metadata");
+        const bool directory=create->kind==CatalogKind::Directory;
+        Check((directory?!input:create->kind==CatalogKind::RegularFile&&input)&&
+              create->parent>=2&&create->parent!=3&&create->parent<nextId&&
+              !resource&&!attributes&&!dates&&!create->finder&&!create->locked&&!create->compression,
+              "External APFS creation requires a plain file or folder with default metadata");
         catalog=std::move(existing.records);
         for(const auto& record:catalog){
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
@@ -1868,7 +1870,9 @@ CatalogWritePlan PrepareCatalogMutation(
         TouchExternalParent(catalog,create->parent,time,true);
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,true,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name);
-        catalog.push_back(WriterDisk::Inode(name,entryId,time,create->parent,0040755,0));
+        catalog.push_back(WriterDisk::Inode(name,entryId,time,create->parent,
+                                           directory?0040755:0100644,directory?0:1,dataSize));
+        streamAt=catalog.size();
     }else if(properties){
         catalog=std::move(existing.records);
         uint64_t entryOid=0;

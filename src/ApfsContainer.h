@@ -64,7 +64,7 @@ uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t par
 
 // Stream a data fork from a separate source into a newly created file.
 uint64_t CreateCatalogFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr);
+                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false);
 // Rename within the same directory, using on-disk inode IDs and the expected checkpoint.
 uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                      const std::u16string& name,Storage::Job&,uint64_t alias=0);

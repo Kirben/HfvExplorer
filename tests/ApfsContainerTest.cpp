@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-created-folders.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-created-file.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2619,6 +2619,10 @@ int RunApfsContainerTest(const char* directory)
                 Reject([&]{Apfs::SetExternalCatalogProperties(*output,linkLocked,2,u"hard_a.txt",{{},editedTime+1},job);},
                        "Editing another APFS alias bypassed the shared lock");
                 Check(openCurrent().transaction==linkLocked.transaction,"Rejected APFS hard-link edit wrote a checkpoint");
+                Memory payload(9181);
+                for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i*13)%251);
+                Apfs::CreateCatalogFile(*output,openCurrent(),2,u"Created data.bin",payload,job,{},
+                                        nullptr,false,nullptr,nullptr,nullptr,true);
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
@@ -2633,6 +2637,13 @@ int RunApfsContainerTest(const char* directory)
                   !published->FindChild(publishedFolder.id,u"file_0222.txt",publishedFile)&&
                   published->FindChild(publishedFolder.id,u"Renamed 222.txt",publishedFile),
                   "Publishing a checkpoint changed the macOS-generated catalog");
+            MacBrowser::Entry imported;
+            Check(published->FindChild(2,u"Created data.bin",imported)&&imported.forks[0].size==9181,
+                  "Created APFS file did not survive reopen");
+            Bytes importedBytes(9181);
+            published->Read(imported.id,0,0,importedBytes.data(),importedBytes.size());
+            for(size_t i=0;i<importedBytes.size();++i)
+                Check(importedBytes[i]==(i*13)%251,"Created APFS file readback differs");
             const auto caps=published->Supports();
             Check(caps.rename&&caps.writable&&!published->Writable()&&!caps.create&&caps.createFolders&&
                   !caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
