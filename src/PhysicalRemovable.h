@@ -53,6 +53,7 @@ public:
  void CheckMedia()override;
  const Geometry& MediaGeometry()const;
  DWORD Generation()const;
+ bool MediaGeneration(uint32_t& generation)const override{generation=Generation();return true;}
 };
 std::vector<Partition> Partitions(HfsPlus::Source&,DWORD logicalSector);
 struct Mounted {Device device;Partition partition;std::shared_ptr<MacBrowser::Volume> volume;std::wstring label;};

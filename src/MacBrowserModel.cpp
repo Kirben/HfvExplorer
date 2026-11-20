@@ -11,6 +11,8 @@
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
 #include "DiskImageOpen.h"
+#include "DiskSlice.h"
+#include "MfsDiskSource.h"
 #include "NdifImage.h"
 #include "ApfsVolume.h"
 #include "DiskPartitions.h"
@@ -283,51 +285,6 @@ std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable) {
     return FromMfs(std::move(source),VolumeCoord::ImageKey(path));
 }
 namespace {
-class MfsDiskSource final : public MfsSource {
-    std::shared_ptr<HfsPlus::Source> source_;
-public:
-    bool readOnly_;
-    explicit MfsDiskSource(std::shared_ptr<HfsPlus::Source> source,bool readOnly=true)
-        :source_(std::move(source)),readOnly_(readOnly){}
-    uint64_t Length()const override{return source_->Size();}
-    bool Writable()const override{return !readOnly_&&source_->Writable();}
-    void DisableWrites()override{readOnly_=true;}
-    bool WriteAt(uint64_t at,const void* bytes,size_t count)override{
-        if(!Writable())return false;
-        try{source_->Write(at,bytes,count);return true;}catch(const HfsPlus::Error&){return false;}
-    }
-    bool Flush()override{
-        try{source_->Flush();return true;}catch(const HfsPlus::Error&){return false;}
-    }
-    bool ProcessLocal()const override{return source_->ProcessLocal();}
-    bool ReadAt(uint64_t at,void* bytes,size_t count)override{source_->Read(at,bytes,count);return true;}
-    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
-};
-
-class DiskSlice final : public HfsPlus::Source {
-    std::shared_ptr<HfsPlus::Source> disk_;
-    const uint64_t start_,size_;
-    const bool write_;
-public:
-    DiskSlice(std::shared_ptr<HfsPlus::Source> disk,uint64_t start,uint64_t size,bool write=false)
-        :disk_(std::move(disk)),start_(start),size_(size),write_(write){}
-    uint64_t Size()const override{return size_;}
-    bool Writable()const override{return write_&&disk_->Writable();}
-    bool ProcessLocal()const override{return disk_->ProcessLocal();}
-    void CheckMedia()override{disk_->CheckMedia();}
-    std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return disk_->WorkerFiles();}
-    void Read(uint64_t at,void* bytes,size_t count)override{
-        Check(HfsPlus::Disk::Range(at,count,size_),"Read outside the disk partition");
-        disk_->Read(start_+at,bytes,count);
-    }
-    void Write(uint64_t at,const void* bytes,size_t count)override{
-        Check(Writable(),"The disk partition is read-only");
-        Check(HfsPlus::Disk::Range(at,count,size_),"Write outside the disk partition");
-        disk_->Write(start_+at,bytes,count);
-    }
-    void Flush()override{if(Writable())disk_->Flush();}
-};
-
 std::shared_ptr<Volume> OpenReadOnlyImage(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
                                 const std::wstring& externalJournal,const char* unsupported="The DMG contains no supported filesystem")
 {
@@ -338,12 +295,12 @@ std::shared_ptr<Volume> OpenReadOnlyImage(std::unique_ptr<HfsPlus::Source> sourc
     std::shared_ptr<HfsPlus::Source> disk(std::move(source));
     if(const auto selected=DiskPartitions::FindLegacy(*disk,true)){
         const auto& part=selected->partition;
-        auto slice=std::make_shared<DiskSlice>(disk,part.offset,part.length);
+        auto slice=std::make_shared<DiskImage::Slice>(disk,part.offset,part.length);
         if(selected->filesystem==DiskPartitions::Filesystem::Mfs)
             return FromMfs(std::make_unique<MfsDiskSource>(std::move(slice)),key);
         return OpenClassicSource(std::move(slice),key);
     }
-    std::unique_ptr<HfsPlus::Source> opticalSource=std::make_unique<DiskSlice>(disk,0,disk->Size());
+    std::unique_ptr<HfsPlus::Source> opticalSource=std::make_unique<DiskImage::Slice>(disk,0,disk->Size());
     if(auto optical=Optical::Open(opticalSource,key))return optical;
     throw HfsPlus::Error(unsupported);
 }
@@ -381,12 +338,12 @@ std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source> source
     std::shared_ptr<HfsPlus::Source> disk(std::move(source));
     const auto& part=selected->selection.partition;
     if(part.index)
-        disk=std::make_shared<DiskSlice>(disk,part.offset,part.length,!part.readOnly);
+        disk=std::make_shared<DiskImage::Slice>(disk,part.offset,part.length,!part.readOnly);
     if(selected->format==VolumeSession::ImageFormat::NdifClassic){
         const bool writable=disk->Writable();
         return OpenClassicSource(std::move(disk),key,writable,true);
     }
-    return FromMfs(std::make_unique<MfsDiskSource>(std::move(disk),false),key);
+    return FromMfs(std::make_unique<MfsDiskSource>(std::move(disk),true),key);
 }
 
 static std::shared_ptr<Volume> OpenTrackImages(

@@ -4,6 +4,8 @@
 #include "WorkerEndpoint.h"
 #include "PhysicalRemovable.h"
 #include "HfsPlusDisk.h"
+#include "DiskSlice.h"
+#include "MfsDiskSource.h"
 #include "ReadOnlyCdBackend.h"
 #include "ReadOnlySource.h"
 #include "StorageJobDialog.h"
@@ -28,6 +30,55 @@ namespace {
 using HfsPlus::Bytes;namespace B=HfsPlus::Disk;
 void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}
 template<class F>void Reject(F f,const char* why){try{f();}catch(const std::exception&){return;}throw HfsPlus::Error(why);}
+void SourceAdapters(FILE* report){
+ struct Backing final:HfsPlus::Source{
+  Bytes bytes=Bytes(32,0x42);
+  bool local=false,changed=false;
+  unsigned writes=0,flushes=0;
+  uint64_t Size()const override{return bytes.size();}
+  bool Writable()const override{return true;}
+  bool ProcessLocal()const override{return local;}
+  void CheckMedia()override{if(changed)throw Storage::MediaChanged("Injected media swap");}
+  int MediaDrive()const override{return 4;}
+  bool MediaGeneration(uint32_t& generation)const override{generation=7;return true;}
+  std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{
+   if(local)return {};
+   return {{L"image",8}};
+  }
+  void Read(uint64_t at,void* p,size_t n)override{memcpy(p,bytes.data()+at,n);}
+  void Write(uint64_t at,const void* p,size_t n)override{memcpy(bytes.data()+at,p,n);++writes;}
+  void Flush()override{++flushes;}
+ };
+ auto backing=std::make_shared<Backing>();
+ auto writable=std::make_shared<DiskImage::Slice>(backing,8,16,true);
+ auto readOnly=std::make_shared<DiskImage::Slice>(backing,8,16);
+ const uint8_t value=0x57;
+ uint8_t got=0;
+ Check(writable->Writable()&&!readOnly->Writable(),"Partition write policy was lost");
+ writable->Write(15,&value,1);
+ Check(backing->bytes[22]==0x42&&backing->bytes[23]==value&&backing->bytes[24]==0x42,
+       "A bounded write changed data outside its partition");
+ readOnly->Read(15,&got,1);
+ Check(got==value,"Partition read did not translate its offset");
+ Reject([&]{writable->Write(16,&value,1);},"Partition accepted an out-of-bounds write");
+ Reject([&]{readOnly->Write(0,&value,1);},"Read-only partition accepted a write");
+ Reject([&]{DiskImage::Slice outside(backing,16,17);},"Slice accepted invalid backing bounds");
+ MfsDiskSource mfs(writable,true),locked(readOnly,true);
+ Check(mfs.WriteAt(0,&value,1)&&!mfs.WriteAt(16,&value,1)&&!locked.WriteAt(0,&value,1),
+       "MFS adapter ignored partition write permissions");
+ Check(mfs.Flush()&&backing->flushes==1,"MFS adapter did not forward a writable flush");
+ mfs.DisableWrites();
+ Check(!mfs.WriteAt(0,&value,1)&&backing->writes==2,"MFS adapter ignored its write fence");
+ uint32_t generation=0;
+ Check(writable->MediaDrive()==4&&writable->MediaGeneration(generation)&&generation==7,
+       "Partition dropped media identity");
+ Check(mfs.WorkerFiles()==backing->WorkerFiles(),"MFS adapter lost disk worker handles");
+ backing->local=true;
+ Check(mfs.ProcessLocal()&&mfs.WorkerFiles().empty(),"MFS adapter exposed a process-local disk to workers");
+ backing->changed=true;
+ Reject([&]{readOnly->CheckMedia();},"Partition suppressed a media change");
+ fprintf(report,"PASS: shared partition bounds, write fence, media identity and process-local MFS source.\n");
+}
 void Payload(unsigned f,uint64_t at,void* p,size_t n){for(size_t i=0;i<n;++i)static_cast<uint8_t*>(p)[i]=uint8_t((at+i)*13+f*71);}
 std::shared_ptr<Bytes> Load(const std::string& path){CFile f;Check(f.Open(path.c_str(),CFile::modeRead|CFile::shareDenyNone)!=FALSE,"Read simulated disk fixture");auto bytes=std::make_shared<Bytes>(size_t(f.GetLength()));Check(f.Read(bytes->data(),UINT(bytes->size()))==bytes->size(),"Read simulated disk bytes");return bytes;}
 std::shared_ptr<Bytes> Plus(const std::string& path,HfsPlus::Volume::FormatKind kind){auto wide=VolumeCoord::Wide(path);{auto s=HfsPlus::CreateImage(wide.c_str(),16*1024*1024);HfsPlus::Volume::Format(*s,u"USB Mac",true,kind);HfsPlus::Volume v(*s,true);auto f=v.Put(2,u"Hello",5003,723,Payload);v.SetAttributes(f,{{u"user.keep",{1,2,3}}});v.MakeHardLink(f,2,u"Alias");v.SetCompression(v.List().back().id,true);}return Load(path);}
@@ -513,6 +564,7 @@ void ApfsRemovableTest(FILE* report)
     fprintf(report,"PASS: raw and GPT APFS on 512/4096-byte fake removable transports, read-only and media replacement.\n");
 }
 int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;FILE* report=fopen((root+"\\physical-removable-report.txt").c_str(),"w");if(!report)return 2;int result=0;InitializeStorageUi();readonly_cd_backend_init();try{
+ SourceAdapters(report);
  ApfsRemovableTest(report);
  auto api=std::make_shared<Fake>();auto classic=Classic(root+"\\classic.dsk"),mfs=Mfs();std::vector<std::shared_ptr<Bytes>> plus;for(auto kind:{HfsPlus::Volume::FormatKind::HfsPlus,HfsPlus::Volume::FormatKind::HfsXCaseSensitive,HfsPlus::Volume::FormatKind::HfsXCaseInsensitive})plus.push_back(Plus(root+"\\plus"+std::to_string(plus.size())+".dsk",kind));auto raw=api->Add(L"USB raw",plus[0],BusTypeUsb,false);auto zip=api->Add(L"Zip",classic,BusTypeScsi,true);api->Add(L"USB MFS",mfs)->geometry.floppy=true;auto apm=Apm(*api,classic,plus[1]);auto gpt=Gpt(*api,plus[2],512),gpt4=Gpt(*api,plus[0],4096);auto internal=api->Add(L"Internal SATA",classic,BusTypeSata,false);Check(!Removable::Eligible(internal->device),"Internal fixed disk was eligible");
  for(auto& d:api->devices)if(Removable::Eligible(d->device)){auto volumes=Removable::Open(d->device,api);Check(volumes.size()==(d==apm?2:1),"Mac removable partition discovery");for(auto& mounted:volumes){auto v=mounted.volume;const auto execution=MacBrowser::ExecutionFor(*v);const std::string kind=v->Kind();Check(execution.stableCatalogIds==(kind!="MFS")&&!execution.Persistent(),"removable worker changed catalog identity policy");Check(!v->Writable()&&!v->Supports().create&&!v->Supports().rename&&!v->Supports().remove,"Physical removable media exposed writes");Verify(*v);Reject([&]{v->MakeDirectory(2,u"Unsafe");},"Physical folder creation allowed");Reject([&]{v->Remove(Find(*v,2,u"Hello"));},"Physical delete allowed");auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(root));Copy(v,target);Verify(*target);if(std::string(v->Kind())=="HFS")Check(v->Name()==u"Zip Classic","Classic removable volume name");}}

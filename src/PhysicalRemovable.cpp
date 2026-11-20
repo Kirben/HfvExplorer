@@ -2,6 +2,8 @@
 #include "stdafx.h"
 #include "PhysicalRemovable.h"
 #include "DiskPartitions.h"
+#include "DiskSlice.h"
+#include "MfsDiskSource.h"
 #include "FloppyWriteLease.h"
 #include "ApfsVolume.h"
 #include "MediaDiscovery.h"
@@ -211,38 +213,7 @@ std::mutex testMutex;std::shared_ptr<Api> testApi;
 #endif
 using MacBrowser::Entry;
 using MacBrowser::Reader;
-class Slice final:public Source {
-    std::shared_ptr<Disk> disk_;
-    Partition part_;
-    void Bound(uint64_t at,size_t n)const {
-        Check(HfsPlus::Disk::Range(at,n,part_.length),"Access outside the removable partition");
-    }
-public:
-    Slice(std::shared_ptr<Disk> disk,Partition part):disk_(std::move(disk)),part_(part){}
-    uint64_t Size()const override{return part_.length;}
-    bool Writable()const override{return disk_->Writable();}
-    bool MediaGeneration(uint32_t& generation)const override{generation=disk_->Generation();return true;}
-    void Read(uint64_t at,void* p,size_t n)override{Bound(at,n);disk_->Read(part_.offset+at,p,n);}
-    void Write(uint64_t at,const void* p,size_t n)override{Bound(at,n);disk_->Write(part_.offset+at,p,n);}
-    void Flush()override{disk_->Flush();}
-    void CheckMedia()override{disk_->CheckMedia();}
-};
-class MfsMedia final:public MfsSource{
-    std::unique_ptr<Slice> source_;
-    bool disabled_=false;
-public:
-    explicit MfsMedia(std::unique_ptr<Slice> s):source_(std::move(s)){}
-    uint64_t Length()const override{return source_->Size();}
-    bool Writable()const override{return !disabled_&&source_->Writable();}
-    void DisableWrites()override{disabled_=true;}
-    bool ReadAt(uint64_t at,void* p,size_t n)override{source_->Read(at,p,n);return true;}
-    bool WriteAt(uint64_t at,const void* p,size_t n)override{
-        if(!Writable())return false;
-        try{source_->Write(at,p,n);return true;}catch(...){return false;}
-    }
-    bool Flush()override{try{source_->Flush();return true;}catch(...){return false;}}
-};
-std::optional<DiskPartitions::Selection> SelectPartition(Slice& slice,bool floppy){
+std::optional<DiskPartitions::Selection> SelectPartition(Source& slice,bool floppy){
     using namespace DiskPartitions;
     if(slice.Size()<2048)return {};
     if(auto plus=FindHfsPlus(slice))return plus;
@@ -256,7 +227,7 @@ std::optional<DiskPartitions::Selection> SelectPartition(Slice& slice,bool flopp
     return {};
 }
 
-std::shared_ptr<MacBrowser::Volume> OpenSelectedPartition(std::unique_ptr<Slice> slice,
+std::shared_ptr<MacBrowser::Volume> OpenSelectedPartition(std::unique_ptr<DiskImage::Slice> slice,
         const DiskPartitions::Selection& selection,const std::string& key,
         const std::shared_ptr<MacBrowser::MfsCatalogIds>& ids){
     using DiskPartitions::Filesystem;
@@ -268,7 +239,7 @@ std::shared_ptr<MacBrowser::Volume> OpenSelectedPartition(std::unique_ptr<Slice>
     case Filesystem::Classic:
         return MacBrowser::OpenClassicSource(std::move(slice),key,writable,true);
     case Filesystem::Mfs:
-        return MacBrowser::FromMfs(std::make_unique<MfsMedia>(std::move(slice)),key,ids);
+        return MacBrowser::FromMfs(std::make_unique<MfsDiskSource>(std::move(slice),writable),key,ids);
     case Filesystem::Apfs: {
         std::unique_ptr<Source> apfsSource(std::move(slice));
         return Apfs::Open(apfsSource,key);
@@ -313,7 +284,8 @@ class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpo
     mutable std::recursive_mutex mutex_;
 
     std::shared_ptr<MacBrowser::Volume> ReopenPartition(const std::shared_ptr<Disk>& disk){
-        auto slice=std::make_unique<Slice>(disk,partition_);
+        auto slice=std::make_unique<DiskImage::Slice>(
+            disk,partition_.offset,partition_.length,!partition_.readOnly);
         if(SelectPartition(*slice,disk->MediaGeometry().floppy)!=selection_)
             throw Storage::MediaChanged("Removable filesystem or partition changed; refresh the drive");
         return OpenSelectedPartition(std::move(slice),selection_,key_,ids_);
@@ -686,7 +658,8 @@ std::vector<Mounted> Open(const Device& device,std::shared_ptr<Api> api){
     for(const auto& partition:Partitions(*disk,disk->MediaGeometry().sector)){
         auto key=Key(device,partition);
         auto ids=std::make_shared<MacBrowser::MfsCatalogIds>();
-        auto slice=std::make_unique<Slice>(disk,partition);
+        auto slice=std::make_unique<DiskImage::Slice>(
+            disk,partition.offset,partition.length,!partition.readOnly);
         const auto selection=SelectPartition(*slice,disk->MediaGeometry().floppy);
         if(!selection)continue;
         auto backend=OpenSelectedPartition(std::move(slice),*selection,key,ids);
