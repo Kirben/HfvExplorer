@@ -375,6 +375,13 @@ uint64_t SetEntryProperties(Source& source,const Container& expected,uint64_t pa
     return Commit(source,expected,job,&request);
 }
 
+uint64_t SetEmbeddedAttributes(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
+                               const HfsPlus::Attributes& attributes,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogAttributes{parent,inode,attributes};
+    return Commit(source,expected,job,&request);
+}
+
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile};

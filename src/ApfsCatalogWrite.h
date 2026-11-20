@@ -41,7 +41,11 @@ struct CatalogMetadata {
     bool locked=false;
     const FinderBytes* finder=nullptr;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata>;
+struct CatalogAttributes {
+    uint64_t parent,inode;
+    const HfsPlus::Attributes& attributes;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes>;
 
 struct DataRun {
     uint64_t block,count;

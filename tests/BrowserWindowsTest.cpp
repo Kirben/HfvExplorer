@@ -686,9 +686,20 @@ int RunBrowserWindowsTest(const char* directory){
    Check(MetadataDialogs::Show(folderItem,a),"open APFS folder Properties");
    finishProperties();
    const auto summary=MetadataDialogs::Window();
-   Check(summary&&BrowserPresentation::Text(GetDlgItem(summary,IDC_ATTR_OPEN))==L"Edit metadata...",
+   Check(summary&&BrowserPresentation::Text(GetDlgItem(summary,IDC_APFS_EDIT_METADATA))==L"Edit metadata...",
          "APFS Properties did not expose the Finder information editor");
    SendMessage(summary,WM_COMMAND,IDC_ATTR_OPEN,0);
+   const auto attributes=MetadataDialogs::Window();
+   Check(attributes&&attributes!=summary&&IsWindowEnabled(GetDlgItem(attributes,IDOK)),
+         "APFS extended attributes were not editable");
+   SetDlgItemTextW(attributes,IDC_ATTR_NAME,L"user.apfs");
+   SetDlgItemTextW(attributes,IDC_ATTR_VALUE,L"12 34");
+   SendMessage(attributes,WM_COMMAND,IDC_ATTR_SET,0);
+   SendMessage(attributes,WM_COMMAND,IDOK,0);
+   finishProperties();
+   Check(!BackgroundCopies::LastResult().code&&mount->GetAttributes(treeCopyRoot.id).at(u"user.apfs")==HfsPlus::Bytes({0x12,0x34}),
+         "APFS Properties did not save an extended attribute");
+   SendMessage(summary,WM_COMMAND,IDC_APFS_EDIT_METADATA,0);
    const auto editor=MetadataDialogs::Window();
    Check(editor&&editor!=summary&&GetDlgItem(editor,IDC_MFS_FINDER),"missing APFS Finder editor");
    SetDlgItemTextW(editor,IDC_MFS_FINDER,L"GG");

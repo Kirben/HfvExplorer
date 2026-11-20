@@ -95,20 +95,19 @@ struct Summary:CDialog,DialogActivity {
  bool CanEditApfsProperties()const{return value.capabilities.CanEditBasicMetadata()&&value.entry.id!=2&&IsApfs(source);}
  BOOL OnInitDialog()override{CDialog::OnInitDialog();for(int id:{IDC_CP_PHASE,IDC_CP_FILE,IDC_CP_STATUS})BrowserPresentation::UnicodeControl(m_hWnd,id,L"STATIC");auto e=value.entry;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,MacBrowser::Wide(e.name).c_str());
  auto description=BrowserPresentation::FromUtf8(value.description)+(value.capabilities.writable?L"":L" (read-only)");SetDlgItemTextW(m_hWnd,IDC_CP_FILE,description.c_str());
- auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";if(e.hardLink)sizes+=L"\r\nHard links: "+std::to_wstring(e.linkCount);if(!value.details.empty())sizes+=L"\r\n"+BrowserPresentation::FromUtf8(value.details);SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow((value.capabilities.attributes||CanEditApfsProperties())?SW_SHOW:SW_HIDE);
- if(CanEditApfsProperties())SetDlgItemText(IDC_ATTR_OPEN,"Edit metadata...");
+ auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";if(e.hardLink)sizes+=L"\r\nHard links: "+std::to_wstring(e.linkCount);if(!value.details.empty())sizes+=L"\r\n"+BrowserPresentation::FromUtf8(value.details);SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow(value.capabilities.attributes&&!(IsApfs(source)&&value.capabilities.writable&&e.id==2)?SW_SHOW:SW_HIDE);
+ GetDlgItem(IDC_APFS_EDIT_METADATA)->ShowWindow(CanEditApfsProperties()?SW_SHOW:SW_HIDE);
  bool compression=value.capabilities.compression&&!e.directory;GetDlgItem(IDC_FILE_COMPRESSION)->ShowWindow(compression?SW_SHOW:SW_HIDE);GetDlgItem(IDC_FILE_COMPRESSION)->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());SetDlgItemText(IDC_FILE_COMPRESSION,e.compressed?"Decompress":"Compress");
  for(int id:{IDC_COMPRESSION_LABEL,IDC_COMPRESSION_METHOD})GetDlgItem(id)->ShowWindow(compression?SW_SHOW:SW_HIDE);
  auto combo=static_cast<CComboBox*>(GetDlgItem(IDC_COMPRESSION_METHOD));
  for(const char* label:{"Uncompressed","zlib","LZVN","LZFSE","LZBITMAP","Stored (no size reduction)","Legacy stored (inline, up to 3786 bytes)"})combo->AddString(label);
  combo->SetCurSel(e.compressed?0:1);combo->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());return TRUE;}
- BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_ATTR_OPEN){
-  if(CanEditApfsProperties()){
-   PresentApfsProperties(source,value.entry,hidden,m_hWnd);
-   DestroyWindow();
-  }else PresentAttributes(source,value,hidden,m_hWnd);
+ BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_APFS_EDIT_METADATA&&CanEditApfsProperties()){
+  PresentApfsProperties(source,value.entry,hidden,m_hWnd);
+  DestroyWindow();
   return TRUE;
  }
+ if(LOWORD(wp)==IDC_ATTR_OPEN){PresentAttributes(source,value,hidden,m_hWnd);return TRUE;}
  if(LOWORD(wp)==IDC_FILE_COMPRESSION){using Mode=HfsPlus::Volume::CompressionMode;const Mode methods[]={Mode::Uncompressed,Mode::Zlib,Mode::Lzvn,Mode::Lzfse,Mode::Lzbitmap,Mode::Stored,Mode::StoredInline};auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);if(selected<0||selected>=ARRAYSIZE(methods))return TRUE;FileOperations::ChangeCompression request{source,value.entry,value.attributes,methods[selected]};if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();return TRUE;}return CDialog::OnCommand(wp,lp);}
  void PostNcDestroy()override{source={};value={};CDialog::PostNcDestroy();}
  void OnOK()override{DestroyWindow();}void OnCancel()override{DestroyWindow();}

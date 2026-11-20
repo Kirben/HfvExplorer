@@ -444,7 +444,7 @@ public:
         capabilities.resourceForks=!writable;
         capabilities.createFolders=writable;
         capabilities.unicodeNames=true;
-        capabilities.attributes=!writable;
+        capabilities.attributes=true;
         capabilities.basicMetadata=writable;
         return capabilities;
     }
@@ -892,6 +892,20 @@ public:
     uint32_t PutResourceReplacement(uint32_t,const Entry&,MacBrowser::Reader,
                                      std::function<void(uint64_t,size_t)>)override{
         throw Error("APFS resource-fork replacement is not supported yet");
+    }
+    void SetAttributes(uint32_t id,const Attributes& attributes)override{
+        ValidateEmbeddedAttributes(attributes);
+        WriteMount([&]{
+            Check(id!=2,"APFS root attribute editing is unavailable");
+            const auto& item=At(id);
+            const auto parent=item.entry.parent;
+            const auto oid=item.oid;
+            const auto parentOid=At(parent).oid;
+            Storage::Job job;
+            CommitMutation(parent,0,job,[&](auto& job){
+                return SetEmbeddedAttributes(*source,container,parentOid,oid,attributes,job);
+            });
+        });
     }
     void SetBasicMetadata(uint32_t id,const Entry& desired)override{
         WriteMount([&]{

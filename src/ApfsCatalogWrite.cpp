@@ -561,6 +561,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     const auto* metadata=std::get_if<CatalogMetadata>(&request);
+    const auto* attributesEdit=std::get_if<CatalogAttributes>(&request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
         Set(inode,16,CatalogTimestamp(dates->created),8);
@@ -745,7 +746,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     auto& parentInode=records[target->second.record].value;
     Check(!(Le32(parentInode.data()+68)&(UserImmutable|SystemImmutable)),
           "Unlock the APFS destination folder before making changes");
-    if(!replace&&!metadata){
+    if(!replace&&!metadata&&!attributesEdit){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
     }
@@ -772,6 +773,15 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Check(link.kind==CatalogKind::Directory,"APFS folder timestamps require a directory");
             editDates(inode);
             Set(inode,32,time,8);
+            return records;
+        }
+        if(attributesEdit){
+            auto attributes=EncodeAttributes(entryId,&attributesEdit->attributes);
+            Set(inode,32,time,8);
+            const auto index=link.inodeRecord+1;
+            records.erase(records.begin()+index,records.begin()+index+link.attributes);
+            records.insert(records.begin()+index,std::make_move_iterator(attributes.begin()),
+                           std::make_move_iterator(attributes.end()));
             return records;
         }
         const auto mode=Le16(inode.data()+80);

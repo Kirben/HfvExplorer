@@ -1145,7 +1145,7 @@ void WritableNamespace(const std::string& root,FILE* report)
         Reject([&]{OpenImage(path.c_str(),true);},"A second writer opened the mounted APFS image");
         const auto caps=mounted->Supports();
         Check(caps.writable&&caps.rename&&caps.remove&&caps.createFolders&&caps.create&&!caps.resourceForks&&
-              !caps.CanEditAttributes()&&MacBrowser::ExecutionFor(*mounted).processLocal,
+              caps.CanEditAttributes()&&MacBrowser::ExecutionFor(*mounted).processLocal,
               "APFS advertised unsupported write or worker operations");
 
         MacBrowser::Entry target,folder,child,found;
@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-embedded-attributes.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-edited-attributes.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1361,6 +1361,13 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         const auto destination=mounted->MakeDirectory(2,u"Copy destination");
         Storage::Job job;
         MacBrowser::Entry copiedFolder,copiedFile;
+        auto edited=file.attributes;
+        edited.erase(u"user.sample");
+        edited[u"user.new"]={9,8,7};
+        mounted->SetAttributes(id,edited);
+        Check(mounted->GetAttributes(id)==edited&&mounted->Stat(id).finder==file.finder&&
+              mounted->Stat(id).forks[0].size==5,"APFS attribute editing lost other metadata or file data");
+        mounted->SetAttributes(id,file.attributes);
         Check(MacBrowser::Copy(*mounted,parent,*mounted,destination,job)&&
               mounted->FindChild(destination,u"Renamed Folder",copiedFolder)&&copiedFolder.finder==folder.finder&&
               mounted->FindChild(copiedFolder.id,file.name,copiedFile)&&copiedFile.finder==file.finder,
@@ -1486,6 +1493,10 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
             Check(mounted->Put(copiedParent,replacement,contents,true)==overwriteId&&
                   mounted->Stat(overwriteId).protectedFile&&mounted->Stat(overwriteId).forks[0].size==5,
                   "APFS overwrite did not publish its contents and lock together");
+        }
+        {
+            VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+            Reject([&]{mounted->SetAttributes(fresh.id,{});},"APFS edited attributes on a locked file");
         }
         const auto unlockedParent=mounted->Stat(parent.id);
         auto lockedParent=unlockedParent;
