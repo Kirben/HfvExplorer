@@ -1765,21 +1765,48 @@ CatalogWritePlan PrepareCatalogMutation(
         uint64_t entryOid=0;
         CatalogKind kind=CatalogKind::RegularFile;
         std::optional<size_t> directoryRecord;
+        uint64_t siblingId=0;
         const auto parentKey=(uint64_t(9)<<60)|properties->parent;
         for(size_t i=0;i<catalog.size();++i){
             const auto& record=catalog[i];
             if(record.key.size()!=13+name.size()||
                Le64(record.key.data())!=parentKey||
                memcmp(record.key.data()+12,name.c_str(),name.size()+1))continue;
-            Check(!directoryRecord&&record.value.size()==18,"APFS edit requires an unlinked entry");
+            Check(!directoryRecord&&(record.value.size()==18||record.value.size()==34),
+                  "Invalid APFS target directory entry");
             kind=CatalogKind(Le16(record.value.data()+16));
             Check(kind==CatalogKind::RegularFile||kind==CatalogKind::Directory||
                   (properties->newName&&kind==CatalogKind::SymbolicLink),
                   "APFS edit requires a regular file, a folder, or a symbolic-link rename");
             entryOid=Le64(record.value.data());
+            if(record.value.size()==34){
+                const auto* value=record.value.data();
+                siblingId=Le64(value+26);
+                Check(!properties->newName&&kind==CatalogKind::RegularFile&&siblingId>=16&&
+                      siblingId!=entryOid&&siblingId<nextId&&Le16(value+18)==1&&
+                      Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
+                      "Unsupported APFS hard-linked edit");
+            }
             directoryRecord=i;
         }
         Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");
+        if(siblingId){
+            const CatalogSibling sibling{entryOid,properties->parent,name};
+            const auto link=sibling.LinkRecord(siblingId);
+            const auto map=sibling.MapRecord(siblingId);
+            bool linked=false,mapped=false;
+            for(const auto& record:catalog){
+                if(record.key==link.key){
+                    Check(!linked&&record.value==link.value,"APFS sibling link differs from the selected name");
+                    linked=true;
+                }
+                if(record.key==map.key){
+                    Check(!mapped&&record.value==map.value,"APFS sibling map differs from the selected inode");
+                    mapped=true;
+                }
+            }
+            Check(linked&&mapped,"Missing APFS sibling link or map");
+        }
         std::string replacement;
         if(properties->newName){
             replacement=EncodeCatalogName(*properties->newName);
@@ -1788,8 +1815,9 @@ CatalogWritePlan PrepareCatalogMutation(
         for(auto& record:catalog){
             if(record.key.size()!=8||Le64(record.key.data())!=((uint64_t(3)<<60)|entryOid))continue;
             auto& value=record.value;
-            Check(!edited&&value.size()>=92&&Le64(value.data())==properties->parent&&
-                  (kind==CatalogKind::Directory||Le32(value.data()+56)==1)&&
+            Check(!edited&&value.size()>=92&&
+                  (siblingId||Le64(value.data())==properties->parent)&&
+                  (kind==CatalogKind::Directory||(siblingId?Le32(value.data()+56)>1:Le32(value.data()+56)==1))&&
                   (Le16(value.data()+80)&0170000)==(uint16_t(kind)<<12),
                   "APFS catalog edit target inode is unsupported");
             const auto flags=Le32(value.data()+68);

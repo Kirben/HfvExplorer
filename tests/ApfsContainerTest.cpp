@@ -2556,7 +2556,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-folder-properties.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-hard-link-properties.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2612,18 +2612,29 @@ int RunApfsContainerTest(const char* directory)
                 Reject([&]{Apfs::RenameExternalCatalogEntry(*output,folderLocked,manyInode,u"Renamed 222.txt",u"Blocked",job);},
                        "APFS accepted a rename inside a locked folder");
                 Check(openCurrent().transaction==folderLocked.transaction,"Rejected APFS rename wrote a checkpoint");
+                Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,u"hard_b.txt",{createdTime,editedTime},job,true);
+                const auto linkLocked=openCurrent();
+                Reject([&]{Apfs::SetExternalCatalogProperties(*output,linkLocked,2,u"hard_a.txt",{{},editedTime+1},job);},
+                       "Editing another APFS alias bypassed the shared lock");
+                Check(openCurrent().transaction==linkLocked.transaction,"Rejected APFS hard-link edit wrote a checkpoint");
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
             MacBrowser::Entry publishedA,publishedB,publishedFolder,publishedFile;
             Check(published&&published->FindChild(2,u"hard_a.txt",publishedA)&&
                   published->FindChild(2,u"hard_b.txt",publishedB)&&publishedA.resolvedId==publishedB.resolvedId&&
+                  publishedA.protectedFile&&publishedB.protectedFile&&publishedA.created==createdTime&&publishedB.created==createdTime&&
+                  publishedA.modified==editedTime&&publishedB.modified==editedTime&&
                    !published->FindChild(2,u"many",publishedFolder)&&
                   published->FindChild(2,u"Renamed collection",publishedFolder)&&published->List(publishedFolder.id).size()==400&&
                   publishedFolder.modified!=many.modified&&publishedFolder.created==createdTime&&publishedFolder.protectedFile&&
                   !published->FindChild(publishedFolder.id,u"file_0222.txt",publishedFile)&&
                   published->FindChild(publishedFolder.id,u"Renamed 222.txt",publishedFile),
                   "Publishing a checkpoint changed the macOS-generated catalog");
+            Bytes originalHardLink(size_t(a.forks[0].size)),reopenedHardLink(originalHardLink.size());
+            authentic->Read(a.id,0,0,originalHardLink.data(),originalHardLink.size());
+            published->Read(publishedB.id,0,0,reopenedHardLink.data(),reopenedHardLink.size());
+            Check(reopenedHardLink==originalHardLink,"APFS hard-link Properties changed the shared fork");
             MacBrowser::Entry renamedLink;
             Check(!published->FindChild(2,u"link.txt",renamedLink)&&
                   published->FindChild(2,u"Renamed symbolic link",renamedLink)&&
