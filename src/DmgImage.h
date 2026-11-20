@@ -8,6 +8,7 @@ bool Unwrap(std::unique_ptr<HfsPlus::Source>&);
 bool DecodeAppleDataCompression(const HfsPlus::Bytes&,HfsPlus::Bytes&);
 enum class Output { CompressedDmg, RawImage, StoredNdif, CompressedNdif, EditableNdif };
 class Password;
+class PrivateKey;
 Storage::Result Convert(const std::wstring& source,const std::wstring& destination,Output,Storage::Job&,
-                        const Password* password=nullptr);
+                        const Password* password=nullptr,const PrivateKey* key=nullptr);
 }

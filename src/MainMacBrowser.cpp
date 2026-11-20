@@ -426,12 +426,12 @@ void RememberImage(const std::wstring& path)
 }
 
 int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& externalJournal,
-    std::function<bool()> next,std::shared_ptr<const Dmg::Password> password,std::string expectedImage)
+    std::function<bool()> next,Dmg::Credentials credentials,std::string expectedImage)
 {
     using namespace BrowserNavigation;
     Request request{};
     request.intent=Intent::OpenImage;
-    request.image=ImageSource{path,externalJournal,password,expectedImage};
+    request.image=ImageSource{path,externalJournal,credentials,expectedImage};
 
     // A mounted root is still read on the navigation worker. Do not change the
     // tree selection until both opening and reading the root have succeeded.
@@ -450,7 +450,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             result.listing.resourceKey=key;
             if(job.cancelled())throw Storage::Cancelled();
             if(!source.expectedImage.empty()&&key!=source.expectedImage)
-                return Storage::Result{1,ERROR_MEDIA_CHANGED,"The disk image changed while waiting for its password."};
+                return Storage::Result{1,ERROR_MEDIA_CHANGED,"The disk image changed while waiting to be unlocked."};
             try{
                 std::vector<VolumeCoord::Access> access{{key,VolumeCoord::Mode::Read}};
                 if(!source.externalJournal.empty())
@@ -458,7 +458,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 VolumeCoord::Lease lease(std::move(access));
                 auto volume=existing;
                 if(!volume||volume->ResourceKey()!=key)
-                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal,source.password.get());
+                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal,source.credentials.password.get(),source.credentials.privateKey.get());
                 if(!volume)return Storage::Result{1,ERROR_UNRECOGNIZED_VOLUME,"This file does not contain a supported disk image volume."};
                 result.listing.revision=VolumeCoord::Revision(key);
                 if(job.cancelled())throw Storage::Cancelled();
@@ -480,7 +480,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 result.payload=std::move(root);
             }catch(const Dmg::PasswordRequired& error){
                 result.listing.resourceKey.clear();
-                result.payload=ImagePassword{error.retry,key};
+                result.payload=ImageUnlock{error.retry,error.method,key};
             }catch(const HfsPlus::ExternalJournalRequired& error){
                 result.listing.resourceKey.clear();
                 result.payload=ExternalJournal{error.what()};
@@ -489,14 +489,14 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             }
             return Storage::Result{};
         },
-        [this,path,externalJournal,next,password,expectedImage](Result& result){
-            if(auto* prompt=std::get_if<ImagePassword>(&result.payload)){
-                std::shared_ptr<const Dmg::Password> supplied;
+        [this,path,externalJournal,next,credentials,expectedImage](Result& result){
+            if(auto* prompt=std::get_if<ImageUnlock>(&result.payload)){
+                Dmg::Credentials supplied;
 #ifdef HFV_TESTING
-                if(passwordPromptForTest_)supplied=passwordPromptForTest_(prompt->retry);
+                if(passwordPromptForTest_)supplied.password=passwordPromptForTest_(prompt->retry);
                 else
 #endif
-                if(!Hidden(session_))supplied=PromptDmgPassword(session_.Owner(),prompt->retry);
+                if(!Hidden(session_))supplied=PromptDmgCredentials(session_.Owner(),prompt->method,prompt->retry);
                 if(supplied)QueueImageOpen(path,externalJournal,next,std::move(supplied),prompt->image);
                 else if(next)next();
                 return;
@@ -508,7 +508,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 }
                 std::wstring journal;
                 if(SelectHfsPlusExternalJournal(session_.Owner(),journal,prompt->prompt))
-                    QueueImageOpen(path,journal,next,password,expectedImage);
+                    QueueImageOpen(path,journal,next,credentials,expectedImage);
                 else if(next)next();
                 return;
             }
@@ -527,8 +527,8 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             RememberImage(path);
             if(next)next();
         },
-        {},[this,path,externalJournal,next,password,expectedImage]{
-            QueueImageOpen(path,externalJournal,next,password,expectedImage);
+        {},[this,path,externalJournal,next,credentials,expectedImage]{
+            QueueImageOpen(path,externalJournal,next,credentials,expectedImage);
         },next);
     return 1;
 }

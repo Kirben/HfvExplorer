@@ -3,6 +3,8 @@
 #ifdef HFV_TESTING
 #include "DmgImage.h"
 #include "DmgEncryption.h"
+#include "DmgCertificate.h"
+#include <wincrypt.h>
 #include "SparseDisk.h"
 #include "BrowserSession.h"
 #include "HFVExplorer.h"
@@ -527,6 +529,113 @@ void VerifyRawDigest(Source& source,uint64_t length,const uint8_t (&expected)[32
  Check(!memcmp(digest,expected,sizeof(expected)),"Native encrypted image plaintext differs from hdiutil");
 }
 
+void VerifyCertificateFixture(const std::wstring& source,const std::wstring& output,
+                              const Dmg::PrivateKey* key,const Dmg::Password* password=nullptr)
+{
+ Storage::Job job;
+ const auto result=Dmg::Convert(source,output,Dmg::Output::RawImage,job,password,key);
+ Check(!result.code,result.message.c_str());
+ auto file=HfsPlus::OpenImage(output.c_str(),false);
+ const uint8_t expected[]={
+     0x2d,0x0e,0xae,0x24,0x7e,0xef,0x9f,0x48,0xfa,0x16,0x66,0x6e,0xe5,0x49,0x72,0x4f,
+     0x54,0xef,0x65,0x38,0x93,0x3b,0x0e,0xb2,0x82,0x8c,0xc6,0xd3,0xe9,0x5a,0x8a,0x17};
+ VerifyRawDigest(*file,196608,expected);
+}
+
+void NativeCertificates(const std::wstring& base,const std::wstring& root,FILE* report)
+{
+ const Dmg::PrivateKey pem(base+L"\\dmg-cert-test-key-2048.pem");
+ const Dmg::PrivateKey wrong(base+L"\\dmg-cert-test-key-4096.pem");
+ const auto only=base+L"\\dmg-cert-only-udzo-aes256.dmg";
+ const auto raw=root+L"\\certificate-pem.raw";
+ {
+  Storage::Job job;
+  bool retry=false;
+  try{Dmg::Convert(only,raw,Dmg::Output::RawImage,job,nullptr,&wrong);}
+  catch(const Dmg::PasswordRequired& prompt){retry=prompt.retry&&prompt.method==Dmg::UnlockMethod::PrivateKey;}
+  Check(retry&&GetFileAttributesW(raw.c_str())==INVALID_FILE_ATTRIBUTES,
+        "Wrong RSA key produced output or failed to request another key");
+ }
+ VerifyCertificateFixture(only,raw,&pem);
+ const auto mixed=base+L"\\dmg-cert-udzo-aes128.dmg";
+ const Dmg::Password password(L"ewfprobe-test-password");
+ VerifyCertificateFixture(mixed,root+L"\\certificate-mixed-key.raw",&pem);
+ VerifyCertificateFixture(mixed,root+L"\\certificate-mixed-password.raw",nullptr,&password);
+ VerifyCertificateFixture(base+L"\\dmg-cert4096-sparse-aes256.sparseimage",
+                          root+L"\\certificate-4096.raw",&wrong);
+ const auto pfx=base+L"\\dmg-cert-test-ephemeral.pfx";
+ const Dmg::Password pfxPassword(L"fixture-pfx-password");
+ bool needsPassword=false;
+ try{const Dmg::PrivateKey denied(pfx);}
+ catch(const Dmg::KeyFilePasswordRequired&){needsPassword=true;}
+ Check(needsPassword,"Password-protected PKCS#12 did not request its password");
+ const Dmg::PrivateKey imported(pfx,&pfxPassword);
+ VerifyCertificateFixture(only,root+L"\\certificate-pfx.raw",&imported);
+ struct Reset {~Reset(){Dmg::UseCertificateStoreForTest(nullptr);}} reset;
+ Dmg::UseCertificateStoreForTest(&imported);
+ VerifyCertificateFixture(only,root+L"\\certificate-store.raw",nullptr);
+ fprintf(report,"PASS: macOS hdiutil certificate DMGs and RSA-4096 sparseimage match the published raw SHA-256 by PEM, PFX, automatic certificate-store lookup and password where present.\n");
+}
+
+void CertificateRecordTest(const std::string& root,const Dmg::Password& password)
+{
+ struct Key {
+  HCRYPTPROV provider=0;
+  HCRYPTKEY key=0;
+  ~Key(){if(key)CryptDestroyKey(key);if(provider)CryptReleaseContext(provider,0);}
+ } identity;
+ Check(CryptAcquireContextW(&identity.provider,nullptr,nullptr,PROV_RSA_AES,CRYPT_VERIFYCONTEXT|CRYPT_SILENT)&&
+       CryptGenKey(identity.provider,AT_KEYEXCHANGE,(2048u<<16)|CRYPT_EXPORTABLE,&identity.key),
+       "Create an ephemeral RSA test identity");
+ const auto encode=[&](DWORD type,LPCSTR derType){
+  DWORD size=0;
+  Check(CryptExportKey(identity.key,0,type,0,nullptr,&size)!=FALSE,"Size the test RSA key");
+  Bytes blob(size);
+  Check(CryptExportKey(identity.key,0,type,0,blob.data(),&size)&&
+        CryptEncodeObject(X509_ASN_ENCODING,derType,blob.data(),nullptr,&size),"Encode test RSA key");
+  Bytes out(size);
+  Check(CryptEncodeObject(X509_ASN_ENCODING,derType,blob.data(),out.data(),&size)!=FALSE,"Save test DER key");
+  return out;
+ };
+ const auto der=Save(root+"\\generated-rsa.der",encode(PRIVATEKEYBLOB,PKCS_RSA_PRIVATE_KEY));
+ const auto publicKey=encode(PUBLICKEYBLOB,RSA_CSP_PUBLICKEYBLOB);
+ uint8_t id[20]{};
+ DWORD idBytes=sizeof(id);
+ Check(CryptHashCertificate(0,CALG_SHA1,0,publicKey.data(),DWORD(publicKey.size()),id,&idBytes)&&
+       idBytes==sizeof(id),"Hash the test RSA public key");
+ Bytes keys(256);
+ for(unsigned i=0;i<16;++i)keys[i]=uint8_t(0x8c+i);
+ for(unsigned i=0;i<20;++i)keys[16+i]=uint8_t(0x34+i);
+ memcpy(keys.data()+36,"CKIE\0",5);
+ DWORD keyBytes=41;
+ Check(CryptEncrypt(identity.key,0,TRUE,0,keys.data(),&keyBytes,DWORD(keys.size()))&&keyBytes==keys.size(),
+       "Wrap the test DMG payload keys with RSA");
+ std::reverse(keys.begin(),keys.end());
+ const Bytes expected(1024,'Q');
+ auto image=Envelope(expected,128,true,password);
+ P32(image.data()+76,2);
+ constexpr size_t at=96;
+ P64(image.data()+88,52+keys.size());
+ P32(image.data()+at,20);memcpy(image.data()+at+4,id,sizeof(id));
+ P32(image.data()+at+36,42);P32(image.data()+at+40,10);P32(image.data()+at+44,0);
+ P32(image.data()+at+48,uint32_t(keys.size()));memcpy(image.data()+at+52,keys.data(),keys.size());
+
+ const auto fixture=Save(root+"\\certificate-record.dmg",image);
+ const Dmg::PrivateKey imported(der);
+ auto source=HfsPlus::OpenImage(fixture.c_str(),false);
+ bool needsKey=false;
+ try{Dmg::Unlock(source,nullptr);}
+ catch(const Dmg::PasswordRequired& prompt){needsKey=!prompt.retry&&prompt.method==Dmg::UnlockMethod::PrivateKey;}
+ Check(needsKey,"Certificate record did not request a private key");
+ Check(Dmg::Unlock(source,nullptr,&imported)&&!source->Writable()&&source->ProcessLocal()&&
+       source->WorkerFiles().empty()&&Disk::Read(*source,0,expected.size())==expected,
+       "DER private key did not unlock the generated certificate image");
+ P32(image.data()+at+48,4096);
+ const auto corrupt=Save(root+"\\certificate-overrun.dmg",image);
+ Reject([&]{auto invalid=HfsPlus::OpenImage(corrupt.c_str(),false);Dmg::Unlock(invalid,nullptr,&imported);},
+        "Invalid certificate extent was accepted");
+}
+
 void VerifyNativeBundle(const std::wstring& path)
 {
  const Dmg::Password password(L"ewfprobe-test-password");
@@ -638,6 +747,10 @@ int RunEncryptedDmgTest(const char* directory)
  try{
   const auto password=std::make_shared<const Dmg::Password>(L"fixture \u03a9");
   const Dmg::Password wrong(L"incorrect");
+  CertificateRecordTest(root,*password);
+  fprintf(report,"PASS: generated certificate record, DER private key, bounds checks and read-only local decryption.\n");
+  if(const auto fixtures=_wgetenv(L"HFV_CERT_DMG_FIXTURES"))
+   NativeCertificates(fixtures,VolumeCoord::Wide(root),report);
   Bytes plain(2601);
   for(size_t i=0;i<plain.size();++i)plain[i]=uint8_t(i*113+i/512);
   for(const auto aesWrap:{false,true}){

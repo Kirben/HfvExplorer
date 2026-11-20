@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "MacBrowserModel.h"
+#include "DmgEncryption.h"
 #include "BrowserTransfers.h"
 class CHFVExplorerListView;
 class BrowserSession;
@@ -15,7 +16,7 @@ class MainMacBrowser {
     struct State;
     std::unique_ptr<State> state_;
     int QueueImageOpen(const std::wstring&,const std::wstring&,
-        std::function<bool()> next={},std::shared_ptr<const Dmg::Password> password={},
+        std::function<bool()> next={},Dmg::Credentials credentials={},
         std::string expectedImage={});
 #ifdef HFV_TESTING
     std::function<std::shared_ptr<const Dmg::Password>(bool)> passwordPromptForTest_;

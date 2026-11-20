@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "HfsPlus.h"
+#include "DmgEncryption.h"
 #include "StorageWorker.h"
 #include <string>
 class BrowserSession;
@@ -14,8 +15,7 @@ struct MacImageFormatRequest {
 std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageFormatRequest);
 bool StartMacImageFormat(BrowserSession&,MacImageFormatRequest);
 void FormatHfsPlusImage(CWnd *parent,BrowserSession& session);
-namespace Dmg {class Password;}
-std::shared_ptr<const Dmg::Password> PromptDmgPassword(CWnd* parent,bool retry);
+Dmg::Credentials PromptDmgCredentials(CWnd*,Dmg::UnlockMethod,bool retry);
 void ConvertDmgImage(BrowserSession&);
 void HfvUnicodeNameEdit(HWND,int);
 bool EditWindowsName(CWnd *parent, std::wstring &name);

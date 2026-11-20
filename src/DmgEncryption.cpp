@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "DmgEncryption.h"
+#include "DmgCertificate.h"
 #include "HfsPlusDisk.h"
 #include <bcrypt.h>
 #include <mutex>
@@ -21,8 +22,11 @@ Password::Password(std::wstring_view value)
 }
 
 Password::~Password(){SecureZeroMemory(utf8_.data(),utf8_.size());}
-PasswordRequired::PasswordRequired(bool again)
-    :HfsPlus::Error(again?"The password did not unlock this image.":"This disk image requires a password."),retry(again){}
+PasswordRequired::PasswordRequired(bool again,UnlockMethod requested)
+    :HfsPlus::Error(again?"The supplied credential did not unlock this image.":
+        requested==UnlockMethod::PrivateKey?"This disk image requires its matching RSA private key.":
+        requested==UnlockMethod::Either?"This disk image requires a password or private key.":
+        "This disk image requires a password."),retry(again),method(requested){}
 
 namespace {
 using namespace HfsPlus;
@@ -104,6 +108,7 @@ struct Layout {
     uint64_t start,bytes;
     uint32_t block,keyBytes;
     std::vector<Record> records;
+    std::vector<CertificateRecord> certificates;
 };
 
 std::optional<Record> ParseRecord(const Bytes& data)
@@ -142,20 +147,33 @@ Layout Parse(Source& source,bool token=false)
     Check(count&&count<=64&&Range(fixed,uint64_t(count)*row,offset),"Invalid encrypted DMG key table");
     const auto table=Disk::Read(source,fixed,size_t(count)*row);
     const auto recordStart=fixed+count*row;
-    Layout result{offset,size,blocks,bits/8,{}};
+    Layout result{offset,size,blocks,bits/8,{},{}};
     uint64_t iterations=0;
     for(uint32_t i=0;i<count;++i){
         const auto entry=table.data()+i*row;
         const auto at=U64(entry+4),bytes=U64(entry+12);
         Check(bytes&&bytes<=65536&&at>=recordStart&&Range(at,bytes,offset),"Invalid encrypted DMG key record extent");
-        if(U32(entry)!=1)continue; // Certificate or other key types.
+        if(U32(entry)==2&&!token){
+            const auto record=Disk::Read(source,at,size_t(bytes));
+            const auto key=record.data();
+            constexpr size_t prefix=52;
+            Check(record.size()>=prefix,"Truncated DMG certificate record");
+            if(U32(key)!=20||U32(key+36)!=42||U32(key+40)!=10)continue;
+            const auto wrapped=U32(key+48);
+            Check(wrapped>=128&&wrapped<=1024&&Range(prefix,wrapped,record.size()),
+                  "Invalid DMG certificate key length");
+            CertificateRecord cert{{},Bytes(key+prefix,key+prefix+wrapped)};
+            memcpy(cert.id.data(),key+4,cert.id.size());
+            result.certificates.push_back(std::move(cert));
+        }
+        if(U32(entry)!=1)continue;
         auto record=ParseRecord(Disk::Read(source,at,size_t(bytes)));
         if(!record)continue;
         iterations+=record->iterations;
         Check(result.records.size()<8&&iterations<=20000000,"DMG password records exceed the supported work limit");
         result.records.push_back(std::move(*record));
     }
-    Check(!result.records.empty(),"This encrypted DMG has no supported password record");
+    Check(!result.records.empty()||!result.certificates.empty(),"This encrypted image has no supported unlock record");
     return result;
 }
 
@@ -227,7 +245,7 @@ Layout UnlockLegacy(Source& source,const Password* password,Sensitive& key)
     if(!LegacyKey(cipher,std::move(aes),key.bytes.data(),keyBytes)||
        !LegacyKey(cipher,std::move(hmac),key.bytes.data()+keyBytes,20))
         throw PasswordRequired(true);
-    return {0,bytes,block,keyBytes,{}};
+    return {0,bytes,block,keyBytes,{},{}};
 }
 
 class Payload final:public EncryptedPayload {
@@ -272,15 +290,24 @@ public:
     }
 };
 
-std::unique_ptr<EncryptedPayload> UnlockPayload(Layout& layout,const Password* password)
+std::unique_ptr<EncryptedPayload> UnlockPayload(Layout& layout,const Password* password,const PrivateKey* privateKey=nullptr)
 {
-    if(!password)throw PasswordRequired(false);
-    for(auto& record:layout.records){
-        Sensitive key(record.wrapped.size());
-        if(UnwrapKey(record,*password,layout.keyBytes,key))
-            return std::make_unique<Payload>(layout,key);
+    const bool certificates=!layout.certificates.empty(), passwords=!layout.records.empty();
+    if(certificates&&!password){
+        Sensitive key(layout.keyBytes+20);
+        const auto unlocked=privateKey?privateKey->Unwrap(layout.certificates,key.bytes.data(),layout.keyBytes):
+                                        FindCertificateKey(layout.certificates,key.bytes.data(),layout.keyBytes);
+        if(unlocked)return std::make_unique<Payload>(layout,key);
     }
-    throw PasswordRequired(true);
+    if(password){
+        for(auto& record:layout.records){
+            Sensitive key(record.wrapped.size());
+            if(UnwrapKey(record,*password,layout.keyBytes,key))
+                return std::make_unique<Payload>(layout,key);
+        }
+    }
+    const auto method=certificates?(passwords?UnlockMethod::Either:UnlockMethod::PrivateKey):UnlockMethod::Password;
+    throw PasswordRequired(password||privateKey,method);
 }
 
 class Image final:public Source {
@@ -305,7 +332,7 @@ public:
 };
 }
 
-bool Unlock(std::unique_ptr<HfsPlus::Source>& source,const Password* password)
+bool Unlock(std::unique_ptr<HfsPlus::Source>& source,const Password* password,const PrivateKey* key)
 {
     if(source->Size()<8)return false;
     const auto magic=Disk::Read(*source,0,8);
@@ -318,7 +345,7 @@ bool Unlock(std::unique_ptr<HfsPlus::Source>& source,const Password* password)
         return true;
     }
     auto layout=Parse(*source);
-    auto payload=UnlockPayload(layout,password);
+    auto payload=UnlockPayload(layout,password,key);
     source=std::make_unique<Image>(std::move(source),layout,std::move(payload));
     return true;
 }

@@ -4,6 +4,8 @@
 #include <string_view>
 
 namespace Dmg {
+class PrivateKey;
+enum class UnlockMethod {Password,PrivateKey,Either};
 class Password {
     std::array<uint8_t,4096> utf8_{};
     unsigned size_=0;
@@ -16,13 +18,20 @@ public:
     unsigned Size()const{return size_;}
 };
 
+struct Credentials {
+    std::shared_ptr<const Password> password;
+    std::shared_ptr<const PrivateKey> privateKey;
+    explicit operator bool()const{return password||privateKey;}
+};
+
 struct PasswordRequired : HfsPlus::Error {
     bool retry;
-    explicit PasswordRequired(bool retry);
+    UnlockMethod method;
+    explicit PasswordRequired(bool retry,UnlockMethod method=UnlockMethod::Password);
 };
 
 // Decode the outer encryption layer first. The result can be a raw disk or a UDIF container.
-bool Unlock(std::unique_ptr<HfsPlus::Source>&,const Password*);
+bool Unlock(std::unique_ptr<HfsPlus::Source>&,const Password*,const PrivateKey* =nullptr);
 
 using CiphertextReader=std::function<void(uint64_t,void*,size_t)>;
 class EncryptedPayload {

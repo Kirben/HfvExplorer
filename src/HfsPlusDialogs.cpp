@@ -9,6 +9,7 @@
 #include "DmgImage.h"
 #include "SparseDisk.h"
 #include "DmgEncryption.h"
+#include "DmgCertificate.h"
 #include "StorageLocation.h"
 #include <optional>
 #include "StorageJobDialog.h"
@@ -64,19 +65,21 @@ bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter
     return true;
 }
 class ImagePasswordDialog final:public CDialog {
-    bool retry_;
+    bool retry_,keyFile_;
     void Clear() {
         SetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,L"");
         SendDlgItemMessage(IDC_DMG_PASSWORD,EM_EMPTYUNDOBUFFER,0,0);
     }
 public:
     std::shared_ptr<const Dmg::Password> password;
-    ImagePasswordDialog(CWnd* parent,bool retry):CDialog(IDD_DMG_PASSWORD,parent),retry_(retry){}
+    ImagePasswordDialog(CWnd* parent,bool retry,bool keyFile=false):CDialog(IDD_DMG_PASSWORD,parent),retry_(retry),keyFile_(keyFile){}
     BOOL OnInitDialog()override{
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd,IDC_DMG_PASSWORD);
         SendDlgItemMessage(IDC_DMG_PASSWORD,EM_SETLIMITTEXT,1023);
-        if(retry_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,L"The password did not unlock this image. Try again.");
+        if(keyFile_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,retry_?
+            L"The key file could not be opened. Try another password.":L"Enter the password for this PFX or P12 key file.");
+        else if(retry_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,L"The password did not unlock this image. Try again.");
         GetDlgItem(IDC_DMG_PASSWORD)->SetFocus();
         return FALSE;
     }
@@ -390,11 +393,39 @@ int RunHfsPlusUiTest(const char *directory) {
 }
 #endif
 
-std::shared_ptr<const Dmg::Password> PromptDmgPassword(CWnd* parent,bool retry)
+Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool retry)
 {
-    ImagePasswordDialog dialog(parent,retry);
-    if(dialog.DoModal()!=IDOK)return {};
-    return std::move(dialog.password);
+    using Method=Dmg::UnlockMethod;
+    if(method==Method::Either){
+        const int choice=MessageBoxW(parent->m_hWnd,retry?
+            L"The previous credential did not unlock the image.\n\nChoose Yes to enter a password or No to select a private key.":
+            L"Choose Yes to enter a password or No to select a private key.",
+            L"Unlock disk image",MB_YESNOCANCEL|MB_ICONQUESTION);
+        if(choice!=IDYES&&choice!=IDNO)return {};
+        method=choice==IDYES?Method::Password:Method::PrivateKey;
+    }
+    if(method==Method::Password){
+        ImagePasswordDialog dialog(parent,retry);
+        if(dialog.DoModal()!=IDOK)return {};
+        return {std::move(dialog.password),{}};
+    }
+    std::wstring path;
+    if(!FileDialog(parent->m_hWnd,path,false,
+                   L"Private key files\0*.pem;*.der;*.key;*.pfx;*.p12\0All files\0*.*\0\0",nullptr,
+                   retry?L"Select a different RSA private key":L"Select the RSA private key for this disk image"))return {};
+    std::shared_ptr<const Dmg::Password> password;
+    for(;;){
+        try{return {{},std::make_shared<Dmg::PrivateKey>(path,password.get())};}
+        catch(const Dmg::KeyFilePasswordRequired&){
+            ImagePasswordDialog dialog(parent,bool(password),true);
+            if(dialog.DoModal()!=IDOK)return {};
+            password=std::move(dialog.password);
+        }catch(const std::exception& error){
+            const auto message=VolumeCoord::Wide(error.what());
+            MessageBoxW(parent->m_hWnd,message.c_str(),L"Cannot open private key",MB_OK|MB_ICONERROR);
+            return {};
+        }
+    }
 }
 namespace {
 struct DmgConversion {
@@ -403,20 +434,20 @@ struct DmgConversion {
     std::string expectedImage;
 };
 void StartDmgConversion(BrowserSession& session,DmgConversion paths,
-                        std::shared_ptr<const Dmg::Password> password={})
+                        Dmg::Credentials credentials={})
 {
-    auto prompt=std::make_shared<std::optional<bool>>();
+    auto prompt=std::make_shared<std::optional<Dmg::PasswordRequired>>();
     auto complete=session.WhileOpen([paths,prompt](BrowserSession& origin,const Storage::Result& result){
         if(result.code)return;
         if(*prompt){
-            if(auto supplied=PromptDmgPassword(origin.Owner(),**prompt))
+            if(auto supplied=PromptDmgCredentials(origin.Owner(),(*prompt)->method,(*prompt)->retry))
                 StartDmgConversion(origin,paths,std::move(supplied));
         }
     });
-    BackgroundCopies::StartStorageResult([paths,prompt,password](Storage::Job& job){
+    BackgroundCopies::StartStorageResult([paths,prompt,credentials](Storage::Job& job){
         StorageLocation::ValidateImage(paths.source,paths.expectedImage);
-        try{return Dmg::Convert(paths.source,paths.destination,paths.format,job,password.get());}
-        catch(const Dmg::PasswordRequired& error){*prompt=error.retry;return Storage::Result{};}
+        try{return Dmg::Convert(paths.source,paths.destination,paths.format,job,credentials.password.get(),credentials.privateKey.get());}
+        catch(const Dmg::PasswordRequired& error){*prompt=error;return Storage::Result{};}
     },session.Owner(),"Converting disk image","Convert disk image",std::move(complete),{true});
 }
 }

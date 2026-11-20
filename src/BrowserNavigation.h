@@ -4,13 +4,14 @@
 #include "BrowserMountInventory.h"
 #include "PhysicalRemovable.h"
 #include "StorageWorker.h"
+#include "DmgEncryption.h"
 
 namespace BrowserNavigation {
 enum class Intent { SelectFolder, RefreshFolder, RevealFindHit, StartupFolder, OpenImage };
 
 struct ImageSource {
     std::wstring path, externalJournal;
-    std::shared_ptr<const Dmg::Password> password;
+    Dmg::Credentials credentials;
     std::string expectedImage;
 };
 
@@ -33,7 +34,7 @@ struct FloppyFolder {BrowserMountInventory::ClassicMount mount;};
 struct OpticalMount {std::shared_ptr<MacBrowser::Volume> volume;};
 struct ExternalMounts {std::vector<Removable::Mounted> volumes;};
 struct ExternalJournal {std::string prompt;};
-struct ImagePassword {bool retry;std::string image;};
+struct ImageUnlock {bool retry;Dmg::UnlockMethod method;std::string image;};
 struct MountedFolder {
     uint64_t free=0;
     std::vector<uint32_t> ancestors;
@@ -45,7 +46,7 @@ struct MountedFolder {
 
 struct Result {
     BrowserDirectory::Snapshot listing;
-    std::variant<std::monostate,ClassicFolder,FloppyFolder,OpticalMount,ExternalMounts,MountedFolder,ExternalJournal,ImagePassword> payload;
+    std::variant<std::monostate,ClassicFolder,FloppyFolder,OpticalMount,ExternalMounts,MountedFolder,ExternalJournal,ImageUnlock> payload;
 };
 
 using Read = std::function<Storage::Result(const Request&, Result&, Storage::Job&)>;

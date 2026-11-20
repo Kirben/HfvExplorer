@@ -238,7 +238,7 @@ void BrowserSession::Navigate(BrowserNavigation::Request request, BrowserNavigat
             return;
         }
         if(restoreOnError&&(std::holds_alternative<BrowserNavigation::ExternalJournal>(result->payload)||
-                            std::holds_alternative<BrowserNavigation::ImagePassword>(result->payload)))
+                            std::holds_alternative<BrowserNavigation::ImageUnlock>(result->payload)))
             listingPending_=false;
         publish(*result);
         // A drive probe may hand off to another navigation (for example an HFS+ CD).

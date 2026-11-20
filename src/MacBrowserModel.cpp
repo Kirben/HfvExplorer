@@ -441,7 +441,7 @@ static std::shared_ptr<Volume> OpenTrackImages(
     throw HfsPlus::Error("No supported data filesystem was found in the optical track image");
 }
 
-static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr) {
+static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr,const Dmg::PrivateKey* privateKey=nullptr) {
     const DWORD attributes=GetFileAttributesW(path.c_str());
     const bool directory=attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY);
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
@@ -452,7 +452,7 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
         return OpenReadOnlyImage(std::move(bundle),key,{},"The sparse bundle contains no supported filesystem");
     }
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
-    const bool encrypted=Dmg::Unlock(source,password);
+    const bool encrypted=Dmg::Unlock(source,password,privateKey);
     if(SparseDisk::Unwrap(source))
         return OpenReadOnlyImage(std::move(source),key,externalJournal,"The sparse image contains no supported filesystem");
     if(Dmg::Unwrap(source)||encrypted)return OpenReadOnlyImage(std::move(source),key,externalJournal);
@@ -499,8 +499,8 @@ std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &e
     return OpenImageImpl(path,externalJournal,false);
 }
 std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal,
-                                         const Dmg::Password* password) {
-    return OpenImageImpl(path,externalJournal,true,password);
+                                         const Dmg::Password* password,const Dmg::PrivateKey* privateKey) {
+    return OpenImageImpl(path,externalJournal,true,password,privateKey);
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {
     uint16_t signature=0;

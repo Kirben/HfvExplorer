@@ -304,7 +304,7 @@ void WriteRaw(ConversionInput& input,NewImage& output,Storage::Job& job,Storage:
 }
 
 Storage::Result Convert(const std::wstring& source,const std::wstring& destination,
-                        Output format,Storage::Job& job,const Password* password)
+                        Output format,Storage::Job& job,const Password* password,const PrivateKey* key)
 {
     const auto inputKey=VolumeCoord::ImageKey(source);
     auto access=CommandStorage::ImageWrite(destination);
@@ -316,7 +316,7 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         auto input=SparseDisk::OpenBundle(source,password);
         const bool bundle=bool(input);
         if(!bundle)input=HfsPlus::OpenImage(source.c_str(),false);
-        const bool encrypted=!bundle&&Unlock(input,password);
+        const bool encrypted=!bundle&&Unlock(input,password,key);
         const bool sparse=bundle||SparseDisk::Unwrap(input);
         const bool dmg=!sparse&&Unwrap(input);
         const bool ndif=!sparse&&!dmg&&!encrypted&&Ndif::Unwrap(input,&current);
