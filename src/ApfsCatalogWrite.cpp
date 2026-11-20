@@ -745,8 +745,8 @@ void SetSibling(Bytes& value,uint64_t sibling)
 struct CatalogSibling {
     uint64_t inode,parent;
     std::string name;
-    std::optional<size_t> linkRecord;
-    bool mapSeen=false;
+    std::optional<size_t> linkRecord,mapRecord;
+    size_t directoryRecord=0;
 
     OwnedRecord LinkRecord(uint64_t id)const
     {
@@ -834,8 +834,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         std::optional<size_t> resourceRecord,compressionRecord;
     };
     std::map<uint64_t,Link> links;
-    std::optional<size_t> renameRecord;
-    uint64_t renameSibling=0;
+    std::optional<size_t> selectedRecord;
+    uint64_t selectedSibling=0;
     std::map<uint64_t,CatalogSibling> siblings;
     std::map<uint64_t,std::set<uint64_t>> siblingGroups;
     for(size_t i=2;i<records.size();++i){
@@ -849,8 +849,20 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
               "Invalid APFS sibling directory record");
         const auto name=reinterpret_cast<const char*>(item.key.data+12);
         Check(siblings.emplace(sibling,CatalogSibling{inode,Le64(item.key.data)&IdMask,
-              std::string(name,item.key.size-13)}).second,"Repeated APFS sibling ID");
+              std::string(name,item.key.size-13),{},{},i}).second,"Repeated APFS sibling ID");
         siblingGroups[inode].insert(sibling);
+    }
+    // A promoted regular-file name can be in a folder with a later object ID.
+    for(size_t i=2;i<records.size();++i){
+        const auto item=at(i);
+        if(item.key.size<14||Le64(item.key.data)>>60!=9||
+           (item.value.size!=18&&item.value.size!=34)||
+           Le16(item.value.data+16)!=uint16_t(CatalogKind::RegularFile))continue;
+        const auto inode=Le64(item.value.data);
+        if(item.value.size==34&&Le64(item.value.data+26)!=*siblingGroups.at(inode).begin())continue;
+        Check(links.emplace(inode,Link{Le64(item.key.data)&IdMask,CatalogKind::RegularFile,
+              std::string(reinterpret_cast<const char*>(item.key.data+12),item.key.size-13),i}).second,
+              "Repeated APFS primary file name");
     }
     struct AttributeStream {uint64_t inode,blocks;};
     std::map<uint64_t,AttributeStream> attributeStreams;
@@ -891,11 +903,13 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 const auto group=siblingGroups.find(child);
                 const auto sibling=view.value.size==34?Le64(view.value.data+26):0;
                 const auto primary=group==siblingGroups.end()?0:*group->second.begin();
-                renamingThisEntry=rename&&rename->inode==child&&parent==inode&&
-                                  sibling==(rename->alias?rename->alias:primary);
-                if(renamingThisEntry){
-                    renameRecord=i;
-                    renameSibling=sibling;
+                const auto aliasId=rename?rename->alias:remove?remove->alias:0;
+                const bool selected=(rename||remove)&&entryId==child&&parent==inode&&
+                                    sibling==(aliasId?aliasId:primary);
+                renamingThisEntry=rename&&selected;
+                if(selected){
+                    selectedRecord=i;
+                    selectedSibling=sibling;
                 }
                 const auto canonicalName=NormalizedName(childName,fold);
                 Check(directoryNames[inode].insert(canonicalName).second,"Duplicate APFS directory name");
@@ -906,17 +920,17 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(child>=16&&child<nextId&&alias==(group!=siblingGroups.end())&&
                       (!alias||(kind==CatalogKind::RegularFile&&group->second.size()>=2)),
                       "Invalid APFS directory entry ID or sibling group");
-                if(!alias||Le64(view.value.data+26)==*group->second.begin()){
+                if(kind!=CatalogKind::RegularFile){
                     Check(child>inode&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
                           "Invalid or duplicate APFS primary directory entry");
                 }
                 ++folder->second.children;
             }else if(type==12){
                 const auto sibling=siblings.find(inode);
-                Check(sibling!=siblings.end()&&!sibling->second.mapSeen,"Unexpected APFS sibling map");
+                Check(sibling!=siblings.end()&&!sibling->second.mapRecord,"Unexpected APFS sibling map");
                 const auto expected=sibling->second.MapRecord(inode);
                 Check(Matches(view.key,expected.key)&&Matches(view.value,expected.value),"Invalid APFS sibling map");
-                sibling->second.mapSeen=true;
+                sibling->second.mapRecord=i;
             }else if(type==8){
                 const auto stream=attributeStreams.find(inode);
                 Check(stream!=attributeStreams.end(),"APFS extent has no attribute stream");
@@ -1085,7 +1099,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Check(Le32(records[folder.record].value.data()+56)==folder.children,"Invalid APFS directory child count");
     }
     for(const auto& [id,sibling]:siblings)
-        Check(sibling.linkRecord&&sibling.mapSeen,"Missing APFS sibling link or map");
+        Check(sibling.linkRecord&&sibling.mapRecord,"Missing APFS sibling link or map");
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
@@ -1150,23 +1164,51 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         streamAt=records.size();
     }else{
         const auto found=links.find(entryId);
-        Check(found!=links.end()&&(rename?renameRecord.has_value():found->second.parent==parent),
+        Check(found!=links.end()&&((rename||remove)?selectedRecord.has_value():found->second.parent==parent),
               "The APFS entry is no longer in the selected folder");
         const auto& link=found->second;
-        Check(rename||!siblingGroups.count(entryId),"APFS hard-linked entries cannot be changed yet");
+        Check(rename||remove||!siblingGroups.count(entryId),"APFS hard-linked entries cannot be changed yet");
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
         const auto bsdFlags=Le32(inode.data()+68);
         Check(!(bsdFlags&SystemImmutable)&&(!(bsdFlags&UserImmutable)||(metadata&&metadata->finder&&!metadata->locked)),
               "Unlock the APFS entry before making changes");
-        if(renameSibling){
-            auto& sibling=siblings.at(renameSibling);
+        if(remove&&selectedSibling){
+            const auto& deleted=siblings.at(selectedSibling);
+            const auto& group=siblingGroups.at(entryId);
+            const auto first=*group.begin();
+            const auto survivorId=first==selectedSibling?*std::next(group.begin()):first;
+            const auto& survivor=siblings.at(survivorId);
+            const auto count=uint32_t(group.size()-1);
+            Set(inode,56,count,4);
+            Set(inode,32,time,8);
+            if(first==selectedSibling){
+                const auto mode=Le16(inode.data()+80);
+                auto updated=WriterDisk::Inode(survivor.name,entryId,0,survivor.parent,mode,count,
+                                                link.dataSize,link.finder?&*link.finder:nullptr);
+                std::copy_n(inode.begin(),size_t(92),updated.value.begin());
+                Set(updated.value,0,survivor.parent,8);
+                inode=std::move(updated.value);
+            }
+            Set(parentInode,56,target->second.children-1,4);
+            std::vector<size_t> discard{*selectedRecord,*deleted.linkRecord,*deleted.mapRecord};
+            if(count==1){
+                records[survivor.directoryRecord].value.resize(18);
+                discard.push_back(*survivor.linkRecord);
+                discard.push_back(*survivor.mapRecord);
+            }
+            std::sort(discard.rbegin(),discard.rend());
+            for(const auto index:discard)records.erase(records.begin()+index);
+            return records;
+        }
+        if(rename&&selectedSibling){
+            auto& sibling=siblings.at(selectedSibling);
             sibling.name=name;
-            records[*sibling.linkRecord]=sibling.LinkRecord(renameSibling);
-            if(*renameRecord!=link.entryRecord){
+            records[*sibling.linkRecord]=sibling.LinkRecord(selectedSibling);
+            if(*selectedRecord!=link.entryRecord){
                 Set(inode,32,time,8);
-                added.value=std::move(records[*renameRecord].value);
-                records.erase(records.begin()+*renameRecord);
+                added.value=std::move(records[*selectedRecord].value);
+                records.erase(records.begin()+*selectedRecord);
                 records.insert(records.begin()+insertAt,std::move(added));
                 return records;
             }
@@ -1251,8 +1293,15 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             removedKind=link.kind;
             Set(parentInode,56,target->second.children-1,4);
             const auto first=records.begin()+link.inodeRecord;
-            records.erase(first,first+1+link.attributes+link.streamRecords);
-            records.erase(records.begin()+link.entryRecord);
+            const auto end=first+1+link.attributes+link.streamRecords;
+            if(link.entryRecord>link.inodeRecord){
+                records.erase(records.begin()+link.entryRecord);
+                records.erase(records.begin()+link.inodeRecord,
+                              records.begin()+link.inodeRecord+1+link.attributes+link.streamRecords);
+            }else{
+                records.erase(first,end);
+                records.erase(records.begin()+link.entryRecord);
+            }
             return records;
         }
         const auto updatedFinder=metadata?metadata->finder:replace&&replace->finder?replace->finder:existingFinder;

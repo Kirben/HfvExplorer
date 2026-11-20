@@ -30,6 +30,7 @@ struct CatalogRename {
 };
 struct CatalogDelete {
     uint64_t parent,inode;
+    uint64_t alias=0;
 };
 struct CatalogReplaceData {
     uint64_t parent,inode;

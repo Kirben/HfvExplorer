@@ -1149,7 +1149,7 @@ void WritableHardLinks(const std::string& root,FILE* report)
         Check(cancelled&&after&&after->transaction==before->transaction,
               "Cancelled APFS hard-link creation published a checkpoint");
     }
-    const auto path=VolumeCoord::Wide(root+"apfs-renamed-hard-links.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-unlinked-hard-links.img");
     {
         auto copy=CreateFormatOutput(path.c_str(),bytes.size());
         copy->Write(0,bytes.data(),bytes.size());
@@ -1170,7 +1170,6 @@ void WritableHardLinks(const std::string& root,FILE* report)
         Check(volume->Stat(second).linkCount==3&&volume->Stat(second).resolvedId==alias.resolvedId,
               "APFS cannot extend a hard-link group through another alias");
         Reject([&]{volume->MakeHardLink(id,2,u"Second alias");},"APFS accepted a duplicate link name");
-        Reject([&]{volume->Remove(id);},"APFS deleted an alias before unlink was supported");
         Reject([&]{volume->Rename(target.id,2,u"Second alias");},"APFS renamed over another alias of the same inode");
         volume->Rename(id,folder.id,u"Renamed nested alias");
         volume->Rename(second,2,u"Renamed second alias");
@@ -1180,24 +1179,47 @@ void WritableHardLinks(const std::string& root,FILE* report)
               !volume->FindChild(folder.id,u"Nested alias",alias)&&
               !volume->FindChild(2,u"Second alias",alias)&&!volume->FindChild(2,u"renamed file",alias),
               "APFS hard-link rename changed identity or left an old name");
+        volume->Remove(target.id);
+        Reject([&]{volume->Stat(target.id);},"Removed APFS name still resolved");
+        Check(!volume->FindChild(2,u"Renamed primary",alias)&&volume->Stat(id).linkCount==2,
+              "APFS unlink lost the other names");
+        volume->Remove(second);
+        Check(volume->FindChild(folder.id,u"Renamed nested alias",alias)&&alias.id==id&&
+              alias.linkCount==1&&!alias.hardLink,"APFS did not promote the last file name");
         volume->MakeDirectory(2,u"Unrelated edit");
     }
     {
         const auto volume=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry target,alias,second,folder,unrelated;
-        Check(volume->FindChild(2,u"Renamed primary",target)&&volume->FindChild(2,u"Renamed second alias",second)&&
+        Check(!volume->FindChild(2,u"Renamed primary",target)&&!volume->FindChild(2,u"Renamed second alias",second)&&
               volume->FindChild(2,u"Renamed Folder",folder)&&volume->FindChild(folder.id,u"Renamed nested alias",alias)&&
-              volume->FindChild(2,u"Unrelated edit",unrelated)&&target.linkCount==3&&
-              target.resolvedId==alias.resolvedId&&target.resolvedId==second.resolvedId&&
-              target.id!=alias.id&&target.id!=second.id&&alias.id!=second.id,
-              "APFS hard-link group did not survive reopen");
-        Check(target.forks[0].size>0&&alias.forks[0].size==target.forks[0].size,"APFS aliases have different fork sizes");
+              volume->FindChild(2,u"Unrelated edit",unrelated)&&alias.linkCount==1&&!alias.hardLink,
+              "APFS unlink did not survive reopen");
+        const auto before=MacBrowser::OpenBrowserImage(baseline);
+        Check(before->FindChild(2,u"renamed file",target)&&target.forks[0].size>0&&
+              alias.forks[0].size==target.forks[0].size,"APFS unlink changed the file size");
         Bytes expected(size_t(target.forks[0].size)),actual(expected.size());
-        volume->Read(target.id,0,0,expected.data(),expected.size());
+        before->Read(target.id,0,0,expected.data(),expected.size());
         volume->Read(alias.id,0,0,actual.data(),actual.size());
         Check(actual==expected,"APFS alias did not share the original file data");
     }
-    fprintf(report,"PASS: APFS hard-link creation, primary and alias rename, collisions, independent edits and reopen.\n");
+    {
+        const auto survivor=OpenImage(path.c_str(),false);
+        CheckpointFaultImage disk(Disk::Read(*survivor,0,size_t(survivor->Size())));
+        const auto checkpoint=Apfs::Probe(disk);
+        Check(checkpoint.has_value(),"Missing APFS checkpoint after unlink");
+        Storage::Job job;
+        Apfs::DeleteEntry(disk,*checkpoint,17,16,job);
+        auto memory=std::make_unique<Memory>(disk.durable.size());
+        memory->bytes=std::move(disk.durable);
+        std::unique_ptr<Source> source=std::move(memory);
+        const auto volume=Apfs::Open(source,"apfs-last-link-deleted");
+        MacBrowser::Entry folder,file;
+        Check(volume&&volume->FindChild(2,u"Renamed Folder",folder)&&
+              !volume->FindChild(folder.id,u"Renamed nested alias",file),
+              "APFS failed to delete the final hard-link name");
+    }
+    fprintf(report,"PASS: APFS hard-link creation, rename, primary promotion, reopen and final deletion.\n");
 }
 
 void WritableNamespace(const std::string& root,FILE* report)

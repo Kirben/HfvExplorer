@@ -354,7 +354,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
         Entry entry;
         AttributeRecords attributes;
         bool symlink=false;
-        uint64_t aliasId=0;
+        uint64_t aliasId=0,siblingId=0;
     };
     using Address=std::pair<size_t,uint64_t>;
     std::map<uint32_t,Item> entries;
@@ -547,7 +547,7 @@ private:
                 const auto oid=Le64(record.value.data);
                 Check(oid>2&&oid<=IdMask,"Invalid APFS directory record inode");
                 auto inode=LoadInode(catalog,folder.mount,oid);
-                uint64_t aliasId=0;
+                uint64_t aliasId=0,siblingId=0;
                 auto name=Apfs::Name(record.key.data+header,nameLength);
                 Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos&&names.insert(name).second,
                       "Invalid or duplicate APFS directory name");
@@ -563,6 +563,7 @@ private:
                 if(entry.hardLink){
                     const auto [sibling,primary]=ReadSiblingId(catalog,record,folder.oid,oid,
                                                                record.key.data+header,nameLength);
+                    siblingId=sibling;
                     if(!writable||!primary){
                         aliasId=sibling;
                         identity+=':';
@@ -571,14 +572,22 @@ private:
                 }
                 entry.identity=MacBrowser::EntryIdentity(std::move(identity),EntryVersion(mounted));
                 children.push_back({folder.mount,oid,inode.stream,std::move(entry),
-                                    std::move(inode.attributes),inode.symlink,aliasId});
+                                    std::move(inode.attributes),inode.symlink,aliasId,siblingId});
             });
             Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
             std::vector<uint32_t> ids;
             ids.reserve(children.size());
             for(auto& child:children){
                 if(writable){
-                    const auto slot=writableIds.emplace(child.aliasId?child.aliasId:child.oid,uint32_t(next));
+                    const auto key=child.aliasId?child.aliasId:child.oid;
+                    if(!child.aliasId&&child.siblingId&&!writableIds.count(key)){
+                        auto previous=writableIds.extract(child.siblingId);
+                        if(previous){
+                            previous.key()=key;
+                            writableIds.insert(std::move(previous));
+                        }
+                    }
+                    const auto slot=writableIds.emplace(key,uint32_t(next));
                     if(slot.second)++next;
                     child.entry.id=slot.first->second;
                 }else child.entry.id=uint32_t(next++);
@@ -794,8 +803,27 @@ private:
         extents.clear();
         compressed.clear();
         if(removed){
-            writableIds.erase(At(removed).oid);
+            const auto deleted=At(removed);
+            writableIds.erase(deleted.aliasId?deleted.aliasId:deleted.oid);
             entries.erase(removed);
+            if(deleted.entry.hardLink){
+                const auto count=deleted.entry.linkCount-1;
+                linkIdentities.erase({deleted.mount,deleted.oid});
+                for(auto& [id,item]:entries){
+                    if(item.oid!=deleted.oid)continue;
+                    item.entry.linkCount=count;
+                    item.entry.hardLink=count>1;
+                    const auto resolved=linkIdentities.emplace(Address{item.mount,item.oid},id);
+                    item.entry.resolvedId=resolved.first->second;
+                    if(count==1){
+                        if(item.aliasId){
+                            writableIds.erase(item.aliasId);
+                            writableIds.emplace(item.oid,id);
+                        }
+                        item.aliasId=item.siblingId=0;
+                    }
+                }
+            }
         }
         auto& folder=At(parent);
         const auto changed=LoadInode(Catalog(*source,container,mounts.front()),0,folder.oid);
@@ -1122,7 +1150,6 @@ public:
         Access([&]{
             Check(writable&&id!=2,"APFS entry is read-only");
             const auto& entry=At(id).entry;
-            Check(!entry.hardLink,"APFS hard-linked entries cannot be removed yet");
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             return true;
         });
@@ -1135,7 +1162,7 @@ public:
             const auto oid=entry.oid;
             const auto parentOid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job);});
+            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job,entry.siblingId);});
         });
     }
 };
