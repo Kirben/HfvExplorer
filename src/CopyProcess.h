@@ -12,6 +12,7 @@ FileOperations::Location DecodeLocationForTest(const std::vector<uint8_t> &);
 extern std::atomic<DWORD> lastProcess;
 extern std::atomic<bool> enabled;
 inline constexpr unsigned failWorkerLaunch = 14;
+inline constexpr unsigned staleImagePartition = 15;
 extern std::atomic<unsigned> fault;
 extern std::atomic<HANDLE> ioGate;
 extern std::wstring floppyFixture;

@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "VolumeSession.h"
-#include "DiskImageOpen.h"
 #include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
 #include "StorageLocation.h"
 #include "VolumeCoordinator.h"
-#include "floppy.h"
 #include <algorithm>
 
 namespace VolumeSession {
@@ -132,6 +130,16 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         }
         worker_.reset();
     }
+    WorkerOrigin ImageOrigin(bool writable) const {
+        WorkerOrigin origin;
+        origin.kind=WorkerOrigin::Image;
+        origin.path=path_;
+        origin.journal=journal_;
+        origin.identity=key_;
+        origin.writable=writable;
+        origin.imageMount=ImageMount{format_,selection_};
+        return origin;
+    }
     void Start() {
         auto process = std::make_unique<Process>();
         struct Inherited {
@@ -145,14 +153,9 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         }
         process->Launch(inherited.files, L"--volume-session");
         for (const auto& file : inherited.files) SendImageFile(process->input.value,file);
+        WorkerOrigin origin=ImageOrigin(writeAllowed_);
         Data mount;
-        mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_); mount.put(uint64_t(format_));
-        mount.put(selection_.has_value());
-        if(selection_){
-            const auto& part=selection_->partition;
-            mount.put(uint64_t(selection_->filesystem));
-            mount.put(part.offset); mount.put(part.length); mount.put(part.index); mount.put(part.readOnly);
-        }
+        EncodeOrigin(mount,origin);
         Send(process->input.value, SessionMount, std::move(mount));
         worker_ = std::move(process);
         try {
@@ -274,12 +277,7 @@ public:
     }
     WorkerOrigin WorkerDescription() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        WorkerOrigin origin;
-        origin.kind = WorkerOrigin::Image;
-        origin.path = path_;
-        origin.journal = journal_;
-        origin.writable = writable_ && !lost_;
-        return origin;
+        return ImageOrigin(writable_ && !lost_);
     }
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles() const override {
         auto files = guard_->WorkerFiles();
@@ -761,60 +759,11 @@ int Child(const char* inputText, const char* outputText) {
                 continue;
             }
             Check(message == SessionMount, "Expected a volume session mount");
-            auto path = data.wide();
-            auto journal = data.wide();
-            auto writable = data.flag();
-            auto format = data.get();
-            Check(format<=uint64_t(ImageFormat::NdifMfs),"Invalid volume session image format");
-            std::optional<DiskPartitions::Selection> selection;
-            if(data.flag()){
-                const auto fs=data.get(),offset=data.get(),length=data.get(),index=data.get();
-                Check(fs<=uint64_t(DiskPartitions::Filesystem::Apfs)&&length&&offset<=UINT64_MAX-length&&index<=UINT_MAX,
-                      "Invalid volume session partition selection");
-                selection=DiskPartitions::Selection{
-                    DiskPartitions::Filesystem(fs),{offset,length,unsigned(index),data.flag()}};
-            }
-            Check(bool(selection)==(format==uint64_t(ImageFormat::HfsPlus)||format>=uint64_t(ImageFormat::NdifHfsPlus)),
-                  "Unexpected volume session partition selection");
+            const auto origin=DecodeOrigin(data);
+            Check(origin.kind==WorkerOrigin::Image&&origin.imageMount,"Expected a typed disk image mount");
             data.end();
             ImageHandleTransfer::Scope storage(files);
-            std::shared_ptr<Volume> volume;
-            if(format>=uint64_t(ImageFormat::NdifHfsPlus)){
-                Check(journal.empty(),"NDIF has no external journal selection");
-                floppy_module_global_init();
-                const auto key=VolumeCoord::ImageKey(path);
-                const auto open=[&](bool write){
-                    auto disk=DiskImage::Reopen(path,DiskImage::Container::Ndif,{write});
-                    return OpenEditableNdif(std::move(disk),key,*selection);
-                };
-                try{volume=open(writable);}
-                catch(const HfsPlus::Error&){if(!writable)throw;volume=open(false);}
-                Check((format==uint64_t(ImageFormat::NdifClassic)&&!strcmp(volume->Kind(),"HFS"))||
-                      (format==uint64_t(ImageFormat::NdifMfs)&&!strcmp(volume->Kind(),"MFS"))||
-                      (format==uint64_t(ImageFormat::NdifHfsPlus)&&
-                       (!strcmp(volume->Kind(),"HFS+")||!strcmp(volume->Kind(),"HFSX"))),
-                      "The NDIF filesystem changed before the worker opened it");
-            } else if (format==uint64_t(ImageFormat::Mfs)) {
-                Check(journal.empty(),"MFS has no external journal");
-                volume=OpenMfsImage(path,writable);
-            } else if (format==uint64_t(ImageFormat::Classic)) {
-                Check(journal.empty(), "Classic HFS has no external journal");
-                floppy_module_global_init();
-                volume = OpenClassicImage(path, writable);
-            } else {
-                const auto key=VolumeCoord::ImageKey(path);
-                const auto open=[&](bool write){
-                    auto disk=DiskImage::Reopen(path,DiskImage::Container::Raw,{write,journal});
-                    Check(DiskPartitions::FindHfsPlus(*disk)==selection,"The selected HFS+ filesystem or partition changed");
-                    return FromHfsPlus(std::move(disk),write,key,journal);
-                };
-                try { volume=open(writable); }
-                catch (const HfsPlus::ExternalJournalRequired&) { throw; }
-                catch (const HfsPlus::Error&) {
-                    if (!writable) throw;
-                    volume=open(false);
-                }
-            }
+            const auto volume=OpenWorkerImage(origin);
             Data info;
             info.u16(volume->Name()); info.put(volume->Description()); info.put(!strcmp(volume->Kind(), "HFSX"));
             info.put(volume->CaseSensitive()); info.put(volume->Journaled()); info.put(volume->Writable());

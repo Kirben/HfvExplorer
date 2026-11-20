@@ -118,7 +118,7 @@ std::string AnsiPath(const std::wstring &path) {
 std::shared_ptr<Volume> OpenOrigin(const WorkerOrigin &o) {
     std::shared_ptr<Volume> volume;
     if (o.kind == WorkerOrigin::Image)
-        volume = MacBrowser::OpenImage(o.path, o.journal);
+        volume = MacBrowser::OpenWorkerImage(o);
     else if (o.kind == WorkerOrigin::Classic) {
         auto root = o.root;
         std::vector<char> converted(root.begin(), root.end());
@@ -311,6 +311,12 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         Process worker;
 #ifdef HFV_TESTING
         const unsigned testFault = fault.load();
+        if(testFault==staleImagePartition){
+            auto* origin=&target.origin;
+            if(!origin->imageMount&& !sources.empty())origin=&sources.front().origin;
+            Check(origin->imageMount&&origin->imageMount->selection,"Missing test image partition");
+            origin->imageMount->selection->partition.offset+=512;
+        }
         Handle testGate;
         if (testFault == 7) {
             const auto gate = ioGate.load();
@@ -616,6 +622,8 @@ int Child(const char *inputText, const char *outputText) {
                         if (!(endpoint?endpoint->FinishWorkerWrite(*volume):volume->Writable())) safe=false;
                     } catch (const std::exception&) { safe=false; }
                 }
+            } catch (const Storage::MediaChanged& error) {
+                result = {1, ERROR_MEDIA_CHANGED, error.what()};
             } catch (const std::exception &error) {
                 result = {1, ERROR_UNHANDLED_EXCEPTION, error.what()};
             } catch (...) {

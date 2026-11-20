@@ -14,7 +14,7 @@ using FileOperations::ForkSelector;
 using MacBrowser::Entry;
 using MacBrowser::WorkerOrigin;
 
-constexpr uint64_t protocol = 13;
+constexpr uint64_t protocol = 14;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     RequestPacket = 1,
@@ -130,6 +130,7 @@ void DecodeOutcome(Data &data, Storage::Result &result);
 void EncodeProgress(Data &data, const Storage::Progress &progress);
 Storage::Progress DecodeProgress(Data &data);
 void EncodeOrigin(Data &data, const WorkerOrigin &origin);
+WorkerOrigin DecodeOrigin(Data&);
 void EncodeEndpoint(Data &data, const Endpoint &endpoint);
 WireEndpoint ParseEndpoint(Data &data, bool allowMounted = true);
 Data EncodeRequest(const FileOperations::Request &request, HANDLE parent, unsigned fault,

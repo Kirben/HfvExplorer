@@ -3,6 +3,7 @@
 #ifdef HFV_TESTING
 #include "NdifImage.h"
 #include "VolumeSession.h"
+#include "CopyProcess.h"
 #include "NdifLzh.h"
 #include "DmgImage.h"
 #include "CopyProcess.h"
@@ -438,6 +439,21 @@ int RunNdifImageTest(const char* directory)
             {
                 auto volume=MacBrowser::OpenBrowserImage(path);
                 Check(volume&&volume->Writable()!=readOnly,"NDIF ignored partition write boundaries");
+                if(!readOnly){
+                    const auto input=Save(root+name+"-input.txt",Bytes{'T','e','s','t'});
+                    FileOperations::Request copy=FileOperations::OrdinaryCopy{
+                        {FileOperations::Location::Windows(input)},FileOperations::Location::Mounted(volume,2)};
+                    const auto key=volume->ResourceKey();
+                    Storage::Job job;
+                    FileOperations::Completion completion;
+                    CopyProcess::fault=CopyProcess::staleImagePartition;
+                    struct ResetFault { ~ResetFault(){CopyProcess::fault=0;} } reset;
+                    const auto failed=CopyProcess::Run(copy,job,completion,{key},{key});
+                    MacBrowser::Entry unexpected;
+                    Check(failed.error==ERROR_MEDIA_CHANGED&&failed.message.find("filesystem or partition changed")!=std::string::npos&&
+                          !volume->FindChild(2,MacBrowser::U16(VolumeCoord::Wide(std::string(name)+"-input.txt")),unexpected),
+                          "Temporary worker did not reject a stale partition before copying");
+                }
                 MacBrowser::Entry file;file.name=u"Inside Partition";file.forks[0].size=4;
                 const auto put=[&]{
                     return volume->Put(2,file,[](unsigned,uint64_t at,void* bytes,size_t length){
@@ -465,7 +481,7 @@ int RunNdifImageTest(const char* directory)
         partitionCase("partitioned-classic",*classicFile,false);
         partitionCase("partitioned-mfs",*mfsFile,false);
         partitionCase("protected-partition",*mfsFile,true);
-        fprintf(report,"PASS: validated APM classic HFS and MFS partitions for NDIF writes, with map protection and stale worker selection rejection.\n");
+        fprintf(report,"PASS: validated APM classic HFS and MFS partitions for NDIF writes, with map protection and stale partition rejection by persistent and temporary workers.\n");
         const auto sectors=uint32_t(raw->Size()/512);
         const auto rdwrMap=Resource(Map(sectors,0));
         const auto appleSingle=Save(root+"editable.as",Apple(volumeBytes,rdwrMap,true,true));

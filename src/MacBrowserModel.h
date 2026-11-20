@@ -2,6 +2,7 @@
 #pragma once
 
 namespace DiskPartitions { struct Selection; }
+namespace MacBrowser { struct WorkerOrigin; }
 #include "HfsPlus.h"
 #include "MfsImage.h"
 #include <map>
@@ -131,6 +132,7 @@ bool RecognizesClassicImage(const std::wstring&);
 std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source>,const std::string& key,
                                           const DiskPartitions::Selection&);
 std::shared_ptr<Volume> OpenClassicImage(const std::wstring&, bool writable);
+std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin&);
 // Recursive transfers retain both forks and reject self/descendant copies.
 // A move removes its source only after the entire selected tree was copied.
 bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage::Job &, bool move = false);

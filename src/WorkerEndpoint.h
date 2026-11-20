@@ -6,9 +6,16 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "DiskPartitions.h"
 
 namespace MacBrowser {
 class Volume;
+
+enum class ImageFormat { HfsPlus, Classic, Mfs, NdifHfsPlus, NdifClassic, NdifMfs };
+struct ImageMount {
+    ImageFormat format;
+    std::optional<DiskPartitions::Selection> selection;
+};
 
 struct WorkerOrigin {
     enum Kind { Unavailable, Image, Classic, Cd, Removable } kind = Unavailable;
@@ -18,6 +25,7 @@ struct WorkerOrigin {
     uint64_t offset = 0;
     DWORD generation = 0;
     bool generationKnown = false, writable = false;
+    std::optional<ImageMount> imageMount;
 };
 
 struct WorkerExecution {

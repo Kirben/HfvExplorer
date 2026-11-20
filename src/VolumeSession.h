@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "FileOperations.h"
-#include "DiskPartitions.h"
+#include "WorkerEndpoint.h"
 
 namespace VolumeSession {
 bool SharesMountedImage(const FileOperations::Location& source,const FileOperations::Location& destination);
 uint32_t PutFromMountedSource(MacBrowser::Volume&,uint32_t parent,const MacBrowser::Entry&,bool replace,
                          std::function<void(unsigned,uint64_t,size_t)> progress);
-enum class ImageFormat { HfsPlus, Classic, Mfs, NdifHfsPlus, NdifClassic, NdifMfs };
+using MacBrowser::ImageFormat;
 std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring &path, const std::string &key,
                                                        const std::wstring& journal, ImageFormat format,
                                                        std::optional<DiskPartitions::Selection> selection = {});

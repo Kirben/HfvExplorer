@@ -2,6 +2,8 @@
 #include "stdafx.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
+#include "StorageLocation.h"
+#include "floppy.h"
 #include "VolumeSession.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusCd.h"
@@ -370,7 +372,8 @@ std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source> source
                                           const DiskPartitions::Selection& expected)
 {
     const auto selected=FindNdifVolume(*source);
-    Check(selected&&selected->selection==expected,"The selected NDIF filesystem or partition changed");
+    if(!selected||selected->selection!=expected)
+        throw Storage::MediaChanged("The selected NDIF filesystem or partition changed");
     if(selected->format==VolumeSession::ImageFormat::NdifHfsPlus){
         const bool writable=source->Writable();
         return FromHfsPlus(std::move(source),writable,key);
@@ -411,6 +414,40 @@ static std::shared_ptr<Volume> OpenTrackImages(
     if(optical)return optical;
     if(invalid)std::rethrow_exception(invalid);
     throw HfsPlus::Error("No supported data filesystem was found in the optical track image");
+}
+
+std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin& origin)
+{
+    if(!origin.imageMount)
+        return OpenImage(origin.path,origin.journal);
+
+    StorageLocation::ValidateImage(origin.path,origin.identity);
+    const auto& mount=*origin.imageMount;
+    if(mount.format==ImageFormat::Mfs)
+        return OpenMfsImage(origin.path,origin.writable);
+    if(mount.format==ImageFormat::Classic){
+        floppy_module_global_init();
+        return OpenClassicImage(origin.path,origin.writable);
+    }
+
+    const bool ndif=mount.format!=ImageFormat::HfsPlus;
+    if(ndif)floppy_module_global_init();
+    const auto key=VolumeCoord::ImageKey(origin.path);
+    const auto open=[&](bool write){
+        auto disk=DiskImage::Reopen(origin.path,ndif?DiskImage::Container::Ndif:DiskImage::Container::Raw,
+                                    {write,origin.journal});
+        StorageLocation::ValidateImage(origin.path,origin.identity);
+        if(ndif)
+            return OpenEditableNdif(std::move(disk),key,*mount.selection);
+        if(DiskPartitions::FindHfsPlus(*disk)!=mount.selection)
+            throw Storage::MediaChanged("The selected HFS+ filesystem or partition changed");
+        return FromHfsPlus(std::move(disk),write,key,origin.journal);
+    };
+    try{return open(origin.writable);}
+    catch(const HfsPlus::Error&){
+        if(!origin.writable)throw;
+        return open(false);
+    }
 }
 
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr,const Dmg::PrivateKey* privateKey=nullptr) {

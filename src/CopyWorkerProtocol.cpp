@@ -82,6 +82,17 @@ void EncodeOrigin(Data &d, const WorkerOrigin &o) {
     d.put(o.generation);
     d.put(o.generationKnown);
     d.put(o.writable);
+    d.put(o.imageMount.has_value());
+    if(o.imageMount){
+        d.put(uint64_t(o.imageMount->format));
+        const auto& selected=o.imageMount->selection;
+        d.put(selected.has_value());
+        if(selected){
+            const auto& part=selected->partition;
+            d.put(uint64_t(selected->filesystem));
+            d.put(part.offset); d.put(part.length); d.put(part.index); d.put(part.readOnly);
+        }
+    }
 }
 WorkerOrigin DecodeOrigin(Data &d) {
     WorkerOrigin o;
@@ -101,6 +112,29 @@ WorkerOrigin DecodeOrigin(Data &d) {
     o.generation = DWORD(generation);
     o.generationKnown = d.flag();
     o.writable = d.flag();
+    if(d.flag()){
+        Check(o.kind==WorkerOrigin::Image&&!o.path.empty(),"Invalid worker image mount");
+        const auto format=d.get();
+        Check(format<=uint64_t(MacBrowser::ImageFormat::NdifMfs),"Invalid worker image format");
+        MacBrowser::ImageMount mount{MacBrowser::ImageFormat(format),{}};
+        if(d.flag()){
+            const auto fs=d.get(),offset=d.get(),length=d.get(),index=d.get();
+            const bool readOnly=d.flag();
+            using F=MacBrowser::ImageFormat;
+            using S=DiskPartitions::Filesystem;
+            const bool matching=(fs==uint64_t(S::HfsPlus)||fs==uint64_t(S::HfsX))?
+                mount.format==F::HfsPlus||mount.format==F::NdifHfsPlus:
+                fs==uint64_t(S::Classic)?mount.format==F::NdifClassic:
+                fs==uint64_t(S::Mfs)&&mount.format==F::NdifMfs;
+            Check(matching&&length&&offset<=UINT64_MAX-length&&index<=UINT_MAX,"Invalid worker filesystem or partition");
+            mount.selection=DiskPartitions::Selection{DiskPartitions::Filesystem(fs),
+                {offset,length,unsigned(index),readOnly}};
+        }
+        using F=MacBrowser::ImageFormat;
+        Check(bool(mount.selection)==(mount.format!=F::Classic&&mount.format!=F::Mfs)&&
+              (o.journal.empty()||mount.format==F::HfsPlus),"Invalid worker image mount options");
+        o.imageMount=std::move(mount);
+    }
     return o;
 }
 void EncodeEndpoint(Data &d, const Endpoint &e) {
