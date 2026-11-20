@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-edited-attributes.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-embedded-acl.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1323,6 +1323,14 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     file.forks[0].size=5;
     folder.name=u"Folder";
     folder.attributes={{u"user.folder",{0,7}}};
+    Bytes acl(68);
+    Disk::P32(acl.data(),0x012cc16d);
+    Disk::P32(acl.data()+36,1);
+    for(unsigned i=0;i<16;++i)acl[44+i]=uint8_t(i+1);
+    Disk::P32(acl.data()+60,1);
+    Disk::P32(acl.data()+64,2);
+    file.attributes.emplace(u"com.apple.system.Security",acl);
+    folder.attributes.emplace(u"com.apple.system.Security",acl);
     folder.directory=true;
     folder.finder[9]=0x08;
     const auto contents=[](unsigned fork,uint64_t offset,void* data,size_t bytes){
@@ -1363,11 +1371,16 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         MacBrowser::Entry copiedFolder,copiedFile;
         auto edited=file.attributes;
         edited.erase(u"user.sample");
+        edited.erase(u"com.apple.system.Security");
         edited[u"user.new"]={9,8,7};
         mounted->SetAttributes(id,edited);
         Check(mounted->GetAttributes(id)==edited&&mounted->Stat(id).finder==file.finder&&
               mounted->Stat(id).forks[0].size==5,"APFS attribute editing lost other metadata or file data");
         mounted->SetAttributes(id,file.attributes);
+        auto malformed=file.attributes;
+        malformed[u"com.apple.system.Security"]=Bytes(67);
+        Reject([&]{mounted->SetAttributes(id,malformed);},"APFS accepted a malformed ACL");
+        Check(mounted->GetAttributes(id)==file.attributes,"Rejected APFS ACL changed existing attributes");
         Check(MacBrowser::Copy(*mounted,parent,*mounted,destination,job)&&
               mounted->FindChild(destination,u"Renamed Folder",copiedFolder)&&copiedFolder.finder==folder.finder&&
               mounted->FindChild(copiedFolder.id,file.name,copiedFile)&&copiedFile.finder==file.finder,

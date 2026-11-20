@@ -517,10 +517,17 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
 }
 
 constexpr uint64_t EmbeddedAttributeLimit=3804;
+constexpr uint64_t HasSecurityAttribute=0x40;
+constexpr auto SecurityAttribute=u"com.apple.system.Security";
+void SetSecurityFlag(Bytes& inode,const HfsPlus::Attributes& attributes)
+{
+    const auto flags=Le64(inode.data()+48)&~HasSecurityAttribute;
+    Set(inode,48,flags|(attributes.count(SecurityAttribute)?HasSecurityAttribute:0),8);
+}
 bool OrdinaryAttribute(std::string_view name)
 {
     return name!="com.apple.FinderInfo"&&name!="com.apple.ResourceFork"&&name!="com.apple.decmpfs"&&
-           name!="com.apple.fs.symlink"&&name!="com.apple.system.Security";
+           name!="com.apple.fs.symlink";
 }
 
 std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attributes* attributes)
@@ -663,6 +670,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     link->second.inodeRecord=i;
                     link->second.finder=readFinder(view.value.data,view.value.size);
                 }
+                bool hasSecurity=false;
                 if(!reservedInode){
                     std::string previousAttribute;
                     for(;i+1+streamRecords<records.size();++streamRecords){
@@ -675,10 +683,13 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         const std::string name(reinterpret_cast<const char*>(attr.key.data+10),attr.key.size-11);
                         Check(name>previousAttribute&&name.find('\0')==name.npos&&OrdinaryAttribute(name),
                               "Invalid APFS attribute name or order");
+                        hasSecurity|=name=="com.apple.system.Security";
                         previousAttribute=name;
                     }
                     link->second.attributes=streamRecords;
                 }
+                Check(bool(Le64(view.value.data+48)&HasSecurityAttribute)==hasSecurity,
+                      "APFS security attribute and inode flag disagree");
                 const auto mode=Le16(view.value.data+80)&0170000;
                 if(kind==CatalogKind::Directory){
                     Check(mode==0040000&&directories.emplace(inode,Directory{i}).second,"Invalid APFS directory inode");
@@ -691,6 +702,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const auto size=view.value.size==streamEnd?Le64(value+stream):0;
                     Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
                     auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size,finder?&*finder:nullptr);
+                    if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     Set(expected.value,68,Le32(value+68)&UserImmutable,4);
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
@@ -756,6 +768,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize,create->finder));
         if(create->locked)Set(records.back().value,68,UserImmutable,4);
+        if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes);
         records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
@@ -777,6 +790,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         if(attributesEdit){
             auto attributes=EncodeAttributes(entryId,&attributesEdit->attributes);
+            SetSecurityFlag(inode,attributesEdit->attributes);
             Set(inode,32,time,8);
             const auto index=link.inodeRecord+1;
             records.erase(records.begin()+index,records.begin()+index+link.attributes);
@@ -826,6 +840,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             streamAt=afterInode+link.attributes;
             if(replace->attributes){
                 auto attributes=EncodeAttributes(entryId,replace->attributes);
+                SetSecurityFlag(inode,*replace->attributes);
                 records.erase(records.begin()+afterInode,records.begin()+streamAt+link.streamRecords);
                 records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
                                std::make_move_iterator(attributes.end()));
@@ -916,6 +931,7 @@ void ValidateEmbeddedAttributes(const HfsPlus::Attributes& attributes)
         const auto name=EncodeAttributeName(wide);
         Check(OrdinaryAttribute(name),"Special APFS attributes require dedicated write support");
         Check(value.size()<EmbeddedAttributeLimit,"APFS extended attribute requires a data stream");
+        if(wide==SecurityAttribute)HfsPlus::ValidateAttributes({{wide,value}});
     }
 }
 
