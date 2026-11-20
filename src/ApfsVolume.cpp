@@ -403,6 +403,18 @@ public:
         });
     }
     Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
+    bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override{
+        const auto sensitive=Access([&]{
+            const auto& folder=At(parent);
+            return !folder.oid||mounts[folder.mount].sensitive;
+        });
+        for(auto& entry:List(parent)){
+            if(HfsPlus::CompareNames(entry.name,name,sensitive)!=0)continue;
+            found=std::move(entry);
+            return true;
+        }
+        return false;
+    }
 private:
     void ReadStream(size_t mount,uint64_t stream,uint64_t at,void* data,size_t size){
         if(!size)return;

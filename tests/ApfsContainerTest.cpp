@@ -242,6 +242,7 @@ Memory SecondVolume()
     auto block=[&](size_t index){return disk.bytes.data()+index*size;};
     memcpy(block(38),block(37),size);
     Header(block(38),1029,5,13);
+    Little(block(38)+56,8,8); // Case-sensitive with normalization-insensitive directory keys.
     Little(block(38)+128,27,8);
     memcpy(block(27),block(24),size);
     Header(block(27),27,5,0x4000000b);
@@ -539,6 +540,11 @@ int RunApfsContainerTest(const char* directory)
         Check(container->Name()==u"APFS Container"&&volumes.size()==2&&volumes[0].name==u"APFS Fixture"&&
               volumes[1].name==u"APFS Fixture (2)"&&volumes[0].id!=volumes[1].id,
               "APFS container did not expose both volumes with unambiguous names");
+        MacBrowser::Entry insensitive,sensitive;
+        Check(container->FindChild(volumes[0].id,u"folder",insensitive)&&
+              !container->FindChild(volumes[1].id,u"folder",sensitive)&&
+              container->FindChild(volumes[1].id,u"Folder",sensitive)&&insensitive.id!=sensitive.id,
+              "APFS child lookups did not honor each volume's case sensitivity");
         uint32_t second=0;
         for(size_t i=0;i<volumes.size();++i){
             const auto folder=container->List(volumes[i].id).at(0);
@@ -567,7 +573,7 @@ int RunApfsContainerTest(const char* directory)
         char secondData=0;
         multiExports->Read(secondCopy.id,0,0,&secondData,1);
         Check(CopyProcess::lastProcess&&secondData=='B',"APFS copy worker reopened the wrong volume");
-        fprintf(report,"PASS: same-named volumes, overlapping APFS object IDs and export from the second volume.\n");
+        fprintf(report,"PASS: same-named APFS volumes, per-volume case sensitivity, overlapping object IDs and export from the second volume.\n");
         const auto dmgPath=VolumeCoord::Wide(root+"apfs.dmg");
         Storage::Job convert;
         const auto wrapped=Dmg::Convert(path,dmgPath,Dmg::Output::CompressedDmg,convert);
