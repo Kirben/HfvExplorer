@@ -15,6 +15,7 @@ struct CatalogCreate {
     const std::u16string& name;
     CatalogKind kind;
     HfsPlus::Source* data=nullptr;
+    std::optional<FileDates> dates;
 };
 struct CatalogRename {
     uint64_t parent,inode;
@@ -26,6 +27,7 @@ struct CatalogDelete {
 struct CatalogReplaceData {
     uint64_t parent,inode;
     HfsPlus::Source& data;
+    std::optional<FileDates> dates;
 };
 using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData>;
 
@@ -38,6 +40,8 @@ struct CatalogWritePlan {
     HfsPlus::Source* input=nullptr;
     uint64_t dataSize=0;
 };
+std::string CatalogName(const std::u16string&);
+uint64_t CatalogTimestamp(uint64_t secondsSince1904);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);
 uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);
 CatalogWritePlan PrepareCatalogMutation(

@@ -399,13 +399,13 @@ void CheckpointWrites(const std::string& root,FILE* report)
     CheckpointFaultImage dataFiles(files.durable);
     Memory payload(9003);
     for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t(i*31+(i>>9));
-    Check(Apfs::CreateFile(dataFiles,*beforeData,childFolder,u"Data.bin",payload,controlJob)==8,
+    Check(Apfs::CreateCatalogFile(dataFiles,*beforeData,childFolder,u"Data.bin",payload,controlJob)==8,
           "APFS could not create a multi-block data fork");
     for(unsigned step=1;step<=dataFiles.event;++step){
         CheckpointFaultImage attempt(files.durable);
         attempt.failAt=step;
         attempt.fault=step==dataFiles.event||step==dataFiles.event-2?Fault::FailedFlush:Fault::TornWrite;
-        Reject([&]{Apfs::CreateFile(attempt,*beforeData,childFolder,u"Data.bin",payload,controlJob);},
+        Reject([&]{Apfs::CreateCatalogFile(attempt,*beforeData,childFolder,u"Data.bin",payload,controlJob);},
                "Injected APFS data-write interruption succeeded");
         const auto mounted=openCheckpoint(attempt);
         MacBrowser::Entry topDir,parentDir,entry;
@@ -417,7 +417,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
     }
     CheckpointFaultImage outOfSpace(files.durable);
     Memory oversized(imageSize);
-    Reject([&]{Apfs::CreateFile(outOfSpace,*beforeData,2,u"Too large",oversized,controlJob);},
+    Reject([&]{Apfs::CreateCatalogFile(outOfSpace,*beforeData,2,u"Too large",oversized,controlJob);},
            "APFS accepted a fork with no available extent");
     Check(!outOfSpace.event&&outOfSpace.durable==files.durable,"APFS wrote before rejecting an allocation failure");
     const auto afterData=Apfs::Probe(dataFiles);
@@ -432,7 +432,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
         Storage::Job job;
         cancelled.onFlush=[&]{job.cancel();};
         bool stopped=false;
-        try{Apfs::CreateFile(cancelled,*afterFolder,secondParent,u"Small.bin",small,job);}
+        try{Apfs::CreateCatalogFile(cancelled,*afterFolder,secondParent,u"Small.bin",small,job);}
         catch(const Storage::Cancelled&){stopped=true;}
         const auto mounted=openCheckpoint(cancelled);
         MacBrowser::Entry topDir,parentDir,entry,destination;
@@ -444,7 +444,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
         mounted->Read(entry.id,0,0,restored.data(),restored.size());
         Check(restored==payload.bytes,"Cancelled APFS file creation changed existing file data");
     }
-    Check(Apfs::CreateFile(dataFiles,*afterFolder,secondParent,u"Small.bin",small,controlJob)==10,
+    Check(Apfs::CreateCatalogFile(dataFiles,*afterFolder,secondParent,u"Small.bin",small,controlJob)==10,
           "APFS could not add a second physical extent reference");
     const auto withData=openCheckpoint(dataFiles);
     MacBrowser::Entry dataTop,dataParent,dataEntry,secondDir,smallEntry;
@@ -469,7 +469,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
     // Move Small.bin's one-block extent into the middle of the free space.
     // Update both trees and the raw bitmap so the fixture remains valid APFS.
     CheckpointFaultImage fragmentationSeed(original);
-    Check(Apfs::CreateFile(fragmentationSeed,*start,2,u"Small.bin",small,controlJob)==2,
+    Check(Apfs::CreateCatalogFile(fragmentationSeed,*start,2,u"Small.bin",small,controlJob)==2,
           "APFS could not create the fragmentation fixture's blocking file");
     auto fragmentedBase=fragmentationSeed.durable;
     const auto dataCheckpoint=Apfs::Probe(fragmentationSeed);
@@ -526,13 +526,13 @@ void CheckpointWrites(const std::string& root,FILE* report)
     Memory fragmentedPayload(1100*4096-37);
     for(size_t i=0;i<fragmentedPayload.bytes.size();++i)fragmentedPayload.bytes[i]=uint8_t((i>>11)+(i>>19)+i*13);
     CheckpointFaultImage fragmented(fragmentedBase);
-    Check(Apfs::CreateFile(fragmented,*dataCheckpoint,2,u"Fragmented.bin",fragmentedPayload,controlJob)==3,
+    Check(Apfs::CreateCatalogFile(fragmented,*dataCheckpoint,2,u"Fragmented.bin",fragmentedPayload,controlJob)==3,
           "APFS could not use the free space on both sides of an allocated block");
     {
         CheckpointFaultImage interrupted(fragmentedBase);
         interrupted.failAt=1025; // Beyond the maximum length of any run in this fixture.
         interrupted.fault=Fault::TornWrite;
-        Reject([&]{Apfs::CreateFile(interrupted,*dataCheckpoint,2,u"Fragmented.bin",fragmentedPayload,controlJob);},
+        Reject([&]{Apfs::CreateCatalogFile(interrupted,*dataCheckpoint,2,u"Fragmented.bin",fragmentedPayload,controlJob);},
                "Injected APFS interruption after crossing an extent boundary succeeded");
         const auto restored=openCheckpoint(interrupted);
         MacBrowser::Entry entry;
@@ -616,7 +616,7 @@ void MultiChunkWrites(const std::string& root,FILE* report)
         Storage::Job job;
         Apfs::Format(*image,u"Multi-chunk fixture",false,job);
         const auto initial=Apfs::Probe(*image);
-        Check(initial&&Apfs::CreateFile(*image,*initial,2,u"Across chunks",pattern,job)==2,
+        Check(initial&&Apfs::CreateCatalogFile(*image,*initial,2,u"Across chunks",pattern,job)==2,
               "APFS did not allocate file data beyond its first chunk");
 
         const auto checkpoint=Apfs::Probe(*image);
@@ -627,13 +627,13 @@ void MultiChunkWrites(const std::string& root,FILE* report)
             Storage::Job cancelled;
             CancelAfterFlush wrapper(*image,cancelled);
             bool stopped=false;
-            try{Apfs::CreateFile(wrapper,*checkpoint,2,u"Cancelled",patternSlice,cancelled);}
+            try{Apfs::CreateCatalogFile(wrapper,*checkpoint,2,u"Cancelled",patternSlice,cancelled);}
             catch(const Storage::Cancelled&){stopped=true;}
             const auto recovered=Apfs::Probe(*image);
             Check(stopped&&recovered&&recovered->transaction==2,
                   "APFS exposed a checkpoint after cancellation following the multi-chunk bitmap flush");
         }
-        Check(Apfs::CreateFile(*image,*checkpoint,2,u"Another",patternSlice,job)==3,
+        Check(Apfs::CreateCatalogFile(*image,*checkpoint,2,u"Another",patternSlice,job)==3,
               "APFS could not allocate after reopening a materialized chunk");
         image->Keep();
     }
@@ -689,13 +689,13 @@ void MultiCibWrites(const std::string& root,FILE* report)
             Storage::Job cancelled;
             CancelAfterFlush wrapper(*image,cancelled);
             bool stopped=false;
-            try{Apfs::CreateFile(wrapper,*initial,2,u"Second CIB",payload,cancelled);}
+            try{Apfs::CreateCatalogFile(wrapper,*initial,2,u"Second CIB",payload,cancelled);}
             catch(const Storage::Cancelled&){stopped=true;}
             const auto recovered=Apfs::Probe(*image);
             Check(stopped&&recovered&&recovered->transaction==1&&readCibs(*image,*recovered)==oldCibs,
                   "Cancelled APFS write changed the selected chunk-info blocks");
         }
-        Check(Apfs::CreateFile(*image,*initial,2,u"Second CIB",payload,job)==2,
+        Check(Apfs::CreateCatalogFile(*image,*initial,2,u"Second CIB",payload,job)==2,
               "APFS could not write across two chunk-info blocks");
         const auto written=Apfs::Probe(*image);
         Check(written.has_value(),"Missing APFS checkpoint after the multi-CIB write");
@@ -769,7 +769,7 @@ void SplitCatalogWrites(const std::string& root,FILE* report)
     Memory payload(4096+11);
     for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i>>8)+i*11);
     const auto add=[&](Source& target,const Apfs::Container& checkpoint,size_t index,const std::u16string& name){
-        if(index%5==0)return Apfs::CreateFile(target,checkpoint,2,name,payload,job);
+        if(index%5==0)return Apfs::CreateCatalogFile(target,checkpoint,2,name,payload,job);
         return Apfs::CreateCatalogDirectory(target,checkpoint,2,name,job);
     };
 
@@ -961,7 +961,7 @@ void DeleteCatalogWrites(const std::string& root,FILE* report)
 
     Memory replacement(contents.size());
     for(size_t i=0;i<replacement.bytes.size();++i)replacement.bytes[i]=uint8_t(contents[i]^0x53);
-    Reject([&]{Apfs::CreateFile(disk,*withChild,rootId,u"Replacement",replacement,job);},
+    Reject([&]{Apfs::CreateCatalogFile(disk,*withChild,rootId,u"Replacement",replacement,job);},
            "APFS delete test did not exhaust free space before deletion");
     Reject([&]{Apfs::ReplaceFileData(disk,*withChild,rootId,fileInode,replacement,job);},
            "APFS data replacement reused live extents when the image was nearly full");
@@ -990,7 +990,7 @@ void DeleteCatalogWrites(const std::string& root,FILE* report)
     save("checkpoint-deleted-extents.img");
 
     const auto afterDelete=Apfs::Probe(disk);
-    Check(afterDelete&&Apfs::CreateFile(disk,*afterDelete,rootId,u"Replacement",replacement,job)==afterDelete->transaction+1,
+    Check(afterDelete&&Apfs::CreateCatalogFile(disk,*afterDelete,rootId,u"Replacement",replacement,job)==afterDelete->transaction+1,
           "APFS did not reclaim the retired file extents on the next transaction");
     const auto afterReuse=Apfs::Probe(disk);
     Check(afterReuse&&Apfs::DeleteEntry(disk,*afterReuse,folderInode,childInode,job)==afterReuse->transaction+1,
@@ -1144,7 +1144,7 @@ void WritableNamespace(const std::string& root,FILE* report)
         Check(mounted&&mounted->Writable()&&!source,"An exclusive native APFS image did not mount writable");
         Reject([&]{OpenImage(path.c_str(),true);},"A second writer opened the mounted APFS image");
         const auto caps=mounted->Supports();
-        Check(caps.writable&&caps.rename&&caps.remove&&caps.createFolders&&!caps.create&&
+        Check(caps.writable&&caps.rename&&caps.remove&&caps.createFolders&&caps.create&&!caps.resourceForks&&
               !caps.CanEditAttributes()&&MacBrowser::ExecutionFor(*mounted).processLocal,
               "APFS advertised unsupported write or worker operations");
 
@@ -1221,7 +1221,58 @@ void WritableNamespace(const std::string& root,FILE* report)
         MacBrowser::Entry entry;
         Check(recovered&&!recovered->FindChild(2,u"Uncertain",entry),"APFS reopen left an unpublished folder visible");
     }
-    fprintf(report,"PASS: APFS writable shared-volume adapter, exclusive images, stable row IDs, namespace edits, and uncertain flush recovery.\n");
+    {
+        CheckpointFaultImage* raw=nullptr;
+        const auto mounted=faultMount(raw);
+        MacBrowser::Entry target;
+        Check(mounted->FindChild(2,u"renamed file",target),"APFS transfer test could not find its overwrite destination");
+        Bytes oldData(size_t(target.forks[0].size)),reopened(oldData.size());
+        mounted->Read(target.id,0,0,oldData.data(),oldData.size());
+        auto replacement=target;
+        replacement.forks[0].size=8173;
+        replacement.expectedDestinationIdentity=target.identity;
+        Storage::Job cancelled;
+        raw->onFlush=[&]{cancelled.cancel();};
+        bool stopped=false;
+        try{
+            mounted->PutForTransfer(2,replacement,[](unsigned,uint64_t,void* buffer,size_t size){
+                memset(buffer,0xab,size);
+            },true,cancelled);
+        }catch(const Storage::Cancelled&){stopped=true;}
+        Check(stopped&&mounted->Stat(target.id).forks[0].size==oldData.size(),
+              "APFS transfer did not honour cancellation after its first flush");
+        mounted->Read(target.id,0,0,reopened.data(),reopened.size());
+        Check(reopened==oldData,"Late APFS transfer cancellation changed the existing file");
+        raw->onFlush={};
+        bool readFailed=false;
+        Reject([&]{
+            mounted->Put(2,replacement,[&](unsigned,uint64_t at,void* buffer,size_t size){
+                if(at){readFailed=true;throw Error("Injected APFS copy-source error");}
+                memset(buffer,0xcd,size);
+            },true);
+        },"APFS transfer published a partial data fork when its source failed");
+        mounted->Read(target.id,0,0,reopened.data(),reopened.size());
+        Check(readFailed&&reopened==oldData,"APFS source read failure changed existing data");
+        bool nestedRefused=false;
+        Reject([&]{
+            mounted->Put(2,replacement,[&](unsigned,uint64_t,void*,size_t){
+                try{mounted->MakeDirectory(2,u"Nested write");}
+                catch(const Error&){nestedRefused=true;throw;}
+            },true);
+        },"APFS transfer allowed a nested catalog write from its reader");
+        MacBrowser::Entry unused;
+        Check(nestedRefused&&!mounted->FindChild(2,u"Nested write",unused),"APFS nested write changed the catalog");
+        for(const auto withResource:{false,true}){
+            auto unsupported=replacement;
+            if(withResource)unsupported.forks[1].size=1;
+            else unsupported.finder[0]=1;
+            const auto before=raw->event;
+            Reject([&]{mounted->Put(2,unsupported,[](unsigned,uint64_t,void*,size_t){},true);},
+                   "APFS transfer accepted metadata it cannot preserve");
+            Check(raw->event==before,"APFS rejected metadata after starting to write");
+        }
+    }
+    fprintf(report,"PASS: APFS writable shared-volume adapter, exclusive images, stable row IDs, namespace edits, uncertain flush recovery, and late transfer cancellation.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)

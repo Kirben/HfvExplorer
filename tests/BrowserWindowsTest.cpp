@@ -480,8 +480,8 @@ int RunBrowserWindowsTest(const char* directory){
    list.SetItemState(-1,0,LVIS_SELECTED);
    list.SetItemState(fileRow,LVIS_SELECTED,LVIS_SELECTED);
    Check(sa.MacBrowser().CanCreateFolder()&&sa.MacBrowser().CanRename()&&sa.MacBrowser().CanDelete()&&
-         !sa.MacBrowser().Writable()&&!sa.MacBrowser().SelectionWritable()&&
-         sa.MacBrowser().SelectedItems(true).items.empty()&&sa.MacBrowser().CanExport(),
+         sa.MacBrowser().Writable()&&sa.MacBrowser().SelectionWritable()&&
+         !sa.MacBrowser().CanImportResource()&&sa.MacBrowser().CanExport(),
          "APFS browser advertised the wrong namespace or transfer commands");
    const auto waitForRows=[&](const wchar_t* name,bool present){
     const auto deadline=GetTickCount64()+10000;
@@ -514,7 +514,74 @@ int RunBrowserWindowsTest(const char* directory){
    auto remove=FileOperations::Submit(FileOperations::DeleteEntries{{created}});
    Check(outcome(remove)&&waitForRows(L"Browser folder",false)&&VolumeCoord::Revision(mount->ResourceKey())>before,
          "APFS deletion did not refresh both browser windows");
-   fprintf(report,"PASS: ordinary APFS browser open shares an exclusive writable mount, limits commands, and refreshes both windows after namespace edits.\n");
+   fprintf(report,"PASS: ordinary APFS browser open shares an exclusive writable mount and refreshes both windows after namespace edits.\n");
+
+   const auto incomingPath=VolumeCoord::Wide(std::string((LPCSTR)(host+"\\APFS incoming.txt")));
+   const auto writeHost=[&](const std::string& bytes){
+    HANDLE file=CreateFileW(incomingPath.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    Check(file!=INVALID_HANDLE_VALUE,"create Windows APFS copy fixture");
+    struct Close {HANDLE file;~Close(){CloseHandle(file);}} close{file};
+    DWORD written=0;
+    Check(WriteFile(file,bytes.data(),DWORD(bytes.size()),&written,nullptr)!=FALSE&&written==bytes.size(),
+          "write Windows APFS copy fixture");
+    ULARGE_INTEGER value{};
+    value.QuadPart=(9561628800ull+2170000777ull)*10000000;
+    FILETIME stamp{value.LowPart,value.HighPart};
+    Check(SetFileTime(file,&stamp,nullptr,&stamp)!=FALSE,"set Windows APFS copy fixture dates");
+   };
+   const auto target=sa.MacBrowser().TargetFolder();
+   const auto from=FileOperations::Location::Windows(incomingPath);
+   FileOperations::OrdinaryCopy copyToApfs{{from},target};
+   std::string oldBytes(9003,'a'),newBytes(7333,'b');
+   for(size_t i=0;i<oldBytes.size();++i)oldBytes[i]=char((i>>7)+i*11);
+   writeHost(oldBytes);
+   const auto sourceDates=MacBrowser::DescribeWindowsFile(incomingPath);
+   auto import=FileOperations::Submit(copyToApfs);
+   Check(outcome(import)&&waitForRows(L"APFS incoming.txt",true),"Windows-to-APFS copy did not refresh both windows");
+   const auto readImported=[&]{
+    MacBrowser::Entry entry;
+    Check(mount->FindChild(2,u"APFS incoming.txt",entry),"Missing imported APFS file");
+    std::string bytes(size_t(entry.forks[0].size),'\0');
+    mount->Read(entry.id,0,0,bytes.data(),bytes.size());
+    return std::make_pair(entry,std::move(bytes));
+   };
+   const auto saved=readImported();
+   Check(saved.second==oldBytes&&saved.first.datesValid&&saved.first.created==sourceDates.created&&
+         saved.first.modified==sourceDates.modified,"APFS copy lost file data or timestamps");
+
+   writeHost(newBytes);
+   for(const auto choice:{Storage::ConflictChoice::Skip,Storage::ConflictChoice::Cancel,Storage::ConflictChoice::Replace}){
+    auto overwrite=FileOperations::Submit(copyToApfs);
+    const auto deadline=GetTickCount64()+10000;
+    while(overwrite.Job()->conflict().empty()&&!overwrite.Job()->done()&&GetTickCount64()<deadline)Sleep(1);
+    Check(!overwrite.Job()->conflict().empty(),"APFS overwrite did not ask for approval");
+    overwrite.Job()->resolve(choice);
+    const auto done=outcome(overwrite);
+    const auto updated=readImported();
+    Check((choice==Storage::ConflictChoice::Cancel?!done&&overwrite.Job()->result().error==ERROR_CANCELLED:done)&&
+          updated.second==(choice==Storage::ConflictChoice::Replace?newBytes:oldBytes)&&
+          updated.first.identity==saved.first.identity&&updated.first.created==sourceDates.created,
+          "APFS overwrite choice changed the wrong data, outcome, or file identity");
+   }
+   const auto folder=mount->MakeDirectory(2,u"APFS copy target");
+   auto sameImage=FileOperations::Submit(FileOperations::OrdinaryCopy{
+      {FileOperations::Location::Mounted(mount,saved.first.id)},FileOperations::Location::Mounted(mount,folder)});
+   Check(outcome(sameImage),"Same-image APFS file transfer did not complete");
+   MacBrowser::Entry nestedFile;
+   Check(mount->FindChild(folder,u"APFS incoming.txt",nestedFile)&&nestedFile.forks[0].size==newBytes.size(),
+         "Same-image APFS copy produced no data entry");
+   std::string nestedBytes(newBytes.size(),'\0');
+   mount->Read(nestedFile.id,0,0,nestedBytes.data(),nestedBytes.size());
+   Check(nestedBytes==newBytes,"Same-image APFS copy changed the source bytes");
+
+   const auto unsupported=VolumeCoord::Wide(std::string((LPCSTR)(host+"\\APFS unsupported folder")));
+   Check(CreateDirectoryW(unsupported.c_str(),nullptr)!=FALSE,"create unsupported APFS folder source");
+   const auto planned=FileOperations::Location::Windows(unsupported);
+   auto blocked=FileOperations::Submit(FileOperations::OrdinaryCopy{{from,planned},FileOperations::Location::Mounted(mount,folder)});
+   Check(!outcome(blocked)&&blocked.Job()->conflict().empty()&&
+         mount->FindChild(folder,u"APFS incoming.txt",nestedFile)&&mount->List(folder).size()==1,
+         "An unsupported APFS folder transfer was not rejected before writing");
+   fprintf(report,"PASS: Windows/APFS copying, overwrite Replace/Skip/Cancel, timestamps, same-image streaming, and unsupported folder preflight.\n");
   }
   // Make the first frame the MFC main window before closing it: this is the
   // case that CFrameWnd's default SDI shutdown used to close every document.

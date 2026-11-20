@@ -280,7 +280,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
             advance(fork,offset,count);
         };
         auto hostPath=plan.reader?std::wstring{}:src.HostPath(entry.id);
-        if(hostPath.empty())published=dst.Put(parent,outgoing,std::move(reader),found);
+        if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
     if(track)copies.emplace(key,std::make_pair(parent,dst.Stat(published).name));++progress.files; job.progress(progress); return true;

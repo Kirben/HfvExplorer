@@ -1413,7 +1413,7 @@ void CMainFrame::OnUpdateMacTransfer(CCmdUI* ui){
  auto& browser=GetBrowserSession().MacBrowser();bool enabled=false;
  if(!StorageUi::busy()){
   if(ui->m_nID==ID_FILE_MAC_IMPORT)enabled=browser.Writable();
-  else if(ui->m_nID==ID_FILE_MAC_IMPORT_RESOURCE)enabled=browser.CanExport()&&browser.SelectionWritable();
+  else if(ui->m_nID==ID_FILE_MAC_IMPORT_RESOURCE)enabled=browser.CanImportResource();
   else enabled=browser.CanExport();
  }
  ui->Enable(enabled);

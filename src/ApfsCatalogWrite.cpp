@@ -30,17 +30,6 @@ constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
 constexpr size_t MainFreeQueue=240,PoolFreeQueue=200;
 
-std::string CatalogName(const std::u16string& name)
-{
-    Check(!name.empty()&&name.size()<=255&&name!=u"."&&name!=u"..","Invalid APFS entry name");
-    std::string result;
-    for(const auto c:name){
-        Check(c>=32&&c<127&&c!='/'&&c!=':',"APFS catalog updates currently require an ASCII entry name");
-        result+=char(c);
-    }
-    return result;
-}
-
 Bytes ReadBlock(Source& source,uint64_t block)
 {
     return HfsPlus::Disk::Read(source,block*Block,Block);
@@ -530,7 +519,7 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
-    size_t& streamAt)
+    size_t& streamAt,const std::optional<FileDates>& dates)
 {
     Check(directoryCount<=records.size()&&fileCount<=records.size(),"Invalid APFS catalog entry counts");
     const auto at=[&](size_t i){
@@ -542,6 +531,11 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool replace=std::holds_alternative<CatalogReplaceData>(request);
+    const auto copyDates=[&](Bytes& inode){
+        if(!dates)return;
+        Set(inode,16,CatalogTimestamp(dates->created),8);
+        Set(inode,24,CatalogTimestamp(dates->modified),8);
+    };
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
     using Key=std::tuple<uint64_t,uint64_t,uint32_t>;
@@ -683,6 +677,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+        copyDates(records.back().value);
         streamAt=records.size();
     }else{
         const auto found=links.find(entryId);
@@ -710,7 +705,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         auto updated=WriterDisk::Inode(replace?link.name:name,entryId,0,parent,mode,count,replace?dataSize:link.dataSize);
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
         Set(updated.value,32,time,8);
-        if(replace)Set(updated.value,24,time,8);
+        if(replace){
+            Set(updated.value,24,time,8);
+            copyDates(updated.value);
+        }
         inode=std::move(updated.value);
         if(replace){
             streamAt=link.inodeRecord+1;
@@ -795,6 +793,24 @@ void CheckNativeVolume(const Bytes& volume)
 }
 }
 
+std::string CatalogName(const std::u16string& name)
+{
+    Check(!name.empty()&&name.size()<=255&&name!=u"."&&name!=u"..","Invalid APFS entry name");
+    std::string result;
+    for(const auto c:name){
+        Check(c>=32&&c<127&&c!='/'&&c!=':',"APFS catalog updates currently require an ASCII entry name");
+        result+=char(c);
+    }
+    return result;
+}
+
+uint64_t CatalogTimestamp(uint64_t secondsSince1904)
+{
+    constexpr int64_t UnixEpoch=2082844800,Second=1000000000;
+    Check(secondsSince1904<=UnixEpoch+INT64_MAX/Second,"The timestamp is outside the APFS writable range");
+    return uint64_t((int64_t(secondsSince1904)-UnixEpoch)*Second);
+}
+
 void ValidateWritableLayout(Source& source,const Container& container)
 {
     Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
@@ -823,6 +839,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto ascii=create?CatalogName(create->name):rename?CatalogName(rename->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
+    const auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
     CatalogWritePlan plan;
     plan.input=replace?&replace->data:create?create->data:nullptr;
     plan.dataSize=plan.input?plan.input->Size():0;
@@ -858,7 +875,7 @@ CatalogWritePlan PrepareCatalogMutation(
         else return edit.inode;
     },request);
     auto catalog=EditCatalog(std::move(existing.records),request,ascii,nextId,entryId,time,flags==1,
-                            directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind,streamAt);
+                            directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind,streamAt,dates);
     ValidateExtentReferences(extentTree,files);
     const bool retireOldData=replace||removedKind.has_value();
     std::vector<DataRun> retiredData;

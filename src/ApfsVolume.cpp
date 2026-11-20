@@ -311,8 +311,8 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     const bool writable,processLocal;
     std::atomic<uint64_t> freeBytes;
     MacBrowser::WorkerOrigin origin;
-    std::mutex mutex;
-    bool requiresReopen=false;
+    std::recursive_mutex mutex;
+    bool requiresReopen=false,writing=false;
     std::map<uint64_t,uint32_t> writableIds;
     struct Item {
         size_t mount;
@@ -336,7 +336,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     }
     template<class Work>auto Access(Work work)->decltype(work()){
         VolumeCoord::BackendRead lease(key);
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<std::recursive_mutex> lock(mutex);
         Check(!requiresReopen,"Reopen the APFS image before continuing");
         source->CheckMedia();
         auto result=work();
@@ -439,7 +439,7 @@ public:
     uint64_t FreeBytes()const override{return freeBytes.load();}
     MacBrowser::Capabilities Supports() const override {
         auto capabilities = MacBrowser::Volume::Supports();
-        capabilities.create=false;
+        capabilities.resourceForks=!writable;
         capabilities.createFolders=writable;
         capabilities.unicodeNames=!writable;
         capabilities.attributes=!writable;
@@ -703,11 +703,17 @@ public:
         });
     }
 private:
-    template<class Work> auto WriteNamespace(Work work)->decltype(work()){
+    template<class Work> auto WriteMount(Work work)->decltype(work()){
         if(!writable)ReadOnly();
         VolumeCoord::OperationLease lease({{key,VolumeCoord::Mode::Write}});
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<std::recursive_mutex> lock(mutex);
         Check(!requiresReopen,"Reopen the APFS image before continuing");
+        Check(!writing,"An APFS write cannot run inside another APFS write");
+        struct Guard {
+            bool& active;
+            explicit Guard(bool& state):active(state){active=true;}
+            ~Guard(){active=false;}
+        } guard(writing);
         source->CheckMedia();
         return work();
     }
@@ -738,17 +744,18 @@ private:
         ListDirectory(parent);
     }
 
-    template<class Work>void CommitNamespace(uint32_t parent,uint32_t removed,Work work)
+    template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work)
     {
-        Storage::Job job;
         uint64_t transaction;
         try{transaction=work(job);}
         catch(const CheckpointPublicationUncertain&){
             // A buffered checkpoint may still be visible after a failed flush.
             // Keep this session closed to further mutations until it is reopened.
             requiresReopen=true;
+            Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
             throw;
         }
+        Storage::OutcomeEvidence::NoteRetainedChange();
         try{RefreshNamespace(parent,removed,transaction);}
         catch(const std::exception& error){
             requiresReopen=true;
@@ -757,32 +764,107 @@ private:
     }
 public:
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
-        return WriteNamespace([&]{
+        return WriteMount([&]{
             const auto oid=At(parent).oid;
-            CommitNamespace(parent,0,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job);});
+            Storage::Job job;
+            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job);});
             for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
             throw Error("APFS folder was created but could not be found after reopening");
         });
     }
-    uint32_t Put(uint32_t,const Entry&,MacBrowser::Reader,bool)override{
-        throw Error("APFS file copying is not available through this mount");
+    void ValidateEntry(const Entry& entry)const override{
+        if(!writable)ReadOnly();
+        CatalogName(entry.name);
+        Check(!entry.directory,"Copying folders into APFS is not supported yet");
+        Check(entry.readError.empty()&&!entry.forks[1].size&&entry.attributes.empty()&&
+              !entry.protectedFile&&!entry.hardLink&&!entry.compressed&&!entry.version&&
+              std::all_of(entry.finder.begin(),entry.finder.end(),[](uint8_t value){return !value;}),
+              "This APFS writer cannot preserve the source file's Mac metadata");
+        if(entry.datesValid){
+            CatalogTimestamp(entry.created);
+            CatalogTimestamp(entry.modified);
+        }
+    }
+    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
+        // The common planner skips per-entry validation for folders it will merge.
+        Check(std::none_of(entries.begin(),entries.end(),[](const auto& entry){return entry.directory;}),
+              "Copying folders into APFS is not supported yet");
+    }
+    uint32_t Put(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace)override{
+        Storage::Job job;
+        return PutForTransfer(parent,entry,std::move(reader),replace,job);
+    }
+    uint32_t PutFromHost(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
+                         const std::wstring&,Storage::Job& job)override{
+        return PutForTransfer(parent,entry,std::move(reader),replace,job);
+    }
+    uint32_t PutForTransfer(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
+                            Storage::Job& job)override{
+        ValidateEntry(entry);
+        const auto dates=entry.datesValid?std::optional<FileDates>{FileDates{entry.created,entry.modified}}:std::nullopt;
+        class DataFork final:public Source {
+            const uint64_t size;
+            const MacBrowser::Reader& read;
+        public:
+            DataFork(uint64_t length,const MacBrowser::Reader& reader):size(length),read(reader){}
+            uint64_t Size()const override{return size;}
+            bool Writable()const override{return false;}
+            void Read(uint64_t at,void* bytes,size_t length)override{
+                Check(Range(at,length,size)&&bool(read),"Invalid APFS input data request");
+                read(0,at,bytes,length);
+            }
+            void Write(uint64_t,const void*,size_t)override{ReadOnly();}
+            void Flush()override{}
+        } data(entry.forks[0].size,reader);
+
+        return WriteMount([&]{
+            const auto parentOid=At(parent).oid;
+            const auto matches=[&](const Entry& candidate){
+                return HfsPlus::CompareNames(candidate.name,entry.name,caseSensitive)==0;
+            };
+            const auto children=ListDirectory(parent);
+            const auto found=std::find_if(children.begin(),children.end(),matches);
+            if(found!=children.end()){
+                Check(replace&&!found->directory&&!found->protectedFile&&found->readError.empty(),
+                      "The APFS destination already exists or cannot be replaced");
+                Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==found->identity,
+                      "The APFS destination changed after overwrite approval");
+                const auto oid=At(found->id).oid;
+                CommitMutation(parent,0,job,[&](auto& job){
+                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates);
+                });
+                return found->id;
+            }
+            Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
+            CommitMutation(parent,0,job,[&](auto& job){
+                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates);
+            });
+            for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
+            throw Error("APFS file was committed but could not be found after reopening");
+        });
+    }
+    uint32_t PutResourceReplacement(uint32_t,const Entry&,MacBrowser::Reader,
+                                     std::function<void(uint64_t,size_t)>)override{
+        throw Error("APFS resource-fork replacement is not supported yet");
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
-        WriteNamespace([&]{
+        WriteMount([&]{
             const auto& entry=At(id);
             Check(entry.entry.parent==parent,"APFS rename must stay in the original folder");
             const auto oid=entry.oid,parentOid=At(parent).oid;
-            CommitNamespace(parent,0,[&](auto& job){return RenameEntry(*source,container,parentOid,oid,name,job);});
+            Storage::Job job;
+            CommitMutation(parent,0,job,[&](auto& job){return RenameEntry(*source,container,parentOid,oid,name,job);});
         });
     }
     void Remove(uint32_t id)override{
-        WriteNamespace([&]{
+        WriteMount([&]{
             const auto& entry=At(id);
             Check(id!=2,"Cannot delete the APFS root");
             const auto parent=entry.entry.parent;
             const auto oid=entry.oid;
             const auto parentOid=At(parent).oid;
-            CommitNamespace(parent,id,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job);});
+            Storage::Job job;
+            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job);});
         });
     }
 };

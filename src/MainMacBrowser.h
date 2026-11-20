@@ -85,6 +85,7 @@ public:
     bool CanRename()const;
     bool CanDelete()const;
     bool SelectionWritable() const;
+    bool CanImportResource()const;
     bool CanExport() const;
     int SelectedCdDrive() const;
     void ReleaseCd(int drive);

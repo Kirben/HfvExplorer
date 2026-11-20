@@ -593,6 +593,11 @@ bool MainMacBrowser::CanDelete()const{
     return AllowsFolderOperation(&MacBrowser::Capabilities::remove)&&session_.List()->BrowserSelectionAllows(false);
 }
 bool MainMacBrowser::SelectionWritable()const{return Writable()&&CanDelete();}
+bool MainMacBrowser::CanImportResource()const{
+    int index;
+    uint32_t id;
+    return SelectionWritable()&&CanExport()&&state_->Selected(index,id)&&state_->mounts[index].volume->Supports().resourceForks;
+}
 bool MainMacBrowser::CanExport()const{
     if(!Active()||!session_.ListingAvailable())return false;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return false;
     auto model=session_.List()->BrowserRowAt(row);return model&&model->location.IsMounted()&&!model->entry.directory;
@@ -1186,7 +1191,7 @@ bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
 void MainMacBrowser::Import(){if(!Active()||!Writable())return;std::wstring path;if(!FileDialog(session_,path,false))return;
     Location source=Location::Windows(path);try{TransferSelection({source},state_->Target());}catch(const std::exception& e){AfxMessageBox(e.what());}}
 void MainMacBrowser::ImportResource(){
-    if(!Active()||!Writable())return;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return;
+    if(!CanImportResource())return;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return;
     const auto model=session_.List()->BrowserRowAt(row);if(!model||!model->location.IsMounted()||model->entry.directory)return;
     auto selected=state_->Item(row,false);
     std::wstring path;if(!FileDialog(session_,path,false))return;Location input;input.SetWindows(path);
