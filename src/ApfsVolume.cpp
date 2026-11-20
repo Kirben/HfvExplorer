@@ -962,9 +962,10 @@ public:
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
         Check(entry.readError.empty()&&
-              !entry.hardLink&&(!entry.directory||!entry.compressed)&&!entry.version,
+              (!entry.directory||(!entry.hardLink&&!entry.compressed))&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
         Check(!entry.compressed||!entry.forks[1].size,"APFS cannot retain a user resource fork on a compressed file");
+        Check(!entry.hardLink||!entry.protectedFile,"APFS copying cannot preserve locked hard-link groups yet");
         ValidateWritableAttributes(entry.attributes);
         if(entry.datesValid){
             CatalogTimestamp(entry.created);

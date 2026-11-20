@@ -2842,6 +2842,48 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(aliasA.id,0,0,&aByte,1);targetMac->Read(aliasB.id,0,0,&bByte,1);
         Check(aByte=='A'&&bByte=='l',"APFS hard-link groups lost independent file contents");
         fprintf(report,"PASS: separate APFS hard-link groups retain file identity and contents through transfer.\n");
+        const auto apfsCopyPath=VolumeCoord::Wide(root+"apfs-copied-hard-links.img");
+        {
+            const auto baseline=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
+            const auto image=OpenImage(baseline.c_str(),false);
+            const auto bytes=Disk::Read(*image,0,size_t(image->Size()));
+            auto output=CreateFormatOutput(apfsCopyPath.c_str(),bytes.size());
+            output->Write(0,bytes.data(),bytes.size());
+            output->Flush();
+            output->Keep();
+        }
+        {
+            auto source=OpenImage(apfsCopyPath.c_str(),true);
+            auto destination=Apfs::OpenWritable(source,VolumeCoord::ImageKey(apfsCopyPath));
+            Check(destination&&destination->Writable(),"Could not open writable APFS copy fixture");
+            auto lockedAlias=sourceAlias;
+            lockedAlias.protectedFile=true;
+            Reject([&]{destination->ValidateEntry(lockedAlias);},"APFS accepted a locked hard-link group in preflight");
+            Storage::Job copy;
+            Check(MacBrowser::Copy(*linked,sourceFolder.id,*destination,2,copy),
+                  "Copying hard-link groups into APFS failed");
+        }
+        const auto copiedVolume=MacBrowser::OpenBrowserImage(apfsCopyPath);
+        MacBrowser::Entry copiedFolder,copiedA,copiedB,copiedOriginal,copiedOther;
+        Check(copiedVolume&&copiedVolume->FindChild(2,u"Folder",copiedFolder)&&
+              copiedVolume->FindChild(copiedFolder.id,u"Alias A",copiedA)&&
+              copiedVolume->FindChild(copiedFolder.id,u"Alias B",copiedB)&&
+              copiedVolume->FindChild(copiedFolder.id,withMetadata.name,copiedOriginal)&&
+              copiedVolume->FindChild(copiedFolder.id,u"Other",copiedOther)&&
+              copiedA.id!=copiedOriginal.id&&copiedB.id!=copiedOther.id&&
+              copiedA.linkCount==2&&copiedB.linkCount==2&&copiedA.resolvedId==copiedOriginal.resolvedId&&
+              copiedB.resolvedId==copiedOther.resolvedId&&copiedA.resolvedId!=copiedB.resolvedId,
+              "APFS transfer did not preserve both hard-link groups after reopen");
+        for(const auto* entry:{&copiedA,&copiedB}){
+            MacBrowser::Entry sourceEntry;
+            Check(linked->FindChild(sourceFolder.id,entry->name,sourceEntry)&&
+                  sourceEntry.forks[0].size==entry->forks[0].size,"Copied APFS hard link changed size");
+            Bytes expected(size_t(entry->forks[0].size)),actual(expected.size());
+            linked->Read(sourceEntry.id,0,0,expected.data(),expected.size());
+            copiedVolume->Read(entry->id,0,0,actual.data(),actual.size());
+            Check(actual==expected,"Copied APFS hard-link data differs");
+        }
+        fprintf(report,"PASS: copying two distinct hard-link groups into writable APFS preserves both shared inodes.\n");
         auto compressedDisk=BrowseFixture(false,false,true);
         const auto compressedPath=VolumeCoord::Wide(root+"compressed.img");
         {
