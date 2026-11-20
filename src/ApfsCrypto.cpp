@@ -16,7 +16,7 @@ using Disk::Range;
 using Uuid=std::array<uint8_t,16>;
 constexpr size_t Sector=512;
 constexpr uint32_t ContainerKeybag=0x6b657973, VolumeKeybag=0x72656373;
-constexpr uint16_t VolumeKey=2, UnlockRecord=3;
+constexpr uint16_t VolumeKey=2, UnlockRecord=3, HintRecord=4;
 
 template<size_t Size> struct Secret {
     std::array<uint8_t,Size> bytes{};
@@ -125,6 +125,21 @@ Keybag ReadKeybag(Source& source,const Container& container,uint64_t block,uint6
     return bag;
 }
 
+View VolumeRecord(const Keybag& bag,const Uuid& uuid,unsigned tag){
+    View result{};
+    for(const auto& entry:bag.entries){
+        if(entry.uuid!=uuid||entry.tag!=tag)continue;
+        Check(!result.data,"Duplicate APFS keybag record for the volume");
+        result=bag.Value(entry);
+    }
+    return result;
+}
+Keybag ReadUnlockRecords(Source& source,const Container& container,const Uuid& uuid,const Keybag& bag){
+    const auto location=VolumeRecord(bag,uuid,UnlockRecord);
+    Check(location.size==16,"Missing APFS volume keybag");
+    return ReadKeybag(source,container,Le64(location.data),Le64(location.data+8),uuid,VolumeKeybag);
+}
+
 // Key records contain nested tag/length/value fields. Consume each bounded
 // field even when it is unknown so malformed lengths cannot hide duplicates.
 View Field(View blob,unsigned wanted){
@@ -179,23 +194,11 @@ bool Unwrap(const uint8_t* key,View wrapped,Secret<32>& result){
 std::shared_ptr<const VolumeCipher> UnlockSoftwareVolume(
     Source& source,const Container& container,const std::array<uint8_t,16>& uuid,const Dmg::Password& password){
     const auto bag=ReadKeybag(source,container,container.keybagBlock,container.keybagBlocks,container.uuid,ContainerKeybag);
-    View wrappedVek{},location{};
-    for(const auto& e:bag.entries){
-        if(e.uuid!=uuid)continue;
-        if(e.tag==VolumeKey){
-            Check(!wrappedVek.data,"Duplicate APFS volume key");
-            wrappedVek=bag.Value(e);
-        }else if(e.tag==UnlockRecord){
-            Check(!location.data,"Duplicate APFS volume keybag");
-            location=bag.Value(e);
-        }
-    }
-    Check(wrappedVek.data&&location.size==16,"Missing APFS volume keybag");
-    const auto vekFields=KeyFields(wrappedVek);
+    const auto vekFields=KeyFields(VolumeRecord(bag,uuid,VolumeKey));
     Check(SupportedWrap(vekFields),"Unsupported APFS volume key wrapper");
     const auto encryptedKey=Field(vekFields,0x83);
     Check(encryptedKey.size==40,"Invalid APFS wrapped volume key");
-    const auto unlock=ReadKeybag(source,container,Le64(location.data),Le64(location.data+8),uuid,VolumeKeybag);
+    const auto unlock=ReadUnlockRecords(source,container,uuid,bag);
     Algorithm sha(BCRYPT_SHA256_ALGORITHM,BCRYPT_ALG_HANDLE_HMAC_FLAG);
     // Keybag round counts are untrusted. Bound the work in one unlock attempt.
     uint64_t remaining=20000000;
@@ -219,6 +222,31 @@ std::shared_ptr<const VolumeCipher> UnlockSoftwareVolume(
             return std::make_shared<Xts>(vek.bytes.data(),vek.bytes.data()+16);
     }
     Check(supported,"No supported APFS password unlock record");
+    return {};
+}
+
+std::wstring PasswordHint(Source& source,const Container& container,const std::array<uint8_t,16>& uuid){
+    try{
+        const auto bag=ReadKeybag(source,container,container.keybagBlock,container.keybagBlocks,container.uuid,ContainerKeybag);
+        const auto unlock=ReadUnlockRecords(source,container,uuid,bag);
+        for(const auto& entry:unlock.entries){
+            if(entry.tag!=HintRecord||!entry.size)continue;
+            const auto value=unlock.Value(entry);
+            const auto zero=static_cast<const uint8_t*>(memchr(value.data,0,value.size));
+            const auto length=zero?size_t(zero-value.data):value.size;
+            if(!length)continue;
+            const auto text=reinterpret_cast<const char*>(value.data);
+            const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,int(length),nullptr,0);
+            if(!count)continue;
+            std::wstring hint(size_t(count),L'\0');
+            if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,int(length),hint.data(),count)!=count||
+               std::any_of(hint.begin(),hint.end(),[](wchar_t c){return c<32||(c>=127&&c<=159);}))
+                continue;
+            return hint;
+        }
+    }catch(const Error&){
+        // The hint is optional. Unlocking still validates the keybag itself.
+    }
     return {};
 }
 }

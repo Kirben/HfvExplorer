@@ -457,12 +457,12 @@ struct MainMacBrowser::State {
                     result.payload=std::move(listing);
                 }catch(const Apfs::LockedVolume& locked){
                     result.listing.resourceKey.clear();
-                    result.payload=ApfsUnlock{locked.retry};
+                    result.payload=ApfsUnlock{locked.retry,locked.hint};
                 }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"This volume is busy"};}
                 return Storage::Result{};
             }, [this,volume,item,index,id,mountRoot,rebuild,capturedMount](Result& result){
                 if(const auto* prompt=std::get_if<ApfsUnlock>(&result.payload)){
-                    auto supplied=session_.MacBrowser().ImageCredentials(Dmg::UnlockMethod::Password,prompt->retry);
+                    auto supplied=session_.MacBrowser().ImageCredentials(Dmg::UnlockMethod::Password,prompt->retry,&prompt->hint);
                     if(!session_.Mounts().IsCurrent(*capturedMount)||session_.Tree()->GetTreeCtrl().GetSelectedItem()!=item)
                         return;
                     if(supplied.password)Show(index,id,item,false,false,nullptr,std::move(supplied.password));
@@ -613,12 +613,12 @@ void RememberImage(const std::wstring& path)
 }
 }
 
-Dmg::Credentials MainMacBrowser::ImageCredentials(Dmg::UnlockMethod method,bool retry)
+Dmg::Credentials MainMacBrowser::ImageCredentials(Dmg::UnlockMethod method,bool retry,const std::wstring* apfsHint)
 {
 #ifdef HFV_TESTING
     if(passwordPromptForTest_)return {passwordPromptForTest_(retry),{}};
 #endif
-    return Hidden(session_)?Dmg::Credentials{}:PromptDmgCredentials(session_.Owner(),method,retry);
+    return Hidden(session_)?Dmg::Credentials{}:PromptDmgCredentials(session_.Owner(),method,retry,apfsHint);
 }
 
 int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& externalJournal,

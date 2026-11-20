@@ -66,19 +66,28 @@ bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter
 }
 class ImagePasswordDialog final:public CDialog {
     bool retry_,keyFile_;
+    const std::wstring* apfsHint_;
     void Clear() {
         SetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,L"");
         SendDlgItemMessage(IDC_DMG_PASSWORD,EM_EMPTYUNDOBUFFER,0,0);
     }
 public:
     std::shared_ptr<const Dmg::Password> password;
-    ImagePasswordDialog(CWnd* parent,bool retry,bool keyFile=false):CDialog(IDD_DMG_PASSWORD,parent),retry_(retry),keyFile_(keyFile){}
+    ImagePasswordDialog(CWnd* parent,bool retry,bool keyFile=false,const std::wstring* apfsHint=nullptr)
+        :CDialog(IDD_DMG_PASSWORD,parent),retry_(retry),keyFile_(keyFile),apfsHint_(apfsHint){}
     BOOL OnInitDialog()override{
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd,IDC_DMG_PASSWORD);
         SendDlgItemMessage(IDC_DMG_PASSWORD,EM_SETLIMITTEXT,1023);
         if(keyFile_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,retry_?
             L"The key file could not be opened. Try another password.":L"Enter the password for this PFX or P12 key file.");
+        else if(apfsHint_){
+            SetWindowTextW(m_hWnd,L"Unlock APFS volume");
+            GetDlgItem(IDC_DMG_PROMPT)->ModifyStyle(0,SS_NOPREFIX);
+            std::wstring prompt=retry_?L"Incorrect APFS password. Try again.":L"Enter the password for this APFS volume.";
+            if(!apfsHint_->empty())prompt+=L"\r\nHint: "+*apfsHint_;
+            SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,prompt.c_str());
+        }
         else if(retry_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,L"The password did not unlock this image. Try again.");
         GetDlgItem(IDC_DMG_PASSWORD)->SetFocus();
         return FALSE;
@@ -393,7 +402,7 @@ int RunHfsPlusUiTest(const char *directory) {
 }
 #endif
 
-Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool retry)
+Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool retry,const std::wstring* apfsHint)
 {
     using Method=Dmg::UnlockMethod;
     if(method==Method::Either){
@@ -405,7 +414,7 @@ Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool
         method=choice==IDYES?Method::Password:Method::PrivateKey;
     }
     if(method==Method::Password){
-        ImagePasswordDialog dialog(parent,retry);
+        ImagePasswordDialog dialog(parent,retry,false,apfsHint);
         if(dialog.DoModal()!=IDOK)return {};
         return {std::move(dialog.password),{}};
     }

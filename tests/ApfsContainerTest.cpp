@@ -418,10 +418,15 @@ int RunApfsContainerTest(const char* directory)
                 MacBrowser::Entry lockedRoot;
                 Check(opened->FindChild(2,convertedVolume?u"CONVVOL":u"SECRETVOL",lockedRoot),
                       "Missing locked APFS volume");
+                const std::wstring expectedHint=convertedVolume?L"the qnxprobe conversion test":L"";
+                bool initialPrompt=false;
+                try{opened->List(lockedRoot.id);}
+                catch(const Apfs::LockedVolume& result){initialPrompt=!result.retry&&result.hint==expectedHint;}
+                Check(initialPrompt,"Incorrect password hint on the initial APFS prompt");
                 const Dmg::Password wrong(L"wrong-password");
                 bool retry=false;
                 try{Apfs::Unlock(*opened,lockedRoot.id,wrong);}
-                catch(const Apfs::LockedVolume& result){retry=result.retry;}
+                catch(const Apfs::LockedVolume& result){retry=result.retry&&result.hint==expectedHint;}
                 Check(retry&&!opened->Stat(lockedRoot.id).readError.empty(),
                       "An incorrect password changed the locked APFS volume");
                 const Dmg::Password password(convertedVolume?L"qnxprobe-apfs-convert":L"qnxprobe-apfs-test");
@@ -464,6 +469,7 @@ int RunApfsContainerTest(const char* directory)
                 }
             }
             fprintf(report,"PASS: APFS software password unlock, wrong-password rejection, complete and unaligned reads, and process-local export.\n");
+            fprintf(report,"PASS: genuine APFS password hint on initial and retry prompts, and a volume without a hint.\n");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");

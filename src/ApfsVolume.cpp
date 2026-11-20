@@ -380,7 +380,7 @@ public:
             Check(!map.ChangingEncryption(),"APFS volume encryption is changing");
             auto unlocked=mount;
             unlocked.cipher=UnlockSoftwareVolume(*source,container,mount.uuid,password);
-            if(!unlocked.cipher)throw LockedVolume(true);
+            if(!unlocked.cipher)throw LockedVolume(true,PasswordHint(*source,container,mount.uuid));
             auto root=ReadInode(Catalog(*source,container,unlocked),2);
             Check(root.entry.directory,"Invalid decrypted APFS root");
             root.entry.id=item.entry.id;
@@ -407,7 +407,7 @@ public:
                 const auto& mounted=mounts[folder.mount];
                 if(mounted.locked){
                     Check(mounted.softwareEncryption,"This APFS volume does not support software unlocking");
-                    throw LockedVolume();
+                    throw LockedVolume(false,PasswordHint(*source,container,mounted.uuid));
                 }
                 const Catalog catalog(*source,container,mounted);
                 catalog.VisitRecords(folder.oid,9,[&](Record record){
@@ -609,8 +609,9 @@ public:
 };
 }
 
-LockedVolume::LockedVolume(bool again)
-    :HfsPlus::Error(again?"The password did not unlock the APFS volume":LockedMessage),retry(again){}
+LockedVolume::LockedVolume(bool again,std::wstring passwordHint)
+    :HfsPlus::Error(again?"The password did not unlock the APFS volume":LockedMessage),
+     retry(again),hint(std::move(passwordHint)){}
 
 void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password)
 {

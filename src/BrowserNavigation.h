@@ -35,7 +35,7 @@ struct OpticalMount {std::shared_ptr<MacBrowser::Volume> volume;};
 struct ExternalMounts {std::vector<Removable::Mounted> volumes;};
 struct ExternalJournal {std::string prompt;};
 struct ImageUnlock {bool retry;Dmg::UnlockMethod method;std::string image;};
-struct ApfsUnlock {bool retry;};
+struct ApfsUnlock {bool retry;std::wstring hint;};
 struct MountedFolder {
     uint64_t free=0;
     std::vector<uint32_t> ancestors;

@@ -15,7 +15,7 @@ struct MacImageFormatRequest {
 std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageFormatRequest);
 bool StartMacImageFormat(BrowserSession&,MacImageFormatRequest);
 void FormatHfsPlusImage(CWnd *parent,BrowserSession& session);
-Dmg::Credentials PromptDmgCredentials(CWnd*,Dmg::UnlockMethod,bool retry);
+Dmg::Credentials PromptDmgCredentials(CWnd*,Dmg::UnlockMethod,bool retry,const std::wstring* apfsHint=nullptr);
 void ConvertDmgImage(BrowserSession&);
 void HfvUnicodeNameEdit(HWND,int);
 bool EditWindowsName(CWnd *parent, std::wstring &name);

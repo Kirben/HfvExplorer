@@ -12,4 +12,6 @@ public:
 };
 std::shared_ptr<const VolumeCipher> UnlockSoftwareVolume(
     HfsPlus::Source&,const Container&,const std::array<uint8_t,16>& uuid,const Dmg::Password&);
+// The password hint is readable before the volume key is available.
+std::wstring PasswordHint(HfsPlus::Source&,const Container&,const std::array<uint8_t,16>& uuid);
 }
