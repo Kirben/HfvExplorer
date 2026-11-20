@@ -79,7 +79,7 @@ inline uint32_t DirectoryHash(std::string_view name,bool fold=false)
     return (crc&0x3fffff)<<10;
 }
 
-inline Record DirectoryEntry(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent=1,bool fold=false)
+inline Record DirectoryEntry(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent=1,bool fold=false,uint16_t type=4)
 {
     Record entry{Bytes(13+name.size()),Bytes(18)};
     Set(entry.key,0,(uint64_t(9)<<60)|parent,8);
@@ -87,11 +87,12 @@ inline Record DirectoryEntry(std::string_view name,uint64_t inode,uint64_t now,u
     std::copy(name.begin(),name.end(),entry.key.begin()+12);
     Set(entry.value,0,inode,8);
     Set(entry.value,8,now,8);
-    Set(entry.value,16,4,2);
+    Set(entry.value,16,type,2);
     return entry;
 }
 
-inline Record DirectoryInode(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent=1)
+inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent,
+                    uint16_t mode,uint32_t linksOrChildren)
 {
     const size_t nameSpace=size_t(DivideUp(name.size()+1,8)*8);
     Record record{Bytes(8),Bytes(100+nameSpace)};
@@ -100,7 +101,8 @@ inline Record DirectoryInode(std::string_view name,uint64_t inode,uint64_t now,u
     Set(record.value,8,inode,8);
     for(size_t field:{16,24,32,40})Set(record.value,field,now,8);
     Set(record.value,48,0x8000,8);
-    Set(record.value,80,0040755,2);
+    Set(record.value,56,linksOrChildren,4);
+    Set(record.value,80,mode,2);
     Set(record.value,92,1,2);
     Set(record.value,94,nameSpace,2);
     record.value[96]=4;

@@ -132,8 +132,8 @@ class Formatter {
             catalog.push_back(DirectoryEntry("root",2,now));
             catalog.push_back(DirectoryEntry("private-dir",3,now));
         }
-        catalog.push_back(DirectoryInode("root",2,now));
-        catalog.push_back(DirectoryInode("private-dir",3,now));
+        catalog.push_back(Inode("root",2,now,1,0040755,0));
+        catalog.push_back(Inode("private-dir",3,now,1,0040755,0));
         WriteObject(layout.catalog,EncodeLeaf(catalog,0x40),CatalogId,2,14);
         WriteObject(layout.extents,EncodeLeaf({},0x50),layout.extents,Physical|2,15);
         WriteObject(layout.snapshots,EncodeLeaf({},0x50),layout.snapshots,Physical|2,16);

@@ -258,12 +258,7 @@ std::optional<Container> Probe(Source& source)
 }
 
 namespace {
-struct CreateDirectoryRequest {
-    uint64_t parent;
-    const std::u16string& name;
-};
-
-uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const CreateDirectoryRequest* directory)
+uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const CatalogCreate* entry)
 {
     if(job.cancelled())throw Storage::Cancelled();
     Check(source.Writable(),"An exclusive writable APFS image is required");
@@ -276,7 +271,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
           "Checkpoint writes require a raw single-volume APFS image with a contiguous checkpoint ring");
     auto plan=PlanCheckpoint(source,*current);
     std::vector<CheckpointBlockWrite> changedBlocks;
-    if(directory){
+    if(entry){
         const auto object=[&](uint64_t oid) -> Bytes& {
             const auto found=std::find_if(plan.objects.begin(),plan.objects.end(),[&](const auto& entry){
                 return Le64(entry.bytes.data()+8)==oid;
@@ -284,7 +279,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
             Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
             return found->bytes;
         };
-        changedBlocks=PrepareDirectory(source,*current,plan.transaction,plan.superblock,object,directory->parent,directory->name);
+        changedBlocks=PrepareCatalogCreate(source,*current,plan.transaction,plan.superblock,object,*entry);
     }
     Stamp(plan.superblock,plan.transaction);
     auto write=[&](uint64_t block,const uint8_t* bytes){
@@ -326,7 +321,13 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
 
 uint64_t CreateDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
-    const CreateDirectoryRequest request{parent,name};
+    const CatalogCreate request{parent,name,CatalogKind::Directory};
+    return Commit(source,expected,job,&request);
+}
+
+uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
+{
+    const CatalogCreate request{parent,name,CatalogKind::RegularFile};
     return Commit(source,expected,job,&request);
 }
 }

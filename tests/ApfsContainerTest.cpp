@@ -346,6 +346,55 @@ void CheckpointWrites(const std::string& root,FILE* report)
         image->Keep();
     }
     fprintf(report,"PASS: APFS nested catalog writes, parent validation, per-folder names, and interrupted nested creation.\n");
+    const auto directoryState=Apfs::Probe(nested);
+    CheckpointFaultImage files(nested.durable);
+    Check(Apfs::CreateEmptyFile(files,*directoryState,childFolder,u"Empty.txt",controlJob)==5,
+          "APFS could not create an empty file in a nested folder");
+    for(unsigned step=1;step<=files.event;++step){
+        CheckpointFaultImage attempt(nested.durable);
+        attempt.failAt=step;
+        attempt.fault=step==files.event||step==files.event-2?Fault::FailedFlush:Fault::TornWrite;
+        Reject([&]{Apfs::CreateEmptyFile(attempt,*directoryState,childFolder,u"Empty.txt",controlJob);},
+               "Injected APFS file creation interruption succeeded");
+        const auto mounted=openCheckpoint(attempt);
+        MacBrowser::Entry topFolder,containingFolder,oldLeaf;
+        Check(reopen(attempt)==4&&mounted->FindChild(2,u"New Folder",topFolder)&&
+              mounted->FindChild(topFolder.id,u"New Folder",containingFolder)&&
+              mounted->List(containingFolder.id).size()==1&&mounted->FindChild(containingFolder.id,u"Leaf",oldLeaf),
+              "Interrupted APFS file creation changed the preceding directory");
+    }
+    const auto withFile=Apfs::Probe(files);
+    const auto fileEvents=files.event;
+    constexpr uint64_t emptyFile=19;
+    Reject([&]{Apfs::CreateDirectory(files,*withFile,emptyFile,u"Cannot nest",controlJob);},
+           "An APFS regular file was accepted as a parent");
+    Reject([&]{Apfs::CreateEmptyFile(files,*withFile,childFolder,u"leaf",controlJob);},
+           "An APFS file replaced a directory with the same name");
+    Reject([&]{Apfs::CreateDirectory(files,*withFile,childFolder,u"empty.txt",controlJob);},
+           "An APFS directory replaced a file with the same name");
+    Check(files.event==fileEvents,"An invalid APFS file operation changed the image");
+    Check(Apfs::CreateDirectory(files,*withFile,childFolder,u"Sibling",controlJob)==6,
+          "APFS could not edit a catalog containing an empty file");
+    const auto withSibling=Apfs::Probe(files);
+    Check(Apfs::CreateEmptyFile(files,*withSibling,2,u"Empty.txt",controlJob)==7,
+          "APFS could not create an empty file with the same name in a different folder");
+    const auto mountedFiles=openCheckpoint(files);
+    MacBrowser::Entry nestedTop,nestedParent,file,otherFile,sibling;
+    Check(mountedFiles->FindChild(2,u"New Folder",nestedTop)&&
+          mountedFiles->FindChild(nestedTop.id,u"New Folder",nestedParent)&&
+          mountedFiles->FindChild(nestedParent.id,u"Empty.txt",file)&&
+          mountedFiles->FindChild(nestedParent.id,u"Sibling",sibling)&&sibling.directory&&
+          mountedFiles->FindChild(2,u"Empty.txt",otherFile)&&file.id!=otherFile.id&&
+          !file.directory&&!file.hardLink&&file.linkCount==1&&file.readError.empty()&&
+          file.datesValid&&!file.forks[0].size&&!file.forks[1].size,
+          "The mixed APFS catalog did not reopen with the expected empty-file metadata");
+    {
+        const auto path=VolumeCoord::Wide(root+"checkpoint-empty-files.img");
+        auto image=CreateFormatOutput(path.c_str(),imageSize);
+        image->Write(0,files.durable.data(),files.durable.size());
+        image->Keep();
+    }
+    fprintf(report,"PASS: APFS empty files and mixed catalogs, cross-type name conflicts, and interrupted file creation.\n");
     CheckpointFaultImage invalidName(original);
     Reject([&]{Apfs::CreateDirectory(invalidName,*start,2,u"Bad/Name",controlJob);},
            "An illegal APFS directory name was accepted");

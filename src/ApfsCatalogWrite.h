@@ -8,7 +8,13 @@ struct CheckpointBlockWrite {
     HfsPlus::Bytes bytes;
 };
 using CheckpointObjectLookup=std::function<HfsPlus::Bytes&(uint64_t oid)>;
-std::vector<CheckpointBlockWrite> PrepareDirectory(
+enum class CatalogKind : uint16_t { Directory=4, RegularFile=8 };
+struct CatalogCreate {
+    uint64_t parent;
+    const std::u16string& name;
+    CatalogKind kind;
+};
+std::vector<CheckpointBlockWrite> PrepareCatalogCreate(
     HfsPlus::Source&,const Container&,uint64_t transaction,HfsPlus::Bytes& superblock,
-    const CheckpointObjectLookup&,uint64_t parent,const std::u16string& name);
+    const CheckpointObjectLookup&,const CatalogCreate&);
 }
