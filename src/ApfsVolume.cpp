@@ -809,6 +809,22 @@ private:
         compressed.clear();
         if(removed){
             const auto deleted=At(removed);
+            if(limitedEdits&&deleted.entry.directory){
+                std::vector<uint32_t> descendants;
+                for(const auto& [id,item]:entries){
+                    auto ancestor=item.entry.parent;
+                    while(ancestor>2&&ancestor!=removed){
+                        const auto found=entries.find(ancestor);
+                        if(found==entries.end())break;
+                        ancestor=found->second.entry.parent;
+                    }
+                    if(ancestor==removed)descendants.push_back(id);
+                }
+                for(const auto id:descendants){
+                    writableIds.erase(At(id).oid);
+                    entries.erase(id);
+                }
+            }
             writableIds.erase(deleted.aliasId?deleted.aliasId:deleted.oid);
             entries.erase(removed);
             if(deleted.entry.hardLink){
@@ -1190,6 +1206,19 @@ public:
                 return RenameEntry(*source,container,parentOid,oid,name,job,entry.aliasId);
             });
         },true);
+    }
+    bool RemoveTreeAtomically(uint32_t id,Storage::Job& job)override{
+        if(!limitedEdits)return false;
+        WriteMount([&]{
+            const auto& target=At(id);
+            Check(id!=2,"Cannot delete the APFS root");
+            const auto parent=target.entry.parent;
+            const auto parentOid=At(parent).oid,oid=target.oid,sibling=target.siblingId;
+            CommitMutation(parent,id,job,[&](auto& work){
+                return DeleteEntry(*source,container,parentOid,oid,work,sibling,true,true);
+            });
+        },true);
+        return true;
     }
     void ValidateRemoval(uint32_t id)override{
         Access([&]{

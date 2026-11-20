@@ -1834,6 +1834,37 @@ CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogD
     return kind;
 }
 
+std::pair<uint64_t,uint64_t> DeleteExternalTree(std::vector<OwnedRecord>& catalog,const CatalogDelete& root,
+                                               uint64_t time,const CatalogRecords& extentTree,
+                                               std::set<uint64_t>& retired)
+{
+    std::map<uint64_t,std::vector<uint64_t>> children;
+    for(const auto& record:catalog){
+        Check(record.key.size()>=8,"Truncated APFS catalog key");
+        const auto key=Le64(record.key.data()),parent=key&IdMask;
+        if(key>>60!=9||parent==1)continue;
+        Check(record.value.size()>=18,"Invalid APFS directory entry");
+        children[parent].push_back(Le64(record.value.data()));
+    }
+    std::vector<CatalogDelete> order{root};
+    std::set<uint64_t> seen{root.inode};
+    for(size_t i=0;i<order.size();++i){
+        const auto parent=order[i].inode;
+        const auto found=children.find(parent);
+        if(found==children.end())continue;
+        for(const auto child:found->second){
+            Check(child>=16&&seen.insert(child).second,"APFS folder tree is cyclic or contains shared entries");
+            order.push_back({parent,child});
+        }
+    }
+    uint64_t files=0,folders=0;
+    for(auto at=order.rbegin();at!=order.rend();++at){
+        const auto kind=DeleteExternalEntry(catalog,*at,time,extentTree,retired);
+        if(kind==CatalogKind::Directory)++folders;else ++files;
+    }
+    return {files,folders};
+}
+
 void CheckExternalVolume(const Bytes& volume)
 {
     Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
@@ -2038,10 +2069,13 @@ CatalogWritePlan PrepareCatalogMutation(
     },request);
     std::set<uint64_t> retiredStreams;
     std::set<uint64_t> externalRetired;
+    uint64_t deletedFiles=0,deletedFolders=0;
     std::vector<OwnedRecord> catalog;
     if(externalDelete){
         catalog=std::move(existing.records);
-        removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
+        if(remove->recursive)
+            std::tie(deletedFiles,deletedFolders)=DeleteExternalTree(catalog,*remove,time,extentTree,externalRetired);
+        else removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
     }else if(externalReplace){
         catalog=std::move(existing.records);
         TouchExternalParent(catalog,replace->parent,time,0);
@@ -2272,6 +2306,10 @@ CatalogWritePlan PrepareCatalogMutation(
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
         else if(create->kind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount+1,8);
         else Set(volume,184,fileCount+1,8);
+    }else if(deletedFiles||deletedFolders){
+        Check(deletedFiles<=fileCount&&deletedFolders<=directoryCount,"Invalid APFS volume entry counts");
+        Set(volume,184,fileCount-deletedFiles,8);
+        Set(volume,192,directoryCount-deletedFolders,8);
     }else if(removedKind){
         if(*removedKind==CatalogKind::Directory)Set(volume,192,directoryCount-1,8);
         else if(*removedKind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount-1,8);

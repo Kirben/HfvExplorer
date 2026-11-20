@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-entries.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-recursive-delete.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2650,6 +2650,30 @@ int RunApfsContainerTest(const char* directory)
                 Bytes retainedBytes(payload.bytes.size());
                 retainedVolume->Read(retainedFile.id,0,0,retainedBytes.data(),retainedBytes.size());
                 Check(retainedBytes==payload.bytes,"Cancelled APFS deletion changed file bytes");
+                const auto treeInode=newInode+1;
+                Apfs::CreateCatalogDirectory(*output,openCurrent(),2,u"Cancel tree",job,{},nullptr,nullptr,true);
+                Apfs::CreateCatalogFile(*output,openCurrent(),treeInode,u"Kept child.bin",payload,job,{},
+                                        nullptr,false,nullptr,nullptr,nullptr,true);
+                const auto beforeTreeDelete=openCurrent();
+                CheckpointFaultImage treeDelete(Disk::Read(*output,0,size_t(output->Size())));
+                Storage::Job treeJob;
+                treeDelete.onFlush=[&]{treeJob.cancel();};
+                bool treeCancelled=false;
+                try{Apfs::DeleteEntry(treeDelete,beforeTreeDelete,2,treeInode,treeJob,0,true,true);}
+                catch(const Storage::Cancelled&){treeCancelled=true;}
+                const auto previous=Apfs::Probe(treeDelete);
+                Check(treeCancelled&&previous&&previous->transaction==beforeTreeDelete.transaction,
+                      "Cancelled recursive APFS deletion published a checkpoint");
+                auto oldTree=std::make_unique<Memory>(treeDelete.durable.size());
+                oldTree->bytes=std::move(treeDelete.durable);
+                std::unique_ptr<Source> oldTreeSource=std::move(oldTree);
+                const auto mountedTree=Apfs::Open(oldTreeSource,"apfs-cancelled-tree");
+                MacBrowser::Entry tree,kept;
+                Check(mountedTree&&mountedTree->FindChild(2,u"Cancel tree",tree)&&
+                      mountedTree->FindChild(tree.id,u"Kept child.bin",kept),
+                      "Cancelled recursive APFS deletion lost a descendant");
+                mountedTree->Read(kept.id,0,0,retainedBytes.data(),retainedBytes.size());
+                Check(retainedBytes==payload.bytes,"Cancelled recursive APFS deletion changed child bytes");
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
@@ -2795,7 +2819,23 @@ int RunApfsContainerTest(const char* directory)
                 }
                 return operation.Job()->result();
             };
-            Check(erase(renamedFolder.id).code,"External APFS deleted a populated folder");
+            MacBrowser::Entry tree,kept,subfolder;
+            Check(published->FindChild(2,u"Cancel tree",tree)&&
+                  published->FindChild(tree.id,u"Kept child.bin",kept),"Missing recursive deletion fixture");
+            const auto subfolderId=published->MakeDirectory(tree.id,u"Nested empty folder");
+            auto lockedChild=kept;
+            lockedChild.protectedFile=true;
+            published->SetBasicMetadata(kept.id,lockedChild);
+            Check(erase(tree.id).code&&published->FindChild(tree.id,u"Kept child.bin",kept)&&
+                  published->FindChild(tree.id,u"Nested empty folder",subfolder)&&subfolder.id==subfolderId,
+                  "Recursive APFS deletion changed a tree containing a locked child");
+            lockedChild=kept;
+            lockedChild.protectedFile=false;
+            published->SetBasicMetadata(kept.id,lockedChild);
+            Check(!erase(tree.id).code&&!published->FindChild(2,u"Cancel tree",subfolder),
+                  "External APFS browser did not recursively delete the tree");
+            Reject([&]{published->Stat(kept.id);},"Deleted APFS descendant still resolved");
+            Reject([&]{published->Stat(subfolderId);},"Deleted APFS folder still resolved");
             Check(!erase(child.id).code&&!published->FindChild(renamedFolder.id,u"New APFS folder",child),
                   "External APFS browser did not delete the empty folder");
             Check(!erase(replaced).code&&!published->FindChild(2,toCopy.name,child),

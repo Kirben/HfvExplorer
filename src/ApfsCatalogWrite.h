@@ -32,7 +32,7 @@ struct CatalogRename {
 struct CatalogDelete {
     uint64_t parent,inode;
     uint64_t alias=0;
-    bool external=false;
+    bool external=false,recursive=false;
 };
 struct CatalogReplaceData {
     uint64_t parent,inode;
