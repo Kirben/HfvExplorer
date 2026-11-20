@@ -79,9 +79,10 @@ WritableMap ReadWritableMap(Source& source,const Container& container,uint64_t b
         Check(!leaf.Level()&&leaf.Count(),"Invalid APFS object map leaf");
         for(size_t i=0;i<leaf.Count();++i){
             const auto record=leaf.At(i);
-            const auto oid=Le64(record.key.data),xid=Le64(record.key.data+8);
+            const auto [oid,xid]=ReadObjectMapKey(record.key);
+            Check(record.value.size==16,"Invalid APFS writable object-map record size");
             const auto physical=Le64(record.value.data+8);
-            Check(oid>previous&&xid&&xid<=container.transaction&&Le32(record.value.data)==0&&
+            Check(oid>previous&&xid<=container.transaction&&Le32(record.value.data)==0&&
                   Le32(record.value.data+4)==Block&&physical&&physical<container.blockCount&&
                   physicalBlocks.insert(physical).second,"Invalid APFS writable object mapping");
             map.mappings.push_back({oid,physical});

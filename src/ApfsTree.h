@@ -14,6 +14,8 @@ struct View {
 struct Record {
     View key,value;
 };
+using ObjectMapKey=std::pair<uint64_t,uint64_t>;
+ObjectMapKey ReadObjectMapKey(View);
 class VolumeCipher;
 struct TreeLayout {
     uint32_t keySize=0,valueSize=0;

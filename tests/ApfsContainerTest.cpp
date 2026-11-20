@@ -2440,7 +2440,16 @@ int RunApfsContainerTest(const char* directory)
         ObjectMapFixture(mapped);
         Little(mapped.bytes.data()+13*4096+4096-48,13,8);Seal(mapped.bytes,13*4096,4096);
         Reject([&]{map.Lookup(1029);},"APFS object map accepted a circular child reference");
-        fprintf(report,"PASS: APFS object-map index, object versions, tombstones, bounds and cycles.\n");
+        ObjectMapFixture(mapped);
+        auto index=mapped.bytes.data()+13*4096;
+        Little(index+36,2,4);Little(index+42,8,2);Little(index+44,32,2);
+        Little(index+60,16,2);Little(index+62,16,2);
+        Little(index+64,1024,8);Little(index+72,1,8);
+        Little(index+80,1029,8);Little(index+88,6,8);
+        Little(index+4096-56,15,8);
+        Seal(mapped.bytes,13*4096,4096);
+        Reject([&]{map.Lookup(1029);},"APFS object map accepted a leaf crossing its next separator");
+        fprintf(report,"PASS: APFS object-map index, object versions, tombstones, child ranges and cycles.\n");
         auto ring=WithCheckpoints();
         auto checkpoint=Apfs::Probe(ring);
         Check(checkpoint&&checkpoint->transaction==7&&checkpoint->checkpointBlock==1,

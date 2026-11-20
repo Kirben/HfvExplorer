@@ -72,6 +72,14 @@ Record Node::At(size_t i)const
     return {{bytes.data()+loc.key,loc.keySize},{bytes.data()+loc.value,loc.valueSize}};
 }
 
+ObjectMapKey ReadObjectMapKey(View key)
+{
+    Check(key.size==16,"Invalid APFS object-map key size");
+    const ObjectMapKey decoded{Le64(key.data),Le64(key.data+8)};
+    Check(decoded.first&&decoded.second,"Invalid APFS object-map key");
+    return decoded;
+}
+
 ObjectMap::ObjectMap(Source& s,const Container& c,uint64_t block,uint64_t tx,uint64_t treeTx)
     :source(s),container(c),transaction(tx),treeTransaction(treeTx?treeTx:tx)
 {
@@ -91,13 +99,13 @@ std::optional<uint64_t> ObjectMap::Lookup(uint64_t oid)const
 
 std::optional<ObjectMap::Mapping> ObjectMap::Find(uint64_t oid)const
 {
-    using Key=std::pair<uint64_t,uint64_t>;
+    using Key=ObjectMapKey;
     const Key sought{oid,transaction};
     uint64_t block=tree;
     bool root=true;
     unsigned level=0;
     TreeLayout layout;
-    std::optional<Key> fence;
+    std::optional<Key> lower,upper;
     while(true){
         const Node node(ReadObject(source,container,block,block,treeTransaction,root?2:3,11,true),root,layout);
         Check(root||node.Level()+1==level,"Invalid APFS object-map level");
@@ -107,18 +115,20 @@ std::optional<ObjectMap::Mapping> ObjectMap::Find(uint64_t oid)const
         std::optional<Key> previous;
         std::optional<Record> found;
         Key match{};
+        auto nextUpper=upper;
         for(size_t i=0;i<node.Count();++i){
             const auto record=node.At(i);
-            Check(record.key.size==16&&record.value.size==(level?8:16),"Invalid APFS object-map record");
-            const Key key{Le64(record.key.data),Le64(record.key.data+8)};
-            Check(key.first&&key.second&&(!previous||*previous<key)&&(!fence||*fence<=key),
-                  "Unordered APFS object map");
-            previous=key;
+            Check(record.value.size==(level?8:16),"Invalid APFS object-map record");
+            const auto key=ReadObjectMapKey(record.key);
+            Check((!previous||*previous<key)&&(!lower||*lower<=key)&&(!upper||key<*upper),
+                  "APFS object-map key lies outside its ordered range");
             if(key<=sought){found=record;match=key;}
+            else if(found&&previous&&*previous==match)nextUpper=key;
+            previous=key;
         }
         if(!found)return {};
         const auto value=found->value.data;
-        if(level){block=Le64(value);root=false;fence=match;continue;}
+        if(level){block=Le64(value);root=false;lower=match;upper=nextUpper;continue;}
         if(match.first!=oid)return {};
         const auto flags=Le32(value);
         if(flags&1)return {};
