@@ -957,7 +957,6 @@ public:
     }
     void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
     void ValidateSymbolicLink(const Entry& entry,const Bytes& target)const override{
-        Check(!limitedEdits,"This APFS image cannot copy symbolic links yet");
         Check(!entry.directory&&!entry.hardLink&&!entry.compressed&&!entry.forks[0].size&&!entry.forks[1].size,
               "Unsupported APFS symbolic link metadata");
         Check(target.size()<EmbeddedAttributeLimit,"APFS symbolic link target does not fit in an embedded attribute");
@@ -972,6 +971,7 @@ public:
             const auto parentOid=At(parent).oid;
             CommitMutation(parent,0,job,[&](auto& job){
                 if(!entry.expectedDestinationIdentity.empty()){
+                    Check(!limitedEdits,"Overwriting a symbolic link is unsupported on this APFS image");
                     const auto name=NormalizedName(entry.name,!caseSensitive);
                     for(const auto& child:ListDirectory(parent)){
                         if(NormalizedName(child.name,!caseSensitive)!=name)continue;
@@ -984,9 +984,9 @@ public:
                     throw Error("The APFS symbolic link destination disappeared after overwrite approval");
                 }
                 return CreateCatalogSymlink(*source,container,parentOid,entry.name,target,job,
-                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes);
+                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
             });
-        });
+        },true);
     }
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
@@ -1010,7 +1010,7 @@ public:
         if(limitedEdits){
             std::set<std::u32string> names;
             for(const auto& entry:entries){
-                ValidateEntry(entry);
+                if(entry.directory)ValidateEntry(entry);
                 Check(names.insert(NormalizedName(entry.name,!caseSensitive)).second,
                       "More than one file has the same APFS destination name");
             }

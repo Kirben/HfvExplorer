@@ -2083,10 +2083,12 @@ CatalogWritePlan PrepareCatalogMutation(
                                      attributeIds,extentTree,externalRetired);
     }else if(externalCreate){
         const bool directory=create->kind==CatalogKind::Directory;
-        Check((directory?!input:create->kind==CatalogKind::RegularFile&&input)&&
+        const bool symlink=create->kind==CatalogKind::SymbolicLink;
+        Check((directory||symlink?!input:create->kind==CatalogKind::RegularFile&&input)&&
               create->parent>=2&&create->parent!=3&&create->parent<nextId&&
-              !create->compression&&(!directory||(!resource&&!create->locked)),
-              "External APFS creation requires an uncompressed file or an unlocked folder");
+              !create->compression&&(!(directory||symlink)||!resource)&&(!directory||!create->locked)&&
+              (!symlink||create->linkTarget),
+              "Unsupported APFS creation request for this image");
         catalog=std::move(existing.records);
         for(const auto& record:catalog){
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
@@ -2096,7 +2098,7 @@ CatalogWritePlan PrepareCatalogMutation(
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,true,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name);
         auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
-                                     directory?0040755:0100644,directory?0:1,dataSize,create->finder);
+                                     directory?0040755:symlink?0120777:0100644,directory?0:1,dataSize,create->finder);
         if(dates){
             Set(inode.value,16,CatalogTimestamp(dates->created),8);
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
@@ -2105,6 +2107,7 @@ CatalogWritePlan PrepareCatalogMutation(
         if(attributes)SetSecurityFlag(inode.value,*attributes);
         if(resource)SetResourceFlag(inode.value,resource->size!=0);
         auto records=EncodeAttributes(entryId,attributes,resource?&*resource:nullptr,attributeIds);
+        if(symlink)records.push_back(LinkTargetRecord(entryId,*create->linkTarget));
         SortAttributes(records);
         catalog.push_back(std::move(inode));
         catalog.insert(catalog.end(),std::make_move_iterator(records.begin()),std::make_move_iterator(records.end()));

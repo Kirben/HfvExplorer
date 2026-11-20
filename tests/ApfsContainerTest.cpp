@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-recursive-copy.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-copied-symlink.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2793,6 +2793,34 @@ int RunApfsContainerTest(const char* directory)
                 published->Read(copiedChild.id,fork,0,actual.data(),actual.size());
                 Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"Recursive APFS copy changed child fork bytes");
             }
+            MacBrowser::Entry symlinkToCopy;
+            symlinkToCopy.name=u"Dangling link";
+            symlinkToCopy.datesValid=true;
+            symlinkToCopy.created=createdTime;
+            symlinkToCopy.modified=editedTime;
+            const Bytes dangling{'.','.','/','m','i','s','s','i','n','g',0};
+            Storage::Job createLink;
+            importSource->PutSymbolicLink(2,symlinkToCopy,dangling,createLink);
+            MacBrowser::Entry sourceLink,missing;
+            Check(importSource->FindChild(2,symlinkToCopy.name,sourceLink)&&
+                  !importSource->FindChild(2,u"missing",missing),"Could not create a dangling APFS source link");
+            auto linkCopy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(importSource,sourceLink.id)},
+                FileOperations::Location::Mounted(published,nested.id)});
+            const auto linkStart=GetTickCount();
+            while(!linkCopy.Job()->done()){
+                Check(GetTickCount()-linkStart<15000,"External APFS symbolic-link copy timed out");
+                Sleep(5);
+            }
+            const auto linkResult=linkCopy.Job()->result();
+            Check(!linkResult.code,linkResult.message.c_str());
+            MacBrowser::Entry copiedLink;
+            Check(published->FindChild(nested.id,symlinkToCopy.name,copiedLink)&&
+                  published->SymbolicLinkTarget(copiedLink.id)==std::optional<Bytes>(dangling)&&
+                  !copiedLink.forks[0].size&&!copiedLink.forks[1].size&&
+                  copiedLink.created==createdTime&&copiedLink.modified==editedTime,
+                  "APFS copy did not retain the dangling link target and timestamps");
+            Reject([&]{published->Read(copiedLink.id,0,0,nullptr,0);},"APFS copy followed a symbolic link");
             auto replacement=copied;
             replacement.forks[0].size=9001;
             replacement.forks[1].size=6001;
