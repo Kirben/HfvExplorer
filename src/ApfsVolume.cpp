@@ -1115,7 +1115,7 @@ public:
             Check(entry.entry.parent==parent,"APFS rename must stay in the original folder");
             const auto oid=entry.oid,parentOid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){return RenameEntry(*source,container,parentOid,oid,name,job);});
+            CommitMutation(parent,0,job,[&](auto& job){return RenameEntry(*source,container,parentOid,oid,name,job,entry.aliasId);});
         });
     }
     void ValidateRemoval(uint32_t id)override{

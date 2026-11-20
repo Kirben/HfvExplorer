@@ -26,6 +26,7 @@ struct CatalogCreate {
 struct CatalogRename {
     uint64_t parent,inode;
     const std::u16string& name;
+    uint64_t alias=0;
 };
 struct CatalogDelete {
     uint64_t parent,inode;

@@ -60,7 +60,7 @@ uint64_t CreateCatalogFile(HfsPlus::Source&,const Container& expected,uint64_t p
                     HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr);
 // Rename within the same directory, using on-disk inode IDs and the expected checkpoint.
 uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                     const std::u16string& name,Storage::Job&);
+                     const std::u16string& name,Storage::Job&,uint64_t alias=0);
 // Delete a regular file or an empty folder. File blocks become reusable after publication.
 uint64_t DeleteEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job&);
 // Replace a regular file's data fork in one checkpoint, preserving its inode.

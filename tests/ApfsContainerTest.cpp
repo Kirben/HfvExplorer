@@ -1149,7 +1149,7 @@ void WritableHardLinks(const std::string& root,FILE* report)
         Check(cancelled&&after&&after->transaction==before->transaction,
               "Cancelled APFS hard-link creation published a checkpoint");
     }
-    const auto path=VolumeCoord::Wide(root+"apfs-written-hard-links.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-renamed-hard-links.img");
     {
         auto copy=CreateFormatOutput(path.c_str(),bytes.size());
         copy->Write(0,bytes.data(),bytes.size());
@@ -1171,13 +1171,22 @@ void WritableHardLinks(const std::string& root,FILE* report)
               "APFS cannot extend a hard-link group through another alias");
         Reject([&]{volume->MakeHardLink(id,2,u"Second alias");},"APFS accepted a duplicate link name");
         Reject([&]{volume->Remove(id);},"APFS deleted an alias before unlink was supported");
+        Reject([&]{volume->Rename(target.id,2,u"Second alias");},"APFS renamed over another alias of the same inode");
+        volume->Rename(id,folder.id,u"Renamed nested alias");
+        volume->Rename(second,2,u"Renamed second alias");
+        volume->Rename(target.id,2,u"Renamed primary");
+        Check(volume->Stat(id).identity==alias.identity&&volume->Stat(target.id).identity==target.identity&&
+              volume->Stat(id).linkCount==3&&volume->Stat(second).linkCount==3&&
+              !volume->FindChild(folder.id,u"Nested alias",alias)&&
+              !volume->FindChild(2,u"Second alias",alias)&&!volume->FindChild(2,u"renamed file",alias),
+              "APFS hard-link rename changed identity or left an old name");
         volume->MakeDirectory(2,u"Unrelated edit");
     }
     {
         const auto volume=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry target,alias,second,folder,unrelated;
-        Check(volume->FindChild(2,u"renamed file",target)&&volume->FindChild(2,u"Second alias",second)&&
-              volume->FindChild(2,u"Renamed Folder",folder)&&volume->FindChild(folder.id,u"Nested alias",alias)&&
+        Check(volume->FindChild(2,u"Renamed primary",target)&&volume->FindChild(2,u"Renamed second alias",second)&&
+              volume->FindChild(2,u"Renamed Folder",folder)&&volume->FindChild(folder.id,u"Renamed nested alias",alias)&&
               volume->FindChild(2,u"Unrelated edit",unrelated)&&target.linkCount==3&&
               target.resolvedId==alias.resolvedId&&target.resolvedId==second.resolvedId&&
               target.id!=alias.id&&target.id!=second.id&&alias.id!=second.id,
@@ -1188,7 +1197,7 @@ void WritableHardLinks(const std::string& root,FILE* report)
         volume->Read(alias.id,0,0,actual.data(),actual.size());
         Check(actual==expected,"APFS alias did not share the original file data");
     }
-    fprintf(report,"PASS: APFS hard-link creation, cross-folder aliases, collisions, independent edits and reopen.\n");
+    fprintf(report,"PASS: APFS hard-link creation, primary and alias rename, collisions, independent edits and reopen.\n");
 }
 
 void WritableNamespace(const std::string& root,FILE* report)

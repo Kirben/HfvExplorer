@@ -428,9 +428,9 @@ uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t par
 }
 
 uint64_t RenameEntry(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                     const std::u16string& name,Storage::Job& job)
+                     const std::u16string& name,Storage::Job& job,uint64_t alias)
 {
-    const CatalogMutation request=CatalogRename{parent,inode,name};
+    const CatalogMutation request=CatalogRename{parent,inode,name,alias};
     return Commit(source,expected,job,&request);
 }
 
