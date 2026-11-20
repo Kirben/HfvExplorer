@@ -5,6 +5,7 @@
 #include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
+#include "StorageLocation.h"
 #include "VolumeCoordinator.h"
 #include "floppy.h"
 #include <algorithm>
@@ -49,6 +50,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     std::u16string name_;
     std::string description_;
     const ImageFormat format_;
+    const std::optional<DiskPartitions::Selection> selection_;
     bool Classic()const{return format_==ImageFormat::Classic||format_==ImageFormat::NdifClassic;}
     bool Mfs()const{return format_==ImageFormat::Mfs||format_==ImageFormat::NdifMfs;}
     bool Plus()const{return !Classic()&&!Mfs();}
@@ -145,6 +147,12 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         for (const auto& file : inherited.files) SendImageFile(process->input.value,file);
         Data mount;
         mount.wide(path_); mount.wide(journal_); mount.put(writeAllowed_); mount.put(uint64_t(format_));
+        mount.put(selection_.has_value());
+        if(selection_){
+            const auto& part=selection_->partition;
+            mount.put(uint64_t(selection_->filesystem));
+            mount.put(part.offset); mount.put(part.length); mount.put(part.index); mount.put(part.readOnly);
+        }
         Send(process->input.value, SessionMount, std::move(mount));
         worker_ = std::move(process);
         try {
@@ -181,8 +189,10 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         return entry;
     }
 public:
-    PersistentVolume(std::wstring path, std::string key, std::wstring journal, ImageFormat format)
+    PersistentVolume(std::wstring path, std::string key, std::wstring journal, ImageFormat format,
+                     std::optional<DiskPartitions::Selection> selection)
         : path_(std::move(path)), journal_(std::move(journal)), key_(std::move(key)), format_(format),
+          selection_(selection),
           generation_(NextGeneration()) {
         auto open = [&](bool write) {
             guard_ = HfsPlus::OpenImage(path_.c_str(), write);
@@ -191,8 +201,8 @@ public:
         try { open(true); }
         catch (const HfsPlus::Error&) { guard_.reset(); open(false); }
         writeAllowed_ = guard_->Writable();
-        if(format_>=ImageFormat::NdifHfsPlus)
-            Check(VolumeCoord::ImageKey(path_)==key_,"The selected NDIF image was replaced");
+        if(selection_)
+            StorageLocation::ValidateImage(path_,key_);
         if (!journal_.empty())
             dependency_ = std::make_unique<VolumeCoord::ImageDependency>(key_, journal_);
         Start();
@@ -732,8 +742,9 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
 }
 } // namespace
 std::shared_ptr<MacBrowser::Volume> MountPersistentImage(const std::wstring& path, const std::string& key,
-                                                       const std::wstring& journal, ImageFormat format) {
-    return std::make_shared<PersistentVolume>(path, key, journal, format);
+                                                       const std::wstring& journal, ImageFormat format,
+                                                       std::optional<DiskPartitions::Selection> selection) {
+    return std::make_shared<PersistentVolume>(path, key, journal, format, selection);
 }
 
 int Child(const char* inputText, const char* outputText) {
@@ -755,6 +766,16 @@ int Child(const char* inputText, const char* outputText) {
             auto writable = data.flag();
             auto format = data.get();
             Check(format<=uint64_t(ImageFormat::NdifMfs),"Invalid volume session image format");
+            std::optional<DiskPartitions::Selection> selection;
+            if(data.flag()){
+                const auto fs=data.get(),offset=data.get(),length=data.get(),index=data.get();
+                Check(fs<=uint64_t(DiskPartitions::Filesystem::Apfs)&&length&&offset<=UINT64_MAX-length&&index<=UINT_MAX,
+                      "Invalid volume session partition selection");
+                selection=DiskPartitions::Selection{
+                    DiskPartitions::Filesystem(fs),{offset,length,unsigned(index),data.flag()}};
+            }
+            Check(bool(selection)==(format==uint64_t(ImageFormat::HfsPlus)||format>=uint64_t(ImageFormat::NdifHfsPlus)),
+                  "Unexpected volume session partition selection");
             data.end();
             ImageHandleTransfer::Scope storage(files);
             std::shared_ptr<Volume> volume;
@@ -764,7 +785,7 @@ int Child(const char* inputText, const char* outputText) {
                 const auto key=VolumeCoord::ImageKey(path);
                 const auto open=[&](bool write){
                     auto disk=DiskImage::Reopen(path,DiskImage::Container::Ndif,{write});
-                    return OpenEditableNdif(std::move(disk),key);
+                    return OpenEditableNdif(std::move(disk),key,*selection);
                 };
                 try{volume=open(writable);}
                 catch(const HfsPlus::Error&){if(!writable)throw;volume=open(false);}
@@ -781,13 +802,17 @@ int Child(const char* inputText, const char* outputText) {
                 floppy_module_global_init();
                 volume = OpenClassicImage(path, writable);
             } else {
-                auto guard = DiskImage::Reopen(path,DiskImage::Container::Raw,{writable,journal});
-                auto key = VolumeCoord::ImageKey(path);
-                try { volume = FromHfsPlus(std::move(guard), writable, key, journal); }
+                const auto key=VolumeCoord::ImageKey(path);
+                const auto open=[&](bool write){
+                    auto disk=DiskImage::Reopen(path,DiskImage::Container::Raw,{write,journal});
+                    Check(DiskPartitions::FindHfsPlus(*disk)==selection,"The selected HFS+ filesystem or partition changed");
+                    return FromHfsPlus(std::move(disk),write,key,journal);
+                };
+                try { volume=open(writable); }
                 catch (const HfsPlus::ExternalJournalRequired&) { throw; }
                 catch (const HfsPlus::Error&) {
                     if (!writable) throw;
-                    volume = FromHfsPlus(DiskImage::Reopen(path,DiskImage::Container::Raw,{false,journal}),false,key,journal);
+                    volume=open(false);
                 }
             }
             Data info;

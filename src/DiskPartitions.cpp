@@ -21,6 +21,67 @@ bool MacType(const uint8_t* p,DiskPartitions::GptType type)
 }
 
 namespace DiskPartitions {
+std::optional<Selection> FindHfsPlus(Source& source)
+{
+    if (source.Size()<2048) return {};
+    const auto boot=B::Read(source,0,512);
+    auto partitions=ProbeGptImage(source,boot);
+    if (!partitions) partitions=ProbeApm(source,boot);
+    if (partitions) {
+        for (const auto& part:*partitions) {
+            if (part.length<2048) continue;
+            const auto header=B::Read(source,part.offset+1024,4);
+            const auto signature=B::U16(header.data()),version=B::U16(header.data()+2);
+            if (signature==0x482b&&version==4) return Selection{Filesystem::HfsPlus,part};
+            if (signature==0x4858&&version==5) return Selection{Filesystem::HfsX,part};
+        }
+        return {};
+    }
+    const auto header=B::Read(source,1024,512);
+    const auto signature=B::U16(header.data());
+    if (signature==0x482b||signature==0x4858)
+        return Selection{signature==0x482b?Filesystem::HfsPlus:Filesystem::HfsX,{0,source.Size(),0,false}};
+    if (signature!=0x4244||B::U16(header.data()+124)!=0x482b) return {};
+    const uint64_t block=B::U32(header.data()+20);
+    const auto offset=uint64_t(B::U16(header.data()+28))*512+B::U16(header.data()+126)*block;
+    const auto length=B::U16(header.data()+128)*block;
+    if (length<2048||!B::Range(offset,length,source.Size())) return {};
+    const auto embedded=B::Read(source,offset+1024,2);
+    B::Check(B::U16(embedded.data())!=0x4858,"HFSX must not be embedded in an HFS wrapper");
+    return Selection{Filesystem::HfsPlus,{offset,length,0,false}};
+}
+
+std::optional<Filesystem> LegacyFilesystem(Source& source,const MacPartition& part,bool diskCopy)
+{
+    if (part.length<1536) return {};
+    const auto signature=B::U16(B::Read(source,part.offset+1024,2).data());
+    if (signature==0x4244) return Filesystem::Classic;
+    if (signature==0xd2d7) return Filesystem::Mfs;
+    if (!diskCopy) return {};
+    const auto header=B::Read(source,part.offset,84);
+    if (header[0]<=63&&B::U16(header.data()+82)==0x0100&&
+        B::U16(B::Read(source,part.offset+1108,2).data())==0xd2d7) return Filesystem::Mfs;
+    return {};
+}
+
+std::optional<Selection> FindLegacy(Source& source,bool diskCopy)
+{
+    const MacPartition whole{0,source.Size(),0,false};
+    std::optional<std::vector<MacPartition>> partitions;
+    if (source.Size()>=2048) {
+        const auto boot=B::Read(source,0,512);
+        partitions=ProbeGptImage(source,boot);
+        if (!partitions) partitions=ProbeApm(source,boot);
+    }
+    if (!partitions) {
+        if (auto fs=LegacyFilesystem(source,whole,diskCopy)) return Selection{*fs,whole};
+        return {};
+    }
+    for (const auto& part:*partitions)
+        if (auto fs=LegacyFilesystem(source,part,diskCopy)) return Selection{*fs,part};
+    return {};
+}
+
 bool HasProtectiveMbr(const Bytes& boot)
 {
     if (boot.size()<512 || boot[510]!=0x55 || boot[511]!=0xaa)

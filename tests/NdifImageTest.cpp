@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "NdifImage.h"
+#include "VolumeSession.h"
 #include "NdifLzh.h"
 #include "DmgImage.h"
 #include "CopyProcess.h"
@@ -421,6 +422,19 @@ int RunNdifImageTest(const char* directory)
             P32(map+8,uint32_t(start/512));P32(map+12,uint32_t(source.Size()/512));
             memcpy(map+48,"Apple_HFS",9);
             const auto path=Save(root+name+".bin",Pack(disk,Resource(Map(uint32_t(disk.size()/512),0))));
+            if(!readOnly){
+                auto encoded=HfsPlus::OpenImage(path.c_str(),false);
+                Check(Ndif::Unwrap(encoded),"Open NDIF for partition selection test");
+                auto selected=DiskPartitions::FindLegacy(*encoded);
+                Check(selected&&selected->partition.offset==start&&!selected->partition.readOnly,
+                      "Missing original NDIF partition selection");
+                encoded.reset();
+                selected->partition.offset+=512;
+                const auto format=selected->filesystem==DiskPartitions::Filesystem::Classic?
+                    VolumeSession::ImageFormat::NdifClassic:VolumeSession::ImageFormat::NdifMfs;
+                Reject([&]{VolumeSession::MountPersistentImage(path,VolumeCoord::ImageKey(path),{},format,*selected);},
+                       "The worker mounted a partition different from the captured selection");
+            }
             {
                 auto volume=MacBrowser::OpenBrowserImage(path);
                 Check(volume&&volume->Writable()!=readOnly,"NDIF ignored partition write boundaries");
@@ -451,7 +465,7 @@ int RunNdifImageTest(const char* directory)
         partitionCase("partitioned-classic",*classicFile,false);
         partitionCase("partitioned-mfs",*mfsFile,false);
         partitionCase("protected-partition",*mfsFile,true);
-        fprintf(report,"PASS: validated APM classic HFS and MFS partitions for NDIF writes, with map protection.\n");
+        fprintf(report,"PASS: validated APM classic HFS and MFS partitions for NDIF writes, with map protection and stale worker selection rejection.\n");
         const auto sectors=uint32_t(raw->Size()/512);
         const auto rdwrMap=Resource(Map(sectors,0));
         const auto appleSingle=Save(root+"editable.as",Apple(volumeBytes,rdwrMap,true,true));

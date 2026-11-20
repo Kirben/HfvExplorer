@@ -85,46 +85,6 @@ void ForkStage(View &v, const Fork &f, uint32_t bs, const Bytes &data) {
     }
     Check(pos == data.size(), "Metadata fork is too short");
 }
-uint64_t Locate(Source &s, uint64_t &length, bool write = false) {
-    length = s.Size();
-    if (s.Size() < 2048)
-        return UINT64_MAX;
-    auto dd = Disk::Read(s, 0, 512);
-    auto locatePartition = [&](const std::vector<DiskPartitions::MacPartition>& partitions,
-                               const char* readOnlyError) -> uint64_t {
-        for (const auto& partition : partitions) {
-            if (partition.length < 2048)
-                continue;
-            const auto header = Disk::Read(s, partition.offset + 1024, 4);
-            const auto sig = U16(header.data()), version = U16(header.data() + 2);
-            if ((sig == 0x482b && version == 4) || (sig == 0x4858 && version == 5)) {
-                Check(!write || !partition.readOnly, readOnlyError);
-                length = partition.length;
-                return partition.offset;
-            }
-        }
-        return UINT64_MAX;
-    };
-    if (auto partitions = DiskPartitions::ProbeGptImage(s, dd))
-        return locatePartition(*partitions, "GPT partition is marked read-only");
-    if (auto partitions = DiskPartitions::ProbeApm(s, dd))
-        return locatePartition(*partitions, "Apple partition overlaps the partition map and is read-only");
-    auto vh = Disk::Read(s, 1024, 512);
-    uint16_t sig = U16(vh.data());
-    if (sig == 0x482b || sig == 0x4858)
-        return 0;
-    if (sig == 0x4244 && U16(vh.data() + 124) == 0x482b) {
-        uint32_t bs = U32(vh.data() + 20);
-        uint64_t b = uint64_t(U16(vh.data() + 28)) * 512 + uint64_t(U16(vh.data() + 126)) * bs;
-        length = uint64_t(U16(vh.data() + 128)) * bs;
-        if (Range(b, length, s.Size()) && length >= 2048) {
-            auto embedded = Disk::Read(s, b + 1024, 2);
-            Check(U16(embedded.data()) != 0x4858, "HFSX must not be embedded in an HFS wrapper");
-            return b;
-        }
-    }
-    return UINT64_MAX;
-}
 // Walk the leaf chain with structural and bounded-range checks. The rebuilt
 // trees below include indexes for interoperability with native Mac readers.
 std::vector<Record> ReadTree(View &view, const Fork &fork, uint32_t bs, unsigned keyLimit,
@@ -314,8 +274,12 @@ struct Volume::Impl {
     uint32_t fileMetadata = 0, directoryMetadata = 0;
     explicit Impl(Source &s, bool w) : source(s), view(s), journal(view), write(w) {
         Check(!w || s.Writable(), "Cannot open a read-only image for writing");
-        view.base = Locate(s, view.length, w);
-        Check(view.base != UINT64_MAX, "No HFS+ volume found");
+        const auto selected=DiskPartitions::FindHfsPlus(s);
+        Check(selected.has_value(), "No HFS+ volume found");
+        const auto& partition=selected->partition;
+        Check(!w||!partition.readOnly,"HFS+ partition is read-only");
+        view.base=partition.offset;
+        view.length=partition.length;
         LoadHeader();
         // A relocated journal can be discovered through either committed redo
         // copy. Follow JIB after each replay; read-only mounts use the overlay.
@@ -1383,8 +1347,7 @@ struct Volume::Impl {
     }
 };
 bool Volume::Recognizes(Source &s) {
-    uint64_t n;
-    return Locate(s, n) != UINT64_MAX;
+    return DiskPartitions::FindHfsPlus(s).has_value();
 }
 Volume::Volume(Source &s, bool w) : p_(new Impl(s, w)) {}
 Volume::~Volume() = default;
