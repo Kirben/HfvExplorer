@@ -2350,6 +2350,81 @@ Memory Gpt(const Memory& raw,unsigned sector,bool readOnly=false)
     memcpy(boot+start,raw.bytes.data(),raw.bytes.size());
     return disk;
 }
+void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wchar_t* fixture)
+{
+    const auto path=VolumeCoord::Wide(root+(fixture?"apfs-macos-sensitive-writes.img":"apfs-external-sensitive-writes.img"));
+    Storage::Job job;
+    {
+        auto original=fixture?OpenImage(fixture,false):nullptr;
+        auto image=CreateFormatOutput(path.c_str(),original?original->Size():32*1024*1024);
+        if(original){
+            auto bytes=Disk::Read(*original,0,size_t(original->Size()));
+            image->Write(0,bytes.data(),bytes.size());
+        }else{
+            Apfs::Format(*image,u"Case-sensitive external writer test",true,job);
+            const auto checkpoint=Apfs::Probe(*image);
+            Check(checkpoint&&checkpoint->volumes.size()==1,"Missing case-sensitive test volume");
+            Apfs::ObjectMap objects(*image,*checkpoint,checkpoint->objectMap,checkpoint->transaction);
+            const auto block=objects.Lookup(checkpoint->volumes.front());
+            Check(block.has_value(),"Missing case-sensitive volume superblock");
+            const auto offset=*block*checkpoint->blockSize;
+            auto volume=Disk::Read(*image,offset,checkpoint->blockSize);
+            // Exercise the compatibility writer even without a separately mastered image.
+            memset(volume.data()+272,0,32);
+            memcpy(volume.data()+272,"Case test",9);
+            Seal(volume,0,checkpoint->blockSize);
+            image->Write(offset,volume.data(),volume.size());
+        }
+        image->Flush();
+        image->Keep();
+    }
+    const auto expect=[](MacBrowser::Volume& volume,uint32_t folder,const std::u16string& name,uint8_t value){
+        MacBrowser::Entry entry;
+        Check(volume.FindChild(folder,name,entry)&&entry.name==name&&entry.forks[0].size==8197,
+              "Case-sensitive APFS lookup returned the wrong file");
+        Bytes data(8197);
+        volume.Read(entry.id,0,0,data.data(),data.size());
+        Check(data==Bytes(data.size(),value),"Case-sensitive APFS write changed the wrong file");
+        return entry.id;
+    };
+    {
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->CaseSensitive()&&volume->Supports().writable&&!volume->Writable(),
+              "Case-sensitive APFS did not select the compatibility writer");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        const auto folder=volume->MakeDirectory(2,u"Case compatibility test");
+        const auto put=[&](const std::u16string& name,uint8_t value,bool overwrite=false){
+            MacBrowser::Entry entry;
+            entry.name=name;
+            entry.forks[0].size=8197;
+            const auto reader=[value](unsigned,uint64_t,void* bytes,size_t count){memset(bytes,value,count);};
+            return volume->Put(folder,entry,reader,overwrite);
+        };
+        const auto upper=put(u"Report",0x31);
+        const auto lower=put(u"report",0x62);
+        Check(upper!=lower,"Case-sensitive APFS files shared an identity");
+        Reject([&]{volume->Rename(upper,folder,u"report");},"APFS rename accepted an exact collision");
+        volume->Rename(upper,folder,u"REPORT");
+        expect(*volume,folder,u"REPORT",0x31);
+        expect(*volume,folder,u"report",0x62);
+        put(u"report",0x53,true);
+        expect(*volume,folder,u"REPORT",0x31);
+        volume->Remove(expect(*volume,folder,u"report",0x53));
+        MacBrowser::Entry removed;
+        Check(!volume->FindChild(folder,u"report",removed),"APFS case-sensitive delete retained the target");
+        put(u"caf\u00e9",0x44);
+        Reject([&]{put(u"cafe\u0301",0x22);},"APFS accepted a normalization-equivalent name");
+    }
+    auto reopened=MacBrowser::OpenBrowserImage(path);
+    MacBrowser::Entry folder,missing;
+    Check(reopened&&reopened->FindChild(2,u"Case compatibility test",folder)&&
+          !reopened->FindChild(folder.id,u"Report",missing)&&!reopened->FindChild(folder.id,u"report",missing),
+          "Case-sensitive APFS edits did not survive reopen");
+    expect(*reopened,folder.id,u"REPORT",0x31);
+    expect(*reopened,folder.id,u"caf\u00e9",0x44);
+    fprintf(report,"PASS: %s case-sensitive APFS compatibility writer, collisions, rename, overwrite, delete and exact readback.\n",
+            fixture?"macOS-created":"generated");
+}
 void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFixture=nullptr)
 {
     const auto baselinePath=macFixture?std::wstring(macFixture):VolumeCoord::Wide(root+"checkpoint-before.img");
@@ -2487,6 +2562,9 @@ int RunApfsContainerTest(const char* directory)
         DataStreamAllocation(report);
         CheckpointWrites(root,report);
         WritableGptImages(root,report);
+        ExternalCaseSensitiveWrites(root,report,nullptr);
+        if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))
+            ExternalCaseSensitiveWrites(root,report,fixture);
         MultiChunkWrites(root,report);
         MultiCibWrites(root,report);
         SplitCatalogWrites(root,report);

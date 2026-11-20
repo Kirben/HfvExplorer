@@ -1610,11 +1610,11 @@ void SetExternalFinderInfo(Bytes& inode,const FinderBytes& finder)
 }
 
 void InsertExternalDirectoryRecord(std::vector<OwnedRecord>& catalog,OwnedRecord record,
-                                   uint64_t parent,const std::string& name)
+                                   uint64_t parent,const std::string& name,bool fold)
 {
     const auto parentKey=(uint64_t(9)<<60)|parent;
     const auto hash=Le32(record.key.data()+8)&~1023u;
-    const auto comparison=NormalizedName(name,true);
+    const auto comparison=NormalizedName(name,fold);
     auto insert=catalog.end();
     for(auto entry=catalog.begin();entry!=catalog.end();++entry){
         Check(entry->key.size()>=8,"Truncated APFS catalog key");
@@ -1628,7 +1628,7 @@ void InsertExternalDirectoryRecord(std::vector<OwnedRecord>& catalog,OwnedRecord
         Check(key.size()>=14&&(Le32(key.data()+8)&1023)==key.size()-12&&!key.back(),
               "Invalid APFS directory name");
         const std::string existing(reinterpret_cast<const char*>(key.data()+12),key.size()-13);
-        Check(NormalizedName(existing,true)!=comparison,"The APFS entry name already exists");
+        Check(NormalizedName(existing,fold)!=comparison,"The APFS entry name already exists");
         const auto existingHash=Le32(key.data()+8)&~1023u;
         if(insert==catalog.end()&&(existingHash>hash||(existingHash==hash&&existing>name)))insert=entry;
     }
@@ -2151,7 +2151,7 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
 }
 
 void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardLink& request,
-                             const std::string& name,uint64_t nextId,uint64_t time)
+                             const std::string& name,uint64_t nextId,uint64_t time,bool fold)
 {
     Check(request.parent>=2&&request.parent!=3&&request.inode>=16,
           "Invalid external APFS hard-link request");
@@ -2222,20 +2222,20 @@ void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardL
         append({request.inode,originalParent,originalName},nextId);
     }
     const auto aliasId=nextId+1;
-    auto added=WriterDisk::DirectoryEntry(name,request.inode,time,request.parent,true,
+    auto added=WriterDisk::DirectoryEntry(name,request.inode,time,request.parent,fold,
                                           uint16_t(CatalogKind::RegularFile));
     SetSibling(added.value,aliasId);
     append({request.inode,request.parent,name},aliasId);
     catalog.insert(catalog.begin()+afterLinks,std::make_move_iterator(links.begin()),
                    std::make_move_iterator(links.end()));
-    InsertExternalDirectoryRecord(catalog,std::move(added),request.parent,name);
+    InsertExternalDirectoryRecord(catalog,std::move(added),request.parent,name,fold);
     catalog.insert(catalog.end(),std::make_move_iterator(maps.begin()),std::make_move_iterator(maps.end()));
 }
 
 void CheckExternalVolume(const Bytes& volume)
 {
     Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
-          !Le64(volume.data()+48)&&Le64(volume.data()+56)==1&&Le64(volume.data()+264)==1&&
+          !Le64(volume.data()+48)&&(Le64(volume.data()+56)==1||Le64(volume.data()+56)==8)&&Le64(volume.data()+264)==1&&
           Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
           "Unsupported APFS volume features for external edits");
 }
@@ -2381,6 +2381,7 @@ CatalogWritePlan PrepareCatalogMutation(
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current);
     const auto oid=current.volumes.front();
     const auto flags=Le64(volume.data()+56);
+    const bool fold=flags==1;
     const auto fileCount=Le64(volume.data()+184);
     const auto directoryCount=Le64(volume.data()+192);
     const auto symlinkCount=Le64(volume.data()+200);
@@ -2445,19 +2446,19 @@ CatalogWritePlan PrepareCatalogMutation(
         if(hardLink->replaced){
             Check(hardLink->replaced!=hardLink->inode,"APFS hard-link source and replacement are the same inode");
             const auto destinationKey=(uint64_t(9)<<60)|hardLink->parent;
-            const auto destinationName=NormalizedName(name,true);
+            const auto destinationName=NormalizedName(name,fold);
             const auto matches=[&](const OwnedRecord& record){
                 if(record.key.size()<14||Le64(record.key.data())!=destinationKey||
                    record.value.size()!=18||Le64(record.value.data())!=hardLink->replaced||
                    Le16(record.value.data()+16)!=uint16_t(CatalogKind::RegularFile)||record.key.back())return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
-                return NormalizedName(candidate,true)==destinationName;
+                return NormalizedName(candidate,fold)==destinationName;
             };
             Check(std::any_of(catalog.begin(),catalog.end(),matches),
                   "APFS hard-link overwrite requires an existing unlinked regular file at the chosen name");
             removedKind=DeleteExternalEntry(source,catalog,{hardLink->parent,hardLink->replaced},time,extentTree,externalRetired);
         }
-        CreateExternalHardLink(catalog,*hardLink,name,nextId,time);
+        CreateExternalHardLink(catalog,*hardLink,name,nextId,time,fold);
     }else if(externalDelete){
         catalog=std::move(existing.records);
         if(remove->recursive)
@@ -2486,8 +2487,8 @@ CatalogWritePlan PrepareCatalogMutation(
                   "APFS catalog contains an object at or after its next ID");
         }
         TouchExternalParent(catalog,create->parent,time,1);
-        auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,true,uint16_t(create->kind));
-        InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name);
+        auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,fold,uint16_t(create->kind));
+        InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name,fold);
         auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
                                      directory?0040755:symlink?0120777:0100644,directory?0:1,dataSize,create->finder);
         if(dates){
@@ -2589,12 +2590,12 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             auto record=std::move(catalog[*directoryRecord]);
             catalog.erase(catalog.begin()+*directoryRecord);
-            const auto hash=WriterDisk::DirectoryHash(replacement,true);
+            const auto hash=WriterDisk::DirectoryHash(replacement,fold);
             record.key.resize(13+replacement.size());
             record.key.back()=0;
             Set(record.key,8,hash|(replacement.size()+1),4);
             std::copy(replacement.begin(),replacement.end(),record.key.begin()+12);
-            InsertExternalDirectoryRecord(catalog,std::move(record),properties->parent,replacement);
+            InsertExternalDirectoryRecord(catalog,std::move(record),properties->parent,replacement,fold);
             TouchExternalParent(catalog,properties->parent,time,0);
         }
     }else{
