@@ -1324,7 +1324,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-compressed-write.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-compressed-copy.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1447,10 +1447,38 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         Check(!mounted->Stat(compressedId).compressed&&!mounted->Stat(compressedId).forks[1].size,
               "APFS decompression left compression metadata behind");
         mounted->SetCompressionMethod(compressedId,Mode::Zlib,{});
-        mounted->SetCompressionMethod(id,Mode::StoredInline,{});
-        Check(mounted->Stat(id).compressed&&mounted->Stat(id).forks[1].size==9003,
-              "Inline APFS compression lost a user resource fork");
-        mounted->SetCompressionMethod(id,Mode::Uncompressed,{});
+        Reject([&]{mounted->SetCompressionMethod(id,Mode::StoredInline,{});},
+               "APFS compressed a file with a user resource fork");
+        Check(!mounted->Stat(id).compressed&&mounted->Stat(id).forks[1].size==9003,
+              "Rejected APFS compression changed the file or its user resource fork");
+        auto inlineFile=file;
+        inlineFile.name=u"Inline compressed fixture";
+        inlineFile.forks[1].size=0;
+        const auto inlineId=mounted->Put(2,inlineFile,contents,false);
+        mounted->SetCompressionMethod(inlineId,Mode::StoredInline,{});
+        const auto copies=mounted->MakeDirectory(2,u"Compressed copies");
+        Storage::Job copyJob;
+        MacBrowser::Entry copied;
+        Check(MacBrowser::Copy(*mounted,compressedId,*mounted,copies,copyJob)&&
+              mounted->FindChild(copies,large.name,copied)&&copied.compressed&&
+              copied.forks[0].size==large.forks[0].size&&mounted->GetAttributes(copied.id)==large.attributes,
+              "Copying a compressed APFS file lost compression, size or metadata");
+        mounted->Read(copied.id,0,150003-tail.size(),tail.data(),tail.size());
+        Check(std::string(tail.begin(),tail.end())==std::string(tail.size(),'A'),"Compressed APFS copy changed file data");
+        auto overwriteTarget=file;
+        overwriteTarget.name=inlineFile.name;
+        const auto targetId=mounted->Put(copies,overwriteTarget,contents,false);
+        auto compressedSource=mounted->Stat(inlineId);
+        compressedSource.attributes=mounted->GetAttributes(inlineId);
+        compressedSource.attributesKnown=true;
+        const auto readCompressed=[&](unsigned fork,uint64_t offset,void* bytes,size_t size){
+            mounted->Read(inlineId,fork,offset,bytes,size);
+        };
+        Check(mounted->Put(copies,compressedSource,readCompressed,true)==targetId&&
+              mounted->Stat(targetId).compressed&&!mounted->Stat(targetId).forks[1].size,
+              "Compressed APFS overwrite kept a stale resource fork or lost compression or destination identity");
+        mounted->Read(targetId,0,0,tail.data(),5);
+        Check(std::string(tail.data(),5)=="abcde","Compressed APFS overwrite changed file contents");
         auto malformed=file.attributes;
         malformed[u"com.apple.system.Security"]=Bytes(67);
         Reject([&]{mounted->SetAttributes(id,malformed);},"APFS accepted a malformed ACL");

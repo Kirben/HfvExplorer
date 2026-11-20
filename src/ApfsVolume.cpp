@@ -824,8 +824,9 @@ public:
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
         Check(entry.readError.empty()&&
-              !entry.hardLink&&!entry.compressed&&!entry.version,
+              !entry.hardLink&&(!entry.directory||!entry.compressed)&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
+        Check(!entry.compressed||!entry.forks[1].size,"APFS cannot retain a user resource fork on a compressed file");
         ValidateWritableAttributes(entry.attributes);
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
@@ -865,7 +866,22 @@ public:
         Check(!entry.directory,"Select a regular file for APFS data transfer");
         const auto dates=CopyDates(entry);
         const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
-        ForkInput data(entry.forks[0].size,0,reader),resource(entry.forks[1].size,1,reader);
+        std::optional<HfsPlus::EncodedCompression> encoded;
+        if(entry.compressed){
+            encoded.emplace(entry.forks[0].size,[&](uint64_t offset,void* bytes,size_t count){
+                if(job.cancelled())throw Storage::Cancelled();
+                reader(0,offset,bytes,count);
+            });
+
+        }
+        const bool compressionResource=encoded&&encoded->UsesResource();
+        const MacBrowser::Reader payload=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
+            if(compressionResource&&fork==1)encoded->ReadResource(offset,bytes,count);
+            else reader(fork,offset,bytes,count);
+        };
+        ForkInput data(encoded?0:entry.forks[0].size,0,payload);
+        ForkInput resource(compressionResource?encoded->ResourceSize():entry.forks[1].size,1,payload);
+        const auto* compression=encoded?&encoded->Attribute():nullptr;
 
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
@@ -882,13 +898,13 @@ public:
                       "The APFS destination changed after overwrite approval");
                 const auto oid=At(found->id).oid;
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource);
+                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression);
                 });
                 return found->id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource);
+                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression);
             });
             for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
             throw Error("APFS file was committed but could not be found after reopening");
@@ -922,6 +938,7 @@ public:
                   "Select an unlocked APFS regular file to change compression");
             const bool compress=method!=HfsPlus::Volume::CompressionMode::Uncompressed;
             if(!compress&&!current.compressed)return;
+            Check(!compress||!current.forks[1].size,"APFS cannot retain a user resource fork on a compressed file");
             const auto size=current.forks[0].size;
             uint64_t done=0;
             const auto report=[&]{
@@ -935,8 +952,7 @@ public:
             std::optional<HfsPlus::EncodedCompression> encoded;
             if(compress)encoded.emplace(size,logical,method);
             const bool compressionResource=encoded&&encoded->UsesResource();
-            Check(!compressionResource||!current.forks[1].size,
-                  "This APFS compression method would replace the existing resource fork");
+
             const bool oldCompressionResource=current.compressed&&!current.forks[1].size&&
                                               item.attributes.count(ResourceFork)!=0;
             const MacBrowser::Reader read=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){

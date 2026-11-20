@@ -396,10 +396,10 @@ uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t paren
 }
 
 uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource)
+                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
-    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked,attributes,resource};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked,attributes,resource,compression};
     return Commit(source,expected,job,&request);
 }
 

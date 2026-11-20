@@ -20,6 +20,7 @@ struct CatalogCreate {
     bool locked=false;
     const HfsPlus::Attributes* attributes=nullptr;
     HfsPlus::Source* resource=nullptr;
+    const HfsPlus::Bytes* compression=nullptr;
 };
 struct CatalogRename {
     uint64_t parent,inode;

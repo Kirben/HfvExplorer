@@ -618,6 +618,21 @@ std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attribut
     return records;
 }
 
+void WriteCompressionAttribute(std::vector<OwnedRecord>& attributes,Bytes& inode,
+                               uint64_t id,uint64_t dataSize,const Bytes* compression)
+{
+    uint64_t logicalSize=0;
+    if(compression){
+        Check(compression->size()>=16&&compression->size()<EmbeddedAttributeLimit&&
+              Le32(compression->data())==0x636d7066&&!dataSize,"Invalid APFS compressed file output");
+        auto record=EmbeddedAttribute(id,CompressionAttribute,compression->size());
+        std::copy(compression->begin(),compression->end(),record.value.begin()+4);
+        attributes.push_back(std::move(record));
+        logicalSize=Le64(compression->data()+8);
+    }
+    SetCompressionFlags(inode,logicalSize,compression!=nullptr);
+}
+
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
@@ -889,6 +904,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite,streams);
         if(resourceWrite)SetResourceFlag(records.back().value,resourceWrite->size!=0);
+        if(create->compression)WriteCompressionAttribute(attributes,records.back().value,entryId,dataSize,create->compression);
         SortAttributes(attributes);
         records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
         streamAt=records.size();
@@ -926,18 +942,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             }
             if(ordinary)SetSecurityFlag(inode,*ordinary);
             if(resource)SetResourceFlag(inode,resource->size!=0);
-            if(replace){
-                uint64_t logicalSize=0;
-                if(const auto compression=replace->compression){
-                    Check(compression->size()>=16&&compression->size()<EmbeddedAttributeLimit&&
-                          Le32(compression->data())==0x636d7066&&!dataSize,"Invalid APFS compressed file output");
-                    auto record=EmbeddedAttribute(entryId,CompressionAttribute,compression->size());
-                    std::copy(compression->begin(),compression->end(),record.value.begin()+4);
-                    attributes.push_back(std::move(record));
-                    logicalSize=Le64(compression->data()+8);
-                }
-                SetCompressionFlags(inode,logicalSize,replace->compression!=nullptr);
-            }
+            if(replace)WriteCompressionAttribute(attributes,inode,entryId,dataSize,replace->compression);
             SortAttributes(attributes);
             records.erase(records.begin()+afterInode,records.begin()+afterInode+link.attributes+fileRecords);
             records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
@@ -1153,7 +1158,7 @@ CatalogWritePlan PrepareCatalogMutation(
     auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
     std::optional<ResourceWrite> resource;
     if(resourceInput)resource=ResourceWrite{resourceInput,resourceInput->Size(),0};
-    const bool compressionResource=replace&&replace->compression&&resource&&resource->size;
+    const bool compressionResource=(replace?replace->compression:create?create->compression:nullptr)&&resource&&resource->size;
     const auto resourceBlocks=resource&&(resource->size>=EmbeddedAttributeLimit||compressionResource)?
                               DivideUp(resource->size,Block):0;
     Check(fileBlocks<=current.blockCount&&resourceBlocks<=current.blockCount-fileBlocks,
