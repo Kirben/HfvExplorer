@@ -5,12 +5,14 @@
 #include "StorageWorker.h"
 #include <string>
 class BrowserSession;
+enum class ApfsImageMode {None,CaseInsensitive,CaseSensitive};
 struct MacImageFormatRequest {
     std::wstring path,externalJournal;
     std::u16string name;
     uint64_t size=0;
     HfsPlus::Volume::FormatKind kind=HfsPlus::Volume::FormatKind::HfsPlus;
     bool journaled=true,mfs=false,dc42=false,expanded=false;
+    ApfsImageMode apfs=ApfsImageMode::None;
 };
 std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageFormatRequest);
 bool StartMacImageFormat(BrowserSession&,MacImageFormatRequest);

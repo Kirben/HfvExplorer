@@ -6,6 +6,8 @@
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
+#include "ApfsFormat.h"
+#include "HfsPlusDisk.h"
 #include "DmgImage.h"
 #include "SparseDisk.h"
 #include "DmgEncryption.h"
@@ -139,6 +141,7 @@ class FormatDialog : public CDialog {
     std::u16string name;
     uint64_t size = 0;
     bool journaled = true,mfs=false,dc42=false,expanded=false,external=false;
+    ApfsImageMode apfs=ApfsImageMode::None;
     HfsPlus::Volume::FormatKind kind = HfsPlus::Volume::FormatKind::HfsPlus;
     explicit FormatDialog(CWnd *p) : CDialog(IDD_HPLUS_FORMAT, p) {}
     HfsPlus::Volume::FormatKind SelectedKind() {
@@ -154,22 +157,38 @@ class FormatDialog : public CDialog {
         SetDlgItemText(IDC_HPLUS_SIZE, "128 MiB");
         CheckDlgButton(IDC_HPLUS_JOURNAL, BST_CHECKED);
         for (const char *label :
-             {"HFS+ (case-insensitive)", "HFSX (case-sensitive)", "HFSX (case-insensitive)", "MFS (raw image)", "MFS (Disk Copy 4.2)"})
+             {"HFS+ (case-insensitive)", "HFSX (case-sensitive)", "HFSX (case-insensitive)",
+              "MFS (raw image)", "MFS (Disk Copy 4.2)", "APFS (case-insensitive)", "APFS (case-sensitive)"})
             SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
         SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, 0);
         return TRUE;
     }
     BOOL OnCommand(WPARAM wp,LPARAM lp)override{
-        if(LOWORD(wp)==IDC_HPLUS_FORMAT_KIND&&HIWORD(wp)==CBN_SELCHANGE){int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));bool nowMfs=selected>=3;
-            GetDlgItem(IDC_HPLUS_JOURNAL)->EnableWindow(!nowMfs);GetDlgItem(IDC_HPLUS_EXPANDED)->EnableWindow(!nowMfs);GetDlgItem(IDC_HPLUS_EXTERNAL)->EnableWindow(!nowMfs);if(nowMfs&&!mfs)SetDlgItemText(IDC_HPLUS_SIZE,"400 KiB");if(!nowMfs&&mfs)SetDlgItemText(IDC_HPLUS_SIZE,"128 MiB");mfs=nowMfs;return TRUE;}
+        if(LOWORD(wp)==IDC_HPLUS_FORMAT_KIND&&HIWORD(wp)==CBN_SELCHANGE){
+            const int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));
+            const bool nowMfs=selected==3||selected==4;
+            const bool hfsPlus=selected>=0&&selected<=2;
+            GetDlgItem(IDC_HPLUS_JOURNAL)->EnableWindow(hfsPlus);
+            GetDlgItem(IDC_HPLUS_EXPANDED)->EnableWindow(hfsPlus);
+            GetDlgItem(IDC_HPLUS_EXTERNAL)->EnableWindow(hfsPlus);
+            if(nowMfs!=mfs)SetDlgItemText(IDC_HPLUS_SIZE,nowMfs?"400 KiB":"128 MiB");
+            mfs=nowMfs;
+            return TRUE;
+        }
         if(LOWORD(wp)==IDC_HPLUS_EXTERNAL&&IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_CHECKED)CheckDlgButton(IDC_HPLUS_JOURNAL,BST_CHECKED);
         return CDialog::OnCommand(wp,lp);
     }
     void OnOK() override {
         try {
-            int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));mfs=selected>=3;dc42=selected==4;
+            const int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));
+            mfs=selected==3||selected==4;
+            dc42=selected==4;
+            apfs=selected==5?ApfsImageMode::CaseInsensitive:selected==6?ApfsImageMode::CaseSensitive:ApfsImageMode::None;
             if(mfs){std::string encoded,error;auto text=Text(m_hWnd,IDC_HPLUS_NAME);if(!MfsImage::EncodeName(text,encoded,error,27))throw HfsPlus::Error(error);name=U16(text);}
-            else {kind = SelectedKind();
+            else if(apfs!=ApfsImageMode::None){
+                name=U16(Text(m_hWnd, IDC_HPLUS_NAME));
+                Apfs::FormatLabel(name);
+            }else {kind = SelectedKind();
             name = HfsPlus::Normalize(U16(Text(m_hWnd, IDC_HPLUS_NAME)),
                                       kind == HfsPlus::Volume::FormatKind::HfsXCaseSensitive);}
             CString text;
@@ -180,7 +199,11 @@ class FormatDialog : public CDialog {
             size = parsed;
             if(mfs){if(size<128*1024||size>20*1024*1024||size%512)throw HfsPlus::Error("MFS requires 128 KiB-20 MiB and a 512-byte multiple.");if(dc42&&size!=400*1024&&size!=800*1024&&size!=720*1024&&size!=1440*1024)throw HfsPlus::Error("Disk Copy requires 400, 800, 720 or 1440 KiB.");}
             else if (size < 8 * 1024 * 1024 || size % 4096)throw HfsPlus::Error("Use at least 8 MiB and a multiple of 4096 bytes.");
-            journaled = !mfs&&IsDlgButtonChecked(IDC_HPLUS_JOURNAL) == BST_CHECKED;expanded=!mfs&&IsDlgButtonChecked(IDC_HPLUS_EXPANDED)==BST_CHECKED;external=!mfs&&IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_CHECKED;if(external&&!journaled)throw HfsPlus::Error("Enable journaling to use an external journal");
+            const bool hfsPlus=!mfs&&apfs==ApfsImageMode::None;
+            journaled=hfsPlus&&IsDlgButtonChecked(IDC_HPLUS_JOURNAL)==BST_CHECKED;
+            expanded=hfsPlus&&IsDlgButtonChecked(IDC_HPLUS_EXPANDED)==BST_CHECKED;
+            external=hfsPlus&&IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_CHECKED;
+            if(external&&!journaled)throw HfsPlus::Error("Enable journaling to use an external journal");
             CDialog::OnOK();
         } catch (const std::exception &e) {
             AfxMessageBox(e.what());
@@ -215,7 +238,10 @@ std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageForm
 {
     return [request=std::move(request)](Storage::Job& job){
         const bool external=!request.externalJournal.empty();
-        if(external&&(request.mfs||!request.journaled))
+        const bool apfs=request.apfs!=ApfsImageMode::None;
+        if(apfs&&(request.mfs||request.dc42))
+            return Storage::Result{1,ERROR_INVALID_PARAMETER,"Choose exactly one image format."};
+        if(external&&(request.mfs||apfs||!request.journaled))
             return Storage::Result{1,ERROR_INVALID_PARAMETER,"An external journal requires a journaled HFS+ or HFSX image."};
         if(request.mfs ? (request.size<128*1024||request.size>20*1024*1024||request.size%512)
                        : (request.size<8*1024*1024||request.size%4096||request.size>INT64_MAX))
@@ -229,14 +255,19 @@ std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageForm
         }
         std::vector<std::string> changed;
         for(const auto& item:access)changed.push_back(item.key);
-        return CommandStorage::Guard(std::move(access),[&](Storage::Job&){
+        return CommandStorage::Guard(std::move(access),[&](Storage::Job& job){
             constexpr uint64_t journalSize=64ULL*1024*1024;
             std::unique_ptr<HfsPlus::NewImage> home,journal;
             try{
                 const auto tags=request.dc42&&(request.size==400*1024||request.size==800*1024)?request.size/512*12:0;
                 const auto bytes=request.size+(request.dc42?84+tags:0);
-                home=HfsPlus::CreateFormatOutput(request.path.c_str(),bytes,external?request.externalJournal.c_str():nullptr);
-                if(request.mfs){
+                home=apfs?HfsPlus::CreateStagedOutput(request.path,bytes):
+                     HfsPlus::CreateFormatOutput(request.path.c_str(),bytes,external?request.externalJournal.c_str():nullptr);
+                if(apfs){
+                    Apfs::Format(*home,request.name,request.apfs==ApfsImageMode::CaseSensitive,job);
+                    if(job.cancelled())throw Storage::Cancelled();
+                    home->PublishTo(request.path);
+                }else if(request.mfs){
                     FormatMfsSource mfs(*home);
                     std::string name,error;
                     if(!MfsImage::EncodeName(MacBrowser::Wide(request.name),name,error,27)||
@@ -285,12 +316,12 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
         return;
     std::wstring path;
     if (!FileDialog(parent->m_hWnd, path, true, L"Mac disk images\0*.dsk;*.hfs;*.img\0All files\0*.*\0\0",
-                    L"dsk"))
+                    options.apfs!=ApfsImageMode::None?L"img":L"dsk"))
         return;
     std::wstring externalPath;
     if(options.external&&!FileDialog(parent->m_hWnd,externalPath,true,L"External journal disk image\0*.img\0All files\0*.*\0\0",L"img"))return;
     StartMacImageFormat(session,{std::move(path),std::move(externalPath),std::move(options.name),options.size,
-                                options.kind,options.journaled,options.mfs,options.dc42,options.expanded});
+                                options.kind,options.journaled,options.mfs,options.dc42,options.expanded,options.apfs});
 }
 #ifdef HFV_TESTING
 int RunHfsPlusUiTest(const char *directory) {
@@ -324,13 +355,21 @@ int RunHfsPlusUiTest(const char *directory) {
                 "Unicode format defaults");
         require(format.IsDlgButtonChecked(IDC_HPLUS_EXPANDED)==BST_UNCHECKED&&format.IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_UNCHECKED,"Advanced format defaults");
         format.CheckDlgButton(IDC_HPLUS_JOURNAL,BST_UNCHECKED);format.CheckDlgButton(IDC_HPLUS_EXTERNAL,BST_CHECKED);format.SendMessage(WM_COMMAND,IDC_HPLUS_EXTERNAL,0);require(format.IsDlgButtonChecked(IDC_HPLUS_JOURNAL)==BST_CHECKED,"External format did not require journaling");
-        require(format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCOUNT) == 5,
-                "HFSX format choices missing");
+        require(format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_GETCOUNT) == 7,
+                "Mac image format choices missing");
         for (int choice = 0; choice < 3; ++choice) {
             format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND, CB_SETCURSEL, choice);
             require(static_cast<int>(format.SelectedKind()) == choice, "Format choice not applied");
         }
         for(int choice=3;choice<5;++choice){format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,choice);format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);require(!format.GetDlgItem(IDC_HPLUS_EXTERNAL)->IsWindowEnabled()&&!format.GetDlgItem(IDC_HPLUS_EXPANDED)->IsWindowEnabled()&&!format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"400 KiB","MFS formatter defaults/journal state");}
+        for(int choice=5;choice<7;++choice){
+            format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,choice);
+            format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);
+            require(!format.GetDlgItem(IDC_HPLUS_EXTERNAL)->IsWindowEnabled()&&
+                    !format.GetDlgItem(IDC_HPLUS_EXPANDED)->IsWindowEnabled()&&
+                    !format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&
+                    Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"128 MiB","APFS format size and options");
+        }
         format.DestroyWindow();
         const auto folder=VolumeCoord::Wide(directory);
         auto run=[&](MacImageFormatRequest request){
@@ -356,6 +395,68 @@ int RunHfsPlusUiTest(const char *directory) {
             MfsImage volume;
             require(volume.Open(source)&&image->Size()==(dc42?400*1024+84+800*12:400*1024),
                     "formatted MFS image could not be opened at its selected size");
+        }
+        for(const bool sensitive:{false,true}){
+            const auto output=folder+(sensitive?L"\\formatted-apfs-sensitive.img":L"\\formatted-apfs.img");
+            MacImageFormatRequest request;
+            request.path=output;request.size=sensitive?129ULL*1024*1024:8ULL*1024*1024;
+            request.name=u"New APFS \u65e5\u672c";
+            request.apfs=sensitive?ApfsImageMode::CaseSensitive:ApfsImageMode::CaseInsensitive;
+            const auto result=run(request);
+            require(!result.code,result.message.c_str());
+            auto volume=MacBrowser::OpenBrowserImage(output);
+            require(volume&&std::string(volume->Kind())=="APFS"&&volume->Name()==request.name&&
+                    volume->CaseSensitive()==sensitive&&volume->List(2).empty(),
+                    "Created APFS image did not reopen with its name and case mode");
+            const auto original=HfsPlus::Disk::Read(*HfsPlus::OpenImage(output.c_str(),false),0,4096);
+            require(run(request).code&&HfsPlus::Disk::Read(*HfsPlus::OpenImage(output.c_str(),false),0,4096)==original,
+                    "Existing APFS image was overwritten");
+        }
+        MacImageFormatRequest failedApfs;
+        failedApfs.name=u"Failed APFS";
+        failedApfs.size=8*1024*1024;
+        failedApfs.apfs=ApfsImageMode::CaseInsensitive;
+        failedApfs.path=folder+L"\\failed-apfs.img";
+        bool faulted=false;
+        HfsPlus::workerIoFault=[&](bool writing,uint64_t at,size_t){
+            if(writing&&at==0){
+                faulted=true;
+                throw HfsPlus::Error("Injected APFS superblock write failure");
+            }
+        };
+        const auto writeFailure=run(failedApfs);
+        HfsPlus::workerIoFault={};
+        require(writeFailure.code&&faulted&&GetFileAttributesW(failedApfs.path.c_str())==INVALID_FILE_ATTRIBUTES,
+                "Failed APFS formatting left output behind");
+
+        Storage::Job cancelled;
+        failedApfs.path=folder+L"\\cancelled-apfs.img";
+        HfsPlus::workerIoFault=[&](bool writing,uint64_t,size_t){if(writing)cancelled.cancel();};
+        bool refused=false;
+        try{MakeMacImageFormatJob(failedApfs)(cancelled);}
+        catch(const Storage::Cancelled&){refused=true;}
+        catch(...){HfsPlus::workerIoFault={};throw;}
+        HfsPlus::workerIoFault={};
+        require(refused&&GetFileAttributesW(failedApfs.path.c_str())==INVALID_FILE_ATTRIBUTES,
+                "Cancelled APFS formatting left output behind");
+        WIN32_FIND_DATAW staged{};
+        const auto leftover=FindFirstFileW((folder+L"\\.hfv-image-*.tmp").c_str(),&staged);
+        if(leftover!=INVALID_HANDLE_VALUE)FindClose(leftover);
+        require(leftover==INVALID_HANDLE_VALUE,"APFS formatting left a temporary image behind");
+        fprintf(report,"PASS: APFS case modes, Unicode name, multiple allocation chunks, no overwrite, and failed or cancelled format cleanup.\n");
+        if(_wgetenv(L"HFV_APFS_LARGE_FORMAT")){
+            for(const auto& geometry:{std::pair{L"\\formatted-apfs-multi-cib.img",17ULL<<30},
+                                      std::pair{L"\\formatted-apfs-multi-cab.img",8ULL<<40}}){
+                auto request=failedApfs;
+                request.path=folder+geometry.first;
+                request.name=u"Large APFS";
+                request.size=geometry.second;
+                const auto result=run(request);
+                require(!result.code,result.message.c_str());
+                auto volume=MacBrowser::OpenBrowserImage(request.path);
+                require(volume&&volume->Name()==request.name&&volume->List(2).empty(),"Large APFS image failed to reopen");
+            }
+            fprintf(report,"PASS: sparse 17 GiB and 8 TiB APFS geometries across multiple chunk-info and address blocks.\n");
         }
         const auto home=folder+L"\\external.dsk";
         const auto journal=folder+L"\\external-journal.img";
@@ -384,7 +485,7 @@ int RunHfsPlusUiTest(const char *directory) {
                 GetFileAttributesW(failedJournal.c_str())==INVALID_FILE_ATTRIBUTES,
                 "external journal failure left outputs behind");
         fprintf(report,"PASS: all image formats, external journal reopen, existing journal preservation and rollback of both new outputs.\n");
-        fprintf(report, "PASS: active Unicode name and formatter dialogs; all HFS+/HFSX/MFS format choices, "
+        fprintf(report, "PASS: active Unicode name and formatter dialogs; HFS+/HFSX/MFS/APFS format choices, "
                         "journal default and owner restoration. Main-browser regressions run separately. "
                         "No computer control or physical devices used.\n");
     } catch (const std::exception &e) {
