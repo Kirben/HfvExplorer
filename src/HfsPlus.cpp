@@ -258,7 +258,7 @@ struct Volume::Impl {
     View view;
     Journal journal;
     Bytes header, bitmap;
-    uint32_t bs = 0, total = 0;
+    uint32_t bs = 0, total = 0, freeBlocks = 0;
     bool write = false, usable = true, caseSensitive = false;
     Fork allocation, extents, catalog, attributes;
     std::vector<Record> catalogRecords, overflow;
@@ -319,6 +319,8 @@ struct Volume::Impl {
               "Invalid HFS+ allocation bitmap length");
         bitmap.resize(size_t(allocation.size));
         ForkRead(view, allocation, bs, 0, bitmap.data(), bitmap.size());
+        if (write)
+            freeBlocks = CountFreeBlocks();
         uint8_t compare = 0;
         catalogRecords = ReadTree(view, catalog, bs, 516, &compare);
         caseSensitive = compare == 0xbc;
@@ -858,12 +860,33 @@ struct Volume::Impl {
                   "Journal allocation is not represented by protected files");
         }
     }
+    uint32_t CountFreeBlocks() const {
+        static constexpr auto setBits = [] {
+            std::array<uint8_t, 256> counts{};
+            for (size_t n = 1; n < counts.size(); ++n)
+                counts[n] = uint8_t(counts[n >> 1] + (n & 1));
+            return counts;
+        }();
+        const uint32_t wholeBytes = total / 8, tail = total % 8;
+        uint32_t used = 0;
+        for (uint32_t byte = 0; byte < wholeBytes; ++byte)
+            used += setBits[bitmap[byte]];
+        if (tail)
+            used += setBits[bitmap[wholeBytes] & uint8_t(0xff << (8 - tail))];
+        return total - used;
+    }
     void Mark(uint32_t n, bool used) {
         auto mask = uint8_t(0x80 >> (n % 8));
-        if (used)
-            bitmap[n / 8] |= mask;
-        else
-            bitmap[n / 8] &= uint8_t(~mask);
+        auto &bits = bitmap[n / 8];
+        if (((bits & mask) != 0) == used)
+            return;
+        if (used) {
+            bits |= mask;
+            --freeBlocks;
+        } else {
+            bits &= uint8_t(~mask);
+            ++freeBlocks;
+        }
     }
     Fork Allocate(uint64_t size, bool contiguous = false, bool previouslyFree = false) {
         Check(size <= INT64_MAX, "HFS+ fork exceeds Apple's signed 64-bit limit");
@@ -1235,6 +1258,7 @@ struct Volume::Impl {
         header = fresh.header;
         P32(header.data() + 64, (std::max)(nextId, U32(header.data() + 64)));
         bitmap = std::move(fresh.bitmap);
+        freeBlocks = CountFreeBlocks();
         allocation = fresh.allocation;
         catalog = fresh.catalog;
         extents = fresh.extents;
@@ -1321,10 +1345,7 @@ struct Volume::Impl {
             if (memcmp(bitmap.data() + offset, committedBitmap.data() + offset, n))
                 StageForkRange(allocation, offset, bitmap.data() + offset, n);
         }
-        uint32_t free = 0, files = 0, folders = 0;
-        for (uint32_t i = 0; i < total; ++i)
-            if (!Used(i))
-                ++free;
+        uint32_t files = 0, folders = 0;
         for (auto &p : entries)
             if (p.first != 2) {
                 if (p.second.directory||LinkKind(p.first)==2)
@@ -1334,7 +1355,7 @@ struct Volume::Impl {
             }
         P32(header.data() + 32, files);
         P32(header.data() + 36, folders);
-        P32(header.data() + 48, free);
+        P32(header.data() + 48, freeBlocks);
         P32(header.data() + 20, Time::Encode(Now(),(U32(header.data()+4)&0x20000000)!=0));
         P32(header.data() + 68, U32(header.data() + 68) + 1);
         P32(header.data() + 8, journal.enabled ? 0x4846534a : 0x48465658);

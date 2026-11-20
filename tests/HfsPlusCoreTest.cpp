@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "StorageOutcome.h"
 #include "HfsPlusDisk.h"
+#include <chrono>
 #include <cstdio>
 using namespace HfsPlus;
 void RunIncrementalBTreeTests();
@@ -696,6 +697,108 @@ void resizeIoErrors() {
     puts("PASS: write/flush failures throughout journal growth leave a recoverable filesystem and complete "
          "file forks");
 }
+class SparseBenchmarkDisk final : public Source {
+    static constexpr size_t pageSize=4096;
+    const uint64_t length_;
+    std::map<uint64_t,std::array<uint8_t,pageSize>> pages_;
+public:
+    explicit SparseBenchmarkDisk(uint64_t length):length_(length){}
+    uint64_t Size()const override{return length_;}
+    bool Writable()const override{return true;}
+    void Flush()override{}
+    void Read(uint64_t at,void* out,size_t size)override{
+        must(Disk::Range(at,size,length_),"Benchmark disk read outside image");
+        auto bytes=static_cast<uint8_t*>(out);
+        while(size){
+            const auto offset=size_t(at%pageSize);
+            const auto count=(std::min)(pageSize-offset,size);
+            auto found=pages_.find(at/pageSize);
+            if(found==pages_.end())memset(bytes,0,count);
+            else memcpy(bytes,found->second.data()+offset,count);
+            bytes+=count; at+=count; size-=count;
+        }
+    }
+    void Write(uint64_t at,const void* data,size_t size)override{
+        must(Disk::Range(at,size,length_),"Benchmark disk write outside image");
+        auto bytes=static_cast<const uint8_t*>(data);
+        while(size){
+            const auto offset=size_t(at%pageSize);
+            const auto count=(std::min)(pageSize-offset,size);
+            auto& page=pages_[at/pageSize];
+            memcpy(page.data()+offset,bytes,count);
+            bytes+=count; at+=count; size-=count;
+        }
+    }
+};
+
+void BenchmarkSmallEdits()
+{
+    using Clock=std::chrono::steady_clock;
+    const auto median=[](auto edit){
+        std::array<double,7> times{};
+        for(unsigned i=0;i<times.size();++i){
+            const auto start=Clock::now();
+            edit(i);
+            times[i]=std::chrono::duration<double,std::milli>(Clock::now()-start).count();
+        }
+        std::sort(times.begin(),times.end());
+        return times[times.size()/2];
+    };
+    for(const uint64_t gib:{1,64,256}){
+        SparseBenchmarkDisk disk(gib<<30);
+        Volume::Format(disk,u"Small edits",true);
+        Volume v(disk,true);
+        const Attributes attrs{{u"user.benchmark",Bytes{0}}};
+        const auto id=v.Put(2,u"Rename A",0,0,pattern,nullptr,false,nullptr,&attrs);
+        const auto free=v.FreeBytes();
+        const auto rename=median([&](unsigned i){v.Rename(id,2,i%2?u"Rename A":u"Rename B");});
+        const auto attribute=median([&](unsigned i){v.SetAttributes(id,{{u"user.benchmark",Bytes{uint8_t(i+1)}}});});
+        must(v.FreeBytes()==free,"Metadata-only edits changed free space");
+        printf("%llu GiB: rename %.3f ms, attribute edit %.3f ms (median of seven)\n",
+               static_cast<unsigned long long>(gib),rename,attribute);
+        fflush(stdout);
+    }
+}
+
+void BitmapAccounting()
+{
+    for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
+                      Volume::FormatKind::HfsXCaseInsensitive}) {
+        Memory disk(16 * 1024 * 1024 + 3 * 4096);
+        Volume::Format(disk, u"Allocation accounting", true, kind);
+        auto *header = disk.bytes.data() + 1024;
+        const auto blockSize = Disk::U32(header + 40);
+        const auto total = Disk::U32(header + 44);
+        const auto expectedFree = uint64_t(Disk::U32(header + 48)) * blockSize;
+        uint32_t sentinel;
+        {
+            Volume volume(disk, true);
+            sentinel = volume.Put(2, u"Sentinel", 0, 0, pattern);
+            must(volume.FreeBytes() == expectedFree, "Empty file changed allocation accounting");
+            const auto file = volume.Put(2, u"Both forks", 2 * blockSize, blockSize, pattern);
+            must(volume.FreeBytes() == expectedFree - 3 * blockSize, "Fork allocations changed the wrong block count");
+            volume.Remove(file);
+            must(volume.FreeBytes() == expectedFree, "Deleting both forks did not restore free blocks");
+        }
+
+        // Clear the out-of-volume bits and make both on-disk free counters stale.
+        const auto tail = total % 8;
+        must(tail != 0, "Allocation fixture needs a partial bitmap byte");
+        auto *bitmap = disk.bytes.data() + uint64_t(Disk::U32(header + 128)) * blockSize;
+        bitmap[total / 8] &= uint8_t(0xff << (8 - tail));
+        Disk::P32(header + 48, 0);
+        Disk::P32(disk.bytes.data() + disk.bytes.size() - 1024 + 48, 0);
+        {
+            Volume volume(disk, true);
+            volume.Rename(sentinel, 2, u"Renamed");
+            must(volume.FreeBytes() == expectedFree, "Rename did not recover the real free block count");
+        }
+        Volume reopened(disk);
+        must(reopened.FreeBytes() == expectedFree, "Corrected free block count was not persisted");
+    }
+    puts("PASS: HFS+/HFSX free blocks after allocation, deletion, stale counters and partial bitmap bytes");
+}
+
 Memory largeCatalog() {
     Memory disk(256 * 1024 * 1024);
     Volume::Format(disk, u"Beyond header map");
@@ -1052,6 +1155,7 @@ void directoryMetadata(){
 void RunLargeAttributeTests();
 int wmain(int argc, wchar_t **argv) {
     try {
+        if(argc==2&&!wcscmp(argv[1],L"--benchmark-small-edits")){BenchmarkSmallEdits();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--large-attributes")){RunLargeAttributeTests();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--hard-links")){hardLinks();hardLinkFailures();return 0;}
           if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
@@ -1226,6 +1330,7 @@ int wmain(int argc, wchar_t **argv) {
             puts("PASS: retained committed journal without applying home blocks");
             return 0;
         }
+        BitmapAccounting();
         attributeTests();
         stagedRangeValidation();
         hardLinks();hardLinkFailures();directoryMetadata();
