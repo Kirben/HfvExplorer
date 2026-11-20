@@ -539,13 +539,20 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     };
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
-    using Key=std::tuple<uint64_t,uint64_t,uint32_t>;
+    // APFS orders equal-hash directory keys by their stored names.
+    using Key=std::tuple<uint64_t,uint64_t,uint32_t,std::string>;
+    const auto canonical=[fold](std::string value){
+        if(fold)for(auto& c:value)if(c>='A'&&c<='Z')c+=32;
+        return value;
+    };
+    const auto requestedName=canonical(name);
+    std::map<uint64_t,std::set<std::string>> directoryNames;
     OwnedRecord added;
     std::optional<Key> addedKey;
     if(create||rename){
         added=WriterDisk::DirectoryEntry(name,entryId,time,parent,fold,
                                          uint16_t(create?create->kind:CatalogKind::Directory));
-        addedKey=Key{parent,9,Le32(added.key.data()+8)>>10};
+        addedKey=Key{parent,9,Le32(added.key.data()+8)>>10,name};
     }
     Key previous{};
     size_t insertAt=2;
@@ -578,6 +585,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             const auto key=Le64(view.key.data);
             const auto inode=key&IdMask,type=key>>60;
             uint32_t hash=0;
+            std::string storedName;
             if(type==9){
                 const auto folder=directories.find(inode);
                 Check(inode!=3&&folder!=directories.end()&&view.key.size>=14&&
@@ -592,9 +600,14 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 hash=nameKey>>10;
                 Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash,"Invalid APFS directory name hash");
                 const auto child=Le64(view.value.data);
+                renamingThisEntry=rename&&rename->inode==child&&parent==inode;
+                const auto canonicalName=canonical(childName);
+                Check(directoryNames[inode].insert(canonicalName).second,"Duplicate APFS directory name");
+                Check(!addedKey||parent!=inode||renamingThisEntry||canonicalName!=requestedName,
+                      "The APFS entry name already exists");
+                storedName=childName;
                 Check(child>=16&&child>inode&&child<nextId&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
                       "Invalid or duplicate APFS directory entry ID");
-                renamingThisEntry=rename&&rename->inode==child&&parent==inode;
                 ++folder->second.children;
             }else{
                 Check(type==3&&view.key.size==8&&view.value.size>=92&&Le64(view.value.data+8)==inode,
@@ -650,9 +663,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 }
             }
             // Catalog keys sort by inode ID, record type, then directory name hash.
-            const Key order{inode,type,hash};
+            const Key order{inode,type,hash,std::move(storedName)};
             Check(order>previous,"Invalid or unsupported APFS directory key order");
-            Check(!addedKey||renamingThisEntry||order!=*addedKey,"The APFS entry name already exists or has a conflicting hash");
             // A regular file cannot be a destination parent, so its stream
             // records always sort on the same side of the insertion point.
             if(addedKey&&!renamingThisEntry&&order<*addedKey)insertAt+=1+streamRecords;

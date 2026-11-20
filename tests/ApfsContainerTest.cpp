@@ -1275,6 +1275,36 @@ void WritableNamespace(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS writable shared-volume adapter, exclusive images, stable row IDs, namespace edits, uncertain flush recovery, and late transfer cancellation.\n");
 }
 
+void DirectoryHashCollisions(const std::string& root,FILE* report)
+{
+    const auto path=VolumeCoord::Wide(root+"checkpoint-hash-collision.img");
+    const std::u16string first=u"Collision 1hvkudj",second=u"Collision 1ey4qx3";
+    Check(Apfs::WriterDisk::DirectoryHash("Collision 1hvkudj",true)==
+          Apfs::WriterDisk::DirectoryHash("Collision 1ey4qx3",true),"APFS fixture names no longer collide");
+    {
+        auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*image,u"Hash collision",false,job);
+        auto checkpoint=Apfs::Probe(*image);
+        Apfs::CreateEmptyFile(*image,*checkpoint,2,first,job);
+        checkpoint=Apfs::Probe(*image);
+        Apfs::CreateCatalogDirectory(*image,*checkpoint,2,second,job);
+        checkpoint=Apfs::Probe(*image);
+        Reject([&]{Apfs::CreateEmptyFile(*image,*checkpoint,2,u"COLLISION 1HVKUDJ",job);},
+               "APFS accepted a duplicate case-insensitive name in an equal-hash group");
+        Reject([&]{Apfs::RenameEntry(*image,*checkpoint,2,17,first,job);},
+               "APFS rename replaced a distinct entry with the same hash");
+        Apfs::RenameEntry(*image,*checkpoint,2,17,u"COLLISION 1EY4QX3",job);
+        image->Keep();
+    }
+    const auto opened=MacBrowser::OpenBrowserImage(path);
+    MacBrowser::Entry file,folder;
+    Check(opened&&opened->List().size()==2&&opened->FindChild(2,first,file)&&!file.directory&&
+          opened->FindChild(2,second,folder)&&folder.directory&&folder.name==u"COLLISION 1EY4QX3",
+          "APFS equal-hash directory records did not reopen as separate entries");
+    fprintf(report,"PASS: distinct APFS names with the same hash, duplicate protection, and case-only rename.\n");
+}
+
 Memory Raw(unsigned blockSize=4096)
 {
     Memory disk(1024*1024);
@@ -1632,6 +1662,7 @@ int RunApfsContainerTest(const char* directory)
         DeleteCatalogWrites(root,report);
         ReplaceCatalogData(root,report);
         WritableNamespace(root,report);
+        DirectoryHashCollisions(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
