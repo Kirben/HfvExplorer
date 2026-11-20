@@ -2,6 +2,7 @@
 #include "ApfsContainer.h"
 #include "DiskPartitions.h"
 #include "HfsPlusDisk.h"
+#include "StorageWorker.h"
 
 namespace Apfs {
 namespace {
@@ -17,6 +18,7 @@ constexpr uint64_t MinimumSize=1024*1024;
 constexpr size_t MagicOffset=32;
 constexpr size_t VolumeArrayOffset=184;
 constexpr uint32_t MaxVolumes=100;
+constexpr size_t MapHeader=40,MappingBytes=40;
 
 Container Superblock(const Bytes& block,uint64_t offset,uint64_t length)
 {
@@ -64,24 +66,34 @@ uint64_t Slot(const Ring& ring,uint64_t index)
     return ring.base+index%ring.capacity;
 }
 
+bool ValidMap(const Bytes& map,uint64_t transaction,bool last)
+{
+    const auto p=map.data();
+    return Le64(p)==ObjectChecksum(map)&&(Le32(p+24)&0xffff)==12&&Le64(p+16)==transaction&&
+           Le32(p+32)==unsigned(last)&&Le32(p+36)<=(map.size()-MapHeader)/MappingBytes;
+}
+std::optional<uint32_t> DataIndex(const Ring& data,uint64_t block,uint32_t count)
+{
+    if(!count||block<data.base||block-data.base>=data.capacity)return {};
+    const auto relative=(block-data.base+data.capacity-data.index)%data.capacity;
+    if(!Range(relative,count,data.used))return {};
+    return uint32_t(relative);
+}
+
 bool ValidateMappings(Source& source,const Container& container,const Ring& desc,const Ring& data)
 {
-    constexpr size_t MapHeader=40,MappingBytes=40;
     std::set<std::pair<uint64_t,uint64_t>> objects;
     for(uint32_t i=0;i+1<desc.used;++i){
         const auto slot=Slot(desc,uint64_t(desc.index)+i);
         const auto map=Disk::Read(source,container.offset+slot*container.blockSize,container.blockSize);
         const auto p=map.data();
+        if(!ValidMap(map,container.transaction,i+2==desc.used))return false;
         const auto count=Le32(p+36);
-        if(Le64(p)!=ObjectChecksum(map)||(Le32(p+24)&0xffff)!=12||Le64(p+16)!=container.transaction||
-           Le32(p+32)!=unsigned(i+2==desc.used)||count>(map.size()-MapHeader)/MappingBytes)
-            return false;
         for(uint32_t j=0;j<count;++j){
             const auto entry=p+MapHeader+j*MappingBytes;
             const auto size=Le32(entry+8);
             const auto volume=Le64(entry+16),id=Le64(entry+24),physical=Le64(entry+32);
-            if(!size||size%container.blockSize||physical<data.base||
-               !Range(physical-data.base,size/container.blockSize,data.capacity)||
+            if(size%container.blockSize||!DataIndex(data,physical,size/container.blockSize)||
                !id||!objects.emplace(volume,id).second)
                 return false;
         }
@@ -129,6 +141,92 @@ Container ReadContainer(Source& source,uint64_t offset,uint64_t length)
     Check(newest.has_value(),"No complete APFS checkpoint");
     return std::move(*newest);
 }
+
+void Store(Bytes& bytes,size_t at,uint64_t value,size_t width)
+{
+    for(size_t i=0;i<width;++i)bytes[at+i]=uint8_t(value>>(8*i));
+}
+void Stamp(Bytes& bytes,uint64_t transaction)
+{
+    Store(bytes,16,transaction,8);
+    Store(bytes,0,ObjectChecksum(bytes),8);
+}
+uint32_t NextStart(const Ring& ring,uint32_t next)
+{
+    Check(ring.used&&ring.used<=ring.capacity/2&&next==(uint64_t(ring.index)+ring.used)%ring.capacity,
+          "APFS checkpoint ring cannot hold the next transaction without overwriting the current one");
+    return next;
+}
+struct CheckpointObject {
+    uint32_t index;
+    Bytes bytes;
+};
+struct PendingCheckpoint {
+    uint32_t blockSize;
+    uint64_t transaction;
+    Ring descriptors,data;
+    Bytes superblock;
+    std::vector<Bytes> mappings;
+    std::vector<CheckpointObject> objects;
+};
+PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
+{
+    const auto size=current.blockSize;
+    auto superblock=Disk::Read(source,current.checkpointBlock*size,size);
+    const auto p=superblock.data();
+    Check(Le32(p+24)==0x80000001&&Le64(p+64)==2,"Unsupported APFS checkpoint write layout");
+    const auto descriptors=ReadRing(p,current.blockCount,true);
+    const auto data=ReadRing(p,current.blockCount,false);
+    const auto descStart=NextStart(descriptors,Le32(p+128)),dataStart=NextStart(data,Le32(p+132));
+    const auto transaction=Le64(p+96);
+    Check(transaction>current.transaction&&transaction<UINT64_MAX,"Invalid next APFS transaction ID");
+
+    PendingCheckpoint plan{size,transaction,{descriptors.base,descriptors.capacity,descStart,descriptors.used},
+        {data.base,data.capacity,dataStart,data.used},std::move(superblock),{},{}};
+    std::set<uint32_t> occupied;
+    for(uint32_t i=0;i+1<descriptors.used;++i){
+        const auto original=Slot(descriptors,uint64_t(descriptors.index)+i);
+        auto map=Disk::Read(source,original*size,size);
+        Check(ValidMap(map,current.transaction,i+2==descriptors.used)&&Le64(map.data()+8)==original&&
+              Le32(map.data()+24)==0x4000000c&&Le32(map.data()+28)==0,
+              "Unsupported APFS checkpoint map header");
+        const auto count=Le32(map.data()+36);
+        for(uint32_t j=0;j<count;++j){
+            const auto at=MapHeader+j*MappingBytes;
+            const auto entry=map.data()+at;
+            const auto type=Le32(entry),subtype=Le32(entry+4),bytes=Le32(entry+8);
+            const auto volume=Le64(entry+16),oid=Le64(entry+24),block=Le64(entry+32);
+            Check((type&0xf0000000)==0x80000000&&(!volume||volume==current.volumes.front()),
+                  "Unsupported APFS checkpoint object type");
+            const auto blocks=bytes/size;
+            const auto relative=DataIndex(data,block,blocks);
+            Check(relative&&bytes%size==0&&oid,"APFS checkpoint object lies outside the active data range");
+            Bytes object(bytes);
+            for(uint32_t n=0;n<blocks;++n){
+                Check(occupied.insert(*relative+n).second,"Overlapping APFS checkpoint objects");
+                const auto sourceBlock=Slot(data,uint64_t(data.index)+*relative+n);
+                source.Read(sourceBlock*size,object.data()+size_t(n)*size,size);
+            }
+            Check(Le64(object.data())==ObjectChecksum(object)&&Le64(object.data()+8)==oid&&
+                  Le64(object.data()+16)==current.transaction&&Le32(object.data()+24)==type&&
+                  Le32(object.data()+28)==subtype,"Invalid APFS checkpoint object");
+            Stamp(object,transaction);
+            plan.objects.push_back({*relative,std::move(object)});
+            Store(map,at+32,Slot(data,uint64_t(dataStart)+*relative),8);
+        }
+        Store(map,8,Slot(descriptors,uint64_t(descStart)+i),8);
+        Stamp(map,transaction);
+        plan.mappings.push_back(std::move(map));
+    }
+    Check(occupied.size()==data.used,"Unmapped blocks in the APFS checkpoint data range");
+    Store(plan.superblock,96,transaction+1,8);
+    Store(plan.superblock,128,(uint64_t(descStart)+descriptors.used)%descriptors.capacity,4);
+    Store(plan.superblock,132,(uint64_t(dataStart)+data.used)%data.capacity,4);
+    Store(plan.superblock,136,descStart,4);
+    Store(plan.superblock,144,dataStart,4);
+    Stamp(plan.superblock,transaction);
+    return plan;
+}
 }
 
 uint64_t ObjectChecksum(const HfsPlus::Bytes& object)
@@ -158,5 +256,45 @@ std::optional<Container> Probe(Source& source)
     }
     if(memcmp(boot.data()+MagicOffset,"NXSB",4))return {};
     return ReadContainer(source,0,source.Size());
+}
+
+uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job& job)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    Check(source.Writable(),"An exclusive writable APFS image is required");
+    source.CheckMedia();
+    const auto current=Probe(source);
+    Check(current&&current->uuid==expected.uuid&&current->transaction==expected.transaction&&
+          current->checkpointBlock==expected.checkpointBlock,"The APFS checkpoint changed");
+    Check(!current->offset&&current->checkpointBlock&&!current->keybagBlock&&!current->keybagBlocks&&
+          current->volumes.size()==1&&source.Size()==current->blockCount*current->blockSize,
+          "Checkpoint writes require a raw single-volume APFS image with a contiguous checkpoint ring");
+    const auto plan=PlanCheckpoint(source,*current);
+    auto write=[&](uint64_t block,const uint8_t* bytes){
+        if(job.cancelled())throw Storage::Cancelled();
+        source.Write(block*plan.blockSize,bytes,plan.blockSize);
+    };
+    for(const auto& object:plan.objects){
+        for(size_t i=0;i<object.bytes.size()/plan.blockSize;++i){
+            const auto block=Slot(plan.data,uint64_t(plan.data.index)+object.index+i);
+            write(block,object.bytes.data()+i*plan.blockSize);
+        }
+    }
+    for(size_t i=0;i<plan.mappings.size();++i)
+        write(Slot(plan.descriptors,uint64_t(plan.descriptors.index)+i),plan.mappings[i].data());
+
+    // The superblock is the commit record. Until this write, both rings leave
+    // the selected checkpoint intact and no reader can observe the new XID.
+    source.Flush();
+    source.CheckMedia();
+    if(job.cancelled())throw Storage::Cancelled();
+    const auto commit=Slot(plan.descriptors,uint64_t(plan.descriptors.index)+plan.mappings.size());
+    try{
+        source.Write(commit*plan.blockSize,plan.superblock.data(),plan.blockSize);
+        source.Flush();
+    }catch(const std::exception& error){
+        throw CheckpointPublicationUncertain(std::string("APFS checkpoint publication may have completed: ")+error.what());
+    }
+    return plan.transaction;
 }
 }

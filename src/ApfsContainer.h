@@ -3,6 +3,7 @@
 #include "HfsPlus.h"
 #include <optional>
 
+namespace Storage {class Job;}
 namespace Apfs {
 struct Container {
     uint64_t offset, blockCount, transaction, objectMap;
@@ -16,4 +17,11 @@ struct Container {
 // Locate an APFS container and validate its latest complete contiguous checkpoint.
 std::optional<Container> Probe(HfsPlus::Source&);
 uint64_t ObjectChecksum(const HfsPlus::Bytes&);
+
+struct CheckpointPublicationUncertain : HfsPlus::Error {
+    using HfsPlus::Error::Error;
+};
+// Republish the current state at a new transaction ID. The caller must hold
+// exclusive writable access to an ordinary, raw image for the whole operation.
+uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Job&);
 }

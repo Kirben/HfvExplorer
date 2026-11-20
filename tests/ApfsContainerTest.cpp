@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "ApfsContainer.h"
+#include "ApfsFormat.h"
 #include "ApfsTree.h"
 #include "HfsPlusDisk.h"
 #include "MacBrowserModel.h"
@@ -55,6 +56,139 @@ void Seal(Bytes& disk,size_t offset,size_t blockSize)
     Bytes block(first,first+blockSize);
     Little(disk.data()+offset,Apfs::ObjectChecksum(block),8);
 }
+
+class CheckpointFaultImage final:public Source {
+    Bytes live_;
+public:
+    enum class Fault {None, BeforeWrite, TornWrite, FailedFlush};
+    Bytes durable;
+    unsigned event=0,failAt=0;
+    Fault fault=Fault::None;
+    bool persistBeforeFailedFlush=false;
+    std::function<void()> onFlush;
+    explicit CheckpointFaultImage(const Bytes& base):live_(base),durable(base){}
+    uint64_t Size()const override{return live_.size();}
+    bool Writable()const override{return true;}
+    void Read(uint64_t at,void* dest,size_t size)override{
+        Check(Disk::Range(at,size,live_.size()),"Checkpoint test read exceeded the image");
+        memcpy(dest,live_.data()+at,size);
+    }
+    void Write(uint64_t at,const void* data,size_t size)override{
+        Check(Disk::Range(at,size,live_.size()),"Checkpoint test write exceeded the image");
+        if(++event==failAt&&fault==Fault::BeforeWrite)throw Error("Injected checkpoint write failure");
+        if(event==failAt&&fault==Fault::TornWrite){
+            memcpy(live_.data()+at,data,23);
+            memcpy(durable.data()+at,data,23);
+            throw Error("Injected torn checkpoint write");
+        }
+        memcpy(live_.data()+at,data,size);
+    }
+    void Flush()override{
+        if(++event==failAt&&fault==Fault::FailedFlush){
+            if(persistBeforeFailedFlush)durable=live_;
+            throw Error("Injected checkpoint flush failure");
+        }
+        durable=live_;
+        if(onFlush)onFlush();
+    }
+};
+
+void CheckpointWrites(const std::string& root,FILE* report)
+{
+    constexpr size_t imageSize=8*1024*1024;
+    const auto baselinePath=VolumeCoord::Wide(root+"checkpoint-before.img");
+    {
+        auto image=CreateFormatOutput(baselinePath.c_str(),imageSize);
+        Storage::Job job;
+        Apfs::Format(*image,u"Checkpoint fixture",false,job);
+        image->Keep();
+    }
+    Bytes original;
+    {
+        auto image=HfsPlus::OpenImage(baselinePath.c_str(),false);
+        original=Disk::Read(*image,0,imageSize);
+        Storage::Job job;
+        const auto checkpoint=Apfs::Probe(*image);
+        Reject([&]{Apfs::CommitCheckpoint(*image,*checkpoint,job);},"Read-only APFS source accepted a checkpoint");
+    }
+    const auto reopen=[](const CheckpointFaultImage& source){
+        Memory disk(source.durable.size());
+        disk.bytes=source.durable;
+        const auto checkpoint=Apfs::Probe(disk);
+        Check(checkpoint.has_value(),"No APFS checkpoint survived");
+        return checkpoint->transaction;
+    };
+    CheckpointFaultImage control(original);
+    const auto first=Apfs::Probe(control);
+    Check(first&&first->transaction==1,"APFS formatter did not create the initial checkpoint");
+    Storage::Job controlJob;
+    Check(Apfs::CommitCheckpoint(control,*first,controlJob)==2&&reopen(control)==2,
+          "New APFS checkpoint was not durable and readable");
+    const auto events=control.event;
+    Check(events>=4,"Too few checkpoint publication steps to test");
+    Reject([&]{Apfs::CommitCheckpoint(control,*first,controlJob);},"Stale checkpoint was accepted");
+    using Fault=CheckpointFaultImage::Fault;
+    const auto interrupt=[&](unsigned step,Fault fault,bool persisted){
+        CheckpointFaultImage attempt(original);
+        attempt.failAt=step;
+        attempt.fault=fault;
+        attempt.persistBeforeFailedFlush=persisted;
+        Storage::Job job;
+        bool failed=false,uncertain=false;
+        try{Apfs::CommitCheckpoint(attempt,*first,job);}
+        catch(const Apfs::CheckpointPublicationUncertain&){failed=true;uncertain=true;}
+        catch(const Error&){failed=true;}
+        Check(failed&&uncertain==(step>=events-1)&&reopen(attempt)==(persisted?2u:1u),
+              "Interrupted APFS publication lost the expected checkpoint or misreported the outcome");
+    };
+    for(unsigned step=1;step<=events;++step){
+        if(step==events||step==events-2)interrupt(step,Fault::FailedFlush,false);
+        else{
+            interrupt(step,Fault::BeforeWrite,false);
+            interrupt(step,Fault::TornWrite,false);
+        }
+    }
+    interrupt(events,Fault::FailedFlush,true);
+
+    auto invalid=original;
+    // Two distinct object IDs in the map point to the same physical block.
+    memcpy(invalid.data()+4096+112,invalid.data()+4096+72,8);
+    Seal(invalid,4096,4096);
+    CheckpointFaultImage overlapping(invalid);
+    Reject([&]{Apfs::CommitCheckpoint(overlapping,*first,controlJob);},
+           "Overlapping checkpoint mappings were accepted");
+    Check(!overlapping.event&&overlapping.durable==invalid,"Invalid checkpoint did not fail before writing");
+    {
+        CheckpointFaultImage attempt(original);
+        Storage::Job job;
+        attempt.onFlush=[&]{job.cancel();};
+        bool cancelled=false;
+        try{Apfs::CommitCheckpoint(attempt,*first,job);}catch(const Storage::Cancelled&){cancelled=true;}
+        Check(cancelled&&reopen(attempt)==1,"Cancellation after the data flush published an APFS checkpoint");
+    }
+
+    for(uint64_t tx=3;tx<=19;++tx){
+        const auto checkpoint=Apfs::Probe(control);
+        Check(Apfs::CommitCheckpoint(control,*checkpoint,controlJob)==tx&&reopen(control)==tx,
+              "Repeated checkpoint publication failed at a ring boundary");
+    }
+    // Write the result of normal file-backed commits for an independent checker.
+    const auto afterPath=VolumeCoord::Wide(root+"checkpoint-after.img");
+    {
+        auto image=CreateFormatOutput(afterPath.c_str(),imageSize);
+        image->Write(0,original.data(),original.size());
+        for(uint64_t tx=2;tx<=19;++tx){
+            const auto checkpoint=Apfs::Probe(*image);
+            Check(Apfs::CommitCheckpoint(*image,*checkpoint,controlJob)==tx,"File-backed APFS checkpoint commit failed");
+        }
+        image->Keep();
+    }
+    const auto volume=MacBrowser::OpenBrowserImage(afterPath);
+    Check(volume&&volume->Name()==u"Checkpoint fixture"&&volume->List().empty(),
+          "The browser could not reopen a checkpointed image");
+    fprintf(report,"PASS: APFS checkpoint publication, previous-state recovery at every write/flush boundary, cancellation, stale detection, and descriptor/data ring wrap.\n");
+}
+
 Memory Raw(unsigned blockSize=4096)
 {
     Memory disk(1024*1024);
@@ -404,6 +538,7 @@ int RunApfsContainerTest(const char* directory)
         ring.bytes[4*4096+64]^=1;
         Reject([&]{Apfs::Probe(ring);},"Container with no complete checkpoint was accepted");
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
+        CheckpointWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
@@ -539,7 +674,24 @@ int RunApfsContainerTest(const char* directory)
             const auto extracted=VolumeCoord::Wide(root+"independent-snapshot-raw.img");
             Check(!Dmg::Convert(fixture,extracted,Dmg::Output::RawImage,conversion).code,
                   "Could not extract the independent APFS fixture for filesystem checking");
-            fprintf(report,"PASS: independently authored APFS snapshot in a compressed DMG.\n");
+            {
+                auto raw=HfsPlus::OpenImage(extracted.c_str(),true);
+                const auto checkpoint=Apfs::Probe(*raw);
+                Check(checkpoint&&Apfs::CommitCheckpoint(*raw,*checkpoint,conversion)>checkpoint->transaction,
+                      "Could not commit a checkpoint to the independently authored APFS image");
+            }
+            const auto committed=MacBrowser::OpenBrowserImage(extracted);
+            Check(committed&&committed->FindChild(2,u"Independent APFS",current)&&
+                  committed->FindChild(2,u"Independent APFS [Snapshot: Independent backup]",snapshot),
+                  "Checkpoint publication lost the live volume or snapshot");
+            for(const auto id:{current.id,snapshot.id}){
+                Check(committed->FindChild(id,u"Folder",folder)&&committed->FindChild(folder.id,u"sample.txt",file),
+                      "Checkpoint publication lost the independent APFS file");
+                char bytes[sizeof(expected)-1];
+                committed->Read(file.id,0,0,bytes,sizeof(bytes));
+                Check(!memcmp(bytes,expected,sizeof(bytes)),"Checkpoint publication changed independent APFS file data");
+            }
+            fprintf(report,"PASS: independently authored APFS snapshot and live file survived checkpoint publication.\n");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");
