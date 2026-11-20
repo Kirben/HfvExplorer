@@ -38,6 +38,8 @@ struct Reply {
     bool retained = false;
 };
 
+void EncodeCapabilities(CopyWorkerProtocol::Data&, const MacBrowser::Capabilities&);
+MacBrowser::Capabilities DecodeCapabilities(CopyWorkerProtocol::Data&);
 CopyWorkerProtocol::Data EncodeCommand(Command,const CopyWorkerProtocol::Data& payload);
 Command DecodeCommand(CopyWorkerProtocol::Data&,bool primaryAttributes,bool secondaryAttributes);
 CopyWorkerProtocol::Data Encode(const ListRequest&);

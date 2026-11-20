@@ -38,6 +38,16 @@ struct Entry {
 struct Capabilities {
     bool read = true, create = false, rename = false, remove = false;
     bool unicodeNames = true, resourceForks = true, createFolders = true;
+    bool writable = false;
+    bool attributes = false, basicMetadata = false, classicProperties = false;
+    bool compression = false, hardLinks = false;
+
+    bool CanEditAttributes() const { return writable && attributes; }
+    bool CanEditBasicMetadata() const { return writable && basicMetadata; }
+    bool CanEditClassicProperties() const { return writable && classicProperties; }
+    bool CanEditCompression() const { return writable && compression; }
+    bool CanCreateHardLinks() const { return writable && hardLinks; }
+    void RestrictWrites() { writable = create = rename = remove = false; }
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
 class Volume;
@@ -59,7 +69,7 @@ public:
     virtual bool Journaled() const { return false; }
     virtual int CdDrive() const { return -1; }
     virtual Capabilities Supports() const {
-        Capabilities out; out.create = out.rename = out.remove = Writable(); return out;
+        Capabilities out; out.writable = out.create = out.rename = out.remove = Writable(); return out;
     }
     virtual bool CaseSensitive() const = 0;
     virtual uint64_t FreeBytes() const = 0;
@@ -70,18 +80,15 @@ public:
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
-    virtual bool SupportsHardLinks()const{return false;}
     virtual uint32_t MakeHardLink(uint32_t,uint32_t,const std::u16string&,bool=false){throw HfsPlus::Error("This format cannot create hard links");}
-    virtual bool SupportsCompression()const{return false;}
     virtual void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){if(method!=HfsPlus::Volume::CompressionMode::Zlib&&method!=HfsPlus::Volume::CompressionMode::Uncompressed)throw HfsPlus::Error("This format cannot create this compression method");SetCompression(id,method!=HfsPlus::Volume::CompressionMode::Uncompressed,std::move(progress));}
     virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}
-    virtual bool SupportsAttributes()const{return false;}
     virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
     virtual void SetAttributes(uint32_t,const HfsPlus::Attributes&){throw HfsPlus::Error("This format cannot store extended attributes or Mac ACLs");}
     virtual void ValidateCopyNames(uint32_t,const std::vector<Entry>&,bool) {}
     virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool) {}
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
-    virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive());if(!e.attributes.empty()&&!SupportsAttributes())throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
+    virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive());if(!e.attributes.empty()&&!Supports().attributes)throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;
     virtual Entry Stat(uint32_t id) = 0;
@@ -90,7 +97,6 @@ public:
     virtual bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found){return FindChild(parent,entry.name,found);}
     virtual bool GetClassicProperties(uint32_t, hfsdirent&) { return false; }
     virtual void SetClassicProperties(uint32_t, const hfsdirent&) { throw HfsPlus::Error("Classic Finder properties are unavailable"); }
-    virtual bool SupportsBasicMetadata()const{return false;}
     virtual void SetBasicMetadata(uint32_t,const Entry&){throw HfsPlus::Error("This format has no basic metadata editor");}
     virtual uint32_t MakeDirectory(uint32_t parent, const std::u16string &) = 0;
     virtual uint32_t Put(uint32_t parent, const Entry &, Reader, bool replace) = 0;

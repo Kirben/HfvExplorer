@@ -323,7 +323,11 @@ public:
     bool CaseSensitive()const override{return caseSensitive;}
     bool Writable()const override{return false;}
     uint64_t FreeBytes()const override{return 0;}
-    bool SupportsAttributes()const override{return true;}
+    MacBrowser::Capabilities Supports() const override {
+        auto capabilities = MacBrowser::Volume::Supports();
+        capabilities.attributes = true;
+        return capabilities;
+    }
     MacBrowser::WorkerExecution Execution()const override{
         MacBrowser::WorkerExecution out;out.processLocal=processLocal;return out;
     }

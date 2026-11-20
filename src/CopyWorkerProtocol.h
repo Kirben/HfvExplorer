@@ -14,7 +14,7 @@ using FileOperations::ForkSelector;
 using MacBrowser::Entry;
 using MacBrowser::WorkerOrigin;
 
-constexpr uint64_t protocol = 17;
+constexpr uint64_t protocol = 18;
 constexpr DWORD maximumFrame = 1024 * 1024;
 enum Message : DWORD {
     RequestPacket = 1,

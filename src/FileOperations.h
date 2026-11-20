@@ -118,8 +118,9 @@ struct Change {std::string resourceKey;};
 struct Completion {
  bool complete=false;
  unsigned completed=0;
- HfsPlus::Attributes attributes;bool supportsAttributes=false,basicMetadata=false,supportsCompression=false;
- MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false,writable=false;std::string description;
+ HfsPlus::Attributes attributes;
+ MacBrowser::Capabilities capabilities;
+ MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false;std::string description;
  // Conservatively includes resources that may have changed on a partial failure.
  std::vector<Change> affected;
 };

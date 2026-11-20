@@ -81,12 +81,14 @@ public:
         Call call(*this);Check(bool(source_),"Media was released; select the drive again");try { volume_.reset(new HfsPlus::Volume(*source_, writable_)); usable_=true; }
         catch (...) { usable_=false; throw; }
     }
-    bool SupportsHardLinks()const override{return true;}
+    Capabilities Supports() const override {
+        auto capabilities = Volume::Supports();
+        capabilities.hardLinks = capabilities.compression = capabilities.attributes = true;
+        return capabilities;
+    }
     uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false)override{return Mutate([&]{return volume_->MakeHardLink(source,parent,name,replace);});}
-    bool SupportsCompression()const override{return true;}
     void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,method,progress);});}
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,compressed,progress);});}
-    bool SupportsAttributes()const override{return true;}
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);attributes.erase(u"com.apple.system.hfs.firstlink");if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
     void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}HfsPlus::ValidateAttributes(e.attributes);}
@@ -166,7 +168,12 @@ public:
     std::u16string Name()const override{return *std::atomic_load(&name_);}
     const char* Kind()const override{return "MFS";}
     bool Writable()const override{return usable_&&writable_;}
-    Capabilities Supports()const override{Capabilities c;c.create=c.rename=c.remove=Writable();c.unicodeNames=false;c.createFolders=false;return c;}
+    Capabilities Supports() const override {
+        auto capabilities = Volume::Supports();
+        capabilities.unicodeNames = capabilities.createFolders = false;
+        capabilities.basicMetadata = true;
+        return capabilities;
+    }
     bool CaseSensitive()const override{return false;}
     uint64_t FreeBytes()const override{return free_;}
     void Reload()override{Call call(*this);Ready();try{if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}catch(...){usable_=false;throw;}}
@@ -191,7 +198,6 @@ public:
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{Check(parent==2&&id!=2,"MFS files remain in the volume root");auto encoded=Encode(name);Mutate([&]{return image_.Rename(image_.Entries().at(entries_.at(id)).id,encoded);});}
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
-    bool SupportsBasicMetadata()const override{return true;}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=Encode(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
 struct Planned { Entry entry; std::vector<Planned> children; Reader reader; };
@@ -226,7 +232,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
     found=dst.FindTransferChild(parent,entry,existing);
-    bool track=entry.hardLink&&entry.linkCount>1&&dst.SupportsHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
+    bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
     if(track&&prior!=copies.end()&&entry.directory&&!found){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name);LinkedProgress(plan,progress);job.progress(progress);return true;}
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
@@ -504,7 +510,7 @@ void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress)
     std::function<void(const Planned &)> remove = [&](const Planned &n) {
         if (job.cancelled()) throw Storage::Cancelled();
         // A directory hard link is a link, not ownership of its backing children.
-        Check(!n.entry.hardLink||v.SupportsHardLinks(), "Deleting hard links is not supported by this backend");
+        Check(!n.entry.hardLink||v.Supports().hardLinks, "Deleting hard links is not supported by this backend");
         if(n.entry.directory&&n.entry.hardLink&&n.children.empty()&&v.Stat(n.entry.id).linkCount==1&&!v.List(n.entry.id).empty()){RemoveTree(v,n.entry.id,job,deletionProgress);return;}
         for (const auto &c : n.children) remove(c);
         if(job.cancelled())throw Storage::Cancelled();

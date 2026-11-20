@@ -272,7 +272,10 @@ void WritableMedia(const std::string& root,const std::shared_ptr<Bytes>& classic
  UpdateGptTable(*external,table);
  Reject([&]{selected.volume->MakeDirectory(2,u"Changed map");},"An edited partition table was accepted without reopening");
  auto readOnly=Removable::Open(external->device,api).front();
- Check(!readOnly.volume->Writable()&&external->writes==before,"A physical GPT read-only flag was ignored");
+ const auto readOnlyFeatures=readOnly.volume->Supports();
+ Check(!readOnlyFeatures.writable&&readOnlyFeatures.attributes&&!readOnlyFeatures.CanEditAttributes()&&
+       !readOnlyFeatures.CanEditCompression()&&!readOnlyFeatures.CanCreateHardLinks()&&external->writes==before,
+       "A physical GPT read-only flag did not restrict the backend capabilities");
  Little(table.data()+48,0,8);
  UpdateGptTable(*external,table);
  {

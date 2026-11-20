@@ -272,7 +272,7 @@ class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpo
     const std::shared_ptr<MacBrowser::MfsCatalogIds> ids_;
     const std::u16string name_;
     const std::string kind_,description_;
-    const bool sensitive_,attributes_,stableCatalogIds_,journaled_,links_,compression_,metadata_;
+    const bool sensitive_,stableCatalogIds_,journaled_;
     const MacBrowser::Capabilities capabilities_;
     const bool processLocal_;
     std::atomic<bool> released_{false};
@@ -341,9 +341,8 @@ public:
                   "removable-disk:"+std::to_string(device.number)),
          disk_(std::move(disk)),backend_(std::move(backend)),ids_(std::move(ids)),name_(backend_->Name()),
          kind_(backend_->Kind()),description_(backend_->Description()),sensitive_(backend_->CaseSensitive()),
-         attributes_(backend_->SupportsAttributes()),stableCatalogIds_(MacBrowser::ExecutionFor(*backend_).stableCatalogIds),
-         journaled_(backend_->Journaled()),links_(backend_->SupportsHardLinks()),compression_(backend_->SupportsCompression()),
-         metadata_(backend_->SupportsBasicMetadata()),capabilities_(backend_->Supports()),
+         stableCatalogIds_(MacBrowser::ExecutionFor(*backend_).stableCatalogIds),
+         journaled_(backend_->Journaled()),capabilities_(backend_->Supports()),
          processLocal_(kind_!="APFS"&&WriteCandidate(*disk_,device_,partition_,*api_,kind_)),
          fence_(FenceFor(diskKey_,disk_->Generation())),
          free_(backend_->FreeBytes()),revision_(VolumeCoord::Revision(key_)),generation_(disk_->Generation()){}
@@ -424,13 +423,9 @@ public:
     uint64_t FreeBytes()const override{return free_;}
     MacBrowser::Capabilities Supports()const override{
         auto result=capabilities_;
-        result.create=result.rename=result.remove=Writable();
+        result.writable=result.create=result.rename=result.remove=Writable();
         return result;
     }
-    bool SupportsAttributes()const override{return attributes_;}
-    bool SupportsHardLinks()const override{return links_;}
-    bool SupportsCompression()const override{return compression_;}
-    bool SupportsBasicMetadata()const override{return metadata_;}
     std::vector<Entry> List(uint32_t id)override{return Call([&]{
         auto entries=backend_->List(id);
         for(auto& entry:entries)entry.identity=Identity(entry.identity);

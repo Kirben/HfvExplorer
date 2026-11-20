@@ -161,6 +161,23 @@ void TestVolumeSessionProtocol()
         try{decode();}catch(const HfsPlus::Error&){rejected=true;}
         Check(rejected,message);
     };
+    Capabilities caps;
+    caps.writable = caps.rename = caps.attributes = caps.compression = caps.hardLinks = true;
+    caps.createFolders = false;
+    Data capabilityPacket;
+    Protocol::EncodeCapabilities(capabilityPacket,caps);
+    const auto decodedCaps=Protocol::DecodeCapabilities(capabilityPacket);
+    capabilityPacket.end();
+    Check(decodedCaps.rename && decodedCaps.CanCreateHardLinks() && decodedCaps.CanEditCompression() &&
+          decodedCaps.CanEditAttributes() && !decodedCaps.createFolders && !decodedCaps.basicMetadata,
+          "worker capability description changed in transit");
+    reject([&]{
+        auto malformed=caps;
+        malformed.writable=false;
+        Data packet;
+        Protocol::EncodeCapabilities(packet,malformed);
+        Protocol::DecodeCapabilities(packet);
+    },"accepted a read-only capability description with rename enabled");
     reject([]{Data data;data.put(1000);Protocol::DecodeCommand(data,false,false);},"accepted unknown volume opcode");
     reject([]{auto data=Protocol::EncodeCommand(Command::Put,{});Protocol::DecodeCommand(data,false,false);},
            "accepted missing streamed attributes");
@@ -278,7 +295,7 @@ void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstrin
     const auto directory=image->MakeDirectory(2,u"Fork job fixtures");
     const auto id=Put(*image,directory,u"Fork payload");
     HfsPlus::Attributes attributes{{u"user.fork-metadata",{12,34,56}}};
-    if(image->SupportsAttributes())image->SetAttributes(id,attributes);
+    if(image->Supports().attributes)image->SetAttributes(id,attributes);
     hfsdirent classic{};
     const bool isClassic=image->GetClassicProperties(id,classic);
     if(isClassic){
@@ -355,7 +372,7 @@ void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstrin
     Check(operation.Snapshot().complete && image->FindChild(directory,u"Fork payload",updated) &&
               updated.forks[0].size==300000 && updated.forks[1].size==300000 &&
               updated.finder==original.finder && updated.created==original.created &&
-              (!image->SupportsAttributes() || image->GetAttributes(updated.id)==attributes),
+              (!image->Supports().attributes || image->GetAttributes(updated.id)==attributes),
           "resource replacement failed to preserve the data fork or metadata");
     if(isClassic){
         hfsdirent properties{};
@@ -1106,7 +1123,7 @@ int RunCopyProcessTest(const char *directory) {
             auto alias = OpenBrowserImage(Wide(path));
             Check(classic && classic == alias && ExecutionFor(*classic).Persistent() &&
                       ExecutionFor(*classic).classicConversion && !ExecutionFor(*classic).stableCatalogIds && classic->Writable() &&
-                      classic->Name() == u"Classic" && !classic->SupportsAttributes(),
+                      classic->Name() == u"Classic" && !classic->Supports().attributes,
                   "classic image did not share a writable persistent mount");
             Entry sentinel;
             {
@@ -1341,7 +1358,7 @@ int RunCopyProcessTest(const char *directory) {
             { auto seed=MfsImageFixture(path,dc42); Put(*seed,2,u"Mounted payload",4096,71); }
             auto volume=OpenBrowserImage(path);
             Check(volume && ExecutionFor(*volume).Persistent() && volume->Writable() &&
-                      !volume->Supports().createFolders && volume->SupportsBasicMetadata(),
+                      !volume->Supports().createFolders && volume->Supports().basicMetadata,
                   "MFS writable persistent mount capabilities");
             const auto pid=VolumeSession::VolumeSessionPidForTest(volume);
             {

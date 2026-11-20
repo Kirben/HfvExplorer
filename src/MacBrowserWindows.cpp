@@ -394,7 +394,11 @@ public:
     std::u16string Name() const override { return U16(Path(2)); }
     const char *Kind() const override { return "Windows"; }
     bool Writable() const override { return true; }
-    bool SupportsAttributes()const override{return true;}
+    Capabilities Supports() const override {
+        auto capabilities = Volume::Supports();
+        capabilities.attributes = true;
+        return capabilities;
+    }
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Double d;auto path=Companion(Path(id));return AppleDouble(path,d)?DoubleAttributes(path,d):HfsPlus::Attributes{};}
     void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={}){
         auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));

@@ -207,6 +207,7 @@ public:
     Capabilities Supports() const override {
         auto result = Volume::Supports();
         result.unicodeNames = false;
+        result.classicProperties = true;
         return result;
     }
     bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {

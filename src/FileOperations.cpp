@@ -276,22 +276,20 @@ std::pair<std::shared_ptr<Volume>,uint32_t> ReadProperties(const Location& item,
 {
  auto source=Source(item,item.IsClassic()&&editingClassic);
  auto& [volume,id]=source;
+ result.capabilities=volume->Supports();
+ Check(result.capabilities.read,"This volume does not support reading Properties");
  result.entry=volume->Stat(id);
  result.description=volume->Description();
- result.writable=volume->Writable();
- result.supportsAttributes=volume->SupportsAttributes();
- result.basicMetadata=volume->SupportsBasicMetadata();
- result.supportsCompression=volume->SupportsCompression();
- if(result.supportsAttributes)result.attributes=volume->GetAttributes(id);
+ if(result.capabilities.attributes)result.attributes=volume->GetAttributes(id);
  Cancel(job);
  return source;
 }
 
 void ReadClassicProperties(const Location& item,Volume& volume,uint32_t id,bool editing,Completion& result)
 {
- result.classicProperties=volume.GetClassicProperties(id,result.properties);
+ result.classicProperties=result.capabilities.classicProperties&&volume.GetClassicProperties(id,result.properties);
  if(result.classicProperties&&item.IsClassic()&&!editing)
-  result.writable=StorageLocation::ClassicPropertiesWritable(item);
+  result.capabilities.writable=StorageLocation::ClassicPropertiesWritable(item);
 }
 
 using VolumeCoord::Mode;
@@ -364,7 +362,7 @@ MetadataPlan DescribeMetadata(const EditBasicMetadata& edit)
  return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
   MetadataProgress(job,"Updating properties");
   auto [volume,id]=ReadProperties(edit.item,false,job,result);
-  Check(result.basicMetadata&&result.writable,"This format has no writable basic metadata editor");
+  Check(result.capabilities.CanEditBasicMetadata(),"This format has no writable basic metadata editor");
   const auto& now=result.entry;
   const auto& old=edit.original;
   Check(now.id==old.id&&now.name==old.name&&now.version==old.version&&now.finder==old.finder&&
@@ -384,7 +382,7 @@ MetadataPlan DescribeMetadata(const EditAttributes& edit)
  return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
   MetadataProgress(job,"Updating properties");
   auto [volume,id]=ReadProperties(edit.item,false,job,result);
-  Check(result.supportsAttributes&&result.writable,"This item cannot store extended attributes");
+  Check(result.capabilities.CanEditAttributes(),"This item cannot store extended attributes");
   Check(result.attributes==edit.original,"Attributes changed while Properties was open; reopen Properties before saving");
   Cancel(job);
   Mark(result,edit.item);
@@ -399,7 +397,7 @@ MetadataPlan DescribeMetadata(const ChangeCompression& edit)
  return EditMetadata(edit.item,[&edit](Storage::Job& job,Completion& result){
   MetadataProgress(job,"Updating properties");
   auto [volume,id]=ReadProperties(edit.item,false,job,result);
-  Check(result.supportsCompression&&result.writable,"This volume cannot change compression");
+  Check(result.capabilities.CanEditCompression(),"This volume cannot change compression");
   const auto& now=result.entry;
   const auto& old=edit.original;
   Check(now.id==old.id&&now.parent==old.parent&&now.name==old.name&&now.modified==old.modified&&
@@ -434,7 +432,7 @@ MetadataPlan DescribeMetadata(const EditClassicProperties& edit)
   auto update=[&]{
    auto [volume,id]=ReadProperties(item,true,job,result);
    ReadClassicProperties(item,*volume,id,true,result);
-   Check(result.classicProperties&&result.writable,"This item does not expose writable classic Finder properties");
+   Check(result.classicProperties&&result.capabilities.CanEditClassicProperties(),"This item does not expose writable classic Finder properties");
    const auto current=result.properties;
    Check(!item.expectedCatalogId||uint32_t(current.cnid)==item.expectedCatalogId,"The selected HFS entry was replaced");
    Cancel(job);
@@ -755,7 +753,7 @@ Storage::Result RunHardLink(const CreateHardLink& request,Storage::Job& job,Comp
  StorageLocation::WithVerifiedWrite(request.parent,[&]{
   auto source=Source(request.source);
   auto target=Destination(request.parent);
-  Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&
+  Check(source.first->Supports().hardLinks&&target.first->Supports().CanCreateHardLinks()&&
         source.first->ResourceKey()==target.first->ResourceKey(),
         "Hard links require the same writable HFS+/HFSX volume");
   Cancel(job);

@@ -47,6 +47,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     mutable std::mutex mutex_;
     std::unique_ptr<Process> worker_;
     std::u16string name_;
+    Capabilities capabilities_;
     std::string description_;
     const ImageFormat format_;
     const std::optional<DiskPartitions::Selection> selection_;
@@ -165,7 +166,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
             auto name = info.u16();
             auto description = info.text();
             auto hfsx = info.flag(), caseSensitive = info.flag(), journaled = info.flag();
-            auto writable = info.flag();
+            const auto capabilities = Protocol::DecodeCapabilities(info);
             info.end();
             Response(SessionResult);
             // These descriptors are immutable after publication, so menu
@@ -177,9 +178,10 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
                 hfsx_ = hfsx;
                 caseSensitive_ = caseSensitive;
                 journaled_ = journaled;
+                capabilities_ = capabilities;
                 initialized_ = true;
             }
-            writable_ = writable;
+            writable_ = capabilities.writable;
             lost_ = false;
         } catch (...) {
             worker_.reset();
@@ -230,13 +232,9 @@ public:
     bool Writable() const override { return writable_ && !lost_; }
     bool CaseSensitive() const override { return caseSensitive_; }
     bool Journaled() const override { return journaled_; }
-    bool SupportsHardLinks() const override { return Plus(); }
-    bool SupportsCompression() const override { return Plus(); }
-    bool SupportsAttributes() const override { return Plus(); }
     Capabilities Supports() const override {
-        auto result = Volume::Supports();
-        result.unicodeNames = Plus();
-        result.createFolders = !Mfs();
+        auto result = capabilities_;
+        if (!Writable()) result.RestrictWrites();
         return result;
     }
     bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {
@@ -264,7 +262,6 @@ public:
         });
         return exists;
     }
-    bool SupportsBasicMetadata()const override{return Mfs();}
     void SetBasicMetadata(uint32_t id,const Entry& entry)override {
         std::lock_guard<std::mutex> lock(mutex_);
         Simple(SessionCommandCode::SetBasicMetadata,Protocol::EncodeBasicMetadata(id,entry),true);
@@ -771,7 +768,8 @@ int Child(const char* inputText, const char* outputText) {
             const auto volume=OpenWorkerImage(origin);
             Data info;
             info.u16(volume->Name()); info.put(volume->Description()); info.put(!strcmp(volume->Kind(), "HFSX"));
-            info.put(volume->CaseSensitive()); info.put(volume->Journaled()); info.put(volume->Writable());
+            info.put(volume->CaseSensitive()); info.put(volume->Journaled());
+            Protocol::EncodeCapabilities(info,volume->Supports());
             Send(output, SessionBytes, std::move(info));
             SessionReply(output);
             ServeVolume(input, output, *volume);

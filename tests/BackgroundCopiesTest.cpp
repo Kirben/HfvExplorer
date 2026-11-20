@@ -10,6 +10,7 @@
 #include "BrowserLifetime.h"
 #include "DialogClose.h"
 #include "MainMacBrowser.h"
+#include "VolumeSession.h"
 #include "MetadataDialogs.h"
 #include "CommandStorage.h"
 #include "MediaControl.h"
@@ -634,7 +635,7 @@ int RunBackgroundMetadataTest(const char* directory){
   CString classic=host+"\\classic.dsk";{CFile f;Check(f.Open(classic,CFile::modeCreate|CFile::modeWrite),"create metadata HFS image");f.SetLength(1474560);}char label[]="MetadataClassic";Check(hfs_format(const_cast<char*>((LPCSTR)classic),0,label)==0,"format metadata HFS image");{auto v=MacBrowser::OpenClassic((LPCSTR)classic,"MetadataClassic:",true);Put(*v,u"Classic");v->Close();}
   FileOperations::Location legacy;legacy.SetClassic((LPCSTR)classic,"MetadataClassic:Classic");
   auto submit=[&](FileOperations::Request r,bool pass=true){r.background=true;auto operation=FileOperations::Submit(r);Until([&]{return operation.Job()->done();});if((operation.Job()->result().code==0)!=pass){fprintf(report,"Unexpected metadata result: kind=%d expected=%d code=%d message=%s\n",int(r.OperationKind()),pass,operation.Job()->result().code,operation.Job()->result().message.c_str());fflush(report);}Check((operation.Job()->result().code==0)==pass,"Metadata request returned an unexpected result");return operation.Snapshot();};
-  FileOperations::InspectProperties inspect{legacy};auto initial=submit(inspect);Check(initial.classicProperties&&initial.writable,"classic inspect lost editable properties");legacy.expectedCatalogId=initial.entry.resolvedId;
+  FileOperations::InspectProperties inspect{legacy};auto initial=submit(inspect);Check(initial.classicProperties&&initial.capabilities.CanEditClassicProperties(),"classic inspect lost editable properties");legacy.expectedCatalogId=initial.entry.resolvedId;
   FileOperations::EditClassicProperties patch{legacy,FileOperations::FinderLabel{3}};submit(patch);auto changed=submit(inspect);Check((changed.properties.fdflags&14)==6&&((changed.properties.fdflags^initial.properties.fdflags)&~14)==0,"label update changed other flags");patch.change=FileOperations::FinderPosition{123,-25};submit(patch);changed=submit(inspect);Check(changed.properties.fdlocation.h==123&&changed.properties.fdlocation.v==-25&&(changed.properties.fdflags&14)==6,"position update lost label");
   FileOperations::EditClassicProperties edit{legacy,FileOperations::ClassicPropertyEdit{initial.properties,initial.properties}};auto& propertyEdit=std::get<FileOperations::ClassicPropertyEdit>(edit.change);propertyEdit.desired.fdflags|=HFS_FNDR_ISINVISIBLE;submit(edit,false);Check(submit(inspect).properties.fdlocation.h==123,"stale editor overwrote newer metadata");
   FileOperations::CreateFolder mkdir{};mkdir.parent=legacy;mkdir.parent.SetClassic(mkdir.parent.ClassicImage(),"MetadataClassic:");mkdir.parent.expectedCatalogId=2;mkdir.name=u"Folder";submit(mkdir);submit(mkdir,false);{auto v=MacBrowser::OpenClassic((LPCSTR)classic,"MetadataClassic:",false);Check(Find(*v,u"Folder"),"classic folder missing");v->Close();}
@@ -693,7 +694,7 @@ int RunBackgroundMetadataTest(const char* directory){
    Check(!BackgroundCopies::LastResult().code,"Finder label command failed");
    inspect.item=item;
    auto physical=submit(inspect);
-   Check((physical.properties.fdflags&14)==2*FINDER_COLOR_HOT&&physical.writable,"Finder label did not persist");
+   Check((physical.properties.fdflags&14)==2*FINDER_COLOR_HOT&&physical.capabilities.CanEditClassicProperties(),"Finder label did not persist");
 
    surviving.finderLayout=true;
    surviving.List()->set_style(LVS_ICON);
@@ -1223,7 +1224,7 @@ int RunExtendedAttributesTest(const char* directory){
    });
    return std::move(*attrs);
   };
-  FileOperations::InspectProperties inspect{selected};auto info=submit(inspect);Check(info.supportsAttributes&&info.attributes==attrs,"Properties omitted attributes");
+  FileOperations::InspectProperties inspect{selected};auto info=submit(inspect);Check(info.capabilities.attributes&&info.attributes==attrs,"Properties omitted attributes");
   Check(MetadataDialogs::Show(selected,frame),"show attribute Properties");Until([]{return !BackgroundCopies::Active();});auto summary=MetadataDialogs::Window();Check(summary!=nullptr,"missing attribute summary");SendMessage(summary,WM_COMMAND,IDC_ATTR_OPEN,0);auto editor=MetadataDialogs::Window();Check(editor&&editor!=summary&&IsWindowEnabled(GetDlgItem(editor,IDOK)),"missing writable attribute editor");
   SetDlgItemTextW(editor,IDC_ATTR_NAME,L"user.Edited");SetDlgItemTextW(editor,IDC_ATTR_VALUE,L"DE AD 00 BE EF");SendMessage(editor,WM_COMMAND,IDC_ATTR_SET,0);SendMessage(editor,WM_COMMAND,IDOK,0);Until([]{return !BackgroundCopies::Active();});Check(!BackgroundCopies::LastResult().code&&readFixtureAttributes().at(u"user.Edited")==HfsPlus::Bytes({0xde,0xad,0,0xbe,0xef})&&frame->IsWindowEnabled(),"Properties edit failed/disabled browser");MetadataDialogs::Shutdown();
   FileOperations::EditAttributes edit{selected,attrs,{}};submit(edit,false);Check(readFixtureAttributes().count(u"user.Edited"),"Stale attribute request discarded newer metadata");
@@ -1283,6 +1284,36 @@ int RunCompressionWriteBrowserTest(const char* directory){
   auto submit=[&](FileOperations::Request r,bool success=true){auto op=FileOperations::Submit(std::move(r));Until([&]{if(!op.Job()->conflict().empty())op.Job()->resolve(Storage::ConflictChoice::Replace);return op.Job()->done();});Check((op.Job()->result().code==0)==success,"compression operation result");return op;};
   auto verify=[&](uint64_t size){auto now=target->Stat(id);Check(now.forks[0].size==size,"browser logical compressed size");HfsPlus::Bytes got(size_t(size),0),expected(got.size());target->Read(id,0,0,got.data(),got.size());pattern(0,0,expected.data(),expected.size());Check(got==expected,"browser compressed contents");};
   Check(MetadataDialogs::Show(selected,frame),"open compression properties");Until([]{return !BackgroundCopies::Active();});auto window=MetadataDialogs::Window();Check(window&&IsWindowEnabled(GetDlgItem(window,IDC_FILE_COMPRESSION)),"missing compression button");SendMessage(window,WM_COMMAND,IDC_FILE_COMPRESSION,0);Until([]{return !BackgroundCopies::Active();});Check(!BackgroundCopies::LastResult().code&&target->Stat(id).compressed&&frame->IsWindowEnabled(),"background compression failed or disabled owner");verify(150000);Check(target->GetAttributes(id)==HfsPlus::Attributes({{u"user.keep",{1,2,3}}}),"private compression attribute exposed/lost user metadata");MetadataDialogs::Shutdown();
+  {
+   const auto path=VolumeCoord::Wide((LPCSTR)(host+"\\read-only-properties.dsk"));
+   uint32_t readOnlyId;
+   {
+    auto seed=Image(host+"\\read-only-properties.dsk");
+    readOnlyId=seed->Put(2,e,pattern,false);
+    seed->SetAttributes(readOnlyId,{{u"user.inspect",{7}}});
+   }
+   Check(SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_READONLY)!=FALSE,"mark fixture read-only");
+   struct ResetAttributes {
+    const std::wstring& path;
+    ~ResetAttributes(){SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_NORMAL);}
+   } reset{path};
+   auto readOnly=MacBrowser::OpenBrowserImage(path);
+   Check(readOnly&&VolumeSession::VolumeSessionPidForTest(readOnly)&&readOnly->Supports().attributes&&
+         !readOnly->Supports().CanEditCompression()&&!readOnly->Supports().CanCreateHardLinks(),
+         "read-only worker advertised metadata writes");
+   auto item=FileOperations::Location::Mounted(readOnly,readOnlyId);
+   Check(MetadataDialogs::Show(item,frame),"open read-only worker Properties");
+   Until([]{return !BackgroundCopies::Active();});
+   const auto properties=MetadataDialogs::Window();
+   Check(properties&&GetDlgItem(properties,IDC_ATTR_OPEN)&&
+         !IsWindowEnabled(GetDlgItem(properties,IDC_FILE_COMPRESSION)),
+         "read-only Properties did not match worker capabilities");
+   MetadataDialogs::Shutdown();
+   const auto entry=readOnly->Stat(readOnlyId);
+   submit(FileOperations::ChangeCompression{item,entry,readOnly->GetAttributes(readOnlyId),
+          HfsPlus::Volume::CompressionMode::Zlib},false);
+   Check(!readOnly->Stat(readOnlyId).compressed,"disabled compression could modify the read-only image");
+  }
   // Overwrite a compressed target through the real copy job and overwrite handling.
   e.forks[0].size=200001;auto from=input->Put(2,e,pattern,false);FileOperations::Request copy;FileOperations::Location source;source.SetMounted(input,from);copy.Copy().sources={source};copy.Copy().destination.SetMounted(target,2);auto copied=submit(copy);Check(target->Stat(id).compressed,"copy overwrite lost compression");verify(200001);auto progress=copied.Job()->progress();Check(progress.processed==200001&&progress.fileBytes==200001,"encoder second pass counted twice in progress");
   // Stale Properties cannot silently apply a conversion to a changed file.

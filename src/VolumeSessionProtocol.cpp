@@ -6,6 +6,30 @@ namespace VolumeSessionProtocol {
 using CopyWorkerProtocol::Check;
 using CopyWorkerProtocol::Data;
 
+namespace {
+using MacBrowser::Capabilities;
+constexpr bool Capabilities::* features[] = {
+    &Capabilities::read, &Capabilities::create, &Capabilities::rename, &Capabilities::remove,
+    &Capabilities::unicodeNames, &Capabilities::resourceForks, &Capabilities::createFolders,
+    &Capabilities::writable, &Capabilities::attributes, &Capabilities::basicMetadata,
+    &Capabilities::classicProperties, &Capabilities::compression, &Capabilities::hardLinks
+};
+}
+
+void EncodeCapabilities(Data& packet, const Capabilities& value)
+{
+    for (auto feature : features) packet.put(value.*feature);
+}
+
+Capabilities DecodeCapabilities(Data& packet)
+{
+    Capabilities value;
+    for (auto feature : features) value.*feature = packet.flag();
+    Check(value.writable || !(value.create || value.rename || value.remove),
+          "A read-only volume advertised write operations");
+    return value;
+}
+
 Data EncodeCommand(Command command,const Data& payload)
 {
     Data request;

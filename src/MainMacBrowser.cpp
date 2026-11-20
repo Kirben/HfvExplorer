@@ -883,7 +883,7 @@ bool MainMacBrowser::CreateFolder(const FileOperations::Location& target,const s
  FileOperations::CreateFolder request{target,name};return RunOperation(session_,std::move(request),false,true);
 }
 bool MainMacBrowser::CanPasteHardLink()const{
- if(!Writable())return false;int index;uint32_t folder;if(!state_->Selected(index,folder))return false;auto target=state_->mounts[index].volume;auto selection=BrowserTransfers::Snapshot();return target->SupportsHardLinks()&&selection.items.size()==1&&selection.items[0].Volume()&&selection.items[0].Volume()->SupportsHardLinks()&&selection.items[0].Volume()->ResourceKey()==target->ResourceKey();
+ if(!Writable())return false;int index;uint32_t folder;if(!state_->Selected(index,folder))return false;auto target=state_->mounts[index].volume;auto selection=BrowserTransfers::Snapshot();return target->Supports().CanCreateHardLinks()&&selection.items.size()==1&&selection.items[0].Volume()&&selection.items[0].Volume()->Supports().hardLinks&&selection.items[0].Volume()->ResourceKey()==target->ResourceKey();
 }
 bool MainMacBrowser::PasteHardLink(){
  if(!CanPasteHardLink())return true;auto selection=BrowserTransfers::Snapshot();auto target=state_->Target();std::wstring name=Wide(selection.items[0].expectedName)+L" link";
@@ -925,7 +925,9 @@ bool MainMacBrowser::CanInspectProperties(int index) const
 {
     if (index < 0 || !session_.ListingAvailable()) return false;
     const auto row = session_.List()->BrowserRowAt(index);
-    return row && !row->location.IsNone() && !row->location.IsWindows();
+    if (!row || row->location.IsNone() || row->location.IsWindows()) return false;
+    const auto& volume = row->location.Volume();
+    return !volume || volume->Supports().read;
 }
 
 bool MainMacBrowser::Properties(int index)
