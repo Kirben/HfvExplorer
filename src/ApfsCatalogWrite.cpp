@@ -607,6 +607,7 @@ void ValidateExtentReferences(const CatalogRecords& tree,std::vector<FileRun>& f
 
 constexpr auto ResourceAttribute="com.apple.ResourceFork";
 constexpr auto CompressionAttribute="com.apple.decmpfs";
+constexpr auto SymlinkAttribute="com.apple.fs.symlink";
 constexpr uint64_t HasUncompressedSize=0x40000;
 constexpr uint32_t BsdCompressed=0x20;
 void SetCompressionFlags(Bytes& inode,uint64_t size,bool compressed)
@@ -722,7 +723,7 @@ void WriteCompressionAttribute(std::vector<OwnedRecord>& attributes,Bytes& inode
 }
 
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
-    uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,
+    uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t symlinkCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
     size_t& streamAt,const std::optional<FileDates>& dates,const ResourceWrite* resourceWrite,const AttributeStreams& streams,std::set<uint64_t>& retiredStreams)
 {
@@ -788,7 +789,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     std::map<uint64_t,Link> links;
     struct AttributeStream {uint64_t inode,blocks;};
     std::map<uint64_t,AttributeStream> attributeStreams;
-    uint64_t files=0;
+    uint64_t files=0,symlinks=0;
     for(size_t i=0;i<records.size();++i){
         const auto view=at(i);
         size_t streamRecords=0;
@@ -809,7 +810,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(inode!=3&&folder!=directories.end()&&view.key.size>=14&&
                       view.value.size==18,"Invalid APFS directory entry");
                 const auto kind=CatalogKind(Le16(view.value.data+16));
-                Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile,
+                Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink,
                       "APFS catalog contains an unsupported entry type");
                 const auto nameKey=Le32(view.key.data+8);
                 Check((nameKey&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
@@ -864,7 +865,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     link->second.inodeRecord=i;
                     link->second.finder=readFinder(view.value.data,view.value.size);
                 }
-                bool hasSecurity=false;
+                bool hasSecurity=false,hasTarget=false;
                 if(!reservedInode){
                     std::string previousAttribute;
                     for(;i+1+streamRecords<records.size();++streamRecords){
@@ -875,7 +876,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                               Le16(attr.value.data+2)==attr.value.size-4&&
                               attr.value.size-4<EmbeddedAttributeLimit,"Invalid APFS embedded attribute");
                         const std::string name(reinterpret_cast<const char*>(attr.key.data+10),attr.key.size-11);
-                        Check(name>previousAttribute&&name.find('\0')==name.npos&&(OrdinaryAttribute(name)||name==ResourceAttribute||name==CompressionAttribute),
+                        Check(name>previousAttribute&&name.find('\0')==name.npos&&(OrdinaryAttribute(name)||name==ResourceAttribute||name==CompressionAttribute||name==SymlinkAttribute),
                               "Invalid APFS attribute name or order");
                         hasSecurity|=name=="com.apple.system.Security";
                         if(name==ResourceAttribute){
@@ -888,7 +889,12 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                                   Le32(attr.value.data+4)==0x636d7066,"Invalid APFS compression header");
                             link->second.compressionRecord=i+1+streamRecords;
                         }
-                        if(storage==1){
+                        if(name==SymlinkAttribute){
+                            Check(kind==CatalogKind::SymbolicLink&&storage==6&&attr.value.size>=6&&
+                                  attr.value.data[attr.value.size-1]==0&&
+                                  !memchr(attr.value.data+4,0,attr.value.size-5),"Invalid APFS symbolic link target");
+                            hasTarget=true;
+                        }else if(storage==1){
                             Check(attr.value.size==52,"Invalid APFS attribute stream descriptor");
                             const auto id=Le64(attr.value.data+4),size=Le64(attr.value.data+12);
                             const auto blocks=DivideUp(size,Block);
@@ -904,6 +910,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 }
                 Check(bool(Le64(view.value.data+48)&HasSecurityAttribute)==hasSecurity,
                       "APFS security attribute and inode flag disagree");
+                Check(hasTarget==(kind==CatalogKind::SymbolicLink),"APFS symbolic link target is missing");
                 const auto mode=Le16(view.value.data+80)&0170000;
                 if(kind==CatalogKind::Directory){
                     Check(mode==0040000&&directories.emplace(inode,Directory{i}).second,"Invalid APFS directory inode");
@@ -915,7 +922,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const size_t streamEnd=stream+40+(finder?finder->size():0);
                     const auto size=view.value.size==streamEnd?Le64(value+stream):0;
                     Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
-                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size,finder?&*finder:nullptr);
+                    const bool symlink=kind==CatalogKind::SymbolicLink;
+                    Check(!symlink||(!size&&!link->second.resourceRecord&&!link->second.compressionRecord),
+                          "APFS symbolic link cannot have file streams");
+                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,symlink?0120777:0100644,1,size,finder?&*finder:nullptr);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     Set(expected.value,68,Le32(value+68)&UserImmutable,4);
@@ -924,7 +934,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         Check(!size,"Compressed APFS files cannot have a data stream");
                         SetCompressionFlags(expected.value,Le64(records[*compression].value.data()+12),true);
                     }
-                    Check(mode==0100000&&view.value.size==expected.value.size()&&
+                    Check(mode==(symlink?0120000:0100000)&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
                           "APFS writes require native regular-file data streams");
                     if(size){
@@ -954,7 +964,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     }
                     link->second.dataSize=size;
                     link->second.streamRecords=streamRecords-link->second.attributes;
-                    ++files;
+                    if(symlink)++symlinks;else ++files;
                 }
             }
             // Catalog keys sort by inode ID, record type, then directory name hash.
@@ -968,7 +978,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         i+=streamRecords;
     }
     Check(attributeStreams.empty()&&directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
-          files==fileCount&&links.size()==directoryCount+fileCount,"APFS catalog records and volume counts disagree");
+          files==fileCount&&symlinks==symlinkCount&&links.size()==directoryCount+fileCount+symlinkCount,"APFS catalog records and volume counts disagree");
     for(const auto& entry:directories){
         const auto& folder=entry.second;
         Check(Le32(records[folder.record].value.data()+56)==folder.children,"Invalid APFS directory child count");
@@ -984,15 +994,25 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     }
     if(create){
         const bool isDirectory=create->kind==CatalogKind::Directory;
+        const bool symlink=create->kind==CatalogKind::SymbolicLink;
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
-        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize,create->finder));
+        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:0100644,isDirectory?0:1,dataSize,create->finder));
         if(create->locked)Set(records.back().value,68,UserImmutable,4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite,streams);
         if(resourceWrite)SetResourceFlag(records.back().value,resourceWrite->size!=0);
         if(create->compression)WriteCompressionAttribute(attributes,records.back().value,entryId,dataSize,create->compression);
+        if(symlink){
+            Check(create->linkTarget&&create->linkTarget->size()>=2&&
+                  create->linkTarget->size()<EmbeddedAttributeLimit&&create->linkTarget->back()==0&&
+                  !memchr(create->linkTarget->data(),0,create->linkTarget->size()-1),"Invalid APFS symbolic link target");
+            auto target=EmbeddedAttribute(entryId,SymlinkAttribute,create->linkTarget->size());
+            Set(target.value,0,6,2);
+            std::copy(create->linkTarget->begin(),create->linkTarget->end(),target.value.begin()+4);
+            attributes.push_back(std::move(target));
+        }
         SortAttributes(attributes);
         records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
         streamAt=records.size();
@@ -1022,6 +1042,11 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             for(size_t index=afterInode;index<afterInode+link.attributes;++index){
                 if(link.compressionRecord==index){
                     if(!replace)attributes.push_back(std::move(records[index]));
+                    continue;
+                }
+                const auto& oldAttribute=records[index];
+                if(Le16(oldAttribute.value.data())==6){
+                    attributes.push_back(std::move(records[index]));
                     continue;
                 }
                 const bool isResource=link.resourceRecord==index;
@@ -1212,7 +1237,7 @@ void CheckNativeVolume(const Bytes& volume)
     const auto flags=Le64(volume.data()+56);
     Check(!memcmp(volume.data()+32,"APSB",4)&&!memcmp(volume.data()+272,"HFVExplorer",12)&&
           (flags==1||flags==8)&&Le64(volume.data()+264)==1&&Le32(volume.data()+116)==2&&
-          !Le64(volume.data()+200)&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
+          !Le64(volume.data()+208)&&!Le64(volume.data()+216),
           "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
 }
 }
@@ -1311,6 +1336,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto flags=Le64(volume.data()+56);
     const auto fileCount=Le64(volume.data()+184);
     const auto directoryCount=Le64(volume.data()+192);
+    const auto symlinkCount=Le64(volume.data()+200);
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     CheckNativeVolume(volume);
@@ -1356,7 +1382,7 @@ CatalogWritePlan PrepareCatalogMutation(
     },request);
     std::set<uint64_t> retiredStreams;
     auto catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
-                            directoryCount,fileCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
+                            directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
     ValidateExtentReferences(extentTree,files);
     if(!retiredStreams.empty()){
         catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
@@ -1456,9 +1482,11 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,176,nextAvailable,8);
     if(create){
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
+        else if(create->kind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount+1,8);
         else Set(volume,184,fileCount+1,8);
     }else if(removedKind){
         if(*removedKind==CatalogKind::Directory)Set(volume,192,directoryCount-1,8);
+        else if(*removedKind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount-1,8);
         else Set(volume,184,fileCount-1,8);
     }
     Set(volume,256,time,8);

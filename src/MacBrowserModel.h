@@ -80,6 +80,13 @@ public:
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
+    virtual std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t){return {};}
+    virtual void ValidateSymbolicLink(const Entry&,const HfsPlus::Bytes&)const{
+        throw HfsPlus::Error("The destination cannot copy symbolic links");
+    }
+    virtual void PutSymbolicLink(uint32_t,const Entry&,const HfsPlus::Bytes&,Storage::Job&){
+        throw HfsPlus::Error("The destination cannot copy symbolic links");
+    }
     virtual uint32_t MakeHardLink(uint32_t,uint32_t,const std::u16string&,bool=false){throw HfsPlus::Error("This format cannot create hard links");}
     virtual void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){if(method!=HfsPlus::Volume::CompressionMode::Zlib&&method!=HfsPlus::Volume::CompressionMode::Uncompressed)throw HfsPlus::Error("This format cannot create this compression method");SetCompression(id,method!=HfsPlus::Volume::CompressionMode::Uncompressed,std::move(progress));}
     virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}

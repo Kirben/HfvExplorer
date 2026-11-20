@@ -200,13 +200,14 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=Encode(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; Reader reader; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
     Planned out; out.entry = v.Stat(id);auto identity=out.entry.resolvedId?out.entry.resolvedId:id;
     Check(depth <= 128 && ancestors.insert(identity).second, "Recursive folder link or excessive folder depth");
-    Check(out.entry.readError.empty(), out.entry.readError.c_str());
+    if(!adapter&&!out.entry.readError.empty())out.linkTarget=v.SymbolicLinkTarget(id);
+    Check(out.entry.readError.empty()||out.linkTarget.has_value(), out.entry.readError.c_str());
     out.entry.attributes=v.GetAttributes(id);out.entry.attributesKnown=true;
     // Logical exports decode compression and resolve links rather than cloning
     // their private backing topology or compressed resource-fork storage.
@@ -214,7 +215,7 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     if(out.entry.hardLink)out.entry.attributes.erase(u"com.apple.system.hfs.firstlink");
     if (out.entry.directory){
         if (adapter) out.reader=adapter(v,out.entry,job,depth==0);if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal,reportProgress,adapter));}
-    else { if(!removal){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
+    else { if(!removal&&!out.linkTarget){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
         if (adapter) out.reader=adapter(v,out.entry,job,depth==0);
         ++p.totalFiles; Check(UINT64_MAX - p.totalBytes >= out.entry.forks[0].size,
         "Copy size overflow"); p.totalBytes += out.entry.forks[0].size;
@@ -245,6 +246,13 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
         if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,std::make_pair(parent,dst.Stat(id).name));return complete;
+    }
+    if(plan.linkTarget){
+        Check(!found,"The symbolic link destination already exists");
+        dst.PutSymbolicLink(parent,entry,*plan.linkTarget,job);
+        ++progress.files;
+        job.progress(progress);
+        return true;
     }
     Check(!found || !existing.directory, "A folder blocks the destination file");
     if (found) {
@@ -570,7 +578,10 @@ void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
-  if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
+  if(plan.linkTarget){
+   Check(!exists,"The symbolic link destination already exists");
+   dst.ValidateSymbolicLink(plan.entry,*plan.linkTarget);
+  }else if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
   else {dst.ValidateEntry(plan.entry);if(plan.entry.directory)ValidatePlans(dst,plan.children,0,false);}
  }
 }

@@ -9,7 +9,7 @@ struct CheckpointBlockWrite {
     HfsPlus::Bytes bytes;
 };
 using CheckpointObjectLookup=std::function<HfsPlus::Bytes&(uint64_t oid)>;
-enum class CatalogKind : uint16_t { Directory=4, RegularFile=8 };
+enum class CatalogKind : uint16_t { Directory=4, RegularFile=8, SymbolicLink=10 };
 struct CatalogCreate {
     uint64_t parent;
     const std::u16string& name;
@@ -21,6 +21,7 @@ struct CatalogCreate {
     const HfsPlus::Attributes* attributes=nullptr;
     HfsPlus::Source* resource=nullptr;
     const HfsPlus::Bytes* compression=nullptr;
+    const HfsPlus::Bytes* linkTarget=nullptr;
 };
 struct CatalogRename {
     uint64_t parent,inode;

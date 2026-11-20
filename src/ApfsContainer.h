@@ -45,6 +45,9 @@ uint64_t SetResourceFork(HfsPlus::Source&,const Container& expected,uint64_t par
                                  HfsPlus::Source&,uint64_t modified,Storage::Job&);
 uint64_t SetCatalogAttributes(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                                const HfsPlus::Attributes&,Storage::Job&);
+uint64_t CreateCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent,const std::u16string&,
+                              const HfsPlus::Bytes& target,Storage::Job&,std::optional<FileDates> dates,
+                              const FinderBytes&,bool locked,const HfsPlus::Attributes&);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
 
 // Stream a data fork from a separate source into a newly created file.

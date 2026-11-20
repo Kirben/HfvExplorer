@@ -1954,7 +1954,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    const unsigned records=8+(attributes?3:0)+(links?5:0)+(compressed?1:0)+(symlink!=Symlink::None?1:0);
+    const unsigned records=8+(attributes?3:0)+(links?5:0)+(compressed?1:0)-(symlink!=Symlink::None?2:0);
     Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
@@ -1972,10 +1972,11 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         memcpy(end-valueOffset,value.data(),value.size());
     };
     auto inode=[&](uint64_t id,bool directory,uint64_t length,bool linked=false){
-        Bytes value(directory?92:140);
+        const bool hasData=!directory&&symlink==Symlink::None;
+        Bytes value(hasData?140:92);
         Little(value.data()+8,id,8);Little(value.data()+56,linked?2:1,4);
         Little(value.data()+80,directory?0040755:symlink!=Symlink::None?0120777:0100644,2);
-        if(!directory){
+        if(hasData){
             Little(value.data()+92,1,2);Little(value.data()+94,44,2);
             value[96]=8;Little(value.data()+98,40,2);
             Little(value.data()+100,length,8);
@@ -2023,7 +2024,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         Little(data.data()+8,70001,8);
         xattr("com.apple.decmpfs",2,data);
     }
-    extent(0,40);extent(size,0);extent(2*size,42);
+    if(symlink==Symlink::None){extent(0,40);extent(size,0);extent(2*size,42);}
     if(attributes){
         extent(0,43,331);
         memcpy(disk.bytes.data()+43*size,"resource",8);
@@ -2512,6 +2513,13 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
         Check(restored==resource,"APFS transfer changed the resource fork");
         fprintf(report,"PASS: APFS embedded metadata and extent-backed resource fork preserved through copy to HFS Plus.\n");
+        const auto symlinkPath=VolumeCoord::Wide(root+"apfs-written-symlink.img");
+        {
+            auto image=CreateFormatOutput(symlinkPath.c_str(),8*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*image,u"APFS symbolic link copies",false,job);
+            image->Keep();
+        }
         for(const auto link:{Symlink::Valid,Symlink::Malformed}){
             const auto disk=BrowseFixture(false,false,false,link);
             const auto path=VolumeCoord::Wide(root+(link==Symlink::Valid?"symlink.img":"bad-symlink.img"));
@@ -2526,8 +2534,41 @@ int RunApfsContainerTest(const char* directory)
             Check(volume->PropertiesDetails(file.id)==details&&!file.readError.empty()&&
                   volume->GetAttributes(file.id).empty(),"APFS symbolic link properties are incorrect");
             Reject([&]{volume->Read(file.id,0,0,nullptr,0);},"APFS symlink was readable");
+            const auto destination=MacBrowser::OpenBrowserImage(symlinkPath);
+            Check(destination&&destination->Writable(),"Could not mount the writable APFS link fixture");
+            auto copy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(volume,file.id)},FileOperations::Location::Mounted(destination,2)});
+            Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,"APFS symbolic link copy timed out");
+            const auto result=copy.Job()->result();
+            Check(bool(result.code)==(link==Symlink::Malformed),result.message.c_str());
+            MacBrowser::Entry copied;
+            Check(destination->List().size()==1&&destination->FindChild(2,file.name,copied)&&
+                  destination->PropertiesDetails(copied.id)=="Symbolic link to /a/b\\x0a",
+                  "Copy changed a symbolic link or followed its target");
+            if(link==Symlink::Valid){
+                auto duplicate=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                    {FileOperations::Location::Mounted(volume,file.id)},FileOperations::Location::Mounted(destination,2)});
+                Check(WaitForSingleObject(duplicate.Job()->event(),15000)==WAIT_OBJECT_0&&duplicate.Job()->result().code&&
+                      destination->Stat(copied.id).name==file.name,"APFS symbolic link copy replaced an existing entry");
+                Storage::Job job;
+                Reject([&]{MacBrowser::Copy(*volume,file.id,*targetMac,2,job);},
+                       "APFS symbolic link was flattened into an unsupported destination");
+            }
         }
-        fprintf(report,"PASS: APFS symbolic link targets, malformed targets, and read refusal.\n");
+        if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
+            const auto source=MacBrowser::OpenBrowserImage(fixture);
+            const auto destination=MacBrowser::OpenBrowserImage(symlinkPath);
+            MacBrowser::Entry link,copied;
+            Check(source&&destination&&source->FindChild(2,u"link.txt",link),"Missing genuine APFS symbolic link fixture");
+            VolumeCoord::OperationLease lease({{source->ResourceKey(),VolumeCoord::Mode::Read},
+                                               {destination->ResourceKey(),VolumeCoord::Mode::Write}});
+            Storage::Job job;
+            Check(MacBrowser::Copy(*source,link.id,*destination,2,job)&&
+                  destination->FindChild(2,link.name,copied)&&
+                  destination->SymbolicLinkTarget(copied.id)==source->SymbolicLinkTarget(link.id),
+                  "Copying the genuine APFS symbolic link changed its target");
+        }
+        fprintf(report,"PASS: APFS symbolic link copies, malformed target refusal, and read refusal.\n");
         auto linkedDisk=BrowseFixture(false,true);
         const auto linkedPath=VolumeCoord::Wide(root+"linked.img");
         {

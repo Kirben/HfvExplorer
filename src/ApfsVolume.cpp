@@ -632,6 +632,19 @@ private:
         else memcpy(data,attribute.embedded.data()+size_t(at),size);
     }
 public:
+    std::optional<Bytes> SymbolicLinkTarget(uint32_t id)override{
+        return Access([&]() -> std::optional<Bytes> {
+            const auto& file=At(id);
+            if(!file.symlink)return {};
+            const auto target=file.attributes.find(SymlinkAttribute);
+            Check(target!=file.attributes.end()&&target->second.size>=2&&target->second.size<=4096,
+                  "Invalid APFS symbolic link target size");
+            Bytes path(size_t(target->second.size));
+            ReadAttribute(file.mount,target->second,0,path.data(),path.size());
+            Apfs::Name(path.data(),path.size());
+            return path;
+        });
+    }
     std::string PropertiesDetails(uint32_t id)override{
         return Access([&]() -> std::string {
             const auto& file=At(id);
@@ -820,6 +833,25 @@ public:
         });
     }
     void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
+    void ValidateSymbolicLink(const Entry& entry,const Bytes& target)const override{
+        Check(!entry.directory&&!entry.hardLink&&!entry.compressed&&!entry.forks[0].size&&!entry.forks[1].size,
+              "Unsupported APFS symbolic link metadata");
+        Check(target.size()<EmbeddedAttributeLimit,"APFS symbolic link target does not fit in an embedded attribute");
+        Apfs::Name(target.data(),target.size());
+        auto metadata=entry;
+        metadata.readError.clear();
+        ValidateEntry(metadata);
+    }
+    void PutSymbolicLink(uint32_t parent,const Entry& entry,const Bytes& target,Storage::Job& job)override{
+        ValidateSymbolicLink(entry,target);
+        WriteMount([&]{
+            const auto parentOid=At(parent).oid;
+            CommitMutation(parent,0,job,[&](auto& job){
+                return CreateCatalogSymlink(*source,container,parentOid,entry.name,target,job,
+                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes);
+            });
+        });
+    }
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
         ValidateName(entry.name);
