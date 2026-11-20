@@ -1324,16 +1324,16 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void DeepCatalogGrowth(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-deep-catalog.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-large-object-map.img");
     {
-        auto disk=CreateFormatOutput(path.c_str(),16*1024*1024);
+        auto disk=CreateFormatOutput(path.c_str(),32*1024*1024);
         Storage::Job job;
         Apfs::Format(*disk,u"Deep catalog",false,job);
         disk->Keep();
     }
     MacBrowser::Entry entry;
     entry.name=u"Many long attributes";
-    for(unsigned index=0;index<720;++index){
+    for(unsigned index=0;index<2300;++index){
         auto name=u"user."+MacBrowser::U16(std::to_wstring(index));
         name.resize(127,u'x');
         entry.attributes.emplace(std::move(name),Bytes(3804,uint8_t(index)));
@@ -1353,7 +1353,12 @@ void DeepCatalogGrowth(const std::string& root,FILE* report)
         Check(volumeBlock.has_value(),"Missing deep APFS test volume");
         const auto volume=Apfs::ReadObject(*disk,*checkpoint,*volumeBlock,volumeId,checkpoint->transaction,13);
         const auto treeId=Apfs::Le64(volume.data()+136);
-        const Apfs::ObjectMap volumeMap(*disk,*checkpoint,Apfs::Le64(volume.data()+128),checkpoint->transaction);
+        const auto mapAddress=Apfs::Le64(volume.data()+128);
+        const auto mapHeader=Apfs::ReadObject(*disk,*checkpoint,mapAddress,mapAddress,checkpoint->transaction,11,0,true);
+        const auto mapRootAddress=Apfs::Le64(mapHeader.data()+48);
+        const Apfs::Node mapRoot(Apfs::ReadObject(*disk,*checkpoint,mapRootAddress,mapRootAddress,checkpoint->transaction,2,11,true),true,{});
+        Check(mapRoot.Level()==1&&mapRoot.Count()>1,"APFS object map did not grow past one leaf");
+        const Apfs::ObjectMap volumeMap(*disk,*checkpoint,mapAddress,checkpoint->transaction);
         const auto treeBlock=volumeMap.Lookup(treeId);
         Check(treeBlock.has_value(),"Missing APFS test catalog");
         const Apfs::Node tree(Apfs::ReadObject(*disk,*checkpoint,*treeBlock,treeId,checkpoint->transaction,2,14),true,{});
@@ -1368,7 +1373,7 @@ void DeepCatalogGrowth(const std::string& root,FILE* report)
         volume->Rename(loaded.id,2,u"Renamed in a deep catalog");
         Check(volume->Stat(loaded.id).name==u"Renamed in a deep catalog","APFS deep catalog rename failed");
     }
-    fprintf(report,"PASS: APFS three-level catalog with 720 long attribute keys, exact readback and later rename.\n");
+    fprintf(report,"PASS: APFS multi-leaf object map and three-level catalog with 2300 long keys, exact readback and later rename.\n");
 }
 
 void ExtentReferenceGrowth(const std::string& root,FILE* report)

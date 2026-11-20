@@ -57,38 +57,64 @@ void SetBit(Bytes& map,uint64_t index)
 struct Mapping {
     uint64_t oid,block;
 };
-struct MapLeaf {
+struct WritableMap {
     uint64_t headerBlock,rootBlock;
     Bytes header;
     std::vector<Mapping> mappings;
+    std::vector<uint64_t> leaves;
 };
-MapLeaf ReadWritableMap(Source& source,const Container& container,uint64_t block)
+WritableMap ReadWritableMap(Source& source,const Container& container,uint64_t block)
 {
     auto header=ReadObject(source,container,block,block,container.transaction,11,0,true);
     const auto root=Le64(header.data()+48);
     Check(Le32(header.data()+40)==(Physical|2)&&!Le32(header.data()+36)&&!Le64(header.data()+56),
           "APFS object map contains unsupported snapshot references");
     const Node node(ReadObject(source,container,root,root,container.transaction,2,11,true),true,{});
-    Check(!node.Level()&&node.Layout().keySize==16&&node.Layout().valueSize==16,
-          "APFS writes require a single-leaf object map");
-    MapLeaf map{block,root,std::move(header),{}};
+    Check(node.Level()<=1&&node.Layout().keySize==16&&node.Layout().valueSize==16,
+          "APFS writes require a supported object map");
+    WritableMap map{block,root,std::move(header),{},{}};
     std::set<uint64_t> physicalBlocks{block,root};
     uint64_t previous=0;
-    for(size_t i=0;i<node.Count();++i){
-        const auto record=node.At(i);
-        const auto oid=Le64(record.key.data),xid=Le64(record.key.data+8);
-        const auto physical=Le64(record.value.data+8);
-        Check(oid>previous&&xid&&xid<=container.transaction&&Le32(record.value.data)==0&&
-              Le32(record.value.data+4)==Block&&physical&&physical<container.blockCount&&
-              physicalBlocks.insert(physical).second,"Invalid APFS writable object mapping");
-        map.mappings.push_back({oid,physical});
-        previous=oid;
+    const auto append=[&](const Node& leaf){
+        Check(!leaf.Level()&&leaf.Count(),"Invalid APFS object map leaf");
+        for(size_t i=0;i<leaf.Count();++i){
+            const auto record=leaf.At(i);
+            const auto oid=Le64(record.key.data),xid=Le64(record.key.data+8);
+            const auto physical=Le64(record.value.data+8);
+            Check(oid>previous&&xid&&xid<=container.transaction&&Le32(record.value.data)==0&&
+                  Le32(record.value.data+4)==Block&&physical&&physical<container.blockCount&&
+                  physicalBlocks.insert(physical).second,"Invalid APFS writable object mapping");
+            map.mappings.push_back({oid,physical});
+            previous=oid;
+        }
+    };
+    if(!node.Level())append(node);
+    else{
+        Check(node.Count()>0,"Empty APFS object map index");
+        for(size_t i=0;i<node.Count();++i){
+            const auto separator=node.At(i);
+            Check(separator.key.size==16&&separator.value.size==8,"Invalid APFS object map separator");
+            const auto child=Le64(separator.value.data);
+            Check(physicalBlocks.insert(child).second,"Repeated APFS object map leaf");
+            const Node leaf(ReadObject(source,container,child,child,container.transaction,3,11,true),false,node.Layout());
+            Check(leaf.Count()&&!memcmp(leaf.At(0).key.data,separator.key.data,16),
+                  "APFS object map separator does not match its leaf");
+            map.leaves.push_back(child);
+            append(leaf);
+        }
     }
     return map;
 }
 
-void StageMap(Writes& writes,MapLeaf map,uint64_t headerBlock,uint64_t rootBlock,
-              const std::vector<Mapping>& mappings,uint64_t transaction)
+constexpr size_t MapLeafCapacity=(Block-WriterDisk::NodeHeader-WriterDisk::TreeFooter)/(4+16+16);
+size_t MapLeaves(size_t mappings)
+{
+    return mappings<=MapLeafCapacity?0:size_t(DivideUp(mappings,MapLeafCapacity));
+}
+
+void StageMap(Writes& writes,WritableMap map,uint64_t headerBlock,uint64_t rootBlock,
+              const std::vector<Mapping>& mappings,uint64_t transaction,
+              const std::vector<uint64_t>& allocation,size_t firstLeaf)
 {
     Set(map.header,48,rootBlock,8);
     StageObject(writes,headerBlock,std::move(map.header),headerBlock,transaction,Physical|11);
@@ -101,14 +127,35 @@ void StageMap(Writes& writes,MapLeaf map,uint64_t headerBlock,uint64_t rootBlock
         Set(mapping.value,8,item.block,8);
         records.push_back(std::move(mapping));
     }
-    StageObject(writes,rootBlock,EncodeLeaf(records,0x10,16,16),rootBlock,transaction,Physical|2,11);
+    const auto count=MapLeaves(records.size());
+    if(!count){
+        StageObject(writes,rootBlock,EncodeLeaf(records,0x10,16,16),rootBlock,transaction,Physical|2,11);
+        return;
+    }
+    std::vector<OwnedRecord> index;
+    for(size_t i=0;i<count;++i){
+        const auto begin=i*MapLeafCapacity,end=(std::min)(begin+MapLeafCapacity,records.size());
+        const auto child=allocation[firstLeaf+i];
+        OwnedRecord separator{records[begin].key,Bytes(8)};
+        Set(separator.value,0,child,8);
+        index.push_back(std::move(separator));
+        const std::vector<OwnedRecord> leaf(records.begin()+begin,records.begin()+end);
+        StageObject(writes,child,WriterDisk::EncodeNode(leaf,0x10,false,0,16,16),child,transaction,Physical|3,11);
+    }
+    auto node=WriterDisk::EncodeNode(index,0x10,true,1,16,8);
+    constexpr auto footer=Block-WriterDisk::TreeFooter;
+    Set(node,footer+12,16,4);
+    Set(node,footer+20,16,4);
+    Set(node,footer+24,records.size(),8);
+    Set(node,footer+32,count+1,8);
+    StageObject(writes,rootBlock,std::move(node),rootBlock,transaction,Physical|2,11);
 }
 
 struct CatalogRecords {
     std::vector<OwnedRecord> records;
     std::vector<uint64_t> blocks;
 };
-CatalogRecords ReadWritableCatalog(Source& source,const Container& container,const MapLeaf& map,uint64_t oid)
+CatalogRecords ReadWritableCatalog(Source& source,const Container& container,const WritableMap& map,uint64_t oid)
 {
     const auto find=[&](uint64_t wanted){
         const auto item=std::lower_bound(map.mappings.begin(),map.mappings.end(),wanted,
@@ -1334,10 +1381,12 @@ CatalogWritePlan PrepareCatalogMutation(
     std::vector<uint64_t> retired{containerMap.headerBlock,containerMap.rootBlock,volumeAddress,
                                   volumeMap.headerBlock,volumeMap.rootBlock};
     retired.insert(retired.end(),existing.blocks.begin(),existing.blocks.end());
+    retired.insert(retired.end(),volumeMap.leaves.begin(),volumeMap.leaves.end());
+    retired.insert(retired.end(),containerMap.leaves.begin(),containerMap.leaves.end());
     if(changeExtents)retired.insert(retired.end(),extentTree.blocks.begin(),extentTree.blocks.end());
     const size_t firstChild=changeExtents?7:6;
     CatalogLeaves leaves;
-    size_t children=0,extentChildren=0;
+    size_t children=0,extentChildren=0,mapChildren=0;
     CatalogLeaves extentLeaves;
     std::vector<DataRun> allocatedData;
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
@@ -1380,7 +1429,8 @@ CatalogWritePlan PrepareCatalogMutation(
                 extentLeaves=PartitionCatalog(std::move(references));
                 extentChildren=extentLeaves.size()>1?extentLeaves.size():0;
             }
-            return firstChild+children+extentChildren;
+            mapChildren=MapLeaves(children+1);
+            return firstChild+children+extentChildren+mapChildren;
         });
     if(changeExtents){
         StageExtentTree(writes,extentLeaves,allocated,firstChild+children,transaction);
@@ -1393,9 +1443,9 @@ CatalogWritePlan PrepareCatalogMutation(
         Set(superblock,88,firstOid+children,8);
     }
     const auto mappings=StageCatalog(writes,leaves,allocated,firstChild,catalogOid,firstOid,transaction);
-    StageMap(writes,volumeMap,allocated[1],allocated[2],mappings,transaction);
-    const auto oldChildren=existing.blocks.size()-1+(changeExtents?extentTree.blocks.size()-1:0);
-    const auto newChildren=children+extentChildren;
+    StageMap(writes,volumeMap,allocated[1],allocated[2],mappings,transaction,allocated,firstChild+children+extentChildren);
+    const auto oldChildren=existing.blocks.size()-1+volumeMap.leaves.size()+(changeExtents?extentTree.blocks.size()-1:0);
+    const auto newChildren=children+extentChildren+mapChildren;
     const auto volumeBlocks=Le64(volume.data()+88);
     const auto removedVolumeBlocks=oldChildren+removedBlocks;
     Check(volumeBlocks>=removedVolumeBlocks&&volumeBlocks<=current.blockCount&&
@@ -1419,7 +1469,7 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,224,Le64(volume.data()+224)+newVolumeBlocks,8);
     Set(volume,232,Le64(volume.data()+232)+oldVolumeBlocks,8);
     StageObject(writes,allocated[3],std::move(volume),oid,transaction,13);
-    StageMap(writes,containerMap,allocated[4],allocated[5],{{oid,allocated[3]}},transaction);
+    StageMap(writes,containerMap,allocated[4],allocated[5],{{oid,allocated[3]}},transaction,allocated,0);
     Set(superblock,160,allocated[4],8);
     return plan;
 }
