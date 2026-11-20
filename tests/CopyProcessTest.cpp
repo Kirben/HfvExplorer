@@ -176,6 +176,14 @@ void TestVolumeSessionProtocol()
            "accepted oversized read request");
     reject([]{auto data=Protocol::Encode(Protocol::Reply{3,"",Storage::Rollback::None});Protocol::DecodeReply(data);},
            "accepted invalid session reply");
+    auto reply=Protocol::Encode(Protocol::Reply{1,"Cancelled",Storage::Rollback::Failed,ERROR_CANCELLED,true});
+    const auto decodedReply=Protocol::DecodeReply(reply);
+    Check(decodedReply.error==ERROR_CANCELLED&&decodedReply.retained&&decodedReply.rollback==Storage::Rollback::Failed,
+          "Volume reply lost cancellation, retained changes or rollback evidence");
+    reject([]{auto data=Protocol::Encode(Protocol::Reply{0,"",Storage::Rollback::None,ERROR_MEDIA_CHANGED});
+              Protocol::DecodeReply(data);},"accepted a successful session result with an error");
+    reject([]{auto data=Protocol::Encode(Protocol::Reply{1,"Missing error",Storage::Rollback::None});
+              Protocol::DecodeReply(data);},"accepted a failed session result without an error code");
 
     Entry entry;
     entry.id=42;
@@ -572,6 +580,7 @@ int RunCopyReleaseTest(const char *directory) {
               "Worker lost classic Properties edit");
 
         auto partialId = Put(*target, 2, u"Partial worker delete", 4096);
+        const auto revisionBeforeDelete = VolumeCoord::Revision(target->ResourceKey());
         CopyProcess::lastProcess = 0;
         auto partial = Submit(DeleteEntries{{Native(target, partialId), Native(target)}});
         Wait(partial);
@@ -580,6 +589,7 @@ int RunCopyReleaseTest(const char *directory) {
                   partial.Job()->result().outcome == Storage::Outcome::Failed && partial.Job()->result().partial &&
                   partial.Job()->result().completed == 1 && partial.Snapshot().completed == 1 &&
                   !partial.Snapshot().affected.empty() &&
+                  VolumeCoord::Revision(target->ResourceKey()) == revisionBeforeDelete + 1 &&
                   !target->FindChild(2, u"Partial worker delete", remaining) && target->Stat(2).directory,
               "Worker delete lost partial completion or attempted a volume root");
         fprintf(report, "PASS: shipping worker folder/rename/delete/hard links, partial delete notifications, "

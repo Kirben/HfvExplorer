@@ -108,19 +108,24 @@ Data Encode(const Reply& value)
 {
     Data payload;
     payload.put(value.code);
-    payload.put(value.error);
+    payload.put(value.message);
     payload.put(uint64_t(value.rollback));
+    payload.put(value.error);
+    payload.put(value.retained);
     return payload;
 }
 
 Reply DecodeReply(Data& packet)
 {
     const auto code=packet.get();
-    auto error=packet.text();
+    auto message=packet.text();
     const auto rollback=packet.get();
+    const auto error=packet.get();
+    const auto retained=packet.flag();
     packet.end();
-    Check(code<=2&&rollback<=uint64_t(Storage::Rollback::Failed),"Invalid volume session result");
-    return {unsigned(code),std::move(error),Storage::Rollback(rollback)};
+    Check(code<=2&&rollback<=uint64_t(Storage::Rollback::Failed)&&error<=MAXDWORD&&
+          (code==1 ? error!=0 : error==0&&!retained),"Invalid volume session result");
+    return {unsigned(code),std::move(message),Storage::Rollback(rollback),DWORD(error),retained};
 }
 
 Data Encode(const CatalogItem& request)

@@ -5,6 +5,7 @@
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
 #include "FileOperations.h"
+#include "VolumeCoordinator.h"
 #include "HfsPlusDisk.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
@@ -33,7 +34,7 @@ struct Gate {
 std::wstring W(const std::string& s){return {s.begin(),s.end()};}
 std::shared_ptr<Volume> Image(const std::wstring& path,const std::u16string& label,HfsPlus::Volume::FormatKind kind){auto file=HfsPlus::CreateImage(path.c_str(),8*1024*1024);HfsPlus::Volume::Format(*file,label,true,kind);file.reset();return OpenImage(path);}
 struct Delayed:Volume {
- std::shared_ptr<Volume> inner;DWORD ui=GetCurrentThreadId();unsigned delay=0;bool failRead=false,wrongThread=false;uint32_t failRemove=0;CWnd* owner=nullptr;CWnd* other=nullptr;bool onlyOwnerDisabled=false;
+ std::shared_ptr<Volume> inner;DWORD ui=GetCurrentThreadId();unsigned delay=0;bool failRead=false,wrongThread=false;uint32_t failRemove=0;bool cancelRemove=false,loseMedia=false;CWnd* owner=nullptr;CWnd* other=nullptr;bool onlyOwnerDisabled=false;
  explicit Delayed(std::shared_ptr<Volume> v):inner(std::move(v)){}
  void Thread(){wrongThread|=GetCurrentThreadId()==ui;}
  std::string ResourceKey()const override{return inner->ResourceKey();}
@@ -44,7 +45,18 @@ struct Delayed:Volume {
  uint32_t Put(uint32_t p,const Entry& e,Reader r,bool replace)override{Thread();return inner->Put(p,e,r,replace);}
  void Rename(uint32_t id,uint32_t p,const std::u16string& n)override{Thread();inner->Rename(id,p,n);}
  void ValidateRemoval(uint32_t id)override{Thread();inner->ValidateRemoval(id);}
- void Remove(uint32_t id)override{Thread();if(failRemove==id)throw HfsPlus::Error("Injected delete error");inner->Remove(id);}
+ void Remove(uint32_t id)override{
+  Thread();
+  if(failRemove==id){
+   if(cancelRemove)throw Storage::Cancelled();
+   if(loseMedia){
+    Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Failed);
+    throw Storage::MediaChanged("Injected media replacement during delete");
+   }
+   throw HfsPlus::Error("Injected delete error");
+  }
+  inner->Remove(id);
+ }
 };
 uint32_t Put(Volume& volume,const std::u16string& name){Entry e;e.name=name;e.forks[0].size=4096;e.forks[1].size=17;return volume.Put(2,e,[](unsigned f,uint64_t at,void* p,size_t n){auto bytes=(BYTE*)p;for(size_t i=0;i<n;++i)bytes[i]=BYTE(at+i+f*31);},false);}
 Location Native(const std::shared_ptr<Volume>& volume,uint32_t id,const Entry* expected=nullptr){Location out;out.SetMounted(volume,id);if(expected){out.expectedIdentity=expected->identity;out.expectedName=expected->name;out.expectedParent=expected->parent;}return out;}
@@ -105,6 +117,29 @@ int RunFileOperationsTest(const char* directory){
   uint32_t one=Put(*source,u"Delete one"),two=Put(*source,u"Delete two");delayed->failRemove=two;Request remove = FileOperations::DeleteEntries{{Native(delayed,one),Native(delayed,two)}};auto partial=Submit(remove);Wait(partial);Check(partial.Job()->result().outcome==Storage::Outcome::Failed&&partial.Job()->result().partial&&partial.Job()->result().completed==1&&!partial.Snapshot().complete&&partial.Snapshot().completed==1&&source->Stat(two).name==u"Delete two"&&!partial.Snapshot().affected.empty(),"partial delete completion was lost");delayed->failRemove=0;
   MacBrowser::Entry deletedEntry;
   Check(!source->FindChild(2, u"Delete one", deletedEntry), "Completed delete was rolled back");
+  const auto third=Put(*source,u"Delete before cancellation");
+  auto revision=VolumeCoord::Revision(source->ResourceKey());
+  delayed->failRemove=two;
+  delayed->cancelRemove=true;
+  auto cancelled=Submit(DeleteEntries{{Native(delayed,third),Native(delayed,two)}});
+  Wait(cancelled);
+  const auto stopped=cancelled.Job()->result();
+  Check(stopped.outcome==Storage::Outcome::Cancelled&&stopped.partial&&stopped.completed==1&&
+        stopped.rollback==Storage::Rollback::None&&VolumeCoord::Revision(source->ResourceKey())==revision+1&&
+        !source->FindChild(2,u"Delete before cancellation",deletedEntry)&&source->Stat(two).name==u"Delete two",
+        "Partial delete cancellation lost the retained changes or their revision");
+  delayed->cancelRemove=false;
+  delayed->loseMedia=true;
+  revision=VolumeCoord::Revision(source->ResourceKey());
+  auto changed=Submit(DeleteEntries{{Native(delayed,two)}});
+  Wait(changed);
+  const auto mediaError=changed.Job()->result();
+  Check(mediaError.outcome==Storage::Outcome::Failed&&mediaError.error==ERROR_MEDIA_CHANGED&&
+        mediaError.rollback==Storage::Rollback::Failed&&mediaError.completed==0&&
+        VolumeCoord::Revision(source->ResourceKey())==revision+1&&source->Stat(two).name==u"Delete two",
+        "Failed rollback or media-change result was lost before refresh");
+  delayed->loseMedia=false;
+  delayed->failRemove=0;
   ExportFileFork raw{Native(delayed,file,&expected),Host(root+"\\resource.bin"),ForkSelector::Resource};Pass(Submit(raw));Check(Load(root+"\\resource.bin").size()==17,"raw fork export job");auto repeated=Submit(raw);Wait(repeated);Check(repeated.Job()->result().code&&Load(root+"\\resource.bin").size()==17,"fork export overwrote existing output");
   Save(root+"\\replacement.bin","NEW RESOURCE");ImportResourceFork resource{Host(root+"\\replacement.bin"),Native(delayed,file,&expected)};Pass(Submit(resource));Check(source->Stat(file).forks[0].size==4096&&source->Stat(file).forks[1].size==12,"resource import job lost data fork");
   fprintf(report,"PASS: worker-only copy/rename/delete and fork jobs, slow responsive owner-specific progress, overwrite skip, detached conflict discovery/cancellation, queued cancellation, stale rename/delete rejection, collision preservation, cut-source retention, partial-delete accounting and raw-export overwrite preservation.\n");

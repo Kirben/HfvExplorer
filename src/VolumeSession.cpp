@@ -5,6 +5,7 @@
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
 #include "StorageLocation.h"
+#include "OperationCompletion.h"
 #include "VolumeCoordinator.h"
 #include <algorithm>
 
@@ -28,14 +29,13 @@ void PauseForTest(const std::atomic<HANDLE>& entered,const std::atomic<HANDLE>& 
 }
 #endif
 
-void SessionReply(HANDLE output, unsigned code = 0, const std::string& error = {},
-                  Storage::Rollback rollback = Storage::Rollback::None) {
-    Send(output,SessionResult,Protocol::Encode(Protocol::Reply{code,error,rollback}));
+void SessionReply(HANDLE output, const Protocol::Reply& reply = {}) {
+    Send(output,SessionResult,Protocol::Encode(reply));
 }
 
-class SessionError : public HfsPlus::Error {
+class SessionError : public Storage::OperationError {
 public:
-    using HfsPlus::Error::Error;
+    using Storage::OperationError::OperationError;
 };
 
 class PersistentVolume final : public Volume, public WorkerEndpoint {
@@ -89,8 +89,9 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     void ReadResult(Data& packet) {
         const auto reply=Protocol::DecodeReply(packet);
         RecordRollback(reply.rollback);
-        if(reply.code==2)throw HfsPlus::ExternalJournalRequired(reply.error);
-        if(reply.code==1)throw SessionError(reply.error);
+        if(reply.retained)Storage::OutcomeEvidence::NoteRetainedChange();
+        if(reply.code==2)throw HfsPlus::ExternalJournalRequired(reply.message);
+        if(reply.code==1)throw SessionError(reply.error,reply.message);
     }
     Data Response(Message expected) {
         Data packet;
@@ -592,9 +593,9 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
         }
         Check(message == SessionCommand, "Invalid volume session command frame");
         const auto command=Protocol::DecodeCommand(packet,attributes[0].has_value(),attributes[1].has_value());
-        Storage::OutcomeEvidence evidence;
-        hfs_take_rollback();
-        try {
+        Storage::OperationCompletion outcome;
+        const bool close = command == SessionCommandCode::CloseClassic;
+        auto result = outcome.Run([&]() -> Storage::Result {
             switch (command) {
             case SessionCommandCode::Root: packet.end(); writeNumber(volume.FreeBytes()); break;
             case SessionCommandCode::List: {
@@ -707,8 +708,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 packet.end();
                 Check(!strcmp(volume.Kind(),"HFS"), "Unexpected classic close command");
                 volume.Close();
-                SessionReply(output);
-                return;
+                break;
             case SessionCommandCode::GetClassicProperties: {
                 const auto id=Protocol::DecodeItem(packet).id;
                 hfsdirent entry{};
@@ -731,11 +731,11 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             }
-            SessionReply(output);
-        } catch (const std::exception& error) {
-            Storage::OutcomeEvidence::NoteRollback(Storage::Rollback(hfs_take_rollback()));
-            SessionReply(output, 1, error.what(), evidence.RollbackState());
-        }
+            return {};
+        });
+        outcome.Finish(result);
+        SessionReply(output, {unsigned(result.code),result.message,result.rollback,result.error,result.partial});
+        if(close&&!result.code)return;
     }
 }
 } // namespace
@@ -773,9 +773,9 @@ int Child(const char* inputText, const char* outputText) {
             return 0;
         }
     } catch (const HfsPlus::ExternalJournalRequired& error) {
-        try { SessionReply(output, 2, error.what()); } catch (...) {}
+        try { SessionReply(output, {2,error.what()}); } catch (...) {}
     } catch (const std::exception& error) {
-        try { SessionReply(output, 1, error.what()); } catch (...) {}
+        try { SessionReply(output, {1,error.what(),Storage::Rollback::None,ERROR_UNHANDLED_EXCEPTION}); } catch (...) {}
     }
     return 0;
 }

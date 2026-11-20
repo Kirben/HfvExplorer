@@ -30,7 +30,13 @@ struct DirectoryUpdate {DirectoryUpdateHeader header;MacBrowser::Entry desired,e
 struct BasicMetadataRequest {uint32_t id;MacBrowser::Entry entry;};
 struct ClassicPropertiesRequest {uint32_t id;hfsdirent properties;};
 
-struct Reply {unsigned code;std::string error;Storage::Rollback rollback;};
+struct Reply {
+    unsigned code = 0;
+    std::string message;
+    Storage::Rollback rollback = Storage::Rollback::None;
+    DWORD error = 0;
+    bool retained = false;
+};
 
 CopyWorkerProtocol::Data EncodeCommand(Command,const CopyWorkerProtocol::Data& payload);
 Command DecodeCommand(CopyWorkerProtocol::Data&,bool primaryAttributes,bool secondaryAttributes);

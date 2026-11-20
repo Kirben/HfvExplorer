@@ -3,6 +3,7 @@
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "FileOperationWorkerPolicy.h"
+#include "OperationCompletion.h"
 #include "StorageLocation.h"
 #include "BrowserPresentation.h"
 #include "CopyProcess.h"
@@ -13,7 +14,6 @@
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
-#include "MediaWriteBackend.h"
 #include "RenameName.h"
 #include "charset.h"
 #include <algorithm>
@@ -21,11 +21,6 @@
 #include <string_view>
 #include <fcntl.h>
 #include <optional>
-extern "C" {
-#include "hfs/libhfs/hfs.h"
-#include "hfs/interface.h"
-
-}
 extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
 namespace FileOperations {
 struct Operation::State {mutable std::mutex mutex;Completion completion;};
@@ -36,7 +31,7 @@ struct Registry {
 };
 namespace {
 using namespace MacBrowser;
-struct Failure:std::runtime_error {DWORD error;Failure(DWORD e,const std::string& text):std::runtime_error(text),error(e?e:ERROR_WRITE_FAULT){}};
+using Storage::OperationError;
 void Check(bool ok,const char* text){if(!ok)throw HfsPlus::Error(text);}
 std::wstring HostPath(const Location& item){return item.HostPath();}
 std::wstring ChildPath(std::wstring root,const std::u16string& name){if(!root.empty()&&root.back()!=L'\\')root+=L'\\';return root+MacBrowser::Wide(name);}
@@ -210,7 +205,7 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
    auto source=Source(item,true);Cancel(job);source.first->Close();
    Mark(completion,item);
    if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,rename->name);
-   }else if(!DeleteHostSelectionJob(item.WindowsPath(),item.directory,&job)){Cancel(job);throw Failure(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
+   }else if(!DeleteHostSelectionJob(item.WindowsPath(),item.directory,&job)){Cancel(job);throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }
   ++completion.completed;++progress.files;job.progress(progress);
  }
@@ -219,18 +214,18 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
 Storage::Result ExportFork(const ExportFileFork& request,Storage::Job& job,Completion& completion){
  const auto fork=static_cast<unsigned>(request.fork);auto source=Source(request.source);auto entry=source.first->Stat(source.second);Check(!entry.directory,"Select a file for fork export");
  source.first->Read(source.second,fork,0,nullptr,0);auto& path=request.output.WindowsPath();
- HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create output; choose a new filename");
+ HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot create output; choose a new filename");
  try{Mark(completion,request.output);std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Exporting fork";progress.totalFiles=1;progress.path=Utf8(entry.name);progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
-  for(uint64_t at=0;at<entry.forks[fork].size;){Cancel(job);size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));source.first->Read(source.second,fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw Failure(GetLastError(),"Fork export write failed");at+=n;progress.bytes=progress.fileBytes=progress.processed=at;job.progress(progress);}
+  for(uint64_t at=0;at<entry.forks[fork].size;){Cancel(job);size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));source.first->Read(source.second,fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw OperationError(GetLastError(),"Fork export write failed");at+=n;progress.bytes=progress.fileBytes=progress.processed=at;job.progress(progress);}
   Cancel(job);
-  if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Fork export flush failed");
+  if(!FlushFileBuffers(file))throw OperationError(GetLastError(),"Fork export flush failed");
   CloseHandle(file);
  }catch(...){
   FILE_DISPOSITION_INFO remove{TRUE};
   const bool deleted=SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove))!=FALSE;
   const auto error=GetLastError();
   CloseHandle(file);
-  if(!deleted){Storage::OutcomeEvidence::NoteRetainedChange();throw Failure(error,"Could not remove the incomplete fork export");}
+  if(!deleted){Storage::OutcomeEvidence::NoteRetainedChange();throw OperationError(error,"Could not remove the incomplete fork export");}
   throw;
  }
  completion.complete=true;completion.completed=1;return {};
@@ -341,7 +336,7 @@ MetadataPlan DescribeMetadata(const ExportAttributeValue& output)
   const auto& bytes=output.value;
   const auto& path=output.item.WindowsPath();
   HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-  if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot create attribute output; choose a new filename");
+  if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot create attribute output; choose a new filename");
   Mark(result,output.item);
   try{
    HfsPlus::Bytes buffer(65536);
@@ -351,11 +346,11 @@ MetadataPlan DescribeMetadata(const ExportAttributeValue& output)
     bytes.Read(offset,buffer.data(),count);
     DWORD written=0;
     if(!WriteFile(file,buffer.data(),DWORD(count),&written,nullptr)||written!=count)
-     throw Failure(GetLastError(),"Attribute export write failed");
+     throw OperationError(GetLastError(),"Attribute export write failed");
     offset+=count;
    }
    Cancel(job);
-   if(!FlushFileBuffers(file))throw Failure(GetLastError(),"Attribute export flush failed");
+   if(!FlushFileBuffers(file))throw OperationError(GetLastError(),"Attribute export flush failed");
    CloseHandle(file);
   }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
  }};
@@ -902,7 +897,7 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
   if(flags==INVALID_FILE_ATTRIBUTES){
    const auto error=GetLastError();
    if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)
-    throw Failure(error,"Cannot inspect the Windows copy destination");
+    throw OperationError(error,"Cannot inspect the Windows copy destination");
   }
   if(flags==INVALID_FILE_ATTRIBUTES || !(flags&FILE_ATTRIBUTE_DIRECTORY)) {
    auto end=path.find_last_of(L"\\/");
@@ -1024,14 +1019,16 @@ Operation::Operation(std::shared_ptr<State> state,std::shared_ptr<Storage::Job> 
 Completion Operation::Snapshot()const{std::lock_guard<std::mutex> lock(state_->mutex);return state_->completion;}
 namespace {
 void FinalizeOutcome(Storage::Result& result, Completion& completion, Storage::Job& job,
-                     const Storage::OutcomeEvidence& evidence) {
+                     Storage::OperationCompletion& outcome) {
  const auto progress=job.progress();
- Storage::OutcomeEvidence classic;
- Storage::OutcomeEvidence::NoteRollback(static_cast<Storage::Rollback>(hfs_take_rollback()));
- if(HFSIFACE_take_delete_retained_change())Storage::OutcomeEvidence::NoteRetainedChange();
- result.Finalize(evidence,completion.completed,progress.skipped);
- result.Finalize(classic,progress.files,progress.skipped);
+ outcome.Finish(result,(std::max)(completion.completed,progress.files),progress.skipped);
  completion.completed=result.completed;
+}
+
+void PublishAffected(const Completion& completion) {
+ std::vector<std::string> changed;
+ for(const auto& item:completion.affected)changed.push_back(item.resourceKey);
+ VolumeCoord::Changed(changed);
 }
 }
 namespace {
@@ -1071,19 +1068,16 @@ std::string CaptureLaunchVersion(const Location& item,Storage::Job& job)
 Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
                                 const std::wstring& editedFile,Storage::Job& job)
 {
- Storage::OutcomeEvidence evidence;
- Storage::Result result;
+ Storage::OperationCompletion outcome;
  Completion completion;
- hfs_take_rollback();
- HFSIFACE_take_delete_retained_change();
- try {
+ auto result=outcome.Run([&]() -> Storage::Result {
   Check(item.IsClassic()&&!version.empty(),"The original launcher document could not be verified");
   LegacyEngine::Scope engine;
   VolumeCoord::Lease lease({{item.ResourceKey(),VolumeCoord::Mode::Write},
                            {VolumeCoord::PathKey(editedFile),VolumeCoord::Mode::Read}});
   HANDLE file=CreateFileW(editedFile.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
                          FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
-  if(file==INVALID_HANDLE_VALUE)throw Failure(GetLastError(),"Cannot read the edited temporary document");
+  if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot read the edited temporary document");
   struct CloseFile{HANDLE file;~CloseFile(){CloseHandle(file);}} close{file};
   BY_HANDLE_FILE_INFORMATION info{};
   LARGE_INTEGER size{};
@@ -1109,39 +1103,27 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
     DWORD received=0;
     if(!SetFilePointerEx(file,position,nullptr,FILE_BEGIN)||
        !ReadFile(file,bytes,DWORD(count),&received,nullptr)||received!=count)
-     throw Failure(GetLastError(),"Could not read the entire edited data fork");
+     throw OperationError(GetLastError(),"Could not read the entire edited data fork");
    },{});
    volume.Close();
   });
   completion.completed=1;
- }catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Write-back cancelled"};}
- catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
- catch(const Storage::MediaIoError& error){result={1,error.code,error.what()};}
- catch(const Failure& error){result={1,error.error,error.what()};}
- catch(const VolumeCoord::Busy& error){result={1,ERROR_BUSY,error.what()};}
- catch(const std::exception& error){result={1,ERROR_WRITE_FAULT,error.what()};}
- FinalizeOutcome(result,completion,job,evidence);
- if(!completion.affected.empty())VolumeCoord::Changed({item.ResourceKey()});
+  return {};
+ },ERROR_WRITE_FAULT,"Write-back cancelled");
+ FinalizeOutcome(result,completion,job,outcome);
+ PublishAffected(completion);
  return result;
 }
 
 Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Completion& completion){
- Storage::OutcomeEvidence evidence;
- hfs_take_rollback(); HFSIFACE_take_delete_retained_change(); // Discard anything outside this operation on the executor thread.
- Storage::Result result;
- try{
+ Storage::OperationCompletion outcome;
+ auto result=outcome.Run([&]{
   const auto plan=PlanOperation(request,true);
   LegacyEngine::Scope engine;
   VolumeCoord::Lease access(plan.resources);
-  result=Execute(plan,job,completion);
- }
- catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
- catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
- catch(const Storage::MediaIoError& e){result={1,e.code,e.what()};}
- catch(const Failure& e){result={1,e.error,e.what()};}
- catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
- catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected copy-worker failure"};}
- FinalizeOutcome(result,completion,job,evidence);
+  return Execute(plan,job,completion);
+ });
+ FinalizeOutcome(result,completion,job,outcome);
  return result;
 }
 #ifdef HFV_TESTING
@@ -1240,31 +1222,17 @@ public:
 
  Storage::Result Run(Storage::Job& job,Completion& completion)
  {
-  Storage::Result result;
-  Storage::OutcomeEvidence evidence;
-  hfs_take_rollback();
-  HFSIFACE_take_delete_retained_change();
-  try{
+  Storage::OperationCompletion outcome;
+  auto result=outcome.Run([&]{
    Cancel(job);
-   if(preparationError_.code)result=std::move(preparationError_);
-   else{
-    if(!reservation_)throw VolumeCoord::Busy();
-    result=RunReserved(job,completion);
-   }
-  }
-  catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}
-  catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
-  catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
-  catch(const Storage::MediaIoError& e){result={1,e.code,e.what()};}
-  catch(const Failure& e){result={1,e.error,e.what()};}
-  catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
-  catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
+   if(preparationError_.code)return std::move(preparationError_);
+   if(!reservation_)throw VolumeCoord::Busy();
+   return RunReserved(job,completion);
+  });
 
+  FinalizeOutcome(result,completion,job,outcome);
   reservation_.reset();
-  FinalizeOutcome(result,completion,job,evidence);
-  std::vector<std::string> changed;
-  for(const auto& item:completion.affected)changed.push_back(item.resourceKey);
-  VolumeCoord::Changed(changed);
+  PublishAffected(completion);
   return result;
  }
 };
