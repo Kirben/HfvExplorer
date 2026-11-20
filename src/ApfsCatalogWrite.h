@@ -55,7 +55,15 @@ struct CatalogResourceFork {
     HfsPlus::Source& resource;
     uint64_t modified;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork>;
+struct CatalogReplaceSymlink {
+    uint64_t parent,inode;
+    const HfsPlus::Bytes& target;
+    std::optional<FileDates> dates;
+    const FinderBytes& finder;
+    bool locked;
+    const HfsPlus::Attributes& attributes;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink>;
 
 struct DataRun {
     uint64_t block,count;

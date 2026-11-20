@@ -247,13 +247,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
         if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,std::make_pair(parent,dst.Stat(id).name));return complete;
     }
-    if(plan.linkTarget){
-        Check(!found,"The symbolic link destination already exists");
-        dst.PutSymbolicLink(parent,entry,*plan.linkTarget,job);
-        ++progress.files;
-        job.progress(progress);
-        return true;
-    }
+
     Check(!found || !existing.directory, "A folder blocks the destination file");
     if (found) {
         auto choice = job.replace(BrowserPresentation::Utf8(entry.name)+(existing.hardLink?" (shared by "+std::to_string(existing.linkCount)+" hard links)":""));
@@ -266,6 +260,12 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name,found);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
+    if(plan.linkTarget){
+        dst.PutSymbolicLink(parent,outgoing,*plan.linkTarget,job);
+        ++progress.files;
+        job.progress(progress);
+        return true;
+    }
     const auto advance=[&](unsigned fork,uint64_t offset,size_t count){
         if(job.cancelled())throw Storage::Cancelled();
         const auto end=offset+count;
@@ -582,7 +582,8 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
   if(plan.linkTarget){
-   Check(!exists,"The symbolic link destination already exists");
+   Check(!exists||(!found.protectedFile&&dst.SymbolicLinkTarget(found.id).has_value()),
+         "The symbolic link destination is locked or is not a symbolic link");
    dst.ValidateSymbolicLink(plan.entry,*plan.linkTarget);
   }else if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
   else {dst.ValidateEntry(plan.entry);if(plan.entry.directory)ValidatePlans(dst,plan.children,0,false);}

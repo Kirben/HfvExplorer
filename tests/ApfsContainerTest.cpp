@@ -2513,13 +2513,22 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
         Check(restored==resource,"APFS transfer changed the resource fork");
         fprintf(report,"PASS: APFS embedded metadata and extent-backed resource fork preserved through copy to HFS Plus.\n");
-        const auto symlinkPath=VolumeCoord::Wide(root+"apfs-moved-symlink.img");
+        const auto symlinkPath=VolumeCoord::Wide(root+"apfs-replaced-symlink.img");
         {
             auto image=CreateFormatOutput(symlinkPath.c_str(),8*1024*1024);
             Storage::Job job;
             Apfs::Format(*image,u"APFS symbolic link copies",false,job);
             image->Keep();
         }
+        const auto confirmLink=[](FileOperations::Operation& operation,Storage::ConflictChoice choice){
+            const auto limit=GetTickCount64()+15000;
+            while(operation.Job()->conflict().empty()&&WaitForSingleObject(operation.Job()->event(),0)!=WAIT_OBJECT_0&&
+                  GetTickCount64()<limit)Sleep(1);
+            Check(!operation.Job()->conflict().empty(),"APFS symbolic link did not prompt before overwrite");
+            operation.Job()->resolve(choice);
+            Check(WaitForSingleObject(operation.Job()->event(),15000)==WAIT_OBJECT_0,"APFS link overwrite timed out");
+            return operation.Job()->result();
+        };
         for(const auto link:{Symlink::Valid,Symlink::Malformed}){
             const auto disk=BrowseFixture(false,false,false,link);
             const auto path=VolumeCoord::Wide(root+(link==Symlink::Valid?"symlink.img":"bad-symlink.img"));
@@ -2548,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
             if(link==Symlink::Valid){
                 auto duplicate=FileOperations::Submit(FileOperations::OrdinaryCopy{
                     {FileOperations::Location::Mounted(volume,file.id)},FileOperations::Location::Mounted(destination,2)});
-                Check(WaitForSingleObject(duplicate.Job()->event(),15000)==WAIT_OBJECT_0&&duplicate.Job()->result().code&&
+                Check(confirmLink(duplicate,Storage::ConflictChoice::Cancel).code&&
                       destination->Stat(copied.id).name==file.name,"APFS symbolic link copy replaced an existing entry");
                 Storage::Job job;
                 Reject([&]{MacBrowser::Copy(*volume,file.id,*targetMac,2,job);},
@@ -2578,7 +2587,7 @@ int RunApfsContainerTest(const char* directory)
                 VolumeCoord::OperationLease lease({{image->ResourceKey(),VolumeCoord::Mode::Write}});
                 folder=image->MakeDirectory(2,u"Moved links");
                 Storage::Job job;
-                image->PutSymbolicLink(folder,original,*target,job);
+                image->PutSymbolicLink(folder,original,Bytes{'o','l','d',0},job);
             }
             const auto submit=[](FileOperations::Request request){
                 auto work=FileOperations::Submit(std::move(request));
@@ -2588,10 +2597,18 @@ int RunApfsContainerTest(const char* directory)
             auto cut=FileOperations::Location::Mounted(image,original.id);
             cut.cut=true;
             const auto destination=FileOperations::Location::Mounted(image,folder);
-            Check(submit(FileOperations::OrdinaryCopy{{cut},destination}).code&&
-                  image->SymbolicLinkTarget(original.id)==target,"Rejected APFS cut removed or changed the source link");
+            auto cancelled=FileOperations::Submit(FileOperations::OrdinaryCopy{{cut},destination});
+            Check(confirmLink(cancelled,Storage::ConflictChoice::Cancel).code&&
+                  image->SymbolicLinkTarget(original.id)==target,"Cancelled APFS cut removed or changed the source link");
             MacBrowser::Entry duplicate;
-            Check(image->FindChild(folder,original.name,duplicate),"Could not find destination link for deletion test");
+            Check(image->FindChild(folder,original.name,duplicate)&&
+                  image->SymbolicLinkTarget(duplicate.id)==std::optional<Bytes>(Bytes{'o','l','d',0}),
+                  "Cancelled APFS overwrite changed the destination target");
+            auto overwrite=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(image,original.id)},destination});
+            const auto replaced=confirmLink(overwrite,Storage::ConflictChoice::Replace);
+            Check(!replaced.code&&image->Stat(duplicate.id).identity==duplicate.identity&&
+                  image->SymbolicLinkTarget(duplicate.id)==target,"APFS overwrite did not preserve destination identity");
             const auto deleted=submit(FileOperations::DeleteEntries{{FileOperations::Location::Mounted(image,duplicate.id)}});
             Check(!deleted.code,deleted.message.c_str());
             const auto moved=submit(FileOperations::OrdinaryCopy{{cut},destination});

@@ -707,6 +707,16 @@ std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attribut
     return records;
 }
 
+OwnedRecord LinkTargetRecord(uint64_t inode,const Bytes& path)
+{
+    Check(path.size()>=2&&path.size()<EmbeddedAttributeLimit&&path.back()==0&&
+          !memchr(path.data(),0,path.size()-1),"Invalid APFS symbolic link target");
+    auto record=EmbeddedAttribute(inode,SymlinkAttribute,path.size());
+    Set(record.value,0,6,2);
+    std::copy(path.begin(),path.end(),record.value.begin()+4);
+    return record;
+}
+
 void WriteCompressionAttribute(std::vector<OwnedRecord>& attributes,Bytes& inode,
                                uint64_t id,uint64_t dataSize,const Bytes* compression)
 {
@@ -740,6 +750,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* metadata=std::get_if<CatalogMetadata>(&request);
     const auto* attributesEdit=std::get_if<CatalogAttributes>(&request);
     const auto* resourceEdit=std::get_if<CatalogResourceFork>(&request);
+    const auto* linkEdit=std::get_if<CatalogReplaceSymlink>(&request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
         Set(inode,16,CatalogTimestamp(dates->created),8);
@@ -988,7 +999,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     auto& parentInode=records[target->second.record].value;
     Check(!(Le32(parentInode.data()+68)&(UserImmutable|SystemImmutable)),
           "Unlock the APFS destination folder before making changes");
-    if(!replace&&!metadata&&!attributesEdit&&!resourceEdit){
+    if(!replace&&!metadata&&!attributesEdit&&!resourceEdit&&!linkEdit){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
     }
@@ -1005,13 +1016,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         if(resourceWrite)SetResourceFlag(records.back().value,resourceWrite->size!=0);
         if(create->compression)WriteCompressionAttribute(attributes,records.back().value,entryId,dataSize,create->compression);
         if(symlink){
-            Check(create->linkTarget&&create->linkTarget->size()>=2&&
-                  create->linkTarget->size()<EmbeddedAttributeLimit&&create->linkTarget->back()==0&&
-                  !memchr(create->linkTarget->data(),0,create->linkTarget->size()-1),"Invalid APFS symbolic link target");
-            auto target=EmbeddedAttribute(entryId,SymlinkAttribute,create->linkTarget->size());
-            Set(target.value,0,6,2);
-            std::copy(create->linkTarget->begin(),create->linkTarget->end(),target.value.begin()+4);
-            attributes.push_back(std::move(target));
+            Check(create->linkTarget!=nullptr,"Missing APFS symbolic link target");
+            attributes.push_back(LinkTargetRecord(entryId,*create->linkTarget));
         }
         SortAttributes(attributes);
         records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
@@ -1046,13 +1052,14 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 }
                 const auto& oldAttribute=records[index];
                 if(Le16(oldAttribute.value.data())==6){
-                    attributes.push_back(std::move(records[index]));
+                    if(!linkEdit)attributes.push_back(std::move(records[index]));
                     continue;
                 }
                 const bool isResource=link.resourceRecord==index;
                 if(isResource?!resource:!ordinary)attributes.push_back(std::move(records[index]));
                 else retireAttribute(index);
             }
+            if(linkEdit)attributes.push_back(LinkTargetRecord(entryId,linkEdit->target));
             if(ordinary)SetSecurityFlag(inode,*ordinary);
             if(resource)SetResourceFlag(inode,resource->size!=0);
             if(replace)WriteCompressionAttribute(attributes,inode,entryId,dataSize,replace->compression);
@@ -1062,6 +1069,21 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                            std::make_move_iterator(attributes.end()));
             return afterInode+attributes.size();
         };
+        if(linkEdit){
+            Check(link.kind==CatalogKind::SymbolicLink,"Can only replace an APFS symbolic link");
+            auto updated=WriterDisk::Inode(link.name,entryId,0,parent,0120777,1,0,&linkEdit->finder);
+            const auto flags=(Le64(inode.data()+48)&~WriterDisk::HasFinderInfo)|
+                             (Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo);
+            std::copy_n(inode.begin(),92,updated.value.begin());
+            Set(updated.value,48,flags,8);
+            Set(updated.value,68,linkEdit->locked?bsdFlags|UserImmutable:bsdFlags,4);
+            Set(updated.value,24,time,8);
+            Set(updated.value,32,time,8);
+            copyDates(updated.value);
+            inode=std::move(updated.value);
+            rewriteAttributes(&linkEdit->attributes,nullptr,0);
+            return records;
+        }
         if(attributesEdit){
             Set(inode,32,time,8);
             rewriteAttributes(&attributesEdit->attributes,nullptr,0);
@@ -1310,7 +1332,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
-    auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
+    const auto* linkReplacement=std::get_if<CatalogReplaceSymlink>(&request);
+    const auto dates=replace?replace->dates:create?create->dates:linkReplacement?linkReplacement->dates:std::optional<FileDates>{};
     CatalogWritePlan plan;
     auto* input=replace?&replace->data:create?create->data:nullptr;
     const auto dataSize=input?input->Size():0;
@@ -1354,7 +1377,8 @@ CatalogWritePlan PrepareCatalogMutation(
         plan.streams.back().id=resource->id;
     }
     const auto* attributeEdit=std::get_if<CatalogAttributes>(&request);
-    const auto* attributes=attributeEdit?&attributeEdit->attributes:replace?replace->attributes:create?create->attributes:nullptr;
+    const auto* attributes=attributeEdit?&attributeEdit->attributes:replace?replace->attributes:
+                           create?create->attributes:linkReplacement?&linkReplacement->attributes:nullptr;
     AttributeStreams attributeIds;
     if(attributes){
         ValidateWritableAttributes(*attributes);

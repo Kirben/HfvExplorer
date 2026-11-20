@@ -847,6 +847,18 @@ public:
         WriteMount([&]{
             const auto parentOid=At(parent).oid;
             CommitMutation(parent,0,job,[&](auto& job){
+                if(!entry.expectedDestinationIdentity.empty()){
+                    const auto name=NormalizedName(entry.name,!caseSensitive);
+                    for(const auto& child:ListDirectory(parent)){
+                        if(NormalizedName(child.name,!caseSensitive)!=name)continue;
+                        const auto& destination=At(child.id);
+                        Check(destination.symlink&&!child.protectedFile&&child.identity==entry.expectedDestinationIdentity,
+                              "The APFS symbolic link destination changed after overwrite approval");
+                        return ReplaceCatalogSymlink(*source,container,parentOid,destination.oid,target,job,
+                                                     CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes);
+                    }
+                    throw Error("The APFS symbolic link destination disappeared after overwrite approval");
+                }
                 return CreateCatalogSymlink(*source,container,parentOid,entry.name,target,job,
                                             CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes);
             });
