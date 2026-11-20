@@ -157,7 +157,7 @@ void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<uint64_t> blocks,
 std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& container,
                               Bytes& space,Bytes& superblock,const CheckpointObjectLookup& ephemeral,
                               const std::vector<uint64_t>& retire,uint64_t extents,uint64_t snapshots,
-                              const std::vector<FileRun>& files,uint64_t dataBlocks,uint64_t& dataBlock,
+                              const std::vector<FileRun>& files,uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
                               uint64_t transaction)
 {
     const auto chunks=DivideUp(container.blockCount,Chunk);
@@ -256,29 +256,45 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
             return within(block,run.block,run.count);
         });
     });
-    // Select the contiguous data run before distributing metadata blocks.
-    uint64_t available=0,consecutive=0;
-    for(uint64_t i=0;i<mainLimit;++i){
+    std::vector<DataRun> freeRuns;
+    uint64_t available=0;
+    for(uint64_t i=0;i<mainLimit;){
         if(Bit(mainMap,i)){
-            consecutive=0;
+            ++i;
             continue;
         }
-        ++available;
-        if(++consecutive==dataBlocks&&!dataBlock)dataBlock=i+1-dataBlocks;
+        const auto start=i;
+        do{++i;}while(i<mainLimit&&!Bit(mainMap,i));
+        freeRuns.push_back({start,i-start});
+        available+=i-start;
     }
-    Check(!dataBlocks||dataBlock,"No contiguous APFS space for the file data");
+    Check(available>=reclaimed&&available-reclaimed==Le32(cib.data()+60)&&
+          available-reclaimed+(container.blockCount-mainLimit)==Le64(space.data()+72),
+          "APFS allocation counts disagree");
+    Check(dataBlocks+retire.size()<=available,"Insufficient APFS space in the active allocation chunk");
+
+    // Prefer the longest runs to keep catalog growth small on fragmented images.
+    if(dataBlocks){
+        std::stable_sort(freeRuns.begin(),freeRuns.end(),[](const auto& a,const auto& b){return a.count>b.count;});
+        auto remaining=dataBlocks;
+        for(const auto& run:freeRuns){
+            const auto count=(std::min)(run.count,remaining);
+            dataRuns.push_back({run.block,count});
+            for(uint64_t i=0;i<count;++i)SetBit(mainMap,run.block+i);
+            remaining-=count;
+            if(!remaining)break;
+        }
+        std::sort(dataRuns.begin(),dataRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    }
     std::vector<uint64_t> result;
     for(uint64_t i=0;i<mainLimit&&result.size()<retire.size();++i)
-        if(!Bit(mainMap,i)&&!within(i,dataBlock,dataBlocks))result.push_back(i);
-    Check(available>=reclaimed&&available-reclaimed==Le32(cib.data()+60)&&
-          available-reclaimed+(container.blockCount-mainLimit)==Le64(space.data()+72)&&
-          result.size()==retire.size(),"APFS allocation counts disagree or the active chunk is full");
+        if(!Bit(mainMap,i))result.push_back(i);
+    Check(result.size()==retire.size(),"APFS metadata allocation did not cover the transaction");
 
     Retire(space,mainQueue,MainFreeQueue,retire,transaction);
     Retire(space,poolQueue,PoolFreeQueue,{oldCib,oldMainBitmap},transaction);
 
     for(const auto block:result)SetBit(mainMap,block);
-    for(uint64_t i=0;i<dataBlocks;++i)SetBit(mainMap,dataBlock+i);
     for(const auto block:internal)SetBit(poolMap,block-pool);
     writes.push_back({internal[0],std::move(mainMap)});
     writes.push_back({currentBitmapBase+head,std::move(poolMap)});
@@ -305,10 +321,11 @@ OwnedRecord StreamReference(uint64_t inode)
     return record;
 }
 
-OwnedRecord FileExtent(const FileRun& run)
+OwnedRecord FileExtent(const FileRun& run,uint64_t logicalBlock)
 {
     OwnedRecord record{Bytes(16),Bytes(24)};
     Set(record.key,0,(uint64_t(8)<<60)|run.owner,8);
+    Set(record.key,8,logicalBlock*Block,8);
     Set(record.value,0,run.count*Block,8);
     Set(record.value,8,run.block,8);
     return record;
@@ -375,7 +392,7 @@ std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& requ
     std::vector<OwnedRecord> records;
     for(size_t i=0;i<tree.Count();++i){
         const auto view=tree.At(i);
-        bool streamRecords=false;
+        std::vector<OwnedRecord> streamRecords;
         if(i<2){
             const auto expected=WriterDisk::DirectoryEntry(reserved[i]==2?"root":"private-dir",reserved[i],0);
             Check(view.key.size==expected.key.size()&&!memcmp(view.key.data,expected.key.data(),view.key.size)&&
@@ -424,20 +441,31 @@ std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& requ
                     const auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size);
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
-                          "APFS writes require native regular files with one data extent at most");
+                          "APFS writes require native regular-file data streams");
                     if(size){
                         Check(i+2<tree.Count(),"Missing APFS data-stream records");
-                        const auto reference=tree.At(i+1),extent=tree.At(i+2);
-                        const auto streamRef=StreamReference(inode);
-                        Check(extent.value.size==24,"Invalid APFS file extent size");
-                        const FileRun run{inode,Le64(extent.value.data+8),DivideUp(size,Block)};
-                        Check(run.block&&Range(run.block,run.count,Chunk),"APFS file extent outside the writable chunk");
-                        const auto encoded=FileExtent(run);
-                        Check(Matches(reference.key,streamRef.key)&&Matches(reference.value,streamRef.value)&&
-                              Matches(extent.key,encoded.key)&&Matches(extent.value,encoded.value),
-                              "Invalid APFS data-stream or extent record");
-                        fileRuns.push_back(run);
-                        streamRecords=true;
+                        const auto reference=tree.At(i+1);
+                        auto streamRef=StreamReference(inode);
+                        Check(Matches(reference.key,streamRef.key)&&Matches(reference.value,streamRef.value),
+                              "Invalid APFS data-stream record");
+                        streamRecords.push_back(std::move(streamRef));
+                        const auto blocks=DivideUp(size,Block);
+                        for(uint64_t logical=0;logical<blocks;){
+                            const auto index=i+1+streamRecords.size();
+                            Check(index<tree.Count(),"Missing APFS file extent");
+                            const auto extent=tree.At(index);
+                            Check(extent.value.size==24,"Invalid APFS file extent size");
+                            const auto length=Le64(extent.value.data);
+                            const FileRun run{inode,Le64(extent.value.data+8),length/Block};
+                            Check(run.block&&run.count&&!(length%Block)&&run.count<=blocks-logical&&
+                                  Range(run.block,run.count,Chunk),"Invalid length or address in APFS file extent");
+                            auto encoded=FileExtent(run,logical);
+                            Check(Matches(extent.key,encoded.key)&&Matches(extent.value,encoded.value),
+                                  "Invalid or noncontiguous logical APFS file extent");
+                            logical+=run.count;
+                            fileRuns.push_back(run);
+                            streamRecords.push_back(std::move(encoded));
+                        }
                     }
                     ++files;
                 }
@@ -448,16 +476,13 @@ std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& requ
             Check(order!=addedKey,"The APFS entry name already exists or has a conflicting hash");
             // A regular file cannot be a destination parent, so its stream
             // records always sort on the same side of the insertion point.
-            if(order<addedKey)insertAt+=streamRecords?3:1;
+            if(order<addedKey)insertAt+=1+streamRecords.size();
             previous=order;
         }
         records.push_back({Bytes(view.key.data,view.key.data+view.key.size),
                            Bytes(view.value.data,view.value.data+view.value.size)});
-        if(streamRecords){
-            records.push_back(StreamReference(fileRuns.back().owner));
-            records.push_back(FileExtent(fileRuns.back()));
-            i+=2;
-        }
+        i+=streamRecords.size();
+        for(auto& record:streamRecords)records.push_back(std::move(record));
     }
     Check(directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
           files==fileCount&&links.size()==directoryCount+fileCount,"APFS catalog records and volume counts disagree");
@@ -518,14 +543,17 @@ CatalogWritePlan PrepareCatalogCreate(
                                   volumeMap.headerBlock,volumeMap.rootBlock,volumeMap.physical};
     if(dataBlocks)retired.push_back(extents);
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
-                                  retired,extents,snapshots,files,dataBlocks,plan.dataBlock,transaction);
+                                  retired,extents,snapshots,files,dataBlocks,plan.dataRuns,transaction);
     if(dataBlocks){
-        const FileRun run{nextId,plan.dataBlock,dataBlocks};
         catalog.push_back(StreamReference(nextId));
-        catalog.push_back(FileExtent(run));
-        const auto at=std::lower_bound(files.begin(),files.end(),run.block,
-            [](const auto& file,uint64_t block){return file.block<block;});
-        files.insert(at,run);
+        uint64_t logical=0;
+        for(const auto& data:plan.dataRuns){
+            const FileRun run{nextId,data.block,data.count};
+            catalog.push_back(FileExtent(run,logical));
+            files.push_back(run);
+            logical+=data.count;
+        }
+        std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
         std::vector<OwnedRecord> references;
         for(const auto& file:files)references.push_back(ExtentReference(file));
         StageObject(writes,allocated[6],EncodeLeaf(references,0x50),allocated[6],transaction,Physical|2,15);

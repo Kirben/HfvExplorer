@@ -15,9 +15,13 @@ struct CatalogCreate {
     CatalogKind kind;
     HfsPlus::Source* data=nullptr;
 };
+struct DataRun {
+    uint64_t block,count;
+};
 struct CatalogWritePlan {
     std::vector<CheckpointBlockWrite> metadata;
-    uint64_t dataBlock=0,dataSize=0;
+    std::vector<DataRun> dataRuns;
+    uint64_t dataSize=0;
 };
 CatalogWritePlan PrepareCatalogCreate(
     HfsPlus::Source&,const Container&,uint64_t transaction,HfsPlus::Bytes& superblock,

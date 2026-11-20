@@ -466,6 +466,99 @@ void CheckpointWrites(const std::string& root,FILE* report)
         image->Keep();
     }
     fprintf(report,"PASS: APFS file data extents, partial final blocks, repeat allocation, insufficient space, and write interruption.\n");
+    // Move Small.bin's one-block extent into the middle of the free space.
+    // Update both trees and the raw bitmap so the fixture remains valid APFS.
+    CheckpointFaultImage fragmentationSeed(original);
+    Check(Apfs::CreateFile(fragmentationSeed,*start,2,u"Small.bin",small,controlJob)==2,
+          "APFS could not create the fragmentation fixture's blocking file");
+    auto fragmentedBase=fragmentationSeed.durable;
+    const auto dataCheckpoint=Apfs::Probe(fragmentationSeed);
+    const auto volumeId=dataCheckpoint->volumes.front();
+    const Apfs::ObjectMap containerObjects(fragmentationSeed,*dataCheckpoint,dataCheckpoint->objectMap,dataCheckpoint->transaction);
+    const auto volumeBlock=containerObjects.Lookup(volumeId);
+    Check(volumeBlock.has_value(),"Missing APFS volume for fragmentation fixture");
+    const auto volumeBytes=fragmentedBase.data()+*volumeBlock*4096;
+    const auto catalogId=Apfs::Le64(volumeBytes+136);
+    const Apfs::ObjectMap volumeObjects(fragmentationSeed,*dataCheckpoint,Apfs::Le64(volumeBytes+128),dataCheckpoint->transaction);
+    const auto catalogBlock=volumeObjects.Lookup(catalogId);
+    Check(catalogBlock.has_value(),"Missing APFS catalog for fragmentation fixture");
+    const auto extentBlock=Apfs::Le64(volumeBytes+144);
+    const auto nxData=fragmentedBase.data()+dataCheckpoint->checkpointBlock*4096;
+    const auto dataMap=fragmentedBase.data()+(Apfs::Le64(nxData+112)+Apfs::Le32(nxData+136))*4096;
+    const auto dataSpace=fragmentedBase.data()+Apfs::Le64(dataMap+112)*4096;
+    const auto chunk=fragmentedBase.data()+Apfs::Le64(dataSpace+Apfs::Le32(dataSpace+80))*4096;
+    auto bitmapData=fragmentedBase.data()+Apfs::Le64(chunk+64)*4096;
+    constexpr uint64_t blocker=1024,smallId=16;
+    uint64_t oldBlock=0;
+    const auto updateTree=[&](uint64_t address,uint32_t flags,auto change){
+        auto block=fragmentedBase.data()+address*4096;
+        const Apfs::Node node(Bytes(block,block+4096),true,{});
+        std::vector<Apfs::WriterDisk::Record> records;
+        for(size_t i=0;i<node.Count();++i){
+            const auto view=node.At(i);
+            records.push_back({Bytes(view.key.data,view.key.data+view.key.size),
+                               Bytes(view.value.data,view.value.data+view.value.size)});
+            change(records.back());
+        }
+        const auto encoded=Apfs::WriterDisk::EncodeLeaf(records,flags);
+        memcpy(block+32,encoded.data()+32,4096-32);
+        Seal(fragmentedBase,address*4096,4096);
+    };
+    updateTree(*catalogBlock,0x40,[&](auto& record){
+        if(Apfs::Le64(record.key.data())!=((uint64_t(8)<<60)|smallId))return;
+        oldBlock=Apfs::Le64(record.value.data()+8);
+        Little(record.value.data()+8,blocker,8);
+    });
+    bool referenceMoved=false;
+    updateTree(extentBlock,0x50,[&](auto& record){
+        if(Apfs::Le64(record.value.data()+8)!=smallId)return;
+        Little(record.key.data(),(uint64_t(2)<<60)|blocker,8);
+        referenceMoved=true;
+    });
+    Check(oldBlock&&oldBlock<blocker&&referenceMoved&&
+          (bitmapData[oldBlock/8]&(1u<<(oldBlock%8)))&&!(bitmapData[blocker/8]&(1u<<(blocker%8))),
+          "Fragmentation fixture could not move its blocking file");
+    memcpy(fragmentedBase.data()+blocker*4096,fragmentedBase.data()+oldBlock*4096,4096);
+    bitmapData[oldBlock/8]&=uint8_t(~(1u<<(oldBlock%8)));
+    bitmapData[blocker/8]|=uint8_t(1u<<(blocker%8));
+
+    // No run on either side of the blocker can cover these 1,100 blocks.
+    Memory fragmentedPayload(1100*4096-37);
+    for(size_t i=0;i<fragmentedPayload.bytes.size();++i)fragmentedPayload.bytes[i]=uint8_t((i>>11)+(i>>19)+i*13);
+    CheckpointFaultImage fragmented(fragmentedBase);
+    Check(Apfs::CreateFile(fragmented,*dataCheckpoint,2,u"Fragmented.bin",fragmentedPayload,controlJob)==3,
+          "APFS could not use the free space on both sides of an allocated block");
+    {
+        CheckpointFaultImage interrupted(fragmentedBase);
+        interrupted.failAt=1025; // Beyond the maximum length of any run in this fixture.
+        interrupted.fault=Fault::TornWrite;
+        Reject([&]{Apfs::CreateFile(interrupted,*dataCheckpoint,2,u"Fragmented.bin",fragmentedPayload,controlJob);},
+               "Injected APFS interruption after crossing an extent boundary succeeded");
+        const auto restored=openCheckpoint(interrupted);
+        MacBrowser::Entry entry;
+        Check(reopen(interrupted)==2&&!restored->FindChild(2,u"Fragmented.bin",entry),
+              "APFS exposed a partial multi-extent file after interruption");
+    }
+    const auto fragmentedCheckpoint=Apfs::Probe(fragmented);
+    Check(Apfs::CreateDirectory(fragmented,*fragmentedCheckpoint,2,u"After Fragment",controlJob)==4,
+          "APFS could not validate an existing multi-extent file before a later commit");
+    const auto fragmentedVolume=openCheckpoint(fragmented);
+    MacBrowser::Entry split,pinFile;
+    Check(fragmentedVolume->FindChild(2,u"Fragmented.bin",split)&&split.forks[0].size==fragmentedPayload.Size()&&
+          fragmentedVolume->FindChild(2,u"Small.bin",pinFile),
+          "APFS fragmented image did not reopen with both files");
+    Bytes decodedFragments(fragmentedPayload.bytes.size()),decodedBlocker(small.bytes.size());
+    fragmentedVolume->Read(split.id,0,0,decodedFragments.data(),decodedFragments.size());
+    fragmentedVolume->Read(pinFile.id,0,0,decodedBlocker.data(),decodedBlocker.size());
+    Check(decodedFragments==fragmentedPayload.bytes&&decodedBlocker==small.bytes,
+          "APFS fragmented write changed file contents or overwrote the blocking extent");
+    {
+        const auto path=VolumeCoord::Wide(root+"checkpoint-fragmented-files.img");
+        auto image=CreateFormatOutput(path.c_str(),imageSize);
+        image->Write(0,fragmented.durable.data(),fragmented.durable.size());
+        image->Keep();
+    }
+    fprintf(report,"PASS: APFS fragmented free-space allocation, cross-extent readback, and later catalog writes.\n");
     CheckpointFaultImage invalidName(original);
     Reject([&]{Apfs::CreateDirectory(invalidName,*start,2,u"Bad/Name",controlJob);},
            "An illegal APFS directory name was accepted");

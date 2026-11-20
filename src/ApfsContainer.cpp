@@ -291,13 +291,18 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
         auto& data=*entry->data;
         data.CheckMedia();
         Bytes buffer(plan.blockSize);
-        for(uint64_t offset=0;offset<changes.dataSize;offset+=plan.blockSize){
-            if(job.cancelled())throw Storage::Cancelled();
-            const auto size=size_t((std::min)(uint64_t(plan.blockSize),changes.dataSize-offset));
-            std::fill(buffer.begin()+size,buffer.end(),0);
-            data.Read(offset,buffer.data(),size);
-            write(changes.dataBlock+offset/plan.blockSize,buffer.data());
+        uint64_t offset=0;
+        for(const auto& run:changes.dataRuns){
+            for(uint64_t i=0;i<run.count;++i){
+                if(job.cancelled())throw Storage::Cancelled();
+                const auto size=size_t((std::min)(uint64_t(plan.blockSize),changes.dataSize-offset));
+                std::fill(buffer.begin()+size,buffer.end(),0);
+                data.Read(offset,buffer.data(),size);
+                write(run.block+i,buffer.data());
+                offset+=size;
+            }
         }
+        Check(offset==changes.dataSize,"APFS data allocation did not cover the file");
         data.CheckMedia();
         Check(data.Size()==changes.dataSize,"The APFS file source changed size");
     }
