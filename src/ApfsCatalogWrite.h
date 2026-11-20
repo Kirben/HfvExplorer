@@ -29,7 +29,11 @@ struct CatalogReplaceData {
     HfsPlus::Source& data;
     std::optional<FileDates> dates;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData>;
+struct CatalogDirectoryDates {
+    uint64_t parent,inode;
+    FileDates dates;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogDirectoryDates>;
 
 struct DataRun {
     uint64_t block,count;

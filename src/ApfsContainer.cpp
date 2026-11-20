@@ -354,9 +354,17 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
     return Commit(source,expected,job,nullptr);
 }
 
-uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
+uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
+                                Storage::Job& job,std::optional<FileDates> dates)
 {
-    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory,nullptr,dates};
+    return Commit(source,expected,job,&request);
+}
+
+uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
+                           FileDates dates,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogDirectoryDates{parent,inode,dates};
     return Commit(source,expected,job,&request);
 }
 

@@ -517,8 +517,8 @@ int RunBrowserWindowsTest(const char* directory){
    fprintf(report,"PASS: ordinary APFS browser open shares an exclusive writable mount and refreshes both windows after namespace edits.\n");
 
    const auto incomingPath=VolumeCoord::Wide(std::string((LPCSTR)(host+"\\APFS incoming.txt")));
-   const auto writeHost=[&](const std::string& bytes){
-    HANDLE file=CreateFileW(incomingPath.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+   const auto writeHost=[](const std::wstring& path,const std::string& bytes){
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     Check(file!=INVALID_HANDLE_VALUE,"create Windows APFS copy fixture");
     struct Close {HANDLE file;~Close(){CloseHandle(file);}} close{file};
     DWORD written=0;
@@ -534,7 +534,7 @@ int RunBrowserWindowsTest(const char* directory){
    FileOperations::OrdinaryCopy copyToApfs{{from},target};
    std::string oldBytes(9003,'a'),newBytes(7333,'b');
    for(size_t i=0;i<oldBytes.size();++i)oldBytes[i]=char((i>>7)+i*11);
-   writeHost(oldBytes);
+   writeHost(incomingPath,oldBytes);
    const auto sourceDates=MacBrowser::DescribeWindowsFile(incomingPath);
    auto import=FileOperations::Submit(copyToApfs);
    Check(outcome(import)&&waitForRows(L"APFS incoming.txt",true),"Windows-to-APFS copy did not refresh both windows");
@@ -549,7 +549,7 @@ int RunBrowserWindowsTest(const char* directory){
    Check(saved.second==oldBytes&&saved.first.datesValid&&saved.first.created==sourceDates.created&&
          saved.first.modified==sourceDates.modified,"APFS copy lost file data or timestamps");
 
-   writeHost(newBytes);
+   writeHost(incomingPath,newBytes);
    for(const auto choice:{Storage::ConflictChoice::Skip,Storage::ConflictChoice::Cancel,Storage::ConflictChoice::Replace}){
     auto overwrite=FileOperations::Submit(copyToApfs);
     const auto deadline=GetTickCount64()+10000;
@@ -574,14 +574,102 @@ int RunBrowserWindowsTest(const char* directory){
    mount->Read(nestedFile.id,0,0,nestedBytes.data(),nestedBytes.size());
    Check(nestedBytes==newBytes,"Same-image APFS copy changed the source bytes");
 
-   const auto unsupported=VolumeCoord::Wide(std::string((LPCSTR)(host+"\\APFS unsupported folder")));
+   const auto unsupported=VolumeCoord::Wide(std::string((LPCSTR)host))+L"\\APFS unsupported \u00e9";
    Check(CreateDirectoryW(unsupported.c_str(),nullptr)!=FALSE,"create unsupported APFS folder source");
    const auto planned=FileOperations::Location::Windows(unsupported);
    auto blocked=FileOperations::Submit(FileOperations::OrdinaryCopy{{from,planned},FileOperations::Location::Mounted(mount,folder)});
    Check(!outcome(blocked)&&blocked.Job()->conflict().empty()&&
          mount->FindChild(folder,u"APFS incoming.txt",nestedFile)&&mount->List(folder).size()==1,
-         "An unsupported APFS folder transfer was not rejected before writing");
+         "An APFS folder with an unsupported name was not rejected before writing");
    fprintf(report,"PASS: Windows/APFS copying, overwrite Replace/Skip/Cancel, timestamps, same-image streaming, and unsupported folder preflight.\n");
+
+   const auto hostPath=VolumeCoord::Wide(std::string((LPCSTR)host));
+   const auto stampFolder=[](const std::wstring& path,uint64_t created,uint64_t modified){
+    HANDLE handle=CreateFileW(path.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                             nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+    Check(handle!=INVALID_HANDLE_VALUE,"open Windows folder for test timestamps");
+    struct Close {HANDLE file;~Close(){CloseHandle(file);}} close{handle};
+    const auto asFileTime=[](uint64_t seconds){
+     ULARGE_INTEGER value{};
+     value.QuadPart=(9561628800ull+seconds)*10000000;
+     return FILETIME{value.LowPart,value.HighPart};
+    };
+    const auto creation=asFileTime(created),change=asFileTime(modified);
+    Check(SetFileTime(handle,&creation,nullptr,&change)!=FALSE,"set Windows folder timestamps");
+   };
+   const auto foundFolder=[&](uint32_t parent,const std::u16string& name){
+    MacBrowser::Entry result;
+    Check(mount->FindChild(parent,name,result)&&result.directory&&result.datesValid,"missing copied APFS folder or dates");
+    return result;
+   };
+   const auto datesMatch=[](const MacBrowser::Entry& expected,const MacBrowser::Entry& actual){
+    return expected.datesValid&&actual.datesValid&&expected.created==actual.created&&expected.modified==actual.modified;
+   };
+   const auto windowsTree=hostPath+L"\\APFS tree";
+   const auto windowsChild=windowsTree+L"\\Nested";
+   Check(CreateDirectoryW(windowsTree.c_str(),nullptr)&&CreateDirectoryW(windowsChild.c_str(),nullptr),
+         "create Windows folder hierarchy for APFS copy");
+   writeHost(windowsTree+L"\\Top file.txt",oldBytes);
+   writeHost(windowsChild+L"\\Nested file.txt",newBytes);
+   stampFolder(windowsChild,2160000001,2160000002);
+   stampFolder(windowsTree,2150000001,2150000002);
+   auto treeCopy=FileOperations::Submit(FileOperations::OrdinaryCopy{{FileOperations::Location::Windows(windowsTree)},target});
+   Check(outcome(treeCopy)&&waitForRows(L"APFS tree",true),"recursive APFS copy did not refresh both windows");
+   const auto treeCopyRoot=foundFolder(2,u"APFS tree");
+   const auto treeCopyChild=foundFolder(treeCopyRoot.id,u"Nested");
+   Check(datesMatch(MacBrowser::DescribeWindowsFile(windowsTree),treeCopyRoot)&&
+         datesMatch(MacBrowser::DescribeWindowsFile(windowsChild),treeCopyChild),
+         "APFS recursive copy did not preserve source folder dates");
+   MacBrowser::Entry copiedPayload;
+   Check(mount->FindChild(treeCopyRoot.id,u"Top file.txt",copiedPayload)&&copiedPayload.forks[0].size==oldBytes.size()&&
+         mount->FindChild(treeCopyChild.id,u"Nested file.txt",copiedPayload)&&copiedPayload.forks[0].size==newBytes.size(),
+         "APFS recursive copy lost either level of the hierarchy");
+   std::string treeData(newBytes.size(),'\0');
+   mount->Read(copiedPayload.id,0,0,treeData.data(),treeData.size());
+   Check(treeData==newBytes,"APFS recursive copy changed nested file data");
+
+   for(const auto choice:{Storage::ConflictChoice::Replace,Storage::ConflictChoice::Skip,Storage::ConflictChoice::Cancel}){
+    const bool cancel=choice==Storage::ConflictChoice::Cancel;
+    const bool overwrite=choice==Storage::ConflictChoice::Replace;
+    const auto leaf=cancel?L"APFS merge cancel":overwrite?L"APFS merge replace":L"APFS merge skip";
+    const auto hostFolder=hostPath+L"\\"+leaf;
+    Check(CreateDirectoryW(hostFolder.c_str(),nullptr)!=FALSE,"create Windows source for APFS folder merge");
+    writeHost(hostFolder+L"\\one.txt",newBytes);
+    writeHost(hostFolder+L"\\two.txt",newBytes);
+    stampFolder(hostFolder,2180000001,2180000002);
+    auto resolved=MacBrowser::ResolveWindowsFile(hostFolder);
+    const auto children=resolved.first->List(resolved.second);
+    Check(children.size()==2,"APFS merge fixture has unexpected children");
+    resolved.first->Close();
+
+    MacBrowser::Entry desired;
+    desired.name=MacBrowser::U16(leaf);
+    desired.directory=desired.datesValid=true;
+    desired.created=2090000001;
+    desired.modified=2090000002;
+    const auto seeded=mount->MakeDirectoryWithAttributes(2,desired);
+    MacBrowser::Entry collision;
+    collision.name=children[1].name;
+    collision.forks[0].size=oldBytes.size();
+    mount->Put(seeded,collision,[&](unsigned,uint64_t at,void* data,size_t size){
+     memcpy(data,oldBytes.data()+at,size);
+    },false);
+    const auto expected=mount->Stat(seeded);
+    auto operation=FileOperations::Submit(FileOperations::OrdinaryCopy{{FileOperations::Location::Windows(hostFolder)},target});
+    const auto deadline=GetTickCount64()+10000;
+    while(operation.Job()->conflict().empty()&&!operation.Job()->done()&&GetTickCount64()<deadline)Sleep(1);
+    Check(!operation.Job()->conflict().empty()&&operation.Job()->progress().files==1,
+          "APFS merge did not reach a conflict after creating a child");
+    operation.Job()->resolve(choice);
+    const bool done=outcome(operation);
+    Check((cancel?!done&&operation.Job()->result().error==ERROR_CANCELLED:done)&&
+          datesMatch(expected,mount->Stat(seeded)),"APFS folder merge did not restore destination dates");
+    MacBrowser::Entry kept,added;
+    Check(mount->FindChild(seeded,children[0].name,added)&&added.forks[0].size==newBytes.size()&&
+          mount->FindChild(seeded,children[1].name,kept)&&kept.forks[0].size==(overwrite?newBytes.size():oldBytes.size()),
+          "APFS merge lost a committed child or used the wrong overwrite decision");
+   }
+   fprintf(report,"PASS: recursive APFS folder copy, source timestamps, and destination dates after completed, skipped and cancelled merges.\n");
   }
   // Make the first frame the MFC main window before closing it: this is the
   // case that CFrameWnd's default SDI shutdown used to close every document.

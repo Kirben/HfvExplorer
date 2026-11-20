@@ -531,6 +531,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool replace=std::holds_alternative<CatalogReplaceData>(request);
+    const bool setDirectoryDates=std::holds_alternative<CatalogDirectoryDates>(request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
         Set(inode,16,CatalogTimestamp(dates->created),8);
@@ -668,7 +669,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
-    if(!replace){
+    if(!replace&&!setDirectoryDates){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
     }
@@ -685,6 +686,12 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& link=found->second;
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
+        if(setDirectoryDates){
+            Check(link.kind==CatalogKind::Directory,"APFS folder timestamps require a directory");
+            copyDates(inode);
+            Set(inode,32,time,8);
+            return records;
+        }
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
         const auto old=WriterDisk::Inode(link.name,entryId,0,parent,mode,count,link.dataSize);
@@ -839,7 +846,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto ascii=create?CatalogName(create->name):rename?CatalogName(rename->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
-    const auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
+    auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
+    if(const auto* folder=std::get_if<CatalogDirectoryDates>(&request))dates=folder->dates;
     CatalogWritePlan plan;
     plan.input=replace?&replace->data:create?create->data:nullptr;
     plan.dataSize=plan.input?plan.input->Size():0;

@@ -762,24 +762,54 @@ private:
             throw Error(std::string("APFS catalog change committed. Reopen the image to refresh it. ")+error.what());
         }
     }
-public:
-    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
+    uint32_t CreateFolder(uint32_t parent,const std::u16string& name,std::optional<FileDates> dates){
         return WriteMount([&]{
             const auto oid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job);});
+            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job,dates);});
             for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
             throw Error("APFS folder was created but could not be found after reopening");
+        });
+    }
+    static std::optional<FileDates> CopyDates(const Entry& entry){
+        if(!entry.datesValid)return {};
+        return FileDates{entry.created,entry.modified};
+    }
+public:
+    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
+        return CreateFolder(parent,name,{});
+    }
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& entry)override{
+        ValidateEntry(entry);
+        Check(entry.directory,"The APFS copy source is not a folder");
+        return CreateFolder(parent,entry.name,CopyDates(entry));
+    }
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool)override{
+        const auto dates=CopyDates(desired);
+        if(!dates)return;
+        WriteMount([&]{
+            const auto& item=At(id);
+            const auto& current=item.entry;
+            Check(current.directory&&current.identity==expected.identity&&current.parent==expected.parent&&
+                  current.name==expected.name,"The APFS destination folder changed during copying");
+            if(current.datesValid&&current.created==dates->created&&current.modified==dates->modified)return;
+            const auto parent=current.parent;
+            const auto parentOid=At(parent).oid,oid=item.oid;
+            // Restore destination folder dates even if the transfer was cancelled.
+            Storage::Job metadata;
+            CommitMutation(parent,0,metadata,[&](auto& job){
+                return SetDirectoryDates(*source,container,parentOid,oid,*dates,job);
+            });
         });
     }
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
         CatalogName(entry.name);
-        Check(!entry.directory,"Copying folders into APFS is not supported yet");
+        Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(entry.readError.empty()&&!entry.forks[1].size&&entry.attributes.empty()&&
               !entry.protectedFile&&!entry.hardLink&&!entry.compressed&&!entry.version&&
               std::all_of(entry.finder.begin(),entry.finder.end(),[](uint8_t value){return !value;}),
-              "This APFS writer cannot preserve the source file's Mac metadata");
+              "This APFS writer cannot preserve the source entry's Mac metadata");
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
             CatalogTimestamp(entry.modified);
@@ -787,8 +817,7 @@ public:
     }
     void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
         // The common planner skips per-entry validation for folders it will merge.
-        Check(std::none_of(entries.begin(),entries.end(),[](const auto& entry){return entry.directory;}),
-              "Copying folders into APFS is not supported yet");
+        for(const auto& entry:entries)if(entry.directory)ValidateEntry(entry);
     }
     uint32_t Put(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace)override{
         Storage::Job job;
@@ -801,7 +830,8 @@ public:
     uint32_t PutForTransfer(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
                             Storage::Job& job)override{
         ValidateEntry(entry);
-        const auto dates=entry.datesValid?std::optional<FileDates>{FileDates{entry.created,entry.modified}}:std::nullopt;
+        Check(!entry.directory,"Select a regular file for APFS data transfer");
+        const auto dates=CopyDates(entry);
         class DataFork final:public Source {
             const uint64_t size;
             const MacBrowser::Reader& read;
