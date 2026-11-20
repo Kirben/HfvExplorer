@@ -384,10 +384,12 @@ uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t par
     return Commit(source,expected,job,&request);
 }
 
-uint64_t SetCatalogFileModifiedTime(Source& source,const Container& expected,uint64_t parent,
-                                    const std::u16string& name,uint64_t modified,Storage::Job& job)
+uint64_t SetCatalogFileTimes(Source& source,const Container& expected,uint64_t parent,
+                                    const std::u16string& name,TimestampEdits dates,Storage::Job& job)
 {
-    const CatalogMutation request=CatalogFileTimestamp{parent,name,modified};
+    Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified),
+          "Select an APFS folder and at least one timestamp to edit");
+    const CatalogMutation request=CatalogFileTimestamp{parent,name,dates};
     return Commit(source,expected,job,&request);
 }
 

@@ -1746,7 +1746,8 @@ CatalogWritePlan PrepareCatalogMutation(
                   Le32(value.data()+56)==1&&(Le16(value.data()+80)&0170000)==0100000&&
                   !(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
                   "APFS timestamp target inode is locked or unsupported");
-            Set(value,24,CatalogTimestamp(timestamp->modified),8);
+            if(timestamp->dates.created)Set(value,16,CatalogTimestamp(*timestamp->dates.created),8);
+            if(timestamp->dates.modified)Set(value,24,CatalogTimestamp(*timestamp->dates.modified),8);
             Set(value,32,time,8);
             edited=true;
         }

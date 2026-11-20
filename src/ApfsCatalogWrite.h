@@ -73,7 +73,7 @@ struct CatalogHardLink {
 struct CatalogFileTimestamp {
     uint64_t parent;
     const std::u16string& name;
-    uint64_t modified;
+    TimestampEdits dates;
 };
 using CatalogMutation=std::variant<CatalogFileTimestamp,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 
