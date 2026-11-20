@@ -436,9 +436,9 @@ uint64_t CreateCatalogSymlink(Source& source,const Container& expected,uint64_t 
 
 uint64_t ReplaceCatalogSymlink(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
                                const HfsPlus::Bytes& target,Storage::Job& job,std::optional<FileDates> dates,
-                               const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes)
+                               const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external)
 {
-    const CatalogMutation request=CatalogReplaceSymlink{parent,inode,target,dates,finder,locked,attributes};
+    const CatalogMutation request=CatalogReplaceSymlink{parent,inode,target,dates,finder,locked,attributes,external};
     return Commit(source,expected,job,&request);
 }
 

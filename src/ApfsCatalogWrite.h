@@ -67,6 +67,7 @@ struct CatalogReplaceSymlink {
     const FinderBytes& finder;
     bool locked;
     const HfsPlus::Attributes& attributes;
+    bool external=false;
 };
 struct CatalogHardLink {
     uint64_t parent,inode;

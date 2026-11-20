@@ -57,7 +57,7 @@ uint64_t CreateCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent,
                               const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false);
 uint64_t ReplaceCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent,uint64_t inode,
                                const HfsPlus::Bytes& target,Storage::Job&,std::optional<FileDates> dates,
-                               const FinderBytes&,bool locked,const HfsPlus::Attributes&);
+                               const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false);
 uint64_t CreateCatalogHardLink(HfsPlus::Source&,const Container&,uint64_t parent,uint64_t inode,
                                const std::u16string& name,Storage::Job&,uint64_t replaced=0);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);

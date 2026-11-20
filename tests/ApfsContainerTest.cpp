@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-copied-symlink.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-symlink.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2608,6 +2608,31 @@ int RunApfsContainerTest(const char* directory)
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),manyInode,u"file_0222.txt",u"Renamed 222.txt",job);
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"many",u"Renamed collection",job);
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"link.txt",u"Renamed symbolic link",job);
+                {
+                    const auto checkpoint=openCurrent();
+                    CheckpointFaultImage interruptedLink(Disk::Read(*output,0,size_t(output->Size())));
+                    Storage::Job cancelLink;
+                    interruptedLink.onFlush=[&]{cancelLink.cancel();};
+                    constexpr uint64_t symlinkInode=425; // Inode of link.txt in the macOS fixture.
+                    bool cancelled=false;
+                    try{
+                        Apfs::ReplaceCatalogSymlink(interruptedLink,checkpoint,2,symlinkInode,
+                                                    Bytes{'n','o','n','e',0},cancelLink,{},{},false,{},true);
+                    }catch(const Storage::Cancelled&){cancelled=true;}
+                    const auto retained=Apfs::Probe(interruptedLink);
+                    Check(cancelled&&retained&&retained->transaction==checkpoint.transaction,
+                          "Cancelled APFS symbolic-link overwrite published a checkpoint");
+                    auto memory=std::make_unique<Memory>(interruptedLink.durable.size());
+                    memory->bytes=std::move(interruptedLink.durable);
+                    std::unique_ptr<Source> source=std::move(memory);
+                    const auto reopened=Apfs::Open(source,"apfs-cancelled-symlink-overwrite");
+                    MacBrowser::Entry original;
+                    Check(reopened&&reopened->FindChild(2,u"Renamed symbolic link",original)&&
+                          reopened->SymbolicLinkTarget(original.id)==authentic->SymbolicLinkTarget(symlink.id),
+                          "Cancelled APFS symbolic-link overwrite changed the original target");
+                    Reject([&]{reopened->Read(original.id,0,0,nullptr,0);},
+                           "Cancelled APFS copy followed the original symbolic-link target");
+                }
                 Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,u"Renamed collection",{createdTime,{}},job,true);
                 const auto folderLocked=openCurrent();
                 Reject([&]{Apfs::RenameExternalCatalogEntry(*output,folderLocked,manyInode,u"Renamed 222.txt",u"Blocked",job);},
@@ -2961,6 +2986,27 @@ int RunApfsContainerTest(const char* directory)
                   published->FindChild(2,u"Renamed symbolic link",renamedLink)&&
                   published->SymbolicLinkTarget(renamedLink.id)==authentic->SymbolicLinkTarget(symlink.id),
                   "APFS rename changed the symbolic-link target");
+            symlinkToCopy.name=renamedLink.name;
+            importSource->PutSymbolicLink(2,symlinkToCopy,dangling,createLink);
+            Check(importSource->FindChild(2,symlinkToCopy.name,sourceLink),"Missing APFS replacement link");
+            auto replaceLink=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(importSource,sourceLink.id)},FileOperations::Location::Mounted(published,2)});
+            const auto replaceStart=GetTickCount();
+            while(!replaceLink.Job()->done()){
+                Check(GetTickCount()-replaceStart<15000,"External APFS symbolic-link overwrite timed out");
+                const auto [id,message]=replaceLink.Job()->conflictState();
+                if(!message.empty())replaceLink.Job()->resolve(id,Storage::ConflictChoice::Replace);
+                Sleep(5);
+            }
+            const auto replacedLink=replaceLink.Job()->result();
+            Check(!replacedLink.code,replacedLink.message.c_str());
+            const auto changedLink=published->Stat(renamedLink.id);
+            Check(changedLink.identity==renamedLink.identity&&
+                  published->SymbolicLinkTarget(changedLink.id)==std::optional<Bytes>(dangling)&&
+                  !changedLink.forks[0].size&&!changedLink.forks[1].size,
+                  "APFS overwrite changed link identity or materialized its target");
+            Reject([&]{published->Read(changedLink.id,0,0,nullptr,0);},
+                   "APFS overwrite followed the replacement symbolic-link target");
             published->Read(publishedFile.id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Publishing a checkpoint changed macOS-generated file data");
             MacBrowser::Entry small,originalSmall;
@@ -2972,7 +3018,7 @@ int RunApfsContainerTest(const char* directory)
             authentic->Read(originalSmall.id,0,0,originalBytes.data(),originalBytes.size());
             published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
             Check(editedBytes==originalBytes,"APFS timestamp edit changed the target file contents");
-            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, and collision rejection.\n");
+            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){

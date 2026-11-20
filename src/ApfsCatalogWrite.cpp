@@ -1865,6 +1865,72 @@ std::pair<uint64_t,uint64_t> DeleteExternalTree(std::vector<OwnedRecord>& catalo
     return {files,folders};
 }
 
+void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogReplaceSymlink& edit,
+                            uint64_t time,const AttributeStreams& streams,const CatalogRecords& extentTree,
+                            std::set<uint64_t>& retired)
+{
+    const auto parentKey=(uint64_t(9)<<60)|edit.parent;
+    const auto inodeKey=(uint64_t(3)<<60)|edit.inode;
+    bool named=false;
+    for(const auto& record:catalog){
+        Check(record.key.size()>=8,"Truncated APFS catalog key");
+        if(Le64(record.key.data())!=parentKey||record.value.size()<18||Le64(record.value.data())!=edit.inode)continue;
+        Check(!named&&record.value.size()==18&&Le16(record.value.data()+16)==10,
+              "APFS symbolic-link overwrite requires an unlinked symbolic link");
+        named=true;
+    }
+    Check(named,"The APFS symbolic-link destination no longer exists");
+    auto inode=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+        return Le64(record.key.data())==inodeKey;
+    });
+    Check(inode!=catalog.end()&&inode->key.size()==8&&inode->value.size()>=92,
+          "Invalid APFS symbolic-link inode");
+    auto& value=inode->value;
+    const auto flags=Le32(value.data()+68);
+    Check(Le64(value.data())==edit.parent&&Le32(value.data()+56)==1&&
+          (Le16(value.data()+80)&0170000)==0120000&&!(flags&(UserImmutable|SystemImmutable|BsdCompressed)),
+          "APFS symbolic-link destination is locked or unsupported");
+    std::set<uint64_t> oldStreams;
+    bool hadTarget=false;
+    auto after=std::next(inode);
+    for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
+        Check(Le64(after->key.data())>>60==4&&after->key.size()>=12&&after->key.back()==0&&after->value.size()>=4,
+              "Unsupported APFS symbolic-link record");
+        const std::string attr(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
+        const auto kind=Le16(after->value.data());
+        if(attr==SymlinkAttribute){
+            Check(!hadTarget&&kind==6&&after->value.size()>5&&!after->value.back(),"Invalid APFS symbolic-link target");
+            hadTarget=true;
+        }else{
+            Check(OrdinaryAttribute(attr)&&(kind==2||(kind==1&&after->value.size()==52)),
+                  "Unsupported APFS symbolic-link attribute");
+            if(kind==1){
+                const auto stream=Le64(after->value.data()+4);
+                Check(stream>edit.inode&&oldStreams.insert(stream).second,"Invalid APFS symbolic-link stream");
+            }
+        }
+    }
+    Check(hadTarget,"Missing APFS symbolic-link target");
+    CollectExternalRetiredExtents(catalog,edit.inode,oldStreams,extentTree,retired);
+    SetExternalFinderInfo(value,edit.finder);
+    SetSecurityFlag(value,edit.attributes);
+    if(edit.locked)Set(value,68,flags|UserImmutable,4);
+    Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
+    if(edit.dates)Set(value,16,CatalogTimestamp(edit.dates->created),8);
+    Set(value,32,time,8);
+    auto attributes=EncodeAttributes(edit.inode,&edit.attributes,nullptr,streams);
+    attributes.push_back(LinkTargetRecord(edit.inode,edit.target));
+    SortAttributes(attributes);
+    const auto first=size_t(inode-catalog.begin())+1;
+    catalog.erase(catalog.begin()+first,after);
+    catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
+        const auto key=Le64(record.key.data());
+        return key>>60==8&&oldStreams.count(key&IdMask);
+    }),catalog.end());
+    catalog.insert(catalog.begin()+first,std::make_move_iterator(attributes.begin()),
+                   std::make_move_iterator(attributes.end()));
+}
+
 void CheckExternalVolume(const Bytes& volume)
 {
     Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
@@ -2021,9 +2087,10 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     const bool externalCreate=create&&create->external;
     const bool externalReplace=replace&&replace->external;
+    const bool externalLinkReplace=linkReplacement&&linkReplacement->external;
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
-    if(properties||externalCreate||externalReplace||externalDelete)CheckExternalVolume(volume);
+    if(properties||externalCreate||externalReplace||externalDelete||externalLinkReplace)CheckExternalVolume(volume);
     else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -2076,6 +2143,9 @@ CatalogWritePlan PrepareCatalogMutation(
         if(remove->recursive)
             std::tie(deletedFiles,deletedFolders)=DeleteExternalTree(catalog,*remove,time,extentTree,externalRetired);
         else removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
+    }else if(externalLinkReplace){
+        catalog=std::move(existing.records);
+        ReplaceExternalSymlink(catalog,*linkReplacement,time,attributeIds,extentTree,externalRetired);
     }else if(externalReplace){
         catalog=std::move(existing.records);
         TouchExternalParent(catalog,replace->parent,time,0);
@@ -2201,7 +2271,7 @@ CatalogWritePlan PrepareCatalogMutation(
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
                             directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
     }
-    if(properties||externalCreate||externalReplace||externalDelete){
+    if(properties||externalCreate||externalReplace||externalDelete||externalLinkReplace){
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});
@@ -2216,7 +2286,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        if(externalReplace||externalDelete)return externalRetired.count(run.block)!=0;
+        if(externalReplace||externalDelete||externalLinkReplace)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;
