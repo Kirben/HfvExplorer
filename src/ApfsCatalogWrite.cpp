@@ -707,6 +707,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize,create->finder));
+        if(create->locked)Set(records.back().value,68,UserImmutable,4);
         copyDates(records.back().value);
         streamAt=records.size();
     }else{
@@ -753,6 +754,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(updated.value,48,(Le64(inode.data()+48)&~WriterDisk::HasFinderInfo)|newFinderFlag,8);
         Set(updated.value,32,time,8);
         if(replace){
+            if(replace->locked)Set(updated.value,68,bsdFlags|UserImmutable,4);
             Set(updated.value,24,time,8);
             copyDates(updated.value);
         }

@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-locked-file.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-copy-locked-file.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1429,6 +1429,27 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         unlocked.protectedFile=false;
         Check(!submit(persisted,unlocked).code&&!mounted->Stat(fresh.id).protectedFile,"APFS file did not unlock");
         Check(!submit(unlocked,locked).code&&mounted->Stat(fresh.id).protectedFile,"APFS file did not relock");
+        {
+            VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+            const auto copiedParent=mounted->MakeDirectory(2,u"Locked file copies");
+            Storage::Job job;
+            MacBrowser::Entry copy;
+            Check(MacBrowser::Copy(*mounted,fresh.id,*mounted,copiedParent,job)&&
+                  mounted->FindChild(copiedParent,file.name,copy)&&copy.protectedFile&&copy.finder==locked.finder,
+                  "Ordinary APFS copy lost the source lock or Finder information");
+            auto replacement=locked;
+            replacement.name=u"Replacement";
+            const auto id=mounted->Put(copiedParent,replacement,contents,false);
+            Check(mounted->Stat(id).protectedFile,"New APFS import lost the source lock");
+            auto target=file;
+            target.name=u"Overwritten";
+            target.forks[0].size=0;
+            const auto overwriteId=mounted->Put(copiedParent,target,{},false);
+            replacement.name=target.name;
+            Check(mounted->Put(copiedParent,replacement,contents,true)==overwriteId&&
+                  mounted->Stat(overwriteId).protectedFile&&mounted->Stat(overwriteId).forks[0].size==5,
+                  "APFS overwrite did not publish its contents and lock together");
+        }
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
@@ -1448,11 +1469,12 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     fault.failAt=1;
     const auto previous=Apfs::Probe(fault)->transaction;
     Storage::Job job;
-    Reject([&]{Apfs::CreateCatalogDirectory(fault,*Apfs::Probe(fault),2,u"Interrupted",job,{},&folder.finder);},
+    CheckpointFaultImage input(Bytes{1,2,3});
+    Reject([&]{Apfs::CreateCatalogFile(fault,*Apfs::Probe(fault),2,u"Interrupted",input,job,{},&file.finder,true);},
            "APFS Finder metadata test did not inject a write failure");
     CheckpointFaultImage reopened(fault.durable);
-    Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted Finder metadata write");
-    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, file locks, and interrupted writes.\n");
+    Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted locked file import");
+    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, file locks, locked copies and overwrites, and interrupted import.\n");
 }
 
 void UnicodeCatalogNames(const std::string& root,FILE* report)
