@@ -698,6 +698,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
+    Check(!(Le32(parentInode.data()+68)&(UserImmutable|SystemImmutable)),
+          "Unlock the APFS destination folder before making changes");
     if(!replace&&!metadata){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
@@ -716,17 +718,15 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& link=found->second;
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
+        const auto bsdFlags=Le32(inode.data()+68);
+        Check(!(bsdFlags&SystemImmutable)&&(!(bsdFlags&UserImmutable)||(metadata&&metadata->finder&&!metadata->locked)),
+              "Unlock the APFS entry before making changes");
         if(metadata&&!metadata->finder){
             Check(link.kind==CatalogKind::Directory,"APFS folder timestamps require a directory");
             editDates(inode);
             Set(inode,32,time,8);
             return records;
         }
-        const auto bsdFlags=Le32(inode.data()+68);
-        Check(!(bsdFlags&SystemImmutable)&&(!(bsdFlags&UserImmutable)||(metadata&&metadata->finder&&!metadata->locked)),
-              "Unlock the APFS file before making changes");
-        Check(!metadata||link.kind==CatalogKind::RegularFile||!metadata->locked,
-              "APFS folder locking is unavailable");
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
         const auto existingFinder=link.finder?&*link.finder:nullptr;

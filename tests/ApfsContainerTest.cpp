@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-copy-locked-file.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-locked-folder.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1411,6 +1411,28 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         Check(!cleared.code&&mounted->Stat(parent.id).finder==desiredFolder.finder&&
               mounted->Stat(parent.id).created==desiredFolder.created&&mounted->Stat(parent.id).modified==parent.modified,
               "APFS folder Properties did not clear Finder information");
+        auto lockedFolder=mounted->Stat(parent.id);
+        lockedFolder.protectedFile=true;
+        Check(!submit(mounted->Stat(parent.id),lockedFolder).code&&mounted->Stat(parent.id).protectedFile,
+              "APFS folder did not lock");
+        {
+            VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+            Reject([&]{mounted->MakeDirectory(parent.id,u"Blocked");},"APFS created a child in a locked folder");
+            Reject([&]{mounted->Rename(parent.id,2,u"Locked folder rename");},"APFS renamed a locked folder");
+            Reject([&]{mounted->ValidateRemoval(current.id);},"APFS cut preflight ignored a locked parent");
+            Reject([&]{mounted->Rename(current.id,parent.id,u"Locked child rename");},"APFS renamed a child in a locked folder");
+            Reject([&]{mounted->Remove(current.id);},"APFS deleted from a locked folder");
+            Reject([&]{mounted->Put(parent.id,file,contents,true);},"APFS overwrote in a locked folder");
+            Check(mounted->List(parent.id).size()==1,"Rejected operations changed a locked APFS folder");
+        }
+        auto unlockedFolder=mounted->Stat(parent.id);
+        unlockedFolder.protectedFile=false;
+        Check(!submit(lockedFolder,unlockedFolder).code&&!mounted->Stat(parent.id).protectedFile,
+              "APFS folder did not unlock");
+        {
+            VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+            mounted->Remove(mounted->MakeDirectory(parent.id,u"Unlocked folder child"));
+        }
         auto locked=fresh;
         locked.protectedFile=true;
         Check(!submit(fresh,locked).code&&mounted->Stat(fresh.id).protectedFile,"APFS file did not lock");
@@ -1450,11 +1472,15 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
                   mounted->Stat(overwriteId).protectedFile&&mounted->Stat(overwriteId).forks[0].size==5,
                   "APFS overwrite did not publish its contents and lock together");
         }
+        const auto unlockedParent=mounted->Stat(parent.id);
+        auto lockedParent=unlockedParent;
+        lockedParent.protectedFile=true;
+        Check(!submit(unlockedParent,lockedParent).code,"APFS folder did not relock");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry parent,current;
-        Check(mounted&&mounted->FindChild(2,u"Renamed Folder",parent)&&parent.finder==Apfs::FinderBytes{}&&
+        Check(mounted&&mounted->FindChild(2,u"Renamed Folder",parent)&&parent.finder==Apfs::FinderBytes{}&&parent.protectedFile&&
               mounted->FindChild(parent.id,file.name,current)&&current.finder[31]==0x5a&&current.modified==5000000123ULL&&current.protectedFile,
               "APFS Properties did not survive reopening");
         std::array<char,5> data{};
@@ -1474,7 +1500,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
            "APFS Finder metadata test did not inject a write failure");
     CheckpointFaultImage reopened(fault.durable);
     Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted locked file import");
-    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, file locks, locked copies and overwrites, and interrupted import.\n");
+    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, file and folder locks, locked copies and overwrites, and interrupted import.\n");
 }
 
 void UnicodeCatalogNames(const std::string& root,FILE* report)

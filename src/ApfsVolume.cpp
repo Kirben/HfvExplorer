@@ -889,7 +889,7 @@ public:
             const auto& item=At(id);
             const auto& current=item.entry;
             Check(id!=2&&current.name==desired.name&&current.directory==desired.directory&&
-                  current.version==desired.version&&(!current.directory||current.protectedFile==desired.protectedFile),
+                  current.version==desired.version,
                   "APFS Properties can only change Finder information and timestamps on files and folders");
             Check(current.datesValid==desired.datesValid,"APFS timestamps cannot be removed");
             TimestampEdits dates;
@@ -915,7 +915,9 @@ public:
     }
     void ValidateRemoval(uint32_t id)override{
         Access([&]{
-            Check(writable&&id!=2&&!At(id).entry.protectedFile,"APFS file is locked or read-only");
+            Check(writable&&id!=2,"APFS entry is read-only");
+            const auto& entry=At(id).entry;
+            Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             return true;
         });
     }

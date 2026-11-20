@@ -698,6 +698,7 @@ int RunBrowserWindowsTest(const char* directory){
    for(unsigned i=1;i<31;++i)finder+=L"00 ";
    finder+=L"A5";
    SetDlgItemTextW(editor,IDC_MFS_FINDER,finder.c_str());
+   CheckDlgButton(editor,IDC_MFS_LOCKED,BST_CHECKED);
    SYSTEMTIME modified{};
    modified.wYear=2050;modified.wMonth=2;modified.wDay=3;modified.wHour=4;modified.wMinute=5;modified.wSecond=6;
    Check(SendDlgItemMessageW(editor,IDC_MFS_MODIFIED,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&modified)),
@@ -708,10 +709,10 @@ int RunBrowserWindowsTest(const char* directory){
    SendMessage(editor,WM_COMMAND,IDOK,0);
    finishProperties();
    Check(!BackgroundCopies::LastResult().code&&mount->Stat(treeCopyRoot.id).finder[31]==0xa5&&
-         mount->Stat(treeCopyRoot.id).modified==expectedModified&&
+         mount->Stat(treeCopyRoot.id).modified==expectedModified&&mount->Stat(treeCopyRoot.id).protectedFile&&
          !IsWindow(editor)&&a->IsWindowEnabled(),"APFS Finder editor did not apply or restore the browser");
    MetadataDialogs::Shutdown();
-   fprintf(report,"PASS: APFS Properties routes to a working Finder information and timestamp editor for folders.\n");
+   fprintf(report,"PASS: APFS Properties routes to a working Finder information, timestamp and lock editor for folders.\n");
    fprintf(report,"PASS: recursive APFS folder copy, source timestamps, and destination dates after completed, skipped and cancelled merges.\n");
   }
   // Make the first frame the MFC main window before closing it: this is the

@@ -182,7 +182,6 @@ struct ApfsEditor:CDialog,DialogActivity {
   SetMetadataDate(m_hWnd,IDC_MFS_CREATED,original.created);
   SetMetadataDate(m_hWnd,IDC_MFS_MODIFIED,original.modified);
   CheckDlgButton(IDC_MFS_LOCKED,original.protectedFile?BST_CHECKED:BST_UNCHECKED);
-  GetDlgItem(IDC_MFS_LOCKED)->ShowWindow(original.directory?SW_HIDE:SW_SHOW);
   return TRUE;
  }
  void OnOK()override{
@@ -190,7 +189,7 @@ struct ApfsEditor:CDialog,DialogActivity {
    auto desired=original;
    desired.created=MetadataDate(m_hWnd,IDC_MFS_CREATED);
    desired.modified=MetadataDate(m_hWnd,IDC_MFS_MODIFIED);
-   if(!original.directory)desired.protectedFile=IsDlgButtonChecked(IDC_MFS_LOCKED)==BST_CHECKED;
+   desired.protectedFile=IsDlgButtonChecked(IDC_MFS_LOCKED)==BST_CHECKED;
    const auto bytes=ParseFinderInfo(Text(m_hWnd,IDC_MFS_FINDER),desired.finder.size());
    std::copy(bytes.begin(),bytes.end(),desired.finder.begin());
    const FileOperations::EditBasicMetadata request{source,original,std::move(desired)};
