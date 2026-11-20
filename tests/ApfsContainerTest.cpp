@@ -521,6 +521,26 @@ int RunApfsContainerTest(const char* directory)
             fprintf(report,"PASS: APFS software password unlock, wrong-password rejection, complete and unaligned reads, and process-local export.\n");
             fprintf(report,"PASS: genuine APFS password hint on initial and retry prompts, and a volume without a hint.\n");
         }
+        if(const auto fixture=_wgetenv(L"HFV_APFS_SNAPSHOT_FIXTURE")){
+            const auto volume=MacBrowser::OpenBrowserImage(fixture);
+            MacBrowser::Entry current,snapshot,folder,file;
+            Check(volume&&volume->FindChild(2,u"Independent APFS",current)&&
+                  volume->FindChild(2,u"Independent APFS [Snapshot: Independent backup]",snapshot),
+                  "Independently authored APFS snapshot was not listed");
+            constexpr char expected[]="Independently written APFS data\n";
+            for(const auto id:{current.id,snapshot.id}){
+                Check(volume->FindChild(id,u"Folder",folder)&&volume->FindChild(folder.id,u"sample.txt",file)&&
+                      file.forks[0].size==sizeof(expected)-1,"Independent snapshot catalog was not readable");
+                char bytes[sizeof(expected)-1];
+                volume->Read(file.id,0,0,bytes,sizeof(bytes));
+                Check(!memcmp(bytes,expected,sizeof(bytes)),"Independent snapshot bytes differ");
+            }
+            Storage::Job conversion;
+            const auto extracted=VolumeCoord::Wide(root+"independent-snapshot-raw.img");
+            Check(!Dmg::Convert(fixture,extracted,Dmg::Output::RawImage,conversion).code,
+                  "Could not extract the independent APFS fixture for filesystem checking");
+            fprintf(report,"PASS: independently authored APFS snapshot in a compressed DMG.\n");
+        }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");
         {
