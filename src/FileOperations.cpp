@@ -248,12 +248,12 @@ Storage::Result ReplaceResource(const ImportResourceFork& request,Storage::Job& 
   job.progress(progress);
   Cancel(job);
  };
- volume->PutResourceReplacement(id,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){
+ volume->PutResourceReplacementForJob(id,replacement,[&](unsigned fork,uint64_t at,void* data,size_t n){
   Cancel(job);
   if(fork)from.first->Read(from.second,0,at,data,n);
   else volume->Read(id,0,at,data,n);
   report(fork,at,n);
- },[&](uint64_t at,size_t n){report(0,at,n);});
+ },[&](uint64_t at,size_t n){report(0,at,n);},job);
  if(!request.input.Volume())from.first->Close();completion.complete=true;completion.completed=1;return {};
 }
 

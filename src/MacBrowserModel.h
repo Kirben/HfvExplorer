@@ -132,6 +132,10 @@ public:
                                              std::function<void(uint64_t,size_t)>) {
         return Put(entry.parent, entry, std::move(reader), true);
     }
+    virtual uint32_t PutResourceReplacementForJob(uint32_t id,const Entry& entry,Reader reader,
+                                                   std::function<void(uint64_t,size_t)> keptData,Storage::Job&) {
+        return PutResourceReplacement(id,entry,std::move(reader),std::move(keptData));
+    }
     virtual void Rename(uint32_t id, uint32_t parent, const std::u16string &) = 0;
     virtual void RenameForJob(uint32_t id,uint32_t parent,const std::u16string& name,Storage::Job&) {
         Rename(id,parent,name);

@@ -412,9 +412,9 @@ uint64_t SetEntryProperties(Source& source,const Container& expected,uint64_t pa
 }
 
 uint64_t SetResourceFork(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                                 Source& resource,uint64_t modified,Storage::Job& job)
+                                 Source& resource,uint64_t modified,Storage::Job& job,bool external)
 {
-    const CatalogMutation request=CatalogResourceFork{parent,inode,resource,modified};
+    const CatalogMutation request=CatalogResourceFork{parent,inode,resource,modified,external};
     return Commit(source,expected,job,&request);
 }
 

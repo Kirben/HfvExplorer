@@ -61,6 +61,7 @@ struct CatalogResourceFork {
     uint64_t parent,inode;
     HfsPlus::Source& resource;
     uint64_t modified;
+    bool external=false;
 };
 struct CatalogReplaceSymlink {
     uint64_t parent,inode;

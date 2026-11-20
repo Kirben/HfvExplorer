@@ -1108,6 +1108,11 @@ public:
     }
     uint32_t PutResourceReplacement(uint32_t id,const Entry& desired,MacBrowser::Reader reader,
                                      std::function<void(uint64_t,size_t)> keptData)override{
+        Storage::Job job;
+        return PutResourceReplacementForJob(id,desired,std::move(reader),std::move(keptData),job);
+    }
+    uint32_t PutResourceReplacementForJob(uint32_t id,const Entry& desired,MacBrowser::Reader reader,
+                                           std::function<void(uint64_t,size_t)> keptData,Storage::Job& job)override{
         ForkInput resource(desired.forks[1].size,1,reader);
         return WriteMount([&]{
             const auto& item=At(id);
@@ -1115,15 +1120,17 @@ public:
             Check(!current.directory&&!current.protectedFile&&!current.compressed&&current.readError.empty()&&
                   current.identity==desired.identity&&current.parent==desired.parent&&current.name==desired.name,
                   "The APFS resource fork destination changed or cannot be edited");
-            if(keptData&&current.forks[0].size)keptData(0,size_t(current.forks[0].size));
+            if(job.cancelled())throw Storage::Cancelled();
             const auto parent=current.parent;
-            const auto parentOid=At(parent).oid,oid=item.oid;
-            Storage::Job job;
+            const auto& folder=At(parent);
+            Check(!folder.entry.protectedFile,"The APFS destination folder is locked");
+            if(keptData&&current.forks[0].size)keptData(0,size_t(current.forks[0].size));
+            const auto oid=item.oid;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetResourceFork(*source,container,parentOid,oid,resource,desired.modified,job);
+                return SetResourceFork(*source,container,folder.oid,oid,resource,desired.modified,job,limitedEdits);
             },id);
             return id;
-        });
+        },true);
     }
     void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,
                               std::function<void(uint64_t,uint64_t)> progress)override{

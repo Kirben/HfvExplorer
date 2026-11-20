@@ -2350,6 +2350,62 @@ Memory Gpt(const Memory& raw,unsigned sector,bool readOnly=false)
     memcpy(boot+start,raw.bytes.data(),raw.bytes.size());
     return disk;
 }
+void ExternalResourceForkWrites(MacBrowser::Volume& volume,uint32_t folder)
+{
+    MacBrowser::Entry file;
+    file.name=u"Separate resource fork";
+    file.forks[0].size=8197;
+    file.finder[0]='R';
+    file.datesValid=true;
+    file.created=file.modified=3700000456;
+    file.attributes={{u"user.kept",Bytes(4301,0x54)}};
+    const Bytes data(8197,0x62),embedded(701,0x46),streamed(10193,0x39);
+    const auto id=volume.Put(folder,file,[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
+        Check(!fork,"Unexpected resource fork in APFS test input");
+        memcpy(bytes,data.data()+offset,count);
+    },false);
+    const auto original=volume.Stat(id);
+    const auto verify=[&](const Bytes& resource,uint64_t modified){
+        const auto entry=volume.Stat(id);
+        Check(entry.identity==original.identity&&entry.created==original.created&&entry.modified==modified&&
+              entry.finder==file.finder&&volume.GetAttributes(id)==file.attributes&&
+              entry.forks[0].size==data.size()&&entry.forks[1].size==resource.size(),
+              "APFS resource replacement changed unrelated metadata");
+        Bytes actual(data.size());
+        volume.Read(id,0,0,actual.data(),actual.size());
+        Check(actual==data,"APFS resource replacement changed the data fork");
+        if(!resource.empty()){
+            actual.resize(resource.size());
+            volume.Read(id,1,0,actual.data(),actual.size());
+            Check(actual==resource,"APFS resource fork did not read back exactly");
+        }
+    };
+    const auto replace=[&](const Bytes& bytes,uint64_t modified,bool cancel=false){
+        auto entry=volume.Stat(id);
+        entry.forks[1].size=bytes.size();
+        entry.modified=modified;
+        Storage::Job job;
+        volume.PutResourceReplacementForJob(id,entry,[&](unsigned fork,uint64_t offset,void* dest,size_t count){
+            Check(fork==1,"APFS resource replacement attempted to rewrite the data fork");
+            memcpy(dest,bytes.data()+offset,count);
+            if(cancel)job.cancel();
+        },{},job);
+    };
+    replace(embedded,file.modified+1);
+    verify(embedded,file.modified+1);
+    bool cancelled=false;
+    try{replace(streamed,file.modified+2,true);}catch(const Storage::Cancelled&){cancelled=true;}
+    Check(cancelled,"APFS did not cancel resource stream replacement");
+    verify(embedded,file.modified+1);
+    replace(streamed,file.modified+3);
+    verify(streamed,file.modified+3);
+    replace(embedded,file.modified+4);
+    verify(embedded,file.modified+4);
+    replace(streamed,file.modified+5);
+    replace({},file.modified+6);
+    verify({},file.modified+6);
+}
+
 void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wchar_t* fixture)
 {
     const auto path=VolumeCoord::Wide(root+(fixture?"apfs-macos-sensitive-writes.img":"apfs-external-sensitive-writes.img"));
@@ -2412,6 +2468,7 @@ void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wcha
         volume->Remove(expect(*volume,folder,u"report",0x53));
         MacBrowser::Entry removed;
         Check(!volume->FindChild(folder,u"report",removed),"APFS case-sensitive delete retained the target");
+        ExternalResourceForkWrites(*volume,folder);
         put(u"caf\u00e9",0x44);
         Reject([&]{put(u"cafe\u0301",0x22);},"APFS accepted a normalization-equivalent name");
     }
@@ -2456,6 +2513,7 @@ void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFi
                         Check(fork==0,"Unexpected APFS GPT test fork");
                         memset(output,0x6a,count);
                     },false);
+                    if(macFixture)ExternalResourceForkWrites(*volume,folder);
                     volume->Rename(folder,2,u"Edited partition");
                 }
             }
@@ -2485,6 +2543,7 @@ void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFi
     }
     fprintf(report,"PASS: %s APFS writes in GPT slices, 512/4096 sector geometry, read-only flags, unchanged partition tables and file readback.\n",
             macFixture?"macOS-created":"HFVExplorer-created");
+    if(macFixture)fprintf(report,"PASS: macOS APFS resource fork add, embedded/streamed replacement, clear, cancellation, and data and metadata preservation.\n");
 }
 
 }
