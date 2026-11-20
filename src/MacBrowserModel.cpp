@@ -562,7 +562,10 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
         bytes(&e.created,sizeof(e.created));bytes(&e.modified,sizeof(e.modified));bytes(e.finder.data(),e.finder.size());
         bytes(&e.forks[0].size,sizeof(uint64_t));bytes(&e.forks[1].size,sizeof(uint64_t));
         if(e.directory){auto children=v.List(at);std::sort(children.begin(),children.end(),[](const Entry& a,const Entry& b){return a.name==b.name?a.identity<b.identity:a.name<b.name;});for(auto& child:children)walk(child.id,depth+1);}
-        else{v.Read(at,0,0,nullptr,0);if(e.forks[1].size)v.Read(at,1,0,nullptr,0);}
+        else if(const auto target=e.readError.empty()?std::optional<HfsPlus::Bytes>{}:v.SymbolicLinkTarget(at)){
+            const auto length=uint64_t(target->size());
+            bytes(&length,sizeof(length));bytes(target->data(),target->size());
+        }else{v.Read(at,0,0,nullptr,0);if(e.forks[1].size)v.Read(at,1,0,nullptr,0);}
         ancestors.erase(at);
     };
     walk(id,0);return std::to_string(count)+":"+std::to_string(hash);

@@ -2513,7 +2513,7 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
         Check(restored==resource,"APFS transfer changed the resource fork");
         fprintf(report,"PASS: APFS embedded metadata and extent-backed resource fork preserved through copy to HFS Plus.\n");
-        const auto symlinkPath=VolumeCoord::Wide(root+"apfs-written-symlink.img");
+        const auto symlinkPath=VolumeCoord::Wide(root+"apfs-moved-symlink.img");
         {
             auto image=CreateFormatOutput(symlinkPath.c_str(),8*1024*1024);
             Storage::Job job;
@@ -2568,7 +2568,42 @@ int RunApfsContainerTest(const char* directory)
                   destination->SymbolicLinkTarget(copied.id)==source->SymbolicLinkTarget(link.id),
                   "Copying the genuine APFS symbolic link changed its target");
         }
-        fprintf(report,"PASS: APFS symbolic link copies, malformed target refusal, and read refusal.\n");
+        {
+            const auto image=MacBrowser::OpenBrowserImage(symlinkPath);
+            MacBrowser::Entry original;
+            Check(image&&image->FindChild(2,u"Long \u00e9.txt",original),"Could not reopen the APFS symbolic link");
+            const auto target=image->SymbolicLinkTarget(original.id);
+            uint32_t folder=0;
+            {
+                VolumeCoord::OperationLease lease({{image->ResourceKey(),VolumeCoord::Mode::Write}});
+                folder=image->MakeDirectory(2,u"Moved links");
+                Storage::Job job;
+                image->PutSymbolicLink(folder,original,*target,job);
+            }
+            const auto submit=[](FileOperations::Request request){
+                auto work=FileOperations::Submit(std::move(request));
+                Check(WaitForSingleObject(work.Job()->event(),15000)==WAIT_OBJECT_0,"APFS link operation timed out");
+                return work.Job()->result();
+            };
+            auto cut=FileOperations::Location::Mounted(image,original.id);
+            cut.cut=true;
+            const auto destination=FileOperations::Location::Mounted(image,folder);
+            Check(submit(FileOperations::OrdinaryCopy{{cut},destination}).code&&
+                  image->SymbolicLinkTarget(original.id)==target,"Rejected APFS cut removed or changed the source link");
+            MacBrowser::Entry duplicate;
+            Check(image->FindChild(folder,original.name,duplicate),"Could not find destination link for deletion test");
+            const auto deleted=submit(FileOperations::DeleteEntries{{FileOperations::Location::Mounted(image,duplicate.id)}});
+            Check(!deleted.code,deleted.message.c_str());
+            const auto moved=submit(FileOperations::OrdinaryCopy{{cut},destination});
+            Check(!moved.code,moved.message.c_str());
+            MacBrowser::Entry result;
+            Check(!image->FindChild(2,original.name,duplicate)&&image->FindChild(folder,original.name,result)&&
+                  image->SymbolicLinkTarget(result.id)==target,"APFS cut did not preserve the target and remove the source");
+            const auto renamed=submit(FileOperations::RenameEntry{FileOperations::Location::Mounted(image,result.id),u"Renamed link"});
+            Check(!renamed.code&&image->FindChild(folder,u"Renamed link",result)&&
+                  image->SymbolicLinkTarget(result.id)==target,"APFS rename did not retain the link target");
+        }
+        fprintf(report,"PASS: APFS symbolic link copy, cut, rename, deletion, and read refusal.\n");
         auto linkedDisk=BrowseFixture(false,true);
         const auto linkedPath=VolumeCoord::Wide(root+"linked.img");
         {
