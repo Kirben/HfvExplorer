@@ -25,6 +25,42 @@ struct Dual:Memory{
 };
 void Pattern(unsigned f,uint64_t at,void* p,size_t n){for(size_t i=0;i<n;++i)static_cast<uint8_t*>(p)[i]=uint8_t((at+i)*31+f*97);}
 void Verify(Volume& v,uint32_t id){for(unsigned f=0;f<2;++f){Bytes expected(f?723:5003),got(expected.size());Pattern(f,0,expected.data(),expected.size());Check(v.Read(id,f,0,got.data(),got.size())==got.size()&&got==expected,"Other features changed file forks");}}
+void MutationBoundary(Volume::FormatKind kind){
+ Memory baseline;
+ Volume::Format(baseline,u"Transaction fixture",true,kind);
+ const Attributes original{{u"user.fixture",{1,2,3}}},replacement{{u"user.fixture",{7,8,9}}};
+ uint32_t id=0;
+ {
+  Volume v(baseline,true);
+  id=v.Put(2,u"Original",5003,723,Pattern,nullptr,false,nullptr,&original);
+  v.MakeDirectory(2,u"Collision");
+  const auto before=baseline.writes;
+  Reject([&]{v.Rename(id,2,u"Collision");},"Rename accepted a collision");
+  Reject([&]{v.SetAttributes(id,{{u"",{4}}});},"Attribute edit accepted an invalid key");
+  Check(v.Writable()&&baseline.writes==before&&v.Stat(id).name==u"Original"&&
+        v.GetAttributes(id)==original,"Preflight rejection changed or fenced a healthy mount");
+ }
+ for(bool attributes:{false,true})for(bool afterCommit:{false,true}){
+  Memory failed=baseline;
+  {
+   Volume v(failed,true);
+   const auto phase=afterCommit?"journal-committed":"data-flushed";
+   bool injected=false;
+   v.fault=[&](const char* at){if(!strcmp(at,phase)){injected=true;throw Error("Injected mutation failure");}};
+   Reject([&]{if(attributes)v.SetAttributes(id,replacement);else v.Rename(id,2,u"Renamed");},
+          "Mutation ignored an injected failure");
+   Check(injected&&!v.Writable(),"Failed mutation left the old mount writable");
+   Reject([&]{v.Stat(id);},"Failed mutation exposed the staged catalog through Stat");
+  }
+  const auto writes=failed.writes;
+  Volume recovered(failed,false);
+  Check(recovered.Stat(id).name==(afterCommit&&!attributes?u"Renamed":u"Original")&&
+        recovered.GetAttributes(id)==(afterCommit&&attributes?replacement:original),
+        "Read-only replay recovered the wrong side of a mutation");
+  Verify(recovered,id);
+  Check(failed.writes==writes,"Read-only mutation recovery wrote the image");
+ }
+}
 void Times(Volume::FormatKind kind,bool journaled){
  Memory source;Volume::Format(source,u"Expanded",journaled,kind,true);uint32_t id;
  std::array<uint64_t,2> dates{Time::Epoch,Time::Maximum};
@@ -62,7 +98,8 @@ int RunHfsPlusOtherFeaturesTests(const wchar_t* directory){
  if(!CreateDirectoryW(directory,nullptr))return 2;std::wstring root=directory;FILE* report=_wfopen((root+L"\\other-hfsplus-features-report.txt").c_str(),L"w");if(!report)return 2;
  try{
   Check(Time::Decode(0,false)==0&&Time::Decode(0,true)==Time::Epoch&&Time::Decode(UINT32_MAX,true)==Time::Maximum,"Timestamp boundary decoding");
-  for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive}){for(bool journaled:{false,true})Times(kind,journaled);External(kind);}
+  for(auto kind:{Volume::FormatKind::HfsPlus,Volume::FormatKind::HfsXCaseSensitive,Volume::FormatKind::HfsXCaseInsensitive}){MutationBoundary(kind);for(bool journaled:{false,true})Times(kind,journaled);External(kind);}
+  fprintf(report,"PASS: rename and attribute validation, write fencing, and recovery before and after the journal commit.\n");
   fprintf(report,"PASS: expanded timestamps, 1970/2040/2106 bounds, mixed catalog epochs, no wrapping, metadata/compression preservation and journal crash recovery in HFS+ and both HFSX modes.\n");
   fprintf(report,"PASS: external journal selection, internal-to-external switch/replay, every commit boundary, read-only replay, all home/journal write/flush failure positions, missing/wrong device refusal and disjoint journal enlargement. Injected devices only.\n");
   auto image=root+L"\\external.dsk",journal=root+L"\\journal.img",wrong=root+L"\\wrong.img";auto identity=CreateExternalJournalImage(journal.c_str(),16*1024*1024);CreateExternalJournalImage(wrong.c_str(),16*1024*1024);

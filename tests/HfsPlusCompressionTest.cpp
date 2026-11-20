@@ -524,7 +524,11 @@ Image Filesystem(Volume::FormatKind kind, bool bitmap = false) {
     }
     {
         Image spoof = disk;
-        P32(spoof.Value(link) + 12, date + 1);
+        // A valid link can match either creation date, and the fixture may
+        // create the private directory one second after the root.
+        const auto privateDate = U32(spoof.Value(metadata) + 12);
+        const auto otherDate = (date ^ 1u) == privateDate ? date ^ 2u : date ^ 1u;
+        P32(spoof.Value(link) + 12, otherDate);
         Volume v(spoof);
         Check(!v.Stat(link).hardLink && !v.Stat(link).forks[0].size,
               "Finder-signature lookalike incorrectly resolved as hard link");
