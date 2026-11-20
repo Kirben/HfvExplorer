@@ -1646,9 +1646,9 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* hardLink=std::get_if<CatalogHardLink>(&request);
-    const auto* timestamp=std::get_if<CatalogFileTimestamp>(&request);
+    const auto* properties=std::get_if<CatalogFileProperties>(&request);
     const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):
-                    hardLink?EncodeCatalogName(hardLink->name):timestamp?EncodeCatalogName(timestamp->name):std::string{};
+                    hardLink?EncodeCatalogName(hardLink->name):properties?EncodeCatalogName(properties->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     const auto* linkReplacement=std::get_if<CatalogReplaceSymlink>(&request);
     const auto dates=replace?replace->dates:create?create->dates:linkReplacement?linkReplacement->dates:std::optional<FileDates>{};
@@ -1676,11 +1676,11 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto symlinkCount=Le64(volume.data()+200);
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
-    if(timestamp){
+    if(properties){
         Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
               !Le64(volume.data()+48)&&flags==1&&Le64(volume.data()+264)==1&&
               Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
-              "Unsupported APFS volume features for a timestamp edit");
+              "Unsupported APFS volume features for a Properties edit");
     }else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -1721,37 +1721,42 @@ CatalogWritePlan PrepareCatalogMutation(
     size_t streamAt=0;
     const auto entryId=std::visit([nextId](const auto& edit){
         if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogCreate>)return nextId;
-        else if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogFileTimestamp>)return uint64_t(0);
+        else if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogFileProperties>)return uint64_t(0);
         else return edit.inode;
     },request);
     std::set<uint64_t> retiredStreams;
     std::vector<OwnedRecord> catalog;
-    if(timestamp){
+    if(properties){
         catalog=std::move(existing.records);
         uint64_t file=0;
         for(const auto& record:catalog){
             if(record.key.size()!=13+name.size()||
-               Le64(record.key.data())!=((uint64_t(9)<<60)|timestamp->parent)||
+               Le64(record.key.data())!=((uint64_t(9)<<60)|properties->parent)||
                memcmp(record.key.data()+12,name.c_str(),name.size()+1))continue;
             Check(!file&&record.value.size()==18&&Le16(record.value.data()+16)==8,
-                  "APFS timestamp target must be an unlinked regular file");
+                  "APFS Properties target must be an unlinked regular file");
             file=Le64(record.value.data());
         }
-        Check(file>=16&&file<nextId,"APFS timestamp target was not found");
+        Check(file>=16&&file<nextId,"APFS Properties target was not found");
         bool edited=false;
         for(auto& record:catalog){
             if(record.key.size()!=8||Le64(record.key.data())!=((uint64_t(3)<<60)|file))continue;
             auto& value=record.value;
-            Check(!edited&&value.size()>=92&&Le64(value.data())==timestamp->parent&&
-                  Le32(value.data()+56)==1&&(Le16(value.data()+80)&0170000)==0100000&&
-                  !(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
-                  "APFS timestamp target inode is locked or unsupported");
-            if(timestamp->dates.created)Set(value,16,CatalogTimestamp(*timestamp->dates.created),8);
-            if(timestamp->dates.modified)Set(value,24,CatalogTimestamp(*timestamp->dates.modified),8);
+            Check(!edited&&value.size()>=92&&Le64(value.data())==properties->parent&&
+                  Le32(value.data()+56)==1&&(Le16(value.data()+80)&0170000)==0100000,
+                  "APFS Properties target inode is unsupported");
+            const auto flags=Le32(value.data()+68);
+            const bool unlocking=properties->locked==false;
+            Check(!(flags&SystemImmutable)&&(!(flags&UserImmutable)||unlocking),
+                  "Unlock the APFS file before editing its properties");
+            if(properties->locked)
+                Set(value,68,(flags&~UserImmutable)|(*properties->locked?UserImmutable:0),4);
+            if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
+            if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
             Set(value,32,time,8);
             edited=true;
         }
-        Check(edited,"APFS timestamp target inode was not found");
+        Check(edited,"APFS Properties target inode was not found");
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});

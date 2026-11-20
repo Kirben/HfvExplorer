@@ -39,9 +39,10 @@ uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t p
 struct TimestampEdits {
     std::optional<uint64_t> created,modified;
 };
-// Narrow timestamp mutation for independently formatted volumes.
-uint64_t SetCatalogFileTimes(HfsPlus::Source&,const Container&,uint64_t parent,
-                             const std::u16string& name,TimestampEdits,Storage::Job&);
+// Edits fixed inode fields on supported independently formatted volumes.
+uint64_t SetCatalogFileProperties(HfsPlus::Source&,const Container&,uint64_t parent,
+                                  const std::u16string& name,TimestampEdits,Storage::Job&,
+                                  std::optional<bool> locked={});
 uint64_t SetEntryProperties(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                             const FinderBytes&,TimestampEdits,bool locked,Storage::Job&);
 inline constexpr size_t EmbeddedAttributeLimit=3804;
