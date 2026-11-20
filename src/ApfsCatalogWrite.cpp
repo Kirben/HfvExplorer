@@ -211,7 +211,7 @@ void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<DataRun> ranges,u
 template<class RequiredMetadata>
 std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& container,
                               Bytes& space,Bytes& superblock,const CheckpointObjectLookup& ephemeral,
-                              const std::vector<uint64_t>& retire,uint64_t extents,uint64_t snapshots,
+                              const std::vector<uint64_t>& retire,const std::vector<uint64_t>& extentNodes,uint64_t snapshots,
                               const std::vector<FileRun>& files,std::vector<DataRun> retiredData,
                               uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
                               uint64_t transaction,RequiredMetadata requiredMetadata)
@@ -337,14 +337,15 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         Check(block<pool||!Range(block-pool,1,poolSize),"APFS volume object overlaps the internal pool");
         verify(block,1);
     }
-    verify(extents,1);
+    for(const auto block:extentNodes)verify(block,1);
     verify(snapshots,1);
 
     const auto within=[](uint64_t block,uint64_t start,uint64_t count){
         return block>=start&&block-start<count;
     };
     const auto isMetadata=[&](uint64_t block){
-        return !block||block==extents||block==snapshots||
+        return !block||block==snapshots||
+               std::find(extentNodes.begin(),extentNodes.end(),block)!=extentNodes.end()||
                within(block,Le64(superblock.data()+112),Le32(superblock.data()+104))||
                within(block,Le64(superblock.data()+120),Le32(superblock.data()+108))||
                within(block,currentBitmapBase,bitmapSlots)||within(block,pool,poolSize)||
@@ -502,16 +503,51 @@ bool Matches(View view,const Bytes& expected)
     return view.size==expected.size()&&!memcmp(view.data,expected.data(),view.size);
 }
 
-void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
+CatalogRecords ReadExtentTree(Source& source,const Container& container,uint64_t block)
+{
+    CatalogRecords tree;
+    tree.blocks.push_back(block);
+    const Node root(ReadObject(source,container,block,block,container.transaction,2,15,true),true,{});
+    Check(root.Level()<=1&&!root.Layout().keySize&&!root.Layout().valueSize,
+          "Unsupported APFS extent reference tree layout");
+    const auto append=[&](const Node& leaf){
+        Check(!leaf.Level(),"Invalid APFS extent reference leaf level");
+        for(size_t i=0;i<leaf.Count();++i){
+            const auto record=leaf.At(i);
+            Check(record.key.size==8&&record.value.size==20,"Invalid APFS extent reference record size");
+            tree.records.push_back({Bytes(record.key.data,record.key.data+8),Bytes(record.value.data,record.value.data+20)});
+        }
+    };
+    if(!root.Level())append(root);
+    else{
+        Check(root.Count()>0,"Empty APFS extent reference index");
+        std::set<uint64_t> seen{block};
+        for(size_t i=0;i<root.Count();++i){
+            const auto separator=root.At(i);
+            Check(separator.key.size==8&&separator.value.size==8,"Invalid APFS extent reference index key");
+            const auto child=Le64(separator.value.data);
+            Check(seen.insert(child).second,"Repeated APFS extent reference leaf");
+            const Node leaf(ReadObject(source,container,child,child,container.transaction,3,15,true),false,{});
+            Check(leaf.Count()>0,"Empty APFS extent reference leaf");
+            const auto first=leaf.At(0).key;
+            Check(first.size==8&&!memcmp(first.data,separator.key.data,8),"Invalid APFS extent reference separator");
+            append(leaf);
+            tree.blocks.push_back(child);
+        }
+    }
+    return tree;
+}
+
+void ValidateExtentReferences(const CatalogRecords& tree,std::vector<FileRun>& files)
 {
     std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
-    Check(!tree.Level()&&tree.Count()==files.size(),"APFS extent reference count disagrees with the catalog");
+    Check(tree.records.size()==files.size(),"APFS extent reference count disagrees with the catalog");
     uint64_t end=0;
     for(size_t i=0;i<files.size();++i){
         const auto& run=files[i];
-        const auto record=tree.At(i);
+        const auto& record=tree.records[i];
         const auto expected=ExtentReference(run);
-        Check(run.block>=end&&Matches(record.key,expected.key)&&Matches(record.value,expected.value),
+        Check(run.block>=end&&record.key==expected.key&&record.value==expected.value,
               "Invalid, shared or overlapping APFS extent reference");
         end=run.block+run.count;
     }
@@ -1070,6 +1106,34 @@ std::vector<Mapping> StageCatalog(Writes& writes,const CatalogLeaves& leaves,con
     StageObject(writes,blocks[0],std::move(root),rootOid,tx,2,14);
     return mappings;
 }
+void StageExtentTree(Writes& writes,const CatalogLeaves& leaves,const std::vector<uint64_t>& allocation,
+                     size_t firstLeaf,uint64_t transaction)
+{
+    constexpr uint32_t flags=0x50;
+    const auto rootBlock=allocation[6];
+    if(leaves.size()==1){
+        StageObject(writes,rootBlock,EncodeLeaf(leaves.front(),flags),rootBlock,transaction,Physical|2,15);
+        return;
+    }
+    std::vector<OwnedRecord> separators;
+    size_t records=0;
+    for(size_t index=0;index<leaves.size();++index){
+        const auto block=allocation[firstLeaf+index];
+        const auto& leaf=leaves[index];
+        OwnedRecord separator{leaf.front().key,Bytes(8)};
+        Set(separator.value,0,block,8);
+        separators.push_back(std::move(separator));
+        records+=leaf.size();
+        StageObject(writes,block,WriterDisk::EncodeNode(leaf,flags,false,0),block,transaction,Physical|3,15);
+    }
+    auto root=WriterDisk::EncodeNode(separators,flags,true,1);
+    constexpr auto footer=Block-WriterDisk::TreeFooter;
+    Set(root,footer+20,20,4);
+    Set(root,footer+24,records,8);
+    Set(root,footer+32,leaves.size()+1,8);
+    StageObject(writes,rootBlock,std::move(root),rootBlock,transaction,Physical|2,15);
+}
+
 void CheckNativeVolume(const Bytes& volume)
 {
     const auto flags=Le64(volume.data()+56);
@@ -1132,9 +1196,9 @@ void ValidateWritableLayout(Source& source,const Container& container)
     const auto volume=ReadObject(source,container,map.mappings.front().block,oid,container.transaction,13);
     CheckNativeVolume(volume);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
-    const Node extentTree(ReadObject(source,container,extents,extents,container.transaction,2,15,true),true,{});
+    ReadExtentTree(source,container,extents);
     const Node snapshotTree(ReadObject(source,container,snapshots,snapshots,container.transaction,2,16,true),true,{});
-    Check(!extentTree.Level()&&!snapshotTree.Level()&&!snapshotTree.Count(),"Unsupported APFS extent or snapshot tree");
+    Check(!snapshotTree.Level()&&!snapshotTree.Count(),"Unsupported APFS extent or snapshot tree");
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
     ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
 }
@@ -1177,7 +1241,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     CheckNativeVolume(volume);
-    const Node extentTree(ReadObject(source,current,extents,extents,current.transaction,2,15,true),true,{});
+    const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
     Check(!snapshotTree.Level()&&!snapshotTree.Count(),"APFS catalog writes require an empty snapshot tree");
     const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128));
@@ -1244,13 +1308,14 @@ CatalogWritePlan PrepareCatalogMutation(
     std::vector<uint64_t> retired{containerMap.headerBlock,containerMap.rootBlock,volumeAddress,
                                   volumeMap.headerBlock,volumeMap.rootBlock};
     retired.insert(retired.end(),existing.blocks.begin(),existing.blocks.end());
-    if(changeExtents)retired.push_back(extents);
+    if(changeExtents)retired.insert(retired.end(),extentTree.blocks.begin(),extentTree.blocks.end());
     const size_t firstChild=changeExtents?7:6;
     CatalogLeaves leaves;
-    size_t children=0;
+    size_t children=0,extentChildren=0;
+    CatalogLeaves extentLeaves;
     std::vector<DataRun> allocatedData;
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
-        retired,extents,snapshots,files,std::move(retiredData),dataBlocks,allocatedData,transaction,[&]{
+        retired,extentTree.blocks,snapshots,files,std::move(retiredData),dataBlocks,allocatedData,transaction,[&]{
             AssignDataRuns(plan.streams,allocatedData);
             if(fileBlocks){
                 std::vector<OwnedRecord> stream;
@@ -1274,18 +1339,21 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             leaves=PartitionCatalog(std::move(catalog));
             children=leaves.size()>1?leaves.size():0;
-            return firstChild+children;
+            if(changeExtents){
+                std::vector<FileRun> updated;
+                for(const auto& run:files)if(!retiredRun(run))updated.push_back(run);
+                for(const auto& stream:plan.streams)
+                    for(const auto& run:stream.runs)updated.push_back({entryId,run.block,run.count,stream.id});
+                std::sort(updated.begin(),updated.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+                std::vector<OwnedRecord> references;
+                for(const auto& run:updated)references.push_back(ExtentReference(run));
+                extentLeaves=PartitionCatalog(std::move(references));
+                extentChildren=extentLeaves.size()>1?extentLeaves.size():0;
+            }
+            return firstChild+children+extentChildren;
         });
     if(changeExtents){
-        files.erase(std::remove_if(files.begin(),files.end(),retiredRun),files.end());
-        if(fileBlocks)
-            for(const auto& data:plan.streams.front().runs)files.push_back({entryId,data.block,data.count});
-        for(const auto& stream:plan.streams)if(stream.id)
-            for(const auto& data:stream.runs)files.push_back({entryId,data.block,data.count,stream.id});
-        std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
-        std::vector<OwnedRecord> references;
-        for(const auto& file:files)references.push_back(ExtentReference(file));
-        StageObject(writes,allocated[6],EncodeLeaf(references,0x50),allocated[6],transaction,Physical|2,15);
+        StageExtentTree(writes,extentLeaves,allocated,firstChild+children,transaction);
         Set(volume,144,allocated[6],8);
     }
     const auto firstOid=Le64(superblock.data()+88);
@@ -1296,13 +1364,14 @@ CatalogWritePlan PrepareCatalogMutation(
     }
     const auto mappings=StageCatalog(writes,leaves,allocated,firstChild,catalogOid,firstOid,transaction);
     StageMap(writes,volumeMap,allocated[1],allocated[2],mappings,transaction);
-    const auto oldChildren=existing.blocks.size()-1;
+    const auto oldChildren=existing.blocks.size()-1+(changeExtents?extentTree.blocks.size()-1:0);
+    const auto newChildren=children+extentChildren;
     const auto volumeBlocks=Le64(volume.data()+88);
     const auto removedVolumeBlocks=oldChildren+removedBlocks;
     Check(volumeBlocks>=removedVolumeBlocks&&volumeBlocks<=current.blockCount&&
-          dataBlocks+children<=current.blockCount-(volumeBlocks-removedVolumeBlocks),
+          dataBlocks+newChildren<=current.blockCount-(volumeBlocks-removedVolumeBlocks),
           "Invalid APFS volume allocation count");
-    Set(volume,88,volumeBlocks-removedVolumeBlocks+children+dataBlocks,8);
+    Set(volume,88,volumeBlocks-removedVolumeBlocks+newChildren+dataBlocks,8);
     Set(volume,128,allocated[1],8);
     Set(volume,176,nextAvailable,8);
     if(create){
@@ -1314,7 +1383,7 @@ CatalogWritePlan PrepareCatalogMutation(
     }
     Set(volume,256,time,8);
     const uint64_t replaced=changeExtents?4:3;
-    const auto newVolumeBlocks=replaced+children+dataBlocks,oldVolumeBlocks=replaced+removedVolumeBlocks;
+    const auto newVolumeBlocks=replaced+newChildren+dataBlocks,oldVolumeBlocks=replaced+removedVolumeBlocks;
     Check(Le64(volume.data()+224)<=UINT64_MAX-newVolumeBlocks&&Le64(volume.data()+232)<=UINT64_MAX-oldVolumeBlocks,
           "APFS volume allocation history overflow");
     Set(volume,224,Le64(volume.data()+224)+newVolumeBlocks,8);

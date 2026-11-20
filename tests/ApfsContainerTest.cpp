@@ -1322,6 +1322,63 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: distinct APFS names with the same hash, duplicate protection, and case-only rename.\n");
 }
 
+void ExtentReferenceGrowth(const std::string& root,FILE* report)
+{
+    const auto path=VolumeCoord::Wide(root+"apfs-extent-tree.img");
+    {
+        auto disk=CreateFormatOutput(path.c_str(),8*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Extent reference tree",false,job);
+        disk->Keep();
+    }
+    const auto level=[&]{
+        auto disk=OpenImage(path.c_str(),false);
+        const auto checkpoint=Apfs::Probe(*disk);
+        const Apfs::ObjectMap map(*disk,*checkpoint,checkpoint->objectMap,checkpoint->transaction);
+        const auto oid=checkpoint->volumes.front();
+        const auto address=map.Lookup(oid);
+        Check(address.has_value(),"Missing APFS test volume");
+        const auto volume=Apfs::ReadObject(*disk,*checkpoint,*address,oid,checkpoint->transaction,13);
+        const auto extent=Apfs::Le64(volume.data()+144);
+        const Apfs::Node rootNode(Apfs::ReadObject(*disk,*checkpoint,extent,extent,checkpoint->transaction,2,15,true),true,{});
+        return rootNode.Level();
+    };
+    MacBrowser::Entry entry;
+    entry.name=u"Many streams";
+    for(unsigned index=0;index<135;++index){
+        const auto name=u"user.stream."+MacBrowser::U16(std::to_wstring(index));
+        entry.attributes.emplace(name,Bytes(4001,uint8_t(index)));
+    }
+    {
+        const auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Writable(),"Could not mount APFS extent test image");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        volume->Put(2,entry,{},false);
+    }
+    Check(level()==1,"APFS extent references did not grow past one leaf");
+    {
+        const auto volume=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry loaded;
+        Check(volume&&volume->Writable()&&volume->FindChild(2,entry.name,loaded),
+              "Could not reopen APFS with an extent reference index");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        Check(volume->GetAttributes(loaded.id)==entry.attributes,"Multi-leaf APFS extent references lost stream data");
+        volume->Rename(loaded.id,2,u"Renamed streams");
+        volume->SetAttributes(loaded.id,{{u"user.small",{7}}});
+    }
+    Check(level()==0,"APFS extent references did not shrink after stream removal");
+    {
+        const auto volume=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry loaded;
+        Check(volume&&volume->Writable()&&volume->FindChild(2,u"Renamed streams",loaded),
+              "Could not reopen compacted APFS extent references");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        volume->SetAttributes(loaded.id,entry.attributes);
+    }
+    Check(level()==1,"APFS extent reference tree did not regrow after reclaiming streams");
+    fprintf(report,"PASS: APFS extent reference tree growth, reopen, rename, shrink and regrowth across 135 streams.\n");
+}
+
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
     const auto path=VolumeCoord::Wide(root+"apfs-compressed-copy.img");
@@ -2166,6 +2223,7 @@ int RunApfsContainerTest(const char* directory)
         DirectoryHashCollisions(root,report);
         UnicodeCatalogNames(root,report);
         FinderMetadataWrites(root,report);
+        ExtentReferenceGrowth(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
