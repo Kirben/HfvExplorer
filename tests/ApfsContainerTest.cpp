@@ -2350,16 +2350,17 @@ Memory Gpt(const Memory& raw,unsigned sector,bool readOnly=false)
     memcpy(boot+start,raw.bytes.data(),raw.bytes.size());
     return disk;
 }
-void WritableGptImages(const std::string& root,FILE* report)
+void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFixture=nullptr)
 {
-    auto baseline=OpenImage(VolumeCoord::Wide(root+"checkpoint-before.img").c_str(),false);
+    const auto baselinePath=macFixture?std::wstring(macFixture):VolumeCoord::Wide(root+"checkpoint-before.img");
+    auto baseline=OpenImage(baselinePath.c_str(),false);
     Memory raw(size_t(baseline->Size()));
     baseline->Read(0,raw.bytes.data(),raw.bytes.size());
     constexpr size_t start=1024*1024;
     for(const unsigned sector:{512u,4096u}){
         for(const bool readOnly:{false,true}){
             const auto disk=Gpt(raw,sector,readOnly);
-            const auto suffix=std::to_string(sector)+".img";
+            const auto suffix=(macFixture?"macos-":"")+std::to_string(sector)+".img";
             const auto path=VolumeCoord::Wide(root+(readOnly?"apfs-gpt-readonly-":"apfs-gpt-writable-")+suffix);
             {
                 auto file=CreateFormatOutput(path.c_str(),disk.bytes.size());
@@ -2369,7 +2370,7 @@ void WritableGptImages(const std::string& root,FILE* report)
             }
             {
                 auto volume=MacBrowser::OpenBrowserImage(path);
-                Check(volume&&volume->Writable()==!readOnly,"APFS GPT partition has the wrong write capability");
+                Check(volume&&volume->Supports().writable==!readOnly,"APFS GPT partition has the wrong write capability");
                 if(!readOnly){
                     VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
                     const auto folder=volume->MakeDirectory(2,u"Partition test");
@@ -2394,7 +2395,7 @@ void WritableGptImages(const std::string& root,FILE* report)
                 auto volume=MacBrowser::OpenBrowserImage(path);
                 MacBrowser::Entry folder,payload;
                 std::array<uint8_t,9> tail{};
-                Check(volume&&volume->Writable()&&volume->FindChild(2,u"Edited partition",folder)&&
+                Check(volume&&volume->Supports().writable&&volume->FindChild(2,u"Edited partition",folder)&&
                       volume->FindChild(folder.id,u"Payload",payload),"APFS edits inside GPT did not survive reopening");
                 volume->Read(payload.id,0,8002,tail.data(),tail.size());
                 Check(std::all_of(tail.begin(),tail.end(),[](uint8_t value){return value==0x6a;}),
@@ -2407,7 +2408,8 @@ void WritableGptImages(const std::string& root,FILE* report)
             }
         }
     }
-    fprintf(report,"PASS: APFS writes in GPT slices, 512/4096 sector geometry, read-only flags, unchanged partition tables and file readback.\n");
+    fprintf(report,"PASS: %s APFS writes in GPT slices, 512/4096 sector geometry, read-only flags, unchanged partition tables and file readback.\n",
+            macFixture?"macOS-created":"HFVExplorer-created");
 }
 
 }
@@ -2533,6 +2535,7 @@ int RunApfsContainerTest(const char* directory)
             for(size_t i=0;i<decoded.size();i+=28)
                 Check(!memcmp(decoded.data()+i,"a compressible line of text\n",28),
                       "Independent APFS compressed contents differed from expected");
+            WritableGptImages(root,report,fixture);
             const auto raw=OpenImage(fixture,false);
             const auto before=Apfs::Probe(*raw);
             Check(before.has_value(),"Missing macOS-generated APFS checkpoint");

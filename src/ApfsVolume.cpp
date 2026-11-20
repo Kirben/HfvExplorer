@@ -1371,7 +1371,6 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
         ValidateWritableLayout(*source,*expected);
         WritableFreeBytes(*source,*expected);
     }catch(const Error&){
-        if(partition)return OpenMounted(source,key,*expected,false);
         try{
             InspectFreeQueueAllocation(*source,*expected);
             limitedEdits=true;
