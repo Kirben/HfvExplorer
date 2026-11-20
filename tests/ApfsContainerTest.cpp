@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-symlink.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-symlink.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2622,6 +2622,14 @@ int RunApfsContainerTest(const char* directory)
                     const auto retained=Apfs::Probe(interruptedLink);
                     Check(cancelled&&retained&&retained->transaction==checkpoint.transaction,
                           "Cancelled APFS symbolic-link overwrite published a checkpoint");
+                    Storage::Job cancelDelete;
+                    interruptedLink.onFlush=[&]{cancelDelete.cancel();};
+                    bool deletionCancelled=false;
+                    try{Apfs::DeleteEntry(interruptedLink,checkpoint,2,symlinkInode,cancelDelete,0,true);}
+                    catch(const Storage::Cancelled&){deletionCancelled=true;}
+                    const auto afterCancellation=Apfs::Probe(interruptedLink);
+                    Check(deletionCancelled&&afterCancellation&&afterCancellation->transaction==checkpoint.transaction,
+                          "Cancelled APFS symbolic-link deletion published a checkpoint");
                     auto memory=std::make_unique<Memory>(interruptedLink.durable.size());
                     memory->bytes=std::move(interruptedLink.durable);
                     std::unique_ptr<Source> source=std::move(memory);
@@ -2629,7 +2637,7 @@ int RunApfsContainerTest(const char* directory)
                     MacBrowser::Entry original;
                     Check(reopened&&reopened->FindChild(2,u"Renamed symbolic link",original)&&
                           reopened->SymbolicLinkTarget(original.id)==authentic->SymbolicLinkTarget(symlink.id),
-                          "Cancelled APFS symbolic-link overwrite changed the original target");
+                          "Cancelled APFS symbolic-link deletion or overwrite changed the original target");
                     Reject([&]{reopened->Read(original.id,0,0,nullptr,0);},
                            "Cancelled APFS copy followed the original symbolic-link target");
                 }
@@ -2925,6 +2933,21 @@ int RunApfsContainerTest(const char* directory)
             Check(published->FindChild(2,u"Cancel tree",tree)&&
                   published->FindChild(tree.id,u"Kept child.bin",kept),"Missing recursive deletion fixture");
             const auto subfolderId=published->MakeDirectory(tree.id,u"Nested empty folder");
+            MacBrowser::Entry liveLink,treeLink;
+            liveLink.name=u"Link to unrelated file";
+            const auto targetBytes=[](std::string_view path){
+                Bytes result(path.begin(),path.end());
+                result.push_back(0);
+                return result;
+            };
+            Storage::Job links;
+            published->PutSymbolicLink(2,liveLink,targetBytes("Created data.bin"),links);
+            published->PutSymbolicLink(tree.id,liveLink,targetBytes("../Created data.bin"),links);
+            Check(published->FindChild(2,liveLink.name,liveLink)&&liveLink.symbolicLink&&
+                  published->FindChild(tree.id,liveLink.name,treeLink)&&treeLink.symbolicLink,
+                  "Missing APFS links to an existing file");
+            Check(!erase(liveLink.id).code&&!published->FindChild(2,liveLink.name,subfolder),
+                  "External APFS browser did not delete the symbolic link");
             auto lockedChild=kept;
             lockedChild.protectedFile=true;
             published->SetBasicMetadata(kept.id,lockedChild);
@@ -2938,13 +2961,14 @@ int RunApfsContainerTest(const char* directory)
                   "External APFS browser did not recursively delete the tree");
             Reject([&]{published->Stat(kept.id);},"Deleted APFS descendant still resolved");
             Reject([&]{published->Stat(subfolderId);},"Deleted APFS folder still resolved");
+            Reject([&]{published->Stat(treeLink.id);},"Recursively deleted APFS symbolic link still resolved");
             Check(!erase(child.id).code&&!published->FindChild(renamedFolder.id,u"New APFS folder",child),
                   "External APFS browser did not delete the empty folder");
             Check(!erase(replaced).code&&!published->FindChild(2,toCopy.name,child),
                   "External APFS browser did not delete the overwritten file");
             Bytes unrelated(importedBytes.size());
             published->Read(imported.id,0,0,unrelated.data(),unrelated.size());
-            Check(unrelated==importedBytes,"APFS deletion changed unrelated file bytes");
+            Check(unrelated==importedBytes,"APFS symbolic-link deletion changed the referenced file bytes");
             renamedFolder=published->Stat(renamedFolder.id);
             auto desired=renamedFolder;
             desired.modified=editedTime;

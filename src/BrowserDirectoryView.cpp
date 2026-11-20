@@ -93,7 +93,8 @@ bool CHFVExplorerListView::BrowserSelectionAllows(bool rename)const{
   const auto model=BrowserRowAt(row);
   if(!model)continue;
   selected=true;
-  if(model->location.IsNone()||!model->entry.readError.empty()||!(rename?model->capabilities.rename:model->capabilities.remove))return false;
+  const bool unreadable=!model->entry.readError.empty()&&(rename||!model->entry.symbolicLink);
+  if(model->location.IsNone()||unreadable||!(rename?model->capabilities.rename:model->capabilities.remove))return false;
  }
  return selected;
 }

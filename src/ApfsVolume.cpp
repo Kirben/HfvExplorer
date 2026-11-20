@@ -275,6 +275,7 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         entry.compressed=(Le32(p+68)&0x20)!=0;
         entry.protectedFile=(Le32(p+68)&(UserImmutable|SystemImmutable))!=0;
         out.symlink=mode==0120000;
+        entry.symbolicLink=out.symlink;
         if(out.symlink)entry.readError="APFS symbolic links cannot be exported";
         else if(!entry.directory&&mode!=0100000)entry.readError="APFS special files are unsupported";
         if(record.value.size==inodeSize)return;
@@ -1228,9 +1229,9 @@ public:
             const auto& entry=At(id).entry;
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             if(limitedEdits)
-                Check(!entry.hardLink&&!entry.compressed&&entry.readError.empty()&&
+                Check(!entry.hardLink&&!entry.compressed&&(entry.readError.empty()||At(id).symlink)&&
                       (!entry.directory||ListDirectory(id).empty()),
-                      "This APFS image can only delete unlinked, uncompressed files and empty folders");
+                      "This APFS image can only delete unlinked, uncompressed files, symbolic links, and empty folders");
             return true;
         });
     }
