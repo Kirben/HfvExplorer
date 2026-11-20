@@ -3,6 +3,7 @@
 #ifdef HFV_TESTING
 #include "DmgImage.h"
 #include "DmgEncryption.h"
+#include "SparseDisk.h"
 #include "BrowserSession.h"
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
@@ -469,6 +470,50 @@ Bytes LegacyEnvelope(const Bytes& plain,const Dmg::Password& password)
     file.insert(file.end(),trailer.begin(),trailer.end());
     return file;
 }
+std::wstring EncryptedBundle(const std::string& path,const Bytes& raw,unsigned bits,bool aesWrap,
+                             const Dmg::Password& password)
+{
+ const auto wide=VolumeCoord::Wide(path);
+ Check(CreateDirectoryW(wide.c_str(),nullptr)&&CreateDirectoryW((wide+L"\\bands").c_str(),nullptr),
+       "Create encrypted bundle fixture directory");
+ constexpr size_t band=1024*1024;
+ const auto plist=std::string("<plist><dict><key>bundle-backingstore-version</key><integer>1</integer>"
+                  "<key>diskimage-bundle-type</key><string>com.apple.diskimage.sparsebundle</string>"
+                  "<key>band-size</key><integer>1048576</integer><key>size</key><integer>")+
+                  std::to_string(raw.size())+"</integer></dict></plist>";
+ Save(path+"\\Info.plist",Bytes(plist.begin(),plist.end()));
+ Save(path+"\\token",Envelope({},bits,aesWrap,password));
+ for(size_t at=0;at<raw.size();at+=band){
+  const auto first=raw.begin()+at,last=first+(std::min)(band,raw.size()-at);
+  const auto nonzero=std::find_if(std::make_reverse_iterator(last),std::make_reverse_iterator(first),
+                                 [](auto n){return n!=0;});
+  if(nonzero.base()==first)continue; // Missing bands represent logical zeros.
+  const auto packed=Envelope(Bytes(first,nonzero.base()),bits,aesWrap,password);
+  char name[17]{};
+  sprintf_s(name,"%llx",static_cast<unsigned long long>(at/band));
+  Save(path+"\\bands\\"+name,Bytes(packed.begin()+1536,packed.end()));
+ }
+ return wide;
+}
+
+void VerifyNativeBundle(const std::wstring& path)
+{
+ const Dmg::Password password(L"ewfprobe-test-password");
+ const auto bundle=SparseDisk::OpenBundle(path,&password);
+ Check(bundle&&bundle->Size()==2129920,"Unexpected native encrypted bundle geometry");
+ auto plain=Disk::Read(*bundle,0,size_t(bundle->Size()));
+ TestAlgorithm algorithm(BCRYPT_SHA256_ALGORITHM);
+ auto memory=algorithm.Object();
+ struct Hash {BCRYPT_HASH_HANDLE h=nullptr;~Hash(){if(h)BCryptDestroyHash(h);}} hash;
+ Cng(BCryptCreateHash(algorithm.handle,&hash.h,memory.data(),ULONG(memory.size()),nullptr,0,0),"Load fixture SHA-256");
+ Cng(BCryptHashData(hash.h,plain.data(),ULONG(plain.size()),0),"Hash native bundle plaintext");
+ uint8_t digest[32];
+ Cng(BCryptFinishHash(hash.h,digest,sizeof(digest),0),"Finish native bundle SHA-256");
+ const uint8_t expected[]={0x34,0xda,0x28,0x88,0x83,0xb1,0x9c,0xd6,0x73,0x92,0x2b,0x26,0x74,0xd8,0xa2,0x5f,
+     0xaf,0x1d,0x07,0xe7,0xdb,0xd4,0x33,0x52,0x40,0x71,0x8c,0x1c,0x70,0x44,0xea,0x3a};
+ Check(!memcmp(digest,expected,sizeof(expected)),"Native encrypted bundle plaintext differs from hdiutil");
+}
+
 void NeedsPassword(std::unique_ptr<Source>& file,const Dmg::Password* password,bool retry)
 {
  try{Dmg::Unlock(file,password);}
@@ -495,7 +540,7 @@ public:
 };
 IMPLEMENT_DYNCREATE(EncryptedDmgFrame,CMainFrame)
 
-void BrowserPrompt(const CString& root,const std::wstring& path,
+void BrowserPrompt(const CString& root,std::initializer_list<std::wstring> paths,
                    const std::shared_ptr<const Dmg::Password>& password)
 {
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
@@ -510,25 +555,28 @@ void BrowserPrompt(const CString& root,const std::wstring& path,
  auto& session=frame->GetBrowserSession();
  Check(session.AwaitNavigationForTest()&&session.ListingAvailable(),"Open the initial Windows folder");
  auto& browser=session.MacBrowser();
- unsigned prompts=0;
- browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
-  Check(!retry,"Initial encrypted DMG prompt was a retry");
-  ++prompts;
-  return {};
- });
- Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest()&&prompts==1&&
-       session.ListingAvailable()&&browser.TargetFolder().IsWindows(),"Cancelled password changed the browser listing");
- browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
-  ++prompts;
-  Check(retry==(prompts==3),"Unexpected password retry state");
-  if(!retry)return std::make_shared<Dmg::Password>(L"wrong");
-  return password;
- });
- Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest()&&prompts==3&&
-       browser.Active()&&session.ListingAvailable()&&!browser.Writable()&&
-       session.WindowTitle().find(L"Encrypted fixture")!=std::wstring::npos,
-       "Encrypted DMG did not mount after a wrong password followed by the right one");
- browser.SetPasswordPromptForTest({});
+ for(const auto& path:paths){
+  const auto priorTitle=session.WindowTitle();
+  unsigned prompts=0;
+  browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
+   Check(!retry,"Initial encrypted image prompt was a retry");
+   ++prompts;
+   return {};
+  });
+  Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest()&&prompts==1&&
+        session.ListingAvailable()&&session.WindowTitle()==priorTitle,"Cancelled password changed the browser listing");
+  browser.SetPasswordPromptForTest([&](bool retry)->std::shared_ptr<const Dmg::Password>{
+   ++prompts;
+   Check(retry==(prompts==3),"Unexpected password retry state");
+   if(!retry)return std::make_shared<Dmg::Password>(L"wrong");
+   return password;
+  });
+  Check(browser.OpenImage(path)==1&&session.AwaitNavigationForTest()&&prompts==3&&
+        browser.Active()&&session.ListingAvailable()&&!browser.Writable()&&
+        session.WindowTitle().find(L"Encrypted fixture")!=std::wstring::npos,
+        "Encrypted image did not mount after a wrong password followed by the right one");
+  browser.SetPasswordPromptForTest({});
+ }
 }
 }
 
@@ -600,7 +648,60 @@ int RunEncryptedDmgTest(const char* directory)
   }
   const auto packed=Pack({{{Zlib,0,raw.size()/SectorBytes,ZlibBlock(raw)}}},raw.size()/SectorBytes);
   const auto path=Save(root+"\\compressed encrypted.dmg",Envelope(packed,256,true,*password));
-  BrowserPrompt(root.c_str(),path,password);
+  const auto bundle=EncryptedBundle(root+"\\encrypted.sparsebundle",raw,256,true,*password);
+  BrowserPrompt(root.c_str(),{path,bundle},password);
+
+  constexpr size_t band=1024*1024;
+  Bytes bands(2*band+1024);
+  std::fill_n(bands.begin(),513,'A');
+  std::fill_n(bands.begin()+2*band,11,'C');
+  for(const auto aesWrap:{false,true}){
+   const auto sparse=EncryptedBundle(root+(aesWrap?"\\aes.sparsebundle":"\\3des.sparsebundle"),
+                                     bands,aesWrap?256:128,aesWrap,*password);
+   try{
+    SparseDisk::OpenBundle(sparse,&wrong);
+    throw Error("Wrong password unlocked an encrypted bundle");
+   }catch(const Dmg::PasswordRequired& required){Check(required.retry,"Expected encrypted bundle password retry");}
+   auto unlocked=SparseDisk::OpenBundle(sparse,password.get());
+   Check(unlocked&&!unlocked->Writable()&&unlocked->ProcessLocal()&&unlocked->WorkerFiles().empty(),
+         "Encrypted sparse bundle did not keep keys and plaintext local");
+   Check(Disk::Read(*unlocked,0,3)==Bytes(3,'A')&&Disk::Read(*unlocked,2*band,3)==Bytes(3,'C')&&
+         Disk::Read(*unlocked,0,3)==Bytes(3,'A')&&Disk::Read(*unlocked,0,bands.size())==bands,
+         "Encrypted bundle changed bytes across short bands, holes, or repeated block numbers");
+   Reject([&]{unlocked->Write(0,bands.data(),1);},"Encrypted bundle accepted a write");
+  }
+  const auto corruptBundle=EncryptedBundle(root+"\\truncated.sparsebundle",bands,128,true,*password);
+  const auto corruptBand=corruptBundle+L"\\bands\\0";
+  const auto oldBand=HfsPlus::OpenImage(corruptBand.c_str(),false)->Size();
+  const auto handle=CreateFileW(corruptBand.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);
+  Check(handle!=INVALID_HANDLE_VALUE,"Open encrypted band for truncation fixture");
+  LARGE_INTEGER end{};
+  end.QuadPart=oldBand-1;
+  const bool truncated=SetFilePointerEx(handle,end,nullptr,FILE_BEGIN)&&SetEndOfFile(handle);
+  CloseHandle(handle);
+  Check(truncated,"Truncate encrypted band fixture");
+  Reject([&]{SparseDisk::OpenBundle(corruptBundle,password.get());},"Encrypted bundle accepted a partial ciphertext block");
+  if(const auto nativeBundle=_wgetenv(L"HFV_ENCRYPTED_BUNDLE_FIXTURE")){
+   VerifyNativeBundle(nativeBundle);
+   fprintf(report,"PASS: macOS hdiutil AES-256 sparse bundle matches the published raw SHA-256.\n");
+  }
+  const auto bundleExtracted=VolumeCoord::Wide(root+"\\bundle.raw");
+  {
+   Storage::Job convertBundle;
+   bool retry=false;
+   try{Dmg::Convert(bundle,bundleExtracted,Dmg::Output::RawImage,convertBundle,&wrong);}
+   catch(const Dmg::PasswordRequired& required){retry=required.retry;}
+   Check(retry&&GetFileAttributesW(bundleExtracted.c_str())==INVALID_FILE_ATTRIBUTES,
+         "Wrong bundle password left a raw output or did not request a retry");
+  }
+  {
+   Storage::Job convertBundle;
+   Check(!Dmg::Convert(bundle,bundleExtracted,Dmg::Output::RawImage,convertBundle,password.get()).code,
+         "Convert encrypted bundle into a raw image");
+   auto result=HfsPlus::OpenImage(bundleExtracted.c_str(),false);
+   Check(result->Size()==raw.size()&&Disk::Read(*result,0,raw.size())==raw,"Encrypted bundle raw conversion changed sectors");
+  }
+  fprintf(report,"PASS: encrypted bundle password retry, per-band CBC, holes, short bands, ciphertext bounds and raw conversion.\n");
   const auto extracted=VolumeCoord::Wide(root+"\\decrypted.img");
   Storage::Job convert;
   Check(!Dmg::Convert(path,extracted,Dmg::Output::RawImage,convert,password.get()).code,
@@ -608,35 +709,37 @@ int RunEncryptedDmgTest(const char* directory)
   auto decrypted=HfsPlus::OpenImage(extracted.c_str(),false);
   Check(decrypted->Size()==raw.size()&&Disk::Read(*decrypted,0,raw.size())==raw,
         "Raw conversion changed encrypted image data");
-  const auto volume=MacBrowser::OpenBrowserImage(path,{},password.get());
-  MacBrowser::Entry entry;
-  Check(volume&&volume->FindChild(2,u"Payload",entry)&&!volume->Writable()&&
-        MacBrowser::ExecutionFor(*volume).processLocal,"Open encrypted and compressed HFS+ in the browser");
-  const auto to=VolumeCoord::Wide(root+"\\export");
-  Check(CreateDirectoryW(to.c_str(),nullptr)!=FALSE,"Create encrypted export directory");
-  const auto source=FileOperations::Location::Mounted(volume,entry.id);
-  FileOperations::Request request=FileOperations::OrdinaryCopy{{source},FileOperations::Location::Windows(to)};
-  request.background=true;
-  CopyProcess::enabled=true;
-  CopyProcess::lastProcess=0;
-  Check(!FileOperations::InspectPlanForTest(request,volume->ResourceKey()).temporaryWorker,
-        "Encrypted image selected a temporary worker");
-  const auto op=FileOperations::Submit(std::move(request));
-  const auto start=GetTickCount();
-  while(!op.Job()->done()){
-   Check(GetTickCount()-start<15000,"Encrypted DMG export timed out");
-   Sleep(5);
+  for(const auto& image:{path,bundle}){
+   const auto volume=MacBrowser::OpenBrowserImage(image,{},password.get());
+   MacBrowser::Entry entry;
+   Check(volume&&volume->FindChild(2,u"Payload",entry)&&!volume->Writable()&&
+         MacBrowser::ExecutionFor(*volume).processLocal,"Open HFS+ from each encrypted image format");
+   const auto to=VolumeCoord::Wide(root+(image==path?"\\export-dmg":"\\export-bundle"));
+   Check(CreateDirectoryW(to.c_str(),nullptr)!=FALSE,"Create encrypted export directory");
+   const auto source=FileOperations::Location::Mounted(volume,entry.id);
+   FileOperations::Request request=FileOperations::OrdinaryCopy{{source},FileOperations::Location::Windows(to)};
+   request.background=true;
+   CopyProcess::enabled=true;
+   CopyProcess::lastProcess=0;
+   Check(!FileOperations::InspectPlanForTest(request,volume->ResourceKey()).temporaryWorker,
+         "Encrypted image selected a temporary worker");
+   const auto op=FileOperations::Submit(std::move(request));
+   const auto start=GetTickCount();
+   while(!op.Job()->done()){
+    Check(GetTickCount()-start<15000,"Encrypted image export timed out");
+    Sleep(5);
+   }
+   const auto copied=op.Job()->result();
+   Check(!copied.code,copied.message.c_str());
+   Check(!CopyProcess::lastProcess&&op.Snapshot().complete,"Encrypted copy crossed the subprocess boundary");
+   const auto windows=MacBrowser::OpenWindows(to);
+   Check(windows->FindChild(2,u"Payload",entry)&&entry.forks[0].size==contents.size()&&entry.forks[1].size==1,
+         "Encrypted image export lost a fork");
+   Bytes output(contents.size());windows->Read(entry.id,0,0,output.data(),output.size());
+   uint8_t resource=0;windows->Read(entry.id,1,0,&resource,1);
+   Check(output==contents&&resource==0x4d,"Encrypted image export changed file contents");
   }
-  const auto copied=op.Job()->result();
-  Check(!copied.code,copied.message.c_str());
-  Check(!CopyProcess::lastProcess&&op.Snapshot().complete,"Encrypted copy crossed the subprocess boundary");
-  const auto windows=MacBrowser::OpenWindows(to);
-  Check(windows->FindChild(2,u"Payload",entry)&&entry.forks[0].size==contents.size()&&entry.forks[1].size==1,
-        "Encrypted image export lost a fork");
-  Bytes output(contents.size());windows->Read(entry.id,0,0,output.data(),output.size());
-  uint8_t resource=0;windows->Read(entry.id,1,0,&resource,1);
-  Check(output==contents&&resource==0x4d,"Encrypted image export changed file contents");
-  fprintf(report,"PASS: Cancel and wrong-password retry in the normal image-opening path, layered encryption and compression, and both-fork background export without transferring keys.\n");
+  fprintf(report,"PASS: Cancel and wrong-password retry, and both-fork background export without transferring keys from either encrypted image format.\n");
  }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());status=1;}
  CopyProcess::enabled=false;
  ShutdownStorageUi();

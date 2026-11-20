@@ -23,4 +23,15 @@ struct PasswordRequired : HfsPlus::Error {
 
 // Decode the outer encryption layer first. The result can be a raw disk or a UDIF container.
 bool Unlock(std::unique_ptr<HfsPlus::Source>&,const Password*);
+
+using CiphertextReader=std::function<void(uint64_t,void*,size_t)>;
+class EncryptedPayload {
+public:
+    virtual ~EncryptedPayload()=default;
+    virtual uint32_t BlockSize()const=0;
+    // Each stream has its own block numbering and cache identity.
+    virtual void Read(uint64_t stream,uint64_t size,uint64_t offset,void* output,size_t bytes,
+                      const CiphertextReader&)=0;
+};
+std::unique_ptr<EncryptedPayload> UnlockBundleToken(HfsPlus::Source&,const Password*);
 }

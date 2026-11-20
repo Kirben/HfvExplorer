@@ -447,7 +447,7 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
     if(directory){
         if(!externalJournal.empty())return {};
-        auto bundle=SparseDisk::OpenBundle(path);
+        auto bundle=SparseDisk::OpenBundle(path,password);
         if(!bundle)return {};
         return OpenReadOnlyImage(std::move(bundle),key,{},"The sparse bundle contains no supported filesystem");
     }

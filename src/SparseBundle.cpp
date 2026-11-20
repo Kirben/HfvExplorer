@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "SparseDisk.h"
+#include "DmgEncryption.h"
 #include "AppleImagePlist.h"
 #include "HfsPlusDisk.h"
 #include <optional>
@@ -171,21 +172,25 @@ struct Band {uint64_t bytes;FILETIME modified;};
 
 class SparseBundle final : public Source {
     std::wstring path_, bandsPath_;
-    Handle root_, folder_, plist_;
+    Handle root_, folder_, plist_, token_;
+    std::unique_ptr<Dmg::EncryptedPayload> cipher_;
     FILETIME stamp_{};
     Geometry geometry_{};
     std::map<uint64_t,Band> bands_;
 public:
-    explicit SparseBundle(std::wstring path):path_(std::move(path)),bandsPath_(path_+L"\\bands"){
+    SparseBundle(std::wstring path,const Dmg::Password* password):path_(std::move(path)),bandsPath_(path_+L"\\bands"){
         Open(root_,path_,true);
         Open(folder_,bandsPath_,true);
         Open(plist_,path_+L"\\Info.plist",false);
         geometry_=ParseInfo(plist_.value);
 
-        Handle token;
-        Open(token,path_+L"\\token",false,true);
-        Check(token.value==INVALID_HANDLE_VALUE||FileSize(Info(token.value))==0,
-              "Encrypted sparse bundles are unsupported");
+        const auto tokenPath=path_+L"\\token";
+        Open(token_,tokenPath,false,true);
+        if(token_.value!=INVALID_HANDLE_VALUE&&FileSize(Info(token_.value))){
+            // Reopen while the checked token handle denies changes and replacement.
+            auto token=HfsPlus::OpenImage(tokenPath.c_str(),false);
+            cipher_=Dmg::UnlockBundleToken(*token,password);
+        }
 
         stamp_=Info(folder_.value).ftLastWriteTime;
         const auto count=(geometry_.size-1)/geometry_.bandSize+1;
@@ -199,6 +204,7 @@ public:
                 Check(!(data.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)),
                       "A sparse bundle band is a directory or reparse point");
                 const auto bytes=(uint64_t(data.nFileSizeHigh)<<32)|data.nFileSizeLow;
+                Check(!cipher_||bytes%cipher_->BlockSize()==0,"Truncated sparse bundle encryption block");
                 bands_.emplace(*number,Band{bytes,data.ftLastWriteTime});
             }while(FindNextFileW(search,&data));
             Check(GetLastError()==ERROR_NO_MORE_FILES,"Cannot enumerate sparse bundle bands");
@@ -233,7 +239,11 @@ public:
                 Check(FileSize(info)==band->second.bytes&&CompareFileTime(&info.ftLastWriteTime,&band->second.modified)==0,
                       "A sparse bundle band changed; reopen the image");
                 const size_t have=inside>=band->second.bytes?0:size_t((std::min)(uint64_t(take),band->second.bytes-inside));
-                if(have)ReadAt(file.value,inside,out,have);
+                if(have&&cipher_){
+                    // CBC block numbers restart at zero in each physical band.
+                    cipher_->Read(number,band->second.bytes,inside,out,have,
+                        [&](uint64_t at,void* bytes,size_t count){ReadAt(file.value,at,bytes,count);});
+                }else if(have)ReadAt(file.value,inside,out,have);
                 memset(out+have,0,take-have);
             }else{
                 const auto next=band==bands_.end()?Size():band->first*geometry_.bandSize;
@@ -263,7 +273,7 @@ std::wstring BundleFromPlist(const std::wstring& path)
     return BundleName(folder)?folder:path;
 }
 
-std::unique_ptr<HfsPlus::Source> OpenBundle(const std::wstring& path)
+std::unique_ptr<HfsPlus::Source> OpenBundle(const std::wstring& path,const Dmg::Password* password)
 {
     const auto last=path.find_last_not_of(L"\\/");
     if(last==path.npos)return {};
@@ -271,6 +281,6 @@ std::unique_ptr<HfsPlus::Source> OpenBundle(const std::wstring& path)
     if(!BundleName(folder))return {};
     const auto attrs=GetFileAttributesW(folder.c_str());
     if(attrs==INVALID_FILE_ATTRIBUTES||!(attrs&FILE_ATTRIBUTE_DIRECTORY))return {};
-    return std::make_unique<SparseBundle>(folder);
+    return std::make_unique<SparseBundle>(folder,password);
 }
 }

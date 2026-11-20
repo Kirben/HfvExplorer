@@ -15,14 +15,14 @@ Password::Password(std::wstring_view value)
         value.data(),int(value.size()),reinterpret_cast<char*>(utf8_.data()),int(utf8_.size()),nullptr,nullptr):0;
     if(length<=0){
         SecureZeroMemory(utf8_.data(),utf8_.size());
-        throw HfsPlus::Error("Invalid or too long DMG password");
+        throw HfsPlus::Error("Invalid or too long disk image password");
     }
     size_=unsigned(length);
 }
 
 Password::~Password(){SecureZeroMemory(utf8_.data(),utf8_.size());}
 PasswordRequired::PasswordRequired(bool again)
-    :HfsPlus::Error(again?"The DMG password did not unlock this image.":"This DMG requires a password."),retry(again){}
+    :HfsPlus::Error(again?"The password did not unlock this image.":"This disk image requires a password."),retry(again){}
 
 namespace {
 using namespace HfsPlus;
@@ -125,7 +125,7 @@ std::optional<Record> ParseRecord(const Bytes& data)
     return Record{iter,algorithm,Bytes(d+16,d+16+saltSize),std::move(iv),Bytes(d+fixed,d+fixed+length)};
 }
 
-Layout Parse(Source& source)
+Layout Parse(Source& source,bool token=false)
 {
     constexpr uint32_t fixed=76,row=20;
     const auto header=Disk::Read(source,0,fixed);
@@ -134,9 +134,11 @@ Layout Parse(Source& source)
     const auto size=U64(d+56),offset=U64(d+64);
     Check(U32(d+8)==2&&U32(d+12)==16&&U32(d+16)==5&&U32(d+20)==Aes&&(bits==128||bits==256),
           "Unsupported encrypted DMG payload format");
-    Check(size&&size<=INT64_MAX&&blocks>=512&&blocks<=1024*1024&&blocks%16==0&&
-          (size-1)/blocks<=UINT32_MAX&&Range(offset,(size+15)&~uint64_t(15),source.Size()),
-          "Invalid encrypted DMG data extent");
+    Check(blocks>=512&&blocks<=1024*1024&&blocks%16==0,"Invalid encrypted disk image block size");
+    // A bundle token contains the key table with no inline disk payload.
+    if(token)Check(!size&&offset==source.Size(),"Invalid encrypted sparse bundle token extent");
+    else Check(size&&size<=INT64_MAX&&(size-1)/blocks<=UINT32_MAX&&
+               Range(offset,(size+15)&~uint64_t(15),source.Size()),"Invalid encrypted DMG data extent");
     Check(count&&count<=64&&Range(fixed,uint64_t(count)*row,offset),"Invalid encrypted DMG key table");
     const auto table=Disk::Read(source,fixed,size_t(count)*row);
     const auto recordStart=fixed+count*row;
@@ -228,21 +230,66 @@ Layout UnlockLegacy(Source& source,const Password* password,Sensitive& key)
     return {0,bytes,block,keyBytes,{}};
 }
 
-class Image final:public Source {
-    std::unique_ptr<Source> file_;
-    const uint64_t start_,size_;
+class Payload final:public EncryptedPayload {
     const uint32_t block_;
     Cipher cipher_;
     ChunkIv iv_;
     std::mutex lock_;
     Sensitive plaintext_;
     Bytes encrypted_;
-    uint64_t cached_=UINT64_MAX;
+    uint64_t stream_=UINT64_MAX,cached_=UINT64_MAX;
 public:
-    Image(std::unique_ptr<Source> file,const Layout& layout,const Sensitive& key)
-        :file_(std::move(file)),start_(layout.start),size_(layout.bytes),block_(layout.block),
-        cipher_(BCRYPT_AES_ALGORITHM,key.bytes.data(),layout.keyBytes),
-        iv_(key.bytes.data()+layout.keyBytes),plaintext_(block_),encrypted_(block_){}
+    Payload(const Layout& layout,const Sensitive& key)
+        :block_(layout.block),cipher_(BCRYPT_AES_ALGORITHM,key.bytes.data(),layout.keyBytes),
+         iv_(key.bytes.data()+layout.keyBytes),plaintext_(block_),encrypted_(block_){}
+    uint32_t BlockSize()const override{return block_;}
+    void Read(uint64_t stream,uint64_t size,uint64_t at,void* output,size_t bytes,
+              const CiphertextReader& read)override{
+        Check(Range(at,bytes,size)&&(!bytes||output)&&(!size||(size-1)/block_<=UINT32_MAX),
+              "Read exceeds the encrypted disk image payload");
+        std::lock_guard<std::mutex> lock(lock_);
+        auto dest=static_cast<uint8_t*>(output);
+        while(bytes){
+            const uint64_t block=at/block_,position=at%block_;
+            if(stream_!=stream||cached_!=block){
+                cached_=UINT64_MAX;
+                const auto offset=block*block_;
+                const auto available=(std::min)(uint64_t(block_),size-offset);
+                encrypted_.resize(size_t((available+15)&~uint64_t(15)));
+                read(offset,encrypted_.data(),encrypted_.size());
+                uint8_t iv[16]{};
+                iv_.Make(uint32_t(block),iv);
+                ULONG written=0;
+                Check(cipher_.Decrypt(encrypted_,plaintext_.bytes,iv,sizeof(iv),false,written)&&
+                      written==encrypted_.size(),"Cannot decrypt disk image block");
+                stream_=stream;
+                cached_=block;
+            }
+            const auto count=size_t((std::min)(uint64_t(bytes),block_-position));
+            memcpy(dest,plaintext_.bytes.data()+position,count);
+            at+=count;dest+=count;bytes-=count;
+        }
+    }
+};
+
+std::unique_ptr<EncryptedPayload> UnlockPayload(Layout& layout,const Password* password)
+{
+    if(!password)throw PasswordRequired(false);
+    for(auto& record:layout.records){
+        Sensitive key(record.wrapped.size());
+        if(UnwrapKey(record,*password,layout.keyBytes,key))
+            return std::make_unique<Payload>(layout,key);
+    }
+    throw PasswordRequired(true);
+}
+
+class Image final:public Source {
+    std::unique_ptr<Source> file_;
+    const uint64_t start_,size_;
+    std::unique_ptr<EncryptedPayload> payload_;
+public:
+    Image(std::unique_ptr<Source> file,const Layout& layout,std::unique_ptr<EncryptedPayload> payload)
+        :file_(std::move(file)),start_(layout.start),size_(layout.bytes),payload_(std::move(payload)){}
     uint64_t Size()const override{return size_;}
     bool Writable()const override{return false;}
     bool ProcessLocal()const override{return true;}
@@ -251,28 +298,9 @@ public:
     void Flush()override{}
     void Write(uint64_t,const void*,size_t)override{throw Error("Encrypted DMG images are read-only");}
     void Read(uint64_t at,void* output,size_t bytes)override{
-        Check(Range(at,bytes,size_)&&(!bytes||output),"Read exceeds the encrypted DMG payload");
-        std::lock_guard<std::mutex> lock(lock_);
-        auto dest=static_cast<uint8_t*>(output);
-        while(bytes){
-            const uint64_t block=at/block_,position=at%block_;
-            if(cached_!=block){
-                cached_=UINT64_MAX;
-                const auto offset=block*block_;
-                const auto available=(std::min)(uint64_t(block_),size_-offset);
-                encrypted_.resize(size_t((available+15)&~uint64_t(15)));
-                file_->Read(start_+offset,encrypted_.data(),encrypted_.size());
-                uint8_t iv[16]{};
-                iv_.Make(uint32_t(block),iv);
-                ULONG written=0;
-                Check(cipher_.Decrypt(encrypted_,plaintext_.bytes,iv,sizeof(iv),false,written)&&
-                      written==encrypted_.size(),"Cannot decrypt DMG data block");
-                cached_=block;
-            }
-            const auto count=size_t((std::min)(uint64_t(bytes),block_-position));
-            memcpy(dest,plaintext_.bytes.data()+position,count);
-            at+=count;dest+=count;bytes-=count;
-        }
+        payload_->Read(0,size_,at,output,bytes,[this](uint64_t offset,void* cipher,size_t count){
+            file_->Read(start_+offset,cipher,count);
+        });
     }
 };
 }
@@ -286,18 +314,20 @@ bool Unlock(std::unique_ptr<HfsPlus::Source>& source,const Password* password)
         if(memcmp(tail.data(),"cdsaencr",8))return false;
         Sensitive key(32+20);
         auto layout=UnlockLegacy(*source,password,key);
-        source=std::make_unique<Image>(std::move(source),layout,key);
+        source=std::make_unique<Image>(std::move(source),layout,std::make_unique<Payload>(layout,key));
         return true;
     }
     auto layout=Parse(*source);
-    if(!password)throw PasswordRequired(false);
-    for(auto& record:layout.records){
-        Sensitive key(record.wrapped.size());
-        if(UnwrapKey(record,*password,layout.keyBytes,key)){
-            source=std::make_unique<Image>(std::move(source),layout,key);
-            return true;
-        }
-    }
-    throw PasswordRequired(true);
+    auto payload=UnlockPayload(layout,password);
+    source=std::make_unique<Image>(std::move(source),layout,std::move(payload));
+    return true;
+}
+
+std::unique_ptr<EncryptedPayload> UnlockBundleToken(HfsPlus::Source& token,const Password* password)
+{
+    Check(token.Size()>=76&&!memcmp(Disk::Read(token,0,8).data(),"encrcdsa",8),
+          "Invalid or unsupported sparse bundle encryption token");
+    auto layout=Parse(token,true);
+    return UnlockPayload(layout,password);
 }
 }
