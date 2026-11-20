@@ -57,12 +57,16 @@ using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,Cat
 struct DataRun {
     uint64_t block,count;
 };
+struct DataStreamWrite {
+    HfsPlus::Source& input;
+    uint64_t size;
+    std::vector<DataRun> runs;
+};
 struct CatalogWritePlan {
     std::vector<CheckpointBlockWrite> metadata;
-    std::vector<DataRun> dataRuns;
-    HfsPlus::Source* input=nullptr;
-    uint64_t dataSize=0;
+    std::vector<DataStreamWrite> streams;
 };
+void AssignDataRuns(std::vector<DataStreamWrite>&,const std::vector<DataRun>&);
 void ValidateEmbeddedAttributes(const HfsPlus::Attributes&);
 uint64_t CatalogTimestamp(uint64_t secondsSince1904);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);

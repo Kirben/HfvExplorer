@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "ApfsContainer.h"
+#include "ApfsCatalogWrite.h"
 #include "ApfsFormat.h"
 #include "ApfsTree.h"
 #include "ApfsWriteDisk.h"
@@ -93,6 +94,22 @@ public:
         if(onFlush)onFlush();
     }
 };
+
+void DataStreamAllocation(FILE* report)
+{
+    Memory data(4097),empty(0),resource(8193);
+    std::vector<Apfs::DataStreamWrite> streams{{data,data.Size()},{empty,empty.Size()},{resource,resource.Size()}};
+    const std::vector<Apfs::DataRun> runs{{20,3},{42,2}};
+    Apfs::AssignDataRuns(streams,runs);
+    Check(streams[0].runs.size()==1&&streams[0].runs[0].block==20&&streams[0].runs[0].count==2&&
+          streams[1].runs.empty()&&streams[2].runs.size()==2&&
+          streams[2].runs[0].block==22&&streams[2].runs[0].count==1&&
+          streams[2].runs[1].block==42&&streams[2].runs[1].count==2,
+          "APFS streams shared a partial block or lost a fragmented extent");
+    Reject([&]{Apfs::AssignDataRuns(streams,{{20,4}});},"APFS accepted too few blocks for its streams");
+    Reject([&]{Apfs::AssignDataRuns(streams,{{20,6}});},"APFS accepted surplus blocks for its streams");
+    fprintf(report,"PASS: APFS stream allocation splits runs at independently padded stream boundaries.\n");
+}
 
 void CheckpointWrites(const std::string& root,FILE* report)
 {
@@ -2005,6 +2022,7 @@ int RunApfsContainerTest(const char* directory)
         ring.bytes[4*4096+64]^=1;
         Reject([&]{Apfs::Probe(ring);},"Container with no complete checkpoint was accepted");
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
+        DataStreamAllocation(report);
         CheckpointWrites(root,report);
         MultiChunkWrites(root,report);
         MultiCibWrites(root,report);

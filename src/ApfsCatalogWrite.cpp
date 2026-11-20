@@ -964,6 +964,30 @@ void CheckNativeVolume(const Bytes& volume)
 }
 }
 
+void AssignDataRuns(std::vector<DataStreamWrite>& streams,const std::vector<DataRun>& runs)
+{
+    size_t index=0;
+    uint64_t consumed=0;
+    for(auto& stream:streams){
+        stream.runs.clear();
+        auto remaining=DivideUp(stream.size,Block);
+        while(remaining){
+            Check(index<runs.size()&&consumed<runs[index].count,"APFS data allocation is incomplete");
+            const auto& run=runs[index];
+            const auto count=(std::min)(remaining,run.count-consumed);
+            Check(consumed<=UINT64_MAX-run.block,"APFS data allocation overflows");
+            stream.runs.push_back({run.block+consumed,count});
+            remaining-=count;
+            consumed+=count;
+            if(consumed==run.count){
+                ++index;
+                consumed=0;
+            }
+        }
+    }
+    Check(index==runs.size(),"APFS data allocation has unused blocks");
+}
+
 void ValidateEmbeddedAttributes(const HfsPlus::Attributes& attributes)
 {
     for(const auto& [wide,value]:attributes){
@@ -1011,9 +1035,10 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
     CatalogWritePlan plan;
-    plan.input=replace?&replace->data:create?create->data:nullptr;
-    plan.dataSize=plan.input?plan.input->Size():0;
-    const auto dataBlocks=DivideUp(plan.dataSize,Block);
+    auto* input=replace?&replace->data:create?create->data:nullptr;
+    const auto dataSize=input?input->Size():0;
+    if(dataSize)plan.streams.push_back({*input,dataSize});
+    const auto dataBlocks=DivideUp(dataSize,Block);
     Check(dataBlocks<=current.blockCount,"APFS file exceeds the container size");
     const auto oid=current.volumes.front();
     const auto containerMap=ReadWritableMap(source,current,current.objectMap);
@@ -1045,7 +1070,7 @@ CatalogWritePlan PrepareCatalogMutation(
         else return edit.inode;
     },request);
     auto catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
-                            directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind,streamAt,dates);
+                            directoryCount,fileCount,dataSize,current.blockCount,files,removedKind,streamAt,dates);
     ValidateExtentReferences(extentTree,files);
     const bool retireOldData=replace||removedKind.has_value();
     std::vector<DataRun> retiredData;
@@ -1067,13 +1092,15 @@ CatalogWritePlan PrepareCatalogMutation(
     const size_t firstChild=changeExtents?7:6;
     CatalogLeaves leaves;
     size_t children=0;
+    std::vector<DataRun> allocatedData;
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
-        retired,extents,snapshots,files,std::move(retiredData),dataBlocks,plan.dataRuns,transaction,[&]{
+        retired,extents,snapshots,files,std::move(retiredData),dataBlocks,allocatedData,transaction,[&]{
+            AssignDataRuns(plan.streams,allocatedData);
             if(dataBlocks){
                 std::vector<OwnedRecord> stream;
                 stream.push_back(StreamReference(entryId));
                 uint64_t logical=0;
-                for(const auto& data:plan.dataRuns){
+                for(const auto& data:plan.streams.front().runs){
                     const FileRun run{entryId,data.block,data.count};
                     stream.push_back(FileExtent(run,logical));
                     logical+=data.count;
@@ -1089,7 +1116,8 @@ CatalogWritePlan PrepareCatalogMutation(
         if(retireOldData)files.erase(std::remove_if(files.begin(),files.end(),[&](const auto& run){
             return run.owner==entryId;
         }),files.end());
-        for(const auto& data:plan.dataRuns)files.push_back({entryId,data.block,data.count});
+        if(dataBlocks)
+            for(const auto& data:plan.streams.front().runs)files.push_back({entryId,data.block,data.count});
         std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
         std::vector<OwnedRecord> references;
         for(const auto& file:files)references.push_back(ExtentReference(file));
