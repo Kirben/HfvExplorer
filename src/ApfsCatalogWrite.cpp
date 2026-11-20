@@ -12,6 +12,8 @@ namespace {
 using HfsPlus::Source;
 using HfsPlus::Disk::Range;
 using WriterDisk::Block;
+using WriterDisk::Chunk;
+using WriterDisk::ChunksPerCib;
 using WriterDisk::Bytes;
 using WriterDisk::Check;
 using WriterDisk::DivideUp;
@@ -22,7 +24,7 @@ using Writes=std::vector<CheckpointBlockWrite>;
 struct FileRun {
     uint64_t owner,block,count;
 };
-constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000,Chunk=Block*8;
+constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
 constexpr size_t MainFreeQueue=240,PoolFreeQueue=200;
 
@@ -151,56 +153,75 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
                               uint64_t transaction)
 {
     const auto chunks=DivideUp(container.blockCount,Chunk);
+    const auto cibCount=DivideUp(chunks,ChunksPerCib);
     Check(space.size()==Block&&Le32(space.data()+24)==(Ephemeral|5)&&Le32(space.data()+32)==Block&&
-          Le32(space.data()+36)==Chunk&&Le64(space.data()+48)==container.blockCount&&
-          Le64(space.data()+56)==chunks&&Le32(space.data()+64)==1&&!Le32(space.data()+68)&&
+          Le32(space.data()+36)==Chunk&&Le32(space.data()+40)==ChunksPerCib&&Le64(space.data()+48)==container.blockCount&&
+          Le64(space.data()+56)==chunks&&Le32(space.data()+64)==cibCount&&!Le32(space.data()+68)&&
           !Le64(space.data()+96)&&Le32(space.data()+160)==1,
           "Unsupported APFS space-manager layout");
     const auto cibOffset=Le32(space.data()+80);
-    Check(cibOffset>=336&&Range(cibOffset,8,space.size()),"APFS chunk address is missing");
-    const auto oldCib=Le64(space.data()+cibOffset),pool=Le64(space.data()+176),poolSize=Le64(space.data()+152);
+    Check(cibOffset>=336&&Range(cibOffset,cibCount*8,space.size()),"APFS chunk address is missing");
+    const auto pool=Le64(space.data()+176),poolSize=Le64(space.data()+152);
     const auto currentBitmapBase=Le64(space.data()+168);
     const auto bitmapSlots=Le32(space.data()+164);
     const auto mainLimit=(std::min)(container.blockCount,Chunk);
     Check(pool&&poolSize&&bitmapSlots>2&&bitmapSlots<UINT16_MAX&&
           currentBitmapBase&&Range(currentBitmapBase,bitmapSlots,mainLimit)&&currentBitmapBase+bitmapSlots<=pool&&
-          Range(pool,poolSize,mainLimit)&&oldCib>=pool&&Range(oldCib-pool,1,poolSize),
+          Range(pool,poolSize,mainLimit),
           "Invalid APFS internal pool geometry");
-    auto cib=ReadObject(source,container,oldCib,oldCib,container.transaction,7,0,true);
-    Check(Le32(cib.data()+32)==0&&Le32(cib.data()+36)==chunks&&chunks<=(Block-40)/32,
-          "Invalid APFS chunk information");
     struct ChunkBitmap {
         uint64_t size,available,oldBlock;
         Bytes bitmap;
         bool dirty=false;
     };
+    struct ChunkInfoBlock {
+        uint64_t address;
+        Bytes bytes;
+        bool dirty=false;
+    };
     std::vector<ChunkBitmap> bitmaps;
-    std::set<uint64_t> currentPoolBlocks{oldCib};
+    std::vector<ChunkInfoBlock> cibs;
+    std::set<uint64_t> currentPoolBlocks;
+    const auto trackPoolBlock=[&](uint64_t block){
+        Check(block>=pool&&Range(block-pool,1,poolSize)&&currentPoolBlocks.insert(block).second,
+              "Invalid or duplicate APFS chunk metadata block");
+    };
     uint64_t available=0;
-    for(uint64_t i=0;i<chunks;++i){
-        const auto record=cib.data()+40+i*32;
-        const auto size=(std::min)(Chunk,container.blockCount-i*Chunk);
-        const auto free=Le32(record+20);
-        const auto oldBlock=Le64(record+24);
-        const auto xid=Le64(record);
-        Check(xid&&xid<=Le64(cib.data()+16)&&Le64(record+8)==i*Chunk&&Le32(record+16)==size&&free<=size,
-              "Invalid APFS chunk record");
-        if(oldBlock){
-            Check(oldBlock>=pool&&Range(oldBlock-pool,1,poolSize)&&currentPoolBlocks.insert(oldBlock).second,
-                  "Invalid or duplicate APFS chunk bitmap");
-        }else Check(free==size,"APFS chunk is missing its allocation bitmap");
-        auto bitmap=oldBlock?ReadBlock(source,oldBlock):Bytes(Block);
-        if(oldBlock){
-            uint64_t used=0;
-            for(uint64_t bit=0;bit<Chunk;++bit){
-                if(!Bit(bitmap,bit))continue;
-                Check(bit<size,"APFS bitmap marks blocks beyond the container");
-                ++used;
+    for(uint64_t n=0;n<cibCount;++n){
+        const auto address=Le64(space.data()+cibOffset+n*8);
+        trackPoolBlock(address);
+        auto cib=ReadObject(source,container,address,address,container.transaction,7,0,true);
+        const auto first=n*ChunksPerCib;
+        const auto count=(std::min)(ChunksPerCib,chunks-first);
+        Check(Le32(cib.data()+32)==n&&Le32(cib.data()+36)==count,"Invalid APFS chunk-info block");
+        uint64_t latestChunk=0;
+        for(uint64_t i=0;i<count;++i){
+            const auto record=cib.data()+40+i*32;
+            const auto start=(first+i)*Chunk;
+            const auto size=(std::min)(Chunk,container.blockCount-start);
+            const auto free=Le32(record+20);
+            const auto oldBlock=Le64(record+24);
+            const auto xid=Le64(record);
+            Check(xid&&xid<=Le64(cib.data()+16)&&Le64(record+8)==start&&Le32(record+16)==size&&free<=size,
+                  "Invalid APFS chunk record");
+            latestChunk=(std::max)(latestChunk,xid);
+            if(oldBlock)trackPoolBlock(oldBlock);
+            else Check(free==size,"APFS chunk is missing its allocation bitmap");
+            auto bitmap=oldBlock?ReadBlock(source,oldBlock):Bytes(Block);
+            if(oldBlock){
+                uint64_t used=0;
+                for(uint64_t bit=0;bit<Chunk;++bit){
+                    if(!Bit(bitmap,bit))continue;
+                    Check(bit<size,"APFS bitmap marks blocks beyond the container");
+                    ++used;
+                }
+                Check(size-used==free,"APFS chunk bitmap and free count disagree");
             }
-            Check(size-used==free,"APFS chunk bitmap and free count disagree");
+            available+=free;
+            bitmaps.push_back({size,free,oldBlock,std::move(bitmap)});
         }
-        available+=free;
-        bitmaps.push_back({size,free,oldBlock,std::move(bitmap)});
+        Check(latestChunk==Le64(cib.data()+16),"APFS chunk-info block has a mismatched transaction ID");
+        cibs.push_back({address,std::move(cib)});
     }
     Check(available==Le64(space.data()+72),"APFS space manager and chunk counts disagree");
 
@@ -294,6 +315,10 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     std::vector<DataRun> freeRuns;
     for(uint64_t chunk=0;chunk<chunks&&dataBlocks;++chunk){
         const auto& bitmap=bitmaps[chunk];
+        if(bitmap.available==bitmap.size){
+            freeRuns.push_back({chunk*Chunk,bitmap.size});
+            continue;
+        }
         for(uint64_t i=0;i<bitmap.size;){
             if(Bit(bitmap.bitmap,i)){
                 ++i;
@@ -307,7 +332,10 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
 
     // Prefer the longest runs to keep catalog growth small on fragmented images.
     if(dataBlocks){
-        std::stable_sort(freeRuns.begin(),freeRuns.end(),[](const auto& a,const auto& b){return a.count>b.count;});
+        // Prefer higher addresses on ties to leave low blocks available for metadata.
+        std::sort(freeRuns.begin(),freeRuns.end(),[](const auto& a,const auto& b){
+            return std::tie(a.count,a.block)>std::tie(b.count,b.block);
+        });
         auto remaining=dataBlocks;
         for(const auto& run:freeRuns){
             const auto count=(std::min)(run.count,remaining);
@@ -326,34 +354,43 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     }
     Check(result.size()==retire.size(),"APFS metadata allocation did not cover the transaction");
 
-    // Only replace dirty bitmaps. Both they and the CIB must remain live
-    // until the checkpoint pointing to their replacements is durable.
-    std::vector<uint64_t> retiredPool{oldCib};
+    // Only replace dirty bitmaps and their owning chunk-info blocks.
+    std::vector<uint64_t> retiredPool;
     size_t nextInternal=0;
+    const auto allocateInternal=[&]{
+        Check(nextInternal<internal.size(),"APFS internal pool is full");
+        const auto block=internal[nextInternal++];
+        SetBit(poolMap,block-pool);
+        return block;
+    };
     for(size_t i=0;i<bitmaps.size();++i){
         auto& chunk=bitmaps[i];
         if(!chunk.dirty)continue;
         uint64_t newBlock=0;
         if(chunk.available!=chunk.size){
-            Check(nextInternal<internal.size(),"APFS internal pool is full");
-            newBlock=internal[nextInternal++];
+            newBlock=allocateInternal();
             writes.push_back({newBlock,std::move(chunk.bitmap)});
-            SetBit(poolMap,newBlock-pool);
         }
         if(chunk.oldBlock)retiredPool.push_back(chunk.oldBlock);
-        const auto at=40+32*i;
-        Set(cib,at,transaction,8);
-        Set(cib,at+20,chunk.available,4);
-        Set(cib,at+24,newBlock,8);
+        auto& cib=cibs[i/ChunksPerCib];
+        const auto at=40+32*(i%ChunksPerCib);
+        Set(cib.bytes,at,transaction,8);
+        Set(cib.bytes,at+20,chunk.available,4);
+        Set(cib.bytes,at+24,newBlock,8);
+        cib.dirty=true;
     }
-    Check(nextInternal<internal.size(),"APFS internal pool has no space for the chunk records");
-    const auto newCib=internal[nextInternal];
-    SetBit(poolMap,newCib-pool);
+    for(size_t i=0;i<cibs.size();++i){
+        auto& cib=cibs[i];
+        if(!cib.dirty)continue;
+        const auto block=allocateInternal();
+        retiredPool.push_back(cib.address);
+        StageObject(writes,block,std::move(cib.bytes),block,transaction,Physical|7);
+        Set(space,cibOffset+8*i,block,8);
+    }
     Retire(space,mainQueue,MainFreeQueue,retire,transaction);
     Retire(space,poolQueue,PoolFreeQueue,std::move(retiredPool),transaction);
     writes.push_back({currentBitmapBase+head,std::move(poolMap)});
-    StageObject(writes,newCib,std::move(cib),newCib,transaction,Physical|7);
-    Set(space,cibOffset,newCib,8);
+
     Set(space,72,available,8);
     Set(space,xidOffset,transaction,8);
     Set(space,bitmapOffset,head,2);

@@ -19,7 +19,7 @@ namespace {
 // catalog, extent and snapshot trees, and one complete checkpoint. The space
 // manager accounts for all reserved areas even when they contain only zeros.
 using namespace WriterDisk;
-constexpr uint64_t Chunk=8*Block,ChunksPerCib=(Block-40)/32,CibsPerCab=(Block-40)/8;
+constexpr uint64_t CibsPerCab=(Block-40)/8;
 constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000,Tx=1;
 constexpr uint64_t SpaceId=1024,ReaperId=1025,VolumeId=1026,CatalogId=1027,PoolQueueId=1028,MainQueueId=1029;
 constexpr uint64_t DescBase=1,DescBlocks=8,DataBase=DescBase+DescBlocks,PoolBitmapVersions=16;

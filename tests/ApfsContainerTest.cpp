@@ -579,6 +579,18 @@ void CheckpointWrites(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS allocation, repeated directory creation, retired block reuse, copy-on-write maps, and interrupted commits.\n");
 }
 
+class CancelAfterFlush final:public Source {
+    Source& file;
+    Storage::Job& job;
+public:
+    CancelAfterFlush(Source& file,Storage::Job& job):file(file),job(job){}
+    uint64_t Size()const override{return file.Size();}
+    bool Writable()const override{return true;}
+    void Read(uint64_t at,void* data,size_t size)override{file.Read(at,data,size);}
+    void Write(uint64_t at,const void* data,size_t size)override{file.Write(at,data,size);}
+    void Flush()override{file.Flush();job.cancel();}
+};
+
 void MultiChunkWrites(const std::string& root,FILE* report)
 {
     constexpr uint64_t chunkBytes=128ull*1024*1024;
@@ -610,17 +622,6 @@ void MultiChunkWrites(const std::string& root,FILE* report)
         const auto checkpoint=Apfs::Probe(*image);
         Memory patternSlice(33);
         std::fill(patternSlice.bytes.begin(),patternSlice.bytes.end(),0xa5);
-        class CancelAfterFlush final:public Source {
-            Source& file;
-            Storage::Job& job;
-        public:
-            CancelAfterFlush(Source& file,Storage::Job& job):file(file),job(job){}
-            uint64_t Size()const override{return file.Size();}
-            bool Writable()const override{return true;}
-            void Read(uint64_t at,void* data,size_t size)override{file.Read(at,data,size);}
-            void Write(uint64_t at,const void* data,size_t size)override{file.Write(at,data,size);}
-            void Flush()override{file.Flush();job.cancel();}
-        };
         {
             Check(checkpoint.has_value(),"Missing APFS checkpoint after writing across chunks");
             Storage::Job cancelled;
@@ -653,6 +654,80 @@ void MultiChunkWrites(const std::string& root,FILE* report)
     Check(std::all_of(buffer.begin(),buffer.begin()+33,[](uint8_t byte){return byte==0xa5;}),
           "APFS later write into a materialized chunk lost data");
     fprintf(report,"PASS: APFS multi-chunk allocation, bitmap publication, repeat allocation, and full readback beyond 128 MiB.\n");
+}
+
+void MultiCibWrites(const std::string& root,FILE* report)
+{
+    constexpr auto blockSize=Apfs::WriterDisk::Block;
+    constexpr auto secondCibStart=Apfs::WriterDisk::ChunksPerCib*Apfs::WriterDisk::Chunk;
+    constexpr auto imageSize=(secondCibStart+Apfs::WriterDisk::Chunk)*blockSize;
+    const auto path=VolumeCoord::Wide(root+"checkpoint-multicib.img");
+    const auto readCibs=[&](Source& image,const Apfs::Container& checkpoint){
+        const auto nx=Disk::Read(image,checkpoint.checkpointBlock*blockSize,blockSize);
+        const auto descriptor=Apfs::Le64(nx.data()+112)+Apfs::Le32(nx.data()+136);
+        const auto map=Disk::Read(image,descriptor*blockSize,blockSize);
+        const auto space=Disk::Read(image,Apfs::Le64(map.data()+112)*blockSize,blockSize);
+        const auto offset=Apfs::Le32(space.data()+80);
+        Check(Apfs::Le32(space.data()+64)==2&&Disk::Range(offset,16,space.size()),
+              "Expected two directly addressed APFS chunk-info blocks");
+        return std::array<uint64_t,2>{Apfs::Le64(space.data()+offset),Apfs::Le64(space.data()+offset+8)};
+    };
+
+    Memory payload(3*blockSize+11);
+    for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t(i*13+(i>>7));
+    {
+        auto image=CreateFormatOutput(path.c_str(),imageSize);
+        const auto attributes=GetFileAttributesW(path.c_str());
+        Check(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_SPARSE_FILE),
+              "The multi-CIB APFS test requires a sparse image file");
+        Storage::Job job;
+        Apfs::Format(*image,u"Multi-CIB fixture",false,job);
+        const auto initial=Apfs::Probe(*image);
+        Check(initial.has_value(),"Missing initial APFS checkpoint on the multi-CIB fixture");
+        const auto oldCibs=readCibs(*image,*initial);
+        {
+            Storage::Job cancelled;
+            CancelAfterFlush wrapper(*image,cancelled);
+            bool stopped=false;
+            try{Apfs::CreateFile(wrapper,*initial,2,u"Second CIB",payload,cancelled);}
+            catch(const Storage::Cancelled&){stopped=true;}
+            const auto recovered=Apfs::Probe(*image);
+            Check(stopped&&recovered&&recovered->transaction==1&&readCibs(*image,*recovered)==oldCibs,
+                  "Cancelled APFS write changed the selected chunk-info blocks");
+        }
+        Check(Apfs::CreateFile(*image,*initial,2,u"Second CIB",payload,job)==2,
+              "APFS could not write across two chunk-info blocks");
+        const auto written=Apfs::Probe(*image);
+        Check(written.has_value(),"Missing APFS checkpoint after the multi-CIB write");
+        const auto newCibs=readCibs(*image,*written);
+        Check(newCibs[0]!=oldCibs[0]&&newCibs[1]!=oldCibs[1],
+              "APFS did not publish replacement CIBs for both modified regions");
+        const auto second=Disk::Read(*image,newCibs[1]*blockSize,blockSize);
+        const auto bitmap=Apfs::Le64(second.data()+64);
+        Check(Apfs::Le64(second.data()+48)==secondCibStart&&bitmap&&
+              Apfs::Le32(second.data()+56)-Apfs::Le32(second.data()+60)==4,
+              "APFS did not materialize the later chunk's data bitmap");
+        const auto raw=Disk::Read(*image,secondCibStart*blockSize,payload.bytes.size());
+        Check(raw==payload.bytes,"APFS payload did not land in the chunk described by the second CIB");
+
+        Check(Apfs::CreateDirectory(*image,*written,2,u"After write",job)==3,
+              "APFS could not commit after reopening multiple live chunk-info blocks");
+        const auto next=Apfs::Probe(*image);
+        Check(next.has_value(),"Missing APFS checkpoint after the subsequent commit");
+        const auto nextCibs=readCibs(*image,*next);
+        Check(nextCibs[0]!=newCibs[0]&&nextCibs[1]==newCibs[1],
+              "APFS replaced an untouched chunk-info block");
+        image->Keep();
+    }
+    const auto mounted=MacBrowser::OpenBrowserImage(path);
+    MacBrowser::Entry file,folder;
+    Check(mounted&&mounted->FindChild(2,u"Second CIB",file)&&file.forks[0].size==payload.Size()&&
+          mounted->FindChild(2,u"After write",folder)&&folder.directory,
+          "The APFS browser did not reopen both multi-CIB commits");
+    Bytes readback(payload.bytes.size());
+    mounted->Read(file.id,0,0,readback.data(),readback.size());
+    Check(readback==payload.bytes,"APFS file contents changed after rotating chunk-info blocks");
+    fprintf(report,"PASS: APFS multiple chunk-info blocks, second-CIB allocation, and reuse of unchanged CIBs.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)
@@ -1006,6 +1081,7 @@ int RunApfsContainerTest(const char* directory)
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
         CheckpointWrites(root,report);
         MultiChunkWrites(root,report);
+        MultiCibWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

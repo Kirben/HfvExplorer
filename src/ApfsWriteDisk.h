@@ -8,6 +8,7 @@ namespace Apfs::WriterDisk {
 using HfsPlus::Bytes;
 using HfsPlus::Disk::Check;
 inline constexpr uint64_t Block=4096;
+inline constexpr uint64_t Chunk=8*Block,ChunksPerCib=(Block-40)/32;
 inline uint64_t DivideUp(uint64_t value,uint64_t unit){return value/unit+(value%unit!=0);}
 
 inline void Put(uint8_t* at,uint64_t value,unsigned width)
