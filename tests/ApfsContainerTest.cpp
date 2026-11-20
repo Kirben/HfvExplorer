@@ -2556,7 +2556,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-nested-rename.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-folder-rename.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2596,22 +2596,24 @@ int RunApfsContainerTest(const char* directory)
                 Check(openCurrent().transaction==locked.transaction,"Rejected APFS lock edit changed the checkpoint");
                 Apfs::SetCatalogFileProperties(*output,locked,2,file,{},job,false);
                 const auto beforeRename=openCurrent();
-                Reject([&]{Apfs::RenameExternalCatalogFile(*output,beforeRename,2,file,u"HARD_A.TXT",job);},
+                Reject([&]{Apfs::RenameExternalCatalogEntry(*output,beforeRename,2,file,u"HARD_A.TXT",job);},
                        "APFS accepted a case-insensitive rename collision");
                 Check(openCurrent().transaction==beforeRename.transaction,"Rejected APFS rename changed the checkpoint");
                 constexpr auto longer=u"Longer caf\u00e9 filename.txt";
-                Apfs::RenameExternalCatalogFile(*output,beforeRename,2,file,longer,job);
-                Apfs::RenameExternalCatalogFile(*output,openCurrent(),2,longer,u"x",job);
+                Apfs::RenameExternalCatalogEntry(*output,beforeRename,2,file,longer,job);
+                Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,longer,u"x",job);
                 Apfs::SetCatalogFileProperties(*output,openCurrent(),2,u"x",{createdTime,{}},job,true);
                 constexpr uint64_t manyInode=24; // Directory ID on the macOS-generated fixture.
-                Apfs::RenameExternalCatalogFile(*output,openCurrent(),manyInode,u"file_0222.txt",u"Renamed 222.txt",job);
+                Apfs::RenameExternalCatalogEntry(*output,openCurrent(),manyInode,u"file_0222.txt",u"Renamed 222.txt",job);
+                Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"many",u"Renamed collection",job);
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
             MacBrowser::Entry publishedA,publishedB,publishedFolder,publishedFile;
             Check(published&&published->FindChild(2,u"hard_a.txt",publishedA)&&
                   published->FindChild(2,u"hard_b.txt",publishedB)&&publishedA.resolvedId==publishedB.resolvedId&&
-                  published->FindChild(2,u"many",publishedFolder)&&published->List(publishedFolder.id).size()==400&&
+                   !published->FindChild(2,u"many",publishedFolder)&&
+                  published->FindChild(2,u"Renamed collection",publishedFolder)&&published->List(publishedFolder.id).size()==400&&
                   publishedFolder.modified!=many.modified&&publishedFolder.created==many.created&&
                   !published->FindChild(publishedFolder.id,u"file_0222.txt",publishedFile)&&
                   published->FindChild(publishedFolder.id,u"Renamed 222.txt",publishedFile),
@@ -2627,7 +2629,7 @@ int RunApfsContainerTest(const char* directory)
             authentic->Read(originalSmall.id,0,0,originalBytes.data(),originalBytes.size());
             published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
             Check(editedBytes==originalBytes,"APFS timestamp edit changed the target file contents");
-            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, nested rename, folder timestamps and collision rejection.\n");
+            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, nested file and populated folder renames, folder timestamps and collision rejection.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){

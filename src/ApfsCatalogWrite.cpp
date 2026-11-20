@@ -1762,7 +1762,8 @@ CatalogWritePlan PrepareCatalogMutation(
     std::vector<OwnedRecord> catalog;
     if(properties){
         catalog=std::move(existing.records);
-        uint64_t file=0;
+        uint64_t entryOid=0;
+        bool directory=false;
         std::optional<size_t> directoryRecord;
         const auto parentKey=(uint64_t(9)<<60)|properties->parent;
         for(size_t i=0;i<catalog.size();++i){
@@ -1770,23 +1771,27 @@ CatalogWritePlan PrepareCatalogMutation(
             if(record.key.size()!=13+name.size()||
                Le64(record.key.data())!=parentKey||
                memcmp(record.key.data()+12,name.c_str(),name.size()+1))continue;
-            Check(!file&&record.value.size()==18&&Le16(record.value.data()+16)==8,
-                  "APFS Properties target must be an unlinked regular file");
-            file=Le64(record.value.data());
+            Check(!directoryRecord&&record.value.size()==18,"APFS edit requires an unlinked entry");
+            const auto type=Le16(record.value.data()+16);
+            directory=type==4;
+            Check(type==8||(properties->newName&&directory),
+                  "APFS edit requires a regular file or a folder rename");
+            entryOid=Le64(record.value.data());
             directoryRecord=i;
         }
-        Check(file>=16&&file<nextId,"APFS Properties target was not found");
+        Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");
         std::string replacement;
         if(properties->newName){
             replacement=EncodeCatalogName(*properties->newName);
         }
         bool edited=false;
         for(auto& record:catalog){
-            if(record.key.size()!=8||Le64(record.key.data())!=((uint64_t(3)<<60)|file))continue;
+            if(record.key.size()!=8||Le64(record.key.data())!=((uint64_t(3)<<60)|entryOid))continue;
             auto& value=record.value;
             Check(!edited&&value.size()>=92&&Le64(value.data())==properties->parent&&
-                  Le32(value.data()+56)==1&&(Le16(value.data()+80)&0170000)==0100000,
-                  "APFS Properties target inode is unsupported");
+                  (directory||Le32(value.data()+56)==1)&&
+                  (Le16(value.data()+80)&0170000)==(directory?0040000:0100000),
+                  "APFS catalog edit target inode is unsupported");
             const auto flags=Le32(value.data()+68);
             const bool unlocking=properties->locked==false;
             Check(!(flags&SystemImmutable)&&(!(flags&UserImmutable)||unlocking),
