@@ -2862,6 +2862,22 @@ int RunApfsContainerTest(const char* directory)
             Storage::Job copy;
             Check(MacBrowser::Copy(*linked,sourceFolder.id,*destination,2,copy),
                   "Copying hard-link groups into APFS failed");
+            MacBrowser::Entry directory,alias;
+            Check(destination->FindChild(2,u"Folder",directory)&&
+                  destination->FindChild(directory.id,u"Alias A",alias),"Missing APFS overwrite source");
+            MacBrowser::Entry victim;
+            victim.name=u"Replace me";
+            victim.forks[0].size=5000;
+            victim.forks[1].size=6200;
+            const auto old=destination->Put(directory.id,victim,[](unsigned,uint64_t,void* data,size_t size){
+                memset(data,0x55,size);
+            },false);
+            const auto replacement=destination->MakeHardLink(alias.id,directory.id,u"Replace me",true);
+            Check(replacement!=old&&destination->Stat(replacement).resolvedId==destination->Stat(alias.id).resolvedId,
+                  "APFS overwrite did not publish a new hard-link identity");
+            Reject([&]{destination->Stat(old);},"APFS retained the overwritten file's browser row");
+            Check(destination->MakeHardLink(alias.id,directory.id,u"Replace me",true)==replacement,
+                  "APFS overwrite of an existing same-inode alias changed identity");
         }
         const auto copiedVolume=MacBrowser::OpenBrowserImage(apfsCopyPath);
         MacBrowser::Entry copiedFolder,copiedA,copiedB,copiedOriginal,copiedOther;
@@ -2871,9 +2887,13 @@ int RunApfsContainerTest(const char* directory)
               copiedVolume->FindChild(copiedFolder.id,withMetadata.name,copiedOriginal)&&
               copiedVolume->FindChild(copiedFolder.id,u"Other",copiedOther)&&
               copiedA.id!=copiedOriginal.id&&copiedB.id!=copiedOther.id&&
-              copiedA.linkCount==2&&copiedB.linkCount==2&&copiedA.resolvedId==copiedOriginal.resolvedId&&
+              copiedA.linkCount==3&&copiedB.linkCount==2&&copiedA.resolvedId==copiedOriginal.resolvedId&&
               copiedB.resolvedId==copiedOther.resolvedId&&copiedA.resolvedId!=copiedB.resolvedId,
               "APFS transfer did not preserve both hard-link groups after reopen");
+        MacBrowser::Entry replacement;
+        Check(copiedVolume->FindChild(copiedFolder.id,u"Replace me",replacement)&&
+              replacement.resolvedId==copiedA.resolvedId&&!replacement.forks[1].size,
+              "APFS overwrite left the old resource fork or lost its shared inode");
         for(const auto* entry:{&copiedA,&copiedB}){
             MacBrowser::Entry sourceEntry;
             Check(linked->FindChild(sourceFolder.id,entry->name,sourceEntry)&&

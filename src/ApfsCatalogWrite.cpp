@@ -834,7 +834,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         std::optional<size_t> resourceRecord,compressionRecord;
     };
     std::map<uint64_t,Link> links;
-    std::optional<size_t> selectedRecord;
+    std::optional<size_t> selectedRecord,replacedRecord;
     uint64_t selectedSibling=0;
     std::map<uint64_t,CatalogSibling> siblings;
     std::map<uint64_t,std::set<uint64_t>> siblingGroups;
@@ -913,7 +913,9 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 }
                 const auto canonicalName=NormalizedName(childName,fold);
                 Check(directoryNames[inode].insert(canonicalName).second,"Duplicate APFS directory name");
-                Check(!addedKey||parent!=inode||renamingThisEntry||canonicalName!=requestedName,
+                if(hardLink&&hardLink->replaced==child&&parent==inode&&canonicalName==requestedName)
+                    replacedRecord=i;
+                Check(!addedKey||parent!=inode||renamingThisEntry||replacedRecord==i||canonicalName!=requestedName,
                       "The APFS entry name already exists");
                 storedName=childName;
                 const bool alias=view.value.size==34;
@@ -1087,7 +1089,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Check(order>previous,"Invalid or unsupported APFS directory key order");
             // A regular file cannot be a destination parent, so its stream
             // records always sort on the same side of the insertion point.
-            if(addedKey&&!renamingThisEntry&&order<*addedKey)insertAt+=1+streamRecords;
+            if(addedKey&&!renamingThisEntry&&replacedRecord!=i&&order<*addedKey)insertAt+=1+streamRecords;
             previous=order;
         }
         i+=streamRecords;
@@ -1120,7 +1122,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Check(count<INT32_MAX,"Too many APFS hard links");
         Set(inode,56,count+1,4);
         Set(inode,32,time,8);
-        Set(parentInode,56,target->second.children+1,4);
+        if(!hardLink->replaced)Set(parentInode,56,target->second.children+1,4);
         auto afterLinks=link.inodeRecord+1+link.attributes+(count==1?0:count);
         std::vector<OwnedRecord> newLinks,newMaps;
         const auto append=[&](uint64_t id,uint64_t folder,const std::string& filename){
@@ -1135,6 +1137,33 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto aliasId=nextId+1;
         SetSibling(added.value,aliasId);
         append(aliasId,parent,name);
+        if(hardLink->replaced){
+            const auto victim=links.find(hardLink->replaced);
+            Check(replacedRecord&&victim!=links.end()&&victim->second.entryRecord==*replacedRecord&&
+                  victim->second.kind==CatalogKind::RegularFile&&victim->first!=entryId&&
+                  !siblingGroups.count(victim->first),"APFS can only replace an unlinked regular file with a hard link");
+            const auto& old=victim->second;
+            Check(!Le32(records[old.inodeRecord].value.data()+68),"Unlock the APFS destination before replacing it");
+            const auto first=old.inodeRecord+1;
+            for(size_t index=first;index<first+old.attributes;++index){
+                const auto& value=records[index].value;
+                if(Le16(value.data())==1)retiredStreams.insert(Le64(value.data()+4));
+            }
+            const auto length=1+old.attributes+old.streamRecords;
+            const auto oldAfterLinks=afterLinks;
+            if(*replacedRecord<oldAfterLinks)--afterLinks;
+            if(old.inodeRecord<oldAfterLinks)afterLinks-=length;
+            if(old.inodeRecord<*replacedRecord){
+                records.erase(records.begin()+*replacedRecord);
+                records.erase(records.begin()+old.inodeRecord,records.begin()+old.inodeRecord+length);
+            }else{
+                records.erase(records.begin()+old.inodeRecord,records.begin()+old.inodeRecord+length);
+                records.erase(records.begin()+*replacedRecord);
+            }
+            // The directory record was already excluded from the insertion position.
+            if(victim->first<parent)insertAt-=length;
+            removedKind=CatalogKind::RegularFile;
+        }
         records.insert(records.begin()+afterLinks,std::make_move_iterator(newLinks.begin()),
                        std::make_move_iterator(newLinks.end()));
         if(insertAt>=afterLinks)insertAt+=newLinks.size();
@@ -1617,8 +1646,9 @@ CatalogWritePlan PrepareCatalogMutation(
         }),catalog.end());
     }
     const bool retireFile=replace||removedKind.has_value();
+    const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==entryId;
+        return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;
     uint64_t removedBlocks=0;

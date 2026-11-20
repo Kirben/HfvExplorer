@@ -68,6 +68,7 @@ struct CatalogReplaceSymlink {
 struct CatalogHardLink {
     uint64_t parent,inode;
     const std::u16string& name;
+    uint64_t replaced=0;
 };
 using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 

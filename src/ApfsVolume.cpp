@@ -874,19 +874,26 @@ private:
 public:
     uint32_t MakeHardLink(uint32_t id,uint32_t parent,const std::u16string& name,bool replace=false)override{
         return WriteMount([&]{
-            Check(!replace,"Replacing a file with an APFS hard link is not supported");
             const auto oid=At(id).oid,folder=At(parent).oid;
             const auto sourceParent=At(id).entry.parent;
             const auto links=At(id).entry.linkCount;
+            Entry destination;
+            uint64_t replaced=0;
+            if(replace){
+                Check(FindChild(parent,name,destination),"The APFS hard-link destination disappeared");
+                replaced=At(destination.id).oid;
+                if(replaced==oid)return destination.id;
+            }
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogHardLink(*source,container,folder,oid,name,job);
+            CommitMutation(parent,destination.id,job,[&](auto& job){
+                return CreateCatalogHardLink(*source,container,folder,oid,name,job,replaced);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
                 if(item.oid==oid)item.entry.linkCount=links+1;
             }
-            for(const auto alias:listings.at(parent))if(At(alias).entry.name==name)return alias;
+            Entry alias;
+            if(FindChild(parent,name,alias))return alias.id;
             throw Error("APFS hard link committed but could not be found after refresh");
         });
     }
