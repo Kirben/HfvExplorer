@@ -1536,17 +1536,28 @@ void RenameExternalInode(Bytes& inode,const std::string& name,const std::string&
     Check(inode.size()>=96,"Missing APFS inode name fields");
     const auto descriptors=Le16(inode.data()+92);
     size_t offset=96+size_t(descriptors)*4;
-    Check(offset<=inode.size(),"Truncated APFS inode field table");
+    Check(offset<=inode.size()&&Le16(inode.data()+94)==inode.size()-offset,
+          "Invalid APFS inode field table size");
+    const auto valuesStart=offset;
     bool found=false;
     for(size_t i=0;i<descriptors;++i){
         const auto field=96+i*4;
         const auto length=Le16(inode.data()+field+2);
-        const auto padded=size_t(DivideUp(length,8)*8);
+        auto padded=size_t(DivideUp(length,8)*8);
         Check(Range(offset,padded,inode.size()),"Truncated APFS inode field");
         if(inode[field]==4){
             Check(!found&&length==name.size()+1&&!memcmp(inode.data()+offset,name.c_str(),length),
                   "APFS inode name differs from its directory entry");
-            std::copy(replacement.begin(),replacement.end(),inode.begin()+offset);
+            const auto replacementLength=replacement.size()+1;
+            Bytes fieldBytes(size_t(DivideUp(replacementLength,8)*8));
+            std::copy(replacement.begin(),replacement.end(),fieldBytes.begin());
+            inode.erase(inode.begin()+offset,inode.begin()+offset+padded);
+            inode.insert(inode.begin()+offset,fieldBytes.begin(),fieldBytes.end());
+            const auto used=inode.size()-valuesStart;
+            Check(used<=UINT16_MAX,"APFS inode fields exceed the on-disk size limit");
+            Set(inode,field+2,replacementLength,2);
+            Set(inode,94,used,2);
+            padded=fieldBytes.size();
             found=true;
         }
         offset+=padded;
@@ -1768,7 +1779,6 @@ CatalogWritePlan PrepareCatalogMutation(
         std::string replacement;
         if(properties->newName){
             replacement=EncodeCatalogName(*properties->newName);
-            Check(replacement.size()==name.size(),"This APFS rename requires the same UTF-8 filename length");
         }
         bool edited=false;
         for(auto& record:catalog){
@@ -1795,6 +1805,8 @@ CatalogWritePlan PrepareCatalogMutation(
             catalog.erase(catalog.begin()+*directoryRecord);
             const auto hash=WriterDisk::DirectoryHash(replacement,true);
             const auto comparison=NormalizedName(replacement,true);
+            record.key.resize(13+replacement.size());
+            record.key.back()=0;
             Set(record.key,8,hash|(replacement.size()+1),4);
             std::copy(replacement.begin(),replacement.end(),record.key.begin()+12);
             auto insert=catalog.end();

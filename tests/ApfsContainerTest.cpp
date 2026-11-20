@@ -2556,7 +2556,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-renamed-file.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-variable-rename.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2595,10 +2595,14 @@ int RunApfsContainerTest(const char* directory)
                        "APFS accepted a date edit on a locked file");
                 Check(openCurrent().transaction==locked.transaction,"Rejected APFS lock edit changed the checkpoint");
                 Apfs::SetCatalogFileProperties(*output,locked,2,file,{},job,false);
-                Reject([&]{Apfs::RenameExternalCatalogFile(*output,openCurrent(),2,file,u"longer.txt",job);},
-                       "APFS accepted an unsupported filename length change");
-                Apfs::RenameExternalCatalogFile(*output,openCurrent(),2,file,u"other.txt",job);
-                Apfs::SetCatalogFileProperties(*output,openCurrent(),2,u"other.txt",{createdTime,{}},job,true);
+                const auto beforeRename=openCurrent();
+                Reject([&]{Apfs::RenameExternalCatalogFile(*output,beforeRename,2,file,u"HARD_A.TXT",job);},
+                       "APFS accepted a case-insensitive rename collision");
+                Check(openCurrent().transaction==beforeRename.transaction,"Rejected APFS rename changed the checkpoint");
+                constexpr auto longer=u"Longer caf\u00e9 filename.txt";
+                Apfs::RenameExternalCatalogFile(*output,beforeRename,2,file,longer,job);
+                Apfs::RenameExternalCatalogFile(*output,openCurrent(),2,longer,u"x",job);
+                Apfs::SetCatalogFileProperties(*output,openCurrent(),2,u"x",{createdTime,{}},job,true);
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
@@ -2611,7 +2615,7 @@ int RunApfsContainerTest(const char* directory)
             published->Read(publishedFile.id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Publishing a checkpoint changed macOS-generated file data");
             MacBrowser::Entry small,originalSmall;
-            Check(!published->FindChild(2,u"small.txt",small)&&published->FindChild(2,u"other.txt",small)&&
+            Check(!published->FindChild(2,u"small.txt",small)&&published->FindChild(2,u"x",small)&&
                   authentic->FindChild(2,u"small.txt",originalSmall)&&
                   small.protectedFile&&small.modified==editedTime&&small.created==createdTime&&
                   small.forks[0].size==originalSmall.forks[0].size,"APFS timestamp edit changed the wrong fields");
@@ -2619,7 +2623,7 @@ int RunApfsContainerTest(const char* directory)
             authentic->Read(originalSmall.id,0,0,originalBytes.data(),originalBytes.size());
             published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
             Check(editedBytes==originalBytes,"APFS timestamp edit changed the target file contents");
-            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits and rename.\n");
+            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, variable-length rename and collision rejection.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){
