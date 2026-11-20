@@ -2556,7 +2556,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-folder-rename.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-folder-properties.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2566,9 +2566,9 @@ int RunApfsContainerTest(const char* directory)
                 const auto after=Apfs::Probe(*output);
                 Check(after&&after->transaction==xid&&xid>before->transaction&&after->uuid==before->uuid,
                       "macOS-generated APFS checkpoint was not published");
-                Reject([&]{Apfs::SetCatalogFileProperties(*output,*after,2,u"missing.txt",{std::nullopt,editedTime},job);},
+                Reject([&]{Apfs::SetExternalCatalogProperties(*output,*after,2,u"missing.txt",{std::nullopt,editedTime},job);},
                        "APFS accepted a missing timestamp target");
-                Check(Apfs::SetCatalogFileProperties(*output,*after,2,u"small.txt",{std::nullopt,editedTime},job)>xid,
+                Check(Apfs::SetExternalCatalogProperties(*output,*after,2,u"small.txt",{std::nullopt,editedTime},job)>xid,
                       "APFS did not publish the macOS modification time edit");
                 const auto modified=Apfs::Probe(*output);
                 Check(modified.has_value(),"APFS modification time checkpoint could not be reopened");
@@ -2576,12 +2576,12 @@ int RunApfsContainerTest(const char* directory)
                 Storage::Job cancel;
                 interrupted.onFlush=[&]{cancel.cancel();};
                 bool cancelled=false;
-                try{Apfs::SetCatalogFileProperties(interrupted,*modified,2,u"small.txt",{createdTime,{}},cancel);}
+                try{Apfs::SetExternalCatalogProperties(interrupted,*modified,2,u"small.txt",{createdTime,{}},cancel);}
                 catch(const Storage::Cancelled&){cancelled=true;}
                 const auto retained=Apfs::Probe(interrupted);
                 Check(cancelled&&retained&&retained->transaction==modified->transaction,
                       "Cancelled APFS file timestamp edit published a checkpoint");
-                Check(Apfs::SetCatalogFileProperties(*output,*modified,2,u"small.txt",{createdTime,{}},job)>modified->transaction,
+                Check(Apfs::SetExternalCatalogProperties(*output,*modified,2,u"small.txt",{createdTime,{}},job)>modified->transaction,
                       "APFS did not publish the macOS creation time edit");
                 const auto openCurrent=[&]{
                     const auto current=Apfs::Probe(*output);
@@ -2589,12 +2589,12 @@ int RunApfsContainerTest(const char* directory)
                     return *current;
                 };
                 constexpr auto file=u"small.txt";
-                Apfs::SetCatalogFileProperties(*output,openCurrent(),2,file,{},job,true);
+                Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,file,{},job,true);
                 const auto locked=openCurrent();
-                Reject([&]{Apfs::SetCatalogFileProperties(*output,locked,2,file,{createdTime+1,{}},job);},
+                Reject([&]{Apfs::SetExternalCatalogProperties(*output,locked,2,file,{createdTime+1,{}},job);},
                        "APFS accepted a date edit on a locked file");
                 Check(openCurrent().transaction==locked.transaction,"Rejected APFS lock edit changed the checkpoint");
-                Apfs::SetCatalogFileProperties(*output,locked,2,file,{},job,false);
+                Apfs::SetExternalCatalogProperties(*output,locked,2,file,{},job,false);
                 const auto beforeRename=openCurrent();
                 Reject([&]{Apfs::RenameExternalCatalogEntry(*output,beforeRename,2,file,u"HARD_A.TXT",job);},
                        "APFS accepted a case-insensitive rename collision");
@@ -2602,10 +2602,16 @@ int RunApfsContainerTest(const char* directory)
                 constexpr auto longer=u"Longer caf\u00e9 filename.txt";
                 Apfs::RenameExternalCatalogEntry(*output,beforeRename,2,file,longer,job);
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,longer,u"x",job);
-                Apfs::SetCatalogFileProperties(*output,openCurrent(),2,u"x",{createdTime,{}},job,true);
+                Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,u"x",{createdTime,{}},job,true);
                 constexpr uint64_t manyInode=24; // Directory ID on the macOS-generated fixture.
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),manyInode,u"file_0222.txt",u"Renamed 222.txt",job);
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"many",u"Renamed collection",job);
+                Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"link.txt",u"Renamed symbolic link",job);
+                Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,u"Renamed collection",{createdTime,{}},job,true);
+                const auto folderLocked=openCurrent();
+                Reject([&]{Apfs::RenameExternalCatalogEntry(*output,folderLocked,manyInode,u"Renamed 222.txt",u"Blocked",job);},
+                       "APFS accepted a rename inside a locked folder");
+                Check(openCurrent().transaction==folderLocked.transaction,"Rejected APFS rename wrote a checkpoint");
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
@@ -2614,10 +2620,15 @@ int RunApfsContainerTest(const char* directory)
                   published->FindChild(2,u"hard_b.txt",publishedB)&&publishedA.resolvedId==publishedB.resolvedId&&
                    !published->FindChild(2,u"many",publishedFolder)&&
                   published->FindChild(2,u"Renamed collection",publishedFolder)&&published->List(publishedFolder.id).size()==400&&
-                  publishedFolder.modified!=many.modified&&publishedFolder.created==many.created&&
+                  publishedFolder.modified!=many.modified&&publishedFolder.created==createdTime&&publishedFolder.protectedFile&&
                   !published->FindChild(publishedFolder.id,u"file_0222.txt",publishedFile)&&
                   published->FindChild(publishedFolder.id,u"Renamed 222.txt",publishedFile),
                   "Publishing a checkpoint changed the macOS-generated catalog");
+            MacBrowser::Entry renamedLink;
+            Check(!published->FindChild(2,u"link.txt",renamedLink)&&
+                  published->FindChild(2,u"Renamed symbolic link",renamedLink)&&
+                  published->SymbolicLinkTarget(renamedLink.id)==authentic->SymbolicLinkTarget(symlink.id),
+                  "APFS rename changed the symbolic-link target");
             published->Read(publishedFile.id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Publishing a checkpoint changed macOS-generated file data");
             MacBrowser::Entry small,originalSmall;
@@ -2629,7 +2640,7 @@ int RunApfsContainerTest(const char* directory)
             authentic->Read(originalSmall.id,0,0,originalBytes.data(),originalBytes.size());
             published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
             Check(editedBytes==originalBytes,"APFS timestamp edit changed the target file contents");
-            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, nested file and populated folder renames, folder timestamps and collision rejection.\n");
+            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, and collision rejection.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){

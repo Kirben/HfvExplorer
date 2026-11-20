@@ -384,13 +384,13 @@ uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t par
     return Commit(source,expected,job,&request);
 }
 
-uint64_t SetCatalogFileProperties(Source& source,const Container& expected,uint64_t parent,
+uint64_t SetExternalCatalogProperties(Source& source,const Container& expected,uint64_t parent,
                                   const std::u16string& name,TimestampEdits dates,Storage::Job& job,
                                   std::optional<bool> locked)
 {
     Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified||locked.has_value()),
           "Select an APFS folder and at least one property to edit");
-    const CatalogMutation request=CatalogFileProperties{parent,name,dates,locked};
+    const CatalogMutation request=ExternalCatalogEdit{parent,name,dates,locked};
     return Commit(source,expected,job,&request);
 }
 
@@ -398,7 +398,7 @@ uint64_t RenameExternalCatalogEntry(Source& source,const Container& expected,uin
                                    const std::u16string& name,const std::u16string& newName,Storage::Job& job)
 {
     Check(parent>=2&&parent<(uint64_t(1)<<60),"Select an APFS folder");
-    const CatalogMutation request=CatalogFileProperties{parent,name,{},{},&newName};
+    const CatalogMutation request=ExternalCatalogEdit{parent,name,{},{},&newName};
     return Commit(source,expected,job,&request);
 }
 

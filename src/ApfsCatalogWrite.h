@@ -70,14 +70,14 @@ struct CatalogHardLink {
     const std::u16string& name;
     uint64_t replaced=0;
 };
-struct CatalogFileProperties {
+struct ExternalCatalogEdit {
     uint64_t parent;
     const std::u16string& name;
     TimestampEdits dates;
     std::optional<bool> locked;
     const std::u16string* newName=nullptr;
 };
-using CatalogMutation=std::variant<CatalogFileProperties,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
+using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 
 struct DataRun {
     uint64_t block,count;
