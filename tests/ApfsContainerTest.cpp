@@ -262,6 +262,56 @@ Memory SecondVolume()
     return disk;
 }
 
+Memory SnapshotFixture()
+{
+    auto disk=BrowseFixture();
+    constexpr size_t size=4096;
+    const auto block=[&](size_t n){return disk.bytes.data()+n*size;};
+    auto live=block(37);
+    auto frozen=block(39);
+    memcpy(frozen,live,size);
+    Header(frozen,39,4,0x4000000d);
+    Little(frozen+128,0,8); // A frozen volume has no independent object map.
+    Little(live+124,0x40000002,4);
+    Little(live+152,32,8);
+    Little(live+216,1,8);
+
+    auto metadata=block(32);
+    Header(metadata,32,5,0x40000002,16);
+    Little(metadata+32,3,2);Little(metadata+36,1,4);Little(metadata+42,8,2);
+    Little(metadata+44,8,2);Little(metadata+58,8,2);
+    Little(metadata+64,(uint64_t(1)<<60)|4,8);
+    constexpr char name[]="Before edit";
+    constexpr auto recordSize=50+sizeof(name);
+    Little(metadata+60,recordSize,2);Little(metadata+62,recordSize,2);
+    auto metadataEnd=metadata+size-40;
+    Little(metadataEnd+4,size,4);
+    auto record=metadataEnd-recordSize;
+    Little(record+8,39,8);
+    Little(record+16,1000000000,8);
+    Little(record+48,sizeof(name),2);
+    memcpy(record+50,name,sizeof(name));
+
+    auto map=block(25);
+    Little(map+36,2,4);Little(map+42,8,2);Little(map+44,32,2);
+    Little(map+56,0,2);Little(map+58,16,2);Little(map+60,16,2);Little(map+62,32,2);
+    auto mapEnd=map+size-40;
+    for(unsigned i=0;i<2;++i){
+        auto key=map+64+i*16;
+        Little(key,2048,8);Little(key+8,4+i,8);
+        auto value=mapEnd-(i+1)*16;
+        Little(value+4,size,4);Little(value+8,i==0?30:26,8);
+    }
+    auto historical=block(30);
+    memcpy(historical,block(26),size);
+    Header(historical,2048,4,2,14);
+    auto extent=historical+size-40-Apfs::Le16(historical+56+5*8+4);
+    Little(extent+8,44,8);
+    memset(block(44),'S',size);
+    for(const auto object:{25,30,32,37,39})Seal(disk.bytes,object*size,size);
+    return disk;
+}
+
 Memory Gpt(const Memory& raw,unsigned sector)
 {
     const size_t start=1024*1024;
@@ -614,6 +664,54 @@ int RunApfsContainerTest(const char* directory)
         Check(std::all_of(decoded.begin(),decoded.end(),[](uint8_t b){return b=='C';}),
               "APFS inline zlib crossed 64 KiB incorrectly");
         fprintf(report,"PASS: bounded APFS inline decmpfs decoding beyond 64 KiB.\n");
+        {
+            auto disk=SnapshotFixture();
+            const auto save=[&](const char* name){
+                const auto path=VolumeCoord::Wide(root+name);
+                auto image=CreateFormatOutput(path.c_str(),disk.Size());
+                image->Write(0,disk.bytes.data(),disk.bytes.size());image->Flush();image->Keep();
+                return path;
+            };
+            auto snapshots=MacBrowser::OpenBrowserImage(save("snapshot.img"));
+            MacBrowser::Entry active,historical,folder,newFile,oldFile;
+            Check(snapshots&&snapshots->List().size()==2&&
+                  snapshots->FindChild(2,u"APFS Fixture",active)&&
+                  snapshots->FindChild(2,u"APFS Fixture [Snapshot: Before edit]",historical)&&
+                  historical.datesValid&&historical.created==2082844801&&
+                  snapshots->PropertiesDetails(historical.id)=="APFS snapshot (transaction 4)",
+                  "APFS snapshot did not appear alongside its live volume");
+            Check(snapshots->FindChild(active.id,u"Folder",folder)&&
+                  snapshots->FindChild(folder.id,u"Long \u00e9.txt",newFile)&&
+                  snapshots->FindChild(historical.id,u"Folder",folder)&&
+                  snapshots->FindChild(folder.id,u"Long \u00e9.txt",oldFile)&&
+                  !newFile.identity.SameObject(oldFile.identity),"Historical APFS catalog reused the live identity");
+            char current=0,previous=0;
+            snapshots->Read(newFile.id,0,0,&current,1);
+            snapshots->Read(oldFile.id,0,0,&previous,1);
+            Check(current=='A'&&previous=='S',"APFS snapshot returned the current file contents");
+            Reject([&]{snapshots->Remove(oldFile.id);},"An APFS snapshot accepted a write");
+            const auto to=VolumeCoord::Wide(root+"snapshot-export");
+            Check(CreateDirectoryW(to.c_str(),nullptr)!=FALSE,"Create APFS snapshot export directory");
+            FileOperations::Request request=FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(snapshots,oldFile.id)},FileOperations::Location::Windows(to)};
+            request.background=true;
+            CopyProcess::lastProcess=0;
+            const auto copy=FileOperations::Submit(std::move(request));
+            Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,"APFS snapshot export timed out");
+            const auto result=copy.Job()->result();
+            Check(!result.code&&CopyProcess::lastProcess,result.message.c_str());
+            const auto exported=MacBrowser::OpenWindows(to);
+            MacBrowser::Entry file;
+            Check(exported->FindChild(2,oldFile.name,file),"APFS snapshot export was missing");
+            exported->Read(file.id,0,0,&previous,1);
+            Check(previous=='S',"Worker exported the live APFS file instead of the snapshot");
+
+            disk.bytes[39*4096+32]^=1;
+            auto recovered=MacBrowser::OpenBrowserImage(save("bad-snapshot.img"));
+            Check(recovered&&recovered->Name()==u"APFS Fixture"&&recovered->FindChild(2,u"Folder",folder),
+                  "A corrupt snapshot prevented the live volume from opening");
+            fprintf(report,"PASS: APFS read-only snapshot roots, historic object versions, worker export, and recovery from a corrupt snapshot.\n");
+        }
         auto multiple=SecondVolume();
         const auto multiPath=VolumeCoord::Wide(root+"multi-volume.img");
         {

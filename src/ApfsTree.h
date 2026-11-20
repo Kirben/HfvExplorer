@@ -40,7 +40,7 @@ private:
 
 class ObjectMap {
 public:
-    ObjectMap(HfsPlus::Source&,const Container&,uint64_t block,uint64_t transaction);
+    ObjectMap(HfsPlus::Source&,const Container&,uint64_t block,uint64_t transaction,uint64_t treeTransaction=0);
     struct Mapping {uint64_t block;bool encrypted;};
     std::optional<Mapping> Find(uint64_t oid)const;
     bool ChangingEncryption()const{return changingEncryption;}
@@ -49,7 +49,7 @@ public:
 private:
     HfsPlus::Source& source;
     const Container& container;
-    uint64_t tree,transaction;
+    uint64_t tree,transaction,treeTransaction;
     bool changingEncryption=false;
 };
 }

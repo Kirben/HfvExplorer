@@ -41,28 +41,92 @@ struct Mounted {
     std::u16string name;
     std::array<uint8_t,16> uuid;
     std::shared_ptr<const VolumeCipher> cipher;
+    uint64_t mapTransaction=0,snapshotTree=0;
+    std::optional<uint64_t> snapshotCreated;
 };
 
-Mounted ReadVolume(Source& source,const Container& container,uint64_t oid,uint64_t physical)
+Mounted ReadVolume(const Bytes& block,uint64_t oid,uint64_t liveMap=0)
 {
-    const auto block=ReadObject(source,container,physical,oid,container.transaction,13);
     const auto p=block.data();
     Check(!memcmp(p+32,"APSB",4),"Missing APFS volume signature");
     const auto incompatible=Le64(p+56);
     const bool locked=!(Le64(p+264)&1);
+    const auto map=liveMap?liveMap:Le64(p+128);
     if(!locked){
         Check(!(incompatible&~uint64_t(0x0b)),"Unsupported APFS volume features");
-        Check(Le32(p+116)==2&&Le64(p+128)&&Le64(p+136),"Unsupported APFS filesystem tree");
+        Check(Le32(p+116)==2&&map&&Le64(p+136),"Unsupported APFS filesystem tree");
     }
     constexpr size_t nameOffset=704,nameLimit=256;
     const auto end=static_cast<const uint8_t*>(memchr(p+nameOffset,0,nameLimit));
     Check(end!=nullptr,"Unterminated APFS volume name");
     const bool software=(Le64(p+264)&8)&&!Le64(p+976)&&
         !(incompatible&~uint64_t(0x0f))&&Le32(p+116)==2&&Le64(p+128)&&Le64(p+136);
-    Mounted mount{oid,Le64(p+16),Le64(p+128),Le64(p+136),!(incompatible&1),bool(incompatible&9),
-                  locked,software,Name(p+nameOffset,size_t(end-(p+nameOffset))+1),{},{}};
+    Mounted mount{oid,Le64(p+16),map,Le64(p+136),!(incompatible&1),bool(incompatible&9),
+                  locked,software,Name(p+nameOffset,size_t(end-(p+nameOffset))+1),{},{},0,0,{}};
     memcpy(mount.uuid.data(),p+240,mount.uuid.size());
+    if(Le32(p+124)==0x40000002&&Le64(p+216))mount.snapshotTree=Le64(p+152);
     return mount;
+}
+
+struct Snapshot {
+    uint64_t xid,superblock,created;
+    std::u16string name;
+};
+
+void ReadSnapshotRecords(Source& source,const Container& container,const Mounted& live,
+                         uint64_t block,std::optional<unsigned> parentLevel,TreeLayout layout,
+                         std::set<uint64_t>& visited,std::vector<Snapshot>& snapshots)
+{
+    const bool root=!parentLevel;
+    Check(visited.insert(block).second,"Repeated APFS snapshot tree node");
+    const Node node(ReadObject(source,container,block,block,live.xid,root?2:3,16,true),root,layout);
+    Check(node.Level()<64&&(root||node.Level()+1==*parentLevel),"Invalid APFS snapshot tree level");
+    for(size_t i=0;i<node.Count();++i){
+        const auto record=node.At(i);
+        Check(record.key.size>=8,"Truncated APFS snapshot key");
+        if(node.Level()){
+            Check(record.value.size==8,"Invalid APFS snapshot tree child");
+            ReadSnapshotRecords(source,container,live,Le64(record.value.data),node.Level(),node.Layout(),
+                                visited,snapshots);
+            continue;
+        }
+        const auto key=Le64(record.key.data);
+        if(key>>60!=1)continue; // Snapshot-name index entries refer back to these metadata records.
+        const auto xid=key&IdMask;
+        const auto value=record.value.data;
+        Check(record.key.size==8&&record.value.size>=50&&xid&&xid<=live.xid,"Invalid APFS snapshot record");
+        const auto nameLength=Le16(value+48);
+        Check(record.value.size==50+size_t(nameLength),"Invalid APFS snapshot name length");
+        if(Le32(value+44))continue; // Dataless or in-progress snapshots cannot supply a full view.
+        auto name=Name(value+50,nameLength);
+        Check(name.find(u'/')==std::u16string::npos,"Invalid APFS snapshot name");
+        snapshots.push_back({xid,Le64(value+8),Date(value+16),std::move(name)});
+    }
+}
+
+std::vector<Mounted> ReadSnapshots(Source& source,const Container& container,const Mounted& live)
+{
+    std::vector<Mounted> views;
+    if(live.locked||!live.snapshotTree)return views;
+    std::set<uint64_t> visited;
+    std::vector<Snapshot> snapshots;
+    ReadSnapshotRecords(source,container,live,live.snapshotTree,{},TreeLayout{},visited,snapshots);
+    std::set<uint64_t> transactions;
+    for(const auto& snapshot:snapshots){
+        if(!transactions.insert(snapshot.xid).second)continue;
+        try{
+            const auto bytes=ReadObject(source,container,snapshot.superblock,snapshot.superblock,snapshot.xid,13,0,true);
+            auto view=ReadVolume(bytes,live.oid,live.map);
+            Check(!view.locked&&view.xid==snapshot.xid&&view.uuid==live.uuid,"Invalid APFS snapshot superblock");
+            view.mapTransaction=live.xid;
+            view.snapshotCreated=snapshot.created;
+            view.name=live.name+u" [Snapshot: "+snapshot.name+u"]";
+            views.push_back(std::move(view));
+        }catch(const Error&){
+            // An unavailable historical view must not prevent opening the live volume.
+        }
+    }
+    return views;
 }
 
 class Catalog {
@@ -100,7 +164,8 @@ class Catalog {
             Scan(child,node.Level()-1,false,node.Layout(),wanted,seen,visit);
     }
 public:
-    Catalog(Source& s,const Container& c,const Mounted& v):source(s),container(c),volume(v),map(s,c,v.map,v.xid){}
+    Catalog(Source& s,const Container& c,const Mounted& v)
+        :source(s),container(c),volume(v),map(s,c,v.map,v.xid,v.mapTransaction){}
     void VisitRecords(uint64_t oid,unsigned type,const Visit& visit)const
     {
         std::set<uint64_t> seen;
@@ -291,6 +356,11 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
         }catch(const Error& error){inode.entry.readError=error.what();}
         return inode;
     }
+    std::string MountKey(const Mounted& mount)const{
+        auto identity=key+":"+std::to_string(mount.oid);
+        if(mount.snapshotCreated)identity+=":snapshot:"+std::to_string(mount.xid);
+        return identity;
+    }
     [[noreturn]] static void ReadOnly(){throw Error("APFS is read-only");}
 public:
     Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource)
@@ -313,7 +383,11 @@ public:
                 }
                 Check(root.entry.directory,"APFS root is not a directory");
                 root.entry.name=mount.name;
-                root.entry.identity=MacBrowser::EntryIdentity(key+":"+std::to_string(mount.oid),mount.xid);
+                root.entry.identity=MacBrowser::EntryIdentity(MountKey(mount),mount.xid);
+                if(mount.snapshotCreated){
+                    root.entry.created=root.entry.modified=*mount.snapshotCreated;
+                    root.entry.datesValid=true;
+                }
                 roots.push_back({i,2,root.stream,std::move(root.entry),std::move(root.attributes)});
             }catch(const Error&){if(!failure)failure=std::current_exception();}
         }
@@ -427,7 +501,7 @@ public:
                     }
                     auto& entry=inode.entry;
                     entry.parent=parent;entry.name=std::move(name);
-                    auto identity=key+":"+std::to_string(mounted.oid)+":"+std::to_string(folder.oid)+":"+std::to_string(oid);
+                    auto identity=MountKey(mounted)+":"+std::to_string(folder.oid)+":"+std::to_string(oid);
                     // Alias names in the same directory can refer to the same
                     // inode, but each alias is a separate browser selection.
                     if(entry.hardLink){
@@ -530,7 +604,11 @@ public:
     std::string PropertiesDetails(uint32_t id)override{
         return Access([&]() -> std::string {
             const auto& file=At(id);
-            if(file.oid==2&&mounts[file.mount].locked)return LockedMessage;
+            if(file.oid==2){
+                const auto& mount=mounts[file.mount];
+                if(mount.locked)return LockedMessage;
+                if(mount.snapshotCreated)return "APFS snapshot (transaction "+std::to_string(mount.xid)+")";
+            }
             if(!file.symlink)return {};
             const auto target=file.attributes.find(SymlinkAttribute);
             constexpr size_t maxDisplayedPath=4096;
@@ -632,7 +710,14 @@ std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const s
         try{
             const auto block=map.Lookup(oid);
             Check(block.has_value(),"Missing APFS volume mapping");
-            volumes.push_back(ReadVolume(*source,*container,oid,*block));
+            auto live=ReadVolume(ReadObject(*source,*container,*block,oid,container->transaction,13),oid);
+            try{
+                auto snapshots=ReadSnapshots(*source,*container,live);
+                volumes.push_back(std::move(live));
+                for(auto& view:snapshots)volumes.push_back(std::move(view));
+            }catch(const Error&){
+                volumes.push_back(std::move(live));
+            }
         }catch(const Error&){if(!problem)problem=std::current_exception();}
     }
     if(volumes.empty())std::rethrow_exception(problem);

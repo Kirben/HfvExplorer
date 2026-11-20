@@ -70,10 +70,10 @@ Record Node::At(size_t i)const
     return {{bytes.data()+loc.key,loc.keySize},{bytes.data()+loc.value,loc.valueSize}};
 }
 
-ObjectMap::ObjectMap(Source& s,const Container& c,uint64_t block,uint64_t tx)
-    :source(s),container(c),transaction(tx)
+ObjectMap::ObjectMap(Source& s,const Container& c,uint64_t block,uint64_t tx,uint64_t treeTx)
+    :source(s),container(c),transaction(tx),treeTransaction(treeTx?treeTx:tx)
 {
-    const auto object=ReadObject(source,container,block,block,transaction,11,0,true);
+    const auto object=ReadObject(source,container,block,block,treeTransaction,11,0,true);
     Check(Le32(object.data()+40)==0x40000002,"Unsupported APFS object-map tree type");
     tree=Le64(object.data()+48);
     changingEncryption=(Le32(object.data()+32)&0x0e)!=0;
@@ -97,7 +97,7 @@ std::optional<ObjectMap::Mapping> ObjectMap::Find(uint64_t oid)const
     TreeLayout layout;
     std::optional<Key> fence;
     while(true){
-        const Node node(ReadObject(source,container,block,block,transaction,root?2:3,11,true),root,layout);
+        const Node node(ReadObject(source,container,block,block,treeTransaction,root?2:3,11,true),root,layout);
         Check(root||node.Level()+1==level,"Invalid APFS object-map level");
         level=node.Level();
         layout=node.Layout();
