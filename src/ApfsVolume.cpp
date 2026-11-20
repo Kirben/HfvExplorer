@@ -182,7 +182,7 @@ public:
 };
 
 
-uint64_t ReadSiblingId(const Catalog& catalog,Record drec,uint64_t parent,uint64_t inode,
+std::pair<uint64_t,bool> ReadSiblingId(const Catalog& catalog,Record drec,uint64_t parent,uint64_t inode,
                        const uint8_t* name,size_t nameLength)
 {
     const auto* value=drec.value.data;
@@ -191,10 +191,12 @@ uint64_t ReadSiblingId(const Catalog& catalog,Record drec,uint64_t parent,uint64
     const auto sibling=Le64(value+26);
     Check(sibling>2&&sibling<=IdMask&&sibling!=inode,"Invalid APFS sibling ID");
 
-    bool linked=false,mapped=false;
+    bool linked=false,mapped=false,primary=true;
     catalog.VisitRecords(inode,5,[&](Record record){
         Check(record.key.size==16,"Invalid APFS sibling link key");
-        if(Le64(record.key.data+8)!=sibling)return;
+        const auto id=Le64(record.key.data+8);
+        primary&=id>=sibling;
+        if(id!=sibling)return;
         const auto* link=record.value.data;
         Check(!linked&&record.value.size==10+nameLength&&Le64(link)==parent&&
               Le16(link+8)==nameLength&&!memcmp(link+10,name,nameLength),
@@ -207,7 +209,7 @@ uint64_t ReadSiblingId(const Catalog& catalog,Record drec,uint64_t parent,uint64
         mapped=true;
     });
     Check(linked&&mapped,"Missing APFS sibling link or map");
-    return sibling;
+    return {sibling,primary};
 }
 
 constexpr auto ResourceFork=u"com.apple.ResourceFork";
@@ -352,6 +354,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
         Entry entry;
         AttributeRecords attributes;
         bool symlink=false;
+        uint64_t aliasId=0;
     };
     using Address=std::pair<size_t,uint64_t>;
     std::map<uint32_t,Item> entries;
@@ -477,6 +480,7 @@ public:
         capabilities.attributes=true;
         capabilities.basicMetadata=writable;
         capabilities.compression=writable;
+        capabilities.hardLinks=writable;
         return capabilities;
     }
     MacBrowser::WorkerExecution Execution()const override{
@@ -543,7 +547,7 @@ private:
                 const auto oid=Le64(record.value.data);
                 Check(oid>2&&oid<=IdMask,"Invalid APFS directory record inode");
                 auto inode=LoadInode(catalog,folder.mount,oid);
-                Check(!writable||!inode.entry.hardLink,"APFS writable mounts require unlinked native entries");
+                uint64_t aliasId=0;
                 auto name=Apfs::Name(record.key.data+header,nameLength);
                 Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos&&names.insert(name).second,
                       "Invalid or duplicate APFS directory name");
@@ -557,21 +561,24 @@ private:
                 // Alias names in the same directory can refer to the same
                 // inode, but each alias is a separate browser selection.
                 if(entry.hardLink){
-                    const auto sibling=ReadSiblingId(catalog,record,folder.oid,oid,
-                                                     record.key.data+header,nameLength);
-                    identity+=':';
-                    identity+=std::to_string(sibling);
+                    const auto [sibling,primary]=ReadSiblingId(catalog,record,folder.oid,oid,
+                                                               record.key.data+header,nameLength);
+                    if(!writable||!primary){
+                        aliasId=sibling;
+                        identity+=':';
+                        identity+=std::to_string(sibling);
+                    }
                 }
                 entry.identity=MacBrowser::EntryIdentity(std::move(identity),EntryVersion(mounted));
                 children.push_back({folder.mount,oid,inode.stream,std::move(entry),
-                                    std::move(inode.attributes),inode.symlink});
+                                    std::move(inode.attributes),inode.symlink,aliasId});
             });
             Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
             std::vector<uint32_t> ids;
             ids.reserve(children.size());
             for(auto& child:children){
                 if(writable){
-                    const auto slot=writableIds.emplace(child.oid,uint32_t(next));
+                    const auto slot=writableIds.emplace(child.aliasId?child.aliasId:child.oid,uint32_t(next));
                     if(slot.second)++next;
                     child.entry.id=slot.first->second;
                 }else child.entry.id=uint32_t(next++);
@@ -828,6 +835,24 @@ private:
         return FileDates{entry.created,entry.modified};
     }
 public:
+    uint32_t MakeHardLink(uint32_t id,uint32_t parent,const std::u16string& name,bool replace=false)override{
+        return WriteMount([&]{
+            Check(!replace,"Replacing a file with an APFS hard link is not supported");
+            const auto oid=At(id).oid,folder=At(parent).oid;
+            const auto sourceParent=At(id).entry.parent;
+            const auto links=At(id).entry.linkCount;
+            Storage::Job job;
+            CommitMutation(parent,0,job,[&](auto& job){
+                return CreateCatalogHardLink(*source,container,folder,oid,name,job);
+            });
+            if(sourceParent!=parent)ListDirectory(sourceParent);
+            for(auto& [row,item]:entries){
+                if(item.oid==oid)item.entry.linkCount=links+1;
+            }
+            for(const auto alias:listings.at(parent))if(At(alias).entry.name==name)return alias;
+            throw Error("APFS hard link committed but could not be found after refresh");
+        });
+    }
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
         return CreateFolder(parent,name,{});
     }
@@ -1097,6 +1122,7 @@ public:
         Access([&]{
             Check(writable&&id!=2,"APFS entry is read-only");
             const auto& entry=At(id).entry;
+            Check(!entry.hardLink,"APFS hard-linked entries cannot be removed yet");
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             return true;
         });

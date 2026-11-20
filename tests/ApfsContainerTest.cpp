@@ -1131,6 +1131,66 @@ void ReplaceCatalogData(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS atomic data replacement, truncation and refill, stale and invalid destinations, and interrupted writes.\n");
 }
 
+void WritableHardLinks(const std::string& root,FILE* report)
+{
+    const auto baseline=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
+    const auto original=OpenImage(baseline.c_str(),false);
+    const auto bytes=Disk::Read(*original,0,size_t(original->Size()));
+    {
+        CheckpointFaultImage interrupted(bytes);
+        const auto before=Apfs::Probe(interrupted);
+        Check(before.has_value(),"Missing APFS checkpoint for hard-link cancellation");
+        Storage::Job job;
+        interrupted.onFlush=[&]{job.cancel();};
+        bool cancelled=false;
+        try{Apfs::CreateCatalogHardLink(interrupted,*before,2,16,u"Cancelled alias",job);}
+        catch(const Storage::Cancelled&){cancelled=true;}
+        const auto after=Apfs::Probe(interrupted);
+        Check(cancelled&&after&&after->transaction==before->transaction,
+              "Cancelled APFS hard-link creation published a checkpoint");
+    }
+    const auto path=VolumeCoord::Wide(root+"apfs-written-hard-links.img");
+    {
+        auto copy=CreateFormatOutput(path.c_str(),bytes.size());
+        copy->Write(0,bytes.data(),bytes.size());
+        copy->Flush();
+        copy->Keep();
+    }
+    {
+        auto source=OpenImage(path.c_str(),true);
+        auto volume=Apfs::OpenWritable(source,VolumeCoord::ImageKey(path));
+        MacBrowser::Entry target,folder,alias;
+        Check(volume->Supports().CanCreateHardLinks()&&volume->FindChild(2,u"renamed file",target)&&
+              volume->FindChild(2,u"Renamed Folder",folder),"Missing APFS hard-link fixture");
+        const auto id=volume->MakeHardLink(target.id,folder.id,u"Nested alias");
+        Check(volume->FindChild(folder.id,u"Nested alias",alias)&&alias.id==id&&alias.id!=target.id&&
+              alias.linkCount==2&&volume->Stat(target.id).linkCount==2&&
+              alias.resolvedId==volume->Stat(target.id).resolvedId,"APFS cross-folder alias identity differs");
+        const auto second=volume->MakeHardLink(id,2,u"Second alias");
+        Check(volume->Stat(second).linkCount==3&&volume->Stat(second).resolvedId==alias.resolvedId,
+              "APFS cannot extend a hard-link group through another alias");
+        Reject([&]{volume->MakeHardLink(id,2,u"Second alias");},"APFS accepted a duplicate link name");
+        Reject([&]{volume->Remove(id);},"APFS deleted an alias before unlink was supported");
+        volume->MakeDirectory(2,u"Unrelated edit");
+    }
+    {
+        const auto volume=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry target,alias,second,folder,unrelated;
+        Check(volume->FindChild(2,u"renamed file",target)&&volume->FindChild(2,u"Second alias",second)&&
+              volume->FindChild(2,u"Renamed Folder",folder)&&volume->FindChild(folder.id,u"Nested alias",alias)&&
+              volume->FindChild(2,u"Unrelated edit",unrelated)&&target.linkCount==3&&
+              target.resolvedId==alias.resolvedId&&target.resolvedId==second.resolvedId&&
+              target.id!=alias.id&&target.id!=second.id&&alias.id!=second.id,
+              "APFS hard-link group did not survive reopen");
+        Check(target.forks[0].size>0&&alias.forks[0].size==target.forks[0].size,"APFS aliases have different fork sizes");
+        Bytes expected(size_t(target.forks[0].size)),actual(expected.size());
+        volume->Read(target.id,0,0,expected.data(),expected.size());
+        volume->Read(alias.id,0,0,actual.data(),actual.size());
+        Check(actual==expected,"APFS alias did not share the original file data");
+    }
+    fprintf(report,"PASS: APFS hard-link creation, cross-folder aliases, collisions, independent edits and reopen.\n");
+}
+
 void WritableNamespace(const std::string& root,FILE* report)
 {
     auto baseline=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
@@ -2299,6 +2359,7 @@ int RunApfsContainerTest(const char* directory)
         DeleteCatalogWrites(root,report);
         ReplaceCatalogData(root,report);
         WritableNamespace(root,report);
+        WritableHardLinks(root,report);
         DirectoryHashCollisions(root,report);
         UnicodeCatalogNames(root,report);
         FinderMetadataWrites(root,report);

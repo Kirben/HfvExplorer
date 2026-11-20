@@ -406,6 +406,13 @@ uint64_t ReplaceCatalogSymlink(Source& source,const Container& expected,uint64_t
     return Commit(source,expected,job,&request);
 }
 
+uint64_t CreateCatalogHardLink(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
+                               const std::u16string& name,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogHardLink{parent,inode,name};
+    return Commit(source,expected,job,&request);
+}
+
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile};

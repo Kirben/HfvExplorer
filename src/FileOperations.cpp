@@ -757,7 +757,7 @@ Storage::Result RunHardLink(const CreateHardLink& request,Storage::Job& job,Comp
   auto target=Destination(request.parent);
   Check(source.first->Supports().hardLinks&&target.first->Supports().CanCreateHardLinks()&&
         source.first->ResourceKey()==target.first->ResourceKey(),
-        "Hard links require the same writable HFS+/HFSX volume");
+        "Hard links require the same writable volume with hard-link support");
   Cancel(job);
   Mark(completion,request.source);
   MarkChild(completion,request.parent,request.name);

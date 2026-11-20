@@ -732,6 +732,40 @@ void WriteCompressionAttribute(std::vector<OwnedRecord>& attributes,Bytes& inode
     SetCompressionFlags(inode,logicalSize,compression!=nullptr);
 }
 
+void SetSibling(Bytes& value,uint64_t sibling)
+{
+    value.resize(34);
+    Set(value,18,1,2);
+    Set(value,20,8,2);
+    value[22]=1;
+    Set(value,24,8,2);
+    Set(value,26,sibling,8);
+}
+
+struct CatalogSibling {
+    uint64_t inode,parent;
+    std::string name;
+    bool linkSeen=false,mapSeen=false;
+
+    OwnedRecord LinkRecord(uint64_t id)const
+    {
+        OwnedRecord record{Bytes(16),Bytes(11+name.size())};
+        Set(record.key,0,(uint64_t(5)<<60)|inode,8);
+        Set(record.key,8,id,8);
+        Set(record.value,0,parent,8);
+        Set(record.value,8,name.size()+1,2);
+        std::copy(name.begin(),name.end(),record.value.begin()+10);
+        return record;
+    }
+    OwnedRecord MapRecord(uint64_t id)const
+    {
+        OwnedRecord record{Bytes(8),Bytes(8)};
+        Set(record.key,0,(uint64_t(12)<<60)|id,8);
+        Set(record.value,0,inode,8);
+        return record;
+    }
+};
+
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t symlinkCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
@@ -768,9 +802,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     std::map<uint64_t,std::set<std::u32string>> directoryNames;
     OwnedRecord added;
     std::optional<Key> addedKey;
-    if(create||rename){
+    const auto* hardLink=std::get_if<CatalogHardLink>(&request);
+    if(create||rename||hardLink){
         added=WriterDisk::DirectoryEntry(name,entryId,time,parent,fold,
-                                         uint16_t(create?create->kind:CatalogKind::Directory));
+                                         uint16_t(create?create->kind:hardLink?CatalogKind::RegularFile:CatalogKind::Directory));
         addedKey=Key{parent,9,Le32(added.key.data()+8)>>10,name};
     }
     Key previous{};
@@ -798,6 +833,22 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         std::optional<size_t> resourceRecord,compressionRecord;
     };
     std::map<uint64_t,Link> links;
+    std::map<uint64_t,CatalogSibling> siblings;
+    std::map<uint64_t,std::set<uint64_t>> siblingGroups;
+    for(size_t i=2;i<records.size();++i){
+        const auto item=at(i);
+        if(item.key.size<14||Le64(item.key.data)>>60!=9||item.value.size!=34)continue;
+        const auto sibling=Le64(item.value.data+26);
+        const auto inode=Le64(item.value.data);
+        Bytes expected(item.value.data,item.value.data+18);
+        SetSibling(expected,sibling);
+        Check(sibling>inode&&sibling<nextId&&Matches(item.value,expected),
+              "Invalid APFS sibling directory record");
+        const auto name=reinterpret_cast<const char*>(item.key.data+12);
+        Check(siblings.emplace(sibling,CatalogSibling{inode,Le64(item.key.data)&IdMask,
+              std::string(name,item.key.size-13)}).second,"Repeated APFS sibling ID");
+        siblingGroups[inode].insert(sibling);
+    }
     struct AttributeStream {uint64_t inode,blocks;};
     std::map<uint64_t,AttributeStream> attributeStreams;
     uint64_t files=0,symlinks=0;
@@ -814,12 +865,13 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Check(view.key.size>=8,"Invalid APFS directory key");
             const auto key=Le64(view.key.data);
             const auto inode=key&IdMask,type=key>>60;
+            Check(type==12||!siblings.count(inode),"APFS sibling ID is also used by another catalog object");
             uint32_t hash=0;
             std::string storedName;
             if(type==9){
                 const auto folder=directories.find(inode);
                 Check(inode!=3&&folder!=directories.end()&&view.key.size>=14&&
-                      view.value.size==18,"Invalid APFS directory entry");
+                      (view.value.size==18||view.value.size==34),"Invalid APFS directory entry");
                 const auto kind=CatalogKind(Le16(view.value.data+16));
                 Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink,
                       "APFS catalog contains an unsupported entry type");
@@ -839,9 +891,22 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(!addedKey||parent!=inode||renamingThisEntry||canonicalName!=requestedName,
                       "The APFS entry name already exists");
                 storedName=childName;
-                Check(child>=16&&child>inode&&child<nextId&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
-                      "Invalid or duplicate APFS directory entry ID");
+                const auto group=siblingGroups.find(child);
+                const bool alias=view.value.size==34;
+                Check(child>=16&&child<nextId&&alias==(group!=siblingGroups.end())&&
+                      (!alias||(kind==CatalogKind::RegularFile&&group->second.size()>=2)),
+                      "Invalid APFS directory entry ID or sibling group");
+                if(!alias||Le64(view.value.data+26)==*group->second.begin()){
+                    Check(child>inode&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
+                          "Invalid or duplicate APFS primary directory entry");
+                }
                 ++folder->second.children;
+            }else if(type==12){
+                const auto sibling=siblings.find(inode);
+                Check(sibling!=siblings.end()&&!sibling->second.mapSeen,"Unexpected APFS sibling map");
+                const auto expected=sibling->second.MapRecord(inode);
+                Check(Matches(view.key,expected.key)&&Matches(view.value,expected.value),"Invalid APFS sibling map");
+                sibling->second.mapSeen=true;
             }else if(type==8){
                 const auto stream=attributeStreams.find(inode);
                 Check(stream!=attributeStreams.end(),"APFS extent has no attribute stream");
@@ -918,6 +983,17 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         previousAttribute=name;
                     }
                     link->second.attributes=streamRecords;
+                    for(;i+1+streamRecords<records.size();++streamRecords){
+                        const auto item=at(i+1+streamRecords);
+                        if(item.key.size<8||Le64(item.key.data)!=((uint64_t(5)<<60)|inode))break;
+                        Check(item.key.size==16,"Invalid APFS sibling link key");
+                        const auto id=Le64(item.key.data+8);
+                        const auto sibling=siblings.find(id);
+                        Check(sibling!=siblings.end()&&!sibling->second.linkSeen,"Unexpected APFS sibling link");
+                        const auto expected=sibling->second.LinkRecord(id);
+                        Check(Matches(item.key,expected.key)&&Matches(item.value,expected.value),"Invalid APFS sibling link");
+                        sibling->second.linkSeen=true;
+                    }
                 }
                 Check(bool(Le64(view.value.data+48)&HasSecurityAttribute)==hasSecurity,
                       "APFS security attribute and inode flag disagree");
@@ -936,7 +1012,11 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const bool symlink=kind==CatalogKind::SymbolicLink;
                     Check(!symlink||(!size&&!link->second.resourceRecord&&!link->second.compressionRecord),
                           "APFS symbolic link cannot have file streams");
-                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,symlink?0120777:0100644,1,size,finder?&*finder:nullptr);
+                    const auto group=siblingGroups.find(inode);
+                    const auto count=group==siblingGroups.end()?1:group->second.size();
+                    Check(count<=INT32_MAX,"Too many APFS hard links");
+                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,symlink?0120777:0100644,
+                                                    uint32_t(count),size,finder?&*finder:nullptr);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     Set(expected.value,68,Le32(value+68)&UserImmutable,4);
@@ -994,6 +1074,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& folder=entry.second;
         Check(Le32(records[folder.record].value.data()+56)==folder.children,"Invalid APFS directory child count");
     }
+    for(const auto& [id,sibling]:siblings)
+        Check(sibling.linkSeen&&sibling.mapSeen,"Missing APFS sibling link or map");
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
@@ -1002,6 +1084,40 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     if(!replace&&!metadata&&!attributesEdit&&!resourceEdit&&!linkEdit){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
+    }
+    if(hardLink){
+        const auto found=links.find(entryId);
+        Check(found!=links.end()&&found->second.kind==CatalogKind::RegularFile,
+              "APFS hard-link source must be a regular file");
+        const auto& link=found->second;
+        auto& inode=records[link.inodeRecord].value;
+        Check(!Le32(inode.data()+68),"Unlock the APFS file before creating a hard link");
+        const auto count=Le32(inode.data()+56);
+        Check(count<INT32_MAX,"Too many APFS hard links");
+        Set(inode,56,count+1,4);
+        Set(inode,32,time,8);
+        Set(parentInode,56,target->second.children+1,4);
+        auto afterLinks=link.inodeRecord+1+link.attributes+(count==1?0:count);
+        std::vector<OwnedRecord> newLinks,newMaps;
+        const auto append=[&](uint64_t id,uint64_t folder,const std::string& filename){
+            const CatalogSibling sibling{entryId,folder,filename};
+            newLinks.push_back(sibling.LinkRecord(id));
+            newMaps.push_back(sibling.MapRecord(id));
+        };
+        if(count==1){
+            SetSibling(records[link.entryRecord].value,nextId);
+            append(nextId,link.parent,link.name);
+        }
+        const auto aliasId=nextId+1;
+        SetSibling(added.value,aliasId);
+        append(aliasId,parent,name);
+        records.insert(records.begin()+afterLinks,std::make_move_iterator(newLinks.begin()),
+                       std::make_move_iterator(newLinks.end()));
+        if(insertAt>=afterLinks)insertAt+=newLinks.size();
+        records.insert(records.begin()+insertAt,std::move(added));
+        records.insert(records.end(),std::make_move_iterator(newMaps.begin()),
+                       std::make_move_iterator(newMaps.end()));
+        return records;
     }
     if(create){
         const bool isDirectory=create->kind==CatalogKind::Directory;
@@ -1026,6 +1142,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto found=links.find(entryId);
         Check(found!=links.end()&&found->second.parent==parent,"The APFS entry is no longer in the selected folder");
         const auto& link=found->second;
+        Check(!siblingGroups.count(entryId),"APFS hard-linked entries cannot be changed yet");
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
         const auto bsdFlags=Le32(inode.data()+68);
@@ -1330,7 +1447,9 @@ CatalogWritePlan PrepareCatalogMutation(
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
-    const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):std::string{};
+    const auto* hardLink=std::get_if<CatalogHardLink>(&request);
+    const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):
+                    hardLink?EncodeCatalogName(hardLink->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     const auto* linkReplacement=std::get_if<CatalogReplaceSymlink>(&request);
     const auto dates=replace?replace->dates:create?create->dates:linkReplacement?linkReplacement->dates:std::optional<FileDates>{};
@@ -1370,7 +1489,7 @@ CatalogWritePlan PrepareCatalogMutation(
     auto existing=ReadWritableCatalog(source,current,volumeMap,catalogOid);
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
-    auto nextAvailable=nextId+bool(create)+bool(resourceBlocks);
+    auto nextAvailable=nextId+bool(create)+bool(resourceBlocks)+(hardLink?2:0);
     Check(nextAvailable<IdMask,"APFS file-system object IDs are exhausted");
     if(resourceBlocks){
         resource->id=nextId+bool(create);

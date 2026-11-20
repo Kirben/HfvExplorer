@@ -63,7 +63,11 @@ struct CatalogReplaceSymlink {
     bool locked;
     const HfsPlus::Attributes& attributes;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink>;
+struct CatalogHardLink {
+    uint64_t parent,inode;
+    const std::u16string& name;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 
 struct DataRun {
     uint64_t block,count;
