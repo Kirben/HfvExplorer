@@ -4,6 +4,7 @@
 #include "CopyProcess.h"
 #include "VolumeSession.h"
 #include "VolumeSessionProtocol.h"
+#include "StorageLocation.h"
 #include "WorkerTransport.h"
 #include "TypeMappingSnapshot.h"
 #include "StorageHandoff.h"
@@ -1347,6 +1348,10 @@ int RunCopyProcessTest(const char *directory) {
             volume=OpenBrowserImage(path);
             Check(volume && volume->Writable(),"clean MFS image did not reopen writable");
             const auto beforeCrash=VolumeSession::VolumeSessionPidForTest(volume);
+            Entry beforeRestart;
+            Check(volume->FindChild(2,u"Renamed payload",beforeRestart),"Capture MFS entry before worker restart");
+            auto stale=FileOperations::Location::Mounted(volume,beforeRestart.id);
+            stale.expectedIdentity=beforeRestart.identity;
             VolumeSession::CrashVolumeSessionDuringPutForTest(volume);
             bool failed=false;
             try{Put(*volume,2,u"Interrupted write",4096);}
@@ -1356,6 +1361,11 @@ int RunCopyProcessTest(const char *directory) {
             volume->Reload();
             Check(!volume->Writable() && VolumeSession::VolumeSessionPidForTest(volume)!=beforeCrash,
                   "MFS crash refresh did not restore read-only browsing");
+            Entry afterRestart;
+            Check(volume->FindChild(2,u"Renamed payload",afterRestart)&&
+                  afterRestart.identity.primary==beforeRestart.identity.primary&&
+                  !StorageLocation::MatchesEntry(stale,afterRestart),"Worker restart accepted a stale selection");
+            stale={};
             volume.reset();
             volume=OpenBrowserImage(path);
             Entry retained;

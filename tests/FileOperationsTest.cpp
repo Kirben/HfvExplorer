@@ -162,6 +162,38 @@ int RunFileOperationsTest(const char* directory){
    Check(GetFileAttributesW(folder.c_str())==INVALID_FILE_ATTRIBUTES,"recursive deletion lost a Unicode child");
    fprintf(report,"PASS: typed Windows rename and recursive delete preserve Unicode paths.\n");
   }
+  {
+   auto host=OpenWindows(W(root));
+   Put(*host,u"Companion identity");
+   const auto file=root+"\\Companion identity";
+   const auto sidecar=W(root+"\\%Companion identity");
+   auto selected=Location::Windows(W(file));
+   selected.expectedIdentity=DescribeWindowsFile(W(file)).identity;
+   Check(!selected.expectedIdentity.companion.key.empty(),"Capture Windows companion identity");
+   auto handle=CreateFileW(sidecar.c_str(),FILE_WRITE_ATTRIBUTES|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,
+                           nullptr,OPEN_EXISTING,0,nullptr);
+   Check(handle!=INVALID_HANDLE_VALUE,"Open companion for version change");
+   FILETIME modified{};
+   const bool changed=GetFileTime(handle,nullptr,nullptr,&modified)!=FALSE;
+   ++modified.dwHighDateTime;
+   const bool saved=changed&&SetFileTime(handle,nullptr,nullptr,&modified)!=FALSE;
+   CloseHandle(handle);
+   const auto updated=DescribeWindowsFile(W(file)).identity;
+   Check(saved&&updated.SameObject(selected.expectedIdentity)&&updated.primary==selected.expectedIdentity.primary&&
+         updated.companion!=selected.expectedIdentity.companion,"Companion update changed the primary identity");
+   auto stale=Submit(RenameEntry{selected,u"Unexpected rename"});
+   Wait(stale);
+   Check(stale.Job()->result().code&&GetFileAttributesW(sidecar.c_str())!=INVALID_FILE_ATTRIBUTES,
+         "Stale companion selection modified the source");
+   selected.expectedIdentity=updated;
+   Check(MoveFileA(file.c_str(),(file+"-old").c_str())!=FALSE,"Retain original host file");
+   Save(file,"Replacement");
+   auto replacement=Submit(RenameEntry{selected,u"Unexpected replacement rename"});
+   Wait(replacement);
+   Check(replacement.Job()->result().code&&Load(file)==std::vector<BYTE>({'R','e','p','l','a','c','e','m','e','n','t'}),
+         "Captured object identity accepted a replacement at the same path");
+   fprintf(report,"PASS: stale Windows companion and same-path replacement identities refused.\n");
+  }
   Request classicRename = FileOperations::RenameEntry{classicSource, u"Renamed"};Pass(Submit(classicRename));
   Request legacy;legacy = FileOperations::LegacyConversion{};legacy.Legacy().source=FileOperations::Location::FromLegacy(classic,"Classic:Renamed");legacy.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\raw.dat");legacy.Legacy().options.output='r';legacy.Legacy().options.input='r';legacy.Legacy().options.appledouble=false;
   {Gate gate;auto captured=Submit(legacy);legacy.Legacy().options.output='5';HFSIFACE_restore_copy_settings('5','m',1);gate.Release();Pass(captured);char out,in;int ad;HFSIFACE_copy_settings(&out,&in,&ad);Check(out=='5'&&in=='m'&&ad==1&&Load(root+"\\raw.dat")==std::vector<BYTE>({'D','A','T','A'}),"queued conversion settings were not captured/restored");}

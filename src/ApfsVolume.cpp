@@ -280,7 +280,7 @@ public:
                 auto root=LoadInode(Catalog(*source,container,mount),i,2);
                 Check(root.entry.directory,"APFS root is not a directory");
                 root.entry.name=mount.name;
-                root.entry.identity=key+":"+std::to_string(mount.oid)+":"+std::to_string(mount.xid);
+                root.entry.identity=MacBrowser::EntryIdentity(key+":"+std::to_string(mount.oid),mount.xid);
                 roots.push_back({i,2,root.stream,std::move(root.entry),std::move(root.attributes)});
             }catch(const Error&){if(!failure)failure=std::current_exception();}
         }
@@ -294,7 +294,7 @@ public:
         }else{
             label=u"APFS Container";
             Entry root;
-            root.id=root.resolvedId=2;root.parent=1;root.directory=true;root.name=label;root.identity=key;
+            root.id=root.resolvedId=2;root.parent=1;root.directory=true;root.name=label;root.identity=MacBrowser::EntryIdentity(key);
             entries.emplace(2,Item{0,0,0,std::move(root),{}});
             std::vector<uint32_t> ids;
             std::set<std::u16string> names;
@@ -356,8 +356,9 @@ public:
                     }
                     auto& entry=inode.entry;
                     entry.parent=parent;entry.name=std::move(name);
-                    entry.identity=key+":"+std::to_string(mounted.oid)+":"+std::to_string(mounted.xid)+":"+
-                                   std::to_string(folder.oid)+":"+std::to_string(oid);
+                    entry.identity=MacBrowser::EntryIdentity(
+                        key+":"+std::to_string(mounted.oid)+":"+std::to_string(folder.oid)+":"+std::to_string(oid),
+                        mounted.xid);
                     children.push_back({folder.mount,oid,inode.stream,std::move(entry),std::move(inode.attributes)});
                 });
                 Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");

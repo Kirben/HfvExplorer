@@ -125,10 +125,10 @@ int RunTypedLocationsTest(const char *directory) {
         Reject([&] { Location::Mounted(backend, 0); }, "Invalid catalog identifier accepted");
         auto mounted = Location::Mounted(backend, 99);
         mounted.cut = mounted.directory = true;
-        mounted.expectedIdentity = "selected";
+        mounted.expectedIdentity = MacBrowser::EntryIdentity("selected");
         mounted.SetMounted(backend, 101);
         Check(mounted.Id() == 101 && mounted.cut && mounted.directory &&
-                  mounted.expectedIdentity == "selected" && !backend->calls,
+                  mounted.expectedIdentity == MacBrowser::EntryIdentity("selected") && !backend->calls,
               "Rebinding changed guards or performed I/O");
         {
             auto owned = std::make_shared<Memory>();
@@ -145,7 +145,10 @@ int RunTypedLocationsTest(const char *directory) {
             if (location.IsWindows()) location.BindWindowsMediaSerial(0);
             location.cut = true;
             location.directory = true;
-            location.expectedIdentity = "identity";
+            location.expectedIdentity = MacBrowser::EntryIdentity("identity",42);
+            location.expectedIdentity.companion={"companion",0};
+            location.expectedIdentity.media=MacBrowser::MediaIdentity{"device",0};
+            location.expectedIdentity.session=17;
             location.expectedName = u"Name";
             location.expectedCatalogId = 19;
             location.expectedParent = 17;

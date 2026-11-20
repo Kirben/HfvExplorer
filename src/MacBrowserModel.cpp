@@ -54,7 +54,7 @@ class Plus final : public Volume, public WorkerEndpoint {
         Entry e; e.id=in.id; e.parent=in.parent; e.resolvedId=in.resolvedId;
         e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile;
         e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
-        e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=std::to_string(in.id);
+        e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
         for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;return e;
     }
 public:
@@ -138,7 +138,7 @@ class Mfs final : public Volume, public WorkerEndpoint {
     Entry EntryAt(size_t i){
         const auto& in=image_.Entries().at(i);Entry e;e.id=ids_->byFile.at(in.id);e.resolvedId=in.id;e.parent=2;e.name=U16(MfsDisplayName(in.name));e.version=in.version;e.protectedFile=(in.flags&1)!=0;
         e.created=in.created;e.modified=in.modified;e.datesValid=true;memcpy(e.finder.data(),in.finderInfo,16);for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].length;
-        e.identity=std::to_string(in.id)+":"+std::to_string(in.created)+":"+std::to_string(in.version);return e;
+        e.identity=EntryIdentity(std::to_string(in.id),(uint64_t(in.created)<<8)|in.version);return e;
     }
     void Ready()const{Check(usable_,"Reopen the MFS image after a failed operation");}
     void Mutate(std::function<bool()> work){
@@ -244,7 +244,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
     if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name,found);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
-    auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:std::string{};
+    auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     const auto advance=[&](unsigned fork,uint64_t offset,size_t count){
         if(job.cancelled())throw Storage::Cancelled();
         const auto end=offset+count;
@@ -518,7 +518,18 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
         auto e=v.Stat(at);Check(!e.identity.empty(),"Cannot verify source identity; source items were retained");++count;
         if(requireRemovable)v.ValidateRemoval(at);
         auto attributes=v.GetAttributes(at);for(const auto& a:attributes){auto size=a.second.size();bytes(a.first.data(),a.first.size()*2);bytes(&size,sizeof(size));HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<a.second.size();){auto n=size_t((std::min)(uint64_t(buffer.size()),a.second.size()-at));a.second.Read(at,buffer.data(),n);bytes(buffer.data(),n);at+=n;}}
-        bytes(e.identity.data(),e.identity.size());bytes(e.name.data(),e.name.size()*2);
+        const auto object=[&](const ObjectIdentity& value){
+            const auto length=uint64_t(value.key.size());
+            bytes(&length,sizeof(length));bytes(value.key.data(),value.key.size());
+            const auto version=value.version.value_or(0);
+            bytes(&version,sizeof(version));
+        };
+        object(e.identity.primary);object(e.identity.companion);
+        if(e.identity.media){
+            object({e.identity.media->device,e.identity.media->generation});
+        }else object({});
+        const auto session=e.identity.session.value_or(0);
+        bytes(&session,sizeof(session));bytes(e.name.data(),e.name.size()*2);
         bytes(&e.created,sizeof(e.created));bytes(&e.modified,sizeof(e.modified));bytes(e.finder.data(),e.finder.size());
         bytes(&e.forks[0].size,sizeof(uint64_t));bytes(&e.forks[1].size,sizeof(uint64_t));
         if(e.directory){auto children=v.List(at);std::sort(children.begin(),children.end(),[](const Entry& a,const Entry& b){return a.name==b.name?a.identity<b.identity:a.name<b.name;});for(auto& child:children)walk(child.id,depth+1);}

@@ -201,7 +201,7 @@ public:
     {
         auto root=reader_->Root();
         root.entry.id=2;root.entry.parent=1;
-        root.entry.identity=key_+":"+root.address;
+        root.entry.identity=MacBrowser::EntryIdentity(key_+":"+root.address);
         name_=root.entry.name;
         nodes_.push_back(std::move(root));
         const auto files=source_->WorkerFiles();
@@ -262,7 +262,7 @@ public:
                     }else child.entry.forks[0].size=child.size;
                     child.entry.id=uint32_t(nodes_.size()+ids.size()+2);
                     child.entry.parent=parent;
-                    child.entry.identity=folder.entry.identity+"/"+child.address;
+                    child.entry.identity=MacBrowser::EntryIdentity(folder.entry.identity.primary.key+"/"+child.address);
                     ids.push_back(child.entry.id);
                 }
                 nodes_.insert(nodes_.end(),std::make_move_iterator(children.begin()),std::make_move_iterator(children.end()));

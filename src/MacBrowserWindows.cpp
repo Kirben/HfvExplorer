@@ -59,6 +59,13 @@ struct File {
         Check(SetFileTime(h,&a,nullptr,&b)!=FALSE,"Cannot preserve Windows file timestamps");
     }
 };
+ObjectIdentity WindowsIdentity(const BY_HANDLE_FILE_INFORMATION& info)
+{
+    return {std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+
+            std::to_string(info.nFileIndexLow),
+            (uint64_t(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime};
+}
+
 // Keep writers off the captured version. Renames are allowed so our own
 // publication can move it, but every moved version is checked by file identity.
 struct FileVersion {
@@ -68,14 +75,13 @@ struct FileVersion {
  FileVersion(const FileVersion&)=delete;FileVersion& operator=(const FileVersion&)=delete;
  bool Present()const{return handle!=INVALID_HANDLE_VALUE;}
  bool Matches(const std::wstring& path)const{try{FileVersion other(path);if(Present()!=other.Present())return false;if(!Present())return true;const auto& a=info;const auto& b=other.info;return a.dwVolumeSerialNumber==b.dwVolumeSerialNumber&&a.nFileIndexHigh==b.nFileIndexHigh&&a.nFileIndexLow==b.nFileIndexLow&&a.nFileSizeHigh==b.nFileSizeHigh&&a.nFileSizeLow==b.nFileSizeLow&&a.ftLastWriteTime.dwHighDateTime==b.ftLastWriteTime.dwHighDateTime&&a.ftLastWriteTime.dwLowDateTime==b.ftLastWriteTime.dwLowDateTime;}catch(...){return false;}}
- std::string Identity()const{const auto& a=info;return std::to_string(a.dwVolumeSerialNumber)+":"+std::to_string(a.nFileIndexHigh)+":"+std::to_string(a.nFileIndexLow)+":"+std::to_string(a.ftLastWriteTime.dwHighDateTime)+":"+std::to_string(a.ftLastWriteTime.dwLowDateTime);}
+ ObjectIdentity Identity()const{return Present()?WindowsIdentity(info):ObjectIdentity{};}
  void Verify(const std::wstring& path)const{Check(Matches(path),"Destination changed during staging/publication; replacement was refused");}
 };
 void CopyNamedStreams(const std::wstring& source,const std::wstring& staged,const Entry& entry,Storage::Job& job)
 {
     FileVersion version(source);
-    const auto slash=entry.identity.find('/');
-    Check(version.Present()&&version.Identity()==entry.identity.substr(0,slash),
+    Check(version.Present()&&version.Identity()==entry.identity.primary,
           "Windows source changed before copying its alternate data streams");
 
     WIN32_FIND_STREAM_DATA stream{};
@@ -110,8 +116,8 @@ void CopyNamedStreams(const std::wstring& source,const std::wstring& staged,cons
 }
 
 struct DirectoryLease {
- HANDLE handle;std::string identity;
- explicit DirectoryLease(const std::wstring& path):handle(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)){Check(handle!=INVALID_HANDLE_VALUE,"Cannot protect destination folder during publication");BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(handle,&info)||!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){CloseHandle(handle);throw HfsPlus::Error("Destination folder was replaced or became a directory link");}identity=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow)+":";}
+ HANDLE handle;ObjectIdentity identity;
+ explicit DirectoryLease(const std::wstring& path):handle(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)){Check(handle!=INVALID_HANDLE_VALUE,"Cannot protect destination folder during publication");BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(handle,&info)||!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){CloseHandle(handle);throw HfsPlus::Error("Destination folder was replaced or became a directory link");}identity=WindowsIdentity(info);}
  ~DirectoryLease(){CloseHandle(handle);}
  DirectoryLease(const DirectoryLease&)=delete;DirectoryLease& operator=(const DirectoryLease&)=delete;
 };
@@ -348,10 +354,16 @@ class Windows final : public Volume, public WorkerEndpoint {
         Entry e; e.id = id; e.directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         e.name = U16(p.substr(p.find_last_of(L"\\/") + 1));
         auto identity=[](const std::wstring& path){
-            std::string result;HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
-            if(h!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION i{};if(GetFileInformationByHandle(h,&i))result=std::to_string(i.dwVolumeSerialNumber)+":"+std::to_string(i.nFileIndexHigh)+":"+std::to_string(i.nFileIndexLow)+":"+std::to_string(i.ftLastWriteTime.dwHighDateTime)+":"+std::to_string(i.ftLastWriteTime.dwLowDateTime);CloseHandle(h);}return result;
+            ObjectIdentity result;
+            HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+            if(h!=INVALID_HANDLE_VALUE){
+                BY_HANDLE_FILE_INFORMATION info{};
+                if(GetFileInformationByHandle(h,&info))result=WindowsIdentity(info);
+                CloseHandle(h);
+            }
+            return result;
         };
-        e.identity=identity(p);
+        e.identity.primary=identity(p);
         ULARGE_INTEGER created,modified;created.LowPart=info.ftCreationTime.dwLowDateTime;created.HighPart=info.ftCreationTime.dwHighDateTime;
         modified.LowPart=info.ftLastWriteTime.dwLowDateTime;modified.HighPart=info.ftLastWriteTime.dwHighDateTime;
         uint64_t a=created.QuadPart/10000000,b=modified.QuadPart/10000000;
@@ -364,8 +376,8 @@ class Windows final : public Volume, public WorkerEndpoint {
             Check(!e.directory||!d.size,"Directory companion contains unexpected resource data; it was preserved");
             if(!e.directory)e.forks[1].size=d.size;e.finder=d.finder;
             const auto companion=identity(Companion(p));
-            if(e.identity.empty()||companion.empty())e.identity.clear();
-            else e.identity+="/"+companion;
+            if(e.identity.empty()||companion.key.empty())e.identity.clear();
+            else e.identity.companion=companion;
         }
         return e;
     }
@@ -387,7 +399,7 @@ public:
     void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={}){
         auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
         DirectoryLease directory(root);FileVersion original(companion);std::unique_ptr<FileVersion> replacement,primary;std::unique_ptr<DirectoryLease> folder;
-        if(e.directory){folder.reset(new DirectoryLease(path));Check(e.identity.compare(0,folder->identity.size(),folder->identity)==0,"Primary folder changed before metadata publication");}else{primary.reset(new FileVersion(path));Check(primary->Present()&&e.identity.substr(0,e.identity.find('/'))==primary->Identity(),"Primary file changed before metadata publication");}
+        if(e.directory){folder.reset(new DirectoryLease(path));Check(e.identity.primary.key==folder->identity.key,"Primary folder changed before metadata publication");}else{primary.reset(new FileVersion(path));Check(primary->Present()&&e.identity.primary==primary->Identity(),"Primary file changed before metadata publication");}
         Double old;bool exists=original.Present();Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");Check(old.size==e.forks[1].size,"Resource fork changed before metadata publication");
         std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
         try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);header.Write(output);if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.WriteForkBytes(buffer.data(),n);at+=n;}}output.SealSparse();output.Flush();}
@@ -409,10 +421,11 @@ public:
         auto path=Path(id);HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         Check(h!=INVALID_HANDLE_VALUE,"Cannot open destination folder for metadata");struct Close{HANDLE h;~Close(){CloseHandle(h);}}close{h};BY_HANDLE_FILE_INFORMATION info{};
         Check(GetFileInformationByHandle(h,&info)&&(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT),"Destination folder is unavailable or became a directory link");
-        auto prefix=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow)+":";
-        Check(expected.directory&&expected.identity.compare(0,prefix.size(),prefix)==0,"Destination folder was replaced during copying");auto now=Describe(id);
-        auto companionIdentity=[](const Entry& e){auto at=e.identity.find('/');return at==e.identity.npos?std::string{}:e.identity.substr(at);};
-        Check(merge||companionIdentity(now)==companionIdentity(expected),"Destination folder metadata changed during copying; companion retained");
+        Check(expected.directory&&expected.identity.primary.key==WindowsIdentity(info).key,
+              "Destination folder was replaced during copying");
+        const auto now=Describe(id);
+        Check(merge||now.identity.companion==expected.identity.companion,
+              "Destination folder metadata changed during copying; companion retained");
         FILETIME created=info.ftCreationTime,modified=info.ftLastWriteTime,rollbackCreated=created,rollbackModified=modified;
         if(desired.datesValid){ULARGE_INTEGER a,b;a.QuadPart=(desired.created+9561628800ULL)*10000000ULL;b.QuadPart=(desired.modified+9561628800ULL)*10000000ULL;created={a.LowPart,a.HighPart};modified={b.LowPart,b.HighPart};if(merge){rollbackCreated=created;rollbackModified=modified;}}
         auto finish=[&]{
@@ -523,7 +536,13 @@ private:
         if(!e.name.empty()&&e.name[0]==u'%'&&e.name.size()>1){Double owned;auto owner=Child(root,Wide(e.name.substr(1)));Check(GetFileAttributesW(owner.c_str())==INVALID_FILE_ATTRIBUTES||!AppleDouble(path,owned),"The destination is another item's metadata companion; it was preserved");}
         DirectoryLease directory(root);FileVersion original(path),originalResource(companion);
         bool existed=original.Present(),sidecar=originalResource.Present();Double old;
-        if(!e.expectedDestinationIdentity.empty()){auto identity=existed?original.Identity():std::string{};if(sidecar)identity+="/"+originalResource.Identity();Check(existed&&identity==e.expectedDestinationIdentity,"Destination changed while the overwrite decision was pending; source retained");}
+        if(!e.expectedDestinationIdentity.empty()){
+            EntryIdentity identity;
+            identity.primary=original.Identity();
+            if(sidecar)identity.companion=originalResource.Identity();
+            Check(existed&&identity==e.expectedDestinationIdentity,
+                  "Destination changed while the overwrite decision was pending; source retained");
+        }
         Check(!existed || replace, "Destination already exists");
         Check(!sidecar || (existed && AppleDouble(companion, old)), "An unrelated companion file blocks export; it was preserved");
         auto outgoing=e;if(!e.attributesKnown&&sidecar)outgoing.attributes=DoubleAttributes(companion,old);const bool withCompanion = !outgoing.portableContainer || !outgoing.attributes.empty() ||

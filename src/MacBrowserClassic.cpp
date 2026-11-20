@@ -102,7 +102,7 @@ class Classic final : public Volume, public WorkerEndpoint {
     Entry Describe(const std::string &path, uint32_t id) {
         RootScope scope(volume_);hfsdirent in; Check(hfs_stat(volume_, const_cast<char*>(path.c_str()), &in) == 0); Entry e;
         e.id=id;if(id==2)e.parent=1;else{auto parent=path.substr(0,path.find_last_of(':'));if(parent.empty())parent=":";e.parent=session_?uint32_t(in.parid):Id(parent);}
-        e.name=Decode(in.name);e.identity=imageIdentity_+":"+std::to_string(uint32_t(in.cnid));e.resolvedId=uint32_t(in.cnid);
+        e.name=Decode(in.name);e.identity=EntryIdentity(imageIdentity_+":"+std::to_string(uint32_t(in.cnid)));e.resolvedId=uint32_t(in.cnid);
         e.directory=(in.flags&HFS_ISDIR)!=0;e.protectedFile=(in.flags&HFS_ISLOCKED)!=0;
         e.created=uint32_t(int64_t(in.crdate)+2082844800LL);e.modified=uint32_t(int64_t(in.mddate)+2082844800LL);e.datesValid=true;
         if(!e.directory){e.forks[0].size=in.u.file.dsize;e.forks[1].size=in.u.file.rsize;

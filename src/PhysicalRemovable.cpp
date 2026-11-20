@@ -322,13 +322,13 @@ class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpo
         return (!g.floppy||supportedFloppy)&&!part.readOnly&&part.offset%g.sector==0&&
                part.length%g.sector==0&&api.CanWrite(device);
     }
-    std::string Identity(const std::string& identity)const{
-        return key_+":"+std::to_string(generation_)+":"+identity;
+    MacBrowser::EntryIdentity Identity(MacBrowser::EntryIdentity identity)const{
+        if(!identity.empty())identity.media=MacBrowser::MediaIdentity{key_,generation_};
+        return identity;
     }
     Entry DestinationEntry(Entry entry)const{
         auto& expected=entry.expectedDestinationIdentity;
-        const auto prefix=Identity("");
-        if(expected.compare(0,prefix.size(),prefix)==0)expected.erase(0,prefix.size());
+        if(expected.media==MacBrowser::MediaIdentity{key_,generation_})expected.media.reset();
         return entry;
     }
 public:

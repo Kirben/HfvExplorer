@@ -18,14 +18,6 @@ void Cancel(Storage::Job& job) {
     if (job.cancelled()) throw Storage::Cancelled();
 }
 
-std::string FolderIdentity(std::string identity) {
-    for (int i=0; i<2; ++i) {
-        const auto colon=identity.find_last_of(':');
-        if (colon==identity.npos) return {};
-        identity.resize(colon);
-    }
-    return identity;
-}
 
 void ValidateSelection(const Location& location, const MacBrowser::Entry& entry) {
     if (!MatchesEntry(location,entry))
@@ -144,8 +136,7 @@ bool MatchesEntry(const Location& location, const MacBrowser::Entry& entry) {
 
 void ValidateFolderIdentity(const Location& location, const MacBrowser::Entry& entry) {
     if (location.expectedIdentity.empty()) return;
-    const auto stableId=FolderIdentity(entry.identity);
-    if (stableId.empty() || stableId!=FolderIdentity(location.expectedIdentity))
+    if (!entry.identity.SameObject(location.expectedIdentity))
         throw HfsPlus::Error("The destination folder was replaced.");
 }
 

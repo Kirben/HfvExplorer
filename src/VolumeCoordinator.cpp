@@ -44,10 +44,10 @@ std::string PathKey(const std::wstring& path){
 #endif
  auto identity=Detail::DescribePath(path);auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);return RegisterPath(bus,std::move(identity));
 }
-std::string ObservedPathKey(const std::string& parent,const std::wstring& leaf,const std::string& identity,bool directory){
+std::string ObservedPathKey(const std::string& parent,const std::wstring& leaf,const std::string& objectKey,bool directory){
  auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);auto found=bus.paths.find(parent);if(found==bus.paths.end())return parent;const auto& root=found->second;Detail::PathIdentity value;value.hosts=root.hosts;value.devices=root.devices;value.ancestors=root.ancestors;if(!root.object.empty())value.ancestors.insert(root.object);value.directory=directory;
  for(auto name:root.names){if(!name.empty()&&name.back()!='\\')name+='\\';value.names.insert(name+Utf8(Upper(leaf)));}
- size_t at=0;for(int n=0;n<3;++n){at=identity.find(':',at);if(at==identity.npos)break;if(n<2)++at;}auto separator=root.object.find('|');if(at!=identity.npos&&separator!=root.object.npos)value.object=root.object.substr(0,separator+1)+identity.substr(0,at);value.fingerprint=Detail::Fingerprint(value);return RegisterPath(bus,std::move(value));
+ const auto separator=root.object.find('|');if(!objectKey.empty()&&separator!=root.object.npos)value.object=root.object.substr(0,separator+1)+objectKey;value.fingerprint=Detail::Fingerprint(value);return RegisterPath(bus,std::move(value));
 }
 std::string LegacyOutputKey(const std::wstring& path){DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return PathKey(path);auto at=path.find_last_of(L"\\/");if(at==path.npos)throw std::runtime_error("Use an absolute Windows destination path");return PathKey(path.substr(0,at==2?3:at));}
 namespace {

@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include "DiskPartitions.h"
+#include "EntryIdentity.h"
 
 namespace MacBrowser {
 class Volume;
@@ -46,7 +47,7 @@ public:
     virtual WorkerExecution Execution() const { return {}; }
     virtual WorkerOrigin WorkerDescription() const { return {}; }
     virtual std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles() const { return {}; }
-    virtual std::string WorkerEntryIdentity(const std::string& identity) const { return identity; }
+    virtual EntryIdentity WorkerEntryIdentity(EntryIdentity identity) const { return identity; }
     virtual void SuspendWorker() {}
     virtual void ResumeWorker() {}
     virtual void WorkerUncleanExit() {}

@@ -4,6 +4,7 @@
 namespace DiskPartitions { struct Selection; }
 namespace MacBrowser { struct WorkerOrigin; }
 #include "HfsPlus.h"
+#include "EntryIdentity.h"
 #include "MfsImage.h"
 #include <map>
 #include "StorageWorker.h"
@@ -31,8 +32,8 @@ struct Entry {
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
     unsigned version = 0; // optional legacy file version, not part of its identity
     bool portableContainer = false; // Encoded Macintosh metadata is already in the data stream.
-    std::string expectedDestinationIdentity; // transient overwrite approval; never filesystem metadata
-    std::string identity; // backend object/version identity for move revalidation
+    EntryIdentity expectedDestinationIdentity; // transient overwrite approval; never filesystem metadata
+    EntryIdentity identity;
 };
 struct Capabilities {
     bool read = true, create = false, rename = false, remove = false;

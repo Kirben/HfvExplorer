@@ -188,7 +188,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         auto packet = Response(SessionEntry);
         auto entry = DecodeEntry(packet);
         packet.end();
-        entry.identity = std::to_string(generation_) + "/" + entry.identity;
+        if(!entry.identity.empty()) entry.identity.session=generation_;
         return entry;
     }
 public:
@@ -271,9 +271,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Simple(SessionCommandCode::SetClassicProperties,Protocol::EncodeClassicProperties(id,entry),true);
     }
-    std::string WorkerEntryIdentity(const std::string& identity) const override {
-        auto separator = identity.find('/');
-        return separator == identity.npos ? identity : identity.substr(separator + 1);
+    EntryIdentity WorkerEntryIdentity(EntryIdentity identity) const override {
+        identity.session.reset();
+        return identity;
     }
     WorkerOrigin WorkerDescription() const override {
         std::lock_guard<std::mutex> lock(mutex_);

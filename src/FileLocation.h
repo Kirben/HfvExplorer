@@ -83,7 +83,8 @@ class Location {
     bool cut = false, directory = false;
     bool requiresWindowsIdentity = false;
     uint32_t expectedCatalogId = 0, expectedParent = 0;
-    std::string expectedIdentity, expectedResource;
+    MacBrowser::EntryIdentity expectedIdentity;
+    std::string expectedResource;
     std::u16string expectedName;
 
   private:

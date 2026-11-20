@@ -21,7 +21,7 @@ public:ImageDependency(const std::string&,const std::wstring&);~ImageDependency(
 std::string HostKey(const std::wstring&);
 // File/folder reservations overlap their descendants and filesystem aliases.
 std::string PathKey(const std::wstring&);
-std::string ObservedPathKey(const std::string& parent,const std::wstring& leaf,const std::string& identity,bool directory);
+std::string ObservedPathKey(const std::string& parent,const std::wstring& leaf,const std::string& objectKey,bool directory);
 #ifdef HFV_TESTING
 void SetPathLookupObserver(std::function<void(const std::wstring&)>);
 #endif

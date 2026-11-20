@@ -137,6 +137,48 @@ WorkerOrigin DecodeOrigin(Data &d) {
     }
     return o;
 }
+namespace {
+void EncodeIdentity(Data& data,const MacBrowser::EntryIdentity& identity)
+{
+    const auto object=[&](const MacBrowser::ObjectIdentity& value){
+        data.put(value.key);
+        data.put(value.version.has_value());
+        if(value.version)data.put(*value.version);
+    };
+    object(identity.primary);
+    object(identity.companion);
+    data.put(identity.media.has_value());
+    if(identity.media){data.put(identity.media->device);data.put(identity.media->generation);}
+    data.put(identity.session.has_value());
+    if(identity.session)data.put(*identity.session);
+}
+MacBrowser::EntryIdentity DecodeIdentity(Data& data)
+{
+    const auto object=[&]{
+        MacBrowser::ObjectIdentity value;
+        value.key=data.text();
+        if(data.flag()){
+            Check(!value.key.empty(),"A worker object version requires an object identity");
+            value.version=data.get();
+        }
+        return value;
+    };
+    MacBrowser::EntryIdentity identity;
+    identity.primary=object();
+    identity.companion=object();
+    if(data.flag()){
+        auto device=data.text();
+        Check(!device.empty(),"A worker media identity requires a device");
+        const auto generation=data.get();
+        Check(generation<=UINT32_MAX,"Invalid worker media generation");
+        identity.media=MacBrowser::MediaIdentity{std::move(device),uint32_t(generation)};
+    }
+    if(data.flag())identity.session=data.get();
+    Check(!identity.empty()||(identity.companion.key.empty()&&!identity.media&&!identity.session),
+          "Worker entry identity has version fields without an object");
+    return identity;
+}
+}
 void EncodeEndpoint(Data &d, const Endpoint &e) {
     const auto &l = e.location;
     StorageLocation::RequireCapturedIdentity(l);
@@ -145,7 +187,7 @@ void EncodeEndpoint(Data &d, const Endpoint &e) {
     d.put(l.directory);
     d.put(l.expectedCatalogId);
     d.put(l.expectedParent);
-    d.put(l.expectedIdentity);
+    EncodeIdentity(d,l.expectedIdentity);
     d.put(l.expectedResource);
     d.u16(l.expectedName);
     switch (l.kind()) {
@@ -177,7 +219,7 @@ void EncodeEndpoint(Data &d, const Endpoint &e) {
             d.put(p.resolvedId);
             d.put(p.version);
             d.put(p.directory);
-            d.put(p.identity);
+            EncodeIdentity(d,p.identity);
         }
         break;
     }
@@ -198,7 +240,7 @@ WireEndpoint ParseEndpoint(Data &d,bool allowMounted) {
     l.directory = d.flag();
     l.expectedCatalogId = CatalogNumber(d);
     l.expectedParent = CatalogNumber(d);
-    l.expectedIdentity = d.text();
+    l.expectedIdentity = DecodeIdentity(d);
     l.expectedResource = d.text();
     l.expectedName = d.u16();
     switch (Location::Kind(tag)) {
@@ -245,7 +287,7 @@ WireEndpoint ParseEndpoint(Data &d,bool allowMounted) {
             e.resolvedId = CatalogNumber(d);
             e.version = CatalogNumber(d);
             e.directory = d.flag();
-            e.identity = d.text();
+            e.identity = DecodeIdentity(d);
             path.push_back(std::move(e));
         }
         break;
@@ -265,7 +307,7 @@ bool SupportsOperation(Kind kind) {
 
 void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.id); d.put(e.parent); d.u16(e.name); d.put(e.version);
-    d.put(e.resolvedId); d.put(e.linkCount); d.put(e.hardLink); d.put(e.identity); d.put(e.readError);
+    d.put(e.resolvedId); d.put(e.linkCount); d.put(e.hardLink); EncodeIdentity(d,e.identity); d.put(e.readError);
     d.put(e.created); d.put(e.modified); d.put(e.datesValid);
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
@@ -274,7 +316,7 @@ void EncodeEntry(Data& d, const Entry& e) {
 Entry DecodeEntry(Data& d) {
     Entry e;
     e.id=CatalogNumber(d); e.parent=CatalogNumber(d); e.name=d.u16(); e.version=CatalogNumber(d);
-    e.resolvedId=CatalogNumber(d); e.linkCount=CatalogNumber(d); e.hardLink=d.flag(); e.identity=d.text(); e.readError=d.text();
+    e.resolvedId=CatalogNumber(d); e.linkCount=CatalogNumber(d); e.hardLink=d.flag(); e.identity=DecodeIdentity(d); e.readError=d.text();
     e.created=d.get(); e.modified=d.get(); e.datesValid=d.flag();
     e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
     e.forks[0].size=d.get(); e.forks[1].size=d.get();

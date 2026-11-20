@@ -40,7 +40,7 @@ public:
         entry.id = id;
         entry.parent = 2;
         entry.name = u"Slow";
-        entry.identity = "slow";
+        entry.identity = MacBrowser::EntryIdentity("slow");
         entry.forks[0].size = BrowserPreview::SampleLimit + 100;
         return entry;
     }
