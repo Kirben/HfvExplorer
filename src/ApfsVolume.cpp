@@ -1221,11 +1221,15 @@ public:
         },true);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
+        Storage::Job job;
+        RenameForJob(id,parent,name,job);
+    }
+    void RenameForJob(uint32_t id,uint32_t parent,const std::u16string& name,Storage::Job& job)override{
         WriteMount([&]{
+            if(job.cancelled())throw Storage::Cancelled();
             const auto& entry=At(id);
             Check(entry.entry.parent==parent,"APFS rename must stay in the original folder");
             const auto oid=entry.oid,parentOid=At(parent).oid;
-            Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
                 if(limitedEdits)return RenameExternalCatalogEntry(*source,container,parentOid,entry.entry.name,name,job);
                 return RenameEntry(*source,container,parentOid,oid,name,job,entry.aliasId);

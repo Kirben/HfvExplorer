@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-stream-decompression.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-compressed-rename.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2657,6 +2657,15 @@ int RunApfsContainerTest(const char* directory)
                 {
                     const auto checkpoint=openCurrent();
                     CheckpointFaultImage interruptedCompression(Disk::Read(*output,0,size_t(output->Size())));
+                    Storage::Job cancelCompressedRename;
+                    interruptedCompression.onFlush=[&]{cancelCompressedRename.cancel();};
+                    bool renameCancelled=false;
+                    try{
+                        Apfs::RenameExternalCatalogEntry(interruptedCompression,checkpoint,2,compressed.name,u"Cancelled compressed rename",cancelCompressedRename);
+                    }catch(const Storage::Cancelled&){renameCancelled=true;}
+                    const auto afterRenameCancellation=Apfs::Probe(interruptedCompression);
+                    Check(renameCancelled&&afterRenameCancellation&&afterRenameCancellation->transaction==checkpoint.transaction,
+                          "Cancelled compressed APFS rename published a checkpoint");
                     Storage::Job cancelCompressedDelete;
                     interruptedCompression.onFlush=[&]{cancelCompressedDelete.cancel();};
                     constexpr uint64_t compressedInode=430; // Inode of decmpfs.txt in the macOS fixture.
@@ -2910,6 +2919,11 @@ int RunApfsContainerTest(const char* directory)
             shortCompressed.name=u"Inline compressed";
             shortCompressed.forks[0].size=1300;
             shortCompressed.compressed=true;
+            shortCompressed.finder[0]='T';
+            shortCompressed.created=createdTime;
+            shortCompressed.modified=editedTime;
+            shortCompressed.datesValid=true;
+            shortCompressed.attributes={{u"user.rename",Bytes(4301,0x52)}};
             const auto shortId=importSource->Put(2,shortCompressed,[](unsigned,uint64_t,void* bytes,size_t size){
                 memset(bytes,0x42,size);
             },false);
@@ -3253,15 +3267,44 @@ int RunApfsContainerTest(const char* directory)
                 }
                 return operation.Job()->result();
             };
+            const auto renameCompressed=[&](const MacBrowser::Entry& entry,const std::u16string& name,const Bytes& expected){
+                const auto attributes=published->GetAttributes(entry.id);
+                auto operation=FileOperations::Submit(FileOperations::RenameEntry{
+                    FileOperations::Location::Mounted(published,entry.id),name});
+                const auto start=GetTickCount();
+                while(!operation.Job()->done()){
+                    Check(GetTickCount()-start<15000,"External compressed APFS rename timed out");
+                    Sleep(5);
+                }
+                const auto result=operation.Job()->result();
+                Check(!result.code,result.message.c_str());
+                MacBrowser::Entry renamed;
+                Check(!published->FindChild(entry.parent,entry.name,renamed)&&
+                      published->FindChild(entry.parent,name,renamed)&&renamed.id==entry.id&&
+                      renamed.identity==entry.identity&&renamed.compressed&&renamed.finder==entry.finder&&
+                      renamed.created==entry.created&&renamed.modified==entry.modified&&
+                      renamed.forks[0].size==expected.size()&&renamed.forks[1].size==entry.forks[1].size&&
+                      published->GetAttributes(renamed.id)==attributes,
+                      "APFS compressed rename changed file metadata or identity");
+                Bytes actual(expected.size());
+                published->Read(renamed.id,0,0,actual.data(),actual.size());
+                Check(actual==expected,"APFS compressed rename changed file contents");
+            };
             MacBrowser::Entry deletedCompressed,unrelatedCompressed;
+            Check(published->FindChild(2,compressed.name,unrelatedCompressed),"Missing streamed APFS compression fixture");
+            constexpr auto renamedStream=u"Renamed macOS compressed file.txt";
+            constexpr auto renamedInline=u"Renamed inline compressed file";
+            renameCompressed(unrelatedCompressed,renamedStream,decoded);
+            renameCompressed(shortCompressed,renamedInline,actualInline);
+            fprintf(report,"PASS: macOS APFS compressed-file rename with inline and stream-backed headers, exact bytes, metadata, and checkpoint cancellation.\n");
             const auto deletedInline=erase(shortCompressed.id);
             Check(!deletedInline.code,deletedInline.message.c_str());
-            Check(!published->FindChild(2,u"Inline compressed",deletedCompressed),
+            Check(!published->FindChild(2,renamedInline,deletedCompressed),
                   "APFS did not remove the inline compressed file");
             const auto deletedTree=erase(compressionFolder);
             Check(!deletedTree.code,deletedTree.message.c_str());
             Check(!published->FindChild(2,u"Compressed copies",deletedCompressed)&&
-                  published->FindChild(2,compressed.name,unrelatedCompressed)&&unrelatedCompressed.compressed,
+                  published->FindChild(2,renamedStream,unrelatedCompressed)&&unrelatedCompressed.compressed,
                   "APFS recursive deletion removed an unrelated compressed file");
             Bytes untouchedCompressed(decoded.size());
             published->Read(unrelatedCompressed.id,0,0,untouchedCompressed.data(),untouchedCompressed.size());

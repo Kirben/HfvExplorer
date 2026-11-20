@@ -133,6 +133,9 @@ public:
         return Put(entry.parent, entry, std::move(reader), true);
     }
     virtual void Rename(uint32_t id, uint32_t parent, const std::u16string &) = 0;
+    virtual void RenameForJob(uint32_t id,uint32_t parent,const std::u16string& name,Storage::Job&) {
+        Rename(id,parent,name);
+    }
     virtual void Remove(uint32_t id) = 0;
 };
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {},std::wstring externalJournal = {});

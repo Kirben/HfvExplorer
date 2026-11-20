@@ -194,7 +194,7 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
      Mark(completion,item);
      auto path=HostPath(item);
      if(!path.empty()){Location parent;parent.SetWindows(path.substr(0,path.find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);}
-     volume.Rename(source.id,rename->parent.IsNone()?entry.parent:rename->parent.Id(),rename->name);
+     volume.RenameForJob(source.id,rename->parent.IsNone()?entry.parent:rename->parent.Id(),rename->name,job);
      Storage::OutcomeEvidence::NoteRetainedChange();
     }else{
      Check(volume.Supports().remove,"The selected entry cannot be deleted");
