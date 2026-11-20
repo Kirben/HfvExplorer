@@ -517,7 +517,7 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
     }
 }
 
-std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const CatalogCreate& request,const std::string& name,
+std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t id,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t dataSize,uint64_t blockCount,
     std::vector<FileRun>& fileRuns)
 {
@@ -526,11 +526,13 @@ std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const 
         const auto& record=records[i];
         return Record{{record.key.data(),record.key.size()},{record.value.data(),record.value.size()}};
     };
-    const auto parent=request.parent;
-    const bool isDirectory=request.kind==CatalogKind::Directory;
+    const auto parent=std::visit([](const auto& edit){return edit.parent;},request);
+    const auto* create=std::get_if<CatalogCreate>(&request);
+    const auto* rename=std::get_if<CatalogRename>(&request);
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
-    auto added=WriterDisk::DirectoryEntry(name,id,time,parent,fold,uint16_t(request.kind));
+    auto added=WriterDisk::DirectoryEntry(name,rename?rename->inode:id,time,parent,fold,
+                                            uint16_t(create?create->kind:CatalogKind::Directory));
     using Key=std::tuple<uint64_t,uint64_t,uint32_t>;
     const Key addedKey{parent,9,Le32(added.key.data()+8)>>10};
     Key previous{};
@@ -544,12 +546,16 @@ std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const 
         uint64_t parent;
         CatalogKind kind;
         std::string name;
+        size_t entryRecord;
+        size_t inodeRecord=0;
+        uint64_t dataSize=0;
     };
     std::map<uint64_t,Link> links;
     uint64_t files=0;
     for(size_t i=0;i<records.size();++i){
         const auto view=at(i);
         size_t streamRecords=0;
+        bool renamingThisEntry=false;
         if(i<2){
             const auto expected=WriterDisk::DirectoryEntry(reserved[i]==2?"root":"private-dir",reserved[i],0);
             Check(view.key.size==expected.key.size()&&!memcmp(view.key.data,expected.key.data(),view.key.size)&&
@@ -574,8 +580,9 @@ std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const 
                 hash=nameKey>>10;
                 Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash,"Invalid APFS directory name hash");
                 const auto child=Le64(view.value.data);
-                Check(child>=16&&child>inode&&child<id&&links.emplace(child,Link{inode,kind,std::move(childName)}).second,
+                Check(child>=16&&child>inode&&child<id&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
                       "Invalid or duplicate APFS directory entry ID");
+                renamingThisEntry=rename&&rename->inode==child&&parent==inode;
                 ++folder->second.children;
             }else{
                 Check(type==3&&view.key.size==8&&view.value.size>=92&&Le64(view.value.data+8)==inode,
@@ -586,6 +593,7 @@ std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const 
                 Check(reservedInode?parentId==1:link!=links.end()&&link->second.parent==parentId,
                       "Invalid APFS inode parent");
                 const auto kind=reservedInode?CatalogKind::Directory:link->second.kind;
+                if(!reservedInode)link->second.inodeRecord=i;
                 const auto mode=Le16(view.value.data+80)&0170000;
                 if(kind==CatalogKind::Directory){
                     Check(mode==0040000&&directories.emplace(inode,Directory{i}).second,"Invalid APFS directory inode");
@@ -624,16 +632,17 @@ std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const 
                             ++streamRecords;
                         }
                     }
+                    link->second.dataSize=size;
                     ++files;
                 }
             }
             // Catalog keys sort by inode ID, record type, then directory name hash.
             const Key order{inode,type,hash};
             Check(order>previous,"Invalid or unsupported APFS directory key order");
-            Check(order!=addedKey,"The APFS entry name already exists or has a conflicting hash");
+            Check(renamingThisEntry||order!=addedKey,"The APFS entry name already exists or has a conflicting hash");
             // A regular file cannot be a destination parent, so its stream
             // records always sort on the same side of the insertion point.
-            if(order<addedKey)insertAt+=1+streamRecords;
+            if(!renamingThisEntry&&order<addedKey)insertAt+=1+streamRecords;
             previous=order;
         }
         i+=streamRecords;
@@ -649,9 +658,32 @@ std::vector<OwnedRecord> AddCatalogEntry(std::vector<OwnedRecord> records,const 
     auto& parentInode=records[target->second.record].value;
     Set(parentInode,24,time,8);
     Set(parentInode,32,time,8);
-    Set(parentInode,56,target->second.children+1,4);
-    records.insert(records.begin()+insertAt,std::move(added));
-    records.push_back(WriterDisk::Inode(name,id,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+    if(create){
+        const bool isDirectory=create->kind==CatalogKind::Directory;
+        Set(parentInode,56,target->second.children+1,4);
+        records.insert(records.begin()+insertAt,std::move(added));
+        records.push_back(WriterDisk::Inode(name,id,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+    }else{
+        const auto found=links.find(rename->inode);
+        Check(found!=links.end()&&found->second.parent==parent,"The APFS entry is no longer in the selected folder");
+        const auto& link=found->second;
+        auto& inode=records[link.inodeRecord].value;
+        const auto mode=Le16(inode.data()+80);
+        const auto count=Le32(inode.data()+56);
+        const auto old=WriterDisk::Inode(link.name,rename->inode,0,parent,mode,count,link.dataSize);
+        constexpr size_t inodeHeader=92;
+        Check(inode.size()==old.value.size()&&
+              !memcmp(inode.data()+inodeHeader,old.value.data()+inodeHeader,inode.size()-inodeHeader),
+              "APFS rename requires native inode name fields");
+        auto updated=WriterDisk::Inode(name,rename->inode,0,parent,mode,count,link.dataSize);
+        std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
+        Set(updated.value,32,time,8);
+        inode=std::move(updated.value);
+
+        added.value=std::move(records[link.entryRecord].value);
+        records.erase(records.begin()+link.entryRecord);
+        records.insert(records.begin()+insertAt,std::move(added));
+    }
     return records;
 }
 
@@ -716,14 +748,15 @@ std::vector<Mapping> StageCatalog(Writes& writes,const CatalogLeaves& leaves,con
 }
 }
 
-CatalogWritePlan PrepareCatalogCreate(
+CatalogWritePlan PrepareCatalogMutation(
     Source& source,const Container& current,uint64_t transaction,Bytes& superblock,
-    const CheckpointObjectLookup& ephemeral,const CatalogCreate& request)
+    const CheckpointObjectLookup& ephemeral,const CatalogMutation& request)
 {
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
-    const auto ascii=CatalogName(request.name);
+    const auto ascii=std::visit([](const auto& edit){return CatalogName(edit.name);},request);
+    const auto* create=std::get_if<CatalogCreate>(&request);
     CatalogWritePlan plan;
-    plan.dataSize=request.data?request.data->Size():0;
+    plan.dataSize=create&&create->data?create->data->Size():0;
     const auto dataBlocks=DivideUp(plan.dataSize,Block);
     Check(dataBlocks<=current.blockCount,"APFS file exceeds the container size");
     const auto oid=current.volumes.front();
@@ -752,7 +785,7 @@ CatalogWritePlan PrepareCatalogCreate(
     GetSystemTimeAsFileTime(&fileTime);
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
     std::vector<FileRun> files;
-    auto catalog=AddCatalogEntry(std::move(existing.records),request,ascii,nextId,time,flags==1,
+    auto catalog=EditCatalog(std::move(existing.records),request,ascii,nextId,time,flags==1,
                                  directoryCount,fileCount,plan.dataSize,current.blockCount,files);
     ValidateExtentReferences(extentTree,files);
     auto& space=ephemeral(Le64(superblock.data()+152));
@@ -801,9 +834,11 @@ CatalogWritePlan PrepareCatalogCreate(
           dataBlocks+children<=current.blockCount-(volumeBlocks-oldChildren),"Invalid APFS volume allocation count");
     Set(volume,88,volumeBlocks-oldChildren+children+dataBlocks,8);
     Set(volume,128,allocated[1],8);
-    Set(volume,176,nextId+1,8);
-    if(request.kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
-    else Set(volume,184,fileCount+1,8);
+    if(create){
+        Set(volume,176,nextId+1,8);
+        if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
+        else Set(volume,184,fileCount+1,8);
+    }
     Set(volume,256,time,8);
     const uint64_t replaced=dataBlocks?4:3;
     const auto newVolumeBlocks=replaced+children+dataBlocks,oldVolumeBlocks=replaced+oldChildren;

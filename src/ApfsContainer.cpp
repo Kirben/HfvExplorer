@@ -258,7 +258,7 @@ std::optional<Container> Probe(Source& source)
 }
 
 namespace {
-uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const CatalogCreate* entry)
+uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const CatalogMutation* mutation)
 {
     if(job.cancelled())throw Storage::Cancelled();
     Check(source.Writable(),"An exclusive writable APFS image is required");
@@ -271,7 +271,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
           "Checkpoint writes require a raw single-volume APFS image with a contiguous checkpoint ring");
     auto plan=PlanCheckpoint(source,*current);
     CatalogWritePlan changes;
-    if(entry){
+    if(mutation){
         const auto object=[&](uint64_t oid) -> Bytes& {
             const auto found=std::find_if(plan.objects.begin(),plan.objects.end(),[&](const auto& entry){
                 return Le64(entry.bytes.data()+8)==oid;
@@ -279,7 +279,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
             Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
             return found->bytes;
         };
-        changes=PrepareCatalogCreate(source,*current,plan.transaction,plan.superblock,object,*entry);
+        changes=PrepareCatalogMutation(source,*current,plan.transaction,plan.superblock,object,*mutation);
     }
     Stamp(plan.superblock,plan.transaction);
     auto write=[&](uint64_t block,const uint8_t* bytes){
@@ -288,7 +288,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
     };
     source.CheckMedia();
     if(changes.dataSize){
-        auto& data=*entry->data;
+        auto& data=*std::get<CatalogCreate>(*mutation).data;
         data.CheckMedia();
         Bytes buffer(plan.blockSize);
         uint64_t offset=0;
@@ -340,13 +340,13 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
 
 uint64_t CreateDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
-    const CatalogCreate request{parent,name,CatalogKind::Directory};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory};
     return Commit(source,expected,job,&request);
 }
 
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
-    const CatalogCreate request{parent,name,CatalogKind::RegularFile};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile};
     return Commit(source,expected,job,&request);
 }
 
@@ -354,7 +354,14 @@ uint64_t CreateFile(Source& source,const Container& expected,uint64_t parent,con
                     Source& data,Storage::Job& job)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
-    const CatalogCreate request{parent,name,CatalogKind::RegularFile,&data};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile,&data};
+    return Commit(source,expected,job,&request);
+}
+
+uint64_t RenameEntry(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
+                     const std::u16string& name,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogRename{parent,inode,name};
     return Commit(source,expected,job,&request);
 }
 }

@@ -730,6 +730,15 @@ void MultiCibWrites(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS multiple chunk-info blocks, second-CIB allocation, and reuse of unchanged CIBs.\n");
 }
 
+std::u16string SplitFixtureName(size_t index)
+{
+    std::u16string name=u"Catalog entry ";
+    name+=char16_t(u'A'+index/26);
+    name+=char16_t(u'A'+index%26);
+    name+=std::u16string(90,char16_t(u'a'+index%26));
+    return name;
+}
+
 void SplitCatalogWrites(const std::string& root,FILE* report)
 {
     const auto path=VolumeCoord::Wide(root+"checkpoint-split-catalog.img");
@@ -767,10 +776,7 @@ void SplitCatalogWrites(const std::string& root,FILE* report)
     std::vector<std::u16string> names;
     bool split=false;
     for(size_t i=0;i<40;++i){
-        std::u16string name=u"Catalog entry ";
-        name+=char16_t(u'A'+i/26);
-        name+=char16_t(u'A'+i%26);
-        name+=std::u16string(90,char16_t(u'a'+i%26));
+        auto name=SplitFixtureName(i);
         const auto checkpoint=Apfs::Probe(disk);
         Check(checkpoint.has_value(),"Missing APFS checkpoint before catalog insertion");
         Bytes previous;
@@ -822,6 +828,92 @@ void SplitCatalogWrites(const std::string& root,FILE* report)
     image->Flush();
     image->Keep();
     fprintf(report,"PASS: APFS catalog growth past one leaf, cross-leaf lookup and data, and interrupted splits.\n");
+}
+
+void RenameCatalogWrites(const std::string& root,FILE* report)
+{
+    auto input=VolumeCoord::Wide(root+"checkpoint-split-catalog.img");
+    if(const auto shared=_wgetenv(L"HFV_APFS_RENAME_BASE"))input=shared;
+    auto image=OpenImage(input.c_str(),false);
+    CheckpointFaultImage disk(Disk::Read(*image,0,size_t(image->Size())));
+    Storage::Job job;
+    const auto open=[](const CheckpointFaultImage& disk){
+        auto memory=std::make_unique<Memory>(disk.durable.size());
+        memory->bytes=disk.durable;
+        std::unique_ptr<Source> source=std::move(memory);
+        auto mounted=Apfs::Open(source,"apfs-rename-catalog");
+        Check(bool(mounted),"Could not reopen the APFS rename fixture");
+        return mounted;
+    };
+    const auto before=open(disk);
+    const auto oldFile=SplitFixtureName(0),oldFolder=SplitFixtureName(1);
+    constexpr uint64_t rootId=2,fileInode=16,folderInode=17;
+    MacBrowser::Entry oldEntry;
+    Check(before->FindChild(2,oldFile,oldEntry)&&!oldEntry.directory,"APFS rename fixture has no source file");
+    Bytes contents(size_t(oldEntry.forks[0].size));
+    before->Read(oldEntry.id,0,0,contents.data(),contents.size());
+    const auto start=Apfs::Probe(disk);
+    Check(start.has_value(),"No APFS rename checkpoint");
+    Reject([&]{Apfs::RenameEntry(disk,*start,rootId,fileInode,oldFolder,job);},
+           "APFS rename replaced a folder with a conflicting name");
+    Reject([&]{Apfs::RenameEntry(disk,*start,folderInode,fileInode,u"Wrong parent",job);},
+           "APFS rename accepted an entry from the wrong parent");
+    Reject([&]{Apfs::RenameEntry(disk,*start,rootId,rootId,u"Root",job);},
+           "APFS rename accepted the reserved root inode");
+    Reject([&]{Apfs::RenameEntry(disk,*start,rootId,fileInode,u"Bad/Name",job);},
+           "APFS rename accepted an invalid name");
+    Check(!disk.event,"Rejected APFS rename wrote to the image");
+
+    const auto original=disk.durable;
+    const auto afterFile=Apfs::RenameEntry(disk,*start,rootId,fileInode,u"Renamed File",job);
+    Check(afterFile==start->transaction+1,"APFS file rename did not publish a checkpoint");
+    for(unsigned step=1;step<=disk.event;++step){
+        CheckpointFaultImage interrupted(original);
+        interrupted.failAt=step;
+        interrupted.fault=step==disk.event||step==disk.event-2?
+            CheckpointFaultImage::Fault::FailedFlush:CheckpointFaultImage::Fault::TornWrite;
+        Reject([&]{Apfs::RenameEntry(interrupted,*start,rootId,fileInode,u"Renamed File",job);},
+               "Injected APFS rename interruption succeeded");
+        const auto previous=open(interrupted);
+        MacBrowser::Entry entry;
+        Check(!previous->FindChild(2,u"Renamed File",entry)&&previous->FindChild(2,oldFile,entry),
+              "Interrupted APFS rename did not preserve the old name");
+        Bytes bytes(contents.size());
+        previous->Read(entry.id,0,0,bytes.data(),bytes.size());
+        Check(bytes==contents,"Interrupted APFS rename changed the file data");
+    }
+    Reject([&]{Apfs::RenameEntry(disk,*start,rootId,fileInode,u"Stale",job);},
+           "APFS rename accepted a stale checkpoint");
+    const auto current=Apfs::Probe(disk);
+    Check(current&&Apfs::RenameEntry(disk,*current,rootId,fileInode,u"renamed file",job)==afterFile+1,
+          "APFS could not change only the case of a name");
+
+    const auto renamed=Apfs::Probe(disk);
+    Check(renamed&&Apfs::CreateEmptyFile(disk,*renamed,folderInode,u"Child",job)==afterFile+2,
+          "Could not add a child to the APFS rename test folder");
+    const auto withChild=Apfs::Probe(disk);
+    Check(withChild&&Apfs::RenameEntry(disk,*withChild,rootId,folderInode,u"Renamed Folder",job)==afterFile+3,
+          "APFS could not rename a populated folder");
+    const auto mounted=open(disk);
+    MacBrowser::Entry file,folder,child,unused;
+    Check(mounted->List().size()==before->List().size()&&
+          !mounted->FindChild(2,oldFile,unused)&&!mounted->FindChild(2,oldFolder,unused)&&
+          mounted->FindChild(2,u"renamed file",file)&&file.name==u"renamed file"&&
+          file.created==oldEntry.created&&file.modified==oldEntry.modified&&file.forks[0].size==contents.size()&&
+          mounted->FindChild(2,u"Renamed Folder",folder)&&folder.directory&&
+          mounted->FindChild(folder.id,u"Child",child)&&!child.directory,
+          "APFS rename lost file metadata, kept an old name, or disconnected the folder contents");
+    Bytes data(contents.size());
+    mounted->Read(file.id,0,0,data.data(),data.size());
+    Check(data==contents,"APFS rename changed a live file extent");
+
+    {
+        const auto output=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
+        auto result=CreateFormatOutput(output.c_str(),disk.durable.size());
+        result->Write(0,disk.durable.data(),disk.durable.size());
+        result->Keep();
+    }
+    fprintf(report,"PASS: APFS file and populated-folder rename, case-only names, collisions, stale requests and interrupted commits.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)
@@ -1177,6 +1269,7 @@ int RunApfsContainerTest(const char* directory)
         MultiChunkWrites(root,report);
         MultiCibWrites(root,report);
         SplitCatalogWrites(root,report);
+        RenameCatalogWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

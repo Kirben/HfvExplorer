@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "ApfsContainer.h"
+#include <variant>
 
 namespace Apfs {
 struct CheckpointBlockWrite {
@@ -15,6 +16,12 @@ struct CatalogCreate {
     CatalogKind kind;
     HfsPlus::Source* data=nullptr;
 };
+struct CatalogRename {
+    uint64_t parent,inode;
+    const std::u16string& name;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename>;
+
 struct DataRun {
     uint64_t block,count;
 };
@@ -23,7 +30,7 @@ struct CatalogWritePlan {
     std::vector<DataRun> dataRuns;
     uint64_t dataSize=0;
 };
-CatalogWritePlan PrepareCatalogCreate(
+CatalogWritePlan PrepareCatalogMutation(
     HfsPlus::Source&,const Container&,uint64_t transaction,HfsPlus::Bytes& superblock,
-    const CheckpointObjectLookup&,const CatalogCreate&);
+    const CheckpointObjectLookup&,const CatalogMutation&);
 }
