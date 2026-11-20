@@ -185,6 +185,7 @@ PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
     PendingCheckpoint plan{size,transaction,{descriptors.base,descriptors.capacity,descStart,descriptors.used},
         {data.base,data.capacity,dataStart,data.used},std::move(superblock),{},{}};
     std::set<uint32_t> occupied;
+    std::set<uint64_t> objectIds;
     for(uint32_t i=0;i+1<descriptors.used;++i){
         const auto original=Slot(descriptors,uint64_t(descriptors.index)+i);
         auto map=Disk::Read(source,original*size,size);
@@ -202,6 +203,7 @@ PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
             const auto blocks=bytes/size;
             const auto relative=DataIndex(data,block,blocks);
             Check(relative&&bytes%size==0&&oid,"APFS checkpoint object lies outside the active data range");
+            Check(objectIds.insert(oid).second,"Repeated APFS checkpoint object ID");
             Bytes object(bytes);
             for(uint32_t n=0;n<blocks;++n){
                 Check(occupied.insert(*relative+n).second,"Overlapping APFS checkpoint objects");

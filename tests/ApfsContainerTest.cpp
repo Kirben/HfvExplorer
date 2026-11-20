@@ -176,6 +176,17 @@ void CheckpointWrites(const std::string& root,FILE* report)
     Reject([&]{Apfs::CommitCheckpoint(overlapping,*first,controlJob);},
            "Overlapping checkpoint mappings were accepted");
     Check(!overlapping.event&&overlapping.durable==invalid,"Invalid checkpoint did not fail before writing");
+    invalid=original;
+    // The reader accepts distinct scopes. The writer's lookup uses only the ID.
+    Little(invalid.data()+4096+96,first->volumes.front(),8);
+    memcpy(invalid.data()+4096+104,invalid.data()+4096+64,8);
+    Seal(invalid,4096,4096);
+    CheckpointFaultImage duplicate(invalid);
+    bool repeated=false;
+    try{Apfs::CommitCheckpoint(duplicate,*first,controlJob);}
+    catch(const Error& error){repeated=std::string(error.what())=="Repeated APFS checkpoint object ID";}
+    Check(repeated&&!duplicate.event&&duplicate.durable==invalid,
+          "Repeated APFS checkpoint object IDs did not fail before writing");
     {
         CheckpointFaultImage attempt(original);
         Storage::Job job;
@@ -2491,7 +2502,43 @@ int RunApfsContainerTest(const char* directory)
             for(size_t i=0;i<decoded.size();i+=28)
                 Check(!memcmp(decoded.data()+i,"a compressible line of text\n",28),
                       "Independent APFS compressed contents differed from expected");
-            fprintf(report,"PASS: macOS-generated APFS image and 400-file multi-node directory.\n");
+            const auto raw=OpenImage(fixture,false);
+            const auto before=Apfs::Probe(*raw);
+            Check(before.has_value(),"Missing macOS-generated APFS checkpoint");
+            const auto image=Disk::Read(*raw,0,size_t(raw->Size()));
+            {
+                CheckpointFaultImage interrupted(image);
+                Storage::Job job;
+                interrupted.onFlush=[&]{job.cancel();};
+                bool cancelled=false;
+                try{Apfs::CommitCheckpoint(interrupted,*before,job);}
+                catch(const Storage::Cancelled&){cancelled=true;}
+                const auto preserved=Apfs::Probe(interrupted);
+                Check(cancelled&&preserved&&preserved->transaction==before->transaction,
+                      "Cancelled publication changed a macOS-generated APFS checkpoint");
+            }
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-checkpoint.img");
+            {
+                auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
+                output->Write(0,image.data(),image.size());
+                output->Flush();
+                Storage::Job job;
+                const auto xid=Apfs::CommitCheckpoint(*output,*before,job);
+                const auto after=Apfs::Probe(*output);
+                Check(after&&after->transaction==xid&&xid>before->transaction&&after->uuid==before->uuid,
+                      "macOS-generated APFS checkpoint was not published");
+                output->Keep();
+            }
+            const auto published=MacBrowser::OpenBrowserImage(publishedPath);
+            MacBrowser::Entry publishedA,publishedB,publishedFolder,publishedFile;
+            Check(published&&published->FindChild(2,u"hard_a.txt",publishedA)&&
+                  published->FindChild(2,u"hard_b.txt",publishedB)&&publishedA.resolvedId==publishedB.resolvedId&&
+                  published->FindChild(2,u"many",publishedFolder)&&published->List(publishedFolder.id).size()==400&&
+                  published->FindChild(publishedFolder.id,u"file_0222.txt",publishedFile),
+                  "Publishing a checkpoint changed the macOS-generated catalog");
+            published->Read(publishedFile.id,0,0,data,sizeof(data));
+            Check(!memcmp(data,"entry 222\n",sizeof(data)),"Publishing a checkpoint changed macOS-generated file data");
+            fprintf(report,"PASS: macOS-generated APFS directory, checkpoint publication and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){
