@@ -55,7 +55,7 @@ void SetBit(Bytes& map,uint64_t index)
     map[index/8]|=uint8_t(1u<<(index%8));
 }
 struct Mapping {
-    uint64_t oid,block;
+    uint64_t oid,block,xid=0;
 };
 struct WritableMap {
     uint64_t headerBlock,rootBlock;
@@ -85,7 +85,7 @@ WritableMap ReadWritableMap(Source& source,const Container& container,uint64_t b
             Check(oid>previous&&xid<=container.transaction&&Le32(record.value.data)==0&&
                   Le32(record.value.data+4)==Block&&physical&&physical<container.blockCount&&
                   physicalBlocks.insert(physical).second,"Invalid APFS writable object mapping");
-            map.mappings.push_back({oid,physical});
+            map.mappings.push_back({oid,physical,xid});
             previous=oid;
         }
     };
@@ -123,7 +123,7 @@ void StageMap(Writes& writes,WritableMap map,uint64_t headerBlock,uint64_t rootB
     for(const auto& item:mappings){
         OwnedRecord mapping{Bytes(16),Bytes(16)};
         Set(mapping.key,0,item.oid,8);
-        Set(mapping.key,8,transaction,8);
+        Set(mapping.key,8,item.xid?item.xid:transaction,8);
         Set(mapping.value,4,Block,4);
         Set(mapping.value,8,item.block,8);
         records.push_back(std::move(mapping));
@@ -356,7 +356,7 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
                               const std::vector<uint64_t>& retire,const std::vector<uint64_t>& extentNodes,uint64_t snapshots,
                               const std::vector<FileRun>& files,std::vector<DataRun> retiredData,
                               uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
-                              uint64_t transaction,RequiredMetadata requiredMetadata)
+                              uint64_t transaction,RequiredMetadata requiredMetadata,const std::vector<DataRun>& protectedRuns={})
 {
     auto [bitmaps,cibs,currentPoolBlocks,available,pool,poolSize,currentBitmapBase,cibOffset,bitmapSlots]=
         ReadAllocationBitmaps(source,container,space);
@@ -429,8 +429,21 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         for(uint64_t i=0;i<run.count;++i)
             Check(!isMetadata(run.block+i),"APFS file extent overlaps live metadata");
     }
+    const auto protectedBlock=[&](uint64_t block){
+        const auto next=std::upper_bound(protectedRuns.begin(),protectedRuns.end(),block,
+            [](uint64_t address,const DataRun& run){return address<run.block;});
+        return next!=protectedRuns.begin()&&within(block,std::prev(next)->block,std::prev(next)->count);
+    };
+    for(const auto& run:protectedRuns){
+        verify(run.block,run.count);
+        for(uint64_t i=0;i<run.count;++i)
+            Check(!isMetadata(run.block+i),"APFS sibling volume overlaps selected metadata");
+    }
+    for(const auto& run:files)
+        for(uint64_t i=0;i<run.count;++i)
+            Check(!protectedBlock(run.block+i),"APFS sibling volume overlaps selected data");
     Reclaim(space,mainQueue,MainFreeQueue,0,container.blockCount,container.transaction,[&](uint64_t block){
-        const bool live=isMetadata(block)||std::any_of(files.begin(),files.end(),[&](const auto& run){
+        const bool live=isMetadata(block)||protectedBlock(block)||std::any_of(files.begin(),files.end(),[&](const auto& run){
             return within(block,run.block,run.count);
         });
         Check(!live&&allocated(block),"APFS retired range overlaps free or live blocks");
@@ -1519,17 +1532,25 @@ struct CatalogVolume {
     Bytes volume;
 };
 
-CatalogVolume ReadCatalogVolume(Source& source,const Container& container)
+CatalogVolume ReadCatalogVolume(Source& source,const Container& container,uint64_t selected=0)
 {
     Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
-          !container.keybagBlock&&!container.keybagBlocks&&container.volumes.size()==1&&
-          source.Size()==container.blockCount*Block,"APFS writes require a raw single-volume image");
-    const auto oid=container.volumes.front();
+          !container.keybagBlock&&!container.keybagBlocks&&!container.volumes.empty()&&
+          (selected||container.volumes.size()==1)&&source.Size()==container.blockCount*Block,
+          "APFS writes require a raw image and an unambiguous volume selection");
+    const auto oid=selected?selected:container.volumes.front();
     auto map=ReadWritableMap(source,container,container.objectMap);
-    Check(map.mappings.size()==1&&map.mappings.front().oid==oid,
-          "APFS writes require one container volume mapping");
-    const auto address=map.mappings.front().block;
+    Check(map.mappings.size()==container.volumes.size()&&!map.leaves.size()&&
+          std::all_of(map.mappings.begin(),map.mappings.end(),[&](const auto& mapping){
+              return std::count(container.volumes.begin(),container.volumes.end(),mapping.oid)==1;
+          }),"Unsupported APFS container volume mappings");
+    const auto mapping=std::find_if(map.mappings.begin(),map.mappings.end(),[&](const auto& item){return item.oid==oid;});
+    Check(mapping!=map.mappings.end(),"APFS selected volume is no longer present");
+    const auto address=mapping->block;
     auto volume=ReadObject(source,container,address,oid,container.transaction,13);
+    if(container.volumes.size()>1)
+        Check(!Le64(volume.data()+72)&&!Le64(volume.data()+80),
+              "APFS multi-volume writes do not support volume reserves or quotas");
     return {std::move(map),address,std::move(volume)};
 }
 
@@ -2302,6 +2323,58 @@ void CheckExternalVolume(const Bytes& volume)
           "Unsupported APFS volume features for external edits");
 }
 
+std::vector<DataRun> SiblingVolumeRuns(Source& source,const Container& container,const WritableMap& containerMap,
+                                      uint64_t selected)
+{
+    std::vector<DataRun> runs;
+    const auto block=[&](uint64_t address){runs.push_back({address,1});};
+    for(const auto& mapping:containerMap.mappings){
+        if(mapping.oid==selected)continue;
+        block(mapping.block);
+        const auto volume=ReadObject(source,container,mapping.block,mapping.oid,container.transaction,13);
+        CheckExternalVolume(volume);
+        Check(!Le64(volume.data()+72)&&!Le64(volume.data()+80),
+              "APFS multi-volume writes do not support sibling reserves or quotas");
+        const auto map=ReadWritableMap(source,container,Le64(volume.data()+128));
+        block(map.headerBlock);
+        block(map.rootBlock);
+        for(auto entry:map.leaves)block(entry);
+        for(const auto& entry:map.mappings)block(entry.block);
+        const auto catalog=ReadWritableCatalog(source,container,map,Le64(volume.data()+136));
+        Check(catalog.blocks.size()==map.mappings.size(),"Unsupported APFS sibling catalog mappings");
+        const auto snapshots=Le64(volume.data()+152);
+        const Node snapshotTree(ReadObject(source,container,snapshots,snapshots,container.transaction,2,16,true),true,{});
+        Check(!snapshotTree.Level()&&!snapshotTree.Count(),"APFS sibling volume has snapshots");
+        block(snapshots);
+        const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
+        for(auto entry:extents.blocks)block(entry);
+        std::vector<DataRun> data;
+        for(const auto& extent:extents.records)
+            data.push_back({Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
+        for(const auto& record:catalog.records){
+            if(Le64(record.key.data())>>60!=8)continue;
+            Check(record.key.size()==16&&record.value.size()==24,
+                  "Invalid APFS sibling file extent");
+            const auto size=Le64(record.value.data()),start=Le64(record.value.data()+8);
+            Check(size&&!(size%Block),"Unsupported APFS sibling file extent");
+            if(!start)continue; // Sparse runs own no physical blocks.
+            const auto next=std::upper_bound(data.begin(),data.end(),start,
+                [](uint64_t address,const DataRun& run){return address<run.block;});
+            Check(next!=data.begin()&&Range(start-std::prev(next)->block,size/Block,std::prev(next)->count),
+                  "APFS sibling file extent is missing from the extent references");
+        }
+        runs.insert(runs.end(),data.begin(),data.end());
+    }
+    std::sort(runs.begin(),runs.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    uint64_t end=0;
+    for(const auto& run:runs){
+        Check(run.count&&run.block>=end&&Range(run.block,run.count,container.blockCount),
+              "Invalid or overlapping APFS sibling volume allocation");
+        end=run.block+run.count;
+    }
+    return runs;
+}
+
 void CheckNativeVolume(const Bytes& volume)
 {
     const auto flags=Le64(volume.data()+56);
@@ -2368,9 +2441,10 @@ uint64_t VerifyAllocationBitmaps(Source& source,const Container& container,const
 }
 
 uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uint64_t transaction,
-                                   Bytes& superblock,const CheckpointObjectLookup& ephemeral)
+                                   Bytes& superblock,const CheckpointObjectLookup& ephemeral,uint64_t selected)
 {
-    const auto [containerMap,address,volume]=ReadCatalogVolume(source,container);
+    const auto [containerMap,address,volume]=ReadCatalogVolume(source,container,selected);
+    const auto siblings=SiblingVolumeRuns(source,container,containerMap,selected?selected:container.volumes.front());
     CheckExternalVolume(volume);
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
     const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
@@ -2391,7 +2465,7 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
     Writes discarded;
     std::vector<DataRun> data;
     const auto allocated=Allocate(discarded,source,container,space,superblock,ephemeral,
-                                  live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;});
+                                  live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;},siblings);
     Check(allocated.size()==1&&data.size()==1&&data.front().count==1&&allocated.front()!=data.front().block,
           "APFS allocation preflight did not reserve distinct data and metadata blocks");
     return Le64(space.data()+72)*container.blockSize;
@@ -2412,7 +2486,7 @@ void ValidateWritableLayout(Source& source,const Container& container)
 
 CatalogWritePlan PrepareCatalogMutation(
     Source& source,const Container& current,uint64_t transaction,Bytes& superblock,
-    const CheckpointObjectLookup& ephemeral,const CatalogMutation& request)
+    const CheckpointObjectLookup& ephemeral,const CatalogMutation& request,uint64_t selected)
 {
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
     const auto* create=std::get_if<CatalogCreate>(&request);
@@ -2440,8 +2514,9 @@ CatalogWritePlan PrepareCatalogMutation(
           "APFS forks exceed the container size");
     auto dataBlocks=fileBlocks+resourceBlocks;
     if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
-    auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current);
-    const auto oid=current.volumes.front();
+    auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
+    const auto oid=selected?selected:current.volumes.front();
+    const auto siblings=SiblingVolumeRuns(source,current,containerMap,oid);
     const auto flags=Le64(volume.data()+56);
     const bool fold=flags==1;
     const auto fileCount=Le64(volume.data()+184);
@@ -2752,7 +2827,7 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             mapChildren=MapLeaves(children+1);
             return firstChild+children+extentChildren+mapChildren;
-        });
+        },siblings);
     if(changeExtents){
         StageExtentTree(writes,extentLeaves,allocated,firstChild+children,transaction);
         Set(volume,144,allocated[6],8);
@@ -2798,7 +2873,10 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,224,Le64(volume.data()+224)+newVolumeBlocks,8);
     Set(volume,232,Le64(volume.data()+232)+oldVolumeBlocks,8);
     StageObject(writes,allocated[3],std::move(volume),oid,transaction,13);
-    StageMap(writes,containerMap,allocated[4],allocated[5],{{oid,allocated[3]}},transaction,allocated,0);
+    auto volumeMappings=containerMap.mappings;
+    for(auto& mapping:volumeMappings)
+        if(mapping.oid==oid)mapping={oid,allocated[3]};
+    StageMap(writes,containerMap,allocated[4],allocated[5],volumeMappings,transaction,allocated,0);
     Set(superblock,160,allocated[4],8);
     return plan;
 }

@@ -12,6 +12,7 @@ struct Container {
     std::vector<uint64_t> volumes;
     uint64_t checkpointBlock=0;
     uint64_t keybagBlock=0,keybagBlocks=0;
+    uint64_t writeVolume=0;
 };
 
 // Locate an APFS container and validate its latest complete contiguous checkpoint.

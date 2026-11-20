@@ -2527,6 +2527,109 @@ void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wcha
     fprintf(report,"PASS: %s case-sensitive APFS compatibility writer, collisions, rename, overwrite, delete and exact readback.\n",
             fixture?"macOS-created":"generated");
 }
+void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_t* fixture)
+{
+    const auto path=VolumeCoord::Wide(root+"apfs-multi-volume-writes.img");
+    auto input=OpenImage(fixture,false);
+    const auto initial=Apfs::Probe(*input);
+    Check(initial&&initial->volumes.size()==2&&!initial->offset,"Expected two raw APFS volumes");
+    for(const auto oid:initial->volumes)Apfs::InspectFreeQueueAllocation(*input,*initial,oid);
+    const Apfs::ObjectMap originalMap(*input,*initial,initial->objectMap,initial->transaction);
+    const auto siblingBlock=originalMap.Lookup(initial->volumes.back());
+    Check(siblingBlock.has_value(),"Missing sibling APFS volume mapping");
+    const auto siblingSuper=Disk::Read(*input,*siblingBlock*initial->blockSize,initial->blockSize);
+    {
+        auto output=CreateFormatOutput(path.c_str(),input->Size());
+        Bytes buffer(1024*1024);
+        for(uint64_t offset=0;offset<input->Size();offset+=buffer.size()){
+            const auto size=size_t((std::min)(uint64_t(buffer.size()),input->Size()-offset));
+            input->Read(offset,buffer.data(),size);
+            output->Write(offset,buffer.data(),size);
+        }
+        output->Flush();
+        output->Keep();
+    }
+    std::u16string targetName,siblingName;
+    MacBrowser::Entry originalSibling;
+    HfsPlus::Attributes siblingAttributes;
+    std::array<Bytes,2> siblingForks;
+    const auto readSibling=[&](MacBrowser::Volume& volume){
+        MacBrowser::Entry sibling,folder,file;
+        Check(volume.FindChild(2,siblingName,sibling)&&volume.FindChild(sibling.id,u"Fixture",folder)&&
+              volume.FindChild(folder.id,u"same.txt",file),"APFS sibling fixture disappeared");
+        return file;
+    };
+    {
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Supports().writable,"APFS multi-volume fixture opened read-only");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        auto roots=volume->List(2);
+        Check(roots.size()==2,"APFS multi-volume image did not expose both volume roots");
+        targetName=roots.front().name;
+        siblingName=roots.back().name;
+        originalSibling=readSibling(*volume);
+        siblingAttributes=volume->GetAttributes(originalSibling.id);
+        for(unsigned fork:{0u,1u}){
+            auto& bytes=siblingForks[fork];
+            bytes.resize(size_t(originalSibling.forks[fork].size));
+            if(!bytes.empty())volume->Read(originalSibling.id,fork,0,bytes.data(),bytes.size());
+        }
+        const auto folder=volume->MakeDirectory(roots.front().id,u"HFV multi-volume edits");
+        MacBrowser::Entry file;
+        file.name=u"Remaining.bin";
+        file.forks[0].size=9307;
+        const auto put=[&](unsigned char value,bool replace,Storage::Job& job,bool cancel=false){
+            return volume->PutForTransfer(folder,file,[&](unsigned,uint64_t,void* bytes,size_t count){
+                memset(bytes,value,count);
+                if(cancel)job.cancel();
+            },replace,job);
+        };
+        Storage::Job job;
+        const auto id=put(0x34,false,job);
+        Storage::Job cancelled;
+        bool stopped=false;
+        try{put(0x68,true,cancelled,true);}catch(const Storage::Cancelled&){stopped=true;}
+        Bytes actual(9307);
+        volume->Read(id,0,0,actual.data(),actual.size());
+        Check(stopped&&actual==Bytes(actual.size(),0x34),"Cancelled APFS overwrite changed the original bytes");
+        put(0x56,true,job);
+        file.name=u"Deleted.bin";
+        volume->Remove(put(0x90,false,job));
+        const auto same=readSibling(*volume);
+        Check(same.id==originalSibling.id&&same.identity==originalSibling.identity,
+              "APFS edit invalidated the sibling volume or entry identity");
+    }
+    {
+        auto output=OpenImage(path.c_str(),false);
+        const auto final=Apfs::Probe(*output);
+        Check(final&&final->volumes==initial->volumes,"APFS edits changed the container volume list");
+        const Apfs::ObjectMap finalMap(*output,*final,final->objectMap,final->transaction);
+        Check(finalMap.Lookup(initial->volumes.back())==siblingBlock&&
+              Disk::Read(*output,*siblingBlock*final->blockSize,final->blockSize)==siblingSuper,
+              "APFS edits changed the sibling volume mapping or superblock");
+    }
+    auto volume=MacBrowser::OpenBrowserImage(path);
+    MacBrowser::Entry target,folder,remaining,deleted;
+    Check(volume&&volume->FindChild(2,targetName,target)&&volume->FindChild(target.id,u"HFV multi-volume edits",folder)&&
+          volume->FindChild(folder.id,u"Remaining.bin",remaining)&&!volume->FindChild(folder.id,u"Deleted.bin",deleted),
+          "APFS writes did not survive reopening");
+    Bytes actual(9307);
+    volume->Read(remaining.id,0,0,actual.data(),actual.size());
+    Check(actual==Bytes(actual.size(),0x56),"Overwritten APFS bytes did not survive reopening");
+    const auto same=readSibling(*volume);
+    Check(same.finder==originalSibling.finder&&same.created==originalSibling.created&&
+          same.modified==originalSibling.modified&&volume->GetAttributes(same.id)==siblingAttributes,
+          "APFS operation changed sibling file metadata");
+    for(unsigned fork:{0u,1u}){
+        const auto& expected=siblingForks[fork];
+        Check(same.forks[fork].size==expected.size(),"APFS operation changed a sibling fork size");
+        actual.resize(expected.size());
+        if(!actual.empty())volume->Read(same.id,fork,0,actual.data(),actual.size());
+        Check(actual==expected,"APFS operation changed a sibling fork");
+    }
+    fprintf(report,"PASS: APFS multi-volume create, overwrite, delete, cancellation, and unchanged sibling mapping, forks and metadata.\n");
+}
+
 void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFixture=nullptr)
 {
     const auto baselinePath=macFixture?std::wstring(macFixture):VolumeCoord::Wide(root+"checkpoint-before.img");
@@ -2666,6 +2769,8 @@ int RunApfsContainerTest(const char* directory)
         DataStreamAllocation(report);
         CheckpointWrites(root,report);
         WritableGptImages(root,report);
+        if(const auto fixture=_wgetenv(L"HFV_APFS_MULTI_VOLUME_FIXTURE"))
+            ExternalMultiVolumeWrites(root,report,fixture);
         ExternalCaseSensitiveWrites(root,report,nullptr);
         if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))
             ExternalCaseSensitiveWrites(root,report,fixture);

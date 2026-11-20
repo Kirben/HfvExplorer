@@ -348,7 +348,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     MacBrowser::WorkerOrigin origin;
     std::recursive_mutex mutex;
     bool requiresReopen=false,writing=false;
-    std::map<uint64_t,uint32_t> writableIds;
+    std::map<std::pair<size_t,uint64_t>,uint32_t> writableIds;
     struct Item {
         size_t mount;
         uint64_t oid,stream;
@@ -443,6 +443,7 @@ public:
             entries.emplace(2,std::move(root));
         }else{
             label=u"APFS Container";
+            if(writable)caseSensitive=mounts.front().sensitive;
             Entry root;
             root.id=root.resolvedId=2;root.parent=1;root.directory=true;root.name=label;root.identity=MacBrowser::EntryIdentity(key);
             entries.emplace(2,Item{0,0,0,std::move(root),{}});
@@ -585,9 +586,9 @@ private:
             ids.reserve(children.size());
             for(auto& child:children){
                 if(writable){
-                    const auto key=child.aliasId?child.aliasId:child.oid;
+                    const Address key{child.mount,child.aliasId?child.aliasId:child.oid};
                     if(!child.aliasId&&child.siblingId&&!writableIds.count(key)){
-                        auto previous=writableIds.extract(child.siblingId);
+                        auto previous=writableIds.extract({child.mount,child.siblingId});
                         if(previous){
                             previous.key()=key;
                             writableIds.insert(std::move(previous));
@@ -797,15 +798,20 @@ private:
         auto fresh=Probe(*source);
         Check(fresh&&fresh->uuid==container.uuid&&fresh->volumes==container.volumes&&
               fresh->transaction==transaction,"The APFS image changed during a catalog write");
-        const auto oid=mounts.front().oid;
+        const auto mountIndex=At(parent).mount;
+        const auto oid=mounts[mountIndex].oid;
         const ObjectMap map(*source,*fresh,fresh->objectMap,fresh->transaction);
         const auto address=map.Lookup(oid);
         Check(address.has_value(),"Missing APFS volume after a catalog write");
         auto mount=ReadVolume(ReadObject(*source,*fresh,*address,oid,fresh->transaction,13),oid);
         freeBytes=WritableFreeBytes(*source,*fresh);
         container=std::move(*fresh);
-        mounts.front()=std::move(mount);
-        listings.clear();
+        mounts[mountIndex]=std::move(mount);
+        for(auto listing=listings.begin();listing!=listings.end();){
+            const auto& folder=At(listing->first);
+            if(folder.oid&&folder.mount==mountIndex)listing=listings.erase(listing);
+            else ++listing;
+        }
         extents.clear();
         compressed.clear();
         if(removed){
@@ -826,32 +832,32 @@ private:
                     }
                 }
                 for(const auto& [id,item]:entries){
-                    if(affectedLinks.count(item.oid))descendants.push_back(id);
+                    if(item.mount==deleted.mount&&affectedLinks.count(item.oid))descendants.push_back(id);
                 }
                 std::sort(descendants.begin(),descendants.end());
                 descendants.erase(std::unique(descendants.begin(),descendants.end()),descendants.end());
                 for(const auto id:descendants){
                     const auto& item=At(id);
-                    writableIds.erase(item.aliasId?item.aliasId:item.oid);
+                    writableIds.erase({item.mount,item.aliasId?item.aliasId:item.oid});
                     if(item.entry.hardLink)linkIdentities.erase({item.mount,item.oid});
                     entries.erase(id);
                 }
             }
-            writableIds.erase(deleted.aliasId?deleted.aliasId:deleted.oid);
+            writableIds.erase({deleted.mount,deleted.aliasId?deleted.aliasId:deleted.oid});
             entries.erase(removed);
             if(deleted.entry.hardLink){
                 const auto count=deleted.entry.linkCount-1;
                 linkIdentities.erase({deleted.mount,deleted.oid});
                 for(auto& [id,item]:entries){
-                    if(item.oid!=deleted.oid)continue;
+                    if(item.mount!=deleted.mount||item.oid!=deleted.oid)continue;
                     item.entry.linkCount=count;
                     item.entry.hardLink=count>1;
                     const auto resolved=linkIdentities.emplace(Address{item.mount,item.oid},id);
                     item.entry.resolvedId=resolved.first->second;
                     if(count==1){
                         if(item.aliasId){
-                            writableIds.erase(item.aliasId);
-                            writableIds.emplace(item.oid,id);
+                            writableIds.erase({item.mount,item.aliasId});
+                            writableIds.emplace(Address{item.mount,item.oid},id);
                         }
                         item.aliasId=item.siblingId=0;
                     }
@@ -859,17 +865,26 @@ private:
             }
         }
         auto& folder=At(parent);
-        const auto changed=LoadInode(Catalog(*source,container,mounts.front()),0,folder.oid);
+        const auto changed=LoadInode(Catalog(*source,container,mounts[mountIndex]),mountIndex,folder.oid);
         folder.entry.modified=changed.entry.modified;
         ListDirectory(parent);
         if(changedFile&&At(changedFile).entry.hardLink){
             const auto oid=At(changedFile).oid;
             std::set<uint32_t> folders;
             for(const auto& [id,item]:entries){
-                if(item.oid==oid&&item.entry.parent!=parent)folders.insert(item.entry.parent);
+                if(item.mount==mountIndex&&item.oid==oid&&item.entry.parent!=parent)folders.insert(item.entry.parent);
             }
             for(const auto aliasFolder:folders)ListDirectory(aliasFolder);
         }
+    }
+
+    Container WriteTarget(uint32_t parent)
+    {
+        const auto& folder=At(parent);
+        Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
+        auto target=container;
+        target.writeVolume=mounts[folder.mount].oid;
+        return target;
     }
 
     template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work,
@@ -895,7 +910,7 @@ private:
         return WriteMount([&]{
             const auto oid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job,dates,finder,attributes,limitedEdits);});
+            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,WriteTarget(parent),oid,name,job,dates,finder,attributes,limitedEdits);});
             for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
             throw Error("APFS folder was created but could not be found after reopening");
         },true);
@@ -913,6 +928,7 @@ public:
                                      bool replace,Storage::Job& job)override{
         return WriteMount([&]{
             if(job.cancelled())throw Storage::Cancelled();
+            Check(At(id).mount==At(parent).mount,"APFS hard links cannot cross volumes");
             const auto oid=At(id).oid,folder=At(parent).oid;
             const auto sourceParent=At(id).entry.parent;
             const auto links=At(id).entry.linkCount;
@@ -924,11 +940,11 @@ public:
                 if(replaced==oid)return destination.id;
             }
             CommitMutation(parent,destination.id,job,[&](auto& job){
-                return CreateCatalogHardLink(*source,container,folder,oid,name,job,replaced,limitedEdits);
+                return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,limitedEdits);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
-                if(item.oid==oid)item.entry.linkCount=links+1;
+                if(item.mount==At(parent).mount&&item.oid==oid)item.entry.linkCount=links+1;
             }
             Entry alias;
             if(FindChild(parent,name,alias))return alias.id;
@@ -964,11 +980,11 @@ public:
             Storage::Job metadata;
             CommitMutation(parent,0,metadata,[&](auto& job){
                 if(limitedEdits)
-                    return SetExternalCatalogProperties(*source,container,parentOid,current.name,changes,job,
+                    return SetExternalCatalogProperties(*source,WriteTarget(parent),parentOid,current.name,changes,job,
                                                         lockAfterCopy?std::optional<bool>(true):std::nullopt);
                 if(lockAfterCopy)
-                    return SetEntryProperties(*source,container,parentOid,oid,current.finder,changes,true,job);
-                return SetDirectoryDates(*source,container,parentOid,oid,*dates,job);
+                    return SetEntryProperties(*source,WriteTarget(parent),parentOid,oid,current.finder,changes,true,job);
+                return SetDirectoryDates(*source,WriteTarget(parent),parentOid,oid,*dates,job);
             });
         },true);
     }
@@ -994,12 +1010,12 @@ public:
                         const auto& destination=At(child.id);
                         Check(destination.symlink&&!child.protectedFile&&child.identity==entry.expectedDestinationIdentity,
                               "The APFS symbolic link destination changed after overwrite approval");
-                        return ReplaceCatalogSymlink(*source,container,parentOid,destination.oid,target,job,
+                        return ReplaceCatalogSymlink(*source,WriteTarget(parent),parentOid,destination.oid,target,job,
                                                      CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
                     }
                     throw Error("The APFS symbolic link destination disappeared after overwrite approval");
                 }
-                return CreateCatalogSymlink(*source,container,parentOid,entry.name,target,job,
+                return CreateCatalogSymlink(*source,WriteTarget(parent),parentOid,entry.name,target,job,
                                             CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
             });
         },true);
@@ -1094,13 +1110,13 @@ public:
                       "The APFS destination changed after overwrite approval");
                 const auto oid=At(found->id).oid,sibling=At(found->id).siblingId;
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling);
+                    return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling);
                 },found->id);
                 return found->id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits);
+                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits);
             });
             for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
             throw Error("APFS file was committed but could not be found after reopening");
@@ -1127,7 +1143,7 @@ public:
             if(keptData&&current.forks[0].size)keptData(0,size_t(current.forks[0].size));
             const auto oid=item.oid;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetResourceFork(*source,container,folder.oid,oid,resource,desired.modified,job,limitedEdits);
+                return SetResourceFork(*source,WriteTarget(parent),folder.oid,oid,resource,desired.modified,job,limitedEdits);
             },id);
             return id;
         },true);
@@ -1181,7 +1197,7 @@ public:
             const auto sibling=item.siblingId;
             report();
             CommitMutation(parent,0,job,[&](auto& job){
-                return ReplaceFileData(*source,container,parentOid,oid,data,job,{},
+                return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,{},
                                        nullptr,false,nullptr,limitedEdits||resourceSize||oldCompressionResource?&resource:nullptr,
                                        encoded?&encoded->Attribute():nullptr,limitedEdits,sibling,true);
             },id);
@@ -1202,7 +1218,7 @@ public:
             Check(!folder.entry.protectedFile,"The APFS destination folder is locked");
             const auto oid=item.oid,parentOid=folder.oid;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetCatalogAttributes(*source,container,parentOid,oid,attributes,job,limitedEdits);
+                return SetCatalogAttributes(*source,WriteTarget(parent),parentOid,oid,attributes,job,limitedEdits);
             },id);
         },true);
     }
@@ -1226,9 +1242,9 @@ public:
                     const auto locked=current.protectedFile!=desired.protectedFile?
                         std::optional<bool>(desired.protectedFile):std::nullopt;
                     const auto* finder=current.finder!=desired.finder?&desired.finder:nullptr;
-                    return SetExternalCatalogProperties(*source,container,parentOid,current.name,dates,job,locked,finder);
+                    return SetExternalCatalogProperties(*source,WriteTarget(parent),parentOid,current.name,dates,job,locked,finder);
                 }
-                return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,desired.protectedFile,job);
+                return SetEntryProperties(*source,WriteTarget(parent),parentOid,oid,desired.finder,dates,desired.protectedFile,job);
             },id);
         },true);
     }
@@ -1243,8 +1259,8 @@ public:
             Check(entry.entry.parent==parent,"APFS rename must stay in the original folder");
             const auto oid=entry.oid,parentOid=At(parent).oid;
             CommitMutation(parent,0,job,[&](auto& job){
-                if(limitedEdits)return RenameExternalCatalogEntry(*source,container,parentOid,entry.entry.name,name,job);
-                return RenameEntry(*source,container,parentOid,oid,name,job,entry.aliasId);
+                if(limitedEdits)return RenameExternalCatalogEntry(*source,WriteTarget(parent),parentOid,entry.entry.name,name,job);
+                return RenameEntry(*source,WriteTarget(parent),parentOid,oid,name,job,entry.aliasId);
             });
         },true);
     }
@@ -1266,7 +1282,7 @@ public:
                 }
             }
             CommitMutation(parent,id,job,[&](auto& work){
-                return DeleteEntry(*source,container,parentOid,oid,work,sibling,true,true);
+                return DeleteEntry(*source,WriteTarget(parent),parentOid,oid,work,sibling,true,true);
             });
         },true);
         return true;
@@ -1291,7 +1307,7 @@ public:
             const auto oid=entry.oid;
             const auto parentOid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job,entry.siblingId,limitedEdits);});
+            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,WriteTarget(parent),parentOid,oid,job,entry.siblingId,limitedEdits);});
         },true);
     }
 };
@@ -1384,7 +1400,19 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
         WritableFreeBytes(*source,*expected);
     }catch(const Error&){
         try{
-            InspectFreeQueueAllocation(*source,*expected);
+            if(expected->volumes.size()==1)InspectFreeQueueAllocation(*source,*expected);
+            else{
+                const ObjectMap map(*source,*expected,expected->objectMap,expected->transaction);
+                std::optional<bool> sensitive;
+                for(const auto oid:expected->volumes){
+                    InspectFreeQueueAllocation(*source,*expected,oid);
+                    const auto block=map.Lookup(oid);
+                    Check(block.has_value(),"Missing writable APFS volume");
+                    const auto volume=ReadVolume(ReadObject(*source,*expected,*block,oid,expected->transaction,13),oid);
+                    Check(!sensitive||*sensitive==volume.sensitive,"APFS writable containers require one name comparison mode");
+                    sensitive=volume.sensitive;
+                }
+            }
             limitedEdits=true;
         }catch(const Error&){
             return OpenMounted(source,key,*expected,false);

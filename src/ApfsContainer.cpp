@@ -198,7 +198,7 @@ PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
             const auto entry=map.data()+at;
             const auto type=Le32(entry),subtype=Le32(entry+4),bytes=Le32(entry+8);
             const auto volume=Le64(entry+16),oid=Le64(entry+24),block=Le64(entry+32);
-            Check((type&0xf0000000)==0x80000000&&(!volume||volume==current.volumes.front()),
+            Check((type&0xf0000000)==0x80000000&&(!volume||std::find(current.volumes.begin(),current.volumes.end(),volume)!=current.volumes.end()),
                   "Unsupported APFS checkpoint object type");
             const auto blocks=bytes/size;
             const auto relative=DataIndex(data,block,blocks);
@@ -278,13 +278,14 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
     Check(current&&current->uuid==expected.uuid&&current->transaction==expected.transaction&&
           current->checkpointBlock==expected.checkpointBlock,"The APFS checkpoint changed");
     Check(!current->offset&&current->checkpointBlock&&!current->keybagBlock&&!current->keybagBlocks&&
-          current->volumes.size()==1&&source.Size()==current->blockCount*current->blockSize,
-          "Checkpoint writes require a raw single-volume APFS image with a contiguous checkpoint ring");
+          (current->volumes.size()==1||(mutation&&expected.writeVolume))&&
+          source.Size()==current->blockCount*current->blockSize,
+          "Checkpoint writes require a selected APFS volume and a contiguous checkpoint ring");
     auto plan=PlanCheckpoint(source,*current);
     CatalogWritePlan changes;
     if(mutation){
         const auto object=[&](uint64_t oid) -> Bytes& {return CheckpointObjectById(plan,oid);};
-        changes=PrepareCatalogMutation(source,*current,plan.transaction,plan.superblock,object,*mutation);
+        changes=PrepareCatalogMutation(source,*current,plan.transaction,plan.superblock,object,*mutation,expected.writeVolume);
     }
     Stamp(plan.superblock,plan.transaction);
     auto write=[&](uint64_t block,const uint8_t* bytes){
@@ -345,11 +346,11 @@ uint64_t InspectAllocationFreeBytes(Source& source,const Container& container)
     return VerifyAllocationBitmaps(source,container,space);
 }
 
-uint64_t InspectFreeQueueAllocation(Source& source,const Container& container)
+uint64_t InspectFreeQueueAllocation(Source& source,const Container& container,uint64_t selected)
 {
     auto checkpoint=PlanCheckpoint(source,container);
     const auto object=[&](uint64_t oid)->Bytes& {return CheckpointObjectById(checkpoint,oid);};
-    return VerifyFreeQueueAllocation(source,container,checkpoint.transaction,checkpoint.superblock,object);
+    return VerifyFreeQueueAllocation(source,container,checkpoint.transaction,checkpoint.superblock,object,selected);
 }
 
 uint64_t WritableFreeBytes(Source& source,const Container& container)
