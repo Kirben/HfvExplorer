@@ -70,6 +70,15 @@ char32_t NextScalar(std::u16string_view name,size_t& index)
 }
 }
 
+std::string EncodeAttributeName(std::u16string_view name)
+{
+    Check(!name.empty()&&name.size()<=127&&name.find(u'\0')==name.npos,
+          "Invalid APFS extended attribute name");
+    auto utf8=Utf8(name);
+    Check(utf8.size()<=127,"APFS extended attribute names must fit in 127 UTF-8 bytes");
+    return utf8;
+}
+
 std::string EncodeCatalogName(std::u16string_view name)
 {
     Check(!name.empty()&&name.size()<=255&&name!=u"."&&name!=u"..","Invalid APFS entry name");

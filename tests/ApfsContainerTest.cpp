@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-copy-locked-folder.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-embedded-attributes.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1317,9 +1317,12 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
 
     MacBrowser::Entry file,folder;
     file.name=u"Document";
+    file.attributesKnown=true;
+    file.attributes={{u"user.sample",{1,2,3}},{u"user.\u00e9",HfsPlus::Bytes{}},{u"user.\U0001f600",{0xff,0}}};
     std::copy_n("TEXTttxt",8,file.finder.begin());
     file.forks[0].size=5;
     folder.name=u"Folder";
+    folder.attributes={{u"user.folder",{0,7}}};
     folder.directory=true;
     folder.finder[9]=0x08;
     const auto contents=[](unsigned fork,uint64_t offset,void* data,size_t bytes){
@@ -1347,8 +1350,10 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         const auto temporaryId=mounted->Put(parent,temporary,{},false);
         auto cleared=temporary;
         cleared.finder={};
+        cleared.attributes.clear();
         mounted->Put(parent,cleared,{},true);
         Check(mounted->Stat(temporaryId).finder==cleared.finder,"APFS retained stale Finder information");
+        Check(mounted->GetAttributes(temporaryId).empty(),"APFS overwrite retained stale attributes");
         mounted->Remove(temporaryId);
         temporary.name=u"Removed with metadata";
         mounted->Remove(mounted->Put(parent,temporary,{},false));
@@ -1360,6 +1365,13 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
               mounted->FindChild(destination,u"Renamed Folder",copiedFolder)&&copiedFolder.finder==folder.finder&&
               mounted->FindChild(copiedFolder.id,file.name,copiedFile)&&copiedFile.finder==file.finder,
               "Recursive APFS copy lost Finder information");
+        Check(mounted->GetAttributes(copiedFolder.id)==folder.attributes&&
+              mounted->GetAttributes(copiedFile.id)==file.attributes,
+              "APFS recursive copy lost embedded attributes");
+        auto oversized=file;
+        oversized.name=u"Oversized attribute";
+        oversized.attributes={{u"user.large",Bytes(3804)}};
+        Reject([&]{mounted->Put(parent,oversized,contents,false);},"APFS accepted an attribute requiring a stream");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
@@ -1367,6 +1379,9 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         Check(mounted&&mounted->FindChild(2,u"Renamed Folder",foundFolder)&&foundFolder.finder==folder.finder&&
               mounted->FindChild(foundFolder.id,file.name,foundFile)&&foundFile.finder==file.finder&&
               mounted->List(foundFolder.id).size()==1,"APFS Finder information did not survive reopening");
+        Check(mounted->GetAttributes(foundFolder.id)==folder.attributes&&
+              mounted->GetAttributes(foundFile.id)==file.attributes,
+              "APFS embedded folder or file attributes did not survive reopening");
         std::array<char,5> data{};
         mounted->Read(foundFile.id,0,0,data.data(),data.size());
         Check(std::string(data.begin(),data.end())=="abcde","APFS Finder information changed the data fork");

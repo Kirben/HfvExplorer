@@ -32,7 +32,7 @@ struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.
 };
 uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                                Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr);
+                                Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr);
 uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job&);
 struct TimestampEdits {
@@ -44,7 +44,7 @@ uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t par
 
 // Stream a data fork from a separate source into a newly created file.
 uint64_t CreateCatalogFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false);
+                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr);
 // Rename within the same directory, using on-disk inode IDs and the expected checkpoint.
 uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                      const std::u16string& name,Storage::Job&);
@@ -52,5 +52,5 @@ uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,
 uint64_t DeleteEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job&);
 // Replace a regular file's data fork in one checkpoint, preserving its inode.
 uint64_t ReplaceFileData(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                         HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false);
+                         HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr);
 }

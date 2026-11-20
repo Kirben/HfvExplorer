@@ -355,9 +355,9 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
 }
 
 uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                                Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder)
+                                Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,const HfsPlus::Attributes* attributes)
 {
-    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory,nullptr,dates,finder};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory,nullptr,dates,finder,false,attributes};
     return Commit(source,expected,job,&request);
 }
 
@@ -382,10 +382,10 @@ uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t paren
 }
 
 uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked)
+                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
-    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked};
+    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked,attributes};
     return Commit(source,expected,job,&request);
 }
 
@@ -403,10 +403,10 @@ uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,ui
 }
 
 uint64_t ReplaceFileData(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                         Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked)
+                         Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
-    const CatalogMutation request=CatalogReplaceData{parent,inode,data,dates,finder,locked};
+    const CatalogMutation request=CatalogReplaceData{parent,inode,data,dates,finder,locked,attributes};
     return Commit(source,expected,job,&request);
 }
 }

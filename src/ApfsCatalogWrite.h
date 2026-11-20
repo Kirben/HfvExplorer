@@ -18,6 +18,7 @@ struct CatalogCreate {
     std::optional<FileDates> dates;
     const FinderBytes* finder=nullptr;
     bool locked=false;
+    const HfsPlus::Attributes* attributes=nullptr;
 };
 struct CatalogRename {
     uint64_t parent,inode;
@@ -32,6 +33,7 @@ struct CatalogReplaceData {
     std::optional<FileDates> dates;
     const FinderBytes* finder=nullptr;
     bool locked=false;
+    const HfsPlus::Attributes* attributes=nullptr;
 };
 struct CatalogMetadata {
     uint64_t parent,inode;
@@ -50,6 +52,7 @@ struct CatalogWritePlan {
     HfsPlus::Source* input=nullptr;
     uint64_t dataSize=0;
 };
+void ValidateEmbeddedAttributes(const HfsPlus::Attributes&);
 uint64_t CatalogTimestamp(uint64_t secondsSince1904);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);
 uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);

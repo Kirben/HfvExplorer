@@ -516,6 +516,35 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
     }
 }
 
+constexpr uint64_t EmbeddedAttributeLimit=3804;
+bool OrdinaryAttribute(std::string_view name)
+{
+    return name!="com.apple.FinderInfo"&&name!="com.apple.ResourceFork"&&name!="com.apple.decmpfs"&&
+           name!="com.apple.fs.symlink"&&name!="com.apple.system.Security";
+}
+
+std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attributes* attributes)
+{
+    if(!attributes)return {};
+    ValidateEmbeddedAttributes(*attributes);
+    std::vector<OwnedRecord> records;
+    for(const auto& [wide,value]:*attributes){
+        const auto name=EncodeAttributeName(wide);
+        OwnedRecord record{Bytes(11+name.size()),Bytes(4+size_t(value.size()))};
+        Set(record.key,0,(uint64_t(4)<<60)|inode,8);
+        Set(record.key,8,name.size()+1,2);
+        std::copy(name.begin(),name.end(),record.key.begin()+10);
+        Set(record.value,0,2,2);
+        Set(record.value,2,value.size(),2);
+        if(value.size())value.Read(0,record.value.data()+4,size_t(value.size()));
+        records.push_back(std::move(record));
+    }
+    std::sort(records.begin(),records.end(),[](const auto& a,const auto& b){
+        return std::lexicographical_compare(a.key.begin()+10,a.key.end(),b.key.begin()+10,b.key.end());
+    });
+    return records;
+}
+
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
@@ -573,7 +602,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         CatalogKind kind;
         std::string name;
         size_t entryRecord;
-        size_t inodeRecord=0,streamRecords=0;
+        size_t inodeRecord=0,attributes=0,streamRecords=0;
         uint64_t dataSize=0;
         std::optional<FinderBytes> finder;
     };
@@ -633,6 +662,22 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     link->second.inodeRecord=i;
                     link->second.finder=readFinder(view.value.data,view.value.size);
                 }
+                if(!reservedInode){
+                    std::string previousAttribute;
+                    for(;i+1+streamRecords<records.size();++streamRecords){
+                        const auto attr=at(i+1+streamRecords);
+                        if(attr.key.size<8||Le64(attr.key.data)!=((uint64_t(4)<<60)|inode))break;
+                        Check(attr.key.size>=12&&attr.key.size<=138&&attr.key.data[attr.key.size-1]==0&&
+                              Le16(attr.key.data+8)==attr.key.size-10&&attr.value.size>=4&&
+                              Le16(attr.value.data)==2&&Le16(attr.value.data+2)==attr.value.size-4&&
+                              attr.value.size-4<EmbeddedAttributeLimit,"Invalid APFS embedded attribute");
+                        const std::string name(reinterpret_cast<const char*>(attr.key.data+10),attr.key.size-11);
+                        Check(name>previousAttribute&&name.find('\0')==name.npos&&OrdinaryAttribute(name),
+                              "Invalid APFS attribute name or order");
+                        previousAttribute=name;
+                    }
+                    link->second.attributes=streamRecords;
+                }
                 const auto mode=Le16(view.value.data+80)&0170000;
                 if(kind==CatalogKind::Directory){
                     Check(mode==0040000&&directories.emplace(inode,Directory{i}).second,"Invalid APFS directory inode");
@@ -650,8 +695,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
                           "APFS writes require native regular-file data streams");
                     if(size){
-                        Check(i+2<records.size(),"Missing APFS data-stream records");
-                        const auto reference=at(i+1);
+                        Check(i+2+streamRecords<records.size(),"Missing APFS data-stream records");
+                        const auto reference=at(i+1+streamRecords);
                         const auto streamRef=StreamReference(inode);
                         Check(Matches(reference.key,streamRef.key)&&Matches(reference.value,streamRef.value),
                               "Invalid APFS data-stream record");
@@ -675,7 +720,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         }
                     }
                     link->second.dataSize=size;
-                    link->second.streamRecords=streamRecords;
+                    link->second.streamRecords=streamRecords-link->second.attributes;
                     ++files;
                 }
             }
@@ -711,6 +756,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize,create->finder));
         if(create->locked)Set(records.back().value,68,UserImmutable,4);
         copyDates(records.back().value);
+        auto attributes=EncodeAttributes(entryId,create->attributes);
+        records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
         streamAt=records.size();
     }else{
         const auto found=links.find(entryId);
@@ -741,7 +788,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             removedKind=link.kind;
             Set(parentInode,56,target->second.children-1,4);
             const auto first=records.begin()+link.inodeRecord;
-            records.erase(first,first+1+link.streamRecords);
+            records.erase(first,first+1+link.attributes+link.streamRecords);
             records.erase(records.begin()+link.entryRecord);
             return records;
         }
@@ -765,9 +812,15 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             return records;
         }
         if(replace){
-            streamAt=link.inodeRecord+1;
-            const auto first=records.begin()+streamAt;
-            records.erase(first,first+link.streamRecords);
+            const auto afterInode=link.inodeRecord+1;
+            streamAt=afterInode+link.attributes;
+            if(replace->attributes){
+                auto attributes=EncodeAttributes(entryId,replace->attributes);
+                records.erase(records.begin()+afterInode,records.begin()+streamAt+link.streamRecords);
+                records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
+                               std::make_move_iterator(attributes.end()));
+                streamAt=afterInode+attributes.size();
+            }else records.erase(records.begin()+streamAt,records.begin()+streamAt+link.streamRecords);
             return records;
         }
 
@@ -845,6 +898,15 @@ void CheckNativeVolume(const Bytes& volume)
           !Le64(volume.data()+200)&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
           "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
 }
+}
+
+void ValidateEmbeddedAttributes(const HfsPlus::Attributes& attributes)
+{
+    for(const auto& [wide,value]:attributes){
+        const auto name=EncodeAttributeName(wide);
+        Check(OrdinaryAttribute(name),"Special APFS attributes require dedicated write support");
+        Check(value.size()<EmbeddedAttributeLimit,"APFS extended attribute requires a data stream");
+    }
 }
 
 uint64_t CatalogTimestamp(uint64_t secondsSince1904)
