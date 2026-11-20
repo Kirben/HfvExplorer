@@ -579,6 +579,82 @@ void CheckpointWrites(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS allocation, repeated directory creation, retired block reuse, copy-on-write maps, and interrupted commits.\n");
 }
 
+void MultiChunkWrites(const std::string& root,FILE* report)
+{
+    constexpr uint64_t chunkBytes=128ull*1024*1024;
+    constexpr uint64_t imageSize=chunkBytes+4*1024*1024;
+    constexpr uint64_t fileSize=chunkBytes+17;
+    class PatternSource final:public Source {
+    public:
+        static uint8_t Byte(uint64_t offset){return uint8_t((offset>>20)+(offset>>13)+offset*7);}
+        uint64_t Size()const override{return fileSize;}
+        bool Writable()const override{return false;}
+        void Read(uint64_t at,void* output,size_t size)override{
+            Check(Disk::Range(at,size,fileSize),"Pattern read outside the APFS input");
+            auto data=static_cast<uint8_t*>(output);
+            for(size_t i=0;i<size;++i)data[i]=Byte(at+i);
+        }
+        void Write(uint64_t,const void*,size_t)override{throw Error("Cannot write APFS input");}
+        void Flush()override{}
+    } pattern;
+
+    const auto path=VolumeCoord::Wide(root+"checkpoint-multichunk.img");
+    {
+        auto image=CreateFormatOutput(path.c_str(),imageSize);
+        Storage::Job job;
+        Apfs::Format(*image,u"Multi-chunk fixture",false,job);
+        const auto initial=Apfs::Probe(*image);
+        Check(initial&&Apfs::CreateFile(*image,*initial,2,u"Across chunks",pattern,job)==2,
+              "APFS did not allocate file data beyond its first chunk");
+
+        const auto checkpoint=Apfs::Probe(*image);
+        Memory patternSlice(33);
+        std::fill(patternSlice.bytes.begin(),patternSlice.bytes.end(),0xa5);
+        class CancelAfterFlush final:public Source {
+            Source& file;
+            Storage::Job& job;
+        public:
+            CancelAfterFlush(Source& file,Storage::Job& job):file(file),job(job){}
+            uint64_t Size()const override{return file.Size();}
+            bool Writable()const override{return true;}
+            void Read(uint64_t at,void* data,size_t size)override{file.Read(at,data,size);}
+            void Write(uint64_t at,const void* data,size_t size)override{file.Write(at,data,size);}
+            void Flush()override{file.Flush();job.cancel();}
+        };
+        {
+            Check(checkpoint.has_value(),"Missing APFS checkpoint after writing across chunks");
+            Storage::Job cancelled;
+            CancelAfterFlush wrapper(*image,cancelled);
+            bool stopped=false;
+            try{Apfs::CreateFile(wrapper,*checkpoint,2,u"Cancelled",patternSlice,cancelled);}
+            catch(const Storage::Cancelled&){stopped=true;}
+            const auto recovered=Apfs::Probe(*image);
+            Check(stopped&&recovered&&recovered->transaction==2,
+                  "APFS exposed a checkpoint after cancellation following the multi-chunk bitmap flush");
+        }
+        Check(Apfs::CreateFile(*image,*checkpoint,2,u"Another",patternSlice,job)==3,
+              "APFS could not allocate after reopening a materialized chunk");
+        image->Keep();
+    }
+    const auto mounted=MacBrowser::OpenBrowserImage(path);
+    MacBrowser::Entry large,small;
+    Check(mounted&&mounted->List().size()==2&&mounted->FindChild(2,u"Across chunks",large)&&large.forks[0].size==fileSize&&
+          mounted->FindChild(2,u"Another",small)&&small.forks[0].size==33,
+          "APFS multi-chunk files did not reopen with correct sizes");
+    Bytes buffer(512*1024);
+    for(uint64_t at=0;at<fileSize;){
+        const auto size=size_t((std::min)(uint64_t(buffer.size()),fileSize-at));
+        mounted->Read(large.id,0,at,buffer.data(),size);
+        for(size_t i=0;i<size;++i)
+            if(buffer[i]!=PatternSource::Byte(at+i))throw Error("APFS multi-chunk file data changed");
+        at+=size;
+    }
+    mounted->Read(small.id,0,0,buffer.data(),33);
+    Check(std::all_of(buffer.begin(),buffer.begin()+33,[](uint8_t byte){return byte==0xa5;}),
+          "APFS later write into a materialized chunk lost data");
+    fprintf(report,"PASS: APFS multi-chunk allocation, bitmap publication, repeat allocation, and full readback beyond 128 MiB.\n");
+}
+
 Memory Raw(unsigned blockSize=4096)
 {
     Memory disk(1024*1024);
@@ -929,6 +1005,7 @@ int RunApfsContainerTest(const char* directory)
         Reject([&]{Apfs::Probe(ring);},"Container with no complete checkpoint was accepted");
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
         CheckpointWrites(root,report);
+        MultiChunkWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

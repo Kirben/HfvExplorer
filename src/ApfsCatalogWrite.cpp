@@ -4,6 +4,7 @@
 #include "ApfsWriteDisk.h"
 #include <windows.h>
 #include <map>
+#include <set>
 #include <tuple>
 
 namespace Apfs {
@@ -59,12 +60,6 @@ void SetBit(Bytes& map,uint64_t index)
 {
     map[index/8]|=uint8_t(1u<<(index%8));
 }
-void VerifyAllocated(const Bytes& map,uint64_t start,uint64_t size,uint64_t limit)
-{
-    Check(Range(start,size,limit),"APFS referenced block lies outside the writable allocation chunk");
-    for(uint64_t n=0;n<size;++n)Check(Bit(map,start+n),"APFS referenced block is marked free");
-}
-
 struct MapLeaf {
     uint64_t headerBlock,rootBlock,physical;
     Bytes header;
@@ -98,9 +93,9 @@ void StageMap(Writes& writes,MapLeaf map,uint64_t headerBlock,uint64_t rootBlock
     StageObject(writes,rootBlock,EncodeLeaf({std::move(mapping)},0x10,16,16),rootBlock,transaction,Physical|2,11);
 }
 
-template<class Protected>
-uint64_t Reclaim(const Bytes& space,const Bytes& queue,size_t field,Bytes& bitmap,
-                 uint64_t base,uint64_t limit,uint64_t committed,Protected protectedBlock)
+template<class ReleaseBlock>
+void Reclaim(const Bytes& space,const Bytes& queue,size_t field,uint64_t base,uint64_t limit,
+             uint64_t committed,ReleaseBlock releaseBlock)
 {
     Check(queue.size()==Block&&Le32(queue.data()+24)==(Ephemeral|2)&&Le32(queue.data()+28)==9&&
           Le16(queue.data()+32)==7&&Le16(queue.data()+34)==0&&Le32(queue.data()+Block-40)==0x0c,
@@ -120,16 +115,11 @@ uint64_t Reclaim(const Bytes& space,const Bytes& queue,size_t field,Bytes& bitma
         previous=key;
         // The selected checkpoint no longer references these blocks. Its
         // allocation metadata remains intact until publication succeeds.
-        for(uint64_t n=0;n<count;++n){
-            const auto bit=block-base+n;
-            Check(Bit(bitmap,bit)&&!protectedBlock(block+n),"APFS retired range overlaps free or live blocks");
-            bitmap[bit/8]&=uint8_t(~(1u<<(bit%8)));
-        }
+        for(uint64_t n=0;n<count;++n)releaseBlock(block+n);
         reclaimed+=count;
     }
     Check(reclaimed==Le64(space.data()+field)&&oldest==Le64(space.data()+field+16),
           "APFS free queue counts disagree");
-    return reclaimed;
 }
 
 void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<uint64_t> blocks,uint64_t transaction)
@@ -177,18 +167,42 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
           Range(pool,poolSize,mainLimit)&&oldCib>=pool&&Range(oldCib-pool,1,poolSize),
           "Invalid APFS internal pool geometry");
     auto cib=ReadObject(source,container,oldCib,oldCib,container.transaction,7,0,true);
-    Check(Le32(cib.data()+32)==0&&Le32(cib.data()+36)==chunks&&chunks<=(Block-40)/32&&
-          Le64(cib.data()+48)==0&&Le32(cib.data()+56)==mainLimit,
+    Check(Le32(cib.data()+32)==0&&Le32(cib.data()+36)==chunks&&chunks<=(Block-40)/32,
           "Invalid APFS chunk information");
-    const auto oldMainBitmap=Le64(cib.data()+64);
-    Check(oldMainBitmap!=oldCib&&oldMainBitmap>=pool&&Range(oldMainBitmap-pool,1,poolSize),
-          "Invalid APFS allocation bitmap location");
-    for(uint64_t i=1;i<chunks;++i){
+    struct ChunkBitmap {
+        uint64_t size,available,oldBlock;
+        Bytes bitmap;
+        bool dirty=false;
+    };
+    std::vector<ChunkBitmap> bitmaps;
+    std::set<uint64_t> currentPoolBlocks{oldCib};
+    uint64_t available=0;
+    for(uint64_t i=0;i<chunks;++i){
         const auto record=cib.data()+40+i*32;
-        const auto blocks=(std::min)(Chunk,container.blockCount-i*Chunk);
-        Check(Le64(record+8)==i*Chunk&&Le32(record+16)==blocks&&Le32(record+20)==blocks&&!Le64(record+24),
-              "APFS catalog writes currently require all later allocation chunks to be empty");
+        const auto size=(std::min)(Chunk,container.blockCount-i*Chunk);
+        const auto free=Le32(record+20);
+        const auto oldBlock=Le64(record+24);
+        const auto xid=Le64(record);
+        Check(xid&&xid<=Le64(cib.data()+16)&&Le64(record+8)==i*Chunk&&Le32(record+16)==size&&free<=size,
+              "Invalid APFS chunk record");
+        if(oldBlock){
+            Check(oldBlock>=pool&&Range(oldBlock-pool,1,poolSize)&&currentPoolBlocks.insert(oldBlock).second,
+                  "Invalid or duplicate APFS chunk bitmap");
+        }else Check(free==size,"APFS chunk is missing its allocation bitmap");
+        auto bitmap=oldBlock?ReadBlock(source,oldBlock):Bytes(Block);
+        if(oldBlock){
+            uint64_t used=0;
+            for(uint64_t bit=0;bit<Chunk;++bit){
+                if(!Bit(bitmap,bit))continue;
+                Check(bit<size,"APFS bitmap marks blocks beyond the container");
+                ++used;
+            }
+            Check(size-used==free,"APFS chunk bitmap and free count disagree");
+        }
+        available+=free;
+        bitmaps.push_back({size,free,oldBlock,std::move(bitmap)});
     }
+    Check(available==Le64(space.data()+72),"APFS space manager and chunk counts disagree");
 
     const auto xidOffset=Le32(space.data()+324),bitmapOffset=Le32(space.data()+328),nextOffset=Le32(space.data()+332);
     Check(xidOffset>=336&&Range(xidOffset,8,space.size())&&bitmapOffset>=xidOffset+8&&
@@ -212,29 +226,34 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     auto& mainQueue=ephemeral(Le64(space.data()+MainFreeQueue+8));
     auto& poolQueue=ephemeral(Le64(space.data()+PoolFreeQueue+8));
     auto poolMap=ReadBlock(source,currentBitmapBase+oldSlot);
-    Reclaim(space,poolQueue,PoolFreeQueue,poolMap,pool,poolSize,container.transaction,[&](uint64_t block){
-        return block==oldCib||block==oldMainBitmap;
+    Reclaim(space,poolQueue,PoolFreeQueue,pool,poolSize,container.transaction,[&](uint64_t block){
+        const auto bit=block-pool;
+        Check(Bit(poolMap,bit)&&!currentPoolBlocks.count(block),"APFS retired range overlaps free or live pool blocks");
+        poolMap[bit/8]&=uint8_t(~(1u<<(bit%8)));
     });
     std::vector<uint64_t> internal;
-    size_t used=0;
     for(uint64_t i=0;i<poolSize;++i){
-        if(Bit(poolMap,i))++used;
-        else if(internal.size()<2)internal.push_back(pool+i);
+        const bool active=currentPoolBlocks.count(pool+i)!=0;
+        Check(Bit(poolMap,i)==active,"APFS internal pool allocation is inconsistent");
+        if(!active)internal.push_back(pool+i);
     }
-    Check(used==2&&internal.size()==2&&Bit(poolMap,oldCib-pool)&&Bit(poolMap,oldMainBitmap-pool),
-          "APFS internal pool allocation is inconsistent");
-    auto mainMap=ReadBlock(source,oldMainBitmap);
-    VerifyAllocated(mainMap,0,1,mainLimit);
-    VerifyAllocated(mainMap,Le64(superblock.data()+112),Le32(superblock.data()+104),mainLimit);
-    VerifyAllocated(mainMap,Le64(superblock.data()+120),Le32(superblock.data()+108),mainLimit);
-    VerifyAllocated(mainMap,currentBitmapBase,bitmapSlots,mainLimit);
-    VerifyAllocated(mainMap,pool,poolSize,mainLimit);
+
+    const auto allocated=[&](uint64_t block){return Bit(bitmaps[block/Chunk].bitmap,block%Chunk);};
+    const auto verify=[&](uint64_t start,uint64_t count){
+        Check(Range(start,count,container.blockCount),"APFS referenced block lies outside the container");
+        for(uint64_t n=0;n<count;++n)Check(allocated(start+n),"APFS referenced block is marked free");
+    };
+    verify(0,1);
+    verify(Le64(superblock.data()+112),Le32(superblock.data()+104));
+    verify(Le64(superblock.data()+120),Le32(superblock.data()+108));
+    verify(currentBitmapBase,bitmapSlots);
+    verify(pool,poolSize);
     for(const auto block:retire){
         Check(block<pool||!Range(block-pool,1,poolSize),"APFS volume object overlaps the internal pool");
-        VerifyAllocated(mainMap,block,1,mainLimit);
+        verify(block,1);
     }
-    VerifyAllocated(mainMap,extents,1,mainLimit);
-    VerifyAllocated(mainMap,snapshots,1,mainLimit);
+    verify(extents,1);
+    verify(snapshots,1);
 
     const auto within=[](uint64_t block,uint64_t start,uint64_t count){
         return block>=start&&block-start<count;
@@ -247,31 +266,44 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
                std::find(retire.begin(),retire.end(),block)!=retire.end();
     };
     for(const auto& run:files){
-        VerifyAllocated(mainMap,run.block,run.count,mainLimit);
+        verify(run.block,run.count);
         for(uint64_t i=0;i<run.count;++i)
             Check(!isMetadata(run.block+i),"APFS file extent overlaps live metadata");
     }
-    const auto reclaimed=Reclaim(space,mainQueue,MainFreeQueue,mainMap,0,mainLimit,container.transaction,[&](uint64_t block){
-        return isMetadata(block)||std::any_of(files.begin(),files.end(),[&](const auto& run){
+    Reclaim(space,mainQueue,MainFreeQueue,0,container.blockCount,container.transaction,[&](uint64_t block){
+        const bool live=isMetadata(block)||std::any_of(files.begin(),files.end(),[&](const auto& run){
             return within(block,run.block,run.count);
         });
+        Check(!live&&allocated(block),"APFS retired range overlaps free or live blocks");
+        auto& chunk=bitmaps[block/Chunk];
+        const auto bit=block%Chunk;
+        chunk.bitmap[bit/8]&=uint8_t(~(1u<<(bit%8)));
+        chunk.dirty=true;
+        ++chunk.available;
+        ++available;
     });
+    Check(dataBlocks+retire.size()<=available,"Insufficient APFS space for the transaction");
+
+    const auto reserve=[&](uint64_t block,uint64_t count){
+        auto& chunk=bitmaps[block/Chunk];
+        for(uint64_t i=0;i<count;++i)SetBit(chunk.bitmap,block%Chunk+i);
+        chunk.dirty=true;
+        chunk.available-=count;
+        available-=count;
+    };
     std::vector<DataRun> freeRuns;
-    uint64_t available=0;
-    for(uint64_t i=0;i<mainLimit;){
-        if(Bit(mainMap,i)){
-            ++i;
-            continue;
+    for(uint64_t chunk=0;chunk<chunks&&dataBlocks;++chunk){
+        const auto& bitmap=bitmaps[chunk];
+        for(uint64_t i=0;i<bitmap.size;){
+            if(Bit(bitmap.bitmap,i)){
+                ++i;
+                continue;
+            }
+            const auto start=i;
+            do{++i;}while(i<bitmap.size&&!Bit(bitmap.bitmap,i));
+            freeRuns.push_back({chunk*Chunk+start,i-start});
         }
-        const auto start=i;
-        do{++i;}while(i<mainLimit&&!Bit(mainMap,i));
-        freeRuns.push_back({start,i-start});
-        available+=i-start;
     }
-    Check(available>=reclaimed&&available-reclaimed==Le32(cib.data()+60)&&
-          available-reclaimed+(container.blockCount-mainLimit)==Le64(space.data()+72),
-          "APFS allocation counts disagree");
-    Check(dataBlocks+retire.size()<=available,"Insufficient APFS space in the active allocation chunk");
 
     // Prefer the longest runs to keep catalog growth small on fragmented images.
     if(dataBlocks){
@@ -280,30 +312,49 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         for(const auto& run:freeRuns){
             const auto count=(std::min)(run.count,remaining);
             dataRuns.push_back({run.block,count});
-            for(uint64_t i=0;i<count;++i)SetBit(mainMap,run.block+i);
+            reserve(run.block,count);
             remaining-=count;
             if(!remaining)break;
         }
         std::sort(dataRuns.begin(),dataRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
     }
     std::vector<uint64_t> result;
-    for(uint64_t i=0;i<mainLimit&&result.size()<retire.size();++i)
-        if(!Bit(mainMap,i))result.push_back(i);
+    for(uint64_t i=0;i<container.blockCount&&result.size()<retire.size();++i){
+        if(allocated(i))continue;
+        result.push_back(i);
+        reserve(i,1);
+    }
     Check(result.size()==retire.size(),"APFS metadata allocation did not cover the transaction");
 
+    // Only replace dirty bitmaps. Both they and the CIB must remain live
+    // until the checkpoint pointing to their replacements is durable.
+    std::vector<uint64_t> retiredPool{oldCib};
+    size_t nextInternal=0;
+    for(size_t i=0;i<bitmaps.size();++i){
+        auto& chunk=bitmaps[i];
+        if(!chunk.dirty)continue;
+        uint64_t newBlock=0;
+        if(chunk.available!=chunk.size){
+            Check(nextInternal<internal.size(),"APFS internal pool is full");
+            newBlock=internal[nextInternal++];
+            writes.push_back({newBlock,std::move(chunk.bitmap)});
+            SetBit(poolMap,newBlock-pool);
+        }
+        if(chunk.oldBlock)retiredPool.push_back(chunk.oldBlock);
+        const auto at=40+32*i;
+        Set(cib,at,transaction,8);
+        Set(cib,at+20,chunk.available,4);
+        Set(cib,at+24,newBlock,8);
+    }
+    Check(nextInternal<internal.size(),"APFS internal pool has no space for the chunk records");
+    const auto newCib=internal[nextInternal];
+    SetBit(poolMap,newCib-pool);
     Retire(space,mainQueue,MainFreeQueue,retire,transaction);
-    Retire(space,poolQueue,PoolFreeQueue,{oldCib,oldMainBitmap},transaction);
-
-    for(const auto block:result)SetBit(mainMap,block);
-    for(const auto block:internal)SetBit(poolMap,block-pool);
-    writes.push_back({internal[0],std::move(mainMap)});
+    Retire(space,poolQueue,PoolFreeQueue,std::move(retiredPool),transaction);
     writes.push_back({currentBitmapBase+head,std::move(poolMap)});
-    Set(cib,40,transaction,8);
-    Set(cib,60,available-result.size()-dataBlocks,4);
-    Set(cib,64,internal[0],8);
-    StageObject(writes,internal[1],std::move(cib),internal[1],transaction,Physical|7);
-    Set(space,cibOffset,internal[1],8);
-    Set(space,72,available+(container.blockCount-mainLimit)-result.size()-dataBlocks,8);
+    StageObject(writes,newCib,std::move(cib),newCib,transaction,Physical|7);
+    Set(space,cibOffset,newCib,8);
+    Set(space,72,available,8);
     Set(space,xidOffset,transaction,8);
     Set(space,bitmapOffset,head,2);
     Set(space,320,nextHead,2);
@@ -362,7 +413,7 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
 }
 
 std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::string& name,
-    uint64_t id,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t dataSize,
+    uint64_t id,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t dataSize,uint64_t blockCount,
     std::vector<FileRun>& fileRuns)
 {
     const Node tree(std::move(catalog),true,{});
@@ -437,7 +488,7 @@ std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& requ
                     const auto value=view.value.data;
                     const size_t stream=104+size_t(DivideUp(primaryName.size()+1,8)*8);
                     const auto size=view.value.size==stream+40?Le64(value+stream):0;
-                    Check(size<=Block*Chunk,"Unsupported APFS file size in writable catalog");
+                    Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
                     const auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size);
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
@@ -458,7 +509,7 @@ std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& requ
                             const auto length=Le64(extent.value.data);
                             const FileRun run{inode,Le64(extent.value.data+8),length/Block};
                             Check(run.block&&run.count&&!(length%Block)&&run.count<=blocks-logical&&
-                                  Range(run.block,run.count,Chunk),"Invalid length or address in APFS file extent");
+                                  Range(run.block,run.count,blockCount),"Invalid length or address in APFS file extent");
                             auto encoded=FileExtent(run,logical);
                             Check(Matches(extent.key,encoded.key)&&Matches(extent.value,encoded.value),
                                   "Invalid or noncontiguous logical APFS file extent");
@@ -511,7 +562,7 @@ CatalogWritePlan PrepareCatalogCreate(
     CatalogWritePlan plan;
     plan.dataSize=request.data?request.data->Size():0;
     const auto dataBlocks=DivideUp(plan.dataSize,Block);
-    Check(dataBlocks<=(std::min)(current.blockCount,Chunk),"APFS file exceeds the writable allocation chunk");
+    Check(dataBlocks<=current.blockCount,"APFS file exceeds the container size");
     const auto oid=current.volumes.front();
     const auto containerMap=ReadSingleMapping(source,current,current.objectMap,oid);
     auto volume=ReadObject(source,current,containerMap.physical,oid,current.transaction,13);
@@ -535,7 +586,7 @@ CatalogWritePlan PrepareCatalogCreate(
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
     std::vector<FileRun> files;
     auto catalog=AddCatalogEntry(ReadObject(source,current,volumeMap.physical,catalogOid,current.transaction,2,14),
-                                 request,ascii,nextId,time,flags==1,directoryCount,fileCount,plan.dataSize,files);
+                                 request,ascii,nextId,time,flags==1,directoryCount,fileCount,plan.dataSize,current.blockCount,files);
     ValidateExtentReferences(extentTree,files);
     auto& space=ephemeral(Le64(superblock.data()+152));
     auto& writes=plan.metadata;
