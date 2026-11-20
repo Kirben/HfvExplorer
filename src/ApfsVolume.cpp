@@ -895,7 +895,13 @@ private:
     }
 public:
     uint32_t MakeHardLink(uint32_t id,uint32_t parent,const std::u16string& name,bool replace=false)override{
+        Storage::Job job;
+        return MakeHardLinkForTransfer(id,parent,name,replace,job);
+    }
+    uint32_t MakeHardLinkForTransfer(uint32_t id,uint32_t parent,const std::u16string& name,
+                                     bool replace,Storage::Job& job)override{
         return WriteMount([&]{
+            if(job.cancelled())throw Storage::Cancelled();
             const auto oid=At(id).oid,folder=At(parent).oid;
             const auto sourceParent=At(id).entry.parent;
             const auto links=At(id).entry.linkCount;
@@ -905,9 +911,7 @@ public:
                 Check(FindChild(parent,name,destination),"The APFS hard-link destination disappeared");
                 replaced=At(destination.id).oid;
                 if(replaced==oid)return destination.id;
-                Check(!limitedEdits,"This APFS image cannot replace a file with a hard link yet");
             }
-            Storage::Job job;
             CommitMutation(parent,destination.id,job,[&](auto& job){
                 return CreateCatalogHardLink(*source,container,folder,oid,name,job,replaced,limitedEdits);
             });

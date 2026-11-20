@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-copied-hard-links.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-hard-link.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2664,6 +2664,43 @@ int RunApfsContainerTest(const char* directory)
                 Apfs::CreateCatalogFile(*output,beforeCreate,2,u"Created data.bin",payload,job,{},
                                         nullptr,false,nullptr,nullptr,nullptr,true);
                 const auto beforeDelete=openCurrent();
+                {
+                    CheckpointFaultImage overwriteDisk(Disk::Read(*output,0,size_t(output->Size())));
+                    Memory data(4411),resource(5801);
+                    std::fill(data.bytes.begin(),data.bytes.end(),0x25);
+                    std::fill(resource.bytes.begin(),resource.bytes.end(),0x31);
+                    const Apfs::FinderBytes finder{0x15};
+                    const Attributes attributes{{u"user.victim",{2,3,5}}};
+                    Apfs::CreateCatalogFile(overwriteDisk,beforeDelete,2,u"Retained victim",data,job,
+                                            Apfs::FileDates{createdTime,editedTime},&finder,false,&attributes,&resource,nullptr,true);
+                    const auto checkpoint=Apfs::Probe(overwriteDisk);
+                    Check(checkpoint.has_value(),"Missing APFS hard-link overwrite checkpoint");
+                    Storage::Job cancelLink;
+                    overwriteDisk.onFlush=[&]{cancelLink.cancel();};
+                    bool cancelled=false;
+                    try{
+                        Apfs::CreateCatalogHardLink(overwriteDisk,*checkpoint,2,newInode,u"Retained victim",
+                                                    cancelLink,newInode+1,true);
+                    }catch(const Storage::Cancelled&){cancelled=true;}
+                    const auto current=Apfs::Probe(overwriteDisk);
+                    Check(cancelled&&current&&current->transaction==checkpoint->transaction,
+                          "Cancelled APFS hard-link overwrite published a checkpoint");
+                    auto memory=std::make_unique<Memory>(overwriteDisk.durable.size());
+                    memory->bytes=std::move(overwriteDisk.durable);
+                    std::unique_ptr<Source> source=std::move(memory);
+                    const auto reopened=Apfs::Open(source,"apfs-cancelled-hard-link-overwrite");
+                    MacBrowser::Entry victim;
+                    Check(reopened&&reopened->FindChild(2,u"Retained victim",victim)&&!victim.hardLink&&
+                          victim.forks[0].size==data.Size()&&victim.forks[1].size==resource.Size()&&
+                          victim.finder==finder&&victim.created==createdTime&&victim.modified==editedTime&&
+                          reopened->GetAttributes(victim.id)==attributes,
+                          "Cancelled APFS hard-link overwrite changed the victim metadata");
+                    Bytes keptData(size_t(data.Size())),keptResource(size_t(resource.Size()));
+                    reopened->Read(victim.id,0,0,keptData.data(),keptData.size());
+                    reopened->Read(victim.id,1,0,keptResource.data(),keptResource.size());
+                    Check(keptData==data.bytes&&keptResource==resource.bytes,
+                          "Cancelled APFS hard-link overwrite changed victim forks");
+                }
                 CheckpointFaultImage deletion(Disk::Read(*output,0,size_t(output->Size())));
                 Storage::Job deletionJob;
                 deletion.onFlush=[&]{deletionJob.cancel();};
@@ -2885,6 +2922,24 @@ int RunApfsContainerTest(const char* directory)
                     published->Read(alias->id,fork,0,actual.data(),actual.size());
                     Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"Copied APFS hard-link fork differs");
                 }
+            }
+            MacBrowser::Entry victim=toCopy;
+            victim.name=u"Replace with hard link";
+            const auto victimId=published->Put(copiedAliases.id,victim,[](unsigned,uint64_t,void* bytes,size_t size){
+                memset(bytes,0x21,size);
+            },false);
+            Storage::Job linkOverwrite;
+            const auto aliasId=published->MakeHardLinkForTransfer(primary.id,copiedAliases.id,victim.name,true,linkOverwrite);
+            const auto alias=published->Stat(aliasId);
+            Check(aliasId!=victimId&&alias.linkCount==4&&alias.resolvedId==published->Stat(primary.id).resolvedId&&
+                  published->GetAttributes(aliasId)==toCopy.attributes,
+                  "APFS hard-link overwrite did not redirect the destination to the source inode");
+            Reject([&]{published->Stat(victimId);},"APFS retained an overwritten file's selection");
+            for(unsigned fork=0;fork<2;++fork){
+                Check(alias.forks[fork].size==toCopy.forks[fork].size,"APFS hard-link overwrite lost a source fork");
+                Bytes actual(size_t(alias.forks[fork].size));
+                published->Read(aliasId,fork,0,actual.data(),actual.size());
+                Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS hard-link overwrite did not share the source fork");
             }
             auto replacement=copied;
             replacement.forks[0].size=9001;

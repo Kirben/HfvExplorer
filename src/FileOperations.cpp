@@ -766,7 +766,7 @@ Storage::Result RunHardLink(const CreateHardLink& request,Storage::Job& job,Comp
   progress.phase="Creating hard link";
   progress.totalFiles=1;
   job.progress(progress);
-  target.first->MakeHardLink(source.second,target.second,request.name);
+  target.first->MakeHardLinkForTransfer(source.second,target.second,request.name,false,job);
   progress.files=1;
   job.progress(progress);
  });

@@ -234,7 +234,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     const auto &entry = plan.entry; Entry existing; bool found = false;
     found=dst.FindTransferChild(parent,entry,existing);
     bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
-    if(track&&prior!=copies.end()&&entry.directory&&!found){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name);LinkedProgress(plan,progress);job.progress(progress);return true;}
+    if(track&&prior!=copies.end()&&entry.directory&&!found){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLinkForTransfer(original.id,parent,entry.name,false,job);LinkedProgress(plan,progress);job.progress(progress);return true;}
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
@@ -257,7 +257,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
-    if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLink(original.id,parent,entry.name,found);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
+    if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLinkForTransfer(original.id,parent,entry.name,found,job);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     if(plan.linkTarget){

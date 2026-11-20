@@ -1945,8 +1945,8 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
 void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardLink& request,
                              const std::string& name,uint64_t nextId,uint64_t time)
 {
-    Check(!request.replaced&&request.parent>=2&&request.parent!=3&&request.inode>=16,
-          "External APFS hard-link creation requires a new name");
+    Check(request.parent>=2&&request.parent!=3&&request.inode>=16,
+          "Invalid external APFS hard-link request");
     const auto inodeKey=(uint64_t(3)<<60)|request.inode;
     const auto linkKey=(uint64_t(5)<<60)|request.inode;
     std::optional<size_t> inodeRecord;
@@ -2234,6 +2234,21 @@ CatalogWritePlan PrepareCatalogMutation(
     std::vector<OwnedRecord> catalog;
     if(externalHardLink){
         catalog=std::move(existing.records);
+        if(hardLink->replaced){
+            Check(hardLink->replaced!=hardLink->inode,"APFS hard-link source and replacement are the same inode");
+            const auto destinationKey=(uint64_t(9)<<60)|hardLink->parent;
+            const auto destinationName=NormalizedName(name,true);
+            const auto matches=[&](const OwnedRecord& record){
+                if(record.key.size()<14||Le64(record.key.data())!=destinationKey||
+                   record.value.size()!=18||Le64(record.value.data())!=hardLink->replaced||
+                   Le16(record.value.data()+16)!=uint16_t(CatalogKind::RegularFile)||record.key.back())return false;
+                const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
+                return NormalizedName(candidate,true)==destinationName;
+            };
+            Check(std::any_of(catalog.begin(),catalog.end(),matches),
+                  "APFS hard-link overwrite requires an existing unlinked regular file at the chosen name");
+            removedKind=DeleteExternalEntry(catalog,{hardLink->parent,hardLink->replaced},time,extentTree,externalRetired);
+        }
         CreateExternalHardLink(catalog,*hardLink,name,nextId,time);
     }else if(externalDelete){
         catalog=std::move(existing.records);
@@ -2383,7 +2398,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        if(externalReplace||externalDelete||externalLinkReplace)return externalRetired.count(run.block)!=0;
+        if(externalReplace||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;

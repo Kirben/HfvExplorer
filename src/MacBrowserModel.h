@@ -89,6 +89,10 @@ public:
         throw HfsPlus::Error("The destination cannot copy symbolic links");
     }
     virtual uint32_t MakeHardLink(uint32_t,uint32_t,const std::u16string&,bool=false){throw HfsPlus::Error("This format cannot create hard links");}
+    virtual uint32_t MakeHardLinkForTransfer(uint32_t source,uint32_t parent,const std::u16string& name,
+                                            bool replace,Storage::Job&){
+        return MakeHardLink(source,parent,name,replace);
+    }
     virtual void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){if(method!=HfsPlus::Volume::CompressionMode::Zlib&&method!=HfsPlus::Volume::CompressionMode::Uncompressed)throw HfsPlus::Error("This format cannot create this compression method");SetCompression(id,method!=HfsPlus::Volume::CompressionMode::Uncompressed,std::move(progress));}
     virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}
     virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
