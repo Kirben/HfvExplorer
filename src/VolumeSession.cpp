@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "VolumeSession.h"
-#include "NdifImage.h"
+#include "DiskImageOpen.h"
 #include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
@@ -763,8 +763,7 @@ int Child(const char* inputText, const char* outputText) {
                 floppy_module_global_init();
                 const auto key=VolumeCoord::ImageKey(path);
                 const auto open=[&](bool write){
-                    auto disk=HfsPlus::OpenImage(path.c_str(),write);
-                    Check(Ndif::Unwrap(disk),"The selected image is no longer an NDIF image");
+                    auto disk=DiskImage::Reopen(path,DiskImage::Container::Ndif,{write});
                     return OpenEditableNdif(std::move(disk),key);
                 };
                 try{volume=open(writable);}
@@ -782,13 +781,13 @@ int Child(const char* inputText, const char* outputText) {
                 floppy_module_global_init();
                 volume = OpenClassicImage(path, writable);
             } else {
-                auto guard = HfsPlus::OpenImage(path.c_str(), writable, journal.empty() ? nullptr : journal.c_str());
+                auto guard = DiskImage::Reopen(path,DiskImage::Container::Raw,{writable,journal});
                 auto key = VolumeCoord::ImageKey(path);
                 try { volume = FromHfsPlus(std::move(guard), writable, key, journal); }
                 catch (const HfsPlus::ExternalJournalRequired&) { throw; }
                 catch (const HfsPlus::Error&) {
                     if (!writable) throw;
-                    volume = FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false, journal.empty() ? nullptr : journal.c_str()), false, key, journal);
+                    volume = FromHfsPlus(DiskImage::Reopen(path,DiskImage::Container::Raw,{false,journal}),false,key,journal);
                 }
             }
             Data info;

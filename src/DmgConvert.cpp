@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "DmgImage.h"
-#include "SparseDisk.h"
-#include "DmgEncryption.h"
+#include "DiskImageOpen.h"
 #include "NdifImage.h"
 #include "HfsPlusDisk.h"
 #include "CommandStorage.h"
@@ -313,14 +312,10 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
     const auto changed=access.back().key;
     access.push_back({inputKey,VolumeCoord::Mode::Read});
     return CommandStorage::Guard(std::move(access),[&](Storage::Job& current){
-        auto input=SparseDisk::OpenBundle(source,password);
-        const bool bundle=bool(input);
-        if(!bundle)input=HfsPlus::OpenImage(source.c_str(),false);
-        const bool encrypted=!bundle&&Unlock(input,password,key);
-        const bool sparse=bundle||SparseDisk::Unwrap(input);
-        const bool dmg=!sparse&&Unwrap(input);
-        const bool ndif=!sparse&&!dmg&&!encrypted&&Ndif::Unwrap(input,&current);
-        Check(format!=Output::RawImage||sparse||dmg||encrypted||ndif,
+        auto opened=DiskImage::Open(source,{false,{},password,key,&current});
+        Check(bool(opened.source),"The input is not a supported disk image");
+        auto& input=opened.source;
+        Check(format!=Output::RawImage||opened.container!=DiskImage::Container::Raw,
               "The input does not contain a supported disk image container");
         auto output=HfsPlus::CreateStagedOutput(destination,512);
         output->Resize(0);
@@ -345,7 +340,7 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
         }else if(outputNdif)WriteNdif(stream,*output,current,progress,format==Output::CompressedNdif);
         else WriteDmg(stream,*output,current,progress);
         stream.Verify();
-        if(ndif)Ndif::VerifySegmentChecksums(*input,current);
+        if(opened.container==DiskImage::Container::Ndif)Ndif::VerifySegmentChecksums(*input,current);
         if(current.cancelled())throw Storage::Cancelled();
         output->PublishTo(destination);
         output->Keep();

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "DmgImage.h"
+#include "DiskImageOpen.h"
 #include "DmgEncryption.h"
 #include "DmgCertificate.h"
 #include <wincrypt.h>
@@ -300,6 +301,13 @@ int RunDmgImageTest(const char* directory)
         Storage::Job create,extract;
         Check(!Dmg::Convert(rawPath,createdPath,Dmg::Output::CompressedDmg,create).code,
               "Create compressed DMG");
+        {
+            const auto source=DiskImage::Open(createdPath,{true});
+            Check(source.container==DiskImage::Container::Udif&&source.source&&!source.source->Writable(),
+                  "Shared opener did not identify a read-only UDIF");
+            Reject([&]{DiskImage::Reopen(createdPath,DiskImage::Container::Raw,{true});},
+                   "Writable reopen accepted a replacement container");
+        }
         const auto reopened=MacBrowser::OpenBrowserImage(createdPath);
         MacBrowser::Entry made;
         Check(reopened&&reopened->FindChild(2,u"Fixture",made)&&made.forks[1].size==1,
@@ -756,6 +764,17 @@ int RunEncryptedDmgTest(const char* directory)
   for(const auto aesWrap:{false,true}){
    const auto path=Save(root+(aesWrap?"\\aes.dmg":"\\3des.dmg"),
                         Envelope(plain,aesWrap?256:128,aesWrap,*password));
+   auto unlockError=[&](const auto& open){
+    try{open();}catch(const Dmg::PasswordRequired& error){return error.retry;}
+    throw Error("Wrong image password did not request a retry");
+   };
+   Check(unlockError([&]{MacBrowser::OpenBrowserImage(path,{},&wrong);}),
+         "Browser did not request another password");
+   Storage::Job conversion;
+   const auto output=VolumeCoord::Wide(root+"\\wrong-password.img");
+   Check(unlockError([&]{Dmg::Convert(path,output,Dmg::Output::RawImage,conversion,&wrong);})&&
+         GetFileAttributesW(output.c_str())==INVALID_FILE_ATTRIBUTES,
+         "Converter did not propagate the same unlock error");
    auto source=HfsPlus::OpenImage(path.c_str(),false);
    NeedsPassword(source,nullptr,false);
    NeedsPassword(source,&wrong,true);

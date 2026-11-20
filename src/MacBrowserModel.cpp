@@ -8,12 +8,10 @@
 #include "OpticalVolume.h"
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
-#include "DmgImage.h"
-#include "SparseDisk.h"
+#include "DiskImageOpen.h"
 #include "NdifImage.h"
 #include "ApfsVolume.h"
 #include "DiskPartitions.h"
-#include "DmgEncryption.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
 #include <set>
@@ -442,28 +440,25 @@ static std::shared_ptr<Volume> OpenTrackImages(
 }
 
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr,const Dmg::PrivateKey* privateKey=nullptr) {
-    const DWORD attributes=GetFileAttributesW(path.c_str());
-    const bool directory=attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY);
+    using DiskImage::Container;
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
-    if(directory){
-        if(!externalJournal.empty())return {};
-        auto bundle=SparseDisk::OpenBundle(path,password);
-        if(!bundle)return {};
-        return OpenReadOnlyImage(std::move(bundle),key,{},"The sparse bundle contains no supported filesystem");
-    }
-    auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
-    const bool encrypted=Dmg::Unlock(source,password,privateKey);
-    if(SparseDisk::Unwrap(source))
+    auto opened=DiskImage::Open(path,{false,externalJournal,password,privateKey});
+    auto& source=opened.source;
+    if(!source)return {};
+    if(opened.container==Container::SparseBundle)
+        return OpenReadOnlyImage(std::move(source),key,{},"The sparse bundle contains no supported filesystem");
+    if(opened.container==Container::SparseImage)
         return OpenReadOnlyImage(std::move(source),key,externalJournal,"The sparse image contains no supported filesystem");
-    if(Dmg::Unwrap(source)||encrypted)return OpenReadOnlyImage(std::move(source),key,externalJournal);
-    if(externalJournal.empty()&&Ndif::Unwrap(source)){
+    if(opened.container==Container::Udif||opened.container==Container::EncryptedDisk)
+        return OpenReadOnlyImage(std::move(source),key,externalJournal);
+    if(opened.container==Container::Ndif){
         const auto selected=FindNdifVolume(*source);
         if(!selected)return OpenReadOnlyImage(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
         source.reset();
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},selected->format));
-        try{source=HfsPlus::OpenImage(path.c_str(),true);}
-        catch(const HfsPlus::Error&){source=HfsPlus::OpenImage(path.c_str(),false);}
-        Check(VolumeCoord::ImageKey(path)==key&&Ndif::Unwrap(source),
+        try{source=DiskImage::Reopen(path,Container::Ndif,{true});}
+        catch(const HfsPlus::Error&){source=DiskImage::Reopen(path,Container::Ndif,{});}
+        Check(VolumeCoord::ImageKey(path)==key,
               "The selected NDIF image changed while it was being opened");
         const auto reopened=FindNdifVolume(*source);
         Check(reopened&&reopened->format==selected->format,"The NDIF filesystem changed while it was being opened");
@@ -475,8 +470,8 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
         source.reset();
         if(persistent)
             return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,externalJournal));
-        try { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), true,externalJournal.empty()?nullptr:externalJournal.c_str()), true,key,externalJournal); }
-        catch (...) { return FromHfsPlus(HfsPlus::OpenImage(path.c_str(), false,externalJournal.empty()?nullptr:externalJournal.c_str()), false,key,externalJournal); }
+        try { return FromHfsPlus(DiskImage::Reopen(path,Container::Raw,{true,externalJournal}),true,key,externalJournal); }
+        catch (...) { return FromHfsPlus(DiskImage::Reopen(path,Container::Raw,{false,externalJournal}),false,key,externalJournal); }
     }
     if(externalJournal.empty()){
         if(auto apfs=Apfs::Open(source,key))return apfs;
