@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "CopyWorkerProtocol.h"
+#include "FileOperationWorkerPolicy.h"
 #include "StorageLocation.h"
 
 namespace CopyWorkerProtocol {
@@ -295,15 +296,6 @@ WireEndpoint ParseEndpoint(Data &d,bool allowMounted) {
     }
     return endpoint;
 }
-bool SupportsOperation(Kind kind) {
-    switch (kind) {
-    case Kind::Copy: case Kind::LegacyCopy: case Kind::ExportFork: case Kind::ReplaceResource:
-    case Kind::Rename: case Kind::Delete: case Kind::CreateFolder: case Kind::CreateHardLink:
-    case Kind::SetProperties: case Kind::SetBasicMetadata: case Kind::SetAttributes:
-    case Kind::SetCompression: return true;
-    default: return false;
-    }
-}
 
 void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.id); d.put(e.parent); d.u16(e.name); d.put(e.version);
@@ -424,9 +416,10 @@ Data EncodeRequest(const Request &request, HANDLE parent, unsigned testFault,
 WireRequest DecodeRequest(Data &d) {
     WireRequest wire;
     auto kind = d.get();
-    Check(kind <= uint64_t(Kind::SetCompression) && SupportsOperation(Kind(kind)),
-          "Invalid worker operation");
+    Check(kind <= uint64_t(Kind::SetCompression),"Invalid worker operation");
     wire.kind = Kind(kind);
+    const auto policy=WorkerPolicy(wire.kind);
+    Check(policy.has_value(),"Invalid worker operation");
     if (wire.kind == Kind::LegacyCopy) {
         WireConversion legacy;
         legacy.directory=d.flag();
@@ -448,7 +441,7 @@ WireRequest DecodeRequest(Data &d) {
     }
     switch(wire.kind) {
     case Kind::Rename:
-        wire.name=d.u16(); wire.checkNameLock=d.flag(); break;
+        wire.rename=WireRename{d.u16(),d.flag()}; break;
     case Kind::CreateFolder: case Kind::CreateHardLink:
         wire.name=d.u16(); break;
     case Kind::SetProperties: {
@@ -474,17 +467,13 @@ WireRequest DecodeRequest(Data &d) {
     }
     default: break;
     }
-    if(wire.kind==Kind::Rename||wire.kind==Kind::CreateFolder||wire.kind==Kind::CreateHardLink)
-        Check(!wire.name.empty(),"Missing worker operation name");
+    if(policy->needsName)
+        Check(wire.rename?!wire.rename->name.empty():!wire.name.empty(),"Missing worker operation name");
     wire.parent = HANDLE(uintptr_t(d.get()));
     Check(wire.parent != nullptr, "Missing copy-worker parent");
     wire.fault = CatalogNumber(d);
     auto count = d.get();
-    if (wire.kind == Kind::Copy) Check(count > 0, "Copy requires a source");
-    else if (wire.kind == Kind::Delete) Check(count > 0, "Delete requires a selection");
-    else if (wire.kind == Kind::CreateFolder) Check(!count, "Folder creation has no source");
-    else Check(count == 1, wire.kind == Kind::ExportFork || wire.kind == Kind::ReplaceResource ?
-               "Fork jobs require exactly one source" : "Worker job requires exactly one source");
+    Check(policy->AcceptsSourceCount(count),policy->sourceError);
 
     // The smallest endpoint has eight 64-bit fields, and a target must follow.
     Check(count < (d.bytes.size() - d.at) / 64, "Truncated copy-worker endpoints");
@@ -495,33 +484,10 @@ WireRequest DecodeRequest(Data &d) {
     }
     wire.target = ParseEndpoint(d);
     d.end();
-    using Address = Location::Kind;
-    switch (wire.kind) {
-    case Kind::Copy:
-        Check(wire.target.kind != Address::None, "Missing copy destination");
-        break;
-    case Kind::LegacyCopy:
-        Check(wire.target.kind!=Address::None,"Missing conversion destination");
-        Check(wire.target.kind!=Address::Mounted||wire.legacy->target==FileOperations::ConversionTarget::Folder,
+    Check(policy->AcceptsDestination(wire.target.kind),policy->destinationError);
+    if(wire.legacy&&wire.target.kind==Location::Kind::Mounted)
+        Check(wire.legacy->target==FileOperations::ConversionTarget::Folder,
               "A mounted conversion destination must be a folder");
-        break;
-    case Kind::ExportFork:
-        Check(wire.target.kind == Address::Windows, "Fork export requires a Windows output file");
-        break;
-    case Kind::ReplaceResource:
-        Check(wire.target.kind == Address::Mounted || wire.target.kind == Address::Windows,
-              "Resource import requires a mounted or Windows destination file");
-        break;
-    case Kind::CreateFolder: case Kind::CreateHardLink:
-        Check(wire.target.kind!=Address::None,"Missing worker destination"); break;
-    case Kind::Rename:
-        Check(wire.target.kind==Address::None || wire.target.kind==Address::Mounted,
-              "Invalid rename parent"); break;
-    case Kind::Delete: case Kind::SetProperties: case Kind::SetBasicMetadata:
-    case Kind::SetAttributes: case Kind::SetCompression:
-        Check(wire.target.kind==Address::None,"Unexpected worker destination"); break;
-    default: throw HfsPlus::Error("Invalid worker operation");
-    }
     return wire;
 }
 } // namespace CopyWorkerProtocol

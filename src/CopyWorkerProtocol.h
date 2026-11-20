@@ -103,6 +103,7 @@ struct WireConversion {
     FileOperations::ConversionTarget target=FileOperations::ConversionTarget::NamedPath;
     LegacyCopyOptions options;
 };
+struct WireRename { std::u16string name; bool checkNameLock; };
 struct WireRequest {
     Kind kind = Kind::Copy;
     HANDLE parent = nullptr;
@@ -110,7 +111,7 @@ struct WireRequest {
     std::optional<WireConversion> legacy;
     ForkSelector fork = ForkSelector::Data;
     std::u16string name;
-    bool checkNameLock = true;
+    std::optional<WireRename> rename;
     std::optional<EditClassicProperties> classic;
     std::optional<EditBasicMetadata> basic;
     std::optional<ChangeCompression> compression;
@@ -118,7 +119,6 @@ struct WireRequest {
     WireEndpoint target;
 };
 
-bool SupportsOperation(Kind kind);
 DWORD FrameLimit(DWORD message);
 Message ValidateFrame(const DWORD (&header)[3]);
 void EncodeEntry(Data &data, const Entry &entry);

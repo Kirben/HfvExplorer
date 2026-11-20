@@ -250,6 +250,28 @@ int RunTypedLocationsTest(const char *directory) {
             Reject([&]{DecodeRequest(extraConversion);},"conversion accepted a second source");
             auto targetlessConversion=EncodeRequest(conversion,parent,0,sources,Endpoint{});
             Reject([&]{DecodeRequest(targetlessConversion);},"conversion accepted a missing destination");
+            const Request rename=RenameEntry{windows,u"New name",{},false};
+            auto renamePacket=EncodeRequest(rename,parent,0,sources,{});
+            const auto renameRequest=DecodeRequest(renamePacket);
+            Check(renameRequest.rename&&renameRequest.rename->name==u"New name"&&
+                  !renameRequest.rename->checkNameLock&&renameRequest.sources.size()==1,
+                  "Rename lost its typed options");
+            auto renameWithWindowsParent=EncodeRequest(rename,parent,0,sources,target);
+            Reject([&]{DecodeRequest(renameWithWindowsParent);},"Rename accepted a Windows parent endpoint");
+            auto renameWithoutSource=EncodeRequest(rename,parent,0,{},{});
+            Reject([&]{DecodeRequest(renameWithoutSource);},"Rename accepted a missing source");
+
+            const Request remove=DeleteEntries{{windows,output}};
+            auto deletePacket=EncodeRequest(remove,parent,0,{sources.front(),target},{});
+            const auto deletion=DecodeRequest(deletePacket);
+            Check(deletion.kind==Kind::Delete&&deletion.sources.size()==2&&
+                  deletion.sources.back().location.WindowsPath()==output.WindowsPath(),
+                  "Delete changed the selection order");
+            auto deleteWithTarget=EncodeRequest(remove,parent,0,{sources.front(),target},target);
+            Reject([&]{DecodeRequest(deleteWithTarget);},"Delete accepted an unexpected destination");
+            auto deleteWithoutSelection=EncodeRequest(remove,parent,0,{},{});
+            Reject([&]{DecodeRequest(deleteWithoutSelection);},"Delete accepted an empty selection");
+
             DWORD frame[] = {DWORD(Protocol::protocol), DWORD(Protocol::RequestPacket), DWORD(encoded.bytes.size())};
             Check(Protocol::ValidateFrame(frame) == Protocol::RequestPacket, "Valid request frame rejected");
             ++frame[0];

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
+#include "FileOperationWorkerPolicy.h"
 #include "StorageLocation.h"
 #include "BrowserPresentation.h"
 #include "CopyProcess.h"
@@ -806,7 +807,7 @@ std::vector<VolumeCoord::Access> BindResources(const ExecutionPlan& plan)
 
 ExecutionPlan PlanOperation(const Request& request, bool inWorker=false){
  ExecutionPlan plan;
- const bool temporary=CanUseTemporaryWorker(inWorker);
+ const bool temporary=WorkerPolicy(request.OperationKind()).has_value()&&CanUseTemporaryWorker(inWorker);
  if(const auto* copy=request.Get<OrdinaryCopy>())plan.transfer=DescribeTransfer(*copy,request.background,temporary);
  else if(const auto* conversion=request.Conversion())plan.transfer=DescribeTransfer(*conversion,request.background,temporary);
  else if(const auto* output=request.Get<ExportFileFork>())plan.transfer=DescribeTransfer(*output,request.background,temporary);

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "CopyProcess.h"
 #include "WorkerTransport.h"
+#include "FileOperationWorkerPolicy.h"
 #include "TypeMappingSnapshot.h"
 #include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
@@ -186,14 +187,6 @@ Location ResolveEndpoint(WireEndpoint endpoint, WorkerMounts &mounts) {
     l.expectedName = e.name;
     return std::move(l);
 }
-bool ReportsAffectedStorage(Kind kind) {
-    switch (kind) {
-    case Kind::Rename: case Kind::Delete: case Kind::CreateFolder: case Kind::CreateHardLink:
-    case Kind::SetProperties: case Kind::SetBasicMetadata: case Kind::SetAttributes:
-    case Kind::SetCompression: return true;
-    default: return false;
-    }
-}
 
 void AddAffected(Completion& completion, const std::string& key) {
     if (std::none_of(completion.affected.begin(), completion.affected.end(),
@@ -228,8 +221,8 @@ Request ResolveRequest(WireRequest wire, WorkerMounts &mounts, AttributeSets& at
         Check(wire.basic->original.id == wire.sources.front().selectedId,
               "The Properties selection changed");
     auto source = ResolveEndpoint(std::move(wire.sources.front()), mounts);
-    if (wire.kind == Kind::Rename)
-        return RenameEntry{std::move(source), std::move(wire.name), std::move(target), wire.checkNameLock};
+    if (wire.rename)
+        return RenameEntry{std::move(source),std::move(wire.rename->name),std::move(target),wire.rename->checkNameLock};
     if (wire.kind == Kind::CreateHardLink)
         return FileOperations::CreateHardLink{std::move(source), std::move(target), std::move(wire.name)};
     if (wire.classic) {
@@ -303,6 +296,8 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
         sources.push_back(Capture(std::visit([](const auto& edit) -> const Location& { return edit.item; },
                                             *metadata)));
     }
+    const auto workerPolicy=WorkerPolicy(request.OperationKind());
+    Check(workerPolicy.has_value(),"Operation cannot run in a temporary worker");
     WorkerStorageHandoff handoff;
     Storage::Result result;
     bool requestSent = false;
@@ -421,7 +416,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
               "Copy worker failed during cleanup; inspect the destination");
     } catch (...) {
         if(requestSent)Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
-        if (requestSent && ReportsAffectedStorage(request.OperationKind()))
+        if (requestSent && workerPolicy->reportsAffectedStorage)
             for (const auto& key : writes) AddAffected(completion, key);
         handoff.RestoreAfterFailure(std::current_exception(), requestSent);
     }
@@ -446,8 +441,9 @@ int Child(const char *inputText, const char *outputText) {
             auto message = Receive(input, d);
             if (message == RequestPacket) {
                 wire = DecodeRequest(d);
-                Check(attributes[0].has_value() == (wire->kind == Kind::SetAttributes || wire->kind == Kind::SetCompression) &&
-                      attributes[1].has_value() == (wire->kind == Kind::SetAttributes),
+                const auto attributeCount=WorkerPolicy(wire->kind)->streamedAttributeSets;
+                Check(attributes[0].has_value()==(attributeCount>=1)&&
+                      attributes[1].has_value()==(attributeCount==2),
                       "Wrong attribute sets for worker operation");
                 break;
             } else if (message == AttributeSet) {
@@ -640,7 +636,7 @@ int Child(const char *inputText, const char *outputText) {
                       "Worker storage recovery was incomplete; inspect the volume before further writes"};
         stop = true;
         control.join();
-        if (ReportsAffectedStorage(wire->kind))
+        if (WorkerPolicy(wire->kind)->reportsAffectedStorage)
             for (const auto& change : completion.affected) {
                 Data affected;
                 affected.put(change.resourceKey);
