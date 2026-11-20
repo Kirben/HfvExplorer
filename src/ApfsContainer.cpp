@@ -417,10 +417,10 @@ uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,ui
 }
 
 uint64_t ReplaceFileData(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                         Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource)
+                         Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
-    const CatalogMutation request=CatalogReplaceData{parent,inode,data,dates,finder,locked,attributes,resource};
+    const CatalogMutation request=CatalogReplaceData{parent,inode,data,dates,finder,locked,attributes,resource,compression};
     return Commit(source,expected,job,&request);
 }
 }

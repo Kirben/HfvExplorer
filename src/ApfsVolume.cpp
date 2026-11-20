@@ -446,6 +446,7 @@ public:
         capabilities.unicodeNames=true;
         capabilities.attributes=true;
         capabilities.basicMetadata=writable;
+        capabilities.compression=writable;
         return capabilities;
     }
     MacBrowser::WorkerExecution Execution()const override{
@@ -910,6 +911,51 @@ public:
                 return SetResourceFork(*source,container,parentOid,oid,resource,desired.modified,job);
             });
             return id;
+        });
+    }
+    void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,
+                              std::function<void(uint64_t,uint64_t)> progress)override{
+        WriteMount([&]{
+            const auto& item=At(id);
+            const auto current=item.entry;
+            Check(!current.directory&&!current.protectedFile&&current.readError.empty(),
+                  "Select an unlocked APFS regular file to change compression");
+            const bool compress=method!=HfsPlus::Volume::CompressionMode::Uncompressed;
+            if(!compress&&!current.compressed)return;
+            const auto size=current.forks[0].size;
+            uint64_t done=0;
+            const auto report=[&]{
+                if(progress)progress(done,size);
+            };
+            const HfsPlus::EncodedCompression::Reader logical=[&](uint64_t offset,void* bytes,size_t count){
+                Read(id,0,offset,bytes,count);
+                done=(std::max)(done,offset+count);
+                report();
+            };
+            std::optional<HfsPlus::EncodedCompression> encoded;
+            if(compress)encoded.emplace(size,logical,method);
+            const bool compressionResource=encoded&&encoded->UsesResource();
+            Check(!compressionResource||!current.forks[1].size,
+                  "This APFS compression method would replace the existing resource fork");
+            const bool oldCompressionResource=current.compressed&&!current.forks[1].size&&
+                                              item.attributes.count(ResourceFork)!=0;
+            const MacBrowser::Reader read=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
+                if(fork){
+                    encoded->ReadResource(offset,bytes,count);
+                    report();
+                }else logical(offset,bytes,count);
+            };
+            ForkInput data(compress?0:size,0,read);
+            ForkInput resource(compressionResource?encoded->ResourceSize():0,1,read);
+            const auto parent=current.parent;
+            const auto parentOid=At(parent).oid,oid=item.oid;
+            Storage::Job job;
+            report();
+            CommitMutation(parent,0,job,[&](auto& job){
+                return ReplaceFileData(*source,container,parentOid,oid,data,job,CopyDates(current),
+                                       nullptr,false,nullptr,compressionResource||oldCompressionResource?&resource:nullptr,
+                                       encoded?&encoded->Attribute():nullptr);
+            });
         });
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{

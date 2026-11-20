@@ -1324,7 +1324,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-streamed-attributes.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-compressed-write.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1425,6 +1425,32 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         Check(mounted->GetAttributes(id)==edited&&mounted->Stat(id).finder==file.finder&&
               mounted->Stat(id).forks[0].size==5,"APFS attribute editing lost other metadata or file data");
         mounted->SetAttributes(id,file.attributes);
+        const auto makePayload=[](unsigned fork,uint64_t,void* bytes,size_t size){
+            Check(fork==0,"Unexpected resource read from an uncompressed fixture");
+            memset(bytes,'A',size);
+        };
+        MacBrowser::Entry large;
+        large.name=u"Compressed fixture";
+        large.forks[0].size=150003;
+        large.finder=file.finder;
+        large.attributes=file.attributes;
+        const auto compressedId=mounted->Put(2,large,makePayload,false);
+        using Mode=HfsPlus::Volume::CompressionMode;
+        mounted->SetCompressionMethod(compressedId,Mode::Zlib,{});
+        Check(mounted->Stat(compressedId).compressed&&mounted->Stat(compressedId).forks[0].size==150003&&
+              !mounted->Stat(compressedId).forks[1].size&&mounted->GetAttributes(compressedId)==large.attributes,
+              "APFS compression changed logical sizes or ordinary attributes");
+        std::array<char,25> tail{};
+        mounted->Read(compressedId,0,150003-tail.size(),tail.data(),tail.size());
+        Check(std::string(tail.begin(),tail.end())==std::string(tail.size(),'A'),"APFS compressed resource readback differed");
+        mounted->SetCompressionMethod(compressedId,Mode::Uncompressed,{});
+        Check(!mounted->Stat(compressedId).compressed&&!mounted->Stat(compressedId).forks[1].size,
+              "APFS decompression left compression metadata behind");
+        mounted->SetCompressionMethod(compressedId,Mode::Zlib,{});
+        mounted->SetCompressionMethod(id,Mode::StoredInline,{});
+        Check(mounted->Stat(id).compressed&&mounted->Stat(id).forks[1].size==9003,
+              "Inline APFS compression lost a user resource fork");
+        mounted->SetCompressionMethod(id,Mode::Uncompressed,{});
         auto malformed=file.attributes;
         malformed[u"com.apple.system.Security"]=Bytes(67);
         Reject([&]{mounted->SetAttributes(id,malformed);},"APFS accepted a malformed ACL");
@@ -1453,6 +1479,13 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         std::array<char,5> data{};
         mounted->Read(foundFile.id,0,0,data.data(),data.size());
         Check(std::string(data.begin(),data.end())=="abcde","APFS Finder information changed the data fork");
+        MacBrowser::Entry compressed;
+        Check(mounted->FindChild(2,u"Compressed fixture",compressed)&&compressed.compressed,
+              "Compressed APFS file did not survive reopening");
+        std::array<char,17> compressedBytes{};
+        mounted->Read(compressed.id,0,65529,compressedBytes.data(),compressedBytes.size());
+        Check(std::string(compressedBytes.begin(),compressedBytes.end())==std::string(compressedBytes.size(),'A'),
+              "Reopened APFS compression did not read across units");
         std::array<char,6> fork{};
         mounted->Read(foundFile.id,1,8997,fork.data(),fork.size());
         Check(std::string(fork.begin(),fork.end())=="xxxxxx","APFS streamed resource fork did not survive reopening");

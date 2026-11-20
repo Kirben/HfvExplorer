@@ -684,6 +684,17 @@ int RunBrowserWindowsTest(const char* directory){
           mount->FindChild(seeded,children[1].name,kept)&&kept.forks[0].size==(overwrite?newBytes.size():oldBytes.size()),
           "APFS merge lost a committed child or used the wrong overwrite decision");
    }
+   const auto compressionItem=FileOperations::Location::Mounted(mount,copiedPayload.id);
+   const auto originalPayload=mount->Stat(copiedPayload.id);
+   auto compression=FileOperations::Submit(FileOperations::ChangeCompression{
+       compressionItem,originalPayload,mount->GetAttributes(copiedPayload.id),
+       HfsPlus::Volume::CompressionMode::Zlib});
+   const bool compressed=outcome(compression);
+   Check(compressed,compression.Job()->result().message.c_str());
+   Check(mount->Stat(copiedPayload.id).compressed,"APFS compression request did not set compression");
+   std::string compressedRead(newBytes.size(),'\0');
+   mount->Read(copiedPayload.id,0,0,compressedRead.data(),compressedRead.size());
+   Check(compressedRead==newBytes,"APFS browser compression job changed file contents");
    const auto finishProperties=[]{
     const auto deadline=GetTickCount64()+15000;
     while(BackgroundCopies::Active()&&GetTickCount64()<deadline){

@@ -518,6 +518,17 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
 }
 
 constexpr auto ResourceAttribute="com.apple.ResourceFork";
+constexpr auto CompressionAttribute="com.apple.decmpfs";
+constexpr uint64_t HasUncompressedSize=0x40000;
+constexpr uint32_t BsdCompressed=0x20;
+void SetCompressionFlags(Bytes& inode,uint64_t size,bool compressed)
+{
+    const auto flags=Le64(inode.data()+48)&~HasUncompressedSize;
+    Set(inode,48,flags|(compressed?HasUncompressedSize:0),8);
+    const auto bsd=Le32(inode.data()+68)&~BsdCompressed;
+    Set(inode,68,bsd|(compressed?BsdCompressed:0),4);
+    Set(inode,84,compressed?size:0,8);
+}
 constexpr uint64_t HasResourceFork=0x4000,NoResourceFork=0x8000;
 void SetResourceFlag(Bytes& inode,bool present)
 {
@@ -669,7 +680,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         size_t inodeRecord=0,attributes=0,streamRecords=0;
         uint64_t dataSize=0;
         std::optional<FinderBytes> finder;
-        std::optional<size_t> resourceRecord;
+        std::optional<size_t> resourceRecord,compressionRecord;
     };
     std::map<uint64_t,Link> links;
     struct AttributeStream {uint64_t inode,blocks;};
@@ -761,7 +772,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                               Le16(attr.value.data+2)==attr.value.size-4&&
                               attr.value.size-4<EmbeddedAttributeLimit,"Invalid APFS embedded attribute");
                         const std::string name(reinterpret_cast<const char*>(attr.key.data+10),attr.key.size-11);
-                        Check(name>previousAttribute&&name.find('\0')==name.npos&&(OrdinaryAttribute(name)||name==ResourceAttribute),
+                        Check(name>previousAttribute&&name.find('\0')==name.npos&&(OrdinaryAttribute(name)||name==ResourceAttribute||name==CompressionAttribute),
                               "Invalid APFS attribute name or order");
                         hasSecurity|=name=="com.apple.system.Security";
                         if(name==ResourceAttribute){
@@ -769,11 +780,16 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                             link->second.resourceRecord=i+1+streamRecords;
                         }
                         const auto storage=Le16(attr.value.data);
+                        if(name==CompressionAttribute){
+                            Check(kind==CatalogKind::RegularFile&&storage==2&&attr.value.size>=20&&
+                                  Le32(attr.value.data+4)==0x636d7066,"Invalid APFS compression header");
+                            link->second.compressionRecord=i+1+streamRecords;
+                        }
                         if(storage==1){
                             Check(attr.value.size==52,"Invalid APFS attribute stream descriptor");
                             const auto id=Le64(attr.value.data+4),size=Le64(attr.value.data+12);
                             const auto blocks=DivideUp(size,Block);
-                            Check(id>inode&&id<nextId&&size>=EmbeddedAttributeLimit&&blocks<=blockCount&&
+                            Check(id>inode&&id<nextId&&size&&blocks<=blockCount&&
                                   Le64(attr.value.data+20)==blocks*Block&&
                                   !Le64(attr.value.data+28)&&!Le64(attr.value.data+36)&&!Le64(attr.value.data+44)&&
                                   attributeStreams.emplace(id,AttributeStream{inode,blocks}).second,
@@ -800,6 +816,11 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     Set(expected.value,68,Le32(value+68)&UserImmutable,4);
+                    const auto compression=link->second.compressionRecord;
+                    if(compression){
+                        Check(!size,"Compressed APFS files cannot have a data stream");
+                        SetCompressionFlags(expected.value,Le64(records[*compression].value.data()+12),true);
+                    }
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
                           "APFS writes require native regular-file data streams");
@@ -895,12 +916,28 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto rewriteAttributes=[&](const HfsPlus::Attributes* ordinary,const ResourceWrite* resource,size_t fileRecords){
             auto attributes=EncodeAttributes(entryId,ordinary,resource,streams);
             for(size_t index=afterInode;index<afterInode+link.attributes;++index){
+                if(link.compressionRecord==index){
+                    if(!replace)attributes.push_back(std::move(records[index]));
+                    continue;
+                }
                 const bool isResource=link.resourceRecord==index;
                 if(isResource?!resource:!ordinary)attributes.push_back(std::move(records[index]));
                 else retireAttribute(index);
             }
             if(ordinary)SetSecurityFlag(inode,*ordinary);
             if(resource)SetResourceFlag(inode,resource->size!=0);
+            if(replace){
+                uint64_t logicalSize=0;
+                if(const auto compression=replace->compression){
+                    Check(compression->size()>=16&&compression->size()<EmbeddedAttributeLimit&&
+                          Le32(compression->data())==0x636d7066&&!dataSize,"Invalid APFS compressed file output");
+                    auto record=EmbeddedAttribute(entryId,CompressionAttribute,compression->size());
+                    std::copy(compression->begin(),compression->end(),record.value.begin()+4);
+                    attributes.push_back(std::move(record));
+                    logicalSize=Le64(compression->data()+8);
+                }
+                SetCompressionFlags(inode,logicalSize,replace->compression!=nullptr);
+            }
             SortAttributes(attributes);
             records.erase(records.begin()+afterInode,records.begin()+afterInode+link.attributes+fileRecords);
             records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
@@ -1116,7 +1153,9 @@ CatalogWritePlan PrepareCatalogMutation(
     auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
     std::optional<ResourceWrite> resource;
     if(resourceInput)resource=ResourceWrite{resourceInput,resourceInput->Size(),0};
-    const auto resourceBlocks=resource&&resource->size>=EmbeddedAttributeLimit?DivideUp(resource->size,Block):0;
+    const bool compressionResource=replace&&replace->compression&&resource&&resource->size;
+    const auto resourceBlocks=resource&&(resource->size>=EmbeddedAttributeLimit||compressionResource)?
+                              DivideUp(resource->size,Block):0;
     Check(fileBlocks<=current.blockCount&&resourceBlocks<=current.blockCount-fileBlocks,
           "APFS forks exceed the container size");
     auto dataBlocks=fileBlocks+resourceBlocks;
