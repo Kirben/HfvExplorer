@@ -1924,7 +1924,7 @@ void ObjectMapFixture(Memory& disk)
 }
 
 enum class Symlink { None, Valid, Malformed };
-Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false,Symlink symlink=Symlink::None)
+Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false,Symlink symlink=Symlink::None,bool badSiblingMap=false)
 {
     auto disk=Raw();
     constexpr size_t size=4096;
@@ -1954,7 +1954,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    const unsigned records=8+(attributes?3:0)+(links?5:0)+(compressed?1:0)-(symlink!=Symlink::None?2:0);
+    const unsigned records=8+(attributes?3:0)+(links?13:0)+(compressed?1:0)-(symlink!=Symlink::None?2:0);
     Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
@@ -1983,9 +1983,13 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         }
         record(id,3,{},std::move(value));
     };
-    auto drec=[&](uint64_t directory,uint64_t id,const char* name){
+    auto drec=[&](uint64_t directory,uint64_t id,const char* name,uint64_t sibling=0){
         const auto len=strlen(name)+1;
-        Bytes key(4+len),value(18);
+        Bytes key(4+len),value(sibling?34:18);
+        if(sibling){
+            Little(value.data()+18,1,2);Little(value.data()+20,8,2);
+            value[22]=1;Little(value.data()+24,8,2);Little(value.data()+26,sibling,8);
+        }
         Little(key.data(),len,4);memcpy(key.data()+4,name,len);
         Little(value.data(),id,8);
         record(directory,9,std::move(key),std::move(value));
@@ -1997,8 +2001,15 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         record(stream,8,std::move(key),std::move(value));
     };
     inode(2,true,0);drec(2,320,"Folder");
-    inode(320,true,0);drec(320,330,"Long \xc3\xa9.txt");
-    if(links){drec(320,330,"Alias A");drec(320,340,"Alias B");drec(320,340,"Other");}
+    inode(320,true,0);drec(320,330,"Long \xc3\xa9.txt",links?350:0);
+    if(links){drec(320,330,"Alias A",351);drec(320,340,"Alias B",352);drec(320,340,"Other",353);}
+    auto siblingLink=[&](uint64_t inode,uint64_t sibling,const char* name){
+        const auto length=strlen(name)+1;
+        Bytes key(8),value(10+length);
+        Little(key.data(),sibling,8);Little(value.data(),320,8);
+        Little(value.data()+8,length,2);memcpy(value.data()+10,name,length);
+        record(inode,5,std::move(key),std::move(value));
+    };
     inode(330,false,2*size+7,links);
     auto xattr=[&](const char* name,uint16_t flags,const Bytes& data){
         const auto length=strlen(name)+1;
@@ -2024,12 +2035,25 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         Little(data.data()+8,70001,8);
         xattr("com.apple.decmpfs",2,data);
     }
+    if(links){
+        siblingLink(330,350,"Long \xc3\xa9.txt");
+        siblingLink(330,351,"Alias A");
+    }
     if(symlink==Symlink::None){extent(0,40);extent(size,0);extent(2*size,42);}
     if(attributes){
         extent(0,43,331);
         memcpy(disk.bytes.data()+43*size,"resource",8);
     }
-    if(links){inode(340,false,1,true);extent(0,42,340);}
+    if(links){
+        inode(340,false,1,true);
+        siblingLink(340,352,"Alias B");siblingLink(340,353,"Other");
+        extent(0,42,340);
+        for(uint64_t sibling=350;sibling<=353;++sibling){
+            Bytes value(8);
+            Little(value.data(),sibling<352&&!(badSiblingMap&&sibling==351)?330:340,8);
+            record(sibling,12,{},std::move(value));
+        }
+    }
     Little(catalog+44,keyOffset,2);
     Seal(disk.bytes,26*size,size);
     memset(disk.bytes.data()+40*size,'A',size);
@@ -2638,6 +2662,17 @@ int RunApfsContainerTest(const char* directory)
         MacBrowser::Entry reopenedAlias;
         Check(reopened->FindChild(reopened->List().at(0).id,u"Alias A",reopenedAlias)&&
               reopenedAlias.identity==sourceAlias.identity,"APFS hard-link selection changed after reopen");
+        const auto badPath=VolumeCoord::Wide(root+"bad-sibling-map.img");
+        {
+            auto damaged=BrowseFixture(false,true,false,Symlink::None,true);
+            auto image=CreateFormatOutput(badPath.c_str(),damaged.Size());
+            image->Write(0,damaged.bytes.data(),damaged.bytes.size());image->Flush();image->Keep();
+        }
+        auto damaged=MacBrowser::OpenBrowserImage(badPath);
+        bool rejected=false;
+        try{damaged->List(damaged->List().at(0).id);}
+        catch(const std::exception& e){rejected=std::string(e.what())=="APFS sibling map does not match its inode";}
+        Check(rejected,"Incorrect APFS sibling map was accepted");
         Storage::Job linkCopy;
         Check(MacBrowser::Copy(*linked,linked->List().at(0).id,*targetMac,2,linkCopy),
               "APFS hard-link group copy did not complete");

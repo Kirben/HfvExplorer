@@ -182,6 +182,34 @@ public:
 };
 
 
+uint64_t ReadSiblingId(const Catalog& catalog,Record drec,uint64_t parent,uint64_t inode,
+                       const uint8_t* name,size_t nameLength)
+{
+    const auto* value=drec.value.data;
+    Check(drec.value.size==34&&Le16(value+18)==1&&Le16(value+20)==8&&
+          value[22]==1&&Le16(value+24)==8,"Invalid APFS hard-link directory record");
+    const auto sibling=Le64(value+26);
+    Check(sibling>2&&sibling<=IdMask&&sibling!=inode,"Invalid APFS sibling ID");
+
+    bool linked=false,mapped=false;
+    catalog.VisitRecords(inode,5,[&](Record record){
+        Check(record.key.size==16,"Invalid APFS sibling link key");
+        if(Le64(record.key.data+8)!=sibling)return;
+        const auto* link=record.value.data;
+        Check(!linked&&record.value.size==10+nameLength&&Le64(link)==parent&&
+              Le16(link+8)==nameLength&&!memcmp(link+10,name,nameLength),
+              "APFS sibling link does not match its directory entry");
+        linked=true;
+    });
+    catalog.VisitRecords(sibling,12,[&](Record record){
+        Check(!mapped&&record.key.size==8&&record.value.size==8&&Le64(record.value.data)==inode,
+              "APFS sibling map does not match its inode");
+        mapped=true;
+    });
+    Check(linked&&mapped,"Missing APFS sibling link or map");
+    return sibling;
+}
+
 constexpr auto ResourceFork=u"com.apple.ResourceFork";
 constexpr auto FinderInfo=u"com.apple.FinderInfo";
 constexpr auto CompressionAttribute=u"com.apple.decmpfs";
@@ -529,8 +557,10 @@ private:
                 // Alias names in the same directory can refer to the same
                 // inode, but each alias is a separate browser selection.
                 if(entry.hardLink){
+                    const auto sibling=ReadSiblingId(catalog,record,folder.oid,oid,
+                                                     record.key.data+header,nameLength);
                     identity+=':';
-                    identity.append(reinterpret_cast<const char*>(record.key.data+header),nameLength-1);
+                    identity+=std::to_string(sibling);
                 }
                 entry.identity=MacBrowser::EntryIdentity(std::move(identity),EntryVersion(mounted));
                 children.push_back({folder.mount,oid,inode.stream,std::move(entry),
