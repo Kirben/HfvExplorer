@@ -25,7 +25,7 @@ HfsPlus::Bytes ReadObject(HfsPlus::Source&,const Container&,uint64_t block,uint6
 
 class Node {
 public:
-    Node(HfsPlus::Bytes,bool root,TreeLayout);
+    Node(HfsPlus::Bytes,bool root,TreeLayout,bool allowGhosts=false);
     unsigned Level()const{return level;}
     size_t Count()const{return locations.size();}
     TreeLayout Layout()const{return layout;}

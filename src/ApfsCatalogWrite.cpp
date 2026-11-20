@@ -93,12 +93,42 @@ void StageMap(Writes& writes,MapLeaf map,uint64_t headerBlock,uint64_t rootBlock
     StageObject(writes,rootBlock,EncodeLeaf({std::move(mapping)},0x10,16,16),rootBlock,transaction,Physical|2,11);
 }
 
+template<class Protected>
+uint64_t Reclaim(const Bytes& space,const Bytes& queue,size_t field,Bytes& bitmap,
+                 uint64_t base,uint64_t limit,uint64_t committed,Protected protectedBlock)
+{
+    Check(queue.size()==Block&&Le32(queue.data()+24)==(Ephemeral|2)&&Le32(queue.data()+28)==9&&
+          Le16(queue.data()+32)==7&&Le16(queue.data()+34)==0&&Le32(queue.data()+Block-40)==0x0c,
+          "Unsupported APFS free queue");
+    const Node tree(queue,true,{},true);
+    Check(tree.Layout().keySize==16&&tree.Layout().valueSize==8,"Invalid APFS free queue record layout");
+    uint64_t reclaimed=0,oldest=0;
+    std::pair<uint64_t,uint64_t> previous{};
+    for(size_t i=0;i<tree.Count();++i){
+        const auto record=tree.At(i);
+        const auto xid=Le64(record.key.data),block=Le64(record.key.data+8);
+        const auto count=record.value.size?Le64(record.value.data):1;
+        const auto key=std::make_pair(xid,block);
+        Check(xid&&xid<=committed&&key>previous&&count&&block>=base&&Range(block-base,count,limit),
+              "Invalid APFS retired block range");
+        if(!oldest)oldest=xid;
+        previous=key;
+        // The selected checkpoint no longer references these blocks. Its
+        // allocation metadata remains intact until publication succeeds.
+        for(uint64_t n=0;n<count;++n){
+            const auto bit=block-base+n;
+            Check(Bit(bitmap,bit)&&!protectedBlock(block+n),"APFS retired range overlaps free or live blocks");
+            bitmap[bit/8]&=uint8_t(~(1u<<(bit%8)));
+        }
+        reclaimed+=count;
+    }
+    Check(reclaimed==Le64(space.data()+field)&&oldest==Le64(space.data()+field+16),
+          "APFS free queue counts disagree");
+    return reclaimed;
+}
+
 void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<uint64_t> blocks,uint64_t transaction)
 {
-    Check(Le32(queue.data()+24)==(Ephemeral|2)&&Le32(queue.data()+28)==9&&
-          Le16(queue.data()+32)==7&&Le16(queue.data()+34)==0&&Le32(queue.data()+36)==0&&
-          Le64(space.data()+field)==0&&Le64(space.data()+field+16)==0,
-          "APFS free queues need reclaim support before another catalog mutation");
     std::sort(blocks.begin(),blocks.end());
     Check(std::adjacent_find(blocks.begin(),blocks.end())==blocks.end(),"Duplicate APFS retired block");
     std::vector<OwnedRecord> runs;
@@ -173,7 +203,12 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
             Check(slot==tail&&count==bitmapSlots-1,"Incomplete APFS internal bitmap free list");
     }
 
+    auto& mainQueue=ephemeral(Le64(space.data()+MainFreeQueue+8));
+    auto& poolQueue=ephemeral(Le64(space.data()+PoolFreeQueue+8));
     auto poolMap=ReadBlock(source,currentBitmapBase+oldSlot);
+    Reclaim(space,poolQueue,PoolFreeQueue,poolMap,pool,poolSize,container.transaction,[&](uint64_t block){
+        return block==oldCib||block==oldMainBitmap;
+    });
     std::vector<uint64_t> internal;
     size_t used=0;
     for(uint64_t i=0;i<poolSize;++i){
@@ -181,7 +216,7 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         else if(internal.size()<2)internal.push_back(pool+i);
     }
     Check(used==2&&internal.size()==2&&Bit(poolMap,oldCib-pool)&&Bit(poolMap,oldMainBitmap-pool),
-          "APFS internal pool requires free-queue reclamation or is inconsistent");
+          "APFS internal pool allocation is inconsistent");
     auto mainMap=ReadBlock(source,oldMainBitmap);
     VerifyAllocated(mainMap,0,1,mainLimit);
     VerifyAllocated(mainMap,Le64(superblock.data()+112),Le32(superblock.data()+104),mainLimit);
@@ -195,6 +230,16 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     VerifyAllocated(mainMap,extents,1,mainLimit);
     VerifyAllocated(mainMap,snapshots,1,mainLimit);
 
+    const auto within=[](uint64_t block,uint64_t start,uint64_t count){
+        return block>=start&&block-start<count;
+    };
+    const auto reclaimed=Reclaim(space,mainQueue,MainFreeQueue,mainMap,0,mainLimit,container.transaction,[&](uint64_t block){
+        return !block||block==extents||block==snapshots||
+               within(block,Le64(superblock.data()+112),Le32(superblock.data()+104))||
+               within(block,Le64(superblock.data()+120),Le32(superblock.data()+108))||
+               within(block,currentBitmapBase,bitmapSlots)||within(block,pool,poolSize)||
+               std::find(retire.begin(),retire.end(),block)!=retire.end();
+    });
     std::vector<uint64_t> result;
     uint64_t available=0;
     for(uint64_t i=0;i<mainLimit;++i){
@@ -202,11 +247,10 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         ++available;
         if(result.size()<retire.size())result.push_back(i);
     }
-    Check(available==Le32(cib.data()+60)&&available+(container.blockCount-mainLimit)==Le64(space.data()+72)&&
+    Check(available>=reclaimed&&available-reclaimed==Le32(cib.data()+60)&&
+          available-reclaimed+(container.blockCount-mainLimit)==Le64(space.data()+72)&&
           result.size()==retire.size(),"APFS allocation counts disagree or the active chunk is full");
 
-    auto& mainQueue=ephemeral(Le64(space.data()+MainFreeQueue+8));
-    auto& poolQueue=ephemeral(Le64(space.data()+PoolFreeQueue+8));
     Retire(space,mainQueue,MainFreeQueue,retire,transaction);
     Retire(space,poolQueue,PoolFreeQueue,{oldCib,oldMainBitmap},transaction);
 
@@ -219,7 +263,7 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     Set(cib,64,internal[0],8);
     StageObject(writes,internal[1],std::move(cib),internal[1],transaction,Physical|7);
     Set(space,cibOffset,internal[1],8);
-    Set(space,72,Le64(space.data()+72)-result.size(),8);
+    Set(space,72,available+(container.blockCount-mainLimit)-result.size(),8);
     Set(space,xidOffset,transaction,8);
     Set(space,bitmapOffset,head,2);
     Set(space,320,nextHead,2);
@@ -229,13 +273,22 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     return result;
 }
 
-Bytes AddDirectory(Bytes catalog,const std::string& name,uint64_t id,uint64_t time,bool fold)
+Bytes AddDirectory(Bytes catalog,const std::string& name,uint64_t id,uint64_t time,bool fold,
+                   uint64_t directoryCount)
 {
     const Node tree(std::move(catalog),true,{});
-    Check(tree.Level()==0&&tree.Count()==4,"APFS catalog writes currently require an empty native volume");
-    // Retain both reserved entries and both reserved inodes in their original order.
+    Check(tree.Level()==0&&directoryCount<=tree.Count()&&tree.Count()==4+2*directoryCount,
+          "APFS catalog writes currently require a single leaf containing only root folders");
+    // The record keys sort first by inode ID, then by record type.
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
+    const auto added=WriterDisk::DirectoryEntry(name,id,time,2,fold);
+    const uint32_t newHash=Le32(added.key.data()+8)>>10;
+    const size_t privateIndex=3+size_t(directoryCount);
+    size_t insertAt=3;
+    uint32_t previousHash=0;
+    uint64_t previousInode=1;
+    std::vector<uint64_t> children;
     std::vector<OwnedRecord> records;
     for(size_t i=0;i<tree.Count();++i){
         const auto view=tree.At(i);
@@ -244,18 +297,46 @@ Bytes AddDirectory(Bytes catalog,const std::string& name,uint64_t id,uint64_t ti
             Check(view.key.size==expected.key.size()&&!memcmp(view.key.data,expected.key.data(),view.key.size)&&
                   view.value.size==18&&Le64(view.value.data)==reserved[i]&&Le16(view.value.data+16)==4,
                   "Invalid APFS reserved directory entry");
+        }else if(i>2&&i<privateIndex){
+            Check(view.key.size>=14&&Le64(view.key.data)==((uint64_t(9)<<60)|2)&&
+                  view.value.size==18&&Le16(view.value.data+16)==4,"Invalid APFS root directory entry");
+            const auto key=Le32(view.key.data+8);
+            Check((key&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
+                  "Invalid APFS root directory name");
+            const auto begin=view.key.data+12;
+            const auto childName=DirectoryName(std::u16string(begin,view.key.data+view.key.size-1));
+            const auto hash=key>>10;
+            Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash&&(i==3||hash>previousHash),
+                  "Unsupported APFS root directory key order");
+            Check(hash!=newHash,"The APFS directory name already exists or has a conflicting hash");
+            if(hash<newHash)++insertAt;
+            previousHash=hash;
+            const auto child=Le64(view.value.data);
+            Check(child>=16&&child<id,"Invalid APFS root directory entry ID");
+            children.push_back(child);
         }else{
-            Check(view.key.size==8&&Le64(view.key.data)==((uint64_t(3)<<60)|i)&&view.value.size>=92&&
-                  Le64(view.value.data)==1&&Le64(view.value.data+8)==i&&Le32(view.value.data+56)==0&&
-                  (Le16(view.value.data+80)&0170000)==0040000,"Invalid APFS reserved directory inode");
+            const bool userDirectory=i>privateIndex;
+            Check(view.key.size==8&&view.value.size>=92,"Invalid APFS directory inode size");
+            const auto key=Le64(view.key.data);
+            const auto inode=key&IdMask;
+            const bool validId=userDirectory?inode>=16:inode==(i==2?2u:3u);
+            Check((key>>60)==3&&validId&&inode>previousInode&&inode<id&&
+                  Le64(view.value.data)==(userDirectory?2:1)&&Le64(view.value.data+8)==inode&&
+                  Le32(view.value.data+56)==(i==2?directoryCount:0)&&
+                  (Le16(view.value.data+80)&0170000)==0040000,"Invalid APFS directory inode");
+            if(userDirectory){
+                if(i==privateIndex+1)std::sort(children.begin(),children.end());
+                Check(inode==children[i-privateIndex-1],"APFS directory entry and inode disagree");
+            }
+            previousInode=inode;
         }
         records.push_back({Bytes(view.key.data,view.key.data+view.key.size),
                            Bytes(view.value.data,view.value.data+view.value.size)});
     }
     Set(records[2].value,24,time,8);
     Set(records[2].value,32,time,8);
-    Set(records[2].value,56,1,4);
-    records.insert(records.begin()+3,WriterDisk::DirectoryEntry(name,id,time,2,fold));
+    Set(records[2].value,56,directoryCount+1,4);
+    records.insert(records.begin()+insertAt,added);
     records.push_back(WriterDisk::DirectoryInode(name,id,time,2));
     return EncodeLeaf(records,0x40);
 }
@@ -271,13 +352,14 @@ std::vector<CheckpointBlockWrite> PrepareRootDirectory(
     const auto containerMap=ReadSingleMapping(source,current,current.objectMap,oid);
     auto volume=ReadObject(source,current,containerMap.physical,oid,current.transaction,13);
     const auto flags=Le64(volume.data()+56);
+    const auto directoryCount=Le64(volume.data()+192);
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     Check(!memcmp(volume.data()+32,"APSB",4)&&!memcmp(volume.data()+272,"HFVExplorer",12)&&
           (flags==1||flags==8)&&Le64(volume.data()+264)==1&&Le32(volume.data()+116)==2&&
-          !Le64(volume.data()+184)&&!Le64(volume.data()+192)&&!Le64(volume.data()+200)&&
+          !Le64(volume.data()+184)&&!Le64(volume.data()+200)&&
           !Le64(volume.data()+208)&&!Le64(volume.data()+216),
-          "APFS catalog writes currently require an empty, unencrypted volume formatted by HFVExplorer");
+          "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
     const Node extentTree(ReadObject(source,current,extents,extents,current.transaction,2,15,true),true,{});
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
     Check(!extentTree.Level()&&!extentTree.Count()&&!snapshotTree.Level()&&!snapshotTree.Count(),
@@ -289,7 +371,7 @@ std::vector<CheckpointBlockWrite> PrepareRootDirectory(
     GetSystemTimeAsFileTime(&fileTime);
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
     auto catalog=AddDirectory(ReadObject(source,current,volumeMap.physical,catalogOid,current.transaction,2,14),
-                              ascii,nextId,time,flags==1);
+                              ascii,nextId,time,flags==1,directoryCount);
     auto& space=ephemeral(Le64(superblock.data()+152));
     Writes writes;
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
@@ -299,7 +381,7 @@ std::vector<CheckpointBlockWrite> PrepareRootDirectory(
     StageMap(writes,volumeMap,allocated[1],allocated[2],catalogOid,allocated[0],transaction);
     Set(volume,128,allocated[1],8);
     Set(volume,176,nextId+1,8);
-    Set(volume,192,1,8);
+    Set(volume,192,directoryCount+1,8);
     Set(volume,256,time,8);
     // Replacing the catalog and its object map retires three volume blocks.
     Check(Le64(volume.data()+224)<=UINT64_MAX-3&&Le64(volume.data()+232)<=UINT64_MAX-3,

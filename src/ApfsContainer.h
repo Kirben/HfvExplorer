@@ -24,7 +24,7 @@ struct CheckpointPublicationUncertain : HfsPlus::Error {
 // Republish the current state at a new transaction ID. The caller must hold
 // exclusive writable access to an ordinary, raw image for the whole operation.
 uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Job&);
-// The first catalog mutation supports one root folder in an empty native image.
+// Root folder creation supports flat, single-leaf catalogs in native images.
 // The same exclusive image ownership is required as for CommitCheckpoint.
 uint64_t CreateRootDirectory(HfsPlus::Source&,const Container& expected,const std::u16string& name,Storage::Job&);
 }

@@ -23,7 +23,7 @@ Bytes ReadObject(Source& source,const Container& container,uint64_t block,uint64
     return bytes;
 }
 
-Node::Node(Bytes data,bool root,TreeLayout sizes):bytes(std::move(data)),layout(sizes)
+Node::Node(Bytes data,bool root,TreeLayout sizes,bool allowGhosts):bytes(std::move(data)),layout(sizes)
 {
     constexpr size_t header=56,footer=40;
     const auto p=bytes.data();
@@ -52,13 +52,15 @@ Node::Node(Bytes data,bool root,TreeLayout sizes):bytes(std::move(data)),layout(
         const auto entry=p+table+i*stride;
         const size_t key=keys+Le16(entry),keySize=fixed?layout.keySize:Le16(entry+2);
         const size_t back=Le16(entry+(fixed?2:4));
-        const size_t valueSize=fixed?(level?8:layout.valueSize):Le16(entry+6);
-        Check(keySize&&valueSize&&back>=valueSize&&back<=valuesEnd-(space+spaceSize)&&
-              Range(key,keySize,space),"APFS B-tree record extends outside its data area");
-        const auto value=valuesEnd-back;
+        const bool ghost=allowGhosts&&fixed&&!level&&back==UINT16_MAX;
+        const size_t valueSize=ghost?0:fixed?(level?8:layout.valueSize):Le16(entry+6);
+        Check(keySize&&Range(key,keySize,space)&&
+              (ghost||(valueSize&&back>=valueSize&&back<=valuesEnd-(space+spaceSize))),
+              "APFS B-tree record extends outside its data area");
+        const auto value=ghost?0:valuesEnd-back;
         locations.push_back({key,keySize,value,valueSize});
         occupied.emplace_back(key,key+keySize);
-        occupied.emplace_back(value,value+valueSize);
+        if(!ghost)occupied.emplace_back(value,value+valueSize);
     }
     std::sort(occupied.begin(),occupied.end());
     for(size_t i=1;i<occupied.size();++i)

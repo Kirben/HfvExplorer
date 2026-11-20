@@ -4,6 +4,7 @@
 #include "ApfsContainer.h"
 #include "ApfsFormat.h"
 #include "ApfsTree.h"
+#include "ApfsWriteDisk.h"
 #include "HfsPlusDisk.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
@@ -221,9 +222,86 @@ void CheckpointWrites(const std::string& root,FILE* report)
     const auto eventsAfter=created.event;
     Reject([&]{Apfs::CreateRootDirectory(created,*start,u"Stale",controlJob);},
            "A stale catalog mutation was accepted");
-    Reject([&]{Apfs::CreateRootDirectory(created,*state,u"Another",controlJob);},
-           "An APFS volume outside this writer's scope accepted a mutation");
-    Check(created.event==eventsAfter,"Unsupported APFS catalog write modified the image");
+    Reject([&]{Apfs::CreateRootDirectory(created,*state,u"new folder",controlJob);},
+           "A case-insensitive APFS name collision was accepted");
+    Check(created.event==eventsAfter,"Rejected APFS catalog write modified the image");
+
+    const auto listFolders=[](const CheckpointFaultImage& disk){
+        auto memory=std::make_unique<Memory>(disk.durable.size());
+        memory->bytes=disk.durable;
+        std::unique_ptr<Source> source=std::move(memory);
+        const auto mounted=Apfs::Open(source,"apfs-reclaim-test");
+        Check(mounted!=nullptr,"Reclaimed APFS image could not be opened");
+        std::vector<std::u16string> names;
+        for(const auto& entry:mounted->List()){
+            Check(entry.directory&&mounted->List(entry.id).empty(),"Unexpected APFS directory contents");
+            names.push_back(entry.name);
+        }
+        std::sort(names.begin(),names.end());
+        return names;
+    };
+    CheckpointFaultImage reused(created.durable);
+    Check(Apfs::CreateRootDirectory(reused,*state,u"Another",controlJob)==3&&reopen(reused)==3,
+          "APFS catalog write could not reuse retired blocks");
+    const auto oldMap=first->objectMap*4096;
+    Check(!std::equal(original.begin()+oldMap,original.begin()+oldMap+4096,reused.durable.begin()+oldMap),
+          "APFS catalog write did not reuse the initial checkpoint's object map block");
+    for(unsigned step=1;step<=reused.event;++step){
+        CheckpointFaultImage attempt(created.durable);
+        attempt.failAt=step;
+        attempt.fault=step==reused.event||step==reused.event-2?Fault::FailedFlush:Fault::TornWrite;
+        Reject([&]{Apfs::CreateRootDirectory(attempt,*state,u"Another",controlJob);},
+               "Injected APFS reuse interruption succeeded");
+        Check(reopen(attempt)==2&&listFolders(attempt)==std::vector<std::u16string>{u"New Folder"},
+              "Interrupted APFS block reuse damaged the preceding catalog");
+    }
+    // A validly encoded free queue must still never reclaim live metadata.
+    auto badQueue=created.durable;
+    const auto nx=badQueue.data()+state->checkpointBlock*4096;
+    const auto descriptor=Apfs::Le64(nx+112)+Apfs::Le32(nx+136);
+    const auto queueCheckpointMap=badQueue.data()+descriptor*4096;
+    const auto spaceman=Apfs::Le64(queueCheckpointMap+112);
+    auto queuedSpace=badQueue.data()+spaceman*4096;
+    const auto queueOid=Apfs::Le64(queuedSpace+248);
+    uint64_t queueBlock=0;
+    for(uint32_t i=0;i<Apfs::Le32(queueCheckpointMap+36);++i){
+        const auto entry=queueCheckpointMap+40+40*i;
+        if(Apfs::Le64(entry+24)==queueOid)queueBlock=Apfs::Le64(entry+32);
+    }
+    Check(queueBlock,"Cannot locate the APFS free queue in the test fixture");
+    Apfs::WriterDisk::Record retired{Bytes(16),{}};
+    Little(retired.key.data(),state->transaction,8);
+    Little(retired.key.data()+8,state->objectMap,8);
+    auto queue=Apfs::WriterDisk::EncodeLeaf({retired},0x0c,16,8);
+    memcpy(queue.data()+8,badQueue.data()+queueBlock*4096+8,24);
+    memcpy(badQueue.data()+queueBlock*4096,queue.data(),queue.size());
+    Seal(badQueue,queueBlock*4096,4096);
+    Little(queuedSpace+240,1,8);
+    Seal(badQueue,spaceman*4096,4096);
+    CheckpointFaultImage liveBlockQueued(badQueue);
+    Check(reopen(liveBlockQueued)==2,"Corrupt free-queue fixture did not preserve the selected checkpoint");
+    Reject([&]{Apfs::CreateRootDirectory(liveBlockQueued,*state,u"Another",controlJob);},
+           "APFS reclamation accepted a retired range overlapping live metadata");
+    Check(!liveBlockQueued.event&&liveBlockQueued.durable==badQueue,"APFS reclamation wrote invalid allocation data");
+
+    std::vector<std::u16string> expected{u"Another",u"New Folder"};
+    Check(listFolders(reused)==expected,"APFS block reuse lost a previously created directory");
+    for(uint64_t tx=4;tx<=13;++tx){
+        std::u16string folderName=u"Folder ";
+        folderName+=char16_t(u'A'+tx-4);
+        const auto checkpoint=Apfs::Probe(reused);
+        Check(checkpoint&&Apfs::CreateRootDirectory(reused,*checkpoint,folderName,controlJob)==tx&&reopen(reused)==tx,
+              "Repeated APFS directory creation exhausted the allocator");
+        expected.push_back(folderName);
+    }
+    std::sort(expected.begin(),expected.end());
+    Check(listFolders(reused)==expected,"Repeated APFS block reclamation lost a directory");
+    {
+        const auto path=VolumeCoord::Wide(root+"checkpoint-reclaimed.img");
+        auto image=CreateFormatOutput(path.c_str(),imageSize);
+        image->Write(0,reused.durable.data(),reused.durable.size());
+        image->Keep();
+    }
     CheckpointFaultImage invalidName(original);
     Reject([&]{Apfs::CreateRootDirectory(invalidName,*start,u"Bad/Name",controlJob);},
            "An illegal APFS directory name was accepted");
@@ -241,7 +319,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
     Reject([&]{Apfs::CreateRootDirectory(wrongAllocation,*start,u"Must not exist",controlJob);},
            "The APFS allocator trusted a free bit for a live metadata block");
     Check(!wrongAllocation.event&&wrongAllocation.durable==badBitmap,"Invalid APFS allocation wrote to the image");
-    fprintf(report,"PASS: APFS allocation, copy-on-write catalog and object maps, first directory, and fault recovery.\n");
+    fprintf(report,"PASS: APFS allocation, repeated directory creation, retired block reuse, copy-on-write maps, and interrupted commits.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)
