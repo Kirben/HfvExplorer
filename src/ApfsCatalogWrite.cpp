@@ -189,25 +189,30 @@ void Reclaim(const Bytes& space,const Bytes& queue,size_t field,uint64_t base,ui
           "APFS free queue counts disagree");
 }
 
-void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<uint64_t> blocks,uint64_t transaction)
+void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<DataRun> ranges,uint64_t transaction)
 {
-    std::sort(blocks.begin(),blocks.end());
-    Check(std::adjacent_find(blocks.begin(),blocks.end())==blocks.end(),"Duplicate APFS retired block");
-    std::vector<OwnedRecord> runs;
-    for(size_t i=0;i<blocks.size();){
-        size_t end=i+1;
-        while(end<blocks.size()&&blocks[end]==blocks[end-1]+1)++end;
-        OwnedRecord record{Bytes(16),Bytes(end==i+1?0:8)};
+    std::sort(ranges.begin(),ranges.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    std::vector<OwnedRecord> records;
+    uint64_t retired=0;
+    for(size_t i=0;i<ranges.size();){
+        const auto first=ranges[i].block;
+        uint64_t end=first;
+        do{
+            end+=ranges[i++].count;
+            Check(i==ranges.size()||ranges[i].block>=end,"Overlapping APFS retired block ranges");
+        }while(i<ranges.size()&&ranges[i].block==end);
+        const auto count=end-first;
+        OwnedRecord record{Bytes(16),Bytes(count==1?0:8)};
         Set(record.key,0,transaction,8);
-        Set(record.key,8,blocks[i],8);
-        if(!record.value.empty())Set(record.value,0,end-i,8);
-        runs.push_back(std::move(record));
-        i=end;
+        Set(record.key,8,first,8);
+        if(count!=1)Set(record.value,0,count,8);
+        records.push_back(std::move(record));
+        retired+=count;
     }
-    auto updated=EncodeLeaf(runs,0x0c,16,8);
+    auto updated=EncodeLeaf(records,0x0c,16,8);
     std::copy_n(queue.begin(),size_t(32),updated.begin());
     queue=std::move(updated);
-    Set(space,field,blocks.size(),8);
+    Set(space,field,retired,8);
     Set(space,field+16,transaction,8);
 }
 
@@ -215,7 +220,8 @@ template<class RequiredMetadata>
 std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& container,
                               Bytes& space,Bytes& superblock,const CheckpointObjectLookup& ephemeral,
                               const std::vector<uint64_t>& retire,uint64_t extents,uint64_t snapshots,
-                              const std::vector<FileRun>& files,uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
+                              const std::vector<FileRun>& files,std::vector<DataRun> retiredData,
+                              uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
                               uint64_t transaction,RequiredMetadata requiredMetadata)
 {
     const auto chunks=DivideUp(container.blockCount,Chunk);
@@ -423,7 +429,7 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     Check(result.size()==metadataCount,"APFS metadata allocation did not cover the transaction");
 
     // Only replace dirty bitmaps and their owning chunk-info blocks.
-    std::vector<uint64_t> retiredPool;
+    std::vector<DataRun> retiredPool;
     size_t nextInternal=0;
     const auto allocateInternal=[&]{
         Check(nextInternal<internal.size(),"APFS internal pool is full");
@@ -439,7 +445,7 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
             newBlock=allocateInternal();
             writes.push_back({newBlock,std::move(chunk.bitmap)});
         }
-        if(chunk.oldBlock)retiredPool.push_back(chunk.oldBlock);
+        if(chunk.oldBlock)retiredPool.push_back({chunk.oldBlock,1});
         auto& cib=cibs[i/ChunksPerCib];
         const auto at=40+32*(i%ChunksPerCib);
         Set(cib.bytes,at,transaction,8);
@@ -451,11 +457,13 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         auto& cib=cibs[i];
         if(!cib.dirty)continue;
         const auto block=allocateInternal();
-        retiredPool.push_back(cib.address);
+        retiredPool.push_back({cib.address,1});
         StageObject(writes,block,std::move(cib.bytes),block,transaction,Physical|7);
         Set(space,cibOffset+8*i,block,8);
     }
-    Retire(space,mainQueue,MainFreeQueue,retire,transaction);
+    // Deleted file blocks remain allocated until the new catalog is durable.
+    for(const auto block:retire)retiredData.push_back({block,1});
+    Retire(space,mainQueue,MainFreeQueue,std::move(retiredData),transaction);
     Retire(space,poolQueue,PoolFreeQueue,std::move(retiredPool),transaction);
     writes.push_back({currentBitmapBase+head,std::move(poolMap)});
 
@@ -519,7 +527,7 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
 
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t id,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t dataSize,uint64_t blockCount,
-    std::vector<FileRun>& fileRuns)
+    std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind)
 {
     Check(directoryCount<=records.size()&&fileCount<=records.size(),"Invalid APFS catalog entry counts");
     const auto at=[&](size_t i){
@@ -529,12 +537,18 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto parent=std::visit([](const auto& edit){return edit.parent;},request);
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
+    const auto* remove=std::get_if<CatalogDelete>(&request);
+    const auto entryId=remove?remove->inode:rename?rename->inode:id;
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
-    auto added=WriterDisk::DirectoryEntry(name,rename?rename->inode:id,time,parent,fold,
-                                            uint16_t(create?create->kind:CatalogKind::Directory));
     using Key=std::tuple<uint64_t,uint64_t,uint32_t>;
-    const Key addedKey{parent,9,Le32(added.key.data()+8)>>10};
+    OwnedRecord added;
+    std::optional<Key> addedKey;
+    if(!remove){
+        added=WriterDisk::DirectoryEntry(name,entryId,time,parent,fold,
+                                         uint16_t(create?create->kind:CatalogKind::Directory));
+        addedKey=Key{parent,9,Le32(added.key.data()+8)>>10};
+    }
     Key previous{};
     size_t insertAt=2;
     struct Directory {
@@ -547,7 +561,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         CatalogKind kind;
         std::string name;
         size_t entryRecord;
-        size_t inodeRecord=0;
+        size_t inodeRecord=0,streamRecords=0;
         uint64_t dataSize=0;
     };
     std::map<uint64_t,Link> links;
@@ -633,16 +647,17 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         }
                     }
                     link->second.dataSize=size;
+                    link->second.streamRecords=streamRecords;
                     ++files;
                 }
             }
             // Catalog keys sort by inode ID, record type, then directory name hash.
             const Key order{inode,type,hash};
             Check(order>previous,"Invalid or unsupported APFS directory key order");
-            Check(renamingThisEntry||order!=addedKey,"The APFS entry name already exists or has a conflicting hash");
+            Check(!addedKey||renamingThisEntry||order!=*addedKey,"The APFS entry name already exists or has a conflicting hash");
             // A regular file cannot be a destination parent, so its stream
             // records always sort on the same side of the insertion point.
-            if(!renamingThisEntry&&order<addedKey)insertAt+=1+streamRecords;
+            if(addedKey&&!renamingThisEntry&&order<*addedKey)insertAt+=1+streamRecords;
             previous=order;
         }
         i+=streamRecords;
@@ -664,18 +679,28 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,id,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
     }else{
-        const auto found=links.find(rename->inode);
+        const auto found=links.find(entryId);
         Check(found!=links.end()&&found->second.parent==parent,"The APFS entry is no longer in the selected folder");
         const auto& link=found->second;
         auto& inode=records[link.inodeRecord].value;
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
-        const auto old=WriterDisk::Inode(link.name,rename->inode,0,parent,mode,count,link.dataSize);
+        const auto old=WriterDisk::Inode(link.name,entryId,0,parent,mode,count,link.dataSize);
         constexpr size_t inodeHeader=92;
         Check(inode.size()==old.value.size()&&
               !memcmp(inode.data()+inodeHeader,old.value.data()+inodeHeader,inode.size()-inodeHeader),
-              "APFS rename requires native inode name fields");
-        auto updated=WriterDisk::Inode(name,rename->inode,0,parent,mode,count,link.dataSize);
+              "APFS writes require native inode name fields");
+        if(remove){
+            Check(link.kind!=CatalogKind::Directory||directories.at(entryId).children==0,
+                  "The APFS folder is not empty");
+            removedKind=link.kind;
+            Set(parentInode,56,target->second.children-1,4);
+            const auto first=records.begin()+link.inodeRecord;
+            records.erase(first,first+1+link.streamRecords);
+            records.erase(records.begin()+link.entryRecord);
+            return records;
+        }
+        auto updated=WriterDisk::Inode(name,entryId,0,parent,mode,count,link.dataSize);
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
         Set(updated.value,32,time,8);
         inode=std::move(updated.value);
@@ -753,8 +778,9 @@ CatalogWritePlan PrepareCatalogMutation(
     const CheckpointObjectLookup& ephemeral,const CatalogMutation& request)
 {
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
-    const auto ascii=std::visit([](const auto& edit){return CatalogName(edit.name);},request);
     const auto* create=std::get_if<CatalogCreate>(&request);
+    const auto* rename=std::get_if<CatalogRename>(&request);
+    const auto ascii=create?CatalogName(create->name):rename?CatalogName(rename->name):std::string{};
     CatalogWritePlan plan;
     plan.dataSize=create&&create->data?create->data->Size():0;
     const auto dataBlocks=DivideUp(plan.dataSize,Block);
@@ -785,20 +811,32 @@ CatalogWritePlan PrepareCatalogMutation(
     GetSystemTimeAsFileTime(&fileTime);
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
     std::vector<FileRun> files;
+    std::optional<CatalogKind> removedKind;
     auto catalog=EditCatalog(std::move(existing.records),request,ascii,nextId,time,flags==1,
-                                 directoryCount,fileCount,plan.dataSize,current.blockCount,files);
+                            directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind);
     ValidateExtentReferences(extentTree,files);
+    const auto* remove=std::get_if<CatalogDelete>(&request);
+    std::vector<DataRun> retiredData;
+    uint64_t removedBlocks=0;
+    if(remove){
+        for(const auto& run:files){
+            if(run.owner!=remove->inode)continue;
+            retiredData.push_back({run.block,run.count});
+            removedBlocks+=run.count;
+        }
+    }
+    const bool changeExtents=dataBlocks||removedBlocks;
     auto& space=ephemeral(Le64(superblock.data()+152));
     auto& writes=plan.metadata;
     std::vector<uint64_t> retired{containerMap.headerBlock,containerMap.rootBlock,volumeAddress,
                                   volumeMap.headerBlock,volumeMap.rootBlock};
     retired.insert(retired.end(),existing.blocks.begin(),existing.blocks.end());
-    if(dataBlocks)retired.push_back(extents);
-    const size_t firstChild=dataBlocks?7:6;
+    if(changeExtents)retired.push_back(extents);
+    const size_t firstChild=changeExtents?7:6;
     CatalogLeaves leaves;
     size_t children=0;
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
-        retired,extents,snapshots,files,dataBlocks,plan.dataRuns,transaction,[&]{
+        retired,extents,snapshots,files,std::move(retiredData),dataBlocks,plan.dataRuns,transaction,[&]{
             if(dataBlocks){
                 catalog.push_back(StreamReference(nextId));
                 uint64_t logical=0;
@@ -812,7 +850,10 @@ CatalogWritePlan PrepareCatalogMutation(
             children=leaves.size()>1?leaves.size():0;
             return firstChild+children;
         });
-    if(dataBlocks){
+    if(changeExtents){
+        if(remove)files.erase(std::remove_if(files.begin(),files.end(),[&](const auto& run){
+            return run.owner==remove->inode;
+        }),files.end());
         for(const auto& data:plan.dataRuns)files.push_back({nextId,data.block,data.count});
         std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
         std::vector<OwnedRecord> references;
@@ -830,18 +871,23 @@ CatalogWritePlan PrepareCatalogMutation(
     StageMap(writes,volumeMap,allocated[1],allocated[2],mappings,transaction);
     const auto oldChildren=existing.blocks.size()-1;
     const auto volumeBlocks=Le64(volume.data()+88);
-    Check(volumeBlocks>=oldChildren&&volumeBlocks<=current.blockCount&&
-          dataBlocks+children<=current.blockCount-(volumeBlocks-oldChildren),"Invalid APFS volume allocation count");
-    Set(volume,88,volumeBlocks-oldChildren+children+dataBlocks,8);
+    const auto removedVolumeBlocks=oldChildren+removedBlocks;
+    Check(volumeBlocks>=removedVolumeBlocks&&volumeBlocks<=current.blockCount&&
+          dataBlocks+children<=current.blockCount-(volumeBlocks-removedVolumeBlocks),
+          "Invalid APFS volume allocation count");
+    Set(volume,88,volumeBlocks-removedVolumeBlocks+children+dataBlocks,8);
     Set(volume,128,allocated[1],8);
     if(create){
         Set(volume,176,nextId+1,8);
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
         else Set(volume,184,fileCount+1,8);
+    }else if(removedKind){
+        if(*removedKind==CatalogKind::Directory)Set(volume,192,directoryCount-1,8);
+        else Set(volume,184,fileCount-1,8);
     }
     Set(volume,256,time,8);
-    const uint64_t replaced=dataBlocks?4:3;
-    const auto newVolumeBlocks=replaced+children+dataBlocks,oldVolumeBlocks=replaced+oldChildren;
+    const uint64_t replaced=changeExtents?4:3;
+    const auto newVolumeBlocks=replaced+children+dataBlocks,oldVolumeBlocks=replaced+removedVolumeBlocks;
     Check(Le64(volume.data()+224)<=UINT64_MAX-newVolumeBlocks&&Le64(volume.data()+232)<=UINT64_MAX-oldVolumeBlocks,
           "APFS volume allocation history overflow");
     Set(volume,224,Le64(volume.data()+224)+newVolumeBlocks,8);

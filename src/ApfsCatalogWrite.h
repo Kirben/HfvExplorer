@@ -20,7 +20,10 @@ struct CatalogRename {
     uint64_t parent,inode;
     const std::u16string& name;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename>;
+struct CatalogDelete {
+    uint64_t parent,inode;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete>;
 
 struct DataRun {
     uint64_t block,count;

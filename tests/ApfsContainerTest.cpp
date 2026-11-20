@@ -916,6 +916,98 @@ void RenameCatalogWrites(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS file and populated-folder rename, case-only names, collisions, stale requests and interrupted commits.\n");
 }
 
+void DeleteCatalogWrites(const std::string& root,FILE* report)
+{
+    auto input=VolumeCoord::Wide(root+"checkpoint-fragmented-files.img");
+    if(const auto shared=_wgetenv(L"HFV_APFS_DELETE_BASE"))input=shared;
+    auto image=OpenImage(input.c_str(),false);
+    CheckpointFaultImage disk(Disk::Read(*image,0,size_t(image->Size())));
+    const auto open=[](const CheckpointFaultImage& candidate){
+        auto memory=std::make_unique<Memory>(candidate.durable.size());
+        memory->bytes=candidate.durable;
+        std::unique_ptr<Source> source=std::move(memory);
+        auto mounted=Apfs::Open(source,"apfs-delete-catalog");
+        Check(bool(mounted),"Could not reopen the APFS delete fixture");
+        return mounted;
+    };
+    const auto save=[&](const std::string& filename){
+        const auto output=VolumeCoord::Wide(root+filename);
+        auto result=CreateFormatOutput(output.c_str(),disk.durable.size());
+        result->Write(0,disk.durable.data(),disk.durable.size());
+        result->Keep();
+    };
+    constexpr uint64_t rootId=2,fileInode=17,folderInode=18,childInode=19;
+    Storage::Job job;
+    const auto before=open(disk);
+    MacBrowser::Entry file,pin;
+    Check(before->FindChild(2,u"Fragmented.bin",file)&&before->FindChild(2,u"Small.bin",pin),
+          "APFS delete fixture is missing its fragmented or blocking file");
+    Bytes contents(size_t(file.forks[0].size)),pinContents(size_t(pin.forks[0].size));
+    before->Read(file.id,0,0,contents.data(),contents.size());
+    before->Read(pin.id,0,0,pinContents.data(),pinContents.size());
+
+    const auto start=Apfs::Probe(disk);
+    Check(start.has_value(),"No APFS delete checkpoint");
+    Check(Apfs::CreateEmptyFile(disk,*start,folderInode,u"Child",job)==start->transaction+1,
+          "Could not populate the APFS delete test folder");
+    const auto withChild=Apfs::Probe(disk);
+    Check(withChild.has_value(),"No APFS checkpoint for the populated folder");
+    const auto untouched=disk.event;
+    Reject([&]{Apfs::DeleteEntry(disk,*withChild,rootId,folderInode,job);},"APFS deleted a nonempty folder");
+    Reject([&]{Apfs::DeleteEntry(disk,*withChild,folderInode,fileInode,job);},"APFS deleted an entry from the wrong parent");
+    Reject([&]{Apfs::DeleteEntry(disk,*withChild,rootId,rootId,job);},"APFS deleted a reserved inode");
+    Reject([&]{Apfs::DeleteEntry(disk,*start,rootId,fileInode,job);},"APFS deleted an entry using a stale checkpoint");
+    Check(disk.event==untouched,"Rejected APFS delete wrote to the image");
+
+    Memory replacement(contents.size());
+    for(size_t i=0;i<replacement.bytes.size();++i)replacement.bytes[i]=uint8_t(contents[i]^0x53);
+    Reject([&]{Apfs::CreateFile(disk,*withChild,rootId,u"Replacement",replacement,job);},
+           "APFS delete test did not exhaust free space before deletion");
+    Check(disk.event==untouched,"Rejected APFS allocation wrote to the image");
+
+    const auto original=disk.durable;
+    Check(Apfs::DeleteEntry(disk,*withChild,rootId,fileInode,job)==withChild->transaction+1,
+          "APFS could not delete a fragmented file");
+    const auto events=disk.event-untouched;
+    for(unsigned step=1;step<=events;++step){
+        CheckpointFaultImage interrupted(original);
+        interrupted.failAt=step;
+        interrupted.fault=step==events||step==events-2?
+            CheckpointFaultImage::Fault::FailedFlush:CheckpointFaultImage::Fault::TornWrite;
+        Reject([&]{Apfs::DeleteEntry(interrupted,*withChild,rootId,fileInode,job);},
+               "Injected APFS delete interruption succeeded");
+        const auto previous=open(interrupted);
+        Check(previous->FindChild(2,u"Fragmented.bin",file),"Interrupted APFS delete lost the file");
+        Bytes bytes(contents.size());
+        previous->Read(file.id,0,0,bytes.data(),bytes.size());
+        Check(bytes==contents,"Interrupted APFS delete changed the file data");
+    }
+    const auto deleted=open(disk);
+    Check(!deleted->FindChild(2,u"Fragmented.bin",file)&&deleted->FindChild(2,u"Small.bin",pin),
+          "APFS reopened with an incorrect listing after deletion");
+    save("checkpoint-deleted-extents.img");
+
+    const auto afterDelete=Apfs::Probe(disk);
+    Check(afterDelete&&Apfs::CreateFile(disk,*afterDelete,rootId,u"Replacement",replacement,job)==afterDelete->transaction+1,
+          "APFS did not reclaim the retired file extents on the next transaction");
+    const auto afterReuse=Apfs::Probe(disk);
+    Check(afterReuse&&Apfs::DeleteEntry(disk,*afterReuse,folderInode,childInode,job)==afterReuse->transaction+1,
+          "APFS could not delete an empty file");
+    const auto afterChild=Apfs::Probe(disk);
+    Check(afterChild&&Apfs::DeleteEntry(disk,*afterChild,rootId,folderInode,job)==afterChild->transaction+1,
+          "APFS could not delete an empty folder");
+    const auto mounted=open(disk);
+    Check(mounted->List().size()==2&&mounted->FindChild(2,u"Replacement",file)&&
+          file.forks[0].size==replacement.Size()&&mounted->FindChild(2,u"Small.bin",pin),
+          "APFS delete and reuse produced an incorrect catalog");
+    Bytes data(replacement.bytes.size()),pinData(pinContents.size());
+    mounted->Read(file.id,0,0,data.data(),data.size());
+    mounted->Read(pin.id,0,0,pinData.data(),pinData.size());
+    Check(data==replacement.bytes&&pinData==pinContents,"APFS extent reuse changed live file data");
+    save("checkpoint-reused-file-extents.img");
+    fprintf(report,"PASS: APFS file and empty-folder deletion, interrupted deletes, and deferred reuse of fragmented extents.\n");
+}
+
 Memory Raw(unsigned blockSize=4096)
 {
     Memory disk(1024*1024);
@@ -1270,6 +1362,7 @@ int RunApfsContainerTest(const char* directory)
         MultiCibWrites(root,report);
         SplitCatalogWrites(root,report);
         RenameCatalogWrites(root,report);
+        DeleteCatalogWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

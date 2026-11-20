@@ -34,4 +34,6 @@ uint64_t CreateFile(HfsPlus::Source&,const Container& expected,uint64_t parent,c
 // Rename within the same directory, using on-disk inode IDs and the expected checkpoint.
 uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                      const std::u16string& name,Storage::Job&);
+// Delete a regular file or an empty folder. File blocks become reusable after publication.
+uint64_t DeleteEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job&);
 }

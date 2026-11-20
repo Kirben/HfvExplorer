@@ -364,4 +364,10 @@ uint64_t RenameEntry(Source& source,const Container& expected,uint64_t parent,ui
     const CatalogMutation request=CatalogRename{parent,inode,name};
     return Commit(source,expected,job,&request);
 }
+
+uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogDelete{parent,inode};
+    return Commit(source,expected,job,&request);
+}
 }
