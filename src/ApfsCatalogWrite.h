@@ -56,6 +56,7 @@ struct CatalogMetadata {
 struct CatalogAttributes {
     uint64_t parent,inode;
     const HfsPlus::Attributes& attributes;
+    bool external=false;
 };
 struct CatalogResourceFork {
     uint64_t parent,inode;

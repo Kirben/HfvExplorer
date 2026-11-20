@@ -482,7 +482,7 @@ public:
         capabilities.writable=writable;
         capabilities.createFolders=writable;
         capabilities.unicodeNames=true;
-        capabilities.attributes=!limitedEdits;
+        capabilities.attributes=true;
         capabilities.basicMetadata=writable;
         capabilities.finderMetadata=writable;
         capabilities.compression=writable;
@@ -1188,18 +1188,23 @@ public:
         },true);
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{
+        Storage::Job job;
+        SetAttributesForJob(id,attributes,job);
+    }
+    void SetAttributesForJob(uint32_t id,const Attributes& attributes,Storage::Job& job)override{
         ValidateWritableAttributes(attributes);
         WriteMount([&]{
+            if(job.cancelled())throw Storage::Cancelled();
             Check(id!=2,"APFS root attribute editing is unavailable");
             const auto& item=At(id);
             const auto parent=item.entry.parent;
-            const auto oid=item.oid;
-            const auto parentOid=At(parent).oid;
-            Storage::Job job;
+            const auto& folder=At(parent);
+            Check(!folder.entry.protectedFile,"The APFS destination folder is locked");
+            const auto oid=item.oid,parentOid=folder.oid;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetCatalogAttributes(*source,container,parentOid,oid,attributes,job);
+                return SetCatalogAttributes(*source,container,parentOid,oid,attributes,job,limitedEdits);
             },id);
-        });
+        },true);
     }
     void SetBasicMetadata(uint32_t id,const Entry& desired)override{
         WriteMount([&]{

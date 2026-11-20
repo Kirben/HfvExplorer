@@ -387,7 +387,7 @@ MetadataPlan DescribeMetadata(const EditAttributes& edit)
   Check(result.attributes==edit.original,"Attributes changed while Properties was open; reopen Properties before saving");
   Cancel(job);
   Mark(result,edit.item);
-  volume->SetAttributes(id,edit.desired);
+  volume->SetAttributesForJob(id,edit.desired,job);
   result.attributes=edit.desired;
   ReadClassicProperties(edit.item,*volume,id,false,result);
  });

@@ -419,9 +419,9 @@ uint64_t SetResourceFork(Source& source,const Container& expected,uint64_t paren
 }
 
 uint64_t SetCatalogAttributes(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                               const HfsPlus::Attributes& attributes,Storage::Job& job)
+                               const HfsPlus::Attributes& attributes,Storage::Job& job,bool external)
 {
-    const CatalogMutation request=CatalogAttributes{parent,inode,attributes};
+    const CatalogMutation request=CatalogAttributes{parent,inode,attributes,external};
     return Commit(source,expected,job,&request);
 }
 

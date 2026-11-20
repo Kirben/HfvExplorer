@@ -2404,6 +2404,51 @@ void ExternalResourceForkWrites(MacBrowser::Volume& volume,uint32_t folder)
     replace(streamed,file.modified+5);
     replace({},file.modified+6);
     verify({},file.modified+6);
+    replace(streamed,file.modified+7);
+    const auto beforeAttributes=volume.Stat(id);
+    const auto acl=[](unsigned count){
+        Bytes bytes(44+24*count);
+        Disk::P32(bytes.data(),0x012cc16d);
+        Disk::P32(bytes.data()+36,count);
+        for(unsigned i=0;i<count;++i){
+            bytes[44+24*i]=uint8_t(i+1);
+            Disk::P32(bytes.data()+60+24*i,1);
+            Disk::P32(bytes.data()+64+24*i,2);
+        }
+        return bytes;
+    };
+    auto attributes=file.attributes;
+    attributes[u"user.added"]=Bytes{1,2,3};
+    attributes[u"com.apple.system.Security"]=acl(1);
+    volume.SetAttributes(id,attributes);
+    Check(volume.GetAttributes(id)==attributes,"APFS did not add ordinary attributes and ACL");
+    auto replacement=attributes;
+    replacement[u"user.added"]=Bytes(9503,0x28);
+    replacement.erase(u"user.kept");
+    replacement[u"com.apple.system.Security"]=acl(128);
+    Storage::Job cancelledAttributes;
+    cancelledAttributes.cancel();
+    bool stopped=false;
+    try{volume.SetAttributesForJob(id,replacement,cancelledAttributes);}catch(const Storage::Cancelled&){stopped=true;}
+    Check(stopped&&volume.GetAttributes(id)==attributes,"Cancelled APFS edit changed attributes or ACL");
+    volume.SetAttributes(id,replacement);
+    Check(volume.GetAttributes(id)==replacement,"APFS did not replace streamed attributes and ACL");
+    auto malformed=replacement;
+    malformed[u"com.apple.system.Security"]=Bytes(67);
+    Reject([&]{volume.SetAttributes(id,malformed);},"APFS accepted a malformed ACL");
+    Check(volume.GetAttributes(id)==replacement,"Rejected APFS ACL changed existing attributes");
+    volume.SetAttributes(id,{});
+    const auto after=volume.Stat(id);
+    Check(volume.GetAttributes(id).empty()&&after.identity==beforeAttributes.identity&&
+          after.created==beforeAttributes.created&&after.modified==beforeAttributes.modified&&
+          after.finder==beforeAttributes.finder&&after.forks[0].size==data.size()&&after.forks[1].size==streamed.size(),
+          "APFS attribute edits changed unrelated metadata");
+    for(unsigned fork:{0u,1u}){
+        const auto& expected=fork?streamed:data;
+        Bytes actual(expected.size());
+        volume.Read(id,fork,0,actual.data(),actual.size());
+        Check(actual==expected,"APFS attribute edits changed a file fork");
+    }
 }
 
 void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wchar_t* fixture)
@@ -2543,7 +2588,7 @@ void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFi
     }
     fprintf(report,"PASS: %s APFS writes in GPT slices, 512/4096 sector geometry, read-only flags, unchanged partition tables and file readback.\n",
             macFixture?"macOS-created":"HFVExplorer-created");
-    if(macFixture)fprintf(report,"PASS: macOS APFS resource fork add, embedded/streamed replacement, clear, cancellation, and data and metadata preservation.\n");
+    if(macFixture)fprintf(report,"PASS: macOS APFS resource forks, embedded/streamed attributes, ACL edits, cancellation, and data and metadata preservation.\n");
 }
 
 }
@@ -2806,6 +2851,16 @@ int RunApfsContainerTest(const char* directory)
                     const auto afterRenameCancellation=Apfs::Probe(interruptedCompression);
                     Check(renameCancelled&&afterRenameCancellation&&afterRenameCancellation->transaction==checkpoint.transaction,
                           "Cancelled compressed APFS rename published a checkpoint");
+                    Storage::Job cancelAttributes;
+                    interruptedCompression.onFlush=[&]{cancelAttributes.cancel();};
+                    bool attributesCancelled=false;
+                    try{
+                        Apfs::SetCatalogAttributes(interruptedCompression,checkpoint,2,430,
+                            {{u"user.cancelled",Bytes(8001,0x42)}},cancelAttributes,true);
+                    }catch(const Storage::Cancelled&){attributesCancelled=true;}
+                    const auto afterAttributeCancellation=Apfs::Probe(interruptedCompression);
+                    Check(attributesCancelled&&afterAttributeCancellation&&afterAttributeCancellation->transaction==checkpoint.transaction,
+                          "Cancelled APFS streamed attribute edit published a checkpoint");
                     Storage::Job cancelCompressedDelete;
                     interruptedCompression.onFlush=[&]{cancelCompressedDelete.cancel();};
                     constexpr uint64_t compressedInode=430; // Inode of decmpfs.txt in the macOS fixture.
@@ -2964,7 +3019,7 @@ int RunApfsContainerTest(const char* directory)
                 Check(importedBytes[i]==(i*13)%251,"Created APFS file readback differs");
             const auto caps=published->Supports();
             Check(caps.rename&&caps.writable&&!published->Writable()&&caps.create&&caps.createFolders&&
-                  caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
+                  caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&caps.CanEditAttributes()&&
                   caps.CanEditCompression()&&caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
             const auto importPath=VolumeCoord::Wide(root+"apfs-import-source.img");
@@ -3110,7 +3165,7 @@ int RunApfsContainerTest(const char* directory)
             const auto changeCompression=[&](CompressionMode method){
                 auto operation=FileOperations::Submit(FileOperations::ChangeCompression{
                     FileOperations::Location::Mounted(published,transformId),published->Stat(transformId),
-                    {},method});
+                    transform.attributes,method});
                 const auto start=GetTickCount();
                 while(!operation.Job()->done()){
                     Check(GetTickCount()-start<15000,"In-place APFS compression job timed out");

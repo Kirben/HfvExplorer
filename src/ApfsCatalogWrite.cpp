@@ -1711,51 +1711,56 @@ uint32_t ReadExternalCompressionMode(Source& source,const std::vector<OwnedRecor
     return Le32(header+4);
 }
 
-void ReplaceExternalResource(std::vector<OwnedRecord>& catalog,const CatalogResourceFork& edit,
-                             const ResourceWrite& resource,uint64_t time,const CatalogRecords& extentTree,
-                             std::set<uint64_t>& retired)
+void ReplaceExternalAttributes(std::vector<OwnedRecord>& catalog,uint64_t parent,uint64_t id,
+                               const HfsPlus::Attributes* ordinary,const ResourceWrite* resource,
+                               const AttributeStreams& attributeStreams,uint64_t modified,uint64_t time,
+                               const CatalogRecords& extentTree,std::set<uint64_t>& retired)
 {
-    const auto inodeKey=(uint64_t(3)<<60)|edit.inode;
-    const auto parentKey=(uint64_t(9)<<60)|edit.parent;
+    const auto inodeKey=(uint64_t(3)<<60)|id;
+    const auto parentKey=(uint64_t(9)<<60)|parent;
     const auto inode=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
         return record.key.size()==8&&Le64(record.key.data())==inodeKey;
     });
     Check(inode!=catalog.end()&&inode->value.size()>=92,"Missing APFS resource fork inode");
     auto& value=inode->value;
-    Check((Le16(value.data()+80)&0170000)==0100000&&Le32(value.data()+56)&&
-          !(Le32(value.data()+68)&(UserImmutable|SystemImmutable|BsdCompressed)),
-          "Select an unlocked, uncompressed APFS regular file");
+    const auto kind=(Le16(value.data()+80)&0170000)>>12;
+    const auto flags=Le32(value.data()+68);
+    Check((kind==8||(kind==4&&!resource))&&!(flags&(UserImmutable|SystemImmutable))&&
+          (!resource||!(flags&BsdCompressed)),
+          "The APFS entry is locked or does not support this attribute edit");
     Check(std::any_of(catalog.begin(),catalog.end(),[&](const auto& record){
         return record.key.size()>=14&&Le64(record.key.data())==parentKey&&record.value.size()>=18&&
-               Le64(record.value.data())==edit.inode&&Le16(record.value.data()+16)==8;
+               Le64(record.value.data())==id&&Le16(record.value.data()+16)==kind;
     }),"The APFS resource fork target no longer exists");
 
-    auto attributes=EncodeAttributes(edit.inode,nullptr,&resource,{});
+    auto attributes=EncodeAttributes(id,ordinary,resource,attributeStreams);
     std::set<uint64_t> streams,removeStreams;
-    bool foundResource=false;
+    std::set<std::string_view> names;
     const auto first=std::next(inode);
     auto after=first;
-    for(;after!=catalog.end()&&Le64(after->key.data())==((uint64_t(4)<<60)|edit.inode);++after){
+    for(;after!=catalog.end()&&Le64(after->key.data())==((uint64_t(4)<<60)|id);++after){
         const auto& old=after->value;
         Check(after->key.size()>=12&&!after->key.back()&&old.size()>=4&&Le16(old.data()+2)==old.size()-4,
               "Invalid APFS resource fork attribute");
         const std::string_view name(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
         const auto storage=Le16(old.data());
-        Check(name!=CompressionAttribute&&name!=SymlinkAttribute&&(storage==2||(storage==1&&old.size()==52)),
-              "Unsupported APFS resource fork target attributes");
+        Check(names.insert(name).second&&(!resource||name!=CompressionAttribute)&&
+              name!=SymlinkAttribute&&(storage==2||(storage==1&&old.size()==52)),
+              "Unsupported APFS attribute record");
+        const bool replace=(resource&&name==ResourceAttribute)||(ordinary&&OrdinaryAttribute(name));
         if(storage==1){
             const auto stream=Le64(old.data()+4);
-            Check(stream>edit.inode&&streams.insert(stream).second,"Invalid APFS attribute stream ID");
-            if(name==ResourceAttribute)removeStreams.insert(stream);
+            Check(stream>id&&streams.insert(stream).second,"Invalid APFS attribute stream ID");
+            if(replace)removeStreams.insert(stream);
         }
-        if(name==ResourceAttribute){
-            Check(!foundResource,"Repeated APFS resource fork");
-            foundResource=true;
-        }else attributes.push_back(*after);
+        if(!replace)attributes.push_back(*after);
     }
-    CollectExternalRetiredExtents(catalog,edit.inode,removeStreams,extentTree,retired);
-    SetResourceFlag(value,resource.size!=0);
-    Set(value,24,CatalogTimestamp(edit.modified),8);
+    CollectExternalRetiredExtents(catalog,id,removeStreams,extentTree,retired);
+    if(ordinary)SetSecurityFlag(value,*ordinary);
+    if(resource){
+        SetResourceFlag(value,resource->size!=0);
+        Set(value,24,CatalogTimestamp(modified),8);
+    }
     Set(value,32,time,8);
     SortAttributes(attributes);
     const auto insert=catalog.erase(first,after);
@@ -2448,10 +2453,12 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool externalHardLink=hardLink&&hardLink->external;
     const bool externalReplace=replace&&replace->external;
     const bool externalResource=resourceEdit&&resourceEdit->external;
+    const auto* attributeEdit=std::get_if<CatalogAttributes>(&request);
+    const bool externalAttributes=attributeEdit&&attributeEdit->external;
     const bool externalLinkReplace=linkReplacement&&linkReplacement->external;
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
-    if(properties||externalCreate||externalReplace||externalResource||externalDelete||externalLinkReplace||externalHardLink)CheckExternalVolume(volume);
+    if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)CheckExternalVolume(volume);
     else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -2466,7 +2473,6 @@ CatalogWritePlan PrepareCatalogMutation(
         resource->id=nextId+bool(create);
         plan.streams.back().id=resource->id;
     }
-    const auto* attributeEdit=std::get_if<CatalogAttributes>(&request);
     const auto* attributes=attributeEdit?&attributeEdit->attributes:replace?replace->attributes:
                            create?create->attributes:linkReplacement?&linkReplacement->attributes:nullptr;
     AttributeStreams attributeIds;
@@ -2526,9 +2532,11 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(externalLinkReplace){
         catalog=std::move(existing.records);
         ReplaceExternalSymlink(catalog,*linkReplacement,time,attributeIds,extentTree,externalRetired);
-    }else if(externalResource){
+    }else if(externalResource||externalAttributes){
         catalog=std::move(existing.records);
-        ReplaceExternalResource(catalog,*resourceEdit,*resource,time,extentTree,externalRetired);
+        ReplaceExternalAttributes(catalog,externalResource?resourceEdit->parent:attributeEdit->parent,entryId,
+                                  externalAttributes?attributes:nullptr,externalResource?&*resource:nullptr,
+                                  attributeIds,externalResource?resourceEdit->modified:0,time,extentTree,externalRetired);
     }else if(externalReplace){
         catalog=std::move(existing.records);
         TouchExternalParent(catalog,replace->parent,time,0);
@@ -2663,7 +2671,7 @@ CatalogWritePlan PrepareCatalogMutation(
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
                             directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
     }
-    if(properties||externalCreate||externalReplace||externalResource||externalDelete||externalLinkReplace||externalHardLink){
+    if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink){
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});
@@ -2678,7 +2686,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        if(externalReplace||externalResource||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
+        if(externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;

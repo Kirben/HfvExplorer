@@ -101,6 +101,9 @@ public:
     virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}
     virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
     virtual void SetAttributes(uint32_t,const HfsPlus::Attributes&){throw HfsPlus::Error("This format cannot store extended attributes or Mac ACLs");}
+    virtual void SetAttributesForJob(uint32_t id,const HfsPlus::Attributes& attributes,Storage::Job&) {
+        SetAttributes(id,attributes);
+    }
     virtual void ValidateCopyNames(uint32_t,const std::vector<Entry>&,bool) {}
     virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool) {}
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}

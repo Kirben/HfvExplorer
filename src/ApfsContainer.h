@@ -51,7 +51,7 @@ inline constexpr size_t EmbeddedAttributeLimit=3804;
 uint64_t SetResourceFork(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                                  HfsPlus::Source&,uint64_t modified,Storage::Job&,bool external=false);
 uint64_t SetCatalogAttributes(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                               const HfsPlus::Attributes&,Storage::Job&);
+                               const HfsPlus::Attributes&,Storage::Job&,bool external=false);
 uint64_t CreateCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent,const std::u16string&,
                               const HfsPlus::Bytes& target,Storage::Job&,std::optional<FileDates> dates,
                               const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false);
