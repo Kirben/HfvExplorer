@@ -338,6 +338,13 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
 }
 }
 
+uint64_t InspectAllocationFreeBytes(Source& source,const Container& container)
+{
+    auto checkpoint=PlanCheckpoint(source,container);
+    const auto& space=CheckpointObjectById(checkpoint,Le64(checkpoint.superblock.data()+152));
+    return VerifyAllocationBitmaps(source,container,space);
+}
+
 uint64_t WritableFreeBytes(Source& source,const Container& container)
 {
     auto checkpoint=PlanCheckpoint(source,container);

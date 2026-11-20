@@ -261,13 +261,26 @@ void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<DataRun> ranges,u
     Set(space,field+16,transaction,8);
 }
 
-template<class RequiredMetadata>
-std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& container,
-                              Bytes& space,Bytes& superblock,const CheckpointObjectLookup& ephemeral,
-                              const std::vector<uint64_t>& retire,const std::vector<uint64_t>& extentNodes,uint64_t snapshots,
-                              const std::vector<FileRun>& files,std::vector<DataRun> retiredData,
-                              uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
-                              uint64_t transaction,RequiredMetadata requiredMetadata)
+struct ChunkBitmap {
+    uint64_t size,available,oldBlock;
+    Bytes bitmap;
+    bool dirty=false;
+};
+struct ChunkInfoBlock {
+    uint64_t address;
+    Bytes bytes;
+    bool dirty=false;
+};
+
+struct AllocationBitmaps {
+    std::vector<ChunkBitmap> bitmaps;
+    std::vector<ChunkInfoBlock> cibs;
+    std::set<uint64_t> currentPoolBlocks;
+    uint64_t available,pool,poolSize,currentBitmapBase;
+    uint32_t cibOffset,bitmapSlots;
+};
+
+AllocationBitmaps ReadAllocationBitmaps(Source& source,const Container& container,const Bytes& space)
 {
     const auto chunks=DivideUp(container.blockCount,Chunk);
     const auto cibCount=DivideUp(chunks,ChunksPerCib);
@@ -286,16 +299,6 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
           currentBitmapBase&&Range(currentBitmapBase,bitmapSlots,mainLimit)&&currentBitmapBase+bitmapSlots<=pool&&
           Range(pool,poolSize,mainLimit),
           "Invalid APFS internal pool geometry");
-    struct ChunkBitmap {
-        uint64_t size,available,oldBlock;
-        Bytes bitmap;
-        bool dirty=false;
-    };
-    struct ChunkInfoBlock {
-        uint64_t address;
-        Bytes bytes;
-        bool dirty=false;
-    };
     std::vector<ChunkBitmap> bitmaps;
     std::vector<ChunkInfoBlock> cibs;
     std::set<uint64_t> currentPoolBlocks;
@@ -341,6 +344,23 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         cibs.push_back({address,std::move(cib)});
     }
     Check(available==Le64(space.data()+72),"APFS space manager and chunk counts disagree");
+
+    return {std::move(bitmaps),std::move(cibs),std::move(currentPoolBlocks),
+            available,pool,poolSize,currentBitmapBase,cibOffset,bitmapSlots};
+}
+
+
+template<class RequiredMetadata>
+std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& container,
+                              Bytes& space,Bytes& superblock,const CheckpointObjectLookup& ephemeral,
+                              const std::vector<uint64_t>& retire,const std::vector<uint64_t>& extentNodes,uint64_t snapshots,
+                              const std::vector<FileRun>& files,std::vector<DataRun> retiredData,
+                              uint64_t dataBlocks,std::vector<DataRun>& dataRuns,
+                              uint64_t transaction,RequiredMetadata requiredMetadata)
+{
+    auto [bitmaps,cibs,currentPoolBlocks,available,pool,poolSize,currentBitmapBase,cibOffset,bitmapSlots]=
+        ReadAllocationBitmaps(source,container,space);
+
 
     const auto xidOffset=Le32(space.data()+324),bitmapOffset=Le32(space.data()+328),nextOffset=Le32(space.data()+332);
     Check(xidOffset>=336&&Range(xidOffset,8,space.size())&&bitmapOffset>=xidOffset+8&&
@@ -431,7 +451,7 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
         available-=count;
     };
     std::vector<DataRun> freeRuns;
-    for(uint64_t chunk=0;chunk<chunks&&dataBlocks;++chunk){
+    for(uint64_t chunk=0;chunk<bitmaps.size()&&dataBlocks;++chunk){
         const auto& bitmap=bitmaps[chunk];
         if(bitmap.available==bitmap.size){
             freeRuns.push_back({chunk*Chunk,bitmap.size});
@@ -1569,6 +1589,11 @@ CatalogLayoutCounts InspectCatalogLayout(Source& source,const Container& contain
     const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
     const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
     return {catalog.records.size(),extents.records.size()};
+}
+
+uint64_t VerifyAllocationBitmaps(Source& source,const Container& container,const Bytes& space)
+{
+    return ReadAllocationBitmaps(source,container,space).available*container.blockSize;
 }
 
 void ValidateWritableLayout(Source& source,const Container& container)

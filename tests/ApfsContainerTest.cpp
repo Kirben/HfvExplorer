@@ -2538,6 +2538,9 @@ int RunApfsContainerTest(const char* directory)
             const auto layout=Apfs::InspectCatalogLayout(*raw,*before);
             Check(layout.catalogRecords>800&&layout.extentReferences>100,
                   "The write planner did not validate the macOS-generated catalog and extent tree");
+            const auto free=Apfs::InspectAllocationFreeBytes(*raw,*before);
+            Check(free>0&&free<raw->Size()&&free==Apfs::WritableFreeBytes(*raw,*before),
+                  "APFS macOS allocation bitmap totals did not match the space manager");
             const auto image=Disk::Read(*raw,0,size_t(raw->Size()));
             {
                 CheckpointFaultImage interrupted(image);
