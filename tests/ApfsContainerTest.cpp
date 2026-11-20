@@ -1281,7 +1281,7 @@ void WritableNamespace(const std::string& root,FILE* report)
         Check(nestedRefused&&!mounted->FindChild(2,u"Nested write",unused),"APFS nested write changed the catalog");
         for(const auto withResource:{false,true}){
             auto unsupported=replacement;
-            if(withResource)unsupported.forks[1].size=Apfs::EmbeddedAttributeLimit;
+            if(withResource)unsupported.forks[1].size=UINT64_MAX;
             else unsupported.version=1;
             const auto before=raw->event;
             Reject([&]{mounted->Put(2,unsupported,[](unsigned,uint64_t,void*,size_t){},true);},
@@ -1324,7 +1324,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-embedded-resource.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-streamed-resource.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1338,7 +1338,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     file.attributes={{u"user.sample",{1,2,3}},{u"user.\u00e9",HfsPlus::Bytes{}},{u"user.\U0001f600",{0xff,0}}};
     std::copy_n("TEXTttxt",8,file.finder.begin());
     file.forks[0].size=5;
-    file.forks[1].size=3;
+    file.forks[1].size=9003;
     folder.name=u"Folder";
     folder.attributes={{u"user.folder",{0,7}}};
     Bytes acl(68);
@@ -1352,7 +1352,12 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     folder.directory=true;
     folder.finder[9]=0x08;
     const auto contents=[](unsigned fork,uint64_t offset,void* data,size_t bytes){
-        const std::string_view content=fork?"xyz":"abcde";
+        if(fork==1){
+            Check(offset<=9003&&bytes<=9003-offset,"Unexpected APFS resource read");
+            memset(data,'x',bytes);
+            return;
+        }
+        const std::string_view content="abcde";
         Check(fork<2&&offset<=content.size()&&bytes<=content.size()-offset,"Unexpected APFS fixture read");
         memcpy(data,content.data()+offset,bytes);
     };
@@ -1394,7 +1399,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         edited.erase(u"com.apple.system.Security");
         edited[u"user.new"]={9,8,7};
         mounted->SetAttributes(id,edited);
-        Check(mounted->Stat(id).forks[1].size==3,"Editing APFS attributes cleared the resource fork");
+        Check(mounted->Stat(id).forks[1].size==9003,"Editing APFS attributes cleared the resource fork");
         const auto original=mounted->Stat(id);
         auto replacement=original;
         replacement.forks[1].size=2;
@@ -1411,7 +1416,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         mounted->PutResourceReplacement(id,replacement,{},{});
         Check(!mounted->Stat(id).forks[1].size,"APFS resource removal did not clear the fork");
         replacement=mounted->Stat(id);
-        replacement.forks[1].size=3;
+        replacement.forks[1].size=9003;
         mounted->PutResourceReplacement(id,replacement,contents,{});
         Check(mounted->GetAttributes(id)==edited&&mounted->Stat(id).finder==file.finder&&
               mounted->Stat(id).forks[0].size==5,"APFS attribute editing lost other metadata or file data");
@@ -1444,9 +1449,9 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         std::array<char,5> data{};
         mounted->Read(foundFile.id,0,0,data.data(),data.size());
         Check(std::string(data.begin(),data.end())=="abcde","APFS Finder information changed the data fork");
-        std::array<char,3> fork{};
-        mounted->Read(foundFile.id,1,0,fork.data(),fork.size());
-        Check(std::string(fork.begin(),fork.end())=="xyz","APFS resource fork did not survive reopening");
+        std::array<char,6> fork{};
+        mounted->Read(foundFile.id,1,8997,fork.data(),fork.size());
+        Check(std::string(fork.begin(),fork.end())=="xxxxxx","APFS streamed resource fork did not survive reopening");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);

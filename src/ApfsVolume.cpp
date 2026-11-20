@@ -822,7 +822,6 @@ public:
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
-        Check(entry.forks[1].size<EmbeddedAttributeLimit,"APFS resource fork requires a data stream");
         Check(entry.readError.empty()&&
               !entry.hardLink&&!entry.compressed&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
@@ -844,32 +843,28 @@ public:
                          const std::wstring&,Storage::Job& job)override{
         return PutForTransfer(parent,entry,std::move(reader),replace,job);
     }
+    class ForkInput final:public Source {
+        const uint64_t size;
+        const unsigned fork;
+        const MacBrowser::Reader& read;
+    public:
+        ForkInput(uint64_t length,unsigned selector,const MacBrowser::Reader& reader):size(length),fork(selector),read(reader){}
+        uint64_t Size()const override{return size;}
+        bool Writable()const override{return false;}
+        void Read(uint64_t at,void* bytes,size_t length)override{
+            Check(Range(at,length,size)&&bool(read),"Invalid APFS input fork request");
+            read(fork,at,bytes,length);
+        }
+        void Write(uint64_t,const void*,size_t)override{ReadOnly();}
+        void Flush()override{}
+    };
     uint32_t PutForTransfer(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
                             Storage::Job& job)override{
         ValidateEntry(entry);
         Check(!entry.directory,"Select a regular file for APFS data transfer");
         const auto dates=CopyDates(entry);
-        Bytes resource(size_t(entry.forks[1].size));
-        if(!resource.empty()){
-            Check(bool(reader),"Missing APFS resource fork reader");
-            if(job.cancelled())throw Storage::Cancelled();
-            reader(1,0,resource.data(),resource.size());
-        }
         const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
-        class DataFork final:public Source {
-            const uint64_t size;
-            const MacBrowser::Reader& read;
-        public:
-            DataFork(uint64_t length,const MacBrowser::Reader& reader):size(length),read(reader){}
-            uint64_t Size()const override{return size;}
-            bool Writable()const override{return false;}
-            void Read(uint64_t at,void* bytes,size_t length)override{
-                Check(Range(at,length,size)&&bool(read),"Invalid APFS input data request");
-                read(0,at,bytes,length);
-            }
-            void Write(uint64_t,const void*,size_t)override{ReadOnly();}
-            void Flush()override{}
-        } data(entry.forks[0].size,reader);
+        ForkInput data(entry.forks[0].size,0,reader),resource(entry.forks[1].size,1,reader);
 
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
@@ -900,12 +895,7 @@ public:
     }
     uint32_t PutResourceReplacement(uint32_t id,const Entry& desired,MacBrowser::Reader reader,
                                      std::function<void(uint64_t,size_t)> keptData)override{
-        Check(desired.forks[1].size<EmbeddedAttributeLimit,"APFS resource fork requires a data stream");
-        Bytes resource(size_t(desired.forks[1].size));
-        if(!resource.empty()){
-            Check(bool(reader),"Missing APFS resource fork reader");
-            reader(1,0,resource.data(),resource.size());
-        }
+        ForkInput resource(desired.forks[1].size,1,reader);
         return WriteMount([&]{
             const auto& item=At(id);
             const auto& current=item.entry;
@@ -917,7 +907,7 @@ public:
             const auto parentOid=At(parent).oid,oid=item.oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetEmbeddedResourceFork(*source,container,parentOid,oid,resource,desired.modified,job);
+                return SetResourceFork(*source,container,parentOid,oid,resource,desired.modified,job);
             });
             return id;
         });

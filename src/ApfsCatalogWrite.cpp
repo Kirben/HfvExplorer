@@ -25,6 +25,7 @@ using OwnedRecord=WriterDisk::Record;
 using Writes=std::vector<CheckpointBlockWrite>;
 struct FileRun {
     uint64_t owner,block,count;
+    uint64_t stream=0;
 };
 constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
@@ -479,7 +480,7 @@ OwnedRecord StreamReference(uint64_t inode)
 OwnedRecord FileExtent(const FileRun& run,uint64_t logicalBlock)
 {
     OwnedRecord record{Bytes(16),Bytes(24)};
-    Set(record.key,0,(uint64_t(8)<<60)|run.owner,8);
+    Set(record.key,0,(uint64_t(8)<<60)|(run.stream?run.stream:run.owner),8);
     Set(record.key,8,logicalBlock*Block,8);
     Set(record.value,0,run.count*Block,8);
     Set(record.value,8,run.block,8);
@@ -553,8 +554,12 @@ void SortAttributes(std::vector<OwnedRecord>& records)
         return std::lexicographical_compare(a.key.begin()+10,a.key.end(),b.key.begin()+10,b.key.end());
     });
 }
+struct ResourceWrite {
+    Source* input;
+    uint64_t size,id;
+};
 std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attributes* attributes,
-                                          const Bytes* resource=nullptr)
+                                          const ResourceWrite* resource=nullptr)
 {
     std::vector<OwnedRecord> records;
     if(attributes){
@@ -565,10 +570,14 @@ std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attribut
             records.push_back(std::move(record));
         }
     }
-    if(resource&&!resource->empty()){
-        Check(resource->size()<EmbeddedAttributeLimit,"APFS resource fork requires a data stream");
-        auto record=EmbeddedAttribute(inode,ResourceAttribute,resource->size());
-        std::copy(resource->begin(),resource->end(),record.value.begin()+4);
+    if(resource&&resource->size){
+        auto record=EmbeddedAttribute(inode,ResourceAttribute,resource->id?48:size_t(resource->size));
+        if(resource->id){
+            Set(record.value,0,1,2);
+            Set(record.value,4,resource->id,8);
+            Set(record.value,12,resource->size,8);
+            Set(record.value,20,DivideUp(resource->size,Block)*Block,8);
+        }else resource->input->Read(0,record.value.data()+4,size_t(resource->size));
         records.push_back(std::move(record));
     }
     return records;
@@ -577,7 +586,7 @@ std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attribut
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
     uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
-    size_t& streamAt,const std::optional<FileDates>& dates)
+    size_t& streamAt,const std::optional<FileDates>& dates,const ResourceWrite* resourceWrite,uint64_t& retiredResource)
 {
     Check(directoryCount<=records.size()&&fileCount<=records.size(),"Invalid APFS catalog entry counts");
     const auto at=[&](size_t i){
@@ -639,6 +648,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         std::optional<size_t> resourceRecord;
     };
     std::map<uint64_t,Link> links;
+    struct ResourceStream {uint64_t inode,blocks;};
+    std::map<uint64_t,ResourceStream> resourceStreams;
     uint64_t files=0;
     for(size_t i=0;i<records.size();++i){
         const auto view=at(i);
@@ -681,6 +692,27 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(child>=16&&child>inode&&child<nextId&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
                       "Invalid or duplicate APFS directory entry ID");
                 ++folder->second.children;
+            }else if(type==8){
+                const auto stream=resourceStreams.find(inode);
+                Check(stream!=resourceStreams.end(),"APFS extent has no resource stream");
+                const auto size=stream->second.blocks;
+                for(uint64_t logical=0;logical<size;++streamRecords){
+                    const auto index=i+streamRecords;
+                    Check(index<records.size(),"Missing APFS resource extent");
+                    const auto extent=at(index);
+                    Check(extent.value.size==24,"Invalid APFS resource extent size");
+                    const auto length=Le64(extent.value.data);
+                    const FileRun run{stream->second.inode,Le64(extent.value.data+8),length/Block,inode};
+                    Check(run.block&&run.count&&!(length%Block)&&run.count<=size-logical&&
+                          Range(run.block,run.count,blockCount),"Invalid APFS resource extent");
+                    const auto encoded=FileExtent(run,logical);
+                    Check(Matches(extent.key,encoded.key)&&Matches(extent.value,encoded.value),
+                          "Invalid APFS resource extent order");
+                    fileRuns.push_back(run);
+                    logical+=run.count;
+                }
+                --streamRecords;
+                resourceStreams.erase(stream);
             }else{
                 Check(type==3&&view.key.size==8&&view.value.size>=92&&Le64(view.value.data+8)==inode,
                       "Invalid APFS inode");
@@ -702,7 +734,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         if(attr.key.size<8||Le64(attr.key.data)!=((uint64_t(4)<<60)|inode))break;
                         Check(attr.key.size>=12&&attr.key.size<=138&&attr.key.data[attr.key.size-1]==0&&
                               Le16(attr.key.data+8)==attr.key.size-10&&attr.value.size>=4&&
-                              Le16(attr.value.data)==2&&Le16(attr.value.data+2)==attr.value.size-4&&
+                              Le16(attr.value.data+2)==attr.value.size-4&&
                               attr.value.size-4<EmbeddedAttributeLimit,"Invalid APFS embedded attribute");
                         const std::string name(reinterpret_cast<const char*>(attr.key.data+10),attr.key.size-11);
                         Check(name>previousAttribute&&name.find('\0')==name.npos&&(OrdinaryAttribute(name)||name==ResourceAttribute),
@@ -712,6 +744,17 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                             Check(kind==CatalogKind::RegularFile&&attr.value.size>4,"Invalid APFS resource fork");
                             link->second.resourceRecord=i+1+streamRecords;
                         }
+                        const auto storage=Le16(attr.value.data);
+                        if(storage==1){
+                            Check(name==ResourceAttribute&&attr.value.size==52,"Unsupported APFS attribute stream");
+                            const auto id=Le64(attr.value.data+4),size=Le64(attr.value.data+12);
+                            const auto blocks=DivideUp(size,Block);
+                            Check(id>inode&&id<nextId&&size>=EmbeddedAttributeLimit&&blocks<=blockCount&&
+                                  Le64(attr.value.data+20)==blocks*Block&&
+                                  !Le64(attr.value.data+28)&&!Le64(attr.value.data+36)&&!Le64(attr.value.data+44)&&
+                                  resourceStreams.emplace(id,ResourceStream{inode,blocks}).second,
+                                  "Invalid APFS resource stream");
+                        }else Check(storage==2,"Invalid APFS embedded attribute flags");
                         previousAttribute=name;
                     }
                     link->second.attributes=streamRecords;
@@ -776,7 +819,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         i+=streamRecords;
     }
-    Check(directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
+    Check(resourceStreams.empty()&&directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
           files==fileCount&&links.size()==directoryCount+fileCount,"APFS catalog records and volume counts disagree");
     for(const auto& entry:directories){
         const auto& folder=entry.second;
@@ -799,8 +842,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         if(create->locked)Set(records.back().value,68,UserImmutable,4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
-        auto attributes=EncodeAttributes(entryId,create->attributes,create->resource);
-        if(create->resource)SetResourceFlag(records.back().value,!create->resource->empty());
+        auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite);
+        if(resourceWrite)SetResourceFlag(records.back().value,resourceWrite->size!=0);
         SortAttributes(attributes);
         records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
         streamAt=records.size();
@@ -819,15 +862,19 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Set(inode,32,time,8);
             return records;
         }
+        if(link.resourceRecord&&(resourceWrite||remove)){
+            const auto& oldResource=records[*link.resourceRecord].value;
+            if(Le16(oldResource.data())==1)retiredResource=Le64(oldResource.data()+4);
+        }
         const auto afterInode=link.inodeRecord+1;
-        const auto rewriteAttributes=[&](const HfsPlus::Attributes* ordinary,const Bytes* resource,size_t streams){
+        const auto rewriteAttributes=[&](const HfsPlus::Attributes* ordinary,const ResourceWrite* resource,size_t streams){
             auto attributes=EncodeAttributes(entryId,ordinary,resource);
             for(size_t index=afterInode;index<afterInode+link.attributes;++index){
                 const bool isResource=link.resourceRecord==index;
                 if(isResource?!resource:!ordinary)attributes.push_back(std::move(records[index]));
             }
             if(ordinary)SetSecurityFlag(inode,*ordinary);
-            if(resource)SetResourceFlag(inode,!resource->empty());
+            if(resource)SetResourceFlag(inode,resource->size!=0);
             SortAttributes(attributes);
             records.erase(records.begin()+afterInode,records.begin()+afterInode+link.attributes+streams);
             records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
@@ -843,7 +890,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Check(link.kind==CatalogKind::RegularFile,"Select a regular file for APFS resource import");
             Set(inode,24,CatalogTimestamp(resourceEdit->modified),8);
             Set(inode,32,time,8);
-            rewriteAttributes(nullptr,&resourceEdit->resource,0);
+            rewriteAttributes(nullptr,resourceWrite,0);
             return records;
         }
         const auto mode=Le16(inode.data()+80);
@@ -884,7 +931,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             return records;
         }
         if(replace){
-            streamAt=rewriteAttributes(replace->attributes,replace->resource,link.streamRecords);
+            streamAt=rewriteAttributes(replace->attributes,resourceWrite,link.streamRecords);
             return records;
         }
 
@@ -1038,8 +1085,16 @@ CatalogWritePlan PrepareCatalogMutation(
     auto* input=replace?&replace->data:create?create->data:nullptr;
     const auto dataSize=input?input->Size():0;
     if(dataSize)plan.streams.push_back({*input,dataSize});
-    const auto dataBlocks=DivideUp(dataSize,Block);
-    Check(dataBlocks<=current.blockCount,"APFS file exceeds the container size");
+    const auto fileBlocks=DivideUp(dataSize,Block);
+    const auto* resourceEdit=std::get_if<CatalogResourceFork>(&request);
+    auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
+    std::optional<ResourceWrite> resource;
+    if(resourceInput)resource=ResourceWrite{resourceInput,resourceInput->Size(),0};
+    const auto resourceBlocks=resource&&resource->size>=EmbeddedAttributeLimit?DivideUp(resource->size,Block):0;
+    Check(fileBlocks<=current.blockCount&&resourceBlocks<=current.blockCount-fileBlocks,
+          "APFS forks exceed the container size");
+    const auto dataBlocks=fileBlocks+resourceBlocks;
+    if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
     const auto oid=current.volumes.front();
     const auto containerMap=ReadWritableMap(source,current,current.objectMap);
     Check(containerMap.mappings.size()==1&&containerMap.mappings.front().oid==oid,
@@ -1059,6 +1114,9 @@ CatalogWritePlan PrepareCatalogMutation(
     auto existing=ReadWritableCatalog(source,current,volumeMap,catalogOid);
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
+    const auto nextAvailable=nextId+bool(create)+bool(resourceBlocks);
+    Check(nextAvailable<IdMask,"APFS file-system object IDs are exhausted");
+    if(resourceBlocks)resource->id=nextId+bool(create);
     FILETIME fileTime{};
     GetSystemTimeAsFileTime(&fileTime);
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
@@ -1069,18 +1127,26 @@ CatalogWritePlan PrepareCatalogMutation(
         if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogCreate>)return nextId;
         else return edit.inode;
     },request);
+    uint64_t retiredResource=0;
     auto catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
-                            directoryCount,fileCount,dataSize,current.blockCount,files,removedKind,streamAt,dates);
+                            directoryCount,fileCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,retiredResource);
     ValidateExtentReferences(extentTree,files);
-    const bool retireOldData=replace||removedKind.has_value();
+    if(retiredResource){
+        const auto key=(uint64_t(8)<<60)|retiredResource;
+        catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
+            return Le64(record.key.data())==key;
+        }),catalog.end());
+    }
+    const bool retireFile=replace||removedKind.has_value();
+    const auto retiredRun=[&](const FileRun& run){
+        return run.stream?run.stream==retiredResource:retireFile&&run.owner==entryId;
+    };
     std::vector<DataRun> retiredData;
     uint64_t removedBlocks=0;
-    if(retireOldData){
-        for(const auto& run:files){
-            if(run.owner!=entryId)continue;
-            retiredData.push_back({run.block,run.count});
-            removedBlocks+=run.count;
-        }
+    for(const auto& run:files){
+        if(!retiredRun(run))continue;
+        retiredData.push_back({run.block,run.count});
+        removedBlocks+=run.count;
     }
     const bool changeExtents=dataBlocks||removedBlocks;
     auto& space=ephemeral(Le64(superblock.data()+152));
@@ -1096,7 +1162,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
         retired,extents,snapshots,files,std::move(retiredData),dataBlocks,allocatedData,transaction,[&]{
             AssignDataRuns(plan.streams,allocatedData);
-            if(dataBlocks){
+            if(fileBlocks){
                 std::vector<OwnedRecord> stream;
                 stream.push_back(StreamReference(entryId));
                 uint64_t logical=0;
@@ -1108,16 +1174,23 @@ CatalogWritePlan PrepareCatalogMutation(
                 catalog.insert(catalog.begin()+streamAt,std::make_move_iterator(stream.begin()),
                                std::make_move_iterator(stream.end()));
             }
+            if(resourceBlocks){
+                uint64_t logical=0;
+                for(const auto& data:plan.streams.back().runs){
+                    catalog.push_back(FileExtent({entryId,data.block,data.count,resource->id},logical));
+                    logical+=data.count;
+                }
+            }
             leaves=PartitionCatalog(std::move(catalog));
             children=leaves.size()>1?leaves.size():0;
             return firstChild+children;
         });
     if(changeExtents){
-        if(retireOldData)files.erase(std::remove_if(files.begin(),files.end(),[&](const auto& run){
-            return run.owner==entryId;
-        }),files.end());
-        if(dataBlocks)
+        files.erase(std::remove_if(files.begin(),files.end(),retiredRun),files.end());
+        if(fileBlocks)
             for(const auto& data:plan.streams.front().runs)files.push_back({entryId,data.block,data.count});
+        if(resourceBlocks)
+            for(const auto& data:plan.streams.back().runs)files.push_back({entryId,data.block,data.count,resource->id});
         std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
         std::vector<OwnedRecord> references;
         for(const auto& file:files)references.push_back(ExtentReference(file));
@@ -1140,8 +1213,8 @@ CatalogWritePlan PrepareCatalogMutation(
           "Invalid APFS volume allocation count");
     Set(volume,88,volumeBlocks-removedVolumeBlocks+children+dataBlocks,8);
     Set(volume,128,allocated[1],8);
+    Set(volume,176,nextAvailable,8);
     if(create){
-        Set(volume,176,nextId+1,8);
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
         else Set(volume,184,fileCount+1,8);
     }else if(removedKind){
