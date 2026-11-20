@@ -1088,8 +1088,6 @@ public:
             const auto children=ListDirectory(parent);
             const auto found=std::find_if(children.begin(),children.end(),matches);
             if(found!=children.end()){
-                Check(!limitedEdits||(!found->compressed&&!entry.compressed),
-                      "This APFS image cannot overwrite with or replace a compressed file yet");
                 Check(replace&&!found->directory&&!found->protectedFile&&found->readError.empty(),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==found->identity,

@@ -1682,7 +1682,7 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
                            const AttributeStreams& streams,const CatalogRecords& extentTree,
                            std::set<uint64_t>& retired)
 {
-    Check(!edit.compression&&resource,"External APFS overwrite requires an uncompressed replacement with both forks");
+    Check(resource,"External APFS overwrite requires both forks");
     const auto inodeKey=(uint64_t(3)<<60)|edit.inode;
     const auto inode=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
         return record.key.size()==8&&Le64(record.key.data())==inodeKey;
@@ -1692,7 +1692,7 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
     const auto flags=Le32(old.data()+68),count=Le32(old.data()+56);
     const auto primaryParent=Le64(old.data());
     Check(Le64(old.data()+8)==edit.inode&&count&&bool(edit.alias)==(count>1)&&
-          Le16(old.data()+80)==0100644&&!(flags&(UserImmutable|SystemImmutable|BsdCompressed)),
+          Le16(old.data()+80)==0100644&&!(flags&(UserImmutable|SystemImmutable)),
           "External APFS overwrite cannot replace this file");
     const auto name=ExternalInodeName(old);
     std::map<Bytes,Bytes> siblings;
@@ -1746,6 +1746,8 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
         }
         offset+=size_t(padded);
     }
+    const bool wasCompressed=(flags&BsdCompressed)!=0;
+    Check(!wasCompressed||!oldSize,"APFS compressed overwrite target unexpectedly has a data stream");
     const auto oldLayout=WriterDisk::Inode(name,edit.inode,0,primaryParent,0100644,count,oldSize,
                                            oldFinder?&*oldFinder:nullptr);
     Check(old.size()==oldLayout.value.size()&&std::equal(old.begin()+92,old.end(),oldLayout.value.begin()+92),
@@ -1763,12 +1765,17 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
     Set(updated.value,32,time,8);
 
     auto attributes=EncodeAttributes(edit.inode,edit.attributes,resource,streams);
+    WriteCompressionAttribute(attributes,updated.value,edit.inode,size,edit.compression);
+    bool foundCompression=false;
     std::set<uint64_t> removeStreams{edit.inode};
     std::vector<OwnedRecord> links;
     auto after=std::next(inode);
     for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
         const auto kind=Le64(after->key.data())>>60;
-        if(kind==6||kind==8)continue;
+        if(kind==6||kind==8){
+            Check(!wasCompressed,"APFS compressed overwrite target has unexpected data records");
+            continue;
+        }
         if(kind==5){
             Check(siblings.count(after->key),"Unexpected APFS overwrite sibling link");
             links.push_back(*after);
@@ -1778,6 +1785,13 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
               "Unsupported APFS overwrite record");
         const std::string attr(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
         const auto storage=Le16(after->value.data());
+        if(attr==CompressionAttribute){
+            Check(wasCompressed&&!foundCompression&&storage==2&&after->value.size()>=20&&
+                  Le32(after->value.data()+4)==0x636d7066&&Le64(after->value.data()+12)==Le64(old.data()+84),
+                  "Invalid APFS compressed overwrite target");
+            foundCompression=true;
+            continue;
+        }
         Check((OrdinaryAttribute(attr)||attr==ResourceAttribute)&&(storage==2||(storage==1&&after->value.size()==52)),
               "Unsupported APFS overwrite attribute");
         if(attr!=ResourceAttribute&&!edit.attributes)attributes.push_back(*after);
@@ -1786,6 +1800,7 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
             Check(stream>edit.inode&&removeStreams.insert(stream).second,"Invalid APFS overwrite stream ID");
         }
     }
+    Check(wasCompressed==foundCompression,"Missing APFS compression attribute");
     CollectExternalRetiredExtents(catalog,edit.inode,removeStreams,extentTree,retired);
     const auto index=size_t(inode-catalog.begin());
     inode->value=std::move(updated.value);

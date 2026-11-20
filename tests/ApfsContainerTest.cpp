@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-copied-compressed.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-compressed.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2836,6 +2836,51 @@ int RunApfsContainerTest(const char* directory)
             Bytes actualCompressed(decoded.size());
             published->Read(copiedCompressed.id,0,0,actualCompressed.data(),actualCompressed.size());
             Check(actualCompressed==decoded,"Copied APFS compressed file differed byte for byte");
+            auto compressedEdit=copiedCompressed;
+            const auto originalAttributes=published->GetAttributes(copiedCompressed.id);
+            compressedEdit.attributes={{u"user.compressed",{13,21,34}}};
+            compressedEdit.attributesKnown=true;
+            compressedEdit.finder[0]='Z';
+            compressedEdit.datesValid=true;
+            compressedEdit.created=createdTime;
+            compressedEdit.modified=editedTime;
+            Bytes replacementBytes(150123);
+            for(size_t i=0;i<replacementBytes.size();++i)replacementBytes[i]=uint8_t((i*17)%251);
+            compressedEdit.forks[0].size=replacementBytes.size();
+            const auto readReplacement=[&](unsigned fork,uint64_t offset,void* data,size_t length){
+                Check(!fork&&offset<=replacementBytes.size()&&length<=replacementBytes.size()-offset,
+                      "Invalid compressed replacement read");
+                memcpy(data,replacementBytes.data()+offset,length);
+            };
+            Storage::Job cancelCompression;
+            unsigned firstReads=0;
+            bool compressionCancelled=false;
+            try{
+                published->PutForTransfer(compressionFolder,compressedEdit,
+                    [&](unsigned fork,uint64_t offset,void* data,size_t length){
+                        readReplacement(fork,offset,data,length);
+                        if(!offset&&++firstReads==2)cancelCompression.cancel();
+                    },true,cancelCompression);
+            }catch(const Storage::Cancelled&){compressionCancelled=true;}
+            const auto oldCompressed=published->Stat(copiedCompressed.id);
+            Check(compressionCancelled&&oldCompressed.compressed&&oldCompressed.identity==copiedCompressed.identity&&
+                  oldCompressed.forks[0].size==decoded.size()&&oldCompressed.finder==copiedCompressed.finder&&
+                  oldCompressed.created==copiedCompressed.created&&oldCompressed.modified==copiedCompressed.modified&&
+                  published->GetAttributes(oldCompressed.id)==originalAttributes,
+                  "Cancelled APFS compressed overwrite changed original metadata");
+            published->Read(oldCompressed.id,0,0,actualCompressed.data(),actualCompressed.size());
+            Check(actualCompressed==decoded,"Cancelled APFS compressed overwrite changed original bytes");
+            Storage::Job replaceCompression;
+            const auto compressedId=published->PutForTransfer(compressionFolder,compressedEdit,readReplacement,true,replaceCompression);
+            const auto newCompressed=published->Stat(compressedId);
+            Check(compressedId==copiedCompressed.id&&newCompressed.identity==copiedCompressed.identity&&newCompressed.compressed&&
+                  newCompressed.forks[0].size==replacementBytes.size()&&!newCompressed.forks[1].size&&
+                  newCompressed.finder==compressedEdit.finder&&newCompressed.created==createdTime&&newCompressed.modified==editedTime&&
+                  published->GetAttributes(compressedId)==compressedEdit.attributes,
+                  "Completed APFS overwrite lost compression, identity or metadata");
+            actualCompressed.resize(replacementBytes.size());
+            published->Read(compressedId,0,0,actualCompressed.data(),actualCompressed.size());
+            Check(actualCompressed==replacementBytes,"Completed APFS compressed overwrite changed replacement bytes");
             MacBrowser::Entry shortCompressed;
             shortCompressed.name=u"Inline compressed";
             shortCompressed.forks[0].size=1300;
