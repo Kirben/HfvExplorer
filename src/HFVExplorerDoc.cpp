@@ -763,6 +763,7 @@ void CHFVExplorerDoc::my_chdir(CString path,int mac,int preferredVolume)
 
 void CHFVExplorerDoc::OnCleanDocument()
 {
+ GetBrowserSession().CancelClassicRefresh();
  GetBrowserSession().MacBrowser().DetachTree();
 	CHFVExplorerApp	*pApp;
 
@@ -802,50 +803,8 @@ void CHFVExplorerDoc::OnCloseDocument()
 	CDocument::OnCloseDocument();
 }
 
-void CHFVExplorerDoc::check_hfv_file_times(int ask)
-{
- auto& session=GetBrowserSession();
- auto& mounts=session.Mounts();
- for(int index=0;index<mounts.ClassicCount();++index){
-  const auto& slot=mounts.ClassicAt(index);
-  if(!slot.m_opened)continue;
-  const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,index};
-  const auto old=mounts.Bind(address);
-  const auto key=VolumeCoord::ImageKey(std::string(slot.m_file_name.GetString()));
-  try{
-   VolumeCoord::OperationLease access({{key,VolumeCoord::Mode::Write}});
-   if(!mounts.RefreshClassic(index,ask))continue;
-  }catch(const VolumeCoord::Busy&){continue;}
-  const auto root=session.MountRoot(address);
-  if(auto tree=session.Tree();tree&&root&&mounts.Bind(address).incarnation!=old.incarnation){
-   const auto enabled=tree->SelectionNotificationsEnabled();
-   tree->enable_selchange(0);
-   auto& control=tree->GetTreeCtrl();
-   for(auto at=control.GetSelectedItem();at;at=control.GetParentItem(at)){
-    if(at!=root)continue;
-    control.SelectItem(root);
-    break;
-   }
-   tree->delete_subdir_contents(root);
-   tree->RenewBrowserMount(root);
-   tree->enable_selchange(enabled);
-  }
-  VolumeCoord::Changed({key});
- }
-}
-
 void CHFVExplorerDoc::OnViewRefresh()
 {
  auto& session=GetBrowserSession();
  if(!session.RefreshSelected())session.MacBrowser().ScanMedia();
-}
-
-void CHFVExplorerDoc::set_hfs_volume_clean( char *path )
-{
-	int inx;
-
-	inx = Mounts().FindClassicSlot( CString(path) );
-	if(inx >= 0) {
-		Mounts().MarkClassicClean(inx);
-	}
 }

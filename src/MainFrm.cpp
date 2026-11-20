@@ -690,10 +690,7 @@ void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 	CFrameWnd::OnActivateApp(bActive, hTask);
 	
 	if(bActive && m_browserSession && GetBrowserSession().Document() && !StorageUi::busy() && !StorageUi::state().sessionOpen) {
-		// check HFV files for changes
-		CHFVExplorerApp	*pApp;
-		pApp = (CHFVExplorerApp *)AfxGetApp();
-		GetBrowserSession().Document()->check_hfv_file_times( 0 );
+		GetBrowserSession().QueueClassicRefresh();
 		// if(!m_timer) m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 		m_volcheck_enabled = TRUE;
 	} else {
@@ -803,7 +800,7 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 			// if(m_timer) KillTimer(m_timer);
 			// m_timer = 0;
 			m_volcheck_enabled = FALSE;
-			GetBrowserSession().Document()->check_hfv_file_times( 0 );
+			GetBrowserSession().QueueClassicRefresh();
 			m_volcheck_enabled = TRUE;
 			// if(!m_timer) m_timer = SetTimer( MYTIMERID, VOLCHECK_TIMER_DELAY, 0 );
 		}

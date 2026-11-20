@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "BrowserMountInventory.h"
 #include "VolumeCoordinator.h"
+#include "BrowserDirectory.h"
 #include "ftypes.h"
 #include <algorithm>
 
@@ -9,6 +10,7 @@ void BrowserMountInventory::ClassicMount::ReadMount(const MacBrowser::ClassicMou
 {
  m_volume_name=info.label.c_str();
  freeBytes=info.freeBytes;
+ if(!info.resourceKey.empty())resourceKey_=info.resourceKey;
  m_mediaGenerationKnown=info.generation.has_value();
  m_mediaGeneration=info.generation.value_or(0);
  update_time_stamp();
@@ -33,20 +35,20 @@ void BrowserMountInventory::ClassicMount::update_time_stamp()
   modified_=status.ftLastWriteTime;
 }
 
-bool BrowserMountInventory::ClassicMount::update_if_needed(int ask)
+bool BrowserMountInventory::ClassicMount::ProbeChanged(const std::string& key)
 {
  if(m_is_cd)return false;
+ WIN32_FILE_ATTRIBUTE_DATA status{};
  if(m_is_floppy){
   if(!m_floppy_update_needed)return false;
   m_floppy_update_needed=false;
-  return open()!=0;
+ }else{
+  if(!GetFileAttributesExA(m_file_name,GetFileExInfoStandard,&status)||
+     (resourceKey_==key&&CompareFileTime(&status.ftLastWriteTime,&modified_)==0))
+   return false;
  }
- WIN32_FILE_ATTRIBUTE_DATA status{};
- if(!GetFileAttributesExA(m_file_name,GetFileExInfoStandard,&status)||
-    CompareFileTime(&status.ftLastWriteTime,&modified_)==0)return false;
- if(ask&&AfxMessageBox("Contents of volume \""+m_volume_name+"\" have changed. Reload now?",MB_YESNO)==IDNO&&
-    AfxMessageBox("Not reloading will cause data integrity problems. Reload?",MB_YESNO)==IDNO)return false;
- return open()!=0;
+ BrowserDirectory::ObserveRead("classic-refresh");
+ return open()&&(m_is_floppy||CompareFileTime(&status.ftLastWriteTime,&modified_)==0);
 }
 
 int BrowserMountInventory::AddClassic(ClassicMount volume)
@@ -75,6 +77,7 @@ void BrowserMountInventory::UpdateClassic(int index,const MacBrowser::ClassicMou
  const auto previous=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
  if(previous!=info.generation)classicIncarnation_[index]=++nextIncarnation_;
  slot.ReadMount(info);
+ classicState_[index]=++nextIncarnation_;
 }
 
 bool BrowserMountInventory::PublishClassic(const Entry& expected,ClassicMount volume)
@@ -83,10 +86,12 @@ bool BrowserMountInventory::PublishClassic(const Entry& expected,ClassicMount vo
  const auto index=expected.address.index;
  auto& old=*classic.at(index);
  if(old.m_file_name.CompareNoCase(volume.m_file_name)!=0)return false;
- if(old.m_mediaGenerationKnown!=volume.m_mediaGenerationKnown||
+ if((!old.ResourceKey().empty()&&!volume.ResourceKey().empty()&&old.ResourceKey()!=volume.ResourceKey())||
+    old.m_mediaGenerationKnown!=volume.m_mediaGenerationKnown||
     (volume.m_mediaGenerationKnown&&old.m_mediaGeneration!=volume.m_mediaGeneration))
     classicIncarnation_[index]=++nextIncarnation_;
  old=std::move(volume);
+ classicState_[index]=++nextIncarnation_;
  return true;
 }
 
@@ -117,21 +122,17 @@ int BrowserMountInventory::FindClassicSlot(const CString& path) const
  return -1;
 }
 
-void BrowserMountInventory::CloseClassic(int index){classic.at(index)->close();}
+void BrowserMountInventory::CloseClassic(int index){
+ classic.at(index)->close();
+ classicState_[index]=++nextIncarnation_;
+}
 void BrowserMountInventory::CloseClassicVolumes()
 {
  for(int index=0;index<classicCount;++index)CloseClassic(index);
 }
-void BrowserMountInventory::MarkClassicDirty(int index){classic.at(index)->m_floppy_update_needed=true;}
-void BrowserMountInventory::MarkClassicClean(int index){classic.at(index)->update_time_stamp();}
-bool BrowserMountInventory::RefreshClassic(int index,int ask)
-{
- auto& slot=*classic.at(index);
- const auto before=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
- if(!slot.update_if_needed(ask))return false;
- const auto after=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
- if(before!=after)classicIncarnation_[index]=++nextIncarnation_;
- return true;
+void BrowserMountInventory::MarkClassicDirty(int index){
+ classic.at(index)->m_floppy_update_needed=true;
+ classicState_[index]=++nextIncarnation_;
 }
 
 #ifdef HFV_TESTING

@@ -16,6 +16,7 @@ struct ClassicMountInfo {
     std::string label;
     uint64_t freeBytes=0;
     std::optional<DWORD> generation;
+    std::string resourceKey;
 };
 ClassicMountInfo ReadClassicMountInfo(Volume&);
 void SelectClassicCatalogFolder(Volume&,const std::string& path);

@@ -19,8 +19,8 @@ extern "C" {
 #include <set>
 #include <fcntl.h>
 struct BrowserSession::Notifications:public CWnd {
- static constexpr UINT NavigationReady=WM_APP+31,MediaReady=WM_APP+32;
- static constexpr UINT_PTR NavigationRetry=3,MediaRetry=4;
+ static constexpr UINT NavigationReady=WM_APP+31,MediaReady=WM_APP+32,ClassicRefreshReady=WM_APP+33;
+ static constexpr UINT_PTR NavigationRetry=3,MediaRetry=4,ClassicRefreshRetry=5;
  struct Mailbox {
   std::mutex mutex;
   HWND window=nullptr;
@@ -61,6 +61,10 @@ struct BrowserSession::Notifications:public CWnd {
    if(blocked||session.MacBrowser().ApplyMediaChanges()==MainMacBrowser::MediaUpdate::Retry)
     SetTimer(MediaRetry,60,nullptr);
    else KillTimer(MediaRetry);
+   return 0;
+  }
+  if(message==ClassicRefreshReady||(message==WM_TIMER&&w==ClassicRefreshRetry)){
+   session.CompleteClassicRefresh();
    return 0;
   }
   if(message==NavigationReady||(message==WM_TIMER&&w==NavigationRetry)){
@@ -400,19 +404,21 @@ void BrowserSession::Attach(CWnd* owner,HFVExplorerTreeView* tree,CHFVExplorerLi
     tree_->BindBrowserSession(this);list_->BindBrowserSession(this);if(preview_)preview_->BindBrowserSession(this);SetLocationTitle({});
 }
 void BrowserSession::StopNotifications(){
+ CancelClassicRefresh();
  InvalidateStorageCompletions();
  CancelNavigation();if(preview_)preview_->Clear();subscription_.Close();deferred_={};current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
  if(notifications_){notifications_->KillTimer(1);notifications_->KillTimer(2);notifications_->KillTimer(Notifications::MediaRetry);}
 }
 void BrowserSession::DetachPanes(){
+    CancelClassicRefresh();
     InvalidateStorageCompletions();
     ClearCurrent();subscription_.Close();current_=Context{};seen_.clear();dirty_.clear();mounts_.ClearObserved();
     browser_->ForgetTree();
     if(tree_)tree_->BindBrowserSession(nullptr);if(list_)list_->BindBrowserSession(nullptr);if(preview_)preview_->BindBrowserSession(nullptr);
     tree_=nullptr;list_=nullptr;preview_=nullptr;owner_=nullptr;status_=nullptr;
 }
-void BrowserSession::Detach(HFVExplorerTreeView* view){if(tree_==view){InvalidateStorageCompletions();CancelNavigation();tree_=nullptr;browser_->ForgetTree();}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
-void BrowserSession::Detach(CHFVExplorerListView* view){if(list_==view){InvalidateStorageCompletions();CancelNavigation();list_=nullptr;}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
+void BrowserSession::Detach(HFVExplorerTreeView* view){if(tree_==view){InvalidateStorageCompletions();CancelNavigation();CancelClassicRefresh();tree_=nullptr;browser_->ForgetTree();}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
+void BrowserSession::Detach(CHFVExplorerListView* view){if(list_==view){InvalidateStorageCompletions();CancelNavigation();CancelClassicRefresh();list_=nullptr;}if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
 void BrowserSession::Detach(CHFVPreviewView* view){if(preview_==view)preview_=nullptr;if(!tree_&&!list_&&!preview_){subscription_.Close();current_=Context{};owner_=nullptr;status_=nullptr;}}
 BrowserSession& CHFVExplorerListView::GetBrowserSession()const{
     if(m_browserSession)return *m_browserSession;
@@ -548,6 +554,111 @@ void BrowserSession::RestoreListingSelection(const std::vector<FileOperations::L
  }
 }
 
+void BrowserSession::QueueClassicRefresh()
+{
+ if(classicRefresh_||!notifications_||!tree_||!list_||!document_)return;
+ using Inventory=BrowserMountInventory;
+ struct Probe {
+  Inventory::Entry mount;
+  uint64_t state;
+  Inventory::ClassicMount volume;
+ };
+ struct Change {
+  Probe probe;
+  std::string previous;
+  uint64_t revision;
+ };
+ std::vector<Probe> probes;
+ for(int index=0;index<mounts_.ClassicCount();++index){
+  const auto& slot=mounts_.ClassicAt(index);
+  if(!slot.m_opened||slot.m_is_cd||(slot.m_is_floppy&&!slot.m_floppy_update_needed))continue;
+  if(auto mount=mounts_.Lookup({Inventory::Kind::ClassicVolume,index}))
+   probes.push_back({std::move(*mount),mounts_.ClassicStateVersion(index),slot});
+ }
+ if(probes.empty())return;
+ auto changes=std::make_shared<std::vector<Change>>();
+ // An incidental check on slow storage must leave navigation workers available.
+ static Storage::Worker scanner(2);
+ classicRefresh_=scanner.submit([probes=std::move(probes),changes](Storage::Job& job) mutable {
+  for(auto& probe:probes){
+   if(job.cancelled())break;
+   try{
+    const auto key=VolumeCoord::ImageKey(probe.mount.locator);
+    const auto previous=probe.volume.ResourceKey();
+    VolumeCoord::Lease lease({{key,VolumeCoord::Mode::Read},{previous,VolumeCoord::Mode::Read}});
+    if(probe.volume.ProbeChanged(key)&&!job.cancelled()&&probe.volume.ResourceKey()==key&&
+       VolumeCoord::ImageKey(probe.mount.locator)==key)
+     changes->push_back({std::move(probe),previous,VolumeCoord::Revision(key)});
+   }catch(const VolumeCoord::Busy&){
+    // Activation or the next timer tick can check this mount again.
+   }catch(const HfsPlus::Error&){
+    // A transient probe failure keeps the last successful mount observation.
+   }
+  }
+  return Storage::Result{};
+ });
+ applyClassicRefresh_=[this,changes]{
+  std::vector<std::string> affected;
+  int refreshRoot=-1;
+  for(auto& change:*changes){
+   auto& probe=change.probe;
+   const auto address=probe.mount.address;
+   const auto key=probe.volume.ResourceKey();
+   if(!mounts_.IsCurrent(probe.mount)||mounts_.ClassicStateVersion(address.index)!=probe.state||
+      !StorageLocation::RevisionCurrent(key,change.revision))continue;
+   const auto root=MountRoot(address);
+   if(!mounts_.PublishClassic(probe.mount,std::move(probe.volume)))continue;
+   if(root){
+    auto& control=tree_->GetTreeCtrl();
+    control.SetItemText(root,mounts_.ClassicAt(address.index).m_volume_name);
+    if(!mounts_.IsBound(address)){
+     const auto enabled=tree_->SelectionNotificationsEnabled();
+     tree_->enable_selchange(0);
+     for(auto at=control.GetSelectedItem();at;at=control.GetParentItem(at))
+      if(at==root){
+       control.SelectItem(root);
+       refreshRoot=address.index;
+       break;
+      }
+     tree_->delete_subdir_contents(root);
+     tree_->RenewBrowserMount(root);
+     tree_->enable_selchange(enabled);
+    }
+   }
+   affected.push_back(key);
+   if(change.previous!=key)affected.push_back(change.previous);
+  }
+  VolumeCoord::Changed(affected);
+  if(refreshRoot>=0)document_->NavigateClassicFolder(refreshRoot,CNID_ROOT_ID,true,nullptr,true);
+ };
+ notifications_->NotifyOnCompletion(classicRefresh_,Notifications::ClassicRefreshReady);
+}
+
+void BrowserSession::CancelClassicRefresh()
+{
+ if(classicRefresh_)classicRefresh_->cancel();
+ classicRefresh_.reset();
+ applyClassicRefresh_={};
+ if(notifications_)notifications_->KillTimer(Notifications::ClassicRefreshRetry);
+}
+
+void BrowserSession::CompleteClassicRefresh()
+{
+ if(!classicRefresh_||!classicRefresh_->done())return;
+ if(!tree_||!list_||!document_){CancelClassicRefresh();return;}
+ const auto& control=list_->GetListCtrl();
+ if(Navigating()||StorageUi::busy()||StorageUi::state().sessionOpen||
+    control.GetEditControl()||list_->IsDragging()){
+  notifications_->SetTimer(Notifications::ClassicRefreshRetry,75,nullptr);
+  return;
+ }
+ notifications_->KillTimer(Notifications::ClassicRefreshRetry);
+ auto applied=std::move(applyClassicRefresh_);
+ const auto status=classicRefresh_->result();
+ classicRefresh_.reset();
+ if(!status.code&&applied)applied();
+}
+
 bool BrowserSession::RefreshSelected(bool afterMutation)
 {
  if(!tree_)return false;
@@ -569,5 +680,5 @@ bool BrowserSession::RefreshSelected(bool afterMutation)
  }
  const auto id=binding->CatalogId();
  if(afterMutation&&id!=current_.folder.expectedCatalogId)return false;
- return document_->NavigateClassicFolder(address.index,id,true);
+ return document_->NavigateClassicFolder(address.index,id,true,nullptr,afterMutation);
 }

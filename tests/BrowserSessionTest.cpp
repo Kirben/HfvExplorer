@@ -503,6 +503,77 @@ int RunBrowserSessionTest(const char* directory){
    fprintf(report,"PASS: Unicode Windows Find opens the matching folder and selects the file.\n");
   }
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"first.txt")>=0,"startup before global main-window assignment");
+  {
+   const CString image=root+"\\refresh-classic.dsk", replacement=root+"\\replacement-classic.dsk";
+   auto checking=std::make_unique<Panes>();
+   checking->Classic(image,"before refresh");
+   {Panes seed;seed.Classic(replacement,"replacement file");}
+   const auto key=checking->Session().Mounts().ClassicAt(0).ResourceKey();
+   auto write=[&](const char16_t* name){
+    auto volume=MacBrowser::OpenClassic((LPCSTR)image,":",true);
+    MacBrowser::Entry entry;
+    entry.name=name;
+    volume->Put(2,entry,[](unsigned,uint64_t,void*,size_t){},false);
+    volume->Close();
+   };
+   struct Pause {
+    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    std::atomic<unsigned> calls{0};
+    ~Pause(){CloseHandle(entered);CloseHandle(release);}
+   };
+   const auto pause=std::make_shared<Pause>();
+   const auto ui=GetCurrentThreadId();
+   BrowserDirectory::testObserveRead=[pause,ui](const char* tag){
+    if(strcmp(tag,"classic-refresh"))return;
+    if(GetCurrentThreadId()==ui)throw std::runtime_error("classic refresh reopened on the UI thread");
+    ++pause->calls;
+    SetEvent(pause->entered);
+    WaitForSingleObject(pause->release,10000);
+   };
+   struct Release {
+    std::shared_ptr<Pause> pause;
+    ~Release(){SetEvent(pause->release);BrowserDirectory::testObserveRead={};}
+   } release{pause};
+   auto start=[&]{
+    ResetEvent(pause->entered);
+    ResetEvent(pause->release);
+    checking->Session().QueueClassicRefresh();
+    PumpUntil([&]{return WaitForSingleObject(pause->entered,0)==WAIT_OBJECT_0;},
+              "classic refresh did not start on its worker");
+   };
+   write(u"after refresh");
+   start();
+   for(int i=0;i<5;++i)checking->Session().QueueClassicRefresh();
+   Check(pause->calls==1&&checking->owner.IsWindowEnabled()&&Find(checking->list,L"before refresh")>=0&&
+         Find(checking->list,L"after refresh")<0,"the slow classic check replaced the listing or queued duplicates");
+   SetEvent(pause->release);
+   PumpUntil([&]{return !checking->Session().ClassicRefreshPendingForTest()&&
+                       Find(checking->list,L"after refresh")>=0;},"classic change did not refresh the selected folder");
+
+   write(u"interrupted check");
+   start();
+   Check(MoveFileExA(replacement,image,MOVEFILE_REPLACE_EXISTING)!=FALSE,"replace the classic image during its check");
+   SetEvent(pause->release);
+   PumpUntil([&]{return !checking->Session().ClassicRefreshPendingForTest();},"stale classic check did not finish");
+   Check(Find(checking->list,L"after refresh")>=0&&Find(checking->list,L"replacement file")<0&&
+         checking->Session().Mounts().ClassicAt(0).ResourceKey()==key,
+         "a check published a replacement it did not capture");
+   checking->Session().QueueClassicRefresh();
+   PumpUntil([&]{return !checking->Session().ClassicRefreshPendingForTest()&&
+                       Find(checking->list,L"replacement file")>=0;},"fresh check did not load the replacement image");
+   const auto replacementKey=checking->Session().Mounts().ClassicAt(0).ResourceKey();
+   Check(key!=replacementKey,"same-path image replacement kept the old resource identity");
+
+   write(u"close during check");
+   start();
+   checking.reset();
+   SetEvent(pause->release);
+   PumpUntil([&]{return VolumeCoord::Readable(replacementKey)&&
+                       VolumeCoord::Available({{replacementKey,VolumeCoord::Mode::Write}});},
+             "closing a browser left its classic refresh lease held");
+   fprintf(report,"PASS: classic change probes coalesce, preserve the listing, reject a replacement during reopen and can outlive a closed browser safely.\n");
+  }
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
   a.Classic(root+"\\third.dsk","third classic",1);

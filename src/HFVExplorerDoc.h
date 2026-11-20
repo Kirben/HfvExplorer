@@ -61,7 +61,8 @@ protected: // create from serialization only
 
 
     bool NavigateStartupDirectory(const std::string& path,bool mac);
-    bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
+    bool NavigateClassicFolder(int index, uint32_t id, bool refresh = false,
+        const BrowserNavigation::Request* find = nullptr, bool useKnownResource = false);
     void PublishClassicFolder(int index, HTREEITEM item, const std::optional<std::wstring>& parent,
                               const BrowserDirectory::Snapshot&);
     bool NavigateWindowsFolder(int index, const std::wstring& path, bool refresh = false, const BrowserNavigation::Request* find = nullptr);
@@ -72,7 +73,6 @@ protected: // create from serialization only
 	void open_fat_directory( int volinx, LPSTR path, int list );
 #endif
 	CString FindClassicLauncher(const char* type,const char* creator,int preferredVolume);
-	void check_hfv_file_times(int ask);
 	int insert_volume( CString name, int is_floppy, int is_cd, int is_hd, int is_removable );
 	void enum_hfs_volumes(LPSTR mask);
 	void enum_volumes_ext( LPSTR mask, LPSTR ext );
@@ -88,7 +88,6 @@ protected: // create from serialization only
 	void enum_fat_volumes();
 
 	void update_invisible_attributes();
-	void set_hfs_volume_clean( char *path );
 
 // Attributes
 public:

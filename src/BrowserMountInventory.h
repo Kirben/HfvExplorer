@@ -46,10 +46,12 @@ public:
         int open();
         void close(){m_opened=false;}
         void ReadMount(const MacBrowser::ClassicMountInfo&);
-        void update_time_stamp();
-        bool update_if_needed(int ask);
+        bool ProbeChanged(const std::string& key);
+        const std::string& ResourceKey() const { return resourceKey_; }
     private:
+        void update_time_stamp();
         FILETIME modified_{};
+        std::string resourceKey_;
     };
     int ClassicCount() const {return classicCount;}
     int WindowsCount() const {return windowsCount;}
@@ -60,8 +62,7 @@ public:
     void CloseClassic(int index);
     void CloseClassicVolumes();
     void MarkClassicDirty(int index);
-    void MarkClassicClean(int index);
-    bool RefreshClassic(int index,int ask);
+    uint64_t ClassicStateVersion(int index) const { return classicState_.at(index); }
 #ifdef HFV_TESTING
     bool OpenClassicForTest(int index);
     void SetClassicSourceForTest(int index,const CString& path,bool cd);
@@ -94,7 +95,7 @@ private:
     std::array<CFATVolume,MAX_FAT_VOLUMES> windows;
     int classicCount=0,windowsCount=0;
     std::vector<Mount> mounted;
-    std::array<uint64_t,MAX_HFS_VOLUMES> classicIncarnation_{};
+    std::array<uint64_t,MAX_HFS_VOLUMES> classicIncarnation_{},classicState_{};
     std::array<uint64_t,MAX_FAT_VOLUMES> windowsIncarnation_{};
     uint64_t nextIncarnation_=1;
     std::array<uint64_t,26> mediaEpoch_{};

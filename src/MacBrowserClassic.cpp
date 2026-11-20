@@ -261,7 +261,7 @@ public:
         hfsvolent info{};
         Check(volume_&&hfs_vstat(volume_,&info)==0);
         mac_to_pc_charset(reinterpret_cast<unsigned char*>(info.name));
-        ClassicMountInfo result{info.name,info.freebytes,{}};
+        ClassicMountInfo result{info.name,info.freebytes,{},resourceKey_};
         const auto drive=physical_floppy_path(image_.c_str());
         DWORD generation=0;
         if(drive>=0&&physical_floppy_generation(drive,&generation))

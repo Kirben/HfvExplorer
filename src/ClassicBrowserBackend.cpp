@@ -262,7 +262,8 @@ namespace {
 using MacBrowser::ClassicAncestor;
 }
 
-bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,const BrowserNavigation::Request* find)
+bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,const BrowserNavigation::Request* find,
+                                          bool useKnownResource)
 {
  auto& session=GetBrowserSession();
  if((!find&&!session.UsesAsyncNavigation())||index<0||index>=Mounts().ClassicCount())return false;
@@ -279,7 +280,9 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  path+=':';
  const auto parent=tree->get_parent_id(root,index,id);
  const auto image=selected.m_file_name;
- const auto key=VolumeCoord::ImageKey(std::string((LPCSTR)image));
+ const auto key=useKnownResource&&!selected.ResourceKey().empty()?selected.ResourceKey():
+     VolumeCoord::ImageKey(std::string((LPCSTR)image));
+ const bool changedResource=!selected.ResourceKey().empty()&&selected.ResourceKey()!=key;
  Request request=find?*find:Request{FileOperations::Location::Classic((LPCSTR)image,path),
      refresh?Intent::RefreshFolder:Intent::SelectFolder,key};
  if(find&&request.folder.expectedResource!=key)return false;
@@ -300,12 +303,12 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  const auto finder=session.finderLayout;
  const auto mount=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,index});
  if(!mount)return false;
- const auto retry=[this,index,id,refresh,found=find?std::optional<Request>(*find):std::nullopt]{
-  if(!NavigateClassicFolder(index,id,refresh,found?&*found:nullptr))
+ const auto retry=[this,index,id,refresh,useKnownResource,found=find?std::optional<Request>(*find):std::nullopt]{
+  if(!NavigateClassicFolder(index,id,refresh,found?&*found:nullptr,useKnownResource))
    GetBrowserSession().RejectNavigation(found?found->resource:std::string(),"The classic HFS volume changed.");
  };
  session.Navigate(std::move(request),
- [reader,index,finder,parent](const Request& request,Result& result,Storage::Job& job){
+ [reader,index,finder,parent,changedResource](const Request& request,Result& result,Storage::Job& job){
   try{
    VolumeCoord::Lease lease({{request.resource,VolumeCoord::Mode::Read}});
    if(job.cancelled())throw Storage::Cancelled();
@@ -324,7 +327,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    }
    auto& details=result.payload.emplace<ClassicFolder>();
    auto& route=details.ancestors;
-   const bool readRoute=request.intent!=Intent::SelectFolder;
+   const bool readRoute=changedResource||request.intent!=Intent::SelectFolder;
    std::string directory=id==2?std::string((LPCSTR)volume.m_volume_name)+":":request.folder.ClassicPath();
    if(readRoute&&id!=2){
     if(!id){
@@ -353,15 +356,16 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
   auto& details=std::get<ClassicFolder>(result.payload);
   auto& route=details.ancestors;
   if(!session.Mounts().PublishClassic(*mount,std::move(details.mount)))return;
+  const bool replaced=!session.Mounts().IsBound(mount->address);
   tree->RenewBrowserMount(root);
   control.SetItemText(root,Mounts().ClassicAt(index).m_volume_name);
   const auto& shown=result.listing.folder.ClassicPath();
   auto target=item;
   const auto enabled=tree->SelectionNotificationsEnabled();
   tree->enable_selchange(0);
-  if(findResult||(refresh&&_stricmp(path.c_str(),shown.c_str()))){
+  if(replaced||findResult||(refresh&&_stricmp(path.c_str(),shown.c_str()))){
    // Build only the confirmed ancestry for the destination.
-   if(refresh)tree->delete_subdir_contents(root);
+   if(replaced||refresh)tree->delete_subdir_contents(root);
    target=root;
    for(auto& step:route)target=tree->tree_insert(root,index,step.name.data(),step.id,step.parent);
   }

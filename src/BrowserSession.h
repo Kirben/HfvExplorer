@@ -36,6 +36,9 @@ class BrowserSession {
  std::shared_ptr<Storage::Job> navigation_;
  int navigationMediaDrive_=-1;
  std::function<void(const Storage::Result&)> navigationReady_;
+ std::shared_ptr<Storage::Job> classicRefresh_;
+ std::function<void()> applyClassicRefresh_;
+ void CompleteClassicRefresh();
  void CompleteNavigation();
  void ProcessChanges();
  std::vector<FileOperations::Location> CaptureListingSelection() const;
@@ -100,6 +103,8 @@ public:
     std::optional<FindScope> CaptureFindScope();
     bool RevealFindHit(const FindHit&);
     bool UsesAsyncNavigation() const;
+    void QueueClassicRefresh();
+    void CancelClassicRefresh();
     void ScheduleMediaUpdates();
     void NotifyMediaCompletion(const std::shared_ptr<Storage::Job>&);
     bool Navigating() const { return bool(navigation_); }
@@ -112,6 +117,7 @@ public:
  bool Defer(const std::string& key,bool classic,std::function<void()>,bool force=false,bool keepListing=false);
 #ifdef HFV_TESTING
     bool AwaitNavigationForTest();
+    bool ClassicRefreshPendingForTest() const { return bool(classicRefresh_); }
     std::string navigationErrorForTest;
     unsigned notificationRefreshes=0,notificationErrors=0;
 #endif
