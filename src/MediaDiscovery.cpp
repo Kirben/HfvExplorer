@@ -155,9 +155,9 @@ DriveMedia ProbeDrive(int drive,UINT type,bool checkFloppy,bool checkExternal,St
   try{media.floppy=MacBrowser::OpenClassic(image,":",false);}
   catch(const HfsPlus::Error&){}
  }
- if(!media.floppy&&checkExternal){
+ if(!media.floppy&&(checkExternal||(checkFloppy&&type==DRIVE_REMOVABLE))){
   const wchar_t root[]={wchar_t(L'A'+drive),L':',L'\\',0};
-  media.removable=Removable::FromDriveRoot(root,&job);
+  media.removable=Removable::FromDriveRoot(root,&job,!checkExternal);
  }
  Cancel(job);
  return media;

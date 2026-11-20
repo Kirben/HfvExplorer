@@ -108,7 +108,8 @@ public:
    std::lock_guard<std::mutex> guard(mutex);
    for(auto& store:devices)if(store->device.path==device.path)target=store;
    Check(bool(target)&&target->writable,"Invalid simulated writable disk");
-   if(target->locked||target->denyLock){SetLastError(ERROR_SHARING_VIOLATION);return {};}
+   if(target->locked||target->denyLock||
+      (target->device.floppyDrive>=0&&target->opens!=target->closes)){SetLastError(ERROR_SHARING_VIOLATION);return {};}
    target->locked=true;
    target->target=part;
    ++target->locks;
@@ -146,7 +147,10 @@ void WritableMedia(const std::string& root,const std::shared_ptr<Bytes>& classic
  auto zip=Apm(*api,std::make_shared<Bytes>(*classic),std::make_shared<Bytes>(*plus));
  auto external=Gpt(*api,std::make_shared<Bytes>(*hfsx),4096);
  auto raw=api->Add(L"MFS removable",std::make_shared<Bytes>(*mfs));
- for(const auto& drive:{zip,external,raw})drive->writable=true;
+ auto floppy=api->Add(L"MFS floppy",std::make_shared<Bytes>(*mfs));
+ floppy->geometry.floppy=true;
+ floppy->device.floppyDrive=0;
+ for(const auto& drive:{zip,external,raw,floppy})drive->writable=true;
  auto zipMounts=Removable::Open(zip->device,api);
  auto gptMounts=Removable::Open(external->device,api);
  auto mfsMounts=Removable::Open(raw->device,api);
@@ -181,6 +185,31 @@ void WritableMedia(const std::string& root,const std::shared_ptr<Bytes>& classic
  verifyWrite(zipMounts[1],false);
  verifyWrite(gptMounts[0],false);
  verifyWrite(mfsMounts[0],true);
+
+ auto floppyMounts=Removable::Open(floppy->device,api);
+ Check(floppyMounts.size()==1,"Discover writable MFS floppy");
+ verifyWrite(floppyMounts.front(),true);
+ auto floppyVolume=floppyMounts.front().volume;
+ auto floppyFile=floppyVolume->Stat(Find(*floppyVolume,2,u"Hello"));
+ floppyFile.version=10;
+ floppyFile.finder[3]=0x64;
+ floppyVolume->SetBasicMetadata(floppyFile.id,floppyFile);
+ auto updated=floppyVolume->Stat(floppyFile.id);
+ Check(updated.version==10&&updated.finder[3]==0x64,"MFS floppy metadata changed incorrectly");
+ const Bytes floppyBefore=*floppy->segments.at(0);
+ floppy->corruptReadback=true;
+ Reject([&]{floppyVolume->Rename(floppyFile.id,2,u"Bad rename");},"MFS floppy accepted mismatched readback");
+ Check(*floppy->segments.at(0)==floppyBefore&&!floppy->locked,"MFS floppy rollback changed the disk or leaked its lock");
+ floppy->swapAtLock=true;
+ const auto floppyWrites=floppy->writes;
+ Reject([&]{floppyVolume->Rename(floppyFile.id,2,u"Wrong disc");},"MFS floppy accepted a changed generation");
+ Check(floppy->writes==floppyWrites&&!floppy->locked,"A changed floppy was written or left locked");
+
+ auto otherFloppy=api->Add(L"Unsupported floppy",std::make_shared<Bytes>(*plus));
+ otherFloppy->geometry.floppy=true;
+ otherFloppy->device.floppyDrive=1;
+ otherFloppy->writable=true;
+ Check(!Removable::Open(otherFloppy->device,api).front().volume->Writable(),"Non-MFS floppy was made writable here");
 
  // A second raw writer must fail, and an intervening swap must precede every write.
  auto selected=gptMounts[0];
@@ -473,7 +502,7 @@ int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directo
  Removable::SetTestApi(api);api->windowsReadable=true;Check(Removable::FromDriveRoot(L"Z:\\").empty(),"Windows-readable volume was hijacked");api->windowsReadable=false;auto direct=Removable::FromDriveRoot(L"Z:\\");Check(direct.size()==1,"Explicit Windows drive selection missed Mac media");Verify(*direct[0].volume);direct.clear();Storage::Job scan;auto discovery=Removable::Scan(scan,api);Check(!discovery.errors.empty()&&discovery.volumes.size()>=7,"One failed device aborted discovery");discovery.volumes.clear();
  fprintf(report,"PASS: 64-bit reads/cache hits, cached/during-read media swaps, short reads, missing change counters, access denial, handle cleanup, GPT checksum/APM bounds checks, Windows-volume fallback and per-device discovery errors. No device writes or physical hardware.\n");
  WritableMedia(root,classic,plus[0],plus[1],mfs);
- fprintf(report,"PASS: exclusive removable writes for classic HFS and HFS+ in APM, HFSX in 4096-byte GPT and raw MFS. Separate mounts refreshed. Partition boundaries and neighboring data were preserved. Lock conflicts, media swaps, verification mismatch and failed Cut were handled safely.\n");
+ fprintf(report,"PASS: exclusive removable writes for classic HFS and HFS+ in APM, HFSX in 4096-byte GPT and raw MFS including 1.44 MB physical floppies. Separate mounts refreshed. Partition boundaries and neighboring data were preserved. Lock conflicts, media swaps, verification mismatch and failed Cut were handled safely.\n");
  fflush(report);
  const auto gptImage=GptImages(root,*gpt,plus[0],plus[1]);
  fprintf(report,"PASS: GPT images open on persistent workers and support writes/reopen at 512/4096-byte sector sizes and above 4 GiB. GPT metadata and neighboring data remain intact. Invalid CRCs, overlaps and partition bounds are rejected; read-only flags disable writes.\n");

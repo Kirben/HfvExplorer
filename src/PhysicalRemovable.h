@@ -3,7 +3,7 @@
 #include "MacBrowserModel.h"
 #include <winioctl.h>
 namespace Removable {
-struct Device {std::wstring path,label;DWORD number=MAXDWORD;STORAGE_BUS_TYPE bus=BusTypeUnknown;bool removable=false,hotplug=false;};
+struct Device {std::wstring path,label;DWORD number=MAXDWORD;STORAGE_BUS_TYPE bus=BusTypeUnknown;bool removable=false,hotplug=false;int floppyDrive=-1;};
 struct Geometry {uint64_t bytes=0;DWORD sector=512;bool floppy=false;};
 struct Partition {
  uint64_t offset=0,length=0;unsigned index=0;bool readOnly=false;
@@ -60,7 +60,7 @@ struct Discovery {std::vector<Mounted> volumes;std::vector<std::string> errors;s
 std::vector<Mounted> Open(const Device&,std::shared_ptr<Api> api={});
 Discovery Scan(Storage::Job&,std::shared_ptr<Api> api={});
 std::shared_ptr<MacBrowser::Volume> Reopen(const std::wstring&,uint64_t offset);
-std::vector<Mounted> FromDriveRoot(const std::wstring&,Storage::Job* job=nullptr);
+std::vector<Mounted> FromDriveRoot(const std::wstring&,Storage::Job* job=nullptr,bool floppyOnly=false);
 #ifdef HFV_TESTING
 void SetTestApi(std::shared_ptr<Api>);
 bool HasTestApi();
