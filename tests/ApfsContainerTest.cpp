@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-written-hard-links.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-copied-compressed.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2825,6 +2825,31 @@ int RunApfsContainerTest(const char* directory)
                 }
                 return copy.Job()->result();
             };
+            const auto compressionFolder=published->MakeDirectory(2,u"Compressed copies");
+            Storage::Job compressionCopy;
+            Check(MacBrowser::Copy(*authentic,compressed.id,*published,compressionFolder,compressionCopy),
+                  "Copying a macOS compressed file into APFS failed");
+            MacBrowser::Entry copiedCompressed;
+            Check(published->FindChild(compressionFolder,compressed.name,copiedCompressed)&&copiedCompressed.compressed&&
+                  copiedCompressed.forks[0].size==decoded.size()&&!copiedCompressed.forks[1].size,
+                  "APFS copy did not retain resource-backed compression");
+            Bytes actualCompressed(decoded.size());
+            published->Read(copiedCompressed.id,0,0,actualCompressed.data(),actualCompressed.size());
+            Check(actualCompressed==decoded,"Copied APFS compressed file differed byte for byte");
+            MacBrowser::Entry shortCompressed;
+            shortCompressed.name=u"Inline compressed";
+            shortCompressed.forks[0].size=1300;
+            shortCompressed.compressed=true;
+            const auto shortId=importSource->Put(2,shortCompressed,[](unsigned,uint64_t,void* bytes,size_t size){
+                memset(bytes,0x42,size);
+            },false);
+            Storage::Job inlineCopy;
+            Check(MacBrowser::Copy(*importSource,shortId,*published,2,inlineCopy)&&
+                  published->FindChild(2,shortCompressed.name,shortCompressed)&&shortCompressed.compressed,
+                  "APFS copy did not retain inline compression");
+            Bytes actualInline(1300);
+            published->Read(shortCompressed.id,0,0,actualInline.data(),actualInline.size());
+            Check(actualInline==Bytes(1300,0x42),"Copied inline APFS compression changed file contents");
             const auto importedCopy=runImport();
             Check(!importedCopy.code,importedCopy.message.c_str());
             MacBrowser::Entry copied;

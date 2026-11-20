@@ -2405,7 +2405,7 @@ CatalogWritePlan PrepareCatalogMutation(
         const bool symlink=create->kind==CatalogKind::SymbolicLink;
         Check((directory||symlink?!input:create->kind==CatalogKind::RegularFile&&input)&&
               create->parent>=2&&create->parent!=3&&create->parent<nextId&&
-              !create->compression&&(!(directory||symlink)||!resource)&&(!directory||!create->locked)&&
+              (!(directory||symlink)||(!resource&&!create->compression))&&(!directory||!create->locked)&&
               (!symlink||create->linkTarget),
               "Unsupported APFS creation request for this image");
         catalog=std::move(existing.records);
@@ -2427,6 +2427,7 @@ CatalogWritePlan PrepareCatalogMutation(
         if(resource)SetResourceFlag(inode.value,resource->size!=0);
         auto records=EncodeAttributes(entryId,attributes,resource?&*resource:nullptr,attributeIds);
         if(symlink)records.push_back(LinkTargetRecord(entryId,*create->linkTarget));
+        if(create->compression)WriteCompressionAttribute(records,inode.value,entryId,dataSize,create->compression);
         SortAttributes(records);
         catalog.push_back(std::move(inode));
         catalog.insert(catalog.end(),std::make_move_iterator(records.begin()),std::make_move_iterator(records.end()));

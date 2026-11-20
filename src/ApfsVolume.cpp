@@ -1006,7 +1006,6 @@ public:
     }
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
-        if(limitedEdits)Check(!entry.compressed,"This APFS image cannot copy compressed files yet");
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
@@ -1089,7 +1088,8 @@ public:
             const auto children=ListDirectory(parent);
             const auto found=std::find_if(children.begin(),children.end(),matches);
             if(found!=children.end()){
-                Check(!limitedEdits||!found->compressed,"This APFS overwrite requires an uncompressed destination");
+                Check(!limitedEdits||(!found->compressed&&!entry.compressed),
+                      "This APFS image cannot overwrite with or replace a compressed file yet");
                 Check(replace&&!found->directory&&!found->protectedFile&&found->readError.empty(),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==found->identity,
