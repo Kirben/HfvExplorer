@@ -1484,6 +1484,26 @@ void StageExtentTree(Writes& writes,const CatalogLeaves& leaves,const std::vecto
     StageObject(writes,rootBlock,std::move(root),rootBlock,transaction,Physical|2,15);
 }
 
+struct CatalogVolume {
+    WritableMap containerMap;
+    uint64_t address;
+    Bytes volume;
+};
+
+CatalogVolume ReadCatalogVolume(Source& source,const Container& container)
+{
+    Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
+          !container.keybagBlock&&!container.keybagBlocks&&container.volumes.size()==1&&
+          source.Size()==container.blockCount*Block,"APFS writes require a raw single-volume image");
+    const auto oid=container.volumes.front();
+    auto map=ReadWritableMap(source,container,container.objectMap);
+    Check(map.mappings.size()==1&&map.mappings.front().oid==oid,
+          "APFS writes require one container volume mapping");
+    const auto address=map.mappings.front().block;
+    auto volume=ReadObject(source,container,address,oid,container.transaction,13);
+    return {std::move(map),address,std::move(volume)};
+}
+
 void CheckNativeVolume(const Bytes& volume)
 {
     const auto flags=Le64(volume.data()+56);
@@ -1534,16 +1554,18 @@ uint64_t CatalogTimestamp(uint64_t secondsSince1904)
     return uint64_t((int64_t(secondsSince1904)-UnixEpoch)*Second);
 }
 
+size_t InspectCatalogRecordCount(Source& source,const Container& container)
+{
+    const auto layout=ReadCatalogVolume(source,container);
+    const auto& volume=layout.volume;
+    const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
+    return ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136)).records.size();
+}
+
 void ValidateWritableLayout(Source& source,const Container& container)
 {
-    Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
-          !container.keybagBlock&&!container.keybagBlocks&&container.volumes.size()==1&&
-          source.Size()==container.blockCount*Block,"APFS writes require a raw single-volume image");
-    const auto oid=container.volumes.front();
-    const auto map=ReadWritableMap(source,container,container.objectMap);
-    Check(map.mappings.size()==1&&map.mappings.front().oid==oid,
-          "APFS writes require one container volume mapping");
-    const auto volume=ReadObject(source,container,map.mappings.front().block,oid,container.transaction,13);
+    const auto layout=ReadCatalogVolume(source,container);
+    const auto& volume=layout.volume;
     CheckNativeVolume(volume);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     ReadExtentTree(source,container,extents);
@@ -1582,12 +1604,8 @@ CatalogWritePlan PrepareCatalogMutation(
           "APFS forks exceed the container size");
     auto dataBlocks=fileBlocks+resourceBlocks;
     if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
+    auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current);
     const auto oid=current.volumes.front();
-    const auto containerMap=ReadWritableMap(source,current,current.objectMap);
-    Check(containerMap.mappings.size()==1&&containerMap.mappings.front().oid==oid,
-          "APFS writes require one container volume mapping");
-    const auto volumeAddress=containerMap.mappings.front().block;
-    auto volume=ReadObject(source,current,volumeAddress,oid,current.transaction,13);
     const auto flags=Le64(volume.data()+56);
     const auto fileCount=Le64(volume.data()+184);
     const auto directoryCount=Le64(volume.data()+192);

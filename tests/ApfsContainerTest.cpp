@@ -2514,6 +2514,8 @@ int RunApfsContainerTest(const char* directory)
             const auto raw=OpenImage(fixture,false);
             const auto before=Apfs::Probe(*raw);
             Check(before.has_value(),"Missing macOS-generated APFS checkpoint");
+            Check(Apfs::InspectCatalogRecordCount(*raw,*before)>800,
+                  "The write planner did not enumerate the macOS-generated catalog");
             const auto image=Disk::Read(*raw,0,size_t(raw->Size()));
             {
                 CheckpointFaultImage interrupted(image);

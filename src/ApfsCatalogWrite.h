@@ -89,6 +89,7 @@ struct CatalogWritePlan {
 void AssignDataRuns(std::vector<DataStreamWrite>&,const std::vector<DataRun>&);
 void ValidateWritableAttributes(const HfsPlus::Attributes&);
 uint64_t CatalogTimestamp(uint64_t secondsSince1904);
+size_t InspectCatalogRecordCount(HfsPlus::Source&,const Container&);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);
 uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);
 CatalogWritePlan PrepareCatalogMutation(
