@@ -521,7 +521,7 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
     catch(const std::exception&){return {};}
 }
 void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress) {
-    Check(id != 2 && v.Writable(), "Cannot delete the volume root or a read-only item");
+    Check(id != 2 && v.Supports().remove, "Cannot delete the volume root or a read-only item");
     std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0,true,deletionProgress);
     std::function<void(const Planned &)> remove = [&](const Planned &n) {
         if (job.cancelled()) throw Storage::Cancelled();

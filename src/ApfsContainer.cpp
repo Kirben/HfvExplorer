@@ -472,9 +472,9 @@ uint64_t RenameEntry(Source& source,const Container& expected,uint64_t parent,ui
     return Commit(source,expected,job,&request);
 }
 
-uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job& job,uint64_t alias)
+uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job& job,uint64_t alias,bool external)
 {
-    const CatalogMutation request=CatalogDelete{parent,inode,alias};
+    const CatalogMutation request=CatalogDelete{parent,inode,alias,external};
     return Commit(source,expected,job,&request);
 }
 

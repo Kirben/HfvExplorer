@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-file.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-entries.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2621,8 +2621,35 @@ int RunApfsContainerTest(const char* directory)
                 Check(openCurrent().transaction==linkLocked.transaction,"Rejected APFS hard-link edit wrote a checkpoint");
                 Memory payload(9181);
                 for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i*13)%251);
-                Apfs::CreateCatalogFile(*output,openCurrent(),2,u"Created data.bin",payload,job,{},
+                const auto beforeCreate=openCurrent();
+                const auto volumeOid=beforeCreate.volumes.front();
+                const Apfs::ObjectMap map(*output,beforeCreate,beforeCreate.objectMap,beforeCreate.transaction);
+                const auto volumeBlock=map.Lookup(volumeOid);
+                Check(volumeBlock.has_value(),"Missing APFS volume for cancellation test");
+                const auto volume=Apfs::ReadObject(*output,beforeCreate,*volumeBlock,volumeOid,beforeCreate.transaction,13);
+                const auto newInode=Apfs::Le64(volume.data()+176);
+                Apfs::CreateCatalogFile(*output,beforeCreate,2,u"Created data.bin",payload,job,{},
                                         nullptr,false,nullptr,nullptr,nullptr,true);
+                const auto beforeDelete=openCurrent();
+                CheckpointFaultImage deletion(Disk::Read(*output,0,size_t(output->Size())));
+                Storage::Job deletionJob;
+                deletion.onFlush=[&]{deletionJob.cancel();};
+                bool deletionCancelled=false;
+                try{Apfs::DeleteEntry(deletion,beforeDelete,2,newInode,deletionJob,0,true);}
+                catch(const Storage::Cancelled&){deletionCancelled=true;}
+                const auto preserved=Apfs::Probe(deletion);
+                Check(deletionCancelled&&preserved&&preserved->transaction==beforeDelete.transaction,
+                      "Cancelled APFS deletion changed the durable checkpoint");
+                auto memory=std::make_unique<Memory>(deletion.durable.size());
+                memory->bytes=std::move(deletion.durable);
+                std::unique_ptr<Source> retainedSource=std::move(memory);
+                const auto retainedVolume=Apfs::Open(retainedSource,"apfs-cancelled-deletion");
+                MacBrowser::Entry retainedFile;
+                Check(retainedVolume&&retainedVolume->FindChild(2,u"Created data.bin",retainedFile)&&
+                      retainedFile.forks[0].size==payload.Size(),"Cancelled APFS deletion lost its file");
+                Bytes retainedBytes(payload.bytes.size());
+                retainedVolume->Read(retainedFile.id,0,0,retainedBytes.data(),retainedBytes.size());
+                Check(retainedBytes==payload.bytes,"Cancelled APFS deletion changed file bytes");
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
@@ -2646,7 +2673,7 @@ int RunApfsContainerTest(const char* directory)
                 Check(importedBytes[i]==(i*13)%251,"Created APFS file readback differs");
             const auto caps=published->Supports();
             Check(caps.rename&&caps.writable&&!published->Writable()&&caps.create&&caps.createFolders&&
-                  !caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
+                  caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
                   !caps.CanEditCompression()&&!caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
             const auto importPath=VolumeCoord::Wide(root+"apfs-import-source.img");
@@ -2758,6 +2785,24 @@ int RunApfsContainerTest(const char* directory)
                   published->List(child.id).empty(),"External APFS folder did not reopen empty");
             Reject([&]{published->MakeDirectory(renamedFolder.id,u"NEW APFS FOLDER");},
                    "APFS folder creation accepted a case-insensitive collision");
+            const auto erase=[&](uint32_t id){
+                auto operation=FileOperations::Submit(FileOperations::DeleteEntries{
+                    {FileOperations::Location::Mounted(published,id)}});
+                const auto start=GetTickCount();
+                while(!operation.Job()->done()){
+                    Check(GetTickCount()-start<15000,"External APFS deletion timed out");
+                    Sleep(5);
+                }
+                return operation.Job()->result();
+            };
+            Check(erase(renamedFolder.id).code,"External APFS deleted a populated folder");
+            Check(!erase(child.id).code&&!published->FindChild(renamedFolder.id,u"New APFS folder",child),
+                  "External APFS browser did not delete the empty folder");
+            Check(!erase(replaced).code&&!published->FindChild(2,toCopy.name,child),
+                  "External APFS browser did not delete the overwritten file");
+            Bytes unrelated(importedBytes.size());
+            published->Read(imported.id,0,0,unrelated.data(),unrelated.size());
+            Check(unrelated==importedBytes,"APFS deletion changed unrelated file bytes");
             renamedFolder=published->Stat(renamedFolder.id);
             auto desired=renamedFolder;
             desired.modified=editedTime;
@@ -2788,7 +2833,7 @@ int RunApfsContainerTest(const char* directory)
             desired=published->Stat(updated.id);
             desired.finder[0]=0x12;
             published->SetBasicMetadata(updated.id,desired);
-            Check(published->Stat(updated.id).finder==desired.finder&&published->List(updated.id).size()==401,
+            Check(published->Stat(updated.id).finder==desired.finder&&published->List(updated.id).size()==400,
                   "APFS Finder information edit lost unrelated folder contents");
             Bytes originalHardLink(size_t(a.forks[0].size)),reopenedHardLink(originalHardLink.size());
             authentic->Read(a.id,0,0,originalHardLink.data(),originalHardLink.size());

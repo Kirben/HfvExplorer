@@ -477,6 +477,7 @@ public:
         capabilities.resourceForks=true;
         capabilities.create=writable;
         capabilities.rename=writable;
+        capabilities.remove=writable;
         capabilities.writable=writable;
         capabilities.createFolders=writable;
         capabilities.unicodeNames=true;
@@ -1192,9 +1193,13 @@ public:
     }
     void ValidateRemoval(uint32_t id)override{
         Access([&]{
-            Check(Writable()&&id!=2,"APFS entry is read-only");
+            Check(writable&&id!=2,"APFS entry is read-only");
             const auto& entry=At(id).entry;
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
+            if(limitedEdits)
+                Check(!entry.hardLink&&!entry.compressed&&entry.readError.empty()&&
+                      (!entry.directory||ListDirectory(id).empty()),
+                      "This APFS image can only delete unlinked, uncompressed files and empty folders");
             return true;
         });
     }
@@ -1206,8 +1211,8 @@ public:
             const auto oid=entry.oid;
             const auto parentOid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job,entry.siblingId);});
-        });
+            CommitMutation(parent,id,job,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job,entry.siblingId,limitedEdits);});
+        },true);
     }
 };
 }

@@ -1633,7 +1633,7 @@ void InsertExternalDirectoryRecord(std::vector<OwnedRecord>& catalog,OwnedRecord
     catalog.insert(insert,std::move(record));
 }
 
-void TouchExternalParent(std::vector<OwnedRecord>& catalog,uint64_t parent,uint64_t time,bool addChild)
+void TouchExternalParent(std::vector<OwnedRecord>& catalog,uint64_t parent,uint64_t time,int childDelta)
 {
     const auto parentInode=(uint64_t(3)<<60)|parent;
     Bytes* value=nullptr;
@@ -1646,13 +1646,33 @@ void TouchExternalParent(std::vector<OwnedRecord>& catalog,uint64_t parent,uint6
     Check(value,"APFS parent inode was not found");
     Check(!(Le32(value->data()+68)&(UserImmutable|SystemImmutable)),
           "Unlock the APFS folder before changing its entries");
-    if(addChild){
-        const auto children=Le32(value->data()+56);
-        Check(children<INT32_MAX,"APFS directory child count is exhausted");
-        Set(*value,56,children+1,4);
+    if(childDelta){
+        const auto children=int64_t(Le32(value->data()+56))+childDelta;
+        Check(children>=0&&children<=INT32_MAX,"Invalid APFS directory child count");
+        Set(*value,56,uint64_t(children),4);
     }
     Set(*value,24,time,8);
     Set(*value,32,time,8);
+}
+
+void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint64_t inode,
+                                   const std::set<uint64_t>& removeStreams,const CatalogRecords& extentTree,
+                                   std::set<uint64_t>& retired)
+{
+    std::map<uint64_t,uint64_t> owned;
+    for(const auto& extent:extentTree.records){
+        if(Le64(extent.value.data()+8)==inode)
+            owned.emplace(Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask);
+    }
+    for(const auto& record:catalog){
+        const auto key=Le64(record.key.data());
+        if(key>>60!=8||!removeStreams.count(key&IdMask))continue;
+        Check(record.key.size()==16&&record.value.size()==24,"Invalid APFS removed extent");
+        const auto block=Le64(record.value.data()+8),bytes=Le64(record.value.data());
+        const auto run=owned.find(block);
+        Check(run!=owned.end()&&bytes==run->second*Block&&retired.insert(block).second,
+              "APFS removed extent does not have an exclusive reference");
+    }
 }
 
 size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplaceData& edit,
@@ -1732,20 +1752,7 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
             Check(stream>edit.inode&&removeStreams.insert(stream).second,"Invalid APFS overwrite stream ID");
         }
     }
-    std::map<uint64_t,uint64_t> owned;
-    for(const auto& extent:extentTree.records){
-        if(Le64(extent.value.data()+8)==edit.inode)
-            owned.emplace(Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask);
-    }
-    for(const auto& record:catalog){
-        const auto key=Le64(record.key.data());
-        if(key>>60!=8||!removeStreams.count(key&IdMask))continue;
-        Check(record.key.size()==16&&record.value.size()==24,"Invalid APFS overwrite extent");
-        const auto block=Le64(record.value.data()+8),bytes=Le64(record.value.data());
-        const auto run=owned.find(block);
-        Check(run!=owned.end()&&bytes==run->second*Block&&retired.insert(block).second,
-              "APFS overwrite extent does not have an exclusive reference");
-    }
+    CollectExternalRetiredExtents(catalog,edit.inode,removeStreams,extentTree,retired);
     const auto index=size_t(inode-catalog.begin());
     inode->value=std::move(updated.value);
     catalog.erase(catalog.begin()+index+1,after);
@@ -1757,6 +1764,74 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
     catalog.insert(catalog.begin()+index+1,std::make_move_iterator(attributes.begin()),
                    std::make_move_iterator(attributes.end()));
     return index+1+attributes.size();
+}
+
+CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogDelete& edit,
+                                uint64_t time,const CatalogRecords& extentTree,std::set<uint64_t>& retired)
+{
+    Check(!edit.alias&&edit.inode>=16&&edit.inode!=edit.parent,"APFS cannot delete this entry");
+    const auto entryKey=(uint64_t(9)<<60)|edit.parent;
+    std::optional<size_t> directoryRecord;
+    CatalogKind kind=CatalogKind::RegularFile;
+    for(size_t i=0;i<catalog.size();++i){
+        const auto& record=catalog[i];
+        Check(record.key.size()>=8,"Truncated APFS catalog key");
+        if(Le64(record.key.data())!=entryKey||record.value.size()<18||Le64(record.value.data())!=edit.inode)continue;
+        Check(!directoryRecord&&record.value.size()==18,"APFS deletion requires an unlinked entry");
+        kind=CatalogKind(Le16(record.value.data()+16));
+        Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile,
+              "APFS can only delete a regular file or an empty folder");
+        directoryRecord=i;
+    }
+    Check(directoryRecord.has_value(),"The APFS deletion target no longer exists");
+
+    const auto inodeKey=(uint64_t(3)<<60)|edit.inode;
+    const auto inode=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+        return Le64(record.key.data())==inodeKey;
+    });
+    Check(inode!=catalog.end()&&inode->key.size()==8&&inode->value.size()>=92,"Invalid APFS deletion inode");
+    const auto& value=inode->value;
+    const bool directory=kind==CatalogKind::Directory;
+    Check(Le64(value.data())==edit.parent&&Le64(value.data()+8)==edit.inode&&
+          (Le16(value.data()+80)&0170000)==(uint16_t(kind)<<12)&&
+          !(Le32(value.data()+68)&(UserImmutable|SystemImmutable|BsdCompressed)),
+          "APFS deletion requires a supported unlocked inode");
+    Check(Le32(value.data()+56)==(directory?0:1),"The APFS folder is populated or file has multiple names");
+
+    std::set<uint64_t> streams;
+    if(!directory)streams.insert(edit.inode);
+    auto after=std::next(inode);
+    for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
+        const auto type=Le64(after->key.data())>>60;
+        if(!directory&&(type==6||type==8))continue;
+        Check(type==4&&after->key.size()>=12&&after->key.back()==0&&after->value.size()>=4,
+              "APFS deletion found an unsupported entry record");
+        const std::string attr(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
+        const auto storage=Le16(after->value.data());
+        Check((OrdinaryAttribute(attr)||attr==ResourceAttribute)&&
+              (storage==2||(storage==1&&after->value.size()==52)),
+              "APFS deletion found an unsupported attribute");
+        if(storage==1){
+            const auto stream=Le64(after->value.data()+4);
+            Check(stream>edit.inode&&streams.insert(stream).second,"Invalid APFS deletion stream ID");
+        }
+    }
+    CollectExternalRetiredExtents(catalog,edit.inode,streams,extentTree,retired);
+    const auto first=size_t(inode-catalog.begin()),last=size_t(after-catalog.begin());
+    const auto entry=*directoryRecord;
+    TouchExternalParent(catalog,edit.parent,time,-1);
+    if(entry>first){
+        catalog.erase(catalog.begin()+entry);
+        catalog.erase(catalog.begin()+first,catalog.begin()+last);
+    }else{
+        catalog.erase(catalog.begin()+first,catalog.begin()+last);
+        catalog.erase(catalog.begin()+entry);
+    }
+    catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
+        const auto key=Le64(record.key.data());
+        return key>>60==8&&streams.count(key&IdMask);
+    }),catalog.end());
+    return kind;
 }
 
 void CheckExternalVolume(const Bytes& volume)
@@ -1915,7 +1990,9 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     const bool externalCreate=create&&create->external;
     const bool externalReplace=replace&&replace->external;
-    if(properties||externalCreate||externalReplace)CheckExternalVolume(volume);
+    const auto* remove=std::get_if<CatalogDelete>(&request);
+    const bool externalDelete=remove&&remove->external;
+    if(properties||externalCreate||externalReplace||externalDelete)CheckExternalVolume(volume);
     else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -1962,9 +2039,12 @@ CatalogWritePlan PrepareCatalogMutation(
     std::set<uint64_t> retiredStreams;
     std::set<uint64_t> externalRetired;
     std::vector<OwnedRecord> catalog;
-    if(externalReplace){
+    if(externalDelete){
         catalog=std::move(existing.records);
-        TouchExternalParent(catalog,replace->parent,time,false);
+        removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
+    }else if(externalReplace){
+        catalog=std::move(existing.records);
+        TouchExternalParent(catalog,replace->parent,time,0);
         streamAt=ReplaceExternalFile(catalog,*replace,dataSize,time,resource?&*resource:nullptr,
                                      attributeIds,extentTree,externalRetired);
     }else if(externalCreate){
@@ -1978,7 +2058,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
                   "APFS catalog contains an object at or after its next ID");
         }
-        TouchExternalParent(catalog,create->parent,time,true);
+        TouchExternalParent(catalog,create->parent,time,1);
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,true,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name);
         auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
@@ -2078,13 +2158,13 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(record.key,8,hash|(replacement.size()+1),4);
             std::copy(replacement.begin(),replacement.end(),record.key.begin()+12);
             InsertExternalDirectoryRecord(catalog,std::move(record),properties->parent,replacement);
-            TouchExternalParent(catalog,properties->parent,time,false);
+            TouchExternalParent(catalog,properties->parent,time,0);
         }
     }else{
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
                             directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
     }
-    if(properties||externalCreate||externalReplace){
+    if(properties||externalCreate||externalReplace||externalDelete){
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});
@@ -2099,7 +2179,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        if(externalReplace)return externalRetired.count(run.block)!=0;
+        if(externalReplace||externalDelete)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;
