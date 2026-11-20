@@ -92,10 +92,11 @@ inline Record DirectoryEntry(std::string_view name,uint64_t inode,uint64_t now,u
 }
 
 inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent,
-                    uint16_t mode,uint32_t linksOrChildren)
+                    uint16_t mode,uint32_t linksOrChildren,uint64_t dataSize=0)
 {
     const size_t nameSpace=size_t(DivideUp(name.size()+1,8)*8);
-    Record record{Bytes(8),Bytes(100+nameSpace)};
+    const size_t dataField=dataSize?4:0;
+    Record record{Bytes(8),Bytes(100+dataField+nameSpace+(dataSize?40:0))};
     Set(record.key,0,(uint64_t(3)<<60)|inode,8);
     Set(record.value,0,parent,8);
     Set(record.value,8,inode,8);
@@ -103,12 +104,20 @@ inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t p
     Set(record.value,48,0x8000,8);
     Set(record.value,56,linksOrChildren,4);
     Set(record.value,80,mode,2);
-    Set(record.value,92,1,2);
-    Set(record.value,94,nameSpace,2);
+    Set(record.value,92,dataSize?2:1,2);
+    Set(record.value,94,nameSpace+(dataSize?40:0),2);
     record.value[96]=4;
     record.value[97]=2;
     Set(record.value,98,name.size()+1,2);
-    std::copy(name.begin(),name.end(),record.value.begin()+100);
+    std::copy(name.begin(),name.end(),record.value.begin()+100+dataField);
+    if(dataSize){
+        record.value[100]=8;
+        record.value[101]=0x20; // System field.
+        Set(record.value,102,40,2);
+        const size_t stream=104+nameSpace;
+        Set(record.value,stream,dataSize,8);
+        Set(record.value,stream+8,DivideUp(dataSize,Block)*Block,8);
+    }
     return record;
 }
 

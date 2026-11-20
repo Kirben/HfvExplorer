@@ -18,6 +18,9 @@ using WriterDisk::EncodeLeaf;
 using WriterDisk::Set;
 using OwnedRecord=WriterDisk::Record;
 using Writes=std::vector<CheckpointBlockWrite>;
+struct FileRun {
+    uint64_t owner,block,count;
+};
 constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000,Chunk=Block*8;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
 constexpr size_t MainFreeQueue=240,PoolFreeQueue=200;
@@ -154,6 +157,7 @@ void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<uint64_t> blocks,
 std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& container,
                               Bytes& space,Bytes& superblock,const CheckpointObjectLookup& ephemeral,
                               const std::vector<uint64_t>& retire,uint64_t extents,uint64_t snapshots,
+                              const std::vector<FileRun>& files,uint64_t dataBlocks,uint64_t& dataBlock,
                               uint64_t transaction)
 {
     const auto chunks=DivideUp(container.blockCount,Chunk);
@@ -235,20 +239,37 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     const auto within=[](uint64_t block,uint64_t start,uint64_t count){
         return block>=start&&block-start<count;
     };
-    const auto reclaimed=Reclaim(space,mainQueue,MainFreeQueue,mainMap,0,mainLimit,container.transaction,[&](uint64_t block){
+    const auto isMetadata=[&](uint64_t block){
         return !block||block==extents||block==snapshots||
                within(block,Le64(superblock.data()+112),Le32(superblock.data()+104))||
                within(block,Le64(superblock.data()+120),Le32(superblock.data()+108))||
                within(block,currentBitmapBase,bitmapSlots)||within(block,pool,poolSize)||
                std::find(retire.begin(),retire.end(),block)!=retire.end();
-    });
-    std::vector<uint64_t> result;
-    uint64_t available=0;
-    for(uint64_t i=0;i<mainLimit;++i){
-        if(Bit(mainMap,i))continue;
-        ++available;
-        if(result.size()<retire.size())result.push_back(i);
+    };
+    for(const auto& run:files){
+        VerifyAllocated(mainMap,run.block,run.count,mainLimit);
+        for(uint64_t i=0;i<run.count;++i)
+            Check(!isMetadata(run.block+i),"APFS file extent overlaps live metadata");
     }
+    const auto reclaimed=Reclaim(space,mainQueue,MainFreeQueue,mainMap,0,mainLimit,container.transaction,[&](uint64_t block){
+        return isMetadata(block)||std::any_of(files.begin(),files.end(),[&](const auto& run){
+            return within(block,run.block,run.count);
+        });
+    });
+    // Select the contiguous data run before distributing metadata blocks.
+    uint64_t available=0,consecutive=0;
+    for(uint64_t i=0;i<mainLimit;++i){
+        if(Bit(mainMap,i)){
+            consecutive=0;
+            continue;
+        }
+        ++available;
+        if(++consecutive==dataBlocks&&!dataBlock)dataBlock=i+1-dataBlocks;
+    }
+    Check(!dataBlocks||dataBlock,"No contiguous APFS space for the file data");
+    std::vector<uint64_t> result;
+    for(uint64_t i=0;i<mainLimit&&result.size()<retire.size();++i)
+        if(!Bit(mainMap,i)&&!within(i,dataBlock,dataBlocks))result.push_back(i);
     Check(available>=reclaimed&&available-reclaimed==Le32(cib.data()+60)&&
           available-reclaimed+(container.blockCount-mainLimit)==Le64(space.data()+72)&&
           result.size()==retire.size(),"APFS allocation counts disagree or the active chunk is full");
@@ -257,15 +278,16 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     Retire(space,poolQueue,PoolFreeQueue,{oldCib,oldMainBitmap},transaction);
 
     for(const auto block:result)SetBit(mainMap,block);
+    for(uint64_t i=0;i<dataBlocks;++i)SetBit(mainMap,dataBlock+i);
     for(const auto block:internal)SetBit(poolMap,block-pool);
     writes.push_back({internal[0],std::move(mainMap)});
     writes.push_back({currentBitmapBase+head,std::move(poolMap)});
     Set(cib,40,transaction,8);
-    Set(cib,60,available-result.size(),4);
+    Set(cib,60,available-result.size()-dataBlocks,4);
     Set(cib,64,internal[0],8);
     StageObject(writes,internal[1],std::move(cib),internal[1],transaction,Physical|7);
     Set(space,cibOffset,internal[1],8);
-    Set(space,72,available+(container.blockCount-mainLimit)-result.size(),8);
+    Set(space,72,available+(container.blockCount-mainLimit)-result.size()-dataBlocks,8);
     Set(space,xidOffset,transaction,8);
     Set(space,bitmapOffset,head,2);
     Set(space,320,nextHead,2);
@@ -275,13 +297,60 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     return result;
 }
 
-Bytes AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::string& name,uint64_t id,uint64_t time,
-                      bool fold,uint64_t directoryCount,uint64_t fileCount)
+OwnedRecord StreamReference(uint64_t inode)
+{
+    OwnedRecord record{Bytes(8),Bytes(4)};
+    Set(record.key,0,(uint64_t(6)<<60)|inode,8);
+    Set(record.value,0,1,4);
+    return record;
+}
+
+OwnedRecord FileExtent(const FileRun& run)
+{
+    OwnedRecord record{Bytes(16),Bytes(24)};
+    Set(record.key,0,(uint64_t(8)<<60)|run.owner,8);
+    Set(record.value,0,run.count*Block,8);
+    Set(record.value,8,run.block,8);
+    return record;
+}
+
+OwnedRecord ExtentReference(const FileRun& run)
+{
+    OwnedRecord record{Bytes(8),Bytes(20)};
+    Set(record.key,0,(uint64_t(2)<<60)|run.block,8);
+    Set(record.value,0,(uint64_t(1)<<60)|run.count,8);
+    Set(record.value,8,run.owner,8);
+    Set(record.value,16,1,4);
+    return record;
+}
+
+bool Matches(View view,const Bytes& expected)
+{
+    return view.size==expected.size()&&!memcmp(view.data,expected.data(),view.size);
+}
+
+void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
+{
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    Check(!tree.Level()&&tree.Count()==files.size(),"APFS extent reference count disagrees with the catalog");
+    uint64_t end=0;
+    for(size_t i=0;i<files.size();++i){
+        const auto& run=files[i];
+        const auto record=tree.At(i);
+        const auto expected=ExtentReference(run);
+        Check(run.block>=end&&Matches(record.key,expected.key)&&Matches(record.value,expected.value),
+              "Invalid, shared or overlapping APFS extent reference");
+        end=run.block+run.count;
+    }
+}
+
+std::vector<OwnedRecord> AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::string& name,
+    uint64_t id,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t dataSize,
+    std::vector<FileRun>& fileRuns)
 {
     const Node tree(std::move(catalog),true,{});
-    Check(tree.Level()==0&&directoryCount<=tree.Count()&&fileCount<=tree.Count()&&
-          tree.Count()==4+2*(directoryCount+fileCount),
-          "APFS catalog writes require a single leaf containing only folders and empty files");
+    Check(tree.Level()==0&&directoryCount<=tree.Count()&&fileCount<=tree.Count(),
+          "APFS catalog writes require single-leaf catalogs");
     const auto parent=request.parent;
     const bool isDirectory=request.kind==CatalogKind::Directory;
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
@@ -306,6 +375,7 @@ Bytes AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::stri
     std::vector<OwnedRecord> records;
     for(size_t i=0;i<tree.Count();++i){
         const auto view=tree.At(i);
+        bool streamRecords=false;
         if(i<2){
             const auto expected=WriterDisk::DirectoryEntry(reserved[i]==2?"root":"private-dir",reserved[i],0);
             Check(view.key.size==expected.key.size()&&!memcmp(view.key.data,expected.key.data(),view.key.size)&&
@@ -348,13 +418,27 @@ Bytes AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::stri
                 }else{
                     const auto& primaryName=link->second.name;
                     const auto value=view.value.data;
-                    const auto nameSpace=DivideUp(primaryName.size()+1,8)*8;
-                    Check(mode==0100000&&view.value.size==100+nameSpace&&Le32(value+56)==1&&
-                          Le64(value+48)==0x8000&&!Le32(value+68)&&!Le64(value+84)&&
-                          Le16(value+92)==1&&Le16(value+94)==nameSpace&&value[96]==4&&value[97]==2&&
-                          Le16(value+98)==primaryName.size()+1&&
-                          !memcmp(value+100,primaryName.c_str(),primaryName.size()+1),
-                          "APFS catalog writes currently support only native empty regular files");
+                    const size_t stream=104+size_t(DivideUp(primaryName.size()+1,8)*8);
+                    const auto size=view.value.size==stream+40?Le64(value+stream):0;
+                    Check(size<=Block*Chunk,"Unsupported APFS file size in writable catalog");
+                    const auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size);
+                    Check(mode==0100000&&view.value.size==expected.value.size()&&
+                          !memcmp(value+48,expected.value.data()+48,view.value.size-48),
+                          "APFS writes require native regular files with one data extent at most");
+                    if(size){
+                        Check(i+2<tree.Count(),"Missing APFS data-stream records");
+                        const auto reference=tree.At(i+1),extent=tree.At(i+2);
+                        const auto streamRef=StreamReference(inode);
+                        Check(extent.value.size==24,"Invalid APFS file extent size");
+                        const FileRun run{inode,Le64(extent.value.data+8),DivideUp(size,Block)};
+                        Check(run.block&&Range(run.block,run.count,Chunk),"APFS file extent outside the writable chunk");
+                        const auto encoded=FileExtent(run);
+                        Check(Matches(reference.key,streamRef.key)&&Matches(reference.value,streamRef.value)&&
+                              Matches(extent.key,encoded.key)&&Matches(extent.value,encoded.value),
+                              "Invalid APFS data-stream or extent record");
+                        fileRuns.push_back(run);
+                        streamRecords=true;
+                    }
                     ++files;
                 }
             }
@@ -362,11 +446,18 @@ Bytes AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::stri
             const Key order{inode,type,hash};
             Check(order>previous,"Invalid or unsupported APFS directory key order");
             Check(order!=addedKey,"The APFS entry name already exists or has a conflicting hash");
-            if(order<addedKey)++insertAt;
+            // A regular file cannot be a destination parent, so its stream
+            // records always sort on the same side of the insertion point.
+            if(order<addedKey)insertAt+=streamRecords?3:1;
             previous=order;
         }
         records.push_back({Bytes(view.key.data,view.key.data+view.key.size),
                            Bytes(view.value.data,view.value.data+view.value.size)});
+        if(streamRecords){
+            records.push_back(StreamReference(fileRuns.back().owner));
+            records.push_back(FileExtent(fileRuns.back()));
+            i+=2;
+        }
     }
     Check(directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
           files==fileCount&&links.size()==directoryCount+fileCount,"APFS catalog records and volume counts disagree");
@@ -381,17 +472,21 @@ Bytes AddCatalogEntry(Bytes catalog,const CatalogCreate& request,const std::stri
     Set(parentInode,32,time,8);
     Set(parentInode,56,target->second.children+1,4);
     records.insert(records.begin()+insertAt,std::move(added));
-    records.push_back(WriterDisk::Inode(name,id,time,parent,isDirectory?0040755:0100644,isDirectory?0:1));
-    return EncodeLeaf(records,0x40);
+    records.push_back(WriterDisk::Inode(name,id,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+    return records;
 }
 }
 
-std::vector<CheckpointBlockWrite> PrepareCatalogCreate(
+CatalogWritePlan PrepareCatalogCreate(
     Source& source,const Container& current,uint64_t transaction,Bytes& superblock,
     const CheckpointObjectLookup& ephemeral,const CatalogCreate& request)
 {
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
     const auto ascii=CatalogName(request.name);
+    CatalogWritePlan plan;
+    plan.dataSize=request.data?request.data->Size():0;
+    const auto dataBlocks=DivideUp(plan.dataSize,Block);
+    Check(dataBlocks<=(std::min)(current.blockCount,Chunk),"APFS file exceeds the writable allocation chunk");
     const auto oid=current.volumes.front();
     const auto containerMap=ReadSingleMapping(source,current,current.objectMap,oid);
     auto volume=ReadObject(source,current,containerMap.physical,oid,current.transaction,13);
@@ -406,36 +501,54 @@ std::vector<CheckpointBlockWrite> PrepareCatalogCreate(
           "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
     const Node extentTree(ReadObject(source,current,extents,extents,current.transaction,2,15,true),true,{});
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
-    Check(!extentTree.Level()&&!extentTree.Count()&&!snapshotTree.Level()&&!snapshotTree.Count(),
-          "APFS catalog writes currently require empty extent and snapshot trees");
+    Check(!snapshotTree.Level()&&!snapshotTree.Count(),"APFS catalog writes require an empty snapshot tree");
     const auto volumeMap=ReadSingleMapping(source,current,Le64(volume.data()+128),catalogOid);
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
     FILETIME fileTime{};
     GetSystemTimeAsFileTime(&fileTime);
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
+    std::vector<FileRun> files;
     auto catalog=AddCatalogEntry(ReadObject(source,current,volumeMap.physical,catalogOid,current.transaction,2,14),
-                              request,ascii,nextId,time,flags==1,directoryCount,fileCount);
+                                 request,ascii,nextId,time,flags==1,directoryCount,fileCount,plan.dataSize,files);
+    ValidateExtentReferences(extentTree,files);
     auto& space=ephemeral(Le64(superblock.data()+152));
-    Writes writes;
+    auto& writes=plan.metadata;
+    std::vector<uint64_t> retired{containerMap.headerBlock,containerMap.rootBlock,containerMap.physical,
+                                  volumeMap.headerBlock,volumeMap.rootBlock,volumeMap.physical};
+    if(dataBlocks)retired.push_back(extents);
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
-        {containerMap.headerBlock,containerMap.rootBlock,containerMap.physical,
-         volumeMap.headerBlock,volumeMap.rootBlock,volumeMap.physical},extents,snapshots,transaction);
-    StageObject(writes,allocated[0],std::move(catalog),catalogOid,transaction,2,14);
+                                  retired,extents,snapshots,files,dataBlocks,plan.dataBlock,transaction);
+    if(dataBlocks){
+        const FileRun run{nextId,plan.dataBlock,dataBlocks};
+        catalog.push_back(StreamReference(nextId));
+        catalog.push_back(FileExtent(run));
+        const auto at=std::lower_bound(files.begin(),files.end(),run.block,
+            [](const auto& file,uint64_t block){return file.block<block;});
+        files.insert(at,run);
+        std::vector<OwnedRecord> references;
+        for(const auto& file:files)references.push_back(ExtentReference(file));
+        StageObject(writes,allocated[6],EncodeLeaf(references,0x50),allocated[6],transaction,Physical|2,15);
+        Set(volume,144,allocated[6],8);
+        const auto volumeBlocks=Le64(volume.data()+88);
+        Check(volumeBlocks<=current.blockCount-dataBlocks,"Invalid APFS volume allocation count");
+        Set(volume,88,volumeBlocks+dataBlocks,8);
+    }
+    StageObject(writes,allocated[0],EncodeLeaf(catalog,0x40),catalogOid,transaction,2,14);
     StageMap(writes,volumeMap,allocated[1],allocated[2],catalogOid,allocated[0],transaction);
     Set(volume,128,allocated[1],8);
     Set(volume,176,nextId+1,8);
     if(request.kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
     else Set(volume,184,fileCount+1,8);
     Set(volume,256,time,8);
-    // Replacing the catalog and its object map retires three volume blocks.
-    Check(Le64(volume.data()+224)<=UINT64_MAX-3&&Le64(volume.data()+232)<=UINT64_MAX-3,
+    const uint64_t replaced=dataBlocks?4:3;
+    Check(Le64(volume.data()+224)<=UINT64_MAX-replaced-dataBlocks&&Le64(volume.data()+232)<=UINT64_MAX-replaced,
           "APFS volume allocation history overflow");
-    Set(volume,224,Le64(volume.data()+224)+3,8);
-    Set(volume,232,Le64(volume.data()+232)+3,8);
+    Set(volume,224,Le64(volume.data()+224)+replaced+dataBlocks,8);
+    Set(volume,232,Le64(volume.data()+232)+replaced,8);
     StageObject(writes,allocated[3],std::move(volume),oid,transaction,13);
     StageMap(writes,containerMap,allocated[4],allocated[5],oid,allocated[3],transaction);
     Set(superblock,160,allocated[4],8);
-    return writes;
+    return plan;
 }
 }

@@ -270,7 +270,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
           current->volumes.size()==1&&source.Size()==current->blockCount*current->blockSize,
           "Checkpoint writes require a raw single-volume APFS image with a contiguous checkpoint ring");
     auto plan=PlanCheckpoint(source,*current);
-    std::vector<CheckpointBlockWrite> changedBlocks;
+    CatalogWritePlan changes;
     if(entry){
         const auto object=[&](uint64_t oid) -> Bytes& {
             const auto found=std::find_if(plan.objects.begin(),plan.objects.end(),[&](const auto& entry){
@@ -279,7 +279,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
             Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
             return found->bytes;
         };
-        changedBlocks=PrepareCatalogCreate(source,*current,plan.transaction,plan.superblock,object,*entry);
+        changes=PrepareCatalogCreate(source,*current,plan.transaction,plan.superblock,object,*entry);
     }
     Stamp(plan.superblock,plan.transaction);
     auto write=[&](uint64_t block,const uint8_t* bytes){
@@ -287,7 +287,21 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
         source.Write(block*plan.blockSize,bytes,plan.blockSize);
     };
     source.CheckMedia();
-    for(const auto& block:changedBlocks)write(block.block,block.bytes.data());
+    if(changes.dataSize){
+        auto& data=*entry->data;
+        data.CheckMedia();
+        Bytes buffer(plan.blockSize);
+        for(uint64_t offset=0;offset<changes.dataSize;offset+=plan.blockSize){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto size=size_t((std::min)(uint64_t(plan.blockSize),changes.dataSize-offset));
+            std::fill(buffer.begin()+size,buffer.end(),0);
+            data.Read(offset,buffer.data(),size);
+            write(changes.dataBlock+offset/plan.blockSize,buffer.data());
+        }
+        data.CheckMedia();
+        Check(data.Size()==changes.dataSize,"The APFS file source changed size");
+    }
+    for(const auto& block:changes.metadata)write(block.block,block.bytes.data());
     for(auto& object:plan.objects){
         Stamp(object.bytes,plan.transaction);
         for(size_t i=0;i<object.bytes.size()/plan.blockSize;++i){
@@ -328,6 +342,14 @@ uint64_t CreateDirectory(Source& source,const Container& expected,uint64_t paren
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogCreate request{parent,name,CatalogKind::RegularFile};
+    return Commit(source,expected,job,&request);
+}
+
+uint64_t CreateFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
+                    Source& data,Storage::Job& job)
+{
+    Check(&source!=&data,"APFS file data requires a separate source");
+    const CatalogCreate request{parent,name,CatalogKind::RegularFile,&data};
     return Commit(source,expected,job,&request);
 }
 }

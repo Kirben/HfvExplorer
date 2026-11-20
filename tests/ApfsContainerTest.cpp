@@ -395,6 +395,77 @@ void CheckpointWrites(const std::string& root,FILE* report)
         image->Keep();
     }
     fprintf(report,"PASS: APFS empty files and mixed catalogs, cross-type name conflicts, and interrupted file creation.\n");
+    const auto beforeData=Apfs::Probe(files);
+    CheckpointFaultImage dataFiles(files.durable);
+    Memory payload(9003);
+    for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t(i*31+(i>>9));
+    Check(Apfs::CreateFile(dataFiles,*beforeData,childFolder,u"Data.bin",payload,controlJob)==8,
+          "APFS could not create a multi-block data fork");
+    for(unsigned step=1;step<=dataFiles.event;++step){
+        CheckpointFaultImage attempt(files.durable);
+        attempt.failAt=step;
+        attempt.fault=step==dataFiles.event||step==dataFiles.event-2?Fault::FailedFlush:Fault::TornWrite;
+        Reject([&]{Apfs::CreateFile(attempt,*beforeData,childFolder,u"Data.bin",payload,controlJob);},
+               "Injected APFS data-write interruption succeeded");
+        const auto mounted=openCheckpoint(attempt);
+        MacBrowser::Entry topDir,parentDir,entry;
+        Check(reopen(attempt)==7&&mounted->FindChild(2,u"New Folder",topDir)&&
+              mounted->FindChild(topDir.id,u"New Folder",parentDir)&&
+              mounted->FindChild(parentDir.id,u"Empty.txt",entry)&&
+              !mounted->FindChild(parentDir.id,u"Data.bin",entry),
+              "Interrupted APFS data write changed the preceding catalog");
+    }
+    CheckpointFaultImage outOfSpace(files.durable);
+    Memory oversized(imageSize);
+    Reject([&]{Apfs::CreateFile(outOfSpace,*beforeData,2,u"Too large",oversized,controlJob);},
+           "APFS accepted a fork with no available extent");
+    Check(!outOfSpace.event&&outOfSpace.durable==files.durable,"APFS wrote before rejecting an allocation failure");
+    const auto afterData=Apfs::Probe(dataFiles);
+    Check(Apfs::CreateDirectory(dataFiles,*afterData,2,u"After Data",controlJob)==9,
+          "APFS could not edit a catalog containing allocated file data");
+    const auto afterFolder=Apfs::Probe(dataFiles);
+    constexpr uint64_t secondParent=23;
+    Memory small(27);
+    std::fill(small.bytes.begin(),small.bytes.end(),0xc7);
+    {
+        CheckpointFaultImage cancelled(dataFiles.durable);
+        Storage::Job job;
+        cancelled.onFlush=[&]{job.cancel();};
+        bool stopped=false;
+        try{Apfs::CreateFile(cancelled,*afterFolder,secondParent,u"Small.bin",small,job);}
+        catch(const Storage::Cancelled&){stopped=true;}
+        const auto mounted=openCheckpoint(cancelled);
+        MacBrowser::Entry topDir,parentDir,entry,destination;
+        Check(stopped&&reopen(cancelled)==9&&mounted->FindChild(2,u"After Data",destination)&&
+              mounted->List(destination.id).empty()&&mounted->FindChild(2,u"New Folder",topDir)&&
+              mounted->FindChild(topDir.id,u"New Folder",parentDir)&&mounted->FindChild(parentDir.id,u"Data.bin",entry),
+              "APFS cancellation after the data flush changed the previous catalog");
+        Bytes restored(payload.bytes.size());
+        mounted->Read(entry.id,0,0,restored.data(),restored.size());
+        Check(restored==payload.bytes,"Cancelled APFS file creation changed existing file data");
+    }
+    Check(Apfs::CreateFile(dataFiles,*afterFolder,secondParent,u"Small.bin",small,controlJob)==10,
+          "APFS could not add a second physical extent reference");
+    const auto withData=openCheckpoint(dataFiles);
+    MacBrowser::Entry dataTop,dataParent,dataEntry,secondDir,smallEntry;
+    Check(withData->FindChild(2,u"New Folder",dataTop)&&
+          withData->FindChild(dataTop.id,u"New Folder",dataParent)&&
+          withData->FindChild(dataParent.id,u"Data.bin",dataEntry)&&
+          withData->FindChild(2,u"After Data",secondDir)&&withData->FindChild(secondDir.id,u"Small.bin",smallEntry),
+          "APFS files with data did not reopen after subsequent writes");
+    Check(!dataEntry.directory&&dataEntry.forks[0].size==payload.Size()&&!dataEntry.forks[1].size&&
+          smallEntry.forks[0].size==small.Size(),"Incorrect APFS data-fork sizes");
+    Bytes decoded(payload.bytes.size()),decodedSmall(small.bytes.size());
+    withData->Read(dataEntry.id,0,0,decoded.data(),decoded.size());
+    withData->Read(smallEntry.id,0,0,decodedSmall.data(),decodedSmall.size());
+    Check(decoded==payload.bytes&&decodedSmall==small.bytes,"APFS extent write did not preserve file contents");
+    {
+        const auto path=VolumeCoord::Wide(root+"checkpoint-data-files.img");
+        auto image=CreateFormatOutput(path.c_str(),imageSize);
+        image->Write(0,dataFiles.durable.data(),dataFiles.durable.size());
+        image->Keep();
+    }
+    fprintf(report,"PASS: APFS file data extents, partial final blocks, repeat allocation, insufficient space, and write interruption.\n");
     CheckpointFaultImage invalidName(original);
     Reject([&]{Apfs::CreateDirectory(invalidName,*start,2,u"Bad/Name",controlJob);},
            "An illegal APFS directory name was accepted");
