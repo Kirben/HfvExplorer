@@ -1913,7 +1913,7 @@ bool UnlinkExternalAlias(std::vector<OwnedRecord>& catalog,const CatalogDelete& 
     return true;
 }
 
-CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogDelete& edit,
+CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog,const CatalogDelete& edit,
                                 uint64_t time,const CatalogRecords& extentTree,std::set<uint64_t>& retired)
 {
     Check((!edit.alias||edit.recursive)&&edit.inode>=16&&edit.inode!=edit.parent,"APFS cannot delete this entry");
@@ -1941,17 +1941,19 @@ CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogD
     const bool directory=kind==CatalogKind::Directory;
     Check(Le64(value.data())==edit.parent&&Le64(value.data()+8)==edit.inode&&
           (Le16(value.data()+80)&0170000)==(uint16_t(kind)<<12)&&
-          !(Le32(value.data()+68)&(UserImmutable|SystemImmutable|BsdCompressed)),
+          !(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
           "APFS deletion requires a supported unlocked inode");
+    const bool compressed=(Le32(value.data()+68)&BsdCompressed)!=0;
+    Check(!compressed||kind==CatalogKind::RegularFile,"Invalid APFS compressed inode type");
     Check(Le32(value.data()+56)==(directory?0:1),"The APFS folder is populated or file has multiple names");
 
     std::set<uint64_t> streams;
-    if(kind==CatalogKind::RegularFile)streams.insert(edit.inode);
-    bool hadTarget=false;
+    if(kind==CatalogKind::RegularFile&&!compressed)streams.insert(edit.inode);
+    bool hadTarget=false,hadCompression=false,hadResource=false,needsResource=false;
     auto after=std::next(inode);
     for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
         const auto type=Le64(after->key.data())>>60;
-        if(kind==CatalogKind::RegularFile&&(type==6||type==8))continue;
+        if(kind==CatalogKind::RegularFile&&!compressed&&(type==6||type==8))continue;
         Check(type==4&&after->key.size()>=12&&after->key.back()==0&&after->value.size()>=4,
               "APFS deletion found an unsupported entry record");
         const std::string attr(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
@@ -1963,15 +1965,55 @@ CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogD
             hadTarget=true;
             continue;
         }
+        if(attr==CompressionAttribute){
+            Check(compressed&&!hadCompression&&Le16(after->value.data()+2)==after->value.size()-4,
+                  "Invalid APFS compression attribute for deletion");
+            Bytes streamedHeader;
+            const auto* header=after->value.data()+4;
+            if(storage==1){
+                Check(after->value.size()==52&&Le64(header+8)>=16,
+                      "Invalid APFS compression attribute stream");
+                const auto stream=Le64(header);
+                Check(stream>edit.inode&&streams.insert(stream).second,"Invalid APFS compression stream ID");
+                const auto first=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+                    return record.key.size()==16&&Le64(record.key.data())==((uint64_t(8)<<60)|stream)&&
+                           !Le64(record.key.data()+8);
+                });
+                Check(first!=catalog.end()&&first->value.size()==24,"Missing APFS compression stream header extent");
+                const auto block=Le64(first->value.data()+8);
+                const auto owned=std::find_if(extentTree.records.begin(),extentTree.records.end(),[&](const auto& record){
+                    return (Le64(record.key.data())&IdMask)==block&&Le64(record.value.data()+8)==edit.inode&&
+                           Le32(record.value.data()+16)==1;
+                });
+                Check(block&&block<source.Size()/Block&&owned!=extentTree.records.end(),
+                      "APFS compression header has no exclusive extent");
+                streamedHeader=HfsPlus::Disk::Read(source,block*Block,16);
+                header=streamedHeader.data();
+            }else Check(storage==2&&after->value.size()>=20,"Truncated APFS compression header");
+            Check(Le32(header)==0x636d7066&&Le64(header+8)==Le64(value.data()+84),
+                  "APFS compression header disagrees with the inode");
+            const auto mode=Le32(header+4);
+            needsResource=mode==4||mode==8||mode==10||mode==12||mode==14;
+            Check(needsResource||mode==1||mode==3||mode==7||mode==9||mode==11||mode==13,
+                  "Unsupported APFS compression mode for deletion");
+            hadCompression=true;
+            continue;
+        }
         Check((OrdinaryAttribute(attr)||(kind==CatalogKind::RegularFile&&attr==ResourceAttribute))&&
               (storage==2||(storage==1&&after->value.size()==52)),
               "APFS deletion found an unsupported attribute");
+        if(attr==ResourceAttribute){
+            Check(!hadResource,"Repeated APFS resource fork");
+            hadResource=true;
+        }
         if(storage==1){
             const auto stream=Le64(after->value.data()+4);
             Check(stream>edit.inode&&streams.insert(stream).second,"Invalid APFS deletion stream ID");
         }
     }
     Check(hadTarget==(kind==CatalogKind::SymbolicLink),"Missing APFS symbolic-link target");
+    Check(hadCompression==compressed&&(!compressed||hadResource==needsResource),
+          "APFS compression records disagree with the inode");
     CollectExternalRetiredExtents(catalog,edit.inode,streams,extentTree,retired);
     const auto first=size_t(inode-catalog.begin()),last=size_t(after-catalog.begin());
     const auto entry=*directoryRecord;
@@ -1990,7 +2032,7 @@ CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogD
     return kind;
 }
 
-std::tuple<uint64_t,uint64_t,uint64_t> DeleteExternalTree(std::vector<OwnedRecord>& catalog,const CatalogDelete& root,
+std::tuple<uint64_t,uint64_t,uint64_t> DeleteExternalTree(Source& source,std::vector<OwnedRecord>& catalog,const CatalogDelete& root,
                                                uint64_t time,const CatalogRecords& extentTree,
                                                std::set<uint64_t>& retired)
 {
@@ -2019,7 +2061,7 @@ std::tuple<uint64_t,uint64_t,uint64_t> DeleteExternalTree(std::vector<OwnedRecor
     uint64_t files=0,folders=0,symlinks=0;
     for(auto at=order.rbegin();at!=order.rend();++at){
         if(UnlinkExternalAlias(catalog,*at,time))continue;
-        const auto kind=DeleteExternalEntry(catalog,*at,time,extentTree,retired);
+        const auto kind=DeleteExternalEntry(source,catalog,*at,time,extentTree,retired);
         if(kind==CatalogKind::Directory)++folders;
         else if(kind==CatalogKind::SymbolicLink)++symlinks;
         else ++files;
@@ -2398,15 +2440,15 @@ CatalogWritePlan PrepareCatalogMutation(
             };
             Check(std::any_of(catalog.begin(),catalog.end(),matches),
                   "APFS hard-link overwrite requires an existing unlinked regular file at the chosen name");
-            removedKind=DeleteExternalEntry(catalog,{hardLink->parent,hardLink->replaced},time,extentTree,externalRetired);
+            removedKind=DeleteExternalEntry(source,catalog,{hardLink->parent,hardLink->replaced},time,extentTree,externalRetired);
         }
         CreateExternalHardLink(catalog,*hardLink,name,nextId,time);
     }else if(externalDelete){
         catalog=std::move(existing.records);
         if(remove->recursive)
-            std::tie(deletedFiles,deletedFolders,deletedSymlinks)=DeleteExternalTree(catalog,*remove,time,extentTree,externalRetired);
+            std::tie(deletedFiles,deletedFolders,deletedSymlinks)=DeleteExternalTree(source,catalog,*remove,time,extentTree,externalRetired);
         else if(!UnlinkExternalAlias(catalog,*remove,time))
-            removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
+            removedKind=DeleteExternalEntry(source,catalog,*remove,time,extentTree,externalRetired);
     }else if(externalLinkReplace){
         catalog=std::move(existing.records);
         ReplaceExternalSymlink(catalog,*linkReplacement,time,attributeIds,extentTree,externalRetired);

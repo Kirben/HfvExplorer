@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-compressed.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-compressed.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2654,6 +2654,31 @@ int RunApfsContainerTest(const char* directory)
                 Check(openCurrent().transaction==linkLocked.transaction,"Rejected APFS hard-link edit wrote a checkpoint");
                 Memory payload(9181);
                 for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i*13)%251);
+                {
+                    const auto checkpoint=openCurrent();
+                    CheckpointFaultImage interruptedCompression(Disk::Read(*output,0,size_t(output->Size())));
+                    Storage::Job cancelCompressedDelete;
+                    interruptedCompression.onFlush=[&]{cancelCompressedDelete.cancel();};
+                    constexpr uint64_t compressedInode=430; // Inode of decmpfs.txt in the macOS fixture.
+                    bool cancelled=false;
+                    try{Apfs::DeleteEntry(interruptedCompression,checkpoint,2,compressedInode,cancelCompressedDelete,0,true);}
+                    catch(const Storage::Cancelled&){cancelled=true;}
+                    const auto after=Apfs::Probe(interruptedCompression);
+                    Check(cancelled&&after&&after->transaction==checkpoint.transaction,
+                          "Cancelled compressed APFS deletion published a checkpoint");
+                    auto memory=std::make_unique<Memory>(interruptedCompression.durable.size());
+                    memory->bytes=std::move(interruptedCompression.durable);
+                    std::unique_ptr<Source> source=std::move(memory);
+                    const auto reopened=Apfs::Open(source,"apfs-cancelled-compressed-delete");
+                    MacBrowser::Entry original;
+                    Check(reopened&&reopened->FindChild(2,compressed.name,original)&&original.compressed&&
+                          original.forks[0].size==decoded.size()&&original.finder==compressed.finder&&
+                          original.modified==compressed.modified&&original.created==compressed.created,
+                          "Cancelled APFS deletion changed compressed file metadata");
+                    Bytes actual(decoded.size());
+                    reopened->Read(original.id,0,0,actual.data(),actual.size());
+                    Check(actual==decoded,"Cancelled APFS deletion changed the compressed file bytes");
+                }
                 const auto beforeCreate=openCurrent();
                 const auto volumeOid=beforeCreate.volumes.front();
                 const Apfs::ObjectMap map(*output,beforeCreate,beforeCreate.objectMap,beforeCreate.transaction);
@@ -3170,6 +3195,19 @@ int RunApfsContainerTest(const char* directory)
                 }
                 return operation.Job()->result();
             };
+            MacBrowser::Entry deletedCompressed,unrelatedCompressed;
+            const auto deletedInline=erase(shortCompressed.id);
+            Check(!deletedInline.code,deletedInline.message.c_str());
+            Check(!published->FindChild(2,u"Inline compressed",deletedCompressed),
+                  "APFS did not remove the inline compressed file");
+            const auto deletedTree=erase(compressionFolder);
+            Check(!deletedTree.code,deletedTree.message.c_str());
+            Check(!published->FindChild(2,u"Compressed copies",deletedCompressed)&&
+                  published->FindChild(2,compressed.name,unrelatedCompressed)&&unrelatedCompressed.compressed,
+                  "APFS recursive deletion removed an unrelated compressed file");
+            Bytes untouchedCompressed(decoded.size());
+            published->Read(unrelatedCompressed.id,0,0,untouchedCompressed.data(),untouchedCompressed.size());
+            Check(untouchedCompressed==decoded,"APFS deletion changed an unrelated compressed file");
             Check(!erase(aliasId).code&&!published->FindChild(copiedAliases.id,victim.name,firstAlias),
                   "Deleting an APFS alias did not remove its name");
             auto retainedAlias=published->Stat(primary.id);

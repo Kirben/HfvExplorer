@@ -1251,9 +1251,9 @@ public:
             const auto& entry=At(id).entry;
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             if(limitedEdits)
-                Check(!entry.compressed&&(entry.readError.empty()||At(id).symlink)&&
+                Check((entry.readError.empty()||At(id).symlink)&&
                       (!entry.directory||ListDirectory(id).empty()),
-                      "This APFS image can only delete unlinked, uncompressed files, symbolic links, and empty folders");
+                      "This APFS image can only delete supported regular files, symbolic links, and empty folders");
             return true;
         });
     }
