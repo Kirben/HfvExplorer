@@ -384,6 +384,13 @@ uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t par
     return Commit(source,expected,job,&request);
 }
 
+uint64_t SetCatalogFileModifiedTime(Source& source,const Container& expected,uint64_t parent,
+                                    const std::u16string& name,uint64_t modified,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogFileTimestamp{parent,name,modified};
+    return Commit(source,expected,job,&request);
+}
+
 uint64_t SetEntryProperties(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
                        const FinderBytes& finder,TimestampEdits dates,bool locked,Storage::Job& job)
 {

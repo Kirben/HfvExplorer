@@ -2555,7 +2555,8 @@ int RunApfsContainerTest(const char* directory)
                 Check(cancelled&&preserved&&preserved->transaction==before->transaction,
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-checkpoint.img");
+            constexpr uint64_t editedTime=3730000123;
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-timestamp.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2565,6 +2566,10 @@ int RunApfsContainerTest(const char* directory)
                 const auto after=Apfs::Probe(*output);
                 Check(after&&after->transaction==xid&&xid>before->transaction&&after->uuid==before->uuid,
                       "macOS-generated APFS checkpoint was not published");
+                Reject([&]{Apfs::SetCatalogFileModifiedTime(*output,*after,2,u"missing.txt",editedTime,job);},
+                       "APFS accepted a missing timestamp target");
+                Check(Apfs::SetCatalogFileModifiedTime(*output,*after,2,u"small.txt",editedTime,job)>xid,
+                      "APFS did not publish the macOS file timestamp edit");
                 output->Keep();
             }
             const auto published=MacBrowser::OpenBrowserImage(publishedPath);
@@ -2576,7 +2581,15 @@ int RunApfsContainerTest(const char* directory)
                   "Publishing a checkpoint changed the macOS-generated catalog");
             published->Read(publishedFile.id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Publishing a checkpoint changed macOS-generated file data");
-            fprintf(report,"PASS: macOS-generated APFS directory, checkpoint publication and cancellation.\n");
+            MacBrowser::Entry small,originalSmall;
+            Check(published->FindChild(2,u"small.txt",small)&&authentic->FindChild(2,u"small.txt",originalSmall)&&
+                  small.modified==editedTime&&small.created==originalSmall.created&&
+                  small.forks[0].size==originalSmall.forks[0].size,"APFS timestamp edit changed the wrong fields");
+            Bytes originalBytes(size_t(small.forks[0].size)),editedBytes(originalBytes.size());
+            authentic->Read(originalSmall.id,0,0,originalBytes.data(),originalBytes.size());
+            published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
+            Check(editedBytes==originalBytes,"APFS timestamp edit changed the target file contents");
+            fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation and file timestamp edit.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){

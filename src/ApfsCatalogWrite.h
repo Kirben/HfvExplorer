@@ -70,7 +70,12 @@ struct CatalogHardLink {
     const std::u16string& name;
     uint64_t replaced=0;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
+struct CatalogFileTimestamp {
+    uint64_t parent;
+    const std::u16string& name;
+    uint64_t modified;
+};
+using CatalogMutation=std::variant<CatalogFileTimestamp,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 
 struct DataRun {
     uint64_t block,count;

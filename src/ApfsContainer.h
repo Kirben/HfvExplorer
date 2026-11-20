@@ -35,6 +35,9 @@ uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint6
                                 Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr);
 uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job&);
+// Narrow timestamp mutation for independently formatted volumes; not a browser mount mode.
+uint64_t SetCatalogFileModifiedTime(HfsPlus::Source&,const Container&,uint64_t parent,
+                                    const std::u16string& name,uint64_t modified,Storage::Job&);
 struct TimestampEdits {
     std::optional<uint64_t> created,modified;
 };
