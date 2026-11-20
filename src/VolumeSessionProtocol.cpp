@@ -12,7 +12,8 @@ constexpr bool Capabilities::* features[] = {
     &Capabilities::read, &Capabilities::create, &Capabilities::rename, &Capabilities::remove,
     &Capabilities::unicodeNames, &Capabilities::resourceForks, &Capabilities::createFolders,
     &Capabilities::writable, &Capabilities::attributes, &Capabilities::basicMetadata,
-    &Capabilities::classicProperties, &Capabilities::compression, &Capabilities::hardLinks
+    &Capabilities::classicProperties, &Capabilities::compression, &Capabilities::hardLinks,
+    &Capabilities::finderMetadata
 };
 }
 

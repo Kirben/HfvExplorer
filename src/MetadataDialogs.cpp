@@ -82,7 +82,7 @@ struct AttributesDialog:CDialog,DialogActivity {
  void OnCancel()override{DestroyWindow();}
 };
 void PresentAttributes(FileOperations::Location source,const FileOperations::Completion& value,bool hidden,HWND anchor){CollectClosed();auto dialog=std::make_unique<AttributesDialog>(std::move(source),value,hidden);if(!dialog->Create(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()))throw HfsPlus::Error("Cannot create attribute editor");NativeDpi::CenterPopup(dialog->GetSafeHwnd(),anchor);if(!hidden)dialog->ShowWindow(SW_SHOWNOACTIVATE);windows.push_back(std::move(dialog));}
-void PresentApfsProperties(FileOperations::Location,const MacBrowser::Entry&,bool,HWND);
+void PresentApfsProperties(FileOperations::Location,const MacBrowser::Entry&,bool,bool,HWND);
 bool IsApfs(const FileOperations::Location& source)
 {
  const auto volume=source.Volume();
@@ -103,7 +103,7 @@ struct Summary:CDialog,DialogActivity {
  for(const char* label:{"Uncompressed","zlib","LZVN","LZFSE","LZBITMAP","Stored (no size reduction)","Legacy stored (inline, up to 3786 bytes)"})combo->AddString(label);
  combo->SetCurSel(e.compressed?0:1);combo->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());return TRUE;}
  BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_APFS_EDIT_METADATA&&CanEditApfsProperties()){
-  PresentApfsProperties(source,value.entry,hidden,m_hWnd);
+  PresentApfsProperties(source,value.entry,value.capabilities.finderMetadata,hidden,m_hWnd);
   DestroyWindow();
   return TRUE;
  }
@@ -164,9 +164,9 @@ struct ApfsEditor:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
  FileOperations::Location source;
  MacBrowser::Entry original;
- bool hidden;
- ApfsEditor(FileOperations::Location item,const MacBrowser::Entry& entry,bool testHidden)
-     :CDialog(IDD_APFS_PROPERTIES,CWnd::GetDesktopWindow()),source(std::move(item)),original(entry),hidden(testHidden){}
+ bool editFinder,hidden;
+ ApfsEditor(FileOperations::Location item,const MacBrowser::Entry& entry,bool finder,bool testHidden)
+     :CDialog(IDD_APFS_PROPERTIES,CWnd::GetDesktopWindow()),source(std::move(item)),original(entry),editFinder(finder),hidden(testHidden){}
  BOOL OnInitDialog()override{
   CDialog::OnInitDialog();
   HfvUnicodeNameEdit(m_hWnd,IDC_HPLUS_NAME);
@@ -178,6 +178,7 @@ struct ApfsEditor:CDialog,DialogActivity {
    hex+=byte;
   }
   SetDlgItemTextW(m_hWnd,IDC_MFS_FINDER,hex.c_str());
+  GetDlgItem(IDC_MFS_FINDER)->SendMessage(EM_SETREADONLY,!editFinder);
   SetMetadataDate(m_hWnd,IDC_MFS_CREATED,original.created);
   SetMetadataDate(m_hWnd,IDC_MFS_MODIFIED,original.modified);
   CheckDlgButton(IDC_MFS_LOCKED,original.protectedFile?BST_CHECKED:BST_UNCHECKED);
@@ -189,8 +190,10 @@ struct ApfsEditor:CDialog,DialogActivity {
    desired.created=MetadataDate(m_hWnd,IDC_MFS_CREATED);
    desired.modified=MetadataDate(m_hWnd,IDC_MFS_MODIFIED);
    desired.protectedFile=IsDlgButtonChecked(IDC_MFS_LOCKED)==BST_CHECKED;
-   const auto bytes=ParseFinderInfo(Text(m_hWnd,IDC_MFS_FINDER),desired.finder.size());
-   std::copy(bytes.begin(),bytes.end(),desired.finder.begin());
+   if(editFinder){
+    const auto bytes=ParseFinderInfo(Text(m_hWnd,IDC_MFS_FINDER),desired.finder.size());
+    std::copy(bytes.begin(),bytes.end(),desired.finder.begin());
+   }
    const FileOperations::EditBasicMetadata request{source,original,std::move(desired)};
    if(BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true))DestroyWindow();
   }catch(const std::exception& error){
@@ -204,10 +207,10 @@ struct ApfsEditor:CDialog,DialogActivity {
  void OnCancel()override{DestroyWindow();}
 };
 
-void PresentApfsProperties(FileOperations::Location source,const MacBrowser::Entry& entry,bool hidden,HWND anchor)
+void PresentApfsProperties(FileOperations::Location source,const MacBrowser::Entry& entry,bool editFinder,bool hidden,HWND anchor)
 {
  CollectClosed();
- auto editor=std::make_unique<ApfsEditor>(std::move(source),entry,hidden);
+ auto editor=std::make_unique<ApfsEditor>(std::move(source),entry,editFinder,hidden);
  if(!editor->Create(IDD_APFS_PROPERTIES,CWnd::GetDesktopWindow()))
   throw HfsPlus::Error("Cannot create Finder information editor");
  NativeDpi::CenterPopup(editor->GetSafeHwnd(),anchor);

@@ -342,7 +342,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::u16string label;
     bool caseSensitive=true;
     const std::string key;
-    const bool writable,renameOnly,processLocal;
+    const bool writable,limitedEdits,processLocal;
     std::atomic<uint64_t> freeBytes;
     MacBrowser::WorkerOrigin origin;
     std::recursive_mutex mutex;
@@ -407,7 +407,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
 public:
     Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource,bool write,uint64_t free,bool limited)
         :source(std::move(s)),container(std::move(c)),mounts(std::move(volumes)),key(std::move(resource)),
-         writable(write),renameOnly(limited),processLocal(write||source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
+         writable(write),limitedEdits(limited),processLocal(write||source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
              return mount.locked;
          })),freeBytes(free)
     {
@@ -470,7 +470,7 @@ public:
     std::string ResourceKey()const override{return key;}
     const char* Kind()const override{return "APFS";}
     bool CaseSensitive()const override{return caseSensitive;}
-    bool Writable()const override{return writable&&!renameOnly;}
+    bool Writable()const override{return writable&&!limitedEdits;}
     uint64_t FreeBytes()const override{return freeBytes.load();}
     MacBrowser::Capabilities Supports() const override {
         auto capabilities = MacBrowser::Volume::Supports();
@@ -479,8 +479,9 @@ public:
         capabilities.writable=writable;
         capabilities.createFolders=Writable();
         capabilities.unicodeNames=true;
-        capabilities.attributes=!renameOnly;
-        capabilities.basicMetadata=Writable();
+        capabilities.attributes=!limitedEdits;
+        capabilities.basicMetadata=writable;
+        capabilities.finderMetadata=Writable();
         capabilities.compression=Writable();
         capabilities.hardLinks=Writable();
         return capabilities;
@@ -773,8 +774,8 @@ public:
         });
     }
 private:
-    template<class Work> auto WriteMount(Work work,bool rename=false)->decltype(work()){
-        if(!writable||(renameOnly&&!rename))ReadOnly();
+    template<class Work> auto WriteMount(Work work,bool allowLimited=false)->decltype(work()){
+        if(!writable||(limitedEdits&&!allowLimited))ReadOnly();
         VolumeCoord::OperationLease lease({{key,VolumeCoord::Mode::Write}});
         std::lock_guard<std::recursive_mutex> lock(mutex);
         Check(!requiresReopen,"Reopen the APFS image before continuing");
@@ -1152,9 +1153,15 @@ public:
             const auto parentOid=At(parent).oid,oid=item.oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
+                if(limitedEdits){
+                    Check(current.finder==desired.finder,"Finder information is read-only on this APFS image");
+                    const auto locked=current.protectedFile!=desired.protectedFile?
+                        std::optional<bool>(desired.protectedFile):std::nullopt;
+                    return SetExternalCatalogProperties(*source,container,parentOid,current.name,dates,job,locked);
+                }
                 return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,desired.protectedFile,job);
             },id);
-        });
+        },true);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
         WriteMount([&]{
@@ -1163,7 +1170,7 @@ public:
             const auto oid=entry.oid,parentOid=At(parent).oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
-                if(renameOnly)return RenameExternalCatalogEntry(*source,container,parentOid,entry.entry.name,name,job);
+                if(limitedEdits)return RenameExternalCatalogEntry(*source,container,parentOid,entry.entry.name,name,job);
                 return RenameEntry(*source,container,parentOid,oid,name,job,entry.aliasId);
             });
         },true);
@@ -1202,7 +1209,7 @@ void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password
 }
 
 static std::shared_ptr<MacBrowser::Volume> OpenMounted(std::unique_ptr<Source>& source,const std::string& key,
-                                                    const Container& container,bool writable,uint64_t freeBytes=0,bool renameOnly=false)
+                                                    const Container& container,bool writable,uint64_t freeBytes=0,bool limitedEdits=false)
 {
     Check(!container.volumes.empty(),"The APFS container has no volumes");
     const ObjectMap map(*source,container,container.objectMap,container.transaction);
@@ -1223,7 +1230,7 @@ static std::shared_ptr<MacBrowser::Volume> OpenMounted(std::unique_ptr<Source>& 
         }catch(const Error&){if(!problem)problem=std::current_exception();}
     }
     if(volumes.empty())std::rethrow_exception(problem);
-    return std::make_shared<Volume>(std::move(source),container,std::move(volumes),key,writable,freeBytes,renameOnly);
+    return std::make_shared<Volume>(std::move(source),container,std::move(volumes),key,writable,freeBytes,limitedEdits);
 }
 
 std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const std::string& key)
@@ -1271,7 +1278,7 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
     slice(false);
     const auto expected=partition?Probe(*source):whole;
     Check(bool(expected),"The APFS container could not be opened inside the selected partition");
-    bool renameOnly=false;
+    bool limitedEdits=false;
     try{
         ValidateWritableLayout(*source,*expected);
         WritableFreeBytes(*source,*expected);
@@ -1279,7 +1286,7 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
         if(partition)return OpenMounted(source,key,*expected,false);
         try{
             InspectFreeQueueAllocation(*source,*expected);
-            renameOnly=true;
+            limitedEdits=true;
         }catch(const Error&){
             return OpenMounted(source,key,*expected,false);
         }
@@ -1298,7 +1305,7 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
         source=reopen(true);
         verify();
         slice(true);
-        if(renameOnly){
+        if(limitedEdits){
             const auto free=WritableFreeBytes(*source,*expected);
             source->Flush();
             return OpenMounted(source,key,*expected,true,free,true);

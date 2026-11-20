@@ -40,7 +40,7 @@ struct Capabilities {
     bool unicodeNames = true, resourceForks = true, createFolders = true;
     bool writable = false;
     bool attributes = false, basicMetadata = false, classicProperties = false;
-    bool compression = false, hardLinks = false;
+    bool compression = false, hardLinks = false, finderMetadata = false;
 
     bool CanEditAttributes() const { return writable && attributes; }
     bool CanEditBasicMetadata() const { return writable && basicMetadata; }
