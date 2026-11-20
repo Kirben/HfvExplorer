@@ -2085,8 +2085,8 @@ CatalogWritePlan PrepareCatalogMutation(
         const bool directory=create->kind==CatalogKind::Directory;
         Check((directory?!input:create->kind==CatalogKind::RegularFile&&input)&&
               create->parent>=2&&create->parent!=3&&create->parent<nextId&&
-              !create->compression&&(!directory||(!resource&&!attributes&&!dates&&!create->finder&&!create->locked)),
-              "External APFS creation requires an uncompressed file or a folder with default metadata");
+              !create->compression&&(!directory||(!resource&&!create->locked)),
+              "External APFS creation requires an uncompressed file or an unlocked folder");
         catalog=std::move(existing.records);
         for(const auto& record:catalog){
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,

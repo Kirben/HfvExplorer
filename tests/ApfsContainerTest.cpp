@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-recursive-delete.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-recursive-copy.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2743,6 +2743,55 @@ int RunApfsContainerTest(const char* directory)
                 Bytes actual(size_t(copied.forks[fork].size));
                 published->Read(copied.id,fork,0,actual.data(),actual.size());
                 Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS imported fork differs");
+            }
+            MacBrowser::Entry folderMetadata;
+            folderMetadata.name=u"Folder import";
+            folderMetadata.directory=true;
+            folderMetadata.datesValid=true;
+            folderMetadata.created=createdTime;
+            folderMetadata.modified=editedTime;
+            folderMetadata.finder[0]=0x24;
+            folderMetadata.attributes={{u"user.folder",Bytes(4300,0x71)}};
+            const auto folderId=importSource->MakeDirectoryWithAttributes(2,folderMetadata);
+            const auto nestedId=importSource->MakeDirectory(folderId,u"Nested");
+            const auto writePayload=[](unsigned fork,uint64_t,void* data,size_t length){
+                memset(data,fork?0x7b:0x6a,length);
+            };
+            importSource->Put(nestedId,toCopy,writePayload,false);
+            importSource->FinalizeDirectory(folderId,folderMetadata,importSource->Stat(folderId),false);
+            auto folderCopy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(importSource,folderId)},FileOperations::Location::Mounted(published,2)});
+            const auto folderStart=GetTickCount();
+            while(!folderCopy.Job()->done()){
+                Check(GetTickCount()-folderStart<15000,"External APFS recursive import timed out");
+                Sleep(5);
+            }
+            const auto folderResult=folderCopy.Job()->result();
+            Check(!folderResult.code,folderResult.message.c_str());
+            MacBrowser::Entry copiedFolder,nested,copiedChild;
+            Check(published->FindChild(2,folderMetadata.name,copiedFolder)&&
+                  copiedFolder.created==folderMetadata.created&&copiedFolder.modified==folderMetadata.modified&&
+                  copiedFolder.finder==folderMetadata.finder&&published->GetAttributes(copiedFolder.id)==folderMetadata.attributes&&
+                  published->FindChild(copiedFolder.id,u"Nested",nested)&&
+                  published->FindChild(nested.id,toCopy.name,copiedChild),"APFS recursive copy lost folder metadata or children");
+
+            Storage::Job cancelFolderCopy;
+            cancelFolderCopy.transport([&](const Storage::Progress& progress){
+                if(progress.fileBytes>toCopy.forks[0].size)cancelFolderCopy.cancel();
+            },[](const std::string&){return Storage::ConflictChoice::Replace;});
+            bool cancelledTree=false;
+            try{MacBrowser::Copy(*importSource,folderId,*published,2,cancelFolderCopy);}
+            catch(const Storage::Cancelled&){cancelledTree=true;}
+            const auto retainedFolder=published->Stat(copiedFolder.id);
+            Check(cancelledTree&&retainedFolder.created==copiedFolder.created&&retainedFolder.modified==copiedFolder.modified&&
+                  retainedFolder.finder==copiedFolder.finder&&published->GetAttributes(copiedFolder.id)==folderMetadata.attributes,
+                  "Cancelled recursive APFS copy changed destination folder metadata");
+            for(unsigned fork=0;fork<2;++fork){
+                Check(published->Stat(copiedChild.id).forks[fork].size==toCopy.forks[fork].size,
+                      "Recursive APFS copy lost a child fork");
+                Bytes actual(size_t(toCopy.forks[fork].size));
+                published->Read(copiedChild.id,fork,0,actual.data(),actual.size());
+                Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"Recursive APFS copy changed child fork bytes");
             }
             auto replacement=copied;
             replacement.forks[0].size=9001;

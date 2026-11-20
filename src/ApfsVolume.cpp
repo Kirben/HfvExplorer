@@ -946,14 +946,18 @@ public:
             // Restore destination folder dates even if the transfer was cancelled.
             Storage::Job metadata;
             CommitMutation(parent,0,metadata,[&](auto& job){
+                if(limitedEdits)
+                    return SetExternalCatalogProperties(*source,container,parentOid,current.name,changes,job,
+                                                        lockAfterCopy?std::optional<bool>(true):std::nullopt);
                 if(lockAfterCopy)
                     return SetEntryProperties(*source,container,parentOid,oid,current.finder,changes,true,job);
                 return SetDirectoryDates(*source,container,parentOid,oid,*dates,job);
             });
-        });
+        },true);
     }
     void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
     void ValidateSymbolicLink(const Entry& entry,const Bytes& target)const override{
+        Check(!limitedEdits,"This APFS image cannot copy symbolic links yet");
         Check(!entry.directory&&!entry.hardLink&&!entry.compressed&&!entry.forks[0].size&&!entry.forks[1].size,
               "Unsupported APFS symbolic link metadata");
         Check(target.size()<EmbeddedAttributeLimit,"APFS symbolic link target does not fit in an embedded attribute");
@@ -986,8 +990,8 @@ public:
     }
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
-        if(limitedEdits)Check(!entry.directory&&!entry.hardLink&&!entry.compressed,
-                              "This APFS image currently accepts uncompressed regular files only");
+        if(limitedEdits)Check(!entry.hardLink&&!entry.compressed,
+                              "This APFS image cannot copy compressed files or hard links yet");
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
@@ -1002,9 +1006,8 @@ public:
             CatalogTimestamp(entry.modified);
         }
     }
-    void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool parentExists)override{
+    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
         if(limitedEdits){
-            Check(parentExists,"This APFS image cannot copy folder trees yet");
             std::set<std::u32string> names;
             for(const auto& entry:entries){
                 ValidateEntry(entry);
