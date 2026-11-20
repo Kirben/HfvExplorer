@@ -1473,13 +1473,17 @@ std::vector<Entry> Volume::List(uint32_t parent) const {
     p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
     const auto target = p_->ResolveListedFolder(parent);
+    const auto end = p_->catalogRecords.end();
+    auto record = std::lower_bound(p_->catalogRecords.begin(), end, target,
+        [](const Record& entry, uint32_t folder) { return U32(entry.key.data() + 2) < folder; });
     std::vector<Entry> result;
-    for (const auto& pair : p_->entries)
-        if (pair.second.parent == target && p_->VisibleCatalogEntry(pair.first))
-            result.push_back(p_->ListedEntry(pair.first, parent));
-    std::sort(result.begin(), result.end(), [&](const Entry &a, const Entry &b) {
-        return CompareNames(a.name, b.name, p_->caseSensitive) < 0;
-    });
+    for (; record != end && U32(record->key.data() + 2) == target; ++record) {
+        if (U16(record->value.data()) >= 3)
+            continue; // Thread records share the catalog key space.
+        const auto id = U32(record->value.data() + 8);
+        if (p_->VisibleCatalogEntry(id))
+            result.push_back(p_->ListedEntry(id, parent));
+    }
     return result;
 }
 bool Volume::FindChild(uint32_t parent, const std::u16string& name, Entry& found) const {

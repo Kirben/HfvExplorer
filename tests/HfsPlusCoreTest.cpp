@@ -882,6 +882,72 @@ void BenchmarkLargeCatalogs()
     }
 }
 
+void BenchmarkFolderListing()
+{
+    for (bool sensitive : {false, true}) {
+        const auto kind = sensitive ? Volume::FormatKind::HfsXCaseSensitive : Volume::FormatKind::HfsPlus;
+        for (uint32_t files : {100u, 100000u}) {
+            SparseBenchmarkDisk disk(256ULL << 20);
+            Volume::Format(disk, u"Folder listing benchmark", true, kind);
+            PopulateBenchmarkCatalog(disk, files, sensitive);
+            Volume volume(disk, true);
+            const auto folder = volume.MakeDirectory(2, u"Small folder");
+            for (char16_t suffix = u'0'; suffix < u'8'; ++suffix) {
+                std::u16string name = u"File ";
+                name += suffix;
+                volume.Put(folder, name, 0, 0, pattern);
+            }
+            constexpr unsigned visits = 32;
+            const auto elapsed = MedianEditTime([&](unsigned) {
+                for (unsigned n = 0; n < visits; ++n) {
+                    const auto entries = volume.List(folder);
+                    must(entries.size() == 8 && entries.front().name == u"File 0" &&
+                             entries.back().name == u"File 7", "Wrong entries in listing benchmark");
+                }
+            });
+            printf("%s, %lu unrelated files: %.1f us per eight-entry listing (median of seven batches)\n",
+                   sensitive ? "HFSX" : "HFS+", static_cast<unsigned long>(files), 1000 * elapsed / visits);
+            fflush(stdout);
+        }
+    }
+}
+
+void CatalogRangeListing()
+{
+    for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
+                      Volume::FormatKind::HfsXCaseInsensitive}) {
+        Memory disk(16 * 1024 * 1024);
+        Volume::Format(disk, u"Folder ranges", true, kind);
+        const auto sensitive = kind == Volume::FormatKind::HfsXCaseSensitive;
+        uint32_t folder, alias, empty;
+        {
+            Volume volume(disk, true);
+            const auto before = volume.MakeDirectory(2, u"Before");
+            folder = volume.MakeDirectory(2, u"Target");
+            empty = volume.MakeDirectory(2, u"After");
+            volume.Put(before, u"Unrelated", 0, 0, pattern);
+            for (const auto name : {u"beta", u"Zeta", u"Alpha"})
+                volume.Put(folder, name, 0, 0, pattern);
+            alias = volume.MakeHardLink(folder, 2, u"Alias");
+        }
+        Volume volume(disk);
+        const std::vector<std::u16string> expected = sensitive ?
+            std::vector<std::u16string>{u"Alpha",u"Zeta",u"beta"} :
+            std::vector<std::u16string>{u"Alpha",u"beta",u"Zeta"};
+        for (auto parent : {folder, alias}) {
+            const auto entries = volume.List(parent);
+            std::vector<std::u16string> names;
+            for (const auto& entry : entries) {
+                must(entry.parent == parent, "Folder listing lost the visible hard-link parent");
+                names.push_back(entry.name);
+            }
+            must(names == expected, "Catalog range used the wrong parent or filename order");
+        }
+        must(volume.List(empty).empty(), "Empty folder included a neighboring parent's entries");
+    }
+    puts("PASS: ordered HFS+/HFSX folder ranges, empty folders and visible directory aliases");
+}
+
 void CatalogOrderEdits()
 {
     for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
@@ -1323,6 +1389,7 @@ int wmain(int argc, wchar_t **argv) {
     try {
         if(argc==2&&!wcscmp(argv[1],L"--benchmark-small-edits")){BenchmarkSmallEdits();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--benchmark-large-catalogs")){BenchmarkLargeCatalogs();return 0;}
+        if(argc==2&&!wcscmp(argv[1],L"--benchmark-folder-listing")){BenchmarkFolderListing();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--large-attributes")){RunLargeAttributeTests();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--hard-links")){hardLinks();hardLinkFailures();return 0;}
           if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
@@ -1499,6 +1566,7 @@ int wmain(int argc, wchar_t **argv) {
         }
         BitmapAccounting();
         CatalogOrderEdits();
+        CatalogRangeListing();
         attributeTests();
         stagedRangeValidation();
         hardLinks();hardLinkFailures();directoryMetadata();
