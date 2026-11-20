@@ -786,7 +786,7 @@ private:
         return work();
     }
 
-    void RefreshNamespace(uint32_t parent,uint32_t removed,uint64_t transaction)
+    void RefreshNamespace(uint32_t parent,uint32_t removed,uint64_t transaction,uint32_t changedFile)
     {
         auto fresh=Probe(*source);
         Check(fresh&&fresh->uuid==container.uuid&&fresh->volumes==container.volumes&&
@@ -829,9 +829,18 @@ private:
         const auto changed=LoadInode(Catalog(*source,container,mounts.front()),0,folder.oid);
         folder.entry.modified=changed.entry.modified;
         ListDirectory(parent);
+        if(changedFile&&At(changedFile).entry.hardLink){
+            const auto oid=At(changedFile).oid;
+            std::set<uint32_t> folders;
+            for(const auto& [id,item]:entries){
+                if(item.oid==oid&&item.entry.parent!=parent)folders.insert(item.entry.parent);
+            }
+            for(const auto aliasFolder:folders)ListDirectory(aliasFolder);
+        }
     }
 
-    template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work)
+    template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work,
+                                            uint32_t changedFile=0)
     {
         uint64_t transaction;
         try{transaction=work(job);}
@@ -843,7 +852,7 @@ private:
             throw;
         }
         Storage::OutcomeEvidence::NoteRetainedChange();
-        try{RefreshNamespace(parent,removed,transaction);}
+        try{RefreshNamespace(parent,removed,transaction,changedFile);}
         catch(const std::exception& error){
             requiresReopen=true;
             throw Error(std::string("APFS catalog change committed. Reopen the image to refresh it. ")+error.what());
@@ -1028,7 +1037,7 @@ public:
                 const auto oid=At(found->id).oid;
                 CommitMutation(parent,0,job,[&](auto& job){
                     return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression);
-                });
+                },found->id);
                 return found->id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
@@ -1054,7 +1063,7 @@ public:
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
                 return SetResourceFork(*source,container,parentOid,oid,resource,desired.modified,job);
-            });
+            },id);
             return id;
         });
     }
@@ -1100,7 +1109,7 @@ public:
                 return ReplaceFileData(*source,container,parentOid,oid,data,job,CopyDates(current),
                                        nullptr,false,nullptr,compressionResource||oldCompressionResource?&resource:nullptr,
                                        encoded?&encoded->Attribute():nullptr);
-            });
+            },id);
         });
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{
@@ -1114,7 +1123,7 @@ public:
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
                 return SetCatalogAttributes(*source,container,parentOid,oid,attributes,job);
-            });
+            },id);
         });
     }
     void SetBasicMetadata(uint32_t id,const Entry& desired)override{
@@ -1134,7 +1143,7 @@ public:
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
                 return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,desired.protectedFile,job);
-            });
+            },id);
         });
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{

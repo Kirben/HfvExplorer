@@ -1164,10 +1164,15 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         streamAt=records.size();
     }else{
         const auto found=links.find(entryId);
-        Check(found!=links.end()&&((rename||remove)?selectedRecord.has_value():found->second.parent==parent),
-              "The APFS entry is no longer in the selected folder");
+        Check(found!=links.end(),"The APFS entry no longer exists");
         const auto& link=found->second;
-        Check(rename||remove||!siblingGroups.count(entryId),"APFS hard-linked entries cannot be changed yet");
+        const auto group=siblingGroups.find(entryId);
+        const bool shared=group!=siblingGroups.end();
+        const bool inFolder=link.parent==parent||(shared&&
+            std::any_of(group->second.begin(),group->second.end(),
+                        [&](uint64_t id){return siblings.at(id).parent==parent;}));
+        Check((rename||remove)?selectedRecord.has_value():inFolder,
+              "The APFS entry is no longer in the selected folder");
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
         const auto bsdFlags=Le32(inode.data()+68);
@@ -1246,6 +1251,12 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             if(resource)SetResourceFlag(inode,resource->size!=0);
             if(replace)WriteCompressionAttribute(attributes,inode,entryId,dataSize,replace->compression);
             SortAttributes(attributes);
+            // Replacing the data stream also removes the records following the
+            // attributes. Keep sibling links ahead of the new stream records.
+            if(replace&&shared){
+                for(const auto id:group->second)
+                    attributes.push_back(std::move(records[*siblings.at(id).linkRecord]));
+            }
             records.erase(records.begin()+afterInode,records.begin()+afterInode+link.attributes+fileRecords);
             records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
                            std::make_move_iterator(attributes.end()));
@@ -1281,7 +1292,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
         const auto existingFinder=link.finder?&*link.finder:nullptr;
-        const auto old=WriterDisk::Inode(link.name,entryId,0,parent,mode,count,link.dataSize,existingFinder);
+        const auto old=WriterDisk::Inode(link.name,entryId,0,link.parent,mode,count,link.dataSize,existingFinder);
         constexpr size_t inodeHeader=92;
         Check(inode.size()==old.value.size()&&
               !memcmp(inode.data()+inodeHeader,old.value.data()+inodeHeader,inode.size()-inodeHeader),
@@ -1306,7 +1317,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         const auto updatedFinder=metadata?metadata->finder:replace&&replace->finder?replace->finder:existingFinder;
         const auto& updatedName=(replace||metadata)?link.name:name;
-        auto updated=WriterDisk::Inode(updatedName,entryId,0,parent,mode,count,
+        auto updated=WriterDisk::Inode(updatedName,entryId,0,link.parent,mode,count,
                                        replace?dataSize:link.dataSize,updatedFinder);
         const auto newFinderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());

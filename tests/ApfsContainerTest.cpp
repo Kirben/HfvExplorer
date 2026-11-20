@@ -1222,6 +1222,67 @@ void WritableHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS hard-link creation, rename, primary promotion, reopen and final deletion.\n");
 }
 
+void SharedInodeEdits(const std::string& root,FILE* report)
+{
+    const auto baseline=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-shared-inode-edits.img");
+    const auto original=OpenImage(baseline.c_str(),false);
+    const auto bytes=Disk::Read(*original,0,size_t(original->Size()));
+    {
+        auto copy=CreateFormatOutput(path.c_str(),bytes.size());
+        copy->Write(0,bytes.data(),bytes.size());
+        copy->Flush();
+        copy->Keep();
+    }
+    const auto reader=[](unsigned fork,uint64_t at,void* data,size_t size){
+        memset(data,fork?'R':'D',size);
+    };
+    const auto verify=[&](MacBrowser::Volume& volume,const MacBrowser::Entry& file){
+        Check(file.linkCount==2&&file.forks[0].size==4500&&file.forks[1].size==5100&&file.finder[0]=='H'&&
+              volume.GetAttributes(file.id)==Attributes{{u"user.alias",{3,1,4}}},"APFS aliases disagree on shared file metadata");
+        for(unsigned fork=0;fork<2;++fork){
+            Bytes actual(size_t(file.forks[fork].size)),expected(actual.size());
+            reader(fork,0,expected.data(),expected.size());
+            volume.Read(file.id,fork,0,actual.data(),actual.size());
+            Check(actual==expected,"APFS alias did not read the updated shared fork");
+        }
+    };
+    {
+        auto source=OpenImage(path.c_str(),true);
+        const auto volume=Apfs::OpenWritable(source,VolumeCoord::ImageKey(path));
+        MacBrowser::Entry original,folder;
+        Check(volume&&volume->FindChild(2,u"renamed file",original)&&volume->FindChild(2,u"Renamed Folder",folder),
+              "Missing APFS shared inode fixture");
+        const auto alias=volume->MakeHardLink(original.id,folder.id,u"Shared alias");
+        auto edit=volume->Stat(alias);
+        edit.hardLink=false;
+        edit.forks[0].size=4500;
+        edit.forks[1].size=0;
+        Storage::Job job;
+        Check(volume->PutForTransfer(folder.id,edit,reader,true,job)==alias,"APFS overwrite replaced the alias identity");
+        edit=volume->Stat(alias);
+        edit.forks[1].size=5100;
+        volume->PutResourceReplacement(alias,edit,reader,{});
+        volume->SetAttributes(alias,{{u"user.alias",{3,1,4}}});
+        edit=volume->Stat(alias);
+        edit.finder[0]='H';
+        volume->SetBasicMetadata(alias,edit);
+        const auto primary=volume->Stat(original.id);
+        const auto secondary=volume->Stat(alias);
+        Check(secondary.resolvedId==primary.resolvedId&&secondary.id!=primary.id&&
+              primary.identity==original.identity&&secondary.identity==edit.identity,"APFS shared edits changed alias identities");
+        verify(*volume,primary);
+        verify(*volume,secondary);
+    }
+    const auto reopened=MacBrowser::OpenBrowserImage(path);
+    MacBrowser::Entry originalEntry,folder,alias;
+    Check(reopened&&reopened->FindChild(2,u"renamed file",originalEntry)&&reopened->FindChild(2,u"Renamed Folder",folder)&&
+          reopened->FindChild(folder.id,u"Shared alias",alias),"APFS shared edits lost a name on reopen");
+    verify(*reopened,originalEntry);
+    verify(*reopened,alias);
+    fprintf(report,"PASS: APFS shared inode data, resource fork, attributes, Finder metadata, cache refresh and reopen.\n");
+}
+
 void WritableNamespace(const std::string& root,FILE* report)
 {
     auto baseline=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
@@ -2391,6 +2452,7 @@ int RunApfsContainerTest(const char* directory)
         ReplaceCatalogData(root,report);
         WritableNamespace(root,report);
         WritableHardLinks(root,report);
+        SharedInodeEdits(root,report);
         DirectoryHashCollisions(root,report);
         UnicodeCatalogNames(root,report);
         FinderMetadataWrites(root,report);
