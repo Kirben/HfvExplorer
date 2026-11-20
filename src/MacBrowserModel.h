@@ -92,6 +92,7 @@ public:
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;
     virtual Entry Stat(uint32_t id) = 0;
+    virtual std::string PropertiesDetails(uint32_t) { return {}; }
     virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
     virtual bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found){return FindChild(parent,entry.name,found);}

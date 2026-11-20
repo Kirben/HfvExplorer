@@ -5,6 +5,7 @@
 #include "WorkerEndpoint.h"
 #include "StorageHandoff.h"
 #include <mutex>
+#include <string_view>
 
 namespace Optical {
 void Reader::Contents(const Node& node,uint64_t offset,void* output,size_t bytes)
@@ -72,10 +73,227 @@ uint32_t Both32(const uint8_t* p)
     return Le32(p);
 }
 
+bool Signature(const uint8_t* field,const char* id)
+{
+    return field[0]==id[0]&&field[1]==id[1];
+}
+
+std::pair<const uint8_t*,size_t> SystemUse(const uint8_t* record,size_t size)
+{
+    Check(size>=34&&record[32]&&record[32]<=size-33,"Truncated ISO 9660 directory record");
+    const auto start=size_t(33+record[32]+(record[32]%2==0));
+    return start<size?std::make_pair(record+start,size-start):std::make_pair(record+size,size_t(0));
+}
+
+std::u16string RockName(const std::string& bytes)
+{
+    if(bytes.empty())return {};
+    const auto length=int(bytes.size());
+    const auto count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,bytes.data(),length,nullptr,0);
+    if(!count){
+        // POSIX names can use an unspecified byte encoding.
+        std::u16string name;
+        for(unsigned char byte:bytes)name.push_back(char16_t(byte));
+        return name;
+    }
+    std::wstring wide(size_t(count),0);
+    Check(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,bytes.data(),length,wide.data(),count)==count,
+          "Invalid Rock Ridge filename");
+    return {wide.begin(),wide.end()};
+}
+
+std::optional<uint64_t> RockDate(const uint8_t* p,bool longForm)
+{
+    SYSTEMTIME time{};
+    const auto digits=[](const uint8_t* s,unsigned n){
+        unsigned value=0;
+        for(unsigned i=0;i<n;++i){
+            if(s[i]<'0'||s[i]>'9')return 0u;
+            value=value*10+s[i]-'0';
+        }
+        return value;
+    };
+    if(longForm){
+        time.wYear=WORD(digits(p,4)); time.wMonth=WORD(digits(p+4,2)); time.wDay=WORD(digits(p+6,2));
+        time.wHour=WORD(digits(p+8,2)); time.wMinute=WORD(digits(p+10,2)); time.wSecond=WORD(digits(p+12,2));
+    }else{
+        time.wYear=WORD(1900+p[0]); time.wMonth=p[1]; time.wDay=p[2];
+        time.wHour=p[3]; time.wMinute=p[4]; time.wSecond=p[5];
+    }
+    const auto zone=int(int8_t(p[longForm?16:6]));
+    return zone>=-48&&zone<=52?CatalogDate(time,zone*15):std::nullopt;
+}
+
+struct RockRecord {
+    std::string name,target;
+    std::optional<uint32_t> child,parent,mode;
+    uint32_t links=0,uid=0,gid=0;
+    std::optional<uint64_t> created,modified;
+    bool relocated=false,link=false,special=false,unsupportedData=false;
+    bool nameMore=false,linkMore=false,componentMore=false;
+
+    void ReadLink(const uint8_t* field,size_t size) {
+        Check(size>=5&&(field[4]&~1)==0&&(!link||linkMore),"Invalid Rock Ridge symbolic link");
+        link=true;
+        linkMore=(field[4]&1)!=0;
+        for(size_t at=5;at<size;){
+            Check(size-at>=2,"Truncated Rock Ridge link component");
+            const auto flags=field[at],length=field[at+1];
+            at+=2;
+            Check(length<=size-at&&(flags==0||flags==1||flags==2||flags==4||flags==8||flags==16||flags==32),
+                  "Invalid Rock Ridge link component");
+            if(!componentMore&&!target.empty()&&target.back()!='/')target+='/';
+            if(flags<=1){
+                Check(length&&std::none_of(field+at,field+at+length,[](uint8_t c){return c==0||c=='/';}),
+                      "Invalid Rock Ridge link component name");
+                target.append(reinterpret_cast<const char*>(field+at),length);
+            }else{
+                Check(!length&&!componentMore,"Invalid special Rock Ridge link component");
+                if(flags==8){Check(target.empty(),"Misplaced Rock Ridge link root");target="/";}
+                else if(flags==2)target+='.';
+                else if(flags==4)target+="..";
+                else target+=flags==16?"<volume root>":"<host>";
+            }
+            componentMore=flags==1;
+            at+=length;
+        }
+    }
+
+    void Parse(const uint8_t* field,size_t size) {
+        if(field[3]!=1)return;
+        if(Signature(field,"NM")){
+            Check(size>5&&(field[4]&~1)==0&&(name.empty()||nameMore),"Invalid Rock Ridge alternate name");
+            name.append(reinterpret_cast<const char*>(field+5),size-5);
+            nameMore=(field[4]&1)!=0;
+        }else if(Signature(field,"PX")){
+            Check((size==36||size==44)&&!mode,"Invalid Rock Ridge POSIX attributes");
+            mode=Both32(field+4);links=Both32(field+12);uid=Both32(field+20);gid=Both32(field+28);
+        }else if(Signature(field,"SL")){
+            ReadLink(field,size);
+        }else if(Signature(field,"CL")||Signature(field,"PL")){
+            auto& linkBlock=Signature(field,"CL")?child:parent;
+            Check(size==12&&!linkBlock,"Invalid Rock Ridge relocation link");
+            linkBlock=Both32(field+4);
+        }else if(Signature(field,"RE")){
+            Check(size==4,"Invalid Rock Ridge relocated-directory record");
+            relocated=true;
+        }else if(Signature(field,"TF")){
+            Check(size>=5,"Truncated Rock Ridge timestamps");
+            const auto flags=field[4];
+            const auto width=(flags&128)?17u:7u;
+            size_t at=5;
+            for(unsigned bit=1;bit<128;bit<<=1)if(flags&bit){
+                Check(width<=size-at,"Truncated Rock Ridge timestamp");
+                if(bit==1)created=RockDate(field+at,width==17);
+                if(bit==2)modified=RockDate(field+at,width==17);
+                at+=width;
+            }
+            Check(at==size,"Invalid Rock Ridge timestamp length");
+        }else if(Signature(field,"PN")){
+            special=true;
+        }else if(Signature(field,"SF")||Signature(field,"ZF")){
+            unsupportedData=true;
+        }
+    }
+};
+
 class Iso final:public Reader {
     uint64_t blocks_=0;
     bool joliet_;
     Node root_;
+    bool rockRidge_=false;
+    size_t suspSkip_=0;
+
+    template<class Visit>
+    void WalkSusp(const uint8_t* bytes,size_t size,Visit visit)
+    {
+        constexpr size_t continuationBudget=64*1024;
+        size_t remaining=continuationBudget;
+        std::set<uint64_t> visited;
+        Bytes continuation;
+        for(;;){
+            uint64_t next=0,length=0;
+            while(size&&*bytes){
+                Check(size>=4&&bytes[2]>=4&&bytes[2]<=size,"Invalid ISO System Use entry length");
+                const auto width=bytes[2];
+                if(Signature(bytes,"ST")&&bytes[3]==1){
+                    Check(width==4,"Invalid ISO System Use terminator");
+                    break;
+                }
+                if(Signature(bytes,"CE")&&bytes[3]==1){
+                    Check(width==28&&!length,"Invalid ISO continuation record");
+                    const auto block=Both32(bytes+4),offset=Both32(bytes+12);
+                    length=Both32(bytes+20);
+                    next=uint64_t(block)*BlockSize+offset;
+                    Check(offset<BlockSize&&length&&length<=remaining&&visited.size()<32&&
+                          Range(next,length,blocks_*BlockSize)&&visited.insert(next).second,
+                          "Invalid or cyclic ISO continuation area");
+                }else visit(bytes,width);
+                bytes+=width;
+                size-=width;
+            }
+            if(!length)return;
+            remaining-=size_t(length);
+            continuation.resize(size_t(length));
+            Read(next,continuation.data(),continuation.size());
+            bytes=continuation.data();
+            size=continuation.size();
+        }
+    }
+
+    void RecognizeRockRidge()
+    {
+        if(joliet_)return;
+        std::array<uint8_t,BlockSize> block{};
+        const auto bytes=size_t((std::min)(BlockSize,root_.size));
+        Contents(root_,0,block.data(),bytes);
+        const auto length=block[0];
+        if(length<34||length>bytes||block[32]!=1||block[33]!=0)return;
+        auto [fields,size]=SystemUse(block.data(),length);
+        for(size_t prefix:{0u,14u}){ // CD-ROM XA can precede the root's SP field.
+            if(size<prefix+7)continue;
+            const auto p=fields+prefix;
+            if(!Signature(p,"SP")||p[2]!=7||p[3]!=1||p[4]!=0xbe||p[5]!=0xef)continue;
+            suspSkip_=p[6];
+            WalkSusp(p,size-prefix,[&](const uint8_t* field,size_t width){
+                if(!Signature(field,"ER")||field[3]!=1)return;
+                Check(width>=8&&size_t(8+field[4]+field[5]+field[6])<=width,
+                      "Invalid ISO extension reference");
+                const std::string_view id(reinterpret_cast<const char*>(field+8),field[4]);
+                rockRidge_|=field[7]==1&&(id=="RRIP_1991A"||id=="IEEE_P1282");
+            });
+            return;
+        }
+    }
+
+    RockRecord Rock(const uint8_t* record,size_t length)
+    {
+        RockRecord rock;
+        auto [fields,size]=SystemUse(record,length);
+        if(size>suspSkip_)WalkSusp(fields+suspSkip_,size-suspSkip_,[&](const uint8_t* field,size_t width){
+            rock.Parse(field,width);
+        });
+        Check(!rock.nameMore&&!rock.linkMore&&!rock.componentMore&&(!rock.link||!rock.target.empty()),
+              "Incomplete Rock Ridge name or link");
+        return rock;
+    }
+
+    Node FollowRelocation(uint32_t block,const Node& folder)
+    {
+        Check(Range(uint64_t(block)*BlockSize,BlockSize,blocks_*BlockSize),"Rock Ridge child link is outside the volume");
+        std::array<uint8_t,BlockSize> buffer{};
+        Read(uint64_t(block)*BlockSize,buffer.data(),buffer.size());
+        const auto self=buffer.data();
+        Check(self[0]>=34&&self[32]==1&&self[33]==0,"Invalid Rock Ridge relocated self record");
+        auto entry=Record(self,self[0]);
+        Check(entry.entry.directory&&entry.size&&entry.extents.front().block==block,
+              "Rock Ridge child link does not point to a directory");
+        const auto parent=self+self[0];
+        Check(parent[0]>=34&&parent[32]==1&&parent[33]==1,"Invalid Rock Ridge relocated parent record");
+        const auto back=Rock(parent,parent[0]).parent;
+        Check(back&&*back==folder.extents.front().block,"Rock Ridge relocated parent does not match");
+        return entry;
+    }
 
     std::u16string Name(const uint8_t* p,size_t length)const {
         std::u16string name;
@@ -121,8 +339,9 @@ public:
         while(!root_.entry.name.empty()&&(root_.entry.name.back()==u' '||!root_.entry.name.back()))
             root_.entry.name.pop_back();
         if(root_.entry.name.empty())root_.entry.name=u"ISO 9660";
+        RecognizeRockRidge();
     }
-    const char* Kind()const override{return joliet_?"ISO 9660 / Joliet":"ISO 9660";}
+    const char* Kind()const override{return joliet_?"ISO 9660 / Joliet":rockRidge_?"ISO 9660 / Rock Ridge":"ISO 9660";}
     Node Root()const override{return root_;}
     std::vector<Node> List(const Node& folder)override {
         std::vector<Node> entries;
@@ -150,12 +369,44 @@ public:
                     previous.size+=item.size;
                     previous.extents.push_back(item.extents.front());
                 }else{
-                    item.entry.name=raw;
-                    if(!item.entry.directory && item.entry.name.size()>=2 &&
+                    const auto rock=rockRidge_?Rock(p,length):RockRecord{};
+                    if(rock.relocated){
+                        Check(!continued,"Relocated Rock Ridge entry uses multiple extents");
+                        continue;
+                    }
+                    if(rock.child){
+                        Check(!continued&&!rock.link,"Invalid Rock Ridge child link");
+                        item=FollowRelocation(*rock.child,folder);
+                    }
+                    item.entry.name=rock.name.empty()?raw:RockName(rock.name);
+                    if(rock.name.empty()&&!item.entry.directory && item.entry.name.size()>=2 &&
                        item.entry.name.substr(item.entry.name.size()-2)==u";1")
                         item.entry.name.resize(item.entry.name.size()-2);
-                    if(!item.entry.directory&&!item.entry.name.empty()&&item.entry.name.back()==u'.')
+                    if(rock.name.empty()&&!item.entry.directory&&!item.entry.name.empty()&&item.entry.name.back()==u'.')
                         item.entry.name.pop_back();
+                    if(rock.created){item.entry.created=*rock.created;item.entry.datesValid=true;}
+                    if(rock.modified){item.entry.modified=*rock.modified;item.entry.datesValid=true;}
+                    if(rock.mode){
+                        const auto type=*rock.mode&0170000;
+                        char permissions[8]{};
+                        snprintf(permissions,sizeof(permissions),"%04o",unsigned(*rock.mode&07777));
+                        item.details=std::string("POSIX mode ")+permissions+
+                            ", uid "+std::to_string(rock.uid)+", gid "+std::to_string(rock.gid)+
+                            ", links "+std::to_string(rock.links);
+                        if(type){
+                            Check(item.entry.directory==(type==0040000),
+                                  "Rock Ridge file type does not match its ISO directory record");
+                            if(type!=0100000&&type!=0040000&&!rock.link)
+                                item.entry.readError="Rock Ridge special files cannot be exported";
+                        }
+                    }
+                    if(rock.special)item.entry.readError="Rock Ridge special files cannot be exported";
+                    if(rock.link){
+                        Check(!item.entry.directory,"Rock Ridge symbolic link was marked as a directory");
+                        item.entry.readError="Rock Ridge symbolic links cannot be exported";
+                        item.details="Symbolic link to "+rock.target;
+                    }
+                    if(rock.unsupportedData)item.entry.readError="Rock Ridge sparse or compressed file data is unsupported";
                     Check(GoodName(item.entry.name),"Invalid ISO 9660 entry name");
                     entries.push_back(std::move(item));
                 }
@@ -274,6 +525,7 @@ public:
         });
     }
     MacBrowser::Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
+    std::string PropertiesDetails(uint32_t id)override{return Access([&]{return At(id).details;});}
     void Read(uint32_t id,unsigned fork,uint64_t offset,void* p,size_t n)override{
         Access([&]{
             const auto& node=At(id);

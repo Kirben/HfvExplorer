@@ -280,6 +280,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> ReadProperties(const Location& item,
  Check(result.capabilities.read,"This volume does not support reading Properties");
  result.entry=volume->Stat(id);
  result.description=volume->Description();
+ result.details=volume->PropertiesDetails(id);
  if(result.capabilities.attributes)result.attributes=volume->GetAttributes(id);
  Cancel(job);
  return source;

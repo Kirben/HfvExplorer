@@ -35,7 +35,7 @@ struct Node {
     uint32_t descriptorBlock=0;
     std::vector<Extent> extents;
     Bytes embedded;
-    std::string address;
+    std::string address,details;
 };
 
 class Reader {

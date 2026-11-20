@@ -120,7 +120,7 @@ struct Completion {
  unsigned completed=0;
  HfsPlus::Attributes attributes;
  MacBrowser::Capabilities capabilities;
- MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false;std::string description;
+ MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false;std::string description,details;
  // Conservatively includes resources that may have changed on a partial failure.
  std::vector<Change> affected;
 };

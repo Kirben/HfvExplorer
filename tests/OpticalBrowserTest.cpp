@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #ifdef HFV_TESTING
-#include "OpticalVolume.h"
+#include "OpticalReader.h"
 #include "CopyProcess.h"
 #include "HfsPlusDisk.h"
 #include "CdImage.h"
@@ -241,6 +241,135 @@ MacBrowser::Entry File(MacBrowser::Volume& volume,uint32_t directory,const std::
     Reject([&]{volume.Remove(file.id);},"Optical file deletion was allowed");
     return file;
 }
+
+void RockRidgeFixtures(const std::wstring& fixtures,const std::string& output,FILE* report)
+{
+    using namespace HfsPlus;
+    const auto expected=std::string("independently mastered Rock Ridge data\n");
+    const auto fileName=u"Caf\u00e9 notes.txt";
+    const auto read=[&](MacBrowser::Volume& volume,uint32_t folder,const std::u16string& name){
+        MacBrowser::Entry file;
+        Check(volume.FindChild(folder,name,file)&&!file.directory&&file.forks[0].size==expected.size(),
+              "Rock Ridge file or its length is missing");
+        std::string bytes(expected.size(),0);
+        volume.Read(file.id,0,0,bytes.data(),bytes.size());
+        Check(bytes==expected,"Rock Ridge file bytes differ");
+        return file;
+    };
+    const auto load=[&](const wchar_t* name){
+        auto path=fixtures+L"\\"+name;
+        auto image=HfsPlus::OpenImage(path.c_str(),false);
+        return Disk::Read(*image,0,size_t(image->Size()));
+    };
+    for(const auto revision:{L"rrip-109.iso",L"rrip-112.iso"}){
+        const auto path=fixtures+L"\\"+revision;
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&std::string(volume->Kind())=="ISO 9660 / Rock Ridge"&&!volume->Writable(),
+              "Independent Rock Ridge image did not open read-only");
+        MacBrowser::Entry folder,link;
+        Check(volume->FindChild(2,u"Unix docs",folder)&&folder.directory,"Rock Ridge directory name missing");
+        const auto file=read(*volume,folder.id,fileName);
+        Check(file.datesValid&&file.created==3782844800ULL&&file.modified==3782844920ULL&&
+              volume->PropertiesDetails(file.id).find("POSIX mode 0640")!=std::string::npos,
+              "Rock Ridge timestamp or POSIX mode was not exposed");
+        read(*volume,folder.id,std::u16string(225,u'a')+u".txt");
+        Check(volume->FindChild(2,u"Unix link",link)&&!link.directory&&!link.readError.empty()&&
+              volume->PropertiesDetails(link.id)=="Symbolic link to /Unix docs/Caf\xc3\xa9 notes.txt",
+              "Rock Ridge link target is missing or the link is readable");
+        char byte=0;
+        Reject([&]{volume->Read(link.id,0,0,&byte,0);},"Rock Ridge symlink was readable");
+        Reject([&]{volume->Remove(file.id);},"Rock Ridge allowed a filesystem mutation");
+        uint32_t parent=2;
+        for(unsigned depth=1;depth<=10;++depth){
+            const auto number=std::to_wstring(depth);
+            const std::u16string name=u"Long level "+std::u16string(number.begin(),number.end());
+            Check(volume->FindChild(parent,name,folder)&&folder.directory,"Relocated Rock Ridge directory missing");
+            parent=folder.id;
+        }
+        read(*volume,parent,u"Deep file.txt");
+
+        const auto pathOut=output+"\\rock-ridge-export-"+(revision[6]==L'0'?"109":"112");
+        Check(CreateDirectoryA(pathOut.c_str(),nullptr),"Create Rock Ridge output directory");
+        FileOperations::Request request=FileOperations::OrdinaryCopy{
+            {FileOperations::Location::Mounted(volume,file.id)},
+            FileOperations::Location::Windows(VolumeCoord::Wide(pathOut))};
+        request.background=true;
+        CopyProcess::enabled=true;
+        CopyProcess::lastProcess=0;
+        const auto copy=FileOperations::Submit(std::move(request));
+        Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,"Rock Ridge copy timed out");
+        CopyProcess::enabled=false;
+        const auto result=copy.Job()->result();
+        Check(!result.code&&CopyProcess::lastProcess,result.message.c_str());
+        auto exported=MacBrowser::OpenWindows(VolumeCoord::Wide(pathOut));
+        read(*exported,2,fileName);
+    }
+
+    const auto dual=load(L"rock-ridge-joliet.iso");
+    const auto joliet=MacBrowser::OpenBrowserImage(fixtures+L"\\rock-ridge-joliet.iso");
+    MacBrowser::Entry folder;
+    Check(joliet&&std::string(joliet->Kind())=="ISO 9660 / Joliet"&&
+          joliet->FindChild(2,u"Joliet docs",folder),"Adding Rock Ridge changed Joliet precedence");
+    read(*joliet,folder.id,u"Joliet file.txt");
+
+    // Combine the independently mastered dual-tree ISO with a valid Apple
+    // partition in its system area, leaving every ISO/Joliet record intact.
+    const auto hfsPath=VolumeCoord::Wide(output+"\\hybrid-hfs.img");
+    constexpr size_t hfsBytes=8*1024*1024;
+    auto hfs=CreateFormatOutput(hfsPath.c_str(),hfsBytes);
+    Volume::Format(*hfs,u"Mac hybrid",false);
+    const auto base=(dual.size()+4095)&~size_t(4095);
+    auto hybrid=dual;
+    hybrid.resize(base+hfsBytes);
+    hfs->Read(0,hybrid.data()+base,hfsBytes);
+    Disk::P16(hybrid.data(),0x4552);
+    Disk::P16(hybrid.data()+2,512);
+    Disk::P32(hybrid.data()+4,uint32_t(hybrid.size()/512));
+    for(unsigned i=1;i<=2;++i){
+        auto map=hybrid.data()+i*512;
+        Disk::P16(map,0x504d);
+        Disk::P32(map+4,2);
+        Disk::P32(map+8,i==1?1:uint32_t(base/512));
+        Disk::P32(map+12,i==1?2:uint32_t(hfsBytes/512));
+        strcpy(reinterpret_cast<char*>(map+48),i==1?"Apple_partition_map":"Apple_HFS");
+    }
+    auto mounted=MacBrowser::OpenBrowserImage(Save(output+"\\mac-hybrid.iso",hybrid));
+    Check(mounted&&mounted->Name()==u"Mac hybrid"&&!strcmp(mounted->Kind(),"HFS+"),
+          "Rock Ridge changed the Macintosh side of a hybrid image");
+    auto medium=std::make_shared<Disc>(hybrid);
+    auto mac=MacBrowser::OpenCd(3,medium);
+    Check(mac&&mac->Name()==u"Mac hybrid"&&!strcmp(mac->Kind(),"HFS+"),
+          "Rock Ridge changed the Macintosh side of a hybrid disc");
+
+    auto corrupt=load(L"rrip-112.iso");
+    const auto lba=Optical::Le32(corrupt.data()+16*Block+158);
+    auto dot=corrupt.data()+size_t(lba)*Block;
+    size_t ce=0;
+    for(size_t at=34;at+4<=dot[0];){
+        const auto width=dot[at+2];
+        if(width<4||at+width>dot[0])break;
+        if(dot[at]=='C'&&dot[at+1]=='E'&&width==28){
+            Le(dot+at+4,UINT32_MAX,4);
+            Disk::P32(dot+at+8,UINT32_MAX);
+            ce=at;
+            break;
+        }
+        at+=width;
+    }
+    Check(ce!=0,"Independent fixture lacks a SUSP continuation");
+    Reject([&]{MacBrowser::OpenBrowserImage(Save(output+"\\bad-continuation.iso",corrupt));},
+           "Rock Ridge accepted a continuation outside the volume");
+    const auto setBoth=[&](size_t field,uint32_t value){
+        Le(dot+ce+field,value,4);
+        Disk::P32(dot+ce+field+4,value);
+    };
+    setBoth(4,lba);
+    setBoth(12,34);
+    setBoth(20,uint32_t(ce+28-34));
+    Reject([&]{MacBrowser::OpenBrowserImage(Save(output+"\\cyclic-continuation.iso",corrupt));},
+           "Rock Ridge accepted a cyclic continuation");
+    fprintf(report,"PASS: independently mastered RRIP 1.09 and 1.12 names, continuations, deep directories, timestamps, POSIX mode, safe links, worker export, Joliet and Mac hybrid priority, and out-of-volume and cyclic continuation rejection.\n");
+}
 }
 
 int RunOpticalBrowserTest(const char* directory)
@@ -252,6 +381,7 @@ int RunOpticalBrowserTest(const char* directory)
     const auto co=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     int status=0;
     try{
+        if(const auto fixtures=_wgetenv(L"HFV_ROCK_RIDGE_FIXTURES"))RockRidgeFixtures(fixtures,root,report);
         for(auto fs:{FsiFileSystemISO9660,FsiFileSystems(FsiFileSystemISO9660|FsiFileSystemJoliet),FsiFileSystemUDF,
                      FsiFileSystems(FsiFileSystemISO9660|FsiFileSystemUDF)}){
             const auto bytes=Master(fs);
