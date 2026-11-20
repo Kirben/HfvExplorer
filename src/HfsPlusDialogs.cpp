@@ -406,8 +406,9 @@ int RunHfsPlusUiTest(const char *directory) {
             require(!result.code,result.message.c_str());
             auto volume=MacBrowser::OpenBrowserImage(output);
             require(volume&&std::string(volume->Kind())=="APFS"&&volume->Name()==request.name&&
-                    volume->CaseSensitive()==sensitive&&volume->List(2).empty(),
-                    "Created APFS image did not reopen with its name and case mode");
+                    volume->CaseSensitive()==sensitive&&volume->List(2).empty()&&volume->Writable(),
+                    "Created APFS image did not reopen writable with its name and case mode");
+            volume.reset(); // Release the exclusive browser handle before reading raw bytes.
             const auto original=HfsPlus::Disk::Read(*HfsPlus::OpenImage(output.c_str(),false),0,4096);
             require(run(request).code&&HfsPlus::Disk::Read(*HfsPlus::OpenImage(output.c_str(),false),0,4096)==original,
                     "Existing APFS image was overwritten");
@@ -454,7 +455,9 @@ int RunHfsPlusUiTest(const char *directory) {
                 const auto result=run(request);
                 require(!result.code,result.message.c_str());
                 auto volume=MacBrowser::OpenBrowserImage(request.path);
-                require(volume&&volume->Name()==request.name&&volume->List(2).empty(),"Large APFS image failed to reopen");
+                require(volume&&volume->Name()==request.name&&volume->List(2).empty()&&
+                        volume->Writable()==(request.size==(17ULL<<30)),
+                        "Large APFS image did not reopen with the expected write capability");
             }
             fprintf(report,"PASS: sparse 17 GiB and 8 TiB APFS geometries across multiple chunk-info and address blocks.\n");
         }

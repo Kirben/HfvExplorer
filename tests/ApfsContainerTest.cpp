@@ -1178,9 +1178,18 @@ void WritableNamespace(const std::string& root,FILE* report)
     {
         const auto reopened=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry entry;
-        Check(reopened&&!reopened->Writable()&&reopened->FindChild(2,u"Adapter file",entry)&&
-              reopened->FindChild(2,u"Public folder",entry)&&!reopened->FindChild(2,u"Adapter folder",entry),
-              "The ordinary read-only browser did not reopen the committed APFS namespace");
+        Check(reopened&&reopened->Writable()&&reopened->FreeBytes()>0&&
+              reopened->FindChild(2,u"Adapter file",entry)&&reopened->FindChild(2,u"Public folder",entry)&&
+              !reopened->FindChild(2,u"Adapter folder",entry),
+              "The browser did not reopen the supported APFS namespace with write access");
+    }
+    {
+        const auto readHandle=OpenImage(path.c_str(),false);
+        const auto reopened=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry entry;
+        Check(reopened&&!reopened->Writable()&&!reopened->Supports().createFolders&&
+              reopened->FindChild(2,u"Public folder",entry),
+              "APFS browser open did not fall back to read-only when a reader held the image");
     }
 
     const auto faultMount=[&](CheckpointFaultImage*& raw){

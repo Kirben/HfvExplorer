@@ -894,7 +894,7 @@ std::optional<bool> CHFVExplorerListView::BrowserItemCommandEnabled(UINT command
     case ID_OWN_NEW_FOLDER:
         return ready && (browser.Active() ? browser.CanCreateFolder() : BrowserDirectoryWritable());
     case ID_OWN_DELETE:
-        return ready && (browser.Active() ? browser.SelectionWritable() : BrowserSelectionAllows(false));
+        return ready && (browser.Active() ? browser.CanDelete() : BrowserSelectionAllows(false));
     default:
         return std::nullopt;
     }

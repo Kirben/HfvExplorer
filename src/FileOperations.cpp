@@ -475,7 +475,8 @@ Storage::Result MakeFolder(const CreateFolder& folder,Storage::Job& job,Completi
    auto [volume,id]=Source(item);
    const auto entry=volume->Stat(id);
    Cancel(job);
-   Check(entry.directory&&volume->Supports().create&&volume->Supports().createFolders&&
+   const auto caps=volume->Supports();
+   Check(entry.directory&&caps.writable&&caps.createFolders&&
          (entry.id==2||!entry.protectedFile),"Cannot create a folder here");
    MarkChild(completion,item,folder.name);
    volume->MakeDirectory(id,folder.name);

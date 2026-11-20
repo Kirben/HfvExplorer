@@ -795,17 +795,23 @@ void CheckNativeVolume(const Bytes& volume)
 }
 }
 
-void ValidateWritableImage(Source& source,const Container& container)
+void ValidateWritableLayout(Source& source,const Container& container)
 {
-    Check(source.Writable()&&!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
+    Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
           !container.keybagBlock&&!container.keybagBlocks&&container.volumes.size()==1&&
-          source.Size()==container.blockCount*Block,"APFS writes require a writable raw single-volume image");
+          source.Size()==container.blockCount*Block,"APFS writes require a raw single-volume image");
     const auto oid=container.volumes.front();
     const auto map=ReadWritableMap(source,container,container.objectMap);
     Check(map.mappings.size()==1&&map.mappings.front().oid==oid,
           "APFS writes require one container volume mapping");
     const auto volume=ReadObject(source,container,map.mappings.front().block,oid,container.transaction,13);
     CheckNativeVolume(volume);
+    const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
+    const Node extentTree(ReadObject(source,container,extents,extents,container.transaction,2,15,true),true,{});
+    const Node snapshotTree(ReadObject(source,container,snapshots,snapshots,container.transaction,2,16,true),true,{});
+    Check(!extentTree.Level()&&!snapshotTree.Level()&&!snapshotTree.Count(),"Unsupported APFS extent or snapshot tree");
+    const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
+    ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
 }
 
 CatalogWritePlan PrepareCatalogMutation(

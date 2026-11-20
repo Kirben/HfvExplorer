@@ -226,6 +226,15 @@ PendingCheckpoint PlanCheckpoint(Source& source,const Container& current)
     Store(plan.superblock,144,dataStart,4);
     return plan;
 }
+
+Bytes& CheckpointObjectById(PendingCheckpoint& plan,uint64_t oid)
+{
+    const auto found=std::find_if(plan.objects.begin(),plan.objects.end(),[&](const auto& entry){
+        return Le64(entry.bytes.data()+8)==oid;
+    });
+    Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
+    return found->bytes;
+}
 }
 
 uint64_t ObjectChecksum(const HfsPlus::Bytes& object)
@@ -272,13 +281,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
     auto plan=PlanCheckpoint(source,*current);
     CatalogWritePlan changes;
     if(mutation){
-        const auto object=[&](uint64_t oid) -> Bytes& {
-            const auto found=std::find_if(plan.objects.begin(),plan.objects.end(),[&](const auto& entry){
-                return Le64(entry.bytes.data()+8)==oid;
-            });
-            Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
-            return found->bytes;
-        };
+        const auto object=[&](uint64_t oid) -> Bytes& {return CheckpointObjectById(plan,oid);};
         changes=PrepareCatalogMutation(source,*current,plan.transaction,plan.superblock,object,*mutation);
     }
     Stamp(plan.superblock,plan.transaction);
@@ -331,6 +334,19 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
     }
     return plan.transaction;
 }
+}
+
+uint64_t WritableFreeBytes(Source& source,const Container& container)
+{
+    auto checkpoint=PlanCheckpoint(source,container);
+    const auto& space=CheckpointObjectById(checkpoint,Le64(checkpoint.superblock.data()+152));
+    Check(space.size()==container.blockSize&&Le32(space.data()+24)==0x80000005&&
+          Le32(space.data()+32)==container.blockSize&&Le64(space.data()+48)==container.blockCount&&
+          !Le32(space.data()+68)&&!Le64(space.data()+96)&&Le32(space.data()+160)==1,
+          "Unsupported APFS space-manager layout");
+    const auto free=Le64(space.data()+72);
+    Check(free<=container.blockCount,"Invalid APFS free-space count");
+    return free*container.blockSize;
 }
 
 uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job& job)

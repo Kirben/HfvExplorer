@@ -461,7 +461,15 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
         catch (...) { return open(false); }
     }
     if(externalJournal.empty()){
-        if(auto apfs=Apfs::Open(source,key))return apfs;
+        if(persistent){
+            const auto reopen=[&](bool writable){
+                auto image=DiskImage::Reopen(path,Container::Raw,{writable});
+                if(VolumeCoord::ImageKey(path)!=key)
+                    throw Storage::MediaChanged("The selected APFS image changed while it was being opened");
+                return image;
+            };
+            if(auto apfs=Apfs::OpenRawBrowserImage(source,key,reopen))return apfs;
+        }else if(auto apfs=Apfs::Open(source,key))return apfs;
         if(auto optical=Optical::Open(source,key))return optical;
     }
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;

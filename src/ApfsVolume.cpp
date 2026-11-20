@@ -10,6 +10,7 @@
 #include "VolumeCoordinator.h"
 #include "WorkerEndpoint.h"
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 namespace Apfs {
@@ -308,6 +309,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     bool caseSensitive=true;
     const std::string key;
     const bool writable,processLocal;
+    std::atomic<uint64_t> freeBytes;
     MacBrowser::WorkerOrigin origin;
     std::mutex mutex;
     bool requiresReopen=false;
@@ -368,11 +370,11 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     }
     [[noreturn]] static void ReadOnly(){throw Error("APFS is read-only");}
 public:
-    Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource,bool write)
+    Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource,bool write,uint64_t free)
         :source(std::move(s)),container(std::move(c)),mounts(std::move(volumes)),key(std::move(resource)),
          writable(write),processLocal(write||source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
              return mount.locked;
-         }))
+         })),freeBytes(free)
     {
         std::vector<Item> roots;
         std::exception_ptr failure;
@@ -434,7 +436,7 @@ public:
     const char* Kind()const override{return "APFS";}
     bool CaseSensitive()const override{return caseSensitive;}
     bool Writable()const override{return writable;}
-    uint64_t FreeBytes()const override{return 0;}
+    uint64_t FreeBytes()const override{return freeBytes.load();}
     MacBrowser::Capabilities Supports() const override {
         auto capabilities = MacBrowser::Volume::Supports();
         capabilities.create=false;
@@ -720,6 +722,7 @@ private:
         const auto address=map.Lookup(oid);
         Check(address.has_value(),"Missing APFS volume after a catalog write");
         auto mount=ReadVolume(ReadObject(*source,*fresh,*address,oid,fresh->transaction,13),oid);
+        freeBytes=WritableFreeBytes(*source,*fresh);
         container=std::move(*fresh);
         mounts.front()=std::move(mount);
         listings.clear();
@@ -796,26 +799,20 @@ void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password
     apfs->Unlock(id,password);
 }
 
-static std::shared_ptr<MacBrowser::Volume> OpenImpl(std::unique_ptr<Source>& source,const std::string& key,bool writable)
+static std::shared_ptr<MacBrowser::Volume> OpenMounted(std::unique_ptr<Source>& source,const std::string& key,
+                                                    const Container& container,bool writable,uint64_t freeBytes=0)
 {
-    auto container=Probe(*source);
-    if(!container)return {};
-    if(writable){
-        ValidateWritableImage(*source,*container);
-        // A previous mount may have closed after an uncertain publication.
-        source->Flush();
-    }
-    Check(!container->volumes.empty(),"The APFS container has no volumes");
-    const ObjectMap map(*source,*container,container->objectMap,container->transaction);
+    Check(!container.volumes.empty(),"The APFS container has no volumes");
+    const ObjectMap map(*source,container,container.objectMap,container.transaction);
     std::vector<Mounted> volumes;
     std::exception_ptr problem;
-    for(const auto oid:container->volumes){
+    for(const auto oid:container.volumes){
         try{
             const auto block=map.Lookup(oid);
             Check(block.has_value(),"Missing APFS volume mapping");
-            auto live=ReadVolume(ReadObject(*source,*container,*block,oid,container->transaction,13),oid);
+            auto live=ReadVolume(ReadObject(*source,container,*block,oid,container.transaction,13),oid);
             try{
-                auto snapshots=ReadSnapshots(*source,*container,live);
+                auto snapshots=ReadSnapshots(*source,container,live);
                 volumes.push_back(std::move(live));
                 for(auto& view:snapshots)volumes.push_back(std::move(view));
             }catch(const Error&){
@@ -824,16 +821,57 @@ static std::shared_ptr<MacBrowser::Volume> OpenImpl(std::unique_ptr<Source>& sou
         }catch(const Error&){if(!problem)problem=std::current_exception();}
     }
     if(volumes.empty())std::rethrow_exception(problem);
-    return std::make_shared<Volume>(std::move(source),std::move(*container),std::move(volumes),key,writable);
+    return std::make_shared<Volume>(std::move(source),container,std::move(volumes),key,writable,freeBytes);
 }
 
 std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const std::string& key)
 {
-    return OpenImpl(source,key,false);
+    const auto container=Probe(*source);
+    return container?OpenMounted(source,key,*container,false):nullptr;
 }
 
 std::shared_ptr<MacBrowser::Volume> OpenWritable(std::unique_ptr<Source>& source,const std::string& key)
 {
-    return OpenImpl(source,key,true);
+    const auto container=Probe(*source);
+    if(!container)return {};
+    Check(source->Writable(),"APFS writes require an exclusive writable image");
+    ValidateWritableLayout(*source,*container);
+    const auto free=WritableFreeBytes(*source,*container);
+    // A prior mount may have closed after an uncertain publication.
+    source->Flush();
+    return OpenMounted(source,key,*container,true,free);
+}
+
+std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>& source,
+    const std::string& key,const ReopenRawImage& reopen)
+{
+    const auto expected=Probe(*source);
+    if(!expected)return {};
+    try{
+        ValidateWritableLayout(*source,*expected);
+        WritableFreeBytes(*source,*expected);
+    }catch(const Error&){
+        return OpenMounted(source,key,*expected,false);
+    }
+
+    const auto verify=[&]{
+        const auto mounted=Probe(*source);
+        if(!mounted||mounted->uuid!=expected->uuid||mounted->transaction!=expected->transaction||
+           mounted->checkpointBlock!=expected->checkpointBlock)
+            throw Storage::MediaChanged("The selected APFS checkpoint changed while opening the image");
+    };
+    source.reset();
+    try{
+        source=reopen(true);
+        verify();
+        return OpenWritable(source,key);
+    }catch(const Storage::MediaChanged&){
+        throw;
+    }catch(const Error&){
+        source.reset();
+        source=reopen(false);
+        verify();
+        return OpenMounted(source,key,*expected,false);
+    }
 }
 }

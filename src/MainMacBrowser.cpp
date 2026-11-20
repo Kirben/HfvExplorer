@@ -497,7 +497,7 @@ struct MainMacBrowser::State {
         snapshot.capabilities=capabilities;
         snapshot.capabilitiesKnown=true;
         if(!mutableFolder)
-            snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=false;
+            snapshot.capabilities.RestrictWrites();
         snapshot.rows.reserve(entries.size());
         for(const auto& entry:entries)
             if(showInvisible||!((uint16_t(entry.finder[8])<<8|entry.finder[9])&0x4000))
@@ -576,14 +576,23 @@ MainMacBrowser::~MainMacBrowser()=default;
 void MainMacBrowser::ForgetTree(){state_->media.Cancel();state_->restore.clear();}
 std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?tree->BrowserNodeAt(item):nullptr;if(!p)return {};if(p->LegacyType()==LIST_HFS&&p->mount.index>=0&&p->mount.index<doc->Mounts().ClassicCount())return doc->Mounts().ClassicAt(p->mount.index).m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->Mounts().ClassicAt(p->mount.index).m_file_name));if(p->LegacyType()==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return folder&&folder->location.IsWindows()?session_.ObservedWindowsKey(folder->location.WindowsPath()):std::string();}return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
-bool MainMacBrowser::Writable()const{int i;uint32_t id;return session_.ListingAvailable()&&state_->Selected(i,id)&&state_->folderMutable&&state_->mounts[i].volume->Supports().create;}
-bool MainMacBrowser::CanCreateFolder()const{int i;uint32_t id;return Writable()&&state_->Selected(i,id)&&state_->mounts[i].volume->Supports().createFolders;}
-bool MainMacBrowser::SelectionWritable()const{
-    if(!Writable())return false;auto& list=session_.List()->GetListCtrl();bool selected=false;
-    for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){
-        const auto entry=session_.List()->BrowserRowAt(row);if(!entry||!entry->location.IsMounted())continue;selected=true;if(entry->entry.protectedFile||!entry->entry.readError.empty())return false;}
-    return selected;
+bool MainMacBrowser::AllowsFolderOperation(bool MacBrowser::Capabilities::* capability)const
+{
+    int index;
+    uint32_t id;
+    if(!session_.ListingAvailable()||!state_->Selected(index,id)||!state_->folderMutable)return false;
+    const auto caps=state_->mounts[index].volume->Supports();
+    return caps.writable&&(caps.*capability);
 }
+bool MainMacBrowser::Writable()const{return AllowsFolderOperation(&MacBrowser::Capabilities::create);}
+bool MainMacBrowser::CanCreateFolder()const{return AllowsFolderOperation(&MacBrowser::Capabilities::createFolders);}
+bool MainMacBrowser::CanRename()const{
+    return AllowsFolderOperation(&MacBrowser::Capabilities::rename)&&session_.List()->BrowserSelectionAllows(true);
+}
+bool MainMacBrowser::CanDelete()const{
+    return AllowsFolderOperation(&MacBrowser::Capabilities::remove)&&session_.List()->BrowserSelectionAllows(false);
+}
+bool MainMacBrowser::SelectionWritable()const{return Writable()&&CanDelete();}
 bool MainMacBrowser::CanExport()const{
     if(!Active()||!session_.ListingAvailable())return false;auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return false;
     auto model=session_.List()->BrowserRowAt(row);return model&&model->location.IsMounted()&&!model->entry.directory;
@@ -1099,12 +1108,12 @@ bool MainMacBrowser::RenameWindowsItem(int row){
  }catch(const std::exception& error){MessageBoxA(session_.Owner()->GetSafeHwnd(),error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);}
  return true;
 }
-bool MainMacBrowser::Rename(){if(!Active())return false;if(!SelectionWritable())return true;
+bool MainMacBrowser::Rename(){if(!Active())return false;if(!CanRename())return true;
  auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
  auto item=state_->Item(row,false);auto name=Wide(item.expectedName);
  if(EditHfsPlusName(session_.Owner(),name,item.Volume()->CaseSensitive())){FileOperations::RenameEntry request{item, U16(name)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
 }
-bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!SelectionWritable())return true;
+bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!CanDelete())return true;
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){const auto row=session_.List()->BrowserRowAt(i);if(row&&row->location.IsMounted())selected.push_back(state_->Item(i,false));}
     if(selected.empty()||(confirm&&session_.Owner()->MessageBox("Delete the selected files and folders?","HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES))return true;
     FileOperations::DeleteEntries request{std::move(selected)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();return true;}
@@ -1123,7 +1132,7 @@ bool MainMacBrowser::Properties(int index)
     return MetadataDialogs::Show(session_.List()->BrowserRowAt(index)->location, session_.Owner());
 }
 BrowserTransfers::Selection MainMacBrowser::SelectedItems(bool cut){
- BrowserTransfers::Selection out;if(!session_.ListingAvailable())return out;out.canMove=session_.List()->BrowserSelectionAllows(false);
+ BrowserTransfers::Selection out;if(!session_.ListingAvailable())return out;out.canMove=Active()?SelectionWritable():session_.List()->BrowserSelectionAllows(false);
  if(cut&&!out.canMove)return out;
  auto& list=session_.List()->GetListCtrl();
  for(int row=-1;(row=list.GetNextItem(row,LVNI_SELECTED))>=0;){if(session_.List()->BrowserRowAt(row))out.items.push_back(state_->Item(row,cut));}
@@ -1195,12 +1204,12 @@ bool MainMacBrowser::ContextMenu(CPoint point){
     if(!Active())return false;auto& list=session_.List()->GetListCtrl();
     if(point.x>=0){CPoint local=point;list.ScreenToClient(&local);int row=list.HitTest(local);if(row>=0&&!list.GetItemState(row,LVIS_SELECTED)){list.SetItemState(-1,0,LVIS_SELECTED);list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);}}
     else{CRect rect;list.GetWindowRect(&rect);point=rect.CenterPoint();}
-    bool selected=list.GetNextItem(-1,LVNI_SELECTED)>=0;UINT write=Writable()?MF_ENABLED:MF_GRAYED;UINT selectionWrite=SelectionWritable()?MF_ENABLED:MF_GRAYED;
+    bool selected=list.GetNextItem(-1,LVNI_SELECTED)>=0;
     CMenu menu;menu.CreatePopupMenu();menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_OPEN,"&Open");
-    menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"&Copy");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_CUT,"Cu&t");
+    menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"&Copy");menu.AppendMenu(MF_STRING|(SelectionWritable()?MF_ENABLED:MF_GRAYED),ID_EDIT_CUT,"Cu&t");
     menu.AppendMenu(MF_STRING|(Writable()&&BrowserTransfers::Any()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_STRING|(CanPasteHardLink()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE_HARD_LINK,"Paste hard &link...");menu.AppendMenu(MF_SEPARATOR);
-    menu.AppendMenu(MF_STRING|(CanCreateFolder()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
-    menu.AppendMenu(MF_STRING|(selected?selectionWrite:MF_GRAYED),ID_OWN_DELETE,"&Delete");
+    menu.AppendMenu(MF_STRING|(CanCreateFolder()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(CanRename()?MF_ENABLED:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
+    menu.AppendMenu(MF_STRING|(CanDelete()?MF_ENABLED:MF_GRAYED),ID_OWN_DELETE,"&Delete");
     menu.AppendMenu(MF_STRING, ID_OWN_FILE_PROPERTIES, "P&roperties...");
     session_.List()->UpdateBrowserItemMenu(menu);
     const UINT command = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, session_.Owner());

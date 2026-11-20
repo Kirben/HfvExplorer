@@ -8,6 +8,8 @@
 #include "MainMacBrowser.h"
 #include "VolumeSession.h"
 #include "HfsPlusDisk.h"
+#include "ApfsContainer.h"
+#include "ApfsFormat.h"
 #include "StorageJobDialog.h"
 #include "DeviceWait.h"
 #include "utils.h"
@@ -452,6 +454,68 @@ int RunBrowserWindowsTest(const char* directory){
         "fresh selection could not write after journal recovery");
   fprintf(report,"PASS: two browsers share one persistent worker, rename refreshes both without remounting, "
                  "worker crash requires refresh, stale selections are rejected and fresh writes succeed.\n");
+  {
+   const auto path=VolumeCoord::Wide(std::string((LPCSTR)(host+"\\apfs-browser-writes.img")));
+   if(const auto baseline=_wgetenv(L"HFV_APFS_NAMESPACE_BASE")){
+    Check(CopyFileW(baseline,path.c_str(),TRUE)!=FALSE,"copy shared APFS browser fixture");
+   }else{
+    auto image=HfsPlus::CreateFormatOutput(path.c_str(),8*1024*1024);
+    Storage::Job job;
+    Apfs::Format(*image,u"APFS browser",false,job);
+    const auto initial=Apfs::Probe(*image);
+    Check(initial&&Apfs::CreateEmptyFile(*image,*initial,2,u"Adapter file",job)==2,"populate APFS browser fixture");
+    image->Keep();
+   }
+   Check(sa.MacBrowser().OpenImage(path)==1&&sa.AwaitNavigationForTest()&&
+         sb.MacBrowser().OpenImage(path)==1&&sb.AwaitNavigationForTest(),"open a writable APFS image in both browsers");
+   const auto fileRow=Find(sa,L"Adapter file"),peerRow=Find(sb,L"Adapter file");
+   Check(fileRow>=0&&peerRow>=0,"browser did not list the APFS file");
+   const auto source=sa.MacBrowser().CaptureItem(fileRow);
+   const auto peer=sb.MacBrowser().CaptureItem(peerRow);
+   const auto mount=source.Volume();
+   Check(mount&&mount==peer.Volume()&&mount->Writable()&&mount->FreeBytes()>0,
+         "APFS browsers did not share a writable mount with free-space information");
+
+   auto& list=sa.List()->GetListCtrl();
+   list.SetItemState(-1,0,LVIS_SELECTED);
+   list.SetItemState(fileRow,LVIS_SELECTED,LVIS_SELECTED);
+   Check(sa.MacBrowser().CanCreateFolder()&&sa.MacBrowser().CanRename()&&sa.MacBrowser().CanDelete()&&
+         !sa.MacBrowser().Writable()&&!sa.MacBrowser().SelectionWritable()&&
+         sa.MacBrowser().SelectedItems(true).items.empty()&&sa.MacBrowser().CanExport(),
+         "APFS browser advertised the wrong namespace or transfer commands");
+   const auto waitForRows=[&](const wchar_t* name,bool present){
+    const auto deadline=GetTickCount64()+10000;
+    while(GetTickCount64()<deadline){
+     if((Find(sa,name)>=0)==present&&(Find(sb,name)>=0)==present)return true;
+     MSG message{};
+     while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){
+      TranslateMessage(&message);DispatchMessage(&message);
+     }
+     Sleep(1);
+    }
+    return false;
+   };
+   const auto outcome=[](FileOperations::Operation& operation){
+    return WaitForSingleObject(operation.Job()->event(),10000)==WAIT_OBJECT_0&&
+           !operation.Job()->result().code;
+   };
+   const auto before=VolumeCoord::Revision(mount->ResourceKey());
+   auto create=FileOperations::Submit(FileOperations::CreateFolder{sa.MacBrowser().TargetFolder(),u"Browser folder"});
+   Check(outcome(create)&&waitForRows(L"Browser folder",true),"APFS folder creation did not refresh both browser windows");
+   auto rename=FileOperations::Submit(FileOperations::RenameEntry{source,u"Browser renamed"});
+   Check(outcome(rename)&&waitForRows(L"Browser renamed",true)&&waitForRows(L"Adapter file",false),
+         "APFS rename did not refresh both browser windows");
+   auto stale=FileOperations::Submit(FileOperations::RenameEntry{peer,u"Stale APFS name"});
+   Check(WaitForSingleObject(stale.Job()->event(),10000)==WAIT_OBJECT_0&&stale.Job()->result().code,
+         "A stale APFS selection from the second window was accepted");
+   const auto created=sb.MacBrowser().CaptureItem(Find(sb,L"Browser folder"));
+   auto nested=FileOperations::Submit(FileOperations::CreateFolder{created,u"Child folder"});
+   Check(outcome(nested)&&!mount->List(created.Id()).empty(),"APFS folder could not be populated through a browser job");
+   auto remove=FileOperations::Submit(FileOperations::DeleteEntries{{created}});
+   Check(outcome(remove)&&waitForRows(L"Browser folder",false)&&VolumeCoord::Revision(mount->ResourceKey())>before,
+         "APFS deletion did not refresh both browser windows");
+   fprintf(report,"PASS: ordinary APFS browser open shares an exclusive writable mount, limits commands, and refreshes both windows after namespace edits.\n");
+  }
   // Make the first frame the MFC main window before closing it: this is the
   // case that CFrameWnd's default SDI shutdown used to close every document.
   app.ActivateBrowser(a);a->SendMessage(WM_CLOSE);

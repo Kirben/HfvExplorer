@@ -22,6 +22,7 @@ class MainMacBrowser {
 #ifdef HFV_TESTING
     std::function<std::shared_ptr<const Dmg::Password>(bool)> passwordPromptForTest_;
 #endif
+    bool AllowsFolderOperation(bool MacBrowser::Capabilities::* capability)const;
     bool QueueNextImage(const std::shared_ptr<const std::vector<std::wstring>>&,size_t);
 public:
     ~MainMacBrowser();
@@ -81,6 +82,8 @@ public:
     void Export(unsigned fork);
     bool Writable() const;
     bool CanCreateFolder()const;
+    bool CanRename()const;
+    bool CanDelete()const;
     bool SelectionWritable() const;
     bool CanExport() const;
     int SelectedCdDrive() const;

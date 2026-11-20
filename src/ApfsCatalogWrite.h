@@ -38,7 +38,8 @@ struct CatalogWritePlan {
     HfsPlus::Source* input=nullptr;
     uint64_t dataSize=0;
 };
-void ValidateWritableImage(HfsPlus::Source&,const Container&);
+void ValidateWritableLayout(HfsPlus::Source&,const Container&);
+uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);
 CatalogWritePlan PrepareCatalogMutation(
     HfsPlus::Source&,const Container&,uint64_t transaction,HfsPlus::Bytes& superblock,
     const CheckpointObjectLookup&,const CatalogMutation&);
