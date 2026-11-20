@@ -2527,15 +2527,16 @@ void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wcha
     fprintf(report,"PASS: %s case-sensitive APFS compatibility writer, collisions, rename, overwrite, delete and exact readback.\n",
             fixture?"macOS-created":"generated");
 }
-void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_t* fixture)
+void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_t* fixture,size_t targetIndex)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-multi-volume-writes.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-multi-volume-writes-"+std::to_string(targetIndex+1)+".img");
+    const auto siblingIndex=1-targetIndex;
     auto input=OpenImage(fixture,false);
     const auto initial=Apfs::Probe(*input);
     Check(initial&&initial->volumes.size()==2&&!initial->offset,"Expected two raw APFS volumes");
     for(const auto oid:initial->volumes)Apfs::InspectFreeQueueAllocation(*input,*initial,oid);
     const Apfs::ObjectMap originalMap(*input,*initial,initial->objectMap,initial->transaction);
-    const auto siblingBlock=originalMap.Lookup(initial->volumes.back());
+    const auto siblingBlock=originalMap.Lookup(initial->volumes[siblingIndex]);
     Check(siblingBlock.has_value(),"Missing sibling APFS volume mapping");
     const auto siblingSuper=Disk::Read(*input,*siblingBlock*initial->blockSize,initial->blockSize);
     {
@@ -2555,8 +2556,10 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
     std::array<Bytes,2> siblingForks;
     const auto readSibling=[&](MacBrowser::Volume& volume){
         MacBrowser::Entry sibling,folder,file;
-        Check(volume.FindChild(2,siblingName,sibling)&&volume.FindChild(sibling.id,u"Fixture",folder)&&
-              volume.FindChild(folder.id,u"same.txt",file),"APFS sibling fixture disappeared");
+        Check(volume.FindChild(2,siblingName,sibling),"APFS sibling volume disappeared");
+        const bool found=volume.FindChild(sibling.id,u"Fixture",folder)?
+                         volume.FindChild(folder.id,u"same.txt",file):volume.FindChild(sibling.id,u"small.txt",file);
+        Check(found,"APFS sibling fixture disappeared");
         return file;
     };
     {
@@ -2565,8 +2568,8 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
         VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
         auto roots=volume->List(2);
         Check(roots.size()==2,"APFS multi-volume image did not expose both volume roots");
-        targetName=roots.front().name;
-        siblingName=roots.back().name;
+        targetName=roots[targetIndex].name;
+        siblingName=roots[siblingIndex].name;
         originalSibling=readSibling(*volume);
         siblingAttributes=volume->GetAttributes(originalSibling.id);
         for(unsigned fork:{0u,1u}){
@@ -2574,14 +2577,14 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
             bytes.resize(size_t(originalSibling.forks[fork].size));
             if(!bytes.empty())volume->Read(originalSibling.id,fork,0,bytes.data(),bytes.size());
         }
-        const auto folder=volume->MakeDirectory(roots.front().id,u"HFV multi-volume edits");
+        const auto folder=volume->MakeDirectory(roots[targetIndex].id,u"HFV multi-volume edits");
         MacBrowser::Entry file;
         file.name=u"Remaining.bin";
         file.forks[0].size=9307;
         const auto put=[&](unsigned char value,bool replace,Storage::Job& job,bool cancel=false){
-            return volume->PutForTransfer(folder,file,[&](unsigned,uint64_t,void* bytes,size_t count){
+            return volume->PutForTransfer(folder,file,[&](unsigned,uint64_t offset,void* bytes,size_t count){
                 memset(bytes,value,count);
-                if(cancel)job.cancel();
+                if(cancel&&offset)job.cancel(); // Leave at least one staged block behind the old checkpoint.
             },replace,job);
         };
         Storage::Job job;
@@ -2604,7 +2607,7 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
         const auto final=Apfs::Probe(*output);
         Check(final&&final->volumes==initial->volumes,"APFS edits changed the container volume list");
         const Apfs::ObjectMap finalMap(*output,*final,final->objectMap,final->transaction);
-        Check(finalMap.Lookup(initial->volumes.back())==siblingBlock&&
+        Check(finalMap.Lookup(initial->volumes[siblingIndex])==siblingBlock&&
               Disk::Read(*output,*siblingBlock*final->blockSize,final->blockSize)==siblingSuper,
               "APFS edits changed the sibling volume mapping or superblock");
     }
@@ -2627,7 +2630,8 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
         if(!actual.empty())volume->Read(same.id,fork,0,actual.data(),actual.size());
         Check(actual==expected,"APFS operation changed a sibling fork");
     }
-    fprintf(report,"PASS: APFS multi-volume create, overwrite, delete, cancellation, and unchanged sibling mapping, forks and metadata.\n");
+    fprintf(report,"PASS: APFS volume %zu create, overwrite, delete, cancellation, and unchanged sibling mapping, forks and metadata.\n",
+            targetIndex+1);
 }
 
 void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFixture=nullptr)
@@ -2769,8 +2773,18 @@ int RunApfsContainerTest(const char* directory)
         DataStreamAllocation(report);
         CheckpointWrites(root,report);
         WritableGptImages(root,report);
-        if(const auto fixture=_wgetenv(L"HFV_APFS_MULTI_VOLUME_FIXTURE"))
-            ExternalMultiVolumeWrites(root,report,fixture);
+        if(const auto fixture=_wgetenv(L"HFV_APFS_MULTI_VOLUME_FIXTURE")){
+            std::wstring input=fixture;
+            if(input.size()>=4&&input.compare(input.size()-4,4,L".dmg")==0){
+                const auto extracted=VolumeCoord::Wide(root+"apfs-multi-volume-source.img");
+                Storage::Job conversion;
+                const auto result=Dmg::Convert(input,extracted,Dmg::Output::RawImage,conversion);
+                Check(!result.code,result.message.c_str());
+                input=extracted;
+            }
+            for(size_t target=0;target<2;++target)
+                ExternalMultiVolumeWrites(root,report,input.c_str(),target);
+        }
         ExternalCaseSensitiveWrites(root,report,nullptr);
         if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))
             ExternalCaseSensitiveWrites(root,report,fixture);

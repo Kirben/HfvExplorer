@@ -2315,16 +2315,36 @@ void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardL
     catalog.insert(catalog.end(),std::make_move_iterator(maps.begin()),std::make_move_iterator(maps.end()));
 }
 
-void CheckExternalVolume(const Bytes& volume)
+constexpr uint64_t VolumeGroupInodeSpace=0x10,UnifiedInodeMark=0x0800000000000000;
+constexpr uint16_t SystemVolumeRole=1,DataVolumeRole=64;
+constexpr size_t VolumeRoleOffset=964,VolumeGroupOffset=1008;
+
+bool InVolumeGroup(const Bytes& volume)
 {
-    Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
+    return (Le64(volume.data()+40)&VolumeGroupInodeSpace)!=0;
+}
+
+void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup)
+{
+    const auto features=Le64(volume.data()+40);
+    const auto group=allowVolumeGroup&&features==(2|VolumeGroupInodeSpace);
+    Check(!memcmp(volume.data()+32,"APSB",4)&&(features==2||group)&&
           !Le64(volume.data()+48)&&(Le64(volume.data()+56)==1||Le64(volume.data()+56)==8)&&Le64(volume.data()+264)==1&&
           Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
           "Unsupported APFS volume features for external edits");
+    if(group){
+        const auto role=Le16(volume.data()+VolumeRoleOffset);
+        const auto nextId=Le64(volume.data()+176);
+        Check((role==SystemVolumeRole&&nextId>=UnifiedInodeMark+16)||
+              (role==DataVolumeRole&&nextId>=16&&nextId<UnifiedInodeMark),
+              "Unsupported APFS volume group inode namespace");
+        Check(std::any_of(volume.begin()+VolumeGroupOffset,volume.begin()+VolumeGroupOffset+16,
+                          [](uint8_t byte){return byte!=0;}),"Missing APFS volume group identifier");
+    }
 }
 
 std::vector<DataRun> SiblingVolumeRuns(Source& source,const Container& container,const WritableMap& containerMap,
-                                      uint64_t selected)
+                                      uint64_t selected,const Bytes& selectedVolume)
 {
     std::vector<DataRun> runs;
     const auto block=[&](uint64_t address){runs.push_back({address,1});};
@@ -2332,7 +2352,14 @@ std::vector<DataRun> SiblingVolumeRuns(Source& source,const Container& container
         if(mapping.oid==selected)continue;
         block(mapping.block);
         const auto volume=ReadObject(source,container,mapping.block,mapping.oid,container.transaction,13);
-        CheckExternalVolume(volume);
+        CheckExternalVolume(volume,container.volumes.size()==2);
+        if(InVolumeGroup(volume)||InVolumeGroup(selectedVolume)){
+            Check(InVolumeGroup(volume)&&InVolumeGroup(selectedVolume)&&
+                  Le16(volume.data()+VolumeRoleOffset)!=Le16(selectedVolume.data()+VolumeRoleOffset)&&
+                  std::equal(volume.begin()+VolumeGroupOffset,volume.begin()+VolumeGroupOffset+16,
+                             selectedVolume.begin()+VolumeGroupOffset),
+                  "Unsupported APFS volume group membership");
+        }
         Check(!Le64(volume.data()+72)&&!Le64(volume.data()+80),
               "APFS multi-volume writes do not support sibling reserves or quotas");
         const auto map=ReadWritableMap(source,container,Le64(volume.data()+128));
@@ -2444,8 +2471,8 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
                                    Bytes& superblock,const CheckpointObjectLookup& ephemeral,uint64_t selected)
 {
     const auto [containerMap,address,volume]=ReadCatalogVolume(source,container,selected);
-    const auto siblings=SiblingVolumeRuns(source,container,containerMap,selected?selected:container.volumes.front());
-    CheckExternalVolume(volume);
+    CheckExternalVolume(volume,container.volumes.size()==2);
+    const auto siblings=SiblingVolumeRuns(source,container,containerMap,selected?selected:container.volumes.front(),volume);
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
     const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
     const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
@@ -2516,7 +2543,7 @@ CatalogWritePlan PrepareCatalogMutation(
     if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
     const auto oid=selected?selected:current.volumes.front();
-    const auto siblings=SiblingVolumeRuns(source,current,containerMap,oid);
+    const auto siblings=SiblingVolumeRuns(source,current,containerMap,oid,volume);
     const auto flags=Le64(volume.data()+56);
     const bool fold=flags==1;
     const auto fileCount=Le64(volume.data()+184);
@@ -2533,7 +2560,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool externalLinkReplace=linkReplacement&&linkReplacement->external;
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
-    if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)CheckExternalVolume(volume);
+    if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)CheckExternalVolume(volume,current.volumes.size()==2);
     else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -2543,7 +2570,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
     auto nextAvailable=nextId+bool(create)+bool(resourceBlocks)+(hardLink?2:0);
-    Check(nextAvailable<IdMask,"APFS file-system object IDs are exhausted");
+    const auto idLimit=InVolumeGroup(volume)&&Le16(volume.data()+VolumeRoleOffset)==DataVolumeRole?UnifiedInodeMark:IdMask;
+    Check(nextAvailable<idLimit,"APFS file-system object IDs are exhausted");
     if(resourceBlocks){
         resource->id=nextId+bool(create);
         plan.streams.back().id=resource->id;
