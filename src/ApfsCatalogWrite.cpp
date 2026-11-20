@@ -1766,6 +1766,28 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
     return index+1+attributes.size();
 }
 
+std::string ExternalInodeName(const Bytes& inode)
+{
+    Check(inode.size()>=96,"Missing APFS inode name fields");
+    const auto fields=Le16(inode.data()+92);
+    size_t offset=96+size_t(fields)*4;
+    Check(offset<=inode.size(),"Truncated APFS hard-link inode fields");
+    std::optional<std::string> primaryName;
+    for(size_t i=0;i<fields;++i){
+        const auto desc=96+4*i;
+        const auto length=Le16(inode.data()+desc+2);
+        const auto padded=size_t(DivideUp(length,8)*8);
+        Check(Range(offset,padded,inode.size()),"Truncated APFS hard-link inode field");
+        if(inode[desc]==4){
+            Check(!primaryName&&length>1&&inode[offset+length-1]==0,"Invalid APFS hard-link inode name");
+            primaryName.emplace(reinterpret_cast<const char*>(inode.data()+offset),length-1);
+        }
+        offset+=padded;
+    }
+    Check(primaryName.has_value(),"Missing APFS hard-link inode name");
+    return std::move(*primaryName);
+}
+
 bool UnlinkExternalAlias(std::vector<OwnedRecord>& catalog,const CatalogDelete& edit,uint64_t time)
 {
     if(!edit.alias)return false;
@@ -1825,25 +1847,10 @@ bool UnlinkExternalAlias(std::vector<OwnedRecord>& catalog,const CatalogDelete& 
     Check(selected.has_value(),"The APFS hard-link name no longer exists");
     const auto& removed=group[*selected];
     const auto& survivor=group[*selected==0?1:0];
-    const auto fields=Le16(inode.data()+92);
-    size_t offset=96+size_t(fields)*4;
-    Check(offset<=inode.size(),"Truncated APFS hard-link inode fields");
-    std::optional<std::string> primaryName;
-    for(size_t i=0;i<fields;++i){
-        const auto desc=96+4*i;
-        const auto length=Le16(inode.data()+desc+2);
-        const auto padded=size_t(DivideUp(length,8)*8);
-        Check(Range(offset,padded,inode.size()),"Truncated APFS hard-link inode field");
-        if(inode[desc]==4){
-            Check(!primaryName&&length>1&&inode[offset+length-1]==0,"Invalid APFS hard-link inode name");
-            primaryName.emplace(reinterpret_cast<const char*>(inode.data()+offset),length-1);
-        }
-        offset+=padded;
-    }
-    Check(primaryName.has_value(),"Missing APFS hard-link inode name");
+    const auto primaryName=ExternalInodeName(inode);
     const auto primaryParent=Le64(inode.data());
-    if(group.size()==2||(primaryParent==removed.sibling.parent&&*primaryName==removed.sibling.name)){
-        RenameExternalInode(inode,*primaryName,survivor.sibling.name);
+    if(group.size()==2||(primaryParent==removed.sibling.parent&&primaryName==removed.sibling.name)){
+        RenameExternalInode(inode,primaryName,survivor.sibling.name);
         Set(inode,0,survivor.sibling.parent,8);
     }
     Set(inode,56,group.size()-1,4);
@@ -2411,7 +2418,7 @@ CatalogWritePlan PrepareCatalogMutation(
             if(record.value.size()==34){
                 const auto* value=record.value.data();
                 siblingId=Le64(value+26);
-                Check(!properties->newName&&kind==CatalogKind::RegularFile&&siblingId>=16&&
+                Check(kind==CatalogKind::RegularFile&&siblingId>=16&&
                       siblingId!=entryOid&&siblingId<nextId&&Le16(value+18)==1&&
                       Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
                       "Unsupported APFS hard-linked edit");
@@ -2419,22 +2426,24 @@ CatalogWritePlan PrepareCatalogMutation(
             directoryRecord=i;
         }
         Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");
+        std::optional<size_t> siblingLink;
         if(siblingId){
             const CatalogSibling sibling{entryOid,properties->parent,name};
             const auto link=sibling.LinkRecord(siblingId);
             const auto map=sibling.MapRecord(siblingId);
-            bool linked=false,mapped=false;
-            for(const auto& record:catalog){
+            bool mapped=false;
+            for(size_t index=0;index<catalog.size();++index){
+                const auto& record=catalog[index];
                 if(record.key==link.key){
-                    Check(!linked&&record.value==link.value,"APFS sibling link differs from the selected name");
-                    linked=true;
+                    Check(!siblingLink&&record.value==link.value,"APFS sibling link differs from the selected name");
+                    siblingLink=index;
                 }
                 if(record.key==map.key){
                     Check(!mapped&&record.value==map.value,"APFS sibling map differs from the selected inode");
                     mapped=true;
                 }
             }
-            Check(linked&&mapped,"Missing APFS sibling link or map");
+            Check(siblingLink&&mapped,"Missing APFS sibling link or map");
         }
         std::string replacement;
         if(properties->newName){
@@ -2457,13 +2466,19 @@ CatalogWritePlan PrepareCatalogMutation(
                 Set(value,68,(flags&~UserImmutable)|(*properties->locked?UserImmutable:0),4);
             if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
             if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
-            if(properties->newName)RenameExternalInode(value,name,replacement);
+            if(properties->newName&&(!siblingId||
+               (Le64(value.data())==properties->parent&&ExternalInodeName(value)==name)))
+                RenameExternalInode(value,name,replacement);
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
             edited=true;
         }
         Check(edited,"APFS Properties target inode was not found");
         if(properties->newName){
+            if(siblingLink){
+                const CatalogSibling renamed{entryOid,properties->parent,replacement};
+                catalog[*siblingLink]=renamed.LinkRecord(siblingId);
+            }
             auto record=std::move(catalog[*directoryRecord]);
             catalog.erase(catalog.begin()+*directoryRecord);
             const auto hash=WriterDisk::DirectoryHash(replacement,true);

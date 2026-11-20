@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-hard-link.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-renamed-hard-links.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2946,6 +2946,29 @@ int RunApfsContainerTest(const char* directory)
                     Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"Copied APFS hard-link fork differs");
                 }
             }
+            Reject([&]{published->Rename(firstAlias.id,copiedAliases.id,secondAlias.name);},
+                   "APFS rename overwrote a sibling name");
+            published->Rename(primary.id,copiedLinks.id,u"Renamed shared file");
+            published->Rename(firstAlias.id,copiedAliases.id,u"Longer renamed alias");
+            published->Rename(secondAlias.id,copiedAliases.id,u"x");
+            MacBrowser::Entry renamedPrimary,renamedFirst,renamedSecond;
+            Check(!published->FindChild(copiedLinks.id,toCopy.name,renamedPrimary)&&
+                  !published->FindChild(copiedAliases.id,u"First alias",renamedFirst)&&
+                  !published->FindChild(copiedAliases.id,u"Second alias",renamedSecond)&&
+                  published->FindChild(copiedLinks.id,u"Renamed shared file",renamedPrimary)&&
+                  published->FindChild(copiedAliases.id,u"Longer renamed alias",renamedFirst)&&
+                  published->FindChild(copiedAliases.id,u"x",renamedSecond)&&
+                  renamedPrimary.id==primary.id&&renamedFirst.id==firstAlias.id&&renamedSecond.id==secondAlias.id&&
+                  renamedPrimary.resolvedId==renamedFirst.resolvedId&&renamedPrimary.resolvedId==renamedSecond.resolvedId&&
+                  renamedPrimary.linkCount==3,"Renaming APFS names changed their shared inode");
+            for(const auto* entry:{&renamedPrimary,&renamedFirst,&renamedSecond}){
+                for(unsigned fork=0;fork<2;++fork){
+                    Check(entry->forks[fork].size==toCopy.forks[fork].size,"Renaming an APFS alias lost a fork");
+                    Bytes actual(size_t(entry->forks[fork].size));
+                    published->Read(entry->id,fork,0,actual.data(),actual.size());
+                    Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS hard-link rename changed shared fork bytes");
+                }
+            }
             MacBrowser::Entry victim=toCopy;
             victim.name=u"Replace with hard link";
             const auto victimId=published->Put(copiedAliases.id,victim,[](unsigned,uint64_t,void* bytes,size_t size){
@@ -3053,7 +3076,7 @@ int RunApfsContainerTest(const char* directory)
             };
             verifyForks(retainedAlias);
             Check(!erase(copiedAliases.id).code&&!published->FindChild(copiedLinks.id,u"Aliases",copiedAliases)&&
-                  published->FindChild(copiedLinks.id,toCopy.name,retainedAlias)&&
+                  published->FindChild(copiedLinks.id,u"Renamed shared file",retainedAlias)&&
                   retainedAlias.linkCount==1&&!retainedAlias.hardLink,
                   "Recursive APFS deletion did not preserve the alias outside the removed folder");
             verifyForks(retainedAlias);
