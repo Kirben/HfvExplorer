@@ -441,7 +441,7 @@ public:
     uint64_t FreeBytes()const override{return freeBytes.load();}
     MacBrowser::Capabilities Supports() const override {
         auto capabilities = MacBrowser::Volume::Supports();
-        capabilities.resourceForks=!writable;
+        capabilities.resourceForks=true;
         capabilities.createFolders=writable;
         capabilities.unicodeNames=true;
         capabilities.attributes=true;
@@ -821,7 +821,9 @@ public:
         if(!writable)ReadOnly();
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
-        Check(entry.readError.empty()&&!entry.forks[1].size&&
+        Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
+        Check(entry.forks[1].size<EmbeddedAttributeLimit,"APFS resource fork requires a data stream");
+        Check(entry.readError.empty()&&
               !entry.hardLink&&!entry.compressed&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
         ValidateEmbeddedAttributes(entry.attributes);
@@ -847,6 +849,13 @@ public:
         ValidateEntry(entry);
         Check(!entry.directory,"Select a regular file for APFS data transfer");
         const auto dates=CopyDates(entry);
+        Bytes resource(size_t(entry.forks[1].size));
+        if(!resource.empty()){
+            Check(bool(reader),"Missing APFS resource fork reader");
+            if(job.cancelled())throw Storage::Cancelled();
+            reader(1,0,resource.data(),resource.size());
+        }
+        const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
         class DataFork final:public Source {
             const uint64_t size;
             const MacBrowser::Reader& read;
@@ -877,21 +886,41 @@ public:
                       "The APFS destination changed after overwrite approval");
                 const auto oid=At(found->id).oid;
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr);
+                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource);
                 });
                 return found->id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr);
+                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource);
             });
             for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
             throw Error("APFS file was committed but could not be found after reopening");
         });
     }
-    uint32_t PutResourceReplacement(uint32_t,const Entry&,MacBrowser::Reader,
-                                     std::function<void(uint64_t,size_t)>)override{
-        throw Error("APFS resource-fork replacement is not supported yet");
+    uint32_t PutResourceReplacement(uint32_t id,const Entry& desired,MacBrowser::Reader reader,
+                                     std::function<void(uint64_t,size_t)> keptData)override{
+        Check(desired.forks[1].size<EmbeddedAttributeLimit,"APFS resource fork requires a data stream");
+        Bytes resource(size_t(desired.forks[1].size));
+        if(!resource.empty()){
+            Check(bool(reader),"Missing APFS resource fork reader");
+            reader(1,0,resource.data(),resource.size());
+        }
+        return WriteMount([&]{
+            const auto& item=At(id);
+            const auto& current=item.entry;
+            Check(!current.directory&&!current.protectedFile&&!current.compressed&&current.readError.empty()&&
+                  current.identity==desired.identity&&current.parent==desired.parent&&current.name==desired.name,
+                  "The APFS resource fork destination changed or cannot be edited");
+            if(keptData&&current.forks[0].size)keptData(0,size_t(current.forks[0].size));
+            const auto parent=current.parent;
+            const auto parentOid=At(parent).oid,oid=item.oid;
+            Storage::Job job;
+            CommitMutation(parent,0,job,[&](auto& job){
+                return SetEmbeddedResourceFork(*source,container,parentOid,oid,resource,desired.modified,job);
+            });
+            return id;
+        });
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{
         ValidateEmbeddedAttributes(attributes);

@@ -1144,7 +1144,7 @@ void WritableNamespace(const std::string& root,FILE* report)
         Check(mounted&&mounted->Writable()&&!source,"An exclusive native APFS image did not mount writable");
         Reject([&]{OpenImage(path.c_str(),true);},"A second writer opened the mounted APFS image");
         const auto caps=mounted->Supports();
-        Check(caps.writable&&caps.rename&&caps.remove&&caps.createFolders&&caps.create&&!caps.resourceForks&&
+        Check(caps.writable&&caps.rename&&caps.remove&&caps.createFolders&&caps.create&&caps.resourceForks&&
               caps.CanEditAttributes()&&MacBrowser::ExecutionFor(*mounted).processLocal,
               "APFS advertised unsupported write or worker operations");
 
@@ -1264,7 +1264,7 @@ void WritableNamespace(const std::string& root,FILE* report)
         Check(nestedRefused&&!mounted->FindChild(2,u"Nested write",unused),"APFS nested write changed the catalog");
         for(const auto withResource:{false,true}){
             auto unsupported=replacement;
-            if(withResource)unsupported.forks[1].size=1;
+            if(withResource)unsupported.forks[1].size=Apfs::EmbeddedAttributeLimit;
             else unsupported.version=1;
             const auto before=raw->event;
             Reject([&]{mounted->Put(2,unsupported,[](unsigned,uint64_t,void*,size_t){},true);},
@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-embedded-acl.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-embedded-resource.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1321,6 +1321,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     file.attributes={{u"user.sample",{1,2,3}},{u"user.\u00e9",HfsPlus::Bytes{}},{u"user.\U0001f600",{0xff,0}}};
     std::copy_n("TEXTttxt",8,file.finder.begin());
     file.forks[0].size=5;
+    file.forks[1].size=3;
     folder.name=u"Folder";
     folder.attributes={{u"user.folder",{0,7}}};
     Bytes acl(68);
@@ -1334,8 +1335,9 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
     folder.directory=true;
     folder.finder[9]=0x08;
     const auto contents=[](unsigned fork,uint64_t offset,void* data,size_t bytes){
-        Check(!fork&&offset<=5&&bytes<=5-offset,"Unexpected Finder fixture read");
-        memcpy(data,"abcde"+offset,bytes);
+        const std::string_view content=fork?"xyz":"abcde";
+        Check(fork<2&&offset<=content.size()&&bytes<=content.size()-offset,"Unexpected APFS fixture read");
+        memcpy(data,content.data()+offset,bytes);
     };
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
@@ -1355,6 +1357,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         auto temporary=file;
         temporary.name=u"Temporary";
         temporary.forks[0].size=0;
+        temporary.forks[1].size=0;
         const auto temporaryId=mounted->Put(parent,temporary,{},false);
         auto cleared=temporary;
         cleared.finder={};
@@ -1374,6 +1377,25 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         edited.erase(u"com.apple.system.Security");
         edited[u"user.new"]={9,8,7};
         mounted->SetAttributes(id,edited);
+        Check(mounted->Stat(id).forks[1].size==3,"Editing APFS attributes cleared the resource fork");
+        const auto original=mounted->Stat(id);
+        auto replacement=original;
+        replacement.forks[1].size=2;
+        mounted->PutResourceReplacement(id,replacement,[](unsigned fork,uint64_t at,void* bytes,size_t size){
+            Check(fork==1&&at==0&&size==2,"Unexpected APFS resource replacement read");
+            memcpy(bytes,"RS",size);
+        },{});
+        std::array<char,2> resource{};
+        mounted->Read(id,1,0,resource.data(),resource.size());
+        Check(std::string(resource.begin(),resource.end())=="RS"&&mounted->GetAttributes(id)==edited&&
+              mounted->Stat(id).forks[0].size==5,"APFS resource replacement changed ordinary attributes or the data fork");
+        replacement=mounted->Stat(id);
+        replacement.forks[1].size=0;
+        mounted->PutResourceReplacement(id,replacement,{},{});
+        Check(!mounted->Stat(id).forks[1].size,"APFS resource removal did not clear the fork");
+        replacement=mounted->Stat(id);
+        replacement.forks[1].size=3;
+        mounted->PutResourceReplacement(id,replacement,contents,{});
         Check(mounted->GetAttributes(id)==edited&&mounted->Stat(id).finder==file.finder&&
               mounted->Stat(id).forks[0].size==5,"APFS attribute editing lost other metadata or file data");
         mounted->SetAttributes(id,file.attributes);
@@ -1405,6 +1427,9 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         std::array<char,5> data{};
         mounted->Read(foundFile.id,0,0,data.data(),data.size());
         Check(std::string(data.begin(),data.end())=="abcde","APFS Finder information changed the data fork");
+        std::array<char,3> fork{};
+        mounted->Read(foundFile.id,1,0,fork.data(),fork.size());
+        Check(std::string(fork.begin(),fork.end())=="xyz","APFS resource fork did not survive reopening");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
@@ -1501,6 +1526,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
             auto target=file;
             target.name=u"Overwritten";
             target.forks[0].size=0;
+            target.forks[1].size=0;
             const auto overwriteId=mounted->Put(copiedParent,target,{},false);
             replacement.name=target.name;
             Check(mounted->Put(copiedParent,replacement,contents,true)==overwriteId&&

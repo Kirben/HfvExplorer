@@ -19,6 +19,7 @@ struct CatalogCreate {
     const FinderBytes* finder=nullptr;
     bool locked=false;
     const HfsPlus::Attributes* attributes=nullptr;
+    const HfsPlus::Bytes* resource=nullptr;
 };
 struct CatalogRename {
     uint64_t parent,inode;
@@ -34,6 +35,7 @@ struct CatalogReplaceData {
     const FinderBytes* finder=nullptr;
     bool locked=false;
     const HfsPlus::Attributes* attributes=nullptr;
+    const HfsPlus::Bytes* resource=nullptr;
 };
 struct CatalogMetadata {
     uint64_t parent,inode;
@@ -45,7 +47,12 @@ struct CatalogAttributes {
     uint64_t parent,inode;
     const HfsPlus::Attributes& attributes;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes>;
+struct CatalogResourceFork {
+    uint64_t parent,inode;
+    const HfsPlus::Bytes& resource;
+    uint64_t modified;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork>;
 
 struct DataRun {
     uint64_t block,count;

@@ -483,7 +483,7 @@ int RunBrowserWindowsTest(const char* directory){
    list.SetItemState(fileRow,LVIS_SELECTED,LVIS_SELECTED);
    Check(sa.MacBrowser().CanCreateFolder()&&sa.MacBrowser().CanRename()&&sa.MacBrowser().CanDelete()&&
          sa.MacBrowser().Writable()&&sa.MacBrowser().SelectionWritable()&&
-         !sa.MacBrowser().CanImportResource()&&sa.MacBrowser().CanExport(),
+         sa.MacBrowser().CanImportResource()&&sa.MacBrowser().CanExport(),
          "APFS browser advertised the wrong namespace or transfer commands");
    const auto waitForRows=[&](const wchar_t* name,bool present){
     const auto deadline=GetTickCount64()+10000;
@@ -532,6 +532,19 @@ int RunBrowserWindowsTest(const char* directory){
     Check(SetFileTime(file,&stamp,nullptr,&stamp)!=FALSE,"set Windows APFS copy fixture dates");
    };
    const auto target=sa.MacBrowser().TargetFolder();
+   const auto resourcePath=VolumeCoord::Wide(std::string((LPCSTR)(host+"\\APFS resource.bin")));
+   writeHost(resourcePath,"fork");
+   MacBrowser::Entry resourceTarget;
+   Check(mount->FindChild(2,u"Browser renamed",resourceTarget),"Missing browser resource import target");
+   auto resourceImport=FileOperations::Submit(FileOperations::ImportResourceFork{
+       FileOperations::Location::Windows(resourcePath),FileOperations::Location::Mounted(mount,resourceTarget.id)});
+   const auto imported=outcome(resourceImport);
+   Check(imported,resourceImport.Job()->result().message.c_str());
+   std::array<char,4> fork{};
+   mount->Read(resourceTarget.id,1,0,fork.data(),fork.size());
+   Check(std::string(fork.begin(),fork.end())=="fork"&&
+         mount->Stat(resourceTarget.id).forks[0].size==resourceTarget.forks[0].size,
+         "APFS resource import changed data fork length or resource contents");
    const auto from=FileOperations::Location::Windows(incomingPath);
    FileOperations::OrdinaryCopy copyToApfs{{from},target};
    std::string oldBytes(9003,'a'),newBytes(7333,'b');

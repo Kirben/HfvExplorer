@@ -516,7 +516,13 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
     }
 }
 
-constexpr uint64_t EmbeddedAttributeLimit=3804;
+constexpr auto ResourceAttribute="com.apple.ResourceFork";
+constexpr uint64_t HasResourceFork=0x4000,NoResourceFork=0x8000;
+void SetResourceFlag(Bytes& inode,bool present)
+{
+    const auto flags=Le64(inode.data()+48)&~(HasResourceFork|NoResourceFork);
+    Set(inode,48,flags|(present?HasResourceFork:NoResourceFork),8);
+}
 constexpr uint64_t HasSecurityAttribute=0x40;
 constexpr auto SecurityAttribute=u"com.apple.system.Security";
 void SetSecurityFlag(Bytes& inode,const HfsPlus::Attributes& attributes)
@@ -530,25 +536,41 @@ bool OrdinaryAttribute(std::string_view name)
            name!="com.apple.fs.symlink";
 }
 
-std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attributes* attributes)
+OwnedRecord EmbeddedAttribute(uint64_t inode,std::string_view name,size_t size)
 {
-    if(!attributes)return {};
-    ValidateEmbeddedAttributes(*attributes);
-    std::vector<OwnedRecord> records;
-    for(const auto& [wide,value]:*attributes){
-        const auto name=EncodeAttributeName(wide);
-        OwnedRecord record{Bytes(11+name.size()),Bytes(4+size_t(value.size()))};
-        Set(record.key,0,(uint64_t(4)<<60)|inode,8);
-        Set(record.key,8,name.size()+1,2);
-        std::copy(name.begin(),name.end(),record.key.begin()+10);
-        Set(record.value,0,2,2);
-        Set(record.value,2,value.size(),2);
-        if(value.size())value.Read(0,record.value.data()+4,size_t(value.size()));
-        records.push_back(std::move(record));
-    }
+    OwnedRecord record{Bytes(11+name.size()),Bytes(4+size)};
+    Set(record.key,0,(uint64_t(4)<<60)|inode,8);
+    Set(record.key,8,name.size()+1,2);
+    std::copy(name.begin(),name.end(),record.key.begin()+10);
+    Set(record.value,0,2,2);
+    Set(record.value,2,size,2);
+    return record;
+}
+
+void SortAttributes(std::vector<OwnedRecord>& records)
+{
     std::sort(records.begin(),records.end(),[](const auto& a,const auto& b){
         return std::lexicographical_compare(a.key.begin()+10,a.key.end(),b.key.begin()+10,b.key.end());
     });
+}
+std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attributes* attributes,
+                                          const Bytes* resource=nullptr)
+{
+    std::vector<OwnedRecord> records;
+    if(attributes){
+        ValidateEmbeddedAttributes(*attributes);
+        for(const auto& [wide,value]:*attributes){
+            auto record=EmbeddedAttribute(inode,EncodeAttributeName(wide),size_t(value.size()));
+            if(value.size())value.Read(0,record.value.data()+4,size_t(value.size()));
+            records.push_back(std::move(record));
+        }
+    }
+    if(resource&&!resource->empty()){
+        Check(resource->size()<EmbeddedAttributeLimit,"APFS resource fork requires a data stream");
+        auto record=EmbeddedAttribute(inode,ResourceAttribute,resource->size());
+        std::copy(resource->begin(),resource->end(),record.value.begin()+4);
+        records.push_back(std::move(record));
+    }
     return records;
 }
 
@@ -569,6 +591,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     const auto* metadata=std::get_if<CatalogMetadata>(&request);
     const auto* attributesEdit=std::get_if<CatalogAttributes>(&request);
+    const auto* resourceEdit=std::get_if<CatalogResourceFork>(&request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
         Set(inode,16,CatalogTimestamp(dates->created),8);
@@ -613,6 +636,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         size_t inodeRecord=0,attributes=0,streamRecords=0;
         uint64_t dataSize=0;
         std::optional<FinderBytes> finder;
+        std::optional<size_t> resourceRecord;
     };
     std::map<uint64_t,Link> links;
     uint64_t files=0;
@@ -681,9 +705,13 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                               Le16(attr.value.data)==2&&Le16(attr.value.data+2)==attr.value.size-4&&
                               attr.value.size-4<EmbeddedAttributeLimit,"Invalid APFS embedded attribute");
                         const std::string name(reinterpret_cast<const char*>(attr.key.data+10),attr.key.size-11);
-                        Check(name>previousAttribute&&name.find('\0')==name.npos&&OrdinaryAttribute(name),
+                        Check(name>previousAttribute&&name.find('\0')==name.npos&&(OrdinaryAttribute(name)||name==ResourceAttribute),
                               "Invalid APFS attribute name or order");
                         hasSecurity|=name=="com.apple.system.Security";
+                        if(name==ResourceAttribute){
+                            Check(kind==CatalogKind::RegularFile&&attr.value.size>4,"Invalid APFS resource fork");
+                            link->second.resourceRecord=i+1+streamRecords;
+                        }
                         previousAttribute=name;
                     }
                     link->second.attributes=streamRecords;
@@ -702,6 +730,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const auto size=view.value.size==streamEnd?Le64(value+stream):0;
                     Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
                     auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size,finder?&*finder:nullptr);
+                    SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     Set(expected.value,68,Le32(value+68)&UserImmutable,4);
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
@@ -758,7 +787,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     auto& parentInode=records[target->second.record].value;
     Check(!(Le32(parentInode.data()+68)&(UserImmutable|SystemImmutable)),
           "Unlock the APFS destination folder before making changes");
-    if(!replace&&!metadata&&!attributesEdit){
+    if(!replace&&!metadata&&!attributesEdit&&!resourceEdit){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
     }
@@ -770,7 +799,9 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         if(create->locked)Set(records.back().value,68,UserImmutable,4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
-        auto attributes=EncodeAttributes(entryId,create->attributes);
+        auto attributes=EncodeAttributes(entryId,create->attributes,create->resource);
+        if(create->resource)SetResourceFlag(records.back().value,!create->resource->empty());
+        SortAttributes(attributes);
         records.insert(records.end(),std::make_move_iterator(attributes.begin()),std::make_move_iterator(attributes.end()));
         streamAt=records.size();
     }else{
@@ -788,14 +819,31 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Set(inode,32,time,8);
             return records;
         }
-        if(attributesEdit){
-            auto attributes=EncodeAttributes(entryId,&attributesEdit->attributes);
-            SetSecurityFlag(inode,attributesEdit->attributes);
-            Set(inode,32,time,8);
-            const auto index=link.inodeRecord+1;
-            records.erase(records.begin()+index,records.begin()+index+link.attributes);
-            records.insert(records.begin()+index,std::make_move_iterator(attributes.begin()),
+        const auto afterInode=link.inodeRecord+1;
+        const auto rewriteAttributes=[&](const HfsPlus::Attributes* ordinary,const Bytes* resource,size_t streams){
+            auto attributes=EncodeAttributes(entryId,ordinary,resource);
+            for(size_t index=afterInode;index<afterInode+link.attributes;++index){
+                const bool isResource=link.resourceRecord==index;
+                if(isResource?!resource:!ordinary)attributes.push_back(std::move(records[index]));
+            }
+            if(ordinary)SetSecurityFlag(inode,*ordinary);
+            if(resource)SetResourceFlag(inode,!resource->empty());
+            SortAttributes(attributes);
+            records.erase(records.begin()+afterInode,records.begin()+afterInode+link.attributes+streams);
+            records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
                            std::make_move_iterator(attributes.end()));
+            return afterInode+attributes.size();
+        };
+        if(attributesEdit){
+            Set(inode,32,time,8);
+            rewriteAttributes(&attributesEdit->attributes,nullptr,0);
+            return records;
+        }
+        if(resourceEdit){
+            Check(link.kind==CatalogKind::RegularFile,"Select a regular file for APFS resource import");
+            Set(inode,24,CatalogTimestamp(resourceEdit->modified),8);
+            Set(inode,32,time,8);
+            rewriteAttributes(nullptr,&resourceEdit->resource,0);
             return records;
         }
         const auto mode=Le16(inode.data()+80);
@@ -836,16 +884,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             return records;
         }
         if(replace){
-            const auto afterInode=link.inodeRecord+1;
-            streamAt=afterInode+link.attributes;
-            if(replace->attributes){
-                auto attributes=EncodeAttributes(entryId,replace->attributes);
-                SetSecurityFlag(inode,*replace->attributes);
-                records.erase(records.begin()+afterInode,records.begin()+streamAt+link.streamRecords);
-                records.insert(records.begin()+afterInode,std::make_move_iterator(attributes.begin()),
-                               std::make_move_iterator(attributes.end()));
-                streamAt=afterInode+attributes.size();
-            }else records.erase(records.begin()+streamAt,records.begin()+streamAt+link.streamRecords);
+            streamAt=rewriteAttributes(replace->attributes,replace->resource,link.streamRecords);
             return records;
         }
 
