@@ -1305,6 +1305,58 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: distinct APFS names with the same hash, duplicate protection, and case-only rename.\n");
 }
 
+void UnicodeCatalogNames(const std::string& root,FILE* report)
+{
+    for(const bool sensitive:{false,true}){
+        const auto path=VolumeCoord::Wide(root+(sensitive?"apfs-unicode-sensitive.img":"apfs-unicode.img"));
+        const auto spelling=u"Caf\u00e9 \U0001f600";
+        const auto decomposed=u"Cafe\u0301 \U0001f600";
+        const auto uppercase=u"CAF\u00c9 \U0001f600";
+        const auto renamed=u"\uac01 \u65e5\u672c";
+        {
+            auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*image,u"Unicode names",sensitive,job);
+            Apfs::CreateEmptyFile(*image,*Apfs::Probe(*image),2,spelling,job);
+            const auto checkpoint=Apfs::Probe(*image);
+            Reject([&]{Apfs::CreateCatalogDirectory(*image,*checkpoint,2,decomposed,job);},
+                   "APFS accepted canonically equivalent names");
+            if(sensitive)Apfs::CreateEmptyFile(*image,*checkpoint,2,uppercase,job);
+            else Reject([&]{Apfs::CreateEmptyFile(*image,*checkpoint,2,uppercase,job);},
+                        "APFS accepted canonically equivalent names with different case");
+            Reject([&]{Apfs::CreateEmptyFile(*image,*Apfs::Probe(*image),2,
+                                            std::u16string(128,u'\u00e9'),job);},
+                   "APFS accepted a name exceeding the UTF-8 byte limit");
+            Reject([&]{Apfs::CreateEmptyFile(*image,*Apfs::Probe(*image),2,u"\U0001FAE0",job);},
+                   "APFS accepted an unassigned Unicode 9.0 character");
+            Apfs::CreateCatalogDirectory(*image,*Apfs::Probe(*image),2,u"\u1e0b\u0323",job);
+            image->Keep();
+        }
+        {
+            const auto opened=MacBrowser::OpenBrowserImage(path);
+            Check(bool(opened),"Could not open the APFS Unicode fixture");
+            opened->ValidateName(spelling);
+            Reject([&]{opened->ValidateName(std::u16string(1,char16_t(0xd800)));},
+                   "The APFS browser accepted an unpaired surrogate");
+            MacBrowser::Entry file,alias,folder;
+            Check(opened->Supports().unicodeNames&&opened->FindChild(2,decomposed,file)&&
+                  file.name==spelling&&opened->FindChild(2,uppercase,alias)&&
+                  ((file.id!=alias.id)==sensitive)&&
+                  opened->FindChild(2,u"d\u0323\u0307",folder)&&folder.directory,
+                  "APFS Unicode name lookup lost spelling, case mode or combining-mark order");
+        }
+        auto output=HfsPlus::OpenImage(path.c_str(),true);
+        Storage::Job job;
+        Apfs::RenameEntry(*output,*Apfs::Probe(*output),2,16,renamed,job);
+        output.reset();
+        const auto reopened=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry file;
+        Check(reopened&&reopened->FindChild(2,u"\u1100\u1161\u11a8 \u65e5\u672c",file)&&file.name==renamed&&
+              !reopened->FindChild(2,decomposed,file),"APFS Unicode rename did not survive reopening");
+    }
+    fprintf(report,"PASS: APFS UTF-8 names, normalization, case modes, invalid names and Unicode rename.\n");
+}
+
 Memory Raw(unsigned blockSize=4096)
 {
     Memory disk(1024*1024);
@@ -1663,6 +1715,7 @@ int RunApfsContainerTest(const char* directory)
         ReplaceCatalogData(root,report);
         WritableNamespace(root,report);
         DirectoryHashCollisions(root,report);
+        UnicodeCatalogNames(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

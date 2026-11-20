@@ -574,7 +574,7 @@ int RunBrowserWindowsTest(const char* directory){
    mount->Read(nestedFile.id,0,0,nestedBytes.data(),nestedBytes.size());
    Check(nestedBytes==newBytes,"Same-image APFS copy changed the source bytes");
 
-   const auto unsupported=VolumeCoord::Wide(std::string((LPCSTR)host))+L"\\APFS unsupported \u00e9";
+   const auto unsupported=VolumeCoord::Wide(std::string((LPCSTR)host))+L"\\APFS unsupported \U0001fae0";
    Check(CreateDirectoryW(unsupported.c_str(),nullptr)!=FALSE,"create unsupported APFS folder source");
    const auto planned=FileOperations::Location::Windows(unsupported);
    auto blocked=FileOperations::Submit(FileOperations::OrdinaryCopy{{from,planned},FileOperations::Location::Mounted(mount,folder)});
@@ -605,24 +605,24 @@ int RunBrowserWindowsTest(const char* directory){
    const auto datesMatch=[](const MacBrowser::Entry& expected,const MacBrowser::Entry& actual){
     return expected.datesValid&&actual.datesValid&&expected.created==actual.created&&expected.modified==actual.modified;
    };
-   const auto windowsTree=hostPath+L"\\APFS tree";
+   const auto windowsTree=hostPath+L"\\APFS tr\u00e9e";
    const auto windowsChild=windowsTree+L"\\Nested";
    Check(CreateDirectoryW(windowsTree.c_str(),nullptr)&&CreateDirectoryW(windowsChild.c_str(),nullptr),
          "create Windows folder hierarchy for APFS copy");
    writeHost(windowsTree+L"\\Top file.txt",oldBytes);
-   writeHost(windowsChild+L"\\Nested file.txt",newBytes);
+   writeHost(windowsChild+L"\\Nested \u65e5\u672c.txt",newBytes);
    stampFolder(windowsChild,2160000001,2160000002);
    stampFolder(windowsTree,2150000001,2150000002);
    auto treeCopy=FileOperations::Submit(FileOperations::OrdinaryCopy{{FileOperations::Location::Windows(windowsTree)},target});
-   Check(outcome(treeCopy)&&waitForRows(L"APFS tree",true),"recursive APFS copy did not refresh both windows");
-   const auto treeCopyRoot=foundFolder(2,u"APFS tree");
+   Check(outcome(treeCopy)&&waitForRows(L"APFS tr\u00e9e",true),"recursive APFS copy did not refresh both windows");
+   const auto treeCopyRoot=foundFolder(2,u"APFS tre\u0301e");
    const auto treeCopyChild=foundFolder(treeCopyRoot.id,u"Nested");
    Check(datesMatch(MacBrowser::DescribeWindowsFile(windowsTree),treeCopyRoot)&&
          datesMatch(MacBrowser::DescribeWindowsFile(windowsChild),treeCopyChild),
          "APFS recursive copy did not preserve source folder dates");
    MacBrowser::Entry copiedPayload;
    Check(mount->FindChild(treeCopyRoot.id,u"Top file.txt",copiedPayload)&&copiedPayload.forks[0].size==oldBytes.size()&&
-         mount->FindChild(treeCopyChild.id,u"Nested file.txt",copiedPayload)&&copiedPayload.forks[0].size==newBytes.size(),
+         mount->FindChild(treeCopyChild.id,u"Nested \u65e5\u672c.txt",copiedPayload)&&copiedPayload.forks[0].size==newBytes.size(),
          "APFS recursive copy lost either level of the hierarchy");
    std::string treeData(newBytes.size(),'\0');
    mount->Read(copiedPayload.id,0,0,treeData.data(),treeData.size());

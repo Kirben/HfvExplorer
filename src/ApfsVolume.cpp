@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsVolume.h"
 #include "ApfsCatalogWrite.h"
+#include "ApfsUnicode.h"
 #include "StorageWorker.h"
 #include "ApfsTree.h"
 #include "ApfsCrypto.h"
@@ -441,7 +442,7 @@ public:
         auto capabilities = MacBrowser::Volume::Supports();
         capabilities.resourceForks=!writable;
         capabilities.createFolders=writable;
-        capabilities.unicodeNames=!writable;
+        capabilities.unicodeNames=true;
         capabilities.attributes=!writable;
         return capabilities;
     }
@@ -556,12 +557,15 @@ private:
 public:
     Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
     bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override{
-        const auto sensitive=Access([&]{
+        const auto [sensitive,normalized]=Access([&]{
             const auto& folder=At(parent);
-            return !folder.oid||mounts[folder.mount].sensitive;
+            return std::pair{!folder.oid||mounts[folder.mount].sensitive,
+                             folder.oid&&mounts[folder.mount].hashedNames};
         });
+        const auto key=normalized?NormalizedName(name,!sensitive):std::u32string{};
         for(auto& entry:List(parent)){
-            if(HfsPlus::CompareNames(entry.name,name,sensitive)!=0)continue;
+            if(normalized?NormalizedName(entry.name,!sensitive)!=key:
+                          HfsPlus::CompareNames(entry.name,name,sensitive)!=0)continue;
             found=std::move(entry);
             return true;
         }
@@ -802,9 +806,10 @@ public:
             });
         });
     }
+    void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
-        CatalogName(entry.name);
+        ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(entry.readError.empty()&&!entry.forks[1].size&&entry.attributes.empty()&&
               !entry.protectedFile&&!entry.hardLink&&!entry.compressed&&!entry.version&&
@@ -849,8 +854,9 @@ public:
 
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
+            const auto key=NormalizedName(entry.name,!caseSensitive);
             const auto matches=[&](const Entry& candidate){
-                return HfsPlus::CompareNames(candidate.name,entry.name,caseSensitive)==0;
+                return NormalizedName(candidate.name,!caseSensitive)==key;
             };
             const auto children=ListDirectory(parent);
             const auto found=std::find_if(children.begin(),children.end(),matches);

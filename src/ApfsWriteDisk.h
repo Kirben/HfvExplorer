@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "HfsPlusDisk.h"
+#include "ApfsUnicode.h"
 #include <algorithm>
 #include <string_view>
 
@@ -86,10 +87,10 @@ inline Bytes EncodeLeaf(const std::vector<Record>& records,uint32_t flags,unsign
 
 inline uint32_t DirectoryHash(std::string_view name,bool fold=false)
 {
-    // APFS hashes normalized UTF-32LE. These encoders accept ASCII names.
+    // Each normalized scalar contributes four little-endian bytes.
     uint32_t crc=UINT32_MAX;
-    for(const auto c:name){
-        crc^=uint8_t(fold&&c>='A'&&c<='Z'?c+32:c);
+    for(const auto c:NormalizedName(name,fold)){
+        crc^=uint32_t(c);
         for(unsigned bit=0;bit<32;++bit)crc=(crc>>1)^((crc&1)?0x82f63b78u:0);
     }
     return (crc&0x3fffff)<<10;

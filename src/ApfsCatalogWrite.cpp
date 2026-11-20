@@ -541,12 +541,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
     // APFS orders equal-hash directory keys by their stored names.
     using Key=std::tuple<uint64_t,uint64_t,uint32_t,std::string>;
-    const auto canonical=[fold](std::string value){
-        if(fold)for(auto& c:value)if(c>='A'&&c<='Z')c+=32;
-        return value;
-    };
-    const auto requestedName=canonical(name);
-    std::map<uint64_t,std::set<std::string>> directoryNames;
+    const auto requestedName=NormalizedName(name,fold);
+    std::map<uint64_t,std::set<std::u32string>> directoryNames;
     OwnedRecord added;
     std::optional<Key> addedKey;
     if(create||rename){
@@ -596,12 +592,15 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 const auto nameKey=Le32(view.key.data+8);
                 Check((nameKey&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
                       "Invalid APFS entry name");
-                auto childName=CatalogName(std::u16string(view.key.data+12,view.key.data+view.key.size-1));
+                auto childName=std::string(reinterpret_cast<const char*>(view.key.data+12),view.key.size-13);
+                Check(childName.size()<=255&&childName.find_first_of("/:")==childName.npos&&
+                      childName.find('\0')==childName.npos&&childName!="."&&childName!="..",
+                      "Invalid APFS directory name");
                 hash=nameKey>>10;
                 Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash,"Invalid APFS directory name hash");
                 const auto child=Le64(view.value.data);
                 renamingThisEntry=rename&&rename->inode==child&&parent==inode;
-                const auto canonicalName=canonical(childName);
+                const auto canonicalName=NormalizedName(childName,fold);
                 Check(directoryNames[inode].insert(canonicalName).second,"Duplicate APFS directory name");
                 Check(!addedKey||parent!=inode||renamingThisEntry||canonicalName!=requestedName,
                       "The APFS entry name already exists");
@@ -812,17 +811,6 @@ void CheckNativeVolume(const Bytes& volume)
 }
 }
 
-std::string CatalogName(const std::u16string& name)
-{
-    Check(!name.empty()&&name.size()<=255&&name!=u"."&&name!=u"..","Invalid APFS entry name");
-    std::string result;
-    for(const auto c:name){
-        Check(c>=32&&c<127&&c!='/'&&c!=':',"APFS catalog updates currently require an ASCII entry name");
-        result+=char(c);
-    }
-    return result;
-}
-
 uint64_t CatalogTimestamp(uint64_t secondsSince1904)
 {
     constexpr int64_t UnixEpoch=2082844800,Second=1000000000;
@@ -856,7 +844,7 @@ CatalogWritePlan PrepareCatalogMutation(
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
-    const auto ascii=create?CatalogName(create->name):rename?CatalogName(rename->name):std::string{};
+    const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
     if(const auto* folder=std::get_if<CatalogDirectoryDates>(&request))dates=folder->dates;
@@ -894,7 +882,7 @@ CatalogWritePlan PrepareCatalogMutation(
         if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogCreate>)return nextId;
         else return edit.inode;
     },request);
-    auto catalog=EditCatalog(std::move(existing.records),request,ascii,nextId,entryId,time,flags==1,
+    auto catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
                             directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind,streamAt,dates);
     ValidateExtentReferences(extentTree,files);
     const bool retireOldData=replace||removedKind.has_value();

@@ -5,6 +5,7 @@
 #include "StorageWorker.h"
 #include <string>
 class BrowserSession;
+namespace MacBrowser { class Volume; }
 enum class ApfsImageMode {None,CaseInsensitive,CaseSensitive};
 struct MacImageFormatRequest {
     std::wstring path,externalJournal;
@@ -21,6 +22,6 @@ Dmg::Credentials PromptDmgCredentials(CWnd*,Dmg::UnlockMethod,bool retry,const s
 void ConvertDmgImage(BrowserSession&);
 void HfvUnicodeNameEdit(HWND,int);
 bool EditWindowsName(CWnd *parent, std::wstring &name);
-bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive);
+bool EditMacVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume);
 
 bool SelectHfsPlusExternalJournal(CWnd*,std::wstring&,const std::string&);

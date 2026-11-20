@@ -88,7 +88,8 @@ public:
     virtual void ValidateCopyNames(uint32_t,const std::vector<Entry>&,bool) {}
     virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool) {}
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
-    virtual void ValidateEntry(const Entry &e) const { HfsPlus::Normalize(e.name,CaseSensitive());if(!e.attributes.empty()&&!Supports().attributes)throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
+    virtual void ValidateName(const std::u16string& name) const { HfsPlus::Normalize(name,CaseSensitive()); }
+    virtual void ValidateEntry(const Entry &e) const { ValidateName(e.name);if(!e.attributes.empty()&&!Supports().attributes)throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;
     virtual Entry Stat(uint32_t id) = 0;

@@ -6,6 +6,7 @@
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
+#include "MacBrowserModel.h"
 #include "ApfsFormat.h"
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
@@ -110,7 +111,7 @@ public:
 class NameDialog : public CDialog {
   public:
     std::wstring value;
-    bool caseSensitive = false;
+    const MacBrowser::Volume* volume = nullptr;
     bool windows = false;
     explicit NameDialog(CWnd *p) : CDialog(IDD_HPLUS_NAME, p) {}
     BOOL OnInitDialog() override {
@@ -129,7 +130,8 @@ class NameDialog : public CDialog {
                    value.find_first_of(L"<>:\"/\\|?*")!=value.npos||
                    std::any_of(value.begin(),value.end(),[](wchar_t c){return c<32;}))
                     throw HfsPlus::Error("Enter a valid Windows filename.");
-            }else HfsPlus::Normalize(U16(value), caseSensitive);
+            }else if(volume)volume->ValidateName(U16(value));
+            else HfsPlus::Normalize(U16(value),false);
             CDialog::OnOK();
         } catch (const std::exception &e) {
             AfxMessageBox(e.what());
@@ -217,8 +219,8 @@ bool EditWindowsName(CWnd *parent, std::wstring &name) {
  NameDialog dialog(parent);dialog.value=name;dialog.windows=true;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
 }
-bool EditHfsPlusName(CWnd *parent, std::wstring &name, bool caseSensitive) {
- NameDialog dialog(parent);dialog.value=name;dialog.caseSensitive=caseSensitive;
+bool EditMacVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume) {
+ NameDialog dialog(parent);dialog.value=name;dialog.volume=&volume;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
 }
 namespace {

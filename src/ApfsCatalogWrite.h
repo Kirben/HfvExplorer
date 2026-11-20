@@ -44,7 +44,6 @@ struct CatalogWritePlan {
     HfsPlus::Source* input=nullptr;
     uint64_t dataSize=0;
 };
-std::string CatalogName(const std::u16string&);
 uint64_t CatalogTimestamp(uint64_t secondsSince1904);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);
 uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);
