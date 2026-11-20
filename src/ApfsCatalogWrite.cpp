@@ -563,11 +563,18 @@ CatalogRecords ReadExtentTree(Source& source,const Container& container,uint64_t
     const Node root(ReadObject(source,container,block,block,container.transaction,2,15,true),true,{});
     Check(root.Level()<=1&&!root.Layout().keySize&&!root.Layout().valueSize,
           "Unsupported APFS extent reference tree layout");
+    uint64_t previousEnd=0;
     const auto append=[&](const Node& leaf){
         Check(!leaf.Level(),"Invalid APFS extent reference leaf level");
         for(size_t i=0;i<leaf.Count();++i){
             const auto record=leaf.At(i);
             Check(record.key.size==8&&record.value.size==20,"Invalid APFS extent reference record size");
+            const auto key=Le64(record.key.data),length=Le64(record.value.data);
+            const auto start=key&IdMask,count=length&IdMask;
+            Check(key>>60==2&&length>>60==1&&start&&count&&start>=previousEnd&&
+                  Range(start,count,container.blockCount)&&Le32(record.value.data+16)>0,
+                  "Invalid or overlapping APFS physical extent range");
+            previousEnd=start+count;
             tree.records.push_back({Bytes(record.key.data,record.key.data+8),Bytes(record.value.data,record.value.data+20)});
         }
     };
@@ -1554,12 +1561,14 @@ uint64_t CatalogTimestamp(uint64_t secondsSince1904)
     return uint64_t((int64_t(secondsSince1904)-UnixEpoch)*Second);
 }
 
-size_t InspectCatalogRecordCount(Source& source,const Container& container)
+CatalogLayoutCounts InspectCatalogLayout(Source& source,const Container& container)
 {
     const auto layout=ReadCatalogVolume(source,container);
     const auto& volume=layout.volume;
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
-    return ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136)).records.size();
+    const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
+    const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
+    return {catalog.records.size(),extents.records.size()};
 }
 
 void ValidateWritableLayout(Source& source,const Container& container)

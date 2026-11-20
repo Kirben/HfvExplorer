@@ -1593,7 +1593,28 @@ void ExtentReferenceGrowth(const std::string& root,FILE* report)
         volume->SetAttributes(loaded.id,entry.attributes);
     }
     Check(level()==1,"APFS extent reference tree did not regrow after reclaiming streams");
-    fprintf(report,"PASS: APFS extent reference tree growth, reopen, rename, shrink and regrowth across 135 streams.\n");
+    {
+        auto image=OpenImage(path.c_str(),false);
+        Memory invalid(size_t(image->Size()));
+        invalid.bytes=Disk::Read(*image,0,invalid.bytes.size());
+        const auto checkpoint=Apfs::Probe(invalid);
+        const auto oid=checkpoint->volumes.front();
+        const auto address=Apfs::ObjectMap(invalid,*checkpoint,checkpoint->objectMap,checkpoint->transaction).Lookup(oid);
+        const auto volume=Apfs::ReadObject(invalid,*checkpoint,*address,oid,checkpoint->transaction,13);
+        const auto extent=Apfs::Le64(volume.data()+144);
+        const Apfs::Node index(Apfs::ReadObject(invalid,*checkpoint,extent,extent,checkpoint->transaction,2,15,true),true,{});
+        const auto leaf=Apfs::Le64(index.At(0).value.data)*checkpoint->blockSize;
+        auto* node=invalid.bytes.data()+leaf;
+        const auto table=56+Apfs::Le16(node+40);
+        const auto value=checkpoint->blockSize-Apfs::Le16(node+table+4);
+        Little(node+value,uint64_t(1)<<60,8); // Valid extent kind, zero blocks.
+        Seal(invalid.bytes,leaf,checkpoint->blockSize);
+        bool rejected=false;
+        try{Apfs::InspectCatalogLayout(invalid,*checkpoint);}
+        catch(const Error& e){rejected=std::string(e.what())=="Invalid or overlapping APFS physical extent range";}
+        Check(rejected,"APFS accepted a zero-length physical extent");
+    }
+    fprintf(report,"PASS: APFS extent-tree growth, reopen, shrink, regrowth and invalid range rejection.\n");
 }
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
@@ -2514,8 +2535,9 @@ int RunApfsContainerTest(const char* directory)
             const auto raw=OpenImage(fixture,false);
             const auto before=Apfs::Probe(*raw);
             Check(before.has_value(),"Missing macOS-generated APFS checkpoint");
-            Check(Apfs::InspectCatalogRecordCount(*raw,*before)>800,
-                  "The write planner did not enumerate the macOS-generated catalog");
+            const auto layout=Apfs::InspectCatalogLayout(*raw,*before);
+            Check(layout.catalogRecords>800&&layout.extentReferences>100,
+                  "The write planner did not validate the macOS-generated catalog and extent tree");
             const auto image=Disk::Read(*raw,0,size_t(raw->Size()));
             {
                 CheckpointFaultImage interrupted(image);
