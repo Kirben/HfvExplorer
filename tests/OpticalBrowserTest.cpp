@@ -242,6 +242,89 @@ MacBrowser::Entry File(MacBrowser::Volume& volume,uint32_t directory,const std::
     return file;
 }
 
+void RecordedUdf(const std::string& output,FILE* report)
+{
+    constexpr unsigned version=3,physicalStart=300,sectors=512;
+    const auto extendPartition=[version](Bytes& disk,unsigned access){
+        for(unsigned lba:{257u,260u}){
+            auto descriptor=disk.data()+lba*Block;
+            Le(descriptor+184,access,4);
+            Le(descriptor+192,2048,4);
+            Tag(descriptor,5,lba,512,version);
+        }
+    };
+
+    auto vat=Udf(0x201,Map::Virtual);
+    extendPartition(vat,2);
+    auto volume=MacBrowser::OpenBrowserImage(Save(output+"\\recorded-vat.udf",vat));
+    Check(volume&&!strcmp(volume->Kind(),"UDF"),"Could not mount a write-once UDF image ending at the VAT");
+    File(*volume,2,u"\u03a9Fil");
+    auto disc=MacBrowser::OpenCd(3,std::make_shared<Disc>(vat));
+    Check(disc&&disc->CdDrive()==3&&!strcmp(disc->Kind(),"UDF"),"Recorded VAT did not mount through CD selection");
+    File(*disc,2,u"\u03a9Fil");
+
+    auto mainWithoutVat=vat;
+    auto mainLogical=mainWithoutVat.data()+258*Block;
+    Le(mainLogical+264,6,4);
+    Le(mainLogical+268,1,4);
+    Tag(mainLogical,6,258,446,version);
+    auto reserve=MacBrowser::OpenBrowserImage(Save(output+"\\recorded-vat-reserve.udf",mainWithoutVat));
+    Check(reserve&&!strcmp(reserve->Kind(),"UDF"),"Could not recover the VAT map from the reserve sequence");
+    File(*reserve,2,u"\u03a9Fil");
+
+    auto missing=vat;
+    missing.resize(missing.size()-Block);
+    const auto missingPath=Save(output+"\\missing-vat.udf",missing);
+    Reject([&]{MacBrowser::OpenBrowserImage(missingPath);},"Missing VAT was accepted");
+
+    auto entry=vat.data()+(sectors-1)*Block;
+    Le(entry+176+152+16,sectors-physicalStart,4); // File data now maps to the first unrecorded block.
+    Tag(entry,261,sectors-1-physicalStart,176+152+20,version);
+    auto damaged=MacBrowser::OpenBrowserImage(Save(output+"\\unrecorded-vat-data.udf",vat));
+    MacBrowser::Entry file;
+    Check(damaged&&damaged->FindChild(2,u"\u03a9Fil",file),"Cannot list the UDF file with an invalid data reference");
+    Bytes data(payload.size(),0x5a);
+    Reject([&]{damaged->Read(file.id,0,0,data.data(),data.size());},"An unrecorded VAT data block was read");
+    Check(data==Bytes(payload.size(),0x5a),"The reader filled bytes for unrecorded data");
+
+    auto linear=Udf(0x201,Map::Physical);
+    extendPartition(linear,2);
+    const auto linearPath=Save(output+"\\oversized-linear.udf",linear);
+    Reject([&]{MacBrowser::OpenBrowserImage(linearPath);},"Oversized partition without a VAT was accepted");
+    extendPartition(vat,3);
+    const auto rewritablePath=Save(output+"\\oversized-rewritable.udf",vat);
+    Reject([&]{MacBrowser::OpenBrowserImage(rewritablePath);},"Oversized rewritable partition was accepted");
+    fprintf(report,"PASS: recorded VAT file reads through images and CD selection, reserve VAT map recovery, missing VAT and unrecorded block rejection, and strict non-sequential partition bounds.\n");
+}
+
+void UdfInteropFixtures(const std::wstring& fixtures,FILE* report)
+{
+    auto bridge=MacBrowser::OpenBrowserImage(fixtures+L"\\geniso-bridge.iso");
+    MacBrowser::Entry folder,file;
+    constexpr char content[]="UDF interoperability\n";
+    Check(bridge&&!strcmp(bridge->Kind(),"UDF")&&!bridge->Writable()&&
+          bridge->FindChild(2,u"sub",folder)&&folder.directory&&
+          bridge->FindChild(folder.id,u"payload.txt",file)&&file.forks[0].size==sizeof(content)-1,
+          "genisoimage UDF bridge did not expose the expected file");
+    char actual[sizeof(content)-1];
+    bridge->Read(file.id,0,0,actual,sizeof(actual));
+    Check(!memcmp(actual,content,sizeof(actual)),"genisoimage UDF file payload differs");
+    fprintf(report,"PASS: genisoimage UDF/ISO bridge browsing and file data.\n");
+
+    for(const auto name:{"cdrw-2.01","dvdrw-2.01","cdr-1.50","cdr-2.01","cdr-closed-2.01","dvdr-2.01","bdr-2.60"}){
+        const auto path=fixtures+L"\\"+VolumeCoord::Wide(name)+L".udf";
+        try{
+            auto volume=MacBrowser::OpenBrowserImage(path);
+            Check(volume&&!strcmp(volume->Kind(),"UDF")&&!volume->Writable()&&
+                  volume->Stat(2).name==u"OPTICAL"&&volume->List(2).empty(),
+                  "Expected a readable, empty optical UDF volume");
+        }catch(const HfsPlus::Error& error){
+            throw HfsPlus::Error(std::string(name)+": "+error.what());
+        }
+        fprintf(report,"PASS: mkudffs optical UDF profile %s.\n",name);
+    }
+}
+
 void RockRidgeFixtures(const std::wstring& fixtures,const std::string& output,FILE* report)
 {
     using namespace HfsPlus;
@@ -382,6 +465,7 @@ int RunOpticalBrowserTest(const char* directory)
     int status=0;
     try{
         if(const auto fixtures=_wgetenv(L"HFV_ROCK_RIDGE_FIXTURES"))RockRidgeFixtures(fixtures,root,report);
+        if(const auto fixtures=_wgetenv(L"HFV_UDF_INTEROP_FIXTURES"))UdfInteropFixtures(fixtures,report);
         for(auto fs:{FsiFileSystemISO9660,FsiFileSystems(FsiFileSystemISO9660|FsiFileSystemJoliet),FsiFileSystemUDF,
                      FsiFileSystems(FsiFileSystemISO9660|FsiFileSystemUDF)}){
             const auto bytes=Master(fs);
@@ -451,6 +535,7 @@ int RunOpticalBrowserTest(const char* directory)
             Check(volume&&!strcmp(volume->Kind(),"UDF"),"Open UDF revision fixture");
             File(*volume,2,u"\u03a9Fil");
         }
+        RecordedUdf(root,report);
         auto broken=Udf(0x102,Map::Physical);
         broken[258*Block+8]^=1;
         const auto reserve=MacBrowser::OpenImage(Save(root+"\\reserve.udf",broken));

@@ -6,7 +6,7 @@
 namespace Optical {
 namespace {
 struct Address {uint32_t block;uint16_t map;};
-struct Partition {uint32_t start,blocks,sequence;};
+struct Partition {uint32_t start,blocks,sequence,access;};
 
 Address LongAd(const uint8_t* p)
 {
@@ -99,11 +99,13 @@ class Udf final:public Reader {
             if(tag==5){
                 const auto number=Le16(desc.data()+22);
                 const auto sequence=Le32(desc.data()+16);
+                const auto access=Le32(desc.data()+184);
                 const auto first=Le32(desc.data()+188),count=Le32(desc.data()+192);
-                Check(count&&Range(first,count,blocks_),"UDF physical partition exceeds the image");
+                Check(count&&first<blocks_&&Range(first,count,uint64_t(UINT32_MAX)+1)&&
+                      (access==2||Range(first,count,blocks_)),"UDF physical partition exceeds the image");
                 auto old=descriptors.partitions.find(number);
                 if(old==descriptors.partitions.end()||sequence>=old->second.sequence)
-                    descriptors.partitions[number]={first,count,sequence};
+                    descriptors.partitions[number]={first,count,sequence,access};
             }else if(tag==6&&(descriptors.logical.empty()||Le32(desc.data()+16)>=Le32(descriptors.logical.data()+16)))
                 descriptors.logical=std::move(desc);
         }
@@ -111,15 +113,19 @@ class Udf final:public Reader {
         return descriptors;
     }
 
-    Descriptors ReadDescriptors() {
+    void OpenFromAnchors() {
         std::exception_ptr failure;
         for(const auto anchor:{uint64_t(256),blocks_-1,blocks_-257}){
             if(anchor>=blocks_)continue;
             try{
                 const auto bytes=Absolute(anchor);
                 Check(Tag(bytes,uint32_t(anchor))==2,"Missing UDF anchor");
-                try{return Sequence(Le32(bytes.data()+20),Le32(bytes.data()+16));}
-                catch(const HfsPlus::Error&){return Sequence(Le32(bytes.data()+28),Le32(bytes.data()+24));}
+                for(unsigned field:{16u,24u}){
+                    try{
+                        Mount(Sequence(Le32(bytes.data()+field+4),Le32(bytes.data()+field)));
+                        return;
+                    }catch(const HfsPlus::Error&){if(!failure)failure=std::current_exception();}
+                }
             }catch(const HfsPlus::Error&){if(!failure)failure=std::current_exception();}
         }
         if(failure)std::rethrow_exception(failure);
@@ -153,7 +159,9 @@ class Udf final:public Reader {
             const auto remapped=map.remapped.find(packet);
             if(remapped!=map.remapped.end())return remapped->second+(lba-packet);
         }
-        return map.physical.start+lba;
+        const auto physical=map.physical.start+lba;
+        Check(physical<blocks_,"UDF block is past the recorded optical data");
+        return physical;
     }
 
     void ReadExtent(const Extent& extent,uint64_t offset,void* output,size_t size)override {
@@ -165,8 +173,11 @@ class Udf final:public Reader {
             auto take=size_t((std::min)(uint64_t(size),BlockSize-skip));
             // Physical maps have no translation discontinuities.
             const auto& map=maps_[extent.partition];
-            if(map.kind==MapKind::Physical)
-                take=size_t((std::min)(uint64_t(size),(map.physical.blocks-block)*BlockSize-skip));
+            if(map.kind==MapKind::Physical){
+                const auto available=(std::min)(map.physical.blocks-block,blocks_-physical)*BlockSize-skip;
+                Check(size<=available,"UDF extent exceeds the recorded partition");
+                take=size;
+            }
             Read(physical*BlockSize+skip,dest,take);
             size-=take;dest+=take;offset+=take;
         }
@@ -307,7 +318,7 @@ class Udf final:public Reader {
 
     void Virtual(Map& map,bool modern) {
         const auto& backing=maps_[map.backing].physical;
-        const auto end=uint64_t(backing.start)+backing.blocks;
+        const auto end=(std::min)(blocks_,uint64_t(backing.start)+backing.blocks);
         // VAT file entries live at the last recorded block. Also check the
         // physical partition end for images padded after mastering.
         for(const auto boundary:{blocks_,end}){
@@ -365,6 +376,7 @@ class Udf final:public Reader {
         Check(count&&count<=UINT16_MAX&&Range(440,bytes,BlockSize)&&
               440+uint64_t(bytes)<=16u+Le16(data+10),"Invalid UDF partition map table");
         std::vector<const uint8_t*> details;
+        std::set<unsigned> virtualPartitions;
         size_t at=0;
         for(unsigned i=0;i<count;++i){
             Check(Range(at,2,bytes),"Truncated UDF partition map table");
@@ -382,11 +394,22 @@ class Udf final:public Reader {
             if(p[0]==1)map.initialized=true;
             else if(Entity(p+4,"*UDF Sparable Partition")){map.kind=MapKind::Sparable;Sparing(map,p);}
             else if(Entity(p+4,"*UDF Metadata Partition"))map.kind=MapKind::Metadata;
-            else if(Entity(p+4,"*UDF Virtual Partition"))map.kind=MapKind::Virtual;
+            else if(Entity(p+4,"*UDF Virtual Partition")){
+                map.kind=MapKind::Virtual;
+                virtualPartitions.insert(map.number);
+            }
             else throw HfsPlus::Error("Unsupported UDF partition map type");
             maps_.push_back(std::move(map));details.push_back(p);
         }
         Check(at==bytes,"Unexpected bytes in UDF partition map table");
+        // A sequential image can end at the VAT ICB while the write-once
+        // partition still declares the unrecorded capacity of the medium.
+        for(const auto& map:maps_){
+            if(Range(map.physical.start,map.physical.blocks,blocks_))continue;
+            Check(map.physical.access==2&&virtualPartitions.count(map.number)&&
+                  (map.kind==MapKind::Physical||map.kind==MapKind::Virtual),
+                  "Only a write-once UDF partition with a VAT may extend past the image");
+        }
         for(size_t i=0;i<maps_.size();++i){
             auto& map=maps_[i];
             if(map.initialized)continue;
@@ -413,10 +436,8 @@ class Udf final:public Reader {
         throw HfsPlus::Error("UDF directory block is not allocated");
     }
 
-public:
-    explicit Udf(HfsPlus::Source& source):Reader(source),blocks_(source.Size()/BlockSize) {
-        Check(source.Size()%BlockSize==0&&blocks_>256&&blocks_<=UINT32_MAX,"Invalid UDF image size");
-        const auto descriptors=ReadDescriptors();
+    void Mount(const Descriptors& descriptors) {
+        maps_.clear();
         const auto p=descriptors.logical.data();
         Check(Le32(p+212)==BlockSize&&Entity(p+216,"*OSTA UDF Compliant"),
               "Unsupported UDF logical block size or domain");
@@ -433,6 +454,11 @@ public:
         Check(length<=127,"Invalid UDF volume identifier");
         root_.entry.name=Name(p+84,length);
         if(root_.entry.name.empty())root_.entry.name=u"UDF";
+    }
+public:
+    explicit Udf(HfsPlus::Source& source):Reader(source),blocks_(source.Size()/BlockSize) {
+        Check(source.Size()%BlockSize==0&&blocks_>256&&blocks_<=UINT32_MAX,"Invalid UDF image size");
+        OpenFromAnchors();
     }
     const char* Kind()const override{return "UDF";}
     Node Root()const override{return root_;}
