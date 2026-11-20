@@ -17,6 +17,6 @@ public:
  DirectFloppy(const DirectFloppy&)=delete;DirectFloppy& operator=(const DirectFloppy&)=delete;
  ~DirectFloppy();
  bool Open(int drive,bool verifyWrites=false);bool Read(ULONGLONG offset,DWORD count,void* buffer);bool Write(ULONGLONG offset,DWORD count,const void* buffer);bool Finish();
- DWORD Error() const{return error_;}DWORD Generation()const{return generation_;}bool WritesStarted() const{return writes_;}
+ DWORD Error() const{return error_;}DWORD Generation()const{return generation_;}
  static DirectFloppy* Current(int drive);
 };

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "StorageLocation.h"
+#include "MediaWriteBackend.h"
+#include "FloppyFileWrite.h"
 #include "LegacyEngine.h"
 #include "ReadOnlyCdBackend.h"
 #include "ReadOnlyFloppy.h"
@@ -8,6 +10,10 @@
 
 namespace StorageLocation {
 namespace {
+bool ClassicFloppy(const Location& location) {
+    return location.IsPhysical() && location.Media()==FileOperations::ClassicMedia::Floppy;
+}
+
 void Cancel(Storage::Job& job) {
     if (job.cancelled()) throw Storage::Cancelled();
 }
@@ -84,6 +90,48 @@ void ValidateMedia(const Location& location, FloppyProbe probe) {
         }
         ValidateClassicGeneration(location,valid?std::optional<DWORD>(generation):std::nullopt);
     }
+}
+
+void WithVerifiedWrite(const Location& location,const std::function<void()>& work) {
+    if(ClassicFloppy(location)) {
+        const auto generation=location.MediaGenerationKnown()?std::optional<DWORD>(location.MediaGeneration()):std::nullopt;
+        RunFloppyWrite(location.Drive(),generation,work);
+        return;
+    }
+    if(auto backend=dynamic_cast<Storage::MediaWriteBackend*>(location.Volume().get())) {
+        backend->WithVerifiedWrite(work);
+        return;
+    }
+    work();
+}
+
+bool ClassicPropertiesWritable(const Location& location) {
+    return ClassicFloppy(location)||(!location.IsPhysical()&&
+        (GetFileAttributesA(location.ClassicImage().c_str())&FILE_ATTRIBUTE_READONLY)==0);
+}
+
+ResolvedEntry PrepareCutSource(const Location& location,const std::string& snapshot,Storage::Job& job) {
+    Cancel(job);
+    const bool reopen=ClassicFloppy(location);
+    auto checked=ResolveEntry(location,!reopen);
+    if(MacBrowser::Snapshot(*checked.volume,checked.id,job)!=snapshot)
+        throw Storage::MediaChanged("Source changed during the copy; source items were retained");
+    if(reopen) checked.volume->Close();
+    return checked;
+}
+
+void FinalizeCutSource(const Location& location,ResolvedEntry prepared,const std::string& snapshot,
+                       Storage::Job& job,const std::function<void(MacBrowser::Volume&,uint32_t)>& remove) {
+    Cancel(job);
+    WithVerifiedWrite(location,[&]{
+        const bool reopen=ClassicFloppy(location);
+        if(reopen) prepared=ResolveEntry(location,true);
+        if((reopen||dynamic_cast<Storage::MediaWriteBackend*>(prepared.volume.get()))&&
+           MacBrowser::Snapshot(*prepared.volume,prepared.id,job)!=snapshot)
+            throw Storage::MediaChanged("Source media changed before move cleanup; source items were retained");
+        remove(*prepared.volume,prepared.id);
+        if(!location.Volume())prepared.volume->Close();
+    });
 }
 
 bool MatchesEntry(const Location& location, const MacBrowser::Entry& entry) {

@@ -18,12 +18,13 @@
 #include <atomic>
 #include <limits>
 #include "StorageOutcome.h"
+#include "MediaWriteBackend.h"
 namespace Removable {
 namespace {
 using namespace HfsPlus;
 void Check(bool ok,const char* message){if(!ok)throw Error(message);}
 std::string Utf8(const std::wstring& s){return BrowserPresentation::Utf8(MacBrowser::U16(s));}
-[[noreturn]]void IoError(const char* stage,DWORD error){if(!error)error=ERROR_IO_DEVICE;if(error==ERROR_MEDIA_CHANGED)throw Storage::MediaChanged("Removable media changed; refresh the drive");throw Error(std::string(stage)+" (Windows error "+std::to_string(error)+"). "+(error==ERROR_ACCESS_DENIED?"Windows may require running HFVExplorer as administrator for raw disk access.":error==ERROR_MEDIA_CHANGED?"The media changed; refresh the drive before continuing.":"Refresh or reconnect the removable drive before trying again."));}
+[[noreturn]]void IoError(const char* stage,DWORD error){if(!error)error=ERROR_IO_DEVICE;if(error==ERROR_MEDIA_CHANGED)throw Storage::MediaChanged("Removable media changed; refresh the drive");throw Storage::MediaIoError(error,std::string(stage)+" (Windows error "+std::to_string(error)+"). "+(error==ERROR_ACCESS_DENIED?"Windows may require running HFVExplorer as administrator for raw disk access.":error==ERROR_MEDIA_CHANGED?"The media changed; refresh the drive before continuing.":"Refresh or reconnect the removable drive before trying again."));}
 bool Root(const std::wstring& path){return path.size()==3&&path[1]==L':'&&(path[2]==L'\\'||path[2]==L'/')&&towupper(path[0])>=L'A'&&towupper(path[0])<=L'Z';}
 class NativeWriteAccess final:public WriteAccess {
     FloppyWriteLease floppyLease_;
@@ -288,7 +289,8 @@ std::shared_ptr<WriteFence> FenceFor(const std::string& device,DWORD generation)
     if(!fence)item=fence=std::make_shared<WriteFence>();
     return fence;
 }
-class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
+class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint,
+                        public Storage::MediaWriteBackend {
     const Device device_;
     const Partition partition_;
     const DiskPartitions::Selection selection_;
@@ -339,7 +341,7 @@ class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpo
         disk_->CheckMedia();
         return result;
     }
-    template<class F>void Change(F work){WithMediaWrite(work);}
+    template<class F>void Change(F work){WithVerifiedWrite(work);}
     static bool WriteCandidate(const Disk& disk,const Device& device,const Partition& part,const Api& api,
                                const std::string& kind){
         const auto& g=disk.MediaGeometry();
@@ -374,7 +376,7 @@ public:
          fence_(FenceFor(diskKey_,disk_->Generation())),
          free_(backend_->FreeBytes()),revision_(VolumeCoord::Revision(key_)),generation_(disk_->Generation()){}
 
-    void WithMediaWrite(const std::function<void()>& work)override{
+    void WithVerifiedWrite(const std::function<void()>& work)override{
         Check(Writable(),"Physical removable partition is read-only");
         VolumeCoord::OperationLease lease({{key_,VolumeCoord::Mode::Write},{diskKey_,VolumeCoord::Mode::Write}});
         std::lock_guard<std::recursive_mutex> guard(mutex_);

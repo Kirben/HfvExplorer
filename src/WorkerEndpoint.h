@@ -43,7 +43,6 @@ public:
     virtual void ResumeWorker() {}
     virtual void WorkerUncleanExit() {}
     virtual void ReleaseWorkerReaders(const std::vector<std::string>&) {}
-    virtual void WithMediaWrite(const std::function<void()>& work) { work(); }
     virtual bool FinishWorkerWrite(Volume& volume);
 
     static WorkerEndpoint* Find(Volume& volume);

@@ -36,6 +36,7 @@ class MfsMemory:public MfsSource{public:Bytes bytes=Bytes(1474560);uint64_t Leng
 std::shared_ptr<Bytes> Mfs(){MfsMemory memory;std::string error;Check(MfsImage::Format(memory,"MFS",1474560,false,error),error.c_str());MfsImage v;Check(v.Open(memory),"Open MFS fixture");MfsEntry e;e.name="Hello";e.forks[0].length=5003;e.forks[1].length=723;uint32_t id=0;Check(v.Put(e,Payload,false,id),"Populate MFS fixture");return std::make_shared<Bytes>(std::move(memory.bytes));}
 struct Store{Removable::Device device;Removable::Geometry geometry;std::map<uint64_t,std::shared_ptr<Bytes>> segments;DWORD generation=7,error=0;bool shortRead=false,noIdentity=false,changeAfterRead=false,pattern=false;bool writable=false,locked=false,denyLock=false,swapAtLock=false,swapOnWrite=false;
  bool corruptReadback=false,pendingReadback=false,failFlush=false;
+ std::function<void(Store&)> changeAtLock;
  unsigned opens=0,closes=0,reads=0,checks=0,locks=0,writes=0,flushes=0;
  Removable::Partition target;};
 class Fake:public Removable::Api {
@@ -114,6 +115,7 @@ public:
    target->target=part;
    ++target->locks;
    if(target->swapAtLock){target->swapAtLock=false;++target->generation;}
+   if(target->changeAtLock)std::exchange(target->changeAtLock,{})(*target);
   }
   return std::make_unique<Locked>(*this,Open(device,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_RANDOM_ACCESS));
  }
@@ -277,6 +279,29 @@ void WritableMedia(const std::string& root,const std::shared_ptr<Bytes>& classic
  operation.Job()->wait();
  Check(operation.Job()->result().code&&operation.Job()->result().rollback!=Storage::Rollback::None&&
        Find(*source,2,file.name)==id&&!target.volume->Writable()&&!observer.volume->Writable()&&!fixture->locked,"An unverified Cut deleted its source, left writes enabled, or leaked the lock");
+
+ auto changing=api->Add(L"MFS Cut source",std::make_shared<Bytes>(*mfs));
+ changing->writable=true;
+ auto changingVolume=Removable::Open(changing->device,api).front().volume;
+ auto copiedId=Find(*changingVolume,2,u"Hello");
+ changing->changeAtLock=[](Store& disk){
+  MfsMemory edited;
+  edited.bytes=*disk.segments.at(0);
+  MfsImage filesystem;
+  Check(filesystem.Open(edited)&&filesystem.Entries().size()==1,"Open simulated media for external rename");
+  Check(filesystem.Rename(filesystem.Entries().front().id,"Changed externally"),"Simulated external rename");
+  *disk.segments.at(0)=std::move(edited.bytes);
+ };
+ FileOperations::OrdinaryCopy move{
+  {FileOperations::Location::Mounted(changingVolume,copiedId)}, FileOperations::Location::Mounted(source,2)};
+ move.sources.front().cut=true;
+ auto changed=FileOperations::Submit(std::move(move));
+ changed.Job()->wait();
+ Check(changed.Job()->result().error==ERROR_MEDIA_CHANGED&&changing->locks==1&&
+       !changing->writes&&!changing->locked,"Cut removed source data changed while taking the media lock");
+ auto fresh=Removable::Open(changing->device,api).front().volume;
+ Check(Find(*fresh,2,u"Changed externally")!=0,"The externally changed source was not retained");
+ Verify(*source);
 }
 
 std::wstring SaveGptImage(const std::string& path,const Store& image)
@@ -502,7 +527,7 @@ int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directo
  Removable::SetTestApi(api);api->windowsReadable=true;Check(Removable::FromDriveRoot(L"Z:\\").empty(),"Windows-readable volume was hijacked");api->windowsReadable=false;auto direct=Removable::FromDriveRoot(L"Z:\\");Check(direct.size()==1,"Explicit Windows drive selection missed Mac media");Verify(*direct[0].volume);direct.clear();Storage::Job scan;auto discovery=Removable::Scan(scan,api);Check(!discovery.errors.empty()&&discovery.volumes.size()>=7,"One failed device aborted discovery");discovery.volumes.clear();
  fprintf(report,"PASS: 64-bit reads/cache hits, cached/during-read media swaps, short reads, missing change counters, access denial, handle cleanup, GPT checksum/APM bounds checks, Windows-volume fallback and per-device discovery errors. No device writes or physical hardware.\n");
  WritableMedia(root,classic,plus[0],plus[1],mfs);
- fprintf(report,"PASS: exclusive removable writes for classic HFS and HFS+ in APM, HFSX in 4096-byte GPT and raw MFS including 1.44 MB physical floppies. Separate mounts refreshed. Partition boundaries and neighboring data were preserved. Lock conflicts, media swaps, verification mismatch and failed Cut were handled safely.\n");
+ fprintf(report,"PASS: exclusive removable writes for classic HFS and HFS+ in APM, HFSX in 4096-byte GPT and raw MFS including 1.44 MB physical floppies. Separate mounts refreshed. Partition boundaries and neighboring data were preserved. Lock conflicts, media swaps, verification mismatch, failed Cut, and source changes under the final Cut lock were handled safely.\n");
  fflush(report);
  const auto gptImage=GptImages(root,*gpt,plus[0],plus[1]);
  fprintf(report,"PASS: GPT images open on persistent workers and support writes/reopen at 512/4096-byte sector sizes and above 4 GiB. GPT metadata and neighboring data remain intact. Invalid CRCs, overlaps and partition bounds are rejected; read-only flags disable writes.\n");

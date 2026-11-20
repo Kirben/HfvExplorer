@@ -25,5 +25,16 @@ struct ResolvedEntry {
 // Callers acquire any operation lease before resolving. Read-only is the
 // default for opening a classic image or device.
 ResolvedEntry ResolveEntry(const Location&, bool writable = false);
+
+// The callback may open writable filesystem handles. It must release its own
+// handles before returning so the backend can finish and verify the write.
+void WithVerifiedWrite(const Location&, const std::function<void()>&);
+bool ClassicPropertiesWritable(const Location&);
+
+// Recheck every Cut source before deleting any, then reopen legacy media
+// under its exclusive write scope for the final identity check and removal.
+ResolvedEntry PrepareCutSource(const Location&, const std::string& snapshot, Storage::Job&);
+void FinalizeCutSource(const Location&, ResolvedEntry prepared, const std::string& snapshot,
+                       Storage::Job&, const std::function<void(MacBrowser::Volume&,uint32_t)>& remove);
 std::vector<uint8_t> ReadDataPrefix(const Location&, size_t maximum, bool& truncated, Storage::Job&);
 }

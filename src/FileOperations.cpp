@@ -12,8 +12,7 @@
 #include "LegacyEngine.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
-#include "FloppyFileWrite.h"
-#include "ReadOnlyCdBackend.h"
+#include "MediaWriteBackend.h"
 #include "RenameName.h"
 #include "charset.h"
 #include <algorithm>
@@ -60,38 +59,16 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  }
  return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true),2};
 }
-bool IsFloppy(const Location& item){
- return item.IsPhysical()&&item.Media()==ClassicMedia::Floppy;
-}
-void WriteWithMedia(const Location& item,const std::function<void()>& mutate){
- if(IsFloppy(item)){
-  std::optional<DWORD> generation;
-  if(item.MediaGenerationKnown())generation=item.MediaGeneration();
-  RunFloppyWrite(item.Drive(),generation,mutate);
-  return;
- }
- if(auto volume=item.Volume()){
-  if(auto endpoint=MacBrowser::WorkerEndpoint::Find(*volume)){
-   endpoint->WithMediaWrite(mutate);
-   return;
-  }
- }
- mutate();
-}
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,Storage::Job& job,Completion& completion){
- std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> fresh(sources.size());
- for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);bool physical=IsFloppy(sources[i]);
-  fresh[i]=Source(sources[i],!physical);Check(MacBrowser::Snapshot(*fresh[i].first,fresh[i].second,job)==snapshots[i],"Source changed during the copy; source items were retained");if(physical)fresh[i].first->Close();
- }
- for(size_t i=0;i<sources.size();++i)if(sources[i].cut){Cancel(job);WriteWithMedia(sources[i],[&]{
-  const bool physical=IsFloppy(sources[i]);
-  auto opened=physical?Source(sources[i],true):std::move(fresh[i]);
-  if(physical)Check(MacBrowser::Snapshot(*opened.first,opened.second,job)==snapshots[i],"Source floppy changed before move cleanup; source items were retained");
-  Mark(completion,sources[i]);
-  RemoveTree(*opened.first,opened.second,job);
-  if(!sources[i].Volume())opened.first->Close();
-  });
- }
+ std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
+ for(size_t i=0;i<sources.size();++i)
+  if(sources[i].cut)checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job);
+ for(size_t i=0;i<sources.size();++i)
+  if(sources[i].cut)StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
+    [&](Volume& volume,uint32_t id){
+     Mark(completion,sources[i]);
+     RemoveTree(volume,id,job);
+    });
 }
 bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
  if(!target.Supports().rename)return false;
@@ -151,7 +128,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  Check(!request.sources.empty(),"Select a source file or folder");
  std::vector<std::string> snapshots;
  bool complete=false,inPlace=false;
- WriteWithMedia(target,[&]{
+ StorageLocation::WithVerifiedWrite(target,[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
   auto destination=Destination(target);
@@ -227,7 +204,7 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
     }
     if(item.IsClassic())volume.Close();
    };
-   WriteWithMedia(item,mutate);
+   StorageLocation::WithVerifiedWrite(item,mutate);
   }else if(item.IsWindows()){
    auto source=Source(item,true);Cancel(job);source.first->Close();
    Mark(completion,item);
@@ -315,8 +292,7 @@ void ReadClassicProperties(const Location& item,Volume& volume,uint32_t id,bool 
 {
  result.classicProperties=volume.GetClassicProperties(id,result.properties);
  if(result.classicProperties&&item.IsClassic()&&!editing)
-  result.writable=IsFloppy(item)||(!item.IsPhysical()&&
-      (GetFileAttributesA(item.ClassicImage().c_str())&FILE_ATTRIBUTE_READONLY)==0);
+  result.writable=StorageLocation::ClassicPropertiesWritable(item);
 }
 
 using VolumeCoord::Mode;
@@ -487,7 +463,7 @@ MetadataPlan DescribeMetadata(const EditClassicProperties& edit)
    Storage::OutcomeEvidence::NoteRetainedChange();
    if(item.IsClassic())volume->Close();
   };
-  if(item.IsClassic())WriteWithMedia(item,update);
+  if(item.IsClassic())StorageLocation::WithVerifiedWrite(item,update);
   else update();
  });
 }
@@ -497,7 +473,7 @@ Storage::Result MakeFolder(const CreateFolder& folder,Storage::Job& job,Completi
  MetadataProgress(job,"Creating folder",folder.name);
  const auto& item=folder.parent;
  if(item.Volume()){
-  WriteWithMedia(item,[&]{
+  StorageLocation::WithVerifiedWrite(item,[&]{
    auto [volume,id]=Source(item);
    const auto entry=volume->Stat(id);
    Cancel(job);
@@ -517,7 +493,7 @@ Storage::Result MakeFolder(const CreateFolder& folder,Storage::Job& job,Completi
  }else{
   Check(item.IsClassic(),"Invalid folder destination");
   StorageLocation::ValidateImage(VolumeCoord::Wide(item.ClassicImage()),item.expectedResource);
-  WriteWithMedia(item,[&]{
+  StorageLocation::WithVerifiedWrite(item,[&]{
    auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);
    const auto entry=volume->Stat(2);
    Cancel(job);
@@ -777,7 +753,7 @@ MutationPlan DescribeMutation(const CreateFolder& request,bool temporary)
 
 Storage::Result RunHardLink(const CreateHardLink& request,Storage::Job& job,Completion& completion)
 {
- WriteWithMedia(request.parent,[&]{
+ StorageLocation::WithVerifiedWrite(request.parent,[&]{
   auto source=Source(request.source);
   auto target=Destination(request.parent);
   Check(source.first->SupportsHardLinks()&&target.first->SupportsHardLinks()&&
@@ -1025,7 +1001,7 @@ Storage::Result Execute(const ExecutionPlan& plan,Storage::Job& job,Completion& 
    try{
     auto execute=[&]{plan.metadata->execute(job,completion);};
     if(plan.metadata->access==Mode::Write&&plan.metadata->item->IsMounted())
-     WriteWithMedia(*plan.metadata->item,execute);
+     StorageLocation::WithVerifiedWrite(*plan.metadata->item,execute);
     else execute();
     break;
    }catch(const VolumeCoord::Busy&){
@@ -1113,7 +1089,7 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
   Check(GetFileInformationByHandle(file,&info)&&
         !(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))&&
         GetFileSizeEx(file,&size)&&size.QuadPart>=0,"Invalid edited temporary document");
-  WriteWithMedia(item,[&]{
+  StorageLocation::WithVerifiedWrite(item,[&]{
    auto original=Source(item,true);
    auto& volume=*original.first;
    const auto id=original.second;
@@ -1139,7 +1115,7 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
   completion.completed=1;
  }catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Write-back cancelled"};}
  catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
- catch(const FloppyWriteFailure& error){result={1,error.error,error.what()};}
+ catch(const Storage::MediaIoError& error){result={1,error.code,error.what()};}
  catch(const Failure& error){result={1,error.error,error.what()};}
  catch(const VolumeCoord::Busy& error){result={1,ERROR_BUSY,error.what()};}
  catch(const std::exception& error){result={1,ERROR_WRITE_FAULT,error.what()};}
@@ -1160,7 +1136,7 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
  }
  catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
  catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
- catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}
+ catch(const Storage::MediaIoError& e){result={1,e.code,e.what()};}
  catch(const Failure& e){result={1,e.error,e.what()};}
  catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
  catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected copy-worker failure"};}
@@ -1278,7 +1254,7 @@ public:
   catch(const VolumeCoord::Busy& e){result={1,ERROR_BUSY,e.what()};}
   catch(const Storage::Cancelled&){result={1,ERROR_CANCELLED,"Cancelled"};}
   catch(const Storage::MediaChanged& e){result={1,ERROR_MEDIA_CHANGED,e.what()};}
-  catch(const FloppyWriteFailure& e){result={1,e.error,e.what()};}
+  catch(const Storage::MediaIoError& e){result={1,e.code,e.what()};}
   catch(const Failure& e){result={1,e.error,e.what()};}
   catch(const std::exception& e){result={1,ERROR_UNHANDLED_EXCEPTION,e.what()};}
   catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected file-operation failure"};}
