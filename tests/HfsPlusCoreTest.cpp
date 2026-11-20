@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "StorageOutcome.h"
 #include "HfsPlusDisk.h"
+#include "HfsPlusBTree.h"
 #include <chrono>
 #include <cstdio>
 using namespace HfsPlus;
@@ -731,19 +732,22 @@ public:
     }
 };
 
+template<class Edit>
+double MedianEditTime(Edit edit)
+{
+    using Clock = std::chrono::steady_clock;
+    std::array<double,7> times{};
+    for (unsigned i = 0; i < times.size(); ++i) {
+        const auto start = Clock::now();
+        edit(i);
+        times[i] = std::chrono::duration<double,std::milli>(Clock::now() - start).count();
+    }
+    std::sort(times.begin(), times.end());
+    return times[times.size() / 2];
+}
+
 void BenchmarkSmallEdits()
 {
-    using Clock=std::chrono::steady_clock;
-    const auto median=[](auto edit){
-        std::array<double,7> times{};
-        for(unsigned i=0;i<times.size();++i){
-            const auto start=Clock::now();
-            edit(i);
-            times[i]=std::chrono::duration<double,std::milli>(Clock::now()-start).count();
-        }
-        std::sort(times.begin(),times.end());
-        return times[times.size()/2];
-    };
     for(const uint64_t gib:{1,64,256}){
         SparseBenchmarkDisk disk(gib<<30);
         Volume::Format(disk,u"Small edits",true);
@@ -751,13 +755,175 @@ void BenchmarkSmallEdits()
         const Attributes attrs{{u"user.benchmark",Bytes{0}}};
         const auto id=v.Put(2,u"Rename A",0,0,pattern,nullptr,false,nullptr,&attrs);
         const auto free=v.FreeBytes();
-        const auto rename=median([&](unsigned i){v.Rename(id,2,i%2?u"Rename A":u"Rename B");});
-        const auto attribute=median([&](unsigned i){v.SetAttributes(id,{{u"user.benchmark",Bytes{uint8_t(i+1)}}});});
+        const auto rename=MedianEditTime([&](unsigned i){v.Rename(id,2,i%2?u"Rename A":u"Rename B");});
+        const auto attribute=MedianEditTime([&](unsigned i){v.SetAttributes(id,{{u"user.benchmark",Bytes{uint8_t(i+1)}}});});
         must(v.FreeBytes()==free,"Metadata-only edits changed free space");
         printf("%llu GiB: rename %.3f ms, attribute edit %.3f ms (median of seven)\n",
                static_cast<unsigned long long>(gib),rename,attribute);
         fflush(stdout);
     }
+}
+
+Disk::TreeRecord CatalogFixtureRecord(uint32_t parent, const std::u16string& name, Bytes value)
+{
+    Bytes key(8 + name.size() * 2);
+    Disk::P16(key.data(), uint16_t(key.size() - 2));
+    Disk::P32(key.data() + 2, parent);
+    Disk::P16(key.data() + 6, uint16_t(name.size()));
+    for (size_t i = 0; i < name.size(); ++i)
+        Disk::P16(key.data() + 8 + i * 2, name[i]);
+    return {std::move(key), std::move(value)};
+}
+
+void PopulateBenchmarkCatalog(Source& disk, uint32_t files, bool sensitive)
+{
+    Bytes header(512);
+    disk.Read(1024, header.data(), header.size());
+    const auto blockSize = Disk::U32(header.data() + 40);
+    const auto oldStart = Disk::U32(header.data() + 288);
+    const auto oldCount = Disk::U32(header.data() + 292);
+    Bytes catalog(size_t(oldCount) * blockSize);
+    disk.Read(uint64_t(oldStart) * blockSize, catalog.data(), catalog.size());
+    const auto keyName=[](const Bytes& key) {
+        std::u16string name;
+        for (size_t at = 8; at < key.size(); at += 2)
+            name.push_back(Disk::U16(key.data() + at));
+        return name;
+    };
+    {
+        Disk::BTree tree(
+            [&](uint64_t at, void* data, size_t size) { memcpy(data, catalog.data() + at, size); },
+            [&](uint64_t at, const void* data, size_t size) { memcpy(catalog.data() + at, data, size); },
+            [&](uint64_t length) { catalog.resize(size_t(length)); return catalog.size(); },
+            [&](const Bytes& a, const Bytes& b) {
+                const auto first = Disk::U32(a.data() + 2), second = Disk::U32(b.data() + 2);
+                if (first != second) return first < second ? -1 : 1;
+                return CompareNames(keyName(a), keyName(b), sensitive);
+            });
+        for (uint32_t i = 0; i < files; ++i) {
+            const uint32_t id = 18 + i;
+            const auto digits = std::to_string(1000000 + i);
+            const auto name = u"File " + std::u16string(digits.begin(), digits.end());
+            Bytes file(248), thread(10 + name.size() * 2);
+            Disk::P16(file.data(), 2);
+            Disk::P16(file.data() + 2, 2);
+            Disk::P32(file.data() + 8, id);
+            Disk::P16(file.data() + 42, 0100644);
+            Disk::P16(thread.data(), 4);
+            Disk::P32(thread.data() + 4, 2);
+            Disk::P16(thread.data() + 8, uint16_t(name.size()));
+            for (size_t n = 0; n < name.size(); ++n)
+                Disk::P16(thread.data() + 10 + n * 2, name[n]);
+            tree.Set(CatalogFixtureRecord(2, name, std::move(file)));
+            tree.Set(CatalogFixtureRecord(id, u"", std::move(thread)));
+        }
+        tree.Flush();
+    }
+
+    // Relocate the expanded catalog past the formatter's initial journal.
+    const uint32_t start = 16 * 1024 * 1024 / blockSize;
+    const auto blocks = uint32_t(catalog.size() / blockSize);
+    must(catalog.size() % blockSize == 0 && start + blocks < disk.Size() / blockSize - 1,
+         "Benchmark catalog does not fit the image");
+    const auto allocation = uint64_t(Disk::U32(header.data() + 128)) * blockSize;
+    Bytes bitmap(size_t(Disk::U64(header.data() + 112)));
+    disk.Read(allocation, bitmap.data(), bitmap.size());
+    for (uint32_t n = oldStart; n < oldStart + oldCount; ++n)
+        bitmap[n / 8] &= uint8_t(~(0x80 >> (n % 8)));
+    for (uint32_t n = start; n < start + blocks; ++n) {
+        const auto mask = uint8_t(0x80 >> (n % 8));
+        must(!(bitmap[n / 8] & mask), "Benchmark catalog overlaps existing allocation");
+        bitmap[n / 8] |= mask;
+    }
+    disk.Write(allocation, bitmap.data(), bitmap.size());
+    disk.Write(uint64_t(start) * blockSize, catalog.data(), catalog.size());
+    Disk::P32(header.data() + 32, files + 2);
+    Disk::P32(header.data() + 48, Disk::U32(header.data() + 48) + oldCount - blocks);
+    Disk::P32(header.data() + 64, 18 + files);
+    Disk::P64(header.data() + 272, catalog.size());
+    Disk::P32(header.data() + 284, blocks);
+    Disk::P32(header.data() + 288, start);
+    Disk::P32(header.data() + 292, blocks);
+    disk.Write(1024, header.data(), header.size());
+    disk.Write(disk.Size() - 1024, header.data(), header.size());
+}
+
+void BenchmarkLargeCatalogs()
+{
+    for (bool sensitive : {false, true}) {
+        const auto kind = sensitive ? Volume::FormatKind::HfsXCaseSensitive : Volume::FormatKind::HfsPlus;
+        for (uint32_t files : {100u, 10000u, 100000u}) {
+            SparseBenchmarkDisk disk(256ULL << 20);
+            Volume::Format(disk, u"Catalog benchmark", true, kind);
+            PopulateBenchmarkCatalog(disk, files, sensitive);
+            uint32_t id;
+            {
+                Volume volume(disk, true);
+                const Attributes attributes{{u"user.benchmark", Bytes{0}}};
+                // Warm the attribute tree and settle the initial directory counts.
+                id = volume.Put(2, u"Rename A", 0, 0, pattern, nullptr, false, nullptr, &attributes);
+                const auto rename = MedianEditTime([&](unsigned i) {
+                    volume.Rename(id, 2, i % 2 ? u"Rename A" : u"Rename B");
+                });
+                const auto attribute = MedianEditTime([&](unsigned i) {
+                    volume.SetAttributes(id, {{u"user.benchmark", Bytes{uint8_t(i + 1)}}});
+                });
+                printf("%s, %lu files: rename %.3f ms, attribute edit %.3f ms (median of seven)\n",
+                       sensitive ? "HFSX" : "HFS+", static_cast<unsigned long>(files), rename, attribute);
+                fflush(stdout);
+            }
+            Volume reopened(disk);
+            must(reopened.Stat(id).name == u"Rename B" &&
+                     reopened.GetAttributes(id) == Attributes{{u"user.benchmark", Bytes{7}}} &&
+                     reopened.Stat(18).name == u"File 1000000" &&
+                     reopened.List(2).size() == files + 3,
+                 "Benchmark volume did not reopen with the expected entries and edit");
+        }
+    }
+}
+
+void CatalogOrderEdits()
+{
+    for (auto kind : {Volume::FormatKind::HfsPlus, Volume::FormatKind::HfsXCaseSensitive,
+                      Volume::FormatKind::HfsXCaseInsensitive}) {
+        SparseBenchmarkDisk disk(256ULL << 20);
+        Volume::Format(disk, u"Catalog order", true, kind);
+        PopulateBenchmarkCatalog(disk, 1500, kind == Volume::FormatKind::HfsXCaseSensitive);
+        uint32_t file, folder;
+        {
+            Volume volume(disk, true);
+            folder = volume.MakeDirectory(2, u"Destination");
+            file = volume.Put(2, u"Case", 23, 41, pattern);
+            volume.Rename(file, 2, u"case");
+            must(volume.Stat(file).name == u"case", "Case-only catalog rename lost the new spelling");
+            volume.Rename(file, 2, u"ZZZ");
+            volume.Rename(file, 2, u"A");
+            fails([&] { volume.Rename(file, 2, u"File 1000000"); }, "Catalog lookup missed an occupied key");
+            volume.fault = [](const char* phase) {
+                if (!strcmp(phase, "journal-committed")) throw Error("Injected catalog move interruption");
+            };
+            fails([&] { volume.Rename(file, folder, u"Moved"); }, "Catalog move fault did not fire");
+        }
+        {
+            Volume recovered(disk);
+            const auto items = recovered.List(folder);
+            must(items.size() == 1 && items[0].id == file && items[0].name == u"Moved" &&
+                     recovered.Stat(18).name == u"File 1000000",
+                 "Journal replay lost the renamed record, parent or unrelated entry");
+            verify(recovered, file, 0, 23);
+            verify(recovered, file, 1, 41);
+        }
+        {
+            Volume recovered(disk, true);
+            recovered.Remove(file);
+            must(recovered.List(folder).empty(), "Delete did not remove the moved catalog record");
+        }
+        Bytes header(512);
+        disk.Read(1024, header.data(), header.size());
+        must(Disk::U32(header.data() + 32) == 1502 && Disk::U32(header.data() + 36) == 1,
+             "Wrong on-disk file or folder count after catalog edits");
+    }
+    puts("PASS: large HFS+/HFSX catalog key changes, collisions, journal replay, both forks and counts");
 }
 
 void BitmapAccounting()
@@ -1156,6 +1322,7 @@ void RunLargeAttributeTests();
 int wmain(int argc, wchar_t **argv) {
     try {
         if(argc==2&&!wcscmp(argv[1],L"--benchmark-small-edits")){BenchmarkSmallEdits();return 0;}
+        if(argc==2&&!wcscmp(argv[1],L"--benchmark-large-catalogs")){BenchmarkLargeCatalogs();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--large-attributes")){RunLargeAttributeTests();return 0;}
         if(argc==2&&!wcscmp(argv[1],L"--hard-links")){hardLinks();hardLinkFailures();return 0;}
           if(argc==3&&!wcscmp(argv[1],L"--other-features"))return RunHfsPlusOtherFeaturesTests(argv[2]);
@@ -1331,6 +1498,7 @@ int wmain(int argc, wchar_t **argv) {
             return 0;
         }
         BitmapAccounting();
+        CatalogOrderEdits();
         attributeTests();
         stagedRangeValidation();
         hardLinks();hardLinkFailures();directoryMetadata();

@@ -411,12 +411,40 @@ struct Volume::Impl {
         }
         Validate(f);
     }
-    int Order(const Record &a, const Record &b) const {
-        uint32_t ap = U32(a.key.data() + 2), bp = U32(b.key.data() + 2);
-        if (ap != bp)
-            return ap < bp ? -1 : 1;
-        return CompareNames(String(a.key.data() + 6, a.key.size() - 6),
-                            String(b.key.data() + 6, b.key.size() - 6), caseSensitive);
+    int CatalogOrder(const Bytes& a, const Bytes& b) const {
+        if (a == b)
+            return 0;
+        const auto parentA = U32(a.data() + 2), parentB = U32(b.data() + 2);
+        if (parentA != parentB)
+            return parentA < parentB ? -1 : 1;
+        return CompareNames(String(a.data() + 6, a.size() - 6),
+                            String(b.data() + 6, b.size() - 6), caseSensitive);
+    }
+    int Order(const Record& a, const Record& b) const {
+        return CatalogOrder(a.key, b.key);
+    }
+    size_t CatalogPosition(const Bytes& key) const {
+        const auto at = std::lower_bound(catalogRecords.begin(), catalogRecords.end(), key,
+            [&](const Record& record, const Bytes& value) { return CatalogOrder(record.key, value) < 0; });
+        return size_t(at - catalogRecords.begin());
+    }
+    Record* InsertCatalogRecord(Record record) {
+        const auto position = CatalogPosition(record.key);
+        Check(position == catalogRecords.size() || CatalogOrder(catalogRecords[position].key, record.key) != 0,
+              "Duplicate HFS+ catalog key");
+        return &*catalogRecords.insert(catalogRecords.begin() + position, std::move(record));
+    }
+    Record* ChangeCatalogKey(Record* record, Bytes key) {
+        if (record->key == key)
+            return record;
+        if (CatalogOrder(record->key, key) == 0) {
+            record->key = std::move(key);
+            return record;
+        }
+        Record updated = std::move(*record);
+        catalogRecords.erase(catalogRecords.begin() + (record - catalogRecords.data()));
+        updated.key = std::move(key);
+        return InsertCatalogRecord(std::move(updated));
     }
     void LoadEntries() {
         compressedReaders.clear();
@@ -770,9 +798,13 @@ struct Volume::Impl {
         Check(!(r->value[40] & 4) && !(r->value[41] & 4), "Parent folder is append-only");
     }
     uint32_t Existing(uint32_t parent, const std::u16string &name) const {
-        for (auto &pair : entries)
-            if (pair.second.parent == parent && !CompareNames(pair.second.name, name, caseSensitive))
-                return pair.first;
+        const auto key = Key(parent, name);
+        const auto position = CatalogPosition(key);
+        if (position == catalogRecords.size())
+            return 0;
+        const auto& record = catalogRecords[position];
+        if (U16(record.value.data()) <= 2 && CatalogOrder(record.key, key) == 0)
+            return U32(record.value.data() + 8);
         return 0;
     }
     bool Used(uint32_t n) const { return (bitmap[n / 8] & (0x80 >> (n % 8))) != 0; }
@@ -972,8 +1004,7 @@ struct Volume::Impl {
         throw Error("Catalog entry missing");
     }
     void UpdateEntry(const Entry &e) {
-        auto r = CatalogRecord(e.id);
-        r->key = Key(e.parent, e.name);
+        auto r = ChangeCatalogKey(CatalogRecord(e.id), Key(e.parent, e.name));
         auto modified=Now();P32(r->value.data() + 16, Time::Encode(modified,(U16(r->value.data()+2)&0x1000)!=0));entries[e.id].modified=modified;
         memcpy(r->value.data() + 48, e.finder.data(), 32);
         if (!e.directory) {
@@ -982,12 +1013,6 @@ struct Volume::Impl {
         }
     }
     void Thread(const Entry &e) {
-        catalogRecords.erase(std::remove_if(catalogRecords.begin(), catalogRecords.end(),
-                                            [&](const Record &r) {
-                                                return U32(r.key.data() + 2) == e.id &&
-                                                       U16(r.value.data()) >= 3;
-                                            }),
-                             catalogRecords.end());
         Record thread;
         thread.key = Key(e.id, u"");
         thread.value.assign(10 + e.name.size() * 2, 0);
@@ -996,7 +1021,13 @@ struct Volume::Impl {
         P16(thread.value.data() + 8, uint16_t(e.name.size()));
         for (size_t i = 0; i < e.name.size(); ++i)
             P16(thread.value.data() + 10 + i * 2, e.name[i]);
-        catalogRecords.push_back(std::move(thread));
+        const auto position = CatalogPosition(thread.key);
+        if (position < catalogRecords.size() && catalogRecords[position].key == thread.key) {
+            Check(U16(catalogRecords[position].value.data()) >= 3, "Expected an HFS+ thread record");
+            catalogRecords[position].value = std::move(thread.value);
+        } else {
+            InsertCatalogRecord(std::move(thread));
+        }
     }
     void New(Entry &e) {
         uint64_t next = U32(header.data() + 64);
@@ -1016,7 +1047,7 @@ struct Volume::Impl {
         for (unsigned i = 12; i <= 28; i += 4)
             P32(r.value.data() + i, Time::Encode(e.created,(U16(r.value.data()+2)&0x1000)!=0));
         P16(r.value.data() + 42, e.directory ? 0040755 : 0100644);
-        catalogRecords.push_back(std::move(r));
+        InsertCatalogRecord(std::move(r));
         entries[id] = e;
         UpdateEntry(e);
         Thread(e);
@@ -1298,15 +1329,28 @@ struct Volume::Impl {
                 bool allowGrow = true) {
         Guard();
         std::map<uint32_t, uint32_t> counts, folderCounts;
-        for (auto &e : entries)
-            if (e.first != 2) {
-                ++counts[e.second.parent];
-                if (e.second.directory || LinkKind(e.first) == 2)
-                    ++folderCounts[e.second.parent];
-            }
         std::set<uint32_t> childLinks;
-        std::map<uint32_t,std::vector<uint32_t>> directoryParents;std::vector<uint32_t> pending;
-        for(auto& item:entries)if(LinkKind(item.first)==2){pending.push_back(item.second.parent);try{directoryParents[Resolve(item.first)].push_back(item.second.parent);}catch(const Error&){}}
+        std::map<uint32_t, std::vector<uint32_t>> directoryParents;
+        std::vector<uint32_t> pending;
+        uint32_t files = 0, folders = 0;
+        for (const auto& item : entries) {
+            if (item.first == 2)
+                continue;
+            const auto& entry = item.second;
+            const auto folderLink = LinkKind(item.first) == 2;
+            ++counts[entry.parent];
+            if (entry.directory || folderLink) {
+                ++folders;
+                ++folderCounts[entry.parent];
+            } else {
+                ++files;
+            }
+            if (folderLink) {
+                pending.push_back(entry.parent);
+                try { directoryParents[Resolve(item.first)].push_back(entry.parent); }
+                catch (const Error&) {}
+            }
+        }
         while(!pending.empty()){auto parent=pending.back();pending.pop_back();if(parent==1||!childLinks.insert(parent).second)continue;pending.push_back(Get(parent).parent);for(auto visibleParent:directoryParents[parent])pending.push_back(visibleParent);}
         for (auto &record : catalogRecords)
             if (U16(record.value.data()) == 1) {
@@ -1321,8 +1365,6 @@ struct Volume::Impl {
                 if (U16(header.data()) == 0x4858 && (U16(r->value.data() + 2) & 0x10))
                     P32(r->value.data() + 84, folderCounts[id]);
             }
-        std::sort(catalogRecords.begin(), catalogRecords.end(),
-                  [&](const Record &a, const Record &b) { return Order(a, b) < 0; });
         if(attributesDirty) {
             if(!attributes.size){auto tree=BuildInitialTree({},false,65536,bs);P16(tree.data()+14+20,266);P32(tree.data()+14+38,6);
                 attributes=Allocate(tree.size(),false,true);uint64_t logical=0;for(auto e:attributes.extents){auto n=size_t(uint64_t(e.count)*bs);view.Write(uint64_t(e.start)*bs,tree.data()+logical,n);logical+=n;}Overflow(8,0,attributes);}
@@ -1345,14 +1387,6 @@ struct Volume::Impl {
             if (memcmp(bitmap.data() + offset, committedBitmap.data() + offset, n))
                 StageForkRange(allocation, offset, bitmap.data() + offset, n);
         }
-        uint32_t files = 0, folders = 0;
-        for (auto &p : entries)
-            if (p.first != 2) {
-                if (p.second.directory||LinkKind(p.first)==2)
-                    ++folders;
-                else
-                    ++files;
-            }
         P32(header.data() + 32, files);
         P32(header.data() + 36, folders);
         P32(header.data() + 48, freeBlocks);
@@ -1632,7 +1666,7 @@ void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
         e.name = normalized;
         e.parent = parent;
         p.entries[id] = e;
-        if(p.LinkKind(id)){auto record=p.CatalogRecord(id);record->key=Key(e.parent,e.name);auto inode=p.CatalogRecord(p.Resolve(id));P32(inode->value.data()+20,Time::Encode(Now(),(U16(inode->value.data()+2)&0x1000)!=0));}else p.UpdateEntry(e);
+        if(p.LinkKind(id)){p.ChangeCatalogKey(p.CatalogRecord(id),Key(e.parent,e.name));auto inode=p.CatalogRecord(p.Resolve(id));P32(inode->value.data()+20,Time::Encode(Now(),(U16(inode->value.data()+2)&0x1000)!=0));}else p.UpdateEntry(e);
         p.Thread(e);
     });
 }
@@ -1651,7 +1685,7 @@ uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16stri
         else {
             reference=original.directory?inode:(std::max)(100u,inode);auto prefix=original.directory?u"dir_":u"iNode";
             for(;;){auto number=std::to_string(reference);std::u16string candidate=prefix;candidate.append(number.begin(),number.end());if(!p.Existing(metadata,candidate)){original.name=candidate;break;}Check(!original.directory&&reference<1073741923,"Hard-link inode name is unavailable");++reference;}
-            original.parent=metadata;original.protectedFile=true;p.entries[inode]=original;auto r=p.CatalogRecord(inode);r->key=Key(original.parent,original.name);p.Thread(original);
+            original.parent=metadata;original.protectedFile=true;p.entries[inode]=original;p.ChangeCatalogKey(p.CatalogRecord(inode),Key(original.parent,original.name));p.Thread(original);
             links.push_back(p.Stub(inode,visible.parent,visible.name,reference,true));
         }
         auto added=p.Stub(inode,parent,normalized,reference,chained);links.push_back(added);p.SyncLinks(inode,links,chained);
