@@ -1382,8 +1382,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(updated.value,32,time,8);
         if(replace){
             if(replace->locked)Set(updated.value,68,bsdFlags|UserImmutable,4);
-            Set(updated.value,24,time,8);
-            copyDates(updated.value);
+            if(!replace->preserveDates){
+                Set(updated.value,24,time,8);
+                copyDates(updated.value);
+            }
         }
         inode=std::move(updated.value);
         if(metadata){
@@ -1760,8 +1762,10 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
     SetResourceFlag(updated.value,resource->size!=0);
     if(edit.attributes)SetSecurityFlag(updated.value,*edit.attributes);
     if(edit.locked)Set(updated.value,68,flags|UserImmutable,4);
-    Set(updated.value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
-    if(edit.dates)Set(updated.value,16,CatalogTimestamp(edit.dates->created),8);
+    if(!edit.preserveDates){
+        Set(updated.value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
+        if(edit.dates)Set(updated.value,16,CatalogTimestamp(edit.dates->created),8);
+    }
     Set(updated.value,32,time,8);
 
     auto attributes=EncodeAttributes(edit.inode,edit.attributes,resource,streams);

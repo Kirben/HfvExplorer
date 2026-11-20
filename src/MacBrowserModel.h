@@ -94,6 +94,10 @@ public:
         return MakeHardLink(source,parent,name,replace);
     }
     virtual void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){if(method!=HfsPlus::Volume::CompressionMode::Zlib&&method!=HfsPlus::Volume::CompressionMode::Uncompressed)throw HfsPlus::Error("This format cannot create this compression method");SetCompression(id,method!=HfsPlus::Volume::CompressionMode::Uncompressed,std::move(progress));}
+    virtual void SetCompressionMethodForJob(uint32_t id,HfsPlus::Volume::CompressionMode mode,
+                                            std::function<void(uint64_t,uint64_t)> progress,Storage::Job&){
+        SetCompressionMethod(id,mode,std::move(progress));
+    }
     virtual void SetCompression(uint32_t,bool,std::function<void(uint64_t,uint64_t)>){throw HfsPlus::Error("This format cannot create compression");}
     virtual HfsPlus::Attributes GetAttributes(uint32_t){return {};}
     virtual void SetAttributes(uint32_t,const HfsPlus::Attributes&){throw HfsPlus::Error("This format cannot store extended attributes or Mac ACLs");}

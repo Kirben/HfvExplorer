@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-compressed.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-in-place-compression.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2816,7 +2816,7 @@ int RunApfsContainerTest(const char* directory)
             const auto caps=published->Supports();
             Check(caps.rename&&caps.writable&&!published->Writable()&&caps.create&&caps.createFolders&&
                   caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
-                  !caps.CanEditCompression()&&caps.CanCreateHardLinks(),
+                  caps.CanEditCompression()&&caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
             const auto importPath=VolumeCoord::Wide(root+"apfs-import-source.img");
             {
@@ -2920,6 +2920,64 @@ int RunApfsContainerTest(const char* directory)
             Bytes actualInline(1300);
             published->Read(shortCompressed.id,0,0,actualInline.data(),actualInline.size());
             Check(actualInline==Bytes(1300,0x42),"Copied inline APFS compression changed file contents");
+            MacBrowser::Entry transform;
+            transform.name=u"In-place compression";
+            transform.forks[0].size=replacementBytes.size();
+            transform.finder[0]='C';
+            transform.datesValid=true;
+            transform.created=createdTime;
+            transform.modified=editedTime;
+            transform.attributes={{u"user.compression",Bytes(4301,0x24)}};
+            const auto transformId=published->Put(2,transform,readReplacement,false);
+            const auto beforeTransform=published->Stat(transformId);
+            const auto verifyTransform=[&](bool compressed){
+                const auto current=published->Stat(transformId);
+                Check(current.identity==beforeTransform.identity&&current.compressed==compressed&&
+                      current.forks[0].size==replacementBytes.size()&&!current.forks[1].size&&
+                      current.finder==transform.finder&&current.created==createdTime&&current.modified==editedTime&&
+                      published->GetAttributes(transformId)==transform.attributes,
+                      "In-place APFS compression changed file metadata");
+                Bytes actual(replacementBytes.size());
+                published->Read(transformId,0,0,actual.data(),actual.size());
+                Check(actual==replacementBytes,"In-place APFS compression changed file bytes");
+            };
+            using CompressionMode=HfsPlus::Volume::CompressionMode;
+            Storage::Job cancelEncode;
+            unsigned fullReports=0;
+            bool encodeCancelled=false;
+            try{
+                published->SetCompressionMethodForJob(transformId,CompressionMode::Zlib,
+                    [&](uint64_t done,uint64_t total){
+                        if(done==total&&++fullReports==3)cancelEncode.cancel();
+                    },cancelEncode);
+            }catch(const Storage::Cancelled&){encodeCancelled=true;}
+            Check(encodeCancelled,"In-place APFS compression did not cancel during staging");
+            verifyTransform(false);
+            const auto changeCompression=[&](CompressionMode method){
+                auto operation=FileOperations::Submit(FileOperations::ChangeCompression{
+                    FileOperations::Location::Mounted(published,transformId),published->Stat(transformId),
+                    {},method});
+                const auto start=GetTickCount();
+                while(!operation.Job()->done()){
+                    Check(GetTickCount()-start<15000,"In-place APFS compression job timed out");
+                    Sleep(5);
+                }
+                const auto result=operation.Job()->result();
+                Check(!result.code,result.message.c_str());
+            };
+            changeCompression(CompressionMode::Zlib);
+            verifyTransform(true);
+            Storage::Job cancelDecode;
+            bool decodeCancelled=false;
+            try{
+                published->SetCompressionMethodForJob(transformId,CompressionMode::Uncompressed,
+                    [&](uint64_t done,uint64_t){if(done>4096)cancelDecode.cancel();},cancelDecode);
+            }catch(const Storage::Cancelled&){decodeCancelled=true;}
+            Check(decodeCancelled,"In-place APFS decompression did not cancel during staging");
+            verifyTransform(true);
+            changeCompression(CompressionMode::Uncompressed);
+            verifyTransform(false);
+            fprintf(report,"PASS: macOS-generated APFS in-place compression and decompression, exact bytes, metadata, and cancellation during staging.\n");
             const auto importedCopy=runImport();
             Check(!importedCopy.code,importedCopy.message.c_str());
             MacBrowser::Entry copied;

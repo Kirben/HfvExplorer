@@ -45,6 +45,7 @@ struct CatalogReplaceData {
     const HfsPlus::Bytes* compression=nullptr;
     bool external=false;
     uint64_t alias=0;
+    bool preserveDates=false;
 };
 struct CatalogMetadata {
     uint64_t parent,inode;

@@ -485,7 +485,7 @@ public:
         capabilities.attributes=!limitedEdits;
         capabilities.basicMetadata=writable;
         capabilities.finderMetadata=writable;
-        capabilities.compression=Writable();
+        capabilities.compression=writable;
         capabilities.hardLinks=writable;
         return capabilities;
     }
@@ -1127,7 +1127,13 @@ public:
     }
     void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,
                               std::function<void(uint64_t,uint64_t)> progress)override{
+        Storage::Job job;
+        SetCompressionMethodForJob(id,method,std::move(progress),job);
+    }
+    void SetCompressionMethodForJob(uint32_t id,HfsPlus::Volume::CompressionMode method,
+                                    std::function<void(uint64_t,uint64_t)> progress,Storage::Job& job)override{
         WriteMount([&]{
+            if(job.cancelled())throw Storage::Cancelled();
             const auto& item=At(id);
             const auto current=item.entry;
             Check(!current.directory&&!current.protectedFile&&current.readError.empty(),
@@ -1138,7 +1144,9 @@ public:
             const auto size=current.forks[0].size;
             uint64_t done=0;
             const auto report=[&]{
+                if(job.cancelled())throw Storage::Cancelled();
                 if(progress)progress(done,size);
+                if(job.cancelled())throw Storage::Cancelled();
             };
             const HfsPlus::EncodedCompression::Reader logical=[&](uint64_t offset,void* bytes,size_t count){
                 Read(id,0,offset,bytes,count);
@@ -1161,14 +1169,14 @@ public:
             ForkInput resource(compressionResource?encoded->ResourceSize():0,1,read);
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
-            Storage::Job job;
+            const auto sibling=item.siblingId;
             report();
             CommitMutation(parent,0,job,[&](auto& job){
-                return ReplaceFileData(*source,container,parentOid,oid,data,job,CopyDates(current),
-                                       nullptr,false,nullptr,compressionResource||oldCompressionResource?&resource:nullptr,
-                                       encoded?&encoded->Attribute():nullptr);
+                return ReplaceFileData(*source,container,parentOid,oid,data,job,{},
+                                       nullptr,false,nullptr,limitedEdits||compressionResource||oldCompressionResource?&resource:nullptr,
+                                       encoded?&encoded->Attribute():nullptr,limitedEdits,sibling,true);
             },id);
-        });
+        },true);
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{
         ValidateWritableAttributes(attributes);

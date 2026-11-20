@@ -414,12 +414,12 @@ MetadataPlan DescribeMetadata(const ChangeCompression& edit)
   progress.utf8=progress.byteTransfer=true;
   progress.scanning=false;
   progress.totalBytes=now.forks[0].size+now.forks[1].size;
-  volume->SetCompressionMethod(id,edit.method,[&](uint64_t done,uint64_t total){
+  volume->SetCompressionMethodForJob(id,edit.method,[&](uint64_t done,uint64_t total){
    Cancel(job);
    progress.processed=progress.bytes=done;
    progress.totalBytes=total;
    job.progress(progress);
-  });
+  },job);
   result.entry=volume->Stat(id);
   ReadClassicProperties(edit.item,*volume,id,false,result);
  });

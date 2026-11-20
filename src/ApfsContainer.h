@@ -73,5 +73,5 @@ uint64_t DeleteEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,
                      Storage::Job&,uint64_t alias=0,bool external=false,bool recursive=false);
 // Replace a regular file's data fork in one checkpoint, preserving its inode.
 uint64_t ReplaceFileData(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                         HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t alias=0);
+                         HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t alias=0,bool preserveDates=false);
 }
