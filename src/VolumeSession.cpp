@@ -18,6 +18,7 @@ namespace {
 namespace Protocol=VolumeSessionProtocol;
 using SessionCommandCode=Protocol::Command;
 #ifdef HFV_TESTING
+std::atomic<unsigned> listingRequests{0};
 std::atomic<HANDLE> readPauseEntered{nullptr}, readPauseRelease{nullptr};
 std::atomic<HANDLE> writePauseEntered{nullptr}, writePauseRelease{nullptr};
 void PauseForTest(const std::atomic<HANDLE>& entered,const std::atomic<HANDLE>& release) {
@@ -248,15 +249,15 @@ public:
         return true;
     }
     bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override {
-        return Mfs()?FindMfs(parent,name,{},found):Volume::FindChild(parent,name,found);
+        return Classic()?Volume::FindChild(parent,name,found):LookupChild(parent,name,{},found);
     }
     bool FindTransferChild(uint32_t parent,const Entry& source,Entry& found)override {
-        return Mfs()?FindMfs(parent,source.name,source.version,found):Volume::FindTransferChild(parent,source,found);
+        return Mfs()?LookupChild(parent,source.name,source.version,found):Volume::FindTransferChild(parent,source,found);
     }
-    bool FindMfs(uint32_t parent,const std::u16string& name,std::optional<unsigned> version,Entry& found) {
+    bool LookupChild(uint32_t parent,const std::u16string& name,std::optional<unsigned> version,Entry& found) {
         std::lock_guard<std::mutex> lock(mutex_);
         bool exists=false;
-        Call(SessionCommandCode::FindMfs,Protocol::Encode(Protocol::FindMfsRequest{parent,name,version}),false,[&]{
+        Call(SessionCommandCode::FindChild,Protocol::Encode(Protocol::FindChildRequest{parent,name,version}),false,[&]{
             auto packet=Response(SessionBytes);
             exists=packet.flag();packet.end();
             if(exists)found=ReadEntry();
@@ -314,6 +315,9 @@ public:
         return bytes;
     }
     std::vector<Entry> List(uint32_t parent) override {
+#ifdef HFV_TESTING
+        ++listingRequests;
+#endif
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<Entry> entries;
         Call(SessionCommandCode::List,Protocol::Encode(Protocol::ListRequest{parent}),false,[&] {
@@ -685,11 +689,12 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 volume.ValidateEntry(entry);
                 break;
             }
-            case SessionCommandCode::FindMfs: {
-                auto request=Protocol::DecodeFindMfs(packet);
+            case SessionCommandCode::FindChild: {
+                auto request=Protocol::DecodeFindChild(packet);
                 Entry found;
                 bool exists;
                 if(request.version){
+                    Check(!strcmp(volume.Kind(),"MFS"), "An MFS file version requires an MFS session");
                     Entry selector;
                     selector.name=std::move(request.name);
                     selector.version=*request.version;
@@ -788,6 +793,7 @@ void PauseVolumeWriteForTest(HANDLE entered,HANDLE release) {
     if(entered)writePauseRelease=release;
     writePauseEntered=entered;
 }
+unsigned VolumeListingRequestsForTest() { return listingRequests.load(); }
 DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
     auto persistent = std::dynamic_pointer_cast<PersistentVolume>(volume);
     return persistent ? persistent->Pid() : 0;

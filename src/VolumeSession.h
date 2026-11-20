@@ -15,6 +15,7 @@ int Child(const char *input, const char *output);
 #ifdef HFV_TESTING
 void PauseVolumeReadForTest(HANDLE entered, HANDLE release);
 void PauseVolumeWriteForTest(HANDLE entered, HANDLE release);
+unsigned VolumeListingRequestsForTest();
 DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>&);
 void CrashVolumeSessionOnRenameForTest(const std::shared_ptr<MacBrowser::Volume>&);
 void CrashVolumeSessionDuringPutForTest(const std::shared_ptr<MacBrowser::Volume>&);

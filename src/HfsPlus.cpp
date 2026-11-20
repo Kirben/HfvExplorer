@@ -807,6 +807,28 @@ struct Volume::Impl {
             return U32(record.value.data() + 8);
         return 0;
     }
+    uint32_t ResolveListedFolder(uint32_t parent) {
+        const auto target = Resolve(parent);
+        Check(Get(target).directory, "Not an HFS+ folder");
+        Check(parent != fileMetadata && parent != directoryMetadata,
+              "Private HFS+ backing inodes are not browsable");
+        return target;
+    }
+    bool VisibleCatalogEntry(uint32_t id) const {
+        return id && id != 2 && id != fileMetadata && id != directoryMetadata;
+    }
+    Entry ListedEntry(uint32_t id, uint32_t parent) {
+        Entry entry;
+        try {
+            entry = Presented(id);
+        } catch (const Error& error) {
+            entry = Get(id);
+            entry.hardLink = LinkKind(id) != 0;
+            entry.readError = error.what();
+        }
+        entry.parent = parent;
+        return entry;
+    }
     bool Used(uint32_t n) const { return (bitmap[n / 8] & (0x80 >> (n % 8))) != 0; }
     void AuditAllocation() {
         std::map<uint32_t, const Record *> threads;
@@ -1450,30 +1472,37 @@ uint64_t Volume::FreeBytes() const { return uint64_t(U32(p_->header.data() + 48)
 std::vector<Entry> Volume::List(uint32_t parent) const {
     p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
-    uint32_t target = p_->Resolve(parent);
-    Check(p_->Get(target).directory, "Not an HFS+ folder");
-    Check(parent != p_->fileMetadata && parent != p_->directoryMetadata,
-          "Private HFS+ backing inodes are not browsable");
+    const auto target = p_->ResolveListedFolder(parent);
     std::vector<Entry> result;
-    for (auto &pair : p_->entries)
-        if (pair.second.parent == target && pair.first != 2 && pair.first != p_->fileMetadata &&
-            pair.first != p_->directoryMetadata) {
-            Entry e;
-            try {
-                e = p_->Presented(pair.first);
-            } catch (const Error &error) {
-                e = pair.second;
-                e.hardLink = p_->LinkKind(e.id) != 0;
-                e.readError = error.what();
-            }
-            e.parent = parent;
-            result.push_back(std::move(e));
-        }
+    for (const auto& pair : p_->entries)
+        if (pair.second.parent == target && p_->VisibleCatalogEntry(pair.first))
+            result.push_back(p_->ListedEntry(pair.first, parent));
     std::sort(result.begin(), result.end(), [&](const Entry &a, const Entry &b) {
         return CompareNames(a.name, b.name, p_->caseSensitive) < 0;
     });
     return result;
 }
+bool Volume::FindChild(uint32_t parent, const std::u16string& name, Entry& found) const {
+    p_->source.CheckMedia();
+    Check(p_->usable, "Reopen HFS+ image after error");
+    const auto target = p_->ResolveListedFolder(parent);
+    // A long folded lookup can still match if its extra characters are ignorable.
+    if (name.size() > 255) {
+        for (const auto& item : p_->entries)
+            if (item.second.parent == target && p_->VisibleCatalogEntry(item.first) &&
+                !CompareNames(item.second.name, name, p_->caseSensitive)) {
+                found = p_->ListedEntry(item.first, parent);
+                return true;
+            }
+        return false;
+    }
+    const auto id = p_->Existing(target, name);
+    if (!p_->VisibleCatalogEntry(id))
+        return false;
+    found = p_->ListedEntry(id, parent);
+    return true;
+}
+
 Entry Volume::Stat(uint32_t id) const {
     p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");

@@ -86,6 +86,7 @@ class Volume {
     explicit Volume(Source &, bool write = false);
     ~Volume();
     std::vector<Entry> List(uint32_t parent = 2) const;
+    bool FindChild(uint32_t parent, const std::u16string& name, Entry& found) const;
     Entry Stat(uint32_t id) const;
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);

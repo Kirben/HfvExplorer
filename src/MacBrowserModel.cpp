@@ -99,6 +99,13 @@ public:
     std::vector<Entry> List(uint32_t id) override {
         Call call(*this);Ready();std::vector<Entry> out;for(const auto& e:volume_->List(id))out.push_back(Describe(e));return out;
     }
+    bool FindChild(uint32_t parent, const std::u16string& name, Entry& found) override {
+        Call call(*this); Ready();
+        HfsPlus::Entry entry;
+        if (!volume_->FindChild(parent,name,entry)) return false;
+        found=Describe(entry);
+        return true;
+    }
     Entry Stat(uint32_t id) override { Call call(*this);Ready(); return Describe(volume_->Stat(id)); }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
         Call call(*this);Ready(); Check(volume_->Read(id, fork, offset, p, n) == n, "Short Macintosh fork read");

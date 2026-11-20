@@ -685,6 +685,34 @@ int RunCopyProcessTest(const char *directory) {
         }
         fprintf(report, "PASS: child process, journaled HFS+ to HFSX, recursive forks and attributes, parent "
                         "engines restored\n");
+        for (const auto kind : {HfsPlus::Volume::FormatKind::HfsPlus,
+                                HfsPlus::Volume::FormatKind::HfsXCaseSensitive,
+                                HfsPlus::Volume::FormatKind::HfsXCaseInsensitive}) {
+            const auto path = Wide(root + "\\lookup-" + std::to_string(static_cast<int>(kind)) + ".dsk");
+            uint32_t file, alias, variant = 0;
+            {
+                auto seed = Image(path, kind);
+                const auto folder = seed->MakeDirectory(2, u"Original");
+                file = Put(*seed, folder, u"Mixed");
+                if (kind == HfsPlus::Volume::FormatKind::HfsXCaseSensitive)
+                    variant = Put(*seed, folder, u"mixed");
+                alias = seed->MakeHardLink(folder, 2, u"Alias");
+            }
+            const auto mounted = OpenBrowserImage(path);
+            Check(mounted && ExecutionFor(*mounted).Persistent(), "lookup volume did not use a persistent worker");
+            const auto listings = VolumeSession::VolumeListingRequestsForTest();
+            Entry found;
+            Check(mounted->FindChild(alias, u"Mixed", found) && found.id == file && found.parent == alias,
+                  "single-entry lookup lost the visible directory alias");
+            Entry requested;
+            requested.name = u"mixed";
+            Check(mounted->FindTransferChild(alias, requested, found) &&
+                  found.id == (variant ? variant : file), "lookup used the wrong collation for a copy conflict");
+            Check(!mounted->FindChild(alias, u"Absent", found) &&
+                  VolumeSession::VolumeListingRequestsForTest() == listings,
+                  "single-entry lookup requested a full directory listing");
+        }
+        fprintf(report, "PASS: single-entry worker lookup, HFS+/HFSX collation and directory aliases without a List request.\n");
         auto again = Submit(request);
         Conflict(again);
         again.Job()->resolve(Storage::ConflictChoice::Skip);

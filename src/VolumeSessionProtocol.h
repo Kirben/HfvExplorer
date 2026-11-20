@@ -6,7 +6,7 @@ namespace VolumeSessionProtocol {
 enum class Command {
     Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
     HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory,
-    ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindMfs,
+    ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindChild,
     SetBasicMetadata, TestCrashRename, TestCrashPut
 };
 inline constexpr size_t ReadLimit=256*1024;
@@ -19,7 +19,7 @@ struct CatalogItem {uint32_t id;};
 struct DirectoryName {uint32_t parent;std::u16string name;};
 struct HardLinkRequest {uint32_t source,parent;std::u16string name;bool replace;};
 struct CopyCheck {uint32_t id,parent;};
-struct FindMfsRequest {uint32_t parent;std::u16string name;std::optional<uint32_t> version;};
+struct FindChildRequest {uint32_t parent;std::u16string name;std::optional<uint32_t> version;};
 struct CompressionRequest {uint32_t id;HfsPlus::Volume::CompressionMode method;};
 struct CompressionProgress {uint64_t done,total;};
 struct ForkRange {uint32_t fork;uint64_t offset,count;};
@@ -54,7 +54,7 @@ CopyWorkerProtocol::Data Encode(const CatalogItem&);
 CopyWorkerProtocol::Data Encode(const DirectoryName&);
 CopyWorkerProtocol::Data Encode(const HardLinkRequest&);
 CopyWorkerProtocol::Data Encode(const CopyCheck&);
-CopyWorkerProtocol::Data Encode(const FindMfsRequest&);
+CopyWorkerProtocol::Data Encode(const FindChildRequest&);
 CopyWorkerProtocol::Data Encode(const CompressionRequest&);
 CopyWorkerProtocol::Data Encode(const CompressionProgress&);
 CopyWorkerProtocol::Data Encode(const ForkRange&);
@@ -69,7 +69,7 @@ CatalogItem DecodeItem(CopyWorkerProtocol::Data&);
 DirectoryName DecodeDirectoryName(CopyWorkerProtocol::Data&);
 HardLinkRequest DecodeHardLink(CopyWorkerProtocol::Data&);
 CopyCheck DecodeCopyCheck(CopyWorkerProtocol::Data&);
-FindMfsRequest DecodeFindMfs(CopyWorkerProtocol::Data&);
+FindChildRequest DecodeFindChild(CopyWorkerProtocol::Data&);
 CompressionRequest DecodeCompression(CopyWorkerProtocol::Data&);
 CompressionProgress DecodeCompressionProgress(CopyWorkerProtocol::Data&);
 ForkRange DecodeForkRange(CopyWorkerProtocol::Data&,const MacBrowser::Entry&);

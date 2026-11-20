@@ -190,7 +190,7 @@ CopyCheck DecodeCopyCheck(Data& packet)
     return request;
 }
 
-Data Encode(const FindMfsRequest& request)
+Data Encode(const FindChildRequest& request)
 {
     Data payload;
     payload.put(request.parent);
@@ -200,9 +200,9 @@ Data Encode(const FindMfsRequest& request)
     return payload;
 }
 
-FindMfsRequest DecodeFindMfs(Data& packet)
+FindChildRequest DecodeFindChild(Data& packet)
 {
-    FindMfsRequest request{CatalogNumber(packet),packet.u16(),{}};
+    FindChildRequest request{CatalogNumber(packet),packet.u16(),{}};
     if(packet.flag())request.version=CatalogNumber(packet);
     packet.end();
     return request;
