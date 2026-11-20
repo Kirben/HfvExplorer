@@ -31,11 +31,12 @@ struct CatalogReplaceData {
     std::optional<FileDates> dates;
     const FinderBytes* finder=nullptr;
 };
-struct CatalogDirectoryDates {
+struct CatalogMetadata {
     uint64_t parent,inode;
-    FileDates dates;
+    std::optional<FileDates> dates;
+    const FinderBytes* finder=nullptr;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogDirectoryDates>;
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata>;
 
 struct DataRun {
     uint64_t block,count;

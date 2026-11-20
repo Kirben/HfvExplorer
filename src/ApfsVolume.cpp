@@ -444,6 +444,7 @@ public:
         capabilities.createFolders=writable;
         capabilities.unicodeNames=true;
         capabilities.attributes=!writable;
+        capabilities.basicMetadata=writable;
         return capabilities;
     }
     MacBrowser::WorkerExecution Execution()const override{
@@ -881,6 +882,23 @@ public:
     uint32_t PutResourceReplacement(uint32_t,const Entry&,MacBrowser::Reader,
                                      std::function<void(uint64_t,size_t)>)override{
         throw Error("APFS resource-fork replacement is not supported yet");
+    }
+    void SetBasicMetadata(uint32_t id,const Entry& desired)override{
+        WriteMount([&]{
+            const auto& item=At(id);
+            const auto& current=item.entry;
+            Check(id!=2&&current.name==desired.name&&current.directory==desired.directory&&
+                  current.created==desired.created&&current.modified==desired.modified&&
+                  current.version==desired.version&&current.protectedFile==desired.protectedFile,
+                  "APFS Properties can only change Finder information on files and folders");
+            if(current.finder==desired.finder)return;
+            const auto parent=current.parent;
+            const auto parentOid=At(parent).oid,oid=item.oid;
+            Storage::Job job;
+            CommitMutation(parent,0,job,[&](auto& job){
+                return SetFinderInfo(*source,container,parentOid,oid,desired.finder,job);
+            });
+        });
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
         WriteMount([&]{

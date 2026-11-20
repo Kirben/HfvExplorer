@@ -11,6 +11,8 @@
 #include "ApfsContainer.h"
 #include "ApfsFormat.h"
 #include "StorageJobDialog.h"
+#include "BackgroundCopies.h"
+#include "MetadataDialogs.h"
 #include "DeviceWait.h"
 #include "utils.h"
 #include <cstdio>
@@ -669,6 +671,39 @@ int RunBrowserWindowsTest(const char* directory){
           mount->FindChild(seeded,children[1].name,kept)&&kept.forks[0].size==(overwrite?newBytes.size():oldBytes.size()),
           "APFS merge lost a committed child or used the wrong overwrite decision");
    }
+   const auto finishProperties=[]{
+    const auto deadline=GetTickCount64()+15000;
+    while(BackgroundCopies::Active()&&GetTickCount64()<deadline){
+     MSG message{};
+     while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){
+      TranslateMessage(&message);DispatchMessage(&message);
+     }
+     Sleep(1);
+    }
+    Check(!BackgroundCopies::Active(),"APFS Properties job timed out");
+   };
+   const auto folderItem=FileOperations::Location::Mounted(mount,treeCopyRoot.id);
+   Check(MetadataDialogs::Show(folderItem,a),"open APFS folder Properties");
+   finishProperties();
+   const auto summary=MetadataDialogs::Window();
+   Check(summary&&BrowserPresentation::Text(GetDlgItem(summary,IDC_ATTR_OPEN))==L"Finder information...",
+         "APFS Properties did not expose the Finder information editor");
+   SendMessage(summary,WM_COMMAND,IDC_ATTR_OPEN,0);
+   const auto editor=MetadataDialogs::Window();
+   Check(editor&&editor!=summary&&GetDlgItem(editor,IDC_MFS_FINDER),"missing APFS Finder editor");
+   SetDlgItemTextW(editor,IDC_MFS_FINDER,L"GG");
+   SendMessage(editor,WM_COMMAND,IDOK,0);
+   Check(IsWindow(editor)&&!MetadataDialogs::LastError().empty(),"invalid Finder hex closed the editor");
+   std::wstring finder=L"00 ";
+   for(unsigned i=1;i<31;++i)finder+=L"00 ";
+   finder+=L"A5";
+   SetDlgItemTextW(editor,IDC_MFS_FINDER,finder.c_str());
+   SendMessage(editor,WM_COMMAND,IDOK,0);
+   finishProperties();
+   Check(!BackgroundCopies::LastResult().code&&mount->Stat(treeCopyRoot.id).finder[31]==0xa5&&
+         !IsWindow(editor)&&a->IsWindowEnabled(),"APFS Finder editor did not apply or restore the browser");
+   MetadataDialogs::Shutdown();
+   fprintf(report,"PASS: APFS Properties routes to a working Finder information editor for folders.\n");
    fprintf(report,"PASS: recursive APFS folder copy, source timestamps, and destination dates after completed, skipped and cancelled merges.\n");
   }
   // Make the first frame the MFC main window before closing it: this is the

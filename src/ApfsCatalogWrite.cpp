@@ -531,7 +531,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
-    const bool setDirectoryDates=std::holds_alternative<CatalogDirectoryDates>(request);
+    const auto* metadata=std::get_if<CatalogMetadata>(&request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
         Set(inode,16,CatalogTimestamp(dates->created),8);
@@ -693,7 +693,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
-    if(!replace&&!setDirectoryDates){
+    if(!replace&&!metadata){
         Set(parentInode,24,time,8);
         Set(parentInode,32,time,8);
     }
@@ -710,7 +710,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& link=found->second;
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
-        if(setDirectoryDates){
+        if(metadata&&!metadata->finder){
             Check(link.kind==CatalogKind::Directory,"APFS folder timestamps require a directory");
             copyDates(inode);
             Set(inode,32,time,8);
@@ -734,8 +734,9 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             records.erase(records.begin()+link.entryRecord);
             return records;
         }
-        const auto updatedFinder=replace&&replace->finder?replace->finder:existingFinder;
-        auto updated=WriterDisk::Inode(replace?link.name:name,entryId,0,parent,mode,count,
+        const auto updatedFinder=metadata?metadata->finder:replace&&replace->finder?replace->finder:existingFinder;
+        const auto& updatedName=(replace||metadata)?link.name:name;
+        auto updated=WriterDisk::Inode(updatedName,entryId,0,parent,mode,count,
                                        replace?dataSize:link.dataSize,updatedFinder);
         const auto newFinderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
@@ -746,6 +747,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             copyDates(updated.value);
         }
         inode=std::move(updated.value);
+        if(metadata)return records;
         if(replace){
             streamAt=link.inodeRecord+1;
             const auto first=records.begin()+streamAt;
@@ -865,7 +867,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto name=create?EncodeCatalogName(create->name):rename?EncodeCatalogName(rename->name):std::string{};
     const auto* replace=std::get_if<CatalogReplaceData>(&request);
     auto dates=replace?replace->dates:create?create->dates:std::optional<FileDates>{};
-    if(const auto* folder=std::get_if<CatalogDirectoryDates>(&request))dates=folder->dates;
+    if(const auto* metadata=std::get_if<CatalogMetadata>(&request))dates=metadata->dates;
     CatalogWritePlan plan;
     plan.input=replace?&replace->data:create?create->data:nullptr;
     plan.dataSize=plan.input?plan.input->Size():0;
