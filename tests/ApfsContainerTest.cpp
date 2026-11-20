@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-hard-link.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-hard-link.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2664,6 +2664,29 @@ int RunApfsContainerTest(const char* directory)
                 Apfs::CreateCatalogFile(*output,beforeCreate,2,u"Created data.bin",payload,job,{},
                                         nullptr,false,nullptr,nullptr,nullptr,true);
                 const auto beforeDelete=openCurrent();
+                {
+                    CheckpointFaultImage unlinkDisk(Disk::Read(*output,0,size_t(output->Size())));
+                    Apfs::CreateCatalogHardLink(unlinkDisk,beforeDelete,2,newInode,u"Cancelled unlink",job,0,true);
+                    const auto linked=Apfs::Probe(unlinkDisk);
+                    Check(linked.has_value(),"Missing APFS hard-link checkpoint");
+                    Storage::Job cancelUnlink;
+                    unlinkDisk.onFlush=[&]{cancelUnlink.cancel();};
+                    bool cancelled=false;
+                    try{Apfs::DeleteEntry(unlinkDisk,*linked,2,newInode,cancelUnlink,newInode+2,true);}
+                    catch(const Storage::Cancelled&){cancelled=true;}
+                    const auto retained=Apfs::Probe(unlinkDisk);
+                    Check(cancelled&&retained&&retained->transaction==linked->transaction,
+                          "Cancelled APFS unlink published a checkpoint");
+                    auto memory=std::make_unique<Memory>(unlinkDisk.durable.size());
+                    memory->bytes=std::move(unlinkDisk.durable);
+                    std::unique_ptr<Source> source=std::move(memory);
+                    const auto reopened=Apfs::Open(source,"apfs-cancelled-unlink");
+                    MacBrowser::Entry original,alias;
+                    Check(reopened&&reopened->FindChild(2,u"Created data.bin",original)&&
+                          reopened->FindChild(2,u"Cancelled unlink",alias)&&original.linkCount==2&&
+                          alias.linkCount==2&&original.resolvedId==alias.resolvedId,
+                          "Cancelled APFS unlink lost an alias");
+                }
                 {
                     CheckpointFaultImage overwriteDisk(Disk::Read(*output,0,size_t(output->Size())));
                     Memory data(4411),resource(5801);
@@ -3016,6 +3039,24 @@ int RunApfsContainerTest(const char* directory)
                 }
                 return operation.Job()->result();
             };
+            Check(!erase(aliasId).code&&!published->FindChild(copiedAliases.id,victim.name,firstAlias),
+                  "Deleting an APFS alias did not remove its name");
+            auto retainedAlias=published->Stat(primary.id);
+            Check(retainedAlias.linkCount==3&&retainedAlias.hardLink,"Deleting one APFS name changed the wrong inode");
+            const auto verifyForks=[&](const MacBrowser::Entry& entry){
+                for(unsigned fork=0;fork<2;++fork){
+                    Check(entry.forks[fork].size==toCopy.forks[fork].size,"APFS unlink lost a fork");
+                    Bytes actual(size_t(entry.forks[fork].size));
+                    published->Read(entry.id,fork,0,actual.data(),actual.size());
+                    Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS unlink changed shared fork bytes");
+                }
+            };
+            verifyForks(retainedAlias);
+            Check(!erase(copiedAliases.id).code&&!published->FindChild(copiedLinks.id,u"Aliases",copiedAliases)&&
+                  published->FindChild(copiedLinks.id,toCopy.name,retainedAlias)&&
+                  retainedAlias.linkCount==1&&!retainedAlias.hardLink,
+                  "Recursive APFS deletion did not preserve the alias outside the removed folder");
+            verifyForks(retainedAlias);
             MacBrowser::Entry tree,kept,subfolder;
             Check(published->FindChild(2,u"Cancel tree",tree)&&
                   published->FindChild(tree.id,u"Kept child.bin",kept),"Missing recursive deletion fixture");

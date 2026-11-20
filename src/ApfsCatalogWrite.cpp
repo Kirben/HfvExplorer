@@ -1766,10 +1766,100 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
     return index+1+attributes.size();
 }
 
+bool UnlinkExternalAlias(std::vector<OwnedRecord>& catalog,const CatalogDelete& edit,uint64_t time)
+{
+    if(!edit.alias)return false;
+    struct Alias {
+        uint64_t id;
+        size_t directory;
+        CatalogSibling sibling;
+    };
+    std::vector<Alias> group;
+    std::map<Bytes,size_t> records;
+    std::optional<size_t> inodeIndex;
+    for(size_t i=0;i<catalog.size();++i){
+        const auto& record=catalog[i];
+        Check(record.key.size()>=8,"Truncated APFS catalog key");
+        const auto raw=Le64(record.key.data()),type=raw>>60,oid=raw&IdMask;
+        if(oid==edit.inode&&type==3){
+            Check(!inodeIndex&&record.key.size()==8&&record.value.size()>=96,"Invalid APFS hard-link inode");
+            inodeIndex=i;
+        }
+        if(type==12||(type==5&&oid==edit.inode))
+            Check(records.emplace(record.key,i).second,"Repeated APFS sibling record");
+        if(type!=9||record.value.size()<18||Le64(record.value.data())!=edit.inode)continue;
+        if(edit.recursive&&record.value.size()==18&&oid==edit.parent)return false;
+        Check(record.value.size()==34&&record.key.size()>=14&&record.key.back()==0&&
+              Le16(record.value.data()+16)==8&&Le16(record.value.data()+18)==1&&
+              Le16(record.value.data()+20)==8&&record.value[22]==1&&Le16(record.value.data()+24)==8,
+              "Invalid APFS hard-link directory entry");
+        const auto id=Le64(record.value.data()+26);
+        Check(id>=16&&id!=edit.inode,"Invalid APFS sibling ID");
+        group.push_back({id,i,{edit.inode,oid,std::string(reinterpret_cast<const char*>(record.key.data()+12),
+                                                         record.key.size()-13)}});
+    }
+    Check(inodeIndex.has_value()&&group.size()>=2,"The APFS hard-link group no longer exists");
+    auto& inode=catalog[*inodeIndex].value;
+    Check(Le32(inode.data()+56)==group.size()&&(Le16(inode.data()+80)&0170000)==0100000&&
+          !(Le32(inode.data()+68)&(UserImmutable|SystemImmutable)),
+          "Invalid or locked APFS hard-link inode");
+    std::sort(group.begin(),group.end(),[](const Alias& a,const Alias& b){return a.id<b.id;});
+    std::vector<size_t> discard;
+    std::optional<size_t> selected;
+    for(size_t i=0;i<group.size();++i){
+        const auto& alias=group[i];
+        const auto link=alias.sibling.LinkRecord(alias.id),map=alias.sibling.MapRecord(alias.id);
+        const auto storedLink=records.find(link.key),storedMap=records.find(map.key);
+        Check((!i||group[i-1].id<alias.id)&&storedLink!=records.end()&&storedMap!=records.end()&&
+              catalog[storedLink->second].value==link.value&&catalog[storedMap->second].value==map.value,
+              "APFS sibling records disagree with the directory entry");
+        if(alias.id==edit.alias){
+            Check(alias.sibling.parent==edit.parent,"APFS hard link moved to another folder");
+            selected=i;
+        }
+        if(alias.id==edit.alias||group.size()==2){
+            discard.push_back(storedLink->second);
+            discard.push_back(storedMap->second);
+        }
+    }
+    Check(selected.has_value(),"The APFS hard-link name no longer exists");
+    const auto& removed=group[*selected];
+    const auto& survivor=group[*selected==0?1:0];
+    const auto fields=Le16(inode.data()+92);
+    size_t offset=96+size_t(fields)*4;
+    Check(offset<=inode.size(),"Truncated APFS hard-link inode fields");
+    std::optional<std::string> primaryName;
+    for(size_t i=0;i<fields;++i){
+        const auto desc=96+4*i;
+        const auto length=Le16(inode.data()+desc+2);
+        const auto padded=size_t(DivideUp(length,8)*8);
+        Check(Range(offset,padded,inode.size()),"Truncated APFS hard-link inode field");
+        if(inode[desc]==4){
+            Check(!primaryName&&length>1&&inode[offset+length-1]==0,"Invalid APFS hard-link inode name");
+            primaryName.emplace(reinterpret_cast<const char*>(inode.data()+offset),length-1);
+        }
+        offset+=padded;
+    }
+    Check(primaryName.has_value(),"Missing APFS hard-link inode name");
+    const auto primaryParent=Le64(inode.data());
+    if(group.size()==2||(primaryParent==removed.sibling.parent&&*primaryName==removed.sibling.name)){
+        RenameExternalInode(inode,*primaryName,survivor.sibling.name);
+        Set(inode,0,survivor.sibling.parent,8);
+    }
+    Set(inode,56,group.size()-1,4);
+    Set(inode,32,time,8);
+    if(group.size()==2)catalog[survivor.directory].value.resize(18);
+    TouchExternalParent(catalog,edit.parent,time,-1);
+    discard.push_back(removed.directory);
+    std::sort(discard.rbegin(),discard.rend());
+    for(const auto index:discard)catalog.erase(catalog.begin()+index);
+    return true;
+}
+
 CatalogKind DeleteExternalEntry(std::vector<OwnedRecord>& catalog,const CatalogDelete& edit,
                                 uint64_t time,const CatalogRecords& extentTree,std::set<uint64_t>& retired)
 {
-    Check(!edit.alias&&edit.inode>=16&&edit.inode!=edit.parent,"APFS cannot delete this entry");
+    Check((!edit.alias||edit.recursive)&&edit.inode>=16&&edit.inode!=edit.parent,"APFS cannot delete this entry");
     const auto entryKey=(uint64_t(9)<<60)|edit.parent;
     std::optional<size_t> directoryRecord;
     CatalogKind kind=CatalogKind::RegularFile;
@@ -1847,27 +1937,31 @@ std::tuple<uint64_t,uint64_t,uint64_t> DeleteExternalTree(std::vector<OwnedRecor
                                                uint64_t time,const CatalogRecords& extentTree,
                                                std::set<uint64_t>& retired)
 {
-    std::map<uint64_t,std::vector<uint64_t>> children;
+    std::map<uint64_t,std::vector<CatalogDelete>> children;
     for(const auto& record:catalog){
         Check(record.key.size()>=8,"Truncated APFS catalog key");
         const auto key=Le64(record.key.data()),parent=key&IdMask;
         if(key>>60!=9||parent==1)continue;
         Check(record.value.size()>=18,"Invalid APFS directory entry");
-        children[parent].push_back(Le64(record.value.data()));
+        const auto alias=record.value.size()==34?Le64(record.value.data()+26):0;
+        children[parent].push_back({parent,Le64(record.value.data()),alias,true,true});
     }
     std::vector<CatalogDelete> order{root};
-    std::set<uint64_t> seen{root.inode};
+    std::set<uint64_t> seen{root.alias?root.alias:root.inode};
     for(size_t i=0;i<order.size();++i){
+        if(order[i].alias)continue;
         const auto parent=order[i].inode;
         const auto found=children.find(parent);
         if(found==children.end())continue;
-        for(const auto child:found->second){
-            Check(child>=16&&seen.insert(child).second,"APFS folder tree is cyclic or contains shared entries");
-            order.push_back({parent,child});
+        for(const auto& child:found->second){
+            Check(child.inode>=16&&seen.insert(child.alias?child.alias:child.inode).second,
+                  "APFS folder tree is cyclic or repeats an entry");
+            order.push_back(child);
         }
     }
     uint64_t files=0,folders=0,symlinks=0;
     for(auto at=order.rbegin();at!=order.rend();++at){
+        if(UnlinkExternalAlias(catalog,*at,time))continue;
         const auto kind=DeleteExternalEntry(catalog,*at,time,extentTree,retired);
         if(kind==CatalogKind::Directory)++folders;
         else if(kind==CatalogKind::SymbolicLink)++symlinks;
@@ -2254,7 +2348,8 @@ CatalogWritePlan PrepareCatalogMutation(
         catalog=std::move(existing.records);
         if(remove->recursive)
             std::tie(deletedFiles,deletedFolders,deletedSymlinks)=DeleteExternalTree(catalog,*remove,time,extentTree,externalRetired);
-        else removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
+        else if(!UnlinkExternalAlias(catalog,*remove,time))
+            removedKind=DeleteExternalEntry(catalog,*remove,time,extentTree,externalRetired);
     }else if(externalLinkReplace){
         catalog=std::move(existing.records);
         ReplaceExternalSymlink(catalog,*linkReplacement,time,attributeIds,extentTree,externalRetired);

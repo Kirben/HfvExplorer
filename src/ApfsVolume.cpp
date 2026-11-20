@@ -812,6 +812,7 @@ private:
             const auto deleted=At(removed);
             if(limitedEdits&&deleted.entry.directory){
                 std::vector<uint32_t> descendants;
+                std::set<uint64_t> affectedLinks;
                 for(const auto& [id,item]:entries){
                     auto ancestor=item.entry.parent;
                     while(ancestor>2&&ancestor!=removed){
@@ -819,10 +820,20 @@ private:
                         if(found==entries.end())break;
                         ancestor=found->second.entry.parent;
                     }
-                    if(ancestor==removed)descendants.push_back(id);
+                    if(ancestor==removed){
+                        descendants.push_back(id);
+                        if(item.entry.hardLink)affectedLinks.insert(item.oid);
+                    }
                 }
+                for(const auto& [id,item]:entries){
+                    if(affectedLinks.count(item.oid))descendants.push_back(id);
+                }
+                std::sort(descendants.begin(),descendants.end());
+                descendants.erase(std::unique(descendants.begin(),descendants.end()),descendants.end());
                 for(const auto id:descendants){
-                    writableIds.erase(At(id).oid);
+                    const auto& item=At(id);
+                    writableIds.erase(item.aliasId?item.aliasId:item.oid);
+                    if(item.entry.hardLink)linkIdentities.erase({item.mount,item.oid});
                     entries.erase(id);
                 }
             }
@@ -1221,6 +1232,16 @@ public:
             Check(id!=2,"Cannot delete the APFS root");
             const auto parent=target.entry.parent;
             const auto parentOid=At(parent).oid,oid=target.oid,sibling=target.siblingId;
+            if(target.entry.directory){
+                // Cache descendant identities so aliases outside the removed tree
+                // can be invalidated when their link counts change.
+                std::vector<uint32_t> folders{id};
+                for(size_t i=0;i<folders.size();++i){
+                    if(job.cancelled())throw Storage::Cancelled();
+                    for(const auto& entry:ListDirectory(folders[i]))
+                        if(entry.directory)folders.push_back(entry.id);
+                }
+            }
             CommitMutation(parent,id,job,[&](auto& work){
                 return DeleteEntry(*source,container,parentOid,oid,work,sibling,true,true);
             });
@@ -1233,7 +1254,7 @@ public:
             const auto& entry=At(id).entry;
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             if(limitedEdits)
-                Check(!entry.hardLink&&!entry.compressed&&(entry.readError.empty()||At(id).symlink)&&
+                Check(!entry.compressed&&(entry.readError.empty()||At(id).symlink)&&
                       (!entry.directory||ListDirectory(id).empty()),
                       "This APFS image can only delete unlinked, uncompressed files, symbolic links, and empty folders");
             return true;
