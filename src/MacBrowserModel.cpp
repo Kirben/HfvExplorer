@@ -572,7 +572,7 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
 }
 namespace {
 void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
-    Check(dst.Writable(),"The destination is read-only");Check(id!=2,"Select files or folders rather than a volume root");
+    Check(dst.Supports().create,"The destination cannot create files");Check(id!=2,"Select files or folders rather than a volume root");
     src.ValidateCopyTo(id,dst,parent);
     if(&src==&dst){std::set<uint32_t> visited;for(uint32_t p=parent;p!=2;){
         Check(p!=id&&visited.insert(p).second,"Cannot copy a folder into itself or its descendants");p=dst.Stat(p).parent;}
@@ -592,7 +592,7 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
 }
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes){
     Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
-    Check(dst.Writable(),"The destination is read-only");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
+    Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
         plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));}

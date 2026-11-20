@@ -475,6 +475,7 @@ public:
     MacBrowser::Capabilities Supports() const override {
         auto capabilities = MacBrowser::Volume::Supports();
         capabilities.resourceForks=true;
+        capabilities.create=writable;
         capabilities.rename=writable;
         capabilities.writable=writable;
         capabilities.createFolders=writable;
@@ -967,7 +968,9 @@ public:
         });
     }
     void ValidateEntry(const Entry& entry)const override{
-        if(!Writable())ReadOnly();
+        if(!writable)ReadOnly();
+        if(limitedEdits)Check(!entry.directory&&!entry.hardLink&&!entry.compressed,
+                              "This APFS image currently accepts uncompressed regular files only");
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
@@ -982,7 +985,18 @@ public:
             CatalogTimestamp(entry.modified);
         }
     }
-    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
+    void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool parentExists)override{
+        if(limitedEdits){
+            Check(parentExists,"This APFS image cannot copy folder trees yet");
+            std::set<std::u32string> names;
+            for(const auto& entry:entries){
+                ValidateEntry(entry);
+                Entry existing;
+                Check(names.insert(NormalizedName(entry.name,!caseSensitive)).second&&
+                      !FindTransferChild(parent,entry,existing),"This APFS image cannot overwrite files yet");
+            }
+            return;
+        }
         // The common planner skips per-entry validation for folders it will merge.
         for(const auto& entry:entries)if(entry.directory)ValidateEntry(entry);
     }
@@ -1041,6 +1055,7 @@ public:
             const auto children=ListDirectory(parent);
             const auto found=std::find_if(children.begin(),children.end(),matches);
             if(found!=children.end()){
+                Check(!limitedEdits,"This APFS image cannot overwrite files yet");
                 Check(replace&&!found->directory&&!found->protectedFile&&found->readError.empty(),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==found->identity,
@@ -1053,11 +1068,11 @@ public:
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression);
+                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits);
             });
             for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
             throw Error("APFS file was committed but could not be found after reopening");
-        });
+        },true);
     }
     uint32_t PutResourceReplacement(uint32_t id,const Entry& desired,MacBrowser::Reader reader,
                                      std::function<void(uint64_t,size_t)> keptData)override{

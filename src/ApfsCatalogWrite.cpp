@@ -1860,8 +1860,8 @@ CatalogWritePlan PrepareCatalogMutation(
         const bool directory=create->kind==CatalogKind::Directory;
         Check((directory?!input:create->kind==CatalogKind::RegularFile&&input)&&
               create->parent>=2&&create->parent!=3&&create->parent<nextId&&
-              !resource&&!attributes&&!dates&&!create->finder&&!create->locked&&!create->compression,
-              "External APFS creation requires a plain file or folder with default metadata");
+              !create->compression&&(!directory||(!resource&&!attributes&&!dates&&!create->finder&&!create->locked)),
+              "External APFS creation requires an uncompressed file or a folder with default metadata");
         catalog=std::move(existing.records);
         for(const auto& record:catalog){
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
@@ -1870,8 +1870,19 @@ CatalogWritePlan PrepareCatalogMutation(
         TouchExternalParent(catalog,create->parent,time,true);
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,true,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name);
-        catalog.push_back(WriterDisk::Inode(name,entryId,time,create->parent,
-                                           directory?0040755:0100644,directory?0:1,dataSize));
+        auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
+                                     directory?0040755:0100644,directory?0:1,dataSize,create->finder);
+        if(dates){
+            Set(inode.value,16,CatalogTimestamp(dates->created),8);
+            Set(inode.value,24,CatalogTimestamp(dates->modified),8);
+        }
+        if(create->locked)Set(inode.value,68,UserImmutable,4);
+        if(attributes)SetSecurityFlag(inode.value,*attributes);
+        if(resource)SetResourceFlag(inode.value,resource->size!=0);
+        auto records=EncodeAttributes(entryId,attributes,resource?&*resource:nullptr,attributeIds);
+        SortAttributes(records);
+        catalog.push_back(std::move(inode));
+        catalog.insert(catalog.end(),std::make_move_iterator(records.begin()),std::make_move_iterator(records.end()));
         streamAt=catalog.size();
     }else if(properties){
         catalog=std::move(existing.records);

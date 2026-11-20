@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-created-file.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-imported-file.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2645,10 +2645,55 @@ int RunApfsContainerTest(const char* directory)
             for(size_t i=0;i<importedBytes.size();++i)
                 Check(importedBytes[i]==(i*13)%251,"Created APFS file readback differs");
             const auto caps=published->Supports();
-            Check(caps.rename&&caps.writable&&!published->Writable()&&!caps.create&&caps.createFolders&&
+            Check(caps.rename&&caps.writable&&!published->Writable()&&caps.create&&caps.createFolders&&
                   !caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
                   !caps.CanEditCompression()&&!caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
+            const auto importPath=VolumeCoord::Wide(root+"apfs-import-source.img");
+            {
+                auto image=CreateFormatOutput(importPath.c_str(),8*1024*1024);
+                Storage::Job job;
+                Apfs::Format(*image,u"Import source",false,job);
+                image->Keep();
+            }
+            const auto importSource=MacBrowser::OpenBrowserImage(importPath);
+            Check(importSource&&importSource->Writable(),"Could not mount APFS import source");
+            MacBrowser::Entry toCopy;
+            toCopy.name=u"Imported forks";
+            toCopy.forks[0].size=4301;
+            toCopy.forks[1].size=5701;
+            toCopy.datesValid=true;
+            toCopy.created=createdTime;
+            toCopy.modified=editedTime;
+            toCopy.finder[0]='F';
+            toCopy.attributes={{u"user.imported",Bytes(4200,0x33)}};
+            const auto importId=importSource->Put(2,toCopy,[](unsigned fork,uint64_t offset,void* data,size_t length){
+                memset(data,fork?0x7b:0x6a,length);
+            },false);
+            const FileOperations::OrdinaryCopy request{{FileOperations::Location::Mounted(importSource,importId)},
+                                                      FileOperations::Location::Mounted(published,2)};
+            const auto runImport=[&]{
+                auto copy=FileOperations::Submit(request);
+                const auto start=GetTickCount();
+                while(!copy.Job()->done()){
+                    Check(GetTickCount()-start<15000,"External APFS import timed out");
+                    Sleep(5);
+                }
+                return copy.Job()->result();
+            };
+            const auto importedCopy=runImport();
+            Check(!importedCopy.code,importedCopy.message.c_str());
+            Check(runImport().code,"External APFS import accepted an overwrite");
+            MacBrowser::Entry copied;
+            Check(published->FindChild(2,toCopy.name,copied)&&copied.created==toCopy.created&&
+                  copied.modified==toCopy.modified&&copied.finder==toCopy.finder&&
+                  published->GetAttributes(copied.id)==toCopy.attributes,"APFS import lost file metadata");
+            for(unsigned fork=0;fork<2;++fork){
+                Check(copied.forks[fork].size==toCopy.forks[fork].size,"APFS import lost a fork");
+                Bytes actual(size_t(copied.forks[fork].size));
+                published->Read(copied.id,fork,0,actual.data(),actual.size());
+                Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS imported fork differs");
+            }
             MacBrowser::Entry renamedFolder;
             auto rename=FileOperations::Submit(FileOperations::RenameEntry{
                 FileOperations::Location::Mounted(published,publishedFolder.id),u"Browser renamed folder"});
