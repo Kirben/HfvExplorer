@@ -345,6 +345,13 @@ uint64_t InspectAllocationFreeBytes(Source& source,const Container& container)
     return VerifyAllocationBitmaps(source,container,space);
 }
 
+uint64_t InspectFreeQueueAllocation(Source& source,const Container& container)
+{
+    auto checkpoint=PlanCheckpoint(source,container);
+    const auto object=[&](uint64_t oid)->Bytes& {return CheckpointObjectById(checkpoint,oid);};
+    return VerifyFreeQueueAllocation(source,container,checkpoint.transaction,checkpoint.superblock,object);
+}
+
 uint64_t WritableFreeBytes(Source& source,const Container& container)
 {
     auto checkpoint=PlanCheckpoint(source,container);

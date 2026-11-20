@@ -210,7 +210,7 @@ void Reclaim(const Bytes& space,const Bytes& queue,size_t field,uint64_t base,ui
              uint64_t committed,ReleaseBlock releaseBlock)
 {
     Check(queue.size()==Block&&Le32(queue.data()+24)==(Ephemeral|2)&&Le32(queue.data()+28)==9&&
-          Le16(queue.data()+32)==7&&Le16(queue.data()+34)==0&&Le32(queue.data()+Block-40)==0x0c,
+          Le16(queue.data()+32)==7&&Le16(queue.data()+34)==0&&(Le32(queue.data()+Block-40)&~2u)==0x0c,
           "Unsupported APFS free queue");
     const Node tree(queue,true,{},true);
     Check(tree.Layout().keySize==16&&tree.Layout().valueSize==8,"Invalid APFS free queue record layout");
@@ -254,7 +254,7 @@ void Retire(Bytes& space,Bytes& queue,size_t field,std::vector<DataRun> ranges,u
         records.push_back(std::move(record));
         retired+=count;
     }
-    auto updated=EncodeLeaf(records,0x0c,16,8);
+    auto updated=EncodeLeaf(records,Le32(queue.data()+Block-40),16,8);
     std::copy_n(queue.begin(),size_t(32),updated.begin());
     queue=std::move(updated);
     Set(space,field,retired,8);
@@ -1594,6 +1594,35 @@ CatalogLayoutCounts InspectCatalogLayout(Source& source,const Container& contain
 uint64_t VerifyAllocationBitmaps(Source& source,const Container& container,const Bytes& space)
 {
     return ReadAllocationBitmaps(source,container,space).available*container.blockSize;
+}
+
+uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uint64_t transaction,
+                                   Bytes& superblock,const CheckpointObjectLookup& ephemeral)
+{
+    const auto [containerMap,address,volume]=ReadCatalogVolume(source,container);
+    const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
+    const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
+    const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
+    const auto snapshots=Le64(volume.data()+152);
+    const Node snapshotTree(ReadObject(source,container,snapshots,snapshots,container.transaction,2,16,true),true,{});
+    Check(!snapshotTree.Level()&&!snapshotTree.Count(),"APFS allocation inspection requires an empty snapshot tree");
+    std::vector<uint64_t> live{containerMap.headerBlock,containerMap.rootBlock,address,
+                               volumeMap.headerBlock,volumeMap.rootBlock};
+    live.insert(live.end(),containerMap.leaves.begin(),containerMap.leaves.end());
+    live.insert(live.end(),volumeMap.leaves.begin(),volumeMap.leaves.end());
+    live.insert(live.end(),catalog.blocks.begin(),catalog.blocks.end());
+    std::vector<FileRun> files;
+    for(const auto& extent:extents.records)
+        files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
+                         Le64(extent.value.data())&IdMask});
+    auto& space=ephemeral(Le64(superblock.data()+152));
+    Writes discarded;
+    std::vector<DataRun> data;
+    const auto allocated=Allocate(discarded,source,container,space,superblock,ephemeral,
+                                  live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;});
+    Check(allocated.size()==1&&data.size()==1&&data.front().count==1&&allocated.front()!=data.front().block,
+          "APFS allocation preflight did not reserve distinct data and metadata blocks");
+    return Le64(space.data()+72)*container.blockSize;
 }
 
 void ValidateWritableLayout(Source& source,const Container& container)

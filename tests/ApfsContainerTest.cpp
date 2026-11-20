@@ -2541,6 +2541,8 @@ int RunApfsContainerTest(const char* directory)
             const auto free=Apfs::InspectAllocationFreeBytes(*raw,*before);
             Check(free>0&&free<raw->Size()&&free==Apfs::WritableFreeBytes(*raw,*before),
                   "APFS macOS allocation bitmap totals did not match the space manager");
+            Check(Apfs::InspectFreeQueueAllocation(*raw,*before)>free,
+                  "APFS macOS free queues did not release blocks in the allocation dry run");
             const auto image=Disk::Read(*raw,0,size_t(raw->Size()));
             {
                 CheckpointFaultImage interrupted(image);
