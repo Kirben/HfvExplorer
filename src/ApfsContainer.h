@@ -26,7 +26,7 @@ struct CheckpointPublicationUncertain : HfsPlus::Error {
 uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Job&);
 // Folder and file creation and rename support up to two catalog tree levels in native images.
 // The same exclusive image ownership is required as for CommitCheckpoint.
-uint64_t CreateDirectory(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
+uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
 // Stream a data fork from a separate source into a newly created file.
 uint64_t CreateFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,

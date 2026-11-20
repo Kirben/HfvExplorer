@@ -338,7 +338,7 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
     return Commit(source,expected,job,nullptr);
 }
 
-uint64_t CreateDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
+uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory};
     return Commit(source,expected,job,&request);

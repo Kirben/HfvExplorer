@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsVolume.h"
+#include "ApfsCatalogWrite.h"
+#include "StorageWorker.h"
 #include "ApfsTree.h"
 #include "ApfsCrypto.h"
 #include "HfsPlusDisk.h"
@@ -300,14 +302,16 @@ std::vector<Extent> Extents(const Catalog& catalog,const Container& container,ui
 
 class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::unique_ptr<Source> source;
-    const Container container;
+    Container container;
     std::vector<Mounted> mounts;
     std::u16string label;
     bool caseSensitive=true;
     const std::string key;
-    const bool processLocal;
+    const bool writable,processLocal;
     MacBrowser::WorkerOrigin origin;
     std::mutex mutex;
+    bool requiresReopen=false;
+    std::map<uint64_t,uint32_t> writableIds;
     struct Item {
         size_t mount;
         uint64_t oid,stream;
@@ -331,6 +335,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     template<class Work>auto Access(Work work)->decltype(work()){
         VolumeCoord::BackendRead lease(key);
         std::lock_guard<std::mutex> lock(mutex);
+        Check(!requiresReopen,"Reopen the APFS image before continuing");
         source->CheckMedia();
         auto result=work();
         source->CheckMedia();
@@ -363,9 +368,9 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     }
     [[noreturn]] static void ReadOnly(){throw Error("APFS is read-only");}
 public:
-    Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource)
+    Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource,bool write)
         :source(std::move(s)),container(std::move(c)),mounts(std::move(volumes)),key(std::move(resource)),
-         processLocal(source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
+         writable(write),processLocal(write||source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
              return mount.locked;
          }))
     {
@@ -383,7 +388,7 @@ public:
                 }
                 Check(root.entry.directory,"APFS root is not a directory");
                 root.entry.name=mount.name;
-                root.entry.identity=MacBrowser::EntryIdentity(MountKey(mount),mount.xid);
+                root.entry.identity=MacBrowser::EntryIdentity(MountKey(mount),EntryVersion(mount));
                 if(mount.snapshotCreated){
                     root.entry.created=root.entry.modified=*mount.snapshotCreated;
                     root.entry.datesValid=true;
@@ -428,11 +433,14 @@ public:
     std::string ResourceKey()const override{return key;}
     const char* Kind()const override{return "APFS";}
     bool CaseSensitive()const override{return caseSensitive;}
-    bool Writable()const override{return false;}
+    bool Writable()const override{return writable;}
     uint64_t FreeBytes()const override{return 0;}
     MacBrowser::Capabilities Supports() const override {
         auto capabilities = MacBrowser::Volume::Supports();
-        capabilities.attributes = true;
+        capabilities.create=false;
+        capabilities.createFolders=writable;
+        capabilities.unicodeNames=!writable;
+        capabilities.attributes=!writable;
         return capabilities;
     }
     MacBrowser::WorkerExecution Execution()const override{
@@ -472,66 +480,78 @@ public:
         });
     }
     std::vector<Entry> List(uint32_t parent)override{
-        return Access([&]{
-            auto& folder=At(parent);
-            Check(folder.entry.directory,"The APFS entry is not a directory");
-            if(!listings.count(parent)){
-                std::vector<Item> children;
-                std::set<std::u16string> names;
-                const auto& mounted=mounts[folder.mount];
-                if(mounted.locked){
-                    Check(mounted.softwareEncryption,"This APFS volume does not support software unlocking");
-                    throw LockedVolume(false,PasswordHint(*source,container,mounted.uuid));
-                }
-                const Catalog catalog(*source,container,mounted);
-                catalog.VisitRecords(folder.oid,9,[&](Record record){
-                    const size_t header=mounted.hashedNames?12:10;
-                    Check(record.key.size>=header&&record.value.size>=18,"Truncated APFS directory record");
-                    const auto nameLength=mounted.hashedNames?Le32(record.key.data+8)&0x3ff:Le16(record.key.data+8);
-                    Check(record.key.size-header==nameLength,"Invalid APFS directory record name length");
-                    const auto oid=Le64(record.value.data);
-                    Check(oid>2&&oid<=IdMask,"Invalid APFS directory record inode");
-                    auto inode=LoadInode(catalog,folder.mount,oid);
-                    auto name=Apfs::Name(record.key.data+header,nameLength);
-                    Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos&&names.insert(name).second,
-                          "Invalid or duplicate APFS directory name");
-                    if(inode.entry.directory){
-                        for(uint32_t id=parent;id>=2;id=At(id).entry.parent)
-                            Check(At(id).oid!=oid,"Circular APFS directory");
-                    }
-                    auto& entry=inode.entry;
-                    entry.parent=parent;entry.name=std::move(name);
-                    auto identity=MountKey(mounted)+":"+std::to_string(folder.oid)+":"+std::to_string(oid);
-                    // Alias names in the same directory can refer to the same
-                    // inode, but each alias is a separate browser selection.
-                    if(entry.hardLink){
-                        identity+=':';
-                        identity.append(reinterpret_cast<const char*>(record.key.data+header),nameLength-1);
-                    }
-                    entry.identity=MacBrowser::EntryIdentity(std::move(identity),mounted.xid);
-                    children.push_back({folder.mount,oid,inode.stream,std::move(entry),
-                                        std::move(inode.attributes),inode.symlink});
-                });
-                Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
-                std::vector<uint32_t> ids;
-                ids.reserve(children.size());
-                for(auto& child:children){
-                    child.entry.id=uint32_t(next++);
-                    child.entry.resolvedId=child.entry.id;
-                    if(child.entry.hardLink){
-                        const auto first=linkIdentities.emplace(Address{child.mount,child.oid},child.entry.id);
-                        child.entry.resolvedId=first.first->second;
-                    }
-                    ids.push_back(child.entry.id);
-                    entries.emplace(child.entry.id,std::move(child));
-                }
-                listings.emplace(parent,std::move(ids));
-            }
-            std::vector<Entry> out;
-            for(const auto id:listings.at(parent))out.push_back(At(id).entry);
-            return out;
-        });
+        return Access([&]{return ListDirectory(parent);});
     }
+private:
+    std::optional<uint64_t> EntryVersion(const Mounted& mount)const{
+        if(writable)return {};
+        return mount.xid;
+    }
+    std::vector<Entry> ListDirectory(uint32_t parent){
+        auto& folder=At(parent);
+        Check(folder.entry.directory,"The APFS entry is not a directory");
+        if(!listings.count(parent)){
+            std::vector<Item> children;
+            std::set<std::u16string> names;
+            const auto& mounted=mounts[folder.mount];
+            if(mounted.locked){
+                Check(mounted.softwareEncryption,"This APFS volume does not support software unlocking");
+                throw LockedVolume(false,PasswordHint(*source,container,mounted.uuid));
+            }
+            const Catalog catalog(*source,container,mounted);
+            catalog.VisitRecords(folder.oid,9,[&](Record record){
+                const size_t header=mounted.hashedNames?12:10;
+                Check(record.key.size>=header&&record.value.size>=18,"Truncated APFS directory record");
+                const auto nameLength=mounted.hashedNames?Le32(record.key.data+8)&0x3ff:Le16(record.key.data+8);
+                Check(record.key.size-header==nameLength,"Invalid APFS directory record name length");
+                const auto oid=Le64(record.value.data);
+                Check(oid>2&&oid<=IdMask,"Invalid APFS directory record inode");
+                auto inode=LoadInode(catalog,folder.mount,oid);
+                Check(!writable||!inode.entry.hardLink,"APFS writable mounts require unlinked native entries");
+                auto name=Apfs::Name(record.key.data+header,nameLength);
+                Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos&&names.insert(name).second,
+                      "Invalid or duplicate APFS directory name");
+                if(inode.entry.directory){
+                    for(uint32_t id=parent;id>=2;id=At(id).entry.parent)
+                        Check(At(id).oid!=oid,"Circular APFS directory");
+                }
+                auto& entry=inode.entry;
+                entry.parent=parent;entry.name=std::move(name);
+                auto identity=MountKey(mounted)+":"+std::to_string(folder.oid)+":"+std::to_string(oid);
+                // Alias names in the same directory can refer to the same
+                // inode, but each alias is a separate browser selection.
+                if(entry.hardLink){
+                    identity+=':';
+                    identity.append(reinterpret_cast<const char*>(record.key.data+header),nameLength-1);
+                }
+                entry.identity=MacBrowser::EntryIdentity(std::move(identity),EntryVersion(mounted));
+                children.push_back({folder.mount,oid,inode.stream,std::move(entry),
+                                    std::move(inode.attributes),inode.symlink});
+            });
+            Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
+            std::vector<uint32_t> ids;
+            ids.reserve(children.size());
+            for(auto& child:children){
+                if(writable){
+                    const auto slot=writableIds.emplace(child.oid,uint32_t(next));
+                    if(slot.second)++next;
+                    child.entry.id=slot.first->second;
+                }else child.entry.id=uint32_t(next++);
+                child.entry.resolvedId=child.entry.id;
+                if(child.entry.hardLink){
+                    const auto first=linkIdentities.emplace(Address{child.mount,child.oid},child.entry.id);
+                    child.entry.resolvedId=first.first->second;
+                }
+                ids.push_back(child.entry.id);
+                entries.insert_or_assign(child.entry.id,std::move(child));
+            }
+            listings.emplace(parent,std::move(ids));
+        }
+        std::vector<Entry> out;
+        for(const auto id:listings.at(parent))out.push_back(At(id).entry);
+        return out;
+    }
+public:
     Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
     bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override{
         const auto sensitive=Access([&]{
@@ -680,10 +700,88 @@ public:
             return true;
         });
     }
-    uint32_t MakeDirectory(uint32_t,const std::u16string&)override{ReadOnly();}
-    uint32_t Put(uint32_t,const Entry&,MacBrowser::Reader,bool)override{ReadOnly();}
-    void Rename(uint32_t,uint32_t,const std::u16string&)override{ReadOnly();}
-    void Remove(uint32_t)override{ReadOnly();}
+private:
+    template<class Work> auto WriteNamespace(Work work)->decltype(work()){
+        if(!writable)ReadOnly();
+        VolumeCoord::OperationLease lease({{key,VolumeCoord::Mode::Write}});
+        std::lock_guard<std::mutex> lock(mutex);
+        Check(!requiresReopen,"Reopen the APFS image before continuing");
+        source->CheckMedia();
+        return work();
+    }
+
+    void RefreshNamespace(uint32_t parent,uint32_t removed,uint64_t transaction)
+    {
+        auto fresh=Probe(*source);
+        Check(fresh&&fresh->uuid==container.uuid&&fresh->volumes==container.volumes&&
+              fresh->transaction==transaction,"The APFS image changed during a catalog write");
+        const auto oid=mounts.front().oid;
+        const ObjectMap map(*source,*fresh,fresh->objectMap,fresh->transaction);
+        const auto address=map.Lookup(oid);
+        Check(address.has_value(),"Missing APFS volume after a catalog write");
+        auto mount=ReadVolume(ReadObject(*source,*fresh,*address,oid,fresh->transaction,13),oid);
+        container=std::move(*fresh);
+        mounts.front()=std::move(mount);
+        listings.clear();
+        extents.clear();
+        compressed.clear();
+        if(removed){
+            writableIds.erase(At(removed).oid);
+            entries.erase(removed);
+        }
+        auto& folder=At(parent);
+        const auto changed=LoadInode(Catalog(*source,container,mounts.front()),0,folder.oid);
+        folder.entry.modified=changed.entry.modified;
+        ListDirectory(parent);
+    }
+
+    template<class Work>void CommitNamespace(uint32_t parent,uint32_t removed,Work work)
+    {
+        Storage::Job job;
+        uint64_t transaction;
+        try{transaction=work(job);}
+        catch(const CheckpointPublicationUncertain&){
+            // A buffered checkpoint may still be visible after a failed flush.
+            // Keep this session closed to further mutations until it is reopened.
+            requiresReopen=true;
+            throw;
+        }
+        try{RefreshNamespace(parent,removed,transaction);}
+        catch(const std::exception& error){
+            requiresReopen=true;
+            throw Error(std::string("APFS catalog change committed. Reopen the image to refresh it. ")+error.what());
+        }
+    }
+public:
+    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
+        return WriteNamespace([&]{
+            const auto oid=At(parent).oid;
+            CommitNamespace(parent,0,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job);});
+            for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
+            throw Error("APFS folder was created but could not be found after reopening");
+        });
+    }
+    uint32_t Put(uint32_t,const Entry&,MacBrowser::Reader,bool)override{
+        throw Error("APFS file copying is not available through this mount");
+    }
+    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
+        WriteNamespace([&]{
+            const auto& entry=At(id);
+            Check(entry.entry.parent==parent,"APFS rename must stay in the original folder");
+            const auto oid=entry.oid,parentOid=At(parent).oid;
+            CommitNamespace(parent,0,[&](auto& job){return RenameEntry(*source,container,parentOid,oid,name,job);});
+        });
+    }
+    void Remove(uint32_t id)override{
+        WriteNamespace([&]{
+            const auto& entry=At(id);
+            Check(id!=2,"Cannot delete the APFS root");
+            const auto parent=entry.entry.parent;
+            const auto oid=entry.oid;
+            const auto parentOid=At(parent).oid;
+            CommitNamespace(parent,id,[&](auto& job){return DeleteEntry(*source,container,parentOid,oid,job);});
+        });
+    }
 };
 }
 
@@ -698,10 +796,15 @@ void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password
     apfs->Unlock(id,password);
 }
 
-std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const std::string& key)
+static std::shared_ptr<MacBrowser::Volume> OpenImpl(std::unique_ptr<Source>& source,const std::string& key,bool writable)
 {
     auto container=Probe(*source);
     if(!container)return {};
+    if(writable){
+        ValidateWritableImage(*source,*container);
+        // A previous mount may have closed after an uncertain publication.
+        source->Flush();
+    }
     Check(!container->volumes.empty(),"The APFS container has no volumes");
     const ObjectMap map(*source,*container,container->objectMap,container->transaction);
     std::vector<Mounted> volumes;
@@ -721,6 +824,16 @@ std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const s
         }catch(const Error&){if(!problem)problem=std::current_exception();}
     }
     if(volumes.empty())std::rethrow_exception(problem);
-    return std::make_shared<Volume>(std::move(source),std::move(*container),std::move(volumes),key);
+    return std::make_shared<Volume>(std::move(source),std::move(*container),std::move(volumes),key,writable);
+}
+
+std::shared_ptr<MacBrowser::Volume> Open(std::unique_ptr<Source>& source,const std::string& key)
+{
+    return OpenImpl(source,key,false);
+}
+
+std::shared_ptr<MacBrowser::Volume> OpenWritable(std::unique_ptr<Source>& source,const std::string& key)
+{
+    return OpenImpl(source,key,true);
 }
 }

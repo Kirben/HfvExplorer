@@ -785,6 +785,27 @@ std::vector<Mapping> StageCatalog(Writes& writes,const CatalogLeaves& leaves,con
     StageObject(writes,blocks[0],std::move(root),rootOid,tx,2,14);
     return mappings;
 }
+void CheckNativeVolume(const Bytes& volume)
+{
+    const auto flags=Le64(volume.data()+56);
+    Check(!memcmp(volume.data()+32,"APSB",4)&&!memcmp(volume.data()+272,"HFVExplorer",12)&&
+          (flags==1||flags==8)&&Le64(volume.data()+264)==1&&Le32(volume.data()+116)==2&&
+          !Le64(volume.data()+200)&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
+          "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
+}
+}
+
+void ValidateWritableImage(Source& source,const Container& container)
+{
+    Check(source.Writable()&&!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
+          !container.keybagBlock&&!container.keybagBlocks&&container.volumes.size()==1&&
+          source.Size()==container.blockCount*Block,"APFS writes require a writable raw single-volume image");
+    const auto oid=container.volumes.front();
+    const auto map=ReadWritableMap(source,container,container.objectMap);
+    Check(map.mappings.size()==1&&map.mappings.front().oid==oid,
+          "APFS writes require one container volume mapping");
+    const auto volume=ReadObject(source,container,map.mappings.front().block,oid,container.transaction,13);
+    CheckNativeVolume(volume);
 }
 
 CatalogWritePlan PrepareCatalogMutation(
@@ -812,10 +833,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto directoryCount=Le64(volume.data()+192);
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
-    Check(!memcmp(volume.data()+32,"APSB",4)&&!memcmp(volume.data()+272,"HFVExplorer",12)&&
-          (flags==1||flags==8)&&Le64(volume.data()+264)==1&&Le32(volume.data()+116)==2&&
-          !Le64(volume.data()+200)&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
-          "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
+    CheckNativeVolume(volume);
     const Node extentTree(ReadObject(source,current,extents,extents,current.transaction,2,15,true),true,{});
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
     Check(!snapshotTree.Level()&&!snapshotTree.Count(),"APFS catalog writes require an empty snapshot tree");

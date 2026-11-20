@@ -191,13 +191,13 @@ void CheckpointWrites(const std::string& root,FILE* report)
 
     CheckpointFaultImage created(original);
     const auto start=Apfs::Probe(created);
-    Check(Apfs::CreateDirectory(created,*start,2,u"New Folder",controlJob)==2&&reopen(created)==2,
+    Check(Apfs::CreateCatalogDirectory(created,*start,2,u"New Folder",controlJob)==2&&reopen(created)==2,
           "APFS catalog transaction did not publish its checkpoint");
     for(unsigned step=1;step<=created.event;++step){
         CheckpointFaultImage attempt(original);
         attempt.failAt=step;
         attempt.fault=step==created.event||step==created.event-2?Fault::FailedFlush:Fault::TornWrite;
-        Reject([&]{Apfs::CreateDirectory(attempt,*start,2,u"New Folder",controlJob);},
+        Reject([&]{Apfs::CreateCatalogDirectory(attempt,*start,2,u"New Folder",controlJob);},
                "Injected APFS catalog interruption succeeded");
         Check(reopen(attempt)==1,"Interrupted APFS directory creation published a new checkpoint");
         auto memory=std::make_unique<Memory>(attempt.durable.size());
@@ -220,9 +220,9 @@ void CheckpointWrites(const std::string& root,FILE* report)
           "New APFS directory was not found on reopen");
     const auto state=Apfs::Probe(created);
     const auto eventsAfter=created.event;
-    Reject([&]{Apfs::CreateDirectory(created,*start,2,u"Stale",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(created,*start,2,u"Stale",controlJob);},
            "A stale catalog mutation was accepted");
-    Reject([&]{Apfs::CreateDirectory(created,*state,2,u"new folder",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(created,*state,2,u"new folder",controlJob);},
            "A case-insensitive APFS name collision was accepted");
     Check(created.event==eventsAfter,"Rejected APFS catalog write modified the image");
 
@@ -245,7 +245,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
         return names;
     };
     CheckpointFaultImage reused(created.durable);
-    Check(Apfs::CreateDirectory(reused,*state,2,u"Another",controlJob)==3&&reopen(reused)==3,
+    Check(Apfs::CreateCatalogDirectory(reused,*state,2,u"Another",controlJob)==3&&reopen(reused)==3,
           "APFS catalog write could not reuse retired blocks");
     const auto oldMap=first->objectMap*4096;
     Check(!std::equal(original.begin()+oldMap,original.begin()+oldMap+4096,reused.durable.begin()+oldMap),
@@ -254,7 +254,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
         CheckpointFaultImage attempt(created.durable);
         attempt.failAt=step;
         attempt.fault=step==reused.event||step==reused.event-2?Fault::FailedFlush:Fault::TornWrite;
-        Reject([&]{Apfs::CreateDirectory(attempt,*state,2,u"Another",controlJob);},
+        Reject([&]{Apfs::CreateCatalogDirectory(attempt,*state,2,u"Another",controlJob);},
                "Injected APFS reuse interruption succeeded");
         Check(reopen(attempt)==2&&listFolders(attempt)==std::vector<std::u16string>{u"New Folder"},
               "Interrupted APFS block reuse damaged the preceding catalog");
@@ -284,7 +284,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
     Seal(badQueue,spaceman*4096,4096);
     CheckpointFaultImage liveBlockQueued(badQueue);
     Check(reopen(liveBlockQueued)==2,"Corrupt free-queue fixture did not preserve the selected checkpoint");
-    Reject([&]{Apfs::CreateDirectory(liveBlockQueued,*state,2,u"Another",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(liveBlockQueued,*state,2,u"Another",controlJob);},
            "APFS reclamation accepted a retired range overlapping live metadata");
     Check(!liveBlockQueued.event&&liveBlockQueued.durable==badQueue,"APFS reclamation wrote invalid allocation data");
 
@@ -294,7 +294,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
         std::u16string folderName=u"Folder ";
         folderName+=char16_t(u'A'+tx-4);
         const auto checkpoint=Apfs::Probe(reused);
-        Check(checkpoint&&Apfs::CreateDirectory(reused,*checkpoint,2,folderName,controlJob)==tx&&reopen(reused)==tx,
+        Check(checkpoint&&Apfs::CreateCatalogDirectory(reused,*checkpoint,2,folderName,controlJob)==tx&&reopen(reused)==tx,
               "Repeated APFS directory creation exhausted the allocator");
         expected.push_back(folderName);
     }
@@ -308,30 +308,30 @@ void CheckpointWrites(const std::string& root,FILE* report)
     }
     CheckpointFaultImage nested(created.durable);
     for(const uint64_t missing:{1,3,17}){
-        Reject([&]{Apfs::CreateDirectory(nested,*state,missing,u"Child",controlJob);},
+        Reject([&]{Apfs::CreateCatalogDirectory(nested,*state,missing,u"Child",controlJob);},
                "APFS accepted a reserved or missing folder as a destination");
     }
     Check(!nested.event&&nested.durable==created.durable,"Invalid APFS destinations changed the image");
     // The formatter assigns the first user folder inode 16. The browser
     // assigns separate, mount-local IDs for enumeration and lookup.
     constexpr uint64_t firstFolder=16,childFolder=17;
-    Check(Apfs::CreateDirectory(nested,*state,firstFolder,u"New Folder",controlJob)==3,
+    Check(Apfs::CreateCatalogDirectory(nested,*state,firstFolder,u"New Folder",controlJob)==3,
           "APFS nested creation rejected a name used under a different parent");
     for(unsigned step=1;step<=nested.event;++step){
         CheckpointFaultImage attempt(created.durable);
         attempt.failAt=step;
         attempt.fault=step==nested.event||step==nested.event-2?Fault::FailedFlush:Fault::TornWrite;
-        Reject([&]{Apfs::CreateDirectory(attempt,*state,firstFolder,u"New Folder",controlJob);},
+        Reject([&]{Apfs::CreateCatalogDirectory(attempt,*state,firstFolder,u"New Folder",controlJob);},
                "Injected APFS nested directory interruption succeeded");
         Check(reopen(attempt)==2&&listFolders(attempt)==std::vector<std::u16string>{u"New Folder"},
               "Interrupted APFS nested directory creation changed its parent's listing");
     }
     const auto childCheckpoint=Apfs::Probe(nested);
     const auto nestedEvents=nested.event;
-    Reject([&]{Apfs::CreateDirectory(nested,*childCheckpoint,firstFolder,u"new folder",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(nested,*childCheckpoint,firstFolder,u"new folder",controlJob);},
            "APFS accepted a case-insensitive duplicate in a nested folder");
     Check(nested.event==nestedEvents,"A duplicate APFS nested name changed the image");
-    Check(Apfs::CreateDirectory(nested,*childCheckpoint,childFolder,u"Leaf",controlJob)==4,
+    Check(Apfs::CreateCatalogDirectory(nested,*childCheckpoint,childFolder,u"Leaf",controlJob)==4,
           "APFS could not create a third-level directory");
     const auto nestedMounted=openCheckpoint(nested);
     MacBrowser::Entry top,child,leaf;
@@ -366,14 +366,14 @@ void CheckpointWrites(const std::string& root,FILE* report)
     const auto withFile=Apfs::Probe(files);
     const auto fileEvents=files.event;
     constexpr uint64_t emptyFile=19;
-    Reject([&]{Apfs::CreateDirectory(files,*withFile,emptyFile,u"Cannot nest",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(files,*withFile,emptyFile,u"Cannot nest",controlJob);},
            "An APFS regular file was accepted as a parent");
     Reject([&]{Apfs::CreateEmptyFile(files,*withFile,childFolder,u"leaf",controlJob);},
            "An APFS file replaced a directory with the same name");
-    Reject([&]{Apfs::CreateDirectory(files,*withFile,childFolder,u"empty.txt",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(files,*withFile,childFolder,u"empty.txt",controlJob);},
            "An APFS directory replaced a file with the same name");
     Check(files.event==fileEvents,"An invalid APFS file operation changed the image");
-    Check(Apfs::CreateDirectory(files,*withFile,childFolder,u"Sibling",controlJob)==6,
+    Check(Apfs::CreateCatalogDirectory(files,*withFile,childFolder,u"Sibling",controlJob)==6,
           "APFS could not edit a catalog containing an empty file");
     const auto withSibling=Apfs::Probe(files);
     Check(Apfs::CreateEmptyFile(files,*withSibling,2,u"Empty.txt",controlJob)==7,
@@ -421,7 +421,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
            "APFS accepted a fork with no available extent");
     Check(!outOfSpace.event&&outOfSpace.durable==files.durable,"APFS wrote before rejecting an allocation failure");
     const auto afterData=Apfs::Probe(dataFiles);
-    Check(Apfs::CreateDirectory(dataFiles,*afterData,2,u"After Data",controlJob)==9,
+    Check(Apfs::CreateCatalogDirectory(dataFiles,*afterData,2,u"After Data",controlJob)==9,
           "APFS could not edit a catalog containing allocated file data");
     const auto afterFolder=Apfs::Probe(dataFiles);
     constexpr uint64_t secondParent=23;
@@ -540,7 +540,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
               "APFS exposed a partial multi-extent file after interruption");
     }
     const auto fragmentedCheckpoint=Apfs::Probe(fragmented);
-    Check(Apfs::CreateDirectory(fragmented,*fragmentedCheckpoint,2,u"After Fragment",controlJob)==4,
+    Check(Apfs::CreateCatalogDirectory(fragmented,*fragmentedCheckpoint,2,u"After Fragment",controlJob)==4,
           "APFS could not validate an existing multi-extent file before a later commit");
     const auto fragmentedVolume=openCheckpoint(fragmented);
     MacBrowser::Entry split,pinFile;
@@ -560,7 +560,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
     }
     fprintf(report,"PASS: APFS fragmented free-space allocation, cross-extent readback, and later catalog writes.\n");
     CheckpointFaultImage invalidName(original);
-    Reject([&]{Apfs::CreateDirectory(invalidName,*start,2,u"Bad/Name",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(invalidName,*start,2,u"Bad/Name",controlJob);},
            "An illegal APFS directory name was accepted");
     Check(!invalidName.event&&invalidName.durable==original,"Invalid APFS name modified the image");
 
@@ -573,7 +573,7 @@ void CheckpointWrites(const std::string& root,FILE* report)
     // Mark the existing container object map free in a damaged allocation bitmap.
     badBitmap[bitmap*4096+start->objectMap/8]&=uint8_t(~(1u<<(start->objectMap%8)));
     CheckpointFaultImage wrongAllocation(badBitmap);
-    Reject([&]{Apfs::CreateDirectory(wrongAllocation,*start,2,u"Must not exist",controlJob);},
+    Reject([&]{Apfs::CreateCatalogDirectory(wrongAllocation,*start,2,u"Must not exist",controlJob);},
            "The APFS allocator trusted a free bit for a live metadata block");
     Check(!wrongAllocation.event&&wrongAllocation.durable==badBitmap,"Invalid APFS allocation wrote to the image");
     fprintf(report,"PASS: APFS allocation, repeated directory creation, retired block reuse, copy-on-write maps, and interrupted commits.\n");
@@ -710,7 +710,7 @@ void MultiCibWrites(const std::string& root,FILE* report)
         const auto raw=Disk::Read(*image,secondCibStart*blockSize,payload.bytes.size());
         Check(raw==payload.bytes,"APFS payload did not land in the chunk described by the second CIB");
 
-        Check(Apfs::CreateDirectory(*image,*written,2,u"After write",job)==3,
+        Check(Apfs::CreateCatalogDirectory(*image,*written,2,u"After write",job)==3,
               "APFS could not commit after reopening multiple live chunk-info blocks");
         const auto next=Apfs::Probe(*image);
         Check(next.has_value(),"Missing APFS checkpoint after the subsequent commit");
@@ -770,7 +770,7 @@ void SplitCatalogWrites(const std::string& root,FILE* report)
     for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i>>8)+i*11);
     const auto add=[&](Source& target,const Apfs::Container& checkpoint,size_t index,const std::u16string& name){
         if(index%5==0)return Apfs::CreateFile(target,checkpoint,2,name,payload,job);
-        return Apfs::CreateDirectory(target,checkpoint,2,name,job);
+        return Apfs::CreateCatalogDirectory(target,checkpoint,2,name,job);
     };
 
     std::vector<std::u16string> names;
@@ -1112,6 +1112,107 @@ void ReplaceCatalogData(const std::string& root,FILE* report)
     Check(check==payload.bytes&&neighborCheck==neighborData,"APFS refill changed file contents");
     save("checkpoint-refilled-data.img");
     fprintf(report,"PASS: APFS atomic data replacement, truncation and refill, stale and invalid destinations, and interrupted writes.\n");
+}
+
+void WritableNamespace(const std::string& root,FILE* report)
+{
+    auto baseline=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
+    if(const auto shared=_wgetenv(L"HFV_APFS_REPLACE_BASE"))baseline=shared;
+    auto original=OpenImage(baseline.c_str(),false);
+    Reject([&]{Apfs::OpenWritable(original,"apfs-read-only-fixture");},
+           "APFS enabled catalog edits through a read-only handle");
+    const auto bytes=Disk::Read(*original,0,size_t(original->Size()));
+    if(const auto reference=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
+        auto macOS=OpenImage(reference,false);
+        std::unique_ptr<Source> writable=std::make_unique<CheckpointFaultImage>(
+            Disk::Read(*macOS,0,size_t(macOS->Size())));
+        Reject([&]{Apfs::OpenWritable(writable,"apfs-independent-fixture");},
+               "APFS allowed writes on an independently formatted volume");
+    }
+
+    const auto path=VolumeCoord::Wide(root+"checkpoint-writable-namespace.img");
+    {
+        auto copy=CreateFormatOutput(path.c_str(),bytes.size());
+        copy->Write(0,bytes.data(),bytes.size());
+        copy->Flush();
+        copy->Keep();
+    }
+    {
+        auto source=OpenImage(path.c_str(),true);
+        const auto key=VolumeCoord::ImageKey(path);
+        auto mounted=Apfs::OpenWritable(source,key);
+        Check(mounted&&mounted->Writable()&&!source,"An exclusive native APFS image did not mount writable");
+        Reject([&]{OpenImage(path.c_str(),true);},"A second writer opened the mounted APFS image");
+        const auto caps=mounted->Supports();
+        Check(caps.writable&&caps.rename&&caps.remove&&caps.createFolders&&!caps.create&&
+              !caps.CanEditAttributes()&&MacBrowser::ExecutionFor(*mounted).processLocal,
+              "APFS advertised unsupported write or worker operations");
+
+        MacBrowser::Entry target,folder,child,found;
+        Check(mounted->FindChild(2,u"renamed file",target)&&mounted->FindChild(2,u"Renamed Folder",folder)&&
+              mounted->FindChild(folder.id,u"Child",child),"APFS writable fixture did not list its existing entries");
+        Bytes old(size_t(target.forks[0].size)),actual(old.size());
+        mounted->Read(target.id,0,0,old.data(),old.size());
+        {
+            VolumeCoord::OperationLease lease({{key,VolumeCoord::Mode::Write}});
+            mounted->Rename(target.id,2,u"Adapter file");
+            const auto renamed=mounted->Stat(target.id);
+            Check(renamed.name==u"Adapter file"&&renamed.identity==target.identity,
+                  "APFS rename invalidated an existing browser row ID");
+            const auto newFolder=mounted->MakeDirectory(2,u"Adapter folder");
+            Check(mounted->Stat(newFolder).name==u"Adapter folder"&&mounted->List(newFolder).empty(),
+                  "An APFS folder was unavailable after it was created");
+            const auto nested=mounted->MakeDirectory(newFolder,u"Nested");
+            Reject([&]{mounted->Remove(newFolder);},"The APFS adapter removed a populated folder");
+            mounted->Remove(nested);
+            mounted->Remove(newFolder);
+            Reject([&]{mounted->Stat(nested);},"APFS retained a deleted row ID");
+            const auto newId=mounted->MakeDirectory(2,u"Public folder");
+            Check(newId!=newFolder&&newId!=nested,"APFS recycled a deleted browser row ID");
+        }
+        mounted->Read(target.id,0,0,actual.data(),actual.size());
+        Check(actual==old&&mounted->FindChild(folder.id,u"Child",found)&&found.id==child.id&&
+              mounted->Stat(folder.id).identity==folder.identity,
+              "APFS refresh changed file bytes or invalidated an unrelated folder's selection");
+    }
+    {
+        const auto reopened=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry entry;
+        Check(reopened&&!reopened->Writable()&&reopened->FindChild(2,u"Adapter file",entry)&&
+              reopened->FindChild(2,u"Public folder",entry)&&!reopened->FindChild(2,u"Adapter folder",entry),
+              "The ordinary read-only browser did not reopen the committed APFS namespace");
+    }
+
+    const auto faultMount=[&](CheckpointFaultImage*& raw){
+        auto fault=std::make_unique<CheckpointFaultImage>(bytes);
+        raw=fault.get();
+        std::unique_ptr<Source> source=std::move(fault);
+        return Apfs::OpenWritable(source,"apfs-adapter-fault-fixture");
+    };
+    unsigned finalFlush=0;
+    {
+        CheckpointFaultImage* raw=nullptr;
+        const auto control=faultMount(raw);
+        control->MakeDirectory(2,u"Uncertain");
+        finalFlush=raw->event;
+    }
+    {
+        CheckpointFaultImage* raw=nullptr;
+        const auto interrupted=faultMount(raw);
+        raw->failAt=finalFlush;
+        raw->fault=CheckpointFaultImage::Fault::FailedFlush;
+        bool uncertain=false;
+        try{interrupted->MakeDirectory(2,u"Uncertain");}
+        catch(const Apfs::CheckpointPublicationUncertain&){uncertain=true;}
+        Check(uncertain,"The APFS volume adapter hid an uncertain checkpoint");
+        Reject([&]{interrupted->List();},"The APFS mount kept using a potentially buffered checkpoint");
+        Reject([&]{interrupted->MakeDirectory(2,u"Another");},"An uncertain APFS mount accepted another write");
+        std::unique_ptr<Source> durable=std::make_unique<CheckpointFaultImage>(raw->durable);
+        const auto recovered=Apfs::OpenWritable(durable,"apfs-adapter-recovered");
+        MacBrowser::Entry entry;
+        Check(recovered&&!recovered->FindChild(2,u"Uncertain",entry),"APFS reopen left an unpublished folder visible");
+    }
+    fprintf(report,"PASS: APFS writable shared-volume adapter, exclusive images, stable row IDs, namespace edits, and uncertain flush recovery.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)
@@ -1470,6 +1571,7 @@ int RunApfsContainerTest(const char* directory)
         RenameCatalogWrites(root,report);
         DeleteCatalogWrites(root,report);
         ReplaceCatalogData(root,report);
+        WritableNamespace(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
