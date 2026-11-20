@@ -963,6 +963,8 @@ void DeleteCatalogWrites(const std::string& root,FILE* report)
     for(size_t i=0;i<replacement.bytes.size();++i)replacement.bytes[i]=uint8_t(contents[i]^0x53);
     Reject([&]{Apfs::CreateFile(disk,*withChild,rootId,u"Replacement",replacement,job);},
            "APFS delete test did not exhaust free space before deletion");
+    Reject([&]{Apfs::ReplaceFileData(disk,*withChild,rootId,fileInode,replacement,job);},
+           "APFS data replacement reused live extents when the image was nearly full");
     Check(disk.event==untouched,"Rejected APFS allocation wrote to the image");
 
     const auto original=disk.durable;
@@ -1006,6 +1008,110 @@ void DeleteCatalogWrites(const std::string& root,FILE* report)
     Check(data==replacement.bytes&&pinData==pinContents,"APFS extent reuse changed live file data");
     save("checkpoint-reused-file-extents.img");
     fprintf(report,"PASS: APFS file and empty-folder deletion, interrupted deletes, and deferred reuse of fragmented extents.\n");
+}
+
+void ReplaceCatalogData(const std::string& root,FILE* report)
+{
+    auto input=VolumeCoord::Wide(root+"checkpoint-renamed-catalog.img");
+    if(const auto shared=_wgetenv(L"HFV_APFS_REPLACE_BASE"))input=shared;
+    auto image=OpenImage(input.c_str(),false);
+    CheckpointFaultImage disk(Disk::Read(*image,0,size_t(image->Size())));
+    const auto open=[](const CheckpointFaultImage& candidate){
+        auto memory=std::make_unique<Memory>(candidate.durable.size());
+        memory->bytes=candidate.durable;
+        std::unique_ptr<Source> source=std::move(memory);
+        auto mounted=Apfs::Open(source,"apfs-replace-data");
+        Check(bool(mounted),"Could not reopen the APFS replacement fixture");
+        return mounted;
+    };
+    const auto save=[&](const std::string& filename){
+        const auto output=VolumeCoord::Wide(root+filename);
+        auto result=CreateFormatOutput(output.c_str(),disk.durable.size());
+        result->Write(0,disk.durable.data(),disk.durable.size());
+        result->Keep();
+    };
+    constexpr uint64_t rootId=2,fileInode=16,folderInode=17;
+    const auto before=open(disk);
+    MacBrowser::Entry original,neighbor;
+    const auto neighborName=SplitFixtureName(5);
+    Check(before->FindChild(2,u"renamed file",original)&&before->FindChild(2,neighborName,neighbor),
+          "APFS replacement fixture is missing its files");
+    Bytes oldData(size_t(original.forks[0].size)),neighborData(size_t(neighbor.forks[0].size));
+    before->Read(original.id,0,0,oldData.data(),oldData.size());
+    before->Read(neighbor.id,0,0,neighborData.data(),neighborData.size());
+
+    Memory payload(3*4096-41);
+    for(size_t i=0;i<payload.bytes.size();++i)payload.bytes[i]=uint8_t((i>>7)+i*17);
+    const auto start=Apfs::Probe(disk);
+    Check(start.has_value(),"No APFS replacement checkpoint");
+    Storage::Job job;
+    Reject([&]{Apfs::ReplaceFileData(disk,*start,rootId,folderInode,payload,job);},
+           "APFS allowed replacing the data fork of a folder");
+    Reject([&]{Apfs::ReplaceFileData(disk,*start,folderInode,fileInode,payload,job);},
+           "APFS allowed replacing a file with the wrong parent");
+    Check(!disk.event,"Rejected APFS replacement wrote to the image");
+    const auto base=disk.durable;
+    Check(Apfs::ReplaceFileData(disk,*start,rootId,fileInode,payload,job)==start->transaction+1,
+          "APFS did not commit replacement file data");
+    const auto events=disk.event;
+    for(unsigned step=1;step<=events;++step){
+        CheckpointFaultImage interrupted(base);
+        interrupted.failAt=step;
+        interrupted.fault=step==events||step==events-2?
+            CheckpointFaultImage::Fault::FailedFlush:CheckpointFaultImage::Fault::TornWrite;
+        Reject([&]{Apfs::ReplaceFileData(interrupted,*start,rootId,fileInode,payload,job);},
+               "Injected APFS replacement interruption succeeded");
+        const auto previous=open(interrupted);
+        MacBrowser::Entry entry;
+        Check(previous->FindChild(2,u"renamed file",entry)&&entry.forks[0].size==oldData.size(),
+              "Interrupted APFS replacement changed the original file size");
+        Bytes data(oldData.size());
+        previous->Read(entry.id,0,0,data.data(),data.size());
+        Check(data==oldData,"Interrupted APFS replacement overwrote existing data");
+    }
+    {
+        CheckpointFaultImage cancelled(base);
+        Storage::Job cancelledJob;
+        cancelled.onFlush=[&]{cancelledJob.cancel();};
+        bool stopped=false;
+        try{Apfs::ReplaceFileData(cancelled,*start,rootId,fileInode,payload,cancelledJob);}
+        catch(const Storage::Cancelled&){stopped=true;}
+        const auto previous=open(cancelled);
+        MacBrowser::Entry entry;
+        Check(stopped&&previous->FindChild(2,u"renamed file",entry)&&entry.forks[0].size==oldData.size(),
+              "Cancelled APFS replacement published the new fork");
+    }
+    const auto changed=open(disk);
+    MacBrowser::Entry entry;
+    Check(changed->FindChild(2,u"renamed file",entry)&&entry.name==original.name&&entry.created==original.created&&
+          entry.linkCount==original.linkCount&&entry.forks[0].size==payload.Size(),
+          "APFS replacement changed the file identity metadata");
+    Bytes check(payload.bytes.size());
+    changed->Read(entry.id,0,0,check.data(),check.size());
+    Check(check==payload.bytes,"APFS replacement lost new file data");
+    save("checkpoint-replaced-data.img");
+
+    Reject([&]{Apfs::ReplaceFileData(disk,*start,rootId,fileInode,payload,job);},
+           "APFS data replacement accepted a stale checkpoint");
+    const auto afterWrite=Apfs::Probe(disk);
+    Memory empty(0);
+    Check(afterWrite&&Apfs::ReplaceFileData(disk,*afterWrite,rootId,fileInode,empty,job)==afterWrite->transaction+1,
+          "APFS could not truncate a data fork to zero length");
+    const auto truncated=open(disk);
+    Check(truncated->FindChild(2,u"renamed file",entry)&&!entry.forks[0].size&&entry.created==original.created,
+          "APFS truncate did not preserve the file");
+    const auto afterTruncate=Apfs::Probe(disk);
+    Check(afterTruncate&&Apfs::ReplaceFileData(disk,*afterTruncate,rootId,fileInode,payload,job)==afterTruncate->transaction+1,
+          "APFS could not put data into the same inode after truncation");
+    const auto reopened=open(disk);
+    Check(reopened->List().size()==before->List().size()&&reopened->FindChild(2,u"renamed file",entry)&&
+          reopened->FindChild(2,neighborName,neighbor),"APFS refill changed the directory listing");
+    Bytes neighborCheck(neighborData.size());
+    reopened->Read(entry.id,0,0,check.data(),check.size());
+    reopened->Read(neighbor.id,0,0,neighborCheck.data(),neighborCheck.size());
+    Check(check==payload.bytes&&neighborCheck==neighborData,"APFS refill changed file contents");
+    save("checkpoint-refilled-data.img");
+    fprintf(report,"PASS: APFS atomic data replacement, truncation and refill, stale and invalid destinations, and interrupted writes.\n");
 }
 
 Memory Raw(unsigned blockSize=4096)
@@ -1363,6 +1469,7 @@ int RunApfsContainerTest(const char* directory)
         SplitCatalogWrites(root,report);
         RenameCatalogWrites(root,report);
         DeleteCatalogWrites(root,report);
+        ReplaceCatalogData(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

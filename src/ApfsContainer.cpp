@@ -288,7 +288,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
     };
     source.CheckMedia();
     if(changes.dataSize){
-        auto& data=*std::get<CatalogCreate>(*mutation).data;
+        auto& data=*changes.input;
         data.CheckMedia();
         Bytes buffer(plan.blockSize);
         uint64_t offset=0;
@@ -368,6 +368,14 @@ uint64_t RenameEntry(Source& source,const Container& expected,uint64_t parent,ui
 uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job& job)
 {
     const CatalogMutation request=CatalogDelete{parent,inode};
+    return Commit(source,expected,job,&request);
+}
+
+uint64_t ReplaceFileData(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
+                         Source& data,Storage::Job& job)
+{
+    Check(&source!=&data,"APFS file data requires a separate source");
+    const CatalogMutation request=CatalogReplaceData{parent,inode,data};
     return Commit(source,expected,job,&request);
 }
 }

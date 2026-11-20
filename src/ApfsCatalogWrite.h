@@ -23,7 +23,11 @@ struct CatalogRename {
 struct CatalogDelete {
     uint64_t parent,inode;
 };
-using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete>;
+struct CatalogReplaceData {
+    uint64_t parent,inode;
+    HfsPlus::Source& data;
+};
+using CatalogMutation=std::variant<CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData>;
 
 struct DataRun {
     uint64_t block,count;
@@ -31,6 +35,7 @@ struct DataRun {
 struct CatalogWritePlan {
     std::vector<CheckpointBlockWrite> metadata;
     std::vector<DataRun> dataRuns;
+    HfsPlus::Source* input=nullptr;
     uint64_t dataSize=0;
 };
 CatalogWritePlan PrepareCatalogMutation(

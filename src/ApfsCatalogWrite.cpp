@@ -3,9 +3,11 @@
 #include "ApfsTree.h"
 #include "ApfsWriteDisk.h"
 #include <windows.h>
+#include <iterator>
 #include <map>
 #include <set>
 #include <tuple>
+#include <type_traits>
 
 namespace Apfs {
 namespace {
@@ -526,8 +528,9 @@ void ValidateExtentReferences(const Node& tree,std::vector<FileRun>& files)
 }
 
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
-    uint64_t id,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t dataSize,uint64_t blockCount,
-    std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind)
+    uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,
+    uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
+    size_t& streamAt)
 {
     Check(directoryCount<=records.size()&&fileCount<=records.size(),"Invalid APFS catalog entry counts");
     const auto at=[&](size_t i){
@@ -538,13 +541,13 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* remove=std::get_if<CatalogDelete>(&request);
-    const auto entryId=remove?remove->inode:rename?rename->inode:id;
+    const bool replace=std::holds_alternative<CatalogReplaceData>(request);
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
     using Key=std::tuple<uint64_t,uint64_t,uint32_t>;
     OwnedRecord added;
     std::optional<Key> addedKey;
-    if(!remove){
+    if(create||rename){
         added=WriterDisk::DirectoryEntry(name,entryId,time,parent,fold,
                                          uint16_t(create?create->kind:CatalogKind::Directory));
         addedKey=Key{parent,9,Le32(added.key.data()+8)>>10};
@@ -594,7 +597,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 hash=nameKey>>10;
                 Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash,"Invalid APFS directory name hash");
                 const auto child=Le64(view.value.data);
-                Check(child>=16&&child>inode&&child<id&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
+                Check(child>=16&&child>inode&&child<nextId&&links.emplace(child,Link{inode,kind,std::move(childName),i}).second,
                       "Invalid or duplicate APFS directory entry ID");
                 renamingThisEntry=rename&&rename->inode==child&&parent==inode;
                 ++folder->second.children;
@@ -671,17 +674,21 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
-    Set(parentInode,24,time,8);
-    Set(parentInode,32,time,8);
+    if(!replace){
+        Set(parentInode,24,time,8);
+        Set(parentInode,32,time,8);
+    }
     if(create){
         const bool isDirectory=create->kind==CatalogKind::Directory;
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
-        records.push_back(WriterDisk::Inode(name,id,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+        streamAt=records.size();
     }else{
         const auto found=links.find(entryId);
         Check(found!=links.end()&&found->second.parent==parent,"The APFS entry is no longer in the selected folder");
         const auto& link=found->second;
+        Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
@@ -700,10 +707,17 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             records.erase(records.begin()+link.entryRecord);
             return records;
         }
-        auto updated=WriterDisk::Inode(name,entryId,0,parent,mode,count,link.dataSize);
+        auto updated=WriterDisk::Inode(replace?link.name:name,entryId,0,parent,mode,count,replace?dataSize:link.dataSize);
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
         Set(updated.value,32,time,8);
+        if(replace)Set(updated.value,24,time,8);
         inode=std::move(updated.value);
+        if(replace){
+            streamAt=link.inodeRecord+1;
+            const auto first=records.begin()+streamAt;
+            records.erase(first,first+link.streamRecords);
+            return records;
+        }
 
         added.value=std::move(records[link.entryRecord].value);
         records.erase(records.begin()+link.entryRecord);
@@ -781,8 +795,10 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto ascii=create?CatalogName(create->name):rename?CatalogName(rename->name):std::string{};
+    const auto* replace=std::get_if<CatalogReplaceData>(&request);
     CatalogWritePlan plan;
-    plan.dataSize=create&&create->data?create->data->Size():0;
+    plan.input=replace?&replace->data:create?create->data:nullptr;
+    plan.dataSize=plan.input?plan.input->Size():0;
     const auto dataBlocks=DivideUp(plan.dataSize,Block);
     Check(dataBlocks<=current.blockCount,"APFS file exceeds the container size");
     const auto oid=current.volumes.front();
@@ -812,15 +828,20 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
     std::vector<FileRun> files;
     std::optional<CatalogKind> removedKind;
-    auto catalog=EditCatalog(std::move(existing.records),request,ascii,nextId,time,flags==1,
-                            directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind);
+    size_t streamAt=0;
+    const auto entryId=std::visit([nextId](const auto& edit){
+        if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogCreate>)return nextId;
+        else return edit.inode;
+    },request);
+    auto catalog=EditCatalog(std::move(existing.records),request,ascii,nextId,entryId,time,flags==1,
+                            directoryCount,fileCount,plan.dataSize,current.blockCount,files,removedKind,streamAt);
     ValidateExtentReferences(extentTree,files);
-    const auto* remove=std::get_if<CatalogDelete>(&request);
+    const bool retireOldData=replace||removedKind.has_value();
     std::vector<DataRun> retiredData;
     uint64_t removedBlocks=0;
-    if(remove){
+    if(retireOldData){
         for(const auto& run:files){
-            if(run.owner!=remove->inode)continue;
+            if(run.owner!=entryId)continue;
             retiredData.push_back({run.block,run.count});
             removedBlocks+=run.count;
         }
@@ -838,23 +859,26 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
         retired,extents,snapshots,files,std::move(retiredData),dataBlocks,plan.dataRuns,transaction,[&]{
             if(dataBlocks){
-                catalog.push_back(StreamReference(nextId));
+                std::vector<OwnedRecord> stream;
+                stream.push_back(StreamReference(entryId));
                 uint64_t logical=0;
                 for(const auto& data:plan.dataRuns){
-                    const FileRun run{nextId,data.block,data.count};
-                    catalog.push_back(FileExtent(run,logical));
+                    const FileRun run{entryId,data.block,data.count};
+                    stream.push_back(FileExtent(run,logical));
                     logical+=data.count;
                 }
+                catalog.insert(catalog.begin()+streamAt,std::make_move_iterator(stream.begin()),
+                               std::make_move_iterator(stream.end()));
             }
             leaves=PartitionCatalog(std::move(catalog));
             children=leaves.size()>1?leaves.size():0;
             return firstChild+children;
         });
     if(changeExtents){
-        if(remove)files.erase(std::remove_if(files.begin(),files.end(),[&](const auto& run){
-            return run.owner==remove->inode;
+        if(retireOldData)files.erase(std::remove_if(files.begin(),files.end(),[&](const auto& run){
+            return run.owner==entryId;
         }),files.end());
-        for(const auto& data:plan.dataRuns)files.push_back({nextId,data.block,data.count});
+        for(const auto& data:plan.dataRuns)files.push_back({entryId,data.block,data.count});
         std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.block<b.block;});
         std::vector<OwnedRecord> references;
         for(const auto& file:files)references.push_back(ExtentReference(file));

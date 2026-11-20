@@ -36,4 +36,7 @@ uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,
                      const std::u16string& name,Storage::Job&);
 // Delete a regular file or an empty folder. File blocks become reusable after publication.
 uint64_t DeleteEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,Storage::Job&);
+// Replace a regular file's data fork in one checkpoint, preserving its inode.
+uint64_t ReplaceFileData(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
+                         HfsPlus::Source& data,Storage::Job&);
 }
