@@ -313,9 +313,11 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
     const auto changed=access.back().key;
     access.push_back({inputKey,VolumeCoord::Mode::Read});
     return CommandStorage::Guard(std::move(access),[&](Storage::Job& current){
-        auto input=HfsPlus::OpenImage(source.c_str(),false);
-        const bool encrypted=Unlock(input,password);
-        const bool sparse=SparseDisk::Unwrap(input);
+        auto input=SparseDisk::OpenBundle(source);
+        const bool bundle=bool(input);
+        if(!bundle)input=HfsPlus::OpenImage(source.c_str(),false);
+        const bool encrypted=!bundle&&Unlock(input,password);
+        const bool sparse=bundle||SparseDisk::Unwrap(input);
         const bool dmg=!sparse&&Unwrap(input);
         const bool ndif=!sparse&&!dmg&&!encrypted&&Ndif::Unwrap(input,&current);
         Check(format!=Output::RawImage||sparse||dmg||encrypted||ndif,

@@ -68,6 +68,8 @@ extern "C" {
 
 #include <direct.h>
 #include <dbt.h>
+#include <atlbase.h>
+#include <shobjidl.h>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -86,6 +88,7 @@ IMPLEMENT_DYNCREATE(CMainFrame, CFrameWnd)
 
 BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_COMMAND(ID_FILE_OPEN, OnFileOpenImage)
+ ON_COMMAND(ID_FILE_OPEN_SPARSE_BUNDLE, OnFileOpenSparseBundle)
  ON_COMMAND_RANGE(ID_FILE_MRU_FILE1, ID_FILE_MRU_FILE16, OnOpenRecentImage)
  ON_UPDATE_COMMAND_UI(ID_FILE_EJECT, OnUpdatePhysicalMedia)
  ON_UPDATE_COMMAND_UI(ID_FILE_RELOAD, OnUpdatePhysicalMedia)
@@ -662,6 +665,22 @@ void CMainFrame::OnFileOpenImage()
     "Disk images|*.dsk;*.hf*;*.img;*.image;*.mfs;*.dc42;*.iso;*.udf;*.dmg;*.sparseimage;*.cue;*.bin;*.smi;*.hqx;*.as|All Files|*.*||",session.Owner());
  if(dialog.DoModal()==IDOK)session.Document()->OnOpenDocument(dialog.GetPathName());
 }
+void CMainFrame::OnFileOpenSparseBundle()
+{
+    if(StorageUi::busy()||StorageUi::state().sessionOpen)return;
+    CComPtr<IFileOpenDialog> picker;
+    DWORD flags=0;
+    if(FAILED(picker.CoCreateInstance(CLSID_FileOpenDialog))||
+       FAILED(picker->GetOptions(&flags))||
+       FAILED(picker->SetOptions(flags|FOS_PICKFOLDERS|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST))||
+       FAILED(picker->SetTitle(L"Select a .sparsebundle folder"))||
+       FAILED(picker->Show(m_hWnd)))return;
+    CComPtr<IShellItem> selected;
+    CComHeapPtr<wchar_t> path;
+    if(SUCCEEDED(picker->GetResult(&selected))&&SUCCEEDED(selected->GetDisplayName(SIGDN_FILESYSPATH,&path)))
+        GetBrowserSession().MacBrowser().OpenImage(std::wstring(path));
+}
+
 void CMainFrame::OnOpenRecentImage(UINT command)
 {
  static_cast<CHFVExplorerApp*>(AfxGetApp())->OpenRecentImage(command,GetBrowserSession());
@@ -852,7 +871,8 @@ void CMainFrame::OnDropFiles(HDROP drop)
            !_wcsicmp(extension.c_str(),L".mfs")||!_wcsicmp(extension.c_str(),L".dc42")||
            !_wcsicmp(extension.c_str(),L".iso")||!_wcsicmp(extension.c_str(),L".udf")||
            !_wcsicmp(extension.c_str(),L".dmg")||!_wcsicmp(extension.c_str(),L".cue")||
-           !_wcsicmp(extension.c_str(),L".bin"))
+           !_wcsicmp(extension.c_str(),L".bin")||!_wcsicmp(extension.c_str(),L".sparseimage")||
+           !_wcsicmp(extension.c_str(),L".sparsebundle"))
             images.push_back(std::move(path));
     }
     DragFinish(drop);

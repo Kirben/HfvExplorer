@@ -3,8 +3,7 @@
 #include "DmgImage.h"
 #include "HfsPlusDisk.h"
 #include "VolumeCoordinator.h"
-#include <atlbase.h>
-#include <xmllite.h>
+#include "AppleImagePlist.h"
 #include <wincrypt.h>
 #include <mutex>
 #include <optional>
@@ -20,7 +19,6 @@ extern "C" {
 #include "compression/xz/xz.h"
 #include "compression/lzfse/lzfse_internal.h"
 }
-#pragma comment(lib,"xmllite.lib")
 #pragma comment(lib,"crypt32.lib")
 
 namespace Dmg {
@@ -52,28 +50,7 @@ Bytes Base64(const std::wstring& text)
 
 template<class Add> void ReadPlist(Bytes xml,Add add)
 {
-    // Apple plists commonly name an external DTD. Strip that declaration
-    // from the prolog and keep DTD processing disabled.
-    constexpr std::string_view prefix="<!DOCTYPE plist";
-    const std::string_view text(reinterpret_cast<const char*>(xml.data()),xml.size());
-    const auto doctype=text.find(prefix);
-    const auto root=text.find("<plist");
-    if(doctype!=text.npos&&root!=text.npos&&doctype<root){
-        const auto end=text.find('>',doctype);
-        Check(end<root&&text.substr(doctype,end-doctype).find('[')==text.npos,
-              "DMG plist contains an unsupported DOCTYPE");
-        xml.erase(xml.begin()+doctype,xml.begin()+end+1);
-    }
-    CComPtr<IStream> stream;
-    Check(SUCCEEDED(CreateStreamOnHGlobal(nullptr,TRUE,&stream)),"Cannot allocate DMG plist stream");
-    ULONG done=0;
-    LARGE_INTEGER zero{};
-    Check(SUCCEEDED(stream->Write(xml.data(),ULONG(xml.size()),&done))&&done==xml.size()&&
-          SUCCEEDED(stream->Seek(zero,STREAM_SEEK_SET,nullptr)),"Cannot load DMG plist stream");
-    CComPtr<IXmlReader> reader;
-    Check(SUCCEEDED(CreateXmlReader(__uuidof(IXmlReader),reinterpret_cast<void**>(&reader),nullptr))&&
-          SUCCEEDED(reader->SetProperty(XmlReaderProperty_DtdProcessing,DtdProcessing_Prohibit))&&
-          SUCCEEDED(reader->SetInput(stream)),"Cannot initialize DMG plist reader");
+    auto reader=AppleImagePlist::Open(xml);
 
     enum Role {Other,Plist,Root,Resource,BlockArray,Block,Key,Data};
     struct Node {Role role;std::wstring key,text;};

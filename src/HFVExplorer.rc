@@ -113,6 +113,7 @@ BEGIN
         MENUITEM "Format Mac image...", ID_FILE_NEWHFSPLUS
         MENUITEM "Convert disk image...", ID_FILE_CONVERT_DMG
         MENUITEM "&Open volume...\tCtrl+O",     ID_FILE_OPEN
+        MENUITEM "Open sparse bundle...", ID_FILE_OPEN_SPARSE_BUNDLE
         MENUITEM "Check for Mac removable disks", ID_FILE_SCAN_REMOVABLE
         MENUITEM "Import file...", ID_FILE_MAC_IMPORT
         MENUITEM "Replace resource fork...", ID_FILE_MAC_IMPORT_RESOURCE

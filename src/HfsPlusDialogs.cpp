@@ -7,6 +7,7 @@
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
 #include "DmgImage.h"
+#include "SparseDisk.h"
 #include "DmgEncryption.h"
 #include "StorageLocation.h"
 #include <optional>
@@ -425,8 +426,9 @@ void ConvertDmgImage(BrowserSession& session)
     auto parent=session.Owner();
     std::wstring source,destination;
     if(!FileDialog(parent->m_hWnd,source,false,
-        L"Disk images\0*.dmg;*.img;*.dsk;*.hfv;*.hfs;*.iso;*.sparseimage;*.smi;*.bin;*.hqx;*.as\0All files\0*.*\0\0",nullptr,
+        L"Disk images\0*.dmg;*.img;*.dsk;*.hfv;*.hfs;*.iso;*.sparseimage;*.smi;*.bin;*.hqx;*.as\0Sparse bundle metadata (Info.plist)\0Info.plist\0All files\0*.*\0\0",nullptr,
         L"Choose a disk image to convert"))return;
+    source=SparseDisk::BundleFromPlist(source);
     DWORD type=1;
     if(!FileDialog(parent->m_hWnd,destination,true,
         L"Compressed DMG\0*.dmg\0Raw disk image\0*.img\0NDIF (compressed, MacBinary)\0*.bin\0NDIF (uncompressed, MacBinary)\0*.bin\0NDIF (read/write, MacBinary)\0*.bin\0\0",nullptr,

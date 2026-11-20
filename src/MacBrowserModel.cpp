@@ -442,8 +442,15 @@ static std::shared_ptr<Volume> OpenTrackImages(
 }
 
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr) {
-    DWORD attributes=GetFileAttributesW(path.c_str());if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY))return {};
+    const DWORD attributes=GetFileAttributesW(path.c_str());
+    const bool directory=attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY);
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
+    if(directory){
+        if(!externalJournal.empty())return {};
+        auto bundle=SparseDisk::OpenBundle(path);
+        if(!bundle)return {};
+        return OpenReadOnlyImage(std::move(bundle),key,{},"The sparse bundle contains no supported filesystem");
+    }
     auto source = HfsPlus::OpenImage(path.c_str(),false,externalJournal.empty()?nullptr:externalJournal.c_str());
     const bool encrypted=Dmg::Unlock(source,password);
     if(SparseDisk::Unwrap(source))

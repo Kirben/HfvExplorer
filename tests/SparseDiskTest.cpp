@@ -5,6 +5,8 @@
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
 #include "MacBrowserModel.h"
+#include "FileOperations.h"
+#include "CopyProcess.h"
 #include "StorageWorker.h"
 #include "VolumeCoordinator.h"
 #include <bcrypt.h>
@@ -171,6 +173,145 @@ void SparseImageCases(const std::wstring& root,FILE* report)
         fprintf(report,"PASS: original hdiutil sparse image matches the published raw SHA-256.\n");
     }
 }
+
+void Mkdir(const std::wstring& path)
+{
+    Check(CreateDirectoryW(path.c_str(),nullptr)!=FALSE,"Cannot create sparse bundle fixture directory");
+}
+
+void Plist(const std::wstring& bundle,uint64_t size,uint64_t band,const std::string& extra={})
+{
+    const auto xml=std::string(R"(<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+<key>diskimage-bundle-type</key><string>com.apple.diskimage.sparsebundle</string>
+<key>bundle-backingstore-version</key><integer>1</integer>
+<key>band-size</key><integer>)")+std::to_string(band)+"</integer>\n<key>size</key><integer>"+
+                   std::to_string(size)+"</integer>"+extra+"</dict></plist>";
+    Create(bundle+L"\\Info.plist",Bytes(xml.begin(),xml.end()));
+}
+
+std::wstring BundleFixture(const std::wstring& path,uint64_t size,uint64_t band,const std::string& extra={})
+{
+    Mkdir(path);
+    Mkdir(path+L"\\bands");
+    Plist(path,size,band,extra);
+    return path;
+}
+
+void SparseBundleCases(const std::wstring& root,FILE* report)
+{
+    const auto basic=BundleFixture(root+L"holes.sparsebundle",11*1024+512,1024);
+    auto path=basic+L"\\bands\\0";
+    Create(path,Bytes(512,'A'));
+    Create(basic+L"\\bands\\a",Bytes(1024,'B'));
+    Create(basic+L"\\bands\\b",Bytes(512,'C'));
+    Create(basic+L"\\bands\\c",Bytes(512,'X')); // Beyond the logical disk.
+    auto disk=SparseDisk::OpenBundle(basic+L"\\");
+    Check(disk&&!disk->Writable()&&SparseDisk::BundleFromPlist(basic+L"\\Info.plist")==basic,
+          "Sparse bundle did not open read-only");
+    Check(disk->Size()==11*1024+512,"Sparse bundle logical length changed");
+    Bytes expected(size_t(disk->Size()),0);
+    std::fill_n(expected.data(),512,'A');
+    std::fill_n(expected.data()+10*1024,1024,'B');
+    std::fill_n(expected.data()+11*1024,512,'C');
+    Check(Disk::Read(*disk,0,expected.size())==expected,"Sparse bundle stored or zero-filled ranges differ");
+    Reject([&]{disk->Write(0,expected.data(),1);},"Sparse bundle accepted a write");
+    Reject([&]{Disk::Read(*disk,disk->Size()-1,2);},"Sparse bundle accepted a read past its end");
+    {
+        auto change=HfsPlus::OpenImage(path.c_str(),true);
+        const char byte='x';
+        change->Write(0,&byte,1);
+        change->Flush();
+    }
+    const auto attrs=GetFileAttributesW(path.c_str());
+    Check(attrs!=INVALID_FILE_ATTRIBUTES,"Cannot inspect changed sparse band fixture");
+    const auto file=CreateFileW(path.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ,nullptr,
+                               OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    Check(file!=INVALID_HANDLE_VALUE,"Cannot change fixture timestamp");
+    FILETIME modified{0x30554000,0x01d70001};
+    const bool changed=SetFileTime(file,nullptr,nullptr,&modified)!=FALSE;
+    CloseHandle(file);
+    Check(changed,"Cannot set fixture timestamp");
+    Reject([&]{Disk::Read(*disk,0,1);},"Sparse bundle accepted a changed band");
+
+    const auto huge=BundleFixture(root+L"large.sparsebundle",(1ULL<<44)+512,1<<20);
+    Create(huge+L"\\bands\\1000000",Bytes(512,'Z'));
+    auto hugeDisk=SparseDisk::OpenBundle(huge);
+    const auto last=Disk::Read(*hugeDisk,hugeDisk->Size()-513,513);
+    Check(last.front()==0&&std::all_of(last.begin()+1,last.end(),[](auto b){return b=='Z';}),
+          "Sparse bundle lost a high logical band number");
+
+    const auto duplicate=BundleFixture(root+L"duplicate.sparsebundle",4096,1024,"<key>size</key><integer>2048</integer>");
+    Reject([&]{SparseDisk::OpenBundle(duplicate);},"Sparse bundle accepted duplicate geometry fields");
+    const auto unsafe=BundleFixture(root+L"unsafe.sparsebundle",4096,1024);
+    Mkdir(unsafe+L"\\bands\\0");
+    Reject([&]{SparseDisk::OpenBundle(unsafe);},"Sparse bundle accepted a directory as band data");
+    const auto encrypted=BundleFixture(root+L"encrypted.sparsebundle",4096,1024);
+    Create(encrypted+L"\\token",Bytes{'e','n','c','r','c','d','s','a'});
+    Reject([&]{SparseDisk::OpenBundle(encrypted);},"Sparse bundle treated encrypted data as plain");
+    const auto incomplete=root+L"incomplete.sparsebundle";
+    Mkdir(incomplete);
+    Plist(incomplete,4096,1024);
+    Reject([&]{SparseDisk::OpenBundle(incomplete);},"Sparse bundle accepted a missing bands directory");
+    fprintf(report,"PASS: sparse bundle missing and short bands, hexadecimal names, >16 TiB offsets, changed bands and invalid layouts.\n");
+
+    const auto rawPath=root+L"volume.raw";
+    const auto source=CreateImage(rawPath.c_str(),8*1024*1024);
+    Volume::Format(*source,u"Bundle Fixture",false);
+    {
+        Volume volume(*source,true);
+        volume.Put(2,u"Both forks",4,4,[](unsigned fork,uint64_t at,void* out,size_t bytes){
+            memcpy(out,(fork?"RSRC":"DATA")+size_t(at),bytes);
+        });
+    }
+    const auto raw=Disk::Read(*source,0,size_t(source->Size()));
+    const auto mount=BundleFixture(root+L"image-\u03b2.sparsebundle",raw.size(),1024*1024);
+    for(size_t at=0;at<raw.size();at+=1<<20){
+        const auto first=raw.begin()+at,last=first+(1<<20);
+        if(std::any_of(first,last,[](uint8_t byte){return byte!=0;}))
+            Create(mount+L"\\bands\\"+std::to_wstring(at>>20),Bytes(first,last));
+    }
+    auto mounted=MacBrowser::OpenBrowserImage(mount);
+    MacBrowser::Entry entry;
+    Check(mounted&&!mounted->Writable()&&mounted->FindChild(2,u"Both forks",entry)&&
+          MacBrowser::OpenBrowserImage(mount)==mounted,"Sparse bundle did not open in the shared browser");
+    const auto destination=root+L"export";
+    Mkdir(destination);
+    CopyProcess::enabled=true;
+    FileOperations::Request request=FileOperations::OrdinaryCopy{
+        {FileOperations::Location::Mounted(mounted,entry.id)},FileOperations::Location::Windows(destination)};
+    request.background=true;
+    auto operation=FileOperations::Submit(std::move(request));
+    const auto start=GetTickCount64();
+    while(!operation.Job()->done()){
+        Check(GetTickCount64()-start<15000,"Sparse bundle background copy timed out");
+        Sleep(5);
+    }
+    const auto exported=operation.Job()->result();
+    Check(!exported.code,exported.message.c_str());
+    auto windows=MacBrowser::OpenWindows(destination);
+    auto copied=windows->List().at(0);
+    for(unsigned fork=0;fork<2;++fork){
+        char bytes[4];
+        Check(copied.forks[fork].size==sizeof(bytes),"Sparse bundle copy lost a fork");
+        windows->Read(copied.id,fork,0,bytes,sizeof(bytes));
+        Check(!memcmp(bytes,fork?"RSRC":"DATA",4),"Sparse bundle copy changed a fork");
+    }
+    Storage::Job job;
+    const auto extracted=root+L"extracted.raw";
+    const auto result=Dmg::Convert(mount,extracted,Dmg::Output::RawImage,job);
+    Check(!result.code,result.message.c_str());
+    auto out=HfsPlus::OpenImage(extracted.c_str(),false);
+    Check(Disk::Read(*out,0,raw.size())==raw,"Sparse bundle raw conversion changed sectors");
+    fprintf(report,"PASS: shared sparse bundle browser, background both-fork copy and byte-exact raw conversion.\n");
+
+    if(const auto fixture=_wgetenv(L"HFV_NATIVE_SPARSE_BUNDLE")){
+        VerifyNative(fixture,root+L"native-sparse.raw");
+        fprintf(report,"PASS: original hdiutil sparse bundle matches the published raw SHA-256.\n");
+    }
+}
 }
 
 int RunSparseDiskTest(const char* directory)
@@ -182,6 +323,20 @@ int RunSparseDiskTest(const char* directory)
     int status=0;
     try{SparseImageCases(root,report);}
     catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());status=1;}
+    fclose(report);
+    return status;
+}
+
+int RunSparseBundleTest(const char* directory)
+{
+    if(!CreateDirectoryA(directory,nullptr))return 2;
+    const auto root=VolumeCoord::Wide(std::string(directory)+"\\");
+    FILE* report=_wfopen((root+L"sparse-bundle-report.txt").c_str(),L"w");
+    if(!report)return 2;
+    int status=0;
+    try{SparseBundleCases(root,report);}
+    catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());status=1;}
+    CopyProcess::enabled=false;
     fclose(report);
     return status;
 }

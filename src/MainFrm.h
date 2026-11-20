@@ -116,6 +116,7 @@ public:
  BOOL OnCmdMsg(UINT,int,void*,AFX_CMDHANDLERINFO*) override;
  afx_msg void OnActivate(UINT,CWnd*,BOOL);
  afx_msg void OnFileOpenImage();
+ afx_msg void OnFileOpenSparseBundle();
  afx_msg void OnOpenRecentImage(UINT);
  afx_msg void OnUpdateMacTransfer(CCmdUI*);
  afx_msg void OnUpdateMacEdit(CCmdUI*);

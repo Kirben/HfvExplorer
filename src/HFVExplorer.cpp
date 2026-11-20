@@ -393,6 +393,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3 && strcmp(__argv[1],"--verify-file-mutations")==0)ExitProcess(RunFileMutationTest(__argv[2]));
  extern int RunEncryptedDmgTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-encrypted-dmg"))ExitProcess(RunEncryptedDmgTest(__argv[2]));
+ extern int RunSparseBundleTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-sparse-bundle"))ExitProcess(RunSparseBundleTest(__argv[2]));
  extern int RunSparseDiskTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-sparse-image"))ExitProcess(RunSparseDiskTest(__argv[2]));
  extern int RunNdifImageTest(const char*);
