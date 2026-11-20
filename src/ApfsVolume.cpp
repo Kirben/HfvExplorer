@@ -766,11 +766,11 @@ private:
             throw Error(std::string("APFS catalog change committed. Reopen the image to refresh it. ")+error.what());
         }
     }
-    uint32_t CreateFolder(uint32_t parent,const std::u16string& name,std::optional<FileDates> dates){
+    uint32_t CreateFolder(uint32_t parent,const std::u16string& name,std::optional<FileDates> dates,const FinderBytes* finder=nullptr){
         return WriteMount([&]{
             const auto oid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job,dates);});
+            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job,dates,finder);});
             for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
             throw Error("APFS folder was created but could not be found after reopening");
         });
@@ -786,7 +786,7 @@ public:
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& entry)override{
         ValidateEntry(entry);
         Check(entry.directory,"The APFS copy source is not a folder");
-        return CreateFolder(parent,entry.name,CopyDates(entry));
+        return CreateFolder(parent,entry.name,CopyDates(entry),&entry.finder);
     }
     void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool)override{
         const auto dates=CopyDates(desired);
@@ -812,8 +812,7 @@ public:
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(entry.readError.empty()&&!entry.forks[1].size&&entry.attributes.empty()&&
-              !entry.protectedFile&&!entry.hardLink&&!entry.compressed&&!entry.version&&
-              std::all_of(entry.finder.begin(),entry.finder.end(),[](uint8_t value){return !value;}),
+              !entry.protectedFile&&!entry.hardLink&&!entry.compressed&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
@@ -867,13 +866,13 @@ public:
                       "The APFS destination changed after overwrite approval");
                 const auto oid=At(found->id).oid;
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates);
+                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder);
                 });
                 return found->id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates);
+                return CreateCatalogFile(*source,container,parentOid,entry.name,data,job,dates,&entry.finder);
             });
             for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
             throw Error("APFS file was committed but could not be found after reopening");

@@ -2,6 +2,7 @@
 #pragma once
 #include "HfsPlusDisk.h"
 #include "ApfsUnicode.h"
+#include "ApfsContainer.h"
 #include <algorithm>
 #include <string_view>
 
@@ -108,32 +109,46 @@ inline Record DirectoryEntry(std::string_view name,uint64_t inode,uint64_t now,u
     return entry;
 }
 
+inline constexpr uint64_t HasFinderInfo=0x100;
+inline constexpr size_t FinderFieldSize=4+FinderBytes{}.size();
+
 inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent,
-                    uint16_t mode,uint32_t linksOrChildren,uint64_t dataSize=0)
+                    uint16_t mode,uint32_t linksOrChildren,uint64_t dataSize=0,const FinderBytes* finder=nullptr)
 {
     const size_t nameSpace=size_t(DivideUp(name.size()+1,8)*8);
+    const bool hasFinder=finder&&std::any_of(finder->begin(),finder->end(),[](uint8_t value){return value!=0;});
     const size_t dataField=dataSize?4:0;
-    Record record{Bytes(8),Bytes(100+dataField+nameSpace+(dataSize?40:0))};
+    const size_t finderHeader=hasFinder?4:0;
+    const size_t fields=100+dataField+finderHeader;
+    const size_t dataBytes=dataSize?40:0;
+    Record record{Bytes(8),Bytes(fields+nameSpace+dataBytes+(hasFinder?finder->size():0))};
     Set(record.key,0,(uint64_t(3)<<60)|inode,8);
     Set(record.value,0,parent,8);
     Set(record.value,8,inode,8);
     for(size_t field:{16,24,32,40})Set(record.value,field,now,8);
-    Set(record.value,48,0x8000,8);
+    Set(record.value,48,0x8000|(hasFinder?HasFinderInfo:0),8);
     Set(record.value,56,linksOrChildren,4);
     Set(record.value,80,mode,2);
-    Set(record.value,92,dataSize?2:1,2);
-    Set(record.value,94,nameSpace+(dataSize?40:0),2);
+    Set(record.value,92,1+bool(dataSize)+hasFinder,2);
+    Set(record.value,94,nameSpace+dataBytes+(hasFinder?finder->size():0),2);
     record.value[96]=4;
     record.value[97]=2;
     Set(record.value,98,name.size()+1,2);
-    std::copy(name.begin(),name.end(),record.value.begin()+100+dataField);
+    std::copy(name.begin(),name.end(),record.value.begin()+fields);
     if(dataSize){
         record.value[100]=8;
         record.value[101]=0x20; // System field.
         Set(record.value,102,40,2);
-        const size_t stream=104+nameSpace;
+        const size_t stream=fields+nameSpace;
         Set(record.value,stream,dataSize,8);
         Set(record.value,stream+8,DivideUp(dataSize,Block)*Block,8);
+    }
+    if(hasFinder){
+        const size_t descriptor=100+dataField;
+        record.value[descriptor]=7;
+        record.value[descriptor+1]=0x20; // System field.
+        Set(record.value,descriptor+2,finder->size(),2);
+        std::copy(finder->begin(),finder->end(),record.value.end()-finder->size());
     }
     return record;
 }

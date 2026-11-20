@@ -16,6 +16,7 @@ struct CatalogCreate {
     CatalogKind kind;
     HfsPlus::Source* data=nullptr;
     std::optional<FileDates> dates;
+    const FinderBytes* finder=nullptr;
 };
 struct CatalogRename {
     uint64_t parent,inode;
@@ -28,6 +29,7 @@ struct CatalogReplaceData {
     uint64_t parent,inode;
     HfsPlus::Source& data;
     std::optional<FileDates> dates;
+    const FinderBytes* finder=nullptr;
 };
 struct CatalogDirectoryDates {
     uint64_t parent,inode;

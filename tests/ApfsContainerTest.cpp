@@ -1265,7 +1265,7 @@ void WritableNamespace(const std::string& root,FILE* report)
         for(const auto withResource:{false,true}){
             auto unsupported=replacement;
             if(withResource)unsupported.forks[1].size=1;
-            else unsupported.finder[0]=1;
+            else unsupported.version=1;
             const auto before=raw->event;
             Reject([&]{mounted->Put(2,unsupported,[](unsigned,uint64_t,void*,size_t){},true);},
                    "APFS transfer accepted metadata it cannot preserve");
@@ -1303,6 +1303,87 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
           opened->FindChild(2,second,folder)&&folder.directory&&folder.name==u"COLLISION 1EY4QX3",
           "APFS equal-hash directory records did not reopen as separate entries");
     fprintf(report,"PASS: distinct APFS names with the same hash, duplicate protection, and case-only rename.\n");
+}
+
+void FinderMetadataWrites(const std::string& root,FILE* report)
+{
+    const auto path=VolumeCoord::Wide(root+"apfs-finder-info.img");
+    {
+        auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*image,u"Finder metadata",false,job);
+        image->Keep();
+    }
+
+    MacBrowser::Entry file,folder;
+    file.name=u"Document";
+    std::copy_n("TEXTttxt",8,file.finder.begin());
+    file.forks[0].size=5;
+    folder.name=u"Folder";
+    folder.directory=true;
+    folder.finder[9]=0x08;
+    const auto contents=[](unsigned fork,uint64_t offset,void* data,size_t bytes){
+        Check(!fork&&offset<=5&&bytes<=5-offset,"Unexpected Finder fixture read");
+        memcpy(data,"abcde"+offset,bytes);
+    };
+    {
+        const auto mounted=MacBrowser::OpenBrowserImage(path);
+        Check(mounted&&mounted->Writable(),"Could not mount Finder fixture writable");
+        VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+        const auto parent=mounted->MakeDirectoryWithAttributes(2,folder);
+        const auto id=mounted->Put(parent,file,contents,false);
+        mounted->Rename(parent,2,u"Renamed Folder");
+        mounted->Rename(id,parent,u"Renamed Document");
+        Check(mounted->Stat(parent).finder==folder.finder&&mounted->Stat(id).finder==file.finder,
+              "APFS rename lost Finder information");
+        file.name=u"Renamed Document";
+        file.finder[9]=0x40;
+        Check(mounted->Put(parent,file,contents,true)==id&&mounted->Stat(id).finder==file.finder,
+              "APFS overwrite lost Finder information or the destination identity");
+
+        auto temporary=file;
+        temporary.name=u"Temporary";
+        temporary.forks[0].size=0;
+        const auto temporaryId=mounted->Put(parent,temporary,{},false);
+        auto cleared=temporary;
+        cleared.finder={};
+        mounted->Put(parent,cleared,{},true);
+        Check(mounted->Stat(temporaryId).finder==cleared.finder,"APFS retained stale Finder information");
+        mounted->Remove(temporaryId);
+        temporary.name=u"Removed with metadata";
+        mounted->Remove(mounted->Put(parent,temporary,{},false));
+
+        const auto destination=mounted->MakeDirectory(2,u"Copy destination");
+        Storage::Job job;
+        MacBrowser::Entry copiedFolder,copiedFile;
+        Check(MacBrowser::Copy(*mounted,parent,*mounted,destination,job)&&
+              mounted->FindChild(destination,u"Renamed Folder",copiedFolder)&&copiedFolder.finder==folder.finder&&
+              mounted->FindChild(copiedFolder.id,file.name,copiedFile)&&copiedFile.finder==file.finder,
+              "Recursive APFS copy lost Finder information");
+    }
+    {
+        const auto mounted=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry foundFolder,foundFile;
+        Check(mounted&&mounted->FindChild(2,u"Renamed Folder",foundFolder)&&foundFolder.finder==folder.finder&&
+              mounted->FindChild(foundFolder.id,file.name,foundFile)&&foundFile.finder==file.finder&&
+              mounted->List(foundFolder.id).size()==1,"APFS Finder information did not survive reopening");
+        std::array<char,5> data{};
+        mounted->Read(foundFile.id,0,0,data.data(),data.size());
+        Check(std::string(data.begin(),data.end())=="abcde","APFS Finder information changed the data fork");
+    }
+    auto source=OpenImage(path.c_str(),false);
+    Bytes bytes(size_t(source->Size()));
+    source->Read(0,bytes.data(),bytes.size());
+    CheckpointFaultImage fault(bytes);
+    fault.fault=CheckpointFaultImage::Fault::TornWrite;
+    fault.failAt=1;
+    const auto previous=Apfs::Probe(fault)->transaction;
+    Storage::Job job;
+    Reject([&]{Apfs::CreateCatalogDirectory(fault,*Apfs::Probe(fault),2,u"Interrupted",job,{},&folder.finder);},
+           "APFS Finder metadata test did not inject a write failure");
+    CheckpointFaultImage reopened(fault.durable);
+    Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted Finder metadata write");
+    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, and interrupted writes.\n");
 }
 
 void UnicodeCatalogNames(const std::string& root,FILE* report)
@@ -1716,6 +1797,7 @@ int RunApfsContainerTest(const char* directory)
         WritableNamespace(root,report);
         DirectoryHashCollisions(root,report);
         UnicodeCatalogNames(root,report);
+        FinderMetadataWrites(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

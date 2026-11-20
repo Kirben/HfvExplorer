@@ -530,7 +530,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* remove=std::get_if<CatalogDelete>(&request);
-    const bool replace=std::holds_alternative<CatalogReplaceData>(request);
+    const auto* replace=std::get_if<CatalogReplaceData>(&request);
     const bool setDirectoryDates=std::holds_alternative<CatalogDirectoryDates>(request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
@@ -557,6 +557,13 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         uint32_t children=0;
     };
     std::map<uint64_t,Directory> directories;
+    const auto readFinder=[](const uint8_t* value,size_t size)->std::optional<FinderBytes>{
+        if(!(Le64(value+48)&WriterDisk::HasFinderInfo))return {};
+        FinderBytes finder{};
+        Check(size>=100+WriterDisk::FinderFieldSize,"Truncated APFS Finder information");
+        std::copy_n(value+size-finder.size(),finder.size(),finder.begin());
+        return finder;
+    };
     struct Link {
         uint64_t parent;
         CatalogKind kind;
@@ -564,6 +571,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         size_t entryRecord;
         size_t inodeRecord=0,streamRecords=0;
         uint64_t dataSize=0;
+        std::optional<FinderBytes> finder;
     };
     std::map<uint64_t,Link> links;
     uint64_t files=0;
@@ -617,17 +625,22 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(reservedInode?parentId==1:link!=links.end()&&link->second.parent==parentId,
                       "Invalid APFS inode parent");
                 const auto kind=reservedInode?CatalogKind::Directory:link->second.kind;
-                if(!reservedInode)link->second.inodeRecord=i;
+                if(!reservedInode){
+                    link->second.inodeRecord=i;
+                    link->second.finder=readFinder(view.value.data,view.value.size);
+                }
                 const auto mode=Le16(view.value.data+80)&0170000;
                 if(kind==CatalogKind::Directory){
                     Check(mode==0040000&&directories.emplace(inode,Directory{i}).second,"Invalid APFS directory inode");
                 }else{
                     const auto& primaryName=link->second.name;
                     const auto value=view.value.data;
-                    const size_t stream=104+size_t(DivideUp(primaryName.size()+1,8)*8);
-                    const auto size=view.value.size==stream+40?Le64(value+stream):0;
+                    const auto& finder=link->second.finder;
+                    const size_t stream=104+(finder?4:0)+size_t(DivideUp(primaryName.size()+1,8)*8);
+                    const size_t streamEnd=stream+40+(finder?finder->size():0);
+                    const auto size=view.value.size==streamEnd?Le64(value+stream):0;
                     Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
-                    const auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size);
+                    const auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size,finder?&*finder:nullptr);
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
                           "APFS writes require native regular-file data streams");
@@ -688,7 +701,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const bool isDirectory=create->kind==CatalogKind::Directory;
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
-        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize));
+        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:0100644,isDirectory?0:1,dataSize,create->finder));
         copyDates(records.back().value);
         streamAt=records.size();
     }else{
@@ -705,7 +718,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
-        const auto old=WriterDisk::Inode(link.name,entryId,0,parent,mode,count,link.dataSize);
+        const auto existingFinder=link.finder?&*link.finder:nullptr;
+        const auto old=WriterDisk::Inode(link.name,entryId,0,parent,mode,count,link.dataSize,existingFinder);
         constexpr size_t inodeHeader=92;
         Check(inode.size()==old.value.size()&&
               !memcmp(inode.data()+inodeHeader,old.value.data()+inodeHeader,inode.size()-inodeHeader),
@@ -720,8 +734,12 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             records.erase(records.begin()+link.entryRecord);
             return records;
         }
-        auto updated=WriterDisk::Inode(replace?link.name:name,entryId,0,parent,mode,count,replace?dataSize:link.dataSize);
+        const auto updatedFinder=replace&&replace->finder?replace->finder:existingFinder;
+        auto updated=WriterDisk::Inode(replace?link.name:name,entryId,0,parent,mode,count,
+                                       replace?dataSize:link.dataSize,updatedFinder);
+        const auto newFinderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
+        Set(updated.value,48,(Le64(inode.data()+48)&~WriterDisk::HasFinderInfo)|newFinderFlag,8);
         Set(updated.value,32,time,8);
         if(replace){
             Set(updated.value,24,time,8);
