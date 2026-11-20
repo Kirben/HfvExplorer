@@ -17,6 +17,9 @@
 #include "RenameName.h"
 #include "charset.h"
 #include <algorithm>
+#ifdef HFV_TESTING
+#include <atomic>
+#endif
 #include <set>
 #include <string_view>
 #include <fcntl.h>
@@ -1025,10 +1028,24 @@ void FinalizeOutcome(Storage::Result& result, Completion& completion, Storage::J
  completion.completed=result.completed;
 }
 
-void PublishAffected(const Completion& completion) {
+#ifdef HFV_TESTING
+std::atomic<HANDLE> publicationEntered{nullptr}, publicationRelease{nullptr};
+#endif
+
+void PublishAffected(const Completion& completion, VolumeCoord::Lease* reservation,
+                     VolumeCoord::OperationLease* supplemental=nullptr) {
  std::vector<std::string> changed;
  for(const auto& item:completion.affected)changed.push_back(item.resourceKey);
- VolumeCoord::Changed(changed);
+#ifdef HFV_TESTING
+ if(!changed.empty()){
+  if(const auto entered=publicationEntered.load()){
+   SetEvent(entered);
+   WaitForSingleObject(publicationRelease.load(),15000);
+  }
+ }
+#endif
+ if(reservation)reservation->ReleaseAndPublish(changed,supplemental);
+ else VolumeCoord::Changed(changed);
 }
 }
 namespace {
@@ -1070,10 +1087,11 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
 {
  Storage::OperationCompletion outcome;
  Completion completion;
+ std::optional<VolumeCoord::Lease> reservation;
  auto result=outcome.Run([&]() -> Storage::Result {
   Check(item.IsClassic()&&!version.empty(),"The original launcher document could not be verified");
   LegacyEngine::Scope engine;
-  VolumeCoord::Lease lease({{item.ResourceKey(),VolumeCoord::Mode::Write},
+  reservation.emplace(std::vector<VolumeCoord::Access>{{item.ResourceKey(),VolumeCoord::Mode::Write},
                            {VolumeCoord::PathKey(editedFile),VolumeCoord::Mode::Read}});
   HANDLE file=CreateFileW(editedFile.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
                          FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
@@ -1111,7 +1129,7 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
   return {};
  },ERROR_WRITE_FAULT,"Write-back cancelled");
  FinalizeOutcome(result,completion,job,outcome);
- PublishAffected(completion);
+ PublishAffected(completion,reservation?&*reservation:nullptr);
  return result;
 }
 
@@ -1127,6 +1145,11 @@ Storage::Result ExecuteInWorker(const Request& request,Storage::Job& job,Complet
  return result;
 }
 #ifdef HFV_TESTING
+void PausePublicationForTest(HANDLE entered,HANDLE release) {
+ if(entered)publicationRelease=release;
+ publicationEntered=entered;
+}
+
 PlanAccessForTest InspectPlanForTest(const Request& request,const std::string& key,bool inWorker){
  const auto plan=PlanOperation(request,inWorker);
  const auto local=plan.transfer?std::count(plan.transfer->sources.begin(),plan.transfer->sources.end(),
@@ -1181,14 +1204,15 @@ class PreparedOperation {
  Storage::Result preparationError_;
  std::optional<VolumeCoord::Lease> reservation_;
 
- Storage::Result RunReserved(Storage::Job& job,Completion& completion)
+ Storage::Result RunReserved(Storage::Job& job,Completion& completion,
+                             std::optional<VolumeCoord::OperationLease>& executionAccess)
  {
   const auto route=plan_.route;
   LegacyEngine::Scope engine;
   // Bind again while keeping the queued reservation. The executor still
   // checks the typed selection identities before changing any entry.
   const auto current=BindResources(plan_);
-  VolumeCoord::OperationLease executionAccess(current);
+  executionAccess.emplace(current);
   if(route==ExecutionRoute::Local)
    return FileOperations::Execute(plan_,job,completion);
 
@@ -1223,16 +1247,18 @@ public:
  Storage::Result Run(Storage::Job& job,Completion& completion)
  {
   Storage::OperationCompletion outcome;
+  std::optional<VolumeCoord::OperationLease> executionAccess;
   auto result=outcome.Run([&]{
    Cancel(job);
    if(preparationError_.code)return std::move(preparationError_);
    if(!reservation_)throw VolumeCoord::Busy();
-   return RunReserved(job,completion);
+   return RunReserved(job,completion,executionAccess);
   });
 
   FinalizeOutcome(result,completion,job,outcome);
+  PublishAffected(completion,reservation_?&*reservation_:nullptr,executionAccess?&*executionAccess:nullptr);
+  executionAccess.reset();
   reservation_.reset();
-  PublishAffected(completion);
   return result;
  }
 };

@@ -66,6 +66,19 @@ int RunVolumeCoordinationTest(const char* directory){
   {Lease reader({{"lease-A",Mode::Read}});bool read=false,writeBlocked=false,other=false;
    std::thread task([&]{try{Lease two({{"lease-A",Mode::Read}});read=true;}catch(...){}try{Lease write({{"lease-A",Mode::Write},{"lease-B",Mode::Write}});}catch(const Busy&){writeBlocked=true;}try{Lease independent({{"lease-B",Mode::Write}});other=true;}catch(...){}});task.join();Check(read&&writeBlocked&&other,"reader/writer conflict or atomic multi-volume acquisition");}
   {Lease write({{"lease-A",Mode::Read},{"lease-A",Mode::Write}});bool blocked=false;try{Lease read({{"lease-A",Mode::Read}});}catch(const Busy&){blocked=true;}Check(blocked&&!Readable("lease-A")&&Readable("lease-B"),"writer exclusion or unrelated volume availability");}
+  {
+   Subscription changes;
+   changes.Watch("publication-A");
+   changes.Watch("publication-B");
+   const auto first=Revision("publication-A"), second=Revision("publication-B");
+   Lease reserved({{"publication-A",Mode::Write}});
+   OperationLease supplemental({{"publication-B",Mode::Write}});
+   Check(!Readable("publication-A")&&!Readable("publication-B"),"write leases were not held before publication");
+   reserved.ReleaseAndPublish({"publication-A","publication-A","publication-B"},&supplemental);
+   Lease reader({{"publication-A",Mode::Read},{"publication-B",Mode::Read}});
+   Check(Revision("publication-A")==first+1&&Revision("publication-B")==second+1&&changes.Drain().size()==2,
+         "releasing leases lost revisions or sent duplicate notifications");
+  }
   std::wstring path=VolumeCoord::Wide(std::string((LPCSTR)(root+"\\shared.dsk")));auto volume=Image(path);auto same=MacBrowser::OpenImage(path);Check(volume==same&&volume->Writable(),"same-process sessions did not share writable native backend");
   std::wstring upper=path;CharUpperBuffW(&upper[0],DWORD(upper.size()));Check(ImageKey(path)==ImageKey(upper)&&MacBrowser::OpenImage(upper)==volume,"case alias has a separate resource/backend");
   auto alias=VolumeCoord::Wide(std::string((LPCSTR)(root+"\\alias.dsk")));if(CreateHardLinkW(alias.c_str(),path.c_str(),nullptr))Check(ImageKey(alias)==ImageKey(path)&&MacBrowser::OpenImage(alias)==volume,"hard-link alias has a separate resource/backend");else fprintf(report,"NOTE: hard-link creation unavailable; case-alias identity verified.\n");

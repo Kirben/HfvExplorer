@@ -151,6 +151,7 @@ struct PlanAccessForTest {
  bool temporaryWorker, sameMount, read, write;
  size_t workerSources, streamedSources;
 };
+void PausePublicationForTest(HANDLE entered,HANDLE release);
 PlanAccessForTest InspectPlanForTest(const Request&,const std::string& key,bool inWorker=false);
 #endif
 std::vector<Operation> Pending();

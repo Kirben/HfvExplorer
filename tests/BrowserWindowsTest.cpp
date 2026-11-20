@@ -341,20 +341,29 @@ int RunBrowserWindowsTest(const char* directory){
    auto status=[&]{CString text;sb.Status()->GetPaneText(0,text);return text;};
    struct WritePause {
     HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr),release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    HANDLE publicationEntered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
+    HANDLE publicationRelease=CreateEvent(nullptr,TRUE,FALSE,nullptr);
     std::shared_ptr<Storage::Job> job;
     ~WritePause(){
      VolumeSession::PauseVolumeWriteForTest(nullptr,nullptr);
+     FileOperations::PausePublicationForTest(nullptr,nullptr);
      if(release)SetEvent(release);
+     if(publicationRelease)SetEvent(publicationRelease);
      if(job&&!job->done()){job->cancel();job->wait();}
      if(entered)CloseHandle(entered);
      if(release)CloseHandle(release);
+     if(publicationEntered)CloseHandle(publicationEntered);
+     if(publicationRelease)CloseHandle(publicationRelease);
     }
    };
    for(bool cancel:{false,true}){
     if(cancel)seedWindows(0x42,true);
     Check(sb.MacBrowser().ShowTestFolder(1,2),"return the peer browser to the root");
     WritePause pause;
-    Check(pause.entered&&pause.release,"create import pause");
+    Check(pause.entered&&pause.release&&pause.publicationEntered&&pause.publicationRelease,"create import pauses");
+    const auto key=shared->ResourceKey();
+    const auto revision=VolumeCoord::Revision(key);
+    if(!cancel)FileOperations::PausePublicationForTest(pause.publicationEntered,pause.publicationRelease);
     VolumeSession::PauseVolumeWriteForTest(pause.entered,pause.release);
     FileOperations::Request request=FileOperations::OrdinaryCopy{{FileOperations::Location::Windows(filename)},firstSelection};
     request.background=true;
@@ -382,9 +391,19 @@ int RunBrowserWindowsTest(const char* directory){
     if(cancel)pause.job->cancel();
     VolumeSession::PauseVolumeWriteForTest(nullptr,nullptr);
     SetEvent(pause.release);
+    if(!cancel){
+     Check(WaitForSingleObject(pause.publicationEntered,10000)==WAIT_OBJECT_0&&
+           !VolumeCoord::Readable(key)&&VolumeCoord::Revision(key)==revision&&
+           Find(sb,L"Import payload")<0&&!sb.MacBrowser().Writable(),
+           "a committed write became readable before publishing its revision");
+     FileOperations::PausePublicationForTest(nullptr,nullptr);
+     SetEvent(pause.publicationRelease);
+    }
     Check(WaitForSingleObject(pause.job->event(),10000)==WAIT_OBJECT_0&&
               (cancel?pause.job->result().error==ERROR_CANCELLED:!pause.job->result().code),
           "paused import completed with an unexpected result");
+    Check(VolumeCoord::Readable(key)&&VolumeCoord::Revision(key)==revision+1,
+          "the released reservation did not expose its new revision exactly once");
     const auto deadline=GetTickCount()+10000;
     while((Find(sa,L"Import payload")<0||Find(sb,L"Import payload")<0||
            sa.notificationRefreshes==priorRefresh||!sb.MacBrowser().Writable())&&LONG(deadline-GetTickCount())>0){
@@ -400,7 +419,7 @@ int RunBrowserWindowsTest(const char* directory){
           "cancelled overwrite changed the original or restarted the worker");
    }
    Check(sa.MacBrowser().ShowTestFolder(0,2)&&sb.MacBrowser().ShowTestFolder(1,2),"restore roots after import test");
-   fprintf(report,"PASS: shared cached listing during paused import and cancelled overwrite, with refresh in both browsers\n");
+   fprintf(report,"PASS: shared cached listing through atomic revision publication, cancelled overwrite and refresh in both browsers\n");
   }
   auto renamed=FileOperations::Submit(FileOperations::RenameEntry{firstSelection,u"Renamed"});
   Check(WaitForSingleObject(renamed.Job()->event(),10000)==WAIT_OBJECT_0&&

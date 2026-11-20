@@ -85,19 +85,65 @@ Lease::Lease(std::vector<Access> values,bool reuseWriter){
  for(const auto& a:unique)for(const auto& held:bus.resources){auto& r=held.second;if(!r.writer&&!r.readers&&!r.browsers)continue;if(reuseWriter&&r.writer&&r.writerThread==thread)continue;if((r.writer&&(a.second==Mode::Browse?Contains(bus,held.first,a.first):Overlap(bus,a.first,held.first)))||(a.second==Mode::Write&&((r.readers&&Overlap(bus,a.first,held.first))||(r.browsers&&Contains(bus,a.first,held.first)))))throw Busy();}
  for(const auto& a:unique){access_.push_back({a.first,a.second});auto& resource=bus.resources[a.first];if(a.second==Mode::Write){resource.writer=true;resource.writerThread=thread;}else if(a.second==Mode::Browse)++resource.browsers;else ++resource.readers;}
 }
-Lease::~Lease(){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(auto& a:access_){auto& resource=bus.resources[a.key];if(a.mode==Mode::Write)resource.writer=false;else if(a.mode==Mode::Browse)--resource.browsers;else --resource.readers;}}
+namespace {
+void ReleaseAccess(Bus& bus, std::vector<Access>& access) {
+ for(const auto& held:access){
+  auto& resource=bus.resources.at(held.key);
+  if(held.mode==Mode::Write)resource.writer=false;
+  else if(held.mode==Mode::Browse)--resource.browsers;
+  else --resource.readers;
+ }
+ access.clear();
+}
+}
+
+Lease::~Lease(){
+ if(access_.empty())return;
+ auto& bus=Get();
+ std::lock_guard<std::mutex> lock(bus.mutex);
+ ReleaseAccess(bus,access_);
+}
 BackendRead::BackendRead(const std::string& key){lease_.reset(new Lease({{key,Mode::Read}},true));}
 bool Overlapping(const std::vector<std::string>& keys,const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(auto& held:keys)if(Overlap(bus,held,key))return true;return false;}
 bool Available(const std::vector<Access>& access){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(const auto& a:access)for(const auto& held:bus.resources){const auto& r=held.second;if((r.writer&&(a.mode==Mode::Browse?Contains(bus,held.first,a.key):Overlap(bus,a.key,held.first)))||(a.mode==Mode::Write&&((r.readers&&Overlap(bus,a.key,held.first))||(r.browsers&&Contains(bus,a.key,held.first)))))return false;}return true;}
 bool Readable(const std::string& key){return Available({{key,Mode::Read}});}
 OperationLease::OperationLease(std::vector<Access> access){lease_.reset(new Lease(std::move(access),true));}
 uint64_t Revision(const std::string& key){auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);return bus.resources[key].revision;}
-void Changed(const std::vector<std::string>& keys){
- auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);for(const auto& key:keys)if(!key.empty())bus.resources[key];std::vector<Event> events;
- for(auto& resource:bus.resources)for(const auto& key:keys)if(!key.empty()&&Overlap(bus,resource.first,key)){events.push_back({resource.first,++resource.second.revision});break;}
+namespace {
+std::vector<Event> AdvanceRevisions(Bus& bus,const std::vector<std::string>& keys){
+ std::vector<Event> events;
+ if(keys.empty())return events;
+ for(const auto& key:keys)if(!key.empty())bus.resources[key];
+ for(auto& resource:bus.resources)
+  for(const auto& key:keys)
+   if(!key.empty()&&Overlap(bus,resource.first,key)){
+    events.push_back({resource.first,++resource.second.revision});
+    break;
+   }
+ return events;
+}
+void NotifyChanges(Bus& bus,const std::vector<Event>& events) {
+ if(events.empty())return;
  for(auto it=bus.subscribers.begin();it!=bus.subscribers.end();){auto state=it->lock();if(!state){it=bus.subscribers.erase(it);continue;}++it;std::lock_guard<std::mutex> mailbox(state->mutex);if(state->closed)continue;for(const auto& event:events)if(state->watched.count(event.key))state->pending[event.key]=event.revision;
   if(!state->pending.empty()&&!state->posted&&state->window)state->posted=PostMessage(state->window,Notification,WPARAM(state->id),0)!=FALSE;
  }
+}
+}
+
+void Lease::ReleaseAndPublish(const std::vector<std::string>& keys, OperationLease* supplemental) {
+ auto& bus=Get();
+ std::lock_guard<std::mutex> lock(bus.mutex);
+ const auto events=AdvanceRevisions(bus,keys);
+ if(supplemental)ReleaseAccess(bus,supplemental->lease_->access_);
+ ReleaseAccess(bus,access_);
+ NotifyChanges(bus,events);
+}
+
+void Changed(const std::vector<std::string>& keys) {
+ if(keys.empty())return;
+ auto& bus=Get();
+ std::lock_guard<std::mutex> lock(bus.mutex);
+ NotifyChanges(bus,AdvanceRevisions(bus,keys));
 }
 
 std::shared_ptr<MacBrowser::Volume> SharedImage(const std::string& key,std::function<std::shared_ptr<MacBrowser::Volume>()> open){

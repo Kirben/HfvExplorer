@@ -31,6 +31,7 @@ enum class Mode {Read,Write,Browse}; // Browse reads directory metadata without 
 struct Access {std::string key;Mode mode=Mode::Read;};
 class Busy:public std::runtime_error {public:Busy():std::runtime_error("This volume is already in use by another storage operation"){};};
 // Atomic acquisition of all resources: no partial acquisition or lock ordering deadlocks.
+class OperationLease;
 class Lease {
  std::vector<Access> access_;
  Lease(std::vector<Access>,bool reuseWriter);
@@ -38,6 +39,7 @@ class Lease {
 public:
  explicit Lease(std::vector<Access>);
  ~Lease();
+ void ReleaseAndPublish(const std::vector<std::string>& changed, OperationLease* supplemental=nullptr);
  Lease(const Lease&)=delete;Lease& operator=(const Lease&)=delete;
 };
 bool Readable(const std::string&);
@@ -46,6 +48,7 @@ bool Overlapping(const std::vector<std::string>&,const std::string&);
 bool Available(const std::vector<Access>&);
 // Scoped command work may reuse a writer already owned by this worker thread.
 class OperationLease {
+ friend class Lease;
  std::unique_ptr<Lease> lease_;
 public:explicit OperationLease(std::vector<Access>);
 };
