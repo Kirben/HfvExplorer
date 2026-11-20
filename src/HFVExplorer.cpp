@@ -387,6 +387,8 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3&&!strcmp(__argv[1],"--verify-storage-exclusive"))ExitProcess(RunExclusiveAccessTest(__argv[2]));
  if(__argc==4&&!strcmp(__argv[1],"--exclusive-attempt"))ExitProcess(RunExclusiveAccessChild(__argv[2],__argv[3],nullptr,nullptr));
  if(__argc==6&&!strcmp(__argv[1],"--exclusive-hold"))ExitProcess(RunExclusiveAccessChild(__argv[2],__argv[3],__argv[4],__argv[5]));
+ extern int RunFolderCacheTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-folder-cache"))ExitProcess(RunFolderCacheTest(__argv[2]));
  extern int RunMainMacBrowserTest(const char*);
  if(__argc==3 && strcmp(__argv[1],"--verify-main-mac-browser")==0)ExitProcess(RunMainMacBrowserTest(__argv[2]));
  extern int RunFileMutationTest(const char*);

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#ifdef HFV_TESTING
+#include <psapi.h>
+#endif
 #include "WorkerEndpoint.h"
 #include "MetadataDialogs.h"
 #include "PhysicalRemovable.h"
@@ -26,7 +29,7 @@
 #include <commdlg.h>
 #include <set>
 #include <algorithm>
-#include <deque>
+#include <list>
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
@@ -87,31 +90,196 @@ struct FolderSnapshot {
     std::vector<Entry> entries;
     uint64_t free;
 };
-std::deque<FolderSnapshot> folderCache;
+constexpr size_t FolderCacheBudget=96*1024*1024;
+constexpr size_t FolderCacheLimit=64;
 
-const FolderSnapshot* CachedFolder(const std::shared_ptr<Volume>& volume,uint64_t revision,
-                                   uint32_t folder,const std::vector<uint32_t>& ancestry) {
-    for(auto it=folderCache.rbegin();it!=folderCache.rend();++it)
-        if(it->volume.lock()==volume && it->revision==revision && it->folder==folder && it->ancestry==ancestry)
-            return &*it;
-    return nullptr;
+template<class Char>
+size_t StringAllocation(const std::basic_string<Char>& value)
+{
+    static const auto inlineCapacity=std::basic_string<Char>{}.capacity();
+    return value.capacity()>inlineCapacity?(value.capacity()+1)*sizeof(Char):0;
 }
-void RememberFolder(FolderSnapshot snapshot) {
-    auto volume=snapshot.volume.lock();
-    folderCache.erase(std::remove_if(folderCache.begin(),folderCache.end(),[&](const FolderSnapshot& old){
-        return old.volume.expired() || (old.volume.lock()==volume &&
-              (old.revision!=snapshot.revision || (old.folder==snapshot.folder && old.ancestry==snapshot.ancestry)));
-    }),folderCache.end());
-    constexpr size_t cacheLimit=64;
-    if(folderCache.size()>=cacheLimit)folderCache.pop_front();
-    folderCache.push_back(std::move(snapshot));
+
+size_t IdentityAllocation(const MacBrowser::EntryIdentity& identity)
+{
+    return StringAllocation(identity.primary.key)+StringAllocation(identity.companion.key)+
+           (identity.media?StringAllocation(identity.media->device):0);
 }
-void ForgetFolders(const std::shared_ptr<Volume>& volume) {
-    folderCache.erase(std::remove_if(folderCache.begin(),folderCache.end(),[&](const FolderSnapshot& entry){
-        return entry.volume.expired() || entry.volume.lock()==volume;
-    }),folderCache.end());
+
+class FolderCache {
+    struct Record {
+        FolderSnapshot snapshot;
+        size_t bytes;
+    };
+    std::list<Record> folders_;
+    size_t bytes_=0;
+
+    // Estimate the listing's owned allocations. Large attribute values on
+    // anonymous files do not contribute their file contents to memory usage.
+    static size_t Estimate(const FolderSnapshot& snapshot) {
+        size_t remaining=FolderCacheBudget;
+        const auto charge=[&](uint64_t n) {
+            if(n>remaining)return false;
+            remaining-=size_t(n);
+            return true;
+        };
+        if(!charge(sizeof(Record)+2*sizeof(void*))||
+           !charge(snapshot.ancestry.capacity()*sizeof(uint32_t))||
+           !charge(snapshot.entries.capacity()*sizeof(Entry))||
+           !charge(StringAllocation(snapshot.title)))return FolderCacheBudget+1;
+        for(const auto& entry:snapshot.entries){
+            if(!charge(StringAllocation(entry.name)+StringAllocation(entry.readError))||
+               !charge(IdentityAllocation(entry.identity)+IdentityAllocation(entry.expectedDestinationIdentity)))
+                return FolderCacheBudget+1;
+            for(const auto& attribute:entry.attributes){
+                if(!charge(sizeof(attribute)+4*sizeof(void*)+StringAllocation(attribute.first))||
+                   (!attribute.second.FileBacked()&&!charge(attribute.second.size())))
+                    return FolderCacheBudget+1;
+            }
+        }
+        return FolderCacheBudget-remaining;
+    }
+
+    template<class Predicate>
+    void EraseIf(Predicate predicate) {
+        for(auto it=folders_.begin();it!=folders_.end();){
+            if(predicate(it->snapshot)){
+                bytes_-=it->bytes;
+                it=folders_.erase(it);
+            }else ++it;
+        }
+    }
+
+public:
+    const FolderSnapshot* Find(const std::shared_ptr<Volume>& volume,uint64_t revision,
+                               uint32_t folder,const std::vector<uint32_t>& ancestry) {
+        for(auto it=folders_.begin();it!=folders_.end();++it){
+            const auto& entry=it->snapshot;
+            if(entry.volume.lock()==volume&&entry.revision==revision&&entry.folder==folder&&entry.ancestry==ancestry){
+                folders_.splice(folders_.end(),folders_,it);
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    void Store(FolderSnapshot snapshot) {
+        const auto volume=snapshot.volume.lock();
+        if(!volume)return;
+        EraseIf([&](const FolderSnapshot& old){
+            const auto previous=old.volume.lock();
+            return !previous||(previous==volume&&(old.revision!=snapshot.revision||
+                   (old.folder==snapshot.folder&&old.ancestry==snapshot.ancestry)));
+        });
+        const auto bytes=Estimate(snapshot);
+        if(bytes>FolderCacheBudget)return;
+        while(folders_.size()>=FolderCacheLimit||bytes_>FolderCacheBudget-bytes){
+            bytes_-=folders_.front().bytes;
+            folders_.pop_front();
+        }
+        folders_.push_back({std::move(snapshot),bytes});
+        bytes_+=bytes;
+    }
+
+    void Forget(const std::shared_ptr<Volume>& volume) {
+        EraseIf([&](const FolderSnapshot& entry){
+            const auto mount=entry.volume.lock();
+            return !mount||mount==volume;
+        });
+    }
+
+#ifdef HFV_TESTING
+    size_t Bytes() const { return bytes_; }
+#endif
+};
+FolderCache folderCache;
 }
+#ifdef HFV_TESTING
+int RunFolderCacheTest(const char* directory)
+{
+    if(!CreateDirectoryA(directory,nullptr))return 2;
+    const std::string path=std::string(directory)+"\\folder-cache-report.txt";
+    FILE* report=fopen(path.c_str(),"w");
+    if(!report)return 2;
+    int status=0;
+    try{
+        const auto privateBytes=[]{
+            PROCESS_MEMORY_COUNTERS_EX memory{};
+            memory.cb=sizeof(memory);
+            if(!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)))
+                throw std::runtime_error("Cannot measure private process memory");
+            return uint64_t(memory.PrivateUsage);
+        };
+        auto volume=MacBrowser::OpenWindows(VolumeCoord::Wide(directory));
+        constexpr uint32_t first=100,folders=8,entries=50000;
+        const auto before=privateBytes();
+        // Alternate the folders visited by two windows sharing this volume.
+        // Measure saved listing data without including either visible list control.
+        for(uint32_t i=0;i<folders;++i){
+            const auto id=first+i;
+            std::vector<Entry> listing;
+            listing.reserve(entries);
+            for(uint32_t n=0;n<entries;++n){
+                Entry entry;
+                entry.id=entry.resolvedId=1000+i*entries+n;
+                entry.parent=id;
+                const auto digits=std::to_string(n);
+                entry.name=u"File from the archival collection ";
+                entry.name.append(digits.begin(),digits.end());
+                entry.identity=MacBrowser::EntryIdentity(std::to_string(entry.id));
+                entry.identity.session=1;
+                listing.push_back(std::move(entry));
+            }
+            folderCache.Store({volume,7,id,{id,2},L"Archive",std::move(listing),0});
+        }
+        const auto after=privateBytes();
+        size_t retained=0;
+        for(uint32_t i=0;i<folders;++i){
+            const auto id=first+i;
+            if(const auto snapshot=folderCache.Find(volume,7,id,{id,2})){
+                if(snapshot->entries.size()!=entries)throw std::runtime_error("Cached folder is incomplete");
+                retained+=snapshot->entries.size();
+            }
+        }
+        if(!folderCache.Find(volume,7,first+folders-1,{first+folders-1,2}))
+            throw std::runtime_error("Latest cached folder is missing");
+        fprintf(report,"MEASURED: %zu of %u entries retained across eight visits, private bytes before=%llu after=%llu delta=%lld\n",
+                retained,folders*entries,static_cast<unsigned long long>(before),static_cast<unsigned long long>(after),
+                static_cast<long long>(after)-static_cast<long long>(before));
+        fprintf(report,"MEASURED: estimated retained snapshot bytes=%zu, budget=%zu\n",
+                folderCache.Bytes(),FolderCacheBudget);
+        if(folderCache.Bytes()>FolderCacheBudget||retained<2*entries||retained>=folders*entries||
+           !folderCache.Find(volume,7,first+folders-2,{first+folders-2,2})||
+           folderCache.Find(volume,7,first,{first,2}))
+            throw std::runtime_error("Budget did not retain the recent folders from both windows");
+        std::vector<Entry> oversized;
+        oversized.reserve(FolderCacheBudget/sizeof(Entry)+1);
+        folderCache.Store({volume,7,999,{999,2},L"Oversized",std::move(oversized),0});
+        if(folderCache.Find(volume,7,999,{999,2})||
+           !folderCache.Find(volume,7,first+folders-1,{first+folders-1,2}))
+            throw std::runtime_error("Oversized snapshot displaced usable cached folders");
+        for(uint32_t id=200;id<264;++id)
+            folderCache.Store({volume,8,id,{id,2},L"Empty",{},0});
+        if(folderCache.Find(volume,7,first+folders-1,{first+folders-1,2})||
+           !folderCache.Find(volume,8,200,{200,2})||
+           folderCache.Find(volume,8,200,{200,3}))
+            throw std::runtime_error("Cache confused revisions or visible folder ancestry");
+        folderCache.Store({volume,8,264,{264,2},L"Empty",{},0});
+        if(!folderCache.Find(volume,8,200,{200,2})||folderCache.Find(volume,8,201,{201,2}))
+            throw std::runtime_error("A recently used snapshot was evicted before an older one");
+        folderCache.Forget(volume);
+        if(folderCache.Bytes()||folderCache.Find(volume,8,264,{264,2}))
+            throw std::runtime_error("Invalidated cache kept listing data or accounting");
+        fprintf(report,"PASS: byte and count budgets, recent folders, oversized entries, revisions, ancestry and invalidation.\n");
+    }catch(const std::exception& error){
+        fprintf(report,"FAIL: %s\n",error.what());
+        status=1;
+    }
+    fclose(report);
+    return status;
 }
+#endif
+
 struct MainMacBrowser::State {
     BrowserSession& session_;
     explicit State(BrowserSession& session)
@@ -202,7 +370,7 @@ struct MainMacBrowser::State {
         auto restoreCached=[&]{
             if(!canCache || rebuild)return false;
             revision=VolumeCoord::Revision(key);
-            const auto* snapshot=CachedFolder(volume,revision,id,ancestors);
+            const auto* snapshot=folderCache.Find(volume,revision,id,ancestors);
             if(!snapshot)return false;
             folderTitle=snapshot->title;
             entries=snapshot->entries;
@@ -291,7 +459,7 @@ struct MainMacBrowser::State {
                 auto target=item;
                 auto mounted=result.listing.folder.Volume();
                 if(mounted!=volume){
-                    ForgetFolders(volume);
+                    folderCache.Forget(volume);
                     auto replacement=mounts[index];
                     replacement.volume=mounted;
                     session_.Mounts().ReplaceMounted(index,std::move(replacement));
@@ -327,7 +495,7 @@ struct MainMacBrowser::State {
     {
         const auto key=volume->ResourceKey();
         const bool canCache=ExecutionFor(*volume).Persistent();
-        if(canCache&&!cached)RememberFolder({volume,revision,id,ancestors,folderTitle,entries,free});
+        if(canCache&&!cached)folderCache.Store({volume,revision,id,ancestors,folderTitle,entries,free});
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         if(rebuild){
             auto root=MountedRoot(index);tree->delete_subdir_contents(root);std::map<uint32_t,HTREEITEM> pathItems;pathItems[2]=root;
@@ -807,7 +975,7 @@ bool MainMacBrowser::Refresh()
     uint32_t id;
     if(!state_->Selected(index,id))return false;
     const auto& mount=state_->mounts[index];
-    ForgetFolders(mount.volume);
+    folderCache.Forget(mount.volume);
     const bool rebuild=mount.drive<0&&mount.physicalPath.empty();
     return state_->Show(index,id,session_.Tree()->m_ct->GetSelectedItem(),rebuild,true);
 }
