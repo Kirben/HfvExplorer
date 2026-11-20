@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-locked-folder.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-copy-locked-folder.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1476,6 +1476,21 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         auto lockedParent=unlockedParent;
         lockedParent.protectedFile=true;
         Check(!submit(unlockedParent,lockedParent).code,"APFS folder did not relock");
+        VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+        const auto destination=mounted->MakeDirectory(2,u"Folder copies");
+        Storage::Job folderCopy;
+        MacBrowser::Entry copiedFolder,copiedChild;
+        Check(MacBrowser::Copy(*mounted,parent.id,*mounted,destination,folderCopy)&&
+              mounted->FindChild(destination,lockedParent.name,copiedFolder)&&copiedFolder.protectedFile&&
+              copiedFolder.created==lockedParent.created&&copiedFolder.modified==lockedParent.modified&&
+              mounted->FindChild(copiedFolder.id,file.name,copiedChild)&&copiedChild.protectedFile&&
+              copiedChild.forks[0].size==5,"APFS recursive copy did not preserve locks, dates and contents");
+        const auto mergeParent=mounted->MakeDirectory(2,u"Folder merges");
+        const auto existing=mounted->MakeDirectory(mergeParent,lockedParent.name);
+        Storage::Job merge;
+        Check(MacBrowser::Copy(*mounted,parent.id,*mounted,mergeParent,merge)&&
+              !mounted->Stat(existing).protectedFile&&mounted->FindChild(existing,file.name,copiedChild),
+              "Merging a locked source folder changed the destination lock");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
@@ -1500,6 +1515,27 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
            "APFS Finder metadata test did not inject a write failure");
     CheckpointFaultImage reopened(fault.durable);
     Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted locked file import");
+    source.reset();
+    {
+        const auto mounted=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry lockedFolder,partial;
+        Check(mounted&&mounted->FindChild(2,u"Renamed Folder",lockedFolder),"Missing locked APFS source folder");
+        auto image=std::make_unique<CheckpointFaultImage>(bytes);
+        auto* raw=image.get();
+        std::unique_ptr<Source> targetImage=std::move(image);
+        const auto target=Apfs::OpenWritable(targetImage,"apfs-cancelled-folder-copy");
+        Check(bool(target),"Could not open the APFS cancellation fixture");
+        VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Read},
+                                           {target->ResourceKey(),VolumeCoord::Mode::Write}});
+        const auto destination=target->MakeDirectory(2,u"Cancelled destination");
+        Storage::Job stopped;
+        raw->onFlush=[&]{stopped.cancel();};
+        bool cancelled=false;
+        try{MacBrowser::Copy(*mounted,lockedFolder.id,*target,destination,stopped);}
+        catch(const Storage::Cancelled&){cancelled=true;}
+        Check(cancelled&&target->FindChild(destination,lockedFolder.name,partial)&&!partial.protectedFile&&
+              target->List(partial.id).empty(),"APFS locked a folder whose copy was cancelled");
+    }
     fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, file and folder locks, locked copies and overwrites, and interrupted import.\n");
 }
 

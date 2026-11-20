@@ -790,20 +790,28 @@ public:
         Check(entry.directory,"The APFS copy source is not a folder");
         return CreateFolder(parent,entry.name,CopyDates(entry),&entry.finder);
     }
-    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool)override{
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
         const auto dates=CopyDates(desired);
-        if(!dates)return;
+        const bool lockAfterCopy=!merge&&desired.protectedFile;
+        if(!dates&&!lockAfterCopy)return;
         WriteMount([&]{
             const auto& item=At(id);
             const auto& current=item.entry;
             Check(current.directory&&current.identity==expected.identity&&current.parent==expected.parent&&
                   current.name==expected.name,"The APFS destination folder changed during copying");
-            if(current.datesValid&&current.created==dates->created&&current.modified==dates->modified)return;
+            TimestampEdits changes;
+            if(dates){
+                if(!current.datesValid||current.created!=dates->created)changes.created=dates->created;
+                if(!current.datesValid||current.modified!=dates->modified)changes.modified=dates->modified;
+            }
+            if(!changes.created&&!changes.modified&&!lockAfterCopy)return;
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             // Restore destination folder dates even if the transfer was cancelled.
             Storage::Job metadata;
             CommitMutation(parent,0,metadata,[&](auto& job){
+                if(lockAfterCopy)
+                    return SetEntryProperties(*source,container,parentOid,oid,current.finder,changes,true,job);
                 return SetDirectoryDates(*source,container,parentOid,oid,*dates,job);
             });
         });
@@ -814,7 +822,7 @@ public:
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(entry.readError.empty()&&!entry.forks[1].size&&entry.attributes.empty()&&
-              (!entry.directory||!entry.protectedFile)&&!entry.hardLink&&!entry.compressed&&!entry.version,
+              !entry.hardLink&&!entry.compressed&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
