@@ -2000,7 +2000,7 @@ Memory SnapshotFixture()
     return disk;
 }
 
-Memory Gpt(const Memory& raw,unsigned sector)
+Memory Gpt(const Memory& raw,unsigned sector,bool readOnly=false)
 {
     const size_t start=1024*1024;
     Memory disk(start+size_t(raw.Size())+sector*40);
@@ -2013,6 +2013,7 @@ Memory Gpt(const Memory& raw,unsigned sector)
     memcpy(table.data(),guid,sizeof(guid));table[16]=1;
     Little(table.data()+32,start/sector,8);
     Little(table.data()+40,(start+raw.Size())/sector-1,8);
+    if(readOnly)Little(table.data()+48,1ULL<<60,8);
     for(bool backup:{false,true}){
         const auto current=backup?sectors-1:1,entries=backup?sectors-2:2;
         Bytes header(92);
@@ -2029,6 +2030,66 @@ Memory Gpt(const Memory& raw,unsigned sector)
     memcpy(boot+start,raw.bytes.data(),raw.bytes.size());
     return disk;
 }
+void WritableGptImages(const std::string& root,FILE* report)
+{
+    auto baseline=OpenImage(VolumeCoord::Wide(root+"checkpoint-before.img").c_str(),false);
+    Memory raw(size_t(baseline->Size()));
+    baseline->Read(0,raw.bytes.data(),raw.bytes.size());
+    constexpr size_t start=1024*1024;
+    for(const unsigned sector:{512u,4096u}){
+        for(const bool readOnly:{false,true}){
+            const auto disk=Gpt(raw,sector,readOnly);
+            const auto suffix=std::to_string(sector)+".img";
+            const auto path=VolumeCoord::Wide(root+(readOnly?"apfs-gpt-readonly-":"apfs-gpt-writable-")+suffix);
+            {
+                auto file=CreateFormatOutput(path.c_str(),disk.bytes.size());
+                file->Write(0,disk.bytes.data(),disk.bytes.size());
+                file->Flush();
+                file->Keep();
+            }
+            {
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&volume->Writable()==!readOnly,"APFS GPT partition has the wrong write capability");
+                if(!readOnly){
+                    VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+                    const auto folder=volume->MakeDirectory(2,u"Partition test");
+                    MacBrowser::Entry file;
+                    file.name=u"Payload";
+                    file.forks[0].size=8011;
+                    volume->Put(folder,file,[](unsigned fork,uint64_t,void* output,size_t count){
+                        Check(fork==0,"Unexpected APFS GPT test fork");
+                        memset(output,0x6a,count);
+                    },false);
+                    volume->Rename(folder,2,u"Edited partition");
+                }
+            }
+            auto file=OpenImage(path.c_str(),false);
+            const auto result=Disk::Read(*file,0,disk.bytes.size());
+            file.reset();
+            Check(std::equal(result.begin(),result.begin()+start,disk.bytes.begin())&&
+                  std::equal(result.begin()+start+raw.bytes.size(),result.end(),disk.bytes.begin()+start+raw.bytes.size()),
+                  "APFS wrote outside the GPT partition");
+            if(readOnly)Check(result==disk.bytes,"Opening read-only APFS GPT media changed it");
+            else{
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                MacBrowser::Entry folder,payload;
+                std::array<uint8_t,9> tail{};
+                Check(volume&&volume->Writable()&&volume->FindChild(2,u"Edited partition",folder)&&
+                      volume->FindChild(folder.id,u"Payload",payload),"APFS edits inside GPT did not survive reopening");
+                volume->Read(payload.id,0,8002,tail.data(),tail.size());
+                Check(std::all_of(tail.begin(),tail.end(),[](uint8_t value){return value==0x6a;}),
+                      "APFS GPT readback changed file contents");
+                const auto slice=VolumeCoord::Wide(root+"apfs-gpt-slice-"+suffix);
+                auto output=CreateFormatOutput(slice.c_str(),raw.bytes.size());
+                output->Write(0,result.data()+start,raw.bytes.size());
+                output->Flush();
+                output->Keep();
+            }
+        }
+    }
+    fprintf(report,"PASS: APFS writes in GPT slices, 512/4096 sector geometry, read-only flags, unchanged partition tables and file readback.\n");
+}
+
 }
 
 Bytes ApfsRemovableFixture(unsigned sector)
@@ -2094,6 +2155,7 @@ int RunApfsContainerTest(const char* directory)
         fprintf(report,"PASS: latest complete checkpoint, wraparound and rejection of corrupt checkpoint maps.\n");
         DataStreamAllocation(report);
         CheckpointWrites(root,report);
+        WritableGptImages(root,report);
         MultiChunkWrites(root,report);
         MultiCibWrites(root,report);
         SplitCatalogWrites(root,report);

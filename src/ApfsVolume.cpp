@@ -6,6 +6,8 @@
 #include "ApfsTree.h"
 #include "ApfsCrypto.h"
 #include "HfsPlusDisk.h"
+#include "DiskPartitions.h"
+#include "DiskSlice.h"
 #include "HfsPlusCompression.h"
 #include "MacBrowserModel.h"
 #include "VolumeCoordinator.h"
@@ -1096,8 +1098,30 @@ std::shared_ptr<MacBrowser::Volume> OpenWritable(std::unique_ptr<Source>& source
 std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>& source,
     const std::string& key,const ReopenRawImage& reopen)
 {
-    const auto expected=Probe(*source);
-    if(!expected)return {};
+    const auto whole=Probe(*source);
+    if(!whole)return {};
+    const auto writablePartition=[&](const Container& container)->std::optional<DiskPartitions::MacPartition>{
+        if(!container.offset)return {};
+        const auto partitions=DiskPartitions::ProbeGptImage(*source,Disk::Read(*source,0,512),
+                                                            DiskPartitions::GptType::AppleApfs);
+        if(!partitions||partitions->size()!=1)return {};
+        const auto& partition=partitions->front();
+        if(partition.readOnly||partition.offset!=container.offset||
+           partition.length!=container.blockCount*container.blockSize)return {};
+        return partition;
+    };
+    const auto partition=writablePartition(*whole);
+    if(whole->offset&&!partition)return OpenMounted(source,key,*whole,false);
+
+    const auto slice=[&](bool writable){
+        if(partition){
+            auto disk=std::shared_ptr<Source>(std::move(source));
+            source=std::make_unique<DiskImage::Slice>(std::move(disk),partition->offset,partition->length,writable);
+        }
+    };
+    slice(false);
+    const auto expected=partition?Probe(*source):whole;
+    Check(bool(expected),"The APFS container could not be opened inside the selected partition");
     try{
         ValidateWritableLayout(*source,*expected);
         WritableFreeBytes(*source,*expected);
@@ -1107,14 +1131,17 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
 
     const auto verify=[&]{
         const auto mounted=Probe(*source);
-        if(!mounted||mounted->uuid!=expected->uuid||mounted->transaction!=expected->transaction||
-           mounted->checkpointBlock!=expected->checkpointBlock)
-            throw Storage::MediaChanged("The selected APFS checkpoint changed while opening the image");
+        if(!mounted||mounted->uuid!=whole->uuid||mounted->transaction!=whole->transaction||
+           mounted->checkpointBlock!=whole->checkpointBlock||mounted->offset!=whole->offset||
+           mounted->blockCount!=whole->blockCount||mounted->blockSize!=whole->blockSize||
+           !(writablePartition(*mounted)==partition))
+            throw Storage::MediaChanged("The selected APFS checkpoint or partition changed while opening the image");
     };
     source.reset();
     try{
         source=reopen(true);
         verify();
+        slice(true);
         return OpenWritable(source,key);
     }catch(const Storage::MediaChanged&){
         throw;
@@ -1122,6 +1149,7 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
         source.reset();
         source=reopen(false);
         verify();
+        slice(false);
         return OpenMounted(source,key,*expected,false);
     }
 }
