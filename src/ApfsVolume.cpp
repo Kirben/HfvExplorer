@@ -443,7 +443,6 @@ public:
             entries.emplace(2,std::move(root));
         }else{
             label=u"APFS Container";
-            if(writable)caseSensitive=mounts.front().sensitive;
             Entry root;
             root.id=root.resolvedId=2;root.parent=1;root.directory=true;root.name=label;root.identity=MacBrowser::EntryIdentity(key);
             entries.emplace(2,Item{0,0,0,std::move(root),{}});
@@ -1004,9 +1003,8 @@ public:
             const auto parentOid=At(parent).oid;
             CommitMutation(parent,0,job,[&](auto& job){
                 if(!entry.expectedDestinationIdentity.empty()){
-                    const auto name=NormalizedName(entry.name,!caseSensitive);
-                    for(const auto& child:ListDirectory(parent)){
-                        if(NormalizedName(child.name,!caseSensitive)!=name)continue;
+                    Entry child;
+                    if(FindChild(parent,entry.name,child)){
                         const auto& destination=At(child.id);
                         Check(destination.symlink&&!child.protectedFile&&child.identity==entry.expectedDestinationIdentity,
                               "The APFS symbolic link destination changed after overwrite approval");
@@ -1036,12 +1034,17 @@ public:
             CatalogTimestamp(entry.modified);
         }
     }
-    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
+    void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool)override{
         if(limitedEdits){
+            const auto fold=Access([&]{
+                const auto& folder=At(parent);
+                Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
+                return !mounts[folder.mount].sensitive;
+            });
             std::set<std::u32string> names;
             for(const auto& entry:entries){
                 if(entry.directory)ValidateEntry(entry);
-                Check(names.insert(NormalizedName(entry.name,!caseSensitive)).second,
+                Check(names.insert(NormalizedName(entry.name,fold)).second,
                       "More than one file has the same APFS destination name");
             }
             return;
@@ -1097,28 +1100,23 @@ public:
 
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
-            const auto key=NormalizedName(entry.name,!caseSensitive);
-            const auto matches=[&](const Entry& candidate){
-                return NormalizedName(candidate.name,!caseSensitive)==key;
-            };
-            const auto children=ListDirectory(parent);
-            const auto found=std::find_if(children.begin(),children.end(),matches);
-            if(found!=children.end()){
-                Check(replace&&!found->directory&&!found->protectedFile&&found->readError.empty(),
+            Entry existing;
+            if(FindChild(parent,entry.name,existing)){
+                Check(replace&&!existing.directory&&!existing.protectedFile&&existing.readError.empty(),
                       "The APFS destination already exists or cannot be replaced");
-                Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==found->identity,
+                Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==existing.identity,
                       "The APFS destination changed after overwrite approval");
-                const auto oid=At(found->id).oid,sibling=At(found->id).siblingId;
+                const auto oid=At(existing.id).oid,sibling=At(existing.id).siblingId;
                 CommitMutation(parent,0,job,[&](auto& job){
                     return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling);
-                },found->id);
-                return found->id;
+                },existing.id);
+                return existing.id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
                 return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits);
             });
-            for(const auto id:listings.at(parent))if(matches(At(id).entry))return id;
+            if(FindChild(parent,entry.name,existing))return existing.id;
             throw Error("APFS file was committed but could not be found after reopening");
         },true);
     }
@@ -1403,14 +1401,11 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
             if(expected->volumes.size()==1)InspectFreeQueueAllocation(*source,*expected);
             else{
                 const ObjectMap map(*source,*expected,expected->objectMap,expected->transaction);
-                std::optional<bool> sensitive;
                 for(const auto oid:expected->volumes){
                     InspectFreeQueueAllocation(*source,*expected,oid);
                     const auto block=map.Lookup(oid);
                     Check(block.has_value(),"Missing writable APFS volume");
-                    const auto volume=ReadVolume(ReadObject(*source,*expected,*block,oid,expected->transaction,13),oid);
-                    Check(!sensitive||*sensitive==volume.sensitive,"APFS writable containers require one name comparison mode");
-                    sensitive=volume.sensitive;
+                    ReadVolume(ReadObject(*source,*expected,*block,oid,expected->transaction,13),oid);
                 }
             }
             limitedEdits=true;

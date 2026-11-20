@@ -587,7 +587,7 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
          "The symbolic link destination is locked or is not a symbolic link");
    dst.ValidateSymbolicLink(plan.entry,*plan.linkTarget);
   }else if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}
-  else {dst.ValidateEntry(plan.entry);if(plan.entry.directory)ValidatePlans(dst,plan.children,0,false);}
+  else {dst.ValidateEntry(plan.entry);if(plan.entry.directory)ValidatePlans(dst,plan.children,parent,false);}
  }
 }
 }

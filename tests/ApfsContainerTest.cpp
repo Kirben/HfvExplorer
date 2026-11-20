@@ -2527,9 +2527,9 @@ void ExternalCaseSensitiveWrites(const std::string& root,FILE* report,const wcha
     fprintf(report,"PASS: %s case-sensitive APFS compatibility writer, collisions, rename, overwrite, delete and exact readback.\n",
             fixture?"macOS-created":"generated");
 }
-void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_t* fixture,size_t targetIndex)
+void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_t* fixture,size_t targetIndex,bool mixedCase=false)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-multi-volume-writes-"+std::to_string(targetIndex+1)+".img");
+    const auto path=VolumeCoord::Wide(root+(mixedCase?"apfs-mixed-case-writes-":"apfs-multi-volume-writes-")+std::to_string(targetIndex+1)+".img");
     const auto siblingIndex=1-targetIndex;
     auto input=OpenImage(fixture,false);
     const auto initial=Apfs::Probe(*input);
@@ -2598,6 +2598,52 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
         put(0x56,true,job);
         file.name=u"Deleted.bin";
         volume->Remove(put(0x90,false,job));
+        if(mixedCase){
+            constexpr size_t sensitiveIndex=1;
+            const bool sensitive=targetIndex==sensitiveIndex;
+            file.name=u"Report";
+            const auto upper=put(0x31,false,job);
+            file.name=u"report";
+            if(sensitive){
+                const auto lower=put(0x62,false,job);
+                Check(upper!=lower,"APFS case-sensitive files shared an identity");
+                Reject([&]{volume->Rename(upper,folder,u"report");},"APFS case-sensitive rename accepted an exact collision");
+                Check(put(0x28,true,job)==lower,"APFS overwrite chose the wrong case-sensitive name");
+                volume->Read(upper,0,0,actual.data(),actual.size());
+                Check(actual==Bytes(actual.size(),0x31),"APFS overwrote a case-distinct sibling");
+                volume->Rename(upper,folder,u"REPORT");
+            }else{
+                Reject([&]{put(0x62,false,job);},"APFS accepted a case-only duplicate in an insensitive volume");
+                Check(put(0x28,true,job)==upper,"APFS did not fold case for overwrite");
+                volume->Rename(upper,folder,u"REPORT");
+            }
+            MacBrowser::Entry upperEntry,lowerEntry;
+            Check(volume->FindChild(folder,u"REPORT",upperEntry)&&volume->FindChild(folder,u"report",lowerEntry)&&
+                  (upperEntry.id!=lowerEntry.id)==sensitive,"APFS lookup disagreed with its destination case mode");
+
+            auto memory=std::make_unique<CheckpointFaultImage>(Bytes(16*1024*1024));
+            Apfs::Format(*memory,u"Nested test source",true,job);
+            std::unique_ptr<Source> input=std::move(memory);
+            auto source=Apfs::OpenWritable(input,"apfs-mixed-case-nested-source");
+            const auto tree=source->MakeDirectory(2,u"Nested collision test");
+            const auto child=source->MakeDirectory(tree,u"Inside");
+            MacBrowser::Entry name;
+            name.name=u"Draft";
+            source->Put(child,name,{},false);
+            name.name=u"draft";
+            source->Put(child,name,{},false);
+            MacBrowser::Entry copied;
+            if(sensitive){
+                Check(MacBrowser::Copy(*source,tree,*volume,folder,job)&&
+                      volume->FindChild(folder,u"Nested collision test",copied)&&volume->List(copied.id).size()==1&&
+                      volume->List(volume->List(copied.id).front().id).size()==2,
+                      "APFS case-sensitive copy lost a nested case-distinct name");
+            }else{
+                Reject([&]{MacBrowser::Copy(*source,tree,*volume,folder,job);},
+                       "APFS insensitive copy accepted nested case-colliding names");
+                Check(!volume->FindChild(folder,u"Nested collision test",copied),"APFS copy created a folder before detecting a nested collision");
+            }
+        }
         const auto same=readSibling(*volume);
         Check(same.id==originalSibling.id&&same.identity==originalSibling.identity,
               "APFS edit invalidated the sibling volume or entry identity");
@@ -2629,6 +2675,16 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
         actual.resize(expected.size());
         if(!actual.empty())volume->Read(same.id,fork,0,actual.data(),actual.size());
         Check(actual==expected,"APFS operation changed a sibling fork");
+    }
+    if(mixedCase){
+        MacBrowser::Entry upper,lower;
+        const bool sensitive=targetIndex==1;
+        Check(volume->FindChild(folder.id,u"REPORT",upper)&&upper.name==u"REPORT"&&
+              volume->FindChild(folder.id,u"report",lower)&&(upper.id!=lower.id)==sensitive,
+              "APFS case-mode edits did not survive reopening");
+        volume->Read(lower.id,0,0,actual.data(),actual.size());
+        Check(actual==Bytes(actual.size(),0x28),"APFS case-mode overwrite did not survive reopening");
+        fprintf(report,"PASS: mixed-case APFS volume %zu uses its own naming and recursive copy rules.\n",targetIndex+1);
     }
     fprintf(report,"PASS: APFS volume %zu create, overwrite, delete, cancellation, and unchanged sibling mapping, forks and metadata.\n",
             targetIndex+1);
@@ -2784,6 +2840,10 @@ int RunApfsContainerTest(const char* directory)
             }
             for(size_t target=0;target<2;++target)
                 ExternalMultiVolumeWrites(root,report,input.c_str(),target);
+        }
+        if(const auto mixed=_wgetenv(L"HFV_APFS_MIXED_CASE_FIXTURE")){
+            for(size_t target=0;target<2;++target)
+                ExternalMultiVolumeWrites(root,report,mixed,target,true);
         }
         ExternalCaseSensitiveWrites(root,report,nullptr);
         if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))
