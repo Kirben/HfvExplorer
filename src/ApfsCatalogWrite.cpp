@@ -644,7 +644,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const size_t streamEnd=stream+40+(finder?finder->size():0);
                     const auto size=view.value.size==streamEnd?Le64(value+stream):0;
                     Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
-                    const auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size,finder?&*finder:nullptr);
+                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,0100644,1,size,finder?&*finder:nullptr);
+                    Set(expected.value,68,Le32(value+68)&UserImmutable,4);
                     Check(mode==0100000&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
                           "APFS writes require native regular-file data streams");
@@ -720,6 +721,11 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             Set(inode,32,time,8);
             return records;
         }
+        const auto bsdFlags=Le32(inode.data()+68);
+        Check(!(bsdFlags&SystemImmutable)&&(!(bsdFlags&UserImmutable)||(metadata&&metadata->finder&&!metadata->locked)),
+              "Unlock the APFS file before making changes");
+        Check(!metadata||link.kind==CatalogKind::RegularFile||!metadata->locked,
+              "APFS folder locking is unavailable");
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
         const auto existingFinder=link.finder?&*link.finder:nullptr;
@@ -752,6 +758,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         inode=std::move(updated.value);
         if(metadata){
+            Set(inode,68,(bsdFlags&~UserImmutable)|(metadata->locked?UserImmutable:0),4);
             editDates(inode);
             return records;
         }

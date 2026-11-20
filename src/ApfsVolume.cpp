@@ -241,6 +241,7 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
+        entry.protectedFile=(Le32(p+68)&(UserImmutable|SystemImmutable))!=0;
         out.symlink=mode==0120000;
         if(out.symlink)entry.readError="APFS symbolic links cannot be exported";
         else if(!entry.directory&&mode!=0100000)entry.readError="APFS special files are unsupported";
@@ -888,18 +889,18 @@ public:
             const auto& item=At(id);
             const auto& current=item.entry;
             Check(id!=2&&current.name==desired.name&&current.directory==desired.directory&&
-                  current.version==desired.version&&current.protectedFile==desired.protectedFile,
+                  current.version==desired.version&&(!current.directory||current.protectedFile==desired.protectedFile),
                   "APFS Properties can only change Finder information and timestamps on files and folders");
             Check(current.datesValid==desired.datesValid,"APFS timestamps cannot be removed");
             TimestampEdits dates;
             if(current.created!=desired.created)dates.created=desired.created;
             if(current.modified!=desired.modified)dates.modified=desired.modified;
-            if(current.finder==desired.finder&&!dates.created&&!dates.modified)return;
+            if(current.protectedFile==desired.protectedFile&&current.finder==desired.finder&&!dates.created&&!dates.modified)return;
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
-                return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,job);
+                return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,desired.protectedFile,job);
             });
         });
     }
@@ -910,6 +911,12 @@ public:
             const auto oid=entry.oid,parentOid=At(parent).oid;
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){return RenameEntry(*source,container,parentOid,oid,name,job);});
+        });
+    }
+    void ValidateRemoval(uint32_t id)override{
+        Access([&]{
+            Check(writable&&id!=2&&!At(id).entry.protectedFile,"APFS file is locked or read-only");
+            return true;
         });
     }
     void Remove(uint32_t id)override{

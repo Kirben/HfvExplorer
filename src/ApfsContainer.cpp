@@ -369,9 +369,9 @@ uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t par
 }
 
 uint64_t SetEntryProperties(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                       const FinderBytes& finder,TimestampEdits dates,Storage::Job& job)
+                       const FinderBytes& finder,TimestampEdits dates,bool locked,Storage::Job& job)
 {
-    const CatalogMutation request=CatalogMetadata{parent,inode,dates,&finder};
+    const CatalogMutation request=CatalogMetadata{parent,inode,dates,locked,&finder};
     return Commit(source,expected,job,&request);
 }
 

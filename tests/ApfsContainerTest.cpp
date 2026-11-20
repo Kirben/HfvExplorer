@@ -1307,7 +1307,7 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
 
 void FinderMetadataWrites(const std::string& root,FILE* report)
 {
-    const auto path=VolumeCoord::Wide(root+"apfs-timestamp-properties.img");
+    const auto path=VolumeCoord::Wide(root+"apfs-locked-file.img");
     {
         auto image=CreateFormatOutput(path.c_str(),8*1024*1024);
         Storage::Job job;
@@ -1411,12 +1411,30 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
         Check(!cleared.code&&mounted->Stat(parent.id).finder==desiredFolder.finder&&
               mounted->Stat(parent.id).created==desiredFolder.created&&mounted->Stat(parent.id).modified==parent.modified,
               "APFS folder Properties did not clear Finder information");
+        auto locked=fresh;
+        locked.protectedFile=true;
+        Check(!submit(fresh,locked).code&&mounted->Stat(fresh.id).protectedFile,"APFS file did not lock");
+        {
+            VolumeCoord::OperationLease lease({{mounted->ResourceKey(),VolumeCoord::Mode::Write}});
+            Reject([&]{mounted->ValidateRemoval(fresh.id);},"APFS cut preflight accepted a locked file");
+            Reject([&]{mounted->Rename(fresh.id,parent.id,u"Locked rename");},"APFS renamed a locked file");
+            Reject([&]{mounted->Remove(fresh.id);},"APFS deleted a locked file");
+            Reject([&]{mounted->Put(parent.id,file,contents,true);},"APFS overwrote a locked file");
+        }
+        const auto persisted=mounted->Stat(fresh.id);
+        auto stillLocked=persisted;
+        stillLocked.finder[2]^=1;
+        Check(submit(persisted,stillLocked).code,"APFS modified Finder information on a locked file");
+        auto unlocked=persisted;
+        unlocked.protectedFile=false;
+        Check(!submit(persisted,unlocked).code&&!mounted->Stat(fresh.id).protectedFile,"APFS file did not unlock");
+        Check(!submit(unlocked,locked).code&&mounted->Stat(fresh.id).protectedFile,"APFS file did not relock");
     }
     {
         const auto mounted=MacBrowser::OpenBrowserImage(path);
         MacBrowser::Entry parent,current;
         Check(mounted&&mounted->FindChild(2,u"Renamed Folder",parent)&&parent.finder==Apfs::FinderBytes{}&&
-              mounted->FindChild(parent.id,file.name,current)&&current.finder[31]==0x5a&&current.modified==5000000123ULL,
+              mounted->FindChild(parent.id,file.name,current)&&current.finder[31]==0x5a&&current.modified==5000000123ULL&&current.protectedFile,
               "APFS Properties did not survive reopening");
         std::array<char,5> data{};
         mounted->Read(current.id,0,0,data.data(),data.size());
@@ -1434,7 +1452,7 @@ void FinderMetadataWrites(const std::string& root,FILE* report)
            "APFS Finder metadata test did not inject a write failure");
     CheckpointFaultImage reopened(fault.durable);
     Check(Apfs::Probe(reopened)->transaction==previous,"APFS published an interrupted Finder metadata write");
-    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, and interrupted writes.\n");
+    fprintf(report,"PASS: APFS Finder information for files and folders, rename, overwrite, clearing, timestamp edits, stale Properties edits, file locks, and interrupted writes.\n");
 }
 
 void UnicodeCatalogNames(const std::string& root,FILE* report)

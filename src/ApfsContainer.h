@@ -27,6 +27,7 @@ uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Jo
 // Folder and file creation and rename support up to two catalog tree levels in native images.
 // The same exclusive image ownership is required as for CommitCheckpoint.
 using FinderBytes=std::array<uint8_t,32>;
+inline constexpr uint32_t UserImmutable=0x00000002,SystemImmutable=0x00020000;
 struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.
 };
@@ -38,7 +39,7 @@ struct TimestampEdits {
     std::optional<uint64_t> created,modified;
 };
 uint64_t SetEntryProperties(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                            const FinderBytes&,TimestampEdits,Storage::Job&);
+                            const FinderBytes&,TimestampEdits,bool locked,Storage::Job&);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
 
 // Stream a data fork from a separate source into a newly created file.
