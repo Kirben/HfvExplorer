@@ -371,9 +371,14 @@ public:
                     }
                     auto& entry=inode.entry;
                     entry.parent=parent;entry.name=std::move(name);
-                    entry.identity=MacBrowser::EntryIdentity(
-                        key+":"+std::to_string(mounted.oid)+":"+std::to_string(folder.oid)+":"+std::to_string(oid),
-                        mounted.xid);
+                    auto identity=key+":"+std::to_string(mounted.oid)+":"+std::to_string(folder.oid)+":"+std::to_string(oid);
+                    // Alias names in the same directory can refer to the same
+                    // inode, but each alias is a separate browser selection.
+                    if(entry.hardLink){
+                        identity+=':';
+                        identity.append(reinterpret_cast<const char*>(record.key.data+header),nameLength-1);
+                    }
+                    entry.identity=MacBrowser::EntryIdentity(std::move(identity),mounted.xid);
                     children.push_back({folder.mount,oid,inode.stream,std::move(entry),
                                         std::move(inode.attributes),inode.symlink});
                 });

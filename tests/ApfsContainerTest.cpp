@@ -360,8 +360,9 @@ int RunApfsContainerTest(const char* directory)
             Check(files.size()==400,"Independent APFS fixture lost files across catalog nodes");
             MacBrowser::Entry a,b;
             Check(authentic->FindChild(2,u"hard_a.txt",a)&&authentic->FindChild(2,u"hard_b.txt",b)&&
-                  a.hardLink&&b.hardLink&&a.id!=b.id&&a.resolvedId==b.resolvedId,
-                  "APFS hard-linked names do not share the same inode identity");
+                  a.hardLink&&b.hardLink&&a.id!=b.id&&a.resolvedId==b.resolvedId&&
+                  !a.identity.SameObject(b.identity),
+                  "APFS hard-linked names did not retain distinct selections and a shared inode");
             const auto name=std::find_if(files.begin(),files.end(),[](const auto& file){return file.name==u"file_0222.txt";});
             Check(name!=files.end()&&name->forks[0].size==10,"Independent APFS fixture lost a file size");
             char data[10];
@@ -486,6 +487,16 @@ int RunApfsContainerTest(const char* directory)
             image->Write(0,linkedDisk.bytes.data(),linkedDisk.bytes.size());image->Flush();image->Keep();
         }
         auto linked=MacBrowser::OpenBrowserImage(linkedPath);
+        const auto sourceFolder=linked->List().at(0);
+        MacBrowser::Entry sourceAlias,sourceFile;
+        Check(linked->FindChild(sourceFolder.id,u"Alias A",sourceAlias)&&
+              linked->FindChild(sourceFolder.id,withMetadata.name,sourceFile)&&
+              sourceAlias.resolvedId==sourceFile.resolvedId&&!sourceAlias.identity.SameObject(sourceFile.identity),
+              "Same-folder APFS hard links were treated as one browser selection");
+        auto reopened=MacBrowser::OpenBrowserImage(linkedPath);
+        MacBrowser::Entry reopenedAlias;
+        Check(reopened->FindChild(reopened->List().at(0).id,u"Alias A",reopenedAlias)&&
+              reopenedAlias.identity==sourceAlias.identity,"APFS hard-link selection changed after reopen");
         Storage::Job linkCopy;
         Check(MacBrowser::Copy(*linked,linked->List().at(0).id,*targetMac,2,linkCopy),
               "APFS hard-link group copy did not complete");
