@@ -522,6 +522,7 @@ void HFVExplorerTreeView::enable_selchange(int onoff)
 int HFVExplorerTreeView::tree_clear()
 {
 	m_selchange_enabled = 0;
+	mountRoots_.clear();
 	m_ct->SetImageList( 0, 0 );
 	if(this && IsWindow( this->m_hWnd )) {
 		m_ct->DeleteAllItems();
@@ -612,6 +613,19 @@ void HFVExplorerTreeView::Dump(CDumpContext& dc) const
 /////////////////////////////////////////////////////////////////////////////
 // HFVExplorerTreeView message handlers
 
+HTREEITEM HFVExplorerTreeView::MountRoot(BrowserMountInventory::Address address) const
+{
+    const auto found=mountRoots_.find({address.kind,address.index});
+    return found==mountRoots_.end()?nullptr:found->second;
+}
+
+void HFVExplorerTreeView::SetMountRoot(BrowserMountInventory::Address address,HTREEITEM root)
+{
+    const auto slot=std::make_pair(address.kind,address.index);
+    if(root)mountRoots_[slot]=root;
+    else mountRoots_.erase(slot);
+}
+
 void HFVExplorerTreeView::RenewBrowserMount(HTREEITEM item)
 {
     if(!item)return;
@@ -638,7 +652,15 @@ const BrowserDirectory::Folder* HFVExplorerTreeView::BrowserFolderAt(HTREEITEM i
 
 void HFVExplorerTreeView::OnDeleteItem(NMHDR* header,LRESULT* result){
  auto item=reinterpret_cast<NMTREEVIEW*>(header);DWORD_PTR key=DWORD_PTR(item->itemOld.lParam);auto found=m_pointer_slots.find(key);
- if(found!=m_pointer_slots.end()){INT_PTR slot=found->second;m_pointer_array.SetAt(slot,0);m_free_slots.push_back(slot);m_pointer_slots.erase(found);delete reinterpret_cast<BrowserTreeNode*>(key);}
+ if(found!=m_pointer_slots.end()){
+  auto* node=reinterpret_cast<BrowserTreeNode*>(key);
+  if(MountRoot(node->mount)==item->itemOld.hItem)SetMountRoot(node->mount,nullptr);
+  const auto slot=found->second;
+  m_pointer_array.SetAt(slot,0);
+  m_free_slots.push_back(slot);
+  m_pointer_slots.erase(found);
+  delete node;
+ }
  *result=0;
 }
 void HFVExplorerTreeView::OnSelchanged(NMHDR* pNMHDR, LRESULT* pResult) 
@@ -753,7 +775,7 @@ void HFVExplorerTreeView::on_volume_changed( int volinx )
 
 	pApp = (CHFVExplorerApp *)AfxGetApp();
 
-	root = ((CHFVExplorerDoc*)m_pDocument)->Mounts().ClassicAt(volinx).m_rootitem;
+	root = MountRoot({BrowserMountInventory::Kind::ClassicVolume,volinx});
 	currdir = ((CHFVExplorerDoc*)m_pDocument)->get_directory( 0, &mac );
 	GetBrowserSession().Tree()->enable_selchange(0);
 	delete_subdir_contents( root );
@@ -778,7 +800,7 @@ void HFVExplorerTreeView::delete_by_path( LPCSTR path )
 {
 	HTREEITEM htree;
 
-	htree = tree_find_fat( GetBrowserSession().Mounts().ClassicAt(pitem->volinx).m_rootitem, path );
+	htree = tree_find_fat( MountRoot({BrowserMountInventory::Kind::ClassicVolume,pitem->volinx}), path );
 	if(htree) {
 		m_ct->DeleteItem(htree);
 	}

@@ -206,7 +206,7 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
  auto reader=std::make_shared<BrowserFolderReader>(FolderOptions());
  auto& control=session.Tree()->GetTreeCtrl();
  const auto item=control.GetSelectedItem();
- const auto root=Mounts().WindowsAt(index).m_rootitem;
+ const auto root=session.MountRoot({BrowserMountInventory::Kind::WindowsDrive,index});
  const auto type=Mounts().WindowsAt(index).m_type;
  const bool atRoot=path.size()==3&&path[2]==L'\\';
  const int drive=towupper(path[0])-L'A';
@@ -301,9 +301,11 @@ bool CHFVExplorerDoc::NavigateWindowsFolder(int index, const std::wstring& path,
    const auto& attached=Mounts().ClassicAt(mounted);
    auto enabled=tree->SelectionNotificationsEnabled();
    tree->enable_selchange(0);
-   const auto floppyRoot=attached.m_rootitem?attached.m_rootitem:
-      tree->initialize_volume(mounted,attached.m_volume_name,2,1,0,0,0);
-   Mounts().SetRoot(address,floppyRoot);
+   auto floppyRoot=session.MountRoot(address);
+   if(!floppyRoot){
+    floppyRoot=tree->initialize_volume(mounted,attached.m_volume_name,2,1,0,0,0);
+    session.SetMountRoot(address,floppyRoot);
+   }
    tree->delete_subdir_contents(floppyRoot);
    control.SetItemText(floppyRoot,attached.m_volume_name);
    tree->enable_selchange(enabled);

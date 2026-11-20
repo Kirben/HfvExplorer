@@ -499,9 +499,9 @@ void BrowserChecks(const std::string& root,std::shared_ptr<Bytes> plus,std::shar
  auto doc=sa.Document();
  const auto index=doc->Mounts().AddWindows('Z',DRIVE_REMOVABLE,"Z:\\");
  const auto& drive=doc->Mounts().WindowsAt(index);
- doc->Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,index},
+ doc->GetBrowserSession().SetMountRoot({BrowserMountInventory::Kind::WindowsDrive,index},
      sa.Tree()->initialize_fat_volume(index,&drive.m_volume_name,drive.m_type,&drive.m_volume_name,FALSE));
- sa.Tree()->GetTreeCtrl().SelectItem(drive.m_rootitem);
+ sa.Tree()->GetTreeCtrl().SelectItem(sa.MountRoot({BrowserMountInventory::Kind::WindowsDrive,index}));
  Check(sa.AwaitNavigationForTest(),"complete removable drive selection");
  BrowserDirectory::testObserveRead={};
  Check(!windowsRead&&sa.MacBrowser().Active()&&Row(sa,L"Hello")>=0&&!sa.MacBrowser().Writable(),

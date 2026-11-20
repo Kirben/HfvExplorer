@@ -173,13 +173,17 @@ struct MainMacBrowser::State {
             BrowserDirectory::Folder{Location::Mounted(mounts[index].volume, id), mounts[index].volume->Supports().create}});
         return reinterpret_cast<HTREEITEM>(SendMessageW(tree->m_ct->m_hWnd,TVM_INSERTITEMW,0,reinterpret_cast<LPARAM>(&ins)));
     }
+    HTREEITEM MountedRoot(int index) const {
+        return session_.MountRoot({BrowserMountInventory::Kind::MountedVolume,index});
+    }
     void Root(int index) {
         auto& m=mounts[index];if(!m.volume)return;auto label=Wide(m.volume->Name())+L" ("+FromAnsi(m.volume->Description())+L")";
         if(!m.suffix.empty())label+=L" - "+m.suffix;
         if(m.drive>=0)label+=std::wstring(L" - ")+wchar_t('A'+m.drive)+L":";
         if(!m.volume->Writable())label+=L" [read-only]";
+        if(MountedRoot(index))return;
         const auto root=Insert(index,2,nullptr,label,true);
-        session_.Mounts().SetRoot({BrowserMountInventory::Kind::MountedVolume,index},root);
+        session_.SetMountRoot({BrowserMountInventory::Kind::MountedVolume,index},root);
     }
     bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool reload=false,const BrowserNavigation::Request* find=nullptr) {
         session_.CancelNavigation();
@@ -240,7 +244,7 @@ struct MainMacBrowser::State {
                 (rebuild||reload)?Intent::RefreshFolder:Intent::SelectFolder,key};
             request.folder.directory=true;
             const auto& mount=mounts[index];
-            const auto mountRoot=mount.root;
+            const auto mountRoot=MountedRoot(index);
             const auto drive=mount.drive;
             request.mediaDrive=drive;
             const auto physicalPath=mount.physicalPath;
@@ -326,7 +330,7 @@ struct MainMacBrowser::State {
         if(canCache&&!cached)RememberFolder({volume,revision,id,ancestors,folderTitle,entries,free});
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         if(rebuild){
-            auto root=mounts[index].root;tree->delete_subdir_contents(root);std::map<uint32_t,HTREEITEM> pathItems;pathItems[2]=root;
+            auto root=MountedRoot(index);tree->delete_subdir_contents(root);std::map<uint32_t,HTREEITEM> pathItems;pathItems[2]=root;
             for(auto& level:levels)for(auto& entry:level.second)if(entry.directory&&(App().m_show_invisible_mac||!((uint16_t(entry.finder[8])<<8|entry.finder[9])&0x4000)||std::find(ancestors.begin(),ancestors.end(),entry.id)!=ancestors.end()))pathItems[entry.id]=Insert(index,entry.id,pathItems.at(level.first),Wide(entry.name));
             item=pathItems.at(id);
         }
@@ -385,7 +389,7 @@ struct MainMacBrowser::State {
 };
 MainMacBrowser::MainMacBrowser(BrowserSession& session):session_(session),state_(new State(session)){}
 MainMacBrowser::~MainMacBrowser()=default;
-void MainMacBrowser::ForgetTree(){state_->media.Cancel();state_->restore.clear();session_.Mounts().ClearMountedRoots();}
+void MainMacBrowser::ForgetTree(){state_->media.Cancel();state_->restore.clear();}
 std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?tree->BrowserNodeAt(item):nullptr;if(!p)return {};if(p->LegacyType()==LIST_HFS&&p->mount.index>=0&&p->mount.index<doc->Mounts().ClassicCount())return doc->Mounts().ClassicAt(p->mount.index).m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->Mounts().ClassicAt(p->mount.index).m_file_name));if(p->LegacyType()==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return folder&&folder->location.IsWindows()?session_.ObservedWindowsKey(folder->location.WindowsPath()):std::string();}return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::Writable()const{int i;uint32_t id;return session_.ListingAvailable()&&state_->Selected(i,id)&&state_->folderMutable&&state_->mounts[i].volume->Supports().create;}
@@ -519,10 +523,10 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
             });
             int index;
             if(match==state_->mounts.end()){
-                index=session_.Mounts().AddMounted({volume,path,nullptr,-1});
+                index=session_.Mounts().AddMounted({volume,path,-1});
             }else index=int(match-state_->mounts.begin());
-            if(!state_->mounts[index].root)state_->Root(index);
-            state_->Publish(index,2,state_->mounts[index].root,false,false,volume,
+            if(!state_->MountedRoot(index))state_->Root(index);
+            state_->Publish(index,2,state_->MountedRoot(index),false,false,volume,
                 result.listing.revision,Wide(volume->Name()),{},root.entries,root.free,true,{2},&result.listing);
             RememberImage(path);
             if(next)next();
@@ -563,8 +567,8 @@ void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,int d
   ReconcileRemovable(found,drive);
   for(size_t index=0;index<state_->mounts.size();++index){
    const auto& mount=state_->mounts[index];
-   if(mount.volume&&mount.root&&mount.volume->ResourceKey()==key){
-    state_->Show(int(index),2,mount.root);
+   if(mount.volume&&state_->MountedRoot(int(index))&&mount.volume->ResourceKey()==key){
+    state_->Show(int(index),2,state_->MountedRoot(int(index)));
     break;
    }
   }
@@ -574,7 +578,7 @@ void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,int d
   const auto key=VolumeCoord::Wide(foundVolume.volume->ResourceKey());
   const auto old=std::find_if(state_->mounts.begin(),state_->mounts.end(),
       [&](const auto& mount){return mount.key==key;});
-  State::Mount mount{foundVolume.volume,key,nullptr,-1};
+  State::Mount mount{foundVolume.volume,key,-1};
   mount.physicalPath=foundVolume.device.path;
   mount.physicalOffset=foundVolume.partition.offset;
   mount.suffix=foundVolume.label;
@@ -584,6 +588,9 @@ void MainMacBrowser::AdoptRemovable(std::vector<Removable::Mounted>& found,int d
   else{
    index=int(old-state_->mounts.begin());
    session_.Mounts().ReplaceMounted(index,std::move(mount));
+  }
+  if(auto item=state_->MountedRoot(index)){
+   session_.Tree()->GetTreeCtrl().DeleteItem(item);
   }
   state_->Root(index);
  }
@@ -615,7 +622,7 @@ void MainMacBrowser::ReconcileRemovable(std::vector<Removable::Mounted>& found,i
 
   try{
    VolumeCoord::OperationLease access({{mount.volume->ResourceKey(),VolumeCoord::Mode::Write}});
-   if(mount.root){tree->delete_subdir_contents(mount.root);control.DeleteItem(mount.root);}
+   if(auto item=state_->MountedRoot(int(i))){tree->delete_subdir_contents(item);control.DeleteItem(item);}
    affected|=selected==int(i);
    auto released=session_.Mounts().RemoveMounted(int(i));
    Storage::navigationWorker().submit([released](Storage::Job&){return Storage::Result{};});
@@ -699,12 +706,12 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
   if(windows>=0){
    auto& slot=doc->Mounts().WindowsAt(windows);
    const bool replace=update.ReplaceWindows(slot.m_type);
-   if(!update.rescan||replace)clearRoot(slot.m_rootitem,replace);
    const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::WindowsDrive,windows};
+   if(!update.rescan||replace)clearRoot(session_.MountRoot(address),replace);
    session_.Mounts().SetWindowsType(windows,present?update.type:DRIVE_NO_ROOT_DIR);
-   if(replace)session_.Mounts().SetRoot(address,nullptr);
-   if(present&&!slot.m_rootitem)
-    session_.Mounts().SetRoot(address,tree->initialize_fat_volume(windows,&slot.m_volume_name,slot.m_type,&slot.m_volume_name,drive<2));
+   if(replace)session_.SetMountRoot(address,nullptr);
+   if(present&&!session_.MountRoot(address))
+    session_.SetMountRoot(address,tree->initialize_fat_volume(windows,&slot.m_volume_name,slot.m_type,&slot.m_volume_name,drive<2));
   }
 
   int floppy=classicIndex;
@@ -712,14 +719,15 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
   if(floppy>=0){
    auto& slot=doc->Mounts().ClassicAt(floppy);
    const auto generation=slot.m_mediaGenerationKnown?std::optional<DWORD>(slot.m_mediaGeneration):std::nullopt;
-   if(update.RefreshFloppy(slot.m_opened,generation))clearRoot(slot.m_rootitem,!update.floppy);
+   const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,floppy};
+   const auto item=session_.MountRoot(address);
+   if(update.RefreshFloppy(slot.m_opened,generation))clearRoot(item,!update.floppy);
    if(update.floppy){
     session_.Mounts().UpdateClassic(floppy,*update.floppy);
-    const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,floppy};
-    if(!slot.m_rootitem)session_.Mounts().SetRoot(address,tree->initialize_volume(floppy,slot.m_volume_name,2,1,0,0,0));
+    if(!item)session_.SetMountRoot(address,tree->initialize_volume(floppy,slot.m_volume_name,2,1,0,0,0));
     else{
-     tree->RenewBrowserMount(slot.m_rootitem);
-     control.SetItemText(slot.m_rootitem,slot.m_volume_name);
+     tree->RenewBrowserMount(item);
+     control.SetItemText(item,slot.m_volume_name);
     }
    }else session_.Mounts().RemoveClassic(floppy);
   }
@@ -728,13 +736,13 @@ void MainMacBrowser::PublishDriveUpdate(MediaDiscovery::DriveUpdate& update,std:
   for(size_t index=0;index<state_->mounts.size();++index){
    const auto& mount=state_->mounts[index];
    if(!update.RemoveOptical(mount.drive,mount.volume))continue;
-   clearRoot(mount.root,true);
+   clearRoot(state_->MountedRoot(int(index)),true);
    released.push_back(session_.Mounts().RemoveMounted(int(index)));
   }
   if(update.cd&&!HasCdRoot(drive))AdoptCd(drive,root,std::move(update.cd),false);
   if(update.UpdateExternal())ReconcileRemovable(update.removable,drive);
   if(affected){
-   control.SelectItem(windows>=0?doc->Mounts().WindowsAt(windows).m_rootitem:nullptr);
+   control.SelectItem(windows>=0?session_.MountRoot({BrowserMountInventory::Kind::WindowsDrive,windows}):nullptr);
    session_.ClearCurrent();
    session_.SetLocationTitle({});
    session_.List()->initialize_volume("",0);
@@ -760,7 +768,7 @@ void MainMacBrowser::SetDriveTypeForTest(std::function<UINT(int)> probe){state_-
 
 bool MainMacBrowser::HasCdRoot(int drive)const{
  return std::any_of(state_->mounts.begin(),state_->mounts.end(),
-    [&](const auto& mount){return mount.drive==drive&&mount.root;});
+    [&](const auto& mount){return mount.drive==drive&&mount.volume;});
 }
 void MainMacBrowser::ScanStartupDrives(bool floppies,bool cds)
 {
@@ -781,14 +789,14 @@ void MainMacBrowser::ScanStartupDrives(bool floppies,bool cds)
 
 void MainMacBrowser::AdoptCd(int drive,const std::string& root,std::shared_ptr<Volume> volume,bool select){
  const auto existing=std::find_if(state_->mounts.begin(),state_->mounts.end(),
-     [drive](const auto& mount){return mount.drive==drive&&mount.volume&&mount.root;});
+     [drive](const auto& mount){return mount.drive==drive&&mount.volume;});
  int index=int(existing-state_->mounts.begin());
  if(existing==state_->mounts.end()){
-  index=session_.Mounts().AddMounted({std::move(volume),FromAnsi(root.c_str()),nullptr,drive});
+  index=session_.Mounts().AddMounted({std::move(volume),FromAnsi(root.c_str()),drive});
   state_->Root(index);
  }
  if(!select)return;
- auto item=state_->mounts[index].root;
+ auto item=state_->MountedRoot(index);
  state_->Show(index,2,item);
 }
 bool MainMacBrowser::Select(LPARAM data){auto p=session_.Tree()->BrowserNode(data);if(!p||p->LegacyType()!=LIST_MAC)return false;
@@ -823,17 +831,27 @@ std::vector<std::shared_ptr<Volume>> MainMacBrowser::DetachCd(int drive){
     for(size_t index=0;index<state_->mounts.size();++index){
         const auto& mount=state_->mounts[index];
         if(mount.drive!=drive||!mount.volume)continue;
-        if(mount.root)tree->m_ct->DeleteItem(mount.root);
+        if(auto item=state_->MountedRoot(int(index)))tree->m_ct->DeleteItem(item);
         released.push_back(session_.Mounts().RemoveMounted(int(index)));
     }
     tree->enable_selchange(enabled);if(selected){session_.ClearCurrent();session_.SetLocationTitle({});session_.List()->initialize_volume("",0);}
     return released;
 }
 
-void MainMacBrowser::DetachTree(){state_->restore.clear();int i;uint32_t id;if(state_->Selected(i,id)){
-    state_->current=i;for(auto item=session_.Tree()->m_ct->GetSelectedItem();item;item=session_.Tree()->m_ct->GetParentItem(item)){
-        auto p=session_.Tree()->BrowserNodeAt(item);if(p&&p->LegacyType()==LIST_MAC)state_->restore.push_back(uint32_t(p->CatalogId()));}}
-    session_.Mounts().ClearMountedRoots();}
+void MainMacBrowser::DetachTree()
+{
+    state_->restore.clear();
+    int index;
+    uint32_t id;
+    if(!state_->Selected(index,id))return;
+    state_->current=index;
+    const auto tree=session_.Tree();
+    auto& control=tree->GetTreeCtrl();
+    for(auto item=control.GetSelectedItem();item;item=control.GetParentItem(item)){
+        const auto node=tree->BrowserNodeAt(item);
+        if(node&&node->LegacyType()==LIST_MAC)state_->restore.push_back(uint32_t(node->CatalogId()));
+    }
+}
 bool MainMacBrowser::RebuildTree()
 {
     for(size_t i=0;i<state_->mounts.size();++i)state_->Root(int(i));
@@ -841,14 +859,15 @@ bool MainMacBrowser::RebuildTree()
     const auto index=state_->current;
     if(route.empty()||index<0||size_t(index)>=state_->mounts.size())return false;
     const auto& mount=state_->mounts[index];
-    if(!mount.root)return false;
+    const auto root=state_->MountedRoot(index);
+    if(!root)return false;
     BrowserNavigation::Request request{};
     request.folder=Location::Mounted(mount.volume,route.front());
     request.folder.directory=true;
     request.intent=BrowserNavigation::Intent::RefreshFolder;
     request.resource=mount.volume->ResourceKey();
     request.catalogRoute.assign(route.rbegin(),route.rend());
-    return state_->Show(index,request.folder.Id(),mount.root,true,false,&request);
+    return state_->Show(index,request.folder.Id(),root,true,false,&request);
 }
 void MainMacBrowser::Clear(){session_.CancelNavigation();state_->media.Cancel();session_.Mounts().ClearMounted();state_->current=-1;}
 bool MainMacBrowser::Activate(int row){auto model=session_.List()->BrowserRowAt(row);
@@ -947,13 +966,12 @@ bool MainMacBrowser::OpenMountedFolderFrom(const MainMacBrowser& source,const Br
   auto original=std::find_if(source.state_->mounts.begin(),source.state_->mounts.end(),[&](const State::Mount& mount){return mount.volume==volume;});
   if(original==source.state_->mounts.end())return false;
   auto mount=*original;
-  mount.root=nullptr;
   const auto index=session_.Mounts().AddMounted(std::move(mount));
   state_->Root(index);
-  return state_->Show(index,request.folder.Id(),state_->mounts[index].root,true,false,&request);
+  return state_->Show(index,request.folder.Id(),state_->MountedRoot(index),true,false,&request);
  }
  const auto index=int(existing-state_->mounts.begin());
- return state_->Show(index,request.folder.Id(),existing->root,true,false,&request);
+ return state_->Show(index,request.folder.Id(),state_->MountedRoot(index),true,false,&request);
 }
 
 bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
@@ -961,7 +979,7 @@ bool MainMacBrowser::RevealFindHit(const BrowserNavigation::Request& request)
     const auto& volume=request.folder.Volume();
     for(size_t index=0;index<state_->mounts.size();++index){
         const auto& mount=state_->mounts[index];
-        if(!mount.root||mount.volume!=volume)continue;
+        if(!state_->MountedRoot(int(index))||mount.volume!=volume)continue;
         auto anchor=session_.Tree()->GetTreeCtrl().GetSelectedItem();
         return state_->Show(int(index),request.folder.Id(),anchor,true,false,&request);
     }
@@ -1003,11 +1021,11 @@ bool MainMacBrowser::ContextMenu(CPoint point){
 
 #ifdef HFV_TESTING
 size_t MainMacBrowser::TestClipboardCount()const{return BrowserTransfers::Snapshot().items.size();}
-int MainMacBrowser::AttachTestVolume(std::shared_ptr<Volume> volume,const char* key,int drive){const int i=session_.Mounts().AddMounted({volume,FromAnsi(key),nullptr,drive});state_->Root(i);return i;}
+int MainMacBrowser::AttachTestVolume(std::shared_ptr<Volume> volume,const char* key,int drive){const int i=session_.Mounts().AddMounted({volume,FromAnsi(key),drive});state_->Root(i);return i;}
 bool MainMacBrowser::ShowTestFolder(int index,uint32_t id)
 {
  const auto& mount=state_->mounts.at(index);
- if(!state_->Show(index,id,mount.root))return false;
+ if(!state_->Show(index,id,state_->MountedRoot(index)))return false;
  return !session_.Navigating()||session_.AwaitNavigationForTest();
 }
 #endif

@@ -148,7 +148,7 @@ void Host(BrowserSession& session,const CString& path)
 {
  auto doc=session.Document();
  Check(doc->OnOpenDocument(""),"rebuild browser host tree");
- session.Tree()->GetTreeCtrl().SelectItem(doc->Mounts().WindowsAt(0).m_rootitem);
+ session.Tree()->GetTreeCtrl().SelectItem(session.MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
  Check(static_cast<TransferDoc*>(doc)->NavigateWindowsFolder(0,std::string(path.GetString()))&&
        session.AwaitNavigationForTest(),"open host folder through browser navigation");
 }

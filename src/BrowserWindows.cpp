@@ -118,8 +118,8 @@ bool BrowserSession::OpenFolderRequest(BrowserSession& source,BrowserNavigation:
    if(index<0)return false;
   }
   auto& volume=document_->Mounts().ClassicAt(index);
-  if(!volume.m_rootitem)
-   mounts_.SetRoot({BrowserMountInventory::Kind::ClassicVolume,index},
+  if(!MountRoot({BrowserMountInventory::Kind::ClassicVolume,index}))
+   SetMountRoot({BrowserMountInventory::Kind::ClassicVolume,index},
       tree_->initialize_volume(index,image.c_str(),2,volume.m_is_floppy,volume.m_is_cd,0,0));
   // Resolve the selected catalog ID in the new window before publishing it.
   request.intent=Intent::StartupFolder;

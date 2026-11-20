@@ -269,7 +269,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
  auto tree=session.Tree();
  const auto item=tree->GetTreeCtrl().GetSelectedItem();
  auto& selected=Mounts().ClassicAt(index);
- const auto root=selected.m_rootitem;
+ const auto root=session.MountRoot({BrowserMountInventory::Kind::ClassicVolume,index});
  if((!item&&!find)||!root||selected.m_free)return false;
  using namespace BrowserNavigation;
  CString directory=tree->get_directory_name(root,index,id);

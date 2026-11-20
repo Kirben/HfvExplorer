@@ -28,7 +28,6 @@ class CFATVolume
 		CFATVolume::~CFATVolume();
 		char m_letter;
 		UINT m_type;
-		HTREEITEM m_rootitem;
 		CString m_volume_name;
 	protected:
 };

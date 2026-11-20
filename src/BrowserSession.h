@@ -77,6 +77,8 @@ public:
     CWnd* Owner()const{return owner_;}
     CStatusBar* Status()const{return status_;}
     MainMacBrowser& MacBrowser()const{return *browser_;}
+    HTREEITEM MountRoot(BrowserMountInventory::Address address) const;
+    void SetMountRoot(BrowserMountInventory::Address address,HTREEITEM root);
     BrowserMountInventory& Mounts(){return mounts_;}
     const BrowserMountInventory& Mounts()const{return mounts_;}
     void Watch(const std::string&);

@@ -23,7 +23,6 @@ public:
     struct Mount {
         std::shared_ptr<MacBrowser::Volume> volume;
         std::wstring key;
-        HTREEITEM root=nullptr;
         int drive=-1;
         std::wstring physicalPath,suffix;
         uint64_t physicalOffset=0;
@@ -32,7 +31,6 @@ public:
     };
     struct Entry {
         Address address;
-        HTREEITEM root=nullptr;
         std::wstring locator;
         std::weak_ptr<MacBrowser::Volume> volume;
         std::optional<DWORD> generation;
@@ -41,7 +39,6 @@ public:
     };
     struct ClassicMount {
         CString m_file_name, m_volume_name;
-        HTREEITEM m_rootitem=nullptr;
         bool m_free=true,m_opened=false,m_is_floppy=false,m_is_cd=false,m_is_hd=false,m_is_removable=false;
         bool m_floppy_update_needed=false,m_mediaGenerationKnown=false;
         DWORD m_mediaGeneration=0;
@@ -80,8 +77,6 @@ public:
     void SetMountedSourceDrive(int index,int drive);
     std::shared_ptr<MacBrowser::Volume> RemoveMounted(int index);
     void ClearMounted(){mounted.clear();}
-    void ClearMountedRoots();
-    void SetRoot(Address,HTREEITEM);
     const std::vector<Mount>& Mounted() const { return mounted; }
     Address Bind(Address address) const;
     bool IsBound(Address address) const;

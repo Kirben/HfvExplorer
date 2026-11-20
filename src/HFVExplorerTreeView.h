@@ -49,9 +49,12 @@ class BrowserSession;
 class HFVExplorerTreeView : public CTreeView
 {
  BrowserSession* m_browserSession=nullptr;
+ std::map<std::pair<BrowserMountInventory::Kind,int>,HTREEITEM> mountRoots_;
 
 public:
  BrowserSession& GetBrowserSession()const;
+ HTREEITEM MountRoot(BrowserMountInventory::Address address) const;
+ void SetMountRoot(BrowserMountInventory::Address address,HTREEITEM root);
  void RenewBrowserMount(HTREEITEM item);
  void BindBrowserFolder(HTREEITEM item,BrowserDirectory::Folder folder);
  const BrowserDirectory::Folder* BrowserFolderAt(HTREEITEM) const;

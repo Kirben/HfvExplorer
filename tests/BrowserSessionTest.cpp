@@ -77,7 +77,7 @@ struct Panes {
  }
  ~Panes(){doc.GetBrowserSession().MacBrowser().Clear();tree.enable_selchange(0);list.list_clear();tree.Unbind();list.Bind(nullptr);list.DestroyWindow();tree.DestroyWindow();owner.DestroyWindow();}
  BrowserSession& Session(){return doc.GetBrowserSession();}
- void Windows(const CString& path){if(doc.Mounts().WindowsCount()==0)doc.Mounts().AddWindows(path[0],DRIVE_FIXED,path);tree.enable_selchange(0);doc.Mounts().SetRoot({BrowserMountInventory::Kind::WindowsDrive,0},tree.Host(path));tree.GetTreeCtrl().SelectItem(doc.Mounts().WindowsAt(0).m_rootitem);tree.enable_selchange(1);Check(doc.NavigateWindowsFolder(0,std::string(path.GetString()))&&Session().AwaitNavigationForTest(),"open Windows fixture through navigation");}
+ void Windows(const CString& path){if(doc.Mounts().WindowsCount()==0)doc.Mounts().AddWindows(path[0],DRIVE_FIXED,path);tree.enable_selchange(0);doc.GetBrowserSession().SetMountRoot({BrowserMountInventory::Kind::WindowsDrive,0},tree.Host(path));tree.GetTreeCtrl().SelectItem(Session().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));tree.enable_selchange(1);Check(doc.NavigateWindowsFolder(0,std::string(path.GetString()))&&Session().AwaitNavigationForTest(),"open Windows fixture through navigation");}
  void Classic(const CString& path,const char* filename,int slot=0){
   {CFile image;Check(image.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create session classic image");image.SetLength(2*1024*1024);}
   char label[]="Same",type[]="TEXT",app[]="APPL",creator[]="TEST";
@@ -91,7 +91,7 @@ struct Panes {
   Check(doc.Mounts().OpenClassicForTest(slot),"open session classic volume");
   tree.enable_selchange(0);
   const auto root=tree.Classic(slot);
-  doc.Mounts().SetRoot({BrowserMountInventory::Kind::ClassicVolume,slot},root);
+  doc.GetBrowserSession().SetMountRoot({BrowserMountInventory::Kind::ClassicVolume,slot},root);
   tree.GetTreeCtrl().SelectItem(root);
   tree.enable_selchange(1);Check(doc.NavigateClassicFolder(slot,2)&&Session().AwaitNavigationForTest(),"open classic fixture through navigation");
  }
@@ -270,9 +270,7 @@ int RunBrowserSessionTest(const char* directory){
    Check(current&&current->address.incarnation!=old->address.incarnation&&
          !mounts.IsCurrent(*old)&&!mounts.PublishClassic(*old,before),
          "a delayed classic listing could publish into a reused slot");
-   mounts.SetRoot(old->address,reinterpret_cast<HTREEITEM>(1));
-   Check(!mounts.ClassicAt(index).m_rootitem&&mounts.PublishClassic(*current,after),
-         "a stale classic tree root survived slot reuse");
+   Check(mounts.PublishClassic(*current,after),"a current mount could not publish without a tree");
    const auto drive=mounts.AddWindows('Y',DRIVE_REMOVABLE);
    const auto priorDrive=mounts.FindWindowsDrive(24);
    mounts.SetWindowsType(drive,DRIVE_NO_ROOT_DIR);
@@ -281,7 +279,7 @@ int RunBrowserSessionTest(const char* directory){
    mounts.SetWindowsType(drive,DRIVE_REMOVABLE);
    Check(priorDrive&&mounts.FindWindowsDrive(24)&&!mounts.IsCurrent(*priorDrive),
          "a Windows drive replacement revived a stale mount address");
-   fprintf(report,"PASS: mount slot reuse rejects obsolete classic publications, tree roots and Windows drive addresses.\n");
+   fprintf(report,"PASS: mount slot reuse rejects obsolete classic publications and Windows drive addresses.\n");
   }
   TestNavigation();
   {
@@ -326,7 +324,7 @@ int RunBrowserSessionTest(const char* directory){
    auto& session=a.Session();
    auto& browser=session.MacBrowser();
    auto& control=a.tree.GetTreeCtrl();
-   const auto original=a.doc.Mounts().WindowsAt(0).m_rootitem;
+   const auto original=a.Session().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0});
    const auto child=control.InsertItem("Unrelated folder",original);
    control.Expand(original,TVE_EXPAND);
    const auto selected=control.GetSelectedItem();
@@ -363,7 +361,7 @@ int RunBrowserSessionTest(const char* directory){
    SetEvent(gate->release);
    PumpUntil([&]{return !browser.MediaUpdatesPending();},"targeted drive change did not finish",false);
    const auto added=session.Mounts().FindWindowsDrive(24);
-   Check(added&&added->root&&control.GetSelectedItem()==selected&&
+   Check(added&&a.Session().MountRoot(added->address)&&control.GetSelectedItem()==selected&&
          control.GetChildItem(original)==child&&(control.GetItemState(original,TVIS_EXPANDED)&TVIS_EXPANDED)&&
          Selected(a.list,L"first.txt")&&Find(b.list,L"second.txt")>=0,
          "media change replaced an unrelated root or published an obsolete result");
@@ -456,7 +454,7 @@ int RunBrowserSessionTest(const char* directory){
    Check(session.RevealFindHit(hit),"queue stale Windows Find result");
    PumpUntil([&]{return !session.Navigating();},"stale Windows Find did not complete");
    Check(!session.ListingAvailable(),"a stale Windows Find result silently rebound to a replacement file");
-   a.tree.GetTreeCtrl().SelectItem(a.doc.Mounts().WindowsAt(0).m_rootitem);
+   a.tree.GetTreeCtrl().SelectItem(a.Session().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
    Check(DeleteFileA(filename)&&RemoveDirectoryA(nested)&&RemoveDirectoryA(wa+"\\\\Nested"),
        "clean up the Windows Find fixture before the startup check");
   }
@@ -499,8 +497,8 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !b.Session().Navigating();},"second window did not open the Unicode folder");
    Check(Find(b.list,L"\u6587\u4ef6.txt")>=0&&a.tree.GetTreeCtrl().GetSelectedItem()==selected,
          "the second window changed the source selection or lost the Unicode folder");
-   b.tree.GetTreeCtrl().SelectItem(b.doc.Mounts().WindowsAt(0).m_rootitem);
-   a.tree.GetTreeCtrl().SelectItem(a.doc.Mounts().WindowsAt(0).m_rootitem);
+   b.tree.GetTreeCtrl().SelectItem(b.Session().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
+   a.tree.GetTreeCtrl().SelectItem(a.Session().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
    Check(DeleteFileW(file.c_str())&&RemoveDirectoryW(folder.c_str()),"clean up Unicode Find fixture");
    fprintf(report,"PASS: Unicode Windows Find opens the matching folder and selects the file.\n");
   }
@@ -516,7 +514,7 @@ int RunBrowserSessionTest(const char* directory){
   Check(a.Session().AwaitNavigationForTest(),"wait for named classic folder");
   Check(Find(a.list,L"third classic app")>=0&&Find(a.list,L"first classic app")<0,
         "nested classic folder resolution changed volumes or lost case-insensitive lookup");
-  a.tree.GetTreeCtrl().SelectItem(a.doc.Mounts().ClassicAt(0).m_rootitem);
+  a.tree.GetTreeCtrl().SelectItem(a.Session().MountRoot({BrowserMountInventory::Kind::ClassicVolume,0}));
   Check(a.Session().AwaitNavigationForTest(),"return to first classic image");
   fprintf(report,"PASS: shared classic HFS nested folder and launcher lookup on same-named volumes.\n");
   {
@@ -526,7 +524,7 @@ int RunBrowserSessionTest(const char* directory){
         "classic browser mount should report free space and release its image handle after reading");
   }
 
-  auto classicRoot=a.doc.Mounts().ClassicAt(0).m_rootitem;
+  auto classicRoot=a.Session().MountRoot({BrowserMountInventory::Kind::ClassicVolume,0});
   Check(a.Session().RefreshSelected()&&a.Session().Navigating()&&
         Find(a.list,L"first classic")>=0,"classic refresh did not retain the listing");
   PumpUntil([&]{return !a.Session().Navigating();},"classic refresh did not finish");
@@ -568,7 +566,7 @@ int RunBrowserSessionTest(const char* directory){
     PumpUntil([&]{return !mirror.Session().Navigating();},"second classic browser did not finish");
     const auto original=a.Session().Mounts().FindClassicVolume(VolumeCoord::Wide(image));
     const auto duplicate=mirror.Session().Mounts().FindClassicVolume(VolumeCoord::Wide(image));
-    Check(original&&duplicate&&original->root!=duplicate->root&&Find(mirror.list,L"found")>=0&&
+    Check(original&&duplicate&&a.Session().MountRoot(original->address)!=mirror.Session().MountRoot(duplicate->address)&&Find(mirror.list,L"found")>=0&&
           a.tree.GetTreeCtrl().GetSelectedItem()==sourceFolder,"classic mount inventory shared tree or selection state");
    }
    a.tree.GetTreeCtrl().SelectItem(classicRoot);
@@ -619,18 +617,18 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !boot.Navigating();},"startup Windows folder did not publish");
    BrowserDirectory::testObserveRead={};
    Check(!startup.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,0})&&!probedRemovable&&
-         boot.Tree()->GetTreeCtrl().GetSelectedItem()==startup.Mounts().WindowsAt(1).m_rootitem,
+         boot.Tree()->GetTreeCtrl().GetSelectedItem()==boot.MountRoot({BrowserMountInventory::Kind::WindowsDrive,1}),
          "startup did not skip the invalid image or probed the disabled floppy");
    Check(boot.List()->GetListCtrl().GetItemCount()==2,"real startup directory listing");
 #ifdef HFV_FLOPPY_TESTING
    {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
     auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
     FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){doc.Mounts().CloseClassicVolumes();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
-    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.Mounts().WindowsAt(0).m_rootitem);
+    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.GetBrowserSession().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
     PumpUntil([&]{return !startup.GetBrowserSession().Navigating();},"floppy navigation did not finish");
     BrowserDirectory::testObserveRead={};
     auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
-    Check(disk.opens>0&&!windowsProbe&&found&&startup.Mounts().ClassicCount()==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==startup.Mounts().ClassicAt(0).m_rootitem,"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
+    Check(disk.opens>0&&!windowsProbe&&found&&startup.Mounts().ClassicCount()==1&&session.Tree()->GetTreeCtrl().GetSelectedItem()==session.MountRoot({BrowserMountInventory::Kind::ClassicVolume,0}),"explicit floppy selection enumerated Windows before mounting HFS with startup detection disabled");
     const int row=Find(*session.List(),L"Readable");
     auto original=session.MacBrowser().CaptureItem(row);
     Check(original.IsPhysical()&&original.MediaGenerationKnown(),"floppy row did not bind its media generation");
@@ -686,7 +684,7 @@ int RunBrowserSessionTest(const char* directory){
          !session.ListingAvailable()&&app.m_pMainWnd==nullptr,"command-line image did not schedule before showing frame");
    PumpUntil([&]{return !session.Navigating();},"startup image did not publish");
    Check(session.ListingAvailable()&&Find(*session.List(),L"Startup image")>=0&&
-         imageDocument.Mounts().WindowsAt(0).m_rootitem,"startup image lost its root or the Windows tree");
+         session.MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}),"startup image lost its root or the Windows tree");
 
    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);
@@ -701,7 +699,7 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return WaitForSingleObject(entered,0)==WAIT_OBJECT_0;},"image root read did not start");
    Check(Find(*session.List(),L"Startup image")>=0&&!session.ListingAvailable()&&frame.IsWindowEnabled(),
          "image opening replaced the previous listing or disabled the frame");
-   session.Tree()->GetTreeCtrl().SelectItem(imageDocument.Mounts().WindowsAt(0).m_rootitem);
+   session.Tree()->GetTreeCtrl().SelectItem(session.MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
    PumpUntil([&]{return !session.Navigating();},"folder selection waited for superseded image opening");
    SetEvent(release);
    const auto key=VolumeCoord::ImageKey(nextImage);
@@ -733,10 +731,16 @@ int RunBrowserSessionTest(const char* directory){
    Check(nested>=0&&session.MacBrowser().Activate(nested)&&session.AwaitNavigationForTest(),
          "browse the second mounted tree level");
    const auto before=session.MacBrowser().TargetFolder();
+   const auto selectedNode=session.Tree()->BrowserNodeAt(session.Tree()->GetTreeCtrl().GetSelectedItem());
+   Check(selectedNode!=nullptr,"nested folder lacks a mount binding");
+   const auto preservedMount=session.Mounts().Lookup(selectedNode->mount);
+   Check(preservedMount&&session.MountRoot(preservedMount->address),"mounted tree root is missing");
    Check(before.IsMounted()&&before.Id()!=2&&imageDocument.OnOpenDocument("")&&session.Navigating(),
          "mounted tree restoration did not queue navigation");
    PumpUntil([&]{return !session.Navigating();},"mounted tree restoration did not complete");
    const auto after=session.MacBrowser().TargetFolder();
+   Check(session.Mounts().IsCurrent(*preservedMount)&&session.MountRoot(preservedMount->address),
+         "a tree rebuild invalidated an unchanged mount");
    Check(after.IsMounted()&&after.Volume()==before.Volume()&&after.Id()==before.Id(),
          "mounted tree restoration selected the wrong folder");
 

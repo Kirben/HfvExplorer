@@ -107,6 +107,16 @@ void BrowserSession::SetLocationTitle(std::wstring title){
  locationTitle_=std::move(title);UpdateWindowTitle();
 }
 std::string BrowserSession::ObservedWindowsKey(const std::wstring& path)const{return current_.folder.IsWindows()&&!_wcsicmp(current_.folder.WindowsPath().c_str(),path.c_str())?current_.key:std::string();}
+HTREEITEM BrowserSession::MountRoot(BrowserMountInventory::Address address) const
+{
+ return tree_&&mounts_.IsBound(address)?tree_->MountRoot(address):nullptr;
+}
+
+void BrowserSession::SetMountRoot(BrowserMountInventory::Address address,HTREEITEM root)
+{
+ if(tree_&&mounts_.IsBound(address))tree_->SetMountRoot(address,root);
+}
+
 void BrowserSession::ClearCurrent(){CancelNavigation();if(preview_)preview_->Clear();listingPending_=false;current_=Context{};deferred_={};if(notifications_)notifications_->KillTimer(2);}
 bool BrowserSession::UsesAsyncNavigation() const
 {
@@ -481,7 +491,7 @@ void BrowserSession::ProcessChanges(){
   for(const auto& key:changed)for(const auto& root:mounts_.Observed(key)){
    if(root.address.kind==BrowserMountInventory::Kind::MountedVolume||
       (current_.key==key&&active&&root.address==*active)||!mounts_.IsCurrent(root))continue;
-   const auto item=root.root;
+   const auto item=MountRoot(root.address);
    bool selected=false;for(auto at=tree_->GetTreeCtrl().GetSelectedItem();at;at=tree_->GetTreeCtrl().GetParentItem(at))if(at==item)selected=true;
    if(item&&!selected)tree_->delete_subdir_contents(item);
   }tree_->enable_selchange(enabled);

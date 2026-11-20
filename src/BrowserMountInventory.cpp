@@ -83,7 +83,6 @@ bool BrowserMountInventory::PublishClassic(const Entry& expected,ClassicMount vo
  const auto index=expected.address.index;
  auto& old=*classic.at(index);
  if(old.m_file_name.CompareNoCase(volume.m_file_name)!=0)return false;
- volume.m_rootitem=old.m_rootitem;
  if(old.m_mediaGenerationKnown!=volume.m_mediaGenerationKnown||
     (volume.m_mediaGenerationKnown&&old.m_mediaGeneration!=volume.m_mediaGeneration))
     classicIncarnation_[index]=++nextIncarnation_;
@@ -178,24 +177,8 @@ void BrowserMountInventory::SetMountedSourceDrive(int index,int drive)
 std::shared_ptr<MacBrowser::Volume> BrowserMountInventory::RemoveMounted(int index)
 {
  auto& mount=mounted.at(index);
- mount.root=nullptr;
  mount.incarnation=++nextIncarnation_;
  return std::move(mount.volume);
-}
-
-void BrowserMountInventory::ClearMountedRoots()
-{
- for(auto& mount:mounted)mount.root=nullptr;
-}
-
-void BrowserMountInventory::SetRoot(Address address,HTREEITEM root)
-{
- if(!IsBound(address))return;
- switch(address.kind){
- case Kind::ClassicVolume:classic.at(address.index)->m_rootitem=root;break;
- case Kind::WindowsDrive:windows[address.index].m_rootitem=root;break;
- case Kind::MountedVolume:mounted.at(address.index).root=root;break;
- }
 }
 
 BrowserMountInventory::Address BrowserMountInventory::Bind(Address address) const
@@ -233,7 +216,6 @@ std::optional<BrowserMountInventory::Entry> BrowserMountInventory::Lookup(Addres
   if(index>=windowsCount)return {};
   const auto& volume=windows[index];
   if(volume.m_type==DRIVE_NO_ROOT_DIR)return {};
-  entry.root=volume.m_rootitem;
   entry.locator=VolumeCoord::Wide(volume.m_volume_name.GetString());
   entry.drive=toupper(static_cast<unsigned char>(volume.m_letter))-'A';
   entry.generation=windowsSerial_[index];
@@ -244,7 +226,6 @@ std::optional<BrowserMountInventory::Entry> BrowserMountInventory::Lookup(Addres
   const auto* volume=classic[index].get();
   if(!volume||volume->m_free||volume->m_file_name.IsEmpty())return {};
   const auto* file=volume->m_file_name.GetString();
-  entry.root=volume->m_rootitem;
   entry.locator=VolumeCoord::Wide(file);
   if(volume->m_is_floppy||volume->m_is_cd)entry.drive=toupper(static_cast<unsigned char>(file[0]))-'A';
   if(volume->m_mediaGenerationKnown)entry.generation=volume->m_mediaGeneration;
@@ -254,7 +235,6 @@ std::optional<BrowserMountInventory::Entry> BrowserMountInventory::Lookup(Addres
   if(size_t(index)>=mounted.size())return {};
   const auto& volume=mounted[index];
   if(!volume.volume)return {};
-  entry.root=volume.root;
   entry.locator=volume.key;
   entry.drive=volume.drive;
   entry.volume=volume.volume;
@@ -282,7 +262,7 @@ std::optional<BrowserMountInventory::Entry> BrowserMountInventory::FindClassicVo
 bool BrowserMountInventory::IsCurrent(const Entry& captured) const
 {
  const auto current=Lookup(captured.address);
- return current&&current->root==captured.root&&
+ return current&&
      !_wcsicmp(current->locator.c_str(),captured.locator.c_str())&&
      current->drive==captured.drive&&current->mediaEpoch==captured.mediaEpoch&&
      current->generation==captured.generation&&
@@ -295,7 +275,7 @@ void BrowserMountInventory::Observe(Address address,const std::string& resource,
  if(address.kind==Kind::WindowsDrive&&address.index>=0&&address.index<windowsCount)
   windowsSerial_[address.index]=windowsSerial;
  auto entry=Lookup(address);
- if(!entry||!entry->root||resource.empty())return;
+ if(!entry||resource.empty())return;
  auto& known=observed_[resource];
  auto previous=std::find_if(known.begin(),known.end(),[&](const Entry& value){return value.address.SameSlot(address);});
  if(previous==known.end())known.push_back(std::move(*entry));

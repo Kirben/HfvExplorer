@@ -114,17 +114,18 @@ int RunBrowserWindowsTest(const char* directory){
    const auto index=inventory.AddClassic(removable);
    const auto address=BrowserMountInventory::Address{BrowserMountInventory::Kind::ClassicVolume,index};
    const auto oldRoot=tree->initialize_volume(index,"Temporary classic",2,0,0,0,0);
-   inventory.SetRoot(address,oldRoot);
+   sa.SetMountRoot(address,oldRoot);
    const auto oldNode=tree->BrowserNodeAt(oldRoot);
    const auto oldMount=inventory.Lookup(address);
    Check(oldNode&&oldMount&&inventory.IsCurrent(*oldMount),"initial mount was not bound to the tree");
    const auto handle=oldNode->mount;
    inventory.RemoveClassic(index);
    Check(inventory.AddClassic(removable)==index,"classic inventory did not reuse the free slot");
-   inventory.SetRoot(address,oldRoot); // Even an identical path and root cannot revive the old handle.
+   sa.SetMountRoot(handle,oldRoot); // A stale mount cannot bind a tree root.
    Check(!inventory.IsCurrent(*oldMount)&&!inventory.Lookup(handle)&&!tree->BrowserNodeAt(oldRoot),
         "reuse revived a stale navigation or tree binding");
    tree->GetTreeCtrl().DeleteItem(oldRoot);
+   Check(!sa.MountRoot(address)&&inventory.Lookup(address),"deleting a root changed its mount or kept a dead tree handle");
    inventory.RemoveClassic(index);
   }
   fprintf(report,"PASS: executable DPI awareness, system-DPI fallback and stale mount handles.\n");
