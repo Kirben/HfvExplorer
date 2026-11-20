@@ -103,6 +103,7 @@ public:
 constexpr auto ResourceFork=u"com.apple.ResourceFork";
 constexpr auto FinderInfo=u"com.apple.FinderInfo";
 constexpr auto CompressionAttribute=u"com.apple.decmpfs";
+constexpr auto SymlinkAttribute=u"com.apple.fs.symlink";
 struct Attribute {
     uint64_t size=0,stream=0;
     Bytes embedded;
@@ -140,6 +141,7 @@ struct Inode {
     uint64_t stream=0;
     Entry entry;
     AttributeRecords attributes;
+    bool symlink=false;
 };
 Inode ReadInode(const Catalog& catalog,uint64_t oid)
 {
@@ -158,7 +160,9 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
-        if(!entry.directory&&mode!=0100000)entry.readError="APFS special files are unsupported";
+        out.symlink=mode==0120000;
+        if(out.symlink)entry.readError="APFS symbolic links cannot be exported";
+        else if(!entry.directory&&mode!=0100000)entry.readError="APFS special files are unsupported";
         if(record.value.size==inodeSize)return;
         const auto fields=p+inodeSize;
         Check(record.value.size>=inodeSize+4,"Truncated APFS inode extended-field header");
@@ -225,7 +229,13 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     const bool processLocal;
     MacBrowser::WorkerOrigin origin;
     std::mutex mutex;
-    struct Item {size_t mount;uint64_t oid,stream;Entry entry;AttributeRecords attributes;};
+    struct Item {
+        size_t mount;
+        uint64_t oid,stream;
+        Entry entry;
+        AttributeRecords attributes;
+        bool symlink=false;
+    };
     using Address=std::pair<size_t,uint64_t>;
     std::map<uint32_t,Item> entries;
     std::map<Address,uint32_t> linkIdentities;
@@ -249,6 +259,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     }
     Inode LoadInode(const Catalog& catalog,size_t mount,uint64_t oid){
         auto inode=ReadInode(catalog,oid);
+        if(inode.symlink)return inode;
         const auto found=inode.attributes.find(CompressionAttribute);
         if(!inode.entry.compressed&&found==inode.attributes.end())return inode;
         inode.entry.compressed=true;
@@ -363,7 +374,8 @@ public:
                     entry.identity=MacBrowser::EntryIdentity(
                         key+":"+std::to_string(mounted.oid)+":"+std::to_string(folder.oid)+":"+std::to_string(oid),
                         mounted.xid);
-                    children.push_back({folder.mount,oid,inode.stream,std::move(entry),std::move(inode.attributes)});
+                    children.push_back({folder.mount,oid,inode.stream,std::move(entry),
+                                        std::move(inode.attributes),inode.symlink});
                 });
                 Check(children.size()<=uint64_t(UINT32_MAX)+1-next,"Too many APFS browser entries");
                 std::vector<uint32_t> ids;
@@ -417,12 +429,39 @@ private:
         else memcpy(data,attribute.embedded.data()+size_t(at),size);
     }
 public:
+    std::string PropertiesDetails(uint32_t id)override{
+        return Access([&]() -> std::string {
+            const auto& file=At(id);
+            if(!file.symlink)return {};
+            const auto target=file.attributes.find(SymlinkAttribute);
+            constexpr size_t maxDisplayedPath=4096;
+            if(target==file.attributes.end()||target->second.size<2||target->second.size>maxDisplayedPath)
+                return "Symbolic link target unavailable";
+            try{
+                Bytes path(size_t(target->second.size));
+                ReadAttribute(file.mount,target->second,0,path.data(),path.size());
+                Apfs::Name(path.data(),path.size()); // Validate UTF-8 and the terminating null.
+                std::string details="Symbolic link to ";
+                for(size_t i=0;i+1<path.size();++i){
+                    const auto c=path[i];
+                    if(c<32||c==127){
+                        constexpr char hex[]="0123456789abcdef";
+                        details+="\\x";
+                        details+=hex[c>>4];
+                        details+=hex[c&15];
+                    }else details+=char(c);
+                }
+                return details;
+            }catch(const Error&){return "Symbolic link target unavailable";}
+        });
+    }
     Attributes GetAttributes(uint32_t id)override{
         return Access([&]{
             Attributes out;
             const auto& file=At(id);
             for(const auto& pair:file.attributes){
-                if(pair.first==FinderInfo||pair.first==ResourceFork||pair.first==CompressionAttribute)continue;
+                if(pair.first==FinderInfo||pair.first==ResourceFork||pair.first==CompressionAttribute||
+                   pair.first==SymlinkAttribute)continue;
                 const auto& attr=pair.second;
                 if(attr.stream)
                     out.emplace(pair.first,AttributeData::Snapshot(attr.size,[&](uint64_t at,void* data,size_t size){

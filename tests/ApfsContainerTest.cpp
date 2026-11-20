@@ -121,7 +121,8 @@ void ObjectMapFixture(Memory& disk)
     for(size_t block:{12,13,14})Seal(disk.bytes,block*size,size);
 }
 
-Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false)
+enum class Symlink { None, Valid, Malformed };
+Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false,Symlink symlink=Symlink::None)
 {
     auto disk=Raw();
     constexpr size_t size=4096;
@@ -151,7 +152,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    const unsigned records=8+(attributes?3:0)+(links?5:0)+(compressed?1:0);
+    const unsigned records=8+(attributes?3:0)+(links?5:0)+(compressed?1:0)+(symlink!=Symlink::None?1:0);
     Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
@@ -171,7 +172,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
     auto inode=[&](uint64_t id,bool directory,uint64_t length,bool linked=false){
         Bytes value(directory?92:140);
         Little(value.data()+8,id,8);Little(value.data()+56,linked?2:1,4);
-        Little(value.data()+80,directory?0040755:0100644,2);
+        Little(value.data()+80,directory?0040755:symlink!=Symlink::None?0120777:0100644,2);
         if(!directory){
             Little(value.data()+92,1,2);Little(value.data()+94,44,2);
             value[96]=8;Little(value.data()+98,40,2);
@@ -209,6 +210,11 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         Little(stream.data(),331,8);Little(stream.data()+8,8,8);Little(stream.data()+16,size,8);
         xattr("com.apple.ResourceFork",1,stream);
         xattr("user.example",2,Bytes{1,2,3});
+    }
+    if(symlink!=Symlink::None){
+        Bytes target{'/','a','/','b','\n',0};
+        if(symlink==Symlink::Malformed)target.back()='c';
+        xattr("com.apple.fs.symlink",6,target);
     }
     if(compressed){
         Bytes data{102,112,109,99,3,0,0,0,0,0,0,0,0,0,0,0,120,156,237,193,49,1,0,0,0,194,160,112,235,223,201,18,158,64,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,189,13,21,40,148,189};
@@ -361,6 +367,12 @@ int RunApfsContainerTest(const char* directory)
             char data[10];
             authentic->Read(name->id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Independent APFS file differed from expected data");
+            MacBrowser::Entry symlink;
+            Check(authentic->FindChild(2,u"link.txt",symlink)&&!symlink.directory&&!symlink.readError.empty()&&
+                  authentic->PropertiesDetails(symlink.id)=="Symbolic link to small.txt"&&
+                  !authentic->GetAttributes(symlink.id).count(u"com.apple.fs.symlink"),
+                  "macOS-generated APFS symbolic link target was not exposed safely");
+            Reject([&]{authentic->Read(symlink.id,0,0,nullptr,0);},"Reading an APFS symlink was allowed");
             MacBrowser::Entry compressed;
             Check(authentic->FindChild(2,u"decmpfs.txt",compressed)&&compressed.compressed&&
                   compressed.forks[0].size==112000,
@@ -451,6 +463,22 @@ int RunApfsContainerTest(const char* directory)
         targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
         Check(restored==resource,"APFS transfer changed the resource fork");
         fprintf(report,"PASS: APFS embedded metadata and extent-backed resource fork preserved through copy to HFS Plus.\n");
+        for(const auto link:{Symlink::Valid,Symlink::Malformed}){
+            const auto disk=BrowseFixture(false,false,false,link);
+            const auto path=VolumeCoord::Wide(root+(link==Symlink::Valid?"symlink.img":"bad-symlink.img"));
+            {
+                auto image=CreateFormatOutput(path.c_str(),disk.Size());
+                image->Write(0,disk.bytes.data(),disk.bytes.size());image->Flush();image->Keep();
+            }
+            auto volume=MacBrowser::OpenBrowserImage(path);
+            const auto folder=volume->List().at(0);
+            const auto file=volume->List(folder.id).at(0);
+            const auto details=link==Symlink::Valid?"Symbolic link to /a/b\\x0a":"Symbolic link target unavailable";
+            Check(volume->PropertiesDetails(file.id)==details&&!file.readError.empty()&&
+                  volume->GetAttributes(file.id).empty(),"APFS symbolic link properties are incorrect");
+            Reject([&]{volume->Read(file.id,0,0,nullptr,0);},"APFS symlink was readable");
+        }
+        fprintf(report,"PASS: APFS symbolic link targets, malformed targets, and read refusal.\n");
         auto linkedDisk=BrowseFixture(false,true);
         const auto linkedPath=VolumeCoord::Wide(root+"linked.img");
         {
