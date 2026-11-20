@@ -1607,6 +1607,54 @@ void SetExternalFinderInfo(Bytes& inode,const FinderBytes& finder)
     Set(inode,48,flags,8);
 }
 
+void InsertExternalDirectoryRecord(std::vector<OwnedRecord>& catalog,OwnedRecord record,
+                                   uint64_t parent,const std::string& name)
+{
+    const auto parentKey=(uint64_t(9)<<60)|parent;
+    const auto hash=Le32(record.key.data()+8)&~1023u;
+    const auto comparison=NormalizedName(name,true);
+    auto insert=catalog.end();
+    for(auto entry=catalog.begin();entry!=catalog.end();++entry){
+        Check(entry->key.size()>=8,"Truncated APFS catalog key");
+        const auto raw=Le64(entry->key.data());
+        if((raw&IdMask)>parent||((raw&IdMask)==parent&&raw>>60>9)){
+            if(insert==catalog.end())insert=entry;
+            break;
+        }
+        if(raw!=parentKey)continue;
+        const auto& key=entry->key;
+        Check(key.size()>=14&&(Le32(key.data()+8)&1023)==key.size()-12&&!key.back(),
+              "Invalid APFS directory name");
+        const std::string existing(reinterpret_cast<const char*>(key.data()+12),key.size()-13);
+        Check(NormalizedName(existing,true)!=comparison,"The APFS entry name already exists");
+        const auto existingHash=Le32(key.data()+8)&~1023u;
+        if(insert==catalog.end()&&(existingHash>hash||(existingHash==hash&&existing>name)))insert=entry;
+    }
+    catalog.insert(insert,std::move(record));
+}
+
+void TouchExternalParent(std::vector<OwnedRecord>& catalog,uint64_t parent,uint64_t time,bool addChild)
+{
+    const auto parentInode=(uint64_t(3)<<60)|parent;
+    Bytes* value=nullptr;
+    for(auto& entry:catalog){
+        if(entry.key.size()!=8||Le64(entry.key.data())!=parentInode)continue;
+        Check(!value&&entry.value.size()>=92&&(Le16(entry.value.data()+80)&0170000)==0040000,
+              "Invalid APFS parent inode");
+        value=&entry.value;
+    }
+    Check(value,"APFS parent inode was not found");
+    Check(!(Le32(value->data()+68)&(UserImmutable|SystemImmutable)),
+          "Unlock the APFS folder before changing its entries");
+    if(addChild){
+        const auto children=Le32(value->data()+56);
+        Check(children<INT32_MAX,"APFS directory child count is exhausted");
+        Set(*value,56,children+1,4);
+    }
+    Set(*value,24,time,8);
+    Set(*value,32,time,8);
+}
+
 void CheckExternalVolume(const Bytes& volume)
 {
     Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
@@ -1761,7 +1809,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto symlinkCount=Le64(volume.data()+200);
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
-    if(properties)CheckExternalVolume(volume);
+    const bool externalCreate=create&&create->external;
+    if(properties||externalCreate)CheckExternalVolume(volume);
     else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -1807,7 +1856,20 @@ CatalogWritePlan PrepareCatalogMutation(
     },request);
     std::set<uint64_t> retiredStreams;
     std::vector<OwnedRecord> catalog;
-    if(properties){
+    if(externalCreate){
+        Check(create->kind==CatalogKind::Directory&&create->parent>=2&&create->parent!=3&&
+              create->parent<nextId&&!input&&!resource&&!attributes&&!dates&&!create->finder&&!create->locked,
+              "External APFS creation requires an empty folder with default metadata");
+        catalog=std::move(existing.records);
+        for(const auto& record:catalog){
+            Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
+                  "APFS catalog contains an object at or after its next ID");
+        }
+        TouchExternalParent(catalog,create->parent,time,true);
+        auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,true,uint16_t(create->kind));
+        InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name);
+        catalog.push_back(WriterDisk::Inode(name,entryId,time,create->parent,0040755,0));
+    }else if(properties){
         catalog=std::move(existing.records);
         uint64_t entryOid=0;
         CatalogKind kind=CatalogKind::RegularFile;
@@ -1885,50 +1947,21 @@ CatalogWritePlan PrepareCatalogMutation(
             auto record=std::move(catalog[*directoryRecord]);
             catalog.erase(catalog.begin()+*directoryRecord);
             const auto hash=WriterDisk::DirectoryHash(replacement,true);
-            const auto comparison=NormalizedName(replacement,true);
             record.key.resize(13+replacement.size());
             record.key.back()=0;
             Set(record.key,8,hash|(replacement.size()+1),4);
             std::copy(replacement.begin(),replacement.end(),record.key.begin()+12);
-            auto insert=catalog.end();
-            for(auto entry=catalog.begin();entry!=catalog.end();++entry){
-                Check(entry->key.size()>=8,"Truncated APFS catalog key");
-                const auto raw=Le64(entry->key.data());
-                if((raw&IdMask)>properties->parent||((raw&IdMask)==properties->parent&&raw>>60>9)){
-                    if(insert==catalog.end())insert=entry;
-                    break;
-                }
-                if(raw!=parentKey)continue;
-                const auto& key=entry->key;
-                Check(key.size()>=14&&(Le32(key.data()+8)&1023)==key.size()-12&&!key.back(),
-                      "Invalid APFS directory name");
-                const std::string existing(reinterpret_cast<const char*>(key.data()+12),key.size()-13);
-                Check(NormalizedName(existing,true)!=comparison,"The APFS entry name already exists");
-                const auto existingHash=Le32(key.data()+8)&~1023u;
-                if(insert==catalog.end()&&(existingHash>hash||(existingHash==hash&&existing>replacement)))insert=entry;
-            }
-            catalog.insert(insert,std::move(record));
-            const auto parentInode=(uint64_t(3)<<60)|properties->parent;
-            bool updatedParent=false;
-            for(auto& entry:catalog){
-                if(entry.key.size()!=8||Le64(entry.key.data())!=parentInode)continue;
-                auto& value=entry.value;
-                Check(!updatedParent&&value.size()>=92&&(Le16(value.data()+80)&0170000)==0040000,
-                      "Invalid APFS rename parent inode");
-                Check(!(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
-                      "Unlock the APFS folder before renaming its entries");
-                Set(value,24,time,8);
-                Set(value,32,time,8);
-                updatedParent=true;
-            }
-            Check(updatedParent,"APFS rename parent inode was not found");
+            InsertExternalDirectoryRecord(catalog,std::move(record),properties->parent,replacement);
+            TouchExternalParent(catalog,properties->parent,time,false);
         }
-        for(const auto& extent:extentTree.records)
-            files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
-                             Le64(extent.value.data())&IdMask});
     }else{
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
                             directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
+    }
+    if(properties||externalCreate){
+        for(const auto& extent:extentTree.records)
+            files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
+                             Le64(extent.value.data())&IdMask});
     }
     ValidateExtentReferences(extentTree,files);
     if(!retiredStreams.empty()){

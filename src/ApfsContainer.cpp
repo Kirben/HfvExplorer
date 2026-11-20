@@ -371,9 +371,11 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
 }
 
 uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                                Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,const HfsPlus::Attributes* attributes)
+                                Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,const HfsPlus::Attributes* attributes,bool external)
 {
-    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::Directory,nullptr,dates,finder,false,attributes};
+    CatalogCreate create{parent,name,CatalogKind::Directory,nullptr,dates,finder,false,attributes};
+    create.external=external;
+    const CatalogMutation request=create;
     return Commit(source,expected,job,&request);
 }
 

@@ -22,6 +22,7 @@ struct CatalogCreate {
     HfsPlus::Source* resource=nullptr;
     const HfsPlus::Bytes* compression=nullptr;
     const HfsPlus::Bytes* linkTarget=nullptr;
+    bool external=false;
 };
 struct CatalogRename {
     uint64_t parent,inode;

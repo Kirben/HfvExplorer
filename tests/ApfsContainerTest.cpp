@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-finder-properties.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-created-folders.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2634,12 +2634,11 @@ int RunApfsContainerTest(const char* directory)
                   published->FindChild(publishedFolder.id,u"Renamed 222.txt",publishedFile),
                   "Publishing a checkpoint changed the macOS-generated catalog");
             const auto caps=published->Supports();
-            Check(caps.rename&&caps.writable&&!published->Writable()&&!caps.create&&!caps.createFolders&&
+            Check(caps.rename&&caps.writable&&!published->Writable()&&!caps.create&&caps.createFolders&&
                   !caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
                   !caps.CanEditCompression()&&!caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
             MacBrowser::Entry renamedFolder;
-            Reject([&]{published->MakeDirectory(2,u"Blocked create");},"External APFS mount accepted directory creation");
             auto rename=FileOperations::Submit(FileOperations::RenameEntry{
                 FileOperations::Location::Mounted(published,publishedFolder.id),u"Browser renamed folder"});
             const auto renameStart=GetTickCount();
@@ -2651,6 +2650,21 @@ int RunApfsContainerTest(const char* directory)
             Check(!renamed.code,renamed.message.c_str());
             Check(published->FindChild(2,u"Browser renamed folder",renamedFolder)&&renamedFolder.id==publishedFolder.id&&
                   published->List(renamedFolder.id).size()==400,"External APFS browser rename lost the folder or children");
+            auto create=FileOperations::Submit(FileOperations::CreateFolder{
+                FileOperations::Location::Mounted(published,renamedFolder.id),u"New APFS folder"});
+            const auto createStart=GetTickCount();
+            while(!create.Job()->done()){
+                Check(GetTickCount()-createStart<15000,"External APFS folder creation timed out");
+                Sleep(5);
+            }
+            const auto creation=create.Job()->result();
+            Check(!creation.code,creation.message.c_str());
+            MacBrowser::Entry child;
+            Check(published->FindChild(renamedFolder.id,u"New APFS folder",child)&&child.directory&&
+                  published->List(child.id).empty(),"External APFS folder did not reopen empty");
+            Reject([&]{published->MakeDirectory(renamedFolder.id,u"NEW APFS FOLDER");},
+                   "APFS folder creation accepted a case-insensitive collision");
+            renamedFolder=published->Stat(renamedFolder.id);
             auto desired=renamedFolder;
             desired.modified=editedTime;
             desired.protectedFile=true;
@@ -2680,7 +2694,7 @@ int RunApfsContainerTest(const char* directory)
             desired=published->Stat(updated.id);
             desired.finder[0]=0x12;
             published->SetBasicMetadata(updated.id,desired);
-            Check(published->Stat(updated.id).finder==desired.finder&&published->List(updated.id).size()==400,
+            Check(published->Stat(updated.id).finder==desired.finder&&published->List(updated.id).size()==401,
                   "APFS Finder information edit lost unrelated folder contents");
             Bytes originalHardLink(size_t(a.forks[0].size)),reopenedHardLink(originalHardLink.size());
             authentic->Read(a.id,0,0,originalHardLink.data(),originalHardLink.size());

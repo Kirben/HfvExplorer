@@ -477,7 +477,7 @@ public:
         capabilities.resourceForks=true;
         capabilities.rename=writable;
         capabilities.writable=writable;
-        capabilities.createFolders=Writable();
+        capabilities.createFolders=writable;
         capabilities.unicodeNames=true;
         capabilities.attributes=!limitedEdits;
         capabilities.basicMetadata=writable;
@@ -865,10 +865,10 @@ private:
         return WriteMount([&]{
             const auto oid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job,dates,finder,attributes);});
+            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,container,oid,name,job,dates,finder,attributes,limitedEdits);});
             for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
             throw Error("APFS folder was created but could not be found after reopening");
-        });
+        },true);
     }
     static std::optional<FileDates> CopyDates(const Entry& entry){
         if(!entry.datesValid)return {};

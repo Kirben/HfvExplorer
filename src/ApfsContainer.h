@@ -32,7 +32,7 @@ struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.
 };
 uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                                Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr);
+                                Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr,bool external=false);
 uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job&);
 
