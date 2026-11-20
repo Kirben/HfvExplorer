@@ -1675,32 +1675,60 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
     }
 }
 
+std::string ExternalInodeName(const Bytes& inode);
+
 size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplaceData& edit,
                            uint64_t size,uint64_t time,const ResourceWrite* resource,
                            const AttributeStreams& streams,const CatalogRecords& extentTree,
                            std::set<uint64_t>& retired)
 {
     Check(!edit.compression&&resource,"External APFS overwrite requires an uncompressed replacement with both forks");
-    const auto directoryKey=(uint64_t(9)<<60)|edit.parent;
     const auto inodeKey=(uint64_t(3)<<60)|edit.inode;
-    std::string name;
-    for(const auto& record:catalog){
-        Check(record.key.size()>=8,"Truncated APFS catalog key");
-        if(Le64(record.key.data())!=directoryKey||record.value.size()<18||Le64(record.value.data())!=edit.inode)continue;
-        Check(name.empty()&&record.key.size()>=14&&record.key.back()==0&&record.value.size()==18&&
-              Le16(record.value.data()+16)==8,"External APFS overwrite requires an unlinked regular file");
-        name.assign(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
-    }
-    Check(!name.empty(),"The APFS overwrite target no longer exists");
     const auto inode=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
         return record.key.size()==8&&Le64(record.key.data())==inodeKey;
     });
     Check(inode!=catalog.end()&&inode->value.size()>=100,"Invalid APFS overwrite inode");
     const auto& old=inode->value;
-    const auto flags=Le32(old.data()+68);
-    Check(Le64(old.data())==edit.parent&&Le64(old.data()+8)==edit.inode&&Le32(old.data()+56)==1&&
+    const auto flags=Le32(old.data()+68),count=Le32(old.data()+56);
+    const auto primaryParent=Le64(old.data());
+    Check(Le64(old.data()+8)==edit.inode&&count&&bool(edit.alias)==(count>1)&&
           Le16(old.data()+80)==0100644&&!(flags&(UserImmutable|SystemImmutable|BsdCompressed)),
           "External APFS overwrite cannot replace this file");
+    const auto name=ExternalInodeName(old);
+    std::map<Bytes,Bytes> siblings;
+    std::map<Bytes,const Bytes*> onDisk;
+    bool selected=false,foundPrimary=false;
+    size_t names=0;
+    for(const auto& record:catalog){
+        Check(record.key.size()>=8,"Truncated APFS catalog key");
+        const auto key=Le64(record.key.data()),type=key>>60,parent=key&IdMask;
+        if(type==12||(type==5&&parent==edit.inode))
+            Check(onDisk.emplace(record.key,&record.value).second,"Repeated APFS sibling record");
+        if(type!=9||record.value.size()<18||Le64(record.value.data())!=edit.inode)continue;
+        ++names;
+        Check(record.key.size()>=14&&record.key.back()==0&&Le16(record.value.data()+16)==8&&
+              record.value.size()==(edit.alias?34:18),"Invalid APFS overwrite directory entry");
+        const std::string filename(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
+        foundPrimary|=parent==primaryParent&&filename==name;
+        if(!edit.alias){
+            selected|=parent==edit.parent;
+            continue;
+        }
+        const auto* value=record.value.data();
+        const auto alias=Le64(value+26);
+        Check(alias>=16&&alias!=edit.inode&&Le16(value+18)==1&&Le16(value+20)==8&&
+              value[22]==1&&Le16(value+24)==8,"Invalid APFS overwrite sibling ID");
+        const CatalogSibling sibling{edit.inode,parent,filename};
+        auto link=sibling.LinkRecord(alias),map=sibling.MapRecord(alias);
+        Check(siblings.emplace(std::move(link.key),std::move(link.value)).second&&
+              siblings.emplace(std::move(map.key),std::move(map.value)).second,"Repeated APFS overwrite sibling ID");
+        selected|=alias==edit.alias&&parent==edit.parent;
+    }
+    Check(selected&&foundPrimary&&names==count,"The APFS overwrite target no longer exists");
+    for(const auto& [key,value]:siblings){
+        const auto record=onDisk.find(key);
+        Check(record!=onDisk.end()&&*record->second==value,"APFS sibling records differ from their directory names");
+    }
     const auto fields=Le16(old.data()+92);
     size_t offset=96+size_t(fields)*4;
     Check(offset<=old.size(),"Truncated APFS overwrite inode fields");
@@ -1718,11 +1746,11 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
         }
         offset+=size_t(padded);
     }
-    const auto oldLayout=WriterDisk::Inode(name,edit.inode,0,edit.parent,0100644,1,oldSize,
+    const auto oldLayout=WriterDisk::Inode(name,edit.inode,0,primaryParent,0100644,count,oldSize,
                                            oldFinder?&*oldFinder:nullptr);
     Check(old.size()==oldLayout.value.size()&&std::equal(old.begin()+92,old.end(),oldLayout.value.begin()+92),
           "External APFS overwrite requires a supported inode field layout");
-    auto updated=WriterDisk::Inode(name,edit.inode,0,edit.parent,0100644,1,size,
+    auto updated=WriterDisk::Inode(name,edit.inode,0,primaryParent,0100644,count,size,
                                    edit.finder?edit.finder:oldFinder?&*oldFinder:nullptr);
     const auto finderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
     std::copy_n(old.begin(),92,updated.value.begin());
@@ -1736,10 +1764,16 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
 
     auto attributes=EncodeAttributes(edit.inode,edit.attributes,resource,streams);
     std::set<uint64_t> removeStreams{edit.inode};
+    std::vector<OwnedRecord> links;
     auto after=std::next(inode);
     for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
         const auto kind=Le64(after->key.data())>>60;
         if(kind==6||kind==8)continue;
+        if(kind==5){
+            Check(siblings.count(after->key),"Unexpected APFS overwrite sibling link");
+            links.push_back(*after);
+            continue;
+        }
         Check(kind==4&&after->key.size()>=12&&after->key.back()==0&&after->value.size()>=4,
               "Unsupported APFS overwrite record");
         const std::string attr(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
@@ -1761,6 +1795,7 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
         return key>>60==8&&removeStreams.count(key&IdMask);
     }),catalog.end());
     SortAttributes(attributes);
+    attributes.insert(attributes.end(),std::make_move_iterator(links.begin()),std::make_move_iterator(links.end()));
     catalog.insert(catalog.begin()+index+1,std::make_move_iterator(attributes.begin()),
                    std::make_move_iterator(attributes.end()));
     return index+1+attributes.size();

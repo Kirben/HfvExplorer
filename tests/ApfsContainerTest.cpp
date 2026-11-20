@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-renamed-hard-links.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-written-hard-links.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2987,6 +2987,44 @@ int RunApfsContainerTest(const char* directory)
                 published->Read(aliasId,fork,0,actual.data(),actual.size());
                 Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS hard-link overwrite did not share the source fork");
             }
+            auto sharedEdit=toCopy;
+            sharedEdit.name=renamedFirst.name;
+            sharedEdit.modified=editedTime+99;
+            sharedEdit.finder[0]='W';
+            sharedEdit.attributes={{u"user.shared",{8,6,7}}};
+            sharedEdit.attributesKnown=true;
+            const auto verifyShared=[&](bool committed){
+                for(const auto id:{renamedPrimary.id,renamedFirst.id,renamedSecond.id,aliasId}){
+                    const auto entry=published->Stat(id);
+                    const auto& expected=committed?sharedEdit:toCopy;
+                    Check(entry.resolvedId==published->Stat(renamedFirst.id).resolvedId&&entry.linkCount==4&&
+                          entry.created==expected.created&&entry.modified==expected.modified&&
+                          entry.finder==expected.finder&&published->GetAttributes(id)==expected.attributes,
+                          "Shared APFS overwrite changed the wrong inode or metadata");
+                    for(unsigned fork=0;fork<2;++fork){
+                        Check(entry.forks[fork].size==expected.forks[fork].size,"Shared APFS overwrite changed a fork size");
+                        Bytes actual(size_t(entry.forks[fork].size));
+                        published->Read(id,fork,0,actual.data(),actual.size());
+                        const auto fill=committed?(fork?0x4d:0x3c):(fork?0x7b:0x6a);
+                        Check(actual==Bytes(actual.size(),fill),"Shared APFS overwrite left inconsistent fork bytes");
+                    }
+                }
+            };
+            Storage::Job cancelShared;
+            bool sharedCancelled=false;
+            try{
+                published->PutForTransfer(copiedAliases.id,sharedEdit,[&](unsigned fork,uint64_t,void* bytes,size_t size){
+                    memset(bytes,0x41,size);
+                    if(fork)cancelShared.cancel();
+                },true,cancelShared);
+            }catch(const Storage::Cancelled&){sharedCancelled=true;}
+            Check(sharedCancelled,"APFS alias overwrite did not cancel during resource-fork staging");
+            verifyShared(false);
+            Storage::Job writeShared;
+            Check(published->PutForTransfer(copiedAliases.id,sharedEdit,[](unsigned fork,uint64_t,void* bytes,size_t size){
+                memset(bytes,fork?0x4d:0x3c,size);
+            },true,writeShared)==renamedFirst.id,"APFS overwrite replaced the alias identity");
+            verifyShared(true);
             auto replacement=copied;
             replacement.forks[0].size=9001;
             replacement.forks[1].size=6001;
@@ -3071,7 +3109,7 @@ int RunApfsContainerTest(const char* directory)
                     Check(entry.forks[fork].size==toCopy.forks[fork].size,"APFS unlink lost a fork");
                     Bytes actual(size_t(entry.forks[fork].size));
                     published->Read(entry.id,fork,0,actual.data(),actual.size());
-                    Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS unlink changed shared fork bytes");
+                    Check(actual==Bytes(actual.size(),fork?0x4d:0x3c),"APFS unlink changed shared fork bytes");
                 }
             };
             verifyForks(retainedAlias);

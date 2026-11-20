@@ -1089,15 +1089,14 @@ public:
             const auto children=ListDirectory(parent);
             const auto found=std::find_if(children.begin(),children.end(),matches);
             if(found!=children.end()){
-                Check(!limitedEdits||(!found->hardLink&&!found->compressed),
-                      "This APFS overwrite requires an unlinked, uncompressed destination");
+                Check(!limitedEdits||!found->compressed,"This APFS overwrite requires an uncompressed destination");
                 Check(replace&&!found->directory&&!found->protectedFile&&found->readError.empty(),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==found->identity,
                       "The APFS destination changed after overwrite approval");
-                const auto oid=At(found->id).oid;
+                const auto oid=At(found->id).oid,sibling=At(found->id).siblingId;
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits);
+                    return ReplaceFileData(*source,container,parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling);
                 },found->id);
                 return found->id;
             }
