@@ -1565,6 +1565,14 @@ void RenameExternalInode(Bytes& inode,const std::string& name,const std::string&
     Check(found&&offset==inode.size(),"Invalid APFS inode name fields");
 }
 
+void CheckExternalVolume(const Bytes& volume)
+{
+    Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
+          !Le64(volume.data()+48)&&Le64(volume.data()+56)==1&&Le64(volume.data()+264)==1&&
+          Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
+          "Unsupported APFS volume features for external edits");
+}
+
 void CheckNativeVolume(const Bytes& volume)
 {
     const auto flags=Le64(volume.data()+56);
@@ -1634,6 +1642,7 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
                                    Bytes& superblock,const CheckpointObjectLookup& ephemeral)
 {
     const auto [containerMap,address,volume]=ReadCatalogVolume(source,container);
+    CheckExternalVolume(volume);
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
     const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
     const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
@@ -1710,12 +1719,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto symlinkCount=Le64(volume.data()+200);
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
-    if(properties){
-        Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
-              !Le64(volume.data()+48)&&flags==1&&Le64(volume.data()+264)==1&&
-              Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&!Le64(volume.data()+216),
-              "Unsupported APFS volume features for a Properties edit");
-    }else CheckNativeVolume(volume);
+    if(properties)CheckExternalVolume(volume);
+    else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
     Check(!snapshotTree.Level()&&!snapshotTree.Count(),"APFS catalog writes require an empty snapshot tree");

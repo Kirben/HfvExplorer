@@ -2500,7 +2500,8 @@ int RunApfsContainerTest(const char* directory)
         ExtentReferenceGrowth(root,report);
         DeepCatalogGrowth(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
-            const auto authentic=MacBrowser::OpenBrowserImage(fixture);
+            auto readOnlySource=OpenImage(fixture,false);
+            const auto authentic=Apfs::Open(readOnlySource,"apfs-macos-read-only-reference");
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");
             const auto roots=authentic->List();
             MacBrowser::Entry many;
@@ -2556,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-hard-link-properties.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-browser-rename.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2612,6 +2613,7 @@ int RunApfsContainerTest(const char* directory)
                 Reject([&]{Apfs::RenameExternalCatalogEntry(*output,folderLocked,manyInode,u"Renamed 222.txt",u"Blocked",job);},
                        "APFS accepted a rename inside a locked folder");
                 Check(openCurrent().transaction==folderLocked.transaction,"Rejected APFS rename wrote a checkpoint");
+                Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,u"Renamed collection",{},job,false);
                 Apfs::SetExternalCatalogProperties(*output,openCurrent(),2,u"hard_b.txt",{createdTime,editedTime},job,true);
                 const auto linkLocked=openCurrent();
                 Reject([&]{Apfs::SetExternalCatalogProperties(*output,linkLocked,2,u"hard_a.txt",{{},editedTime+1},job);},
@@ -2627,10 +2629,28 @@ int RunApfsContainerTest(const char* directory)
                   publishedA.modified==editedTime&&publishedB.modified==editedTime&&
                    !published->FindChild(2,u"many",publishedFolder)&&
                   published->FindChild(2,u"Renamed collection",publishedFolder)&&published->List(publishedFolder.id).size()==400&&
-                  publishedFolder.modified!=many.modified&&publishedFolder.created==createdTime&&publishedFolder.protectedFile&&
+                  publishedFolder.modified!=many.modified&&publishedFolder.created==createdTime&&!publishedFolder.protectedFile&&
                   !published->FindChild(publishedFolder.id,u"file_0222.txt",publishedFile)&&
                   published->FindChild(publishedFolder.id,u"Renamed 222.txt",publishedFile),
                   "Publishing a checkpoint changed the macOS-generated catalog");
+            const auto caps=published->Supports();
+            Check(caps.rename&&caps.writable&&!published->Writable()&&!caps.create&&!caps.createFolders&&
+                  !caps.remove&&!caps.CanEditBasicMetadata()&&!caps.CanEditAttributes()&&
+                  !caps.CanEditCompression()&&!caps.CanCreateHardLinks(),
+                  "External APFS mount exposed operations beyond rename");
+            MacBrowser::Entry renamedFolder;
+            Reject([&]{published->MakeDirectory(2,u"Blocked create");},"External APFS mount accepted directory creation");
+            auto rename=FileOperations::Submit(FileOperations::RenameEntry{
+                FileOperations::Location::Mounted(published,publishedFolder.id),u"Browser renamed folder"});
+            const auto renameStart=GetTickCount();
+            while(!rename.Job()->done()){
+                Check(GetTickCount()-renameStart<15000,"External APFS browser rename timed out");
+                Sleep(5);
+            }
+            const auto renamed=rename.Job()->result();
+            Check(!renamed.code,renamed.message.c_str());
+            Check(published->FindChild(2,u"Browser renamed folder",renamedFolder)&&renamedFolder.id==publishedFolder.id&&
+                  published->List(renamedFolder.id).size()==400,"External APFS browser rename lost the folder or children");
             Bytes originalHardLink(size_t(a.forks[0].size)),reopenedHardLink(originalHardLink.size());
             authentic->Read(a.id,0,0,originalHardLink.data(),originalHardLink.size());
             published->Read(publishedB.id,0,0,reopenedHardLink.data(),reopenedHardLink.size());
