@@ -1322,6 +1322,55 @@ void DirectoryHashCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: distinct APFS names with the same hash, duplicate protection, and case-only rename.\n");
 }
 
+void DeepCatalogGrowth(const std::string& root,FILE* report)
+{
+    const auto path=VolumeCoord::Wide(root+"apfs-deep-catalog.img");
+    {
+        auto disk=CreateFormatOutput(path.c_str(),16*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Deep catalog",false,job);
+        disk->Keep();
+    }
+    MacBrowser::Entry entry;
+    entry.name=u"Many long attributes";
+    for(unsigned index=0;index<720;++index){
+        auto name=u"user."+MacBrowser::U16(std::to_wstring(index));
+        name.resize(127,u'x');
+        entry.attributes.emplace(std::move(name),Bytes(3804,uint8_t(index)));
+    }
+    {
+        const auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Writable(),"Could not mount APFS deep catalog image");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        volume->Put(2,entry,{},false);
+    }
+    {
+        auto disk=OpenImage(path.c_str(),false);
+        const auto checkpoint=Apfs::Probe(*disk);
+        const Apfs::ObjectMap containerMap(*disk,*checkpoint,checkpoint->objectMap,checkpoint->transaction);
+        const auto volumeId=checkpoint->volumes.front();
+        const auto volumeBlock=containerMap.Lookup(volumeId);
+        Check(volumeBlock.has_value(),"Missing deep APFS test volume");
+        const auto volume=Apfs::ReadObject(*disk,*checkpoint,*volumeBlock,volumeId,checkpoint->transaction,13);
+        const auto treeId=Apfs::Le64(volume.data()+136);
+        const Apfs::ObjectMap volumeMap(*disk,*checkpoint,Apfs::Le64(volume.data()+128),checkpoint->transaction);
+        const auto treeBlock=volumeMap.Lookup(treeId);
+        Check(treeBlock.has_value(),"Missing APFS test catalog");
+        const Apfs::Node tree(Apfs::ReadObject(*disk,*checkpoint,*treeBlock,treeId,checkpoint->transaction,2,14),true,{});
+        Check(tree.Level()==2,"Long APFS keys did not grow the catalog beyond two levels");
+    }
+    {
+        const auto volume=MacBrowser::OpenBrowserImage(path);
+        MacBrowser::Entry loaded;
+        Check(volume&&volume->Writable()&&volume->FindChild(2,entry.name,loaded),"Could not reopen a deep APFS catalog writable");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        Check(volume->GetAttributes(loaded.id)==entry.attributes,"Deep APFS catalog lost long keys or stream data");
+        volume->Rename(loaded.id,2,u"Renamed in a deep catalog");
+        Check(volume->Stat(loaded.id).name==u"Renamed in a deep catalog","APFS deep catalog rename failed");
+    }
+    fprintf(report,"PASS: APFS three-level catalog with 720 long attribute keys, exact readback and later rename.\n");
+}
+
 void ExtentReferenceGrowth(const std::string& root,FILE* report)
 {
     const auto path=VolumeCoord::Wide(root+"apfs-extent-tree.img");
@@ -2224,6 +2273,7 @@ int RunApfsContainerTest(const char* directory)
         UnicodeCatalogNames(root,report);
         FinderMetadataWrites(root,report);
         ExtentReferenceGrowth(root,report);
+        DeepCatalogGrowth(root,report);
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
             const auto authentic=MacBrowser::OpenBrowserImage(fixture);
             Check(authentic&&authentic->Kind()==std::string("APFS"),"Independent APFS fixture did not mount");

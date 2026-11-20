@@ -127,27 +127,32 @@ CatalogRecords ReadWritableCatalog(Source& source,const Container& container,con
     };
     const auto rootBlock=find(oid);
     const Node root(ReadObject(source,container,rootBlock,oid,container.transaction,2,14),true,{});
-    Check(root.Level()<=1&&!root.Layout().keySize&&!root.Layout().valueSize,
-          "APFS catalog writes currently support at most two tree levels");
+    Check(root.Level()<=2&&!root.Layout().keySize&&!root.Layout().valueSize,
+          "APFS catalog writes currently support at most three tree levels");
     catalog.blocks.push_back(rootBlock);
-    if(!root.Level())append(root);
-    else{
-        std::set<uint64_t> children;
-        for(size_t i=0;i<root.Count();++i){
-            const auto record=root.At(i);
+    std::set<uint64_t> seen{oid};
+    const auto visit=[&](const auto& visit,const Node& node)->void{
+        if(!node.Level()){
+            append(node);
+            return;
+        }
+        Check(node.Count()>0,"Empty APFS catalog index");
+        for(size_t i=0;i<node.Count();++i){
+            const auto record=node.At(i);
             Check(record.value.size==8,"Invalid APFS catalog index record");
             const auto child=Le64(record.value.data);
-            Check(child!=oid&&children.insert(child).second,"Repeated APFS catalog leaf");
+            Check(seen.insert(child).second,"Repeated APFS catalog child");
             const auto block=find(child);
-            const Node leaf(ReadObject(source,container,block,child,container.transaction,3,14),false,{});
-            Check(!leaf.Level()&&leaf.Count(),"Invalid APFS catalog child level or count");
-            const auto first=leaf.At(0).key;
+            const Node next(ReadObject(source,container,block,child,container.transaction,3,14),false,{});
+            Check(next.Level()+1==node.Level()&&next.Count(),"Invalid APFS catalog child level or count");
+            const auto first=next.At(0).key;
             Check(first.size==record.key.size&&!memcmp(first.data,record.key.data,first.size),
-                  "APFS catalog separator does not match its first leaf key");
-            append(leaf);
+                  "APFS catalog separator does not match its first child key");
             catalog.blocks.push_back(block);
+            visit(visit,next);
         }
-    }
+    };
+    visit(visit,root);
     Check(catalog.blocks.size()==map.mappings.size(),"APFS volume map has unrelated live objects");
     return catalog;
 }
@@ -1073,6 +1078,20 @@ CatalogLeaves PartitionCatalog(std::vector<OwnedRecord> records)
     return leaves;
 }
 
+OwnedRecord CatalogSeparator(const std::vector<OwnedRecord>& child,uint64_t oid)
+{
+    OwnedRecord record{child.front().key,Bytes(8)};
+    Set(record.value,0,oid,8);
+    return record;
+}
+
+CatalogLeaves CatalogIndex(const CatalogLeaves& leaves,uint64_t firstOid)
+{
+    std::vector<OwnedRecord> separators;
+    for(size_t i=0;i<leaves.size();++i)separators.push_back(CatalogSeparator(leaves[i],firstOid+i));
+    return PartitionCatalog(std::move(separators));
+}
+
 std::vector<Mapping> StageCatalog(Writes& writes,const CatalogLeaves& leaves,const std::vector<uint64_t>& blocks,
                                   size_t firstChild,uint64_t rootOid,uint64_t firstOid,uint64_t tx)
 {
@@ -1081,14 +1100,11 @@ std::vector<Mapping> StageCatalog(Writes& writes,const CatalogLeaves& leaves,con
         StageObject(writes,blocks[0],EncodeLeaf(leaves.front(),0x40),rootOid,tx,2,14);
         return mappings;
     }
-    std::vector<OwnedRecord> index;
+    auto index=CatalogIndex(leaves,firstOid);
     size_t keys=0,longestKey=0,longestValue=8;
     for(size_t i=0;i<leaves.size();++i){
         const auto& leaf=leaves[i];
         const auto oid=firstOid+i,block=blocks[firstChild+i];
-        OwnedRecord child{leaf.front().key,Bytes(8)};
-        Set(child.value,0,oid,8);
-        index.push_back(std::move(child));
         keys+=leaf.size();
         for(const auto& record:leaf){
             longestKey=(std::max)(longestKey,record.key.size());
@@ -1097,15 +1113,25 @@ std::vector<Mapping> StageCatalog(Writes& writes,const CatalogLeaves& leaves,con
         StageObject(writes,block,WriterDisk::EncodeNode(leaf,0x40,false,0),oid,tx,3,14);
         mappings.push_back({oid,block});
     }
-    auto root=WriterDisk::EncodeNode(index,0x40,true,1);
+    std::vector<OwnedRecord> rootIndex;
+    if(index.size()==1)rootIndex=std::move(index.front());
+    else for(size_t i=0;i<index.size();++i){
+        const auto offset=leaves.size()+i;
+        const auto oid=firstOid+offset,block=blocks[firstChild+offset];
+        rootIndex.push_back(CatalogSeparator(index[i],oid));
+        StageObject(writes,block,WriterDisk::EncodeNode(index[i],0x40,false,1),oid,tx,3,14);
+        mappings.push_back({oid,block});
+    }
+    auto root=WriterDisk::EncodeNode(rootIndex,0x40,true,index.size()==1?1:2);
     constexpr auto footer=Block-WriterDisk::TreeFooter;
     Set(root,footer+16,longestKey,4);
     Set(root,footer+20,longestValue,4);
     Set(root,footer+24,keys,8);
-    Set(root,footer+32,leaves.size()+1,8);
+    Set(root,footer+32,mappings.size(),8);
     StageObject(writes,blocks[0],std::move(root),rootOid,tx,2,14);
     return mappings;
 }
+
 void StageExtentTree(Writes& writes,const CatalogLeaves& leaves,const std::vector<uint64_t>& allocation,
                      size_t firstLeaf,uint64_t transaction)
 {
@@ -1339,6 +1365,10 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             leaves=PartitionCatalog(std::move(catalog));
             children=leaves.size()>1?leaves.size():0;
+            if(children){
+                const auto indexes=CatalogIndex(leaves,0).size();
+                if(indexes>1)children+=indexes;
+            }
             if(changeExtents){
                 std::vector<FileRun> updated;
                 for(const auto& run:files)if(!retiredRun(run))updated.push_back(run);
