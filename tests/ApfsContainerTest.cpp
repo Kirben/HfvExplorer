@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-imported-file.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-overwritten-file.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2683,7 +2683,6 @@ int RunApfsContainerTest(const char* directory)
             };
             const auto importedCopy=runImport();
             Check(!importedCopy.code,importedCopy.message.c_str());
-            Check(runImport().code,"External APFS import accepted an overwrite");
             MacBrowser::Entry copied;
             Check(published->FindChild(2,toCopy.name,copied)&&copied.created==toCopy.created&&
                   copied.modified==toCopy.modified&&copied.finder==toCopy.finder&&
@@ -2693,6 +2692,45 @@ int RunApfsContainerTest(const char* directory)
                 Bytes actual(size_t(copied.forks[fork].size));
                 published->Read(copied.id,fork,0,actual.data(),actual.size());
                 Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"APFS imported fork differs");
+            }
+            auto replacement=copied;
+            replacement.forks[0].size=9001;
+            replacement.forks[1].size=6001;
+            replacement.finder[0]='R';
+            replacement.modified=editedTime+17;
+            replacement.attributes={{u"user.replacement",{31,42}}};
+            replacement.attributesKnown=true;
+            Storage::Job cancelOverwrite;
+            bool cancelled=false;
+            try{
+                published->PutForTransfer(2,replacement,[&](unsigned fork,uint64_t offset,void* data,size_t length){
+                    memset(data,0x55,length);
+                    if(fork)cancelOverwrite.cancel();
+                },true,cancelOverwrite);
+            }catch(const Storage::Cancelled&){cancelled=true;}
+            const auto retained=published->Stat(copied.id);
+            Check(cancelled&&retained.identity==copied.identity&&retained.modified==copied.modified&&
+                  retained.created==copied.created&&retained.finder==copied.finder&&
+                  published->GetAttributes(copied.id)==toCopy.attributes,"Cancelled APFS overwrite changed file metadata");
+            for(unsigned fork=0;fork<2;++fork){
+                Check(retained.forks[fork].size==toCopy.forks[fork].size,"Cancelled APFS overwrite changed fork size");
+                Bytes actual(size_t(retained.forks[fork].size));
+                published->Read(retained.id,fork,0,actual.data(),actual.size());
+                Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"Cancelled APFS overwrite changed fork bytes");
+            }
+            Storage::Job overwrite;
+            const auto replaced=published->PutForTransfer(2,replacement,[](unsigned fork,uint64_t offset,void* data,size_t length){
+                memset(data,fork?0x44:0x55,length);
+            },true,overwrite);
+            const auto updatedFile=published->Stat(replaced);
+            Check(replaced==copied.id&&updatedFile.identity==copied.identity&&updatedFile.finder==replacement.finder&&
+                  updatedFile.modified==replacement.modified&&published->GetAttributes(replaced)==replacement.attributes,
+                  "Completed APFS overwrite lost identity or replacement metadata");
+            for(unsigned fork=0;fork<2;++fork){
+                Check(updatedFile.forks[fork].size==replacement.forks[fork].size,"Completed APFS overwrite lost a fork");
+                Bytes actual(size_t(updatedFile.forks[fork].size));
+                published->Read(replaced,fork,0,actual.data(),actual.size());
+                Check(actual==Bytes(actual.size(),fork?0x44:0x55),"Completed APFS overwrite has incorrect fork contents");
             }
             MacBrowser::Entry renamedFolder;
             auto rename=FileOperations::Submit(FileOperations::RenameEntry{

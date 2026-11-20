@@ -42,6 +42,7 @@ struct CatalogReplaceData {
     const HfsPlus::Attributes* attributes=nullptr;
     HfsPlus::Source* resource=nullptr;
     const HfsPlus::Bytes* compression=nullptr;
+    bool external=false;
 };
 struct CatalogMetadata {
     uint64_t parent,inode;
