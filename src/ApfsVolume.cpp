@@ -1159,21 +1159,23 @@ public:
 
             const bool oldCompressionResource=current.compressed&&!current.forks[1].size&&
                                               item.attributes.count(ResourceFork)!=0;
+            const auto resourceSize=compressionResource?encoded->ResourceSize():current.forks[1].size;
             const MacBrowser::Reader read=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
                 if(fork){
-                    encoded->ReadResource(offset,bytes,count);
+                    if(compressionResource)encoded->ReadResource(offset,bytes,count);
+                    else Read(id,1,offset,bytes,count);
                     report();
                 }else logical(offset,bytes,count);
             };
             ForkInput data(compress?0:size,0,read);
-            ForkInput resource(compressionResource?encoded->ResourceSize():0,1,read);
+            ForkInput resource(resourceSize,1,read);
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             const auto sibling=item.siblingId;
             report();
             CommitMutation(parent,0,job,[&](auto& job){
                 return ReplaceFileData(*source,container,parentOid,oid,data,job,{},
-                                       nullptr,false,nullptr,limitedEdits||compressionResource||oldCompressionResource?&resource:nullptr,
+                                       nullptr,false,nullptr,limitedEdits||resourceSize||oldCompressionResource?&resource:nullptr,
                                        encoded?&encoded->Attribute():nullptr,limitedEdits,sibling,true);
             },id);
         },true);

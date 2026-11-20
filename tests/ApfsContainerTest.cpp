@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-in-place-compression.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-stream-decompression.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -3266,6 +3266,31 @@ int RunApfsContainerTest(const char* directory)
             Bytes untouchedCompressed(decoded.size());
             published->Read(unrelatedCompressed.id,0,0,untouchedCompressed.data(),untouchedCompressed.size());
             Check(untouchedCompressed==decoded,"APFS deletion changed an unrelated compressed file");
+            const auto compressedAttributes=published->GetAttributes(unrelatedCompressed.id);
+            const auto verifyStreamDecompression=[&](bool stillCompressed){
+                const auto current=published->Stat(unrelatedCompressed.id);
+                Check(current.identity==unrelatedCompressed.identity&&current.compressed==stillCompressed&&
+                      current.name==unrelatedCompressed.name&&current.finder==unrelatedCompressed.finder&&
+                      current.created==unrelatedCompressed.created&&current.modified==unrelatedCompressed.modified&&
+                      current.forks[0].size==decoded.size()&&!current.forks[1].size&&
+                      published->GetAttributes(current.id)==compressedAttributes,
+                      "APFS streamed-header decompression changed file metadata");
+                Bytes bytes(decoded.size());
+                published->Read(current.id,0,0,bytes.data(),bytes.size());
+                Check(bytes==decoded,"APFS streamed-header decompression changed file contents");
+            };
+            Storage::Job cancelStreamDecode;
+            bool streamDecodeCancelled=false;
+            try{
+                published->SetCompressionMethodForJob(unrelatedCompressed.id,CompressionMode::Uncompressed,
+                    [&](uint64_t done,uint64_t){if(done)cancelStreamDecode.cancel();},cancelStreamDecode);
+            }catch(const Storage::Cancelled&){streamDecodeCancelled=true;}
+            Check(streamDecodeCancelled,"APFS streamed-header decompression did not cancel during staging");
+            verifyStreamDecompression(true);
+            Storage::Job streamDecode;
+            published->SetCompressionMethodForJob(unrelatedCompressed.id,CompressionMode::Uncompressed,{},streamDecode);
+            verifyStreamDecompression(false);
+            fprintf(report,"PASS: genuine macOS APFS streamed-header decompression, exact bytes, metadata, and cancellation.\n");
             Check(!erase(aliasId).code&&!published->FindChild(copiedAliases.id,victim.name,firstAlias),
                   "Deleting an APFS alias did not remove its name");
             auto retainedAlias=published->Stat(primary.id);

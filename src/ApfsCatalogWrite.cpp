@@ -1677,9 +1677,43 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
     }
 }
 
+uint32_t ReadExternalCompressionMode(Source& source,const std::vector<OwnedRecord>& catalog,
+                                     const CatalogRecords& extentTree,const Bytes& attribute,
+                                     uint64_t inode,uint64_t logicalSize,std::set<uint64_t>& streams)
+{
+    Check(attribute.size()>=4&&Le16(attribute.data()+2)==attribute.size()-4,
+          "Invalid APFS compression attribute length");
+    const auto storage=Le16(attribute.data());
+    Bytes streamedHeader;
+    const auto* header=attribute.data()+4;
+    if(storage==1){
+        Check(attribute.size()==52&&Le64(header+8)>=16,
+              "Invalid APFS compression attribute stream");
+        const auto stream=Le64(header);
+        Check(stream>inode&&streams.insert(stream).second,"Invalid APFS compression stream ID");
+        const auto first=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+            return record.key.size()==16&&Le64(record.key.data())==((uint64_t(8)<<60)|stream)&&
+                   !Le64(record.key.data()+8);
+        });
+        Check(first!=catalog.end()&&first->value.size()==24,"Missing APFS compression stream header extent");
+        const auto block=Le64(first->value.data()+8);
+        const auto owned=std::find_if(extentTree.records.begin(),extentTree.records.end(),[&](const auto& record){
+            return (Le64(record.key.data())&IdMask)==block&&Le64(record.value.data()+8)==inode&&
+                   Le32(record.value.data()+16)==1;
+        });
+        Check(block&&block<source.Size()/Block&&owned!=extentTree.records.end(),
+              "APFS compression header has no exclusive extent");
+        streamedHeader=HfsPlus::Disk::Read(source,block*Block,16);
+        header=streamedHeader.data();
+    }else Check(storage==2&&attribute.size()>=20,"Truncated APFS compression header");
+    Check(Le32(header)==0x636d7066&&Le64(header+8)==logicalSize,
+          "APFS compression header disagrees with the inode");
+    return Le32(header+4);
+}
+
 std::string ExternalInodeName(const Bytes& inode);
 
-size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplaceData& edit,
+size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,const CatalogReplaceData& edit,
                            uint64_t size,uint64_t time,const ResourceWrite* resource,
                            const AttributeStreams& streams,const CatalogRecords& extentTree,
                            std::set<uint64_t>& retired)
@@ -1790,9 +1824,9 @@ size_t ReplaceExternalFile(std::vector<OwnedRecord>& catalog,const CatalogReplac
         const std::string attr(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
         const auto storage=Le16(after->value.data());
         if(attr==CompressionAttribute){
-            Check(wasCompressed&&!foundCompression&&storage==2&&after->value.size()>=20&&
-                  Le32(after->value.data()+4)==0x636d7066&&Le64(after->value.data()+12)==Le64(old.data()+84),
-                  "Invalid APFS compressed overwrite target");
+            Check(wasCompressed&&!foundCompression,"Invalid APFS compressed overwrite target");
+            ReadExternalCompressionMode(source,catalog,extentTree,after->value,
+                                        edit.inode,Le64(old.data()+84),removeStreams);
             foundCompression=true;
             continue;
         }
@@ -1970,33 +2004,10 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
             continue;
         }
         if(attr==CompressionAttribute){
-            Check(compressed&&!hadCompression&&Le16(after->value.data()+2)==after->value.size()-4,
+            Check(compressed&&!hadCompression,
                   "Invalid APFS compression attribute for deletion");
-            Bytes streamedHeader;
-            const auto* header=after->value.data()+4;
-            if(storage==1){
-                Check(after->value.size()==52&&Le64(header+8)>=16,
-                      "Invalid APFS compression attribute stream");
-                const auto stream=Le64(header);
-                Check(stream>edit.inode&&streams.insert(stream).second,"Invalid APFS compression stream ID");
-                const auto first=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
-                    return record.key.size()==16&&Le64(record.key.data())==((uint64_t(8)<<60)|stream)&&
-                           !Le64(record.key.data()+8);
-                });
-                Check(first!=catalog.end()&&first->value.size()==24,"Missing APFS compression stream header extent");
-                const auto block=Le64(first->value.data()+8);
-                const auto owned=std::find_if(extentTree.records.begin(),extentTree.records.end(),[&](const auto& record){
-                    return (Le64(record.key.data())&IdMask)==block&&Le64(record.value.data()+8)==edit.inode&&
-                           Le32(record.value.data()+16)==1;
-                });
-                Check(block&&block<source.Size()/Block&&owned!=extentTree.records.end(),
-                      "APFS compression header has no exclusive extent");
-                streamedHeader=HfsPlus::Disk::Read(source,block*Block,16);
-                header=streamedHeader.data();
-            }else Check(storage==2&&after->value.size()>=20,"Truncated APFS compression header");
-            Check(Le32(header)==0x636d7066&&Le64(header+8)==Le64(value.data()+84),
-                  "APFS compression header disagrees with the inode");
-            const auto mode=Le32(header+4);
+            const auto mode=ReadExternalCompressionMode(source,catalog,extentTree,after->value,
+                                                        edit.inode,Le64(value.data()+84),streams);
             needsResource=mode==4||mode==8||mode==10||mode==12||mode==14;
             Check(needsResource||mode==1||mode==3||mode==7||mode==9||mode==11||mode==13,
                   "Unsupported APFS compression mode for deletion");
@@ -2459,7 +2470,7 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(externalReplace){
         catalog=std::move(existing.records);
         TouchExternalParent(catalog,replace->parent,time,0);
-        streamAt=ReplaceExternalFile(catalog,*replace,dataSize,time,resource?&*resource:nullptr,
+        streamAt=ReplaceExternalFile(source,catalog,*replace,dataSize,time,resource?&*resource:nullptr,
                                      attributeIds,extentTree,externalRetired);
     }else if(externalCreate){
         const bool directory=create->kind==CatalogKind::Directory;
