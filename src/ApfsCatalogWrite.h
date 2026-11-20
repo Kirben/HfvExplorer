@@ -75,6 +75,7 @@ struct CatalogFileProperties {
     const std::u16string& name;
     TimestampEdits dates;
     std::optional<bool> locked;
+    const std::u16string* newName=nullptr;
 };
 using CatalogMutation=std::variant<CatalogFileProperties,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 

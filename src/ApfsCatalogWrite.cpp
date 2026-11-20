@@ -1531,6 +1531,29 @@ CatalogVolume ReadCatalogVolume(Source& source,const Container& container)
     return {std::move(map),address,std::move(volume)};
 }
 
+void RenameExternalInode(Bytes& inode,const std::string& name,const std::string& replacement)
+{
+    Check(inode.size()>=96,"Missing APFS inode name fields");
+    const auto descriptors=Le16(inode.data()+92);
+    size_t offset=96+size_t(descriptors)*4;
+    Check(offset<=inode.size(),"Truncated APFS inode field table");
+    bool found=false;
+    for(size_t i=0;i<descriptors;++i){
+        const auto field=96+i*4;
+        const auto length=Le16(inode.data()+field+2);
+        const auto padded=size_t(DivideUp(length,8)*8);
+        Check(Range(offset,padded,inode.size()),"Truncated APFS inode field");
+        if(inode[field]==4){
+            Check(!found&&length==name.size()+1&&!memcmp(inode.data()+offset,name.c_str(),length),
+                  "APFS inode name differs from its directory entry");
+            std::copy(replacement.begin(),replacement.end(),inode.begin()+offset);
+            found=true;
+        }
+        offset+=padded;
+    }
+    Check(found&&offset==inode.size(),"Invalid APFS inode name fields");
+}
+
 void CheckNativeVolume(const Bytes& volume)
 {
     const auto flags=Le64(volume.data()+56);
@@ -1729,15 +1752,24 @@ CatalogWritePlan PrepareCatalogMutation(
     if(properties){
         catalog=std::move(existing.records);
         uint64_t file=0;
-        for(const auto& record:catalog){
+        std::optional<size_t> directoryRecord;
+        const auto parentKey=(uint64_t(9)<<60)|properties->parent;
+        for(size_t i=0;i<catalog.size();++i){
+            const auto& record=catalog[i];
             if(record.key.size()!=13+name.size()||
-               Le64(record.key.data())!=((uint64_t(9)<<60)|properties->parent)||
+               Le64(record.key.data())!=parentKey||
                memcmp(record.key.data()+12,name.c_str(),name.size()+1))continue;
             Check(!file&&record.value.size()==18&&Le16(record.value.data()+16)==8,
                   "APFS Properties target must be an unlinked regular file");
             file=Le64(record.value.data());
+            directoryRecord=i;
         }
         Check(file>=16&&file<nextId,"APFS Properties target was not found");
+        std::string replacement;
+        if(properties->newName){
+            replacement=EncodeCatalogName(*properties->newName);
+            Check(replacement.size()==name.size(),"This APFS rename requires the same UTF-8 filename length");
+        }
         bool edited=false;
         for(auto& record:catalog){
             if(record.key.size()!=8||Le64(record.key.data())!=((uint64_t(3)<<60)|file))continue;
@@ -1753,10 +1785,37 @@ CatalogWritePlan PrepareCatalogMutation(
                 Set(value,68,(flags&~UserImmutable)|(*properties->locked?UserImmutable:0),4);
             if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
             if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
+            if(properties->newName)RenameExternalInode(value,name,replacement);
             Set(value,32,time,8);
             edited=true;
         }
         Check(edited,"APFS Properties target inode was not found");
+        if(properties->newName){
+            auto record=std::move(catalog[*directoryRecord]);
+            catalog.erase(catalog.begin()+*directoryRecord);
+            const auto hash=WriterDisk::DirectoryHash(replacement,true);
+            const auto comparison=NormalizedName(replacement,true);
+            Set(record.key,8,hash|(replacement.size()+1),4);
+            std::copy(replacement.begin(),replacement.end(),record.key.begin()+12);
+            auto insert=catalog.end();
+            for(auto entry=catalog.begin();entry!=catalog.end();++entry){
+                Check(entry->key.size()>=8,"Truncated APFS catalog key");
+                const auto raw=Le64(entry->key.data());
+                if((raw&IdMask)>properties->parent||((raw&IdMask)==properties->parent&&raw>>60>9)){
+                    if(insert==catalog.end())insert=entry;
+                    break;
+                }
+                if(raw!=parentKey)continue;
+                const auto& key=entry->key;
+                Check(key.size()>=14&&(Le32(key.data()+8)&1023)==key.size()-12&&!key.back(),
+                      "Invalid APFS directory name");
+                const std::string existing(reinterpret_cast<const char*>(key.data()+12),key.size()-13);
+                Check(NormalizedName(existing,true)!=comparison,"The APFS entry name already exists");
+                const auto existingHash=Le32(key.data()+8)&~1023u;
+                if(insert==catalog.end()&&(existingHash>hash||(existingHash==hash&&existing>replacement)))insert=entry;
+            }
+            catalog.insert(insert,std::move(record));
+        }
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});

@@ -394,6 +394,14 @@ uint64_t SetCatalogFileProperties(Source& source,const Container& expected,uint6
     return Commit(source,expected,job,&request);
 }
 
+uint64_t RenameExternalCatalogFile(Source& source,const Container& expected,uint64_t parent,
+                                   const std::u16string& name,const std::u16string& newName,Storage::Job& job)
+{
+    Check(parent>=2&&parent<(uint64_t(1)<<60),"Select an APFS folder");
+    const CatalogMutation request=CatalogFileProperties{parent,name,{},{},&newName};
+    return Commit(source,expected,job,&request);
+}
+
 uint64_t SetEntryProperties(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
                        const FinderBytes& finder,TimestampEdits dates,bool locked,Storage::Job& job)
 {
