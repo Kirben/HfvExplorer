@@ -1942,6 +1942,88 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
                    std::make_move_iterator(attributes.end()));
 }
 
+void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardLink& request,
+                             const std::string& name,uint64_t nextId,uint64_t time)
+{
+    Check(!request.replaced&&request.parent>=2&&request.parent!=3&&request.inode>=16,
+          "External APFS hard-link creation requires a new name");
+    const auto inodeKey=(uint64_t(3)<<60)|request.inode;
+    const auto linkKey=(uint64_t(5)<<60)|request.inode;
+    std::optional<size_t> inodeRecord;
+    std::vector<size_t> names;
+    std::map<Bytes,const Bytes*> siblingRecords;
+    size_t afterLinks=0;
+    for(size_t i=0;i<catalog.size();++i){
+        const auto& record=catalog[i];
+        Check(record.key.size()>=8,"Truncated APFS catalog key");
+        const auto raw=Le64(record.key.data()),oid=raw&IdMask,type=raw>>60;
+        Check(oid<nextId,"APFS catalog contains an object at or after its next ID");
+        if(raw==inodeKey){
+            Check(!inodeRecord&&record.key.size()==8&&record.value.size()>=92,"Invalid APFS hard-link source inode");
+            inodeRecord=i;
+        }
+        if(oid<request.inode||(oid==request.inode&&type<=5))afterLinks=i+1;
+        if(type==12||raw==linkKey)
+            Check(siblingRecords.emplace(record.key,&record.value).second,"Repeated APFS sibling record");
+        if(type!=9||record.value.size()<18||Le64(record.value.data())!=request.inode)continue;
+        Check((record.value.size()==18||record.value.size()==34)&&Le16(record.value.data()+16)==8&&
+              record.key.size()>=14&&(Le32(record.key.data()+8)&1023)==record.key.size()-12&&!record.key.back(),
+              "APFS hard-link source must be a regular file");
+        names.push_back(i);
+    }
+    Check(inodeRecord.has_value()&&!names.empty(),"The APFS hard-link source no longer exists");
+    auto& inode=catalog[*inodeRecord].value;
+    const auto count=Le32(inode.data()+56);
+    Check((Le16(inode.data()+80)&0170000)==0100000&&!(Le32(inode.data()+68)&(UserImmutable|SystemImmutable))&&
+          names.size()==count&&count<INT32_MAX,"Invalid or locked APFS hard-link source");
+    std::set<uint64_t> identifiers;
+    for(const auto index:names){
+        const auto& record=catalog[index];
+        if(count==1){
+            Check(record.value.size()==18&&Le64(inode.data())==(Le64(record.key.data())&IdMask),
+                  "Invalid APFS original file name");
+            continue;
+        }
+        Check(record.value.size()==34,"Missing APFS sibling ID");
+        const auto* value=record.value.data();
+        const auto id=Le64(value+26);
+        Check(id>=16&&id<nextId&&id!=request.inode&&identifiers.insert(id).second&&
+              Le16(value+18)==1&&Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
+              "Invalid APFS sibling ID");
+        const CatalogSibling sibling{request.inode,Le64(record.key.data())&IdMask,
+            std::string(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13)};
+        const auto link=sibling.LinkRecord(id),map=sibling.MapRecord(id);
+        const auto storedLink=siblingRecords.find(link.key),storedMap=siblingRecords.find(map.key);
+        Check(storedLink!=siblingRecords.end()&&storedMap!=siblingRecords.end()&&
+              *storedLink->second==link.value&&*storedMap->second==map.value,
+              "APFS sibling records do not match the selected inode");
+    }
+    Set(inode,56,count+1,4);
+    Set(inode,32,time,8);
+    TouchExternalParent(catalog,request.parent,time,1);
+    std::vector<OwnedRecord> links,maps;
+    const auto append=[&](const CatalogSibling& sibling,uint64_t id){
+        links.push_back(sibling.LinkRecord(id));
+        maps.push_back(sibling.MapRecord(id));
+    };
+    if(count==1){
+        auto& original=catalog[names.front()];
+        const auto originalParent=Le64(original.key.data())&IdMask;
+        const std::string originalName(reinterpret_cast<const char*>(original.key.data()+12),original.key.size()-13);
+        SetSibling(original.value,nextId);
+        append({request.inode,originalParent,originalName},nextId);
+    }
+    const auto aliasId=nextId+1;
+    auto added=WriterDisk::DirectoryEntry(name,request.inode,time,request.parent,true,
+                                          uint16_t(CatalogKind::RegularFile));
+    SetSibling(added.value,aliasId);
+    append({request.inode,request.parent,name},aliasId);
+    catalog.insert(catalog.begin()+afterLinks,std::make_move_iterator(links.begin()),
+                   std::make_move_iterator(links.end()));
+    InsertExternalDirectoryRecord(catalog,std::move(added),request.parent,name);
+    catalog.insert(catalog.end(),std::make_move_iterator(maps.begin()),std::make_move_iterator(maps.end()));
+}
+
 void CheckExternalVolume(const Bytes& volume)
 {
     Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
@@ -2097,11 +2179,12 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto catalogOid=Le64(volume.data()+136);
     const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
     const bool externalCreate=create&&create->external;
+    const bool externalHardLink=hardLink&&hardLink->external;
     const bool externalReplace=replace&&replace->external;
     const bool externalLinkReplace=linkReplacement&&linkReplacement->external;
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
-    if(properties||externalCreate||externalReplace||externalDelete||externalLinkReplace)CheckExternalVolume(volume);
+    if(properties||externalCreate||externalReplace||externalDelete||externalLinkReplace||externalHardLink)CheckExternalVolume(volume);
     else CheckNativeVolume(volume);
     const auto extentTree=ReadExtentTree(source,current,extents);
     const Node snapshotTree(ReadObject(source,current,snapshots,snapshots,current.transaction,2,16,true),true,{});
@@ -2149,7 +2232,10 @@ CatalogWritePlan PrepareCatalogMutation(
     std::set<uint64_t> externalRetired;
     uint64_t deletedFiles=0,deletedFolders=0,deletedSymlinks=0;
     std::vector<OwnedRecord> catalog;
-    if(externalDelete){
+    if(externalHardLink){
+        catalog=std::move(existing.records);
+        CreateExternalHardLink(catalog,*hardLink,name,nextId,time);
+    }else if(externalDelete){
         catalog=std::move(existing.records);
         if(remove->recursive)
             std::tie(deletedFiles,deletedFolders,deletedSymlinks)=DeleteExternalTree(catalog,*remove,time,extentTree,externalRetired);
@@ -2282,7 +2368,7 @@ CatalogWritePlan PrepareCatalogMutation(
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
                             directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
     }
-    if(properties||externalCreate||externalReplace||externalDelete||externalLinkReplace){
+    if(properties||externalCreate||externalReplace||externalDelete||externalLinkReplace||externalHardLink){
         for(const auto& extent:extentTree.records)
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});

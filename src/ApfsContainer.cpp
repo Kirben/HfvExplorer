@@ -443,9 +443,9 @@ uint64_t ReplaceCatalogSymlink(Source& source,const Container& expected,uint64_t
 }
 
 uint64_t CreateCatalogHardLink(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                               const std::u16string& name,Storage::Job& job,uint64_t replaced)
+                               const std::u16string& name,Storage::Job& job,uint64_t replaced,bool external)
 {
-    const CatalogMutation request=CatalogHardLink{parent,inode,name,replaced};
+    const CatalogMutation request=CatalogHardLink{parent,inode,name,replaced,external};
     return Commit(source,expected,job,&request);
 }
 

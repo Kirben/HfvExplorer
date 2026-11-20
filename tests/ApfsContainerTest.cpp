@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-deleted-symlink.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-copied-hard-links.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2731,7 +2731,7 @@ int RunApfsContainerTest(const char* directory)
             const auto caps=published->Supports();
             Check(caps.rename&&caps.writable&&!published->Writable()&&caps.create&&caps.createFolders&&
                   caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
-                  !caps.CanEditCompression()&&!caps.CanCreateHardLinks(),
+                  !caps.CanEditCompression()&&caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
             const auto importPath=VolumeCoord::Wide(root+"apfs-import-source.img");
             {
@@ -2854,6 +2854,38 @@ int RunApfsContainerTest(const char* directory)
                   copiedLink.created==createdTime&&copiedLink.modified==editedTime,
                   "APFS copy did not retain the dangling link target and timestamps");
             Reject([&]{published->Read(copiedLink.id,0,0,nullptr,0);},"APFS copy followed a symbolic link");
+            const auto linksFolder=importSource->MakeDirectory(2,u"Linked files");
+            const auto aliasesFolder=importSource->MakeDirectory(linksFolder,u"Aliases");
+            const auto shared=importSource->Put(linksFolder,toCopy,writePayload,false);
+            importSource->MakeHardLink(shared,aliasesFolder,u"First alias");
+            importSource->MakeHardLink(shared,aliasesFolder,u"Second alias");
+            auto hardLinkCopy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(importSource,linksFolder)},FileOperations::Location::Mounted(published,2)});
+            const auto hardLinkStart=GetTickCount();
+            while(!hardLinkCopy.Job()->done()){
+                Check(GetTickCount()-hardLinkStart<15000,"External APFS hard-link copy timed out");
+                Sleep(5);
+            }
+            const auto hardLinkResult=hardLinkCopy.Job()->result();
+            Check(!hardLinkResult.code,hardLinkResult.message.c_str());
+            MacBrowser::Entry copiedLinks,copiedAliases,primary,firstAlias,secondAlias;
+            Check(published->FindChild(2,u"Linked files",copiedLinks)&&
+                  published->FindChild(copiedLinks.id,toCopy.name,primary)&&
+                  published->FindChild(copiedLinks.id,u"Aliases",copiedAliases)&&
+                  published->FindChild(copiedAliases.id,u"First alias",firstAlias)&&
+                  published->FindChild(copiedAliases.id,u"Second alias",secondAlias)&&
+                  primary.id!=firstAlias.id&&primary.id!=secondAlias.id&&firstAlias.id!=secondAlias.id&&
+                  primary.linkCount==3&&firstAlias.linkCount==3&&secondAlias.linkCount==3&&
+                  primary.resolvedId==firstAlias.resolvedId&&primary.resolvedId==secondAlias.resolvedId,
+                  "Copied APFS aliases did not share one inode");
+            for(const auto* alias:{&primary,&firstAlias,&secondAlias}){
+                for(unsigned fork=0;fork<2;++fork){
+                    Check(alias->forks[fork].size==toCopy.forks[fork].size,"Copied APFS hard link lost a fork");
+                    Bytes actual(size_t(alias->forks[fork].size));
+                    published->Read(alias->id,fork,0,actual.data(),actual.size());
+                    Check(actual==Bytes(actual.size(),fork?0x7b:0x6a),"Copied APFS hard-link fork differs");
+                }
+            }
             auto replacement=copied;
             replacement.forks[0].size=9001;
             replacement.forks[1].size=6001;

@@ -73,6 +73,7 @@ struct CatalogHardLink {
     uint64_t parent,inode;
     const std::u16string& name;
     uint64_t replaced=0;
+    bool external=false;
 };
 struct ExternalCatalogEdit {
     uint64_t parent;

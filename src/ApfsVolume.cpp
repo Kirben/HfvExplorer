@@ -486,7 +486,7 @@ public:
         capabilities.basicMetadata=writable;
         capabilities.finderMetadata=writable;
         capabilities.compression=Writable();
-        capabilities.hardLinks=Writable();
+        capabilities.hardLinks=writable;
         return capabilities;
     }
     MacBrowser::WorkerExecution Execution()const override{
@@ -905,10 +905,11 @@ public:
                 Check(FindChild(parent,name,destination),"The APFS hard-link destination disappeared");
                 replaced=At(destination.id).oid;
                 if(replaced==oid)return destination.id;
+                Check(!limitedEdits,"This APFS image cannot replace a file with a hard link yet");
             }
             Storage::Job job;
             CommitMutation(parent,destination.id,job,[&](auto& job){
-                return CreateCatalogHardLink(*source,container,folder,oid,name,job,replaced);
+                return CreateCatalogHardLink(*source,container,folder,oid,name,job,replaced,limitedEdits);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
@@ -917,7 +918,7 @@ public:
             Entry alias;
             if(FindChild(parent,name,alias))return alias.id;
             throw Error("APFS hard link committed but could not be found after refresh");
-        });
+        },true);
     }
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
         return CreateFolder(parent,name,{});
@@ -990,8 +991,7 @@ public:
     }
     void ValidateEntry(const Entry& entry)const override{
         if(!writable)ReadOnly();
-        if(limitedEdits)Check(!entry.hardLink&&!entry.compressed,
-                              "This APFS image cannot copy compressed files or hard links yet");
+        if(limitedEdits)Check(!entry.compressed,"This APFS image cannot copy compressed files yet");
         ValidateName(entry.name);
         Check(!entry.directory||!entry.forks[0].size,"An APFS folder cannot store file data");
         Check(!entry.directory||!entry.forks[1].size,"An APFS folder cannot store a resource fork");
