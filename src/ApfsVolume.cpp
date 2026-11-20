@@ -481,7 +481,7 @@ public:
         capabilities.unicodeNames=true;
         capabilities.attributes=!limitedEdits;
         capabilities.basicMetadata=writable;
-        capabilities.finderMetadata=Writable();
+        capabilities.finderMetadata=writable;
         capabilities.compression=Writable();
         capabilities.hardLinks=Writable();
         return capabilities;
@@ -1154,10 +1154,10 @@ public:
             Storage::Job job;
             CommitMutation(parent,0,job,[&](auto& job){
                 if(limitedEdits){
-                    Check(current.finder==desired.finder,"Finder information is read-only on this APFS image");
                     const auto locked=current.protectedFile!=desired.protectedFile?
                         std::optional<bool>(desired.protectedFile):std::nullopt;
-                    return SetExternalCatalogProperties(*source,container,parentOid,current.name,dates,job,locked);
+                    const auto* finder=current.finder!=desired.finder?&desired.finder:nullptr;
+                    return SetExternalCatalogProperties(*source,container,parentOid,current.name,dates,job,locked,finder);
                 }
                 return SetEntryProperties(*source,container,parentOid,oid,desired.finder,dates,desired.protectedFile,job);
             },id);

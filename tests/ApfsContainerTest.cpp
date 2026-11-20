@@ -2557,7 +2557,7 @@ int RunApfsContainerTest(const char* directory)
                       "Cancelled publication changed a macOS-generated APFS checkpoint");
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
-            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-browser-properties.img");
+            const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-finder-properties.img");
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -2635,7 +2635,7 @@ int RunApfsContainerTest(const char* directory)
                   "Publishing a checkpoint changed the macOS-generated catalog");
             const auto caps=published->Supports();
             Check(caps.rename&&caps.writable&&!published->Writable()&&!caps.create&&!caps.createFolders&&
-                  !caps.remove&&caps.CanEditBasicMetadata()&&!caps.finderMetadata&&!caps.CanEditAttributes()&&
+                  !caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&!caps.CanEditAttributes()&&
                   !caps.CanEditCompression()&&!caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
             MacBrowser::Entry renamedFolder;
@@ -2654,6 +2654,7 @@ int RunApfsContainerTest(const char* directory)
             auto desired=renamedFolder;
             desired.modified=editedTime;
             desired.protectedFile=true;
+            desired.finder[0]=0x12;
             auto edit=FileOperations::Submit(FileOperations::EditBasicMetadata{
                 FileOperations::Location::Mounted(published,renamedFolder.id),renamedFolder,desired});
             const auto editStart=GetTickCount();
@@ -2664,11 +2665,23 @@ int RunApfsContainerTest(const char* directory)
             const auto result=edit.Job()->result();
             Check(!result.code,result.message.c_str());
             const auto updated=published->Stat(renamedFolder.id);
-            Check(updated.modified==editedTime&&updated.protectedFile&&updated.finder==renamedFolder.finder,
+            Check(updated.modified==editedTime&&updated.protectedFile&&updated.finder==desired.finder,
                   "External APFS Properties did not preserve Finder metadata and apply the verified edits");
             desired=updated;
             desired.finder[0]^=1;
-            Reject([&]{published->SetBasicMetadata(updated.id,desired);},"External APFS mount accepted a Finder metadata edit");
+            Reject([&]{published->SetBasicMetadata(updated.id,desired);},"Locked APFS folder accepted a Finder metadata edit");
+            desired.protectedFile=false;
+            published->SetBasicMetadata(updated.id,desired);
+            Check(published->Stat(updated.id).finder==desired.finder,"APFS did not replace Finder information");
+            desired=published->Stat(updated.id);
+            desired.finder={};
+            published->SetBasicMetadata(updated.id,desired);
+            Check(published->Stat(updated.id).finder==desired.finder,"APFS did not clear Finder information");
+            desired=published->Stat(updated.id);
+            desired.finder[0]=0x12;
+            published->SetBasicMetadata(updated.id,desired);
+            Check(published->Stat(updated.id).finder==desired.finder&&published->List(updated.id).size()==400,
+                  "APFS Finder information edit lost unrelated folder contents");
             Bytes originalHardLink(size_t(a.forks[0].size)),reopenedHardLink(originalHardLink.size());
             authentic->Read(a.id,0,0,originalHardLink.data(),originalHardLink.size());
             published->Read(publishedB.id,0,0,reopenedHardLink.data(),reopenedHardLink.size());

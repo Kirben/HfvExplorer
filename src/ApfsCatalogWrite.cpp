@@ -1565,6 +1565,48 @@ void RenameExternalInode(Bytes& inode,const std::string& name,const std::string&
     Check(found&&offset==inode.size(),"Invalid APFS inode name fields");
 }
 
+void SetExternalFinderInfo(Bytes& inode,const FinderBytes& finder)
+{
+    Check(inode.size()>=96,"Missing APFS inode extended fields");
+    const auto fields=Le16(inode.data()+92);
+    const size_t payload=96+size_t(fields)*4;
+    Check(payload<=inode.size()&&Le16(inode.data()+94)==inode.size()-payload,
+          "Invalid APFS inode field table size");
+    size_t offset=payload;
+    std::optional<std::pair<size_t,size_t>> found;
+    for(size_t i=0;i<fields;++i){
+        const auto descriptor=96+i*4;
+        const auto length=Le16(inode.data()+descriptor+2);
+        const auto padded=size_t(DivideUp(length,8)*8);
+        Check(Range(offset,padded,inode.size()),"Truncated APFS inode field");
+        if(inode[descriptor]==7){
+            Check(!found&&length==finder.size(),"Invalid APFS Finder information field");
+            found.emplace(descriptor,offset);
+        }
+        offset+=padded;
+    }
+    auto flags=Le64(inode.data()+48);
+    Check(offset==inode.size()&&bool(flags&WriterDisk::HasFinderInfo)==found.has_value(),
+          "APFS Finder flag and extended fields disagree");
+    const bool present=std::any_of(finder.begin(),finder.end(),[](uint8_t byte){return byte!=0;});
+    if(found&&present){
+        std::copy(finder.begin(),finder.end(),inode.begin()+found->second);
+    }else if(found){
+        inode.erase(inode.begin()+found->second,inode.begin()+found->second+finder.size());
+        inode.erase(inode.begin()+found->first,inode.begin()+found->first+4);
+        Set(inode,92,fields-1,2);
+        Set(inode,94,inode.size()-(payload-4),2);
+    }else if(present){
+        Check(inode.size()-payload<=UINT16_MAX-finder.size(),"APFS inode fields exceed the on-disk size limit");
+        inode.insert(inode.begin()+payload,{7,0x20,uint8_t(finder.size()),0});
+        inode.insert(inode.end(),finder.begin(),finder.end());
+        Set(inode,92,fields+1,2);
+        Set(inode,94,inode.size()-(payload+4),2);
+    }
+    flags=(flags&~WriterDisk::HasFinderInfo)|(present?WriterDisk::HasFinderInfo:0);
+    Set(inode,48,flags,8);
+}
+
 void CheckExternalVolume(const Bytes& volume)
 {
     Check(!memcmp(volume.data()+32,"APSB",4)&&Le64(volume.data()+40)==2&&
@@ -1834,6 +1876,7 @@ CatalogWritePlan PrepareCatalogMutation(
             if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
             if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
             if(properties->newName)RenameExternalInode(value,name,replacement);
+            if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
             edited=true;
         }

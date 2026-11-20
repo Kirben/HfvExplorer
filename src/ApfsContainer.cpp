@@ -386,11 +386,11 @@ uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t par
 
 uint64_t SetExternalCatalogProperties(Source& source,const Container& expected,uint64_t parent,
                                   const std::u16string& name,TimestampEdits dates,Storage::Job& job,
-                                  std::optional<bool> locked)
+                                  std::optional<bool> locked,const FinderBytes* finder)
 {
-    Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified||locked.has_value()),
+    Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified||locked.has_value()||finder),
           "Select an APFS folder and at least one property to edit");
-    const CatalogMutation request=ExternalCatalogEdit{parent,name,dates,locked};
+    const CatalogMutation request=ExternalCatalogEdit{parent,name,dates,locked,nullptr,finder};
     return Commit(source,expected,job,&request);
 }
 

@@ -76,6 +76,7 @@ struct ExternalCatalogEdit {
     TimestampEdits dates;
     std::optional<bool> locked;
     const std::u16string* newName=nullptr;
+    const FinderBytes* finder=nullptr;
 };
 using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 

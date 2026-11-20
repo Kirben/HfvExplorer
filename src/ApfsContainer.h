@@ -42,7 +42,7 @@ struct TimestampEdits {
 // Edits fixed inode fields on supported independently formatted volumes.
 uint64_t SetExternalCatalogProperties(HfsPlus::Source&,const Container&,uint64_t parent,
                                   const std::u16string& name,TimestampEdits,Storage::Job&,
-                                  std::optional<bool> locked={});
+                                  std::optional<bool> locked={},const FinderBytes* finder=nullptr);
 uint64_t RenameExternalCatalogEntry(HfsPlus::Source&,const Container&,uint64_t parent,
                                    const std::u16string& name,const std::u16string& newName,Storage::Job&);
 uint64_t SetEntryProperties(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
