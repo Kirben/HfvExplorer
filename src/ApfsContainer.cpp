@@ -258,7 +258,12 @@ std::optional<Container> Probe(Source& source)
 }
 
 namespace {
-uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const std::u16string* directory)
+struct CreateDirectoryRequest {
+    uint64_t parent;
+    const std::u16string& name;
+};
+
+uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const CreateDirectoryRequest* directory)
 {
     if(job.cancelled())throw Storage::Cancelled();
     Check(source.Writable(),"An exclusive writable APFS image is required");
@@ -279,7 +284,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
             Check(found!=plan.objects.end(),"Missing APFS checkpoint object");
             return found->bytes;
         };
-        changedBlocks=PrepareRootDirectory(source,*current,plan.transaction,plan.superblock,object,*directory);
+        changedBlocks=PrepareDirectory(source,*current,plan.transaction,plan.superblock,object,directory->parent,directory->name);
     }
     Stamp(plan.superblock,plan.transaction);
     auto write=[&](uint64_t block,const uint8_t* bytes){
@@ -319,8 +324,9 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
     return Commit(source,expected,job,nullptr);
 }
 
-uint64_t CreateRootDirectory(Source& source,const Container& expected,const std::u16string& name,Storage::Job& job)
+uint64_t CreateDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
-    return Commit(source,expected,job,&name);
+    const CreateDirectoryRequest request{parent,name};
+    return Commit(source,expected,job,&request);
 }
 }

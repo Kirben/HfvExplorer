@@ -3,6 +3,8 @@
 #include "ApfsTree.h"
 #include "ApfsWriteDisk.h"
 #include <windows.h>
+#include <map>
+#include <tuple>
 
 namespace Apfs {
 namespace {
@@ -273,22 +275,25 @@ std::vector<uint64_t> Allocate(Writes& writes,Source& source,const Container& co
     return result;
 }
 
-Bytes AddDirectory(Bytes catalog,const std::string& name,uint64_t id,uint64_t time,bool fold,
-                   uint64_t directoryCount)
+Bytes AddDirectory(Bytes catalog,uint64_t parent,const std::string& name,uint64_t id,uint64_t time,
+                   bool fold,uint64_t directoryCount)
 {
     const Node tree(std::move(catalog),true,{});
     Check(tree.Level()==0&&directoryCount<=tree.Count()&&tree.Count()==4+2*directoryCount,
-          "APFS catalog writes currently require a single leaf containing only root folders");
-    // The record keys sort first by inode ID, then by record type.
+          "APFS catalog writes require a single leaf containing only directories");
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
-    const auto added=WriterDisk::DirectoryEntry(name,id,time,2,fold);
-    const uint32_t newHash=Le32(added.key.data()+8)>>10;
-    const size_t privateIndex=3+size_t(directoryCount);
-    size_t insertAt=3;
-    uint32_t previousHash=0;
-    uint64_t previousInode=1;
-    std::vector<uint64_t> children;
+    auto added=WriterDisk::DirectoryEntry(name,id,time,parent,fold);
+    using Key=std::tuple<uint64_t,uint64_t,uint32_t>;
+    const Key addedKey{parent,9,Le32(added.key.data()+8)>>10};
+    Key previous{};
+    size_t insertAt=2;
+    struct Directory {
+        size_t record;
+        uint32_t children=0;
+    };
+    std::map<uint64_t,Directory> directories;
+    std::map<uint64_t,uint64_t> parents;
     std::vector<OwnedRecord> records;
     for(size_t i=0;i<tree.Count();++i){
         const auto view=tree.At(i);
@@ -297,54 +302,66 @@ Bytes AddDirectory(Bytes catalog,const std::string& name,uint64_t id,uint64_t ti
             Check(view.key.size==expected.key.size()&&!memcmp(view.key.data,expected.key.data(),view.key.size)&&
                   view.value.size==18&&Le64(view.value.data)==reserved[i]&&Le16(view.value.data+16)==4,
                   "Invalid APFS reserved directory entry");
-        }else if(i>2&&i<privateIndex){
-            Check(view.key.size>=14&&Le64(view.key.data)==((uint64_t(9)<<60)|2)&&
-                  view.value.size==18&&Le16(view.value.data+16)==4,"Invalid APFS root directory entry");
-            const auto key=Le32(view.key.data+8);
-            Check((key&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
-                  "Invalid APFS root directory name");
-            const auto begin=view.key.data+12;
-            const auto childName=DirectoryName(std::u16string(begin,view.key.data+view.key.size-1));
-            const auto hash=key>>10;
-            Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash&&(i==3||hash>previousHash),
-                  "Unsupported APFS root directory key order");
-            Check(hash!=newHash,"The APFS directory name already exists or has a conflicting hash");
-            if(hash<newHash)++insertAt;
-            previousHash=hash;
-            const auto child=Le64(view.value.data);
-            Check(child>=16&&child<id,"Invalid APFS root directory entry ID");
-            children.push_back(child);
         }else{
-            const bool userDirectory=i>privateIndex;
-            Check(view.key.size==8&&view.value.size>=92,"Invalid APFS directory inode size");
+            Check(view.key.size>=8,"Invalid APFS directory key");
             const auto key=Le64(view.key.data);
-            const auto inode=key&IdMask;
-            const bool validId=userDirectory?inode>=16:inode==(i==2?2u:3u);
-            Check((key>>60)==3&&validId&&inode>previousInode&&inode<id&&
-                  Le64(view.value.data)==(userDirectory?2:1)&&Le64(view.value.data+8)==inode&&
-                  Le32(view.value.data+56)==(i==2?directoryCount:0)&&
-                  (Le16(view.value.data+80)&0170000)==0040000,"Invalid APFS directory inode");
-            if(userDirectory){
-                if(i==privateIndex+1)std::sort(children.begin(),children.end());
-                Check(inode==children[i-privateIndex-1],"APFS directory entry and inode disagree");
+            const auto inode=key&IdMask,type=key>>60;
+            uint32_t hash=0;
+            if(type==9){
+                const auto folder=directories.find(inode);
+                Check(inode!=3&&folder!=directories.end()&&view.key.size>=14&&
+                      view.value.size==18&&Le16(view.value.data+16)==4,"Invalid APFS directory entry");
+                const auto nameKey=Le32(view.key.data+8);
+                Check((nameKey&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
+                      "Invalid APFS directory name");
+                const auto childName=DirectoryName(std::u16string(view.key.data+12,view.key.data+view.key.size-1));
+                hash=nameKey>>10;
+                Check((WriterDisk::DirectoryHash(childName,fold)>>10)==hash,"Invalid APFS directory name hash");
+                const auto child=Le64(view.value.data);
+                Check(child>=16&&child>inode&&child<id&&parents.emplace(child,inode).second,
+                      "Invalid or duplicate APFS directory entry ID");
+                ++folder->second.children;
+            }else{
+                Check(type==3&&view.key.size==8&&view.value.size>=92&&
+                      Le64(view.value.data+8)==inode&&(Le16(view.value.data+80)&0170000)==0040000,
+                      "Invalid APFS directory inode");
+                const auto expectedParent=parents.find(inode);
+                const auto parentId=Le64(view.value.data);
+                const bool validParent=inode==2||inode==3?parentId==1:
+                    expectedParent!=parents.end()&&expectedParent->second==parentId;
+                Check(validParent&&directories.emplace(inode,Directory{i}).second,"Invalid APFS directory parent");
             }
-            previousInode=inode;
+            // Catalog keys sort by inode ID, record type, then directory name hash.
+            const Key order{inode,type,hash};
+            Check(order>previous,"Invalid or unsupported APFS directory key order");
+            Check(order!=addedKey,"The APFS directory name already exists or has a conflicting hash");
+            if(order<addedKey)++insertAt;
+            previous=order;
         }
         records.push_back({Bytes(view.key.data,view.key.data+view.key.size),
                            Bytes(view.value.data,view.value.data+view.value.size)});
     }
-    Set(records[2].value,24,time,8);
-    Set(records[2].value,32,time,8);
-    Set(records[2].value,56,directoryCount+1,4);
-    records.insert(records.begin()+insertAt,added);
-    records.push_back(WriterDisk::DirectoryInode(name,id,time,2));
+    Check(directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
+          parents.size()==directoryCount,"APFS directory records and volume counts disagree");
+    for(const auto& entry:directories){
+        const auto& folder=entry.second;
+        Check(Le32(records[folder.record].value.data()+56)==folder.children,"Invalid APFS directory child count");
+    }
+    const auto target=directories.find(parent);
+    Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
+    auto& parentInode=records[target->second.record].value;
+    Set(parentInode,24,time,8);
+    Set(parentInode,32,time,8);
+    Set(parentInode,56,target->second.children+1,4);
+    records.insert(records.begin()+insertAt,std::move(added));
+    records.push_back(WriterDisk::DirectoryInode(name,id,time,parent));
     return EncodeLeaf(records,0x40);
 }
 }
 
-std::vector<CheckpointBlockWrite> PrepareRootDirectory(
+std::vector<CheckpointBlockWrite> PrepareDirectory(
     Source& source,const Container& current,uint64_t transaction,Bytes& superblock,
-    const CheckpointObjectLookup& ephemeral,const std::u16string& name)
+    const CheckpointObjectLookup& ephemeral,uint64_t parent,const std::u16string& name)
 {
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
     const auto ascii=DirectoryName(name);
@@ -371,7 +388,7 @@ std::vector<CheckpointBlockWrite> PrepareRootDirectory(
     GetSystemTimeAsFileTime(&fileTime);
     const auto time=(((uint64_t(fileTime.dwHighDateTime)<<32)|fileTime.dwLowDateTime)-116444736000000000ULL)*100;
     auto catalog=AddDirectory(ReadObject(source,current,volumeMap.physical,catalogOid,current.transaction,2,14),
-                              ascii,nextId,time,flags==1,directoryCount);
+                              parent,ascii,nextId,time,flags==1,directoryCount);
     auto& space=ephemeral(Le64(superblock.data()+152));
     Writes writes;
     const auto allocated=Allocate(writes,source,current,space,superblock,ephemeral,
