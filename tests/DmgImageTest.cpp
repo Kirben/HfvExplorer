@@ -496,22 +496,45 @@ std::wstring EncryptedBundle(const std::string& path,const Bytes& raw,unsigned b
  return wide;
 }
 
-void VerifyNativeBundle(const std::wstring& path)
+Bytes SparseImageFixture(const Bytes& raw)
 {
- const Dmg::Password password(L"ewfprobe-test-password");
- const auto bundle=SparseDisk::OpenBundle(path,&password);
- Check(bundle&&bundle->Size()==2129920,"Unexpected native encrypted bundle geometry");
- auto plain=Disk::Read(*bundle,0,size_t(bundle->Size()));
+ constexpr size_t header=4096,band=1024*1024;
+ Bytes sparse(header);
+ memcpy(sparse.data(),"sprs",4);
+ P32(sparse.data()+4,3);P32(sparse.data()+8,band/512);
+ P32(sparse.data()+16,uint32_t(raw.size()/512));P64(sparse.data()+28,raw.size()/512);
+ size_t slot=0;
+ for(size_t offset=0;offset<raw.size();offset+=band){
+  const auto first=raw.begin()+offset,last=first+(std::min)(band,raw.size()-offset);
+  if(std::all_of(first,last,[](uint8_t value){return value==0;}))continue;
+  P32(sparse.data()+64+slot++*4,uint32_t(offset/band+1));
+  sparse.insert(sparse.end(),first,last);
+ }
+ return sparse;
+}
+
+void VerifyRawDigest(Source& source,uint64_t length,const uint8_t (&expected)[32])
+{
+ Check(source.Size()==length,"Unexpected native encrypted fixture geometry");
+ auto plain=Disk::Read(source,0,size_t(length));
  TestAlgorithm algorithm(BCRYPT_SHA256_ALGORITHM);
  auto memory=algorithm.Object();
  struct Hash {BCRYPT_HASH_HANDLE h=nullptr;~Hash(){if(h)BCryptDestroyHash(h);}} hash;
  Cng(BCryptCreateHash(algorithm.handle,&hash.h,memory.data(),ULONG(memory.size()),nullptr,0,0),"Load fixture SHA-256");
- Cng(BCryptHashData(hash.h,plain.data(),ULONG(plain.size()),0),"Hash native bundle plaintext");
+ Cng(BCryptHashData(hash.h,plain.data(),ULONG(plain.size()),0),"Hash native image plaintext");
  uint8_t digest[32];
- Cng(BCryptFinishHash(hash.h,digest,sizeof(digest),0),"Finish native bundle SHA-256");
+ Cng(BCryptFinishHash(hash.h,digest,sizeof(digest),0),"Finish native image SHA-256");
+ Check(!memcmp(digest,expected,sizeof(expected)),"Native encrypted image plaintext differs from hdiutil");
+}
+
+void VerifyNativeBundle(const std::wstring& path)
+{
+ const Dmg::Password password(L"ewfprobe-test-password");
+ const auto bundle=SparseDisk::OpenBundle(path,&password);
+ Check(bool(bundle),"Cannot open native encrypted bundle");
  const uint8_t expected[]={0x34,0xda,0x28,0x88,0x83,0xb1,0x9c,0xd6,0x73,0x92,0x2b,0x26,0x74,0xd8,0xa2,0x5f,
      0xaf,0x1d,0x07,0xe7,0xdb,0xd4,0x33,0x52,0x40,0x71,0x8c,0x1c,0x70,0x44,0xea,0x3a};
- Check(!memcmp(digest,expected,sizeof(expected)),"Native encrypted bundle plaintext differs from hdiutil");
+ VerifyRawDigest(*bundle,2129920,expected);
 }
 
 void NeedsPassword(std::unique_ptr<Source>& file,const Dmg::Password* password,bool retry)
@@ -522,6 +545,30 @@ void NeedsPassword(std::unique_ptr<Source>& file,const Dmg::Password* password,b
   return;
  }
  throw HfsPlus::Error("Encrypted image did not request the password");
+}
+
+void VerifySparseConversion(const std::wstring& path,const std::wstring& output,const Dmg::Password& password)
+{
+ const Dmg::Password wrong(L"incorrect");
+ Storage::Job denied;
+ bool retry=false;
+ try{Dmg::Convert(path,output,Dmg::Output::RawImage,denied,&wrong);}
+ catch(const Dmg::PasswordRequired& required){retry=required.retry;}
+ Check(retry&&GetFileAttributesW(output.c_str())==INVALID_FILE_ATTRIBUTES,
+       "Wrong password left a raw output or did not request a retry");
+ Storage::Job conversion;
+ const auto done=Dmg::Convert(path,output,Dmg::Output::RawImage,conversion,&password);
+ Check(!done.code,done.message.c_str());
+}
+
+void VerifyNativeSparseImage(const std::wstring& path,const std::wstring& output)
+{
+ const Dmg::Password password(L"ewfprobe-test-password");
+ VerifySparseConversion(path,output,password);
+ auto raw=HfsPlus::OpenImage(output.c_str(),false);
+ const uint8_t expected[]={0x2d,0x0e,0xae,0x24,0x7e,0xef,0x9f,0x48,0xfa,0x16,0x66,0x6e,0xe5,0x49,0x72,0x4f,
+     0x54,0xef,0x65,0x38,0x93,0x3b,0x0e,0xb2,0x82,0x8c,0xc6,0xd3,0xe9,0x5a,0x8a,0x17};
+ VerifyRawDigest(*raw,196608,expected);
 }
 
 CString testHost;
@@ -649,7 +696,12 @@ int RunEncryptedDmgTest(const char* directory)
   const auto packed=Pack({{{Zlib,0,raw.size()/SectorBytes,ZlibBlock(raw)}}},raw.size()/SectorBytes);
   const auto path=Save(root+"\\compressed encrypted.dmg",Envelope(packed,256,true,*password));
   const auto bundle=EncryptedBundle(root+"\\encrypted.sparsebundle",raw,256,true,*password);
-  BrowserPrompt(root.c_str(),{path,bundle},password);
+  const auto sparsePath=Save(root+"\\encrypted.sparseimage",Envelope(SparseImageFixture(raw),128,true,*password));
+  BrowserPrompt(root.c_str(),{path,bundle,sparsePath},password);
+  if(const auto nativeSparse=_wgetenv(L"HFV_ENCRYPTED_SPARSE_IMAGE_FIXTURE")){
+   VerifyNativeSparseImage(nativeSparse,VolumeCoord::Wide(root+"\\native-sparseimage.raw"));
+   fprintf(report,"PASS: macOS hdiutil AES-128 sparseimage raw conversion matches the published SHA-256.\n");
+  }
 
   constexpr size_t band=1024*1024;
   Bytes bands(2*band+1024);
@@ -685,22 +737,23 @@ int RunEncryptedDmgTest(const char* directory)
    VerifyNativeBundle(nativeBundle);
    fprintf(report,"PASS: macOS hdiutil AES-256 sparse bundle matches the published raw SHA-256.\n");
   }
-  const auto bundleExtracted=VolumeCoord::Wide(root+"\\bundle.raw");
-  {
-   Storage::Job convertBundle;
-   bool retry=false;
-   try{Dmg::Convert(bundle,bundleExtracted,Dmg::Output::RawImage,convertBundle,&wrong);}
-   catch(const Dmg::PasswordRequired& required){retry=required.retry;}
-   Check(retry&&GetFileAttributesW(bundleExtracted.c_str())==INVALID_FILE_ATTRIBUTES,
-         "Wrong bundle password left a raw output or did not request a retry");
+  for(const auto& sparse:{bundle,sparsePath}){
+   const auto converted=VolumeCoord::Wide(root+(sparse==bundle?"\\bundle.raw":"\\sparseimage.raw"));
+   VerifySparseConversion(sparse,converted,*password);
+   auto result=HfsPlus::OpenImage(converted.c_str(),false);
+   Check(result->Size()==raw.size()&&Disk::Read(*result,0,raw.size())==raw,"Encrypted sparse raw conversion changed sectors");
   }
-  {
-   Storage::Job convertBundle;
-   Check(!Dmg::Convert(bundle,bundleExtracted,Dmg::Output::RawImage,convertBundle,password.get()).code,
-         "Convert encrypted bundle into a raw image");
-   auto result=HfsPlus::OpenImage(bundleExtracted.c_str(),false);
-   Check(result->Size()==raw.size()&&Disk::Read(*result,0,raw.size())==raw,"Encrypted bundle raw conversion changed sectors");
-  }
+  auto invalidSparse=SparseImageFixture(raw);
+  P32(invalidSparse.data()+64,0xffffffff);
+  const auto damaged=Save(root+"\\malformed.sparseimage",Envelope(invalidSparse,128,true,*password));
+  const auto staged=VolumeCoord::Wide(root+"\\malformed.raw");
+  Storage::Job invalidJob;
+  bool rejected=false;
+  try{rejected=Dmg::Convert(damaged,staged,Dmg::Output::RawImage,invalidJob,password.get()).code!=0;}
+  catch(const Error&){rejected=true;}
+  Check(rejected&&GetFileAttributesW(staged.c_str())==INVALID_FILE_ATTRIBUTES,
+        "Invalid decrypted sparse map published a raw image");
+  fprintf(report,"PASS: password-encrypted sparseimage browsing, raw conversion and rejection of a damaged inner band map.\n");
   fprintf(report,"PASS: encrypted bundle password retry, per-band CBC, holes, short bands, ciphertext bounds and raw conversion.\n");
   const auto extracted=VolumeCoord::Wide(root+"\\decrypted.img");
   Storage::Job convert;
@@ -709,12 +762,12 @@ int RunEncryptedDmgTest(const char* directory)
   auto decrypted=HfsPlus::OpenImage(extracted.c_str(),false);
   Check(decrypted->Size()==raw.size()&&Disk::Read(*decrypted,0,raw.size())==raw,
         "Raw conversion changed encrypted image data");
-  for(const auto& image:{path,bundle}){
+  for(const auto& image:{path,bundle,sparsePath}){
    const auto volume=MacBrowser::OpenBrowserImage(image,{},password.get());
    MacBrowser::Entry entry;
    Check(volume&&volume->FindChild(2,u"Payload",entry)&&!volume->Writable()&&
          MacBrowser::ExecutionFor(*volume).processLocal,"Open HFS+ from each encrypted image format");
-   const auto to=VolumeCoord::Wide(root+(image==path?"\\export-dmg":"\\export-bundle"));
+   const auto to=VolumeCoord::Wide(root+(image==path?"\\export-dmg":image==bundle?"\\export-bundle":"\\export-sparseimage"));
    Check(CreateDirectoryW(to.c_str(),nullptr)!=FALSE,"Create encrypted export directory");
    const auto source=FileOperations::Location::Mounted(volume,entry.id);
    FileOperations::Request request=FileOperations::OrdinaryCopy{{source},FileOperations::Location::Windows(to)};
@@ -739,7 +792,7 @@ int RunEncryptedDmgTest(const char* directory)
    uint8_t resource=0;windows->Read(entry.id,1,0,&resource,1);
    Check(output==contents&&resource==0x4d,"Encrypted image export changed file contents");
   }
-  fprintf(report,"PASS: Cancel and wrong-password retry, and both-fork background export without transferring keys from either encrypted image format.\n");
+  fprintf(report,"PASS: Cancel and wrong-password retry, and both-fork background export without transferring keys from any tested encrypted image format.\n");
  }catch(const std::exception& error){fprintf(report,"FAIL: %s\n",error.what());status=1;}
  CopyProcess::enabled=false;
  ShutdownStorageUi();
