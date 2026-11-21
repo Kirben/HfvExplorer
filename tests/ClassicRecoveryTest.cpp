@@ -267,6 +267,64 @@ void RenameRecovery(const CString& root,const Bytes& original,FILE* report)
     fprintf(report,"PASS: classic HFS case-only and Properties renames and same-volume folder moves recover before and after commit, preserving IDs, forks, metadata and unrelated files.\n");
 }
 
+void CreationRecovery(const CString& root,const Bytes& original,FILE* report)
+{
+    const CString folderSeed=root+"\\creation-folder-seed.dsk";
+    Save(folderSeed,original);
+    uint64_t initialModified=0;
+    {
+        auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(folderSeed.GetString()));
+        initialModified=volume->Stat(volume->MakeDirectory(2,u"New folder")).modified;
+        volume->Close();
+    }
+    const auto folderBefore=Load(folderSeed);
+    for(const auto* action:{L"create-file",L"create-folder",L"finalize-folder"}){
+        const bool file=wcscmp(action,L"create-file")==0;
+        const bool finalize=wcscmp(action,L"finalize-folder")==0;
+        const auto& before=finalize?folderBefore:original;
+        for(unsigned phase:{2u,3u}){
+            CString image;
+            image.Format("%s\\%ls-%u.dsk",root.GetString(),action,phase);
+            Save(image,before);
+            const auto path=VolumeCoord::Wide(image.GetString());
+            CrashChild(image,phase,action);
+            Check(ClassicHfsRecovery::Pending(path)&&Load(image)!=before,
+                  "creation or folder finalization left no recovery record");
+            auto volume=MacBrowser::OpenImage(path);
+            Check(volume&&volume->Writable(),"creation recovery did not reopen writable");
+            const bool committed=phase==3;
+            MacBrowser::Entry created{};
+            if(file&&committed)VerifyFile(*volume,2,u"New file",false);
+            else if(finalize || (!file&&committed)){
+                Check(volume->FindChild(2,u"New folder",created)&&created.directory&&volume->List(created.id).empty(),
+                      "expected an empty folder after reopening the image");
+                if(finalize)Check(created.modified==(committed?3500002000U:initialModified),
+                                  "folder finalization did not recover its recorded state");
+            }else{
+                Check(!volume->FindChild(2,file?u"New file":u"New folder",created),
+                      "uncommitted creation remained visible after recovery");
+            }
+            VerifyFile(*volume,2,u"Document",false);
+            volume->Close();
+            Check(!ClassicHfsRecovery::Pending(path),"creation recovery left a pending journal");
+            if(!committed)Check(Load(image)==before,"creation rollback did not restore every byte");
+        }
+    }
+    const CString cancelled=root+"\\create-cancelled.dsk";
+    Save(cancelled,original);
+    const auto path=VolumeCoord::Wide(cancelled.GetString());
+    auto volume=MacBrowser::OpenImage(path);
+    bool stopped=false;
+    try{Put(*volume,false,true,2,u"New file");}
+    catch(const Storage::Cancelled&){stopped=true;}
+    Check(stopped&&volume->Writable(),"cancelled new file did not restore the writable mount");
+    Verify(*volume,false);
+    volume->Close();
+    Check(!ClassicHfsRecovery::Pending(path)&&Load(cancelled)==original,
+          "cancelled creation did not restore the exact image");
+    fprintf(report,"PASS: classic HFS file and folder creation, imported-folder finalization and cancelled new files recover before and after commit.\n");
+}
+
 }
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -288,6 +346,16 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             strcpy_s(properties.name,"Properties name");
             properties.mddate+=60;
             volume->SetClassicProperties(document,properties);
+        }else if(!strcmp(action,"create-file"))Put(*volume,false,false,2,u"New file");
+        else if(!strcmp(action,"create-folder"))volume->MakeDirectory(2,u"New folder");
+        else if(!strcmp(action,"finalize-folder")){
+            const auto id=Find(*volume,2,u"New folder");
+            const auto expected=volume->Stat(id);
+            auto desired=expected;
+            desired.datesValid=true;
+            desired.created=3500000000U;
+            desired.modified=3500002000U;
+            volume->FinalizeDirectory(id,desired,expected,false);
         }else if(phase!=5)Put(*volume,true);
         volume->Close();
         return 3;
@@ -375,6 +443,7 @@ int RunClassicRecoveryTest(const char* directory)
         fprintf(report,"PASS: interrupted recovery is repeatable through a hard-link alias; cancellation restores the original bytes.\n");
         DeleteRecovery(root,original,report);
         RenameRecovery(root,original,report);
+        CreationRecovery(root,original,report);
     }catch(const std::exception& error){
         fprintf(report,"FAIL: %s\n",error.what());
         result=1;

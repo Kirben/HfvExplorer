@@ -1126,6 +1126,7 @@ int RunCopyProcessTest(const char *directory) {
                       classic->Name() == u"Classic" && !classic->Supports().attributes,
                   "classic image did not share a writable persistent mount");
             Entry sentinel;
+            std::wstring classicMacBinary;
             {
                 auto pid = VolumeSession::VolumeSessionPidForTest(classic);
                 Check(alias->FindChild(2,u"Crash sentinel",sentinel),"classic persistent root listing");
@@ -1200,6 +1201,7 @@ int RunCopyProcessTest(const char *directory) {
                         Check(file.nFileSizeLow==expected,"classic raw export wrote the wrong fork length");
                     }
                     const auto exportedFile=Location::Windows(output+L"\\"+file.cFileName);
+                    if(mode=='m')classicMacBinary=exportedFile.WindowsPath();
                     const auto importFolder=classic->MakeDirectory(targetFolder,u"Import "+std::u16string(1,char16_t(mode))+(mode=='R'?u" resource":u""));
                     LegacyConversion import{exportedFile,Native(classic,importFolder)};
                     import.options.input=mode;
@@ -1290,29 +1292,41 @@ int RunCopyProcessTest(const char *directory) {
             Check(classic->Writable(),"clean classic image did not reopen writable");
 
             const auto beforeCrash=VolumeSession::VolumeSessionPidForTest(classic);
+            const auto freeBeforeImport=classic->FreeBytes();
+            Check(!classicMacBinary.empty(),"missing real MacBinary import fixture");
+            const auto import=[&]{
+                LegacyConversion request{Location::Windows(classicMacBinary),Native(classic,2)};
+                request.options.input='m';
+                request.target=ConversionTarget::Folder;
+                auto job=Submit(request);
+                Wait(job);
+                return job.Job()->result();
+            };
             VolumeSession::CrashVolumeSessionDuringPutForTest(classic);
-            bool lost=false;
-            try { Put(*classic,2,u"Interrupted write"); }
-            catch (const HfsPlus::Error&) { lost=true; }
-            Check(lost && WorkerTransport::lastExitCode==80 && !classic->Writable(),
-                  "classic worker did not fail at the injected point or the image remained writable");
+            const auto interrupted=import();
+            Check(interrupted.code && WorkerTransport::lastExitCode==80 && !classic->Writable(),
+                  "classic import worker did not stop during the new file's transfer");
             classic->Reload();
-            Check(!classic->Writable() && VolumeSession::VolumeSessionPidForTest(classic)!=beforeCrash &&
-                      classic->FindChild(2,u"Crash sentinel",sentinel),
-                  "classic worker did not recover its image read-only");
+            Entry imported;
+            Check(classic->Writable() && VolumeSession::VolumeSessionPidForTest(classic)!=beforeCrash &&
+                      classic->FindChild(2,u"Crash sentinel",sentinel) &&
+                      !classic->FindChild(2,u"Renamed payload",imported) &&
+                      classic->FreeBytes()==freeBeforeImport,
+                  "classic worker did not roll back the interrupted import and restore writable access");
             Verify(*classic,sentinel.id,4096);
+            const auto retried=import();
+            if(retried.code)throw HfsPlus::Error(retried.message);
+            Check(classic->FindChild(2,u"Renamed payload",imported),"retried MacBinary import did not publish");
+            Verify(*classic,imported.id);
+            hfsdirent importedProperties{};
+            Check(classic->GetClassicProperties(imported.id,importedProperties)&&(importedProperties.fdflags&14)==6,
+                  "retried MacBinary import lost Finder metadata");
             classic.reset();
             classic=OpenBrowserImage(Wide(path));
-            Check(classic && !classic->Writable() && classic->FindChild(2,u"Crash sentinel",sentinel),
-                  "fresh classic mount ignored the on-disk dirty flag");
-            Verify(*classic,sentinel.id,4096);
-            bool refused=false;
-            try { Put(*classic,2,u"Disallowed recovery write",4096); }
-            catch (const HfsPlus::Error&) { refused=true; }
-            Entry unexpected;
-            Check(refused && !classic->FindChild(2,u"Disallowed recovery write",unexpected),
-                  "read-only recovery accepted a new write");
-            fprintf(report,"PASS: classic HFS shared mount, Finder edit, rename refresh, conversions, overwrite rollback and durable read-only crash recovery\n");
+            Check(classic&&classic->Writable()&&classic->FindChild(2,u"Renamed payload",imported),
+                  "completed MacBinary import did not survive a fresh mount");
+            Verify(*classic,imported.id);
+            fprintf(report,"PASS: classic HFS shared mount, Finder edits, rename, conversions, and durable rollback and retry after a worker crash during a new MacBinary import\n");
         }
         {
             const auto inputPath = Wide(root + "\\launch-source.dsk");

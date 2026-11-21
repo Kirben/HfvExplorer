@@ -390,13 +390,34 @@ public:
         struct Close{hfsfile* p;~Close(){hfs_close(p);}}close{f};Check(hfs_setfork(f,fork)==0&&hfs_lseek(f,at,SEEK_SET)==at);
         Check(n<=LONG_MAX&&hfs_read(f,p,(unsigned long)n)==n);
     }
-    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override {LegacyEngine::Scope engine(context_);
-        BeforeWrite();RootScope scope(volume_);auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(name);Check(hfs_mkdir(volume_,const_cast<char*>(path.c_str()))==0);return Id(path);
+    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
+        LegacyEngine::Scope engine(context_);
+        const auto leaf=Encode(name);
+        uint32_t id=0;
+        DurableMutation(true,[&](bool){
+            RootScope scope(volume_);
+            const auto folder=Path(parent);
+            auto path=folder+(folder.back()==':'?"":":")+leaf;
+            BeforeWrite();
+            Check(hfs_mkdir(volume_,path.data())==0);
+            id=Id(path);
+        });
+        return id;
     }
-    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{LegacyEngine::Scope engine(context_);RootScope scope(volume_);
-        if(!Writable())throw HfsPlus::Error("Classic destination is read-only");if(!merge)ValidateEntry(desired);BeforeWrite();auto path=Path(id);
-        time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),time_t(int64_t(desired.modified)-2082844800LL)};
-        Check(hfs_setdirmetadata(volume_,const_cast<char*>(path.c_str()),long(expected.resolvedId),merge?nullptr:desired.finder.data(),desired.datesValid?dates:nullptr)==0);
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+        LegacyEngine::Scope engine(context_);
+        if(!Writable())throw HfsPlus::Error("Classic destination is read-only");
+        if(!merge)ValidateEntry(desired);
+        time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),
+                         time_t(int64_t(desired.modified)-2082844800LL)};
+        DurableMutation(!merge,[&](bool){
+            RootScope scope(volume_);
+            auto path=Path(id);
+            BeforeWrite();
+            Check(hfs_setdirmetadata(volume_,path.data(),long(expected.resolvedId),
+                                     merge?nullptr:desired.finder.data(),
+                                     desired.datesValid?dates:nullptr)==0);
+        });
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {
         return PutFile(parent,e,std::move(read),replace,nullptr);
@@ -426,7 +447,7 @@ private:
         }
         if(exists&&!replace)throw HfsPlus::Error("Destination already exists");
         uint32_t id=0;
-        DurableMutation(exists,[&](bool){
+        DurableMutation(true,[&](bool durable){
             RootScope scope(volume_);
             BeforeWrite();
             char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);
@@ -447,7 +468,11 @@ private:
             }catch(...){result=-1;failure=std::current_exception();}
             if(hfs_close(file)<0){result=-1;error=hfs_error;}
             replacement_finish(&state,&result,&error);
-            if(result){if(!exists)hfs_note_rollback(hfs_delete(volume_,const_cast<char*>(path.c_str()))==0?1:3);if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
+            if(result){
+                if(!exists&&!durable)hfs_note_rollback(hfs_delete(volume_,path.data())==0?1:3);
+                if(failure)std::rethrow_exception(failure);
+                throw HfsPlus::Error(error?error:"Classic HFS copy failed");
+            }
             Check(hfs_flush(volume_)==0);
             id=Id(path);
         });
