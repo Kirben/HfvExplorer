@@ -1693,7 +1693,7 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
 {
     std::map<uint64_t,uint64_t> owned;
     for(const auto& extent:extentTree.records){
-        if(Le64(extent.value.data()+8)==inode)
+        if(Le64(extent.value.data()+8)==inode&&Le32(extent.value.data()+16)==1)
             owned.emplace(Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask);
     }
     for(const auto& record:catalog){
@@ -2388,38 +2388,30 @@ WritableMap MapAt(const WritableMap& source,uint64_t xid)
 
 void ValidateSnapshotFileExtents(const CatalogRecords& catalog,const std::vector<OwnedRecord>& extents)
 {
-    std::vector<DataRun> physical,logical;
+    std::map<uint64_t,int64_t> references;
+    const auto add=[&](uint64_t block,uint64_t count,int64_t change){
+        Check(count&&block<=UINT64_MAX-count,"Invalid APFS snapshot extent range");
+        references[block]+=change;
+        references[block+count]-=change;
+    };
+    uint64_t previousEnd=0;
     for(const auto& extent:extents){
-        Check(Le32(extent.value.data()+16)==1,"Shared APFS extents are not supported for snapshot writes");
-        physical.push_back({Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
+        const auto block=Le64(extent.key.data())&IdMask;
+        const auto count=Le64(extent.value.data())&IdMask;
+        Check(block>=previousEnd,"Overlapping APFS snapshot physical extents");
+        add(block,count,Le32(extent.value.data()+16));
+        previousEnd=block+count;
     }
     for(const auto& entry:catalog.records){
         if(Le64(entry.key.data())>>60!=8)continue;
         Check(entry.key.size()==16&&entry.value.size()==24,"Invalid APFS snapshot file extent");
         const auto block=Le64(entry.value.data()+8),length=Le64(entry.value.data());
         Check(length&&!(length%Block)&&!(length>>56),"Unsupported APFS snapshot file extent length");
-        if(block)logical.push_back({block,length/Block});
+        if(block)add(block,length/Block,-1);
     }
-    const auto merge=[](std::vector<DataRun>& source){
-        std::sort(source.begin(),source.end(),[](const auto& a,const auto& b){return a.block<b.block;});
-        std::vector<DataRun> merged;
-        for(const auto& run:source){
-            Check(run.count&&run.block<=UINT64_MAX-run.count,"Invalid APFS snapshot extent range");
-            if(!merged.empty()){
-                auto& previous=merged.back();
-                const auto end=previous.block+previous.count;
-                Check(run.block>=end,"Overlapping APFS snapshot file extents");
-                if(run.block==end){previous.count+=run.count;continue;}
-            }
-            merged.push_back(run);
-        }
-        return merged;
-    };
-    const auto physicalRuns=merge(physical),logicalRuns=merge(logical);
-    Check(physicalRuns.size()==logicalRuns.size()&&
-          std::equal(physicalRuns.begin(),physicalRuns.end(),logicalRuns.begin(),[](const auto& a,const auto& b){
-              return a.block==b.block&&a.count==b.count;
-          }),"APFS snapshot file extents disagree with their physical allocation");
+    Check(std::all_of(references.begin(),references.end(),[](const auto& boundary){
+        return boundary.second==0;
+    }),"APFS snapshot file extents disagree with their reference counts");
 }
 
 
@@ -2464,11 +2456,26 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
     for(const auto& entry:oldMap.mappings)
         if(result.catalogBlocks.count(entry.block))result.mappings.push_back(entry);
     Check(result.mappings.size()==prior.blocks.size(),"Incomplete APFS snapshot catalog map");
+    auto addProtected=[&](uint64_t block,uint64_t size=1){result.protectedRuns.push_back({block,size});};
+    const auto extendedMetadata=Le64(volume.data()+1000);
+    Check(!Le64(historical.data()+1000),"Unsupported historical APFS snapshot extension");
+    const auto liveMap=MapAt(map,container.transaction);
+    uint64_t extensionBlock=0;
+    if(extendedMetadata){
+        const auto entry=std::find_if(liveMap.mappings.begin(),liveMap.mappings.end(),
+            [&](const auto& mapping){return mapping.oid==extendedMetadata;});
+        Check(entry!=liveMap.mappings.end(),"Missing APFS snapshot extension mapping");
+        const auto extension=ReadObject(source,container,entry->block,entry->oid,container.transaction,29);
+        Check(Le32(extension.data()+32)==1&&!Le32(extension.data()+36)&&Le64(extension.data()+40)==xid,
+              "Unsupported APFS snapshot extension");
+        extensionBlock=entry->block;
+        result.mappings.push_back(*entry);
+        addProtected(extensionBlock);
+    }
     for(const auto& entry:map.mappings)
-        Check(!entry.block||liveCatalog.count(entry.block)||result.catalogBlocks.count(entry.block),
+        Check(!entry.block||entry.block==extensionBlock||liveCatalog.count(entry.block)||result.catalogBlocks.count(entry.block),
               "Unsupported APFS historical object map entry");
 
-    auto addProtected=[&](uint64_t block,uint64_t size=1){result.protectedRuns.push_back({block,size});};
     addProtected(super);
     addProtected(snapMap);
     for(const auto address:prior.blocks)addProtected(address);
@@ -2487,9 +2494,9 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
         }
         const auto address=Le64(entry.key.data())&IdMask;
         const auto prior=priorData.find(address);
-        Check(prior!=priorData.end()&&
+        Check(prior!=priorData.end()&&Le32(prior->second.value.data()+16)==1&&
               (Le64(entry.value.data())&IdMask)==(Le64(prior->second.value.data())&IdMask),
-              "Unsupported partial APFS snapshot extent update");
+              "Unsupported partial or shared APFS snapshot extent update");
         removed.insert(address);
         result.removals.push_back(std::move(entry));
     }
@@ -2977,7 +2984,7 @@ CatalogWritePlan PrepareCatalogMutation(
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});
     }
-    ValidateExtentReferences(extentTree,files);
+    if(!historical)ValidateExtentReferences(extentTree,files);
     if(!retiredStreams.empty()){
         catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
             const auto key=Le64(record.key.data());
@@ -2999,6 +3006,13 @@ CatalogWritePlan PrepareCatalogMutation(
         if(snapshot.sharedData.count(run.block))continue;
         retiredData.push_back({run.block,run.count});
         removedBlocks+=run.count;
+    }
+    if(historical){
+        for(const auto& reference:extentTree.records){
+            if(Le32(reference.value.data()+16)==1)continue;
+            Check(!externalRetired.count(Le64(reference.key.data())&IdMask),
+                  "APFS writes cannot retire shared file extents");
+        }
     }
     const bool changeExtents=dataBlocks||removeExtents;
     auto& space=ephemeral(Le64(superblock.data()+152));
@@ -3057,7 +3071,13 @@ CatalogWritePlan PrepareCatalogMutation(
                 std::sort(updated.begin(),updated.end(),[](const auto& a,const auto& b){return a.block<b.block;});
                 auto references=snapshot.removals;
                 for(const auto& run:updated){
-                    if(!snapshot.sharedData.count(run.block))references.push_back(ExtentReference(run));
+                    if(snapshot.sharedData.count(run.block))continue;
+                    const auto key=(uint64_t(2)<<60)|run.block;
+                    const auto old=std::lower_bound(extentTree.records.begin(),extentTree.records.end(),key,
+                        [](const auto& record,uint64_t wanted){return Le64(record.key.data())<wanted;});
+                    if(historical&&old!=extentTree.records.end()&&Le64(old->key.data())==key)
+                        references.push_back(*old);
+                    else references.push_back(ExtentReference(run));
                 }
                 for(const auto& run:files){
                     if(!snapshot.sharedData.count(run.block)||!retiredRun(run))continue;

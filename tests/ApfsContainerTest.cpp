@@ -2690,7 +2690,7 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
             targetIndex+1);
 }
 
-void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* directory,const char16_t* name)
+void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* directory,const char16_t* name,bool withClones=false)
 {
     uint64_t originalTransaction=0,originalCheckpoint=0;
     {
@@ -2709,9 +2709,9 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         snapshot=entries.back();
         Check(snapshot.name.find(u" [Snapshot: ")!=snapshot.name.npos,"Missing APFS snapshot view");
     };
-    const auto locate=[&](MacBrowser::Volume& volume,uint32_t root){
+    const auto locate=[&](MacBrowser::Volume& volume,uint32_t root,const char16_t* fileName){
         MacBrowser::Entry folder,file;
-        Check(volume.FindChild(root,directory,folder)&&volume.FindChild(folder.id,name,file),
+        Check(volume.FindChild(root,directory,folder)&&volume.FindChild(folder.id,fileName,file),
               "Missing APFS snapshot verification file");
         return file;
     };
@@ -2728,21 +2728,39 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
             if(cancel&&offset)job.cancel();
         },true,job);
     };
-    Bytes historical;
+    std::array<Bytes,4> clones;
+    const auto readClones=[&](MacBrowser::Volume& volume){
+        std::array<Bytes,4> state;
+        if(withClones){
+            size_t index=0;
+            for(const auto root:{live.id,snapshot.id})
+                for(const auto file:{u"binary.bin",u"clone.bin"})
+                    state[index++]=bytes(volume,locate(volume,root,file));
+        }
+        return state;
+    };
+    Bytes historical,historicalDeleted;
     {
         auto volume=MacBrowser::OpenBrowserImage(path);
         Check(volume&&volume->Supports().writable,"Supported APFS snapshot image opened read-only");
         VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
         roots(*volume);
-        historical=bytes(*volume,locate(*volume,snapshot.id));
-        const auto original=locate(*volume,live.id);
+        historical=bytes(*volume,locate(*volume,snapshot.id,name));
+        clones=readClones(*volume);
+        if(withClones){
+            Check(!clones[0].empty()&&clones[0]!=clones[1],"The APFS clone fixture must contain distinct data");
+            historicalDeleted=bytes(*volume,locate(*volume,snapshot.id,u"vanished"));
+            Reject([&]{volume->Remove(locate(*volume,live.id,u"clone.bin").id);},
+                   "APFS removed a file with shared extents");
+        }
+        const auto original=locate(*volume,live.id,name);
         const auto originalBytes=bytes(*volume,original);
         Reject([&]{volume->MakeDirectory(snapshot.id,u"No mutation");},"APFS wrote into a snapshot");
         Storage::Job cancelled;
         bool stopped=false;
         try{overwrite(*volume,original,cancelled,true);}catch(const Storage::Cancelled&){stopped=true;}
-        Check(stopped&&bytes(*volume,locate(*volume,live.id))==originalBytes&&
-              bytes(*volume,locate(*volume,snapshot.id))==historical,"Cancelled APFS write changed the live file or snapshot");
+        Check(stopped&&bytes(*volume,locate(*volume,live.id,name))==originalBytes&&
+              bytes(*volume,locate(*volume,snapshot.id,name))==historical,"Cancelled APFS write changed the live file or snapshot");
     }
     {
         auto raw=OpenImage(path.c_str(),false);
@@ -2755,21 +2773,31 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         Check(volume&&volume->Supports().writable,"Could not reopen the APFS live volume for writing");
         VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
         roots(*volume);
-        const auto original=locate(*volume,live.id);
+        const auto original=locate(*volume,live.id,name);
         Storage::Job written;
         const auto id=overwrite(*volume,original,written,false);
         Check(bytes(*volume,volume->Stat(id))==Bytes(9301,0x73),"APFS live overwrite changed replacement data");
-        Check(bytes(*volume,locate(*volume,snapshot.id))==historical,"APFS live overwrite changed snapshot data");
-        volume->Remove(id);
+        Check(bytes(*volume,locate(*volume,snapshot.id,name))==historical,"APFS live overwrite changed snapshot data");
+        const auto deletedName=withClones?u"vanished":name;
+        const auto deleted=withClones?locate(*volume,live.id,deletedName):volume->Stat(id);
+        volume->Remove(deleted.id);
         MacBrowser::Entry missing;
-        Check(!volume->FindChild(original.parent,name,missing),"APFS live deletion retained the file");
-        Check(bytes(*volume,locate(*volume,snapshot.id))==historical,"APFS live deletion changed snapshot data");
+        Check(!volume->FindChild(deleted.parent,deletedName,missing),"APFS live deletion retained the file");
+        Check(bytes(*volume,locate(*volume,snapshot.id,name))==historical,"APFS live deletion changed snapshot data");
+        Check(readClones(*volume)==clones,"APFS live edits changed a clone");
     }
     auto reopened=MacBrowser::OpenBrowserImage(path);
     Check(reopened!=nullptr,"Could not reopen APFS snapshot image");
     roots(*reopened);
-    Check(bytes(*reopened,locate(*reopened,snapshot.id))==historical,"Reopened APFS snapshot changed original bytes");
+    Check(bytes(*reopened,locate(*reopened,snapshot.id,name))==historical,"Reopened APFS snapshot changed original bytes");
+    Check(readClones(*reopened)==clones,"Reopening APFS changed a clone");
+    if(withClones){
+        Check(bytes(*reopened,locate(*reopened,snapshot.id,u"vanished"))==historicalDeleted&&
+              bytes(*reopened,locate(*reopened,live.id,name))==Bytes(9301,0x73),
+              "Reopening APFS changed the overwritten live file or the deleted file in the snapshot");
+    }
     fprintf(report,"PASS: APFS snapshot preserved through live overwrite, deletion, cancellation and reopening.\n");
+    if(withClones)fprintf(report,"PASS: macOS APFS shared extents and both clone files survived live writes.\n");
 }
 
 void ExternalSpaceLimitWrites(const std::string& root,FILE* report,const wchar_t* fixture)
@@ -3033,6 +3061,29 @@ int RunApfsContainerTest(const char* directory)
             const auto path=VolumeCoord::Wide(root+"apple-snapshot-live-edits.img");
             Check(CopyFileW(snapshot,path.c_str(),TRUE)!=FALSE,"Could not copy APFS snapshot writer fixture");
             SnapshotLiveWrites(path,report,u"Fixture",u"entry-0");
+        }
+        if(const auto native=_wgetenv(L"HFV_APFS_NATIVE_SHARED_SNAPSHOT")){
+            const auto diskPath=VolumeCoord::Wide(root+"apfs-native-shared-source-disk.img");
+            const auto path=VolumeCoord::Wide(root+"apfs-native-shared-snapshot-edits.img");
+            Storage::Job conversion;
+            const auto result=Dmg::Convert(native,diskPath,Dmg::Output::RawImage,conversion);
+            Check(!result.code,result.message.c_str());
+            {
+                const auto disk=OpenImage(diskPath.c_str(),false);
+                const auto container=Apfs::Probe(*disk);
+                Check(container.has_value(),"Missing APFS native snapshot container");
+                const auto size=container->blockCount*container->blockSize;
+                auto output=CreateFormatOutput(path.c_str(),size);
+                Bytes buffer(1024*1024);
+                for(uint64_t offset=0;offset<size;offset+=buffer.size()){
+                    const auto count=size_t((std::min)(uint64_t(buffer.size()),size-offset));
+                    disk->Read(container->offset+offset,buffer.data(),count);
+                    output->Write(offset,buffer.data(),count);
+                }
+                output->Flush();
+                output->Keep();
+            }
+            SnapshotLiveWrites(path,report,u"Fixture",u"generation.txt",true);
         }
         ExternalCaseSensitiveWrites(root,report,nullptr);
         if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))

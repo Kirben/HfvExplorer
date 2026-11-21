@@ -232,7 +232,8 @@ AttributeRecords ReadAttributes(const Catalog& catalog,uint64_t oid)
         auto name=Name(record.key.data+10,length);
         const auto p=record.value.data;
         const auto flags=Le16(p),size=Le16(p+2);
-        Check(size==record.value.size-4&&!(flags&~7u),"Invalid APFS attribute value");
+        // Apple can mark a streamed attribute with the 0x10 flag.
+        Check(size==record.value.size-4&&!(flags&~0x17u),"Invalid APFS attribute value");
         Attribute attribute;
         switch(flags&3){
         case 1:
