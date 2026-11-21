@@ -104,9 +104,7 @@ public:
 
 	void MountPath( char *name );
 	void go_home_dir( void );
-	void WaitEmulator( char *name1, char *name2 );
  void TrackLaunchedDocument(std::unique_ptr<LauncherWriteBack>);
-	HWND FindEmuWindow( void );
 	virtual void LoadWindowPosition(void);
 	virtual void SaveWindowPosition(void);
 	void OnCdEjectEjectReload( int reload );
@@ -126,15 +124,11 @@ protected:  // control bar embedded members
 	BrowserToolbar m_wndToolBar;
 	UINT_PTR m_timer;
 	BOOL m_volcheck_enabled;
-	BOOL m_was_zoomed;
-	char m_waiting_emulator1[100];
-	char m_waiting_emulator2[100];
 	
  bool m_handlingTimer=false;
  std::vector<std::unique_ptr<LauncherWriteBack>> m_launchedDocuments;
 
 	/*
-	HANDLE m_waiting_emulator_process;
 	char m_waiting_doc_win_name[_MAX_PATH];
 	char m_waiting_srcvolpath[_MAX_PATH];
 	char m_waiting_srcname[_MAX_PATH];
@@ -142,8 +136,6 @@ protected:  // control bar embedded members
 	LONG m_waiting_emu_size;
 	*/
 
-	DWORD m_start_watch_emulator;
-	BOOL m_emulator_window_detected;
 
 // Generated message map functions
 protected:

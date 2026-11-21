@@ -170,10 +170,7 @@ CMainFrame::CMainFrame()
 {
 	CHFVExplorerApp	*pApp;
 	pApp = (CHFVExplorerApp *)AfxGetApp();
- m_timer=0;m_was_zoomed=FALSE;
-	*m_waiting_emulator1 = 0;
-	*m_waiting_emulator2 = 0;
-	m_emulator_window_detected = 0;
+ m_timer=0;
 	m_volcheck_enabled = TRUE;
 }
 
@@ -669,37 +666,6 @@ void CMainFrame::OnActivateApp(BOOL bActive, DWORD hTask)
 	}
 }
 
-HWND CMainFrame::FindEmuWindow(void) 
-{
-	HWND w;
-	w = ::FindWindow( m_waiting_emulator1, NULL );
-	if(w) return(w);
-	w = ::FindWindow( m_waiting_emulator2, NULL );
-	if(w) return(w);
-	return(0);
-}
-
-BOOL CALLBACK  GetProcessesProc( HWND hwnd, LPARAM lParam )
-{
-	DWORD pid;
-	CDWordArray *plist = (CDWordArray *)lParam;
-
-	GetWindowThreadProcessId( hwnd, &pid );
-	plist->Add(pid);
-	return(TRUE);
-}
-
-static void get_process_list( CDWordArray & plist )
-{
-	plist.RemoveAll();
-	EnumWindows( GetProcessesProc, (LPARAM)&plist );
-}
-
-// To enumerate all of the processes on the system, you can query the Registry using RegQueryValueEx() with key HKEY_PERFORMANCE_DATA, and the Registry database index associated with the database string "Process". 
-
-// hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-// TerminateProcess(hProcess, 0);
-
 void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 {
  if(nIDEvent==9202){
@@ -731,39 +697,6 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
   }
  }
 
-	if(*m_waiting_emulator1) {
-		int stop_wait = 0;
-		if(GetTickCount() > m_start_watch_emulator) {
-			if(!FindEmuWindow()) {
-				stop_wait = 1;
-			} else if(!m_emulator_window_detected) {
-				m_emulator_window_detected = 1;
-			}
-		} else if(m_emulator_window_detected) {
-			if(!FindEmuWindow()) {
-				stop_wait = 1;
-			}
-		} else {
-			if(FindEmuWindow()) {
-				m_emulator_window_detected = 1;
-			}
-		}
-		if(stop_wait) {
-			*m_waiting_emulator1 = 0;
-			*m_waiting_emulator2 = 0;
-			if(m_was_zoomed) {
-				ShowWindow( SW_RESTORE );
-				ShowWindow( SW_SHOWMAXIMIZED );
-			} else {
-				ShowWindow( SW_RESTORE );
-			}
-			SetForegroundWindow();
-			UpdateWindow();
-			m_was_zoomed = 0;
-			m_start_watch_emulator = 0;
-		}
-	}
-
 	if(pApp->m_timer_enabled && m_volcheck_enabled) {
 		if(GetBrowserSession().Document() && GetBrowserSession().List() && GetBrowserSession().Tree()) {
 			// if(m_timer) KillTimer(m_timer);
@@ -777,16 +710,6 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 
 
 	CFrameWnd::OnTimer(nIDEvent);
-}
-
-void CMainFrame::WaitEmulator( char *name1, char *name2 ) 
-{
-	strcpy( m_waiting_emulator1, name1 );
-	strcpy( m_waiting_emulator2, name2 );
-	m_was_zoomed = IsZoomed();
-	m_start_watch_emulator = GetTickCount() + 10000ul;
-	m_emulator_window_detected = 0;
-	ShowWindow( SW_MINIMIZE );
 }
 
 void CMainFrame::TrackLaunchedDocument(std::unique_ptr<LauncherWriteBack> document)

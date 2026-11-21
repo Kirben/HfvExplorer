@@ -39,7 +39,6 @@
 #include "special.h"
 #include "own_ids.h"
 #include "utils.h"
-#include "shell.h"
 #include <direct.h>
 #include "hfs\libhfs\hfs.h"
 #include "hfs\interface.h"

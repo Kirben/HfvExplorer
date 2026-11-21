@@ -711,7 +711,9 @@ int RunBrowserWindowsTest(const char* directory){
    Check(MetadataDialogs::Show(folderItem,a),"open APFS folder Properties");
    finishProperties();
    const auto summary=MetadataDialogs::Window();
-   Check(summary&&BrowserPresentation::Text(GetDlgItem(summary,IDC_APFS_EDIT_METADATA))==L"Edit metadata...",
+   const auto editMetadata=GetDlgItem(summary,IDC_APFS_EDIT_METADATA);
+   Check(editMetadata&&(GetWindowLongPtr(editMetadata,GWL_STYLE)&WS_VISIBLE)&&
+         BrowserPresentation::Text(editMetadata)==L"Edit Metadata\u2026",
          "APFS Properties did not expose the Finder information editor");
    SendMessage(summary,WM_COMMAND,IDC_ATTR_OPEN,0);
    const auto attributes=MetadataDialogs::Window();

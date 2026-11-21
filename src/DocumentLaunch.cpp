@@ -16,7 +16,6 @@
 #include "StorageJobDialog.h"
 #include "own_ids.h"
 #include "utils.h"
-#include "shell.h"
 #include "icon.h"
 #include "tmap.h"
 #include "hfs/interface.h"

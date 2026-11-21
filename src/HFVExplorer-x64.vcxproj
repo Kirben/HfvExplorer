@@ -48,11 +48,9 @@
     <ClCompile Include="OptionsPage2.cpp" />
     <ClCompile Include="OptionsPage3.cpp" />
     <ClCompile Include="OptionsSheet.cpp" />
-    <ClCompile Include="shell.cpp" />
     <ClCompile Include="special.cpp" />
     <ClCompile Include="StdAfx.cpp" />
     <ClCompile Include="utils.cpp" />
-    <ClCompile Include="vmacpatch.c" />
     <ClCompile Include="hfs\binhex.c" />
     <ClCompile Include="hfs\libhfs\block.c" />
     <ClCompile Include="hfs\libhfs\btree.c" />
