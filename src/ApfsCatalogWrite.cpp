@@ -2541,7 +2541,7 @@ std::map<uint64_t,uint32_t> CatalogReferenceCounts(const std::vector<OwnedRecord
 }
 
 std::vector<OwnedRecord> CloneDataExtents(std::vector<OwnedRecord>& catalog,
-                                         const std::vector<OwnedRecord>& historicalData,
+                                         const std::vector<OwnedRecord>& physicalExtents,
                                          uint64_t source,uint64_t destination,uint64_t size)
 {
     const auto inodeKey=(uint64_t(3)<<60)|source;
@@ -2562,12 +2562,12 @@ std::vector<OwnedRecord> CloneDataExtents(std::vector<OwnedRecord>& catalog,
             throw CloneUnavailable("APFS clone source has unsupported extents");
         Check(Le64(record.key.data()+8)==logical&&bytes<=UINT64_MAX-logical,"Invalid APFS clone source stream");
         const auto end=start+bytes/Block;
-        auto base=std::lower_bound(historicalData.begin(),historicalData.end(),(uint64_t(2)<<60)|start,
+        auto base=std::lower_bound(physicalExtents.begin(),physicalExtents.end(),(uint64_t(2)<<60)|start,
             [](const auto& extent,uint64_t key){return Le64(extent.key.data())<key;});
         auto covered=start;
-        for(;base!=historicalData.end()&&(Le64(base->key.data())&IdMask)==covered&&covered<end;++base)
+        for(;base!=physicalExtents.end()&&(Le64(base->key.data())&IdMask)==covered&&covered<end;++base)
             covered+=Le64(base->value.data())&IdMask;
-        if(covered!=end)throw CloneUnavailable("APFS clone source does not cover whole snapshot extents");
+        if(covered!=end)throw CloneUnavailable("APFS clone source does not cover whole physical extents");
         result.push_back(record);
         Set(result.back().key,0,(uint64_t(8)<<60)|destination,8);
         logical+=bytes;
@@ -3091,18 +3091,17 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto liveMap=historical?MapAt(volumeMap,current.transaction):volumeMap;
     auto existing=ReadWritableCatalog(source,current,liveMap,catalogOid,historical);
     const auto snapshot=ReadSnapshotAllocations(source,current,volume,volumeMap,existing,extentTree);
-    const bool liveClones=!historical&&!current.writeCipher&&std::any_of(existing.records.begin(),existing.records.end(),
+    const bool liveClones=!historical&&!current.writeCipher&&(clone||std::any_of(existing.records.begin(),existing.records.end(),
         [](const auto& record){
             constexpr uint64_t cloneFlags=0x10|0x400;
             return record.key.size()==8&&Le64(record.key.data())>>60==3&&record.value.size()>=56&&
                    (Le64(record.value.data()+48)&cloneFlags);
-        });
+        }));
     if(liveClones){
         ValidateSharedFileExtents(existing,extentTree.records);
         extentTree.verifiedPhysicalReferences=true;
     }
     const bool reconcileReferences=extentTree.verifiedPhysicalReferences;
-    if(clone&&!historical)throw CloneUnavailable("APFS cloning requires a supported snapshot");
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
     auto nextAvailable=nextId+bool(create)+bool(resourceBlocks)+(hardLink?2:0);
@@ -3227,7 +3226,10 @@ CatalogWritePlan PrepareCatalogMutation(
             }
         }
         std::vector<OwnedRecord> cloneExtents;
-        if(clone)cloneExtents=CloneDataExtents(catalog,snapshot.historicalData,create->cloneSource,entryId,dataSize);
+        if(clone){
+            const auto& physicalExtents=historical?snapshot.historicalData:extentTree.records;
+            cloneExtents=CloneDataExtents(catalog,physicalExtents,create->cloneSource,entryId,dataSize);
+        }
         TouchExternalParent(catalog,create->parent,time,1);
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,fold,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name,fold);
@@ -3407,7 +3409,7 @@ CatalogWritePlan PrepareCatalogMutation(
         for(const auto& current:extentTree.records){
             const auto start=Le64(current.key.data())&IdMask,blocks=Le64(current.value.data())&IdMask;
             const auto before=Le32(current.value.data()+16),after=CatalogReferences(counts,start,blocks);
-            Check(after<=before||(clone&&snapshot.sharedData.count(start)),"APFS extent references increased");
+            Check(after<=before||(clone&&(!historical||snapshot.sharedData.count(start))),"APFS extent references increased");
             if(after==before)continue;
             extentReferencesChanged=true;
             if(snapshot.sharedData.count(start))continue;

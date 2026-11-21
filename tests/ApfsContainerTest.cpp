@@ -3212,6 +3212,84 @@ int RunApfsContainerTest(const char* directory)
                   "APFS snapshot deletion changed the live catalog or kept a snapshot root");
             fprintf(report,"PASS: APFS snapshot creation, historical reads after live writes, and deletion on a macOS image.\n");
         }
+        if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE")){
+            const auto path=VolumeCoord::Wide(root+"apfs-macos-clone-without-snapshot.img");
+            Check(CopyFileW(fixture,path.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS clone baseline");
+            const auto extentRecords=[&]{
+                auto disk=OpenImage(path.c_str(),false);
+                const auto checkpoint=Apfs::Probe(*disk);
+                Check(checkpoint.has_value(),"Missing APFS clone test checkpoint");
+                return Apfs::InspectCatalogLayout(*disk,*checkpoint).extentReferences;
+            };
+            const auto originalExtents=extentRecords();
+            const auto read=[](MacBrowser::Volume& volume,const MacBrowser::Entry& file){
+                Bytes data(size_t(file.forks[0].size));
+                volume.Read(file.id,0,0,data.data(),data.size());
+                return data;
+            };
+            const auto locate=[](MacBrowser::Volume& volume,const char16_t* directory){
+                MacBrowser::Entry folder,file;
+                Check(volume.FindChild(2,directory,folder)&&volume.FindChild(folder.id,u"entry-0",file),
+                      "Could not locate an APFS clone test file");
+                return file;
+            };
+            Bytes original;
+            {
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&volume->Supports().writable&&Apfs::MountedSnapshotNames(*volume).empty(),
+                      "Shared clone baseline is not a writable snapshot-free APFS image");
+                const auto source=locate(*volume,u"Fixture");
+                original=read(*volume,source);
+                Check(!original.empty(),"Shared APFS clone fixture has no data");
+                const auto target=volume->MakeDirectory(2,u"Clone destination");
+                auto copy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                    {FileOperations::Location::Mounted(volume,source.id)},FileOperations::Location::Mounted(volume,target)});
+                Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,"APFS clone copy timed out");
+                const auto result=copy.Job()->result();
+                Check(!result.code,result.message.c_str());
+                const auto clone=locate(*volume,u"Clone destination");
+                Check(clone.id!=source.id&&!clone.hardLink&&read(*volume,clone)==original,
+                      "Snapshot-free APFS copy did not publish a separate inode");
+            }
+            Check(extentRecords()==originalExtents,"Snapshot-free APFS copy allocated a second physical data extent");
+            const auto shared=VolumeCoord::Wide(root+"apfs-macos-clone-shared.img");
+            Check(CopyFileW(path.c_str(),shared.c_str(),TRUE)!=FALSE,"Could not save the shared-clone checker image");
+            const Bytes sourceEdit(5301,0x31),cloneEdit(7103,0x74);
+            const auto overwrite=[&](MacBrowser::Volume& volume,const char16_t* directory,const Bytes& content){
+                auto file=locate(volume,directory);
+                file.forks[0].size=content.size();
+                volume.Put(file.parent,file,[&](unsigned,uint64_t offset,void* data,size_t size){
+                    std::copy_n(content.data()+offset,size,static_cast<uint8_t*>(data));
+                },true);
+            };
+            const auto cloneFirst=VolumeCoord::Wide(root+"apfs-macos-clone-edited-first.img");
+            Check(CopyFileW(shared.c_str(),cloneFirst.c_str(),TRUE)!=FALSE,"Could not copy the shared extents for reverse edit");
+            {
+                auto volume=MacBrowser::OpenBrowserImage(cloneFirst);
+                Check(volume&&volume->Supports().writable,"Could not mount the APFS reverse edit fixture");
+                overwrite(*volume,u"Clone destination",cloneEdit);
+                Check(read(*volume,locate(*volume,u"Fixture"))==original&&
+                      read(*volume,locate(*volume,u"Clone destination"))==cloneEdit,
+                      "Editing the APFS clone first changed its original");
+            }
+            {
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&volume->Supports().writable,"APFS clones did not reopen writable");
+                overwrite(*volume,u"Fixture",sourceEdit);
+                Check(read(*volume,locate(*volume,u"Fixture"))==sourceEdit&&
+                      read(*volume,locate(*volume,u"Clone destination"))==original,
+                      "Editing the APFS original changed its clone");
+                overwrite(*volume,u"Clone destination",cloneEdit);
+            }
+            {
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&Apfs::MountedSnapshotNames(*volume).empty()&&
+                      read(*volume,locate(*volume,u"Fixture"))==sourceEdit&&
+                      read(*volume,locate(*volume,u"Clone destination"))==cloneEdit,
+                      "Editing the APFS clone changed the original after reopening");
+            }
+            fprintf(report,"PASS: APFS ordinary copy created a snapshot-free clone and both files remained independently writable.\n");
+        }
         if(const auto snapshot=_wgetenv(L"HFV_APFS_APPLE_SNAPSHOT_WRITE_FIXTURE")){
             const auto path=VolumeCoord::Wide(root+"apple-snapshot-live-edits.img");
             Check(CopyFileW(snapshot,path.c_str(),TRUE)!=FALSE,"Could not copy APFS snapshot writer fixture");

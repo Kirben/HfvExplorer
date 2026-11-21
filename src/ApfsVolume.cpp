@@ -1496,7 +1496,7 @@ public:
             const auto& original=At(entry.id);
             const auto& target=At(parent);
             if(original.mount!=target.mount||mounts[original.mount].snapshotCreated||
-               !mounts[original.mount].snapshotTree)return uint32_t(0);
+               mounts[original.mount].cipher)return uint32_t(0);
             Check(original.entry.identity==entry.identity,"The APFS clone source changed");
             const auto inode=original.oid,parentOid=target.oid;
             try{
