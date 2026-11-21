@@ -22,25 +22,11 @@
 #define _BNDL_H_
 
 #define OSType unsigned long
-#define ResType unsigned long
 #define INTEGER unsigned short
 #define ICONTABLESIZE	1024
 #define icn_sharp_hand HICON
 
 #pragma pack(1)
-typedef struct
-{
-  INTEGER local_id;
-  INTEGER resource_id;
-} local_mapping_t;
-
-typedef struct
-{
-  ResType code;
-  INTEGER n_mappings_minus_1;
-  local_mapping_t mapping[1]; /* would like to put 0 here */
-} bndl_section_t;
-
 typedef struct
 {
   INTEGER local_id;
@@ -62,20 +48,6 @@ typedef struct type_creator_link_str
   icn_sharp_hand icon32;
 } type_creator_link_t;
 
-typedef struct
-{
-  OSType type;
-  INTEGER local_id;
-  /* more, but we don't care about it */
-} fref_t, **fref_hand;
-
-typedef struct
-{
-  OSType owner;
-  INTEGER id;
-  INTEGER n_sections_minus_1;
-  bndl_section_t section[1]; /* would like to put 0 here */
-} bndl_t;
 #pragma pack()
 
 #define COLORICONSIZE 1024
