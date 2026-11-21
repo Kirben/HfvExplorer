@@ -1228,9 +1228,13 @@ bool MainMacBrowser::Paste(){try{return BrowserTransfers::Paste(session_);}catch
  browserTransferError=e.what();
 #endif
  if(!Hidden(session_))session_.Owner()->MessageBox(e.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return true;}}
-bool MainMacBrowser::Command(UINT id){if(!Active())return false;
-    if(id>=ID_OWN_WITH_MAC_FIRST&&id<ID_OWN_FILE_PROPERTIES)return true; // Classic emulator/file-type actions do not apply.
-    if(id>=ID_OWN_MAP_THIS&&id<=ID_OWN_SHORTCUT_WINDOWS)return true;return false;}
+bool MainMacBrowser::Command(UINT id)
+{
+    if(!Active())return false;
+    // These classic list-view actions do not apply to the mounted-volume browser.
+    return id==ID_OWN_MAP_THIS || id==ID_OWN_SAVE_ICON || id==ID_OWN_TOGGLE_LABEL_COLORS ||
+           (id>=ID_OWN_SHORTCUT_COLOR_NONE && id<=ID_OWN_SHORTCUT_COLOR_PROJECT_2);
+}
 bool MainMacBrowser::OpenMountedFolderFrom(const MainMacBrowser& source,const BrowserNavigation::Request& request)
 {
  const auto& volume=request.folder.Volume();

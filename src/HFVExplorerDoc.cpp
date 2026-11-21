@@ -602,41 +602,6 @@ void CHFVExplorerDoc::PublishClassicFolder(int volinx,HTREEITEM item,const std::
 
 #pragma optimize("",on)
 
-// must be modified to search fat volumes too
-CString CHFVExplorerDoc::FindClassicLauncher(const char* type,const char* creator,int preferredVolume)
-{
- if(strlen(type)!=4||strlen(creator)!=4)return {};
- struct Candidate {CString image, name;};
- std::vector<Candidate> candidates;
- const auto add=[&](int index){
-  const auto& slot=Mounts().ClassicAt(index);
-  if(!slot.m_free&&!slot.m_file_name.IsEmpty())candidates.push_back({slot.m_file_name,slot.m_volume_name});
- };
- if(preferredVolume>=0&&preferredVolume<Mounts().ClassicCount())add(preferredVolume);
- for(int index=0;index<Mounts().ClassicCount();++index)
-  if(index!=preferredVolume)add(index);
- CString path;
- const bool showHidden=m_mac_show_invisibles!=0;
- auto owner=GetBrowserSession().Owner();
- ShowStorageWaitJob([&](Storage::Job& job){
-  for(const auto& candidate:candidates){
-   if(job.cancelled())throw Storage::Cancelled();
-   const std::string image=(LPCSTR)candidate.image;
-   try{
-    VolumeCoord::Lease read({{VolumeCoord::ImageKey(image),VolumeCoord::Mode::Read}});
-    auto volume=MacBrowser::OpenClassic(image,":",false);
-    const auto match=MacBrowser::FindClassicApplication(*volume,type,creator,showHidden,job);
-    if(!match.empty()){
-     path=candidate.name+match.c_str();
-     break;
-    }
-   }catch(const VolumeCoord::Busy&){}catch(const HfsPlus::Error&){}
-  }
-  return Storage::Result{};
- },!owner->IsWindowVisible(),owner);
- return path;
-}
-
 void CHFVExplorerDoc::BuildBrowserRoots()
 {
     auto tree=GetBrowserSession().Tree();

@@ -72,7 +72,6 @@ protected: // create from serialization only
 	void open_sub_directory( int volinx, unsigned long id, CString partial_name );
 	void open_fat_directory( int volinx, LPSTR path, int list );
 #endif
-	CString FindClassicLauncher(const char* type,const char* creator,int preferredVolume);
 	int insert_volume( CString name, int is_floppy, int is_cd, int is_hd, int is_removable );
 	void enum_hfs_volumes(LPSTR mask);
 	void enum_volumes_ext( LPSTR mask, LPSTR ext );

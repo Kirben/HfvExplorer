@@ -27,7 +27,6 @@ namespace {
 void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}
 struct Doc:CHFVExplorerDoc {
  Doc():CHFVExplorerDoc(false){m_bAutoDelete=FALSE;}
- using CHFVExplorerDoc::FindClassicLauncher;
  using CHFVExplorerDoc::my_chdir;
  using CHFVExplorerDoc::NavigateWindowsFolder;
  using CHFVExplorerDoc::NavigateClassicFolder;
@@ -573,9 +572,6 @@ int RunBrowserSessionTest(const char* directory){
   a.Classic(root+"\\first.dsk","first classic");b.Classic(root+"\\second.dsk","second classic");
   a.doc.open_sub_directory(0,2,"Same");Check(Find(a.list,L"first classic")>=0&&Find(a.list,L"second classic")<0&&Find(b.list,L"second classic")>=0,"same-named classic volumes or view bindings shared across sessions");
   a.Classic(root+"\\third.dsk","third classic",1);
-  Check(a.doc.FindClassicLauncher("APPL","TEST",1)=="Same:Apps:Tools:third classic app"&&
-        a.doc.FindClassicLauncher("APPL","TEST",0)=="Same:Apps:Tools:first classic app",
-        "classic launcher resolution lost the originating same-named volume");
   a.doc.my_chdir("Same:apps:tools:",1,1);
   Check(a.Session().Navigating()&&Find(a.list,L"third classic")>=0,"classic path open did not retain its previous listing");
   Check(a.Session().AwaitNavigationForTest(),"wait for named classic folder");
@@ -583,7 +579,7 @@ int RunBrowserSessionTest(const char* directory){
         "nested classic folder resolution changed volumes or lost case-insensitive lookup");
   a.tree.GetTreeCtrl().SelectItem(a.Session().MountRoot({BrowserMountInventory::Kind::ClassicVolume,0}));
   Check(a.Session().AwaitNavigationForTest(),"return to first classic image");
-  fprintf(report,"PASS: shared classic HFS nested folder and launcher lookup on same-named volumes.\n");
+  fprintf(report,"PASS: shared classic HFS nested folder lookup on same-named volumes.\n");
   {
    const CString image=a.doc.Mounts().ClassicAt(0).m_file_name;
    const CString renamed=root+"\\temporarily-renamed.dsk";

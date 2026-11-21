@@ -323,34 +323,6 @@ public:
         return Ancestors(id);
     }
 
-    std::string FindApplication(const char* type,const char* creator,bool showHidden,Storage::Job& job) {
-        LegacyEngine::Scope engine(context_);
-        RootScope scope(volume_);
-        std::vector<std::string> pending{":"};
-        std::set<uint32_t> visited{HFS_CNID_ROOTDIR};
-        while(!pending.empty()){
-            auto path=std::move(pending.back());
-            pending.pop_back();
-            auto dir=hfs_opendir(volume_,path.data());
-            Check(dir!=nullptr);
-            struct CloseDir {hfsdir* value;~CloseDir(){hfs_closedir(value);}} close{dir};
-            hfsdirent entry{};
-            while(hfs_readdir(dir,&entry)==0){
-                if(job.cancelled())throw Storage::Cancelled();
-                auto child=path+entry.name;
-                if(entry.flags&HFS_ISDIR){
-                    if(visited.insert(uint32_t(entry.cnid)).second)pending.push_back(child+":");
-                }else if((showHidden||!(entry.fdflags&HFS_FNDR_ISINVISIBLE))&&
-                         !memcmp(entry.u.file.type,type,4)&&!memcmp(entry.u.file.creator,creator,4)){
-                    mac_to_pc_charset(reinterpret_cast<unsigned char*>(child.data()));
-                    return child;
-                }
-            }
-            if(errno!=ENOENT)Check(false);
-        }
-        return {};
-    }
-
     void ReadArtwork(uint32_t catalogId,uint64_t offset,void* data,size_t size) {
         Read(artworkIds_.at(catalogId),1,offset,data,size);
     }
@@ -498,9 +470,6 @@ void SelectClassicCatalogFolder(Volume& volume,const std::string& path) {
 }
 std::vector<ClassicAncestor> ResolveClassicFolders(Volume& volume,const std::string& relative,bool showHidden) {
     return dynamic_cast<Classic&>(volume).ResolveFolders(relative,showHidden);
-}
-std::string FindClassicApplication(Volume& volume,const char* type,const char* creator,bool showHidden,Storage::Job& job) {
-    return dynamic_cast<Classic&>(volume).FindApplication(type,creator,showHidden,job);
 }
 void ReadClassicArtwork(Volume& volume,uint32_t catalogId,uint64_t offset,void* data,size_t size) {
     dynamic_cast<Classic&>(volume).ReadArtwork(catalogId,offset,data,size);

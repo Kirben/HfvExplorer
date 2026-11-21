@@ -23,6 +23,5 @@ void SelectClassicCatalogFolder(Volume&,const std::string& path);
 struct ClassicAncestor { uint32_t id, parent; std::string name; };
 std::vector<ClassicAncestor> ReadClassicAncestors(Volume&,uint32_t catalogId);
 std::vector<ClassicAncestor> ResolveClassicFolders(Volume&, const std::string& relative, bool showHidden);
-std::string FindClassicApplication(Volume&, const char* type, const char* creator, bool showHidden, Storage::Job&);
 void ReadClassicArtwork(Volume&, uint32_t catalogId, uint64_t offset, void*, size_t);
 }

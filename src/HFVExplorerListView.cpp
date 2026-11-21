@@ -1046,7 +1046,6 @@ void CHFVExplorerListView::on_properties(int index)
     GetBrowserSession().MacBrowser().Properties(index);
 }
 
-#define MAXCMDS 40
 
 
 void CHFVExplorerListView::save_icon_command( int inx )
