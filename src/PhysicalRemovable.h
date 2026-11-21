@@ -42,7 +42,7 @@ class Disk final:public HfsPlus::Source {
 public:
  Disk(const Device&,std::shared_ptr<Api>,const Partition* writePartition=nullptr);
  void DropCache();
- void EnableClassicUndo(const std::wstring& key);
+ void EnableClassicUndo(const std::wstring& key,const std::string& move={});
  void CommitClassicUndo();
  bool RollBackClassicUndo();
  void RecoverClassicUndo(const std::wstring& key);

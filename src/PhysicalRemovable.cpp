@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "PhysicalRemovable.h"
 #include "RemovableUndo.h"
+#include "ClassicHfsRecovery.h"
 #include "DiskPartitions.h"
 #include "DiskSlice.h"
 #include "MfsDiskSource.h"
@@ -281,7 +282,7 @@ class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpo
     std::atomic<uint64_t> free_;
     uint64_t revision_;
     const DWORD generation_;
-    bool active_=false;
+    bool active_=false,preparedMove_=false;
     mutable std::recursive_mutex mutex_;
 
     std::shared_ptr<MacBrowser::Volume> ReopenPartition(const std::shared_ptr<Disk>& disk){
@@ -309,6 +310,7 @@ class MediaVolume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpo
     template<class F>auto Call(F work)const->decltype(work()){
         VolumeCoord::BackendRead lease(key_);
         std::lock_guard<std::recursive_mutex> guard(mutex_);
+        Check(!preparedMove_,"Removable-media move is waiting for its commit decision");
         const_cast<MediaVolume*>(this)->Refresh();
         auto result=work();
         disk_->CheckMedia();
@@ -348,13 +350,35 @@ public:
          fence_(FenceFor(diskKey_,disk_->Generation())),
          free_(backend_->FreeBytes()),revision_(VolumeCoord::Revision(key_)),generation_(disk_->Generation()){}
 
+    bool SupportsCoordinatedMove()const override{
+        return kind_=="HFS"&&Writable()&&RemovableUndo::Enabled();
+    }
     void WithVerifiedWrite(const std::function<void()>& work)override{
+        WriteScope(work,{});
+    }
+    void WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move)override{
+        if(move.empty()||kind_!="HFS"){work(false);return;}
+        WriteScope([&]{work(true);},move);
+    }
+    void PrepareCopyTransaction()override{
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        Check(active_&&!preparedMove_,"No active removable-media move to prepare");
+        backend_->Close();
+        disk_->CheckMedia();
+        preparedMove_=true;
+    }
+private:
+    void WriteScope(const std::function<void()>& work,const std::string& move){
         Check(Writable(),"Physical removable partition is read-only");
         VolumeCoord::OperationLease lease({{key_,VolumeCoord::Mode::Write},{diskKey_,VolumeCoord::Mode::Write}});
         std::lock_guard<std::recursive_mutex> guard(mutex_);
         Check(Writable(),"Physical removable partition is read-only");
         Refresh();
-        if(active_){work();return;}
+        if(active_){
+            Check(move.empty()&&!preparedMove_,"Cannot join an active or prepared removable-media write");
+            work();
+            return;
+        }
 
         if(kind_=="HFS"&&RemovableUndo::Pending(device_.path))
             throw Error("Removable-media recovery is pending. Reinsert the original disk and refresh the drive.");
@@ -368,7 +392,7 @@ public:
             throw Storage::MediaChanged("Removable partition changed before writing; refresh the drive");
         if(!old.floppy)disk_->CheckMedia();
         writer->CheckMedia();
-        if(kind_=="HFS")writer->EnableClassicUndo(device_.path);
+        if(kind_=="HFS")writer->EnableClassicUndo(device_.path,move);
 
         auto reader=disk_;
         auto readBackend=backend_;
@@ -383,7 +407,10 @@ public:
             work();
         }catch(...){failure=std::current_exception();}
         if(active_){
-            try{backend_->Close();}catch(...){if(!failure)failure=std::current_exception();}
+            if(!preparedMove_){
+                try{backend_->Close();}catch(...){if(!failure)failure=std::current_exception();}
+            }
+            preparedMove_=false;
             backend_=std::move(readBackend);
             disk_=std::move(reader);
             active_=false;
@@ -414,6 +441,7 @@ public:
         if(failure)std::rethrow_exception(failure);
     }
 
+public:
     MacBrowser::WorkerExecution Execution()const override{
         MacBrowser::WorkerExecution out;
         out.classicConversion=kind_=="HFS";
@@ -530,6 +558,7 @@ struct Disk::Impl {
  BYTE *buffer=nullptr,*original=nullptr,*desired=nullptr;
  Partition allowed;
  std::wstring undoKey;
+ std::string moveDecision;
  std::unique_ptr<RemovableUndo::Log> undo;
  bool attempted=false;
  std::recursive_mutex mutex;
@@ -627,9 +656,13 @@ bool Disk::Writable()const{return p_->write!=nullptr;}
 bool Disk::WriteFenced()const{return p_->error!=0;}
 bool Disk::WasWritten()const{return p_->attempted;}
 void Disk::DropCache(){std::lock_guard<std::recursive_mutex> lock(p_->mutex);p_->Clear();}
-void Disk::EnableClassicUndo(const std::wstring& key){
+void Disk::EnableClassicUndo(const std::wstring& key,const std::string& move){
  std::lock_guard<std::recursive_mutex> lock(p_->mutex);
- if(RemovableUndo::Enabled())p_->undoKey=key;
+ Check(move.empty()||RemovableUndo::Enabled(),"Removable-media recovery is unavailable");
+ if(RemovableUndo::Enabled()){
+  p_->undoKey=key;
+  p_->moveDecision=move;
+ }
 }
 void Disk::CommitClassicUndo(){
  std::lock_guard<std::recursive_mutex> lock(p_->mutex);
@@ -652,6 +685,10 @@ void Disk::RecoverClassicUndo(const std::wstring& key){
 bool Disk::RollBackClassicUndo(){
  std::lock_guard<std::recursive_mutex> lock(p_->mutex);
  if(!p_->undo)return false;
+ if(!p_->moveDecision.empty()&&ClassicHfsRecovery::MoveIsCommitted(p_->moveDecision)){
+  CommitClassicUndo();
+  return false;
+ }
  p_->undo.reset();
  RecoverClassicUndo(p_->undoKey);
  return true;
@@ -687,7 +724,7 @@ void Disk::Write(uint64_t at,const void* input,size_t size){
    if(!p_->undoKey.empty()){
     if(!p_->undo)
      p_->undo=std::make_unique<RemovableUndo::Log>(p_->undoKey,p_->UndoRange(),
-      [&](uint64_t at,DWORD count,void* data){p_->RawRead(at,count,data);});
+      [&](uint64_t at,DWORD count,void* data){p_->RawRead(at,count,data);},p_->moveDecision);
     p_->undo->BeforeWrite(start,bytes,p_->original,p_->desired);
    }
    p_->Clear();

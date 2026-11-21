@@ -24,7 +24,7 @@ class Log {
     struct State;
     std::unique_ptr<State> state_;
 public:
-    Log(const std::wstring& device,const Range&,const Read&);
+    Log(const std::wstring& device,const Range&,const Read&,const std::string& move={});
     ~Log();
     void BeforeWrite(uint64_t offset,DWORD count,const void* before,const void* after);
     void Commit();

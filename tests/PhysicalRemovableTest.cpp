@@ -9,6 +9,7 @@
 #include "FakeFloppy.h"
 #include "floppy.h"
 #include "RemovableUndo.h"
+#include "ClassicHfsRecovery.h"
 #include "HfsPlusDisk.h"
 #include "DiskSlice.h"
 #include "MfsDiskSource.h"
@@ -675,10 +676,104 @@ void CrashMedia(const std::string& path,const std::string& adapter,unsigned phas
     DWORD code=0;
     GetExitCodeProcess(child.hProcess,&code);
     CloseHandle(child.hProcess);
-    if(wait!=WAIT_OBJECT_0||code!=100+phase)
+    const unsigned expected=(adapter.find("move-")==0?90u:100u)+phase;
+    if(wait!=WAIT_OBJECT_0||code!=expected)
         throw HfsPlus::Error("Simulated "+adapter+" missed crash phase "+std::to_string(phase)+
                              " (exit "+std::to_string(code)+")");
 }
+Storage::Result MoveToOrFromDisk(const std::string& path,const std::string& adapter,bool persistent)
+{
+    const auto imagePath=VolumeCoord::Wide(path+".image.dsk");
+    auto disk=OpenUndoDisk(path,adapter.find("zip")!=std::string::npos);
+    auto image=persistent?MacBrowser::OpenBrowserImage(imagePath):MacBrowser::OpenImage(imagePath);
+    Check(image&&image->Writable(),"open writable image for a coordinated removable move");
+    const bool toDisk=adapter.find("move-to-")==0;
+    auto source=toDisk?image:disk;
+    auto target=toDisk?disk:image;
+    MacBrowser::Entry entry{};
+    Check(source->FindChild(2,u"Hello",entry),"coordinated removable move source is missing");
+    auto from=FileOperations::Location::Mounted(source,entry.id);
+    from.cut=true;
+    Storage::Job job;
+    FileOperations::Completion completion;
+    return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        {from},FileOperations::Location::Mounted(target,2)},job,completion);
+}
+
+void VerifyMovedPayload(MacBrowser::Volume& volume,const MacBrowser::Entry& entry)
+{
+    for(unsigned fork:{0u,1u}){
+        Bytes bytes(fork?723:5003),expected(bytes.size());
+        Check(entry.forks[fork].size==bytes.size(),"coordinated removable move changed a fork size");
+        Payload(fork,0,expected.data(),expected.size());
+        volume.Read(entry.id,fork,0,bytes.data(),bytes.size());
+        Check(bytes==expected,"coordinated removable move changed a fork");
+    }
+}
+
+void CheckCoordinatedDiskMoves(const std::string& root,const Bytes& populated,FILE* report)
+{
+    Check(SetEnvironmentVariableW(L"HFV_TEST_CLASSIC_MOVE_DIR",VolumeCoord::Wide(root).c_str())!=FALSE,
+          "set isolated shared decision directory for removable moves");
+    const auto seed=root+"\\move-empty.dsk";
+    WriteFixture(seed,0,populated.data(),DWORD(populated.size()),true);
+    {
+        auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(seed));
+        MacBrowser::Entry entry{};
+        Check(volume&&volume->FindChild(2,u"Hello",entry),"open removable-move fixture");
+        volume->Remove(entry.id);
+        volume->Close();
+    }
+    const auto empty=Load(seed);
+    for(const std::string adapter:{"move-to-zip","move-from-usb"}){
+        const bool toDisk=adapter=="move-to-zip";
+        const auto key=toDisk?L"Zip APM":L"USB raw HFS";
+        const auto& oldDisk=toDisk?*empty:populated;
+        const auto& oldImage=toDisk?populated:*empty;
+        for(unsigned phase:{8u,9u,0u}){
+            const auto path=root+"\\"+adapter+"-"+std::to_string(phase)+".dsk";
+            const auto imageFile=path+".image.dsk";
+            const auto imagePath=VolumeCoord::Wide(imageFile);
+            WriteFixture(path,0,oldDisk.data(),DWORD(oldDisk.size()),true);
+            WriteFixture(imageFile,0,oldImage.data(),DWORD(oldImage.size()),true);
+            if(phase){
+                CrashMedia(path,adapter,phase);
+                Check(RemovableUndo::Pending(key)&&ClassicHfsRecovery::Pending(imagePath),
+                      "interrupted removable move did not keep both participant logs");
+                if(phase==8){
+                    const auto interrupted=Load(path);
+                    auto wrong=oldDisk;
+                    wrong.back()^=0x5a;
+                    WriteFixture(path,0,wrong.data(),DWORD(wrong.size()),true);
+                    Reject([&]{OpenUndoDisk(path,toDisk);},"coordinated move replay accepted a replacement disk");
+                    Check(*Load(path)==wrong&&RemovableUndo::Pending(key)&&ClassicHfsRecovery::Pending(imagePath),
+                          "replacement disk or pending participant was modified");
+                    WriteFixture(path,0,interrupted->data(),DWORD(interrupted->size()),true);
+                }
+            }else{
+                const auto result=MoveToOrFromDisk(path,adapter,true);
+                if(result.code||!result.moved)throw HfsPlus::Error("Persistent removable move: "+result.message);
+            }
+            {
+                auto disk=OpenUndoDisk(path,toDisk);
+                auto image=MacBrowser::OpenBrowserImage(imagePath);
+                Check(image&&disk->Writable()&&image->Writable(),"both move participants must reopen writable");
+                const bool onDisk=(phase==8)?!toDisk:toDisk;
+                MacBrowser::Entry diskEntry{},imageEntry{};
+                Check(disk->FindChild(2,u"Hello",diskEntry)==onDisk&&
+                      image->FindChild(2,u"Hello",imageEntry)!=onDisk,
+                      "removable disk and image chose different move outcomes");
+                VerifyMovedPayload(onDisk?*disk:*image,onDisk?diskEntry:imageEntry);
+            }
+            Check(!RemovableUndo::Pending(key)&&!ClassicHfsRecovery::Pending(imagePath),
+                  "reopening a coordinated move left a pending participant");
+            if(phase==8)Check(*Load(path)==oldDisk&&*Load(imageFile)==oldImage,
+                              "aborted removable move changed the exact image bytes");
+        }
+    }
+    fprintf(report,"PASS: image-to-Zip and USB-to-image moves agree before and after the shared decision, preserve both forks, and complete through a persistent image worker.\n");
+}
+
 void CheckDurableMedia(const std::string& root,FILE* report)
 {
     Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_UNDO_DIR",VolumeCoord::Wide(root).c_str())!=FALSE,
@@ -721,6 +816,7 @@ void CheckDurableMedia(const std::string& root,FILE* report)
         }
     }
     fprintf(report,"PASS: classic floppy, partitioned Zip, raw USB disk and image-to-floppy writes survive process loss, torn writes, interrupted replay and a lost commit reply; replacement disks are refused without writes.\n");
+    CheckCoordinatedDiskMoves(root,*zip,report);
 }
 }
 
@@ -730,6 +826,12 @@ int RunRemovableRecoveryChild(const char* target,const char* adapter,unsigned ph
         SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",std::to_wstring(phase).c_str());
         readonly_cd_backend_init();
         if(phase==3){DiscoverUndo(target,adapter,false);return 3;}
+        if(strncmp(adapter,"move-",5)==0){
+            ClassicHfsRecovery::Transaction::CrashAt(phase);
+            const auto result=MoveToOrFromDisk(target,adapter,false);
+            if(result.code)throw HfsPlus::Error(result.message);
+            return 3;
+        }
         if(!strcmp(adapter,"zip")||!strcmp(adapter,"usb"))OpenUndoDisk(target,!strcmp(adapter,"zip"))->MakeDirectory(2,u"Undo folder");
         else{
             UndoFloppy floppy(target);

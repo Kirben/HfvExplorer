@@ -16,6 +16,7 @@ struct MediaIoError : HfsPlus::Error {
 class MediaWriteBackend {
 public:
     virtual ~MediaWriteBackend() = default;
+    virtual bool SupportsCoordinatedMove() const { return false; }
     virtual void WithVerifiedWrite(const std::function<void()>& work) = 0;
 };
 }

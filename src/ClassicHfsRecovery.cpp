@@ -21,7 +21,7 @@ constexpr uint64_t Committed = UINT64_MAX;
 constexpr uint64_t Sector = 512;
 constexpr char Magic[8] = {'H','F','V','H','F','S','U','1'};
 constexpr char MoveMagic[8] = {'H','F','V','H','F','S','U','2'};
-constexpr size_t MoveIdSize=32;
+using ClassicHfsRecovery::MoveIdSize;
 
 struct Handle {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -482,6 +482,10 @@ void ClassicHfsRecovery::MoveDecision::Commit()
 void ClassicHfsRecovery::MoveDecision::Forget() noexcept
 {
     try{DeleteFileW(DecisionPath(id_).c_str());}catch(...){}
+}
+bool ClassicHfsRecovery::MoveIsCommitted(const std::string& id)
+{
+    return MoveCommitted(id);
 }
 bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
 {

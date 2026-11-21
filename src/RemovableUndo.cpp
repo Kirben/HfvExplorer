@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "RemovableUndo.h"
+#include "ClassicHfsRecovery.h"
 #include "OperationCompletion.h"
 #include <bcrypt.h>
 #include <shlobj.h>
@@ -18,6 +19,8 @@ using Digest=std::array<BYTE,32>;
 constexpr DWORD Batch=65536;
 constexpr uint64_t CommitOffset=UINT64_MAX;
 constexpr char Magic[8]={'H','F','V','R','U','N','D','1'};
+constexpr char MoveMagic[8]={'H','F','V','R','U','N','D','2'};
+using ClassicHfsRecovery::MoveIdSize;
 struct Header {
     char magic[8];
     uint64_t offset,length;
@@ -26,6 +29,7 @@ struct Header {
     DWORD crc;
 };
 struct Record {uint64_t offset;DWORD count,crc;};
+bool HasMove(const Header& header){return memcmp(header.magic,MoveMagic,sizeof(MoveMagic))==0;}
 static_assert(sizeof(Header)==64&&sizeof(Record)==16);
 
 void Check(bool passed,const char* message)
@@ -170,7 +174,7 @@ Header LoadHeader(HANDLE file)
 {
     Header header{};
     Load(file,0,&header,sizeof(header));
-    Check(memcmp(header.magic,Magic,sizeof(Magic))==0&&
+    Check((memcmp(header.magic,Magic,sizeof(Magic))==0||HasMove(header))&&
           header.crc==Crc(&header,offsetof(Header,crc))&&
           ValidRange({header.offset,header.length,header.sector}),"Invalid removable-media undo header");
     return header;
@@ -227,20 +231,29 @@ Range PendingRange(const std::wstring& device)
 struct Log::State {
     File file;
     Range range;
+    std::string move;
     uint64_t end=sizeof(Header);
-    State(const std::wstring& key,const Range& bounds,const Read& read):
-        file(JournalPath(key,true),GENERIC_READ|GENERIC_WRITE,OPEN_ALWAYS),range(bounds){
+    State(const std::wstring& key,const Range& bounds,const Read& read,const std::string& decision):
+        file(JournalPath(key,true),GENERIC_READ|GENERIC_WRITE,OPEN_ALWAYS),range(bounds),move(decision){
         Check(file.handle!=INVALID_HANDLE_VALUE,"Cannot open the local removable-media undo log");
         Check(Length(file.handle)==0,"Removable-media recovery is pending");
         Check(ValidRange(range),"Invalid removable-media recovery range");
         Header header{};
-        memcpy(header.magic,Magic,sizeof(Magic));
+        if(!move.empty())
+            Check(!ClassicHfsRecovery::MoveIsCommitted(move),"Removable-media move decision has already committed");
+        memcpy(header.magic,move.empty()?Magic:MoveMagic,sizeof(Magic));
         header.offset=range.offset;
         header.length=range.length;
         header.sector=range.sector;
         header.original=Fingerprint(range,read,[](uint64_t,DWORD,BYTE*){});
         header.crc=Crc(&header,offsetof(Header,crc));
         Append(file.handle,&header,sizeof(header));
+        if(!move.empty()){
+            const auto crc=Crc(move.data(),DWORD(move.size()));
+            Append(file.handle,move.data(),DWORD(move.size()));
+            Append(file.handle,&crc,sizeof(crc));
+            end+=move.size()+sizeof(crc);
+        }
         Flush(file.handle);
     }
     void RecordWrite(uint64_t offset,DWORD count,const void* before,const void* after){
@@ -255,8 +268,8 @@ struct Log::State {
     }
 };
 
-Log::Log(const std::wstring& device,const Range& range,const Read& read)
-    :state_(std::make_unique<State>(device,range,read)){}
+Log::Log(const std::wstring& device,const Range& range,const Read& read,const std::string& move)
+    :state_(std::make_unique<State>(device,range,read,move)){}
 Log::~Log()=default;
 void Log::BeforeWrite(uint64_t offset,DWORD count,const void* before,const void* after)
 {
@@ -265,6 +278,8 @@ void Log::BeforeWrite(uint64_t offset,DWORD count,const void* before,const void*
 }
 void Log::Commit()
 {
+    if(!state_->move.empty())
+        Check(ClassicHfsRecovery::MoveIsCommitted(state_->move),"The removable-media move decision has not committed");
 #ifdef HFV_TESTING
     TestCheckpoint(4);
 #endif
@@ -273,7 +288,8 @@ void Log::Commit()
     TestCheckpoint(2);
 #endif
     // The durable commit record is sufficient if clearing the log fails.
-    try{Clear(state_->file.handle);}catch(const HfsPlus::Error&){}
+    if(!state_->move.empty())Clear(state_->file.handle);
+    else try{Clear(state_->file.handle);}catch(const HfsPlus::Error&){}
 }
 
 void Recover(const std::wstring& device,const Range& range,const Read& read,const Restore& restore)
@@ -288,7 +304,8 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
     if(size<sizeof(Header)){
         Header prefix{};
         Load(file.handle,0,&prefix,DWORD(size));
-        Check(memcmp(prefix.magic,Magic,(std::min)(size,uint64_t(sizeof(Magic))))==0,
+        const auto length=(std::min)(size,uint64_t(sizeof(Magic)));
+        Check(memcmp(prefix.magic,Magic,length)==0||memcmp(prefix.magic,MoveMagic,length)==0,
               "Invalid partial removable-media undo header");
         Clear(file.handle);
         return;
@@ -297,14 +314,29 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
     Check(range.offset==header.offset&&range.length==header.length&&range.sector==header.sector,
           "Insert the original removable media before recovery");
 
+    uint64_t firstRecord=sizeof(header);
+    bool sharedCommit=false;
+    if(HasMove(header)){
+        if(size-firstRecord<MoveIdSize+sizeof(uint32_t)){
+            Clear(file.handle);
+            return;
+        }
+        std::string move(MoveIdSize,0);
+        uint32_t crc=0;
+        Load(file.handle,firstRecord,move.data(),DWORD(move.size()));
+        Load(file.handle,firstRecord+move.size(),&crc,sizeof(crc));
+        Check(crc==Crc(move.data(),DWORD(move.size())),"Removable-media move header is damaged");
+        sharedCommit=ClassicHfsRecovery::MoveIsCommitted(move);
+        firstRecord+=move.size()+sizeof(crc);
+    }
     struct Patch {uint64_t first, before, after; bool restore=false;};
     std::map<uint64_t,Patch> sectors;
     Bytes payload(Batch*2);
-    for(uint64_t at=sizeof(header);size-at>=sizeof(Record);){
+    for(uint64_t at=firstRecord;size-at>=sizeof(Record);){
         Record record{};
         Load(file.handle,at,&record,sizeof(record));
         if(record.offset==CommitOffset){
-            Check(!record.count&&size-at==sizeof(record)&&
+            Check((!HasMove(header)||sharedCommit)&&!record.count&&size-at==sizeof(record)&&
                   record.crc==Crc(&record,offsetof(Record,crc)),"Invalid removable-media commit marker");
             Clear(file.handle);
             return;
@@ -323,7 +355,7 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
         }
         at=data+length;
     }
-    if(sectors.empty()){Clear(file.handle);return;}
+    if(sharedCommit||sectors.empty()){Clear(file.handle);return;}
     Bytes first(range.sector),previous(range.sector),next(range.sector);
     const auto current=Fingerprint(range,read,[&](uint64_t at,DWORD count,BYTE* bytes){
         for(auto iter=sectors.lower_bound(at);iter!=sectors.end()&&iter->first-at<count;++iter){

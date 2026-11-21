@@ -24,6 +24,8 @@ struct ImageRange {
 };
 bool Pending(const std::wstring& path,bool ndif=false);
 bool RecoverNdif(const ImageRange&,bool writable,bool keepJournal=false);
+inline constexpr size_t MoveIdSize=32;
+bool MoveIsCommitted(const std::string& id);
 class MoveDecision {
     std::string id_;
 public:

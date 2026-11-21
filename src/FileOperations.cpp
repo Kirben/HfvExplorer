@@ -139,8 +139,15 @@ bool CanCoordinateClassicMove(const OrdinaryCopy& copy)
  const auto first=copy.sources.front().Volume();
  const auto target=copy.destination.Volume();
  if(!first||!target||first->ResourceKey()==target->ResourceKey()||
-    strcmp(first->Kind(),"HFS")||strcmp(target->Kind(),"HFS")||
-    ExecutionFor(*first).processLocal||ExecutionFor(*target).processLocal)return false;
+    strcmp(first->Kind(),"HFS")||strcmp(target->Kind(),"HFS"))return false;
+ const auto image=[](Volume& volume){return !ExecutionFor(volume).processLocal;};
+ const auto removable=[](Volume& volume){
+  const auto* media=dynamic_cast<const Storage::MediaWriteBackend*>(&volume);
+  return media&&media->SupportsCoordinatedMove();
+ };
+ if(image(*first)){
+  if(!image(*target)&&!removable(*target))return false;
+ }else if(!removable(*first)||!image(*target))return false;
  return std::all_of(copy.sources.begin(),copy.sources.end(),[&](const Location& item){
   return item.cut&&item.Volume()==first;
  });
@@ -190,8 +197,9 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  Check(!request.sources.empty(),"Select a source file or folder");
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
- bool complete=false,inPlace=false,coordinated=false;
- StorageLocation::WithVerifiedWrite(target,[&]{
+ const bool coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
+ bool complete=false,inPlace=false;
+ const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
   auto destination=Destination(target);
@@ -222,7 +230,6 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
     snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
    }
-   coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
    if(coordinated){
     CoordinateClassicMove(*opened.front().first,*destination.first,job,[&]{
      complete=CopyMany(opened,*destination.first,destination.second,job,{},routes,true,true);
@@ -232,7 +239,10 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   }
   if(!target.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
- });
+ };
+ // The coordinator opens both write scopes and retains their undo until it decides.
+ if(coordinated)run();
+ else StorageLocation::WithVerifiedWrite(target,run);
  if(inPlace){
   completion.complete=true;
   completion.completed=unsigned(request.sources.size());
