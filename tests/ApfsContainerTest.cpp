@@ -4173,6 +4173,29 @@ int RunApfsContainerTest(const char* directory)
                   "APFS overwrite changed link identity or materialized its target");
             Reject([&]{published->Read(changedLink.id,0,0,nullptr,0);},
                    "APFS overwrite followed the replacement symbolic-link target");
+            const auto targetBefore=published->Stat(originalTarget.id);
+            const auto readOriginalTarget=[&]{
+                Bytes content(size_t(targetBefore.forks[0].size));
+                published->Read(targetBefore.id,0,0,content.data(),content.size());
+                return content;
+            };
+            const auto beforeLinkReplacement=readOriginalTarget();
+            Storage::Job replaceWithHardLink;
+            const auto hardLinkReplacingSymlink=published->MakeHardLinkForTransfer(
+                sourceAlias.id,2,changedLink.name,true,replaceWithHardLink);
+            const auto replacementLink=published->Stat(hardLinkReplacingSymlink);
+            Check(!replacementLink.symbolicLink&&replacementLink.hardLink&&
+                  replacementLink.resolvedId==published->Stat(sourceAlias.id).resolvedId&&
+                  replacementLink.identity!=changedLink.identity&&readOriginalTarget()==beforeLinkReplacement&&
+                  published->Stat(targetBefore.id).identity==targetBefore.identity,
+                  "APFS hard-link replacement followed the symbolic link or changed an unrelated inode");
+            for(unsigned fork=0;fork<2;++fork){
+                Bytes expected(size_t(sourceAlias.forks[fork].size)),actual(expected.size());
+                published->Read(sourceAlias.id,fork,0,expected.data(),expected.size());
+                published->Read(replacementLink.id,fork,0,actual.data(),actual.size());
+                Check(actual==expected,"APFS replacement of a symbolic link did not share the source forks");
+            }
+            fprintf(report,"PASS: APFS replaced a macOS symbolic-link entry with a hard link and preserved both source forks.\n");
             published->Read(publishedFile.id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"Publishing a checkpoint changed macOS-generated file data");
             MacBrowser::Entry small,originalSmall;
