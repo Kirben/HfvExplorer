@@ -1008,7 +1008,7 @@ public:
     void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
     bool CanReplaceFileWithSymbolicLink(const Entry& entry)const override{
         return writable&&limitedEdits&&!entry.directory&&!entry.symbolicLink&&
-               !entry.hardLink&&!entry.protectedFile&&entry.readError.empty();
+               !entry.protectedFile&&entry.readError.empty();
     }
     void ValidateSymbolicLink(const Entry& entry,const Bytes& target)const override{
         Check(!entry.directory&&!entry.hardLink&&!entry.compressed&&!entry.forks[0].size&&!entry.forks[1].size,

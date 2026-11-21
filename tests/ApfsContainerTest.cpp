@@ -4244,6 +4244,38 @@ int RunApfsContainerTest(const char* directory)
                   "APFS replacement did not publish the symbolic link");
             Reject([&]{published->Stat(small.id);},"APFS replacement retained the old file selection");
             fprintf(report,"PASS: macOS APFS symbolic-link replacement of a regular file, with overwrite confirmation and cancellation.\n");
+            const auto originalAlias=published->Stat(redirectedId);
+            const auto remainingAlias=published->Stat(retainedAlias.id);
+            Check(originalAlias.hardLink&&originalAlias.resolvedId==remainingAlias.resolvedId,
+                  "Missing APFS alias group for symbolic-link replacement");
+            const auto readForks=[&](const MacBrowser::Entry& item){
+                std::array<Bytes,2> forks;
+                for(unsigned fork=0;fork<forks.size();++fork){
+                    forks[fork].resize(size_t(item.forks[fork].size));
+                    published->Read(item.id,fork,0,forks[fork].data(),forks[fork].size());
+                }
+                return forks;
+            };
+            const auto expectedForks=readForks(remainingAlias);
+            const auto expectedAttributes=published->GetAttributes(remainingAlias.id);
+            symlinkToCopy.name=originalAlias.name;
+            importSource->PutSymbolicLink(2,symlinkToCopy,dangling,createLink);
+            Check(importSource->FindChild(2,originalAlias.name,newLink),"Missing source for APFS alias replacement");
+            copyLink(Storage::ConflictChoice::Cancel);
+            Check(published->Stat(originalAlias.id).resolvedId==remainingAlias.resolvedId&&
+                  readForks(originalAlias)==expectedForks,"Cancelled APFS overwrite changed the selected alias");
+            const auto aliasReplacement=copyLink(Storage::ConflictChoice::Replace);
+            Check(!aliasReplacement.code,aliasReplacement.message.c_str());
+            MacBrowser::Entry overwrittenAlias;
+            Check(published->FindChild(2,originalAlias.name,overwrittenAlias)&&
+                  published->SymbolicLinkTarget(overwrittenAlias.id)==std::optional<Bytes>(dangling),
+                  "APFS did not publish the symbolic link at the chosen hard-link name");
+            const auto preserved=published->Stat(remainingAlias.id);
+            Check(preserved.linkCount+1==remainingAlias.linkCount&&preserved.created==remainingAlias.created&&
+                  preserved.modified==remainingAlias.modified&&preserved.finder==remainingAlias.finder&&
+                  readForks(preserved)==expectedForks&&published->GetAttributes(preserved.id)==expectedAttributes,
+                  "Replacing one APFS alias changed the surviving aliases' data or metadata");
+            fprintf(report,"PASS: macOS APFS symbolic-link replacement of a hard-link alias preserves both forks and metadata.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.

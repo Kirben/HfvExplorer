@@ -2882,9 +2882,25 @@ CatalogWritePlan PrepareCatalogMutation(
         }
         if(create->replacedFile){
             Check(symlink&&fileCount,"Invalid APFS symbolic-link replacement");
-            removedKind=DeleteExternalEntry(source,catalog,{create->parent,create->replacedFile},
-                                            time,extentTree,externalRetired);
-            Check(*removedKind==CatalogKind::RegularFile,"APFS symbolic-link replacement requires a regular file");
+            const auto parentKey=(uint64_t(9)<<60)|create->parent;
+            const auto wanted=NormalizedName(name,fold);
+            const auto victim=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+                if(record.key.size()<14||Le64(record.key.data())!=parentKey||record.key.back()||
+                   (record.value.size()!=18&&record.value.size()!=34)||
+                   Le64(record.value.data())!=create->replacedFile||
+                   Le16(record.value.data()+16)!=uint16_t(CatalogKind::RegularFile))return false;
+                const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
+                return NormalizedName(candidate,fold)==wanted;
+            });
+            Check(victim!=catalog.end(),"The APFS symbolic-link replacement file no longer exists");
+            if(victim->value.size()==34){
+                const auto alias=Le64(victim->value.data()+26);
+                Check(UnlinkExternalAlias(catalog,{create->parent,create->replacedFile,alias},time),
+                      "Invalid APFS symbolic-link replacement alias");
+            }else{
+                removedKind=DeleteExternalEntry(source,catalog,{create->parent,create->replacedFile},
+                                                time,extentTree,externalRetired);
+            }
         }
         TouchExternalParent(catalog,create->parent,time,1);
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,fold,uint16_t(create->kind));
