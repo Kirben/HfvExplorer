@@ -2898,8 +2898,8 @@ CatalogWritePlan PrepareCatalogMutation(
                   "Invalid APFS target directory entry");
             kind=CatalogKind(Le16(record.value.data()+16));
             Check(kind==CatalogKind::RegularFile||kind==CatalogKind::Directory||
-                  (properties->newName&&kind==CatalogKind::SymbolicLink),
-                  "APFS edit requires a regular file, a folder, or a symbolic-link rename");
+                  kind==CatalogKind::SymbolicLink,
+                  "APFS edit requires a regular file, a folder, or a symbolic link");
             entryOid=Le64(record.value.data());
             if(record.value.size()==34){
                 const auto* value=record.value.data();

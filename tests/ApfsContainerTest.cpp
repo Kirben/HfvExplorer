@@ -3234,6 +3234,21 @@ int RunApfsContainerTest(const char* directory)
                 constexpr uint64_t manyInode=24; // Directory ID on the macOS-generated fixture.
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),manyInode,u"file_0222.txt",u"Renamed 222.txt",job);
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"many",u"Renamed collection",job);
+                {
+                    const auto checkpoint=openCurrent();
+                    CheckpointFaultImage interruptedLink(Disk::Read(*output,0,size_t(output->Size())));
+                    Storage::Job cancelMetadata;
+                    interruptedLink.onFlush=[&]{cancelMetadata.cancel();};
+                    bool cancelled=false;
+                    try{Apfs::SetExternalCatalogProperties(interruptedLink,checkpoint,2,u"link.txt",
+                            {createdTime+1,editedTime+1},cancelMetadata);}
+                    catch(const Storage::Cancelled&){cancelled=true;}
+                    const auto retained=Apfs::Probe(interruptedLink);
+                    Check(cancelled&&retained&&retained->transaction==checkpoint.transaction,
+                          "Cancelled APFS symbolic-link metadata edit published a checkpoint");
+                    Apfs::SetExternalCatalogProperties(*output,checkpoint,2,u"link.txt",
+                        {createdTime+1,editedTime+1},job);
+                }
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"link.txt",u"Renamed symbolic link",job);
                 {
                     const auto checkpoint=openCurrent();
@@ -4078,6 +4093,11 @@ int RunApfsContainerTest(const char* directory)
                   published->FindChild(2,u"Renamed symbolic link",renamedLink)&&
                   published->SymbolicLinkTarget(renamedLink.id)==authentic->SymbolicLinkTarget(symlink.id),
                   "APFS rename changed the symbolic-link target");
+            Check(renamedLink.datesValid&&renamedLink.created==createdTime+1&&renamedLink.modified==editedTime+1,
+                  "APFS symbolic-link timestamp edits did not survive reopening");
+            MacBrowser::Entry originalTarget;
+            Check(published->FindChild(2,u"x",originalTarget)&&originalTarget.created==createdTime,
+                  "APFS symbolic-link timestamp edits changed the target inode");
             symlinkToCopy.name=renamedLink.name;
             importSource->PutSymbolicLink(2,symlinkToCopy,dangling,createLink);
             Check(importSource->FindChild(2,symlinkToCopy.name,sourceLink),"Missing APFS replacement link");
