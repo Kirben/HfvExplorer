@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "ApfsContainer.h"
 #include "NativeDpi.h"
 #include "WindowsCompatibility.h"
 #include "CopyProcess.h"
@@ -316,8 +317,51 @@ void CHFVExplorerApp::CheckDefaultSettings(void)
 
 int CHFVExplorerApp::ExitInstance(){BrowserTransfers::Clear();ShutdownStorageUi();return CWinApp::ExitInstance();}
 
+namespace {
+int RunApfsSnapshotCommand(bool create)
+{
+    AttachConsole(ATTACH_PARENT_PROCESS);
+    const auto report=[](DWORD stream,const std::string& message){
+        const auto handle=GetStdHandle(stream);
+        if(handle&&handle!=INVALID_HANDLE_VALUE){
+            DWORD written=0;
+            const auto line=message+"\r\n";
+            WriteFile(handle,line.data(),DWORD(line.size()),&written,nullptr);
+        }
+    };
+    int argc=0;
+    auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);
+    if(!argv||argc!=4){
+        if(argv)LocalFree(argv);
+        report(STD_ERROR_HANDLE,"Usage: HFVExplorer --create-apfs-snapshot|--delete-apfs-snapshot <image> <name>");
+        return 2;
+    }
+    const std::wstring image=argv[2],wideName=argv[3];
+    LocalFree(argv);
+    try{
+        const auto attributes=GetFileAttributesW(image.c_str());
+        if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_DIRECTORY))
+            throw HfsPlus::Error("Select an ordinary APFS image file");
+        auto source=HfsPlus::OpenImage(image.c_str(),true);
+        const auto checkpoint=Apfs::Probe(*source);
+        if(!checkpoint)throw HfsPlus::Error("The image does not contain an APFS container");
+        const std::u16string name(wideName.begin(),wideName.end());
+        Storage::Job job;
+        if(create)Apfs::CreateSnapshot(*source,*checkpoint,name,job);
+        else Apfs::DeleteSnapshot(*source,*checkpoint,name,job);
+        report(STD_OUTPUT_HANDLE,create?"APFS snapshot created.":"APFS snapshot deleted.");
+        return 0;
+    }catch(const std::exception& error){
+        report(STD_ERROR_HANDLE,error.what());
+        return 1;
+    }
+}
+}
+
 BOOL CHFVExplorerApp::InitInstance()
 {
+ if(__argc>1&&!strcmp(__argv[1],"--create-apfs-snapshot"))ExitProcess(RunApfsSnapshotCommand(true));
+ if(__argc>1&&!strcmp(__argv[1],"--delete-apfs-snapshot"))ExitProcess(RunApfsSnapshotCommand(false));
  if(__argc==4&&!strcmp(__argv[1],"--volume-session"))ExitProcess(VolumeSession::Child(__argv[2],__argv[3]));
  if(__argc==4&&!strcmp(__argv[1],"--copy-worker"))ExitProcess(CopyProcess::Child(__argv[2],__argv[3]));
  auto windows=WindowsCompatibility::Current();
