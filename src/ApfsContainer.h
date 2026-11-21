@@ -55,7 +55,7 @@ uint64_t SetCatalogAttributes(HfsPlus::Source&,const Container& expected,uint64_
                                const HfsPlus::Attributes&,Storage::Job&,bool external=false);
 uint64_t CreateCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent,const std::u16string&,
                               const HfsPlus::Bytes& target,Storage::Job&,std::optional<FileDates> dates,
-                              const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false,uint64_t replacedFile=0);
+                              const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false,uint64_t replacedEntry=0);
 uint64_t ReplaceCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent,uint64_t inode,
                                const HfsPlus::Bytes& target,Storage::Job&,std::optional<FileDates> dates,
                                const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false);
@@ -65,7 +65,7 @@ uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t par
 
 // Stream a data fork from a separate source into a newly created file.
 uint64_t CreateCatalogFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false);
+                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t replacedEntry=0);
 // Rename within the same directory, using on-disk inode IDs and the expected checkpoint.
 uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                      const std::u16string& name,Storage::Job&,uint64_t alias=0);

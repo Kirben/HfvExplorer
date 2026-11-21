@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "ApfsContainer.h"
+#include "BrowserPresentation.h"
 #include "ApfsCatalogWrite.h"
 #include "ApfsFormat.h"
 #include "ApfsTree.h"
@@ -4276,6 +4277,33 @@ int RunApfsContainerTest(const char* directory)
                   readForks(preserved)==expectedForks&&published->GetAttributes(preserved.id)==expectedAttributes,
                   "Replacing one APFS alias changed the surviving aliases' data or metadata");
             fprintf(report,"PASS: macOS APFS symbolic-link replacement of a hard-link alias preserves both forks and metadata.\n");
+            auto linkToTarget=symlinkToCopy;
+            linkToTarget.expectedDestinationIdentity=overwrittenAlias.identity;
+            const auto targetPath=BrowserPresentation::Utf8(imported.name);
+            Bytes targetName(targetPath.begin(),targetPath.end());
+            targetName.push_back(0);
+            published->PutSymbolicLink(2,linkToTarget,targetName,createLink);
+            auto ordinary=toCopy;
+            ordinary.name=overwrittenAlias.name;
+            const auto normalSource=importSource->MakeDirectory(2,u"Regular replacement source");
+            importSource->Put(normalSource,ordinary,writePayload,false);
+            Check(importSource->FindChild(normalSource,ordinary.name,newLink),"Missing APFS regular replacement source");
+            copyLink(Storage::ConflictChoice::Cancel);
+            Check(published->SymbolicLinkTarget(overwrittenAlias.id)==std::optional<Bytes>(targetName),
+                  "Cancelled APFS regular-file copy changed the symbolic link");
+            const auto fileReplacement=copyLink(Storage::ConflictChoice::Replace);
+            Check(!fileReplacement.code,fileReplacement.message.c_str());
+            MacBrowser::Entry newFile;
+            Check(published->FindChild(2,ordinary.name,newFile)&&!newFile.symbolicLink&&
+                  newFile.id!=overwrittenAlias.id&&published->GetAttributes(newFile.id)==ordinary.attributes,
+                  "APFS did not publish the regular replacement file");
+            const auto actualForks=readForks(newFile);
+            for(unsigned fork=0;fork<actualForks.size();++fork)
+                Check(actualForks[fork]==Bytes(size_t(ordinary.forks[fork].size),fork?0x7b:0x6a),
+                      "APFS replacing a symbolic link changed the incoming fork");
+            published->Read(imported.id,0,0,unrelated.data(),unrelated.size());
+            Check(unrelated==importedBytes,"APFS regular-file replacement changed the symbolic link target");
+            fprintf(report,"PASS: macOS APFS regular-file replacement of a symbolic link preserves both incoming forks and the target.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.

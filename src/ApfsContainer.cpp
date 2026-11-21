@@ -429,11 +429,11 @@ uint64_t SetCatalogAttributes(Source& source,const Container& expected,uint64_t 
 uint64_t CreateCatalogSymlink(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
                               const HfsPlus::Bytes& target,Storage::Job& job,std::optional<FileDates> dates,
                               const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external,
-                              uint64_t replacedFile)
+                              uint64_t replacedEntry)
 {
-    Check(!replacedFile||external,"APFS symbolic-link replacement requires the external catalog writer");
+    Check(!replacedEntry||external,"APFS symbolic-link replacement requires the external catalog writer");
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::SymbolicLink,nullptr,dates,&finder,
-                                                locked,&attributes,nullptr,nullptr,&target,external,replacedFile};
+                                                locked,&attributes,nullptr,nullptr,&target,external,replacedEntry};
     return Commit(source,expected,job,&request);
 }
 
@@ -459,11 +459,13 @@ uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t paren
 }
 
 uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external)
+                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t replacedEntry)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
+    Check(!replacedEntry||external,"APFS entry replacement requires the external catalog writer");
     CatalogCreate create{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked,attributes,resource,compression};
     create.external=external;
+    create.replacedEntry=replacedEntry;
     const CatalogMutation request=create;
     return Commit(source,expected,job,&request);
 }

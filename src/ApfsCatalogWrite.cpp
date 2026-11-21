@@ -2880,25 +2880,26 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
                   "APFS catalog contains an object at or after its next ID");
         }
-        if(create->replacedFile){
-            Check(symlink&&fileCount,"Invalid APFS symbolic-link replacement");
+        if(create->replacedEntry){
+            Check(symlink?fileCount!=0:!directory&&symlinkCount!=0,"Invalid APFS entry replacement");
+            const auto victimKind=symlink?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
             const auto parentKey=(uint64_t(9)<<60)|create->parent;
             const auto wanted=NormalizedName(name,fold);
             const auto victim=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
                 if(record.key.size()<14||Le64(record.key.data())!=parentKey||record.key.back()||
-                   (record.value.size()!=18&&record.value.size()!=34)||
-                   Le64(record.value.data())!=create->replacedFile||
-                   Le16(record.value.data()+16)!=uint16_t(CatalogKind::RegularFile))return false;
+                   (record.value.size()!=18&&(!symlink||record.value.size()!=34))||
+                   Le64(record.value.data())!=create->replacedEntry||
+                   Le16(record.value.data()+16)!=uint16_t(victimKind))return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
                 return NormalizedName(candidate,fold)==wanted;
             });
-            Check(victim!=catalog.end(),"The APFS symbolic-link replacement file no longer exists");
+            Check(victim!=catalog.end(),"The APFS replacement entry no longer exists");
             if(victim->value.size()==34){
                 const auto alias=Le64(victim->value.data()+26);
-                Check(UnlinkExternalAlias(catalog,{create->parent,create->replacedFile,alias},time),
+                Check(UnlinkExternalAlias(catalog,{create->parent,create->replacedEntry,alias},time),
                       "Invalid APFS symbolic-link replacement alias");
             }else{
-                removedKind=DeleteExternalEntry(source,catalog,{create->parent,create->replacedFile},
+                removedKind=DeleteExternalEntry(source,catalog,{create->parent,create->replacedEntry},
                                                 time,extentTree,externalRetired);
             }
         }
@@ -3182,7 +3183,10 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(volume,200,symlinkCount+1,8);
             if(removedKind)Set(volume,184,fileCount-1,8);
         }
-        else Set(volume,184,fileCount+1,8);
+        else{
+            Set(volume,184,fileCount+1,8);
+            if(removedKind)Set(volume,200,symlinkCount-1,8);
+        }
     }else if(externalDelete&&remove->recursive){
         Check(deletedFiles<=fileCount&&deletedFolders<=directoryCount&&deletedSymlinks<=symlinkCount,
               "Invalid APFS volume entry counts");

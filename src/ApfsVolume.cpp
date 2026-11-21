@@ -1024,22 +1024,22 @@ public:
         WriteMount([&]{
             const auto parentOid=At(parent).oid;
             Entry child;
-            uint64_t replacedFile=0;
+            uint64_t replacedEntry=0;
             if(!entry.expectedDestinationIdentity.empty()){
                 Check(FindChild(parent,entry.name,child)&&!child.protectedFile&&
                       child.identity==entry.expectedDestinationIdentity,
                       "The APFS symbolic link destination changed after overwrite approval");
                 if(!child.symbolicLink){
                     Check(CanReplaceFileWithSymbolicLink(child),"The APFS symbolic link cannot replace this entry");
-                    replacedFile=At(child.id).oid;
+                    replacedEntry=At(child.id).oid;
                 }
             }
-            CommitMutation(parent,replacedFile?child.id:0,job,[&](auto& job){
+            CommitMutation(parent,replacedEntry?child.id:0,job,[&](auto& job){
                 if(child.symbolicLink)
                     return ReplaceCatalogSymlink(*source,WriteTarget(parent),parentOid,At(child.id).oid,target,job,
                                                  CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
                 return CreateCatalogSymlink(*source,WriteTarget(parent),parentOid,entry.name,target,job,
-                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,replacedFile);
+                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,replacedEntry);
             });
         },true);
     }
@@ -1128,11 +1128,21 @@ public:
             const auto parentOid=At(parent).oid;
             Entry existing;
             if(FindChild(parent,entry.name,existing)){
-                Check(replace&&!existing.directory&&!existing.protectedFile&&existing.readError.empty(),
+                Check(replace&&!existing.directory&&!existing.protectedFile&&
+                      (existing.symbolicLink?limitedEdits:existing.readError.empty()),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==existing.identity,
                       "The APFS destination changed after overwrite approval");
                 const auto oid=At(existing.id).oid,sibling=At(existing.id).siblingId;
+                if(existing.symbolicLink){
+                    CommitMutation(parent,existing.id,job,[&](auto& job){
+                        return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,
+                                                 &entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,oid);
+                    });
+                    Entry replacement;
+                    if(FindChild(parent,entry.name,replacement))return replacement.id;
+                    throw Error("APFS replacement was committed but could not be found after reopening");
+                }
                 CommitMutation(parent,0,job,[&](auto& job){
                     return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling);
                 },existing.id);
