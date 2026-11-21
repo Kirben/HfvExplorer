@@ -4103,6 +4103,36 @@ int RunApfsContainerTest(const char* directory)
             authentic->Read(a.id,0,0,originalHardLink.data(),originalHardLink.size());
             published->Read(publishedB.id,0,0,reopenedHardLink.data(),reopenedHardLink.size());
             Check(reopenedHardLink==originalHardLink,"APFS hard-link Properties changed the shared fork");
+            const auto sourceAlias=published->Stat(retainedAlias.id);
+            Storage::Job overwriteAlias;
+            Reject([&]{published->MakeHardLinkForTransfer(sourceAlias.id,2,publishedA.name,true,overwriteAlias);},
+                   "APFS replaced a locked hard-link alias");
+            auto unlocked=published->Stat(publishedA.id);
+            unlocked.protectedFile=false;
+            published->SetBasicMetadata(unlocked.id,unlocked);
+            Storage::Job cancelledAlias;
+            cancelledAlias.cancel();
+            bool aliasCancelled=false;
+            try{published->MakeHardLinkForTransfer(sourceAlias.id,2,publishedA.name,true,cancelledAlias);}
+            catch(const Storage::Cancelled&){aliasCancelled=true;}
+            Check(aliasCancelled&&published->Stat(publishedA.id).resolvedId==published->Stat(publishedB.id).resolvedId,
+                  "Cancelled APFS alias replacement changed the original hard-link group");
+            const auto redirectedId=published->MakeHardLinkForTransfer(sourceAlias.id,2,publishedA.name,true,overwriteAlias);
+            const auto redirected=published->Stat(redirectedId);
+            const auto survivor=published->Stat(publishedB.id);
+            Check(redirectedId!=publishedA.id&&redirected.resolvedId==published->Stat(sourceAlias.id).resolvedId&&
+                  redirected.linkCount==sourceAlias.linkCount+1&&!survivor.hardLink&&survivor.linkCount==1&&
+                  survivor.resolvedId!=redirected.resolvedId,
+                  "APFS hard-link replacement did not preserve the surviving alias");
+            published->Read(survivor.id,0,0,reopenedHardLink.data(),reopenedHardLink.size());
+            Check(reopenedHardLink==originalHardLink,"APFS alias replacement changed the surviving file's bytes");
+            for(unsigned fork=0;fork<2;++fork){
+                Bytes expected(size_t(sourceAlias.forks[fork].size)),actual(expected.size());
+                published->Read(sourceAlias.id,fork,0,expected.data(),expected.size());
+                published->Read(redirected.id,fork,0,actual.data(),actual.size());
+                Check(actual==expected,"APFS redirected alias did not share both source forks");
+            }
+            fprintf(report,"PASS: APFS replacement of a genuine macOS hard-link alias preserves the surviving name and both source forks.\n");
             MacBrowser::Entry renamedLink;
             Check(!published->FindChild(2,u"link.txt",renamedLink)&&
                   published->FindChild(2,u"Renamed symbolic link",renamedLink)&&

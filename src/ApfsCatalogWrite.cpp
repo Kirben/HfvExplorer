@@ -2829,14 +2829,20 @@ CatalogWritePlan PrepareCatalogMutation(
             const auto destinationName=NormalizedName(name,fold);
             const auto matches=[&](const OwnedRecord& record){
                 if(record.key.size()<14||Le64(record.key.data())!=destinationKey||
-                   record.value.size()!=18||Le64(record.value.data())!=hardLink->replaced||
+                   (record.value.size()!=18&&record.value.size()!=34)||Le64(record.value.data())!=hardLink->replaced||
                    Le16(record.value.data()+16)!=uint16_t(CatalogKind::RegularFile)||record.key.back())return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
                 return NormalizedName(candidate,fold)==destinationName;
             };
-            Check(std::any_of(catalog.begin(),catalog.end(),matches),
-                  "APFS hard-link overwrite requires an existing unlinked regular file at the chosen name");
-            removedKind=DeleteExternalEntry(source,catalog,{hardLink->parent,hardLink->replaced},time,extentTree,externalRetired);
+            const auto victim=std::find_if(catalog.begin(),catalog.end(),matches);
+            Check(victim!=catalog.end(),"APFS hard-link overwrite requires a regular file at the chosen name");
+            if(victim->value.size()==34){
+                const auto alias=Le64(victim->value.data()+26);
+                Check(UnlinkExternalAlias(catalog,{hardLink->parent,hardLink->replaced,alias},time),
+                      "Invalid APFS hard-link replacement alias");
+            }else{
+                removedKind=DeleteExternalEntry(source,catalog,{hardLink->parent,hardLink->replaced},time,extentTree,externalRetired);
+            }
         }
         CreateExternalHardLink(catalog,*hardLink,name,nextId,time,fold);
     }else if(externalDelete){
