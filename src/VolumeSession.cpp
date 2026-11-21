@@ -19,6 +19,10 @@ namespace {
 namespace Protocol=VolumeSessionProtocol;
 using SessionCommandCode=Protocol::Command;
 #ifdef HFV_TESTING
+struct RecoveryCrashScope {
+    explicit RecoveryCrashScope(unsigned phase){ClassicHfsRecovery::Transaction::CrashAt(phase);}
+    ~RecoveryCrashScope(){ClassicHfsRecovery::Transaction::CrashAt(0);}
+};
 std::atomic<unsigned> listingRequests{0};
 std::atomic<HANDLE> readPauseEntered{nullptr}, readPauseRelease{nullptr};
 std::atomic<HANDLE> writePauseEntered{nullptr}, writePauseRelease{nullptr};
@@ -680,6 +684,11 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
 #endif
             case SessionCommandCode::Rename: {
                 const auto request=Protocol::DecodeRename(packet);
+#ifdef HFV_TESTING
+                const bool crash=command==SessionCommandCode::TestCrashRename;
+                // Keep the durable record on disk when simulating a lost reply.
+                RecoveryCrashScope crashScope(crash&&!strcmp(volume.Kind(),"HFS")?3:0);
+#endif
                 volume.Rename(request.id,request.parent,request.name);
 #ifdef HFV_TESTING
                 if (command == SessionCommandCode::TestCrashRename) ExitProcess(79);
@@ -706,10 +715,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                     if(!Protocol::DecodeContinue(decision,answer))throw Storage::Cancelled();
                 },{});
 #ifdef HFV_TESTING
-                struct CrashScope {
-                    explicit CrashScope(bool enabled){ClassicHfsRecovery::Transaction::CrashAt(enabled?6:0);}
-                    ~CrashScope(){ClassicHfsRecovery::Transaction::CrashAt(0);}
-                } crashScope(command==SessionCommandCode::TestCrashRemoveTree);
+                RecoveryCrashScope crashScope(command==SessionCommandCode::TestCrashRemoveTree?6:0);
 #endif
                 Data response;
                 response.put(volume.RemoveTreeAtomically(id,removal,true));

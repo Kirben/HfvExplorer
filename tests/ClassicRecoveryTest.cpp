@@ -45,11 +45,12 @@ void Put(MacBrowser::Volume& volume,bool updated,bool cancelling=false,
         for(size_t i=0;i<size;++i)output[i]=Byte(updated,fork,offset+i);
     },updated);
 }
-void VerifyFile(MacBrowser::Volume& volume,uint32_t parent,const char16_t* name,bool updated)
+void VerifyFile(MacBrowser::Volume& volume,uint32_t parent,const char16_t* name,bool updated,unsigned modified=0)
 {
     MacBrowser::Entry actual{};
-    const auto expected=Entry(updated);
-    Check(volume.FindChild(parent,name,actual),"reopened HFS image lost the expected file");
+    auto expected=Entry(updated);
+    if(modified)expected.modified=modified;
+    Check(volume.FindChild(parent,name,actual)&&actual.name==name,"reopened HFS image lost the expected file name");
     Check(actual.finder==expected.finder&&actual.created==expected.created&&actual.modified==expected.modified,
           "reopened HFS image changed Finder information or timestamps");
     for(unsigned fork=0;fork<2;++fork){
@@ -85,18 +86,18 @@ void Save(const CString& path,const Bytes& bytes)
     Check(file.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create a scratch recovery image");
     file.Write(bytes.data(),UINT(bytes.size()));
 }
-void CrashChild(const CString& image,unsigned phase,bool deleting=false)
+void CrashChild(const CString& image,unsigned phase,const wchar_t* action=L"overwrite")
 {
     wchar_t executable[MAX_PATH]{};
     const auto length=GetModuleFileNameW(nullptr,executable,MAX_PATH);
     Check(length&&length<MAX_PATH,"locate recovery test executable");
     std::wstring command=L"\""+std::wstring(executable)+L"\" --classic-recovery-child \""+
-                         VolumeCoord::Wide(image.GetString())+L"\" "+std::to_wstring(phase)+(deleting?L" delete":L" overwrite");
+                         VolumeCoord::Wide(image.GetString())+L"\" "+std::to_wstring(phase)+L" "+action;
     STARTUPINFOW startup{};
     startup.cb=sizeof(startup);
     PROCESS_INFORMATION child{};
     Check(CreateProcessW(executable,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,
-                         nullptr,nullptr,&startup,&child)!=FALSE,"start overwrite crash subprocess");
+                         nullptr,nullptr,&startup,&child)!=FALSE,"start classic recovery crash subprocess");
     CloseHandle(child.hThread);
     const auto wait=WaitForSingleObject(child.hProcess,45000);
     DWORD exit=0;
@@ -104,7 +105,7 @@ void CrashChild(const CString& image,unsigned phase,bool deleting=false)
     GetExitCodeProcess(child.hProcess,&exit);
     CloseHandle(child.hProcess);
     if(wait!=WAIT_OBJECT_0||exit!=90+phase)
-        throw HfsPlus::Error("Overwrite subprocess missed crash phase "+std::to_string(phase)+
+        throw HfsPlus::Error("Classic recovery subprocess missed crash phase "+std::to_string(phase)+
                              " (exit "+std::to_string(exit)+")");
 }
 void DeleteRecovery(const CString& root,const Bytes& original,FILE* report)
@@ -134,7 +135,7 @@ void DeleteRecovery(const CString& root,const Bytes& original,FILE* report)
         image.Format("%s\\delete-file-%u.dsk",root.GetString(),phase);
         Save(image,before);
         const auto path=VolumeCoord::Wide(image.GetString());
-        CrashChild(image,phase,true);
+        CrashChild(image,phase,L"delete");
         Check(ClassicHfsRecovery::Pending(path)&&Load(image)!=before,"file deletion did not leave recoverable sectors");
         auto volume=MacBrowser::OpenImage(path);
         Check(volume&&volume->Writable(),"file deletion did not recover writable");
@@ -195,17 +196,99 @@ void DeleteRecovery(const CString& root,const Bytes& original,FILE* report)
     fprintf(report,"PASS: classic HFS file deletion before/after commit and recursive worker crash, cancellation and retry preserve unrelated files.\n");
 }
 
+void RenameRecovery(const CString& root,const Bytes& original,FILE* report)
+{
+    const CString seed=root+"\\rename-seed.dsk";
+    Save(seed,original);
+    uint32_t document=0,bundle=0,leaf=0;
+    {
+        auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(seed.GetString()));
+        document=Find(*volume,2,u"Document");
+        const auto from=volume->MakeDirectory(2,u"From");
+        volume->MakeDirectory(2,u"To");
+        bundle=volume->MakeDirectory(from,u"Bundle");
+        Put(*volume,true,false,bundle,u"Leaf");
+        leaf=Find(*volume,bundle,u"Leaf");
+        Put(*volume,true,false,2,u"Unrelated");
+        volume->Close();
+    }
+    const auto before=Load(seed);
+    const auto verifyMove=[&](MacBrowser::Volume& volume,bool moved){
+        const auto from=Find(volume,2,u"From"),to=Find(volume,2,u"To");
+        const auto parent=moved?to:from;
+        MacBrowser::Entry other;
+        Check(Find(volume,parent,u"Bundle")==bundle&&volume.Stat(bundle).parent==parent&&
+              !volume.FindChild(moved?from:to,u"Bundle",other),"folder move did not preserve its catalog ID and correct parent");
+        Check(Find(volume,bundle,u"Leaf")==leaf,"folder move changed a child's catalog ID");
+        VerifyFile(volume,bundle,u"Leaf",true);
+        VerifyFile(volume,2,u"Unrelated",true);
+    };
+    for(const auto* action:{L"rename",L"move",L"properties"}){
+        for(unsigned phase:{2u,3u}){
+            CString image;
+            image.Format("%s\\rename-%ls-%u.dsk",root.GetString(),action,phase);
+            Save(image,before);
+            const auto path=VolumeCoord::Wide(image.GetString());
+            CrashChild(image,phase,action);
+            Check(ClassicHfsRecovery::Pending(path)&&Load(image)!=before,"rename or move left no recoverable journal");
+            auto volume=MacBrowser::OpenImage(path);
+            Check(volume&&volume->Writable(),"rename or move did not recover writable");
+            const bool committed=phase==3;
+            const bool move=wcscmp(action,L"move")==0;
+            const bool properties=wcscmp(action,L"properties")==0;
+            const auto* expected=committed&&!move?(properties?u"Properties name":u"DOCUMENT"):u"Document";
+            Check(Find(*volume,2,expected)==document,"rename changed the file's catalog ID");
+            VerifyFile(*volume,2,expected,false,committed&&properties?3500001060U:0);
+            verifyMove(*volume,committed&&move);
+            volume->Close();
+            Check(!ClassicHfsRecovery::Pending(path),"rename or move left its journal pending after recovery");
+            if(!committed)Check(Load(image)==before,"rename or move rollback did not restore every byte");
+        }
+    }
+
+    const CString image=root+"\\rename-mounted-move.dsk";
+    Save(image,before);
+    const auto path=VolumeCoord::Wide(image.GetString());
+    auto volume=MacBrowser::OpenBrowserImage(path);
+    Check(volume&&volume->Writable(),"mount classic move fixture in worker");
+    const auto pid=VolumeSession::VolumeSessionPidForTest(volume);
+    Check(pid!=0,"move fixture opened without its worker");
+    VolumeSession::CrashVolumeSessionOnRenameForTest(volume);
+    bool crashed=false;
+    try{volume->MoveHere(*volume,bundle,Find(*volume,2,u"To"),volume->Stat(bundle));}
+    catch(const HfsPlus::Error&){crashed=true;}
+    Check(crashed&&WorkerTransport::lastExitCode==93&&ClassicHfsRecovery::Pending(path),
+          "mounted move missed the durable commit checkpoint");
+    volume->Reload();
+    Check(volume->Writable()&&VolumeSession::VolumeSessionPidForTest(volume)!=pid&&
+          !ClassicHfsRecovery::Pending(path),"browser did not recover the committed move after worker exit");
+    verifyMove(*volume,true);
+    VerifyFile(*volume,2,u"Document",false);
+    fprintf(report,"PASS: classic HFS case-only and Properties renames and same-volume folder moves recover before and after commit, preserving IDs, forks, metadata and unrelated files.\n");
 }
 
-int RunClassicRecoveryChild(const char* image,unsigned phase,bool deleting)
+}
+
+int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
 {
     try{
         readonly_cd_backend_init();
         ClassicHfsRecovery::Transaction::CrashAt(phase);
         auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image));
         Check(bool(volume),"open classic HFS image in subprocess");
-        if(deleting)volume->Remove(Find(*volume,2,u"Document"));
-        else if(phase!=5)Put(*volume,true);
+        const auto document=Find(*volume,2,u"Document");
+        if(!strcmp(action,"delete"))volume->Remove(document);
+        else if(!strcmp(action,"rename"))volume->Rename(document,2,u"DOCUMENT");
+        else if(!strcmp(action,"move")){
+            const auto folder=Find(*volume,Find(*volume,2,u"From"),u"Bundle");
+            volume->MoveHere(*volume,folder,Find(*volume,2,u"To"),volume->Stat(folder));
+        }else if(!strcmp(action,"properties")){
+            hfsdirent properties{};
+            Check(volume->GetClassicProperties(document,properties),"read Properties before rename");
+            strcpy_s(properties.name,"Properties name");
+            properties.mddate+=60;
+            volume->SetClassicProperties(document,properties);
+        }else if(phase!=5)Put(*volume,true);
         volume->Close();
         return 3;
     }catch(...){return 4;}
@@ -291,6 +374,7 @@ int RunClassicRecoveryTest(const char* directory)
         }
         fprintf(report,"PASS: interrupted recovery is repeatable through a hard-link alias; cancellation restores the original bytes.\n");
         DeleteRecovery(root,original,report);
+        RenameRecovery(root,original,report);
     }catch(const std::exception& error){
         fprintf(report,"FAIL: %s\n",error.what());
         result=1;

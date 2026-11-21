@@ -221,13 +221,19 @@ public:
     }
     void SetClassicProperties(uint32_t id, const hfsdirent& entry) override {
         LegacyEngine::Scope engine(context_);
-        RootScope scope(volume_);
-        auto path=Path(id);
-        auto desired=entry;
         if(id==2)throw HfsPlus::Error("Select a file or folder below the volume root");
+        std::string path;
+        {
+            RootScope scope(volume_);
+            path=Path(id);
+        }
+        auto desired=entry;
         auto destination=path.substr(0,path.find_last_of(':')+1)+Encode(Decode(desired.name));
-        BeforeWrite();
-        Check(hfs_editattrs(volume_,path.data(),destination.data(),&desired)==0);
+        DurableMutation(path!=destination,[&](bool){
+            RootScope scope(volume_);
+            BeforeWrite();
+            Check(hfs_editattrs(volume_,path.data(),destination.data(),&desired)==0);
+        });
         paths_[id]=std::move(destination);
     }
     void ValidateEntry(const Entry& e)const override{
@@ -488,24 +494,13 @@ private:
     }
 public:
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}
-    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{LegacyEngine::Scope engine(context_);
-        auto from=dynamic_cast<Classic*>(&source);Check(from&&CanMoveFrom(source));BeforeWrite();RootScope scope(volume_);
-        auto old=from->Path(id),path=Path(parent);if(path.back()!=':')path+=':';path+=Encode(entry.name);
-        Check(hfs_rename(volume_,const_cast<char*>(old.c_str()),const_cast<char*>(path.c_str()))==0);
+    void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{
+        auto* from=dynamic_cast<Classic*>(&source);
+        Check(from&&CanMoveFrom(source));
+        RenameFrom(*from,id,parent,entry.name);
     }
-    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{LegacyEngine::Scope engine(context_);
-        RootScope scope(volume_);
-        auto from=Path(id),to=Path(parent);
-        if(to.back()!=':')to+=':';
-        to+=Encode(name);
-        hfsdirent source{},destination{};
-        Check(hfs_stat(volume_,from.data(),&source)==0);
-        if(hfs_stat(volume_,to.data(),&destination)==0) {
-            if(source.cnid!=destination.cnid)throw HfsPlus::Error("Rename destination already exists");
-        }else if(errno!=ENOENT)Check(false);
-        BeforeWrite();
-        Check(hfs_rename(volume_,from.data(),to.data())==0);
-        paths_[id]=std::move(to);
+    void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
+        RenameFrom(*this,id,parent,name);
     }
     void Remove(uint32_t id)override{
         LegacyEngine::Scope engine(context_);
@@ -532,6 +527,30 @@ public:
         return handled;
     }
 private:
+    void RenameFrom(Classic& source,uint32_t id,uint32_t parent,const std::u16string& name){
+        LegacyEngine::Scope engine(context_);
+        if(id==2)throw HfsPlus::Error("Cannot rename or move the classic HFS volume root");
+        std::string from,to;
+        {
+            RootScope scope(volume_);
+            from=source.Path(id);
+            to=Path(parent);
+            if(to.back()!=':')to+=':';
+            to+=Encode(name);
+            hfsdirent current{},destination{};
+            Check(hfs_stat(volume_,from.data(),&current)==0);
+            if(hfs_stat(volume_,to.data(),&destination)==0){
+                if(current.cnid!=destination.cnid)
+                    throw HfsPlus::Error("Rename or move destination already exists");
+            }else if(errno!=ENOENT)Check(false);
+        }
+        DurableMutation(true,[&](bool){
+            RootScope scope(volume_);
+            BeforeWrite();
+            Check(hfs_rename(volume_,from.data(),to.data())==0);
+        });
+        source.paths_[id]=std::move(to);
+    }
     void RemoveEntry(uint32_t id){
         RootScope scope(volume_);
         auto path=Path(id);
