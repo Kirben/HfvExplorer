@@ -1725,6 +1725,22 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
                                    const std::set<uint64_t>& removeStreams,const CatalogRecords& extentTree,
                                    std::set<uint64_t>& retired)
 {
+    if(removeStreams.empty())return;
+    // Extent reference counts account for physical ranges, not for two
+    // catalog objects claiming the same logical stream ID.
+    for(const auto& record:catalog){
+        const auto key=Le64(record.key.data());
+        if((key&IdMask)==inode)continue;
+        if(key>>60==3){
+            Check(record.value.size()>=16&&!removeStreams.count(Le64(record.value.data()+8)),
+                  "APFS edit would retire another inode's data stream");
+        }else if(key>>60==4){
+            Check(record.value.size()>=4,"Invalid APFS attribute record");
+            if((Le16(record.value.data())&3)==1)
+                Check(record.value.size()==52&&!removeStreams.count(Le64(record.value.data()+4)),
+                      "APFS edit would retire another inode's attribute stream");
+        }
+    }
     // The shared-extent path reconciles references against the edited catalog.
     if(extentTree.verifiedPhysicalReferences)return;
     std::map<uint64_t,uint64_t> owned;
@@ -2871,6 +2887,7 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
     auto extents=ReadExtentTree(source,container,Le64(volume.data()+144),historical);
     const auto snapshots=Le64(volume.data()+152);
     const auto snapshot=ReadSnapshotAllocations(source,container,volume,volumeMap,catalog,extents);
+    if(!historical)ValidateSharedFileExtents(catalog,extents.records,bool(container.writeCipher));
     std::vector<uint64_t> live{containerMap.headerBlock,containerMap.rootBlock,address,
                                volumeMap.headerBlock,volumeMap.rootBlock};
     live.insert(live.end(),containerMap.leaves.begin(),containerMap.leaves.end());
@@ -3160,10 +3177,8 @@ CatalogWritePlan PrepareCatalogMutation(
             return record.key.size()==8&&Le64(record.key.data())>>60==3&&record.value.size()>=56&&
                    (Le64(record.value.data()+48)&cloneFlags);
         }));
-    if(liveClones){
-        ValidateSharedFileExtents(existing,extentTree.records);
-        extentTree.verifiedPhysicalReferences=true;
-    }
+    if(!historical)ValidateSharedFileExtents(existing,extentTree.records,bool(current.writeCipher));
+    if(liveClones)extentTree.verifiedPhysicalReferences=true;
     const bool reconcileReferences=extentTree.verifiedPhysicalReferences;
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");

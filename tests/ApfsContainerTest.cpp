@@ -520,7 +520,8 @@ void CheckpointWrites(const std::string& root,FILE* report)
     auto bitmapData=fragmentedBase.data()+Apfs::Le64(chunk+64)*4096;
     constexpr uint64_t blocker=1024,smallId=16;
     uint64_t oldBlock=0;
-    const auto updateTree=[&](uint64_t address,uint32_t flags,auto change){
+    const auto updateTree=[&](uint64_t address,uint32_t flags,auto change,
+                              const std::optional<Apfs::WriterDisk::Record>& extra={}){
         auto block=fragmentedBase.data()+address*4096;
         const Apfs::Node node(Bytes(block,block+4096),true,{});
         std::vector<Apfs::WriterDisk::Record> records;
@@ -530,15 +531,57 @@ void CheckpointWrites(const std::string& root,FILE* report)
                                Bytes(view.value.data,view.value.data+view.value.size)});
             change(records.back());
         }
+        if(extra){
+            const auto sortKey=[](const auto& record){
+                const auto raw=Apfs::Le64(record.key.data());
+                return std::pair{raw&((uint64_t(1)<<60)-1),raw>>60};
+            };
+            const auto slot=std::lower_bound(records.begin(),records.end(),*extra,[&](const auto& a,const auto& b){
+                return sortKey(a)<sortKey(b);
+            });
+            records.insert(slot,*extra);
+        }
         const auto encoded=Apfs::WriterDisk::EncodeLeaf(records,flags);
         memcpy(block+32,encoded.data()+32,4096-32);
         Seal(fragmentedBase,address*4096,4096);
     };
+    {
+        constexpr char attributeName[]="user.shared-stream";
+        Apfs::WriterDisk::Record attribute{Bytes(10+sizeof(attributeName)),Bytes(52)};
+        Little(attribute.key.data(),(uint64_t(4)<<60)|2,8);
+        Little(attribute.key.data()+8,sizeof(attributeName),2);
+        memcpy(attribute.key.data()+10,attributeName,sizeof(attributeName));
+        Little(attribute.value.data(),1,2);
+        Little(attribute.value.data()+2,48,2);
+        Little(attribute.value.data()+4,smallId,8);
+        Little(attribute.value.data()+12,small.Size(),8);
+        Little(attribute.value.data()+20,4096,8);
+        updateTree(*catalogBlock,0x40,[](auto&){},attribute);
+        CheckpointFaultImage aliased(fragmentedBase);
+        bool rejected=false;
+        try{Apfs::DeleteEntry(aliased,*dataCheckpoint,2,smallId,controlJob,0,true);}
+        catch(const Error& error){rejected=std::string(error.what())=="APFS edit would retire another inode's attribute stream";}
+        Check(rejected&&!aliased.event&&aliased.durable==fragmentedBase,
+              "APFS retired a logical stream referenced by another inode");
+        const auto at=*catalogBlock*4096;
+        std::copy_n(fragmentationSeed.durable.data()+at,4096,fragmentedBase.data()+at);
+    }
     updateTree(*catalogBlock,0x40,[&](auto& record){
         if(Apfs::Le64(record.key.data())!=((uint64_t(8)<<60)|smallId))return;
         oldBlock=Apfs::Le64(record.value.data()+8);
         Little(record.value.data()+8,blocker,8);
     });
+    {
+        // The catalog points at a free block while the physical extent tree
+        // still reserves the original block. An unrelated edit must not allocate it.
+        CheckpointFaultImage inconsistent(fragmentedBase);
+        Reject([&]{Apfs::InspectFreeQueueAllocation(inconsistent,*dataCheckpoint);},
+               "APFS writable preflight accepted an unaccounted-for file extent");
+        Reject([&]{Apfs::CreateCatalogDirectory(inconsistent,*dataCheckpoint,2,u"Unrelated",controlJob,{},nullptr,nullptr,true);},
+               "APFS allowed an unrelated write with an unaccounted-for file extent");
+        Check(!inconsistent.event&&inconsistent.durable==fragmentedBase,
+              "APFS modified a disk with inconsistent extent references");
+    }
     bool referenceMoved=false;
     updateTree(extentBlock,0x50,[&](auto& record){
         if(Apfs::Le64(record.value.data()+8)!=smallId)return;
@@ -2110,7 +2153,7 @@ void ObjectMapFixture(Memory& disk)
 }
 
 enum class Symlink { None, Valid, Malformed };
-Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false,Symlink symlink=Symlink::None,bool badSiblingMap=false)
+Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=false,Symlink symlink=Symlink::None,bool badSiblingMap=false,bool duplicateDirectory=false,bool ambiguousName=false)
 {
     auto disk=Raw();
     constexpr size_t size=4096;
@@ -2140,7 +2183,7 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
 
     auto catalog=mapRoot+size;
     Header(catalog,2048,5,2,14);
-    const unsigned records=8+(attributes?3:0)+(links?13:0)+(compressed?1:0)-(symlink!=Symlink::None?2:0);
+    const unsigned records=8+unsigned(duplicateDirectory)+2*unsigned(ambiguousName)+(attributes?3:0)+(links?13:0)+(compressed?1:0)-(symlink!=Symlink::None?2:0);
     Little(catalog+32,3,2);Little(catalog+36,records,4);Little(catalog+42,records*8,2);
     end=catalog+size-40;
     Little(end+4,size,4);
@@ -2187,8 +2230,11 @@ Memory BrowseFixture(bool attributes=false,bool links=false,bool compressed=fals
         record(stream,8,std::move(key),std::move(value));
     };
     inode(2,true,0);drec(2,320,"Folder");
+    if(duplicateDirectory)drec(2,320,"Folder alias");
+    if(ambiguousName)drec(2,321,"folder");
     inode(320,true,0);drec(320,330,"Long \xc3\xa9.txt",links?350:0);
     if(links){drec(320,330,"Alias A",351);drec(320,340,"Alias B",352);drec(320,340,"Other",353);}
+    if(ambiguousName)inode(321,true,0);
     auto siblingLink=[&](uint64_t inode,uint64_t sibling,const char* name){
         const auto length=strlen(name)+1;
         Bytes key(8),value(10+length);
@@ -5128,6 +5174,13 @@ int RunApfsContainerTest(const char* directory)
             Check(CopyFileW(extracted.c_str(),renamed.c_str(),TRUE)!=FALSE,"Could not copy the macOS snapshot rename fixture");
             RenameVolumeWithSnapshot(renamed,report,u"Folder",u"sample.txt");
             SnapshotLiveWrites(extracted,report,u"Folder",u"sample.txt");
+        }
+        for(const bool ambiguousName:{false,true}){
+            std::unique_ptr<Source> source=std::make_unique<Memory>(
+                BrowseFixture(false,false,false,Symlink::None,false,!ambiguousName,ambiguousName));
+            auto mounted=Apfs::Open(source,"ambiguous-directory-fixture");
+            Check(bool(mounted),"Missing ambiguous APFS directory fixture");
+            Reject([&]{mounted->List(2);},"APFS accepted ambiguous directory entries");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");

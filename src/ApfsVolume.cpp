@@ -708,7 +708,8 @@ private:
         Check(folder.entry.directory,"The APFS entry is not a directory");
         if(!listings.count(parent)){
             std::vector<Item> children;
-            std::set<std::u16string> names;
+            std::set<std::u32string> names;
+            std::set<uint64_t> unlinkedInodes;
             const auto& mounted=mounts[folder.mount];
             if(mounted.locked){
                 Check(mounted.softwareEncryption,"This APFS volume does not support software unlocking");
@@ -725,8 +726,13 @@ private:
                 auto inode=LoadInode(catalog,folder.mount,oid);
                 uint64_t aliasId=0,siblingId=0;
                 auto name=Apfs::Name(record.key.data+header,nameLength);
-                Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos&&names.insert(name).second,
-                      "Invalid or duplicate APFS directory name");
+                Check(name!=u"."&&name!=u".."&&name.find(u'/')==std::u16string::npos,
+                      "Invalid APFS directory name");
+                auto nameKey=mounted.hashedNames?NormalizedName(name,!mounted.sensitive):
+                                                  std::u32string(name.begin(),name.end());
+                Check(names.insert(std::move(nameKey)).second,"Ambiguous APFS directory name");
+                Check(inode.entry.hardLink||unlinkedInodes.insert(oid).second,
+                      "APFS directory entries repeat an inode without hard-link records");
                 if(inode.entry.directory){
                     for(uint32_t id=parent;id>=2;id=At(id).entry.parent)
                         Check(At(id).oid!=oid,"Circular APFS directory");
