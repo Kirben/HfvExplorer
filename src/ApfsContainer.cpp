@@ -428,10 +428,12 @@ uint64_t SetCatalogAttributes(Source& source,const Container& expected,uint64_t 
 
 uint64_t CreateCatalogSymlink(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
                               const HfsPlus::Bytes& target,Storage::Job& job,std::optional<FileDates> dates,
-                              const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external)
+                              const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external,
+                              uint64_t replacedFile)
 {
+    Check(!replacedFile||external,"APFS symbolic-link replacement requires the external catalog writer");
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::SymbolicLink,nullptr,dates,&finder,
-                                                locked,&attributes,nullptr,nullptr,&target,external};
+                                                locked,&attributes,nullptr,nullptr,&target,external,replacedFile};
     return Commit(source,expected,job,&request);
 }
 

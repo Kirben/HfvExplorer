@@ -1006,6 +1006,10 @@ public:
         },true);
     }
     void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
+    bool CanReplaceFileWithSymbolicLink(const Entry& entry)const override{
+        return writable&&limitedEdits&&!entry.directory&&!entry.symbolicLink&&
+               !entry.hardLink&&!entry.protectedFile&&entry.readError.empty();
+    }
     void ValidateSymbolicLink(const Entry& entry,const Bytes& target)const override{
         Check(!entry.directory&&!entry.hardLink&&!entry.compressed&&!entry.forks[0].size&&!entry.forks[1].size,
               "Unsupported APFS symbolic link metadata");
@@ -1019,20 +1023,23 @@ public:
         ValidateSymbolicLink(entry,target);
         WriteMount([&]{
             const auto parentOid=At(parent).oid;
-            CommitMutation(parent,0,job,[&](auto& job){
-                if(!entry.expectedDestinationIdentity.empty()){
-                    Entry child;
-                    if(FindChild(parent,entry.name,child)){
-                        const auto& destination=At(child.id);
-                        Check(destination.symlink&&!child.protectedFile&&child.identity==entry.expectedDestinationIdentity,
-                              "The APFS symbolic link destination changed after overwrite approval");
-                        return ReplaceCatalogSymlink(*source,WriteTarget(parent),parentOid,destination.oid,target,job,
-                                                     CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
-                    }
-                    throw Error("The APFS symbolic link destination disappeared after overwrite approval");
+            Entry child;
+            uint64_t replacedFile=0;
+            if(!entry.expectedDestinationIdentity.empty()){
+                Check(FindChild(parent,entry.name,child)&&!child.protectedFile&&
+                      child.identity==entry.expectedDestinationIdentity,
+                      "The APFS symbolic link destination changed after overwrite approval");
+                if(!child.symbolicLink){
+                    Check(CanReplaceFileWithSymbolicLink(child),"The APFS symbolic link cannot replace this entry");
+                    replacedFile=At(child.id).oid;
                 }
+            }
+            CommitMutation(parent,replacedFile?child.id:0,job,[&](auto& job){
+                if(child.symbolicLink)
+                    return ReplaceCatalogSymlink(*source,WriteTarget(parent),parentOid,At(child.id).oid,target,job,
+                                                 CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
                 return CreateCatalogSymlink(*source,WriteTarget(parent),parentOid,entry.name,target,job,
-                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
+                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,replacedFile);
             });
         },true);
     }

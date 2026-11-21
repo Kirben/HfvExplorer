@@ -2880,6 +2880,12 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(record.key.size()>=8&&(Le64(record.key.data())&IdMask)<entryId,
                   "APFS catalog contains an object at or after its next ID");
         }
+        if(create->replacedFile){
+            Check(symlink&&fileCount,"Invalid APFS symbolic-link replacement");
+            removedKind=DeleteExternalEntry(source,catalog,{create->parent,create->replacedFile},
+                                            time,extentTree,externalRetired);
+            Check(*removedKind==CatalogKind::RegularFile,"APFS symbolic-link replacement requires a regular file");
+        }
         TouchExternalParent(catalog,create->parent,time,1);
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,fold,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name,fold);
@@ -3011,7 +3017,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        if(externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
+        if(externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;
@@ -3156,7 +3162,10 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,176,nextAvailable,8);
     if(create){
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
-        else if(create->kind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount+1,8);
+        else if(create->kind==CatalogKind::SymbolicLink){
+            Set(volume,200,symlinkCount+1,8);
+            if(removedKind)Set(volume,184,fileCount-1,8);
+        }
         else Set(volume,184,fileCount+1,8);
     }else if(externalDelete&&remove->recursive){
         Check(deletedFiles<=fileCount&&deletedFolders<=directoryCount&&deletedSymlinks<=symlinkCount,

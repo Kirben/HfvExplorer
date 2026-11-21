@@ -583,7 +583,8 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
   if(plan.linkTarget){
-   Check(!exists||(!found.protectedFile&&dst.SymbolicLinkTarget(found.id).has_value()),
+   Check(!exists||(!found.protectedFile&&(dst.SymbolicLinkTarget(found.id).has_value()||
+                                        dst.CanReplaceFileWithSymbolicLink(found))),
          "The symbolic link destination is locked or is not a symbolic link");
    dst.ValidateSymbolicLink(plan.entry,*plan.linkTarget);
   }else if(plan.entry.directory&&exists){Check(found.directory,"A file blocks the destination folder");Check(!found.protectedFile&&found.readError.empty(),"The destination folder cannot be merged");ValidatePlans(dst,plan.children,found.id,true);}

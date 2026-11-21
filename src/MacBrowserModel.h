@@ -82,6 +82,7 @@ public:
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
     virtual std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t){return {};}
+    virtual bool CanReplaceFileWithSymbolicLink(const Entry&)const{return false;}
     virtual void ValidateSymbolicLink(const Entry&,const HfsPlus::Bytes&)const{
         throw HfsPlus::Error("The destination cannot copy symbolic links");
     }

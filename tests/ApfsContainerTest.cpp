@@ -4207,6 +4207,43 @@ int RunApfsContainerTest(const char* directory)
             authentic->Read(originalSmall.id,0,0,originalBytes.data(),originalBytes.size());
             published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
             Check(editedBytes==originalBytes,"APFS timestamp edit changed the target file contents");
+            auto unlockedSmall=small;
+            unlockedSmall.protectedFile=false;
+            published->SetBasicMetadata(small.id,unlockedSmall);
+            symlinkToCopy.name=small.name;
+            importSource->PutSymbolicLink(2,symlinkToCopy,dangling,createLink);
+            MacBrowser::Entry newLink;
+            Check(importSource->FindChild(2,small.name,newLink),"Missing APFS symbolic-link replacement source");
+            const auto copyLink=[&](Storage::ConflictChoice choice){
+                auto copy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                    {FileOperations::Location::Mounted(importSource,newLink.id)},FileOperations::Location::Mounted(published,2)});
+                const auto start=GetTickCount();
+                bool prompted=false;
+                while(!copy.Job()->done()){
+                    Check(GetTickCount()-start<15000,"APFS symbolic-link file replacement timed out");
+                    const auto [id,message]=copy.Job()->conflictState();
+                    if(!message.empty()){
+                        prompted=true;
+                        copy.Job()->resolve(id,choice);
+                    }
+                    Sleep(5);
+                }
+                Check(prompted,"APFS symbolic-link file replacement skipped overwrite confirmation");
+                return copy.Job()->result();
+            };
+            copyLink(Storage::ConflictChoice::Cancel);
+            published->Read(small.id,0,0,editedBytes.data(),editedBytes.size());
+            Check(editedBytes==originalBytes&&!published->Stat(small.id).symbolicLink,
+                  "Cancelling APFS symbolic-link replacement changed the regular file");
+            const auto completed=copyLink(Storage::ConflictChoice::Replace);
+            Check(!completed.code,completed.message.c_str());
+            MacBrowser::Entry converted;
+            Check(published->FindChild(2,small.name,converted)&&converted.id!=small.id&&converted.symbolicLink&&
+                  !converted.forks[0].size&&!converted.forks[1].size&&
+                  published->SymbolicLinkTarget(converted.id)==std::optional<Bytes>(dangling),
+                  "APFS replacement did not publish the symbolic link");
+            Reject([&]{published->Stat(small.id);},"APFS replacement retained the old file selection");
+            fprintf(report,"PASS: macOS APFS symbolic-link replacement of a regular file, with overwrite confirmation and cancellation.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
