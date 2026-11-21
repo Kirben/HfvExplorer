@@ -499,22 +499,25 @@ void CFileTypeMapping::OnFiletypeExportSelected()
 
 BOOL CFileTypeMapping::OnInitDialog() 
 {
-  WORD DlgWidthUnits;
-	INT stops[10];
 	BOOL retval = TRUE;
-
-  DlgWidthUnits = LOWORD(GetDialogBaseUnits()) / 4;
-
 	m_enabled = m_enabled_param;
 	CDialog::OnInitDialog();
-	stops[0] = 0;
-	stops[1] = DlgWidthUnits * 20;
-	stops[2] = DlgWidthUnits * 31;
-	stops[3] = DlgWidthUnits * 49;
-	stops[4] = DlgWidthUnits * 71;
-	stops[5] = DlgWidthUnits * 86;
-	stops[6] = DlgWidthUnits * 200; // invisible
-	m_list.SetTabStops( 7, stops );
+
+	// Keep the tab-delimited row format used by the editor and FTM files.
+	// Set the visible stops from the heading positions in the current DPI.
+	const int headers[] = {IDC_FILETYPE_COL_STRIP, IDC_FILETYPE_COL_TYPE,
+		IDC_FILETYPE_COL_CREATOR, IDC_FILETYPE_COL_MAC_TO_WIN, IDC_FILETYPE_COL_WIN_TO_MAC};
+	CRect listRect;
+	m_list.GetWindowRect(&listRect);
+	const int baseX = LOWORD(GetDialogBaseUnits());
+	int stops[_countof(headers) + 1];
+	for (int i = 0; i < _countof(headers); ++i) {
+		CRect heading;
+		GetDlgItem(headers[i])->GetWindowRect(&heading);
+		stops[i] = MulDiv(heading.left - listRect.left - 2, 4, baseX);
+	}
+	stops[_countof(headers)] = MulDiv(listRect.Width() + baseX, 4, baseX);
+	m_list.SetTabStops(_countof(stops), stops);
 	import( make_default_fname() );
 
 	int j, i, count = m_input_types.GetSize(), first_index = m_list.GetCount();
@@ -878,18 +881,18 @@ void CFileTypeMapping::OnFiletypeHelp()
 	AfxMessageBox(
 		"These settings apply only when the copy mode is \"raw\" data or resource.\r\n"
 		"\r\n"
-		"If \"Mapping enabled\" is not selected, no mappings are performed (except those made by other copy modes).\r\n"
+		"If \"Enable file type mappings for raw copies\" is not selected, no mappings are performed (except those made by other copy modes).\r\n"
 		"\r\n"
 		"\"Export All/Selected\": Use these to share your definitions with other people. Saves FTM files.\r\n"
 		"\r\n"
 		"\"Import\": combines FTM files with the current list. If there is a conflict, old definition is overwritten -- no questions asked.\r\n"
 		"\r\n"
-		"\"Strip\": removes (strips) the DOS extension when a file is copied to HFS volume. Potential pitfall: take care not to copy two or more files which would degenerate to the same name ... only one of them would remain. Sorry about that. Will be fixed some time in future.\r\n"
+		"\"Remove the Windows extension when copying to Mac\" removes the extension from the destination name. Potential pitfall: take care not to copy two or more files which would degenerate to the same name ... only one of them would remain. Sorry about that. Will be fixed some time in future.\r\n"
 		"\r\n"
 		"Note that you can have multiple mappings for one dos extension in direction HFS->DOS, but only one in direction DOS->HFS. "
 		"Similarly, many dos extensions may map to the same type/creator pair, but in the direction HFS->DOS only one type/creator pair is allowed.\r\n"
 		"\r\n"
-		"If the currently selected item conflicts with some other item, you will see text CONFLICT at the top of the dialog. "
+		"If the currently selected item conflicts with some other item, you will see text CONFLICT beside Selected mapping. "
 		"Typically you'll see this after every DUPLICATE command until you change the new line.\r\n"
 		"Conflicts are removed when you restart the program or open the dialog again.\r\n"
 		"\r\n"

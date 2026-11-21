@@ -8,6 +8,7 @@
 #include "HfsPlusDialogs.h"
 #include "MetadataDialogs.h"
 #include "DynCopyModeSelect.h"
+#include "FileTypeMapping.h"
 #include "MacBrowserModel.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -410,6 +411,67 @@ int RunHfsPlusUiTest(const char *directory) {
             }
             editor.DestroyWindow();
         }
+        struct MappingDialog : CFileTypeMapping {
+            explicit MappingDialog(CWnd *parent) : CFileTypeMapping(parent) {}
+            using CFileTypeMapping::export_mappings;
+            using CFileTypeMapping::import;
+            using CFileTypeMapping::set_item;
+        };
+        MappingDialog mappings(&owner);
+        require(mappings.Create(IDD_FILETYPE_MAPPINGS, &owner) != FALSE,
+                "Raw Copy File Type Mappings dialog creation");
+        require(Text(mappings.m_hWnd, IDC_FILETYPE_ENABLED) == L"&Enable file type mappings for raw copies" &&
+                Text(mappings.m_hWnd, IDC_FILETYPE_COL_MAC_TO_WIN) == L"Mac to Windows" &&
+                Text(mappings.m_hWnd, IDC_FILETYPE_COL_WIN_TO_MAC) == L"Windows to Mac" &&
+                Text(mappings.m_hWnd, IDC_FILETYPE_SELECT_ALL2) == L"C&lear Selection",
+                "Raw copy mapping controls or column headings changed");
+        mappings.m_list.ResetContent();
+        mappings.set_item(0, "TXT", "TEXT", "ttxt", TRUE, TRUE, FALSE, "Example, with comma", FALSE);
+        mappings.set_item(1, "BIN", "BINA", "test", FALSE, FALSE, TRUE, "Second rule", FALSE);
+        const auto pressMapping = [&](int id) {
+            mappings.SendMessage(WM_COMMAND, MAKEWPARAM(id, BN_CLICKED),
+                                 reinterpret_cast<LPARAM>(mappings.GetDlgItem(id)->m_hWnd));
+        };
+        pressMapping(IDC_FILETYPE_SELECT_ALL);
+        require(mappings.m_list.GetSelCount() == 2 &&
+                !mappings.GetDlgItem(IDC_FILETYPE_COMMENT)->IsWindowEnabled(),
+                "Raw copy mapping multiselection");
+        CString allMappings = CString(directory) + "\\all-mappings.ftm";
+        CString selectedMappings = CString(directory) + "\\selected-mappings.ftm";
+        mappings.export_mappings(allMappings, FALSE);
+        pressMapping(IDC_FILETYPE_SELECT_ALL2);
+        require(mappings.m_list.GetSelCount() == 0 &&
+                !mappings.GetDlgItem(IDC_FILETYPE_EXPORT_SELECTED)->IsWindowEnabled(),
+                "Raw copy mapping selection cleared");
+        mappings.m_list.SetCaretIndex(0);
+        mappings.m_list.SetSel(0);
+        mappings.SendMessage(WM_COMMAND, MAKEWPARAM(IDC_FILETYPE_LIST, LBN_SELCHANGE),
+                             reinterpret_cast<LPARAM>(mappings.m_list.m_hWnd));
+        require(Text(mappings.m_hWnd, IDC_FILETYPE_DOS) == L"TXT" &&
+                Text(mappings.m_hWnd, IDC_FILETYPE_TYPE) == L"TEXT" &&
+                Text(mappings.m_hWnd, IDC_FILETYPE_CREATOR) == L"ttxt" &&
+                Text(mappings.m_hWnd, IDC_FILETYPE_COMMENT) == L"Example, with comma" &&
+                mappings.IsDlgButtonChecked(IDC_FILETYPE_STRIP) == BST_CHECKED &&
+                mappings.IsDlgButtonChecked(IDC_FILETYPE_FAT2HFS) == BST_CHECKED &&
+                mappings.IsDlgButtonChecked(IDC_FILETYPE_HFS2FAT) == BST_UNCHECKED,
+                "Raw copy mapping editor lost rule fields");
+        mappings.export_mappings(selectedMappings, TRUE);
+        CString firstRule, secondRule, importedRule;
+        mappings.m_list.GetText(0, firstRule);
+        mappings.m_list.GetText(1, secondRule);
+        mappings.m_list.ResetContent();
+        mappings.import(selectedMappings);
+        mappings.m_list.GetText(0, importedRule);
+        require(mappings.m_list.GetCount() == 1 && importedRule == firstRule,
+                "Selected FTM export and import changed the rule");
+        mappings.m_list.ResetContent();
+        mappings.import(allMappings);
+        mappings.m_list.GetText(0, importedRule);
+        require(mappings.m_list.GetCount() == 2 && importedRule == firstRule,
+                "Export All and import lost a mapping");
+        mappings.m_list.GetText(1, importedRule);
+        require(importedRule == secondRule, "Export All and import changed the second rule");
+        mappings.DestroyWindow();
         CDynCopyModeSelect mode(&owner);
         mode.m_outcopy=0;
         mode.m_copy_mode=7;
