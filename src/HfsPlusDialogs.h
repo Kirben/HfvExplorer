@@ -24,5 +24,6 @@ void ManageApfsSnapshots(CWnd*,std::shared_ptr<MacBrowser::Volume> selected);
 void HfvUnicodeNameEdit(HWND,int);
 bool EditWindowsName(CWnd *parent, std::wstring &name);
 bool EditMacVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume);
+bool EditApfsVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume);
 
 bool SelectHfsPlusExternalJournal(CWnd*,std::wstring&,const std::string&);

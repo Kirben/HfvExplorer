@@ -611,7 +611,7 @@ bool MainMacBrowser::RenameApfsVolume()
     auto volume=state_->mounts[index].volume;
     std::wstring name;
     if(!Run(session_,[&](Storage::Job&){name=Wide(volume->Stat(root).name);})||
-       !EditMacVolumeName(session_.Owner(),name,*volume))return false;
+       !EditApfsVolumeName(session_.Owner(),name,*volume))return false;
     return Run(session_,[&](Storage::Job& job){Apfs::RenameMountedVolume(*volume,root,U16(name),job);});
 }
 bool MainMacBrowser::CanRestoreSnapshotSelection()const

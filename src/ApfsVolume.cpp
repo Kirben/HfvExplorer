@@ -472,11 +472,11 @@ public:
             origin.path=files.front().first;
         }
     }
-    std::vector<std::u16string> SnapshotNames(){
+    std::vector<std::u16string> SnapshotNames(std::u16string* volumeName=nullptr){
         return Access([&]{
             Check(writable&&source->Writable()&&container.volumes.size()==1&&!mounts.front().locked&&
                   !mounts.front().cipher,"Snapshot management requires a writable unencrypted single-volume APFS image");
-            return ListSnapshotNames(*source,container);
+            return ListSnapshotNames(*source,container,volumeName);
         });
     }
     bool CanRestoreFolder(uint32_t id){
@@ -1678,7 +1678,7 @@ LockedVolume::LockedVolume(bool again,std::wstring passwordHint)
     :HfsPlus::Error(again?"The password did not unlock the APFS volume":LockedMessage),
      retry(again),hint(std::move(passwordHint)){}
 
-std::vector<std::u16string> ListSnapshotNames(Source& source,const Container& container)
+std::vector<std::u16string> ListSnapshotNames(Source& source,const Container& container,std::u16string* volumeName)
 {
     Check(!container.offset&&container.volumes.size()==1,"Snapshot management requires a single-volume raw APFS image");
     const auto oid=container.volumes.front();
@@ -1688,6 +1688,7 @@ std::vector<std::u16string> ListSnapshotNames(Source& source,const Container& co
     const auto bytes=ReadObject(source,container,*address,oid,container.transaction,13);
     const auto live=ReadVolume(bytes,oid);
     Check(!live.locked,"Snapshot management requires an unencrypted APFS volume");
+    if(volumeName)*volumeName=live.name;
     std::vector<Snapshot> snapshots;
     if(live.snapshotTree){
         std::set<uint64_t> visited;
@@ -1700,11 +1701,11 @@ std::vector<std::u16string> ListSnapshotNames(Source& source,const Container& co
     return names;
 }
 
-std::vector<std::u16string> MountedSnapshotNames(MacBrowser::Volume& volume)
+std::vector<std::u16string> MountedSnapshotNames(MacBrowser::Volume& volume,std::u16string* volumeName)
 {
     auto* mounted=dynamic_cast<Volume*>(&volume);
     Check(mounted!=nullptr,"Select an APFS image");
-    return mounted->SnapshotNames();
+    return mounted->SnapshotNames(volumeName);
 }
 
 std::vector<std::u16string> ChangeMountedSnapshot(MacBrowser::Volume& volume,const std::u16string& name,bool create,Storage::Job& job)

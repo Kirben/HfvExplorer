@@ -28,7 +28,7 @@ struct CheckpointPublicationUncertain : HfsPlus::Error {
 // Republish the current state at a new transaction ID. The caller must hold
 // exclusive writable access to an ordinary, raw image for the whole operation.
 uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Job&);
-std::vector<std::u16string> ListSnapshotNames(HfsPlus::Source&,const Container&);
+std::vector<std::u16string> ListSnapshotNames(HfsPlus::Source&,const Container&,std::u16string* volumeName=nullptr);
 uint64_t CreateSnapshot(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
 uint64_t DeleteSnapshot(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
 uint64_t RenameVolume(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);

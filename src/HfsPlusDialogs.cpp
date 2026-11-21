@@ -117,13 +117,18 @@ class NameDialog : public CDialog {
     std::wstring value;
     const MacBrowser::Volume* volume = nullptr;
     bool windows = false;
-    explicit NameDialog(CWnd *p) : CDialog(IDD_HPLUS_NAME, p) {}
+    explicit NameDialog(CWnd *p,UINT resource=IDD_HPLUS_NAME)
+        : CDialog(resource,p),selectName(resource==IDD_APFS_RENAME_VOLUME) {}
+  private:
+    const bool selectName;
+  public:
     BOOL OnInitDialog() override {
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd, IDC_HPLUS_NAME);
         if(windows)SetWindowText("Rename");
         SetDlgItemTextW(m_hWnd, IDC_HPLUS_NAME, value.c_str());
         SendDlgItemMessage(IDC_HPLUS_NAME, EM_SETLIMITTEXT, 255);
+        if(selectName)SendDlgItemMessage(IDC_HPLUS_NAME, EM_SETSEL, 0, -1);
         return TRUE;
     }
     void OnOK() override {
@@ -226,6 +231,15 @@ bool EditWindowsName(CWnd *parent, std::wstring &name) {
 bool EditMacVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume) {
  NameDialog dialog(parent);dialog.value=name;dialog.volume=&volume;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
+}
+bool EditApfsVolumeName(CWnd *parent,std::wstring& name,const MacBrowser::Volume& volume)
+{
+    NameDialog dialog(parent,IDD_APFS_RENAME_VOLUME);
+    dialog.value=name;
+    dialog.volume=&volume;
+    if(dialog.DoModal()!=IDOK)return false;
+    name=dialog.value;
+    return true;
 }
 namespace {
 class FormatMfsSource final : public MfsSource {
@@ -330,6 +344,7 @@ void FormatHfsPlusImage(CWnd *parent,BrowserSession& session) {
                                 options.kind,options.journaled,options.mfs,options.dc42,options.expanded,options.apfs});
 }
 #ifdef HFV_TESTING
+static void VerifyApfsDialogs(CWnd& owner);
 int RunHfsPlusUiTest(const char *directory) {
     if (!CreateDirectoryA(directory, nullptr))
         return 2;
@@ -354,6 +369,8 @@ int RunHfsPlusUiTest(const char *directory) {
         require(IsWindowUnicode(::GetDlgItem(name.m_hWnd, IDC_HPLUS_NAME)) != FALSE, "Name field is ANSI");
         require(Text(name.m_hWnd, IDC_HPLUS_NAME) == name.value, "Unicode name round trip");
         name.DestroyWindow();
+        VerifyApfsDialogs(owner);
+        fprintf(report,"PASS: APFS rename and snapshot labels, Unicode, selection and button states.\n");
         FormatDialog format(&owner);
         require(format.Create(IDD_HPLUS_FORMAT, &owner) != FALSE, "Format dialog creation");
         require(IsWindowUnicode(::GetDlgItem(format.m_hWnd, IDC_HPLUS_NAME)) &&
@@ -584,7 +601,7 @@ class ApfsSnapshotsDialog final : public CDialog {
     std::unique_ptr<HfsPlus::Source> source;
     Apfs::Container checkpoint;
     std::vector<std::u16string> names;
-    std::wstring imageName;
+    std::wstring volumeName;
     void UpdateButtons(){
         const auto selected=SendDlgItemMessage(IDC_APFS_SNAPSHOT_LIST,LB_GETCURSEL);
         GetDlgItem(IDC_APFS_SNAPSHOT_DELETE)->EnableWindow(selected!=LB_ERR);
@@ -649,15 +666,16 @@ public:
     ApfsSnapshotsDialog(CWnd* owner,std::unique_ptr<HfsPlus::Source> image,Apfs::Container container,
                         std::vector<std::u16string> snapshots,std::wstring filename)
         :CDialog(IDD_APFS_SNAPSHOTS,owner),source(std::move(image)),checkpoint(std::move(container)),
-         names(std::move(snapshots)),imageName(std::move(filename)){}
-    ApfsSnapshotsDialog(CWnd* owner,std::shared_ptr<MacBrowser::Volume> volume,std::vector<std::u16string> snapshots)
+         names(std::move(snapshots)),volumeName(std::move(filename)){}
+    ApfsSnapshotsDialog(CWnd* owner,std::shared_ptr<MacBrowser::Volume> volume,std::vector<std::u16string> snapshots,std::wstring label)
         :CDialog(IDD_APFS_SNAPSHOTS,owner),mounted(std::move(volume)),
-         names(std::move(snapshots)),imageName(MacBrowser::Wide(mounted->Name())){}
+         names(std::move(snapshots)),volumeName(std::move(label)){}
     BOOL OnInitDialog() override{
         CDialog::OnInitDialog();
         BrowserPresentation::UnicodeControl(m_hWnd,IDC_APFS_SNAPSHOT_LIST,L"LISTBOX");
         UnicodeEdit(m_hWnd,IDC_APFS_SNAPSHOT_NAME);
-        SetWindowTextW(m_hWnd,(L"Manage APFS Snapshots - "+imageName).c_str());
+        BrowserPresentation::UnicodeControl(m_hWnd,IDC_APFS_SNAPSHOT_TARGET,L"STATIC");
+        SetDlgItemTextW(m_hWnd,IDC_APFS_SNAPSHOT_TARGET,(L"Snapshots on "+volumeName).c_str());
         ShowNames();
         return TRUE;
     }
@@ -673,16 +691,58 @@ public:
 };
 }
 
+#ifdef HFV_TESTING
+static void VerifyApfsDialogs(CWnd& owner)
+{
+    using HfsPlus::Disk::Check;
+    const std::wstring label=L"Macintosh \u03b1";
+    NameDialog rename(&owner,IDD_APFS_RENAME_VOLUME);
+    rename.value=label;
+    Check(rename.Create(IDD_APFS_RENAME_VOLUME,&owner)!=FALSE,"Create APFS rename dialog");
+    wchar_t title[64]{};
+    GetWindowTextW(rename.m_hWnd,title,64);
+    Check(std::wstring(title)==L"Rename APFS Volume","Wrong APFS rename title");
+    const auto selection=rename.SendDlgItemMessage(IDC_HPLUS_NAME,EM_GETSEL);
+    Check(Text(rename.m_hWnd,IDC_HPLUS_NAME)==label&&LOWORD(selection)==0&&HIWORD(selection)==label.size(),
+          "The APFS rename dialog did not select the current Unicode name");
+    rename.DestroyWindow();
+
+    for(const bool hasSnapshot:{false,true}){
+        std::vector<std::u16string> names;
+        if(hasSnapshot)names.push_back(u"Before cleanup");
+        ApfsSnapshotsDialog snapshots(&owner,std::unique_ptr<HfsPlus::Source>{},Apfs::Container{},std::move(names),label);
+        Check(snapshots.Create(IDD_APFS_SNAPSHOTS,&owner)!=FALSE,"Create APFS snapshots dialog");
+        GetWindowTextW(snapshots.m_hWnd,title,64);
+        Check(std::wstring(title)==L"Manage APFS Snapshots"&&
+              Text(snapshots.m_hWnd,IDC_APFS_SNAPSHOT_TARGET)==L"Snapshots on "+label,
+              "APFS snapshot volume label was not shown correctly");
+        Check(Text(snapshots.m_hWnd,IDC_APFS_SNAPSHOT_CREATE)==L"Create Snapshot"&&
+              Text(snapshots.m_hWnd,IDC_APFS_SNAPSHOT_DELETE)==L"Delete Snapshot\u2026"&&
+              Text(snapshots.m_hWnd,IDCANCEL)==L"Close","Wrong APFS snapshot action labels");
+        const auto enabled=[&](int id){return ::IsWindowEnabled(::GetDlgItem(snapshots.m_hWnd,id))!=FALSE;};
+        Check(!enabled(IDC_APFS_SNAPSHOT_CREATE)&&enabled(IDC_APFS_SNAPSHOT_DELETE)==hasSnapshot&&
+              enabled(IDC_APFS_SNAPSHOT_NAME)==!hasSnapshot,"Unexpected APFS snapshot command state");
+        if(!hasSnapshot){
+            SetDlgItemTextW(snapshots.m_hWnd,IDC_APFS_SNAPSHOT_NAME,L"Before cleanup");
+            Check(enabled(IDC_APFS_SNAPSHOT_CREATE)&&!enabled(IDC_APFS_SNAPSHOT_DELETE),
+                  "Entering a snapshot name did not enable creation");
+        }
+        snapshots.DestroyWindow();
+    }
+}
+#endif
+
 void ManageApfsSnapshots(CWnd* owner,std::shared_ptr<MacBrowser::Volume> selected)
 {
     if(selected&&!strcmp(selected->Kind(),"APFS")){
         std::vector<std::u16string> names;
+        std::u16string volumeName;
         const auto result=ShowStorageWaitJob([&](Storage::Job&){
-            names=Apfs::MountedSnapshotNames(*selected);
+            names=Apfs::MountedSnapshotNames(*selected,&volumeName);
             return Storage::Result{};
         },false,owner);
         if(result.code){SnapshotError(owner,result);return;}
-        ApfsSnapshotsDialog dialog(owner,std::move(selected),std::move(names));
+        ApfsSnapshotsDialog dialog(owner,std::move(selected),std::move(names),MacBrowser::Wide(volumeName));
         dialog.DoModal();
         return;
     }
@@ -693,17 +753,18 @@ void ManageApfsSnapshots(CWnd* owner,std::shared_ptr<MacBrowser::Volume> selecte
     std::unique_ptr<HfsPlus::Source> source;
     std::optional<Apfs::Container> checkpoint;
     std::vector<std::u16string> names;
+    std::u16string volumeName;
     const auto result=ShowStorageWaitJob([&](Storage::Job&){
         source=HfsPlus::OpenImage(path.c_str(),true);
         checkpoint=Apfs::Probe(*source);
         if(!checkpoint)throw HfsPlus::Error("Select a raw APFS image");
-        names=Apfs::ListSnapshotNames(*source,*checkpoint);
+        names=Apfs::ListSnapshotNames(*source,*checkpoint,&volumeName);
         Apfs::InspectFreeQueueAllocation(*source,*checkpoint);
         return Storage::Result{};
     },false,owner);
     if(result.code){SnapshotError(owner,result);return;}
     ApfsSnapshotsDialog dialog(owner,std::move(source),*checkpoint,std::move(names),
-                               path.substr(path.find_last_of(L"\\/")+1));
+                               MacBrowser::Wide(volumeName));
     dialog.DoModal();
 }
 
