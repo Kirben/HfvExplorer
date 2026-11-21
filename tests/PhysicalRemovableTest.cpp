@@ -28,6 +28,8 @@
 #include "utils.h"
 #include <cstdio>
 #include <fcntl.h>
+
+FloppyWriteApi& NativeFloppyWriteApiForTest();
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 #define _FHOOK_INTERNAL_
@@ -670,16 +672,16 @@ void CrashMedia(const std::string& path,const std::string& adapter,unsigned phas
     startup.cb=sizeof(startup);
     PROCESS_INFORMATION child{};
     Check(CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&child)!=FALSE,
-          "start simulated-media crash subprocess");
+          "start media crash subprocess");
     CloseHandle(child.hThread);
-    const auto wait=WaitForSingleObject(child.hProcess,45000);
-    if(wait!=WAIT_OBJECT_0)TerminateProcess(child.hProcess,2);
+    const auto wait=WaitForSingleObject(child.hProcess,adapter.find("move-native-")==0?300000:45000);
+    if(wait!=WAIT_OBJECT_0){TerminateProcess(child.hProcess,2);WaitForSingleObject(child.hProcess,5000);}
     DWORD code=0;
     GetExitCodeProcess(child.hProcess,&code);
     CloseHandle(child.hProcess);
     const unsigned expected=(adapter.find("move-")==0?90u:100u)+phase;
     if(wait!=WAIT_OBJECT_0||code!=expected)
-        throw HfsPlus::Error("Simulated "+adapter+" missed crash phase "+std::to_string(phase)+
+        throw HfsPlus::Error(adapter+" missed crash phase "+std::to_string(phase)+
                              " (exit "+std::to_string(code)+")");
 }
 Storage::Result MoveToOrFromDisk(const std::string& path,const std::string& adapter,bool persistent)
@@ -838,19 +840,35 @@ void CheckCoordinatedDiskMoves(const std::string& root,const Bytes& populated,FI
     fprintf(report,"PASS: NTFS and separate removable disks share a verified move decision; swapped media is refused before and after commit.\n");
 }
 
+constexpr char NativeTestName[]="HFV Move Probe";
+class NativeFloppyAttachment {
+public:
+    NativeFloppyAttachment(){
+        Check(readonly_floppy_attach_api(0,&NativeFloppyWriteApiForTest()),"attach native A: for the diagnostic");
+    }
+    ~NativeFloppyAttachment(){
+        physical_floppy_suspend(0);
+        readonly_floppy_attach_api(0,nullptr);
+    }
+};
+
 Storage::Result MoveDriveFloppy(const std::string& file,bool toFloppy,unsigned phase,
-                                const std::string& peer={})
+                                const std::string& peer={},bool native=false)
 {
     constexpr int drive=0;
-    UndoFloppy floppy(file,drive);
-    ReadOnlyFloppy selected(&floppy);
-    Check(selected.OpenDrive(drive),"capture simulated A: generation");
+    std::unique_ptr<UndoFloppy> simulated;
+    std::unique_ptr<NativeFloppyAttachment> hardware;
+    if(native)hardware=std::make_unique<NativeFloppyAttachment>();
+    else simulated=std::make_unique<UndoFloppy>(file,drive);
+    ReadOnlyFloppy selected(physical_floppy_test_api(drive));
+    Check(selected.OpenDrive(drive),"capture A: generation");
     const auto generation=selected.Generation();
     selected.Close();
-    auto mac=FileOperations::Location::Physical(drive,FileOperations::ClassicMedia::Floppy,toFloppy?":":":Hello");
+    const std::string name=native?NativeTestName:"Hello";
+    auto mac=FileOperations::Location::Physical(drive,FileOperations::ClassicMedia::Floppy,toFloppy?":":":"+name);
     mac.BindMediaGeneration(generation);
     const auto folder=VolumeCoord::Wide(file+".windows");
-    auto windows=FileOperations::Location::Windows(toFloppy?folder+L"\\Hello":folder);
+    auto windows=FileOperations::Location::Windows(toFloppy?folder+L"\\"+VolumeCoord::Wide(name):folder);
     auto from=toFloppy?windows:mac;
     auto dest=toFloppy?mac:windows;
     std::shared_ptr<MacBrowser::Volume> volume;
@@ -1025,7 +1043,17 @@ int RunRemovableRecoveryChild(const char* target,const char* adapter,unsigned ph
             const bool fromFloppy=!strcmp(adapter,"move-from-drive-floppy");
             const std::string route=adapter;
             const bool otherPeer=route.find("move-drive-")==0;
-            const auto result=otherPeer?MoveDriveFloppy(target,route.find("move-drive-in-")==0,phase,
+            const bool native=route=="move-native-in"||route=="move-native-out";
+            if(native){
+                const std::string endpoint=target;
+                const auto root=endpoint.substr(0,endpoint.find_last_of("\\/"));
+                const auto journal=_wgetenv(L"HFV_TEST_REMOVABLE_UNDO_DIR");
+                Check((phase==8||phase==9)&&journal&&VolumeCoord::Wide(root)==journal&&
+                      endpoint==root+"\\transfer"&&ValidateFloppyHfs(*Load(root+"\\before.dsk")),
+                      "Native child requires the isolated hardware test directory and verified backup");
+            }
+            const auto result=native?MoveDriveFloppy(target,route=="move-native-in",phase,{},true):
+                otherPeer?MoveDriveFloppy(target,route.find("move-drive-in-")==0,phase,
                                                        route.substr(route.find_last_of('-')+1)):
                 toFloppy||fromFloppy?MoveDriveFloppy(target,toFloppy,phase):MoveToOrFromDisk(target,adapter,false);
             if(result.code)throw HfsPlus::Error(result.message);
@@ -1080,7 +1108,6 @@ int RunRemovableRecoveryTest(const char* directory)
 }
 
 // Explicit opt-in hardware diagnostic, with the backup as the write precondition.
-FloppyWriteApi& NativeFloppyWriteApiForTest();
 int RunNativeFloppyRecoveryCheck(const char* directory,const char* phase)
 {
     constexpr int drive=0;
@@ -1137,6 +1164,128 @@ int RunNativeFloppyRecoveryCheck(const char* directory,const char* phase)
     }catch(const std::exception& error){
         fprintf(report,"FAIL: %s\n",error.what());
         result=1;
+    }
+    fclose(report);
+    return result;
+}
+
+int RunNativeFloppyMoveTest(const char* directory)
+{
+    // The explicit command may write A:. All test paths and journals live in
+    // the newly created directory and the original image is saved first.
+    if(!CreateDirectoryA(directory,nullptr))return 2;
+    const std::string root=directory;
+    FILE* report=nullptr;
+    if(fopen_s(&report,(root+"\\native-floppy-moves.txt").c_str(),"w")||!report)return 2;
+    const auto step=[&](const char* message){fprintf(report,"%s\n",message);fflush(report);};
+    auto& api=NativeFloppyWriteApiForTest();
+    const auto read=[&]{
+        Bytes bytes(FloppyRecovery::Range.length);
+        ReadOnlyFloppy reader(&api);
+        Check(reader.OpenDrive(0)&&reader.MediaSize()==bytes.size()&&
+              reader.ReadBytes(0,DWORD(bytes.size()),bytes.data()),"Cannot back up or read back A:");
+        return bytes;
+    };
+    const auto key=RemovableUndo::FloppyKey(0);
+    Bytes backup,lastVerified;
+    bool altered=false;
+    int result=0;
+    try{
+        // Check the application's regular journal before choosing an isolated one.
+        const auto appdata=_wgetenv(L"LOCALAPPDATA");
+        Check(appdata&&*appdata,"Cannot locate the application's recovery data");
+        const auto appRecovery=std::wstring(appdata)+L"\\HFVExplorer";
+        Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_UNDO_DIR",appRecovery.c_str())!=FALSE&&
+              !RemovableUndo::Pending(key),"Resolve the application's pending A: journal first");
+        const auto scratch=VolumeCoord::Wide(root);
+        Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_UNDO_DIR",scratch.c_str())!=FALSE&&
+              SetEnvironmentVariableW(L"HFV_TEST_CLASSIC_MOVE_DIR",scratch.c_str())!=FALSE,
+              "Cannot isolate the native-move journals");
+        SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",nullptr);
+        readonly_cd_backend_init();
+        backup=read();
+        WriteFixture(root+"\\before.dsk",0,backup.data(),DWORD(backup.size()),true);
+        Check(*Load(root+"\\before.dsk")==backup&&ValidateFloppyHfs(backup),
+              "A: must contain a classic HFS image and have a verified backup");
+        lastVerified=backup;
+        step("Backed up and verified all 1,474,560 original bytes from A:.");
+
+        const auto name=MacBrowser::U16(VolumeCoord::Wide(NativeTestName));
+        const auto inspect=[&](bool recover,const std::function<void(MacBrowser::Volume&)>& check){
+            NativeFloppyAttachment attachment;
+            if(recover)RecoverFloppyWrite(0);
+            char path[MAX_PATH]{};
+            get_floppy_volume_file_name(0,path);
+            auto volume=MacBrowser::OpenClassic(path,":",false);
+            check(*volume);
+            volume->Close();
+        };
+        inspect(false,[&](MacBrowser::Volume& volume){
+            MacBrowser::Entry file;
+            Check(!volume.FindChild(2,name,file)&&volume.FreeBytes()>65536,
+                  "Use a spare HFS floppy with at least 64 KiB free and no HFV Move Probe file");
+        });
+        const auto casePath=root+"\\transfer";
+        const auto hostPath=VolumeCoord::Wide(casePath+".windows");
+        Check(CreateDirectoryW(hostPath.c_str(),nullptr)!=FALSE,"Cannot create the NTFS test folder");
+        {
+            auto host=MacBrowser::OpenWindows(hostPath);
+            MacBrowser::Entry entry;
+            entry.name=name;
+            entry.forks[0].size=5003;
+            entry.forks[1].size=723;
+            memcpy(entry.finder.data(),"TEXTTEST",8);
+            host->Put(2,entry,[](unsigned fork,uint64_t at,void* data,size_t n){Payload(fork,at,data,n);},false);
+        }
+
+        for(const bool importing:{true,false}){
+            for(const unsigned phase:{8u,9u}){
+                const auto direction=importing?"NTFS -> A:":"A: -> NTFS";
+                fprintf(report,"Starting %s crash %s commit.\n",direction,phase==8?"before":"after");fflush(report);
+                altered=true;
+                CrashMedia(casePath,importing?"move-native-in":"move-native-out",phase);
+                Check(RemovableUndo::Pending(key),"native crash did not leave the floppy journal");
+                const bool onFloppy=(phase==9)==importing;
+                inspect(true,[&](MacBrowser::Volume& volume){
+                    auto host=MacBrowser::OpenWindows(hostPath);
+                    MacBrowser::Entry diskEntry,hostEntry;
+                    Check(volume.FindChild(2,name,diskEntry)==onFloppy&&
+                          host->FindChild(2,name,hostEntry)!=onFloppy,"floppy and NTFS disagreed after native recovery");
+                    const auto& entry=onFloppy?diskEntry:hostEntry;
+                    VerifyMovedPayload(onFloppy?volume:*host,entry);
+                    Check(!memcmp(entry.finder.data(),"TEXTTEST",8),"native move changed Finder metadata");
+                });
+                Check(!RemovableUndo::Pending(key),"native recovery left a pending floppy journal");
+                const auto bytes=read();
+                if(phase==8)Check(bytes==lastVerified,"pre-commit replay changed original floppy sectors");
+                lastVerified=bytes;
+                fprintf(report,"PASS: %s crash %s commit; both forks and Finder information verified.\n",
+                        direction,phase==8?"before":"after");fflush(report);
+            }
+        }
+    }catch(const std::exception& e){
+        fprintf(report,"FAIL: %s\n",e.what());fflush(report);
+        result=1;
+    }
+
+    if(altered){
+        try{
+            if(RemovableUndo::Pending(key)){
+                NativeFloppyAttachment attachment;
+                RecoverFloppyWrite(0);
+            }
+            // Restore only if the current sectors match the last verified state.
+            const auto current=read();
+            Check(current==lastVerified,"A: differs from the last verified test state; retain before.dsk for manual recovery");
+            FloppyWriter writer(&api);
+            if(!writer.WriteImage(0,backup,nullptr,nullptr,&current))
+                throw HfsPlus::Error(writer.Diagnostics());
+            Check(read()==backup,"the restored disk does not match before.dsk");
+            step("PASS: restored A: and verified every byte against before.dsk.");
+        }catch(const std::exception& e){
+            fprintf(report,"RESTORE PENDING: %s\n",e.what());fflush(report);
+            result=1;
+        }
     }
     fclose(report);
     return result;
