@@ -2820,7 +2820,26 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         Check(reopened&&reopened->Supports().writable,"Could not reopen the shared APFS overwrite fixture");
         roots(*reopened);
         {
-            VolumeCoord::OperationLease lease({{reopened->ResourceKey(),VolumeCoord::Mode::Write}});
+            MacBrowser::Entry folder;
+            Check(reopened->FindChild(live.id,directory,folder),"Missing APFS clone destination folder");
+            const auto source=locate(*reopened,live.id,u"binary.bin");
+            auto create=source;
+            create.name=u"Created clone.bin";
+            create.attributes=reopened->GetAttributes(source.id);
+            Storage::Job cloneJob;
+            const auto clone=reopened->TryCloneFileForTransfer(*reopened,create,folder.id,cloneJob);
+            Check(clone&&clone!=source.id&&bytes(*reopened,reopened->Stat(clone))==clones[0]&&
+                  !reopened->Stat(clone).hardLink&&reopened->Stat(clone).finder==source.finder,
+                  "APFS clone creation did not publish an independent file sharing the source data");
+            const auto destination=reopened->MakeDirectory(folder.id,u"Clone copy destination");
+            auto copy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(reopened,source.id)},FileOperations::Location::Mounted(reopened,destination)});
+            Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,"APFS clone copy timed out");
+            const auto result=copy.Job()->result();
+            Check(!result.code,result.message.c_str());
+            MacBrowser::Entry copied;
+            Check(reopened->FindChild(destination,source.name,copied)&&copied.id!=source.id&&
+                  bytes(*reopened,copied)==clones[0],"APFS ordinary copy did not publish the cloned file");
             const auto original=locate(*reopened,live.id,u"renamed-clone.bin");
             Storage::Job cancel;
             bool cancelled=false;
@@ -2844,6 +2863,13 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
               bytes(*reopened,locate(*reopened,snapshot.id,u"binary.bin"))==clones[2]&&
               bytes(*reopened,locate(*reopened,snapshot.id,u"clone.bin"))==clones[3],
               "APFS clone deletion or reopen changed the remaining file or snapshot");
+        Check(bytes(*reopened,locate(*reopened,live.id,u"Created clone.bin"))==clones[0],
+              "New APFS clone lost data after deleting its source");
+        MacBrowser::Entry copiedFolder,copiedFile;
+        Check(reopened->FindChild(folder.id,u"Clone copy destination",copiedFolder)&&
+              reopened->FindChild(copiedFolder.id,u"binary.bin",copiedFile)&&bytes(*reopened,copiedFile)==clones[0],
+              "APFS ordinary clone copy lost data after deleting its source");
+        fprintf(report,"PASS: APFS created a copy-on-write clone and preserved its data after deleting the source.\n");
         auto deleteFirst=MacBrowser::OpenBrowserImage(deletePath);
         Check(deleteFirst&&deleteFirst->Supports().writable,"Could not open the shared APFS deletion fixture");
         roots(*deleteFirst);

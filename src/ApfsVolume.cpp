@@ -1298,6 +1298,30 @@ public:
             },id);
         },true);
     }
+    uint32_t TryCloneFileForTransfer(MacBrowser::Volume& from,const Entry& entry,uint32_t parent,Storage::Job& job)override{
+        if(&from!=this||!writable||!limitedEdits||entry.directory||entry.symbolicLink||
+           entry.hardLink||entry.compressed||entry.protectedFile||!entry.forks[0].size||
+           entry.forks[1].size||!entry.attributes.empty())return 0;
+        return WriteMount([&]{
+            const auto& original=At(entry.id);
+            const auto& target=At(parent);
+            if(original.mount!=target.mount||mounts[original.mount].snapshotCreated||
+               !mounts[original.mount].snapshotTree)return uint32_t(0);
+            Check(original.entry.identity==entry.identity,"The APFS clone source changed");
+            const auto inode=original.oid,parentOid=target.oid;
+            try{
+                CommitMutation(parent,0,job,[&](auto& work){
+                    return CreateCatalogClone(*source,WriteTarget(parent),parentOid,entry.name,inode,
+                                              entry.forks[0].size,CopyDates(entry),entry.finder,work);
+                });
+            }catch(const CloneUnavailable&){
+                return uint32_t(0);
+            }
+            Entry copied;
+            Check(FindChild(parent,entry.name,copied),"APFS clone was committed but could not be found");
+            return copied.id;
+        },true);
+    }
     bool CanMoveEntryFrom(const MacBrowser::Volume& source,uint32_t id,uint32_t parent)override{
         if(&source!=this||!writable||!limitedEdits)return false;
         return Access([&]{

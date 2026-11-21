@@ -24,6 +24,7 @@ struct CatalogCreate {
     const HfsPlus::Bytes* linkTarget=nullptr;
     bool external=false;
     uint64_t replacedEntry=0;
+    uint64_t cloneSource=0,cloneSize=0;
 };
 struct CatalogRename {
     uint64_t parent,inode;

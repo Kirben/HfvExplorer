@@ -286,6 +286,16 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(job.cancelled())throw Storage::Cancelled();
     };
     uint32_t published=0;
+    if(!found&&!plan.reader&&route==ForkSource::Stream)
+        published=dst.TryCloneFileForTransfer(src,outgoing,parent,job);
+    if(published){
+        LinkedProgress(plan,progress);
+        progress.bytes+=progress.fileTotal;
+        progress.fileBytes=progress.fileTotal;
+        if(track)copies.emplace(key,dst.Stat(published));
+        job.progress(progress);
+        return true;
+    }
     if(route==ForkSource::MountedWorker)
         published=VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
     else {

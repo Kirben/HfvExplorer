@@ -25,6 +25,9 @@ struct CheckpointPublicationUncertain : HfsPlus::Error {
 // Republish the current state at a new transaction ID. The caller must hold
 // exclusive writable access to an ordinary, raw image for the whole operation.
 uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Job&);
+struct CloneUnavailable : HfsPlus::Error {
+    using HfsPlus::Error::Error;
+};
 // Folder and file creation and rename support up to two catalog tree levels in native images.
 // The same exclusive image ownership is required as for CommitCheckpoint.
 using FinderBytes=std::array<uint8_t,32>;
@@ -62,6 +65,8 @@ uint64_t ReplaceCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent
 uint64_t CreateCatalogHardLink(HfsPlus::Source&,const Container&,uint64_t parent,uint64_t inode,
                                const std::u16string& name,Storage::Job&,uint64_t replaced=0,bool external=false,bool copiedLockedInode=false);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
+uint64_t CreateCatalogClone(HfsPlus::Source&,const Container&,uint64_t parent,const std::u16string& name,
+                            uint64_t inode,uint64_t size,std::optional<FileDates>,const FinderBytes&,Storage::Job&);
 
 // Stream a data fork from a separate source into a newly created file.
 uint64_t CreateCatalogFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,

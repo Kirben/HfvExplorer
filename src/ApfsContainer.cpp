@@ -452,6 +452,17 @@ uint64_t CreateCatalogHardLink(Source& source,const Container& expected,uint64_t
     return Commit(source,expected,job,&request);
 }
 
+uint64_t CreateCatalogClone(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
+                            uint64_t inode,uint64_t size,std::optional<FileDates> dates,const FinderBytes& finder,Storage::Job& job)
+{
+    CatalogCreate create{parent,name,CatalogKind::RegularFile,nullptr,dates,&finder};
+    create.external=true;
+    create.cloneSource=inode;
+    create.cloneSize=size;
+    const CatalogMutation request=create;
+    return Commit(source,expected,job,&request);
+}
+
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile};

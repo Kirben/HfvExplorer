@@ -79,6 +79,7 @@ public:
     virtual void ValidateMedia() {}
     virtual void ReleaseMedia() {} // Explicit physical-media release, including idle clipboard references.
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
+    virtual uint32_t TryCloneFileForTransfer(Volume&,const Entry&,uint32_t,Storage::Job&){return 0;}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
     virtual bool CanMoveEntryFrom(const Volume& source,uint32_t,uint32_t){return CanMoveFrom(source);}
     virtual void MoveHereForJob(Volume& source,uint32_t id,uint32_t parent,const Entry& entry,Storage::Job&){
