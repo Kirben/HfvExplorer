@@ -45,6 +45,9 @@ bool geometry1440(const DISK_GEOMETRY& g) {
     return g.MediaType==F3_1Pt44_512 && g.Cylinders.QuadPart==80 && g.TracksPerCylinder==2 && g.SectorsPerTrack==18 && g.BytesPerSector==512;
 }
 }
+#ifdef HFV_TESTING
+FloppyWriteApi& NativeFloppyWriteApiForTest(){return nativeWriter;}
+#endif
 #ifdef HFV_APP_REMOVABLE_UNDO
 namespace FloppyRecovery {
 void Verify(FloppyWriteApi& api,HANDLE handle,DWORD generation)

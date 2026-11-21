@@ -5,6 +5,7 @@
 #include "PhysicalRemovable.h"
 #include "FloppyFileWrite.h"
 #include "FloppyWriter.h"
+#include "DirectFloppy.h"
 #include "FakeFloppy.h"
 #include "floppy.h"
 #include "RemovableUndo.h"
@@ -771,6 +772,69 @@ int RunRemovableRecoveryTest(const char* directory)
         CheckDurableMedia(root,report);
     }catch(const std::exception& e){
         fprintf(report,"FAIL: %s\n",e.what());
+        result=1;
+    }
+    fclose(report);
+    return result;
+}
+
+// Explicit opt-in hardware diagnostic, with the backup as the write precondition.
+FloppyWriteApi& NativeFloppyWriteApiForTest();
+int RunNativeFloppyRecoveryCheck(const char* directory,const char* phase)
+{
+    constexpr int drive=0;
+    FILE* report=nullptr;
+    const std::string root=directory;
+    if(fopen_s(&report,(root+"\\native-"+phase+".txt").c_str(),"w")||!report)return 2;
+    int result=0;
+    try{
+        const auto before=Load(root+"\\before.dsk");
+        Check(before->size()==FloppyRecovery::Range.length,"The original A: backup must be exactly 1,474,560 bytes");
+        const auto key=RemovableUndo::FloppyKey(drive);
+        Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_UNDO_DIR",VolumeCoord::Wide(root).c_str())!=FALSE,
+              "Cannot select isolated hardware test journal");
+        SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",nullptr);
+        auto& api=NativeFloppyWriteApiForTest();
+        const auto read=[&](Bytes& contents){
+            ReadOnlyFloppy floppy(&api);
+            if(!floppy.OpenDrive(drive)||floppy.MediaSize()!=contents.size()||
+               !floppy.ReadBytes(0,DWORD(contents.size()),contents.data()))
+                throw HfsPlus::Error("Cannot read A: (Windows error "+std::to_string(floppy.Error())+")");
+        };
+        if(!strcmp(phase,"interrupt")){
+            Check(!RemovableUndo::Pending(key),"An interrupted hardware test is already pending");
+            readonly_cd_backend_init();
+            Bytes intended;
+            std::string error;
+            Check(PrepareFloppyHfs("Recovery test",intended,error),"Cannot prepare the classic HFS test image");
+            Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",L"1")!=FALSE,"Cannot arm hardware crash point");
+            FloppyWriter writer(&api);
+            if(!writer.WriteImage(drive,intended,false,nullptr,nullptr,before.get()))
+                throw HfsPlus::Error(writer.Diagnostics());
+            throw HfsPlus::Error("The write did not reach the expected crash checkpoint");
+        }
+        Check(!strcmp(phase,"replay"),"Unknown native floppy diagnostic phase");
+        Check(RemovableUndo::Pending(key),"The interrupted write left no recovery journal");
+        {
+            ReadOnlyFloppy floppy(&api);
+            Check(floppy.OpenDrive(drive)&&floppy.MediaSize()==before->size(),"Cannot inspect interrupted floppy");
+            BYTE firstTrack[18*512]{};
+            Check(floppy.ReadBytes(0,sizeof(firstTrack),firstTrack),"Cannot read the interrupted floppy track");
+            Check(memcmp(firstTrack,before->data(),sizeof(firstTrack))!=0,"No interrupted track write was observed");
+        }
+        {
+            DirectFloppy recovery(&api);
+            if(!recovery.Open(drive,false,true))
+                throw HfsPlus::Error("Cannot lock A: for recovery (Windows error "+std::to_string(recovery.Error())+")");
+        }
+        Bytes restored(before->size());
+        read(restored);
+        Check(restored==*before&&!RemovableUndo::Pending(key),
+              "Hardware replay did not restore the original sectors or left the journal pending");
+        WriteFixture(root+"\\after.dsk",0,restored.data(),DWORD(restored.size()),true);
+        fprintf(report,"PASS: A: native track write was observed after process loss. A fresh process replayed its undo log and verified all 1,474,560 bytes against the original backup.\n");
+    }catch(const std::exception& error){
+        fprintf(report,"FAIL: %s\n",error.what());
         result=1;
     }
     fclose(report);

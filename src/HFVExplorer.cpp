@@ -245,6 +245,9 @@ BOOL CHFVExplorerApp::InitInstance()
  extern int RunPerVolumeCommandsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-per-volume-commands"))ExitProcess(RunPerVolumeCommandsTest(__argv[2]));
  extern int RunPhysicalRemovableTest(const char*);
+ extern int RunNativeFloppyRecoveryCheck(const char*,const char*);
+ if(__argc==4&&!strcmp(__argv[1],"--native-floppy-recovery-check"))
+  ExitProcess(RunNativeFloppyRecoveryCheck(__argv[2],__argv[3]));
  extern int RunRemovableRecoveryTest(const char*);
  extern int RunRemovableRecoveryChild(const char*,const char*,unsigned);
  if(__argc==3&&!strcmp(__argv[1],"--verify-removable-recovery"))ExitProcess(RunRemovableRecoveryTest(__argv[2]));
