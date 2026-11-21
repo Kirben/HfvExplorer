@@ -805,6 +805,11 @@ private:
         auto mount=ReadVolume(ReadObject(*source,*fresh,*address,oid,fresh->transaction,13),oid);
         freeBytes=WritableFreeBytes(*source,*fresh);
         container=std::move(*fresh);
+        for(auto& view:mounts){
+            if(view.oid!=oid||!view.snapshotCreated)continue;
+            view.map=mount.map;
+            view.mapTransaction=mount.xid;
+        }
         mounts[mountIndex]=std::move(mount);
         for(auto listing=listings.begin();listing!=listings.end();){
             const auto& folder=At(listing->first);
@@ -881,6 +886,7 @@ private:
     {
         const auto& folder=At(parent);
         Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
+        Check(!mounts[folder.mount].snapshotCreated,"APFS snapshots are read-only");
         auto target=container;
         target.writeVolume=mounts[folder.mount].oid;
         return target;
@@ -1039,6 +1045,7 @@ public:
             const auto fold=Access([&]{
                 const auto& folder=At(parent);
                 Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
+        Check(!mounts[folder.mount].snapshotCreated,"APFS snapshots are read-only");
                 return !mounts[folder.mount].sensitive;
             });
             std::set<std::u32string> names;

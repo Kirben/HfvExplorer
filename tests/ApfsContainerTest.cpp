@@ -2690,6 +2690,88 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
             targetIndex+1);
 }
 
+void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* directory,const char16_t* name)
+{
+    uint64_t originalTransaction=0,originalCheckpoint=0;
+    {
+        auto raw=OpenImage(path.c_str(),false);
+        const auto checkpoint=Apfs::Probe(*raw);
+        Check(checkpoint.has_value(),"Missing APFS snapshot checkpoint");
+        originalTransaction=checkpoint->transaction;
+        originalCheckpoint=checkpoint->checkpointBlock;
+        Apfs::InspectFreeQueueAllocation(*raw,*checkpoint);
+    }
+    MacBrowser::Entry live,snapshot;
+    const auto roots=[&](MacBrowser::Volume& volume){
+        const auto entries=volume.List(2);
+        Check(entries.size()==2,"The APFS snapshot or live volume is missing");
+        live=entries.front();
+        snapshot=entries.back();
+        Check(snapshot.name.find(u" [Snapshot: ")!=snapshot.name.npos,"Missing APFS snapshot view");
+    };
+    const auto locate=[&](MacBrowser::Volume& volume,uint32_t root){
+        MacBrowser::Entry folder,file;
+        Check(volume.FindChild(root,directory,folder)&&volume.FindChild(folder.id,name,file),
+              "Missing APFS snapshot verification file");
+        return file;
+    };
+    const auto bytes=[&](MacBrowser::Volume& volume,const MacBrowser::Entry& entry){
+        Bytes data(size_t(entry.forks[0].size));
+        if(!data.empty())volume.Read(entry.id,0,0,data.data(),data.size());
+        return data;
+    };
+    const auto overwrite=[](MacBrowser::Volume& volume,const MacBrowser::Entry& original,Storage::Job& job,bool cancel){
+        auto replacement=original;
+        replacement.forks[0].size=9301;
+        return volume.PutForTransfer(original.parent,replacement,[&](unsigned,uint64_t offset,void* data,size_t size){
+            memset(data,0x73,size);
+            if(cancel&&offset)job.cancel();
+        },true,job);
+    };
+    Bytes historical;
+    {
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Supports().writable,"Supported APFS snapshot image opened read-only");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        roots(*volume);
+        historical=bytes(*volume,locate(*volume,snapshot.id));
+        const auto original=locate(*volume,live.id);
+        const auto originalBytes=bytes(*volume,original);
+        Reject([&]{volume->MakeDirectory(snapshot.id,u"No mutation");},"APFS wrote into a snapshot");
+        Storage::Job cancelled;
+        bool stopped=false;
+        try{overwrite(*volume,original,cancelled,true);}catch(const Storage::Cancelled&){stopped=true;}
+        Check(stopped&&bytes(*volume,locate(*volume,live.id))==originalBytes&&
+              bytes(*volume,locate(*volume,snapshot.id))==historical,"Cancelled APFS write changed the live file or snapshot");
+    }
+    {
+        auto raw=OpenImage(path.c_str(),false);
+        const auto checkpoint=Apfs::Probe(*raw);
+        Check(checkpoint&&checkpoint->transaction==originalTransaction&&checkpoint->checkpointBlock==originalCheckpoint,
+              "Cancelled APFS live write published a checkpoint");
+    }
+    {
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Supports().writable,"Could not reopen the APFS live volume for writing");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        roots(*volume);
+        const auto original=locate(*volume,live.id);
+        Storage::Job written;
+        const auto id=overwrite(*volume,original,written,false);
+        Check(bytes(*volume,volume->Stat(id))==Bytes(9301,0x73),"APFS live overwrite changed replacement data");
+        Check(bytes(*volume,locate(*volume,snapshot.id))==historical,"APFS live overwrite changed snapshot data");
+        volume->Remove(id);
+        MacBrowser::Entry missing;
+        Check(!volume->FindChild(original.parent,name,missing),"APFS live deletion retained the file");
+        Check(bytes(*volume,locate(*volume,snapshot.id))==historical,"APFS live deletion changed snapshot data");
+    }
+    auto reopened=MacBrowser::OpenBrowserImage(path);
+    Check(reopened!=nullptr,"Could not reopen APFS snapshot image");
+    roots(*reopened);
+    Check(bytes(*reopened,locate(*reopened,snapshot.id))==historical,"Reopened APFS snapshot changed original bytes");
+    fprintf(report,"PASS: APFS snapshot preserved through live overwrite, deletion, cancellation and reopening.\n");
+}
+
 void ExternalSpaceLimitWrites(const std::string& root,FILE* report,const wchar_t* fixture)
 {
     constexpr uint64_t MiB=1024*1024;
@@ -2947,6 +3029,11 @@ int RunApfsContainerTest(const char* directory)
         }
         if(const auto quota=_wgetenv(L"HFV_APFS_SPACE_LIMIT_FIXTURE"))
             ExternalSpaceLimitWrites(root,report,quota);
+        if(const auto snapshot=_wgetenv(L"HFV_APFS_APPLE_SNAPSHOT_WRITE_FIXTURE")){
+            const auto path=VolumeCoord::Wide(root+"apple-snapshot-live-edits.img");
+            Check(CopyFileW(snapshot,path.c_str(),TRUE)!=FALSE,"Could not copy APFS snapshot writer fixture");
+            SnapshotLiveWrites(path,report,u"Fixture",u"entry-0");
+        }
         ExternalCaseSensitiveWrites(root,report,nullptr);
         if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))
             ExternalCaseSensitiveWrites(root,report,fixture);
@@ -4049,7 +4136,7 @@ int RunApfsContainerTest(const char* directory)
                 Check(checkpoint&&Apfs::CommitCheckpoint(*raw,*checkpoint,conversion)>checkpoint->transaction,
                       "Could not commit a checkpoint to the independently authored APFS image");
             }
-            const auto committed=MacBrowser::OpenBrowserImage(extracted);
+            auto committed=MacBrowser::OpenBrowserImage(extracted);
             Check(committed&&committed->FindChild(2,u"Independent APFS",current)&&
                   committed->FindChild(2,u"Independent APFS [Snapshot: Independent backup]",snapshot),
                   "Checkpoint publication lost the live volume or snapshot");
@@ -4060,7 +4147,8 @@ int RunApfsContainerTest(const char* directory)
                 committed->Read(file.id,0,0,bytes,sizeof(bytes));
                 Check(!memcmp(bytes,expected,sizeof(bytes)),"Checkpoint publication changed independent APFS file data");
             }
-            fprintf(report,"PASS: independently authored APFS snapshot and live file survived checkpoint publication.\n");
+            committed.reset();
+            SnapshotLiveWrites(extracted,report,u"Folder",u"sample.txt");
         }
         auto browsable=Gpt(BrowseFixture(),4096);
         const auto path=VolumeCoord::Wide(root+"apfs.img");
