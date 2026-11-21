@@ -2911,19 +2911,23 @@ CatalogWritePlan PrepareVolumeRename(Source& source,const Container& current,uin
     Bytes& superblock,const CheckpointObjectLookup& ephemeral,const CatalogVolumeRename& request,uint64_t selected)
 {
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
-    CheckExternalVolume(volume,current.volumes.size()==2,false,bool(current.writeCipher));
+    const bool historical=Le64(volume.data()+216)!=0;
+    CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     const auto oid=selected?selected:current.volumes.front();
     const auto name=EncodeCatalogName(request.name);
     const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
-    const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128));
-    const auto catalog=ReadWritableCatalog(source,current,volumeMap,Le64(volume.data()+136));
-    const auto extents=ReadExtentTree(source,current,Le64(volume.data()+144));
-    ValidateSharedFileExtents(catalog,extents.records,bool(current.writeCipher));
+    const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128),historical);
+    const auto liveMap=historical?MapAt(volumeMap,current.transaction):volumeMap;
+    const auto catalog=ReadWritableCatalog(source,current,liveMap,Le64(volume.data()+136),historical);
+    auto extents=ReadExtentTree(source,current,Le64(volume.data()+144),historical);
+    const auto snapshot=ReadSnapshotAllocations(source,current,volume,volumeMap,catalog,extents);
+    if(!historical)ValidateSharedFileExtents(catalog,extents.records,bool(current.writeCipher));
     std::vector<FileRun> files;
     for(const auto& extent:extents.records)
         files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
-    auto protectedRuns=siblings.runs;
-    for(auto block:catalog.blocks)protectedRuns.push_back({block,1});
+    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
+    for(auto block:catalog.blocks)
+        if(!snapshot.catalogBlocks.count(block))protectedRuns.push_back({block,1});
     for(auto block:volumeMap.leaves)protectedRuns.push_back({block,1});
     protectedRuns.push_back({volumeMap.headerBlock,1});
     protectedRuns.push_back({volumeMap.rootBlock,1});

@@ -2720,6 +2720,47 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
             targetIndex+1);
 }
 
+void RenameVolumeWithSnapshot(const std::wstring& path,FILE* report,const char16_t* directory,const char16_t* name)
+{
+    const auto read=[&](MacBrowser::Volume& volume,uint32_t root){
+        MacBrowser::Entry folder,file;
+        Check(volume.FindChild(root,directory,folder)&&volume.FindChild(folder.id,name,file)&&file.forks[0].size,
+              "Missing snapshot rename verification file");
+        Bytes data(size_t(file.forks[0].size));
+        volume.Read(file.id,0,0,data.data(),data.size());
+        return data;
+    };
+    auto volume=MacBrowser::OpenBrowserImage(path);
+    Check(bool(volume),"Cannot mount the APFS snapshot rename fixture");
+    const auto roots=volume->List(2);
+    Check(roots.size()==2,"Expected live and snapshot roots");
+    const auto& live=roots.front();
+    const auto& snapshot=roots.back();
+    const auto suffix=snapshot.name.substr(live.name.size());
+    Check(suffix.find(u" [Snapshot: ")==0&&Apfs::CanRenameMountedVolume(*volume,live.id)&&
+          !Apfs::CanRenameMountedVolume(*volume,snapshot.id),"Wrong APFS rename command availability");
+    const auto liveData=read(*volume,live.id),snapshotData=read(*volume,snapshot.id);
+    Storage::Job cancelled;
+    cancelled.cancel();
+    bool stopped=false;
+    try{Apfs::RenameMountedVolume(*volume,live.id,u"Renamed live APFS",cancelled);}
+    catch(const Storage::Cancelled&){stopped=true;}
+    Check(stopped&&volume->Stat(live.id).name==live.name,"Cancelled rename changed the live APFS label");
+    Storage::Job rename;
+    const std::u16string renamed=u"Renamed live APFS";
+    Apfs::RenameMountedVolume(*volume,live.id,renamed,rename);
+    Check(volume->Stat(live.id).name==renamed&&volume->Stat(snapshot.id).name==renamed+suffix&&
+          read(*volume,snapshot.id)==snapshotData,"Mounted APFS roots did not refresh after rename");
+    volume.reset();
+    volume=MacBrowser::OpenBrowserImage(path);
+    Check(bool(volume),"Cannot reopen the renamed APFS image");
+    MacBrowser::Entry current,historical,old;
+    Check(volume->FindChild(2,renamed,current)&&volume->FindChild(2,renamed+suffix,historical)&&
+          !volume->FindChild(2,live.name,old)&&read(*volume,current.id)==liveData&&
+          read(*volume,historical.id)==snapshotData,"APFS live or snapshot data changed after reopen");
+    fprintf(report,"PASS: live APFS rename preserved the named snapshot and both views after reopening.\n");
+}
+
 void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* directory,const char16_t* name,bool withClones=false)
 {
     uint64_t originalTransaction=0,originalCheckpoint=0;
@@ -3459,6 +3500,9 @@ int RunApfsContainerTest(const char* directory)
         if(const auto snapshot=_wgetenv(L"HFV_APFS_APPLE_SNAPSHOT_WRITE_FIXTURE")){
             const auto path=VolumeCoord::Wide(root+"apple-snapshot-live-edits.img");
             Check(CopyFileW(snapshot,path.c_str(),TRUE)!=FALSE,"Could not copy APFS snapshot writer fixture");
+            const auto renamed=VolumeCoord::Wide(root+"apple-snapshot-renamed-volume.img");
+            Check(CopyFileW(snapshot,renamed.c_str(),TRUE)!=FALSE,"Could not copy APFS snapshot rename fixture");
+            RenameVolumeWithSnapshot(renamed,report,u"Fixture",u"entry-0");
             SnapshotLiveWrites(path,report,u"Fixture",u"entry-0");
         }
         if(const auto native=_wgetenv(L"HFV_APFS_NATIVE_SHARED_SNAPSHOT")){
@@ -5080,6 +5124,9 @@ int RunApfsContainerTest(const char* directory)
                 Check(!memcmp(bytes,expected,sizeof(bytes)),"Checkpoint publication changed independent APFS file data");
             }
             committed.reset();
+            const auto renamed=VolumeCoord::Wide(root+"independent-snapshot-renamed-volume.img");
+            Check(CopyFileW(extracted.c_str(),renamed.c_str(),TRUE)!=FALSE,"Could not copy the macOS snapshot rename fixture");
+            RenameVolumeWithSnapshot(renamed,report,u"Folder",u"sample.txt");
             SnapshotLiveWrites(extracted,report,u"Folder",u"sample.txt");
         }
         auto browsable=Gpt(BrowseFixture(),4096);

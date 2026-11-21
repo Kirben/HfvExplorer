@@ -572,7 +572,7 @@ public:
         const auto item=entries.find(id);
         if(item==entries.end()||item->second.oid!=2)return false;
         const auto& mount=mounts[item->second.mount];
-        return !mount.locked&&!mount.snapshotTree&&!mount.snapshotCreated;
+        return !mount.locked&&!mount.snapshotCreated;
     }
     void RenameRoot(uint32_t id,const std::u16string& name,Storage::Job& job){
         VolumeCoord::Lease access({{key,VolumeCoord::Mode::Write}});
@@ -580,9 +580,10 @@ public:
         try{
             const bool changed=WriteMount([&]{
                 if(job.cancelled())throw Storage::Cancelled();
-                Check(CanRenameRoot(id),"Select a writable live APFS volume with no snapshots");
+                Check(CanRenameRoot(id),"Select a writable live APFS volume");
                 const auto mountIndex=At(id).mount;
-                if(mounts[mountIndex].name==name)return false;
+                const auto oldName=mounts[mountIndex].name;
+                if(oldName==name)return false;
                 CommitMutation(id,0,job,[&](auto& work){
                     try{
                         const auto transaction=RenameVolume(*source,WriteTarget(id),name,work);
@@ -596,6 +597,12 @@ public:
                 auto& root=At(id).entry;
                 const auto& actual=mounts[mountIndex].name;
                 root.name=actual;
+                for(auto& [rootId,item]:entries){
+                    auto& view=mounts[item.mount];
+                    if(item.oid!=2||view.oid!=mounts[mountIndex].oid||!view.snapshotCreated)continue;
+                    view.name=actual+view.name.substr(oldName.size());
+                    item.entry.name=view.name;
+                }
                 if(id==2)std::atomic_store(&updatedLabel,std::make_shared<const std::u16string>(actual));
                 else{
                     for(unsigned suffix=2;;++suffix){
