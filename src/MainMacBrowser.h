@@ -53,6 +53,7 @@ public:
     bool Select(LPARAM treeData);
     bool Active() const;
     std::string SelectedResourceKey()const;
+    std::shared_ptr<MacBrowser::Volume> SelectedVolume() const;
     bool Activate(int row);
     bool Refresh();
     bool RefreshForChange(const std::string&);

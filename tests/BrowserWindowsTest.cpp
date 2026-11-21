@@ -9,6 +9,7 @@
 #include "VolumeSession.h"
 #include "HfsPlusDisk.h"
 #include "ApfsContainer.h"
+#include "ApfsVolume.h"
 #include "ApfsFormat.h"
 #include "StorageJobDialog.h"
 #include "BackgroundCopies.h"
@@ -749,6 +750,53 @@ int RunBrowserWindowsTest(const char* directory){
    MetadataDialogs::Shutdown();
    fprintf(report,"PASS: APFS Properties routes to a working Finder information, timestamp and lock editor for folders.\n");
    fprintf(report,"PASS: recursive APFS folder copy, source timestamps, and destination dates after completed, skipped and cancelled merges.\n");
+  }
+  if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE")){
+   const auto path=VolumeCoord::Wide(std::string(directory)+"\\apfs-mounted-snapshot.img");
+   Check(CopyFileW(fixture,path.c_str(),TRUE)!=FALSE,"copy the macOS mounted-snapshot fixture");
+   Check(sa.MacBrowser().OpenImage(path)==1&&sa.AwaitNavigationForTest()&&
+         sb.MacBrowser().OpenImage(path)==1&&sb.AwaitNavigationForTest(),"open the macOS image in both browsers");
+   const auto volume=sa.MacBrowser().SelectedVolume();
+   Check(volume&&volume==sb.MacBrowser().SelectedVolume(),"APFS browsers did not share the mounted image");
+   const auto key=volume->ResourceKey();
+   const auto originalRoot=MacBrowser::Wide(volume->Name());
+   const auto history=originalRoot+L" [Snapshot: Mounted test]";
+   Check(sb.MacBrowser().Activate(Find(sb,L"Fixture"))&&sb.AwaitNavigationForTest()&&
+         Find(sb,L"entry-0")>=0,"navigate the peer to the live APFS folder");
+   auto firstRefresh=sa.notificationRefreshes,secondRefresh=sb.notificationRefreshes;
+   const auto checkRefresh=[&](uint64_t previous){
+    Check(VolumeCoord::Revision(key)==previous+1,"Mounted APFS snapshot write did not publish a revision");
+    const auto deadline=GetTickCount64()+10000;
+    while((sa.notificationRefreshes==firstRefresh||sb.notificationRefreshes==secondRefresh)&&GetTickCount64()<deadline){
+     MSG message{};
+     while(PeekMessage(&message,nullptr,0,0,PM_REMOVE))DispatchMessage(&message);
+     Sleep(1);
+    }
+    Check(sa.notificationRefreshes>firstRefresh&&sb.notificationRefreshes>secondRefresh&&
+          sa.AwaitNavigationForTest()&&sb.AwaitNavigationForTest()&&
+          sa.MacBrowser().SelectedVolume()==volume&&sb.MacBrowser().SelectedVolume()==volume,
+          "Snapshot refresh replaced or lost the mounted image");
+   };
+   Storage::Job create;
+   auto version=VolumeCoord::Revision(key);
+   Check(Apfs::MountedSnapshotNames(*volume).empty()&&
+         Apfs::ChangeMountedSnapshot(*volume,u"Mounted test",true,create)==std::vector<std::u16string>{u"Mounted test"},
+         "create a snapshot without closing the mounted APFS image");
+   checkRefresh(version);
+   Check(Find(sa,history.c_str())>=0&&Find(sb,L"entry-0")>=0,
+         "open APFS browsers did not show the new snapshot and retain the live folder");
+   Check(sa.MacBrowser().Activate(Find(sa,history.c_str()))&&sa.AwaitNavigationForTest()&&
+         Find(sa,L"Fixture")>=0,"browse the new snapshot before deletion");
+   Storage::Job remove;
+   firstRefresh=sa.notificationRefreshes;
+   secondRefresh=sb.notificationRefreshes;
+   version=VolumeCoord::Revision(key);
+   Check(Apfs::ChangeMountedSnapshot(*volume,u"Mounted test",false,remove).empty(),
+         "delete an APFS snapshot without closing the mounted image");
+   checkRefresh(version);
+   Check(Find(sa,history.c_str())<0&&Find(sa,L"Fixture")>=0&&Find(sb,L"entry-0")>=0,
+         "open APFS browsers did not remove the snapshot and retain the live folder");
+   fprintf(report,"PASS: both open APFS browser windows refreshed after mounted snapshot creation and deletion.\n");
   }
   // Make the first frame the MFC main window before closing it: this is the
   // case that CFrameWnd's default SDI shutdown used to close every document.

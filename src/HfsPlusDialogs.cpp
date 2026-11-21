@@ -9,6 +9,7 @@
 #include "MacBrowserModel.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
+#include "ApfsVolume.h"
 #include "ApfsCatalogWrite.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusDisk.h"
@@ -579,6 +580,7 @@ void SnapshotError(CWnd* owner,const Storage::Result& result)
 }
 
 class ApfsSnapshotsDialog final : public CDialog {
+    std::shared_ptr<MacBrowser::Volume> mounted;
     std::unique_ptr<HfsPlus::Source> source;
     Apfs::Container checkpoint;
     std::vector<std::u16string> names;
@@ -616,6 +618,10 @@ class ApfsSnapshotsDialog final : public CDialog {
         bool reopen=false;
         const auto result=ShowStorageJob([&](Storage::Job& job){
             try{
+                if(mounted){
+                    names=Apfs::ChangeMountedSnapshot(*mounted,name,create,job);
+                    return Storage::Result{};
+                }
                 if(create)Apfs::CreateSnapshot(*source,checkpoint,name,job);
                 else Apfs::DeleteSnapshot(*source,checkpoint,name,job);
             }catch(const Apfs::CheckpointPublicationUncertain&){
@@ -644,6 +650,9 @@ public:
                         std::vector<std::u16string> snapshots,std::wstring filename)
         :CDialog(IDD_APFS_SNAPSHOTS,owner),source(std::move(image)),checkpoint(std::move(container)),
          names(std::move(snapshots)),imageName(std::move(filename)){}
+    ApfsSnapshotsDialog(CWnd* owner,std::shared_ptr<MacBrowser::Volume> volume,std::vector<std::u16string> snapshots)
+        :CDialog(IDD_APFS_SNAPSHOTS,owner),mounted(std::move(volume)),
+         names(std::move(snapshots)),imageName(MacBrowser::Wide(mounted->Name())){}
     BOOL OnInitDialog() override{
         CDialog::OnInitDialog();
         BrowserPresentation::UnicodeControl(m_hWnd,IDC_APFS_SNAPSHOT_LIST,L"LISTBOX");
@@ -664,8 +673,19 @@ public:
 };
 }
 
-void ManageApfsSnapshots(CWnd* owner)
+void ManageApfsSnapshots(CWnd* owner,std::shared_ptr<MacBrowser::Volume> selected)
 {
+    if(selected&&!strcmp(selected->Kind(),"APFS")){
+        std::vector<std::u16string> names;
+        const auto result=ShowStorageWaitJob([&](Storage::Job&){
+            names=Apfs::MountedSnapshotNames(*selected);
+            return Storage::Result{};
+        },false,owner);
+        if(result.code){SnapshotError(owner,result);return;}
+        ApfsSnapshotsDialog dialog(owner,std::move(selected),std::move(names));
+        dialog.DoModal();
+        return;
+    }
     std::wstring path;
     if(!FileDialog(owner->GetSafeHwnd(),path,false,
         L"Raw disk images\0*.img;*.raw;*.dsk;*.image\0All files\0*.*\0\0",nullptr,

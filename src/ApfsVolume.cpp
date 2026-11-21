@@ -346,8 +346,8 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::u16string label;
     bool caseSensitive=true;
     const std::string key;
-    std::atomic<bool> writable;
-    const bool limitedEdits,processLocal;
+    std::atomic<bool> writable,limitedEdits;
+    const bool processLocal;
     std::atomic<uint64_t> freeBytes;
     MacBrowser::WorkerOrigin origin;
     std::recursive_mutex mutex;
@@ -469,6 +469,59 @@ public:
         if(!files.empty()){
             origin.kind=MacBrowser::WorkerOrigin::Image;
             origin.path=files.front().first;
+        }
+    }
+    std::vector<std::u16string> SnapshotNames(){
+        return Access([&]{
+            Check(writable&&source->Writable()&&container.volumes.size()==1&&!mounts.front().locked&&
+                  !mounts.front().cipher,"Snapshot management requires a writable unencrypted single-volume APFS image");
+            return ListSnapshotNames(*source,container);
+        });
+    }
+    std::vector<uint32_t> FolderRoute(const std::vector<uint32_t>& previous){
+        return Access([&]{
+            for(const auto candidate:previous){
+                const auto selected=entries.find(candidate);
+                if(selected==entries.end()||!selected->second.entry.directory)continue;
+                std::vector<uint32_t> route;
+                std::set<uint32_t> seen;
+                for(auto id=candidate;id!=1;id=At(id).entry.parent){
+                    Check(seen.insert(id).second,"Cyclic APFS folder route");
+                    route.push_back(id);
+                }
+                return route;
+            }
+            return std::vector<uint32_t>{2};
+        });
+    }
+    std::vector<std::u16string> ChangeSnapshot(const std::u16string& name,bool create,Storage::Job& job){
+        VolumeCoord::Lease access({{key,VolumeCoord::Mode::Write}});
+        bool changed=false;
+        try{
+            auto names=WriteMount([&]{
+                SnapshotNames();
+                uint64_t transaction=0;
+                try{
+                    transaction=create?CreateSnapshot(*source,container,name,job):DeleteSnapshot(*source,container,name,job);
+                    changed=true;
+                }catch(const CheckpointPublicationUncertain&){
+                    requiresReopen=true;
+                    changed=true;
+                    throw;
+                }
+                try{
+                    RefreshSnapshotViews(transaction,create);
+                    return ListSnapshotNames(*source,container);
+                }catch(const std::exception& error){
+                    requiresReopen=true;
+                    throw Error(std::string("APFS snapshot change committed. Reopen the image to refresh it. ")+error.what());
+                }
+            },true);
+            access.ReleaseAndPublish({key});
+            return names;
+        }catch(...){
+            if(changed)access.ReleaseAndPublish({key});
+            throw;
         }
     }
     std::u16string Name()const override{return label;}
@@ -914,6 +967,86 @@ private:
         }
     }
 
+    void RefreshSnapshotViews(uint64_t transaction,bool create){
+        const auto fresh=Probe(*source);
+        Check(fresh&&fresh->uuid==container.uuid&&fresh->volumes==container.volumes&&
+              fresh->transaction==transaction,"The APFS image changed during snapshot management");
+        const auto oid=fresh->volumes.front();
+        const ObjectMap map(*source,*fresh,fresh->objectMap,transaction);
+        const auto address=map.Lookup(oid);
+        Check(address.has_value(),"Missing APFS live volume after snapshot management");
+        auto live=ReadVolume(ReadObject(*source,*fresh,*address,oid,transaction,13),oid);
+        auto snapshots=ReadSnapshots(*source,*fresh,live);
+        Check(snapshots.size()==size_t(create),"Could not load the updated APFS snapshot view");
+        freeBytes=WritableFreeBytes(*source,*fresh);
+
+        uint32_t liveRoot=2;
+        if(At(2).oid==0){
+            const auto& roots=listings.at(2);
+            Check(!roots.empty(),"Missing APFS live root");
+            liveRoot=roots.front();
+        }
+        if(create)limitedEdits=true;
+        if(create&&liveRoot==2){
+            Check(next<=UINT32_MAX,"Too many APFS browser entries");
+            liveRoot=uint32_t(next++);
+            auto root=entries.extract(2);
+            root.key()=liveRoot;
+            root.mapped().entry.id=root.mapped().entry.resolvedId=liveRoot;
+            root.mapped().entry.parent=2;
+            entries.insert(std::move(root));
+            for(auto& [id,item]:entries)
+                if(id!=liveRoot&&item.entry.parent==2)item.entry.parent=liveRoot;
+            Entry index;
+            index.id=index.resolvedId=2;
+            index.parent=1;
+            index.directory=true;
+            index.name=u"APFS Container";
+            index.identity=MacBrowser::EntryIdentity(key);
+            entries.emplace(2,Item{0,0,0,std::move(index),{}});
+        }
+        for(auto entry=entries.begin();entry!=entries.end();)
+            if(entry->second.mount!=0)entry=entries.erase(entry);
+            else ++entry;
+        for(auto id=writableIds.begin();id!=writableIds.end();)
+            if(id->first.first!=0)id=writableIds.erase(id);
+            else ++id;
+        for(auto id=linkIdentities.begin();id!=linkIdentities.end();)
+            if(id->first.first!=0)id=linkIdentities.erase(id);
+            else ++id;
+        listings.clear();
+        extents.clear();
+        compressed.clear();
+        container=*fresh;
+        mounts.clear();
+        mounts.push_back(std::move(live));
+        if(create){
+            Check(next<=UINT32_MAX,"Too many APFS browser entries");
+            mounts.push_back(std::move(snapshots.front()));
+            const auto& mount=mounts.back();
+            auto root=LoadInode(Catalog(*source,container,mount),1,2);
+            auto& entry=root.entry;
+            const auto id=uint32_t(next++);
+            entry.id=entry.resolvedId=id;
+            entry.parent=2;
+            entry.name=mount.name;
+            entry.identity=MacBrowser::EntryIdentity(MountKey(mount),EntryVersion(mount));
+            entry.created=entry.modified=*mount.snapshotCreated;
+            entry.datesValid=true;
+            entries.emplace(id,Item{1,2,root.stream,std::move(entry),std::move(root.attributes)});
+            listings.emplace(2,std::vector<uint32_t>{liveRoot,id});
+        }else if(liveRoot!=2){
+            entries.erase(2);
+            auto root=entries.extract(liveRoot);
+            root.key()=2;
+            root.mapped().entry.id=root.mapped().entry.resolvedId=2;
+            root.mapped().entry.parent=1;
+            entries.insert(std::move(root));
+            for(auto& [id,item]:entries)
+                if(item.entry.parent==liveRoot)item.entry.parent=2;
+        }
+    }
+
     Container WriteTarget(uint32_t parent)
     {
         const auto& folder=At(parent);
@@ -1162,7 +1295,7 @@ public:
             Entry existing;
             if(FindChild(parent,entry.name,existing)){
                 Check(replace&&!existing.directory&&!existing.protectedFile&&
-                      (existing.symbolicLink?limitedEdits:existing.readError.empty()),
+                      (existing.symbolicLink?limitedEdits.load():existing.readError.empty()),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==existing.identity,
                       "The APFS destination changed after overwrite approval");
@@ -1453,6 +1586,26 @@ std::vector<std::u16string> ListSnapshotNames(Source& source,const Container& co
     std::vector<std::u16string> names;
     for(auto& snapshot:snapshots)names.push_back(std::move(snapshot.name));
     return names;
+}
+
+std::vector<std::u16string> MountedSnapshotNames(MacBrowser::Volume& volume)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    Check(mounted!=nullptr,"Select an APFS image");
+    return mounted->SnapshotNames();
+}
+
+std::vector<std::u16string> ChangeMountedSnapshot(MacBrowser::Volume& volume,const std::u16string& name,bool create,Storage::Job& job)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    Check(mounted!=nullptr,"Select an APFS image");
+    return mounted->ChangeSnapshot(name,create,job);
+}
+
+std::vector<uint32_t> RefreshedFolderRoute(MacBrowser::Volume& volume,const std::vector<uint32_t>& previous)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    return mounted?mounted->FolderRoute(previous):std::vector<uint32_t>{};
 }
 
 void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password)

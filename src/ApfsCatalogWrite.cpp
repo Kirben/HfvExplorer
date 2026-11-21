@@ -2925,7 +2925,12 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
     }
     ValidateSnapshotFileExtents(catalog,extents.records);
     Check(!Le64(volume.data()+1000),"APFS snapshot changes do not support extended snapshot metadata");
-    auto protectedRuns=snapshot.protectedRuns;
+    const std::set<uint64_t> liveCatalog(catalog.blocks.begin(),catalog.blocks.end());
+    auto snapshotOnlyRuns=snapshot.protectedRuns;
+    snapshotOnlyRuns.erase(std::remove_if(snapshotOnlyRuns.begin(),snapshotOnlyRuns.end(),[&](const auto& run){
+        return run.count==1&&snapshot.catalogBlocks.count(run.block)&&liveCatalog.count(run.block);
+    }),snapshotOnlyRuns.end());
+    auto protectedRuns=snapshotOnlyRuns;
     for(auto block:catalog.blocks)protectedRuns.push_back({block,1});
     std::sort(protectedRuns.begin(),protectedRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
     std::vector<uint64_t> retired{containerMap.headerBlock,containerMap.rootBlock,volumeAddress,
@@ -2937,7 +2942,6 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
     auto extentLeaves=PartitionCatalog(deleting?std::move(extents.records):std::vector<OwnedRecord>{});
     const auto extentChildren=extentLeaves.size()>1?extentLeaves.size():0;
     auto mappings=currentMap.mappings;
-    const std::set<uint64_t> liveCatalog(catalog.blocks.begin(),catalog.blocks.end());
     mappings.erase(std::remove_if(mappings.begin(),mappings.end(),[&](const auto& mapping){
         return !liveCatalog.count(mapping.block);
     }),mappings.end());
@@ -2949,7 +2953,7 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
     CatalogWritePlan plan;
     std::vector<DataRun> unused;
     const auto blocks=Allocate(plan.metadata,source,current,space,superblock,ephemeral,retired,extents.blocks,
-        snapshotTree,live,snapshot.protectedRuns,0,unused,transaction,
+        snapshotTree,live,snapshotOnlyRuns,0,unused,transaction,
         [&]{return firstChild+extentChildren+mapChildren;},protectedRuns);
     StageExtentTree(plan.metadata,extentLeaves,blocks,firstChild,transaction);
     FILETIME clock{};
@@ -2991,7 +2995,7 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
     uint64_t dropped=map.leaves.size(),added=mapChildren;
     if(deleting){
         dropped+=extents.blocks.size()-1;
-        for(const auto& run:snapshot.protectedRuns)dropped+=run.count;
+        for(const auto& run:snapshotOnlyRuns)dropped+=run.count;
         Check(snapshot.historicalSuper&&dropped,"Invalid APFS snapshot allocation history");
         --dropped; // The physical snapshot superblock is excluded from the volume allocation count.
         added+=extentChildren;

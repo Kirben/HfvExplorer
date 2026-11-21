@@ -390,8 +390,18 @@ struct MainMacBrowser::State {
                 // Follow the visible path rather than backing-inode parent IDs.
                 // Converting a folder to hard links retains its inode CNID but
                 // gives the original visible name a new catalog CNID.
+                auto path=savedPath;
+                if(!strict){
+                    std::vector<uint32_t> previous;
+                    for(const auto& node:savedPath)previous.push_back(node.first);
+                    const auto route=Apfs::RefreshedFolderRoute(*volume,previous);
+                    if(!route.empty()){
+                        path.clear();
+                        for(const auto id:route)path.push_back({id,{}});
+                    }
+                }
                 id=2;std::vector<uint32_t> chain{2};
-                for(auto old=savedPath.rbegin();old!=savedPath.rend();++old){if(old->first==2)continue;auto children=volume->List(id);auto next=std::find_if(children.begin(),children.end(),[&](const Entry& e){return e.directory&&(e.id==old->first||(e.hardLink&&e.resolvedId==old->first&&e.name==old->second));});if(next==children.end()){if(strict)throw HfsPlus::Error("The search result folder changed.");break;}auto nextId=next->id;levels.push_back({id,std::move(children)});id=nextId;chain.push_back(id);}
+                for(auto old=path.rbegin();old!=path.rend();++old){if(old->first==2)continue;auto children=volume->List(id);auto next=std::find_if(children.begin(),children.end(),[&](const Entry& e){return e.directory&&(e.id==old->first||(e.hardLink&&e.resolvedId==old->first&&e.name==old->second));});if(next==children.end()){if(strict)throw HfsPlus::Error("The search result folder changed.");break;}auto nextId=next->id;levels.push_back({id,std::move(children)});id=nextId;chain.push_back(id);}
                 ancestors.assign(chain.rbegin(),chain.rend());
             }
             std::set<uint32_t> visited;
@@ -574,6 +584,13 @@ struct MainMacBrowser::State {
 MainMacBrowser::MainMacBrowser(BrowserSession& session):session_(session),state_(new State(session)){}
 MainMacBrowser::~MainMacBrowser()=default;
 void MainMacBrowser::ForgetTree(){state_->media.Cancel();state_->restore.clear();}
+std::shared_ptr<MacBrowser::Volume> MainMacBrowser::SelectedVolume()const
+{
+    int index;
+    uint32_t folder;
+    if(!state_->Selected(index,folder))return {};
+    return state_->mounts[index].volume;
+}
 std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?tree->BrowserNodeAt(item):nullptr;if(!p)return {};if(p->LegacyType()==LIST_HFS&&p->mount.index>=0&&p->mount.index<doc->Mounts().ClassicCount())return doc->Mounts().ClassicAt(p->mount.index).m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->Mounts().ClassicAt(p->mount.index).m_file_name));if(p->LegacyType()==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return folder&&folder->location.IsWindows()?session_.ObservedWindowsKey(folder->location.WindowsPath()):std::string();}return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::AllowsFolderOperation(bool MacBrowser::Capabilities::* capability)const

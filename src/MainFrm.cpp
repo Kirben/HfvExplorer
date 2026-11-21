@@ -1388,7 +1388,8 @@ void CMainFrame::OnFileVolumetofloppy()
 
 void CMainFrame::OnToolsApfsSnapshots()
 {
- if(!StorageUi::busy()&&!StorageUi::state().sessionOpen)ManageApfsSnapshots(this);
+  if(!StorageUi::busy()&&!StorageUi::state().sessionOpen)
+     ManageApfsSnapshots(this,GetBrowserSession().MacBrowser().SelectedVolume());
 }
 
 void CMainFrame::OnToolsFind()
