@@ -512,7 +512,73 @@ void VerifyOutside(const Bytes& before,const Bytes& after,uint64_t start,uint64_
           std::equal(before.begin()+size_t(start+length),before.end(),after.begin()+size_t(start+length)),
           "NDIF recovery or commit changed bytes outside the selected HFS partition");
 }
-void NdifRecovery(const CString& root,FILE* report)
+void SiblingRawRecovery(const CString& root,FILE* report)
+{
+    const CString seed=root+"\\sibling-seed.dsk";
+    const auto seedPath=VolumeCoord::Wide(seed.GetString());
+    FormatClassicImage(seedPath,"SiblingUndo",4*1024*1024);
+    {
+        auto volume=MacBrowser::OpenImage(seedPath);
+        Check(volume&&volume->Writable(),"open raw sibling-recovery seed");
+        Put(*volume,false);
+        Put(*volume,true,false,2,u"Unrelated");
+        volume->Close();
+    }
+    const auto original=Load(seed);
+    for(const auto* action:{L"overwrite",L"delete"}){
+        for(unsigned phase:{1u,2u,3u}){
+            CString image;
+            image.Format("%s\\sibling-%ls-%u.dsk",root.GetString(),action,phase);
+            Save(image,original);
+            const auto path=VolumeCoord::Wide(image.GetString());
+            const CString journal=image+".hfv-classic-undo";
+            CrashChild(image,phase,action);
+            Check(ClassicHfsRecovery::Pending(path)&&!Load(journal).empty()&&Load(image)!=original,
+                  "interrupted raw edit did not write a sibling undo file");
+            if(phase==1)CrashChild(image,5);
+            {
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&volume->Writable(),"open raw sibling recovery in the browser worker");
+                MacBrowser::Entry item{};
+                if(phase==3&&wcscmp(action,L"delete")==0)
+                    Check(!volume->FindChild(2,u"Document",item),"committed sibling delete returned");
+                else VerifyFile(*volume,2,u"Document",phase==3);
+                VerifyFile(*volume,2,u"Unrelated",true);
+            }
+            Check(!ClassicHfsRecovery::Pending(path)&&Load(journal).empty(),
+                  "recovered raw image still has sibling undo records");
+            if(phase!=3)Check(Load(image)==original,"sibling undo did not restore exact raw image bytes");
+        }
+    }
+
+    const CString image=root+"\\replaced.dsk",replacement=root+"\\replacement.dsk";
+    const auto path=VolumeCoord::Wide(image.GetString());
+    Save(image,original);
+    CrashChild(image,2);
+    const CString journal=image+".hfv-classic-undo";
+    const auto stale=Load(journal);
+    FormatClassicImage(VolumeCoord::Wide(replacement.GetString()),"Replacement",original.size());
+    const auto before=Load(replacement);
+    Check(MoveFileExA(replacement,image,MOVEFILE_REPLACE_EXISTING)!=FALSE,"replace raw crash-test image");
+    bool rejected=false;
+    try{auto volume=MacBrowser::OpenImage(path);rejected=!volume;}
+    catch(const HfsPlus::Error&){rejected=true;}
+    Check(rejected&&Load(image)==before&&Load(journal)==stale,
+          "stale sibling undo was applied to a replacement image or erased");
+    const CString collision=root+"\\collision.dsk";
+    const CString unrelated=collision+".hfv-classic-undo";
+    const Bytes unrelatedBytes{0x12,0x34,0x56};
+    Save(collision,original);
+    Save(unrelated,unrelatedBytes);
+    rejected=false;
+    try{auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(collision.GetString()));rejected=!volume;}
+    catch(const HfsPlus::Error&){rejected=true;}
+    Check(rejected&&Load(collision)==original&&Load(unrelated)==unrelatedBytes,
+          "an unrelated file at the sibling path was altered or accepted");
+    fprintf(report,"PASS: sibling undo recovers raw overwrites and deletes before and after commit, retries interrupted replay, and rejects stale and unrelated sibling files.\n");
+}
+
+void NdifRecovery(const CString& root,FILE* report,bool sibling=false)
 {
     const wchar_t* fixtures=_wgetenv(L"HFV_NDIF_INTERCHANGE_FIXTURES");
     if(!fixtures||!*fixtures){
@@ -559,6 +625,8 @@ void NdifRecovery(const CString& root,FILE* report)
                 CrashChild(image,phase,action);
                 Check(ClassicHfsRecovery::Pending(path,true)&&!ClassicHfsRecovery::Pending(path)&&Load(image)!=before,
                       "interrupted NDIF change did not leave a container recovery record");
+                if(sibling)
+                    Check(!Load(image+".hfv-ndif-classic-undo").empty(),"NDIF undo did not use the selected sibling file");
                 if(!partitioned&&phase==2&&wcscmp(action,L"overwrite")==0){
                     // A changed wrapper must leave the pending transaction intact.
                     const auto replaceHeaderByte=[&](BYTE value){
@@ -690,6 +758,25 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
         volume->Close();
         return 3;
     }catch(...){return 4;}
+}
+
+int RunClassicSiblingRecoveryTest(const char* directory)
+{
+    if(!CreateDirectoryA(directory,nullptr))return 2;
+    const CString root=directory;
+    FILE* report=nullptr;
+    if(fopen_s(&report,root+"\\classic-sibling-recovery-report.txt","w")||!report)return 2;
+    int result=0;
+    try{
+        readonly_cd_backend_init();
+        SiblingRawRecovery(root,report);
+        NdifRecovery(root,report,true);
+    }catch(const std::exception& error){
+        fprintf(report,"FAIL: %s\n",error.what());
+        result=1;
+    }
+    fclose(report);
+    return result;
 }
 
 int RunClassicRecoveryTest(const char* directory)

@@ -13,6 +13,8 @@ using ClassicHfsRecovery::Transaction;
 using ClassicHfsRecovery::ImageRange;
 constexpr wchar_t Stream[] = L":HFVExplorer.ClassicUndo";
 constexpr wchar_t NdifStream[] = L":HFVExplorer.NdifClassicUndo";
+constexpr wchar_t Sibling[] = L".hfv-classic-undo";
+constexpr wchar_t NdifSibling[] = L".hfv-ndif-classic-undo";
 constexpr uint64_t Committed = UINT64_MAX;
 constexpr uint64_t Sector = 512;
 constexpr char Magic[8] = {'H','F','V','H','F','S','U','1'};
@@ -59,31 +61,43 @@ HANDLE ImageHandle(int fd)
     return fd >= 0 && fd < 0x10000000
         ? reinterpret_cast<HANDLE>(_get_osfhandle(fd)) : INVALID_HANDLE_VALUE;
 }
-std::wstring StreamPath(const std::wstring& path,bool ndif)
+struct JournalPath {
+    std::wstring name;
+    bool sibling=false;
+
+    DWORD OpenFlags() const {
+        return sibling?FILE_FLAG_OPEN_REPARSE_POINT:0;
+    }
+};
+
+bool OrdinaryImage(HANDLE image)
 {
-    const size_t leaf = path.find_last_of(L"\\/");
-    if ((leaf == path.npos && path.find(L':') != path.npos) ||
-        (leaf != path.npos && path.find(L':',leaf+1) != path.npos))
-        return {};
-    return path + (ndif?NdifStream:Stream);
+    return image!=INVALID_HANDLE_VALUE && GetFileType(image)==FILE_TYPE_DISK;
 }
-bool SupportsRecovery(HANDLE image)
+JournalPath LocateJournal(HANDLE image,bool ndif)
 {
-    DWORD flags=0;
-    return image!=INVALID_HANDLE_VALUE && GetFileType(image)==FILE_TYPE_DISK &&
-           GetVolumeInformationByHandleW(image,nullptr,0,nullptr,nullptr,&flags,nullptr,0) &&
-           (flags & FILE_NAMED_STREAMS)!=0;
-}
-std::wstring StreamPath(HANDLE image,bool ndif)
-{
-    if (image==INVALID_HANDLE_VALUE || GetFileType(image)!=FILE_TYPE_DISK) return {};
+    if (!OrdinaryImage(image)) return {};
+    BY_HANDLE_FILE_INFORMATION info{};
+    Check(GetFileInformationByHandle(image,&info)!=FALSE,"Cannot identify the classic HFS recovery image");
+    if(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)return {};
     const auto required = GetFinalPathNameByHandleW(image,nullptr,0,FILE_NAME_OPENED);
-    Check(required!=0,"Cannot locate the classic HFS image recovery stream");
+    Check(required!=0,"Cannot locate the classic HFS recovery journal");
     std::wstring path(required,0);
     const auto used = GetFinalPathNameByHandleW(image,path.data(),required,FILE_NAME_OPENED);
-    Check(used && used<required,"Cannot locate the classic HFS image recovery stream");
+    Check(used && used<required,"Cannot locate the classic HFS recovery journal");
     path.resize(used);
-    return StreamPath(path,ndif);
+    const auto leaf=path.find_last_of(L"\\/");
+    if(leaf==path.npos||path.find(L':',leaf+1)!=path.npos)return {};
+
+    DWORD flags=0;
+    Check(GetVolumeInformationByHandleW(image,nullptr,0,nullptr,nullptr,&flags,nullptr,0)!=FALSE,
+          "Cannot determine how to store the classic HFS recovery journal");
+    bool sibling=(flags&FILE_NAMED_STREAMS)==0;
+#ifdef HFV_TESTING
+    if(GetEnvironmentVariableW(L"HFV_TEST_CLASSIC_SIBLING_UNDO",nullptr,0))sibling=true;
+#endif
+    path+=sibling?(ndif?NdifSibling:Sibling):(ndif?NdifStream:Stream);
+    return {std::move(path),sibling};
 }
 uint64_t Length(HANDLE file)
 {
@@ -127,12 +141,23 @@ bool Clear(HANDLE stream)
 {
     return Seek(stream,0)&&SetEndOfFile(stream)&&FlushFileBuffers(stream);
 }
-void SameFile(HANDLE stream,const Header& image)
+void CheckJournalFile(HANDLE stream,const Header& image,bool sibling)
 {
     BY_HANDLE_FILE_INFORMATION info{};
-    Check(GetFileInformationByHandle(stream,&info)&&info.dwVolumeSerialNumber==image.serial&&
-          info.nFileIndexHigh==image.fileHigh&&info.nFileIndexLow==image.fileLow,
-          "The classic HFS recovery stream belongs to a different image");
+    Check(GetFileInformationByHandle(stream,&info)&&info.dwVolumeSerialNumber==image.serial,
+          "The classic HFS recovery journal is on a different volume");
+    const bool same=info.nFileIndexHigh==image.fileHigh&&info.nFileIndexLow==image.fileLow;
+    if(sibling){
+        // Refuse to replay if this host cannot uniquely identify the image
+        // that was present when the sibling journal was created.
+        Check((image.fileHigh||image.fileLow)&&(image.created.dwHighDateTime||image.created.dwLowDateTime),
+              "This host cannot identify a classic HFS image for sibling-file recovery");
+        Check(!same&&info.nNumberOfLinks==1&&
+              !(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)),
+              "The classic HFS recovery sibling must be a separate ordinary file");
+    }else{
+        Check(same,"The classic HFS recovery stream belongs to a different image");
+    }
 }
 bool Missing(DWORD error)
 {
@@ -165,13 +190,13 @@ struct Journal {
     bool faulted=false;
     bool attached=false;
     bool committing=false;
-    Journal(int imageFd,HANDLE imageHandle,const std::wstring& path,const ImageRange* ndif)
+    Journal(int imageFd,HANDLE imageHandle,const JournalPath& path,const ImageRange* ndif)
         : fd(imageFd),image(imageHandle),
-          stream(CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,0,nullptr)),
+          stream(CreateFileW(path.name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,path.OpenFlags(),nullptr)),
           header(Identify(image)),range(CheckedRange(image,header.size,ndif))
     {
-        Check(bool(stream),"Cannot open the classic HFS recovery stream");
-        SameFile(stream.value,header);
+        Check(bool(stream),"Cannot open the classic HFS recovery journal");
+        CheckJournalFile(stream.value,header,path.sibling);
         Check(Length(stream.value)==0,"A classic HFS operation already needs recovery");
         WriteAt(stream.value,0,&header,sizeof(header));
         if(ndif){
@@ -222,26 +247,33 @@ Journal* ForFd(int fd)
 }
 int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJournal=false)
 {
-    const auto path=StreamPath(image,ndif!=nullptr);
-    if (path.empty()) return 0;
-    Handle stream(CreateFileW(path.c_str(),GENERIC_READ|(writable?GENERIC_WRITE:0),
-                              writable?0:(FILE_SHARE_READ|FILE_SHARE_WRITE),nullptr,OPEN_EXISTING,0,nullptr));
-    if (!stream && Missing(GetLastError())) return 0;
-    Check(bool(stream),"Cannot open pending classic HFS recovery stream");
+    const auto path=LocateJournal(image,ndif!=nullptr);
+    if (path.name.empty()) return 0;
+    Handle stream(CreateFileW(path.name.c_str(),GENERIC_READ|(writable?GENERIC_WRITE:0),
+                              writable?0:(FILE_SHARE_READ|FILE_SHARE_WRITE),nullptr,OPEN_EXISTING,path.OpenFlags(),nullptr));
+    if (!stream && (path.sibling?GetLastError()==ERROR_FILE_NOT_FOUND:Missing(GetLastError()))) return 0;
+    Check(bool(stream),"Cannot open pending classic HFS recovery journal");
+    const auto identity=Identify(image);
+    CheckJournalFile(stream.value,identity,path.sibling);
     const auto size=Length(stream.value);
     if (!size) return 0;
-    const auto identity=Identify(image);
     auto range=CheckedRange(image,identity.size,ndif);
-    SameFile(stream.value,identity);
     Header header{};
     const uint64_t prefix=sizeof(header)+(ndif?sizeof(NdifRegion):0);
+    if (size>=sizeof(header)) {
+        ReadAt(stream.value,0,&header,sizeof(header));
+        Check(memcmp(&identity,&header,sizeof(header))==0,"Classic HFS recovery header or image identity is invalid");
+    }else if(path.sibling){
+        // An interrupted initial header can only be discarded if its
+        // written prefix belongs to this image.
+        ReadAt(stream.value,0,&header,DWORD(size));
+        Check(memcmp(&identity,&header,size_t(size))==0,"Invalid classic HFS recovery sibling header");
+    }
     if (size<prefix) {
         // No image write can occur while the initial header is incomplete.
         if (writable&&!keepJournal) Check(Clear(stream.value),"Cannot clear an incomplete classic HFS recovery header");
         return 0;
     }
-    ReadAt(stream.value,0,&header,sizeof(header));
-    Check(memcmp(&identity,&header,sizeof(header))==0,"Classic HFS recovery header or image identity is invalid");
     if(ndif){
         NdifRegion region{};
         ReadAt(stream.value,sizeof(header),&region,sizeof(region));
@@ -289,14 +321,13 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
 
 struct Transaction::State : Journal { using Journal::Journal; };
 bool Transaction::Supported(int fd,const ImageRange* ndif) {
-    return SupportsRecovery(ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd));
+    return OrdinaryImage(ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd));
 }
 Transaction::Transaction(int fd,const ImageRange* ndif)
 {
     const auto image=ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd);
-    if (!SupportsRecovery(image)) return;
-    const auto path=StreamPath(image,ndif!=nullptr);
-    if (path.empty()) return;
+    const auto path=LocateJournal(image,ndif!=nullptr);
+    if (path.name.empty()) return;
     Check(!ForFd(fd),"A classic HFS recovery transaction is already active");
     state_=std::make_unique<State>(fd,image,path,ndif);
     state_->previous=active;
@@ -327,13 +358,18 @@ void Transaction::Commit()
 }
 bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
 {
-    const auto name=StreamPath(path,ndif);
-    if (name.empty()) return false;
-    Handle stream(CreateFileW(name.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
-                              nullptr,OPEN_EXISTING,0,nullptr));
-    if (!stream && Missing(GetLastError())) return false;
-    if (!stream && GetLastError()==ERROR_DIRECTORY) return false;
-    if (!stream) return false; // The normal image opener reports host access errors.
+    Handle image(CreateFileW(path.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                             nullptr,OPEN_EXISTING,0,nullptr));
+    if(!image)return false;
+    const auto journal=LocateJournal(image.value,ndif);
+    if(journal.name.empty())return false;
+    Handle stream(CreateFileW(journal.name.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
+                              nullptr,OPEN_EXISTING,journal.OpenFlags(),nullptr));
+    if(!stream){
+        // A busy journal still needs to be resolved by the owning image mount.
+        if(journal.sibling)return GetFileAttributesW(journal.name.c_str())!=INVALID_FILE_ATTRIBUTES;
+        return false;
+    }
     return Length(stream.value)!=0;
 }
 bool ClassicHfsRecovery::RecoverNdif(const ImageRange& range,bool writable,bool keepJournal)

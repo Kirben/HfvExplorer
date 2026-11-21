@@ -227,6 +227,8 @@ BOOL CHFVExplorerApp::InitInstance()
 
 #ifdef HFV_TESTING
  extern int RunClassicRecoveryTest(const char*);
+ extern int RunClassicSiblingRecoveryTest(const char*);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-classic-sibling-recovery"))ExitProcess(RunClassicSiblingRecoveryTest(__argv[2]));
  extern int RunClassicRecoveryChild(const char*,unsigned,const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-classic-recovery"))ExitProcess(RunClassicRecoveryTest(__argv[2]));
  if(__argc==5&&!strcmp(__argv[1],"--classic-recovery-child"))ExitProcess(RunClassicRecoveryChild(__argv[2],strtoul(__argv[3],nullptr,10),__argv[4]));
