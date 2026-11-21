@@ -69,11 +69,13 @@ public:
     unsigned event=0,failAt=0;
     Fault fault=Fault::None;
     bool persistBeforeFailedFlush=false;
+    bool failReads=false;
     std::function<void()> onFlush;
     explicit CheckpointFaultImage(const Bytes& base):live_(base),durable(base){}
     uint64_t Size()const override{return live_.size();}
     bool Writable()const override{return true;}
     void Read(uint64_t at,void* dest,size_t size)override{
+        Check(!failReads,"Injected APFS refresh read failure");
         Check(Disk::Range(at,size,live_.size()),"Checkpoint test read exceeded the image");
         memcpy(dest,live_.data()+at,size);
     }
@@ -1449,6 +1451,41 @@ void WritableNamespace(const std::string& root,FILE* report)
         const auto recovered=Apfs::OpenWritable(durable,"apfs-adapter-recovered");
         MacBrowser::Entry entry;
         Check(recovered&&!recovered->FindChild(2,u"Uncertain",entry),"APFS reopen left an unpublished folder visible");
+    }
+    unsigned renameFlush=0;
+    {
+        CheckpointFaultImage* raw=nullptr;
+        const auto mounted=faultMount(raw);
+        Storage::Job rename;
+        Apfs::RenameMountedVolume(*mounted,2,u"Committed rename",rename);
+        renameFlush=raw->event;
+    }
+    for(const bool failPublication:{false,true}){
+        CheckpointFaultImage* raw=nullptr;
+        const auto mounted=faultMount(raw);
+        if(failPublication){
+            raw->failAt=renameFlush;
+            raw->fault=CheckpointFaultImage::Fault::FailedFlush;
+        }else{
+            raw->onFlush=[&]{if(raw->event==renameFlush)raw->failReads=true;};
+        }
+        Storage::OutcomeEvidence evidence;
+        Storage::Job rename;
+        bool failed=false;
+        try{Apfs::RenameMountedVolume(*mounted,2,u"Committed rename",rename);}
+        catch(const Apfs::CheckpointPublicationUncertain&){failed=failPublication;}
+        catch(const Error& error){
+            failed=!failPublication&&std::string(error.what()).find("APFS change committed.")==0;
+        }
+        Check(failed&&evidence.RetainedChanges()==!failPublication&&
+              evidence.RollbackState()==(failPublication?Storage::Rollback::Unverified:Storage::Rollback::None),
+              "APFS rename reported the wrong write outcome");
+        raw->failReads=false;
+        Reject([&]{mounted->List();},"APFS rename left a stale mount usable");
+        std::unique_ptr<Source> durable=std::make_unique<CheckpointFaultImage>(raw->durable);
+        const auto recovered=Apfs::OpenWritable(durable,"apfs-rename-fault-recovered");
+        Check(recovered&&(recovered->Name()==u"Committed rename")==!failPublication,
+              "APFS rename outcome did not match the durable checkpoint");
     }
     {
         CheckpointFaultImage* raw=nullptr;

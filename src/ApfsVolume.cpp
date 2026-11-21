@@ -541,22 +541,12 @@ public:
         try{
             auto names=WriteMount([&]{
                 SnapshotNames();
-                uint64_t transaction=0;
-                try{
-                    transaction=create?CreateSnapshot(*source,container,name,job):DeleteSnapshot(*source,container,name,job);
-                    changed=true;
-                }catch(const CheckpointPublicationUncertain&){
-                    requiresReopen=true;
-                    changed=true;
-                    throw;
-                }
-                try{
+                return CompleteWrite([&]{
+                    return create?CreateSnapshot(*source,container,name,job):DeleteSnapshot(*source,container,name,job);
+                },[&](uint64_t transaction){
                     RefreshSnapshotViews(transaction,create);
                     return ListSnapshotNames(*source,container);
-                }catch(const std::exception& error){
-                    requiresReopen=true;
-                    throw Error(std::string("APFS snapshot change committed. Reopen the image to refresh it. ")+error.what());
-                }
+                },&changed);
             },true);
             access.ReleaseAndPublish({key});
             return names;
@@ -584,36 +574,31 @@ public:
                 const auto mountIndex=At(id).mount;
                 const auto oldName=mounts[mountIndex].name;
                 if(oldName==name)return false;
-                CommitMutation(id,0,job,[&](auto& work){
-                    try{
-                        const auto transaction=RenameVolume(*source,WriteTarget(id),name,work);
-                        committed=true;
-                        return transaction;
-                    }catch(const CheckpointPublicationUncertain&){
-                        committed=true;
-                        throw;
+                CompleteWrite([&]{
+                    return RenameVolume(*source,WriteTarget(id),name,job);
+                },[&](uint64_t transaction){
+                    RefreshNamespace(id,0,transaction,0,0);
+                    auto& root=At(id).entry;
+                    const auto& actual=mounts[mountIndex].name;
+                    root.name=actual;
+                    for(auto& [rootId,item]:entries){
+                        auto& view=mounts[item.mount];
+                        if(item.oid!=2||view.oid!=mounts[mountIndex].oid||!view.snapshotCreated)continue;
+                        view.name=actual+view.name.substr(oldName.size());
+                        item.entry.name=view.name;
                     }
-                });
-                auto& root=At(id).entry;
-                const auto& actual=mounts[mountIndex].name;
-                root.name=actual;
-                for(auto& [rootId,item]:entries){
-                    auto& view=mounts[item.mount];
-                    if(item.oid!=2||view.oid!=mounts[mountIndex].oid||!view.snapshotCreated)continue;
-                    view.name=actual+view.name.substr(oldName.size());
-                    item.entry.name=view.name;
-                }
-                if(id==2)std::atomic_store(&updatedLabel,std::make_shared<const std::u16string>(actual));
-                else{
-                    for(unsigned suffix=2;;++suffix){
-                        const auto duplicate=std::any_of(listings.at(2).begin(),listings.at(2).end(),[&](uint32_t sibling){
-                            return sibling!=id&&At(sibling).entry.name==root.name;
-                        });
-                        if(!duplicate)break;
-                        const auto number=std::to_string(suffix);
-                        root.name=actual+u" ("+std::u16string(number.begin(),number.end())+u")";
+                    if(id==2)std::atomic_store(&updatedLabel,std::make_shared<const std::u16string>(actual));
+                    else{
+                        for(unsigned suffix=2;;++suffix){
+                            const auto duplicate=std::any_of(listings.at(2).begin(),listings.at(2).end(),[&](uint32_t sibling){
+                                return sibling!=id&&At(sibling).entry.name==root.name;
+                            });
+                            if(!duplicate)break;
+                            const auto number=std::to_string(suffix);
+                            root.name=actual+u" ("+std::u16string(number.begin(),number.end())+u")";
+                        }
                     }
-                }
+                },&committed);
                 return true;
             },true);
             if(changed)access.ReleaseAndPublish({key});
@@ -1175,25 +1160,35 @@ private:
         return target;
     }
 
-    template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work,
-                                            uint32_t changedFile=0,uint32_t oldParent=0)
+    template<class Commit,class Refresh>
+    auto CompleteWrite(Commit commit,Refresh refresh,bool* publishChange=nullptr)
+        ->decltype(refresh(uint64_t{}))
     {
         uint64_t transaction;
-        try{transaction=work(job);}
+        try{transaction=commit();}
         catch(const CheckpointPublicationUncertain&){
-            // A buffered checkpoint may still be visible after a failed flush.
-            // Keep this session closed to further mutations until it is reopened.
             requiresReopen=true;
+            if(publishChange)*publishChange=true;
             Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
             throw;
         }
+        if(publishChange)*publishChange=true;
         Storage::OutcomeEvidence::NoteRetainedChange();
-        try{RefreshNamespace(parent,removed,transaction,changedFile,oldParent);}
+        try{return refresh(transaction);}
         catch(const std::exception& error){
             requiresReopen=true;
-            throw Error(std::string("APFS catalog change committed. Reopen the image to refresh it. ")+error.what());
+            throw Error(std::string("APFS change committed. Reopen the image to refresh it. ")+error.what());
         }
     }
+
+    template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work,
+                                            uint32_t changedFile=0,uint32_t oldParent=0)
+    {
+        CompleteWrite([&]{return work(job);},[&](uint64_t transaction){
+            RefreshNamespace(parent,removed,transaction,changedFile,oldParent);
+        });
+    }
+
     uint32_t CreateFolder(uint32_t parent,const std::u16string& name,std::optional<FileDates> dates,const FinderBytes* finder=nullptr,const Attributes* attributes=nullptr){
         return WriteMount([&]{
             const auto oid=At(parent).oid;
