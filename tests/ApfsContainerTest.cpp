@@ -2756,6 +2756,14 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         }
         const auto original=locate(*volume,live.id,name);
         const auto originalBytes=bytes(*volume,original);
+        const auto historicalEntry=locate(*volume,snapshot.id,name);
+        Storage::Job preflight;
+        Check(!MacBrowser::Snapshot(*volume,original.id,preflight,true).empty(),
+              "APFS move preflight rejected the live file");
+        Check(!MacBrowser::Snapshot(*volume,historicalEntry.id,preflight,false).empty(),
+              "APFS copy preflight rejected the snapshot file");
+        Reject([&]{MacBrowser::Snapshot(*volume,historicalEntry.id,preflight,true);},
+               "APFS move preflight accepted a read-only snapshot file");
         Reject([&]{volume->MakeDirectory(snapshot.id,u"No mutation");},"APFS wrote into a snapshot");
         Storage::Job cancelled;
         bool stopped=false;

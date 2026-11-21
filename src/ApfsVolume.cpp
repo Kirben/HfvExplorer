@@ -1296,7 +1296,9 @@ public:
     void ValidateRemoval(uint32_t id)override{
         Access([&]{
             Check(writable&&id!=2,"APFS entry is read-only");
-            const auto& entry=At(id).entry;
+            const auto& item=At(id);
+            Check(!mounts[item.mount].snapshotCreated,"APFS snapshots are read-only");
+            const auto& entry=item.entry;
             Check(!entry.protectedFile&&!At(entry.parent).entry.protectedFile,"APFS entry or its parent folder is locked");
             if(limitedEdits)
                 Check((entry.readError.empty()||At(id).symlink)&&
