@@ -506,19 +506,25 @@ public:
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         Simple(SessionCommandCode::Remove, Protocol::Encode(Protocol::CatalogItem{id}), true);
     }
-    void WithCopyTransaction(const std::function<void(bool)>& work) override {
+    void WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move) override {
         if(!Classic()){work(false);return;}
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        Volume::WithCopyTransaction(work);
+        Volume::WithCopyTransaction(work,move);
     }
-    bool BeginCopyTransaction() override {
+    bool BeginCopyTransaction(const std::string& move) override {
+        Data args;
+        args.put(move);
         bool active=false;
-        Call(SessionCommandCode::BeginCopyTransaction,{},true,[&]{
+        Call(SessionCommandCode::BeginCopyTransaction,std::move(args),true,[&]{
             auto packet=Response(SessionBytes);
             active=packet.flag();
             packet.end();
         });
         return active;
+    }
+    void PrepareCopyTransaction() override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        Simple(SessionCommandCode::PrepareCopyTransaction,{},true);
     }
     void FinishCopyTransaction(bool commit) override {
         // A lost worker leaves the journal for replay before the next mount.
@@ -804,14 +810,20 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 break;
             }
             case SessionCommandCode::BeginCopyTransaction: {
+                const auto move=packet.text();
                 packet.end();
                 Check(!copy.active&&!strcmp(volume.Kind(),"HFS"),"Unexpected classic folder transaction");
-                copy.active=volume.BeginCopyTransaction();
+                copy.active=volume.BeginCopyTransaction(move);
                 Data response;
                 response.put(copy.active);
                 Send(output,SessionBytes,std::move(response));
                 break;
             }
+            case SessionCommandCode::PrepareCopyTransaction:
+                packet.end();
+                Check(copy.active,"No active classic HFS transaction to prepare");
+                volume.PrepareCopyTransaction();
+                break;
             case SessionCommandCode::CommitCopyTransaction:
             case SessionCommandCode::AbortCopyTransaction:
                 packet.end();

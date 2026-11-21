@@ -7,7 +7,7 @@ enum class Command {
     Root, List, Stat, Read, Attributes, SetAttributes, MakeDirectory, Rename, Remove,
     HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory,
     ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindChild,
-    SetBasicMetadata, RemoveTree, BeginCopyTransaction, CommitCopyTransaction, AbortCopyTransaction,
+    SetBasicMetadata, RemoveTree, BeginCopyTransaction, CommitCopyTransaction, AbortCopyTransaction, PrepareCopyTransaction,
     TestCrashRename, TestCrashPut, TestCrashRemoveTree
 };
 inline constexpr size_t ReadLimit=256*1024;

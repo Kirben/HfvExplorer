@@ -647,9 +647,9 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  }
 }
 }
-void Volume::WithCopyTransaction(const std::function<void(bool)>& work)
+void Volume::WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move)
 {
-    if(!BeginCopyTransaction()){work(false);return;}
+    if(!BeginCopyTransaction(move)){work(false);return;}
     try{work(true);}
     catch(...){FinishCopyTransaction(false);throw;}
     FinishCopyTransaction(true);
@@ -679,7 +679,7 @@ void Volume::RunWriteBatch(Storage::Job& job,const std::function<void(bool)>& wo
     if(failure)std::rethrow_exception(failure);
 }
 
-bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes,bool moving){
+bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes,bool moving,bool batchActive){
     Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
     Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
@@ -694,7 +694,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
             if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
         }
     };
-    if(plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory))
+    if(!batchActive&&(plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory)))
         dst.RunWriteBatch(job,transfer);
     else transfer(false);
     return complete;

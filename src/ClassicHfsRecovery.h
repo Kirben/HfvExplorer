@@ -24,15 +24,25 @@ struct ImageRange {
 };
 bool Pending(const std::wstring& path,bool ndif=false);
 bool RecoverNdif(const ImageRange&,bool writable,bool keepJournal=false);
+class MoveDecision {
+    std::string id_;
+public:
+    MoveDecision();
+    const std::string& Id() const { return id_; }
+    void Commit();
+    void Forget() noexcept;
+};
 class Transaction {
     struct State;
     std::unique_ptr<State> state_;
 public:
     static bool Supported(int fd,const ImageRange* ndif=nullptr);
-    explicit Transaction(int fd,const ImageRange* ndif=nullptr);
+    explicit Transaction(int fd,const ImageRange* ndif=nullptr,const std::string& move={});
     ~Transaction();
     bool Active() const;
     bool CommitStarted() const;
+    bool PublishedMove() const;
+    void Prepare();
     void Commit();
     void Detach();
 #ifdef HFV_TESTING

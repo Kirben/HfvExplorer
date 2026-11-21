@@ -424,23 +424,30 @@ public:
                                      desired.datesValid?dates:nullptr)==0);
         });
     }
-    bool BeginCopyTransaction() override {
+    bool BeginCopyTransaction(const std::string& move) override {
         LegacyEngine::Scope engine(context_);
         if(copyTransaction_)throw HfsPlus::Error("A classic HFS folder copy is already active");
         if(!CanRecoverMutation())return false;
-        copyTransaction_=StartRecovery();
+        copyTransaction_=StartRecovery(move);
         copyWasDirty_=markedDirty_;
         return true;
+    }
+    void PrepareCopyTransaction() override {
+        LegacyEngine::Scope engine(context_);
+        if(!copyTransaction_)throw HfsPlus::Error("No classic HFS transaction is active");
+        Check(hfs_mark_session_clean(volume_)==0);
+        markedDirty_=false;
+        copyTransaction_->Prepare();
     }
     void FinishCopyTransaction(bool commit) override {
         LegacyEngine::Scope engine(context_);
         if(!copyTransaction_)throw HfsPlus::Error("No classic HFS folder copy is active");
         auto recovery=std::move(copyTransaction_);
-        if(!commit){
-            RecoverCopy(*recovery);
-            return;
-        }
         try{
+            if(!commit&&!recovery->PublishedMove()){
+                RecoverCopy(*recovery);
+                return;
+            }
             Check(hfs_mark_session_clean(volume_)==0);
             markedDirty_=false;
             recovery->Commit();
@@ -449,9 +456,9 @@ public:
             throw;
         }
     }
-    void WithCopyTransaction(const std::function<void(bool)>& work) override {
+    void WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move) override {
         LegacyEngine::Scope engine(context_);
-        Volume::WithCopyTransaction(work);
+        Volume::WithCopyTransaction(work,move);
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {
         return PutFile(parent,e,std::move(read),replace,nullptr);
@@ -517,9 +524,9 @@ private:
         Check(Writable());
         return ClassicHfsRecovery::Transaction::Supported(volume_->fd,ndifRecovery_?&*ndifRecovery_:nullptr);
     }
-    std::unique_ptr<ClassicHfsRecovery::Transaction> StartRecovery() {
+    std::unique_ptr<ClassicHfsRecovery::Transaction> StartRecovery(const std::string& move={}) {
         Check(hfs_flush(volume_)==0);
-        auto recovery=std::make_unique<ClassicHfsRecovery::Transaction>(volume_->fd,ndifRecovery_?&*ndifRecovery_:nullptr);
+        auto recovery=std::make_unique<ClassicHfsRecovery::Transaction>(volume_->fd,ndifRecovery_?&*ndifRecovery_:nullptr,move);
         if(!recovery->Active())throw HfsPlus::Error("Cannot start the classic HFS durable write transaction");
         return recovery;
     }

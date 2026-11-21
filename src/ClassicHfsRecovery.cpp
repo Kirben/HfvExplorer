@@ -3,6 +3,8 @@
 #include "ClassicHfsRecovery.h"
 #include "HfsPlus.h"
 #include <io.h>
+#include <shlobj.h>
+#include <objbase.h>
 #define Z_SOLO
 #define Z_PREFIX
 #include "compression/zlib/zlib.h"
@@ -18,6 +20,8 @@ constexpr wchar_t NdifSibling[] = L".hfv-ndif-classic-undo";
 constexpr uint64_t Committed = UINT64_MAX;
 constexpr uint64_t Sector = 512;
 constexpr char Magic[8] = {'H','F','V','H','F','S','U','1'};
+constexpr char MoveMagic[8] = {'H','F','V','H','F','S','U','2'};
+constexpr size_t MoveIdSize=32;
 
 struct Handle {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -164,6 +168,51 @@ bool Missing(DWORD error)
     return error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND||
            error==ERROR_INVALID_NAME||error==ERROR_NOT_SUPPORTED;
 }
+std::wstring DecisionPath(const std::string& id,bool create=false)
+{
+    Check(id.size()==MoveIdSize&&id.find_first_not_of("0123456789abcdef")==std::string::npos,
+          "Invalid classic HFS move decision ID");
+    wchar_t root[MAX_PATH]{};
+#ifdef HFV_TESTING
+    const auto bytes=GetEnvironmentVariableW(L"HFV_TEST_CLASSIC_MOVE_DIR",root,MAX_PATH);
+    if(!bytes||bytes>=MAX_PATH)
+#endif
+        Check(SUCCEEDED(SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,root)),
+              "Cannot locate the classic HFS move decisions");
+    auto folder=std::wstring(root);
+    for(const auto* name:{L"HFVExplorer",L"ClassicMoves"}){
+        folder+=L"\\";
+        folder+=name;
+        if(create&&!CreateDirectoryW(folder.c_str(),nullptr)){
+            const auto attributes=GetFileAttributesW(folder.c_str());
+            Check(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY)&&
+                  !(attributes&FILE_ATTRIBUTE_REPARSE_POINT),"Cannot create classic HFS move decisions folder");
+        }
+    }
+    return folder+L"\\"+std::wstring(id.begin(),id.end())+L".move";
+}
+
+bool ReadDecision(HANDLE file,const std::string& id)
+{
+    Check(file!=INVALID_HANDLE_VALUE,
+          "The original classic HFS move decision is unavailable. Keep both images and reopen them on the original PC.");
+    const auto size=Length(file);
+    Check(size>=id.size()&&size<=id.size()*2,"Invalid classic HFS move decision length");
+    char data[MoveIdSize*2]{};
+    ReadAt(file,0,data,DWORD(size));
+    Check(memcmp(data,id.data(),id.size())==0&&
+          memcmp(data+id.size(),id.data(),size_t(size)-id.size())==0,
+          "Classic HFS move decision is damaged");
+    return size==id.size()*2;
+}
+
+bool MoveCommitted(const std::string& id)
+{
+    const auto path=DecisionPath(id);
+    Handle file(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                            FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    return ReadDecision(file.value,id);
+}
 bool ValidSector(uint64_t offset,const ImageRange& range)
 {
     if(offset<range.offset)return false;
@@ -184,26 +233,38 @@ struct Journal {
     Handle stream;
     Header header;
     ImageRange range;
+    const std::string move;
     uint64_t end=sizeof(Header);
     std::unordered_set<uint64_t> recorded;
     Journal* previous=nullptr;
     bool faulted=false;
     bool attached=false;
     bool committing=false;
-    Journal(int imageFd,HANDLE imageHandle,const JournalPath& path,const ImageRange* ndif)
+    Journal(int imageFd,HANDLE imageHandle,const JournalPath& path,const ImageRange* ndif,const std::string& moveId)
         : fd(imageFd),image(imageHandle),
           stream(CreateFileW(path.name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,path.OpenFlags(),nullptr)),
-          header(Identify(image)),range(CheckedRange(image,header.size,ndif))
+          header(Identify(image)),range(CheckedRange(image,header.size,ndif)),move(moveId)
     {
         Check(bool(stream),"Cannot open the classic HFS recovery journal");
         CheckJournalFile(stream.value,header,path.sibling);
         Check(Length(stream.value)==0,"A classic HFS operation already needs recovery");
+        if(!move.empty()){
+            Check(!MoveCommitted(move),"Classic HFS move decision has already been committed");
+            memcpy(header.magic,MoveMagic,sizeof(MoveMagic));
+            header.crc=Crc(&header,offsetof(Header,crc));
+        }
         WriteAt(stream.value,0,&header,sizeof(header));
         if(ndif){
             NdifRegion region{range.offset,range.length,0,0};
             region.crc=Crc(&region,offsetof(NdifRegion,crc));
             WriteAt(stream.value,end,&region,sizeof(region));
             end+=sizeof(region);
+        }
+        if(!move.empty()){
+            WriteAt(stream.value,end,move.data(),DWORD(move.size()));
+            const auto crc=Crc(move.data(),DWORD(move.size()));
+            WriteAt(stream.value,end+move.size(),&crc,sizeof(crc));
+            end+=move.size()+sizeof(crc);
         }
         Check(FlushFileBuffers(stream.value)!=FALSE,"Cannot flush the classic HFS recovery header");
     }
@@ -253,20 +314,30 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
                               writable?0:(FILE_SHARE_READ|FILE_SHARE_WRITE),nullptr,OPEN_EXISTING,path.OpenFlags(),nullptr));
     if (!stream && (path.sibling?GetLastError()==ERROR_FILE_NOT_FOUND:Missing(GetLastError()))) return 0;
     Check(bool(stream),"Cannot open pending classic HFS recovery journal");
-    const auto identity=Identify(image);
+    auto identity=Identify(image);
     CheckJournalFile(stream.value,identity,path.sibling);
     const auto size=Length(stream.value);
     if (!size) return 0;
     auto range=CheckedRange(image,identity.size,ndif);
     Header header{};
-    const uint64_t prefix=sizeof(header)+(ndif?sizeof(NdifRegion):0);
+    uint64_t prefix=sizeof(header)+(ndif?sizeof(NdifRegion):0);
+    bool shared=false;
     if (size>=sizeof(header)) {
         ReadAt(stream.value,0,&header,sizeof(header));
+        shared=memcmp(header.magic,MoveMagic,sizeof(MoveMagic))==0;
+        if(shared){
+            memcpy(identity.magic,MoveMagic,sizeof(MoveMagic));
+            identity.crc=Crc(&identity,offsetof(Header,crc));
+        }
         Check(memcmp(&identity,&header,sizeof(header))==0,"Classic HFS recovery header or image identity is invalid");
     }else if(path.sibling){
         // An interrupted initial header can only be discarded if its
         // written prefix belongs to this image.
         ReadAt(stream.value,0,&header,DWORD(size));
+        if(size>=sizeof(MoveMagic)&&memcmp(header.magic,MoveMagic,sizeof(MoveMagic))==0){
+            memcpy(identity.magic,MoveMagic,sizeof(MoveMagic));
+            identity.crc=Crc(&identity,offsetof(Header,crc));
+        }
         Check(memcmp(&identity,&header,size_t(size))==0,"Invalid classic HFS recovery sibling header");
     }
     if (size<prefix) {
@@ -285,15 +356,30 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
         range.offset=region.offset;
         range.length=region.length;
     }
+    bool sharedCommit=false;
+    if(shared){
+        if(size-prefix<MoveIdSize+sizeof(uint32_t)){
+            if(writable&&!keepJournal)Check(Clear(stream.value),"Cannot clear incomplete classic HFS move header");
+            return 0;
+        }
+        std::string move(MoveIdSize,0);
+        uint32_t crc=0;
+        ReadAt(stream.value,prefix,move.data(),DWORD(move.size()));
+        ReadAt(stream.value,prefix+move.size(),&crc,sizeof(crc));
+        Check(crc==Crc(move.data(),DWORD(move.size())),"Classic HFS move header is damaged");
+        sharedCommit=MoveCommitted(move);
+        prefix+=move.size()+sizeof(crc);
+    }
     const auto count=(size-prefix)/sizeof(Record);
     Check(count<=range.length/Sector+1,"Classic HFS recovery contains too many sector records");
-    bool committed=false;
+    bool committed=sharedCommit;
     for (uint64_t i=0;i<count;++i) {
         Record record{};
         ReadAt(stream.value,prefix+i*sizeof(record),&record,sizeof(record));
         Check(record.crc==Crc(&record,offsetof(Record,crc)),"Classic HFS recovery record is damaged");
         if (record.offset==Committed) {
-            Check(size==prefix+(i+1)*sizeof(record),"Invalid classic HFS recovery commit record");
+            Check((!shared||sharedCommit)&&size==prefix+(i+1)*sizeof(record),
+                  "Invalid classic HFS recovery commit record");
             committed=true;
         } else {
             Check(ValidSector(record.offset,range),"Classic HFS recovery sector lies outside the image");
@@ -323,13 +409,13 @@ struct Transaction::State : Journal { using Journal::Journal; };
 bool Transaction::Supported(int fd,const ImageRange* ndif) {
     return OrdinaryImage(ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd));
 }
-Transaction::Transaction(int fd,const ImageRange* ndif)
+Transaction::Transaction(int fd,const ImageRange* ndif,const std::string& move)
 {
     const auto image=ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd);
     const auto path=LocateJournal(image,ndif!=nullptr);
     if (path.name.empty()) return;
     Check(!ForFd(fd),"A classic HFS recovery transaction is already active");
-    state_=std::make_unique<State>(fd,image,path,ndif);
+    state_=std::make_unique<State>(fd,image,path,ndif,move);
     state_->previous=active;
     state_->attached=true;
     active=state_.get();
@@ -337,24 +423,65 @@ Transaction::Transaction(int fd,const ImageRange* ndif)
 Transaction::~Transaction() { Detach(); }
 bool Transaction::Active() const { return bool(state_); }
 bool Transaction::CommitStarted() const { return state_ && state_->committing; }
+bool Transaction::PublishedMove() const {
+    return state_&&!state_->move.empty()&&MoveCommitted(state_->move);
+}
 void Transaction::Detach()
 {
     if (!state_) return;
     if (state_->attached) active=state_->previous;
     state_.reset();
 }
+void Transaction::Prepare()
+{
+    Check(state_&&!state_->faulted&&FlushFileBuffers(state_->image),"Cannot flush the classic HFS transaction");
+}
 void Transaction::Commit()
 {
     if (!state_) return;
-    Check(!state_->faulted&&FlushFileBuffers(state_->image),"Cannot flush the classic HFS transaction");
+    Prepare();
+    if(!state_->move.empty())
+        Check(MoveCommitted(state_->move),"The classic HFS move decision has not committed");
     Crash(2);
     Record record{};
     record.offset=Committed;
     state_->committing=true;
     state_->Append(record);
     Crash(3);
-    Clear(state_->stream.value);
+    const bool cleared=Clear(state_->stream.value);
+    if(!state_->move.empty())Check(cleared,"Cannot clear the committed classic HFS move journal");
     Detach();
+}
+ClassicHfsRecovery::MoveDecision::MoveDecision()
+{
+    GUID guid{};
+    Check(SUCCEEDED(CoCreateGuid(&guid)),"Cannot allocate a classic HFS move decision ID");
+    constexpr char hex[]="0123456789abcdef";
+    for(size_t at=0;at<sizeof(guid);++at){
+        const auto byte=reinterpret_cast<const unsigned char*>(&guid)[at];
+        id_+=hex[byte>>4];
+        id_+=hex[byte&15];
+    }
+    const auto path=DecisionPath(id_,true);
+    Handle file(CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+    Check(bool(file),"Cannot create the classic HFS move decision");
+    WriteAt(file.value,0,id_.data(),DWORD(id_.size()));
+    Check(FlushFileBuffers(file.value)!=FALSE,"Cannot flush the pending classic HFS move decision");
+}
+void ClassicHfsRecovery::MoveDecision::Commit()
+{
+    const auto path=DecisionPath(id_);
+    Handle file(CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,
+                            FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    Check(!ReadDecision(file.value,id_),"Classic HFS move decision has already committed");
+    Crash(8);
+    WriteAt(file.value,id_.size(),id_.data(),DWORD(id_.size()));
+    Check(FlushFileBuffers(file.value)!=FALSE,"Cannot flush the classic HFS move decision");
+    Crash(9);
+}
+void ClassicHfsRecovery::MoveDecision::Forget() noexcept
+{
+    try{DeleteFileW(DecisionPath(id_).c_str());}catch(...){}
 }
 bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
 {

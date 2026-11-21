@@ -591,7 +591,7 @@ void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
               "cancelled batch left an earlier selected item changed");
     }
     fprintf(report,"PASS: multi-item classic HFS copy and delete restore earlier selected items after cancellation or process loss.\n");
-    for(unsigned phase:{7u,2u,3u,6u}){
+    for(unsigned phase:{7u,6u,8u,9u,3u}){
         CString sourceFile;
         sourceFile.Format("%s\\transfer-%u.dsk",root.GetString(),phase);
         const CString targetFile=sourceFile+".target.dsk";
@@ -600,20 +600,40 @@ void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
         const auto sourcePath=VolumeCoord::Wide(sourceFile.GetString());
         const auto targetPath=VolumeCoord::Wide(targetFile.GetString());
         CrashChild(sourceFile,phase,phase==7?L"folder-copy":L"folder-move");
-        Check(ClassicHfsRecovery::Pending(phase==6?sourcePath:targetPath),
-              "interrupted transfer did not keep its undo journal");
-        const bool copied=phase==3||phase==6;
-        {
-            auto target=MacBrowser::OpenBrowserImage(targetPath);
-            auto source=MacBrowser::OpenBrowserImage(sourcePath);
-            Check(target&&target->Writable()&&source&&source->Writable(),"reopen both transfer images writable");
-            VerifyTransferredTree(*target,copied);
-            const auto tree=Find(*source,2,u"Tree");
-            VerifyFile(*source,tree,u"A File",true);
-            VerifyFile(*source,Find(*source,tree,u"Z Folder"),u"Nested file",true);
+        Check(ClassicHfsRecovery::Pending(targetPath),"interrupted transfer did not keep the destination journal");
+        Check(phase==7||ClassicHfsRecovery::Pending(sourcePath),"interrupted move did not keep the source journal");
+        if(phase==9){
+            const CString decisions=root+"\\HFVExplorer\\ClassicMoves";
+            const CString hidden=root+"\\saved-decisions";
+            const auto changedSource=Load(sourceFile),changedTarget=Load(targetFile);
+            Check(MoveFileA(decisions,hidden)!=FALSE,"simulate unavailable classic HFS move decisions");
+            bool fenced=true;
+            for(const auto& path:{sourcePath,targetPath}){
+                try{if(MacBrowser::OpenImage(path))fenced=false;}
+                catch(const HfsPlus::Error&){}
+            }
+            Check(MoveFileA(hidden,decisions)!=FALSE,"restore classic HFS move decisions");
+            Check(fenced&&Load(sourceFile)==changedSource&&Load(targetFile)==changedTarget&&
+                  ClassicHfsRecovery::Pending(sourcePath)&&ClassicHfsRecovery::Pending(targetPath),
+                  "unavailable shared decision did not fence both images");
         }
-        Check(Load(sourceFile)==sourceBefore,"interrupted move lost or altered its source");
-        if(!copied)Check(Load(targetFile)==targetBefore,"undo changed destination bytes or folder metadata");
+        const bool committed=phase==9||phase==3;
+        {
+            auto source=MacBrowser::OpenBrowserImage(sourcePath);
+            auto target=MacBrowser::OpenBrowserImage(targetPath);
+            Check(target&&target->Writable()&&source&&source->Writable(),"reopen both transfer images writable");
+            VerifyTransferredTree(*target,committed);
+            MacBrowser::Entry item{};
+            if(committed)Check(!source->FindChild(2,u"Tree",item),"committed move retained a duplicate source tree");
+            else{
+                const auto tree=Find(*source,2,u"Tree");
+                VerifyFile(*source,tree,u"A File",true);
+                VerifyFile(*source,Find(*source,tree,u"Z Folder"),u"Nested file",true);
+            }
+            VerifyFile(*source,2,u"Top entry",false);
+        }
+        if(!committed)Check(Load(sourceFile)==sourceBefore&&Load(targetFile)==targetBefore,
+                            "aborted coordinated move changed either image");
     }
 
     for(bool crash:{false,true}){
@@ -684,8 +704,33 @@ void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
         Check(Load(targetFile)==before&&Load(sourceFile)==sourceBefore,
               "NDIF folder undo changed the partition wrapper or source");
         fprintf(report,"PASS: an interrupted copy of a new folder into shared partitioned NDIF restores the exact container bytes.\n");
+        for(unsigned phase:{8u,9u}){
+            CString sourceFile;
+            sourceFile.Format("%s\\ndif-shared-move-%u.dsk",root.GetString(),phase);
+            const CString targetFile=sourceFile+".target.dsk";
+            const auto from=VolumeCoord::Wide(sourceFile.GetString());
+            const auto to=VolumeCoord::Wide(targetFile.GetString());
+            Save(sourceFile,sourceBefore);
+            Check(CopyFileW(fixture.c_str(),to.c_str(),TRUE)!=FALSE,"copy shared NDIF move target");
+            const auto original=Load(targetFile);
+            CrashChild(sourceFile,phase,L"folder-move");
+            Check(ClassicHfsRecovery::Pending(from)&&ClassicHfsRecovery::Pending(to,true),
+                  "interrupted raw-to-NDIF move did not keep both journals");
+            {
+                auto target=MacBrowser::OpenBrowserImage(to);
+                auto source=MacBrowser::OpenBrowserImage(from);
+                MacBrowser::Entry entry{};
+                Check(target&&target->Writable()&&source&&source->Writable()&&
+                      target->FindChild(2,u"Tree",entry)==(phase==9)&&
+                      source->FindChild(2,u"Tree",entry)==(phase==8),"raw and NDIF chose different move outcomes");
+                if(phase==9)VerifyFile(*target,Find(*target,2,u"Tree"),u"A File",true);
+            }
+            if(phase==8)Check(Load(sourceFile)==sourceBefore&&Load(targetFile)==original,
+                              "aborted raw-to-NDIF move changed image bytes");
+        }
+        fprintf(report,"PASS: raw and partitioned NDIF use the same durable decision during a cross-volume move.\n");
     }
-    fprintf(report,"PASS: whole-folder merge recovery restores both forks and exact destination metadata; worker crash and cancellation roll back the tree; a move preserves its source until destination commit and durably deletes it afterward.\n");
+    fprintf(report,"PASS: whole-folder merge recovery restores both forks and exact destination metadata; worker crash and cancellation roll back the tree; both images recover from the shared move decision, including a crash during source deletion and after commit.\n");
 }
 
 void VerifyOutside(const Bytes& before,const Bytes& after,uint64_t start,uint64_t length)
@@ -991,6 +1036,8 @@ int RunClassicRecoveryTest(const char* directory)
     int result=0;
     try{
         readonly_cd_backend_init();
+        Check(SetEnvironmentVariableW(L"HFV_TEST_CLASSIC_MOVE_DIR",VolumeCoord::Wide(root.GetString()).c_str())!=FALSE,
+              "set isolated classic HFS move decision directory");
         FormatRecovery(root,report);
         Save(seed,Bytes(4*1024*1024));
         CString formatPath=seed;

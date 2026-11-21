@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
+#include "ClassicHfsRecovery.h"
 #include "FileOperationWorkerPolicy.h"
 #include "OperationCompletion.h"
 #include "StorageLocation.h"
@@ -120,6 +121,55 @@ struct TransferPlan {
  TransferAdapter adapter;
 };
 
+bool CanCoordinateClassicMove(const OrdinaryCopy& copy)
+{
+ const auto first=copy.sources.front().Volume();
+ const auto target=copy.destination.Volume();
+ if(!first||!target||first->ResourceKey()==target->ResourceKey()||
+    strcmp(first->Kind(),"HFS")||strcmp(target->Kind(),"HFS")||
+    ExecutionFor(*first).processLocal||ExecutionFor(*target).processLocal)return false;
+ return std::all_of(copy.sources.begin(),copy.sources.end(),[&](const Location& item){
+  return item.cut&&item.Volume()==first;
+ });
+}
+void CoordinateClassicMove(Volume& source,Volume& target,Storage::Job& job,
+                           const std::function<void()>& transfer)
+{
+ ClassicHfsRecovery::MoveDecision decision;
+ const auto previous=job.progress();
+ bool deciding=false;
+ bool retained=false;
+ Storage::Rollback rollback;
+ std::exception_ptr failure;
+ {
+  Storage::OutcomeEvidence evidence;
+  try{
+   source.WithCopyTransaction([&](bool sourceActive){
+    Check(sourceActive,"The source cannot join a durable classic HFS move");
+    target.WithCopyTransaction([&](bool targetActive){
+     Check(targetActive,"The destination cannot join a durable classic HFS move");
+     transfer();
+     source.PrepareCopyTransaction();
+     target.PrepareCopyTransaction();
+     Cancel(job);
+     deciding=true;
+     decision.Commit();
+    },decision.Id());
+   },decision.Id());
+  }catch(...){failure=std::current_exception();}
+  rollback=evidence.RollbackState();
+  retained=evidence.RetainedChanges();
+ }
+ Storage::OutcomeEvidence::NoteRollback(rollback);
+ if(failure){
+  if(!deciding&&rollback==Storage::Rollback::Restored)job.progress(previous);
+  else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
+  std::rethrow_exception(failure);
+ }
+ if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
+ decision.Forget();
+}
+
 Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkSource>& routes,
                             Storage::Job& job,Completion& completion){
  const auto& request=transfer.endpoints;
@@ -127,7 +177,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  Check(!request.sources.empty(),"Select a source file or folder");
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
- bool complete=false,inPlace=false;
+ bool complete=false,inPlace=false,coordinated=false;
  StorageLocation::WithVerifiedWrite(target,[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
@@ -159,7 +209,13 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
     snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
    }
-   complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);
+   coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
+   if(coordinated){
+    CoordinateClassicMove(*opened.front().first,*destination.first,job,[&]{
+     complete=CopyMany(opened,*destination.first,destination.second,job,{},routes,true,true);
+     if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+    });
+   }else complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);
   }
   if(!target.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
@@ -171,10 +227,12 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   result.moved=true;
   return result;
  }
- // A Cut source must remain intact until destination unmount and readback succeed.
- for(const auto& source:request.sources)
-  StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
- if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+ if(!coordinated){
+  // Without a shared decision, keep the source through destination close and readback.
+  for(const auto& source:request.sources)
+   StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
+  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+ }
  completion.complete=complete;
  completion.completed=job.progress().files;
  Storage::Result result;
