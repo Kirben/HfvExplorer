@@ -2729,13 +2729,14 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         },true,job);
     };
     std::array<Bytes,4> clones;
-    const auto readClones=[&](MacBrowser::Volume& volume){
+    const auto readClones=[&](MacBrowser::Volume& volume,bool renamed=false){
         std::array<Bytes,4> state;
         if(withClones){
             size_t index=0;
             for(const auto root:{live.id,snapshot.id})
                 for(const auto file:{u"binary.bin",u"clone.bin"})
-                    state[index++]=bytes(volume,locate(volume,root,file));
+                    state[index++]=bytes(volume,locate(volume,root,
+                        renamed&&root==live.id&&file==std::u16string_view(u"clone.bin")?u"renamed-clone.bin":file));
         }
         return state;
     };
@@ -2785,12 +2786,18 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         Check(!volume->FindChild(deleted.parent,deletedName,missing),"APFS live deletion retained the file");
         Check(bytes(*volume,locate(*volume,snapshot.id,name))==historical,"APFS live deletion changed snapshot data");
         Check(readClones(*volume)==clones,"APFS live edits changed a clone");
+        if(withClones){
+            const auto alias=locate(*volume,live.id,u"clone.bin");
+            volume->Rename(alias.id,alias.parent,u"renamed-clone.bin");
+            Check(!volume->FindChild(alias.parent,u"clone.bin",missing)&&readClones(*volume,true)==clones,
+                  "Renaming the live APFS clone changed clone data or the snapshot");
+        }
     }
     auto reopened=MacBrowser::OpenBrowserImage(path);
     Check(reopened!=nullptr,"Could not reopen APFS snapshot image");
     roots(*reopened);
     Check(bytes(*reopened,locate(*reopened,snapshot.id,name))==historical,"Reopened APFS snapshot changed original bytes");
-    Check(readClones(*reopened)==clones,"Reopening APFS changed a clone");
+    Check(readClones(*reopened,withClones)==clones,"Reopening APFS changed a clone");
     if(withClones){
         Check(bytes(*reopened,locate(*reopened,snapshot.id,u"vanished"))==historicalDeleted&&
               bytes(*reopened,locate(*reopened,live.id,name))==Bytes(9301,0x73),
