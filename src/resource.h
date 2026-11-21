@@ -46,7 +46,6 @@
 #define IDI_ICON1_YELLOW                153
 #define IDI_ICON4_YELLOW                154
 #define IDI_ICON51_YELLOW               155
-#define IDD_ASK_DUMP                    156
 #define IDI_ICON52_YELLOW               156
 #define IDD_HFS_ITEM_PROPERTIES         157
 #define IDI_ICON53_YELLOW               157
@@ -106,11 +105,7 @@
 #define IDC_VOLPATH                     1026
 #define IDC_PROP_VALENCE                1026
 #define IDC_DUMP_TO_FLOPPY              1027
-#define IDC_BROWSE_DUMP                 1028
-#define IDC_DUMP_PATH                   1029
-#define IDC_DUMP_START                  1030
 #define IDC_PROP_ISDIR                  1030
-#define IDC_DUMP_BLOCKS                 1031
 #define IDC_PROP_ISINDESKTOP            1031
 #define IDC_PROP_HASCOLORS              1032
 #define IDC_PROP_RESERVEDCOLORS         1033

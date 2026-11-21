@@ -60,7 +60,6 @@
 #include "AskNewVolume.h"
 #include "AskVolumeToFloppy.h"
 #include "utils.h"
-#include "AskDump.h"
 #include "special.h"
 
 extern "C" {

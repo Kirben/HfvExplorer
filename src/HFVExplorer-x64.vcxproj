@@ -20,7 +20,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="AskDir.cpp" />
-    <ClCompile Include="AskDump.cpp" />
     <ClCompile Include="AskNewVolume.cpp" />
     <ClCompile Include="AskProperties.cpp" />
     <ClCompile Include="AskVolumeToFloppy.cpp" />
@@ -49,7 +48,6 @@
     <ClCompile Include="OptionsPage2.cpp" />
     <ClCompile Include="OptionsPage3.cpp" />
     <ClCompile Include="OptionsSheet.cpp" />
-    <ClCompile Include="part.cpp" />
     <ClCompile Include="shell.cpp" />
     <ClCompile Include="special.cpp" />
     <ClCompile Include="StdAfx.cpp" />
