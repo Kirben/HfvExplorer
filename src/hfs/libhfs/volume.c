@@ -642,22 +642,116 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
   return 0;
 }
 
-/*
- * NAME:	markexts()
- * DESCRIPTION:	set bits from an extent record in the volume bitmap
- */
-static
-void markexts(block *vbm, ExtDataRec *exts)
+/* Check every descriptor before touching the allocation bitmap. */
+int v_recovery_extents_valid(const ExtDataRec *extents, unsigned int blocks)
 {
-  int i;
-  unsigned int start, len;
+  unsigned int i;
+  for (i = 0; i < 3; ++i)
+    {
+      unsigned int start = (*extents)[i].xdrStABN;
+      unsigned int count = (*extents)[i].xdrNumABlks;
+
+      if (count && (start >= blocks || count > blocks - start))
+        return 0;
+    }
+  return 1;
+}
+
+static int markexts(hfsvol *vol, const ExtDataRec *extents)
+{
+  unsigned int i;
+  if (!v_recovery_extents_valid(extents, vol->mdb.drNmAlBlks))
+    {
+      ERROR(EIO, "extent outside volume allocation bitmap during HFS recovery");
+      return -1;
+    }
 
   for (i = 0; i < 3; ++i)
     {
-      for (start = (*exts)[i].xdrStABN,
-	     len = (*exts)[i].xdrNumABlks; len--; ++start)
-	BMSET(vbm, start);
+      unsigned int start = (*extents)[i].xdrStABN;
+      unsigned int count = (*extents)[i].xdrNumABlks;
+      unsigned int index;
+      for (index = start; index < start + count; ++index)
+        BMSET(vol->vbm, index);
     }
+  return 0;
+}
+
+int v_recovery_leaf_valid(const node *leaf, unsigned long previous)
+{
+  /* The first leaf must link back to zero; each later leaf must link back
+     to its immediate predecessor. A repeated leaf cannot satisfy this. */
+  return (unsigned char)leaf->nd.ndType == ndLeafNode &&
+         leaf->nd.ndNHeight == 1 && leaf->nd.ndBLink == previous;
+}
+
+static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
+{
+  unsigned long previous = 0;
+  node leaf;
+  leaf.bt = tree;
+
+  for (leaf.nnum = tree->hdr.bthFNode; leaf.nnum; leaf.nnum = leaf.nd.ndFLink)
+    {
+      unsigned int i, record_limit;
+      if (leaf.nnum >= tree->hdr.bthNNodes || leaf.nnum / 8 >= tree->mapsz)
+        {
+          ERROR(EIO, "invalid B-tree leaf number during HFS recovery");
+          return -1;
+        }
+      if (bt_getnode(&leaf) < 0)
+        return -1;
+      if (!v_recovery_leaf_valid(&leaf, previous))
+        {
+          ERROR(EIO, "cyclic or broken B-tree leaf chain during HFS recovery");
+          return -1;
+        }
+      record_limit = HFS_BLOCKSZ - 2 * (leaf.nd.ndNRecs + 1);
+      for (i = 0; i < leaf.nd.ndNRecs; ++i)
+        {
+          unsigned int start = leaf.roff[i], end = leaf.roff[i + 1], key_size;
+          unsigned char *record;
+          if (start < 14 || start >= end || end > record_limit)
+            goto invalid_record;
+          key_size = HFS_RECKEYSKIP(leaf.data + start);
+          if (key_size >= end - start)
+            goto invalid_record;
+          record = leaf.data + start + key_size;
+          if (catalog)
+            {
+              if (record[0] == cdrFilRec)
+                {
+                  CatDataRec data;
+                  if (end - start - key_size < HFS_CATDATALEN)
+                    goto invalid_record;
+                  r_unpackcatdata(record, &data);
+                  if (markexts(vol, &data.u.fil.filExtRec) < 0 ||
+                      markexts(vol, &data.u.fil.filRExtRec) < 0)
+                    return -1;
+                }
+            }
+          else
+            {
+              ExtDataRec data;
+              if (end - start - key_size < HFS_EXTDATALEN)
+                goto invalid_record;
+              r_unpackextdata(record, &data);
+              if (markexts(vol, &data) < 0)
+                return -1;
+            }
+        }
+      previous = leaf.nnum;
+    }
+  if (previous != tree->hdr.bthLNode)
+    {
+      ERROR(EIO, "incomplete B-tree leaf chain during HFS recovery");
+      return -1;
+    }
+  return 0;
+
+invalid_record:
+  ERROR(EIO, "invalid B-tree leaf record during HFS recovery");
+  return -1;
 }
 
 /*
@@ -666,109 +760,20 @@ void markexts(block *vbm, ExtDataRec *exts)
  */
 int v_scavenge(hfsvol *vol)
 {
-  block *vbm = vol->vbm;
-  node n;
   unsigned int pt, blks;
-
-  if (vbm == 0)
+  if (vol->vbm == 0)
     return 0;
 
-  markexts(vbm, &vol->mdb.drXTExtRec);
-  markexts(vbm, &vol->mdb.drCTExtRec);
+  if (markexts(vol, &vol->mdb.drXTExtRec) < 0 ||
+      markexts(vol, &vol->mdb.drCTExtRec) < 0 ||
+      scavenge_tree(vol, &vol->ext, 0) < 0 ||
+      scavenge_tree(vol, &vol->cat, 1) < 0)
+    return -1;
 
   vol->flags |= HFS_UPDATE_VBM;
-
-  /* scavenge the extents overflow file */
-
-  n.bt   = &vol->ext;
-  n.nnum = vol->ext.hdr.bthFNode;
-
-  if (n.nnum > 0)
-    {
-      if (bt_getnode(&n) < 0)
-	return -1;
-
-      n.rnum = 0;
-
-      while (1)
-	{
-	  ExtDataRec data;
-	  unsigned char *ptr;
-
-	  while (n.rnum >= n.nd.ndNRecs)
-	    {
-	      n.nnum = n.nd.ndFLink;
-	      if (n.nnum == 0)
-		break;
-
-	      if (bt_getnode(&n) < 0)
-		return -1;
-
-	      n.rnum = 0;
-	    }
-
-	  if (n.nnum == 0)
-	    break;
-
-	  ptr = HFS_NODEREC(n, n.rnum);
-	  r_unpackextdata(HFS_RECDATA(ptr), &data);
-
-	  markexts(vbm, &data);
-
-	  ++n.rnum;
-	}
-    }
-
-  /* scavenge the catalog file */
-
-  n.bt   = &vol->cat;
-  n.nnum = vol->cat.hdr.bthFNode;
-
-  if (n.nnum > 0)
-    {
-      if (bt_getnode(&n) < 0)
-	return -1;
-
-      n.rnum = 0;
-
-      while (1)
-	{
-	  CatDataRec data;
-	  unsigned char *ptr;
-
-	  while (n.rnum >= n.nd.ndNRecs)
-	    {
-	      n.nnum = n.nd.ndFLink;
-	      if (n.nnum == 0)
-		break;
-
-	      if (bt_getnode(&n) < 0)
-		return -1;
-
-	      n.rnum = 0;
-	    }
-
-	  if (n.nnum == 0)
-	    break;
-
-	  ptr = HFS_NODEREC(n, n.rnum);
-	  r_unpackcatdata(HFS_RECDATA(ptr), &data);
-
-	  if (data.cdrType == cdrFilRec)
-	    {
-	      markexts(vbm, &data.u.fil.filExtRec);
-	      markexts(vbm, &data.u.fil.filRExtRec);
-	    }
-
-	  ++n.rnum;
-	}
-    }
-
   for (blks = 0, pt = vol->mdb.drNmAlBlks; pt--; )
-    {
-      if (! BMTST(vbm, pt))
-	++blks;
-    }
+    if (! BMTST(vol->vbm, pt))
+      ++blks;
 
   if (vol->mdb.drFreeBks != blks)
     {

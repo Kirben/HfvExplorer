@@ -42,4 +42,6 @@ int v_flush(hfsvol *, int);
 int v_adjvalence(hfsvol *, long, int, int);
 int v_newfolder(hfsvol *, long, char *);
 
+int v_recovery_extents_valid(const ExtDataRec *, unsigned int blocks);
+int v_recovery_leaf_valid(const node *, unsigned long previous);
 int v_scavenge(hfsvol *);

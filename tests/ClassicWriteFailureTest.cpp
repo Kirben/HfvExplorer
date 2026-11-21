@@ -8,6 +8,7 @@ extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
 #include "hfs/libhfs/block.h"
+#include "hfs/libhfs/volume.h"
 #define _FHOOK_INTERNAL_
 #include "Filehook.h"
 }
@@ -58,6 +59,42 @@ void verify(hfsvol* volume) {
  std::vector<BYTE> bytes(4097);require(hfs_read(file,bytes.data(),4097)==4097&&bytes==std::vector<BYTE>(4097,0x31),"rollback changed data fork");
  bytes.resize(3001);require(hfs_setfork(file,1)==0&&hfs_read(file,bytes.data(),3001)==3001&&bytes==std::vector<BYTE>(3001,0x72),"rollback changed resource fork");require(hfs_close(file)==0,"close rollback verification");
 }
+void checkRecovery(const CString& path, const std::vector<BYTE>& seed, FILE* report) {
+ ExtDataRec extents={{0,1},{126,2},{0,0}};
+ require(v_recovery_extents_valid(&extents,128),"recovery rejected an extent ending at the bitmap boundary");
+ extents[1].xdrNumABlks=3;
+ require(!v_recovery_extents_valid(&extents,128),"recovery accepted an extent crossing the bitmap boundary");
+ extents[1].xdrStABN=128;extents[1].xdrNumABlks=1;
+ require(!v_recovery_extents_valid(&extents,128),"recovery accepted an extent starting beyond the bitmap");
+ extents[1].xdrNumABlks=0;
+ require(v_recovery_extents_valid(&extents,128),"recovery rejected an unused extent descriptor");
+
+ node first{},second{};
+ first.nnum=1;first.nd.ndType=static_cast<SignedByte>(ndLeafNode);first.nd.ndNHeight=1;
+ second=first;second.nnum=2;second.nd.ndBLink=first.nnum;
+ require(v_recovery_leaf_valid(&first,0)&&v_recovery_leaf_valid(&second,first.nnum),
+         "recovery rejected a valid sequence of leaf predecessors");
+ require(!v_recovery_leaf_valid(&first,first.nnum)&&!v_recovery_leaf_valid(&first,second.nnum)&&
+         !v_recovery_leaf_valid(&second,second.nnum),"recovery accepted a repeated leaf");
+ second.nd.ndType=ndIndxNode;
+ require(!v_recovery_leaf_valid(&second,first.nnum),"recovery accepted an index node as a leaf");
+
+ // Mark a disposable fragmented image dirty, then reopen a copy of that state.
+ save(path,seed);
+ CString livePath=path;
+ auto* volume=hfs_mount(livePath.GetBuffer(),0,O_RDWR);livePath.ReleaseBuffer();
+ require(volume&&hfs_mark_session_dirty(volume)==0,"mark fragmented test volume unclean");
+ const auto unclean=load(path);
+ require(hfs_umount(volume)==0,"close the fragmented test volume");
+ require(unclean!=seed,"unclean flag was not written to the scratch image");
+ save(path,unclean);
+ volume=hfs_mount_session(livePath.GetBuffer(),0,O_RDWR);livePath.ReleaseBuffer();
+ require(volume&&(volume->flags&HFS_READONLY),"unclean worker mount did not recover read-only");
+ verify(volume);
+ require(hfs_umount(volume)==0&&load(path)==unclean,"read-only recovery changed the scratch image");
+ fprintf(report,"PASS: classic HFS recovery validates extent ranges and leaf predecessors, and reopens an unclean fragmented image with both forks unchanged.\n");
+}
+
 }
 void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  CString root=directory,seedPath=root+"\\undo-seed.dsk",path=root+"\\undo-case.dsk";
@@ -79,7 +116,9 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
   }
  }
  require(hfs_close(file)==0&&hfs_close(blocker)==0&&hfs_umount(volume)==0,"finish fragmented rollback fixture");
- auto seed=load(seedPath);originalWrite=fhook_write;
+ auto seed=load(seedPath);
+ checkRecovery(path,seed,report);
+ originalWrite=fhook_write;
  for(int cache=0;cache<2;++cache)for(unsigned operation=0;operation<9;++operation) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount measured operation");if(!cache)require(b_finish(volume)==0,"disable measured block cache");
   calls=0;failAt=~0u;fired=false;fhook_write=failingWrite;
