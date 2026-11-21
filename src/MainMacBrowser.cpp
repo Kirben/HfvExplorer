@@ -471,12 +471,12 @@ struct MainMacBrowser::State {
                     result.payload=std::move(listing);
                 }catch(const Apfs::LockedVolume& locked){
                     result.listing.resourceKey.clear();
-                    result.payload=ApfsUnlock{locked.retry,locked.hint};
+                    result.payload=ApfsUnlock{locked.retry,locked.hint,Wide(request.folder.Volume()->Stat(request.folder.Id()).name)};
                 }catch(const VolumeCoord::Busy&){return Storage::Result{1,ERROR_BUSY,"This volume is busy"};}
                 return Storage::Result{};
             }, [this,volume,item,index,id,mountRoot,rebuild,capturedMount](Result& result){
                 if(const auto* prompt=std::get_if<ApfsUnlock>(&result.payload)){
-                    auto supplied=session_.MacBrowser().ImageCredentials(Dmg::UnlockMethod::Password,prompt->retry,&prompt->hint);
+                    auto supplied=session_.MacBrowser().ImageCredentials(Dmg::UnlockMethod::Password,prompt->retry,&prompt->hint,prompt->volumeName);
                     if(!session_.Mounts().IsCurrent(*capturedMount)||session_.Tree()->GetTreeCtrl().GetSelectedItem()!=item)
                         return;
                     if(supplied.password)Show(index,id,item,false,false,nullptr,std::move(supplied.password));
@@ -695,12 +695,12 @@ void RememberImage(const std::wstring& path)
 }
 }
 
-Dmg::Credentials MainMacBrowser::ImageCredentials(Dmg::UnlockMethod method,bool retry,const std::wstring* apfsHint)
+Dmg::Credentials MainMacBrowser::ImageCredentials(Dmg::UnlockMethod method,bool retry,const std::wstring* apfsHint,const std::wstring& target)
 {
 #ifdef HFV_TESTING
     if(passwordPromptForTest_)return {passwordPromptForTest_(retry),{}};
 #endif
-    return Hidden(session_)?Dmg::Credentials{}:PromptDmgCredentials(session_.Owner(),method,retry,apfsHint);
+    return Hidden(session_)?Dmg::Credentials{}:PromptDmgCredentials(session_.Owner(),method,retry,apfsHint,target);
 }
 
 int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& externalJournal,
@@ -769,7 +769,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
         },
         [this,path,externalJournal,next,credentials,expectedImage](Result& result){
             if(auto* prompt=std::get_if<ImageUnlock>(&result.payload)){
-                auto supplied=ImageCredentials(prompt->method,prompt->retry);
+                auto supplied=ImageCredentials(prompt->method,prompt->retry,nullptr,path);
                 if(supplied)QueueImageOpen(path,externalJournal,next,std::move(supplied),prompt->image);
                 else if(next)next();
                 return;

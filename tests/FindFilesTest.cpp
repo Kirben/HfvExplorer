@@ -16,6 +16,7 @@
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 }
+extern bool ProbeFindOptionsDialog(CWnd*);
 extern bool ProbeFindResultsDialog(CWnd*,const FindResults&,bool);
 namespace {
 void check(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
@@ -92,6 +93,7 @@ int RunFindFilesTest(const char* directory){
   check(readonly_floppy_attach_api(25,nullptr),"detach search floppy");
   CWnd owner;CString ownerClass=AfxRegisterWndClass(0);check(owner.CreateEx(0,ownerClass,"Hidden find owner",WS_OVERLAPPED,0,0,100,100,nullptr,0)!=FALSE,"create hidden find owner");
   AfxGetApp()->m_pMainWnd=&owner;InitializeStorageUi();
+  check(ProbeFindOptionsDialog(&owner),"Find Files scope layout and volume selection");
   check(ProbeFindResultsDialog(&owner,*recursive.second,true)&&ProbeFindResultsDialog(&owner,*bigResult.second,false)&&ProbeFindResultsDialog(&owner,FindResults{},false),"virtual results rows display names and 64-bit sizes, selection and empty results");
   SlowSearchFloppy slow(original);check(readonly_floppy_attach_api(25,&slow),"attach slow search media");storageUiTest={};auto uiResults=std::make_shared<FindResults>();
   auto ui=ShowStorageJob(MakeFindFilesJob(mac,uiResults),"Hidden slow find",true,true,true);

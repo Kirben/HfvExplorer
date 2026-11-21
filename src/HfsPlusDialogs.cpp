@@ -75,22 +75,26 @@ bool FileDialog(HWND owner, std::wstring &path, bool save, const wchar_t *filter
 class ImagePasswordDialog final:public CDialog {
     bool retry_,keyFile_;
     const std::wstring* apfsHint_;
+    std::wstring target_;
     void Clear() {
         SetDlgItemTextW(m_hWnd,IDC_DMG_PASSWORD,L"");
         SendDlgItemMessage(IDC_DMG_PASSWORD,EM_EMPTYUNDOBUFFER,0,0);
     }
 public:
     std::shared_ptr<const Dmg::Password> password;
-    ImagePasswordDialog(CWnd* parent,bool retry,bool keyFile=false,const std::wstring* apfsHint=nullptr)
-        :CDialog(IDD_DMG_PASSWORD,parent),retry_(retry),keyFile_(keyFile),apfsHint_(apfsHint){}
+    ImagePasswordDialog(CWnd* parent,bool retry,bool keyFile=false,const std::wstring* apfsHint=nullptr,std::wstring target={})
+        :CDialog(IDD_DMG_PASSWORD,parent),retry_(retry),keyFile_(keyFile),apfsHint_(apfsHint),target_(std::move(target)){}
     BOOL OnInitDialog()override{
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd,IDC_DMG_PASSWORD);
         SendDlgItemMessage(IDC_DMG_PASSWORD,EM_SETLIMITTEXT,1023);
+        for(int id:{IDC_DMG_TARGET,IDC_DMG_PROMPT})BrowserPresentation::UnicodeControl(m_hWnd,id,L"STATIC");
+        const auto label=target_.empty()?(keyFile_?L"Private key file":apfsHint_?L"APFS volume":L"Encrypted disk image"):target_;
+        SetDlgItemTextW(m_hWnd,IDC_DMG_TARGET,label.c_str());
         if(keyFile_)SetDlgItemTextW(m_hWnd,IDC_DMG_PROMPT,retry_?
             L"The key file could not be opened. Try another password.":L"Enter the password for this PFX or P12 key file.");
         else if(apfsHint_){
-            SetWindowTextW(m_hWnd,L"Unlock APFS volume");
+            SetWindowTextW(m_hWnd,L"Unlock APFS Volume");
             GetDlgItem(IDC_DMG_PROMPT)->ModifyStyle(0,SS_NOPREFIX);
             std::wstring prompt=retry_?L"Incorrect APFS password. Try again.":L"Enter the password for this APFS volume.";
             if(!apfsHint_->empty())prompt+=L"\r\nHint: "+*apfsHint_;
@@ -196,9 +200,11 @@ class FormatDialog : public CDialog {
             const int selected=int(SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_GETCURSEL));
             const bool nowMfs=selected==3||selected==4;
             const bool hfsPlus=selected>=0&&selected<=2;
-            GetDlgItem(IDC_HPLUS_JOURNAL)->EnableWindow(hfsPlus);
-            GetDlgItem(IDC_HPLUS_EXPANDED)->EnableWindow(hfsPlus);
-            GetDlgItem(IDC_HPLUS_EXTERNAL)->EnableWindow(hfsPlus);
+            for(int id:{IDC_HPLUS_JOURNAL,IDC_HPLUS_EXPANDED,IDC_HPLUS_EXTERNAL}){
+                auto* option=GetDlgItem(id);
+                option->EnableWindow(hfsPlus);
+                option->ShowWindow(hfsPlus?SW_SHOW:SW_HIDE);
+            }
             if(nowMfs!=mfs)SetDlgItemText(IDC_HPLUS_SIZE,nowMfs?"400 KiB":"128 MiB");
             mfs=nowMfs;
             return TRUE;
@@ -415,6 +421,16 @@ int RunHfsPlusUiTest(const char *directory) {
                 "Copy Mode lost the Unicode filename, selected mode, or import options");
         mode.DestroyWindow();
         fprintf(report,"PASS: task-specific name dialogs and Copy Mode labels, Unicode and mode selection.\n");
+        const std::wstring hint=L"Example hint";
+        for(const bool apfs:{false,true}){
+            ImagePasswordDialog unlock(&owner,true,false,apfs?&hint:nullptr,L"Archive \u03b1");
+            require(unlock.Create(IDD_DMG_PASSWORD,&owner)!=FALSE,"Create unlock dialog");
+            require(Text(unlock.m_hWnd,IDC_DMG_TARGET)==L"Archive \u03b1"&&
+                    (unlock.GetDlgItem(IDC_DMG_PASSWORD)->GetStyle()&ES_PASSWORD)&&
+                    Text(unlock.m_hWnd,IDC_DMG_PROMPT).find(apfs?hint:L"Try again")!=std::wstring::npos,
+                    "Unlock lost its target, masked field, retry message or APFS hint");
+            unlock.DestroyWindow();
+        }
         VerifyApfsDialogs(owner);
         fprintf(report,"PASS: APFS rename and snapshot labels, Unicode, selection and button states.\n");
         FormatDialog format(&owner);
@@ -439,6 +455,15 @@ int RunHfsPlusUiTest(const char *directory) {
                     !format.GetDlgItem(IDC_HPLUS_JOURNAL)->IsWindowEnabled()&&
                     Text(format.m_hWnd,IDC_HPLUS_SIZE)==L"128 MiB","APFS format size and options");
         }
+        for(int id:{IDC_HPLUS_JOURNAL,IDC_HPLUS_EXPANDED,IDC_HPLUS_EXTERNAL})
+            require(!(format.GetDlgItem(id)->GetStyle()&WS_VISIBLE),"Hidden APFS formatting option remained visible");
+        format.SendDlgItemMessage(IDC_HPLUS_FORMAT_KIND,CB_SETCURSEL,1);
+        format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_HPLUS_FORMAT_KIND,CBN_SELCHANGE),0);
+        for(int id:{IDC_HPLUS_JOURNAL,IDC_HPLUS_EXPANDED,IDC_HPLUS_EXTERNAL})
+            require((format.GetDlgItem(id)->GetStyle()&WS_VISIBLE)&&format.GetDlgItem(id)->IsWindowEnabled(),
+                    "HFSX formatting option did not return");
+        require(format.IsDlgButtonChecked(IDC_HPLUS_EXTERNAL)==BST_CHECKED&&
+                format.IsDlgButtonChecked(IDC_HPLUS_JOURNAL)==BST_CHECKED,"HFS+/HFSX settings were lost when switching format");
         format.DestroyWindow();
         const auto folder=VolumeCoord::Wide(directory);
         auto run=[&](MacImageFormatRequest request){
@@ -575,7 +600,7 @@ int RunHfsPlusUiTest(const char *directory) {
 }
 #endif
 
-Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool retry,const std::wstring* apfsHint)
+Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool retry,const std::wstring* apfsHint,const std::wstring& target)
 {
     using Method=Dmg::UnlockMethod;
     if(method==Method::Either){
@@ -587,7 +612,8 @@ Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool
         method=choice==IDYES?Method::Password:Method::PrivateKey;
     }
     if(method==Method::Password){
-        ImagePasswordDialog dialog(parent,retry,false,apfsHint);
+        ImagePasswordDialog dialog(parent,retry,false,apfsHint,
+            apfsHint?target:target.substr(target.find_last_of(L"\\/")+1));
         if(dialog.DoModal()!=IDOK)return {};
         return {std::move(dialog.password),{}};
     }
@@ -599,7 +625,7 @@ Dmg::Credentials PromptDmgCredentials(CWnd* parent,Dmg::UnlockMethod method,bool
     for(;;){
         try{return {{},std::make_shared<Dmg::PrivateKey>(path,password.get())};}
         catch(const Dmg::KeyFilePasswordRequired&){
-            ImagePasswordDialog dialog(parent,bool(password),true);
+            ImagePasswordDialog dialog(parent,bool(password),true,nullptr,path.substr(path.find_last_of(L"\\/")+1));
             if(dialog.DoModal()!=IDOK)return {};
             password=std::move(dialog.password);
         }catch(const std::exception& error){
@@ -622,7 +648,7 @@ void StartDmgConversion(BrowserSession& session,DmgConversion paths,
     auto complete=session.WhileOpen([paths,prompt](BrowserSession& origin,const Storage::Result& result){
         if(result.code)return;
         if(*prompt){
-            if(auto supplied=PromptDmgCredentials(origin.Owner(),(*prompt)->method,(*prompt)->retry))
+            if(auto supplied=PromptDmgCredentials(origin.Owner(),(*prompt)->method,(*prompt)->retry,nullptr,paths.source))
                 StartDmgConversion(origin,paths,std::move(supplied));
         }
     });

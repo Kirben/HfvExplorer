@@ -135,6 +135,25 @@ public:
 };
 }
 #ifdef HFV_TESTING
+bool ProbeFindOptionsDialog(CWnd* owner){
+ FindScope scope;
+ scope.volumeRoot=FileOperations::Location::Windows(L"C:\\");
+ scope.folderLabel=L"Macintosh / Documents";
+ scope.volumeLabel=L"Macintosh";
+ FindOptions dialog(owner,scope);
+ if(!dialog.Create(IDD_FIND_FILES,owner))return false;
+ const auto text=[&]{return BrowserPresentation::Text(::GetDlgItem(dialog.m_hWnd,IDC_FIND_SCOPE));};
+ bool ok=text()==scope.folderLabel&&dialog.IsDlgButtonChecked(IDC_FIND_RECURSIVE)==BST_CHECKED&&
+     ::IsWindowUnicode(::GetDlgItem(dialog.m_hWnd,IDC_FIND_SCOPE));
+ dialog.CheckDlgButton(IDC_FIND_WHOLE,BST_CHECKED);
+ dialog.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_FIND_WHOLE,BN_CLICKED));
+ ok=ok&&text()==scope.volumeLabel;
+ dialog.CheckDlgButton(IDC_FIND_WHOLE,BST_UNCHECKED);
+ dialog.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_FIND_WHOLE,BN_CLICKED));
+ ok=ok&&text()==scope.folderLabel;
+ dialog.DestroyWindow();
+ return ok;
+}
 bool ProbeFindResultsDialog(CWnd* owner,const FindResults& results,bool mac){
  ResultsDialog dialog(owner,std::make_shared<FindResults>(results),false,mac);if(!dialog.Create(IDD_FIND_RESULTS,owner))return false;
  bool ok=!dialog.IsWindowVisible();
