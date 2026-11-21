@@ -480,6 +480,12 @@ uint64_t DeleteSnapshot(Source& source,const Container& expected,const std::u16s
     return Commit(source,expected,job,&request);
 }
 
+uint64_t RenameVolume(Source& source,const Container& expected,const std::u16string& name,Storage::Job& job)
+{
+    const CatalogMutation request=CatalogVolumeRename{name};
+    return Commit(source,expected,job,&request);
+}
+
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile};

@@ -345,13 +345,17 @@ struct MainMacBrowser::State {
     HTREEITEM MountedRoot(int index) const {
         return session_.MountRoot({BrowserMountInventory::Kind::MountedVolume,index});
     }
-    void Root(int index) {
-        auto& m=mounts[index];if(!m.volume)return;auto label=Wide(m.volume->Name())+L" ("+FromAnsi(m.volume->Description())+L")";
+    std::wstring RootLabel(int index) const {
+        const auto& m=mounts[index];
+        auto label=Wide(m.volume->Name())+L" ("+FromAnsi(m.volume->Description())+L")";
         if(!m.suffix.empty())label+=L" - "+m.suffix;
         if(m.drive>=0)label+=std::wstring(L" - ")+wchar_t('A'+m.drive)+L":";
         if(!m.volume->Writable())label+=L" [read-only]";
-        if(MountedRoot(index))return;
-        const auto root=Insert(index,2,nullptr,label,true);
+        return label;
+    }
+    void Root(int index) {
+        if(!mounts[index].volume||MountedRoot(index))return;
+        const auto root=Insert(index,2,nullptr,RootLabel(index),true);
         session_.SetMountRoot({BrowserMountInventory::Kind::MountedVolume,index},root);
     }
     bool Show(int index,uint32_t id,HTREEITEM item,bool rebuild=false,bool reload=false,
@@ -525,6 +529,7 @@ struct MainMacBrowser::State {
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         if(rebuild){
             auto root=MountedRoot(index);tree->delete_subdir_contents(root);std::map<uint32_t,HTREEITEM> pathItems;pathItems[2]=root;
+            if(!strcmp(volume->Kind(),"APFS"))TreeText(session_,root,RootLabel(index));
             for(auto& level:levels)for(auto& entry:level.second)if(entry.directory&&(App().m_show_invisible_mac||!((uint16_t(entry.finder[8])<<8|entry.finder[9])&0x4000)||std::find(ancestors.begin(),ancestors.end(),entry.id)!=ancestors.end()))pathItems[entry.id]=Insert(index,entry.id,pathItems.at(level.first),Wide(entry.name));
             item=pathItems.at(id);
         }
@@ -590,6 +595,24 @@ std::shared_ptr<MacBrowser::Volume> MainMacBrowser::SelectedVolume()const
     uint32_t folder;
     if(!state_->Selected(index,folder))return {};
     return state_->mounts[index].volume;
+}
+bool MainMacBrowser::CanRenameApfsVolume()const
+{
+    int index;
+    uint32_t root;
+    return session_.ListingAvailable()&&state_->Selected(index,root)&&
+           Apfs::CanRenameMountedVolume(*state_->mounts[index].volume,root);
+}
+bool MainMacBrowser::RenameApfsVolume()
+{
+    int index;
+    uint32_t root;
+    if(!CanRenameApfsVolume()||!state_->Selected(index,root))return false;
+    auto volume=state_->mounts[index].volume;
+    std::wstring name;
+    if(!Run(session_,[&](Storage::Job&){name=Wide(volume->Stat(root).name);})||
+       !EditMacVolumeName(session_.Owner(),name,*volume))return false;
+    return Run(session_,[&](Storage::Job& job){Apfs::RenameMountedVolume(*volume,root,U16(name),job);});
 }
 bool MainMacBrowser::CanRestoreSnapshotSelection()const
 {

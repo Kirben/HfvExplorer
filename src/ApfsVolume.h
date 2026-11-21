@@ -23,6 +23,8 @@ void Unlock(MacBrowser::Volume&,uint32_t id,const Dmg::Password&);
 std::vector<std::u16string> MountedSnapshotNames(MacBrowser::Volume&);
 std::vector<std::u16string> ChangeMountedSnapshot(MacBrowser::Volume&,const std::u16string& name,bool create,Storage::Job&);
 std::vector<uint32_t> RefreshedFolderRoute(MacBrowser::Volume&,const std::vector<uint32_t>& previous);
+bool CanRenameMountedVolume(MacBrowser::Volume&,uint32_t root);
+void RenameMountedVolume(MacBrowser::Volume&,uint32_t root,const std::u16string& name,Storage::Job&);
 bool CanRestoreSnapshotFolder(MacBrowser::Volume&,uint32_t folder);
 MacBrowser::Entry SnapshotRestoreDestination(MacBrowser::Volume&,uint32_t folder);
 }

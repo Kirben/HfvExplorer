@@ -30,6 +30,7 @@ uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Jo
 std::vector<std::u16string> ListSnapshotNames(HfsPlus::Source&,const Container&);
 uint64_t CreateSnapshot(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
 uint64_t DeleteSnapshot(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
+uint64_t RenameVolume(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
 struct CloneUnavailable : HfsPlus::Error {
     using HfsPlus::Error::Error;
 };

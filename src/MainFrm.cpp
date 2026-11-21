@@ -142,6 +142,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_COMMAND(ID_TOOLS_FIND, OnToolsFind)
  ON_COMMAND(ID_TOOLS_APFS_SNAPSHOTS, OnToolsApfsSnapshots)
  ON_COMMAND(ID_TOOLS_APFS_RESTORE, OnToolsApfsRestore)
+ ON_COMMAND(ID_TOOLS_APFS_RENAME_VOLUME, OnToolsApfsRenameVolume)
+ ON_UPDATE_COMMAND_UI(ID_TOOLS_APFS_RENAME_VOLUME, OnUpdateApfsRenameVolume)
  ON_UPDATE_COMMAND_UI(ID_TOOLS_APFS_RESTORE, OnUpdateApfsRestore)
 	//}}AFX_MSG_MAP
 	// Global help commands
@@ -1386,6 +1388,18 @@ void CMainFrame::OnFileVolumetofloppy()
  dialog.m_caption="Write a volume file to floppy";
  if(dialog.DoModal()!=IDOK)return;
  StartFloppyWrite(GetBrowserSession(),dialog.m_drive,ExistingFloppyImage{dialog.m_volname.GetString()});
+}
+
+void CMainFrame::OnToolsApfsRenameVolume()
+{
+ if(!StorageUi::busy()&&!StorageUi::state().sessionOpen)
+     GetBrowserSession().MacBrowser().RenameApfsVolume();
+}
+
+void CMainFrame::OnUpdateApfsRenameVolume(CCmdUI* command)
+{
+ command->Enable(!StorageUi::busy()&&!StorageUi::state().sessionOpen&&
+                 GetBrowserSession().MacBrowser().CanRenameApfsVolume());
 }
 
 void CMainFrame::OnToolsApfsRestore()

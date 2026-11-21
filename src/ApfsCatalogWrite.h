@@ -91,8 +91,9 @@ struct ExternalCatalogEdit {
     const FinderBytes* finder=nullptr;
     uint64_t destinationParent=0;
 };
+struct CatalogVolumeRename { const std::u16string& name; };
 struct CatalogSnapshot { const std::u16string& name; bool create; };
-using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink,CatalogSnapshot>;
+using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink,CatalogSnapshot,CatalogVolumeRename>;
 
 struct DataRun {
     uint64_t block,count;

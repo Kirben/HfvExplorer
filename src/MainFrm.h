@@ -188,6 +188,8 @@ protected:
  afx_msg void OnToolsFind();
  afx_msg void OnToolsApfsSnapshots();
  afx_msg void OnToolsApfsRestore();
+ afx_msg void OnToolsApfsRenameVolume();
+ afx_msg void OnUpdateApfsRenameVolume(CCmdUI*);
  afx_msg void OnUpdateApfsRestore(CCmdUI*);
 
  afx_msg void OnUpdatePhysicalMedia(CCmdUI* ui);

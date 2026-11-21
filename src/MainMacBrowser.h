@@ -55,6 +55,8 @@ public:
     std::string SelectedResourceKey()const;
     std::shared_ptr<MacBrowser::Volume> SelectedVolume() const;
     bool CanRestoreSnapshotSelection() const;
+    bool CanRenameApfsVolume() const;
+    bool RenameApfsVolume();
     bool RestoreSnapshotSelection();
     bool Activate(int row);
     bool Refresh();

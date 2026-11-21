@@ -2688,6 +2688,34 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
         Check(actual==Bytes(actual.size(),0x28),"APFS case-mode overwrite did not survive reopening");
         fprintf(report,"PASS: mixed-case APFS volume %zu uses its own naming and recursive copy rules.\n",targetIndex+1);
     }
+    if(!mixedCase){
+        const std::u16string renamed=u"Renamed APFS volume "+std::u16string(1,char16_t(u'1'+targetIndex));
+        Check(!Apfs::CanRenameMountedVolume(*volume,2)&&Apfs::CanRenameMountedVolume(*volume,target.id),
+              "APFS volume rename did not distinguish the container and its live volume");
+        Storage::Job rename;
+        Apfs::RenameMountedVolume(*volume,target.id,renamed,rename);
+        Check(volume->FindChild(2,renamed,target)&&!volume->FindChild(2,targetName,deleted)&&
+              readSibling(*volume).identity==same.identity,"APFS volume rename changed a sibling selection");
+        volume.reset();
+        {
+            auto disk=OpenImage(path.c_str(),false);
+            const auto checkpoint=Apfs::Probe(*disk);
+            const Apfs::ObjectMap map(*disk,*checkpoint,checkpoint->objectMap,checkpoint->transaction);
+            Check(map.Lookup(initial->volumes[siblingIndex])==siblingBlock&&
+                  Disk::Read(*disk,*siblingBlock*checkpoint->blockSize,checkpoint->blockSize)==siblingSuper,
+                  "APFS volume rename changed a sibling superblock");
+        }
+        volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->FindChild(2,renamed,target)&&volume->FindChild(target.id,u"HFV multi-volume edits",folder)&&
+              volume->FindChild(folder.id,u"Remaining.bin",remaining),"Renamed APFS volume did not reopen with its files");
+        const auto sibling=readSibling(*volume);
+        for(unsigned fork:{0u,1u}){
+            actual.resize(siblingForks[fork].size());
+            if(!actual.empty())volume->Read(sibling.id,fork,0,actual.data(),actual.size());
+            Check(actual==siblingForks[fork],"Renaming an APFS volume changed a sibling fork");
+        }
+        fprintf(report,"PASS: APFS volume rename preserved the sibling volume superblock and both forks.\n");
+    }
     fprintf(report,"PASS: APFS volume %zu create, overwrite, delete, cancellation, and unchanged sibling mapping, forks and metadata.\n",
             targetIndex+1);
 }
@@ -2996,6 +3024,38 @@ void ExternalSpaceLimitWrites(const std::string& root,FILE* report,const wchar_t
         Check(volume->FindChild(2,expected.first,rootEntry)&&volume->PropertiesDetails(rootEntry.id)==expected.second,
               "APFS volume Properties did not report the macOS quota or reserve");
     }
+    MacBrowser::Entry quota,reserve,empty;
+    Check(volume->FindChild(2,u"Limited",quota)&&volume->FindChild(2,u"Reserved",reserve)&&
+          volume->FindChild(2,u"Empty",empty),"Missing shared APFS volume labels for rename");
+    const auto revision=VolumeCoord::Revision(volume->ResourceKey());
+    Storage::Job cancelledRename;
+    cancelledRename.cancel();
+    bool stopped=false;
+    try{Apfs::RenameMountedVolume(*volume,quota.id,u"Renamed quota",cancelledRename);}
+    catch(const Storage::Cancelled&){stopped=true;}
+    Check(stopped&&volume->Stat(quota.id).name==u"Limited"&&VolumeCoord::Revision(volume->ResourceKey())==revision,
+          "Cancelled APFS volume rename changed the label or revision");
+    Storage::Job rename;
+    Apfs::RenameMountedVolume(*volume,quota.id,u"Renamed quota",rename);
+    Apfs::RenameMountedVolume(*volume,reserve.id,u"Renamed reserve",rename);
+    Check(volume->Stat(empty.id).name==u"Empty"&&VolumeCoord::Revision(volume->ResourceKey())==revision+2,
+          "APFS label changes affected a sibling or lost refresh notification");
+    volume.reset();
+    volume=MacBrowser::OpenBrowserImage(path);
+    Check(volume&&volume->FindChild(2,u"Renamed quota",quota)&&volume->FindChild(2,u"Renamed reserve",reserve)&&
+          volume->FindChild(2,u"Empty",empty)&&
+          volume->PropertiesDetails(quota.id)=="APFS quota: 8388608 bytes"&&
+          volume->PropertiesDetails(reserve.id)=="APFS reserve: 1577058304 bytes",
+          "Renamed APFS volumes lost their quota or reserve after reopening");
+    for(const auto& target:std::array<std::pair<uint32_t,const char16_t*>,2>{{
+            {quota.id,u"Within quota"},{reserve.id,u"Within reserve"}}}){
+        MacBrowser::Entry file;
+        Check(volume->FindChild(target.first,target.second,file),"Renamed APFS volume lost a file");
+        Bytes data(4096);
+        volume->Read(file.id,0,file.forks[0].size-data.size(),data.data(),data.size());
+        Check(data==Bytes(data.size(),0x5d),"Renamed APFS volume changed file data");
+    }
+    fprintf(report,"PASS: macOS APFS volume rename preserved quota, reserve, data and the unselected sibling label.\n");
     fprintf(report,"PASS: macOS APFS volume quota, sibling reserve, own reserve, cancellation, and unchanged rejected checkpoints.\n");
 }
 

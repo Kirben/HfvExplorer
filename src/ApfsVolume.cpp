@@ -344,6 +344,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     Container container;
     std::vector<Mounted> mounts;
     std::u16string label;
+    std::shared_ptr<const std::u16string> updatedLabel;
     bool caseSensitive=true;
     const std::string key;
     std::atomic<bool> writable,limitedEdits;
@@ -564,7 +565,60 @@ public:
             throw;
         }
     }
-    std::u16string Name()const override{return label;}
+    bool CanRenameRoot(uint32_t id){
+        VolumeCoord::BackendRead lease(key);
+        std::unique_lock<std::recursive_mutex> lock(mutex,std::try_to_lock);
+        if(!lock.owns_lock()||!writable||requiresReopen)return false;
+        const auto item=entries.find(id);
+        if(item==entries.end()||item->second.oid!=2)return false;
+        const auto& mount=mounts[item->second.mount];
+        return !mount.locked&&!mount.cipher&&!mount.snapshotTree&&!mount.snapshotCreated;
+    }
+    void RenameRoot(uint32_t id,const std::u16string& name,Storage::Job& job){
+        VolumeCoord::Lease access({{key,VolumeCoord::Mode::Write}});
+        bool committed=false;
+        try{
+            const bool changed=WriteMount([&]{
+                if(job.cancelled())throw Storage::Cancelled();
+                Check(CanRenameRoot(id),"Select a writable live APFS volume with no snapshots");
+                const auto mountIndex=At(id).mount;
+                if(mounts[mountIndex].name==name)return false;
+                CommitMutation(id,0,job,[&](auto& work){
+                    try{
+                        const auto transaction=RenameVolume(*source,WriteTarget(id),name,work);
+                        committed=true;
+                        return transaction;
+                    }catch(const CheckpointPublicationUncertain&){
+                        committed=true;
+                        throw;
+                    }
+                });
+                auto& root=At(id).entry;
+                const auto& actual=mounts[mountIndex].name;
+                root.name=actual;
+                if(id==2)std::atomic_store(&updatedLabel,std::make_shared<const std::u16string>(actual));
+                else{
+                    for(unsigned suffix=2;;++suffix){
+                        const auto duplicate=std::any_of(listings.at(2).begin(),listings.at(2).end(),[&](uint32_t sibling){
+                            return sibling!=id&&At(sibling).entry.name==root.name;
+                        });
+                        if(!duplicate)break;
+                        const auto number=std::to_string(suffix);
+                        root.name=actual+u" ("+std::u16string(number.begin(),number.end())+u")";
+                    }
+                }
+                return true;
+            },true);
+            if(changed)access.ReleaseAndPublish({key});
+        }catch(...){
+            if(committed)access.ReleaseAndPublish({key});
+            throw;
+        }
+    }
+    std::u16string Name()const override{
+        const auto name=std::atomic_load(&updatedLabel);
+        return name?*name:label;
+    }
     std::string ResourceKey()const override{return key;}
     const char* Kind()const override{return "APFS";}
     bool CaseSensitive()const override{return caseSensitive;}
@@ -1646,6 +1700,21 @@ std::vector<uint32_t> RefreshedFolderRoute(MacBrowser::Volume& volume,const std:
 {
     auto* mounted=dynamic_cast<Volume*>(&volume);
     return mounted?mounted->FolderRoute(previous):std::vector<uint32_t>{};
+}
+
+bool CanRenameMountedVolume(MacBrowser::Volume& volume,uint32_t root)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    if(!mounted)return false;
+    try{return mounted->CanRenameRoot(root);}
+    catch(const VolumeCoord::Busy&){return false;}
+}
+
+void RenameMountedVolume(MacBrowser::Volume& volume,uint32_t root,const std::u16string& name,Storage::Job& job)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    Check(mounted!=nullptr,"Select a live APFS volume");
+    mounted->RenameRoot(root,name,job);
 }
 
 bool CanRestoreSnapshotFolder(MacBrowser::Volume& volume,uint32_t folder)

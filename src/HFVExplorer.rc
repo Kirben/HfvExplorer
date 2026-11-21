@@ -168,6 +168,7 @@ BEGIN
         MENUITEM "Burn CDR/CDRW ...",           ID_TOOLS_BURN
         MENUITEM "Manage APFS Snapshots...",      ID_TOOLS_APFS_SNAPSHOTS
         MENUITEM "Restore from APFS Snapshot",   ID_TOOLS_APFS_RESTORE
+        MENUITEM "Rename APFS Volume...",        ID_TOOLS_APFS_RENAME_VOLUME
 
     END
     POPUP "&Help"

@@ -854,7 +854,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         return Record{{record.key.data(),record.key.size()},{record.value.data(),record.value.size()}};
     };
     const auto parent=std::visit([](const auto& edit)->uint64_t{
-        if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogSnapshot>)return 0;
+        if constexpr((std::is_same_v<std::decay_t<decltype(edit)>,CatalogSnapshot>||std::is_same_v<std::decay_t<decltype(edit)>,CatalogVolumeRename>))return 0;
         else return edit.parent;
     },request);
     const auto* create=std::get_if<CatalogCreate>(&request);
@@ -2894,6 +2894,49 @@ void ValidateWritableLayout(Source& source,const Container& container)
 }
 
 namespace {
+CatalogWritePlan PrepareVolumeRename(Source& source,const Container& current,uint64_t transaction,
+    Bytes& superblock,const CheckpointObjectLookup& ephemeral,const CatalogVolumeRename& request,uint64_t selected)
+{
+    auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
+    CheckExternalVolume(volume,current.volumes.size()==2);
+    const auto oid=selected?selected:current.volumes.front();
+    const auto name=EncodeCatalogName(request.name);
+    const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
+    const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128));
+    const auto catalog=ReadWritableCatalog(source,current,volumeMap,Le64(volume.data()+136));
+    const auto extents=ReadExtentTree(source,current,Le64(volume.data()+144));
+    ValidateSharedFileExtents(catalog,extents.records);
+    std::vector<FileRun> files;
+    for(const auto& extent:extents.records)
+        files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
+    auto protectedRuns=siblings.runs;
+    for(auto block:catalog.blocks)protectedRuns.push_back({block,1});
+    for(auto block:volumeMap.leaves)protectedRuns.push_back({block,1});
+    protectedRuns.push_back({volumeMap.headerBlock,1});
+    protectedRuns.push_back({volumeMap.rootBlock,1});
+    std::sort(protectedRuns.begin(),protectedRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    CatalogWritePlan plan;
+    std::vector<DataRun> unused;
+    auto& space=ephemeral(Le64(superblock.data()+152));
+    const auto blocks=Allocate(plan.metadata,source,current,space,superblock,ephemeral,
+        {volumeAddress,containerMap.headerBlock,containerMap.rootBlock},extents.blocks,Le64(volume.data()+152),
+        files,{},0,unused,transaction,[]{return 3;},protectedRuns);
+    const auto limits=ReadVolumeSpace(volume,current.blockCount);
+    Check(limits.reserve<=current.blockCount-siblings.totalReserve,"Invalid APFS reserve total");
+    const auto total=siblings.totalReserve+limits.reserve;
+    const auto allocated=siblings.allocatedReserve+(std::min)(limits.reserve,limits.used);
+    Check(Le64(space.data()+SpaceReserveCount)==total&&Le64(space.data()+SpaceReserveAllocated)==allocated&&
+          Le64(space.data()+72)>=total-allocated,"APFS rename would consume reserved space");
+    std::fill_n(volume.begin()+704,256,0);
+    std::copy(name.begin(),name.end(),volume.begin()+704);
+    StageObject(plan.metadata,blocks[0],std::move(volume),oid,transaction,13);
+    for(auto& mapping:containerMap.mappings)
+        if(mapping.oid==oid)mapping={oid,blocks[0]};
+    StageMap(plan.metadata,containerMap,blocks[1],blocks[2],containerMap.mappings,transaction,blocks,3);
+    Set(superblock,160,blocks[1],8);
+    return plan;
+}
+
 CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current,uint64_t transaction,
     Bytes& superblock,const CheckpointObjectLookup& ephemeral,const CatalogSnapshot& request)
 {
@@ -3036,6 +3079,8 @@ CatalogWritePlan PrepareCatalogMutation(
         Check(!selected||selected==current.volumes.front(),"The APFS snapshot volume changed");
         return PrepareSnapshotMutation(source,current,transaction,superblock,ephemeral,*snapshot);
     }
+    if(const auto* rename=std::get_if<CatalogVolumeRename>(&request))
+        return PrepareVolumeRename(source,current,transaction,superblock,ephemeral,*rename,selected);
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* hardLink=std::get_if<CatalogHardLink>(&request);
@@ -3136,7 +3181,7 @@ CatalogWritePlan PrepareCatalogMutation(
     size_t streamAt=0;
     const auto entryId=std::visit([nextId](const auto& edit){
         if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogCreate>)return nextId;
-        else if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,ExternalCatalogEdit>||std::is_same_v<std::decay_t<decltype(edit)>,CatalogSnapshot>)return uint64_t(0);
+        else if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,ExternalCatalogEdit>||(std::is_same_v<std::decay_t<decltype(edit)>,CatalogSnapshot>||std::is_same_v<std::decay_t<decltype(edit)>,CatalogVolumeRename>))return uint64_t(0);
         else return edit.inode;
     },request);
     std::set<uint64_t> retiredStreams;
