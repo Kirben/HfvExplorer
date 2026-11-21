@@ -385,6 +385,12 @@ int hfs_mark_session_dirty(hfsvol *vol) {
   return b_end_mutation(vol,0);
 }
 
+/* Publish a clean marker while the caller still owns the durable undo log. */
+int hfs_mark_session_clean(hfsvol *vol) {
+  if (hfs_flush(vol)<0 || b_begin_mutation(vol)<0) return -1;
+  return b_end_mutation(vol,v_flush(vol,1));
+}
+
 /*
  * NAME:	hfs->flush()
  * DESCRIPTION:	flush all pending changes to an HFS volume

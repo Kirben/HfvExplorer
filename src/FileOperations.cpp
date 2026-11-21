@@ -125,6 +125,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  const auto& request=transfer.endpoints;
  const auto& target=request.destination;
  Check(!request.sources.empty(),"Select a source file or folder");
+ const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
  bool complete=false,inPlace=false;
  StorageLocation::WithVerifiedWrite(target,[&]{
@@ -158,7 +159,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
     snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
    }
-   complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes);
+   complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);
   }
   if(!target.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
@@ -177,7 +178,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  completion.complete=complete;
  completion.completed=job.progress().files;
  Storage::Result result;
- result.moved=complete&&std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
+ result.moved=complete&&moving;
  return result;
 }
 Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t count,Storage::Job& job,Completion& completion){

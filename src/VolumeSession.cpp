@@ -49,7 +49,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     std::string key_;
     std::unique_ptr<HfsPlus::Source> guard_, journalGuard_;
     std::unique_ptr<VolumeCoord::ImageDependency> dependency_;
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     std::unique_ptr<Process> worker_;
     std::u16string name_;
     Capabilities capabilities_;
@@ -247,7 +247,7 @@ public:
     }
     bool GetClassicProperties(uint32_t id, hfsdirent& entry) override {
         if (!Classic()) return false;
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Call(SessionCommandCode::GetClassicProperties, Protocol::Encode(Protocol::CatalogItem{id}), false, [&] {
             auto result = Response(SessionBytes);
             entry = DecodeClassic(result); result.end();
@@ -261,7 +261,7 @@ public:
         return Mfs()?LookupChild(parent,source.name,source.version,found):Volume::FindTransferChild(parent,source,found);
     }
     bool LookupChild(uint32_t parent,const std::u16string& name,std::optional<unsigned> version,Entry& found) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         bool exists=false;
         Call(SessionCommandCode::FindChild,Protocol::Encode(Protocol::FindChildRequest{parent,name,version}),false,[&]{
             auto packet=Response(SessionBytes);
@@ -271,11 +271,11 @@ public:
         return exists;
     }
     void SetBasicMetadata(uint32_t id,const Entry& entry)override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Simple(SessionCommandCode::SetBasicMetadata,Protocol::EncodeBasicMetadata(id,entry),true);
     }
     void SetClassicProperties(uint32_t id, const hfsdirent& entry) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Simple(SessionCommandCode::SetClassicProperties,Protocol::EncodeClassicProperties(id,entry),true);
     }
     EntryIdentity WorkerEntryIdentity(EntryIdentity identity) const override {
@@ -283,7 +283,7 @@ public:
         return identity;
     }
     WorkerOrigin WorkerDescription() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         return ImageOrigin(writable_ && !lost_);
     }
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles() const override {
@@ -295,24 +295,24 @@ public:
         return files;
     }
     void SuspendWorker() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (worker_ && !Alive()) Lost();
         Stop();
     }
     void WorkerUncleanExit() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Lost();
     }
     void ResumeWorker() override { Reload(); }
     void Reload() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (Alive()) return;
         if (worker_) Lost();
         Start();
     }
     uint64_t FreeBytes() const override {
         auto& self = *const_cast<PersistentVolume*>(this);
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         uint64_t bytes = 0;
         self.Call(SessionCommandCode::Root, {}, false, [&] {
             auto result = self.Response(SessionBytes); bytes = result.get(); result.end();
@@ -323,7 +323,7 @@ public:
 #ifdef HFV_TESTING
         ++listingRequests;
 #endif
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::vector<Entry> entries;
         Call(SessionCommandCode::List,Protocol::Encode(Protocol::ListRequest{parent}),false,[&] {
             auto packet = Response(SessionBytes); auto count = packet.get(); packet.end();
@@ -333,7 +333,7 @@ public:
         return entries;
     }
     Entry Stat(uint32_t id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Entry entry;
         Call(SessionCommandCode::Stat,Protocol::Encode(Protocol::StatRequest{id}),false,[&]{entry=ReadEntry();});
         return entry;
@@ -345,7 +345,7 @@ public:
             const auto count = (std::min)(bytes, Protocol::ReadLimit);
             {
                 // Leave the pipe available for browsing between fork chunks.
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<std::recursive_mutex> lock(mutex_);
                 Check(!generation || generation == generation_, "The mounted volume changed during a fork read");
                 generation=generation_;
                 Call(SessionCommandCode::Read,Protocol::Encode(Protocol::ReadRequest{id,fork,offset,count}),false,[&] {
@@ -362,7 +362,7 @@ public:
         } while (bytes);
     }
     HfsPlus::Attributes GetAttributes(uint32_t id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         AttributeSets sets;
         Call(SessionCommandCode::Attributes, Protocol::Encode(Protocol::CatalogItem{id}), false, [&] {
             auto packet = Response(AttributeSet);
@@ -372,12 +372,12 @@ public:
         return std::move(*sets[0]);
     }
     void SetAttributes(uint32_t id, const HfsPlus::Attributes& attributes) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Call(SessionCommandCode::SetAttributes, Protocol::Encode(Protocol::CatalogItem{id}), true, [] {}, &attributes);
     }
     void SetCompressionMethod(uint32_t id, HfsPlus::Volume::CompressionMode method,
                               std::function<void(uint64_t,uint64_t)> progress) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto args=Protocol::Encode(Protocol::CompressionRequest{id,method});
         std::exception_ptr stopped;
         try {
@@ -404,7 +404,7 @@ public:
         SetCompressionMethod(id, compressed ? Mode::Zlib : Mode::Uncompressed, std::move(progress));
     }
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         uint32_t id = 0;
         Call(SessionCommandCode::MakeDirectory,Protocol::Encode(Protocol::DirectoryName{parent,name}),true,[&] {
             auto packet = Response(SessionBytes); id = uint32_t(packet.get()); packet.end();
@@ -428,7 +428,7 @@ public:
 private:
     uint32_t StreamPut(uint32_t parent, const Entry& entry, Reader reader, bool replace, uint32_t original,
                        uint32_t source,std::function<void(unsigned,uint64_t,size_t)> localProgress) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto args=Protocol::EncodePut({parent,replace,entry.attributesKnown,original,source},entry);
         uint32_t id = 0;
         std::exception_ptr sourceFailure;
@@ -479,11 +479,11 @@ private:
 public:
     void ValidateEntry(const Entry& entry) const override {
         auto& self = const_cast<PersistentVolume&>(*this);
-        std::lock_guard<std::mutex> lock(self.mutex_);
+        std::lock_guard<std::recursive_mutex> lock(self.mutex_);
         self.Call(SessionCommandCode::ValidateEntry,Protocol::EncodeEntryCheck(entry),false,[]{},&entry.attributes);
     }
     void FinalizeDirectory(uint32_t id, const Entry& desired, const Entry& expected, bool merge) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto args=Protocol::EncodeDirectoryUpdate({id,merge,desired.attributesKnown},desired,expected);
         Call(SessionCommandCode::FinalizeDirectory,std::move(args),true,[]{},&desired.attributes);
     }
@@ -495,7 +495,7 @@ public:
         Rename(id,parent,entry.name);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto command = SessionCommandCode::Rename;
 #ifdef HFV_TESTING
         if (crashRename_) { crashRename_ = false; command = SessionCommandCode::TestCrashRename; }
@@ -503,13 +503,32 @@ public:
         Simple(command,Protocol::Encode(Protocol::RenameRequest{id,parent,name}),true);
     }
     void Remove(uint32_t id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Simple(SessionCommandCode::Remove, Protocol::Encode(Protocol::CatalogItem{id}), true);
+    }
+    void WithCopyTransaction(const std::function<void(bool)>& work) override {
+        if(!Classic()){work(false);return;}
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        Volume::WithCopyTransaction(work);
+    }
+    bool BeginCopyTransaction() override {
+        bool active=false;
+        Call(SessionCommandCode::BeginCopyTransaction,{},true,[&]{
+            auto packet=Response(SessionBytes);
+            active=packet.flag();
+            packet.end();
+        });
+        return active;
+    }
+    void FinishCopyTransaction(bool commit) override {
+        // A lost worker leaves the journal for replay before the next mount.
+        if(!commit&&!worker_)return;
+        Simple(commit?SessionCommandCode::CommitCopyTransaction:SessionCommandCode::AbortCopyTransaction,{},true);
     }
     bool RemoveTreeAtomically(uint32_t id,Storage::Job& job,bool deletionProgress) override {
         if(!Classic())return false;
         if(job.cancelled())throw Storage::Cancelled();
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto command=SessionCommandCode::RemoveTree;
 #ifdef HFV_TESTING
         if(crashRemoveTree_){crashRemoveTree_=false;command=SessionCommandCode::TestCrashRemoveTree;}
@@ -539,7 +558,7 @@ public:
         return handled;
     }
     uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         uint32_t id = 0;
         auto args=Protocol::Encode(Protocol::HardLinkRequest{source,parent,name,replace});
         Call(SessionCommandCode::HardLink,std::move(args),true,[&] {
@@ -548,28 +567,28 @@ public:
         return id;
     }
     void ValidateRemoval(uint32_t id) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Simple(SessionCommandCode::ValidateRemoval, Protocol::Encode(Protocol::CatalogItem{id}), false);
     }
     void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent) override {
         if (target.ResourceKey()!=key_) return;
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Simple(SessionCommandCode::ValidateCopy,Protocol::Encode(Protocol::CopyCheck{id,parent}),false);
     }
 #ifdef HFV_TESTING
-    DWORD Pid() const { std::lock_guard<std::mutex> lock(mutex_); return worker_ ? worker_->pid : 0; }
+    DWORD Pid() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return worker_ ? worker_->pid : 0; }
     void CrashOnRename() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Check(Alive(), "Fixture volume worker is not running");
         crashRename_ = true;
     }
     void CrashDuringRemoveTree() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Check(Classic()&&Alive(),"Fixture classic volume worker is not running");
         crashRemoveTree_=true;
     }
     void CrashDuringPut() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         Check((Classic() || Mfs()) && Alive(), "Non-journaled fixture worker is not running");
         crashPut_ = true;
     }
@@ -623,6 +642,11 @@ uint32_t WriteStream(HANDLE input,HANDLE output,Volume& volume,Protocol::PutRequ
 }
 
 void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
+    struct CopyTransaction {
+        Volume& volume;
+        bool active=false;
+        ~CopyTransaction(){if(active)try{volume.FinishCopyTransaction(false);}catch(...){}}
+    } copy{volume};
     auto writeNumber = [&](uint64_t value) {
         Data packet; packet.put(value); Send(output, SessionBytes, std::move(packet));
     };
@@ -779,9 +803,25 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 volume.SetBasicMetadata(request.id,request.entry);
                 break;
             }
+            case SessionCommandCode::BeginCopyTransaction: {
+                packet.end();
+                Check(!copy.active&&!strcmp(volume.Kind(),"HFS"),"Unexpected classic folder transaction");
+                copy.active=volume.BeginCopyTransaction();
+                Data response;
+                response.put(copy.active);
+                Send(output,SessionBytes,std::move(response));
+                break;
+            }
+            case SessionCommandCode::CommitCopyTransaction:
+            case SessionCommandCode::AbortCopyTransaction:
+                packet.end();
+                Check(copy.active,"No active classic folder transaction");
+                copy.active=false;
+                volume.FinishCopyTransaction(command==SessionCommandCode::CommitCopyTransaction);
+                break;
             case SessionCommandCode::CloseClassic:
                 packet.end();
-                Check(!strcmp(volume.Kind(),"HFS"), "Unexpected classic close command");
+                Check(!copy.active&&!strcmp(volume.Kind(),"HFS"), "Unexpected classic close command");
                 volume.Close();
                 break;
             case SessionCommandCode::GetClassicProperties: {

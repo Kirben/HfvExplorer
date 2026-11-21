@@ -61,6 +61,8 @@ class Classic final : public Volume, public WorkerEndpoint {
     std::unique_ptr<ReadOnlySources::Registration> registration_;
     std::shared_ptr<HfsPlus::Source> media_;
     std::optional<ClassicHfsRecovery::ImageRange> ndifRecovery_;
+    std::unique_ptr<ClassicHfsRecovery::Transaction> copyTransaction_;
+    bool copyWasDirty_=false;
     int cdDrive_=-1;
     std::map<uint32_t,std::string> paths_;
     std::map<uint32_t,uint32_t> artworkIds_;
@@ -422,6 +424,35 @@ public:
                                      desired.datesValid?dates:nullptr)==0);
         });
     }
+    bool BeginCopyTransaction() override {
+        LegacyEngine::Scope engine(context_);
+        if(copyTransaction_)throw HfsPlus::Error("A classic HFS folder copy is already active");
+        if(!CanRecoverMutation())return false;
+        copyTransaction_=StartRecovery();
+        copyWasDirty_=markedDirty_;
+        return true;
+    }
+    void FinishCopyTransaction(bool commit) override {
+        LegacyEngine::Scope engine(context_);
+        if(!copyTransaction_)throw HfsPlus::Error("No classic HFS folder copy is active");
+        auto recovery=std::move(copyTransaction_);
+        if(!commit){
+            RecoverCopy(*recovery);
+            return;
+        }
+        try{
+            Check(hfs_mark_session_clean(volume_)==0);
+            markedDirty_=false;
+            recovery->Commit();
+        }catch(...){
+            if(recovery->Active())RecoverCopy(*recovery);
+            throw;
+        }
+    }
+    void WithCopyTransaction(const std::function<void(bool)>& work) override {
+        LegacyEngine::Scope engine(context_);
+        Volume::WithCopyTransaction(work);
+    }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace)override {
         return PutFile(parent,e,std::move(read),replace,nullptr);
     }
@@ -481,22 +512,36 @@ private:
         });
         return id;
     }
+    bool CanRecoverMutation() {
+        if(registration_&&!ndifRecovery_)return false;
+        Check(Writable());
+        return ClassicHfsRecovery::Transaction::Supported(volume_->fd,ndifRecovery_?&*ndifRecovery_:nullptr);
+    }
+    std::unique_ptr<ClassicHfsRecovery::Transaction> StartRecovery() {
+        Check(hfs_flush(volume_)==0);
+        auto recovery=std::make_unique<ClassicHfsRecovery::Transaction>(volume_->fd,ndifRecovery_?&*ndifRecovery_:nullptr);
+        if(!recovery->Active())throw HfsPlus::Error("Cannot start the classic HFS durable write transaction");
+        return recovery;
+    }
     void DurableMutation(const std::function<void(bool)>& work)
     {
-        if(registration_&&!ndifRecovery_){work(false);return;}
-        Check(Writable());
-        const auto* ndif=ndifRecovery_?&*ndifRecovery_:nullptr;
-        if(!ClassicHfsRecovery::Transaction::Supported(volume_->fd,ndif)){work(false);return;}
-        Check(hfs_flush(volume_)==0);
-        ClassicHfsRecovery::Transaction recovery(volume_->fd,ndif);
+        if(copyTransaction_){work(true);return;}
+        if(!CanRecoverMutation()){work(false);return;}
+        auto recovery=StartRecovery();
         const bool wasDirty=markedDirty_;
         try{
-            work(recovery.Active());
-            recovery.Commit();
+            work(true);
+            recovery->Commit();
         }catch(...){
-            if(recovery.Active())RecoverFailedMutation(recovery,wasDirty);
+            if(recovery->Active())RecoverFailedMutation(*recovery,wasDirty);
             throw;
         }
+    }
+    void RecoverCopy(ClassicHfsRecovery::Transaction& recovery) {
+        struct Report {
+            ~Report(){Storage::OutcomeEvidence::NoteRollback(static_cast<Storage::Rollback>(hfs_take_rollback()));}
+        } report;
+        RecoverFailedMutation(recovery,copyWasDirty_);
     }
     void RecoverFailedMutation(ClassicHfsRecovery::Transaction& recovery,bool wasDirty)
     {
@@ -555,6 +600,8 @@ public:
 #endif
             });
             if(job.cancelled())throw Storage::Cancelled();
+            Check(hfs_mark_session_clean(volume_)==0);
+            markedDirty_=false;
             handled=true;
         });
         if(handled)Storage::OutcomeEvidence::NoteRetainedChange();

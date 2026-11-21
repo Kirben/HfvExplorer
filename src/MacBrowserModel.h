@@ -120,6 +120,9 @@ public:
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
     virtual void ValidateName(const std::u16string& name) const { HfsPlus::Normalize(name,CaseSensitive()); }
     virtual void ValidateEntry(const Entry &e) const { ValidateName(e.name);if(!e.attributes.empty()&&!Supports().attributes)throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
+    virtual bool BeginCopyTransaction() { return false; }
+    virtual void FinishCopyTransaction(bool) {}
+    virtual void WithCopyTransaction(const std::function<void(bool)>& work);
     virtual bool RemoveTreeAtomically(uint32_t,Storage::Job&,bool) { return false; }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;
@@ -191,7 +194,7 @@ bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage:
 enum class ForkSource { Stream, MountedWorker };
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> &,
               Volume &target,uint32_t parent,Storage::Job &, const TransferAdapter & = {},
-              const std::vector<ForkSource>& routes = {});
+              const std::vector<ForkSource>& routes = {},bool moving=false);
 void RemoveTree(Volume &, uint32_t id, Storage::Job &,bool deletionProgress=false);
 void ApplyRemovalPlan(Volume&,uint32_t id,Storage::Job&,bool deletionProgress,
                       const std::function<void(uint32_t)>& removeEntry);

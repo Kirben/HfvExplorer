@@ -647,7 +647,15 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  }
 }
 }
-bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes){
+void Volume::WithCopyTransaction(const std::function<void(bool)>& work)
+{
+    if(!BeginCopyTransaction()){work(false);return;}
+    try{work(true);}
+    catch(...){FinishCopyTransaction(false);throw;}
+    FinishCopyTransaction(true);
+}
+
+bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes,bool moving){
     Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
     Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
@@ -658,7 +666,32 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     CopiedLinks copies;
     for(size_t i=0;i<plans.size();++i){
         const auto route=routes.empty()?ForkSource::Stream:routes[i];
-        if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
+        const auto transfer=[&]{
+            if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
+        };
+        if(!plans[i].entry.directory&&!moving){transfer();continue;}
+        const auto previous=progress;
+        Storage::Rollback rollback=Storage::Rollback::None;
+        bool retained=false,grouped=false;
+        std::exception_ptr failure;
+        {
+            Storage::OutcomeEvidence folder;
+            try{
+                dst.WithCopyTransaction([&](bool active){
+                    grouped=active;
+                    transfer();
+                    if(active&&job.cancelled())throw Storage::Cancelled();
+                });
+            }catch(...){failure=std::current_exception();}
+            rollback=folder.RollbackState();
+            retained=folder.RetainedChanges();
+        }
+        Storage::OutcomeEvidence::NoteRollback(rollback);
+        if(failure&&grouped&&rollback==Storage::Rollback::Restored){
+            progress=previous;
+            job.progress(progress);
+        }else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
+        if(failure)std::rethrow_exception(failure);
     }
     return complete;
 }
@@ -666,7 +699,7 @@ bool Copy(Volume &src,uint32_t id,Volume &dst,uint32_t parent,Storage::Job& job,
     Check(!move||src.Writable(),"The source is read-only");
     // The public single-item helper borrows its caller-owned adapter.
     std::shared_ptr<Volume> borrowed(&src,[](Volume*){});
-    bool complete=CopyMany({{borrowed,id}},dst,parent,job);
+    bool complete=CopyMany({{borrowed,id}},dst,parent,job,{},{},move);
     if(move&&complete)RemoveTree(src,id,job);return complete;
 }
 }

@@ -505,6 +505,147 @@ void MetadataRecovery(const CString& root,const Bytes& original,FILE* report)
     fprintf(report,"PASS: classic HFS metadata-only file and folder edits and merge timestamps recover before and after commit, preserving both forks and unrelated entries.\n");
 }
 
+Storage::Result TransferTree(const std::shared_ptr<MacBrowser::Volume>& source,
+                             const std::shared_ptr<MacBrowser::Volume>& target,bool move,Storage::Job& job)
+{
+    auto origin=FileOperations::Location::Mounted(source,Find(*source,2,u"Tree"));
+    origin.cut=move;
+    FileOperations::Completion completion;
+    return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        {origin},FileOperations::Location::Mounted(target,2)},job,completion);
+}
+
+void VerifyTransferredTree(MacBrowser::Volume& volume,bool copied)
+{
+    const auto tree=Find(volume,2,u"Tree");
+    VerifyFile(volume,tree,u"A File",copied);
+    VerifyFile(volume,tree,u"Merge extra",false);
+    MacBrowser::Entry folder{};
+    const bool hasNested=volume.FindChild(tree,u"Z Folder",folder);
+    Check(hasNested==copied,"destination contains an incomplete transferred subtree");
+    if(copied)VerifyFile(volume,folder.id,u"Nested file",true);
+    VerifyFile(volume,2,u"Unrelated",true);
+}
+
+void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
+{
+    const CString sourceSeed=root+"\\transfer-source.dsk",targetSeed=root+"\\transfer-target.dsk";
+    Save(sourceSeed,blank);
+    Save(targetSeed,blank);
+    const auto sourceSeedPath=VolumeCoord::Wide(sourceSeed.GetString());
+    const auto targetSeedPath=VolumeCoord::Wide(targetSeed.GetString());
+    {
+        auto source=MacBrowser::OpenImage(sourceSeedPath);
+        auto target=MacBrowser::OpenImage(targetSeedPath);
+        const auto tree=source->MakeDirectory(2,u"Tree");
+        Put(*source,true,false,tree,u"A File");
+        Put(*source,true,false,source->MakeDirectory(tree,u"Z Folder"),u"Nested file");
+        const auto targetTree=target->MakeDirectory(2,u"Tree");
+        Put(*target,false,false,targetTree,u"A File");
+        Put(*target,false,false,targetTree,u"Merge extra");
+        Put(*target,true,false,2,u"Unrelated");
+        source->Close();
+        target->Close();
+    }
+    const auto sourceBefore=Load(sourceSeed);
+    const auto targetBefore=Load(targetSeed);
+    for(unsigned phase:{7u,2u,3u,6u}){
+        CString sourceFile;
+        sourceFile.Format("%s\\transfer-%u.dsk",root.GetString(),phase);
+        const CString targetFile=sourceFile+".target.dsk";
+        Save(sourceFile,sourceBefore);
+        Save(targetFile,targetBefore);
+        const auto sourcePath=VolumeCoord::Wide(sourceFile.GetString());
+        const auto targetPath=VolumeCoord::Wide(targetFile.GetString());
+        CrashChild(sourceFile,phase,phase==7?L"folder-copy":L"folder-move");
+        Check(ClassicHfsRecovery::Pending(phase==6?sourcePath:targetPath),
+              "interrupted transfer did not keep its undo journal");
+        const bool copied=phase==3||phase==6;
+        {
+            auto target=MacBrowser::OpenBrowserImage(targetPath);
+            auto source=MacBrowser::OpenBrowserImage(sourcePath);
+            Check(target&&target->Writable()&&source&&source->Writable(),"reopen both transfer images writable");
+            VerifyTransferredTree(*target,copied);
+            const auto tree=Find(*source,2,u"Tree");
+            VerifyFile(*source,tree,u"A File",true);
+            VerifyFile(*source,Find(*source,tree,u"Z Folder"),u"Nested file",true);
+        }
+        Check(Load(sourceFile)==sourceBefore,"interrupted move lost or altered its source");
+        if(!copied)Check(Load(targetFile)==targetBefore,"undo changed destination bytes or folder metadata");
+    }
+
+    for(bool crash:{false,true}){
+        CString sourceFile;
+        sourceFile.Format("%s\\transfer-worker-%u.dsk",root.GetString(),unsigned(crash));
+        const CString targetFile=sourceFile+".target.dsk";
+        Save(sourceFile,sourceBefore);
+        Save(targetFile,targetBefore);
+        const auto targetPath=VolumeCoord::Wide(targetFile.GetString());
+        {
+            auto source=MacBrowser::OpenBrowserImage(VolumeCoord::Wide(sourceFile.GetString()));
+            auto target=MacBrowser::OpenBrowserImage(targetPath);
+            const auto pid=VolumeSession::VolumeSessionPidForTest(target);
+            bool interrupted=false;
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){
+                if(progress.files!=1||interrupted)return;
+                interrupted=true;
+                if(crash)VolumeSession::CrashVolumeSessionDuringPutForTest(target);
+                else job.cancel();
+            },[](const std::string&){return Storage::ConflictChoice::Replace;});
+            const auto result=TransferTree(source,target,true,job);
+            Check(interrupted&&result.code,"persistent folder move did not fail or cancel");
+            if(crash){
+                Check(ClassicHfsRecovery::Pending(targetPath),"worker interruption discarded folder undo");
+                target->Reload();
+                Check(VolumeSession::VolumeSessionPidForTest(target)!=pid,"persistent worker did not restart");
+            }else{
+                Check(result.error==ERROR_CANCELLED&&result.rollback==Storage::Rollback::Restored&&
+                      !result.partial&&result.completed==0,"cancelled folder move reported retained writes");
+                Check(VolumeSession::VolumeSessionPidForTest(target)==pid,"normal cancellation restarted the worker");
+            }
+            Check(target->Writable(),"recovered folder destination is read-only");
+            VerifyTransferredTree(*target,false);
+        }
+        Check(!ClassicHfsRecovery::Pending(targetPath)&&Load(targetFile)==targetBefore&&Load(sourceFile)==sourceBefore,
+              "persistent folder recovery failed to restore both image files");
+    }
+    {
+        const CString sourceFile=root+"\\completed-source.dsk",targetFile=root+"\\completed-target.dsk";
+        Save(sourceFile,sourceBefore);
+        Save(targetFile,targetBefore);
+        auto source=MacBrowser::OpenBrowserImage(VolumeCoord::Wide(sourceFile.GetString()));
+        auto target=MacBrowser::OpenBrowserImage(VolumeCoord::Wide(targetFile.GetString()));
+        Storage::Job job;
+        job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
+        const auto result=TransferTree(source,target,true,job);
+        MacBrowser::Entry old{};
+        Check(!result.code&&result.moved&&!source->FindChild(2,u"Tree",old),"completed move retained its source tree");
+        VerifyTransferredTree(*target,true);
+    }
+    if(const wchar_t* fixtures=_wgetenv(L"HFV_NDIF_INTERCHANGE_FIXTURES")){
+        const CString sourceFile=root+"\\transfer-new-ndif.dsk",targetFile=sourceFile+".target.dsk";
+        const auto sourcePath=VolumeCoord::Wide(sourceFile.GetString());
+        const auto targetPath=VolumeCoord::Wide(targetFile.GetString());
+        const auto fixture=std::wstring(fixtures)+L"\\partitioned-classic.bin";
+        Save(sourceFile,sourceBefore);
+        Check(CopyFileW(fixture.c_str(),targetPath.c_str(),TRUE)!=FALSE,"copy shared folder-transfer NDIF target");
+        const auto before=Load(targetFile);
+        CrashChild(sourceFile,7,L"folder-copy");
+        Check(ClassicHfsRecovery::Pending(targetPath,true),"interrupted NDIF folder creation has no undo journal");
+        {
+            auto target=MacBrowser::OpenBrowserImage(targetPath);
+            MacBrowser::Entry tree{};
+            Check(target&&target->Writable()&&!target->FindChild(2,u"Tree",tree),
+                  "interrupted NDIF copy retained a newly created folder");
+        }
+        Check(Load(targetFile)==before&&Load(sourceFile)==sourceBefore,
+              "NDIF folder undo changed the partition wrapper or source");
+        fprintf(report,"PASS: an interrupted copy of a new folder into shared partitioned NDIF restores the exact container bytes.\n");
+    }
+    fprintf(report,"PASS: whole-folder merge recovery restores both forks and exact destination metadata; worker crash and cancellation roll back the tree; a move preserves its source until destination commit and durably deletes it afterward.\n");
+}
+
 void VerifyOutside(const Bytes& before,const Bytes& after,uint64_t start,uint64_t length)
 {
     Check(before.size()==after.size()&&start<=before.size()&&length<=before.size()-start&&
@@ -710,6 +851,16 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        if(!strcmp(action,"folder-copy")||!strcmp(action,"folder-move")){
+            auto source=MacBrowser::OpenImage(VolumeCoord::Wide(image));
+            auto target=MacBrowser::OpenImage(VolumeCoord::Wide(std::string(image)+".target.dsk"));
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){
+                if(phase==7&&progress.files==1)ExitProcess(97);
+            },[](const std::string&){return Storage::ConflictChoice::Replace;});
+            const auto result=TransferTree(source,target,!strcmp(action,"folder-move"),job);
+            return result.code?4:3;
+        }
         auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image));
         Check(bool(volume),"open classic HFS image in subprocess");
         const auto document=Find(*volume,2,u"Document");
@@ -861,6 +1012,11 @@ int RunClassicRecoveryTest(const char* directory)
         fprintf(report,"PASS: interrupted recovery is repeatable through a hard-link alias; cancellation restores the original bytes.\n");
         DeleteRecovery(root,original,report);
         RenameRecovery(root,original,report);
+        {
+            const CString empty=root+"\\empty-transfer.dsk";
+            FormatClassicImage(VolumeCoord::Wide(empty.GetString()),"Transfer",4*1024*1024);
+            FolderTransferRecovery(root,Load(empty),report);
+        }
         CreationRecovery(root,original,report);
         MetadataRecovery(root,original,report);
         NdifRecovery(root,report);
