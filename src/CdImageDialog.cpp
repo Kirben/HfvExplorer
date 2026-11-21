@@ -34,21 +34,31 @@ public:
  void OnOK()override{if(Capture())CDialog::OnOK();}
 };
 class CdImageDialog : public CDialog {
+ bool detectDrives_;
+ void UpdateAudioNote(){
+  const auto mode=SendDlgItemMessage(IDC_CDI_FORMAT,CB_GETCURSEL);
+  GetDlgItem(IDC_CDI_AUDIO_NOTE)->ShowWindow(mode==1+int(CdMedia::RawOutput::WaveTracks)?SW_SHOW:SW_HIDE);
+ }
 public:
  int drive=-1,format=0;std::wstring output;
- explicit CdImageDialog(CWnd* owner):CDialog(IDD_CD_IMAGE_SOURCE,owner){}
+ explicit CdImageDialog(CWnd* owner,bool detectDrives=true):CDialog(IDD_CD_IMAGE_SOURCE,owner),detectDrives_(detectDrives){}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();auto combo=(CComboBox*)GetDlgItem(IDC_CDI_DRIVE);
-  for(int n=0;n<26;++n){char root[]="A:\\";root[0]+=char(n);if(GetDriveTypeA(root)==DRIVE_CDROM){int item=combo->AddString(root);combo->SetItemData(item,n);}}
+  for(int n=0;detectDrives_&&n<26;++n){char root[]="A:\\";root[0]+=char(n);if(GetDriveTypeA(root)==DRIVE_CDROM){int item=combo->AddString(root);combo->SetItemData(item,n);}}
   if(combo->GetCount())combo->SetCurSel(0);
   BrowserPresentation::UnicodeEdit(m_hWnd,IDC_CDI_PATH);
   auto formats=static_cast<CComboBox*>(GetDlgItem(IDC_CDI_FORMAT));
   for(const auto* label:{"Data-track image (.iso)","Session image (.bin + .cue)","Raw track, 2352 bytes/sector (.bin)",
                         "Mode 2 Form 2, 2324 bytes/sector (.bin)","Audio tracks (.wav)"})formats->AddString(label);
   formats->SetCurSel(0);
+  UpdateAudioNote();
   return TRUE;
  }
  BOOL OnCommand(WPARAM w,LPARAM l) override {
+  if(LOWORD(w)==IDC_CDI_FORMAT&&HIWORD(w)==CBN_SELCHANGE){
+   UpdateAudioNote();
+   return TRUE;
+  }
   if(LOWORD(w)==IDC_CDI_BROWSE){
    const auto mode=SendDlgItemMessage(IDC_CDI_FORMAT,CB_GETCURSEL);
    const wchar_t* exts[]={L"iso",L"cue",L"bin",L"bin",L"wav"};
@@ -76,6 +86,22 @@ public:
  }
 };
 }
+#ifdef HFV_TESTING
+bool ProbeCdImageLayout()
+{
+ CdImageDialog dialog(CWnd::GetDesktopWindow(),false);
+ if(!dialog.Create(IDD_CD_IMAGE_SOURCE,CWnd::GetDesktopWindow()))return false;
+ bool ok=dialog.SendDlgItemMessage(IDC_CDI_FORMAT,CB_GETCOUNT)==5;
+ for(int mode=0;mode<5;++mode){
+  dialog.SendDlgItemMessage(IDC_CDI_FORMAT,CB_SETCURSEL,mode);
+  dialog.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_CDI_FORMAT,CBN_SELCHANGE));
+  const bool visible=(dialog.GetDlgItem(IDC_CDI_AUDIO_NOTE)->GetStyle()&WS_VISIBLE)!=0;
+  ok=ok&&visible==(mode==1+int(CdMedia::RawOutput::WaveTracks));
+ }
+ dialog.DestroyWindow();
+ return ok;
+}
+#endif
 void ShowCdImageDialog(CWnd* owner) {
  CdImageDialog options(owner);if(options.DoModal()!=IDOK)return;
  auto tracks=std::make_shared<std::vector<CdMedia::Track>>();

@@ -6,6 +6,7 @@
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
+#include "MetadataDialogs.h"
 #include "DynCopyModeSelect.h"
 #include "MacBrowserModel.h"
 #include "ApfsFormat.h"
@@ -431,6 +432,8 @@ int RunHfsPlusUiTest(const char *directory) {
                     "Unlock lost its target, masked field, retry message or APFS hint");
             unlock.DestroyWindow();
         }
+        require(MetadataDialogs::ProbeEditorLayouts(),"Extended Attributes and APFS metadata layout");
+        fprintf(report,"PASS: attribute heading and actions, full-width Finder information label and editor.\n");
         VerifyApfsDialogs(owner);
         fprintf(report,"PASS: APFS rename and snapshot labels, Unicode, selection and button states.\n");
         FormatDialog format(&owner);

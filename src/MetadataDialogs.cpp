@@ -42,14 +42,14 @@ struct AttributeState {FileOperations::Location source;HfsPlus::Attributes origi
 std::wstring Text(HWND window,int id){auto control=GetDlgItem(window,id);int n=GetWindowTextLengthW(control);std::wstring text(n+1,0);GetWindowTextW(control,&text[0],n+1);text.resize(n);return text;}
 struct AttributesDialog:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
- std::shared_ptr<AttributeState> state=std::make_shared<AttributeState>();bool hidden,hexEditable=true;uint64_t pageOffset=0,pageLength=0;std::u16string pageName;
- AttributesDialog(FileOperations::Location source,const FileOperations::Completion& value,bool h):CDialog(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()),hidden(h){state->source=std::move(source);state->desired=state->original=value.attributes;state->writable=value.capabilities.CanEditAttributes()&&!value.entry.protectedFile&&value.entry.id!=2;}
+ std::shared_ptr<AttributeState> state=std::make_shared<AttributeState>();std::u16string entryName;bool hidden,hexEditable=true;uint64_t pageOffset=0,pageLength=0;std::u16string pageName;
+ AttributesDialog(FileOperations::Location source,const FileOperations::Completion& value,bool h):CDialog(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()),entryName(value.entry.name),hidden(h){state->source=std::move(source);state->desired=state->original=value.attributes;state->writable=value.capabilities.CanEditAttributes()&&!value.entry.protectedFile&&value.entry.id!=2;}
  std::u16string Name(){return MacBrowser::U16(Text(m_hWnd,IDC_ATTR_NAME));}
  void Refresh(){SendDlgItemMessage(IDC_ATTR_LIST,LB_RESETCONTENT);for(const auto& a:state->desired){auto text=MacBrowser::Wide(a.first)+L"  ("+std::to_wstring(a.second.size())+L" bytes)";SendDlgItemMessageW(m_hWnd,IDC_ATTR_LIST,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(text.c_str()));}}
- void Clear(){SetDlgItemText(IDC_ATTR_OFFSET,"0");GetDlgItem(IDC_ATTR_GO)->EnableWindow(FALSE);pageOffset=pageLength=0;pageName.clear();GetDlgItem(IDC_ATTR_PREVIOUS)->EnableWindow(FALSE);GetDlgItem(IDC_ATTR_NEXT)->EnableWindow(FALSE);SetDlgItemTextW(m_hWnd,IDC_ATTR_NAME,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_VALUE,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,L"Set value stages a change. Apply saves all staged changes.");hexEditable=true;SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETREADONLY,!state->writable);}
+ void Clear(){SetDlgItemText(IDC_ATTR_OFFSET,"0");GetDlgItem(IDC_ATTR_GO)->EnableWindow(FALSE);pageOffset=pageLength=0;pageName.clear();GetDlgItem(IDC_ATTR_PREVIOUS)->EnableWindow(FALSE);GetDlgItem(IDC_ATTR_NEXT)->EnableWindow(FALSE);SetDlgItemTextW(m_hWnd,IDC_ATTR_NAME,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_VALUE,L"");SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,state->writable?L"Set Value stages the edit. Apply saves staged changes.":L"Select an attribute to view or export its value.");hexEditable=true;SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETREADONLY,!state->writable);}
  void Page(){GetDlgItem(IDC_ATTR_GO)->EnableWindow(TRUE);SetDlgItemTextW(m_hWnd,IDC_ATTR_OFFSET,std::to_wstring(pageOffset).c_str());auto it=state->desired.find(pageName);if(it==state->desired.end())return;const auto& value=it->second;pageLength=(std::min)(uint64_t(65536),value.size()-pageOffset);HfsPlus::Bytes page(size_t(pageLength),0);value.Read(pageOffset,page.data(),page.size());std::wstring hex;const wchar_t* digits=L"0123456789ABCDEF";for(size_t i=0;i<page.size();++i){auto b=page[i];hex+=digits[b>>4];hex+=digits[b&15];hex+=(i%16==15?L"\r\n":L" ");}
   SetDlgItemTextW(m_hWnd,IDC_ATTR_VALUE,hex.c_str());SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETREADONLY,!state->writable);GetDlgItem(IDC_ATTR_PREVIOUS)->EnableWindow(pageOffset!=0);GetDlgItem(IDC_ATTR_NEXT)->EnableWindow(pageOffset+pageLength<value.size());
-  auto detail=L"Bytes "+std::to_wstring(pageOffset)+L" - "+std::to_wstring(pageOffset+pageLength)+L" of "+std::to_wstring(value.size())+L". Set value stages this page; Apply saves staged changes.";SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,detail.c_str());
+  auto detail=L"Bytes "+std::to_wstring(pageOffset)+L" - "+std::to_wstring(pageOffset+pageLength)+L" of "+std::to_wstring(value.size())+(state->writable?L". Set Value stages this page. Apply saves staged changes.":L".");SetDlgItemTextW(m_hWnd,IDC_ATTR_DETAIL,detail.c_str());
  }
  void Selected(){int selected=int(SendDlgItemMessage(IDC_ATTR_LIST,LB_GETCURSEL));if(selected<0||size_t(selected)>=state->desired.size())return;auto it=state->desired.begin();std::advance(it,selected);pageName=it->first;pageOffset=0;SetDlgItemTextW(m_hWnd,IDC_ATTR_NAME,MacBrowser::Wide(pageName).c_str());Page();}
  void StageValue(){auto text=Text(m_hWnd,IDC_ATTR_VALUE);HfsPlus::Bytes bytes;int half=-1;for(auto c:text){if(iswspace(c))continue;int n=c>=L'0'&&c<=L'9'?c-L'0':c>=L'a'&&c<=L'f'?c-L'a'+10:c>=L'A'&&c<=L'F'?c-L'A'+10:-1;if(n<0)throw HfsPlus::Error("Enter hexadecimal byte pairs (00 through FF)");if(half<0)half=n;else{bytes.push_back(uint8_t(half*16+n));half=-1;}}if(half>=0)throw HfsPlus::Error("A hexadecimal byte needs two digits");auto next=state->desired;auto name=Name();if(!pageName.empty()&&state->desired.count(pageName)&&state->desired.at(pageName).size()>65536&&name!=pageName)throw HfsPlus::Error("Keep the selected large attribute name unchanged; use New or Import value to create another attribute");if(name==pageName&&next.count(name)&&next.at(name).size()>65536){if(bytes.size()!=pageLength)throw HfsPlus::Error("Keep this page length unchanged; Import value can replace the entire attribute");next[name]=next.at(name).Patch(pageOffset,bytes);}else next[name]=std::move(bytes);HfsPlus::ValidateAttributes(next);state->desired=std::move(next);Refresh();}
@@ -62,7 +62,7 @@ struct AttributesDialog:CDialog,DialogActivity {
   SetDlgItemText(IDC_ATTR_DETAIL,"Reading attribute value; wait for completion before applying.");
   try{bool started=BackgroundCopies::Start({request},hidden?this:AfxGetMainWnd(),true,[model](bool success){model->importing=false;if(!model->window)return;auto dialog=dynamic_cast<AttributesDialog*>(CWnd::FromHandlePermanent(model->window));if(dialog&&dialog->state==model){DialogDispatch active(*dialog);dialog->FinishImport(success);}},[model](const FileOperations::Completion& value){if(!model->window)return;auto dialog=dynamic_cast<AttributesDialog*>(CWnd::FromHandlePermanent(model->window));if(!dialog||dialog->state!=model)return;DialogDispatch active(*dialog);try{auto next=model->desired;for(const auto& a:value.attributes)next[a.first]=a.second;HfsPlus::ValidateAttributes(next);model->desired=std::move(next);dialog->Refresh();dialog->Clear();}catch(const std::exception& error){Error(model->window,error,dialog->hidden);}});if(!started)FinishImport(false);return started;}catch(...){FinishImport(false);throw;}
  }
- BOOL OnInitDialog()override{CDialog::OnInitDialog();BrowserPresentation::UnicodeEdit(m_hWnd,IDC_ATTR_NAME);BrowserPresentation::UnicodeControl(m_hWnd,IDC_ATTR_LIST,L"LISTBOX");BrowserPresentation::UnicodeControl(m_hWnd,IDC_ATTR_DETAIL,L"STATIC");SendDlgItemMessage(IDC_ATTR_NAME,EM_SETLIMITTEXT,127);state->window=m_hWnd;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,state->writable?L"Named attributes and com.apple.system.Security (Mac ACL)":L"Read-only attributes and Mac ACL");SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETLIMITTEXT,262144);for(int id:{IDC_ATTR_SET,IDC_ATTR_REMOVE,IDC_ATTR_IMPORT,IDC_ATTR_NEW,IDOK})GetDlgItem(id)->EnableWindow(state->writable);Refresh();Clear();return TRUE;}
+ BOOL OnInitDialog()override{CDialog::OnInitDialog();BrowserPresentation::UnicodeEdit(m_hWnd,IDC_ATTR_NAME);BrowserPresentation::UnicodeControl(m_hWnd,IDC_ATTR_LIST,L"LISTBOX");BrowserPresentation::UnicodeControl(m_hWnd,IDC_ATTR_DETAIL,L"STATIC");SendDlgItemMessage(IDC_ATTR_NAME,EM_SETLIMITTEXT,127);state->window=m_hWnd;BrowserPresentation::UnicodeControl(m_hWnd,IDC_CP_PHASE,L"STATIC");auto heading=L"Attributes on "+MacBrowser::Wide(entryName);if(!state->writable)heading+=L" (read-only)";SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,heading.c_str());SendDlgItemMessage(IDC_ATTR_VALUE,EM_SETLIMITTEXT,262144);for(int id:{IDC_ATTR_SET,IDC_ATTR_REMOVE,IDC_ATTR_IMPORT,IDC_ATTR_NEW,IDOK})GetDlgItem(id)->EnableWindow(state->writable);Refresh();Clear();return TRUE;}
  void PostNcDestroy()override{state->window=nullptr;state->writable=false;state->source={};state->original.clear();state->desired.clear();CDialog::PostNcDestroy();}
  BOOL OnCommand(WPARAM wp,LPARAM lp)override{
   int id=LOWORD(wp);if(state->importing&&id!=IDCANCEL)return TRUE;try{
@@ -236,6 +236,42 @@ struct ApfsEditor:CDialog,DialogActivity {
  void PostNcDestroy()override{source={};original={};CDialog::PostNcDestroy();}
  void OnCancel()override{DestroyWindow();}
 };
+
+#ifdef HFV_TESTING
+bool CheckEditorLayouts()
+{
+ FileOperations::Completion value;
+ value.entry.name=u"Read Me \u03b1";
+ AttributesDialog attributes({},value,true);
+ if(!attributes.Create(IDD_EXTENDED_ATTRIBUTES,CWnd::GetDesktopWindow()))return false;
+ bool ok=Text(attributes.m_hWnd,IDC_CP_PHASE)==L"Attributes on Read Me \u03b1 (read-only)"&&
+     Text(attributes.m_hWnd,IDC_ATTR_SET)==L"Set Value"&&
+     Text(attributes.m_hWnd,IDC_ATTR_DETAIL)==L"Select an attribute to view or export its value."&&
+     !attributes.GetDlgItem(IDOK)->IsWindowEnabled();
+ attributes.DestroyWindow();
+
+ value.entry.finder[0]=0x54;
+ ApfsEditor editor({},value.entry,true,true);
+ if(!editor.Create(IDD_APFS_PROPERTIES,CWnd::GetDesktopWindow()))return false;
+ auto* label=editor.GetDlgItem(IDC_APFS_FINDER_LABEL);
+ RECT labelRect{},fieldRect{},textRect{};
+ label->GetWindowRect(&labelRect);
+ editor.GetDlgItem(IDC_MFS_FINDER)->GetWindowRect(&fieldRect);
+ const auto text=Text(editor.m_hWnd,IDC_APFS_FINDER_LABEL);
+ auto dc=::GetDC(label->m_hWnd);
+ const auto font=reinterpret_cast<HFONT>(label->SendMessage(WM_GETFONT));
+ const auto old=font?::SelectObject(dc,font):nullptr;
+ DrawTextW(dc,text.c_str(),int(text.size()),&textRect,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
+ if(old)::SelectObject(dc,old);
+ ::ReleaseDC(label->m_hWnd,dc);
+ ok=ok&&text==L"Finder information (32 hexadecimal bytes)"&&
+    textRect.right<=labelRect.right-labelRect.left&&textRect.bottom<=labelRect.bottom-labelRect.top&&
+    labelRect.bottom<fieldRect.top&&labelRect.left==fieldRect.left&&labelRect.right==fieldRect.right&&
+    Text(editor.m_hWnd,IDC_MFS_FINDER).find(L"54 ")==0;
+ editor.DestroyWindow();
+ return ok;
+}
+#endif
 
 void PresentApfsProperties(FileOperations::Location source,const MacBrowser::Entry& entry,bool editFinder,bool hidden,HWND anchor)
 {
@@ -472,6 +508,7 @@ void Shutdown(){for(auto& window:windows)if(IsWindow(window->GetSafeHwnd()))wind
 bool ImportValue(HWND window,FileOperations::Location file,const std::u16string& name){auto dialog=dynamic_cast<AttributesDialog*>(CWnd::FromHandlePermanent(window));if(!dialog)return false;DialogDispatch active(*dialog);return dialog->BeginImport(std::move(file),name);}
 std::string LastError(){return lastError;}
 unsigned CloseDuringDispatch(HWND window){nestedRetained=0;SendMessage(window,WM_APP+173,0,0);auto count=nestedRetained;CollectClosed();return count;}
+bool ProbeEditorLayouts(){return CheckEditorLayouts();}
 HWND Window(){for(auto at=windows.rbegin();at!=windows.rend();++at)if(IsWindow((*at)->GetSafeHwnd()))return (*at)->GetSafeHwnd();return nullptr;}
 #endif
 }

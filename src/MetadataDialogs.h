@@ -5,6 +5,7 @@ namespace MetadataDialogs {
 bool Show(FileOperations::Location,CWnd*);
 void Shutdown();
 #ifdef HFV_TESTING
+bool ProbeEditorLayouts();
 HWND Window();
 std::string LastError();
 bool ImportValue(HWND,FileOperations::Location,const std::u16string&);
