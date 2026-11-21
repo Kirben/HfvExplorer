@@ -749,5 +749,9 @@ Entry DescribeWindowsFile(const std::wstring& path){
     auto parent=path.substr(0,path.find_last_of(L"\\/"));if(parent.size()==2&&parent.back()==L':')parent+=L'\\';
     Windows volume(parent);return volume.DescribeFile(path);
 }
-std::shared_ptr<Volume> OpenWindows(const std::wstring &path) { return TrackWorkerVolume(std::make_shared<Windows>(path)); }
+std::shared_ptr<Volume> OpenWindows(const std::wstring &path) {
+    auto volume=std::make_shared<Windows>(path);
+    WindowsMoveUndo::RecoverExports(volume->HostPath(2));
+    return TrackWorkerVolume(std::move(volume));
+}
 }

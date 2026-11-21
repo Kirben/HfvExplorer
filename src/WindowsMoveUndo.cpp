@@ -42,11 +42,15 @@ std::wstring Parent(const std::wstring& path)
     Check(slash!=path.npos,"Invalid Windows move path");
     return Strip(path.substr(0,(slash==6)?7:slash));
 }
-std::wstring Stage(const std::wstring& root,const std::string& id)
+constexpr wchar_t ExportPrefix[]=L".hfv-export-";
+std::wstring Stage(const std::wstring& root,const std::string& id,bool exportOnly)
 {
-    return Child(root,L".hfv-move-"+std::wstring(id.begin(),id.end()));
+    return Child(root,(exportOnly?ExportPrefix:L".hfv-move-")+std::wstring(id.begin(),id.end()));
 }
-std::wstring Journal(const std::string& id,bool create=false){return ClassicHfsRecovery::MoveDecisionPath(id,create)+L".windows";}
+std::wstring Journal(const std::string& id,bool create,bool exportOnly)
+{
+    return ClassicHfsRecovery::MoveDecisionPath(id,create)+(exportOnly?L".export":L".windows");
+}
 Handle Open(const std::wstring& path,DWORD rights,DWORD share=Share)
 {
     return Handle(CreateFileW(path.c_str(),rights,share,nullptr,OPEN_EXISTING,
@@ -144,7 +148,7 @@ struct Loaded {
     bool done=false;
     uint64_t end=0;
 };
-Loaded Load(HANDLE handle,const std::string& id)
+Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
 {
     LARGE_INTEGER length{};
     Check(GetFileSizeEx(handle,&length)!=FALSE&&length.QuadPart>=0,"Cannot size Windows move recovery");
@@ -171,7 +175,7 @@ Loaded Load(HANDLE handle,const std::string& id)
         }else{
             Record record{};
             record.op=Op(data.get());
-            const auto stage=Stage(log.root,id);
+            const auto stage=Stage(log.root,id,exportOnly);
             if(record.op==Op::Stage){
                 Check(!log.stageIdentity.file&&log.records.empty(),"Unexpected Windows move staging record");
                 log.stageIdentity=Identity::Decode(data);
@@ -234,6 +238,7 @@ void UndoRename(const std::wstring& stage,const Record& record)
     }
 }
 thread_local Session* current=nullptr;
+void RecoverJournal(const std::string& id,bool committed,const std::wstring* exportRoot,bool skipBusy);
 }
 
 bool Supported(const std::wstring& folder)
@@ -253,13 +258,14 @@ bool Supported(const std::wstring& folder)
 struct Session::State {
     std::wstring root,stage;
     std::string decision;
+    bool exportOnly;
     Handle journal;
     Handle rootLease;
     uint64_t next=0;
     std::set<std::wstring> dates;
-    State(const std::wstring& folder,const std::string& id)
-     : root(Strip(folder)),stage(Stage(root,id)),decision(id),
-       journal(CreateFileW(Journal(id,true).c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr)),
+    State(const std::wstring& folder,const std::string& id,bool standalone)
+     : root(Strip(folder)),stage(Stage(root,id,standalone)),decision(id),exportOnly(standalone),
+       journal(CreateFileW(Journal(id,true,standalone).c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,0,nullptr)),
        rootLease(Open(root,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE)){
         Check(journal&&rootLease,"Cannot start durable Windows folder move");
         auto info=Info(rootLease.value);
@@ -274,10 +280,10 @@ struct Session::State {
         Frame(journal.value,recorded);
     }
 };
-Session::Session(const std::wstring& root,const std::string& decision)
+Session::Session(const std::wstring& root,const std::string& decision,bool exportOnly)
 {
     Check(!current,"Windows move is already active");
-    state_=std::make_unique<State>(root,decision);
+    state_=std::make_unique<State>(root,decision,exportOnly);
     current=this;
 }
 Session::~Session(){if(current==this)current=nullptr;}
@@ -318,30 +324,43 @@ void Session::PreserveDirectoryDates(const std::wstring& path)
 void Session::Finish()
 {
     const auto id=state_->decision;
+    const auto root=state_->root;
+    const bool exportOnly=state_->exportOnly;
     current=nullptr;
     state_.reset();
-    Recover(id,ClassicHfsRecovery::MoveIsCommitted(id));
+    if(exportOnly)RecoverJournal(id,false,&root,false);
+    else Recover(id,ClassicHfsRecovery::MoveIsCommitted(id));
 }
 
-void Recover(const std::string& id,bool committed)
+namespace {
+void RecoverJournal(const std::string& id,bool committed,const std::wstring* exportRoot,bool skipBusy)
 {
-    const auto path=Journal(id);
+    const bool exportOnly=exportRoot!=nullptr;
+    const auto path=Journal(id,false,exportOnly);
     {
         Handle journal(CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,OPEN_EXISTING,
                                    FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
         if(!journal){
             const auto error=GetLastError();
             if(Missing(error))return;
+            if(skipBusy&&error==ERROR_SHARING_VIOLATION)return;
             Check(error==ERROR_SHARING_VIOLATION,"Cannot reopen the Windows move recovery journal");
             throw HfsPlus::Error("The Windows move is still active; try reopening the image after it finishes");
         }
         Info(journal.value);
-        const auto log=Load(journal.value,id);
+        const auto log=Load(journal.value,id,exportOnly);
+        if(exportOnly){
+            Check(!log.root.empty()&&_wcsicmp(log.root.c_str(),exportRoot->c_str())==0,
+                  "The Windows export journal belongs to another folder");
+            // Read the decision only after taking the journal lock. A worker
+            // may still be publishing the decision while another window browses.
+            committed=ClassicHfsRecovery::MoveIsCommitted(id);
+        }
         if(!log.root.empty()){
             // A live path alone is insufficient after a failed or interrupted move.
             auto root=Open(log.root,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE);
             Check(root&&IdentityOf(Info(root.value))==log.rootIdentity,"The original Windows move folder is unavailable");
-            const auto stage=Stage(log.root,id);
+            const auto stage=Stage(log.root,id,exportOnly);
             const auto stageIdentity=Identify(stage);
             if(log.stageIdentity.file){
                 Check((!stageIdentity.file&&log.done)||stageIdentity==log.stageIdentity,
@@ -357,8 +376,6 @@ void Recover(const std::string& id,bool committed)
                           "Cannot finish the Windows move recovery record");
                     Data done;done.put(uint64_t(Op::Done));Frame(journal.value,done);
                 }
-                if(stageIdentity.file)
-                    Check(DeleteHostMoveStaging(stage)!=0,"Cannot clear the Windows move staging folder");
                 if(!committed){
                     for(const auto& record:log.records){
                         if(record.op!=Op::Dates)continue;
@@ -368,11 +385,60 @@ void Recover(const std::string& id,bool committed)
                         Check(SetFileTime(h.value,&creation,nullptr,&modified)!=FALSE,"Cannot restore Windows folder timestamps");
                     }
                 }
+                if(stageIdentity.file)
+                    Check(DeleteHostMoveStaging(stage)!=0,"Cannot clear the Windows move staging folder");
             }
         }
         FILE_DISPOSITION_INFO remove{TRUE};
         Check(SetFileInformationByHandle(journal.value,FileDispositionInfo,&remove,sizeof(remove))!=FALSE,
               "Cannot clear the Windows move journal");
+    }
+    if(exportOnly)ClassicHfsRecovery::ForgetMoveDecision(id);
+}
+}
+
+void Recover(const std::string& id,bool committed)
+{
+    RecoverJournal(id,committed,nullptr,false);
+}
+
+void RecoverExports(const std::wstring& folder)
+{
+    const auto root=Strip(folder);
+    WIN32_FIND_DATAW data{};
+    const auto search=FindFirstFileW(Child(root,std::wstring(ExportPrefix)+L"*").c_str(),&data);
+    if(search==INVALID_HANDLE_VALUE)return;
+    struct Search {HANDLE handle;~Search(){FindClose(handle);}} guard{search};
+    do{
+        std::wstring name=data.cFileName;
+        if((data.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))!=FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        name.erase(0,ARRAYSIZE(ExportPrefix)-1);
+        if(name.size()!=ClassicHfsRecovery::MoveIdSize||name.find_first_not_of(L"0123456789abcdef")!=name.npos)continue;
+        std::string id;
+        for(const auto digit:name)id.push_back(char(digit));
+        RecoverJournal(id,false,&root,true);
+    }while(FindNextFileW(search,&data));
+    Check(GetLastError()==ERROR_NO_MORE_FILES,"Cannot enumerate Windows export recovery");
+}
+
+void RunExport(const std::wstring& folder,const std::function<void()>& work)
+{
+    RecoverExports(folder);
+    ClassicHfsRecovery::MoveDecision decision;
+    Session transaction(folder,decision.Id(),true);
+    std::exception_ptr failure;
+    bool deciding=false;
+    try{
+        work();
+        deciding=true;
+        decision.Commit();
+    }catch(...){failure=std::current_exception();}
+    try{transaction.Finish();}
+    catch(...){Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);throw;}
+    if(failure){
+        if(!deciding)Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Restored);
+        std::rethrow_exception(failure);
     }
 }
 }

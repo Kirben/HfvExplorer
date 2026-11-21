@@ -269,6 +269,29 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
       DeleteMovedSources(request.sources,snapshots,job,completion);
      }
     });
+   }else if(!moving&&target.IsWindows()&&
+            std::all_of(opened.begin(),opened.end(),[](const auto& item){return !strcmp(item.first->Kind(),"HFS");})&&
+            WindowsMoveUndo::Supported(destination.first->HostPath(2))){
+    const auto previous=job.progress();
+    Storage::Rollback rollback;
+    bool retained;
+    std::exception_ptr failure;
+    {
+     Storage::OutcomeEvidence evidence;
+     try{
+      WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
+       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,false,true);
+       destination.first->Close();
+       Cancel(job);
+      });
+     }catch(...){failure=std::current_exception();}
+     rollback=evidence.RollbackState();
+     retained=evidence.RetainedChanges();
+    }
+    Storage::OutcomeEvidence::NoteRollback(rollback);
+    if(failure&&rollback==Storage::Rollback::Restored)job.progress(previous);
+    else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
+    if(failure)std::rethrow_exception(failure);
    }else complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);
   }
   if(!target.Volume())destination.first->Close();

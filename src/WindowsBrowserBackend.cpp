@@ -13,6 +13,7 @@
 #include "BrowserDirectory.h"
 #include "BrowserPresentation.h"
 #include "WindowsFolderEntries.h"
+#include "WindowsMoveUndo.h"
 #include "HfsPlusDisk.h"
 #include "charset.h"
 #include "aspecial.h"
@@ -49,6 +50,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
 {
  if(directory.empty())throw std::runtime_error("Select a Windows folder");
  BrowserDirectory::ObserveRead(BrowserPresentation::Utf8(MacBrowser::U16(directory)).c_str());
+ auto ioFolder=BrowserPresentation::WindowsPath(directory);
  BrowserDirectory::Snapshot snapshot;
  snapshot.folder=FileOperations::Location::Windows(directory);
  snapshot.folder.directory=true;
@@ -67,6 +69,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
   StorageLocation::ValidateMedia(media);
  }else if(driveType==DRIVE_REMOVABLE||driveType==DRIVE_CDROM)
   media.BindWindowsMediaSerial(StorageLocation::WindowsSerial(directory));
+ if(driveType==DRIVE_FIXED)WindowsMoveUndo::RecoverExports(ioFolder);
  try{media.expectedIdentity=MacBrowser::DescribeWindowsFile(directory).identity;}
  catch(const std::exception&){}
  snapshot.capabilitiesKnown=true;
@@ -74,7 +77,6 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
 
  auto folder=directory;
  if(folder.back()!=L'\\'&&folder.back()!=L'/')folder+=L'\\';
- auto ioFolder=BrowserPresentation::WindowsPath(folder);
  if(ioFolder.back()!=L'\\')ioFolder+=L'\\';
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());
  std::string ansiFolder=LegacyPath(folder);

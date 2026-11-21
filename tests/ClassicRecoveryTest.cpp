@@ -120,14 +120,14 @@ void CrashChild(const CString& image,unsigned phase,const wchar_t* action=L"over
 constexpr uint64_t FormatBytes=1474560;
 constexpr char FormatLabel[]="Verified";
 
-Storage::Result MoveWindowsTree(const std::wstring& image,bool importing,Storage::Job& job,bool converted,bool persistent=false)
+Storage::Result MoveWindowsTree(const std::wstring& image,bool importing,Storage::Job& job,bool converted,bool persistent=false,bool copyOnly=false)
 {
     auto classic=persistent?MacBrowser::OpenBrowserImage(image):MacBrowser::OpenImage(image);
     auto windows=FileOperations::Location::Windows(image+L".windows");
     auto root=FileOperations::Location::Mounted(classic,2);
     auto tree=importing?FileOperations::Location::Windows(image+L".windows\\Tree"):
                         FileOperations::Location::Mounted(classic,Find(*classic,2,u"Tree"));
-    tree.cut=true;
+    tree.cut=!copyOnly;
     FileOperations::Completion completion;
     if(converted){
         LegacyCopyOptions options;
@@ -234,6 +234,35 @@ void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
         }
     }
     fprintf(report,"PASS: moves in both directions between Windows and classic HFS recover during publication and on both sides of commit, preserving folders, both forks, Finder metadata and unrelated files. Cancellation restores both endpoints, and conflict recovery retains unrelated Windows files.\n");
+}
+
+void WindowsExportRecovery(const CString& root,const Bytes& blank,FILE* report)
+{
+    for(const unsigned phase:{7U,8U,9U}){
+        CString image;
+        image.Format("%s\\export-only-%u.dsk",root.GetString(),phase);
+        Save(image,blank);
+        const auto path=VolumeCoord::Wide(image.GetString()),hostPath=path+L".windows";
+        Check(CreateDirectoryW(hostPath.c_str(),nullptr)!=FALSE,"create durable export fixture");
+        {
+            auto hfs=MacBrowser::OpenImage(path);
+            auto host=MacBrowser::OpenWindows(hostPath);
+            const auto incoming=hfs->MakeDirectory(2,u"Tree");
+            const auto existing=host->MakeDirectory(2,u"Tree");
+            Put(*hfs,true,false,incoming);
+            Put(*host,false,false,existing);
+            Put(*host,false,false,existing,u"Neighbor");
+        }
+        const auto before=Load(image);
+        CrashChild(image,phase,L"export-only");
+        Check(!ClassicHfsRecovery::Pending(path)&&Load(image)==before,
+              "copy-only export changed the classic HFS source");
+        auto host=MacBrowser::OpenWindows(hostPath);
+        const auto folder=Find(*host,2,u"Tree");
+        VerifyFile(*host,folder,u"Document",phase==9);
+        VerifyFile(*host,folder,u"Neighbor",false);
+    }
+    fprintf(report,"PASS: interrupted copy-only NTFS exports recover both forks from the destination folder without reopening the source.\n");
 }
 
 unsigned StagedImages(const CString& root)
@@ -1107,7 +1136,8 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
         const bool importing=!strcmp(action,"windows-import");
-        if(importing||!strcmp(action,"windows-export")){
+        const bool copyOnly=!strcmp(action,"export-only");
+        if(importing||copyOnly||!strcmp(action,"windows-export")){
             Storage::Job job;
             job.transport([&](const Storage::Progress& progress){
                 if(phase==7&&importing&&progress.files==1)ExitProcess(97);
@@ -1115,7 +1145,7 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             if(phase==7&&!importing)MacBrowser::windowsPublicationFault=[](const char* step){
                 if(!strcmp(step,"data-published"))ExitProcess(97);
             };
-            auto result=MoveWindowsTree(VolumeCoord::Wide(image),importing,job,importing&&phase!=7);
+            auto result=MoveWindowsTree(VolumeCoord::Wide(image),importing,job,importing&&phase!=7,false,copyOnly);
             if(result.code){
                 FILE* diagnostics=nullptr;
                 const auto file=std::string(image)+".move-error.txt";
@@ -1311,6 +1341,7 @@ int RunClassicRecoveryTest(const char* directory)
             FormatClassicImage(VolumeCoord::Wide(empty.GetString()),"Transfer",4*1024*1024);
             FolderTransferRecovery(root,Load(empty),report);
             WindowsMoveRecovery(root,Load(empty),report);
+            WindowsExportRecovery(root,Load(empty),report);
         }
         CreationRecovery(root,original,report);
         MetadataRecovery(root,original,report);

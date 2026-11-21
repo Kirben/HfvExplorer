@@ -486,7 +486,11 @@ void ClassicHfsRecovery::MoveDecision::Commit()
 }
 void ClassicHfsRecovery::MoveDecision::Forget() noexcept
 {
-    try{DeleteFileW(DecisionPath(id_).c_str());}catch(...){}
+    ForgetMoveDecision(id_);
+}
+void ClassicHfsRecovery::ForgetMoveDecision(const std::string& id) noexcept
+{
+    try{DeleteFileW(DecisionPath(id).c_str());}catch(...){}
 }
 std::wstring ClassicHfsRecovery::MoveDecisionPath(const std::string& id,bool create)
 {

@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include <functional>
 #include <memory>
 #include <string>
 
 namespace WindowsMoveUndo {
 bool Supported(const std::wstring& folder);
 void Recover(const std::string& decision,bool committed);
+void RecoverExports(const std::wstring& folder);
+void RunExport(const std::wstring& folder,const std::function<void()>& work);
 
 class Session {
     struct State;
     std::unique_ptr<State> state_;
 public:
-    Session(const std::wstring& folder,const std::string& decision);
+    Session(const std::wstring& folder,const std::string& decision,bool exportOnly=false);
     ~Session();
     Session(const Session&)=delete;
     Session& operator=(const Session&)=delete;

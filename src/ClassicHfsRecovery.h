@@ -27,6 +27,7 @@ bool RecoverNdif(const ImageRange&,bool writable,bool keepJournal=false);
 inline constexpr size_t MoveIdSize=32;
 std::wstring MoveDecisionPath(const std::string& id,bool create=false);
 bool MoveIsCommitted(const std::string& id);
+void ForgetMoveDecision(const std::string& id) noexcept;
 class MoveDecision {
     std::string id_;
 public:
