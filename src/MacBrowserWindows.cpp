@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "WindowsMoveUndo.h"
+#include "ClassicHfsRecovery.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
 #include "VolumeCoordinator.h"
@@ -323,15 +325,47 @@ void Leaf(const std::u16string &s) {
 std::wstring Child(const std::wstring& directory,const std::wstring& name){
     return directory+(directory.back()==L'\\'?L"":L"\\")+name;
 }
-std::wstring Temp(const std::wstring &directory) {
+std::wstring Companion(const std::wstring& path){
+    const auto slash=path.find_last_of(L"\\/");
+    return path.substr(0,slash+1)+L"%"+path.substr(slash+1);
+}
+std::wstring Temp(const std::wstring& directory,bool folder=false) {
     static LONG serial=0;
-    for(unsigned attempt=0;attempt<1000;++attempt){wchar_t leaf[64];
+    for(unsigned attempt=0;attempt<1000;++attempt){
+        wchar_t leaf[64];
         swprintf_s(leaf,L"HFV%08lX%08lX%08lX.tmp",GetCurrentProcessId(),GetTickCount(),DWORD(InterlockedIncrement(&serial)));
-        auto path=Child(directory,leaf);HANDLE h=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-        if(h!=INVALID_HANDLE_VALUE){CloseHandle(h);return path;}
-        Check(GetLastError()==ERROR_FILE_EXISTS,"Cannot create a staging file in the destination folder");
+        const auto path=Child(directory,leaf);
+        bool created;
+        if(folder)created=CreateDirectoryW(path.c_str(),nullptr)!=FALSE;
+        else{
+            const auto handle=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+            created=handle!=INVALID_HANDLE_VALUE;
+            if(created)CloseHandle(handle);
+        }
+        if(created){
+            auto move=WindowsMoveUndo::Session::Current();
+            if(!move)return path;
+            // Create in the real destination parent to inherit its permissions.
+            // Move only this empty temporary object before writing anything to it.
+            const auto staged=move->Slot();
+            if(MoveFileExW(path.c_str(),staged.c_str(),MOVEFILE_WRITE_THROUGH))return staged;
+            if(folder)RemoveDirectoryW(path.c_str());
+            else DeleteFileW(path.c_str());
+            throw HfsPlus::Error("Cannot place a temporary object in Windows move staging");
+        }
+        const auto error=GetLastError();
+        Check(error==ERROR_FILE_EXISTS||error==ERROR_ALREADY_EXISTS,"Cannot create a staging object in the destination folder");
     }
     throw HfsPlus::Error("Cannot reserve a staging filename");
+}
+std::wstring Backup(const std::wstring& directory) {
+    if(auto move=WindowsMoveUndo::Session::Current())return move->Slot();
+    return Temp(directory);
+}
+void PublishRename(const std::wstring& from,const std::wstring& to,const char* message,bool placeholder=false) {
+    if(auto move=WindowsMoveUndo::Session::Current())move->Rename(from,to);
+    else Check(MoveFileExW(from.c_str(),to.c_str(),MOVEFILE_WRITE_THROUGH|
+                          (placeholder?MOVEFILE_REPLACE_EXISTING:0))!=FALSE,message);
 }
 class Windows final : public Volume, public WorkerEndpoint {
     mutable std::recursive_mutex mutex_;
@@ -346,7 +380,6 @@ class Windows final : public Volume, public WorkerEndpoint {
         Check(next_ != UINT32_MAX, "Too many Windows entries"); paths_[next_] = p; return next_++;
     }
     std::wstring Path(uint32_t id)const { std::lock_guard<std::recursive_mutex> lock(mutex_);return paths_.at(id); }
-    std::wstring Companion(const std::wstring &p) { auto at = p.find_last_of(L"\\/"); return p.substr(0,at+1) + L"%" + p.substr(at+1); }
     Entry Describe(uint32_t id) {
         auto p = Path(id); WIN32_FILE_ATTRIBUTE_DATA info;
         Check(GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &info) != FALSE, "Windows file no longer exists");
@@ -409,10 +442,10 @@ public:
         try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);header.Write(output);if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.WriteForkBytes(buffer.data(),n);at+=n;}}output.SealSparse();output.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
             replacement.reset(new FileVersion(staged));Publication("metadata-staged");if(primary)primary->Verify(path);original.Verify(companion);
-            if(exists){backup=Temp(root);reserve(backup);Check(MoveFileExW(companion.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old metadata companion");backed=true;original.Verify(backup);}
-            Check(MoveFileExW(staged.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish metadata companion");staged.clear();published=true;Publication("metadata-published");if(finish)finish();if(primary)primary->Verify(path);replacement->Verify(companion);if(backed)original.Verify(backup);
-        }catch(...){bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(backed||published)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
-        if(!backup.empty())DeleteFileW(backup.c_str());
+            if(exists){backup=Backup(root);reserve(backup);PublishRename(companion,backup,"Cannot preserve old metadata companion",true);backed=true;original.Verify(backup);}
+            PublishRename(staged,companion,"Cannot publish metadata companion");staged.clear();published=true;Publication("metadata-published");if(finish)finish();if(primary)primary->Verify(path);replacement->Verify(companion);if(backed)original.Verify(backup);
+        }catch(...){if(WindowsMoveUndo::Session::Current())throw;bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(backed||published)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
+        if(!WindowsMoveUndo::Session::Current()&&!backup.empty())DeleteFileW(backup.c_str());
     }
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;PublishMetadata(id,e);}
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
@@ -448,6 +481,7 @@ public:
         }catch(...){auto failure=std::current_exception();bool restored=SetFileTime(h,&rollbackCreated,nullptr,&rollbackModified)!=FALSE;Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);Check(restored,"Folder timestamp rollback failed; source retained");std::rethrow_exception(failure);}
     }
     void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool parentExists)override{
+        if(auto move=WindowsMoveUndo::Session::Current();move&&parentExists)move->PreserveDirectoryDates(Path(parent));
         std::vector<std::wstring> names,reserved;
         for(const auto& e:entries){Leaf(e.name);auto name=Wide(e.name);for(const auto& other:names)Check(_wcsicmp(name.c_str(),other.c_str())!=0,"Source names collide on the Windows destination; rename them before copying");names.push_back(name);
             bool companion=!e.directory||!e.attributes.empty()||std::any_of(e.finder.begin(),e.finder.end(),[](uint8_t b){return b!=0;});
@@ -460,6 +494,21 @@ public:
     bool CaseSensitive() const override { return false; }
     WorkerExecution Execution()const override{WorkerExecution out;out.windowsPaths=true;return out;}
     void ReleaseWorkerReaders(const std::vector<std::string>& keys)override{std::lock_guard<std::recursive_mutex> lock(mutex_);for(unsigned fork=0;fork<2;++fork){auto& readers=fork?resourceReaders_:dataReaders_;for(auto it=readers.begin();it!=readers.end();){auto path=Path(it->first);auto key=VolumeCoord::PathKey(fork?Companion(path):path);if(VolumeCoord::Overlapping(keys,key))it=readers.erase(it);else ++it;}}}
+    void WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move)override {
+        if(move.empty()){work(false);return;}
+        WindowsMoveUndo::Session transaction(Path(2),move);
+        std::exception_ptr failure;
+        try{work(true);}catch(...){failure=std::current_exception();}
+        Close();
+        try{transaction.Finish();}
+        catch(...){Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);throw;}
+        if(failure){
+            if(!ClassicHfsRecovery::MoveIsCommitted(move))
+                Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Restored);
+            std::rethrow_exception(failure);
+        }
+    }
+    void PrepareCopyTransaction()override{Close();}
     void Close()override{std::lock_guard<std::recursive_mutex> lock(mutex_);dataReaders_.clear();resourceReaders_.clear();}
     void ValidateEntry(const Entry& e)const override {
         Volume::ValidateEntry(e);Check(!e.datesValid||(e.created<=UINT64_MAX/10000000ULL-9561628800ULL&&e.modified<=UINT64_MAX/10000000ULL-9561628800ULL),"Dates exceed the Windows FILETIME range");DoubleHeader(e);Leaf(e.name);Leaf(u"%"+e.name);
@@ -523,7 +572,11 @@ public:
     }
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name) override {
         Leaf(name); auto path = Child(Path(parent),Wide(name));
-        Check(CreateDirectoryW(path.c_str(), nullptr) != FALSE, "Cannot create Windows folder"); return Id(path);
+        if(auto move=WindowsMoveUndo::Session::Current()){
+            auto staged=Temp(Path(parent),true);
+            move->Rename(staged,path);
+        }else Check(CreateDirectoryW(path.c_str(),nullptr)!=FALSE,"Cannot create Windows folder");
+        return Id(path);
     }
     uint32_t Put(uint32_t parent, const Entry &e, Reader read, bool replace) override {
         return PutFile(parent,e,std::move(read),replace,{},nullptr);
@@ -583,12 +636,11 @@ private:
             if(job&&e.datesValid){File data(staged,GENERIC_WRITE,OPEN_EXISTING);data.Dates(e);data.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
             newData.reset(new FileVersion(staged));if (withCompanion) newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
-            if (existed) { backup=Temp(root);reserve(backup); Check(MoveFileExW(path.c_str(),backup.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old destination"); backed=true;original.Verify(backup); }
-            if (sidecar) { backupResource=Temp(root);reserve(backupResource); Check(MoveFileExW(companion.c_str(),backupResource.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot preserve old resource fork"); backedResource=true;originalResource.Verify(backupResource); }
-            Check(MoveFileExW(staged.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot publish exported data"); staged.clear(); published=true;Publication("data-published");
+            if (existed) { backup=Backup(root);reserve(backup); PublishRename(path,backup,"Cannot preserve old destination",true); backed=true;original.Verify(backup); }
+            if (sidecar) { backupResource=Backup(root);reserve(backupResource); PublishRename(companion,backupResource,"Cannot preserve old resource fork",true); backedResource=true;originalResource.Verify(backupResource); }
+            PublishRename(staged,path,"Cannot publish exported data"); staged.clear(); published=true;Publication("data-published");
             if (withCompanion) {
-                Check(MoveFileExW(resource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,
-                      "Cannot publish exported resource fork");
+                PublishRename(resource,companion,"Cannot publish exported resource fork");
                 resource.clear();
                 publishedResource = true;
                 Publication("resource-published");
@@ -598,6 +650,7 @@ private:
             if(backed)original.Verify(backup);
             if(backedResource)originalResource.Verify(backupResource);
         } catch (...) {
+            if(WindowsMoveUndo::Session::Current())throw;
             bool restored=true;
             if(publishedResource && (!newResource->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;
             if(published && (!newData->Matches(path)||!DeleteFileW(path.c_str())))restored=false;
@@ -609,7 +662,11 @@ private:
             if(published||publishedResource||backed||backedResource)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
             if(!restored)throw HfsPlus::Error(Recovery("Export rollback could not restore the original pair",backed?(Missing(backup)?path:backup):std::wstring{},backedResource?(Missing(backupResource)?companion:backupResource):std::wstring{})); throw;
         }
-        if(!backup.empty())DeleteFileW(backup.c_str()); if(!backupResource.empty())DeleteFileW(backupResource.c_str()); return Id(path);
+        if(!WindowsMoveUndo::Session::Current()){
+            if(!backup.empty())DeleteFileW(backup.c_str());
+            if(!backupResource.empty())DeleteFileW(backupResource.c_str());
+        }
+        return Id(path);
     }
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name) override {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -641,6 +698,41 @@ private:
             if(companion)Check(DeleteFileW(Companion(path).c_str())!=FALSE,"Cannot remove source resource companion"); }
     }
 };
+}
+void StageWindowsCut(Volume& volume,uint32_t id,Storage::Job& job){
+    auto move=WindowsMoveUndo::Session::Current();
+    Check(move&&id!=2,"Cannot stage the Windows cut source");
+    const auto path=volume.HostPath(id);
+    const auto entry=volume.Stat(id);
+    const auto eligible=[](const std::wstring& file){
+        const auto attributes=GetFileAttributesW(file.c_str());
+        Check(attributes!=INVALID_FILE_ATTRIBUTES&&
+              !(attributes&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_REPARSE_POINT)),
+              "The Windows source contains a read-only file or reparse point");
+        WIN32_FIND_STREAM_DATA data{};
+        const auto search=FindFirstStreamW(file.c_str(),FindStreamInfoStandard,&data,0);
+        if(search==INVALID_HANDLE_VALUE){
+            Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot verify Windows source streams");
+            return;
+        }
+        bool named=false;
+        do{if(wcscmp(data.cStreamName,L"::$DATA")){named=true;break;}}
+        while(FindNextStreamW(search,&data));
+        const auto error=GetLastError();
+        FindClose(search);
+        Check(!named,"The Windows source has alternate data streams that classic HFS cannot preserve");
+        Check(error==ERROR_HANDLE_EOF,"Cannot verify Windows source streams");
+    };
+    ApplyRemovalPlan(volume,id,job,false,[&](uint32_t child){
+        const auto name=volume.HostPath(child);
+        eligible(name);
+        if(!volume.Stat(child).identity.companion.key.empty())eligible(Companion(name));
+    });
+    volume.Close();
+    Check(volume.Stat(id).identity==entry.identity,"The Windows source changed before move completion");
+    if(!entry.identity.companion.key.empty())move->Rename(Companion(path),move->Slot());
+    move->Rename(path,move->Slot());
+    Storage::OutcomeEvidence::NoteRetainedChange();
 }
 bool WindowsResourceCompanion(const std::wstring& path){Double data;return AppleDouble(path,data);}
 std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring& path){

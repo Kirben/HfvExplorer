@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "stdafx.h"
 #include "ClassicHfsRecovery.h"
+#include "WindowsMoveUndo.h"
 #include "HfsPlus.h"
 #include <io.h>
 #include <shlobj.h>
@@ -368,6 +369,7 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
         ReadAt(stream.value,prefix+move.size(),&crc,sizeof(crc));
         Check(crc==Crc(move.data(),DWORD(move.size())),"Classic HFS move header is damaged");
         sharedCommit=MoveCommitted(move);
+        if(writable&&!keepJournal)WindowsMoveUndo::Recover(move,sharedCommit);
         prefix+=move.size()+sizeof(crc);
     }
     const auto count=(size-prefix)/sizeof(Record);
@@ -440,8 +442,11 @@ void Transaction::Commit()
 {
     if (!state_) return;
     Prepare();
-    if(!state_->move.empty())
+    if(!state_->move.empty()){
         Check(MoveCommitted(state_->move),"The classic HFS move decision has not committed");
+        // Keep the HFS journal discoverable if Windows cleanup still needs a retry.
+        WindowsMoveUndo::Recover(state_->move,true);
+    }
     Crash(2);
     Record record{};
     record.offset=Committed;
@@ -482,6 +487,10 @@ void ClassicHfsRecovery::MoveDecision::Commit()
 void ClassicHfsRecovery::MoveDecision::Forget() noexcept
 {
     try{DeleteFileW(DecisionPath(id_).c_str());}catch(...){}
+}
+std::wstring ClassicHfsRecovery::MoveDecisionPath(const std::string& id,bool create)
+{
+    return DecisionPath(id,create);
 }
 bool ClassicHfsRecovery::MoveIsCommitted(const std::string& id)
 {

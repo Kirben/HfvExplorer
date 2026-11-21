@@ -120,6 +120,122 @@ void CrashChild(const CString& image,unsigned phase,const wchar_t* action=L"over
 constexpr uint64_t FormatBytes=1474560;
 constexpr char FormatLabel[]="Verified";
 
+Storage::Result MoveWindowsTree(const std::wstring& image,bool importing,Storage::Job& job,bool converted,bool persistent=false)
+{
+    auto classic=persistent?MacBrowser::OpenBrowserImage(image):MacBrowser::OpenImage(image);
+    auto windows=FileOperations::Location::Windows(image+L".windows");
+    auto root=FileOperations::Location::Mounted(classic,2);
+    auto tree=importing?FileOperations::Location::Windows(image+L".windows\\Tree"):
+                        FileOperations::Location::Mounted(classic,Find(*classic,2,u"Tree"));
+    tree.cut=true;
+    FileOperations::Completion completion;
+    if(converted){
+        LegacyCopyOptions options;
+        options.input='a'; // Automatic conversion recognizes the AppleDouble companion.
+        return FileOperations::ExecuteInWorker(FileOperations::LegacyConversion{
+            tree,importing?root:windows,true,true,false,options,FileOperations::ConversionTarget::Folder},job,completion);
+    }
+    return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        {tree},importing?root:windows},job,completion);
+}
+
+void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
+{
+    for(const bool importing:{false,true}){
+        for(const unsigned phase:{0U,7U,8U,9U,10U}){
+            CString image;
+            image.Format("%s\\%s-%u.dsk",root.GetString(),importing?"windows-import":"windows-export",phase);
+            Save(image,blank);
+            const auto path=VolumeCoord::Wide(image.GetString());
+            const auto hostPath=path+L".windows";
+            Check(CreateDirectoryW(hostPath.c_str(),nullptr)!=FALSE,"create Windows move fixture");
+            {
+                auto hfs=MacBrowser::OpenImage(path);
+                auto host=MacBrowser::OpenWindows(hostPath);
+                auto& source=importing?*host:*hfs;
+                auto& target=importing?*hfs:*host;
+                Put(source,false,false,2,u"Source neighbor");
+                Put(target,false,false,2,u"Target neighbor");
+                const auto incoming=source.MakeDirectory(2,u"Tree");
+                const auto existing=target.MakeDirectory(2,u"Tree");
+                Put(source,true,false,incoming);
+                Put(source,false,false,source.MakeDirectory(incoming,u"New folder"),u"New entry");
+                Put(target,false,false,existing);
+                Put(target,false,false,existing,u"Preserved");
+            }
+            const auto before=Load(image);
+            if(!phase){
+                Storage::Job job;
+                job.transport([&](const Storage::Progress& progress){
+                    if(progress.files==1)job.cancel();
+                },[](const std::string&){return Storage::ConflictChoice::Replace;});
+                const auto result=MoveWindowsTree(path,importing,job,false,true);
+                if(result.outcome!=Storage::Outcome::Cancelled||result.rollback!=Storage::Rollback::Restored||result.partial)
+                    throw HfsPlus::Error("Cancelled Windows/HFS move did not restore both participants: "+result.message);
+            }else if(phase==10){
+                Storage::Job job;
+                job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
+                const auto result=MoveWindowsTree(path,importing,job,importing,true);
+                if(result.code||!result.moved)
+                    throw HfsPlus::Error("Persistent browser move did not finish: "+result.message);
+            }else{
+                CrashChild(image,phase,importing?L"windows-import":L"windows-export");
+                Check(ClassicHfsRecovery::Pending(path),"interrupted Windows/HFS move lost HFS recovery");
+            }
+            if(!importing&&phase==8){
+                const CString intruder=image+".windows\\Tree\\New folder\\Unrelated";
+                const CString saved=image+".external-file";
+                const Bytes external{1,2,3,4};
+                Save(intruder,external);
+                bool rejected=false;
+                try{auto open=MacBrowser::OpenImage(path);}
+                catch(const HfsPlus::Error&){rejected=true;}
+                Check(rejected&&ClassicHfsRecovery::Pending(path)&&Load(intruder)==external,
+                      "recovery removed an unrelated file from the newly published folder");
+                Check(MoveFileA(intruder,saved)!=FALSE,"move the unrelated Windows file aside for retry");
+
+                const CString output=image+".windows\\Tree\\Document";
+                const CString moved=image+".published-file";
+                Check(MoveFileA(output,moved)!=FALSE,"simulate a competing edit to the published Windows name");
+                Save(output,external);
+                rejected=false;
+                try{auto open=MacBrowser::OpenImage(path);}
+                catch(const HfsPlus::Error&){rejected=true;}
+                Check(rejected&&ClassicHfsRecovery::Pending(path)&&Load(output)==external,
+                      "recovery overwrote a competing Windows file");
+                Check(DeleteFileA(output)&&MoveFileA(moved,output),"restore the published file for recovery retry");
+            }
+            auto hfs=MacBrowser::OpenImage(path);
+            auto host=MacBrowser::OpenWindows(hostPath);
+            auto& source=importing?*host:*hfs;
+            auto& target=importing?*hfs:*host;
+            Check(!ClassicHfsRecovery::Pending(path),"reopening HFS left the move journal pending");
+            MacBrowser::Entry tree;
+            const auto dest=Find(target,2,u"Tree");
+            VerifyFile(target,dest,u"Document",phase>=9);
+            VerifyFile(target,dest,u"Preserved",false);
+            VerifyFile(source,2,u"Source neighbor",false);
+            VerifyFile(target,2,u"Target neighbor",false);
+            if(phase>=9){
+                Check(!source.FindChild(2,u"Tree",tree),"committed move kept the old tree");
+                VerifyFile(target,Find(target,dest,u"New folder"),u"New entry",false);
+            }else{
+                Check(!target.FindChild(dest,u"New folder",tree),"rollback retained the new destination folder");
+                const auto original=Find(source,2,u"Tree");
+                VerifyFile(source,original,u"Document",true);
+                VerifyFile(source,Find(source,original,u"New folder"),u"New entry",false);
+                Check(Load(image)==before,"Windows move rollback changed the original HFS image");
+            }
+            WIN32_FIND_DATAW data{};
+            const auto staged=FindFirstFileW((hostPath+L"\\.hfv-move-*").c_str(),&data);
+            if(staged!=INVALID_HANDLE_VALUE)FindClose(staged);
+            Check(staged==INVALID_HANDLE_VALUE&&GetLastError()==ERROR_FILE_NOT_FOUND,
+                  "Windows move recovery did not clear staging");
+        }
+    }
+    fprintf(report,"PASS: moves in both directions between Windows and classic HFS recover during publication and on both sides of commit, preserving folders, both forks, Finder metadata and unrelated files. Cancellation restores both endpoints, and conflict recovery retains unrelated Windows files.\n");
+}
+
 unsigned StagedImages(const CString& root)
 {
     WIN32_FIND_DATAA data{};
@@ -990,6 +1106,26 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        const bool importing=!strcmp(action,"windows-import");
+        if(importing||!strcmp(action,"windows-export")){
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){
+                if(phase==7&&importing&&progress.files==1)ExitProcess(97);
+            },[](const std::string&){return Storage::ConflictChoice::Replace;});
+            if(phase==7&&!importing)MacBrowser::windowsPublicationFault=[](const char* step){
+                if(!strcmp(step,"data-published"))ExitProcess(97);
+            };
+            auto result=MoveWindowsTree(VolumeCoord::Wide(image),importing,job,importing&&phase!=7);
+            if(result.code){
+                FILE* diagnostics=nullptr;
+                const auto file=std::string(image)+".move-error.txt";
+                if(!fopen_s(&diagnostics,file.c_str(),"w")){
+                    fprintf(diagnostics,"%s\n",result.message.c_str());
+                    fclose(diagnostics);
+                }
+            }
+            return result.code?4:3;
+        }
         if(!strcmp(action,"batch-move")){
             auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image));
             Storage::Job job;
@@ -1174,6 +1310,7 @@ int RunClassicRecoveryTest(const char* directory)
             const CString empty=root+"\\empty-transfer.dsk";
             FormatClassicImage(VolumeCoord::Wide(empty.GetString()),"Transfer",4*1024*1024);
             FolderTransferRecovery(root,Load(empty),report);
+            WindowsMoveRecovery(root,Load(empty),report);
         }
         CreationRecovery(root,original,report);
         MetadataRecovery(root,original,report);

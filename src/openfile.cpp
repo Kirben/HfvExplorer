@@ -81,6 +81,10 @@ int DeleteHostDirectory(const std::wstring& path,Storage::Job* job)
  return delete_host_tree(full,0,job);
 }
 }
+int DeleteHostMoveStaging(const std::wstring& path)
+{
+ return DeleteHostDirectory(path,nullptr);
+}
 int DeleteHostSelectionJob(const std::wstring& path,bool directory,Storage::Job* job)
 {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}

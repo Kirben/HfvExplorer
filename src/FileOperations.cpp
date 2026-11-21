@@ -3,6 +3,7 @@
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "ClassicHfsRecovery.h"
+#include "WindowsMoveUndo.h"
 #include "FileOperationWorkerPolicy.h"
 #include "OperationCompletion.h"
 #include "StorageLocation.h"
@@ -67,7 +68,8 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
   if(sources[i].cut)StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
     [&](Volume& volume,uint32_t id){
      Mark(completion,sources[i]);
-     RemoveTree(volume,id,job);
+     if(sources[i].IsWindows()&&WindowsMoveUndo::Session::Current())StageWindowsCut(volume,id,job);
+     else RemoveTree(volume,id,job);
     });
 }
 bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
@@ -152,6 +154,29 @@ bool CanCoordinateClassicMove(const OrdinaryCopy& copy)
   return item.cut&&item.Volume()==first;
  });
 }
+bool CanCoordinateWindowsMove(const OrdinaryCopy& copy,
+                              const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,
+                              const Volume& target)
+{
+ const auto classicImage=[](const Volume& volume){
+  return !strcmp(volume.Kind(),"HFS")&&volume.Writable()&&!ExecutionFor(volume).processLocal;
+ };
+ const auto first=copy.sources.front().Volume();
+ if(copy.destination.IsWindows()&&first&&classicImage(*first)){
+  return WindowsMoveUndo::Supported(target.HostPath(2))&&
+         std::all_of(copy.sources.begin(),copy.sources.end(),[&](const Location& item){
+   return item.cut&&item.Volume()==first;
+  });
+ }
+ if(!copy.destination.Volume()||!classicImage(target)||!copy.sources.front().IsWindows())return false;
+ const auto root=sources.front().first->HostPath(2);
+ if(!WindowsMoveUndo::Supported(root))return false;
+ for(size_t i=0;i<sources.size();++i){
+  if(!copy.sources[i].cut||!copy.sources[i].IsWindows()||
+     _wcsicmp(root.c_str(),sources[i].first->HostPath(2).c_str())!=0)return false;
+ }
+ return true;
+}
 void CoordinateClassicMove(Volume& source,Volume& target,Storage::Job& job,
                            const std::function<void()>& transfer)
 {
@@ -197,7 +222,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  Check(!request.sources.empty(),"Select a source file or folder");
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
- const bool coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
+ bool coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
  bool complete=false,inPlace=false;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
@@ -230,10 +255,19 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
     snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
    }
+   const bool windows=CanCoordinateWindowsMove(request,opened,*destination.first);
+   coordinated=coordinated||windows;
    if(coordinated){
-    CoordinateClassicMove(*opened.front().first,*destination.first,job,[&]{
-     complete=CopyMany(opened,*destination.first,destination.second,job,{},routes,true,true);
-     if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+    auto& source=*opened.front().first;
+    auto& dest=*destination.first;
+    const bool windowsSource=windows&&request.sources.front().IsWindows();
+    // Keep the HFS recovery record until the Windows participant finishes cleanup.
+    CoordinateClassicMove(windowsSource?dest:source,windowsSource?source:dest,job,[&]{
+     complete=CopyMany(opened,dest,destination.second,job,transfer.adapter,routes,true,true);
+     if(complete){
+      if(windowsSource)for(const auto& entry:opened)entry.first->Close();
+      DeleteMovedSources(request.sources,snapshots,job,completion);
+     }
     });
    }else complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);
   }
