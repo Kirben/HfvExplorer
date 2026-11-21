@@ -3606,6 +3606,14 @@ int RunApfsContainerTest(const char* directory)
             changeCompression(CompressionMode::Uncompressed);
             verifyTransform(false);
             fprintf(report,"PASS: macOS-generated APFS in-place compression and decompression, exact bytes, metadata, and cancellation during staging.\n");
+            for(const auto method:{CompressionMode::Lzvn,CompressionMode::Lzfse,
+                                  CompressionMode::Lzbitmap,CompressionMode::Stored}){
+                changeCompression(method);
+                verifyTransform(true);
+                changeCompression(CompressionMode::Uncompressed);
+                verifyTransform(false);
+            }
+            fprintf(report,"PASS: APFS LZVN, LZFSE, LZBITMAP, and stored resource compression round trips on a macOS-generated image.\n");
             const auto importedCopy=runImport();
             Check(!importedCopy.code,importedCopy.message.c_str());
             MacBrowser::Entry copied;
