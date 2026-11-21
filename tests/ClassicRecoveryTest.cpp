@@ -685,6 +685,65 @@ Storage::Result MoveSelection(const std::shared_ptr<MacBrowser::Volume>& volume,
         std::move(selected),FileOperations::Location::Mounted(volume,Find(*volume,2,u"Drop here"))},job,completion);
 }
 
+Storage::Result MoveAcrossImages(const std::wstring& destination,Storage::Job& job)
+{
+    auto left=MacBrowser::OpenImage(destination+L".left");
+    auto right=MacBrowser::OpenImage(destination+L".right");
+    auto target=MacBrowser::OpenImage(destination);
+    auto first=FileOperations::Location::Mounted(left,Find(*left,2,u"Left"));
+    auto second=FileOperations::Location::Mounted(right,Find(*right,2,u"Right"));
+    first.cut=second.cut=true;
+    FileOperations::Completion completion;
+    return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        {first,second},FileOperations::Location::Mounted(target,2)},job,completion);
+}
+void MixedImageMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
+{
+    for(const unsigned phase:{0u,8u,9u}){
+        CString image;
+        image.Format("%s\\mixed-image-move-%u.dsk",root.GetString(),phase);
+        const auto path=VolumeCoord::Wide(image.GetString());
+        const CString left=image+".left",right=image+".right";
+        for(const auto& file:{image,left,right})Save(file,blank);
+        Put(*MacBrowser::OpenImage(path),false,false,2,u"Left");
+        Put(*MacBrowser::OpenImage(path+L".left"),true,false,2,u"Left");
+        Put(*MacBrowser::OpenImage(path+L".right"),true,false,2,u"Right");
+        const auto original=Load(image),originalLeft=Load(left),originalRight=Load(right);
+        if(phase){
+            CrashChild(image,phase,L"mixed-image-move");
+            Check(ClassicHfsRecovery::Pending(path)&&ClassicHfsRecovery::Pending(path+L".left")&&
+                  ClassicHfsRecovery::Pending(path+L".right"),"mixed image move lost a participant journal");
+        }else{
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& p){if(p.files==1)job.cancel();},
+                          [](const std::string&){return Storage::ConflictChoice::Replace;});
+            const auto result=MoveAcrossImages(path,job);
+            Check(result.error==ERROR_CANCELLED&&result.rollback==Storage::Rollback::Restored&&!result.partial,
+                  "mixed image cancellation reported retained edits");
+        }
+        {
+            // Open the sources in reverse order to verify independent recovery.
+            auto second=MacBrowser::OpenImage(path+L".right");
+            auto first=MacBrowser::OpenImage(path+L".left");
+            auto dest=MacBrowser::OpenImage(path);
+            VerifyFile(*dest,2,u"Left",phase==9);
+            MacBrowser::Entry item;
+            if(phase==9){
+                Check(!first->FindChild(2,u"Left",item)&&!second->FindChild(2,u"Right",item),
+                      "committed mixed move kept a source");
+                VerifyFile(*dest,2,u"Right",true);
+            }else{
+                Check(!dest->FindChild(2,u"Right",item),"aborted mixed move kept a destination file");
+                VerifyFile(*first,2,u"Left",true);
+                VerifyFile(*second,2,u"Right",true);
+            }
+        }
+        if(phase!=9)Check(Load(image)==original&&Load(left)==originalLeft&&Load(right)==originalRight,
+                         "mixed image rollback did not restore exact bytes");
+    }
+    fprintf(report,"PASS: a mixed selection across two classic HFS images commits together at one destination, with fork-safe cancellation and crash recovery.\n");
+}
+
 void SameVolumeBatchRecovery(const CString& folder,const Bytes& baseline,FILE* report)
 {
     for(unsigned phase:{7u,3u}){
@@ -1156,6 +1215,12 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             }
             return result.code?4:3;
         }
+        if(!strcmp(action,"mixed-image-move")){
+            Storage::Job job;
+            job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
+            const auto result=MoveAcrossImages(VolumeCoord::Wide(image),job);
+            return result.code?4:3;
+        }
         if(!strcmp(action,"batch-move")){
             auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image));
             Storage::Job job;
@@ -1340,6 +1405,7 @@ int RunClassicRecoveryTest(const char* directory)
             const CString empty=root+"\\empty-transfer.dsk";
             FormatClassicImage(VolumeCoord::Wide(empty.GetString()),"Transfer",4*1024*1024);
             FolderTransferRecovery(root,Load(empty),report);
+            MixedImageMoveRecovery(root,Load(empty),report);
             WindowsMoveRecovery(root,Load(empty),report);
             WindowsExportRecovery(root,Load(empty),report);
         }

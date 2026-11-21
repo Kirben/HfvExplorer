@@ -143,25 +143,35 @@ bool CanCoordinateRemovable(const Volume& volume)
  const auto* media=dynamic_cast<const Storage::MediaWriteBackend*>(&volume);
  return media&&media->SupportsCoordinatedMove();
 }
-bool CanCoordinateClassicMove(const OrdinaryCopy& copy)
+std::vector<std::shared_ptr<Volume>> ClassicMoveSources(const OrdinaryCopy& copy)
 {
  const auto first=copy.sources.front().Volume();
  const auto target=copy.destination.Volume();
  if(!first||!target||first->ResourceKey()==target->ResourceKey()||
-    strcmp(first->Kind(),"HFS")||strcmp(target->Kind(),"HFS"))return false;
+    strcmp(first->Kind(),"HFS")||strcmp(target->Kind(),"HFS"))return {};
  const auto image=[](Volume& volume){return !ExecutionFor(volume).processLocal;};
  if((!image(*first)&&!CanCoordinateRemovable(*first))||
-    (!image(*target)&&!CanCoordinateRemovable(*target)))return false;
+    (!image(*target)&&!CanCoordinateRemovable(*target)))return {};
  if(!image(*first)&&!image(*target)){
   const auto* source=WorkerEndpoint::Find(*first);
   const auto* destination=WorkerEndpoint::Find(*target);
-  if(!source||!destination)return false;
+  if(!source||!destination)return {};
   const auto from=source->WorkerDescription(),to=destination->WorkerDescription();
-  if(from.path.empty()||to.path.empty()||_wcsicmp(from.path.c_str(),to.path.c_str())==0)return false;
+  if(from.path.empty()||to.path.empty()||_wcsicmp(from.path.c_str(),to.path.c_str())==0)return {};
  }
- return std::all_of(copy.sources.begin(),copy.sources.end(),[&](const Location& item){
-  return item.cut&&item.Volume()==first;
- });
+ std::vector<std::shared_ptr<Volume>> volumes{first};
+ std::set<std::string> keys{first->ResourceKey(),target->ResourceKey()};
+ for(const auto& item:copy.sources){
+  const auto mount=item.Volume();
+  if(!item.cut||!mount)return {};
+  if(std::find(volumes.begin(),volumes.end(),mount)!=volumes.end())continue;
+  // A mixed selection may join multiple independent image journals. A
+  // physical-media move still holds just the two known device endpoints.
+  if(strcmp(mount->Kind(),"HFS")||!mount->Writable()||!image(*first)||!image(*mount)||!image(*target)||
+     !keys.insert(mount->ResourceKey()).second)return {};
+  volumes.push_back(mount);
+ }
+ return volumes;
 }
 bool CanCoordinateWindowsMove(const OrdinaryCopy& copy,
                               const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,
@@ -188,7 +198,8 @@ bool CanCoordinateWindowsMove(const OrdinaryCopy& copy,
  return true;
 }
 void CoordinateClassicMove(Volume* outer,Volume& inner,Storage::Job& job,
-                           const std::function<void()>& transfer,const Location* floppy=nullptr)
+                           const std::function<void()>& transfer,const Location* floppy=nullptr,
+                           const std::vector<std::shared_ptr<Volume>>& sources={})
 {
  ClassicHfsRecovery::MoveDecision decision;
  const auto previous=job.progress();
@@ -203,13 +214,24 @@ void CoordinateClassicMove(Volume* outer,Volume& inner,Storage::Job& job,
     Check(active,"The outer participant cannot join a durable classic HFS move");
     inner.WithCopyTransaction([&](bool innerActive){
      Check(innerActive,"The second participant cannot join a durable classic HFS move");
-     transfer();
-     if(floppy)PrepareFloppyMove(floppy->Drive());
-     else outer->PrepareCopyTransaction();
-     inner.PrepareCopyTransaction();
-     Cancel(job);
-     deciding=true;
-     decision.Commit();
+     const auto allOpen=[&](auto&& next,size_t index)->void {
+      if(index<sources.size()){
+       sources[index]->WithCopyTransaction([&](bool joined){
+        Check(joined,"An additional classic HFS image cannot join the durable move");
+        next(next,index+1);
+       },decision.Id());
+       return;
+      }
+      transfer();
+      if(floppy)PrepareFloppyMove(floppy->Drive());
+      else outer->PrepareCopyTransaction();
+      inner.PrepareCopyTransaction();
+      for(size_t i=1;i<sources.size();++i)sources[i]->PrepareCopyTransaction();
+      Cancel(job);
+      deciding=true;
+      decision.Commit();
+     };
+     allOpen(allOpen,1);
     },decision.Id());
    };
    if(floppy){
@@ -289,7 +311,8 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
  const auto driveMove=FloppyMoveEndpoints(request);
- bool coordinated=driveMove.floppy||(!transfer.adapter&&CanCoordinateClassicMove(request));
+ const auto classicSources=transfer.adapter?std::vector<std::shared_ptr<Volume>>{}:ClassicMoveSources(request);
+ bool coordinated=driveMove.floppy||!classicSources.empty();
  // A Windows cut can join the disk transaction once its folder is resolved.
  const bool deferDiskScope=target.Volume()&&CanCoordinateRemovable(*target.Volume())&&
      std::all_of(request.sources.begin(),request.sources.end(),[](const Location& item){
@@ -346,7 +369,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
       if(windowsSource)for(const auto& entry:opened)entry.first->Close();
       DeleteMovedSources(request.sources,snapshots,job,completion);
      }
-    });
+    },nullptr,classicSources);
    }else if(!moving&&target.IsWindows()&&
             std::all_of(opened.begin(),opened.end(),[](const auto& item){return !strcmp(item.first->Kind(),"HFS");})&&
             WindowsMoveUndo::Supported(destination.first->HostPath(2))){
