@@ -9,6 +9,8 @@ public:
     virtual ~VolumeCipher()=default;
     // APFS software encryption uses independent 512-byte XTS data units.
     virtual void Decrypt(uint64_t firstSector,uint8_t* data,size_t size)const=0;
+    virtual void Encrypt(uint64_t firstSector,uint8_t* data,size_t size)const=0;
+    virtual std::pair<uint64_t,uint64_t> UnlockBlocks()const=0;
 };
 std::shared_ptr<const VolumeCipher> UnlockSoftwareVolume(
     HfsPlus::Source&,const Container&,const std::array<uint8_t,16>& uuid,const Dmg::Password&);

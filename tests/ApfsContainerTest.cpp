@@ -4546,6 +4546,58 @@ int RunApfsContainerTest(const char* directory)
             fprintf(report,"PASS: same-volume APFS cut and paste moves primary and secondary hard-link names and preserves both forks.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
+        if(const auto encrypted=_wgetenv(L"HFV_APFS_NATIVE_FILEVAULT")){
+            const auto path=VolumeCoord::Wide(root+"apfs-native-filevault-edits.img");
+            Check(CopyFileW(encrypted,path.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS FileVault image");
+            const Dmg::Password password(L"apfs-FV-TEST-2026");
+            const auto mount=[&]{
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                MacBrowser::Entry locked;
+                Check(volume&&volume->FindChild(2,u"FVTEST",locked)&&!locked.readError.empty()&&!volume->Supports().writable,
+                      "APFS FileVault image should open locked and read-only");
+                Apfs::Unlock(*volume,locked.id,password);
+                Check(volume->Supports().writable,"Unlocked macOS APFS FileVault image is read-only");
+                return std::make_pair(volume,locked.id);
+            };
+            const Bytes payload(8197,0x6c);
+            {
+                auto [volume,root]=mount();
+                MacBrowser::Entry original;
+                Check(volume->FindChild(root,u"marker.txt",original),"Missing macOS APFS FileVault marker");
+                auto desired=original;
+                desired.forks[0].size=payload.size();
+                volume->Put(root,desired,[&](unsigned,uint64_t offset,void* data,size_t size){
+                    std::copy_n(payload.data()+offset,size,static_cast<uint8_t*>(data));
+                },true);
+                volume->Rename(original.id,root,u"Edited marker.txt");
+                MacBrowser::Entry created;
+                created.name=u"Encrypted readback.bin";
+                created.forks[0].size=payload.size();
+                volume->Put(root,created,[&](unsigned,uint64_t offset,void* data,size_t size){
+                    std::copy_n(payload.data()+offset,size,static_cast<uint8_t*>(data));
+                },false);
+            }
+            {
+                auto [volume,root]=mount();
+                MacBrowser::Entry file,missing;
+                Check(volume->FindChild(root,u"Edited marker.txt",file)&&file.forks[0].size==payload.size()&&
+                      !volume->FindChild(root,u"marker.txt",missing),"Encrypted APFS rename did not survive reopening");
+                Bytes actual(payload.size());
+                volume->Read(file.id,0,0,actual.data(),actual.size());
+                Check(actual==payload,"Encrypted APFS overwrite did not survive reopening");
+                volume->Remove(file.id);
+            }
+            auto [verify,root]=mount();
+            MacBrowser::Entry absent;
+            Check(!verify->FindChild(root,u"Edited marker.txt",absent),"Encrypted APFS deletion did not survive reopening");
+            MacBrowser::Entry created;
+            Check(verify->FindChild(root,u"Encrypted readback.bin",created)&&created.forks[0].size==payload.size(),
+                  "New encrypted APFS file did not survive reopening");
+            Bytes actual(payload.size());
+            verify->Read(created.id,0,0,actual.data(),actual.size());
+            Check(actual==payload,"New encrypted APFS file read back incorrect bytes");
+            fprintf(report,"PASS: macOS software-encrypted APFS overwrite, rename and deletion after reopening and password unlock.\n");
+        }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){
             const auto checkLocked=[](MacBrowser::Volume& container,const std::u16string& name){

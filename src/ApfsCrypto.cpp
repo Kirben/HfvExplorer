@@ -75,8 +75,13 @@ class Xts final:public VolumeCipher {
         if(carry)bytes[0]^=0x87;
     }
 public:
-    Xts(const uint8_t* a,const uint8_t* b):content(a,16),tweak(b,16){}
-    void Decrypt(uint64_t first,uint8_t* data,size_t size)const override{
+    Xts(const uint8_t* a,const uint8_t* b,std::pair<uint64_t,uint64_t> unlock={}):content(a,16),tweak(b,16),unlock(unlock){}
+    std::pair<uint64_t,uint64_t> UnlockBlocks()const override{return unlock;}
+    void Decrypt(uint64_t first,uint8_t* data,size_t size)const override{Transform(first,data,size,false);}
+    void Encrypt(uint64_t first,uint8_t* data,size_t size)const override{Transform(first,data,size,true);}
+private:
+    std::pair<uint64_t,uint64_t> unlock;
+    void Transform(uint64_t first,uint8_t* data,size_t size,bool encrypt)const{
         Check(size%Sector==0&&size/Sector<=UINT64_MAX-first,"Invalid APFS XTS data-unit range");
         for(size_t start=0;start<size;start+=Sector,++first){
             Secret<16> unit;
@@ -89,7 +94,7 @@ public:
             }
             const auto sector=data+start;
             for(size_t i=0;i<Sector;++i)sector[i]^=masks.bytes[i];
-            content.BlockTransform(sector,Sector,false);
+            content.BlockTransform(sector,Sector,encrypt);
             for(size_t i=0;i<Sector;++i)sector[i]^=masks.bytes[i];
         }
     }
@@ -199,6 +204,7 @@ std::shared_ptr<const VolumeCipher> UnlockSoftwareVolume(
     const auto encryptedKey=Field(vekFields,0x83);
     Check(encryptedKey.size==40,"Invalid APFS wrapped volume key");
     const auto unlock=ReadUnlockRecords(source,container,uuid,bag);
+    const auto bagLocation=VolumeRecord(bag,uuid,UnlockRecord);
     Algorithm sha(BCRYPT_SHA256_ALGORITHM,BCRYPT_ALG_HANDLE_HMAC_FLAG);
     // Keybag round counts are untrusted. Bound the work in one unlock attempt.
     uint64_t remaining=20000000;
@@ -219,7 +225,8 @@ std::shared_ptr<const VolumeCipher> UnlockSoftwareVolume(
               const_cast<PUCHAR>(salt.data),ULONG(salt.size),rounds,derived.bytes.data(),ULONG(derived.bytes.size()),0)>=0,
               "Cannot derive APFS password key");
         if(Unwrap(derived.bytes.data(),wrapped,kek)&&Unwrap(kek.bytes.data(),encryptedKey,vek))
-            return std::make_shared<Xts>(vek.bytes.data(),vek.bytes.data()+16);
+            return std::make_shared<Xts>(vek.bytes.data(),vek.bytes.data()+16,
+                std::make_pair(Le64(bagLocation.data),Le64(bagLocation.data+8)));
     }
     Check(supported,"No supported APFS password unlock record");
     return {};

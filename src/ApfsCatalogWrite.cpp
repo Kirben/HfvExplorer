@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsCatalogWrite.h"
+#include "ApfsCrypto.h"
 #include "ApfsTree.h"
 #include "ApfsWriteDisk.h"
 #include <windows.h>
@@ -90,7 +91,7 @@ WritableMap ReadWritableMap(Source& source,const Container& container,uint64_t b
             const auto flags=Le32(record.value.data),size=Le32(record.value.data+4);
             Check(key>previous&&(historical||oid>previous.first)&&xid<=container.transaction&&
                   ((historical&&flags==1&&!size&&!physical)||
-                   ((!flags||(historical&&flags==2))&&size==Block&&physical&&physical<container.blockCount&&
+                   ((!flags||(historical&&flags==2)||(container.writeCipher&&flags==4))&&size==Block&&physical&&physical<container.blockCount&&
                     physicalBlocks.insert(physical).second)),"Invalid APFS writable object mapping");
             map.mappings.push_back({oid,physical,xid,flags});
             previous=key;
@@ -112,6 +113,18 @@ WritableMap ReadWritableMap(Source& source,const Container& container,uint64_t b
         }
     }
     return map;
+}
+
+void ProtectKeybags(const Container& container,std::vector<DataRun>& runs)
+{
+    if(!container.writeCipher)return;
+    const auto [block,count]=container.writeCipher->UnlockBlocks();
+    Check(block&&count&&container.keybagBlock&&container.keybagBlocks,"Missing writable APFS keybag");
+    runs.push_back({container.keybagBlock,container.keybagBlocks});
+    runs.push_back({block,count});
+    std::sort(runs.begin(),runs.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    for(size_t i=1;i<runs.size();++i)
+        Check(runs[i].block>=runs[i-1].block&&runs[i].block-runs[i-1].block>=runs[i-1].count,"Overlapping APFS protected blocks");
 }
 
 constexpr size_t MapLeafCapacity=(Block-WriterDisk::NodeHeader-WriterDisk::TreeFooter)/(4+16+16);
@@ -164,6 +177,7 @@ struct CatalogRecords {
     std::vector<OwnedRecord> records;
     std::vector<uint64_t> blocks;
     bool verifiedSnapshotReferences=false;
+    bool encrypted=false;
 };
 CatalogRecords ReadWritableCatalog(Source& source,const Container& container,const WritableMap& map,uint64_t oid,bool historical=false)
 {
@@ -171,7 +185,7 @@ CatalogRecords ReadWritableCatalog(Source& source,const Container& container,con
         const auto item=std::lower_bound(map.mappings.begin(),map.mappings.end(),wanted,
             [](const auto& entry,uint64_t id){return entry.oid<id;});
         Check(item!=map.mappings.end()&&item->oid==wanted,"Missing APFS catalog object mapping");
-        return item->block;
+        return *item;
     };
     CatalogRecords catalog;
     const auto append=[&](const Node& leaf){
@@ -182,8 +196,12 @@ CatalogRecords ReadWritableCatalog(Source& source,const Container& container,con
                                        Bytes(record.value.data,record.value.data+record.value.size)});
         }
     };
-    const auto rootBlock=find(oid);
-    const Node root(ReadObject(source,container,rootBlock,oid,container.transaction,2,14),true,{});
+    const auto rootMapping=find(oid);
+    const auto rootBlock=rootMapping.block;
+    const auto cipherFor=[&](const Mapping& mapping){
+        return mapping.flags&4?container.writeCipher.get():nullptr;
+    };
+    const Node root(ReadObject(source,container,rootBlock,oid,container.transaction,2,14,false,cipherFor(rootMapping)),true,{});
     Check(root.Level()<=2&&!root.Layout().keySize&&!root.Layout().valueSize,
           "APFS catalog writes currently support at most three tree levels");
     catalog.blocks.push_back(rootBlock);
@@ -199,8 +217,9 @@ CatalogRecords ReadWritableCatalog(Source& source,const Container& container,con
             Check(record.value.size==8,"Invalid APFS catalog index record");
             const auto child=Le64(record.value.data);
             Check(seen.insert(child).second,"Repeated APFS catalog child");
-            const auto block=find(child);
-            const Node next(ReadObject(source,container,block,child,container.transaction,3,14),false,{});
+            const auto mapping=find(child);
+            const auto block=mapping.block;
+            const Node next(ReadObject(source,container,block,child,container.transaction,3,14,false,cipherFor(mapping)),false,{});
             Check(next.Level()+1==node.Level()&&next.Count(),"Invalid APFS catalog child level or count");
             const auto first=next.At(0).key;
             Check(first.size==record.key.size&&!memcmp(first.data,record.key.data,first.size),
@@ -573,13 +592,17 @@ OwnedRecord StreamReference(uint64_t inode)
     return record;
 }
 
-OwnedRecord FileExtent(const FileRun& run,uint64_t logicalBlock)
+OwnedRecord FileExtent(const FileRun& run,uint64_t logicalBlock,bool encrypted=false)
 {
     OwnedRecord record{Bytes(16),Bytes(24)};
     Set(record.key,0,(uint64_t(8)<<60)|(run.stream?run.stream:run.owner),8);
     Set(record.key,8,logicalBlock*Block,8);
     Set(record.value,0,run.count*Block,8);
     Set(record.value,8,run.block,8);
+    if(encrypted){
+        Set(record.value,0,(uint64_t(1)<<56)|(run.count*Block),8);
+        Set(record.value,16,run.block,8);
+    }
     return record;
 }
 
@@ -1549,7 +1572,7 @@ struct CatalogVolume {
 CatalogVolume ReadCatalogVolume(Source& source,const Container& container,uint64_t selected=0)
 {
     Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
-          !container.keybagBlock&&!container.keybagBlocks&&!container.volumes.empty()&&
+          (container.writeCipher||(!container.keybagBlock&&!container.keybagBlocks))&&!container.volumes.empty()&&
           (selected||container.volumes.size()==1)&&source.Size()==container.blockCount*Block,
           "APFS writes require a raw image and an unambiguous volume selection");
     const auto oid=selected?selected:container.volumes.front();
@@ -1705,7 +1728,7 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
         const auto key=Le64(record.key.data());
         if(key>>60!=8||!removeStreams.count(key&IdMask))continue;
         Check(record.key.size()==16&&record.value.size()==24,"Invalid APFS removed extent");
-        const auto block=Le64(record.value.data()+8),bytes=Le64(record.value.data());
+        const auto block=Le64(record.value.data()+8),bytes=Le64(record.value.data())&((uint64_t(1)<<56)-1);
         const auto run=owned.find(block);
         Check(run!=owned.end()&&bytes==run->second*Block&&retired.insert(block).second,
               "APFS removed extent does not have an exclusive reference");
@@ -1922,7 +1945,8 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
                                            oldFinder?&*oldFinder:nullptr);
     if(oldStream&&old.size()==oldLayout.value.size()){
         const auto canonicalStream=96+size_t(Le16(oldLayout.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
-        std::copy_n(old.data()+*oldStream+24,16,oldLayout.value.data()+canonicalStream+24);
+        const auto first=extentTree.encrypted?16u:24u;
+        std::copy_n(old.data()+*oldStream+first,40-first,oldLayout.value.data()+canonicalStream+first);
     }
     const auto fieldsByType=[](const Bytes& inode){
         std::map<uint8_t,Bytes> fields;
@@ -1947,7 +1971,8 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
                                    edit.finder?edit.finder:oldFinder?&*oldFinder:nullptr);
     if(oldStream&&size){
         const auto newStream=96+size_t(Le16(updated.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
-        std::copy_n(old.data()+*oldStream+24,16,updated.value.data()+newStream+24);
+        const auto first=extentTree.encrypted?16u:24u;
+        std::copy_n(old.data()+*oldStream+first,40-first,updated.value.data()+newStream+first);
     }
     const auto finderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
     std::copy_n(old.begin(),92,updated.value.begin());
@@ -2413,12 +2438,14 @@ bool InVolumeGroup(const Bytes& volume)
     return (Le64(volume.data()+40)&VolumeGroupInodeSpace)!=0;
 }
 
-void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup,bool allowSnapshot=false)
+void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup,bool allowSnapshot=false,bool encrypted=false)
 {
     const auto features=Le64(volume.data()+40);
     const auto group=allowVolumeGroup&&features==(2|VolumeGroupInodeSpace);
     Check(!memcmp(volume.data()+32,"APSB",4)&&(features==2||group)&&
-          !Le64(volume.data()+48)&&(Le64(volume.data()+56)==1||Le64(volume.data()+56)==8)&&Le64(volume.data()+264)==1&&
+          !Le64(volume.data()+48)&&          (encrypted?(Le64(volume.data()+56)==5||Le64(volume.data()+56)==12)&&Le64(volume.data()+264)==8&&
+                     !Le64(volume.data()+976)&&!Le64(volume.data()+216):
+                     (Le64(volume.data()+56)==1||Le64(volume.data()+56)==8)&&Le64(volume.data()+264)==1)&&
           Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&Le64(volume.data()+216)<=(allowSnapshot?1u:0u),
           "Unsupported APFS volume features for external edits");
     if(group){
@@ -2818,7 +2845,7 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
 {
     const auto [containerMap,address,volume]=ReadCatalogVolume(source,container,selected);
     const bool historical=Le64(volume.data()+216)!=0;
-    CheckExternalVolume(volume,container.volumes.size()==2,container.volumes.size()==1);
+    CheckExternalVolume(volume,container.volumes.size()==2,container.volumes.size()==1,bool(container.writeCipher));
     const auto siblings=ReadSiblingAllocation(source,container,containerMap,selected?selected:container.volumes.front(),volume);
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128),historical);
     const auto liveMap=historical?MapAt(volumeMap,container.transaction):volumeMap;
@@ -2839,7 +2866,8 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
     auto& space=ephemeral(Le64(superblock.data()+152));
     Writes discarded;
     std::vector<DataRun> data;
-    const auto& protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
+    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
+    ProtectKeybags(container,protectedRuns);
     const auto allocated=Allocate(discarded,source,container,space,superblock,ephemeral,
                                   live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;},protectedRuns);
     Check(allocated.size()==1&&data.size()==1&&data.front().count==1&&allocated.front()!=data.front().block,
@@ -2895,7 +2923,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto oid=selected?selected:current.volumes.front();
     const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
     const auto flags=Le64(volume.data()+56);
-    const bool fold=flags==1;
+    const bool fold=(flags&1)!=0;
     const auto fileCount=Le64(volume.data()+184);
     const auto directoryCount=Le64(volume.data()+192);
     const auto symlinkCount=Le64(volume.data()+200);
@@ -2912,9 +2940,10 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool externalDelete=remove&&remove->external;
     const bool historical=Le64(volume.data()+216)!=0;
     if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)
-        CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1);
+        CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     else CheckNativeVolume(volume);
     auto extentTree=ReadExtentTree(source,current,extents,historical);
+    extentTree.encrypted=bool(current.writeCipher);
     const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128),historical);
     const auto liveMap=historical?MapAt(volumeMap,current.transaction):volumeMap;
     auto existing=ReadWritableCatalog(source,current,liveMap,catalogOid,historical);
@@ -3050,6 +3079,10 @@ CatalogWritePlan PrepareCatalogMutation(
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name,fold);
         auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
                                      directory?0040755:symlink?0120777:0100644,directory?0:1,dataSize,create->finder);
+        if(current.writeCipher&&dataSize){
+            const auto stream=96+size_t(Le16(inode.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
+            Set(inode.value,stream+16,4,8);
+        }
         if(dates){
             Set(inode.value,16,CatalogTimestamp(dates->created),8);
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
@@ -3260,7 +3293,8 @@ CatalogWritePlan PrepareCatalogMutation(
     retired.insert(retired.end(),containerMap.leaves.begin(),containerMap.leaves.end());
     if(changeExtents)retired.insert(retired.end(),extentTree.blocks.begin(),extentTree.blocks.end());
 
-    const auto& protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
+    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
+    ProtectKeybags(current,protectedRuns);
     const size_t firstChild=changeExtents?7:6;
     CatalogLeaves leaves;
     size_t children=0,extentChildren=0,mapChildren=0;
@@ -3275,7 +3309,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 uint64_t logical=0;
                 for(const auto& data:plan.streams.front().runs){
                     const FileRun run{entryId,data.block,data.count};
-                    stream.push_back(FileExtent(run,logical));
+                    stream.push_back(FileExtent(run,logical,bool(current.writeCipher)));
                     logical+=data.count;
                 }
                 catalog.insert(catalog.begin()+streamAt,std::make_move_iterator(stream.begin()),
@@ -3285,7 +3319,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 if(!stream.id)continue;
                 uint64_t logical=0;
                 for(const auto& data:stream.runs){
-                    catalog.push_back(FileExtent({entryId,data.block,data.count,stream.id},logical));
+                    catalog.push_back(FileExtent({entryId,data.block,data.count,stream.id},logical,bool(current.writeCipher)));
                     logical+=data.count;
                 }
             }
@@ -3333,6 +3367,16 @@ CatalogWritePlan PrepareCatalogMutation(
     }
     auto mappings=StageCatalog(writes,leaves,allocated,firstChild,catalogOid,firstOid,transaction);
     for(auto& entry:mappings)entry.xid=transaction;
+    if(current.writeCipher){
+        for(auto& entry:mappings){
+            entry.flags=4;
+            const auto write=std::find_if(writes.begin(),writes.end(),[&](const auto& item){return item.block==entry.block;});
+            Check(write!=writes.end(),"Missing staged encrypted APFS catalog block");
+            Set(write->bytes,24,Le32(write->bytes.data()+24)|0x10000000U,4);
+            Set(write->bytes,0,ObjectChecksum(write->bytes),8);
+            current.writeCipher->Encrypt(entry.block*(Block/512),write->bytes.data(),write->bytes.size());
+        }
+    }
     mappings.insert(mappings.end(),snapshot.mappings.begin(),snapshot.mappings.end());
     std::sort(mappings.begin(),mappings.end(),[](const auto& a,const auto& b){
         return std::tie(a.oid,a.xid)<std::tie(b.oid,b.xid);

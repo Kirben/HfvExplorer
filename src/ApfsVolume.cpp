@@ -346,7 +346,8 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
     std::u16string label;
     bool caseSensitive=true;
     const std::string key;
-    const bool writable,limitedEdits,processLocal;
+    std::atomic<bool> writable;
+    const bool limitedEdits,processLocal;
     std::atomic<uint64_t> freeBytes;
     MacBrowser::WorkerOrigin origin;
     std::recursive_mutex mutex;
@@ -411,7 +412,7 @@ class Volume final:public MacBrowser::Volume,public MacBrowser::WorkerEndpoint {
 public:
     Volume(std::unique_ptr<Source> s,Container c,std::vector<Mounted> volumes,std::string resource,bool write,uint64_t free,bool limited)
         :source(std::move(s)),container(std::move(c)),mounts(std::move(volumes)),key(std::move(resource)),
-         writable(write),limitedEdits(limited),processLocal(write||source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
+         writable(write),limitedEdits(limited),processLocal(write||limited||source->ProcessLocal()||std::any_of(mounts.begin(),mounts.end(),[](const auto& mount){
              return mount.locked;
          })),freeBytes(free)
     {
@@ -519,12 +520,23 @@ public:
             root.entry.parent=item.entry.parent;
             root.entry.name=item.entry.name;
             root.entry.identity=item.entry.identity;
+            bool canWrite=false;
+            if(source->Writable()&&limitedEdits&&container.volumes.size()==1){
+                auto target=container;
+                target.writeCipher=unlocked.cipher;
+                try{
+                    InspectFreeQueueAllocation(*source,target,unlocked.oid);
+                    source->Flush();
+                    canWrite=true;
+                }catch(const Error&){}
+            }
             source->CheckMedia();
             item.entry=std::move(root.entry);
             item.attributes=std::move(root.attributes);
             item.stream=root.stream;
             mount.cipher=std::move(unlocked.cipher);
             mount.locked=false;
+            writable=canWrite;
             return true;
         });
     }
@@ -815,6 +827,10 @@ private:
         const auto address=map.Lookup(oid);
         Check(address.has_value(),"Missing APFS volume after a catalog write");
         auto mount=ReadVolume(ReadObject(*source,*fresh,*address,oid,fresh->transaction,13),oid);
+        if(const auto& cipher=mounts[mountIndex].cipher){
+            mount.cipher=cipher;
+            mount.locked=false;
+        }
         freeBytes=WritableFreeBytes(*source,*fresh);
         container=std::move(*fresh);
         for(auto& view:mounts){
@@ -905,6 +921,7 @@ private:
         Check(!mounts[folder.mount].snapshotCreated,"APFS snapshots are read-only");
         auto target=container;
         target.writeVolume=mounts[folder.mount].oid;
+        target.writeCipher=mounts[folder.mount].cipher;
         return target;
     }
 
@@ -1493,8 +1510,10 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
     slice(false);
     const auto expected=partition?Probe(*source):whole;
     Check(bool(expected),"The APFS container could not be opened inside the selected partition");
+    const bool encrypted=expected->keybagBlock&&expected->keybagBlocks&&expected->volumes.size()==1&&
+                         expected->blockSize==4096;
     bool limitedEdits=false;
-    try{
+    if(!encrypted)try{
         ValidateWritableLayout(*source,*expected);
         WritableFreeBytes(*source,*expected);
     }catch(const Error&){
@@ -1528,6 +1547,10 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
         source=reopen(true);
         verify();
         slice(true);
+        if(encrypted){
+            const auto free=WritableFreeBytes(*source,*expected);
+            return OpenMounted(source,key,*expected,false,free,true);
+        }
         if(limitedEdits){
             const auto free=WritableFreeBytes(*source,*expected);
             source->Flush();

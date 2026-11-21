@@ -5,6 +5,7 @@
 
 namespace Storage {class Job;}
 namespace Apfs {
+class VolumeCipher;
 struct Container {
     uint64_t offset, blockCount, transaction, objectMap;
     uint32_t blockSize;
@@ -13,6 +14,7 @@ struct Container {
     uint64_t checkpointBlock=0;
     uint64_t keybagBlock=0,keybagBlocks=0;
     uint64_t writeVolume=0;
+    std::shared_ptr<const VolumeCipher> writeCipher;
 };
 
 // Locate an APFS container and validate its latest complete contiguous checkpoint.

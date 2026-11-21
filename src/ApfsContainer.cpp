@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ApfsContainer.h"
 #include "ApfsCatalogWrite.h"
+#include "ApfsCrypto.h"
 #include "DiskPartitions.h"
 #include "HfsPlusDisk.h"
 #include "StorageWorker.h"
@@ -274,10 +275,13 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
     if(job.cancelled())throw Storage::Cancelled();
     Check(source.Writable(),"An exclusive writable APFS image is required");
     source.CheckMedia();
-    const auto current=Probe(source);
+    auto current=Probe(source);
     Check(current&&current->uuid==expected.uuid&&current->transaction==expected.transaction&&
           current->checkpointBlock==expected.checkpointBlock,"The APFS checkpoint changed");
-    Check(!current->offset&&current->checkpointBlock&&!current->keybagBlock&&!current->keybagBlocks&&
+    current->writeCipher=expected.writeCipher;
+    const bool crypto=current->writeCipher&&current->volumes.size()==1&&current->keybagBlock&&current->keybagBlocks;
+    Check(!current->offset&&current->checkpointBlock&&
+          (crypto||(!current->keybagBlock&&!current->keybagBlocks))&&
           (current->volumes.size()==1||(mutation&&expected.writeVolume))&&
           source.Size()==current->blockCount*current->blockSize,
           "Checkpoint writes require a selected APFS volume and a contiguous checkpoint ring");
@@ -304,6 +308,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
                 const auto size=size_t((std::min)(uint64_t(plan.blockSize),stream.size-offset));
                 std::fill(buffer.begin()+size,buffer.end(),0);
                 data.Read(offset,buffer.data(),size);
+                if(crypto)current->writeCipher->Encrypt((run.block+i)*(plan.blockSize/512),buffer.data(),buffer.size());
                 write(run.block+i,buffer.data());
                 offset+=size;
             }
