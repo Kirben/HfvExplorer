@@ -3185,6 +3185,8 @@ int RunApfsContainerTest(const char* directory)
             }
             constexpr uint64_t editedTime=3730000123,createdTime=3700000456;
             const auto publishedPath=VolumeCoord::Wide(root+"apfs-macos-compressed-rename.img");
+            const HfsPlus::Attributes linkAttributes{{u"user.inline",Bytes(11,0x33)},
+                                                      {u"user.streamed",Bytes(4301,0x5a)}};
             {
                 auto output=CreateFormatOutput(publishedPath.c_str(),image.size());
                 output->Write(0,image.data(),image.size());
@@ -3249,13 +3251,26 @@ int RunApfsContainerTest(const char* directory)
                     Apfs::SetExternalCatalogProperties(*output,checkpoint,2,u"link.txt",
                         {createdTime+1,editedTime+1},job);
                 }
+                constexpr uint64_t symlinkInode=425; // Inode of link.txt in the macOS fixture.
+                {
+                    const auto checkpoint=openCurrent();
+                    CheckpointFaultImage interrupted(Disk::Read(*output,0,size_t(output->Size())));
+                    Storage::Job cancelAttributes;
+                    interrupted.onFlush=[&]{cancelAttributes.cancel();};
+                    bool cancelled=false;
+                    try{Apfs::SetCatalogAttributes(interrupted,checkpoint,2,symlinkInode,linkAttributes,cancelAttributes,true);}
+                    catch(const Storage::Cancelled&){cancelled=true;}
+                    const auto retained=Apfs::Probe(interrupted);
+                    Check(cancelled&&retained&&retained->transaction==checkpoint.transaction,
+                          "Cancelled APFS symbolic-link attribute edit published a checkpoint");
+                    Apfs::SetCatalogAttributes(*output,checkpoint,2,symlinkInode,linkAttributes,job,true);
+                }
                 Apfs::RenameExternalCatalogEntry(*output,openCurrent(),2,u"link.txt",u"Renamed symbolic link",job);
                 {
                     const auto checkpoint=openCurrent();
                     CheckpointFaultImage interruptedLink(Disk::Read(*output,0,size_t(output->Size())));
                     Storage::Job cancelLink;
                     interruptedLink.onFlush=[&]{cancelLink.cancel();};
-                    constexpr uint64_t symlinkInode=425; // Inode of link.txt in the macOS fixture.
                     bool cancelled=false;
                     try{
                         Apfs::ReplaceCatalogSymlink(interruptedLink,checkpoint,2,symlinkInode,
@@ -4098,6 +4113,15 @@ int RunApfsContainerTest(const char* directory)
             MacBrowser::Entry originalTarget;
             Check(published->FindChild(2,u"x",originalTarget)&&originalTarget.created==createdTime,
                   "APFS symbolic-link timestamp edits changed the target inode");
+            const auto originalTargetAttributes=published->GetAttributes(originalTarget.id);
+            Check(published->GetAttributes(renamedLink.id)==linkAttributes,
+                  "APFS symbolic-link attributes did not survive reopening");
+            published->SetAttributes(renamedLink.id,{});
+            Check(published->GetAttributes(renamedLink.id).empty()&&
+                  published->GetAttributes(originalTarget.id)==originalTargetAttributes&&
+                  published->SymbolicLinkTarget(renamedLink.id)==authentic->SymbolicLinkTarget(symlink.id),
+                  "Removing APFS symbolic-link attributes changed the link target");
+            fprintf(report,"PASS: macOS APFS symbolic-link inline and streamed attribute edits, cancellation, and preservation of the link target.\n");
             symlinkToCopy.name=renamedLink.name;
             importSource->PutSymbolicLink(2,symlinkToCopy,dangling,createLink);
             Check(importSource->FindChild(2,symlinkToCopy.name,sourceLink),"Missing APFS replacement link");

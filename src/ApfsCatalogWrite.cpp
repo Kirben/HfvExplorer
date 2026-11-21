@@ -1755,7 +1755,8 @@ void ReplaceExternalAttributes(std::vector<OwnedRecord>& catalog,uint64_t parent
     auto& value=inode->value;
     const auto kind=(Le16(value.data()+80)&0170000)>>12;
     const auto flags=Le32(value.data()+68);
-    Check((kind==8||(kind==4&&!resource))&&!(flags&(UserImmutable|SystemImmutable))&&
+    const bool symlink=kind==uint16_t(CatalogKind::SymbolicLink);
+    Check((kind==8||((kind==4||symlink)&&!resource))&&!(flags&(UserImmutable|SystemImmutable))&&
           (!resource||!(flags&BsdCompressed)),
           "The APFS entry is locked or does not support this attribute edit");
     Check(std::any_of(catalog.begin(),catalog.end(),[&](const auto& record){
@@ -1774,8 +1775,14 @@ void ReplaceExternalAttributes(std::vector<OwnedRecord>& catalog,uint64_t parent
               "Invalid APFS resource fork attribute");
         const std::string_view name(reinterpret_cast<const char*>(after->key.data()+10),after->key.size()-11);
         const auto storage=Le16(old.data());
+        if(name==SymlinkAttribute){
+            Check(symlink&&names.insert(name).second&&storage==6&&old.size()>5&&!old.back(),
+                  "Invalid APFS symbolic-link target record");
+            attributes.push_back(*after);
+            continue;
+        }
         Check(names.insert(name).second&&(!resource||name!=CompressionAttribute)&&
-              name!=SymlinkAttribute&&(storage==2||(storage==1&&old.size()==52)),
+              (storage==2||(storage==1&&old.size()==52)),
               "Unsupported APFS attribute record");
         const bool replace=(resource&&name==ResourceAttribute)||(ordinary&&OrdinaryAttribute(name));
         if(storage==1){
@@ -1785,6 +1792,7 @@ void ReplaceExternalAttributes(std::vector<OwnedRecord>& catalog,uint64_t parent
         }
         if(!replace)attributes.push_back(*after);
     }
+    Check(!symlink||names.count(SymlinkAttribute),"Missing APFS symbolic-link target");
     CollectExternalRetiredExtents(catalog,id,removeStreams,extentTree,retired);
     if(ordinary)SetSecurityFlag(value,*ordinary);
     if(resource){
