@@ -108,7 +108,7 @@ int RunCdBurnTest(const char* directory){
         !storageUiTest.disabledDuring&&owner.IsWindowEnabled()&&load(path)==bytes,
         "modeless burn failed to finalize, verify, report completion or preserve its input");
   SendMessage(progress,WM_CLOSE,0,0);
-  COptionsSheet options("Options",nullptr,99);check(options.GetPageCount()==9&&options.m_last_active_page==8,"HPBurner page removed and remembered tab index clamped");
+  COptionsSheet options("Options",nullptr,99);check(options.GetPageCount()==3&&options.m_last_active_page==2,"HPBurner page removed and remembered tab index clamped");
   check(FindResourceA(AfxGetResourceHandle(),MAKEINTRESOURCEA(167),RT_DIALOG)==nullptr,"HPBurner tab resource removed");
   owner.DestroyWindow();AfxGetApp()->m_pMainWnd=nullptr;
   fprintf(report,"PASS: read-only preflight, blank/support/capacity guards, exact source stream and source locking, revalidation, verification configuration/failure, cancellation before/during recording, progress and pre-close owner restoration, completed preflight UI lifecycle, HPBurner tab removal and page bounds; all recorder operations simulated.\n");

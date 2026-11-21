@@ -93,6 +93,7 @@ class JobDialog : public CDialog {
  std::function<void()> cancelled_;
  std::function<void(uint64_t,Storage::ConflictChoice)> resolve_;
  std::function<void(const char*)> failed_;
+ std::wstring imageDestination_;
  CString title_;bool hidden_,waiting_=true,keepWindow_=false,storageOnly_=false,cancellable_=false;
  ITaskbarList3* taskbar_=nullptr;bool uninitialize_=false;uint64_t taskbarDone_=0,taskbarTotal_=0;
  HWND owner_;
@@ -128,33 +129,60 @@ class JobDialog : public CDialog {
   if(progress.fileCopy&&!progress.totalFiles)status.Format("Elapsed: %lu seconds",(GetTickCount()-started_)/1000);
   if(!progress.fileCopy)status.Format("Elapsed: %lu seconds",(GetTickCount()-started_)/1000);
   if(!progress.detail.empty()){status=progress.detail.c_str();CString elapsed;elapsed.Format("; %lu seconds",(GetTickCount()-started_)/1000);status+=elapsed;}
-  if(progress.byteTransfer&&progress.totalBytes)status.Format("%.2f / %.2f MiB; %u%%; %lu seconds",double(progress.processed)/(1024*1024),double(progress.totalBytes)/(1024*1024),unsigned(min(progress.processed,progress.totalBytes)*100/progress.totalBytes),(GetTickCount()-started_)/1000);
-  CString path=progress.path.c_str();
-  if(progress.fileTotal){CString percent;percent.Format(" (%u%%)",unsigned(min(progress.fileBytes,progress.fileTotal)*100/progress.fileTotal));path+=percent;}
+  if(progress.byteTransfer&&progress.totalBytes)status.Format("%.2f / %.2f MiB; %lu seconds",double(progress.processed)/(1024*1024),double(progress.totalBytes)/(1024*1024),(GetTickCount()-started_)/1000);
+  if(!imageDestination_.empty()&&progress.fileTotal&&!progress.path.empty())status=progress.path.c_str()+CString(" - ")+status;
   CString old;
-  if(progress.utf8){BrowserPresentation::UnicodeControl(m_hWnd,IDC_CP_FILE,L"STATIC");auto wide=BrowserPresentation::FromUtf8(progress.path);if(BrowserPresentation::Text(::GetDlgItem(m_hWnd,IDC_CP_FILE))!=wide)SetDlgItemTextW(m_hWnd,IDC_CP_FILE,wide.c_str());}
-  else{GetDlgItemText(IDC_CP_FILE,old);if(old!=path)SetDlgItemText(IDC_CP_FILE,path);}
+  if(imageDestination_.empty()){
+   if(progress.utf8){BrowserPresentation::UnicodeControl(m_hWnd,IDC_CP_FILE,L"STATIC");auto path=BrowserPresentation::FromUtf8(progress.path);if(BrowserPresentation::Text(::GetDlgItem(m_hWnd,IDC_CP_FILE))!=path)SetDlgItemTextW(m_hWnd,IDC_CP_FILE,path.c_str());}
+   else{GetDlgItemText(IDC_CP_FILE,old);if(old!=progress.path.c_str())SetDlgItemText(IDC_CP_FILE,progress.path.c_str());}
+  }
   GetDlgItemText(IDC_CP_STATUS,old);if(old!=status)SetDlgItemText(IDC_CP_STATUS,status);
   GetDlgItemText(IDC_CP_PHASE,old);if(old!=progress.phase.c_str())SetDlgItemText(IDC_CP_PHASE,progress.phase.c_str());
-  bool waiting=mutation_||progress.scanning || (!progress.totalBytes&&!progress.totalFiles);
+  bool waiting=(mutation_&&imageDestination_.empty())||progress.scanning || (!progress.totalBytes&&!progress.totalFiles);
   CProgressCtrl* overall=(CProgressCtrl*)GetDlgItem(IDC_CP_BAR);
   if(waiting!=waiting_){
    if(waiting){overall->ModifyStyle(0,PBS_MARQUEE);overall->SendMessage(PBM_SETMARQUEE,TRUE,40);}
    else{overall->SendMessage(PBM_SETMARQUEE,FALSE,0);overall->ModifyStyle(PBS_MARQUEE,0);overall->SetRange32(0,1000);}
    waiting_=waiting;
   }
-  if(waiting)state(TBPF_INDETERMINATE);
+  if(waiting){SetPercent(IDC_CP_PERCENT,-1);state(TBPF_INDETERMINATE);}
   else{
    auto total=progress.totalBytes?progress.totalBytes:progress.totalFiles;
    auto value=progress.totalBytes?progress.processed:progress.files+progress.skipped;
-   value=min(value,total);int position=int(value*1000/total);if(overall->GetPos()!=position)overall->SetPos(position);taskbarDone_=value;taskbarTotal_=total;state(TBPF_NORMAL);
+   value=min(value,total);int position=ProgressPosition(value,total);if(overall->GetPos()!=position)overall->SetPos(position);SetPercent(IDC_CP_PERCENT,position/10);taskbarDone_=value;taskbarTotal_=total;state(TBPF_NORMAL);
   }
   auto file=(CProgressCtrl*)GetDlgItem(IDC_CP_FILE_BAR);
-  int position=progress.fileTotal?int(min(progress.fileBytes,progress.fileTotal)*1000/progress.fileTotal):0;
-  if(file&&file->GetPos()!=position)file->SetPos(position);
+  if(file){
+   const int position=ProgressPosition(progress.fileBytes,progress.fileTotal);
+   if(file->GetPos()!=position)file->SetPos(position);
+   SetPercent(IDC_CP_FILE_PERCENT,progress.fileTotal?position/10:-1);
+  }
+ }
+ static int ProgressPosition(uint64_t done,uint64_t total) {
+  if(!total)return 0;
+  if(done>=total)return 1000;
+  return min(999,int(double(done)*1000/total));
+ }
+ void SetPercent(int id,int value) {
+  CString text,old;
+  if(value>=0)text.Format("%d%%",value);
+  GetDlgItemText(id,old);
+  if(old!=text)SetDlgItemText(id,text);
+#ifdef HFV_TESTING
+  if(hidden_){
+   if(id==IDC_CP_PERCENT)storageUiTest.overallPercent=value;
+   if(id==IDC_CP_FILE_PERCENT)storageUiTest.filePercent=value;
+  }
+#endif
+ }
+ void ResultDetails(const std::string& detail) {
+  if(GetDlgItem(IDC_CP_PATH_LABEL))SetDlgItemText(IDC_CP_PATH_LABEL,"Details");
+  BrowserPresentation::UnicodeControl(m_hWnd,IDC_CP_FILE,L"STATIC");
+  SetDlgItemTextW(m_hWnd,IDC_CP_FILE,BrowserPresentation::FromUtf8(detail).c_str());
  }
  DWORD started_=GetTickCount();
 public:
+ void ImageDestination(const std::wstring& path){imageDestination_=path;}
  void SuccessMessage(const char* message){if(message)successMessage_=message;}
  void Operation(const char* operation){operation_=operation;mutation_=operation_!="Copy"&&operation_!="Resource import";}
  void DismissOnCompletion(){dismissOnCompletion_=true;}
@@ -196,9 +224,16 @@ public:
 #endif
   DialogClose::SetKind(m_hWnd,cancellable_?DialogClose::Kind::Copy:DialogClose::Kind::Dialog);
   auto menu=GetSystemMenu(FALSE);if(menu)menu->EnableMenuItem(SC_CLOSE,MF_BYCOMMAND|((modeless_||cancellable_)?MF_ENABLED:MF_GRAYED));
-  if(modeless_){
-   for(HWND child=::GetWindow(m_hWnd,GW_CHILD);child;child=::GetWindow(child,GW_HWNDNEXT)){
-    char text[128]{};::GetWindowTextA(child,text,ARRAYSIZE(text));if(!strcmp(text,"Please wait until the operation finishes."))::SetWindowTextA(child,mutation_?"You can keep browsing while this operation runs.":"You can keep browsing while files are copied.");
+  if(modeless_&&GetDlgItem(IDC_CP_HINT))
+   SetDlgItemText(IDC_CP_HINT,mutation_?"You can keep browsing while this operation runs.":"You can keep browsing while files are copied.");
+  if(GetDlgItem(IDC_CP_PATH_LABEL)){
+   if(imageDestination_.empty()){
+    SetDlgItemText(IDC_CP_PATH_LABEL,"Current item");
+    SetDlgItemText(IDC_CP_IMAGE_LABEL,"Progress");
+   }
+   else{
+    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CP_FILE,L"STATIC");
+    SetDlgItemTextW(m_hWnd,IDC_CP_FILE,imageDestination_.c_str());
    }
   }
   if(!storageOnly_)GetDlgItem(IDC_CP_BAR)->SendMessage(PBM_SETMARQUEE,TRUE,40);
@@ -257,7 +292,7 @@ public:
      Storage::Result result=job_->result();
      try{result=finished_();}catch(CException* error){char text[512]{};error->GetErrorMessage(text,ARRAYSIZE(text));displayError=text[0]?text:"MFC completion error";error->Delete();}catch(const std::exception& error){displayError=error.what();if(displayError.empty())displayError="Completion callback failed";}catch(...){displayError="Unknown completion error";}
      if(!GetSafeHwnd()||!IsWindow(m_hWnd))return 0;
-     if(!displayError.empty()){auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());auto detail=BrowserPresentation::FromUtf8(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,detail.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
+     if(!displayError.empty()){auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());ResultDetails(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
      if(dismissOnCompletion_||(result.outcome==Storage::Outcome::Succeeded&&successMessage_.empty())){DestroyWindow();return 0;}
      const bool succeeded=result.outcome==Storage::Outcome::Succeeded;
      const char* ending=succeeded?" completed":result.outcome==Storage::Outcome::Cancelled ? " cancelled" :
@@ -274,7 +309,7 @@ public:
      case Storage::Rollback::Unverified: append("The final storage state could not be verified."); break;
      default: break;
      }
-     auto text=BrowserPresentation::FromUtf8(detail);SetDlgItemTextW(m_hWnd,IDC_CP_FILE,text.c_str());SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
+     ResultDetails(detail);SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;
     }
     KillTimer(1);if(keepWindow_)EndModalLoop(IDOK);else{state(TBPF_NOPROGRESS);PrepareToClose();EndDialog(IDOK);}}
    return 0;
@@ -494,7 +529,7 @@ struct Batch {
  }
 };
 std::vector<std::unique_ptr<Batch>> batches;
-bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancellable,const char* title,const char* operation,const char* successMessage=nullptr){
+bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancellable,const char* title,const char* operation,const char* successMessage=nullptr,const std::wstring& imageDestination={}){
  batches.erase(std::remove_if(batches.begin(),batches.end(),[](const std::unique_ptr<Batch>& b){return b->controller.Finished()&&!b->dialog->GetSafeHwnd()&&!b->dialog->Dispatching();}),batches.end());
  auto ptr=batch.get();
  ++active;
@@ -507,12 +542,13 @@ bool StartBatch(std::unique_ptr<Batch> batch,CWnd* owner,bool single,bool cancel
   batch->dialog.reset(new JobDialog(std::make_shared<Storage::Job>(),title,hidden,CWnd::GetDesktopWindow(),false,false,single,cancellable,true));
   batch->dialog->Operation(operation);
   batch->dialog->SuccessMessage(successMessage);
+  batch->dialog->ImageDestination(imageDestination);
   batch->dialog->ProgressOwner(owner?owner->GetSafeHwnd():nullptr);
   batch->dialog->Background([ptr]{return ptr->Advance();},[ptr]{return ptr->Finish();},
    [ptr]{ptr->Cancel();},
    [ptr](uint64_t id, Storage::ConflictChoice choice){ptr->controller.Resolve(id,choice);},
    [ptr](const char* message){ptr->controller.Fail(message);});
-  if(!batch->dialog->Create(single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background operation progress");
+  if(!batch->dialog->Create(!imageDestination.empty()?IDD_CD_IMAGE_PROGRESS:single?IDD_COPY_SINGLE_PROGRESS:IDD_COPY_PROGRESS,CWnd::GetDesktopWindow()))throw std::runtime_error("Cannot create background operation progress");
   NativeDpi::CenterPopup(batch->dialog->GetSafeHwnd(),owner?owner->GetSafeHwnd():nullptr);
   batch->hidden=hidden;batch->dialog->Planning();batch->Advance();
   batches.push_back(std::move(batch));return true;
@@ -545,7 +581,7 @@ bool StartStorage(JobController::Work work,CWnd* owner,const char* title,
 bool StartStorageResult(JobController::Work work,CWnd* owner,const char* title,
                         const char* operation,StorageCompletion completed,StorageJobOptions options){
  return StartBatch(std::make_unique<Batch>(std::move(work),std::move(completed)),
-                   owner,true,options.cancellable,title,operation,options.successMessage);
+                   owner,true,options.cancellable,title,operation,options.successMessage,options.imageDestination);
 }
 void TransferOwner(HWND closing,HWND replacement){
  for(auto& batch:batches)if(batch->dialog->ProgressOwner()==closing)batch->dialog->ProgressOwner(replacement);

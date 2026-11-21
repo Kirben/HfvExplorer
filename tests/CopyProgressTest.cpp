@@ -393,13 +393,26 @@ int RunCopyProgressTest(const char* directory) {
   {
    CDynCopyModeSelect dialog;dialog.m_outcopy=1;dialog.m_copy_mode=7;
    check(dialog.Create(IDD_DYNAMIC_COPYMODE_SELECT,&owner)!=FALSE,"create copy mode dialog");
-   check(dialog.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCOUNT)==7 && dialog.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCURSEL)==6,"BinHex 5 dynamic selection mapping");
+   check(dialog.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCOUNT)==8 && dialog.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCURSEL)==6,"BinHex 5 dynamic selection mapping");
    check(dialog.UpdateData(TRUE)&&dialog.m_copy_mode==7,"BinHex 5 saved mode mapping");dialog.DestroyWindow();
    COptionsPage2 options;options.m_copyout_mode=7;options.m_copyin_mode=7;
    check(options.Create(IDD_OPTIONS_PAGE_2,&owner)!=FALSE,"create transfer options");
-   check(options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCOUNT)==8&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCOUNT)==8&&options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCURSEL)==7&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCURSEL)==7,"persistent BinHex 5 choices preserve ask index");
+   check(options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCOUNT)==9&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCOUNT)==9&&options.SendDlgItemMessage(IDC_COPYOUT_MODE,CB_GETCURSEL)==7&&options.SendDlgItemMessage(IDC_COPYIN_MODE,CB_GETCURSEL)==7,"persistent BinHex 5 choices preserve ask index");
    options.DestroyWindow();HFSIFACE_set_modeout(7);check(HFSIFACE_copy_mode()=='5',"BinHex 5 mode dispatch");HFSIFACE_set_modeout(0);
   }
+  for(const bool single:{false,true}){
+   storageUiTest={};
+   const auto percentage=ShowStorageJob([](Storage::Job& job){
+    Storage::Progress progress;progress.phase="Copying";progress.scanning=false;
+    progress.totalBytes=100;progress.processed=42;progress.fileTotal=100;progress.fileBytes=66;
+    job.progress(progress);
+    return Storage::Result{};
+   },"Hidden percentage layout",true,single);
+   check(percentage.code==0&&storageUiTest.overallPercent==42&&
+         storageUiTest.filePercent==(single?-1:66)&&storageUiTest.copyBarCount==(single?1u:2u),
+         "progress percentages match single-file and folder bars");
+  }
+  storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;
   auto uiCopy=ShowStorageJob(TransferFixture::Work((LPCSTR)image,"CopyTest:Folder",(LPCSTR)root,(LPCSTR)root,1,0,'a'),"Hidden copy integration",true);
   check(uiCopy.code==0 && storageUiTest.disabledDuring && storageUiTest.enabledAfter && storageUiTest.dialogClosed && owner.IsWindowEnabled()&&storageUiTest.copyBarCount==2,"folder copy retains both bars and restores main window");
   storageUiTest={};storageUiTest.answer=Storage::ConflictChoice::Skip;

@@ -10,6 +10,8 @@
 #include <map>
 #include "StorageJobDialog.h"
 #include "BackgroundCopies.h"
+#include "BrowserPresentation.h"
+#include "resource.h"
 #include <vector>
 #include <stdio.h>
 #include <stdexcept>
@@ -85,13 +87,35 @@ int RunCdImageTest(const char* directory){
   storageUiTest={};storageUiTest.cancelOnTimer=true;auto uiCancelSource=std::make_shared<FakeCdImage>();uiCancelSource->delay=100;
   auto uiCancel=ShowStorageJob(MakeCdImageJob(3,root+"\\ui-cancel.iso",uiCancelSource),"Hidden cancel CD image",true,true,true);
   check(uiCancel.error==ERROR_CANCELLED&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled()&&GetFileAttributesA((root+"\\ui-cancel.iso").c_str())==INVALID_FILE_ATTRIBUTES,"Cancel button cancels between reads, removes partial image and restores owner");noTemporary(root);
+  storageUiTest={};
+  const auto imagePath=root+"\\background-progress.iso";
+  check(BackgroundCopies::StartStorage([](Storage::Job& job){
+   Storage::Progress progress;progress.phase="Saving CD image";progress.scanning=false;
+   progress.totalBytes=100;progress.processed=42;progress.byteTransfer=true;
+   job.progress(progress);
+   return Storage::Result{};
+  },&owner,"Hidden CD percentage","CD image dump",{},{true,nullptr,VolumeCoord::Wide(imagePath)}),
+        "start modeless CD percentage check");
+  const auto percentageStarted=GetTickCount();
+  while(BackgroundCopies::Active()&&GetTickCount()-percentageStarted<5000){
+   MSG message{};
+   while(PeekMessage(&message,nullptr,0,0,PM_REMOVE)){if(message.message!=WM_QUIT)DispatchMessage(&message);}
+   Sleep(1);
+  }
+  check(!BackgroundCopies::Active()&&storageUiTest.overallPercent==42,
+        "modeless CD dump displays determinate image percentage");
   storageUiTest={};storageUiTest.cancelOnTimer=true;
   auto background=std::make_shared<FakeCdImage>();background->delay=100;
   const auto backgroundPath=root+"\\background-cancel.iso";
+  const auto shownDestination=VolumeCoord::Wide(backgroundPath);
   check(BackgroundCopies::StartStorage(MakeCdImageJob(3,backgroundPath,background),&owner,
-       "Hidden background image","CD image dump",{},{true}),"start modeless CD dump");
+       "Hidden background image","CD image dump",{},{true,nullptr,shownDestination}),"start modeless CD dump");
   check(BackgroundCopies::Active()&&owner.IsWindowEnabled(),"CD dump disabled its browser");
   const auto progress=BackgroundCopies::DialogWindow();
+  check(BrowserPresentation::Text(GetDlgItem(progress,IDC_CP_PATH_LABEL))==L"Destination"&&
+        BrowserPresentation::Text(GetDlgItem(progress,IDC_CP_FILE))==shownDestination&&
+        GetDlgItem(progress,IDC_CP_PERCENT)&&!GetDlgItem(progress,IDC_CP_FILE_BAR),
+        "modeless CD dump uses labeled destination and one percentage bar");
   const auto started=GetTickCount();
   while(BackgroundCopies::Active()&&GetTickCount()-started<5000){
    MSG message{};

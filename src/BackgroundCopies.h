@@ -7,6 +7,7 @@ bool Start(std::vector<FileOperations::Request>,CWnd* owner,bool singleFile,std:
 struct StorageJobOptions {
  bool cancellable=false;
  const char* successMessage=nullptr;
+ std::wstring imageDestination;
 };
 bool StartStorage(std::function<Storage::Result(Storage::Job&)>,CWnd* owner,const char* title,
                   const char* operation,std::function<void(bool)> completed={},StorageJobOptions options={});

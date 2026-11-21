@@ -146,8 +146,9 @@ void ShowCdImageDialog(CWnd* owner) {
    }
   }
   if(selection.empty()){AfxMessageBox("The disc has no tracks for the selected format.");return;}
+  const auto destination=options.output;
   BackgroundCopies::StartStorage(SaveRawCd(options.drive,std::move(options.output),{format,std::move(selection),*generation},source),
-     owner,format==RawOutput::WaveTracks?"Extracting CD audio":"Saving raw CD image","Optical extraction",{},{true});
+     owner,format==RawOutput::WaveTracks?"Extracting CD audio":"Saving raw CD image","Optical extraction",{},{true,nullptr,destination});
   return;
  }
  auto source=MakeNativeCdImageSource();
@@ -163,7 +164,7 @@ void ShowCdImageDialog(CWnd* owner) {
  }
  output.pop_back();
  BackgroundCopies::StartStorage(MakeCdImageJob(options.drive,std::move(output),source,selection),
-     owner,"Saving CD image","CD image dump",{},{true});
+     owner,"Saving CD image","CD image dump",{},{true,nullptr,options.output});
 }
 
 #ifdef HFV_TESTING
