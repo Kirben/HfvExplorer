@@ -9,6 +9,7 @@
 #include "MetadataDialogs.h"
 #include "DynCopyModeSelect.h"
 #include "FileTypeMapping.h"
+#include "OptionsSheet.h"
 #include "MacBrowserModel.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -388,6 +389,80 @@ int RunHfsPlusUiTest(const char *directory) {
                 "Hidden owner creation");
         AfxGetApp()->m_pMainWnd = &owner;
         InitializeStorageUi();
+        {
+            COptionsSheet options("HFVExplorer Options", &owner, 1);
+            auto& copying = options.m_Page2;
+            copying.m_copyout_mode = 0;
+            copying.m_copyin_mode = 1;
+            copying.m_copyin_appledouble = TRUE;
+            require(options.Create(&owner, WS_POPUP | WS_CAPTION | WS_SYSMENU) != FALSE,
+                    "Create hidden Options sheet");
+            const auto outCount = copying.SendDlgItemMessage(IDC_COPYOUT_MODE, CB_GETCOUNT);
+            const auto inCount = copying.SendDlgItemMessage(IDC_COPYIN_MODE, CB_GETCOUNT);
+            require(options.GetActivePage() == &copying && outCount >= 2 && inCount >= 2 &&
+                    copying.SendDlgItemMessage(IDC_COPYOUT_MODE, CB_GETCURSEL) == 0 &&
+                    copying.SendDlgItemMessage(IDC_COPYIN_MODE, CB_GETCURSEL) == 1 &&
+                    copying.IsDlgButtonChecked(IDC_COPYIN_APPLEDOUBLE) == BST_CHECKED &&
+                    Text(copying.m_hWnd, IDC_COPY_MAP) == L"File &Type Mappings...",
+                    "Copying files settings or mappings button changed");
+            copying.SendDlgItemMessage(IDC_COPYOUT_MODE, CB_SETCURSEL, outCount - 1);
+            copying.SendDlgItemMessage(IDC_COPYIN_MODE, CB_SETCURSEL, inCount - 2);
+            copying.CheckDlgButton(IDC_COPYIN_APPLEDOUBLE, BST_UNCHECKED);
+            require(copying.UpdateData(TRUE) && copying.m_copyout_mode == outCount - 1 &&
+                    copying.m_copyin_mode == inCount - 2 && !copying.m_copyin_appledouble,
+                    "Copying files selections did not round-trip");
+
+            auto& general = options.m_Page1;
+            general.m_dosicons = 0;
+            general.m_fat_icon_time_limit = 17;
+            general.m_font = "Segoe UI";
+            general.m_psize = "12";
+            require(options.SetActivePage(&general) != FALSE, "Open Options General page");
+            require(Text(general.m_hWnd, IDC_FAT_ICON_TIME_LIMIT) == L"17" &&
+                    Text(general.m_hWnd, IDC_FONT) == L"Segoe UI" &&
+                    Text(general.m_hWnd, IDC_PSIZE) == L"12" &&
+                    general.SendDlgItemMessage(IDC_DOSICONS, CB_GETCURSEL) == 0,
+                    "General icon and font settings changed");
+            for (const int id : {IDC_OPTIONS_MOUNT_ALL, IDC_OPTIONS_STARTUP_FLOPPIES,
+                                IDC_OPTIONS_STARTUP_CDS, IDC_OPTIONS_STARTUP_HDS, IDC_OPTIONS_IS_FONT_SJIS})
+                general.CheckDlgButton(id, BST_CHECKED);
+            general.SetDlgItemText(IDC_FAT_ICON_TIME_LIMIT, "23");
+            general.SetDlgItemText(IDC_FONT, "Tahoma");
+            general.SetDlgItemText(IDC_PSIZE, "10");
+            require(general.UpdateData(TRUE) && general.m_mountall && general.m_startup_floppies &&
+                    general.m_startup_cds && general.m_startup_hds && general.m_is_font_sjis &&
+                    general.m_dosicons == 0 && general.m_fat_icon_time_limit == 23 &&
+                    general.m_font == "Tahoma" && general.m_psize == "10",
+                    "General settings did not round-trip");
+            options.DestroyWindow();
+        }
+        {
+            CDialog conflict(IDD_COPY_CONFLICT, &owner);
+            require(conflict.Create(IDD_COPY_CONFLICT, &owner) != FALSE, "Create overwrite prompt");
+            BrowserPresentation::UnicodeControl(conflict.m_hWnd, IDC_CONFLICT_PATH, L"STATIC");
+            const HWND path = ::GetDlgItem(conflict.m_hWnd, IDC_CONFLICT_PATH);
+            const LONG_PTR pathStyle = GetWindowLongPtr(path, GWL_STYLE);
+            SetWindowTextW(path, L"Macintosh:Research & Data:\u65e5\u672c.txt");
+            require((pathStyle & (SS_SUNKEN | SS_PATHELLIPSIS | SS_NOPREFIX)) ==
+                        (SS_SUNKEN | SS_PATHELLIPSIS | SS_NOPREFIX) &&
+                    Text(conflict.m_hWnd, IDC_CONFLICT_PATH) == L"Macintosh:Research & Data:\u65e5\u672c.txt",
+                    "Overwrite destination field style or Unicode path changed");
+            require(Text(conflict.m_hWnd, IDC_REPLACE) == L"&Replace" &&
+                    Text(conflict.m_hWnd, IDC_REPLACE_ALL) == L"Replace &all" &&
+                    Text(conflict.m_hWnd, IDC_SKIP) == L"&Skip" &&
+                    Text(conflict.m_hWnd, IDC_COPY_CANCEL) == L"Cancel" &&
+                    LOWORD(conflict.SendMessage(DM_GETDEFID)) == IDC_REPLACE,
+                    "Overwrite choices or default changed");
+            CRect pathRect, replaceRect, cancelRect;
+            conflict.GetDlgItem(IDC_CONFLICT_PATH)->GetWindowRect(&pathRect);
+            conflict.GetDlgItem(IDC_REPLACE)->GetWindowRect(&replaceRect);
+            conflict.GetDlgItem(IDC_COPY_CANCEL)->GetWindowRect(&cancelRect);
+            require(pathRect.bottom < replaceRect.top && replaceRect.left < cancelRect.left &&
+                    replaceRect.top == cancelRect.top && pathRect.right == cancelRect.right,
+                    "Overwrite prompt path and footer are misaligned");
+            conflict.DestroyWindow();
+        }
+        fprintf(report, "PASS: Copying files and General settings round-trip, overwrite path and all four choices.\n");
         NameDialog name(&owner);
         name.value = L"\x65e5\x672c \x03b1";
         require(name.Create(IDD_HPLUS_NAME, &owner) != FALSE, "Name dialog creation");

@@ -221,57 +221,51 @@ END
 // Dialog
 //
 
-IDD_OPTIONS_PAGE_1 DIALOG DISCARDABLE  0, 0, 246, 194
+IDD_OPTIONS_PAGE_1 DIALOGEX 0, 0, 246, 194
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "General"
-FONT 8, "Tahoma"
+FONT 9, "Segoe UI"
 BEGIN
-    CONTROL         "Always mount all HFV volumes",IDC_OPTIONS_MOUNT_ALL,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,25,21,137,10
-    CONTROL         "Check for Mac floppies at startup",
-                    IDC_OPTIONS_STARTUP_FLOPPIES,"Button",BS_AUTOCHECKBOX | 
-                    WS_TABSTOP,25,38,122,10
-    CONTROL         "Check for Mac CD's at startup",IDC_OPTIONS_STARTUP_CDS,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,25,51,122,10
-    CONTROL         "Check for other Mac media at startup",
-                    IDC_OPTIONS_STARTUP_HDS,"Button",BS_AUTOCHECKBOX | 
-                    WS_TABSTOP,25,64,146,10
-    COMBOBOX        IDC_DOSICONS,26,92,72,49,CBS_DROPDOWNLIST | WS_VSCROLL | 
-                    WS_TABSTOP
-    EDITTEXT        IDC_FAT_ICON_TIME_LIMIT,118,92,41,14,ES_AUTOHSCROLL
-    LTEXT           "Show DOS icons:",IDC_STATIC,26,82,67,8
-    LTEXT           "Revert to ""No Icons"" after (secs):",IDC_STATIC,118,82,
-                    109,8
-    COMBOBOX        IDC_FONT,50,135,99,95,CBS_DROPDOWN | CBS_SORT | 
-                    WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Font:",IDC_STATIC,26,136,21,8
-    COMBOBOX        IDC_PSIZE,189,135,28,95,CBS_DROPDOWN | WS_VSCROLL | 
-                    WS_TABSTOP
-    LTEXT           "Size:",IDC_STATIC,166,136,19,8
-    CONTROL         "Font character set is SJIS (Japanese)",
-                    IDC_OPTIONS_IS_FONT_SJIS,"Button",BS_AUTOCHECKBOX | 
-                    WS_TABSTOP,25,160,147,10
+    LTEXT           "Startup and mounting",IDC_STATIC,12,9,222,11
+    CONTROL         "Always &mount all HFV volumes",IDC_OPTIONS_MOUNT_ALL,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,23,222,11
+    CONTROL         "Check for Mac &floppies at startup",IDC_OPTIONS_STARTUP_FLOPPIES,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,36,222,11
+    CONTROL         "Check for Mac &CDs at startup",IDC_OPTIONS_STARTUP_CDS,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,49,222,11
+    CONTROL         "Check for &other Mac media at startup",IDC_OPTIONS_STARTUP_HDS,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,62,222,11
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,80,222,1
+    LTEXT           "Windows file icons",IDC_STATIC,12,86,222,11
+    LTEXT           "Show Windows &icons",IDC_STATIC,12,101,100,10
+    COMBOBOX        IDC_DOSICONS,12,114,99,49,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Switch to No Icons after (&seconds)",IDC_STATIC,118,101,116,10
+    EDITTEXT        IDC_FAT_ICON_TIME_LIMIT,118,114,55,14,ES_AUTOHSCROLL
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,134,222,1
+    LTEXT           "Browser font",IDC_STATIC,12,140,222,11
+    LTEXT           "Fo&nt",IDC_STATIC,12,153,143,10
+    COMBOBOX        IDC_FONT,12,166,143,95,CBS_DROPDOWN | CBS_SORT | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Si&ze",IDC_STATIC,168,153,66,10
+    COMBOBOX        IDC_PSIZE,168,166,66,95,CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Use the &Japanese (Shift JIS) character set",IDC_OPTIONS_IS_FONT_SJIS,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,180,222,11
 END
 
-IDD_OPTIONS_PAGE_2 DIALOG DISCARDABLE  0, 0, 246, 196
+IDD_OPTIONS_PAGE_2 DIALOGEX 0, 0, 246, 196
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Copying files"
-FONT 8, "Tahoma"
+FONT 9, "Segoe UI"
 BEGIN
-    LTEXT           "File conversions when copying from HFS file system to DOS file systems:",
-                    IDC_STATIC,36,18,177,20
-    COMBOBOX        IDC_COPYOUT_MODE,35,40,126,105,CBS_DROPDOWNLIST | 
-                    WS_VSCROLL | WS_TABSTOP
-    LTEXT           "File conversions when copying from DOS file systems to HFS file system:",
-                    IDC_STATIC,36,71,180,20
-    COMBOBOX        IDC_COPYIN_MODE,35,93,126,105,CBS_DROPDOWNLIST | 
-                    WS_VSCROLL | WS_TABSTOP
-    CONTROL         " Check for AppleDouble",IDC_COPYIN_APPLEDOUBLE,"Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP,38,111,104,10
-    PUSHBUTTON      """Raw copy"" file type mappings...",IDC_COPY_MAP,62,160,
-                    122,14
-    LTEXT           "Mappings between HFS ""type""/""creator"" info and DOS file name extensions:",
-                    IDC_STATIC,36,138,180,20
+    LTEXT           "Default copy modes",IDC_STATIC,12,10,222,11
+    LTEXT           "&Mac to Windows",IDC_STATIC,12,27,222,10
+    COMBOBOX        IDC_COPYOUT_MODE,12,40,222,105,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "&Windows to Mac",IDC_STATIC,12,62,222,10
+    COMBOBOX        IDC_COPYIN_MODE,12,75,222,105,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Check for Apple&Double",IDC_COPYIN_APPLEDOUBLE,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,99,222,12
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,122,222,1
+    LTEXT           "Raw copy mappings",IDC_STATIC,12,132,222,11
+    PUSHBUTTON      "File &Type Mappings...",IDC_COPY_MAP,12,150,122,17
 END
 
 IDD_OPTIONS_PAGE_3 DIALOG DISCARDABLE  0, 0, 246, 166
@@ -1354,17 +1348,19 @@ BEGIN
  PUSHBUTTON "Cancel",IDCANCEL,270,104,70,18
 END
 
-IDD_COPY_CONFLICT DIALOGEX 0,0,360,90
+IDD_COPY_CONFLICT DIALOGEX 0,0,360,98
 STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "File already exists"
 FONT 9, "Segoe UI"
 BEGIN
  LTEXT "Replace the existing destination file?",IDC_STATIC,10,10,340,12
- LTEXT "",IDC_CONFLICT_PATH,10,28,340,20,SS_PATHELLIPSIS
- DEFPUSHBUTTON "Replace",IDC_REPLACE,10,62,76,18
- PUSHBUTTON "Replace all",IDC_REPLACE_ALL,94,62,76,18
- PUSHBUTTON "Skip",IDC_SKIP,178,62,76,18
- PUSHBUTTON "Cancel",IDC_COPY_CANCEL,262,62,88,18
+ LTEXT "Destination",IDC_STATIC,10,28,340,11
+ LTEXT "",IDC_CONFLICT_PATH,10,41,340,16,SS_PATHELLIPSIS | SS_SUNKEN | SS_CENTERIMAGE | SS_NOPREFIX
+ CONTROL "",IDC_STATIC,"Static",SS_ETCHEDHORZ,10,64,340,1
+ DEFPUSHBUTTON "&Replace",IDC_REPLACE,66,72,66,18
+ PUSHBUTTON "Replace &all",IDC_REPLACE_ALL,138,72,72,18
+ PUSHBUTTON "&Skip",IDC_SKIP,216,72,62,18
+ PUSHBUTTON "Cancel",IDC_COPY_CANCEL,284,72,66,18
 END
 
 IDD_STORAGE_WAIT DIALOGEX 0,0,220,50
