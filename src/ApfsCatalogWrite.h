@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
-#include "ApfsContainer.h"
+#include "ApfsAllocation.h"
 #include <variant>
 
 namespace Apfs {
-struct CheckpointBlockWrite {
-    uint64_t block;
-    HfsPlus::Bytes bytes;
-};
-using CheckpointObjectLookup=std::function<HfsPlus::Bytes&(uint64_t oid)>;
 enum class CatalogKind : uint16_t { Directory=4, RegularFile=8, SymbolicLink=10 };
 struct CatalogCreate {
     uint64_t parent;
@@ -95,9 +90,6 @@ struct CatalogVolumeRename { const std::u16string& name; };
 struct CatalogSnapshot { const std::u16string& name; bool create; };
 using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink,CatalogSnapshot,CatalogVolumeRename>;
 
-struct DataRun {
-    uint64_t block,count;
-};
 struct DataStreamWrite {
     HfsPlus::Source& input;
     uint64_t size;
@@ -121,7 +113,6 @@ uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);
 uint64_t InspectAllocationFreeBytes(HfsPlus::Source&,const Container&);
 uint64_t InspectFreeQueueAllocation(HfsPlus::Source&,const Container&,uint64_t selected=0);
 uint64_t VerifyFreeQueueAllocation(HfsPlus::Source&,const Container&,uint64_t,HfsPlus::Bytes&,const CheckpointObjectLookup&,uint64_t selected);
-uint64_t VerifyAllocationBitmaps(HfsPlus::Source&,const Container&,const HfsPlus::Bytes&);
 CatalogWritePlan PrepareCatalogMutation(
     HfsPlus::Source&,const Container&,uint64_t transaction,HfsPlus::Bytes& superblock,
     const CheckpointObjectLookup&,const CatalogMutation&,uint64_t selected);
