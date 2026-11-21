@@ -123,6 +123,7 @@ public:
     virtual bool BeginCopyTransaction() { return false; }
     virtual void FinishCopyTransaction(bool) {}
     virtual void WithCopyTransaction(const std::function<void(bool)>& work);
+    void RunWriteBatch(Storage::Job&,const std::function<void(bool)>&);
     virtual bool RemoveTreeAtomically(uint32_t,Storage::Job&,bool) { return false; }
     virtual void ValidateRemoval(uint32_t) { if(!Writable())throw HfsPlus::Error("The source is read-only"); }
     virtual std::vector<Entry> List(uint32_t parent = 2) = 0;

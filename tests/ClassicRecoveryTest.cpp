@@ -515,6 +515,18 @@ Storage::Result TransferTree(const std::shared_ptr<MacBrowser::Volume>& source,
         {origin},FileOperations::Location::Mounted(target,2)},job,completion);
 }
 
+Storage::Result TransferSelection(const std::shared_ptr<MacBrowser::Volume>& source,
+                                  const std::shared_ptr<MacBrowser::Volume>& target,Storage::Job& job)
+{
+    std::vector<FileOperations::Location> selected;
+    for(const auto* name:{u"Top entry",u"Tree"})
+        selected.push_back(FileOperations::Location::Mounted(source,Find(*source,2,name)));
+    FileOperations::Completion completion;
+    if(target)return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        std::move(selected),FileOperations::Location::Mounted(target,2)},job,completion);
+    return FileOperations::ExecuteInWorker(FileOperations::DeleteEntries{std::move(selected)},job,completion);
+}
+
 void VerifyTransferredTree(MacBrowser::Volume& volume,bool copied)
 {
     const auto tree=Find(volume,2,u"Tree");
@@ -537,6 +549,7 @@ void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
     {
         auto source=MacBrowser::OpenImage(sourceSeedPath);
         auto target=MacBrowser::OpenImage(targetSeedPath);
+        Put(*source,false,false,2,u"Top entry");
         const auto tree=source->MakeDirectory(2,u"Tree");
         Put(*source,true,false,tree,u"A File");
         Put(*source,true,false,source->MakeDirectory(tree,u"Z Folder"),u"Nested file");
@@ -549,6 +562,35 @@ void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
     }
     const auto sourceBefore=Load(sourceSeed);
     const auto targetBefore=Load(targetSeed);
+    for(bool deleting:{false,true}){
+        const CString sourceFile=root+(deleting?"\\batch-delete.dsk":"\\batch-copy.dsk");
+        const CString targetFile=sourceFile+".target.dsk";
+        Save(sourceFile,sourceBefore);
+        Save(targetFile,targetBefore);
+        CrashChild(sourceFile,7,deleting?L"batch-delete":L"batch-copy");
+        const auto changed=VolumeCoord::Wide((deleting?sourceFile:targetFile).GetString());
+        Check(ClassicHfsRecovery::Pending(changed),"interrupted selection left no batch journal");
+        {
+            auto recovered=MacBrowser::OpenBrowserImage(changed);
+            Check(recovered&&recovered->Writable(),"batch recovery did not reopen the image writable");
+        }
+        Check(Load(sourceFile)==sourceBefore&&Load(targetFile)==targetBefore,
+              "batch rollback retained a change from an earlier selected item");
+        auto source=MacBrowser::OpenBrowserImage(VolumeCoord::Wide(sourceFile.GetString()));
+        auto target=deleting?nullptr:MacBrowser::OpenBrowserImage(VolumeCoord::Wide(targetFile.GetString()));
+        Storage::Job job;
+        job.transport([&](const Storage::Progress& p){
+            if(p.files==1)job.cancel();
+        },[](const std::string&){return Storage::ConflictChoice::Replace;});
+        const auto result=TransferSelection(source,target,job);
+        Check(result.error==ERROR_CANCELLED&&result.rollback==Storage::Rollback::Restored&&
+              !result.partial&&result.completed==0,"cancelled batch reported committed items");
+        source.reset();
+        target.reset();
+        Check(Load(sourceFile)==sourceBefore&&Load(targetFile)==targetBefore,
+              "cancelled batch left an earlier selected item changed");
+    }
+    fprintf(report,"PASS: multi-item classic HFS copy and delete restore earlier selected items after cancellation or process loss.\n");
     for(unsigned phase:{7u,2u,3u,6u}){
         CString sourceFile;
         sourceFile.Format("%s\\transfer-%u.dsk",root.GetString(),phase);
@@ -851,6 +893,16 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        if(!strcmp(action,"batch-copy")||!strcmp(action,"batch-delete")){
+            auto source=MacBrowser::OpenImage(VolumeCoord::Wide(image));
+            auto target=!strcmp(action,"batch-delete")?nullptr:
+                MacBrowser::OpenImage(VolumeCoord::Wide(std::string(image)+".target.dsk"));
+            Storage::Job job;
+            job.transport([](const Storage::Progress& p){if(p.files==1)ExitProcess(97);},
+                          [](const std::string&){return Storage::ConflictChoice::Replace;});
+            const auto result=TransferSelection(source,target,job);
+            return result.code?4:3;
+        }
         if(!strcmp(action,"folder-copy")||!strcmp(action,"folder-move")){
             auto source=MacBrowser::OpenImage(VolumeCoord::Wide(image));
             auto target=MacBrowser::OpenImage(VolumeCoord::Wide(std::string(image)+".target.dsk"));

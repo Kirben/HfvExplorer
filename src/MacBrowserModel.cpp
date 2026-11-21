@@ -655,6 +655,30 @@ void Volume::WithCopyTransaction(const std::function<void(bool)>& work)
     FinishCopyTransaction(true);
 }
 
+void Volume::RunWriteBatch(Storage::Job& job,const std::function<void(bool)>& work)
+{
+    const auto previous=job.progress();
+    Storage::Rollback rollback;
+    bool retained,grouped=false;
+    std::exception_ptr failure;
+    {
+        Storage::OutcomeEvidence batch;
+        try{
+            WithCopyTransaction([&](bool active){
+                grouped=active;
+                work(active);
+                if(active&&job.cancelled())throw Storage::Cancelled();
+            });
+        }catch(...){failure=std::current_exception();}
+        rollback=batch.RollbackState();
+        retained=batch.RetainedChanges();
+    }
+    Storage::OutcomeEvidence::NoteRollback(rollback);
+    if(failure&&grouped&&rollback==Storage::Rollback::Restored)job.progress(previous);
+    else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
+    if(failure)std::rethrow_exception(failure);
+}
+
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes,bool moving){
     Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
     Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
@@ -664,35 +688,15 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     ValidatePlans(dst,plans,parent,true);
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     CopiedLinks copies;
-    for(size_t i=0;i<plans.size();++i){
-        const auto route=routes.empty()?ForkSource::Stream:routes[i];
-        const auto transfer=[&]{
+    const auto transfer=[&](bool){
+        for(size_t i=0;i<plans.size();++i){
+            const auto route=routes.empty()?ForkSource::Stream:routes[i];
             if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
-        };
-        if(!plans[i].entry.directory&&!moving){transfer();continue;}
-        const auto previous=progress;
-        Storage::Rollback rollback=Storage::Rollback::None;
-        bool retained=false,grouped=false;
-        std::exception_ptr failure;
-        {
-            Storage::OutcomeEvidence folder;
-            try{
-                dst.WithCopyTransaction([&](bool active){
-                    grouped=active;
-                    transfer();
-                    if(active&&job.cancelled())throw Storage::Cancelled();
-                });
-            }catch(...){failure=std::current_exception();}
-            rollback=folder.RollbackState();
-            retained=folder.RetainedChanges();
         }
-        Storage::OutcomeEvidence::NoteRollback(rollback);
-        if(failure&&grouped&&rollback==Storage::Rollback::Restored){
-            progress=previous;
-            job.progress(progress);
-        }else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
-        if(failure)std::rethrow_exception(failure);
-    }
+    };
+    if(plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory))
+        dst.RunWriteBatch(job,transfer);
+    else transfer(false);
     return complete;
 }
 bool Copy(Volume &src,uint32_t id,Volume &dst,uint32_t parent,Storage::Job& job,bool move){

@@ -183,7 +183,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
 }
 Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t count,Storage::Job& job,Completion& completion){
  Storage::Progress progress;progress.fileCopy=false;progress.phase=rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(count);progress.utf8=true;job.progress(progress);
- for(size_t index=0;index<count;++index){const auto& item=items[index];Cancel(job);progress.path=item.Volume()?Utf8(item.expectedName):item.IsWindows()?Utf8(U16(item.WindowsPath())):Utf8(Ansi(item.ClassicPath()));job.progress(progress);
+ const auto process=[&](size_t index,bool grouped){const auto& item=items[index];Cancel(job);progress.path=item.Volume()?Utf8(item.expectedName):item.IsWindows()?Utf8(U16(item.WindowsPath())):Utf8(Ansi(item.ClassicPath()));job.progress(progress);
   if(item.IsMounted()||item.IsClassic()){
    auto mutate=[&]{
     auto source=StorageLocation::ResolveEntry(item,item.IsClassic());
@@ -210,14 +210,33 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
     }
     if(item.IsClassic())volume.Close();
    };
-   StorageLocation::WithVerifiedWrite(item,mutate);
+   if(grouped)mutate();
+   else StorageLocation::WithVerifiedWrite(item,mutate);
   }else if(item.IsWindows()){
    auto source=Source(item,true);Cancel(job);source.first->Close();
    Mark(completion,item);
    if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,rename->name);
    }else if(!DeleteHostSelectionJob(item.WindowsPath(),item.directory,&job)){Cancel(job);throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }
-  ++completion.completed;++progress.files;job.progress(progress);
+  if(!grouped)++completion.completed;
+  ++progress.files;
+  job.progress(progress);
+ };
+ for(size_t first=0;first<count;){
+  size_t end=first+1;
+  auto volume=items[first].Volume();
+  if(!rename&&volume&&!strcmp(volume->Kind(),"HFS")&&!ExecutionFor(*volume).processLocal)
+   while(end<count&&items[end].Volume()==volume)++end;
+  if(end==first+1)process(first,false);
+  else StorageLocation::WithVerifiedWrite(items[first],[&]{
+   bool grouped=false;
+   volume->RunWriteBatch(job,[&](bool active){
+    grouped=active;
+    for(auto index=first;index<end;++index)process(index,active);
+   });
+   if(grouped)completion.completed+=unsigned(end-first);
+  });
+  first=end;
  }
  completion.complete=true;return {};
 }
