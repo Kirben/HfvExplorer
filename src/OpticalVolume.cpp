@@ -4,6 +4,10 @@
 #include "VolumeCoordinator.h"
 #include "WorkerEndpoint.h"
 #include "StorageHandoff.h"
+#define Z_SOLO
+#define Z_PREFIX
+#include "compression/zlib/zlib.h"
+#include <array>
 #include <mutex>
 #include <string_view>
 
@@ -29,6 +33,77 @@ void Reader::Contents(const Node& node,uint64_t offset,void* output,size_t bytes
         if(!bytes)return;
     }
     throw HfsPlus::Error("Incomplete optical file extents");
+}
+
+void Reader::FileContents(const Node& node,uint64_t offset,void* output,size_t bytes)
+{
+    if(!node.zisofs){Contents(node,offset,output,bytes);return;}
+    const auto& format=*node.zisofs;
+    Check(Range(offset,bytes,format.size)&&(!bytes||output),"Zisofs read exceeds the file length");
+
+    const uint32_t blockBytes=1u<<format.blockShift;
+    const uint64_t table=uint64_t(format.headerWords)*4;
+    const uint64_t blockCount=(uint64_t(format.size)+blockBytes-1)/blockBytes;
+    const uint64_t data=table+4*(blockCount+1);
+    Check(data<=node.size,"Truncated zisofs block table");
+
+    constexpr uint8_t magic[]={0x37,0xe4,0x53,0x96,0xc9,0xdb,0xd6,0x07};
+    uint8_t header[16];
+    Contents(node,0,header,sizeof(header));
+    Check(!memcmp(header,magic,sizeof(magic))&&Le32(header+8)==format.size&&
+          header[12]==format.headerWords&&header[13]==format.blockShift&&!header[14]&&!header[15],
+          "Zisofs header does not match the directory record");
+    uint8_t edge[4];
+    Contents(node,table,edge,sizeof(edge));
+    Check(Le32(edge)==data,"Invalid first zisofs block pointer");
+    Contents(node,table+4*blockCount,edge,sizeof(edge));
+    const auto end=Le32(edge);
+    Check(end>=data&&end<=node.size,"Invalid last zisofs block pointer");
+    if(!bytes)return;
+
+    std::array<uint8_t,16384> input;
+    Bytes decoded(size_t(blockBytes)+1);
+    auto dest=static_cast<uint8_t*>(output);
+    while(bytes){
+        const auto blockStart=(offset/blockBytes)*blockBytes;
+        const auto expected=uint32_t((std::min)(uint64_t(blockBytes),format.size-blockStart));
+        const auto within=size_t(offset-blockStart);
+        const auto chunk=(std::min)(bytes,expected-within);
+        uint8_t pointers[8];
+        Contents(node,table+4*(offset/blockBytes),pointers,sizeof(pointers));
+        auto current=Le32(pointers);
+        const auto next=Le32(pointers+4);
+        Check(current>=data&&current<=next&&next<=end,"Invalid zisofs block pointers");
+        if(current==next){
+            memset(dest,0,chunk);
+        }else{
+            z_stream stream{};
+            stream.zalloc=[](void*,uInt n,uInt size)->void*{return calloc(n,size);};
+            stream.zfree=[](void*,void* p){free(p);};
+            Check(inflateInit(&stream)==Z_OK,"Cannot initialize zisofs decompression");
+            const std::unique_ptr<z_stream,decltype(&inflateEnd)> cleanup(&stream,inflateEnd);
+            stream.next_out=decoded.data();
+            stream.avail_out=expected+1;
+            int result;
+            do{
+                if(!stream.avail_in){
+                    const auto packed=(std::min)(next-current,uint32_t(input.size()));
+                    Check(packed!=0,"Truncated zisofs compressed block");
+                    Contents(node,current,input.data(),packed);
+                    current+=packed;
+                    stream.next_in=input.data();
+                    stream.avail_in=packed;
+                }
+                result=inflate(&stream,Z_NO_FLUSH);
+            }while(result==Z_OK&&stream.avail_out);
+            Check(result==Z_STREAM_END&&stream.total_out==expected&&!stream.avail_in&&current==next,
+                  "Invalid zisofs compressed block");
+            memcpy(dest,decoded.data()+within,chunk);
+        }
+        bytes-=chunk;
+        offset+=chunk;
+        dest+=chunk;
+    }
 }
 
 namespace {
@@ -129,7 +204,8 @@ struct RockRecord {
     std::optional<uint32_t> child,parent,mode;
     uint32_t links=0,uid=0,gid=0;
     std::optional<uint64_t> created,modified;
-    bool relocated=false,link=false,special=false,unsupportedData=false;
+    std::optional<Zisofs> zisofs;
+    bool relocated=false,link=false,special=false,sparse=false,unsupportedZisofs=false;
     bool nameMore=false,linkMore=false,componentMore=false;
 
     void ReadLink(const uint8_t* field,size_t size) {
@@ -160,6 +236,17 @@ struct RockRecord {
     }
 
     void Parse(const uint8_t* field,size_t size) {
+        if(Signature(field,"ZF")||Signature(field,"Z2")){
+            Check(!zisofs&&!unsupportedZisofs,"Duplicate Rock Ridge compression record");
+            if(!Signature(field,"ZF")||field[3]!=1||size<6||memcmp(field+4,"pz",2)){
+                unsupportedZisofs=true;
+                return;
+            }
+            Check(size==16&&field[6]>=4&&field[7]>=15&&field[7]<=17,
+                  "Invalid Rock Ridge zisofs parameters");
+            zisofs=Zisofs{Both32(field+8),field[6],field[7]};
+            return;
+        }
         if(field[3]!=1)return;
         if(Signature(field,"NM")){
             Check(size>5&&(field[4]&~1)==0&&(name.empty()||nameMore),"Invalid Rock Ridge alternate name");
@@ -191,8 +278,8 @@ struct RockRecord {
             Check(at==size,"Invalid Rock Ridge timestamp length");
         }else if(Signature(field,"PN")){
             special=true;
-        }else if(Signature(field,"SF")||Signature(field,"ZF")){
-            unsupportedData=true;
+        }else if(Signature(field,"SF")){
+            sparse=true;
         }
     }
 };
@@ -406,7 +493,14 @@ public:
                         item.entry.readError="Rock Ridge symbolic links cannot be exported";
                         item.details="Symbolic link to "+rock.target;
                     }
-                    if(rock.unsupportedData)item.entry.readError="Rock Ridge sparse or compressed file data is unsupported";
+                    if(rock.sparse)item.entry.readError="Rock Ridge sparse file data is unsupported";
+                    if(rock.unsupportedZisofs)item.entry.readError="This Rock Ridge compression format is unsupported";
+                    if(rock.zisofs){
+                        Check(!item.entry.directory&&!continued&&item.entry.readError.empty(),
+                              "Zisofs is valid only for regular single-extent files");
+                        item.zisofs=rock.zisofs;
+                        item.entry.compressed=true;
+                    }
                     Check(GoodName(item.entry.name),"Invalid ISO 9660 entry name");
                     entries.push_back(std::move(item));
                 }
@@ -510,7 +604,7 @@ public:
                     if(child.entry.directory){
                         for(auto at=parent;at>=2;at=At(at).entry.parent)
                             Check(At(at).address!=child.address,"Cyclic optical directory");
-                    }else child.entry.forks[0].size=child.size;
+                    }else child.entry.forks[0].size=child.zisofs?child.zisofs->size:child.size;
                     child.entry.id=uint32_t(nodes_.size()+ids.size()+2);
                     child.entry.parent=parent;
                     child.entry.identity=MacBrowser::EntryIdentity(folder.entry.identity.primary.key+"/"+child.address);
@@ -531,7 +625,7 @@ public:
             const auto& node=At(id);
             Check(!node.entry.directory&&fork<2&&(fork==0||(!offset&&!n)),"Invalid optical file fork");
             if(!node.entry.readError.empty())throw HfsPlus::Error(node.entry.readError);
-            if(fork==0)reader_->Contents(node,offset,p,n);
+            if(fork==0)reader_->FileContents(node,offset,p,n);
             return true;
         });
     }

@@ -325,6 +325,88 @@ void UdfInteropFixtures(const std::wstring& fixtures,FILE* report)
     }
 }
 
+void ZisofsFixture(const std::wstring& path,const std::string& output,FILE* report)
+{
+    constexpr size_t page=32768;
+    constexpr auto name=u"Compressed sample.bin";
+    Bytes expected(100003);
+    for(size_t i=0;i<expected.size();++i)
+        if(i<page||i>=2*page)expected[i]=uint8_t('A'+i%3);
+
+    auto volume=MacBrowser::OpenBrowserImage(path);
+    Check(volume&&std::string(volume->Kind())=="ISO 9660 / Rock Ridge"&&!volume->Writable(),
+          "The libarchive zisofs ISO did not open read-only as Rock Ridge");
+    MacBrowser::Entry file;
+    Check(volume->FindChild(2,name,file)&&file.compressed&&!file.directory&&file.readError.empty()&&
+          file.forks[0].size==expected.size()&&!file.forks[1].size,"Incorrect zisofs listing or logical size");
+    for(const auto offset:{size_t(11),page-8,page+100,2*page-8,expected.size()-19}){
+        Bytes actual(19);
+        volume->Read(file.id,0,offset,actual.data(),actual.size());
+        Check(std::equal(actual.begin(),actual.end(),expected.begin()+offset),"Incorrect random zisofs read");
+    }
+    Reject([&]{uint8_t byte;volume->Read(file.id,0,expected.size(),&byte,1);},"Zisofs read passed logical EOF");
+    Reject([&]{volume->Remove(file.id);},"Zisofs volume allowed a mutation");
+
+    const auto destination=output+"\\zisofs-export";
+    Check(CreateDirectoryA(destination.c_str(),nullptr),"Create zisofs output directory");
+    FileOperations::Request request=FileOperations::OrdinaryCopy{
+        {FileOperations::Location::Mounted(volume,file.id)},
+        FileOperations::Location::Windows(VolumeCoord::Wide(destination))};
+    request.background=true;
+    CopyProcess::enabled=true;
+    CopyProcess::lastProcess=0;
+    const auto copy=FileOperations::Submit(std::move(request));
+    Check(WaitForSingleObject(copy.Job()->event(),15000)==WAIT_OBJECT_0,"Zisofs copy timed out");
+    CopyProcess::enabled=false;
+    const auto result=copy.Job()->result();
+    Check(!result.code&&CopyProcess::lastProcess,result.message.c_str());
+    const auto exported=HfsPlus::OpenImage(VolumeCoord::Wide(destination+"\\Compressed sample.bin").c_str(),false);
+    Check(exported->Size()==expected.size()&&
+          HfsPlus::Disk::Read(*exported,0,expected.size())==expected,"Copy worker exported different zisofs data");
+
+    auto image=HfsPlus::OpenImage(path.c_str(),false);
+    auto original=HfsPlus::Disk::Read(*image,0,size_t(image->Size()));
+    const uint8_t magic[]={0x37,0xe4,0x53,0x96,0xc9,0xdb,0xd6,0x07};
+    const uint8_t zf[]={'Z','F',16,1,'p','z',4,15};
+    const auto found=[&](const uint8_t* signature,size_t length){
+        const auto it=std::search(original.begin(),original.end(),signature,signature+length);
+        Check(it!=original.end(),"Fixture is missing the libarchive zisofs signature");
+        return size_t(it-original.begin());
+    };
+    const auto header=found(magic,sizeof(magic));
+    const auto record=found(zf,sizeof(zf));
+    const auto table=header+16;
+    const auto first=Optical::Le32(original.data()+table);
+    Check(Optical::Le32(original.data()+table+4)==Optical::Le32(original.data()+table+8),
+          "Fixture is missing the zero-filled zisofs block");
+    const auto rejectRead=[&](const char* filename,Bytes bytes,size_t offset){
+        auto damaged=MacBrowser::OpenBrowserImage(Save(output+"\\"+filename,bytes));
+        MacBrowser::Entry entry;
+        Check(damaged&&damaged->FindChild(2,name,entry),"Damaged zisofs file should remain listed");
+        uint8_t byte;
+        Reject([&]{damaged->Read(entry.id,0,offset,&byte,1);},"Damaged zisofs file was readable");
+    };
+    auto damaged=original;
+    damaged[header+8]^=1;
+    rejectRead("zisofs-header.iso",std::move(damaged),0);
+    damaged=original;
+    Le(damaged.data()+table+8,first-1,4);
+    rejectRead("zisofs-pointer.iso",std::move(damaged),page);
+    damaged=original;
+    damaged[header+first]^=0xff;
+    rejectRead("zisofs-zlib.iso",std::move(damaged),0);
+    damaged=original;
+    damaged[record+4]='P';
+    rejectRead("zisofs-unknown.iso",std::move(damaged),0);
+    damaged=original;
+    damaged[record+1]='2';
+    damaged[record+3]=2;
+    damaged[record+4]='P';
+    damaged[record+5]='Z';
+    rejectRead("zisofs-v2.iso",std::move(damaged),0);
+    fprintf(report,"PASS: libarchive-mastered zisofs v1, logical sizes, zero blocks, random reads, worker export, and corrupt or unknown compression rejection.\n");
+}
+
 void RockRidgeFixtures(const std::wstring& fixtures,const std::string& output,FILE* report)
 {
     using namespace HfsPlus;
@@ -465,6 +547,7 @@ int RunOpticalBrowserTest(const char* directory)
     int status=0;
     try{
         if(const auto fixtures=_wgetenv(L"HFV_ROCK_RIDGE_FIXTURES"))RockRidgeFixtures(fixtures,root,report);
+        if(const auto fixture=_wgetenv(L"HFV_ZISOFS_FIXTURE"))ZisofsFixture(fixture,root,report);
         if(const auto fixtures=_wgetenv(L"HFV_UDF_INTEROP_FIXTURES"))UdfInteropFixtures(fixtures,report);
         for(auto fs:{FsiFileSystemISO9660,FsiFileSystems(FsiFileSystemISO9660|FsiFileSystemJoliet),FsiFileSystemUDF,
                      FsiFileSystems(FsiFileSystemISO9660|FsiFileSystemUDF)}){

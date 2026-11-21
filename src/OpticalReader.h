@@ -29,12 +29,18 @@ struct Extent {
     bool sparse=false;
 };
 
+struct Zisofs {
+    uint32_t size;
+    uint8_t headerWords,blockShift;
+};
+
 struct Node {
     MacBrowser::Entry entry;
     uint64_t size=0;
     uint32_t descriptorBlock=0;
     std::vector<Extent> extents;
     Bytes embedded;
+    std::optional<Zisofs> zisofs;
     std::string address,details;
 };
 
@@ -53,6 +59,7 @@ public:
     virtual Node Root()const=0;
     virtual std::vector<Node> List(const Node&)=0;
     void Contents(const Node&,uint64_t offset,void*,size_t);
+    void FileContents(const Node&,uint64_t offset,void*,size_t);
 };
 std::unique_ptr<Reader> OpenUdf(HfsPlus::Source&);
 }
