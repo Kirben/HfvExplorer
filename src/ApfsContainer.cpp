@@ -398,10 +398,10 @@ uint64_t SetExternalCatalogProperties(Source& source,const Container& expected,u
 }
 
 uint64_t RenameExternalCatalogEntry(Source& source,const Container& expected,uint64_t parent,
-                                   const std::u16string& name,const std::u16string& newName,Storage::Job& job)
+                                   const std::u16string& name,const std::u16string& newName,Storage::Job& job,uint64_t destinationParent)
 {
     Check(parent>=2&&parent<(uint64_t(1)<<60),"Select an APFS folder");
-    const CatalogMutation request=ExternalCatalogEdit{parent,name,{},{},&newName};
+    const CatalogMutation request=ExternalCatalogEdit{parent,name,{},{},&newName,nullptr,destinationParent};
     return Commit(source,expected,job,&request);
 }
 

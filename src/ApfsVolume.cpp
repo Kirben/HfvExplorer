@@ -804,7 +804,7 @@ private:
         return work();
     }
 
-    void RefreshNamespace(uint32_t parent,uint32_t removed,uint64_t transaction,uint32_t changedFile)
+    void RefreshNamespace(uint32_t parent,uint32_t removed,uint64_t transaction,uint32_t changedFile,uint32_t oldParent)
     {
         auto fresh=Probe(*source);
         Check(fresh&&fresh->uuid==container.uuid&&fresh->volumes==container.volumes&&
@@ -880,10 +880,14 @@ private:
                 }
             }
         }
-        auto& folder=At(parent);
-        const auto changed=LoadInode(Catalog(*source,container,mounts[mountIndex]),mountIndex,folder.oid);
-        folder.entry.modified=changed.entry.modified;
-        ListDirectory(parent);
+        const auto refreshFolder=[&](uint32_t id){
+            auto& folder=At(id);
+            const auto changed=LoadInode(Catalog(*source,container,mounts[mountIndex]),mountIndex,folder.oid);
+            folder.entry.modified=changed.entry.modified;
+            ListDirectory(id);
+        };
+        if(oldParent)refreshFolder(oldParent);
+        refreshFolder(parent);
         if(changedFile&&At(changedFile).entry.hardLink){
             const auto oid=At(changedFile).oid;
             std::set<uint32_t> folders;
@@ -905,7 +909,7 @@ private:
     }
 
     template<class Work>void CommitMutation(uint32_t parent,uint32_t removed,Storage::Job& job,Work work,
-                                            uint32_t changedFile=0)
+                                            uint32_t changedFile=0,uint32_t oldParent=0)
     {
         uint64_t transaction;
         try{transaction=work(job);}
@@ -917,7 +921,7 @@ private:
             throw;
         }
         Storage::OutcomeEvidence::NoteRetainedChange();
-        try{RefreshNamespace(parent,removed,transaction,changedFile);}
+        try{RefreshNamespace(parent,removed,transaction,changedFile,oldParent);}
         catch(const std::exception& error){
             requiresReopen=true;
             throw Error(std::string("APFS catalog change committed. Reopen the image to refresh it. ")+error.what());
@@ -1280,6 +1284,29 @@ public:
                 }
                 return SetEntryProperties(*source,WriteTarget(parent),parentOid,oid,desired.finder,dates,desired.protectedFile,job);
             },id);
+        },true);
+    }
+    bool CanMoveEntryFrom(const MacBrowser::Volume& source,uint32_t id,uint32_t parent)override{
+        if(&source!=this||!writable||!limitedEdits)return false;
+        return Access([&]{
+            const auto& item=At(id);
+            const auto& folder=At(parent);
+            return item.entry.parent!=parent&&!item.entry.directory&&!item.entry.hardLink&&
+                   !item.symlink&&item.entry.readError.empty()&&folder.oid&&folder.entry.directory&&
+                   item.mount==folder.mount&&!mounts[item.mount].snapshotCreated;
+        });
+    }
+    void MoveHereForJob(MacBrowser::Volume& source,uint32_t id,uint32_t parent,const Entry& entry,Storage::Job& job)override{
+        WriteMount([&]{
+            if(job.cancelled())throw Storage::Cancelled();
+            Check(CanMoveEntryFrom(source,id,parent),"The APFS file cannot be moved in place");
+            const auto current=At(id).entry;
+            Check(current.identity==entry.identity&&current.name==entry.name,"The APFS move source changed");
+            const auto oldParentOid=At(current.parent).oid,destinationOid=At(parent).oid;
+            CommitMutation(parent,0,job,[&](auto& work){
+                return RenameExternalCatalogEntry(*this->source,WriteTarget(parent),oldParentOid,
+                                                  current.name,current.name,work,destinationOid);
+            },0,current.parent);
         },true);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{

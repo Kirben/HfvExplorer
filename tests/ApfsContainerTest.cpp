@@ -4304,6 +4304,29 @@ int RunApfsContainerTest(const char* directory)
             published->Read(imported.id,0,0,unrelated.data(),unrelated.size());
             Check(unrelated==importedBytes,"APFS regular-file replacement changed the symbolic link target");
             fprintf(report,"PASS: macOS APFS regular-file replacement of a symbolic link preserves both incoming forks and the target.\n");
+            const auto moveFolder=published->MakeDirectory(2,u"Move destination");
+            Storage::Job cancelledMove;
+            cancelledMove.cancel();
+            bool moveStopped=false;
+            try{published->MoveHereForJob(*published,newFile.id,moveFolder,newFile,cancelledMove);}
+            catch(const Storage::Cancelled&){moveStopped=true;}
+            MacBrowser::Entry moved;
+            Check(moveStopped&&published->FindChild(2,newFile.name,moved)&&moved.id==newFile.id&&
+                  !published->FindChild(moveFolder,newFile.name,moved),
+                  "Cancelled APFS in-place move changed either folder");
+            auto cut=FileOperations::Location::Mounted(published,newFile.id);
+            cut.cut=true;
+            auto move=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {cut},FileOperations::Location::Mounted(published,moveFolder)});
+            Check(WaitForSingleObject(move.Job()->event(),15000)==WAIT_OBJECT_0,"APFS in-place move timed out");
+            const auto moveResult=move.Job()->result();
+            Check(!moveResult.code,moveResult.message.c_str());
+            Check(!published->FindChild(2,newFile.name,moved)&&published->FindChild(moveFolder,newFile.name,moved)&&
+                  moved.id==newFile.id&&moved.parent==moveFolder&&moved.created==newFile.created&&
+                  moved.modified==newFile.modified&&moved.finder==newFile.finder&&
+                  readForks(moved)==actualForks&&published->GetAttributes(moved.id)==ordinary.attributes,
+                  "APFS in-place move changed the browser ID, forks, or metadata");
+            fprintf(report,"PASS: same-volume APFS cut and paste moves a regular file in place on a macOS image.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.

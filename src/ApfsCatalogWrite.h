@@ -87,6 +87,7 @@ struct ExternalCatalogEdit {
     std::optional<bool> locked;
     const std::u16string* newName=nullptr;
     const FinderBytes* finder=nullptr;
+    uint64_t destinationParent=0;
 };
 using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink>;
 

@@ -80,6 +80,10 @@ public:
     virtual void ReleaseMedia() {} // Explicit physical-media release, including idle clipboard references.
     virtual void ValidateCopyTo(uint32_t, Volume &, uint32_t) {}
     virtual bool CanMoveFrom(const Volume&)const{return false;}
+    virtual bool CanMoveEntryFrom(const Volume& source,uint32_t,uint32_t){return CanMoveFrom(source);}
+    virtual void MoveHereForJob(Volume& source,uint32_t id,uint32_t parent,const Entry& entry,Storage::Job&){
+        MoveHere(source,id,parent,entry);
+    }
     virtual void MoveHere(Volume&,uint32_t,uint32_t,const Entry&){throw HfsPlus::Error("This backend cannot move entries in place");}
     virtual std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t){return {};}
     virtual bool CanReplaceFileWithSymbolicLink(const Entry&)const{return false;}

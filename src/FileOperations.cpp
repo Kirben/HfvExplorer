@@ -71,7 +71,7 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
 }
 bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
  if(!target.Supports().rename)return false;
- for(size_t i=0;i<sources.size();++i)if(!request.sources[i].cut||!target.CanMoveFrom(*sources[i].first))return false;
+ for(size_t i=0;i<sources.size();++i)if(!request.sources[i].cut||!target.CanMoveEntryFrom(*sources[i].first,sources[i].second,parent))return false;
  auto existing=target.List(parent);std::vector<Entry> entries;
  for(size_t i=0;i<sources.size();++i){auto& source=*sources[i].first;auto id=sources[i].second;Check(id!=2,"Select files or folders rather than a volume root");source.ValidateCopyTo(id,target,parent);auto entry=source.Stat(id);
   for(auto& e:existing)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
@@ -83,7 +83,7 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  // captured descendant path by renaming its selected ancestor first.
  for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&request.sources[i].IsClassic()&&request.sources[j].IsClassic()){auto a=request.sources[i].ClassicPath(),b=request.sources[j].ClassicPath();if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}
  Storage::Progress progress;progress.phase="Moving";progress.scanning=false;progress.fileCopy=progress.utf8=true;progress.totalFiles=unsigned(sources.size());job.progress(progress);
- for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHere(*sources[i].first,sources[i].second,parent,entries[i]);Storage::OutcomeEvidence::NoteRetainedChange();++progress.files;job.progress(progress);}
+ for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHereForJob(*sources[i].first,sources[i].second,parent,entries[i],job);Storage::OutcomeEvidence::NoteRetainedChange();++progress.files;job.progress(progress);}
  return true;
 }
 enum class ExecutionRoute { Local, TemporaryWorker };
@@ -140,7 +140,10 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   for(const auto& item:request.sources){
    Cancel(job);
    auto source=Source(item);
-   if(item.cut&&item.Volume())Check(source.first->Writable(),"A cut source is read-only");
+   if(item.cut&&item.Volume())
+    Check(source.first->Writable()||(!transfer.adapter&&
+         destination.first->CanMoveEntryFrom(*source.first,source.second,destination.second)),
+         "A cut source is read-only");
    opened.push_back(std::move(source));
   }
   if(transfer.adapter)Mark(completion,target);
@@ -150,8 +153,11 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   inPlace=!transfer.adapter&&MoveInPlace(request,opened,*destination.first,destination.second,job,completion);
   if(!inPlace){
    snapshots.reserve(opened.size());
-   for(size_t i=0;i<request.sources.size();++i)
-    snapshots.push_back(request.sources[i].cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(request.sources[i].Volume())):std::string());
+   for(size_t i=0;i<request.sources.size();++i){
+    const auto& item=request.sources[i];
+    if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
+    snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
+   }
    complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes);
   }
   if(!target.Volume())destination.first->Close();

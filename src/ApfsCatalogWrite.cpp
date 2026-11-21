@@ -2929,6 +2929,8 @@ CatalogWritePlan PrepareCatalogMutation(
         std::optional<size_t> directoryRecord;
         uint64_t siblingId=0;
         const auto parentKey=(uint64_t(9)<<60)|properties->parent;
+        const auto destination=properties->destinationParent?properties->destinationParent:properties->parent;
+        const bool moving=destination!=properties->parent;
         for(size_t i=0;i<catalog.size();++i){
             const auto& record=catalog[i];
             if(record.key.size()!=13+name.size()||
@@ -2949,6 +2951,8 @@ CatalogWritePlan PrepareCatalogMutation(
                       Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
                       "Unsupported APFS hard-linked edit");
             }
+            Check(!moving||(kind==CatalogKind::RegularFile&&!siblingId),
+                  "APFS in-place moves require a regular file with one name");
             directoryRecord=i;
         }
         Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");
@@ -2995,6 +2999,7 @@ CatalogWritePlan PrepareCatalogMutation(
             if(properties->newName&&(!siblingId||
                (Le64(value.data())==properties->parent&&ExternalInodeName(value)==name)))
                 RenameExternalInode(value,name,replacement);
+            if(moving)Set(value,0,destination,8);
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
             edited=true;
@@ -3012,8 +3017,10 @@ CatalogWritePlan PrepareCatalogMutation(
             record.key.back()=0;
             Set(record.key,8,hash|(replacement.size()+1),4);
             std::copy(replacement.begin(),replacement.end(),record.key.begin()+12);
-            InsertExternalDirectoryRecord(catalog,std::move(record),properties->parent,replacement,fold);
-            TouchExternalParent(catalog,properties->parent,time,0);
+            Set(record.key,0,(uint64_t(9)<<60)|destination,8);
+            InsertExternalDirectoryRecord(catalog,std::move(record),destination,replacement,fold);
+            TouchExternalParent(catalog,properties->parent,time,moving?-1:0);
+            if(moving)TouchExternalParent(catalog,destination,time,1);
         }
     }else{
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
