@@ -2752,8 +2752,7 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
         if(withClones){
             Check(!clones[0].empty()&&clones[0]!=clones[1],"The APFS clone fixture must contain distinct data");
             historicalDeleted=bytes(*volume,locate(*volume,snapshot.id,u"vanished"));
-            Reject([&]{volume->Remove(locate(*volume,live.id,u"clone.bin").id);},
-                   "APFS removed a file with shared extents");
+
         }
         const auto original=locate(*volume,live.id,name);
         const auto originalBytes=bytes(*volume,original);
@@ -2813,7 +2812,56 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
               "Reopening APFS changed the overwritten live file or the deleted file in the snapshot");
     }
     fprintf(report,"PASS: APFS snapshot preserved through live overwrite, deletion, cancellation and reopening.\n");
-    if(withClones)fprintf(report,"PASS: macOS APFS shared extents and both clone files survived live writes.\n");
+    if(withClones){
+        const auto deletePath=path+L".delete-first.img";
+        reopened.reset();
+        Check(CopyFileW(path.c_str(),deletePath.c_str(),TRUE)!=FALSE,"Could not copy the shared APFS image for the deletion test");
+        reopened=MacBrowser::OpenBrowserImage(path);
+        Check(reopened&&reopened->Supports().writable,"Could not reopen the shared APFS overwrite fixture");
+        roots(*reopened);
+        {
+            VolumeCoord::OperationLease lease({{reopened->ResourceKey(),VolumeCoord::Mode::Write}});
+            const auto original=locate(*reopened,live.id,u"renamed-clone.bin");
+            Storage::Job cancel;
+            bool cancelled=false;
+            try{overwrite(*reopened,original,cancel,true);}catch(const Storage::Cancelled&){cancelled=true;}
+            Check(cancelled&&readClones(*reopened,true)==clones,"Cancelled APFS shared-extent overwrite changed clone data");
+            Storage::Job write;
+            const auto edited=overwrite(*reopened,original,write,false);
+            auto state=clones;
+            state[1]=Bytes(9301,0x73);
+            Check(edited==original.id&&readClones(*reopened,true)==state,
+                  "APFS shared-extent overwrite changed another clone or snapshot");
+            reopened->Remove(locate(*reopened,live.id,u"binary.bin").id);
+        }
+        reopened.reset();
+        reopened=MacBrowser::OpenBrowserImage(path);
+        Check(reopened&&reopened->Supports().writable,"APFS shared-extent edits did not reopen writable");
+        roots(*reopened);
+        MacBrowser::Entry folder,missing;
+        Check(reopened->FindChild(live.id,directory,folder)&&!reopened->FindChild(folder.id,u"binary.bin",missing)&&
+              bytes(*reopened,locate(*reopened,live.id,u"renamed-clone.bin"))==Bytes(9301,0x73)&&
+              bytes(*reopened,locate(*reopened,snapshot.id,u"binary.bin"))==clones[2]&&
+              bytes(*reopened,locate(*reopened,snapshot.id,u"clone.bin"))==clones[3],
+              "APFS clone deletion or reopen changed the remaining file or snapshot");
+        auto deleteFirst=MacBrowser::OpenBrowserImage(deletePath);
+        Check(deleteFirst&&deleteFirst->Supports().writable,"Could not open the shared APFS deletion fixture");
+        roots(*deleteFirst);
+        {
+            VolumeCoord::OperationLease lease({{deleteFirst->ResourceKey(),VolumeCoord::Mode::Write}});
+            deleteFirst->Remove(locate(*deleteFirst,live.id,u"renamed-clone.bin").id);
+        }
+        deleteFirst.reset();
+        deleteFirst=MacBrowser::OpenBrowserImage(deletePath);
+        Check(deleteFirst&&deleteFirst->Supports().writable,"APFS clone deletion did not reopen writable");
+        roots(*deleteFirst);
+        Check(deleteFirst->FindChild(live.id,directory,folder)&&!deleteFirst->FindChild(folder.id,u"renamed-clone.bin",missing)&&
+              bytes(*deleteFirst,locate(*deleteFirst,live.id,u"binary.bin"))==clones[0]&&
+              bytes(*deleteFirst,locate(*deleteFirst,snapshot.id,u"binary.bin"))==clones[2]&&
+              bytes(*deleteFirst,locate(*deleteFirst,snapshot.id,u"clone.bin"))==clones[3],
+              "APFS clone deletion changed another live clone or snapshot");
+        fprintf(report,"PASS: macOS APFS shared-extent overwrite, cancellation and deletion preserve the other clone and snapshot.\n");
+    }
 }
 
 void ExternalSpaceLimitWrites(const std::string& root,FILE* report,const wchar_t* fixture)

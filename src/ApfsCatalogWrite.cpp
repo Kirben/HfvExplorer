@@ -163,6 +163,7 @@ void StageMap(Writes& writes,WritableMap map,uint64_t headerBlock,uint64_t rootB
 struct CatalogRecords {
     std::vector<OwnedRecord> records;
     std::vector<uint64_t> blocks;
+    bool verifiedSnapshotReferences=false;
 };
 CatalogRecords ReadWritableCatalog(Source& source,const Container& container,const WritableMap& map,uint64_t oid,bool historical=false)
 {
@@ -614,7 +615,7 @@ CatalogRecords ReadExtentTree(Source& source,const Container& container,uint64_t
             const auto start=key&IdMask,count=length&IdMask;
             const auto kind=length>>60;
             const bool removal=updates&&kind==2&&Le64(record.value.data+8)==UINT64_MAX&&
-                               Le32(record.value.data+16)==UINT32_MAX;
+                               Le32(record.value.data+16)>=0x80000000U;
             Check(key>>60==2&&(kind==1||removal)&&start&&count&&start>=previousEnd&&
                   Range(start,count,container.blockCount)&&Le32(record.value.data+16)>0,
                   "Invalid or overlapping APFS physical extent range");
@@ -1691,6 +1692,8 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
                                    const std::set<uint64_t>& removeStreams,const CatalogRecords& extentTree,
                                    std::set<uint64_t>& retired)
 {
+    // The snapshot path reconciles all extent references against the edited catalog.
+    if(extentTree.verifiedSnapshotReferences)return;
     std::map<uint64_t,uint64_t> owned;
     for(const auto& extent:extentTree.records){
         if(Le64(extent.value.data()+8)==inode&&Le32(extent.value.data()+16)==1)
@@ -1811,6 +1814,29 @@ void ReplaceExternalAttributes(std::vector<OwnedRecord>& catalog,uint64_t parent
     }
 }
 
+uint64_t ExclusiveExternalDataStream(const std::vector<OwnedRecord>& catalog,uint64_t inode,
+                                     const Bytes& value,const CatalogRecords& extents)
+{
+    const auto stream=Le64(value.data()+8);
+    if(!extents.verifiedSnapshotReferences){
+        Check(stream==inode,"APFS edit requires a private data stream");
+        return stream;
+    }
+    Check(stream>=16&&stream<=IdMask,"Invalid APFS file data stream ID");
+    for(const auto& record:catalog){
+        const auto key=Le64(record.key.data());
+        if(key>>60==3&&(key&IdMask)!=inode){
+            Check(record.value.size()>=16&&Le64(record.value.data()+8)!=stream&&
+                  Le64(record.value.data()+8)!=inode,"APFS edit requires an unshared logical data stream");
+        }
+        if(key>>60==6&&(key&IdMask)==stream)
+            Check(record.value.size()==4&&Le32(record.value.data())==1,"APFS edit requires a private data stream reference");
+        if(stream!=inode&&(key&IdMask)==inode)
+            Check(key>>60!=6&&key>>60!=8,"APFS replacement data stream ID is already in use");
+    }
+    return stream;
+}
+
 std::string ExternalInodeName(const Bytes& inode);
 
 size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,const CatalogReplaceData& edit,
@@ -1828,9 +1854,10 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     const auto flags=Le32(old.data()+68),count=Le32(old.data()+56);
     const auto mode=Le16(old.data()+80);
     const auto primaryParent=Le64(old.data());
-    Check(Le64(old.data()+8)==edit.inode&&count&&bool(edit.alias)==(count>1)&&
+    Check(count&&bool(edit.alias)==(count>1)&&
           (mode&0170000)==0100000&&!(flags&(UserImmutable|SystemImmutable)),
           "External APFS overwrite cannot replace this file");
+    const auto privateStream=ExclusiveExternalDataStream(catalog,edit.inode,old,extentTree);
     const auto name=ExternalInodeName(old);
     std::map<Bytes,Bytes> siblings;
     std::map<Bytes,const Bytes*> onDisk;
@@ -1891,9 +1918,28 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     Check(!wasCompressed||!oldSize,"APFS compressed overwrite target unexpectedly has a data stream");
     auto oldLayout=WriterDisk::Inode(name,edit.inode,0,primaryParent,mode,count,oldSize,
                                            oldFinder?&*oldFinder:nullptr);
-    if(oldStream&&old.size()==oldLayout.value.size())
-        std::copy_n(old.data()+*oldStream+24,16,oldLayout.value.data()+*oldStream+24);
-    Check(old.size()==oldLayout.value.size()&&std::equal(old.begin()+92,old.end(),oldLayout.value.begin()+92),
+    if(oldStream&&old.size()==oldLayout.value.size()){
+        const auto canonicalStream=96+size_t(Le16(oldLayout.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
+        std::copy_n(old.data()+*oldStream+24,16,oldLayout.value.data()+canonicalStream+24);
+    }
+    const auto fieldsByType=[](const Bytes& inode){
+        std::map<uint8_t,Bytes> fields;
+        const auto count=Le16(inode.data()+92);
+        size_t payload=96+size_t(count)*4;
+        for(size_t i=0;i<count;++i){
+            const auto descriptor=96+i*4;
+            const auto padded=size_t(DivideUp(Le16(inode.data()+descriptor+2),8)*8);
+            Check(Range(payload,padded,inode.size()),"Invalid APFS overwrite inode field");
+            Bytes field(inode.begin()+descriptor,inode.begin()+descriptor+4);
+            field.insert(field.end(),inode.begin()+payload,inode.begin()+payload+padded);
+            Check(fields.emplace(inode[descriptor],std::move(field)).second,"Repeated APFS overwrite inode field");
+            payload+=padded;
+        }
+        Check(payload==inode.size(),"Invalid APFS overwrite inode field length");
+        return fields;
+    };
+    Check(old.size()==oldLayout.value.size()&&Le32(old.data()+92)==Le32(oldLayout.value.data()+92)&&
+          fieldsByType(old)==fieldsByType(oldLayout.value),
           "External APFS overwrite requires a supported inode field layout");
     auto updated=WriterDisk::Inode(name,edit.inode,0,primaryParent,mode,count,size,
                                    edit.finder?edit.finder:oldFinder?&*oldFinder:nullptr);
@@ -1903,6 +1949,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     }
     const auto finderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
     std::copy_n(old.begin(),92,updated.value.begin());
+    Set(updated.value,8,edit.inode,8);
     Set(updated.value,48,(Le64(old.data()+48)&~WriterDisk::HasFinderInfo)|finderFlag,8);
     SetResourceFlag(updated.value,resource->size!=0);
     if(edit.attributes)SetSecurityFlag(updated.value,*edit.attributes);
@@ -1916,7 +1963,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     auto attributes=EncodeAttributes(edit.inode,edit.attributes,resource,streams);
     WriteCompressionAttribute(attributes,updated.value,edit.inode,size,edit.compression);
     bool foundCompression=false;
-    std::set<uint64_t> removeStreams{edit.inode};
+    std::set<uint64_t> removeStreams{privateStream};
     std::vector<OwnedRecord> links;
     auto after=std::next(inode);
     for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
@@ -1956,13 +2003,19 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     catalog.erase(catalog.begin()+index+1,after);
     catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
         const auto key=Le64(record.key.data());
-        return key>>60==8&&removeStreams.count(key&IdMask);
+        return (key>>60==8&&removeStreams.count(key&IdMask))||
+               (key>>60==6&&(key&IdMask)==privateStream);
     }),catalog.end());
+    const auto insert=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+        return Le64(record.key.data())==inodeKey;
+    });
+    Check(insert!=catalog.end(),"Missing APFS replacement inode");
+    const auto streamAt=size_t(insert-catalog.begin())+1;
     SortAttributes(attributes);
     attributes.insert(attributes.end(),std::make_move_iterator(links.begin()),std::make_move_iterator(links.end()));
-    catalog.insert(catalog.begin()+index+1,std::make_move_iterator(attributes.begin()),
+    catalog.insert(catalog.begin()+streamAt,std::make_move_iterator(attributes.begin()),
                    std::make_move_iterator(attributes.end()));
-    return index+1+attributes.size();
+    return streamAt+attributes.size();
 }
 
 std::string ExternalInodeName(const Bytes& inode)
@@ -2088,7 +2141,7 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
     Check(inode!=catalog.end()&&inode->key.size()==8&&inode->value.size()>=92,"Invalid APFS deletion inode");
     const auto& value=inode->value;
     const bool directory=kind==CatalogKind::Directory;
-    Check(Le64(value.data())==edit.parent&&Le64(value.data()+8)==edit.inode&&
+    Check(Le64(value.data())==edit.parent&&
           (Le16(value.data()+80)&0170000)==(uint16_t(kind)<<12)&&
           !(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
           "APFS deletion requires a supported unlocked inode");
@@ -2097,7 +2150,11 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
     Check(Le32(value.data()+56)==(directory?0:1),"The APFS folder is populated or file has multiple names");
 
     std::set<uint64_t> streams;
-    if(kind==CatalogKind::RegularFile&&!compressed)streams.insert(edit.inode);
+    const auto privateStream=kind==CatalogKind::RegularFile&&!compressed?
+        ExclusiveExternalDataStream(catalog,edit.inode,value,extentTree):edit.inode;
+    Check(kind==CatalogKind::RegularFile&&!compressed||Le64(value.data()+8)==edit.inode,
+          "Invalid APFS deletion stream ID");
+    if(kind==CatalogKind::RegularFile&&!compressed)streams.insert(privateStream);
     bool hadTarget=false,hadCompression=false,hadResource=false,needsResource=false;
     auto after=std::next(inode);
     for(;after!=catalog.end()&&(Le64(after->key.data())&IdMask)==edit.inode;++after){
@@ -2153,7 +2210,8 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
     }
     catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
         const auto key=Le64(record.key.data());
-        return key>>60==8&&streams.count(key&IdMask);
+        return (key>>60==8&&streams.count(key&IdMask))||
+               (key>>60==6&&!streams.empty()&&(key&IdMask)==privateStream);
     }),catalog.end());
     return kind;
 }
@@ -2373,7 +2431,7 @@ void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup,bool allowSna
 
 struct SnapshotAllocations {
     std::vector<Mapping> mappings;
-    std::vector<OwnedRecord> removals;
+    std::vector<OwnedRecord> historicalData;
     std::set<uint64_t> sharedData;
     std::set<uint64_t> catalogBlocks;
     std::vector<DataRun> protectedRuns;
@@ -2422,6 +2480,38 @@ void ValidateSnapshotFileExtents(const CatalogRecords& catalog,const std::vector
     }),"APFS snapshot file extents disagree with their reference counts");
 }
 
+
+std::map<uint64_t,uint32_t> CatalogReferenceCounts(const std::vector<OwnedRecord>& catalog)
+{
+    std::map<uint64_t,int64_t> boundaries;
+    for(const auto& entry:catalog){
+        if(Le64(entry.key.data())>>60!=8)continue;
+        Check(entry.key.size()==16&&entry.value.size()==24,"Invalid APFS file extent");
+        const auto start=Le64(entry.value.data()+8),bytes=Le64(entry.value.data());
+        Check(bytes&&!(bytes%Block)&&!(bytes>>56),"Invalid APFS file extent length");
+        if(!start)continue;
+        const auto blocks=bytes/Block;
+        Check(start<=UINT64_MAX-blocks,"Invalid APFS file extent range");
+        ++boundaries[start];
+        --boundaries[start+blocks];
+    }
+    std::map<uint64_t,uint32_t> counts;
+    int64_t active=0;
+    for(const auto& [address,delta]:boundaries){
+        if(!delta)continue;
+        active+=delta;
+        Check(active>=0&&active<=INT32_MAX,"Invalid APFS file extent reference count");
+        counts.emplace(address,uint32_t(active));
+    }
+    return counts;
+}
+
+uint32_t CatalogReferences(const std::map<uint64_t,uint32_t>& counts,uint64_t start,uint64_t blocks)
+{
+    const auto next=counts.upper_bound(start);
+    Check(next==counts.end()||next->first>=start+blocks,"Unsupported partial APFS physical extent change");
+    return next==counts.begin()?0:std::prev(next)->second;
+}
 
 SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& container,const Bytes& volume,
                                              const WritableMap& map,const CatalogRecords& catalog,CatalogRecords& extentTree)
@@ -2493,7 +2583,7 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
     for(const auto& entry:priorExtents.records)
         priorData.emplace(Le64(entry.key.data())&IdMask,entry);
     ValidateSnapshotFileExtents(prior,priorExtents.records);
-    std::set<uint64_t> removed;
+    std::map<uint64_t,uint32_t> reductions;
     std::vector<OwnedRecord> liveData;
     for(auto& entry:extentTree.records){
         if(Le64(entry.value.data())>>60==1){
@@ -2502,16 +2592,19 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
         }
         const auto address=Le64(entry.key.data())&IdMask;
         const auto prior=priorData.find(address);
-        Check(prior!=priorData.end()&&Le32(prior->second.value.data()+16)==1&&
+        const auto reduction=uint32_t(0)-Le32(entry.value.data()+16);
+        Check(prior!=priorData.end()&&reduction<=Le32(prior->second.value.data()+16)&&
               (Le64(entry.value.data())&IdMask)==(Le64(prior->second.value.data())&IdMask),
-              "Unsupported partial or shared APFS snapshot extent update");
-        removed.insert(address);
-        result.removals.push_back(std::move(entry));
+              "Unsupported partial APFS snapshot extent update");
+        reductions.emplace(address,reduction);
     }
     for(auto& [address,entry]:priorData){
-        if(removed.count(address))addProtected(address,Le64(entry.value.data())&IdMask);
+        result.historicalData.push_back(entry);
+        const auto remaining=Le32(entry.value.data()+16)-reductions[address];
+        if(!remaining)addProtected(address,Le64(entry.value.data())&IdMask);
         else{
             result.sharedData.insert(address);
+            Set(entry.value,16,remaining,4);
             liveData.push_back(std::move(entry));
         }
     }
@@ -2520,6 +2613,7 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
     });
     ValidateSnapshotFileExtents(catalog,liveData);
     extentTree.records=std::move(liveData);
+    extentTree.verifiedSnapshotReferences=true;
     std::sort(result.protectedRuns.begin(),result.protectedRuns.end(),[](const auto& a,const auto& b){
         return a.block<b.block;
     });
@@ -3053,15 +3147,44 @@ CatalogWritePlan PrepareCatalogMutation(
             return key>>60==8&&retiredStreams.count(key&IdMask);
         }),catalog.end());
     }
+    std::set<uint64_t> historicalRetired;
+    std::vector<OwnedRecord> snapshotUpdates;
+    bool snapshotReferencesChanged=false;
+    if(historical){
+        const auto counts=CatalogReferenceCounts(catalog);
+        for(const auto& prior:snapshot.historicalData){
+            const auto start=Le64(prior.key.data())&IdMask,blocks=Le64(prior.value.data())&IdMask;
+            const auto before=Le32(prior.value.data()+16),after=CatalogReferences(counts,start,blocks);
+            Check(after<=before,"APFS snapshot extent references increased");
+            if(after==before)continue;
+            auto update=prior;
+            Set(update.value,0,(uint64_t(2)<<60)|blocks,8);
+            Set(update.value,8,UINT64_MAX,8);
+            Set(update.value,16,uint32_t(after-before),4);
+            snapshotUpdates.push_back(std::move(update));
+        }
+        for(const auto& current:extentTree.records){
+            const auto start=Le64(current.key.data())&IdMask,blocks=Le64(current.value.data())&IdMask;
+            const auto before=Le32(current.value.data()+16),after=CatalogReferences(counts,start,blocks);
+            Check(after<=before,"APFS extent references increased");
+            if(after==before)continue;
+            if(snapshot.sharedData.count(start))snapshotReferencesChanged=true;
+            else{
+                Check(!after&&before==1,"APFS cannot retire a shared extent created after the snapshot");
+                historicalRetired.insert(start);
+            }
+        }
+    }
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
+        if(historical)return historicalRetired.count(run.block)!=0;
         if(externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;
     uint64_t removedBlocks=0;
-    bool removeExtents=false;
+    bool removeExtents=snapshotReferencesChanged;
     for(const auto& run:files){
         if(!retiredRun(run))continue;
         removeExtents=true;
@@ -3069,13 +3192,7 @@ CatalogWritePlan PrepareCatalogMutation(
         retiredData.push_back({run.block,run.count});
         removedBlocks+=run.count;
     }
-    if(historical){
-        for(const auto& reference:extentTree.records){
-            if(Le32(reference.value.data()+16)==1)continue;
-            Check(!externalRetired.count(Le64(reference.key.data())&IdMask),
-                  "APFS writes cannot retire shared file extents");
-        }
-    }
+
     const bool changeExtents=dataBlocks||removeExtents;
     auto& space=ephemeral(Le64(superblock.data()+152));
     auto& writes=plan.metadata;
@@ -3131,7 +3248,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 for(const auto& stream:plan.streams)
                     for(const auto& run:stream.runs)updated.push_back({entryId,run.block,run.count,stream.id});
                 std::sort(updated.begin(),updated.end(),[](const auto& a,const auto& b){return a.block<b.block;});
-                auto references=snapshot.removals;
+                auto references=snapshotUpdates;
                 for(const auto& run:updated){
                     if(snapshot.sharedData.count(run.block))continue;
                     const auto key=(uint64_t(2)<<60)|run.block;
@@ -3141,14 +3258,7 @@ CatalogWritePlan PrepareCatalogMutation(
                         references.push_back(*old);
                     else references.push_back(ExtentReference(run));
                 }
-                for(const auto& run:files){
-                    if(!snapshot.sharedData.count(run.block)||!retiredRun(run))continue;
-                    auto update=ExtentReference(run);
-                    Set(update.value,0,(uint64_t(2)<<60)|run.count,8);
-                    Set(update.value,8,UINT64_MAX,8);
-                    Set(update.value,16,UINT32_MAX,4);
-                    references.push_back(std::move(update));
-                }
+
                 std::sort(references.begin(),references.end(),[](const auto& a,const auto& b){
                     return Le64(a.key.data())<Le64(b.key.data());
                 });
