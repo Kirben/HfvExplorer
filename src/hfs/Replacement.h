@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 #ifdef HFV_TESTING
+extern void hfv_hfs_recovery_checkpoint(unsigned phase);
+#endif
+#ifdef HFV_TESTING
 extern int hfv_replacement_fault;
 #else
 #define hfv_replacement_fault 0
@@ -54,6 +57,9 @@ static void replacement_finish(HfsReplacement *state,int *result,char **error) {
   if(hfs_rename(state->volume,state->original,state->backup)<0) {*result=-1;*error=hfs_error;}
   else {
    displaced=1;
+#ifdef HFV_TESTING
+   hfv_hfs_recovery_checkpoint(4);
+#endif
    if(hfv_replacement_fault==2||hfs_rename(state->volume,state->temporary,state->original)<0) {*result=-1;*error=hfs_error;}
    else published=1;
   }

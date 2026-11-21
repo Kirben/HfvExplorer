@@ -11,6 +11,7 @@
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
 #include "DiskImageOpen.h"
+#include "ClassicHfsRecovery.h"
 #include "DiskSlice.h"
 #include "MfsDiskSource.h"
 #include "NdifImage.h"
@@ -449,6 +450,10 @@ std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin& origin)
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr,const Dmg::PrivateKey* privateKey=nullptr) {
     using DiskImage::Container;
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
+    if(externalJournal.empty()&&ClassicHfsRecovery::Pending(path)){
+        if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
+        return OpenClassicImage(path,true);
+    }
     auto opened=DiskImage::Open(path,{false,externalJournal,password,privateKey});
     auto& source=opened.source;
     if(!source)return {};

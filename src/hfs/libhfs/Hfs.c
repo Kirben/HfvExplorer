@@ -50,6 +50,9 @@
 #endif
 
 # include "internal.h"
+#ifdef WIN32
+# include "../../ClassicHfsRecovery.h"
+#endif
 # include "data.h"
 # include "block.h"
 # include "low.h"
@@ -94,10 +97,11 @@ int hfs_recognizes_image(char *path) {
  * NAME:	hfs->mount()
  * DESCRIPTION:	open an HFS volume; return volume descriptor or 0 (error)
  */
-static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
+static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supplied_fd)
 {
   struct _stat64 dev;
   hfsvol *vol = 0;
+  int recovered = 0;
 
 #ifndef WIN32
 #ifdef __EMX__
@@ -116,7 +120,9 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 #endif
 #endif
 
-  /* see if the volume is already mounted */
+  /* A recovery remount adopts the already locked descriptor. */
+  if (supplied_fd < 0)
+    {
 
 #ifdef WIN32
   {
@@ -159,11 +165,14 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 
 #endif
 
+    }
+
   if (vol == 0)
     {
       vol = ALLOC(hfsvol, 1);
       if (vol == 0)
 	{
+	  if (supplied_fd >= 0) close(supplied_fd);
 	  ERROR(ENOMEM, 0);
 	  return 0;
 	}
@@ -199,7 +208,9 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 
       /* open and lock the device */
 
-      if (flags & (O_WRONLY | O_RDWR))
+      if (supplied_fd >= 0)
+        vol->fd = supplied_fd;
+      else if (flags & (O_WRONLY | O_RDWR))
 	{
 #ifdef __EMX__
 	  vol->fd = open(path, O_BINARY | O_RDWR);
@@ -213,10 +224,10 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 	    }
 	}
 
-      if (! (flags & (O_WRONLY | O_RDWR)) ||
+      if (supplied_fd < 0 && (! (flags & (O_WRONLY | O_RDWR)) ||
 	  (vol->fd < 0 &&
 	   (errno == EROFS || errno == EACCES || errno == EAGAIN) &&
-	   (flags & O_RDWR)))
+	   (flags & O_RDWR))))
 	{
 	  vol->flags |= HFS_READONLY;
 #ifdef __EMX__
@@ -240,6 +251,17 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 
 	  return 0;
 	}
+
+#ifdef WIN32
+      recovered = hfv_hfs_recover_image(vol->fd, !(vol->flags & HFS_READONLY));
+      if (recovered < 0)
+        {
+          close(vol->fd);
+          v_destruct(vol);
+          ERROR(EIO,"Classic HFS overwrite recovery could not complete. Keep the image and reopen with exclusive writable access.");
+          return 0;
+        }
+#endif
 
       /* find out what kind of media this is and read the MDB */
 
@@ -296,7 +318,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session)
 
       if (! (vol->mdb.drAtrb & HFS_ATRB_UMOUNTED))
 	{
-          if (session)
+          if (session && !recovered)
             vol->flags |= HFS_READONLY;
 	  /* volume was not cleanly unmounted; scavenge free-space */
 
@@ -334,7 +356,7 @@ int hfs_session_mounts(int enabled) {
   return previous;
 }
 hfsvol *hfs_mount(char *path, int pnum, int flags) {
-  hfsvol *vol=mount_impl(path,pnum,flags,session_mounts);
+  hfsvol *vol=mount_impl(path,pnum,flags,session_mounts,-1);
   if (session_mounts && vol && !(vol->flags&HFS_READONLY) && (vol->mdb.drAtrb&HFS_ATRB_UMOUNTED)) {
     if (hfs_mark_session_dirty(vol)<0) {
       hfs_umount(vol);
@@ -346,7 +368,13 @@ hfsvol *hfs_mount(char *path, int pnum, int flags) {
 }
 
 hfsvol *hfs_mount_session(char *path, int pnum, int flags) {
-  return mount_impl(path,pnum,flags,1);
+  return mount_impl(path,pnum,flags,1,-1);
+}
+
+/* Takes ownership of a duplicate of the image's writable descriptor. */
+hfsvol *hfs_remount_for_recovery(int fd, int pnum, int session) {
+  if (fd < 0) { ERROR(EBADF, "invalid HFS recovery descriptor"); return 0; }
+  return mount_impl(0,pnum,O_RDWR,session,fd);
 }
 
 /* Publish and flush the dirty flag before any non-journaled session write. */

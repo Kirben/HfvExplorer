@@ -160,6 +160,7 @@ void hfs_note_rollback(int);
 int hfs_take_rollback(void);
 hfsvol *hfs_mount_session(char *, int, int);
 int hfs_mark_session_dirty(hfsvol *);
+hfsvol *hfs_remount_for_recovery(int fd, int pnum, int session);
 int hfs_session_mounts(int enabled);
 int hfs_editattrs(hfsvol *, char *, char *, hfsdirent *);
 int hfs_fsetattr(hfsfile *, hfsdirent *);

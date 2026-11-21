@@ -25,6 +25,7 @@
     <ClCompile Include="AskVolumeToFloppy.cpp" />
     <ClCompile Include="aspecial.c" />
     <ClCompile Include="Bndl.cpp" />
+    <ClCompile Include="ClassicHfsRecovery.cpp" />
     <ClCompile Include="MacIcons.cpp" />
     <ClCompile Include="cache.cpp" />
     <ClCompile Include="CFATVolume.cpp" />
@@ -91,6 +92,7 @@
     <ClCompile Include="ReadOnlyCdBackend.cpp" /><ClCompile Include="ReadOnlySource.cpp" /><ClCompile Include="PhysicalRemovable.cpp" /><ClCompile Include="PhysicalPartitions.cpp" /><ClCompile Include="DiskPartitions.cpp" /><ClCompile Include="ReadOnlyFloppy.cpp" /><ClCompile Include="DirectFloppy.cpp" /><ClCompile Include="FloppyFileWrite.cpp" /><ClCompile Include="FloppyWriter.cpp" /><ClCompile Include="FloppyWriteDialog.cpp" /><ClCompile Include="ClassicFormatCommand.cpp" /><ClCompile Include="CopyProgress.cpp" /><ClCompile Include="LauncherWriteBack.cpp" /><ClCompile Include="DocumentLaunch.cpp" /><ClCompile Include="TransferConversion.cpp" /><ClCompile Include="StorageJobDialog.cpp" /><ClCompile Include="BackgroundJobController.cpp" /><ClCompile Include="RefreshStorage.cpp" /><ClCompile Include="MediaDiscovery.cpp" /><ClCompile Include="MediaControl.cpp" /><ClCompile Include="MediaCommands.cpp" /><ClCompile Include="..\tests\MediaControlTest.cpp" /><ClCompile Include="CdImage.cpp" /><ClCompile Include="RawCdImage.cpp" /><ClCompile Include="CueImage.cpp" /><ClCompile Include="..\tests\RawOpticalTest.cpp" /><ClCompile Include="FloppyImage.cpp" /><ClCompile Include="..\tests\FloppyMenuTest.cpp" /><ClCompile Include="CdImageDialog.cpp" /><ClCompile Include="CdBurn.cpp" /><ClCompile Include="CdBurnDialog.cpp" /><ClCompile Include="FindFiles.cpp" /><ClCompile Include="FindFilesDialog.cpp" /><ClCompile Include="..\tests\FindFilesTest.cpp" /><ClCompile Include="..\tests\CdBurnTest.cpp" /><ClCompile Include="..\tests\CdImageTest.cpp" />
     <ClCompile Include="..\tests\FileMutationTest.cpp" />
     <ClCompile Include="..\tests\ClassicWriteFailureTest.cpp" />
+    <ClCompile Include="..\tests\ClassicRecoveryTest.cpp" />
     <ResourceCompile Include="HFVExplorer.rc" />
   </ItemGroup>
   <Import Project="..\HfsPlusCompression.props" />

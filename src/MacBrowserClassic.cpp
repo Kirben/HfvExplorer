@@ -14,11 +14,13 @@ extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
 #include "hfs/Replacement.h"
+#include "hfs/libhfs/block.h"
 int hfs_recognizes_image(char*);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
 #include "ClassicCatalog.h"
 #include "ClassicImagePath.h"
+#include "ClassicHfsRecovery.h"
 #include "ReadOnlyCdBackend.h"
 namespace MacBrowser {
 namespace {
@@ -403,30 +405,80 @@ public:
 private:
     uint32_t PutFile(uint32_t parent,const Entry& e,Reader read,bool replace,const hfsdirent* original) {
         LegacyEngine::Scope engine(context_);
-        ValidateEntry(e);BeforeWrite();RootScope scope(volume_);
+        ValidateEntry(e);
+        if(!Writable())throw HfsPlus::Error("Classic HFS volume is read-only");
         if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
-        auto path=(Path(parent)+(Path(parent).back()==':'?"":":"))+Encode(e.name);hfsdirent old;bool exists=hfs_stat(volume_,const_cast<char*>(path.c_str()),&old)==0;
+        std::string path;
+        bool exists;
+        {
+            RootScope scope(volume_);
+            const auto folder=Path(parent);
+            path=folder+(folder.back()==':'?"":":")+Encode(e.name);
+            hfsdirent old{};
+            exists=hfs_stat(volume_,path.data(),&old)==0;
+            if(!exists && errno!=ENOENT)Check(false);
+        }
         if(exists&&!replace)throw HfsPlus::Error("Destination already exists");
-        char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);
-        HfsReplacement state{};auto file=replacement_open(&state,volume_,const_cast<char*>(path.c_str()),type,creator);Check(file!=nullptr);
-        int result=0;char* error=nullptr;std::exception_ptr failure;
-        try {
-            std::vector<uint8_t> bytes(1024*1024);
-            for(unsigned fork=0;fork<2;++fork){Check(hfs_setfork(file,fork)==0);
-                for(uint64_t at=0;at<e.forks[fork].size;){size_t n=size_t((std::min)(uint64_t(bytes.size()),e.forks[fork].size-at));
-                    read(fork,at,bytes.data(),n);Check(hfs_write(file,bytes.data(),(unsigned long)n)==n);at+=n;}}
-            hfsdirent meta;Check(hfs_fstat(file,&meta)==0);meta.fdflags=HfsPlus::Disk::U16(e.finder.data()+8);
-            if(e.datesValid){meta.crdate=time_t(int64_t(e.created)-2082844800LL);meta.mddate=time_t(int64_t(e.modified)-2082844800LL);}
-            if(original){
-                meta.bkdate=original->bkdate;
-                meta.flags=(meta.flags&~HFS_ISLOCKED)|(original->flags&HFS_ISLOCKED);
+        std::unique_ptr<ClassicHfsRecovery::Overwrite> recovery;
+        const bool wasDirty=markedDirty_;
+        if(exists&&!registration_){
+            Check(hfs_flush(volume_)==0);
+            recovery=std::make_unique<ClassicHfsRecovery::Overwrite>(volume_->fd);
+        }
+        try{
+            RootScope scope(volume_);
+            BeforeWrite();
+            char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);
+            HfsReplacement state{};auto file=replacement_open(&state,volume_,const_cast<char*>(path.c_str()),type,creator);Check(file!=nullptr);
+            int result=0;char* error=nullptr;std::exception_ptr failure;
+            try {
+                std::vector<uint8_t> bytes(1024*1024);
+                for(unsigned fork=0;fork<2;++fork){Check(hfs_setfork(file,fork)==0);
+                    for(uint64_t at=0;at<e.forks[fork].size;){size_t n=size_t((std::min)(uint64_t(bytes.size()),e.forks[fork].size-at));
+                        read(fork,at,bytes.data(),n);Check(hfs_write(file,bytes.data(),(unsigned long)n)==n);at+=n;}}
+                hfsdirent meta;Check(hfs_fstat(file,&meta)==0);meta.fdflags=HfsPlus::Disk::U16(e.finder.data()+8);
+                if(e.datesValid){meta.crdate=time_t(int64_t(e.created)-2082844800LL);meta.mddate=time_t(int64_t(e.modified)-2082844800LL);}
+                if(original){
+                    meta.bkdate=original->bkdate;
+                    meta.flags=(meta.flags&~HFS_ISLOCKED)|(original->flags&HFS_ISLOCKED);
+                }
+                Check(hfs_fsetattr(file,&meta)==0);Check(hfs_fsetfinderinfo(file,e.finder.data())==0);
+            }catch(...){result=-1;failure=std::current_exception();}
+            if(hfs_close(file)<0){result=-1;error=hfs_error;}
+            replacement_finish(&state,&result,&error);
+            if(result){if(!exists)hfs_note_rollback(hfs_delete(volume_,const_cast<char*>(path.c_str()))==0?1:3);if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
+            Check(hfs_flush(volume_)==0);
+            const auto id=Id(path);
+            if(recovery)recovery->Commit();
+            return id;
+        }catch(...){
+            if(recovery&&recovery->Active())
+                RecoverFailedOverwrite(*recovery,wasDirty);
+            throw;
+        }
+    }
+    void RecoverFailedOverwrite(ClassicHfsRecovery::Overwrite& recovery,bool wasDirty)
+    {
+        const bool commitUncertain=recovery.CommitStarted();
+        recovery.Detach();
+        auto* failed=volume_;
+        volume_=nullptr;
+        const int partition=failed->pnum;
+        const int fd=!commitUncertain&&failed->refs==1?_dup(failed->fd):-1;
+        b_quarantine_volume(failed,"Classic HFS overwrite needs recovery. Close all views and reopen the image.");
+        hfs_umount(failed);
+        if(fd>=0){
+            volume_=hfs_remount_for_recovery(fd,partition,session_);
+            if(volume_){
+                markedDirty_=wasDirty;
+                hfs_take_rollback();
+                hfs_note_rollback(1);
+                return;
             }
-            Check(hfs_fsetattr(file,&meta)==0);Check(hfs_fsetfinderinfo(file,e.finder.data())==0);
-        }catch(...){result=-1;failure=std::current_exception();}
-        if(hfs_close(file)<0){result=-1;error=hfs_error;}
-        replacement_finish(&state,&result,&error);
-        if(result){if(!exists)hfs_note_rollback(hfs_delete(volume_,const_cast<char*>(path.c_str()))==0?1:3);if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
-        Check(hfs_flush(volume_)==0);return Id(path);
+        }
+        hfs_note_rollback(3);
+        closeFailed_=true;
+        throw HfsPlus::Error("Classic HFS overwrite recovery is pending. Close all views and reopen the image.");
     }
 public:
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}

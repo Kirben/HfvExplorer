@@ -38,6 +38,9 @@
 # endif
 
 # include "internal.h"
+#ifdef WIN32
+# include "../../ClassicHfsRecovery.h"
+#endif
 # include "data.h"
 # include "block.h"
 # include "low.h"
@@ -382,14 +385,21 @@ static
 int putblock(hfsvol *vol, unsigned long bnum, block *bp)
 {
   int bytes;
+  hfv_offset_t offset = ((hfv_offset_t)vol->vstart + bnum) * HFS_BLOCKSZ;
   if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled");return -1;}
   if(remember_block(vol,bnum)<0)return -1;
+#ifdef WIN32
+  if(hfv_hfs_before_sector_write(vol->fd,offset)<0){
+    ERROR(EIO,"cannot publish classic HFS sector undo");
+    return -1;
+  }
+#endif
 
 # ifdef DEBUG
   printf("WRITE: vol 0x%x block %lu\n", (unsigned int) vol, bnum);
 # endif
 
-  if (lseek(vol->fd, ((hfv_offset_t)vol->vstart + bnum) * HFS_BLOCKSZ, SEEK_SET) < 0)
+  if (lseek(vol->fd, offset, SEEK_SET) < 0)
     {
       ERROR(errno, "error seeking device");
       return -1;
@@ -408,6 +418,9 @@ int putblock(hfsvol *vol, unsigned long bnum, block *bp)
       return -1;
     }
 
+#ifdef WIN32
+  hfv_hfs_after_sector_write(vol->fd);
+#endif
   return 0;
 }
 
