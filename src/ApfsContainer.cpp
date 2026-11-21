@@ -463,18 +463,6 @@ uint64_t CreateCatalogClone(Source& source,const Container& expected,uint64_t pa
     return Commit(source,expected,job,&request);
 }
 
-uint64_t CreateSnapshot(Source& source,const Container& expected,const std::u16string& name,Storage::Job& job)
-{
-    const CatalogMutation request=CatalogSnapshot{name,true};
-    return Commit(source,expected,job,&request);
-}
-
-uint64_t DeleteSnapshot(Source& source,const Container& expected,const std::u16string& name,Storage::Job& job)
-{
-    const CatalogMutation request=CatalogSnapshot{name,false};
-    return Commit(source,expected,job,&request);
-}
-
 uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job& job)
 {
     const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::RegularFile};

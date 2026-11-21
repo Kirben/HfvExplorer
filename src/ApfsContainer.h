@@ -25,8 +25,6 @@ struct CheckpointPublicationUncertain : HfsPlus::Error {
 // Republish the current state at a new transaction ID. The caller must hold
 // exclusive writable access to an ordinary, raw image for the whole operation.
 uint64_t CommitCheckpoint(HfsPlus::Source&,const Container& expected,Storage::Job&);
-uint64_t CreateSnapshot(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
-uint64_t DeleteSnapshot(HfsPlus::Source&,const Container&,const std::u16string& name,Storage::Job&);
 struct CloneUnavailable : HfsPlus::Error {
     using HfsPlus::Error::Error;
 };
