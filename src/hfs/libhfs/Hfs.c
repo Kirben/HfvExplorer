@@ -916,7 +916,7 @@ int hfs_chdir(hfsvol *vol, char *path)
   CatDataRec data;
 
   if (v_getvol(&vol) < 0 ||
-      v_resolve(&vol, path, &data, 0, 0, 0) <= 0)
+      v_resolve(vol, path, &data, 0, 0, 0) <= 0)
     return -1;
 
   if (data.cdrType != cdrDirRec)
@@ -1015,7 +1015,7 @@ hfsdir *hfs_opendir(hfsvol *vol, char *path)
     }
   else
     {
-      if (v_resolve(&vol, path, &data, 0, 0, 0) <= 0)
+      if (v_resolve(vol, path, &data, 0, 0, 0) <= 0)
 	{
 	  FREE(dir);
 	  return 0;
@@ -1270,7 +1270,7 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
       return 0;
     }
 
-  if (v_resolve(&vol, path, &file->cat, &file->parid, file->name, 0) <= 0)
+  if (v_resolve(vol, path, &file->cat, &file->parid, file->name, 0) <= 0)
     {
       FREE(file);
       return 0;
@@ -1571,7 +1571,7 @@ int hfs_stat(hfsvol *vol, char *path, hfsdirent *ent)
   char name[HFS_MAX_FLEN + 1];
 
   if (v_getvol(&vol) < 0 ||
-      v_resolve(&vol, path, &data, &parid, name, 0) <= 0)
+      v_resolve(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
   r_unpackdirent(parid, name, &data, ent);
@@ -1600,7 +1600,7 @@ static int hfs_setattr_impl(hfsvol *vol, char *path, hfsdirent *ent)
   node n;
 
   if (v_getvol(&vol) < 0 ||
-      v_resolve(&vol, path, &data, 0, 0, &n) <= 0)
+      v_resolve(vol, path, &data, 0, 0, &n) <= 0)
     return -1;
 
   if (vol->flags & HFS_READONLY)
@@ -1650,7 +1650,7 @@ static int hfs_mkdir_impl(hfsvol *vol, char *path)
   if (v_getvol(&vol) < 0)
     return -1;
 
-  found = v_resolve(&vol, path, &data, &parid, name, 0);
+  found = v_resolve(vol, path, &data, &parid, name, 0);
   if (found < 0 || parid == 0)
     return -1;
   else if (found)
@@ -1690,7 +1690,7 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
   unsigned char pkey[HFS_CATKEYLEN];
 
   if (v_getvol(&vol) < 0 ||
-      v_resolve(&vol, path, &data, &parid, name, 0) <= 0)
+      v_resolve(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
   if (data.cdrType != cdrDirRec)
@@ -1753,7 +1753,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
   if (v_getvol(&vol) < 0)
     return -1;
 
-  found = v_resolve(&vol, path, &data, &parid, name, 0);
+  found = v_resolve(vol, path, &data, &parid, name, 0);
   if (found < 0 || parid == 0)
     return -1;
   else if (found)
@@ -1844,7 +1844,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
   int found;
 
   if (v_getvol(&vol) < 0 ||
-      v_resolve(&vol, path, &file.cat, &file.parid, file.name, 0) <= 0)
+      v_resolve(vol, path, &file.cat, &file.parid, file.name, 0) <= 0)
     return -1;
 
   if (file.cat.cdrType != cdrFilRec)
@@ -1925,7 +1925,6 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
  */
 static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 {
-  hfsvol *srcvol;
   CatDataRec src, dst;
   long srcid, dstid;
   CatKeyRec key;
@@ -1935,21 +1934,14 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
   node n;
 
   if (v_getvol(&vol) < 0 ||
-      v_resolve(&vol, srcpath, &src, &srcid, srcname, 0) <= 0)
+      v_resolve(vol, srcpath, &src, &srcid, srcname, 0) <= 0)
     return -1;
 
   isdir  = (src.cdrType == cdrDirRec);
-  srcvol = vol;
 
-  found = v_resolve(&vol, dstpath, &dst, &dstid, dstname, 0);
+  found = v_resolve(vol, dstpath, &dst, &dstid, dstname, 0);
   if (found < 0)
     return -1;
-
-  if (vol != srcvol)
-    {
-      ERROR(EINVAL, "can't move across volumes");
-      return -1;
-    }
 
   if (dstid == 0)
     {
@@ -2123,11 +2115,11 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
   return 0;
 }
 
-/* Bind undo to the resolved source volume, including absolute HFS paths. */
+/* Resolve the default mount, then validate the path before starting undo. */
 static int mutation_source(hfsvol **vol,char *path) {
  CatDataRec data;int found;
  if(v_getvol(vol)<0)return -1;
- found=v_resolve(vol,path,&data,0,0,0);
+ found=v_resolve(*vol,path,&data,0,0,0);
  if(found==0)ERROR(ENOENT,"HFS entry not found");
  return found>0?0:-1;
 }
@@ -2145,7 +2137,7 @@ int hfs_rename(hfsvol *vol,char *source,char *destination) {
 static int mutation_target(hfsvol **vol,char *path) {
  CatDataRec data;long parent;int found;
  if(v_getvol(vol)<0)return -1;
- found=v_resolve(vol,path,&data,&parent,0,0);
+ found=v_resolve(*vol,path,&data,&parent,0,0);
  if(found<0)return -1;
  if(!parent){ERROR(ENOENT,"HFS parent directory not found");return -1;}
  return 0;
@@ -2185,7 +2177,7 @@ int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
 
 int hfs_getfinderinfo(hfsvol *vol,char *path,unsigned char *finder) {
  CatDataRec data;unsigned char raw[102];int length=0;
- if(!finder||v_getvol(&vol)<0||v_resolve(&vol,path,&data,0,0,0)<=0)return -1;
+ if(!finder||v_getvol(&vol)<0||v_resolve(vol,path,&data,0,0,0)<=0)return -1;
  if(data.cdrType!=cdrDirRec&&data.cdrType!=cdrFilRec){ERROR(EINVAL,"Finder information requires a file or folder");return -1;}
  r_packcatdata(&data,raw,&length);
  if(data.cdrType==cdrDirRec)memcpy(finder,raw+22,32);
@@ -2200,7 +2192,7 @@ int hfs_fsetfinderinfo(hfsfile *file,const unsigned char *finder) {
 int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char *finder,const time_t *dates) {
  CatDataRec data;node n;unsigned char raw[70];int length=0,result=-1;
  if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
- if(v_resolve(&vol,path,&data,0,0,&n)<=0)goto done;
+ if(v_resolve(vol,path,&data,0,0,&n)<=0)goto done;
  if(data.cdrType!=cdrDirRec||data.u.dir.dirDirID!=expected){ERROR(EINVAL,"Destination folder changed during copying");goto done;}
  if(finder){r_packcatdata(&data,raw,&length);memcpy(raw+22,finder,32);r_unpackcatdata(raw,&data);}
  if(dates){data.u.dir.dirCrDat=d_tomtime(dates[0]);data.u.dir.dirMdDat=d_tomtime(dates[1]);}

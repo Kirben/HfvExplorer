@@ -33,7 +33,7 @@ int v_putextrec(ExtDataRec *, node *);
 int v_allocblocks(hfsvol *, ExtDescriptor *);
 void v_freeblocks(hfsvol *, ExtDescriptor *);
 
-int v_resolve(hfsvol **, char *, CatDataRec *, long *, char *, node *);
+int v_resolve(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 
 void v_destruct(hfsvol *);
 int v_getvol(hfsvol **);

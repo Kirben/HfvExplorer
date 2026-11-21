@@ -16,17 +16,17 @@ typedef struct {
  int active;
  char original[HFS_MAX_FLEN+1], temporary[HFS_MAX_FLEN+1], backup[HFS_MAX_FLEN+1];
 } HfsReplacement;
-static int replacement_unique(hfsvol *volume,char *name,const char *suffix) {
- static unsigned long serial;
+static int replacement_unique(hfsvol *volume,char *name,const char *suffix,unsigned long *serial) {
  hfsdirent entry;unsigned attempt;
  for(attempt=0;attempt<1000;++attempt) {
-  sprintf(name,"HFV%08lX.%s",++serial,suffix);
+  sprintf(name,"HFV%08lX.%s",++*serial,suffix);
   if(hfs_stat(volume,name,&entry)<0) {if(errno==ENOENT)return 0;return -1;}
  }
  hfs_error="Could not reserve HFS replacement names";return -1;
 }
 static hfsfile *replacement_open(HfsReplacement *state,hfsvol *volume,char *name,char *type,char *creator) {
  hfsdirent old;long cwd;hfsfile *file=0;
+ unsigned long serial=0;
  memset(state,0,sizeof(*state));
  if(hfs_stat(volume,name,&old)<0) {
   if(errno!=ENOENT||hfs_create(volume,name,type,creator)<0)return 0;
@@ -36,7 +36,7 @@ static hfsfile *replacement_open(HfsReplacement *state,hfsvol *volume,char *name
  cwd=hfs_getcwd(volume);
  if(hfs_setcwd(volume,old.parid)<0)return 0;
  state->volume=volume;state->parent=old.parid;strcpy(state->original,old.name);
- if(replacement_unique(volume,state->temporary,"tmp")==0&&replacement_unique(volume,state->backup,"bak")==0&&
+ if(replacement_unique(volume,state->temporary,"tmp",&serial)==0&&replacement_unique(volume,state->backup,"bak",&serial)==0&&
     hfs_create(volume,state->temporary,type,creator)==0) {
   file=hfs_open(volume,state->temporary);
   if(file)state->active=1;else hfs_delete(volume,state->temporary);

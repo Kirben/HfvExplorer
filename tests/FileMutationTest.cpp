@@ -14,6 +14,7 @@ extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
 extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
+#include "hfs/Replacement.h"
 #include "hfs/interface.h"
 int do_delete_directory(hfsvol*,char*);
 }
@@ -33,6 +34,74 @@ bool junction(const CString& link,const CString& target) {
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 std::vector<BYTE> load(const CString& path){CFile f;check(f.Open(path,CFile::modeRead)!=FALSE,"open fixture");std::vector<BYTE> b(size_t(f.GetLength()));check(f.Read(b.data(),UINT(b.size()))==b.size(),"read fixture");return b;}
 void save(const CString& path,const char* bytes){CFile f;check(f.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create fixture");f.Write(bytes,UINT(strlen(bytes)));}
+void checkClassicMountResolution(const CString& root,FILE* report) {
+ char label[]="Twin",otherLabel[]="Other",type[]="TEXT",creator[]="TEST";
+ const auto mount=[&](CString image,char* volumeLabel){
+  {
+   CFile f;
+   check(f.Open(image,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create mount identity fixture");
+   f.SetLength(2*1024*1024);
+  }
+  auto* path=image.GetBuffer();
+  check(hfs_format(path,0,volumeLabel)==0,"format mount identity fixture");
+  auto* volume=hfs_mount(path,0,O_RDWR);
+  image.ReleaseBuffer();
+  check(volume!=nullptr,"mount identity fixture");
+  return volume;
+ };
+ auto* a=mount(root+"\\twin-a.dsk",label);
+ auto* b=mount(root+"\\twin-b.dsk",label);
+ auto* other=mount(root+"\\other-label.dsk",otherLabel);
+ const auto put=[&](hfsvol* volume,char* name,char byte){
+  check(hfs_create(volume,name,type,creator)==0,"create entry on selected mount");
+  auto* file=hfs_open(volume,name);
+  check(file&&hfs_write(file,&byte,1)==1&&hfs_close(file)==0,"write selected mount data");
+ };
+ const auto read=[](hfsvol* volume,char* name){
+  auto* file=hfs_open(volume,name);
+  char byte=0;
+  check(file&&hfs_read(file,&byte,1)==1&&hfs_close(file)==0,"read selected mount data");
+  return byte;
+ };
+ char relative[]="File",absolute[]="twin:File",foreign[]="Other:File";
+ put(a,relative,'A');put(b,relative,'B');put(other,relative,'C');
+ hfs_setvol(b);
+ check(read(a,absolute)=='A'&&read(b,absolute)=='B'&&read(nullptr,absolute)=='B',
+       "the current or newer same-label mount displaced an explicit selection");
+ hfsdirent entry{};
+ check(hfs_stat(a,foreign,&entry)<0&&errno==ENOENT,"foreign label resolved on another mount");
+ char foreignOutput[]="Other:New";
+ check(hfs_create(a,foreignOutput,type,creator)<0&&errno==ENOENT&&
+       hfs_stat(other,foreignOutput,&entry)<0,"wrong-label creation reached another mount");
+ check(hfs_rename(a,absolute,foreignOutput)<0&&read(a,absolute)=='A'&&read(other,foreign)=='C',
+       "wrong-label rename changed one of the mounts");
+
+ char firstTemporary[]="HFV00000001.tmp",thirdBackup[]="HFV00000003.bak";
+ put(a,firstTemporary,'T');put(a,thirdBackup,'K');
+ HfsReplacement left{},right{};
+ auto* leftFile=replacement_open(&left,a,absolute,type,creator);
+ auto* rightFile=replacement_open(&right,b,absolute,type,creator);
+ check(leftFile&&rightFile&&left.active&&right.active,"stage replacements on independent mounts");
+ check(!strcmp(left.temporary,"HFV00000002.tmp")&&!strcmp(left.backup,"HFV00000004.bak")&&
+       !strcmp(right.temporary,"HFV00000001.tmp")&&!strcmp(right.backup,"HFV00000002.bak"),
+       "replacement names did not start independently or avoid existing names");
+ char leftByte='X',rightByte='Y';
+ check(hfs_write(leftFile,&leftByte,1)==1&&hfs_write(rightFile,&rightByte,1)==1&&
+       hfs_close(leftFile)==0&&hfs_close(rightFile)==0,"write staged replacements");
+ int leftResult=0,rightResult=0;
+ char* error=nullptr;
+ replacement_finish(&right,&rightResult,&error);
+ replacement_finish(&left,&leftResult,&error);
+ check(!leftResult&&!rightResult&&read(a,absolute)=='X'&&read(b,absolute)=='Y'&&
+       read(a,firstTemporary)=='T'&&read(a,thirdBackup)=='K'&&read(other,foreign)=='C',
+       "replacement touched another mount or an existing temporary or backup name");
+ check(hfs_stat(a,left.temporary,&entry)<0&&hfs_stat(a,left.backup,&entry)<0&&
+       hfs_stat(b,right.temporary,&entry)<0&&hfs_stat(b,right.backup,&entry)<0,
+       "replacement left its own temporary or backup file behind");
+ check(hfs_umount(a)==0&&hfs_umount(b)==0&&hfs_umount(other)==0,"close mount identity fixtures");
+ fprintf(report,"PASS: classic HFS absolute paths stay on the selected mount, and independent staged replacements preserve name collisions.\n");
+}
+
 }
 int RunFileMutationTest(const char* directory) {
  if(!CreateDirectoryA(directory,nullptr))return 2;
@@ -40,6 +109,7 @@ int RunFileMutationTest(const char* directory) {
  int silent=HFSIFACE_silencer(1);
  try {
   RunClassicWriteFailureTests(directory,report);
+  checkClassicMountResolution(root,report);
   {CFile f;check(f.Open(image,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create HFS fixture");f.SetLength(4*1024*1024);}
   char label[]="MutationTest",fileName[]="MutationTest:Keep",type[]="TEXT",creator[]="TEST";
   check(hfs_format(image.GetBuffer(),0,label)==0,"format mutation fixture");image.ReleaseBuffer();

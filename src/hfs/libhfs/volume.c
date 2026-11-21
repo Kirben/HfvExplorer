@@ -312,7 +312,7 @@ void v_freeblocks(hfsvol *vol, ExtDescriptor *blocks)
  * NAME:	vol->resolve()
  * DESCRIPTION:	translate a pathname; return catalog information
  */
-int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
+int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
 	      long *parid, char *fname, node *np)
 {
   long dirid;
@@ -344,28 +344,26 @@ int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
 
   if (*path == ':' || nptr == 0)
     {
-      dirid = (*vol)->cwd;  /* relative path */
+      dirid = vol->cwd;  /* relative path */
 
       if (*path == ':')
 	++path;
 
       if (*path == 0)
 	{
-	  found = v_getdthread(*vol, dirid, data, 0);
+	  found = v_getdthread(vol, dirid, data, 0);
 	  if (found <= 0)
 	    return found;
 
 	  if (parid)
 	    *parid = data->u.dthd.thdParID;
 
-	  return v_catsearch(*vol, data->u.dthd.thdParID,
+	  return v_catsearch(vol, data->u.dthd.thdParID,
 			     data->u.dthd.thdCName, data, fname, np);
 	}
     }
   else
     {
-      hfsvol *check;
-
       dirid = HFS_CNID_ROOTPAR;  /* absolute path */
 
       if (nptr - path > HFS_MAX_VLEN)
@@ -377,14 +375,12 @@ int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
       strncpy(name, path, nptr - path);
       name[nptr - path] = 0;
 
-      for (check = hfs_mounts; check; check = check->next)
-	{
-	  if (d_relstring(check->mdb.drVN, name) == 0)
-	    {
-	      *vol = check;
-	      break;
-	    }
-	}
+      /* The caller already selected the mount. A label only confirms it. */
+      if (d_relstring(vol->mdb.drVN, name) != 0)
+        {
+          ERROR(ENOENT, "path does not name the selected HFS volume");
+          return -1;
+        }
     }
 
   while (1)
@@ -393,7 +389,7 @@ int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
 	{
 	  ++path;
 
-	  found = v_getdthread(*vol, dirid, data, 0);
+	  found = v_getdthread(vol, dirid, data, 0);
 	  if (found <= 0)
 	    return found;
 
@@ -402,14 +398,14 @@ int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
 
       if (*path == 0)
 	{
-	  found = v_getdthread(*vol, dirid, data, 0);
+	  found = v_getdthread(vol, dirid, data, 0);
 	  if (found <= 0)
 	    return found;
 
 	  if (parid)
 	    *parid = data->u.dthd.thdParID;
 
-	  return v_catsearch(*vol, data->u.dthd.thdParID,
+	  return v_catsearch(vol, data->u.dthd.thdParID,
 			     data->u.dthd.thdCName, data, fname, np);
 	}
 
@@ -430,7 +426,7 @@ int v_resolve(hfsvol **vol, char *path, CatDataRec *data,
       if (parid)
 	*parid = dirid;
 
-      found = v_catsearch(*vol, dirid, name, data, fname, np);
+      found = v_catsearch(vol, dirid, name, data, fname, np);
       if (found < 0)
 	return -1;
 
