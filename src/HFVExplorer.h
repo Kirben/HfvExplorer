@@ -61,8 +61,6 @@ public:
  afx_msg void OnExitBrowsers();
 	void LoadSettings(void);
 	void SaveSettings(void);
-	void CheckDefaultSettings(void);
-	void WriteIconIndex(void);
 	void kill_childs();
 	void add_child( HWND hi );
 	BOOL EnableTimer( BOOL onoff );
@@ -89,36 +87,16 @@ public:
 	std::map<UINT, HFONT> m_browserFonts;
 	BOOL	m_is_font_sjis; /* noda */
 
-	int m_next_icon_index;
 
 	int m_show_invisible_mac;
 	int m_show_invisible_fat;
 	int m_protect_locked_mac;
 	int m_protect_locked_fat;
 
-	CString m_executor_dos_path;
-	CString m_executor_win32_path;
-	CString m_vmac_path;
-	CString m_vmac_startup_folder_name;
-	CString m_vmac_system_file_path;
-	int m_link_name_style;
 
-	int m_default_emulator;
 
-	int m_launch_method;
-	int m_use_remover;
 
-	CString	m_fusion_startup_folder_name;
-	CString	m_fusion_system_file_path;
-	CString	m_fusion_batch_path;
-	int m_fusion_use_remover;
 
-	CString	m_shapeshifter_path;
-	CString	m_shapeshifter_startup_folder_name;
-	CString	m_shapeshifter_system_file_path;
-	CString	m_shapeshifter_preferences_file_path;
-	CString	m_shapeshifter_amiga_volume_name;
-	int m_shapeshifter_use_remover;
 
 	BOOL m_mac_window_mode;
 	BOOL m_show_labels;

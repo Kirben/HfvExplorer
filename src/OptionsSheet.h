@@ -21,12 +21,6 @@
 #include "OptionsPage1.h"
 #include "OptionsPage2.h"
 #include "OptionsPage3.h"
-#include "OptionsPage4.h"
-#include "OptionsPage5.h"
-#include "OptionsPage6.h"
-#include "OptionsPage7.h"
-#include "OptionsPage8.h"
-#include "OptionsPage9.h"
 
 /////////////////////////////////////////////////////////////////////////////
 // COptionsSheet
@@ -46,12 +40,6 @@ public:
 	COptionsPage1 m_Page1;
 	COptionsPage2 m_Page2;
 	COptionsPage3 m_Page3;
-	COptionsPage4 m_Page4;
-	COptionsPage5 m_Page5;
-	COptionsPage6 m_Page6;
-	COptionsPage7 m_Page7;
-	COptionsPage8 m_Page8;
-	COptionsPage9 m_Page9;
 
 // Operations
 public:

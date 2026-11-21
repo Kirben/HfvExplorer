@@ -23,7 +23,7 @@ struct Target {
  HWND control=nullptr;
  HTREEITEM item=nullptr;
  int row=-1;
- bool tree=false,writable=false,macApplication=false;
+ bool tree=false,writable=false;
  DropKind kind=DropKind::None;
  FileOperations::Location location;
 };
@@ -69,8 +69,7 @@ Target Resolve(BrowserSession& session,bool tree,HTREEITEM item,int row,bool loc
     if(!model->entry.directory){
      if(!local||!model->entry.readError.empty()||out.location.IsMounted())return {};
      const auto& finder=model->entry.finder;
-     out.macApplication=!memcmp(finder.data(),"APPL",4);
-     if(!out.macApplication&&(out.location.IsClassic()||finder[0]))return {};
+     if(!out.location.IsWindows()||finder[0])return {};
      out.kind=DropKind::Application;
      return out;
     }
@@ -119,9 +118,6 @@ Effect DropEffect(const Selection& selection,const Target& target,UINT keys)
   const auto& app=target.location;
   if(source.IsWindows()&&app.IsWindows()&&!_wcsicmp(source.WindowsPath().c_str(),app.WindowsPath().c_str()))
    return Effect::None;
-  if(source.IsClassic()&&app.IsClassic()&&!_stricmp(source.ClassicPath().c_str(),app.ClassicPath().c_str()))
-   return Effect::None;
-  if(target.macApplication&&(source.IsClassic()||source.IsWindows()))return Effect::Copy;
   if(target.location.IsWindows()&&source.IsWindows())return Effect::Copy;
  }
  return Effect::None;
@@ -132,7 +128,7 @@ bool Transfer(const Selection& selection,const Target& target,UINT keys)
  const auto effect=DropEffect(selection,target,keys);
  if(effect==Effect::None)return false;
  if(target.kind==DropKind::Application)
-  return target.session->List()->OpenWithDrop(selection.items.front(),target.location,target.macApplication);
+  return target.session->List()->OpenWithDrop(selection.items.front(),target.location);
  if(target.kind!=DropKind::Folder)return false;
  auto sources=selection.items;
  for(auto& item:sources)item.cut=effect==Effect::Move;

@@ -4,24 +4,20 @@
 
 class BrowserSession;
 namespace DocumentLaunch {
-enum class Target { Default, ExecutorDos, ExecutorWin32, VMac, ShapeShifter, Fusion, Windows };
 
 struct Request {
  FileOperations::Location selection;
  MacBrowser::Entry entry;
- std::shared_ptr<BrowserDirectory::OwnedIcons> icons;
- HICON small=nullptr,large=nullptr;
- int classicSlot=-1;
- Target target=Target::Default;
- bool shortcut=false;
 };
 
-Target FromMenuCommand(int command);
+void ShowBasiliskII(CWnd* owner);
+void ShowMiniVMac(CWnd* owner);
+#ifdef HFV_TESTING
+bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory);
+#endif
 bool Launch(BrowserSession& session,Request request);
 bool OpenWith(BrowserSession& session,const FileOperations::Location& source,
-              const FileOperations::Location& application,bool mac);
+              const FileOperations::Location& application);
 bool SaveFileIcon(HICON small,HICON large,const char* path,bool document);
-CString ExecutorCommand(const CString& configured,const FileOperations::Location& source,CString application);
-CString DiskArguments(const FileOperations::Location& source,const CString& operation);
 std::wstring WindowsArgument(const FileOperations::Location& source);
 }

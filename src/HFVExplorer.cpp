@@ -93,34 +93,14 @@ CHFVExplorerApp::CHFVExplorerApp()
 	m_timer_enabled = TRUE;
 	m_version = "";
 	m_is_font_sjis = FALSE; /* noda */
-	m_next_icon_index = 0;
 	m_show_invisible_mac = 0;
 	m_show_invisible_fat = 1;
 	m_protect_locked_mac = 0;
 	m_protect_locked_fat = 0;
 
-	m_executor_dos_path = _T("");
-	m_executor_win32_path = _T("");
-	m_vmac_path = _T("");
-	m_vmac_startup_folder_name = _T("");
-	m_vmac_system_file_path = _T("");
-	m_default_emulator = 5;
-	m_link_name_style = 2;
 
-	m_launch_method = 0;
-	m_use_remover = 1;
 
-	m_shapeshifter_path = _T("");
-	m_shapeshifter_startup_folder_name = _T("");
-	m_shapeshifter_system_file_path = _T("");
-	m_shapeshifter_preferences_file_path = _T("");
-	m_shapeshifter_amiga_volume_name = _T("");
-	m_shapeshifter_use_remover = 1;
 
-	m_fusion_startup_folder_name = _T("");
-	m_fusion_system_file_path = _T("");
-	m_fusion_batch_path = _T("");
-	m_fusion_use_remover = 1;
 
 	m_type_mapping_enabled = FALSE;
 	m_mac_window_mode = FALSE;
@@ -151,11 +131,6 @@ CHFVExplorerApp::~CHFVExplorerApp()
 	tmap_final();
 }
 
-void CHFVExplorerApp::WriteIconIndex(void)
-{
-	WriteProfileInt("Setup","NextIconNumber",m_next_icon_index);
-}
-
 void CHFVExplorerApp::LoadSettings(void)
 {
 	m_dosicons = GetProfileInt("Setup","DosIcons",1);
@@ -167,7 +142,6 @@ void CHFVExplorerApp::LoadSettings(void)
 	m_copyout_mode = GetProfileInt("Setup","CopyOutMode",6);
 	m_copyin_mode = GetProfileInt("Setup","CopyInMode",6);
 	m_copyin_appledouble = GetProfileInt("Setup","CopyInAppleDouble",1);
-	m_next_icon_index = GetProfileInt("Setup","NextIconNumber",0);
 
 	m_version = GetProfileString("Setup","Version");
 
@@ -179,28 +153,9 @@ void CHFVExplorerApp::LoadSettings(void)
 	m_show_labels = GetProfileInt("Setup","ShowLabels",0);
 
 
-	m_executor_dos_path = GetProfileString("Setup","ExecutorDOSPath");
-	m_executor_win32_path = GetProfileString("Setup","ExecutorWin32Path");
-	m_vmac_path = GetProfileString("Setup","vMacPath");
-	m_vmac_startup_folder_name = GetProfileString("Setup","vMacStartupFolder");
-	m_vmac_system_file_path = GetProfileString("Setup","vMacSystemFile");
 
-	m_default_emulator = GetProfileInt("Setup","DefaultEmulator",5);
-	m_link_name_style = GetProfileInt("Setup","LinkNameStyle",2);
-	m_launch_method = GetProfileInt("Setup","vMacLaunchMethod",0);
-	m_use_remover = GetProfileInt("Setup","vMacUseRemover",1);
 
-	m_shapeshifter_path = GetProfileString("Setup","ShapeshifterPath");
-	m_shapeshifter_startup_folder_name = GetProfileString("Setup","ShapeshifterStartupFolder");
-	m_shapeshifter_system_file_path = GetProfileString("Setup","ShapeshifterSystemFile");
-	m_shapeshifter_preferences_file_path = GetProfileString("Setup","ShapeshifterPreferences");
-	m_shapeshifter_amiga_volume_name = GetProfileString("Setup","ShapeshifterVolume");
-	m_shapeshifter_use_remover = GetProfileInt("Setup","ShapeshifterUseRemover",1);
 
-	m_fusion_startup_folder_name = GetProfileString("Setup","FusionStartupFolder");
-	m_fusion_system_file_path = GetProfileString("Setup","FusionSystemFile");
-	m_fusion_batch_path = GetProfileString("Setup","FusionBatchFile");
-	m_fusion_use_remover = GetProfileInt("Setup","FusionUseRemover",1);
 
 	point_size = GetProfileInt("Setup","PointSize",10);
 	CString f;
@@ -234,7 +189,6 @@ void CHFVExplorerApp::SaveSettings(void)
 	WriteProfileInt("Setup","CopyOutMode",m_copyout_mode);
 	WriteProfileInt("Setup","CopyInMode",m_copyin_mode);
 	WriteProfileInt("Setup","CopyInAppleDouble",m_copyin_appledouble);
-	WriteIconIndex();
 
 	WriteProfileString("Setup","Version",m_version);
 
@@ -246,29 +200,10 @@ void CHFVExplorerApp::SaveSettings(void)
 	WriteProfileInt("Setup","MacWindowMode",m_mac_window_mode);
 	WriteProfileInt("Setup","ShowLabels",m_show_labels);
 
-	WriteProfileString("Setup","ExecutorDOSPath",m_executor_dos_path);
-	WriteProfileString("Setup","ExecutorWin32Path",m_executor_win32_path);
-	WriteProfileString("Setup","vMacPath",m_vmac_path);
-	WriteProfileString("Setup","vMacStartupFolder",m_vmac_startup_folder_name);
-	WriteProfileString("Setup","vMacSystemFile",m_vmac_system_file_path);
 
-	WriteProfileInt("Setup","DefaultEmulator",m_default_emulator);
 
-	WriteProfileInt("Setup","LinkNameStyle",m_link_name_style);
-	WriteProfileInt("Setup","vMacLaunchMethod",m_launch_method);
-	WriteProfileInt("Setup","vMacUseRemover",m_use_remover);
 
-	WriteProfileString("Setup","ShapeshifterPath",m_shapeshifter_path);
-	WriteProfileString("Setup","ShapeshifterStartupFolder",m_shapeshifter_startup_folder_name);
-	WriteProfileString("Setup","ShapeshifterSystemFile",m_shapeshifter_system_file_path);
-	WriteProfileString("Setup","ShapeshifterPreferences",m_shapeshifter_preferences_file_path);
-	WriteProfileString("Setup","ShapeshifterVolume",m_shapeshifter_amiga_volume_name);
-	WriteProfileInt("Setup","ShapeshifterUseRemover",m_shapeshifter_use_remover);
 
-	WriteProfileString("Setup","FusionStartupFolder",m_fusion_startup_folder_name);
-	WriteProfileString("Setup","FusionSystemFile",m_fusion_system_file_path);
-	WriteProfileString("Setup","FusionBatchFile",m_fusion_batch_path);
-	WriteProfileInt("Setup","FusionUseRemover",m_fusion_use_remover);
 
 	WriteProfileInt("Setup","PointSize",point_size);
 	WriteProfileString("Setup","Font",CString(font_name));
@@ -278,40 +213,6 @@ void CHFVExplorerApp::SaveSettings(void)
 
 	WriteProfileInt("Setup","UsePartialNames",m_use_partial_names);
 
-}
-
-void CHFVExplorerApp::CheckDefaultSettings(void)
-{
-	char path[_MAX_PATH];
-
-	if(m_executor_dos_path == "") {
-		::GetPrivateProfileString( 
-			"Setup", "Executor path", "", path, MAX_PATH, "execut95.ini"
-		);
-		m_executor_dos_path = CString(path);
-	}
-
-	if(m_executor_win32_path == "") {
-		::GetPrivateProfileString( 
-			"Setup", "Executor path", "", path, MAX_PATH, "execut95.ini"
-		);
-		m_executor_win32_path = CString(path);
-	}
-
-	if(m_vmac_startup_folder_name == "") {
-		m_vmac_startup_folder_name = CString("System Folder:Startup Items");
-	}
-
-	if(m_shapeshifter_startup_folder_name == "") {
-		m_shapeshifter_startup_folder_name = CString("System Folder:Startup Items");
-	}
-	if(m_shapeshifter_amiga_volume_name == "") {
-		m_shapeshifter_amiga_volume_name = CString("Executor:");
-	}
-
-	if(m_fusion_startup_folder_name == "") {
-		m_fusion_startup_folder_name = CString("System Folder:Startup Items");
-	}
 }
 
 int CHFVExplorerApp::ExitInstance(){BrowserTransfers::Clear();ShutdownStorageUi();return CWinApp::ExitInstance();}
@@ -444,7 +345,6 @@ BOOL CHFVExplorerApp::InitInstance()
  free((void*)m_pszProfileName);
  m_pszProfileName = _strdup(settingsPath);
 	LoadSettings();
-	CheckDefaultSettings();
 
 	m_prevVersion = m_version;
 

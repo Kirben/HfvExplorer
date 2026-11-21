@@ -34,33 +34,21 @@ static char THIS_FILE[] = __FILE__;
 IMPLEMENT_DYNAMIC(COptionsSheet, CPropertySheet)
 
 COptionsSheet::COptionsSheet(UINT nIDCaption, CWnd* pParentWnd, UINT iSelectPage)
-	:CPropertySheet(nIDCaption, pParentWnd, min(iSelectPage,8U))
+	:CPropertySheet(nIDCaption, pParentWnd, min(iSelectPage,2U))
 {
-	m_last_active_page = min(iSelectPage,8U);
+	m_last_active_page = min(iSelectPage,2U);
 	AddPage(&m_Page1);
 	AddPage(&m_Page2);
 	AddPage(&m_Page3);
-	AddPage(&m_Page4);
-	AddPage(&m_Page5);
-	AddPage(&m_Page6);
-	AddPage(&m_Page7);
-	AddPage(&m_Page8);
-	AddPage(&m_Page9);
 }
 
 COptionsSheet::COptionsSheet(LPCTSTR pszCaption, CWnd* pParentWnd, UINT iSelectPage)
-	:CPropertySheet(pszCaption, pParentWnd, min(iSelectPage,8U))
+	:CPropertySheet(pszCaption, pParentWnd, min(iSelectPage,2U))
 {
-	m_last_active_page = min(iSelectPage,8U);
+	m_last_active_page = min(iSelectPage,2U);
 	AddPage(&m_Page1);
 	AddPage(&m_Page2);
 	AddPage(&m_Page3);
-	AddPage(&m_Page4);
-	AddPage(&m_Page5);
-	AddPage(&m_Page6);
-	AddPage(&m_Page7);
-	AddPage(&m_Page8);
-	AddPage(&m_Page9);
 }
 
 COptionsSheet::~COptionsSheet()

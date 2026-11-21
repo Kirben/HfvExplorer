@@ -162,6 +162,8 @@ BEGIN
     POPUP "&Tools"
     BEGIN
         MENUITEM "&Find...\tF3",                ID_TOOLS_FIND
+        MENUITEM "Launch Basilisk II...",         ID_TOOLS_BASILISK_II
+        MENUITEM "Launch Mini vMac...",           ID_TOOLS_MINI_VMAC
         MENUITEM "New browser\tCtrl+Enter",     ID_TOOLS_NEW_BROWSER
         MENUITEM SEPARATOR
         MENUITEM "Dump CD to file ...",         ID_TOOLS_DUMPCDDEBUG
@@ -286,22 +288,6 @@ BEGIN
                     BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,12,111,222,12
 END
 
-IDD_OPTIONS_PAGE_4 DIALOGEX 0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Shortcuts"
-FONT 9, "Segoe UI"
-BEGIN
-    LTEXT           "Opening Mac files",IDC_STATIC,12,10,222,11
-    LTEXT           "&Default emulator",IDC_STATIC,12,27,222,10
-    COMBOBOX        IDC_COPT4_DEFAULT_EMULATOR,12,40,222,78,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Used when you press Enter or double-click a Mac document or application.",
-                    IDC_STATIC,12,61,222,21
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,92,222,1
-    LTEXT           "Windows shortcuts",IDC_STATIC,12,102,222,11
-    LTEXT           "Shortcut &name style (all emulators)",IDC_STATIC,12,120,222,10
-    COMBOBOX        IDC_COPT4_LINK_NAME_STYLE,12,133,222,65,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-END
-
 IDD_ABOUTBOX DIALOG DISCARDABLE  0, 0, 258, 194
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "About HFVExplorer"
@@ -409,125 +395,6 @@ BEGIN
     PUSHBUTTON      "Cancel",IDCANCEL,345,270,54,15
 END
 
-IDD_OPTIONS_PAGE_7 DIALOGEX 0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "vMac Win32"
-FONT 9, "Segoe UI"
-BEGIN
-    LTEXT           "Emulator files",IDC_STATIC,12,9,222,11
-    LTEXT           "vMac &executable",IDC_STATIC,12,23,222,10
-    EDITTEXT        IDC_COPT7_VMAC_PATH,12,35,163,14,ES_AUTOHSCROLL
-    PUSHBUTTON      "&Browse...",IDC_COPT7_BROWSE_VMAC_PATH,181,34,53,16
-    LTEXT           "System &volume image (System 7 or later)",IDC_STATIC,12,54,222,10
-    EDITTEXT        IDC_COPT7_VMAC_SYSTEM_FILE_PATH,12,66,163,14,ES_AUTOHSCROLL
-    PUSHBUTTON      "B&rowse...",IDC_COPT7_BROWSE_VMAC_SYSTEM_FILE_PATH,181,65,53,16
-    LTEXT           "Startup Items &folder",IDC_STATIC,12,85,222,10
-    EDITTEXT        IDC_COPT7_VMAC_STARTUP_FOLDER_NAME,12,97,163,14,ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...",IDC_COPT7_BROWSE_VMAC_STARTUP_FOLDER_NAME,181,96,53,16,WS_DISABLED
-    PUSHBUTTON      "&Install files required by vMac",IDC_COPT7_VMAC_INSTALL,12,116,139,16
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,139,222,1
-    LTEXT           "Launching",IDC_STATIC,12,145,222,11
-    LTEXT           "Launch &method",IDC_STATIC,12,160,63,10
-    COMBOBOX        IDC_COPT7_LAUNCH_METHOD,79,158,155,45,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    CONTROL         "Remove &alias after launching",IDC_USE_REMOVER,"Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP,12,179,222,12
-END
-
-IDD_OPTIONS_PAGE_8 DIALOG DISCARDABLE  0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Shapeshifter"
-FONT 8, "Tahoma"
-BEGIN
-    EDITTEXT        IDC_COPT8_SHAPESHIFTER_PATH,7,16,192,13,ES_AUTOHSCROLL
-    EDITTEXT        IDC_COPT8_SHAPESHIFTER_SYSTEM_FILE_PATH,7,45,192,13,
-                    ES_AUTOHSCROLL
-    EDITTEXT        IDC_COPT8_SHAPESHIFTER_STARTUP_FOLDER_NAME,7,77,192,13,
-                    ES_AUTOHSCROLL
-    CONTROL         "Remove alias after launching",
-                    IDC_COPT8_SHAPESHIFTER_USE_REMOVER,"Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP,7,95,192,10
-    EDITTEXT        IDC_COPT8_SHAPESHIFTER_PREFERENCES_FILE_PATH,7,124,192,
-                    13,ES_AUTOHSCROLL
-    EDITTEXT        IDC_COPT8_SHAPESHIFTER_AMIGA_VOLUME_NAME,7,169,192,13,
-                    ES_AUTOHSCROLL
-    PUSHBUTTON      ">>",IDC_COPT8_BROWSE_SHAPESHIFTER_PATH,209,16,22,14
-    PUSHBUTTON      ">>",IDC_COPT8_BROWSE_SHAPESHIFTER_SYSTEM_FILE_PATH,209,
-                    45,22,14
-    PUSHBUTTON      ">>",IDC_COPT8_BROWSE_SHAPESHIFTER_STARTUP_FOLDER_NAME,
-                    209,77,22,14,WS_DISABLED
-    PUSHBUTTON      ">>",IDC_COPT8_BROWSE_SHAPESHIFTER_PREFERENCES_FILE_PATH,
-                    209,124,22,14
-    PUSHBUTTON      ">>",IDC_COPT8_BROWSE_SHAPESHIFTER_AMIGA_VOLUME_NAME,209,
-                    169,22,14,WS_DISABLED
-    LTEXT           "Command line to launch WinUAE/Shapeshifter:",IDC_STATIC,
-                    7,7,186,8
-    LTEXT           "Shapeshifter system volume file (System version 7 or later):",
-                    IDC_STATIC,7,36,195,8
-    LTEXT           "Shapeshifter ""startup item""s folder name:",IDC_STATIC,
-                    7,68,180,8
-    LTEXT           "Path to ""Shapeshifter Prefs"" file (PLEASE BACKUP ORIGINAL):",
-                    IDC_STATIC,7,115,200,8
-    LTEXT           "Amiga volume name. All HFV files must be in the root of this Amiga volume. Make a new mapping in WinUAE if you need to:",
-                    IDC_STATIC,7,149,200,18
-END
-
-IDD_OPTIONS_PAGE_6 DIALOG DISCARDABLE  0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Executor Win32"
-FONT 8, "Tahoma"
-BEGIN
-    EDITTEXT        IDC_COPT6_EXECUTOR_WIN32_PATH,25,48,192,13,
-                    ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...",IDC_COPT6_BROWSE_EXECUTOR_WIN32_PATH,26,70,
-                    56,14
-    LTEXT           "Executor Win32 path and parameters:",IDC_STATIC,25,40,
-                    151,8
-END
-
-IDD_OPTIONS_PAGE_9 DIALOG DISCARDABLE  0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Fusion DOS"
-FONT 8, "Tahoma"
-BEGIN
-    EDITTEXT        IDC_COPT9_FUSION_SYSTEM_FILE_PATH,7,16,192,13,
-                    ES_AUTOHSCROLL
-    EDITTEXT        IDC_COPT9_FUSION_STARTUP_FOLDER_NAME,7,42,192,13,
-                    ES_AUTOHSCROLL
-    CONTROL         "Remove alias after launching",
-                    IDC_COPT9_FUSION_USE_REMOVER,"Button",BS_AUTOCHECKBOX | 
-                    WS_TABSTOP,7,58,192,10
-    EDITTEXT        IDC_COPT9_FUSION_BATCH_PATH,7,177,192,13,ES_AUTOHSCROLL
-    PUSHBUTTON      ">>",IDC_COPT9_BROWSE_FUSION_SYSTEM_FILE_PATH,209,16,22,
-                    14
-    PUSHBUTTON      ">>",IDC_COPT9_BROWSE_FUSION_STARTUP_FOLDER_NAME,209,42,
-                    22,14,WS_DISABLED
-    PUSHBUTTON      ">>",IDC_COPT9_BROWSE_FUSION_BATCH_PATH,209,177,22,14
-    LTEXT           "Fusion system volume file (System version 7 or later):",
-                    IDC_STATIC,7,7,184,8
-    LTEXT           "Fusion ""startup item""s folder name:",IDC_STATIC,7,32,
-                    151,8
-    LTEXT           "You need to setup a multi-boot environment and tweak all the Fusion parameters in Fusion setup. Since the demo allows only one HFV volume file, the application/document launched should be in the system volume.",
-                    IDC_STATIC,7,72,232,35
-    LTEXT           "HFVExplorer just creates an alias to the target and reboots Windows, expecting you to boot into DOS and launch Fusion. Tweaking Autoexec.bat, Boot.ini and Config.sys automatically would be far too complicated.",
-                    IDC_STATIC,7,133,232,32
-    LTEXT           "If you have the retail version of Fusion, this restriction should not apply, just make sure that you boot from the HFV file set above.",
-                    IDC_STATIC,7,109,232,20
-    LTEXT           "Batch file or program to run before rebooting (may be left empty):",
-                    IDC_STATIC,7,168,205,8
-END
-
-IDD_OPTIONS_PAGE_5 DIALOG DISCARDABLE  0, 0, 246, 198
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Executor DOS"
-FONT 8, "Tahoma"
-BEGIN
-    EDITTEXT        IDC_COPT5_EXECUTOR_DOS_PATH,25,48,192,13,ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...",IDC_COPT5_BROWSE_EXECUTOR_DOS_PATH,26,70,56,
-                    14
-    LTEXT           "Executor DOS path and parameters:",IDC_STATIC,25,40,151,
-                    8
-END
-
 #ifndef _MAC
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -603,14 +470,6 @@ BEGIN
         BOTTOMMARGIN, 159
     END
 
-    IDD_OPTIONS_PAGE_4, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
-    END
-
     IDD_ABOUTBOX, DIALOG
     BEGIN
         LEFTMARGIN, 7
@@ -641,46 +500,6 @@ BEGIN
         RIGHTMARGIN, 399
         TOPMARGIN, 10
         BOTTOMMARGIN, 285
-    END
-
-    IDD_OPTIONS_PAGE_7, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
-    END
-
-    IDD_OPTIONS_PAGE_8, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
-    END
-
-    IDD_OPTIONS_PAGE_6, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
-    END
-
-    IDD_OPTIONS_PAGE_9, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
-    END
-
-    IDD_OPTIONS_PAGE_5, DIALOG
-    BEGIN
-        LEFTMARGIN, 7
-        RIGHTMARGIN, 239
-        TOPMARGIN, 7
-        BOTTOMMARGIN, 191
     END
 
 END
@@ -782,46 +601,6 @@ BEGIN
     IDC_COPY_MODE, 0x403, 24, 0
 0x6152, 0x2077, 0x6f63, 0x7970, 0x202c, 0x6572, 0x6f73, 0x7275, 0x6563, 
 0x6620, 0x726f, 0x006b, 
-    0
-END
-
-IDD_OPTIONS_PAGE_4 DLGINIT
-BEGIN
-    IDC_COPT4_DEFAULT_EMULATOR, 0x403, 13, 0
-0x7845, 0x6365, 0x7475, 0x726f, 0x4420, 0x534f, "\000" 
-    IDC_COPT4_DEFAULT_EMULATOR, 0x403, 15, 0
-0x7845, 0x6365, 0x7475, 0x726f, 0x5720, 0x6e69, 0x3233, "\000" 
-    IDC_COPT4_DEFAULT_EMULATOR, 0x403, 11, 0
-0x4d76, 0x6361, 0x5720, 0x6e69, 0x3233, "\000" 
-    IDC_COPT4_DEFAULT_EMULATOR, 0x403, 13, 0
-0x6853, 0x7061, 0x7365, 0x6968, 0x7466, 0x7265, "\000" 
-    IDC_COPT4_DEFAULT_EMULATOR, 0x403, 16, 0
-0x7546, 0x6973, 0x6e6f, 0x4420, 0x534f, 0x6420, 0x6d65, 0x006f, 
-    IDC_COPT4_DEFAULT_EMULATOR, 0x403, 27, 0
-0x7341, 0x6f73, 0x6963, 0x7461, 0x6465, 0x5720, 0x6e69, 0x6f64, 0x7377, 
-0x7020, 0x6f72, 0x7267, 0x6d61, "\000" 
-    IDC_COPT4_LINK_NAME_STYLE, 0x403, 18, 0
-0x4d22, 0x2079, 0x6f44, 0x7563, 0x656d, 0x746e, 0x6c2e, 0x6b6e, 0x0022, 
-
-    IDC_COPT4_LINK_NAME_STYLE, 0x403, 24, 0
-0x4d22, 0x2079, 0x6f44, 0x7563, 0x656d, 0x746e, 0x5720, 0x6e69, 0x3233, 
-0x6c2e, 0x6b6e, 0x0022, 
-    IDC_COPT4_LINK_NAME_STYLE, 0x403, 26, 0
-0x4d22, 0x2079, 0x6f44, 0x7563, 0x656d, 0x746e, 0x2820, 0x6957, 0x336e, 
-0x2932, 0x6c2e, 0x6b6e, 0x0022, 
-    IDC_COPT4_LINK_NAME_STYLE, 0x403, 26, 0
-0x5722, 0x6e69, 0x3233, 0x2d20, 0x4d20, 0x2079, 0x6f44, 0x7563, 0x656d, 
-0x746e, 0x6c2e, 0x6b6e, 0x0022, 
-    0
-END
-
-IDD_OPTIONS_PAGE_7 DLGINIT
-BEGIN
-    IDC_COPT7_LAUNCH_METHOD, 0x403, 22, 0
-0x7355, 0x2065, 0x6c61, 0x6169, 0x6573, 0x2073, 0x6f74, 0x6c20, 0x7561, 
-0x636e, 0x0068, 
-    IDC_COPT7_LAUNCH_METHOD, 0x403, 17, 0
-0x7355, 0x2065, 0x7041, 0x6c70, 0x2065, 0x7665, 0x6e65, 0x7374, "\000" 
     0
 END
 
@@ -1628,4 +1407,38 @@ BEGIN
  EDITTEXT IDC_DMG_PASSWORD,86,59,224,15,ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
  DEFPUSHBUTTON "Unlock",IDOK,194,82,55,17
  PUSHBUTTON "Cancel",IDCANCEL,255,82,55,17
+END
+
+IDD_BASILISK_II DIALOGEX 0,0,335,134
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Launch Basilisk II"
+FONT 9,"Segoe UI"
+BEGIN
+    LTEXT           "Basilisk II &executable",IDC_STATIC,12,10,310,10
+    EDITTEXT        IDC_EMULATOR_EXECUTABLE,12,23,244,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "&Browse...",IDC_EMULATOR_BROWSE_EXECUTABLE,263,22,60,16
+    LTEXT           "Basilisk II &preferences file",IDC_STATIC,12,45,310,10
+    EDITTEXT        IDC_EMULATOR_INPUT,12,58,244,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "B&rowse...",IDC_EMULATOR_BROWSE_INPUT,263,57,60,16
+    LTEXT           "Basilisk II uses the ROM and disks configured in this file.",IDC_STATIC,12,81,311,11
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,101,311,1
+    DEFPUSHBUTTON   "&Launch",IDOK,194,109,62,16
+    PUSHBUTTON      "Cancel",IDCANCEL,263,109,60,16
+END
+
+IDD_MINI_VMAC DIALOGEX 0,0,335,134
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Launch Mini vMac"
+FONT 9,"Segoe UI"
+BEGIN
+    LTEXT           "Mini vMac &executable",IDC_STATIC,12,10,310,10
+    EDITTEXT        IDC_EMULATOR_EXECUTABLE,12,23,244,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "&Browse...",IDC_EMULATOR_BROWSE_EXECUTABLE,263,22,60,16
+    LTEXT           "&Disk image (optional)",IDC_STATIC,12,45,310,10
+    EDITTEXT        IDC_EMULATOR_INPUT,12,58,244,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "B&rowse...",IDC_EMULATOR_BROWSE_INPUT,263,57,60,16
+    LTEXT           "Mini vMac finds its ROM and default disks beside the executable.",IDC_STATIC,12,81,311,11
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,101,311,1
+    DEFPUSHBUTTON   "&Launch",IDOK,194,109,62,16
+    PUSHBUTTON      "Cancel",IDCANCEL,263,109,60,16
 END

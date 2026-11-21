@@ -617,9 +617,9 @@ int CHFVExplorerListView::do_rename(
 
 
 bool CHFVExplorerListView::OpenWithDrop(const FileOperations::Location& source,
-    const FileOperations::Location& application,bool mac)
+    const FileOperations::Location& application)
 {
- return DocumentLaunch::OpenWith(GetBrowserSession(),source,application,mac);
+ return DocumentLaunch::OpenWith(GetBrowserSession(),source,application);
 }
 
 void CHFVExplorerListView::go_up( int control )
@@ -640,12 +640,12 @@ void CHFVExplorerListView::go_up( int control )
 	}
 }
 
-void CHFVExplorerListView::activate_list_item( int inx, int control, int make_shortcut ) 
+void CHFVExplorerListView::activate_list_item( int inx, int control )
 {
  if(!control&&GetBrowserSession().MacBrowser().Activate(inx))return;
  if(control){
   const auto* folder=BrowserRowAt(inx);
-  if(folder&&folder->entry.directory&&folder->treeItem&&!make_shortcut){GetBrowserSession().OpenFolderInNewWindow(folder->treeItem);return;}
+  if(folder&&folder->entry.directory&&folder->treeItem){GetBrowserSession().OpenFolderInNewWindow(folder->treeItem);return;}
   if(GetBrowserSession().MacBrowser().Activate(inx))return;
  }
     if(!GetBrowserSession().ListingAvailable())return;
@@ -654,13 +654,8 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
     if(!row&&(!binding||get_lparam_type(binding)!=LIST_SPEC))return;
     const int entry_type=row?row->location.LegacyType():LIST_SPEC;
     const auto id=row?row->entry.id:get_lparam_id(binding);
-    int emulator=control<0?-control:0;
 
 	if(entry_type == LIST_SPEC) {
-		if(make_shortcut) {
-			AfxMessageBox( "You must be kidding." );
-			return;
-		}
 		if(id == ID_GOTO_PARENT) {
 			go_up( control );
 		}
@@ -668,10 +663,6 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 	}
 
 	if(row->entry.directory) {
-		if(make_shortcut) {
-			AfxMessageBox( "Cannot make shortcuts to folders." );
-			return;
-		}
 		HTREEITEM hItem = row->treeItem;
 		if(hItem) {
 			if(control) {
@@ -687,14 +678,7 @@ void CHFVExplorerListView::activate_list_item( int inx, int control, int make_sh
 	if(!VolumeCoord::Readable(row->location.IsWindows()?row->accessKey:row->location.expectedResource))return;
     DocumentLaunch::Request request;
     request.entry=row->entry;
-    request.icons=row->ownedIcons;
-    request.small=row->icon16;request.large=row->icon32;
-    request.target=DocumentLaunch::FromMenuCommand(emulator);
-    request.shortcut=make_shortcut!=FALSE;
     auto& session=GetBrowserSession();
-    const auto* node=session.Tree()->BrowserNodeAt(session.Tree()->GetTreeCtrl().GetSelectedItem());
-    if(row->location.IsClassic()&&node&&node->mount.kind==BrowserMountInventory::Kind::ClassicVolume)
-        request.classicSlot=node->mount.index;
     try{request.selection=session.MacBrowser().CaptureItem(inx);}
     catch(const std::exception& error){session.Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return;}
     DocumentLaunch::Launch(session,std::move(request));
@@ -708,7 +692,7 @@ void CHFVExplorerListView::OnLButtonDblClk(UINT nFlags, CPoint point)
 	if( m_cl->HitTest( &ht ) >= 0 ) {
 		if( ht.flags == LVHT_ONITEMICON || ht.flags == LVHT_ONITEMLABEL ||
 				ht.flags == LVHT_ONITEMSTATEICON) {
-			activate_list_item( ht.iItem, (nFlags & MK_CONTROL) != 0, FALSE );
+			activate_list_item( ht.iItem, (nFlags & MK_CONTROL) != 0 );
 			return;
 		}
 	}
@@ -914,7 +898,7 @@ bool CHFVExplorerListView::RunBrowserItemCommand(UINT command)
     switch (command) {
     case ID_OWN_FILE_OPEN:
     case ID_OWN_FOLDER_OPEN:
-        activate_list_item(m_cl->GetNextItem(-1, LVNI_SELECTED), FALSE, FALSE);
+        activate_list_item(m_cl->GetNextItem(-1, LVNI_SELECTED), FALSE);
         break;
     case ID_OWN_FILE_PROPERTIES:
     case ID_OWN_FOLDER_PROPERTIES:
@@ -958,10 +942,8 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
   if (command) GetBrowserSession().Owner()->SendMessage(WM_COMMAND, command);
   return;
  }
-	CMenu cm, cpop, cpop2, cpop3;
+	CMenu cm, cpop3;
 	int inx, hit = 0;
-	int pop_created = 0;
-	int pop_created2 = 0;
 	int pop_created3 = 0;
 	long id; DWORD_PTR dat;
 	// CString str;
@@ -1004,58 +986,9 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 				cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FOLDER_PROPERTIES, "&Properties..." );
 			} else {
-				CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-				if(pApp->m_default_emulator == 0) {
-					cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (E/DOS)\tEnter" );
-				} else if(pApp->m_default_emulator == 1) {
-					cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (E/Win32)\tEnter" );
-				} else if(pApp->m_default_emulator == 2) {
-					cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (vMac)\tEnter" );
-				} else if(pApp->m_default_emulator == 3) {
-					cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (Shapeshifter)\tEnter" );
-				} else if(pApp->m_default_emulator == 4) {
-					cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (Fusion DOS)\tEnter" );
-				} else if(pApp->m_default_emulator == 5) {
-					cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (Associated Windows program)\tEnter" );
-				}
-				
-				/*
-				if(cpop.CreatePopupMenu()) {
-					pop_created = 1;
-					// mac
-					cpop.AppendMenu( MF_STRING | MF_DISABLED | MF_GRAYED, ID_OWN_WITH_MAC_FIRST, "TextPad" );
-					cpop.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
-					// dos
-					cpop.AppendMenu( MF_STRING | MF_DISABLED | MF_GRAYED, ID_OWN_WITH_PC_FIRST, "PC: WordPad" );
-					cpop.AppendMenu( MF_STRING | MF_DISABLED | MF_GRAYED, ID_OWN_WITH_PC_FIRST+1, "PC: NotePad" );
-					cpop.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
-					cpop.AppendMenu( MF_STRING | MF_DISABLED | MF_GRAYED, ID_OWN_WITH_LIST, "Edit list..." );
-				}
-				*/
-				if(cpop.CreatePopupMenu()) {
-					pop_created = 1;
-					// mac
-					cpop.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_WITH_MAC_FIRST+0, "Executor &DOS" );
-					cpop.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_WITH_MAC_FIRST+1, "Executor &Win32" );
-					cpop.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_WITH_MAC_FIRST+2, "&vMac" );
-					cpop.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_WITH_MAC_FIRST+3, "&Shapeshifter" );
-					cpop.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_WITH_MAC_FIRST+4, "&Fusion DOS" );
-					cpop.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_WITH_MAC_FIRST+5, "&Associated Windows program" );
-				}
-				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_DELETE, "&Delete\tDel" );
-				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_MAP_THIS, "&Map selected files..\tF4" );
-				
-				if(pop_created) cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT_PTR)cpop.m_hMenu, "Open &with..." );
-				if(cpop2.CreatePopupMenu()) {
-					pop_created2 = 1;
-					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_E_DOS, "Executor &DOS" );
-					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_E_WIN32, "Executor &Win32" );
-					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_VMAC, "&vMac" );
-					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_SS, "&Shapeshifter" );
-					cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_CREATE_FUSION, "&Fusion DOS" );
-					// cpop2.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SHORTCUT_WINDOWS, "&Associated Windows program" );
-					cm.AppendMenu( MF_POPUP | MF_STRING | MF_ENABLED, (UINT_PTR)cpop2.m_hMenu, "Create &Shortcut for..." );
-				}
+				cm.AppendMenu(MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (Associated Windows program)\tEnter");
+				cm.AppendMenu(MF_STRING | MF_ENABLED, ID_OWN_DELETE, "&Delete\tDel");
+				cm.AppendMenu(MF_STRING | MF_ENABLED, ID_OWN_MAP_THIS, "&Map selected files..\tF4");
 				cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_NEW_FOLDER, "&New Folder..." );
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_SAVE_ICON, "Save &icon..." );
@@ -1085,8 +1018,6 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 		UpdateBrowserItemMenu(cm);
 		if(cm.TrackPopupMenu( TPM_LEFTALIGN, point.x, point.y, this )) {
 		}
-		if(pop_created) cpop.DestroyMenu();
-		if(pop_created2) cpop2.DestroyMenu();
 		if(pop_created3) cpop3.DestroyMenu();
 		cm.DestroyMenu();
 	}
@@ -1191,49 +1122,8 @@ BOOL CHFVExplorerListView::OnCommand(WPARAM wParam, LPARAM lParam)
 		  // ((CHFVExplorerDoc*)m_pDocument)->open_sub_directory( id, name );
 			}
 			break;
-		case ID_OWN_WITH_LIST:
-			break;
-		case ID_OWN_SHORTCUT_CREATE_E_DOS:
-		case ID_OWN_SHORTCUT_CREATE_E_WIN32:
-		case ID_OWN_SHORTCUT_CREATE_VMAC:
-		case ID_OWN_SHORTCUT_CREATE_SS:
-		case ID_OWN_SHORTCUT_CREATE_FUSION:
-		case ID_OWN_SHORTCUT_WINDOWS:
-			inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
-			if(inx >= 0) {
-				activate_list_item( inx, -(int)cmd, TRUE );
-			}
-			break;
 		default:
-			// if( cmd >= ID_OWN_WITH_MAC_FIRST && cmd <= ID_OWN_WITH_MAC_FIRST+MAXCMDS) {
-			if( cmd >= ID_OWN_WITH_MAC_FIRST && cmd <= ID_OWN_WITH_MAC_FIRST+5) {
-				inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
-				if(inx >= 0) {
-					switch(cmd) {
-						case ID_OWN_WITH_MAC_FIRST:
-							activate_list_item( inx, -ID_OWN_SHORTCUT_CREATE_E_DOS, FALSE );
-							break;
-						case ID_OWN_WITH_MAC_FIRST+1:
-							activate_list_item( inx, -ID_OWN_SHORTCUT_CREATE_E_WIN32, FALSE );
-							break;
-						case ID_OWN_WITH_MAC_FIRST+2:
-							activate_list_item( inx, -ID_OWN_SHORTCUT_CREATE_VMAC, FALSE );
-							break;
-						case ID_OWN_WITH_MAC_FIRST+3:
-							activate_list_item( inx, -ID_OWN_SHORTCUT_CREATE_SS, FALSE );
-							break;
-						case ID_OWN_WITH_MAC_FIRST+4:
-							activate_list_item( inx, -ID_OWN_SHORTCUT_CREATE_FUSION, FALSE );
-							break;
-						case ID_OWN_WITH_MAC_FIRST+5:
-							activate_list_item( inx, -ID_OWN_SHORTCUT_WINDOWS, FALSE );
-							break;
-					}
-				}
-			} else if( cmd >= ID_OWN_WITH_PC_FIRST && cmd <= ID_OWN_WITH_PC_FIRST+MAXCMDS) {
-			} else {
-				handled = 0;
-			}
+			handled = 0;
 	}
 	if(handled) 
 		return(1);
@@ -1764,7 +1654,7 @@ void CHFVExplorerListView::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 			inx = m_cl->GetNextItem( -1, LVNI_ALL | LVNI_FOCUSED );
 			if(inx >= 0) {
 				int ctrl = GetAsyncKeyState( VK_CONTROL ) & 0x80000000ul;
-                if (ctrl) activate_list_item(inx, TRUE, FALSE);
+                if (ctrl) activate_list_item(inx, TRUE);
                 else RunBrowserItemCommand(ID_OWN_FILE_OPEN);
 			}
 			handled = 1;

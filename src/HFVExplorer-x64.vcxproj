@@ -48,12 +48,6 @@
 
     <ClCompile Include="OptionsPage2.cpp" />
     <ClCompile Include="OptionsPage3.cpp" />
-    <ClCompile Include="OptionsPage4.cpp" />
-    <ClCompile Include="OptionsPage5.cpp" />
-    <ClCompile Include="OptionsPage6.cpp" />
-    <ClCompile Include="OptionsPage7.cpp" />
-    <ClCompile Include="OptionsPage8.cpp" />
-    <ClCompile Include="OptionsPage9.cpp" />
     <ClCompile Include="OptionsSheet.cpp" />
     <ClCompile Include="part.cpp" />
     <ClCompile Include="shell.cpp" />

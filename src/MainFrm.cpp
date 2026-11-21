@@ -21,6 +21,7 @@
 #include "stdafx.h"
 #include "BrowserPresentation.h"
 #include "LauncherWriteBack.h"
+#include "DocumentLaunch.h"
 #include "CommandStorage.h"
 #include "LegacyEngine.h"
 #include "DialogClose.h"
@@ -140,6 +141,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_RELOAD, OnFileReload)
 	ON_COMMAND(ID_TOOLS_BURN, OnToolsBurn)
  ON_COMMAND(ID_TOOLS_FIND, OnToolsFind)
+ ON_COMMAND(ID_TOOLS_BASILISK_II, OnToolsBasiliskII)
+ ON_COMMAND(ID_TOOLS_MINI_VMAC, OnToolsMiniVMac)
  ON_COMMAND(ID_TOOLS_APFS_SNAPSHOTS, OnToolsApfsSnapshots)
  ON_COMMAND(ID_TOOLS_APFS_RESTORE, OnToolsApfsRestore)
  ON_COMMAND(ID_TOOLS_APFS_RENAME_VOLUME, OnToolsApfsRenameVolume)
@@ -529,30 +532,11 @@ void CMainFrame::OnProgramProperties()
 	propSheet.m_Page3.m_protect_locked_mac = pApp->m_protect_locked_mac;
 	propSheet.m_Page3.m_protect_locked_fat = pApp->m_protect_locked_fat;
 
-	propSheet.m_Page4.m_default_emulator = pApp->m_default_emulator;
-	propSheet.m_Page4.m_link_name_style = pApp->m_link_name_style;
 	
-	propSheet.m_Page5.m_executor_dos_path = pApp->m_executor_dos_path;
 	
-	propSheet.m_Page6.m_executor_win32_path = pApp->m_executor_win32_path;
 	
-	propSheet.m_Page7.m_vmac_path = pApp->m_vmac_path;
-	propSheet.m_Page7.m_vmac_startup_folder_name = pApp->m_vmac_startup_folder_name;
-	propSheet.m_Page7.m_vmac_system_file_path = pApp->m_vmac_system_file_path;
-	propSheet.m_Page7.m_launch_method = pApp->m_launch_method;
-	propSheet.m_Page7.m_use_remover = pApp->m_use_remover;
 
-	propSheet.m_Page8.m_shapeshifter_path = pApp->m_shapeshifter_path;
-	propSheet.m_Page8.m_shapeshifter_startup_folder_name = pApp->m_shapeshifter_startup_folder_name;
-	propSheet.m_Page8.m_shapeshifter_system_file_path = pApp->m_shapeshifter_system_file_path;
-	propSheet.m_Page8.m_shapeshifter_preferences_file_path = pApp->m_shapeshifter_preferences_file_path;
-	propSheet.m_Page8.m_shapeshifter_amiga_volume_name = pApp->m_shapeshifter_amiga_volume_name;
-	propSheet.m_Page8.m_shapeshifter_use_remover = pApp->m_shapeshifter_use_remover;
 
-	propSheet.m_Page9.m_fusion_startup_folder_name = pApp->m_fusion_startup_folder_name;
-	propSheet.m_Page9.m_fusion_system_file_path = pApp->m_fusion_system_file_path;
-	propSheet.m_Page9.m_fusion_batch_path = pApp->m_fusion_batch_path;
-	propSheet.m_Page9.m_fusion_use_remover = pApp->m_fusion_use_remover;
 
 
 	if (propSheet.DoModal() == IDOK) {
@@ -577,30 +561,11 @@ void CMainFrame::OnProgramProperties()
 		pApp->m_protect_locked_mac = propSheet.m_Page3.m_protect_locked_mac;
 		pApp->m_protect_locked_fat = propSheet.m_Page3.m_protect_locked_fat;
 
-		pApp->m_default_emulator = propSheet.m_Page4.m_default_emulator;
-		pApp->m_link_name_style = propSheet.m_Page4.m_link_name_style;
 
-		pApp->m_executor_dos_path = propSheet.m_Page5.m_executor_dos_path;
 
-		pApp->m_executor_win32_path = propSheet.m_Page6.m_executor_win32_path;
 
-		pApp->m_vmac_path = propSheet.m_Page7.m_vmac_path;
-		pApp->m_vmac_startup_folder_name = propSheet.m_Page7.m_vmac_startup_folder_name;
-		pApp->m_vmac_system_file_path = propSheet.m_Page7.m_vmac_system_file_path;
-		pApp->m_launch_method = propSheet.m_Page7.m_launch_method;
-		pApp->m_use_remover = propSheet.m_Page7.m_use_remover;
 
-		pApp->m_shapeshifter_path = propSheet.m_Page8.m_shapeshifter_path;
-		pApp->m_shapeshifter_startup_folder_name = propSheet.m_Page8.m_shapeshifter_startup_folder_name;
-		pApp->m_shapeshifter_system_file_path = propSheet.m_Page8.m_shapeshifter_system_file_path;
-		pApp->m_shapeshifter_preferences_file_path = propSheet.m_Page8.m_shapeshifter_preferences_file_path;
-		pApp->m_shapeshifter_amiga_volume_name = propSheet.m_Page8.m_shapeshifter_amiga_volume_name;
-		pApp->m_shapeshifter_use_remover = propSheet.m_Page8.m_shapeshifter_use_remover;
 
-		pApp->m_fusion_startup_folder_name = propSheet.m_Page9.m_fusion_startup_folder_name;
-		pApp->m_fusion_system_file_path = propSheet.m_Page9.m_fusion_system_file_path;
-		pApp->m_fusion_batch_path = propSheet.m_Page9.m_fusion_batch_path;
-		pApp->m_fusion_use_remover = propSheet.m_Page9.m_fusion_use_remover;
 
 
 		HFSIFACE_set_copy_modes( 
@@ -1418,6 +1383,16 @@ void CMainFrame::OnToolsApfsSnapshots()
 {
   if(!StorageUi::busy()&&!StorageUi::state().sessionOpen)
      ManageApfsSnapshots(this,GetBrowserSession().MacBrowser().SelectedVolume());
+}
+
+void CMainFrame::OnToolsBasiliskII()
+{
+ DocumentLaunch::ShowBasiliskII(this);
+}
+
+void CMainFrame::OnToolsMiniVMac()
+{
+ DocumentLaunch::ShowMiniVMac(this);
 }
 
 void CMainFrame::OnToolsFind()

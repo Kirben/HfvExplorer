@@ -147,12 +147,12 @@ public:
     void SortBrowserRows(int column,bool ascending);
     const BrowserDirectory::Row* BrowserRowAt(int row) const;
     bool IsParentRow(int index)const;
-    bool OpenWithDrop(const FileOperations::Location& source,const FileOperations::Location& application,bool mac);
+    bool OpenWithDrop(const FileOperations::Location& source,const FileOperations::Location& application);
 #ifdef HFV_TESTING
     void PlaceSelectedIconsForTest(CSize displacement);
 #endif
 
-	void activate_list_item( int inx, int control, int make_shortcut );
+	void activate_list_item( int inx, int control );
 	int initialize_list();
 
     LPARAM StoreRow(BrowserDirectory::Row row);

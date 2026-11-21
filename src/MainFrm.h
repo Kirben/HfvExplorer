@@ -186,6 +186,8 @@ protected:
 	afx_msg void OnFileReload();
 	afx_msg void OnToolsBurn();
  afx_msg void OnToolsFind();
+ afx_msg void OnToolsBasiliskII();
+ afx_msg void OnToolsMiniVMac();
  afx_msg void OnToolsApfsSnapshots();
  afx_msg void OnToolsApfsRestore();
  afx_msg void OnToolsApfsRenameVolume();

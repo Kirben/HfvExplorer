@@ -2,6 +2,9 @@
 // Includes HFVExplorer launcher code by Lauri Pesonen, Copyright 1997-1998 Anygraaf Oy.
 #include "stdafx.h"
 #include "DocumentLaunch.h"
+#include "BrowserPresentation.h"
+#include "resource.h"
+#include <filesystem>
 #include "HFVExplorer.h"
 #include "HFVExplorerDoc.h"
 #include "BrowserSession.h"
@@ -98,96 +101,17 @@ void macish(CString* path)
  path->ReleaseBuffer();
 }
 
-CString make_mac_chrset(CString path)
-{
- macish(&path);
- CString encoded;
- for(int index=0;index<path.GetLength();++index){
-  const auto ch=static_cast<unsigned char>(path[index]);
-  if(isalnum(ch)||strchr(" !#&/()=?.,;:-",ch))encoded+=char(ch);
-  else{char hex[5];sprintf_s(hex,"::%02x",unsigned(ch));encoded+=hex;}
- }
- return encoded;
-}
-void make_short_name(CString& path);
-
-std::pair<CString,CString> SplitExecutorCommand(CString command)
-{
- command.Trim();
- if(command.IsEmpty())return {};
- if(command[0]=='"'){
-  const int end=command.Find('"',1);
-  if(end<0)throw std::invalid_argument("Executor executable path is missing a closing quote");
-  return {command.Mid(1,end-1),command.Mid(end+1).TrimLeft()};
- }
- const int end=command.FindOneOf(" \t");
- if(end<0)return {command,{}};
- return {command.Left(end),command.Mid(end).TrimLeft()};
-}
-
-CString ExecutorArguments(CString command,CString document,CString application,bool dos)
-{
- auto argument=[dos](CString path){
-  if(is_mac_path(path))return make_mac_chrset(path);
-  macish(&path);path.OemToAnsi();
-  CString drive=path.Left(1);drive.MakeLower();
-  path=drive+path.Mid(1);
-  if(dos)make_short_name(path);
-  return path;
- };
- if(!command.IsEmpty()&&command.Right(1)!=" ")command+=" ";
- if(!application.IsEmpty())command+="\""+argument(application)+"\" ";
- return command+"\""+argument(document)+"\"";
-}
-
-struct Settings {
- CString m_executor_dos_path,m_executor_win32_path,m_vmac_path,m_vmac_startup_folder_name,m_vmac_system_file_path;
- CString m_shapeshifter_path,m_shapeshifter_startup_folder_name,m_shapeshifter_system_file_path,m_shapeshifter_preferences_file_path;
- CString m_fusion_startup_folder_name,m_fusion_system_file_path;
- int m_launch_method,m_link_name_style,defaultEmulator;
- explicit Settings(const CHFVExplorerApp& app)
-  :m_executor_dos_path(app.m_executor_dos_path),m_executor_win32_path(app.m_executor_win32_path),
-   m_vmac_path(app.m_vmac_path),m_vmac_startup_folder_name(app.m_vmac_startup_folder_name),
-   m_vmac_system_file_path(app.m_vmac_system_file_path),m_shapeshifter_path(app.m_shapeshifter_path),
-   m_shapeshifter_startup_folder_name(app.m_shapeshifter_startup_folder_name),
-   m_shapeshifter_system_file_path(app.m_shapeshifter_system_file_path),
-   m_shapeshifter_preferences_file_path(app.m_shapeshifter_preferences_file_path),
-   m_fusion_startup_folder_name(app.m_fusion_startup_folder_name),m_fusion_system_file_path(app.m_fusion_system_file_path),
-   m_launch_method(app.m_launch_method),m_link_name_style(app.m_link_name_style),defaultEmulator(app.m_default_emulator){}
-};
-
 class Launchers {
  BrowserSession& session_;
  const Request& request_;
- Settings settings_;
 public:
  Launchers(BrowserSession& session,const Request& request)
-  :session_(session),request_(request),settings_(*static_cast<CHFVExplorerApp*>(AfxGetApp())){}
+  :session_(session),request_(request){}
  bool Run();
 private:
- bool LegacyDocument(CString& document)const;
  bool MapDocumentType(const CString& type,const CString& creator);
- void get_icons_folder_name(char*);
- void get_vmac_launcher_name(char*);
- int make_icon_name(LPSTR);
- int make_e_dos_param_file_name(LPSTR);
- int check_shortcut_installation(Target);
- int write_text_file(LPSTR,LPSTR);
- void add_link_tail(char*,char*);
- int do_make_shortcut(CString,CString,Target,int);
- int do_make_shortcut_e_dos(CString,CString,int);
- int do_make_shortcut_e_win32(CString,CString,int);
- int do_make_shortcut_windows(CString,CString,int);
- int do_make_shortcut_vmac(CString,CString,int);
- int do_make_shortcut_ss(CString,CString,int);
- int do_make_shortcut_fusion(CString,CString,int);
+ bool OpenClassicDocument(CString,CString);
 };
-
-bool Launchers::LegacyDocument(CString& document)const
-{
- document=request_.selection.LegacyPath().c_str();
- return !document.IsEmpty()&&document.GetLength()<MAX_PATH;
-}
 
 bool Launchers::MapDocumentType(const CString& type,const CString& creator)
 {
@@ -215,380 +139,7 @@ bool OpenWindows(CWnd* owner,const Location& source,const Location* application)
  return false;
 }
 
-bool RunExecutor(CWnd* owner,const CString& configured,const Location& source,CString application)
-{
- const auto command=ExecutorCommand(configured,source,std::move(application));
- if(WinExec(command,SW_SHOW)>31)return true;
- owner->MessageBox("Could not start "+command+
-     ".\nPlease use execut95.exe to define Executor path and options.","HFVExplorer",MB_OK|MB_ICONERROR);
- return false;
-}
-
-void Launchers::get_icons_folder_name( char *name )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	char *p;
-
-	GetModuleFileName( pApp->m_hInstance, name, _MAX_PATH );
-	p = strrchr( name, '\\' );
-	if(p) *p = 0;
-	strcat( name, "\\Links" );
-}
-
-void Launchers::get_vmac_launcher_name( char *name )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	char *p;
-
-	GetModuleFileName( pApp->m_hInstance, name, _MAX_PATH );
-	p = strrchr( name, '\\' );
-	if(p) *p = 0;
-	strcat( name, "\\vMacLink.exe" );
-}
-
-int Launchers::make_icon_name( LPSTR lpszIconFile )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	char folder[_MAX_PATH];
-
-	*lpszIconFile = 0;
-	get_icons_folder_name( folder );
-	if(!exists(folder)) {
-		if(!CreateDirectory(folder,NULL)) {
-			CString cs = "Cannot create the icon folder \"" + CString(folder) + "\".";
-			AfxMessageBox( cs );
-			return(0);
-		} else {
-			CString cs = "The folder \"" + CString(folder) + "\" was created. "
-				"All shortcut icons (and E/DOS parameter files) will be in this folder.";
-			AfxMessageBox( cs );
-		}
-	}
-	int i = 0;
-	do {
-		sprintf(
-			lpszIconFile,
-			"%s\\Ic%06d.ico",
-			folder,
-			++pApp->m_next_icon_index );
-			if(++i > 1000) break; // panic out, use this whatever icon it was.
-	} while( exists(lpszIconFile) );
-	pApp->WriteIconIndex();
-	return(1);
-}
-
-// assumes that "make_icon_name" was just called!
-int Launchers::make_e_dos_param_file_name( LPSTR lpszParamsFile )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	char folder[_MAX_PATH];
-
-	*lpszParamsFile = 0;
-	get_icons_folder_name( folder );
-	if(!exists(folder)) {
-		CString cs = "Folder \"" + CString(folder) + "\" does not exist.";
-		AfxMessageBox( cs );
-		return(0);
-	}
-	sprintf(
-		lpszParamsFile,
-		"%s\\Ic%06d.txt",
-		folder,
-		pApp->m_next_icon_index );
-	return(1);
-}
-
-void pc_validate_charset( LPSTR s )
-{
-	int i, len = strlen(s);
-
-	for(i=0; i<len; i++) {
-		switch( s[i] ) {
-			case '\\': s[i] = '_'; break;
-			case '/':  s[i] = '-'; break;
-			case ':':  s[i] = ';'; break;
-			case '*':  s[i] = '@'; break;
-			case '?':  s[i] = '!'; break;
-			case '\"': s[i] = '-'; break;
-			case '<':  s[i] = '['; break;
-			case '>':  s[i] = ']'; break;
-			case '|':  s[i] = '-'; break;
-		}
-	}
-}
-
-void make_shortcut_name( LPCSTR objpath, LPSTR linkname )
-{
-	const char *p;
-	int ismac;
-
-	*linkname = 0;
-
-	ismac = is_mac_path(CString(objpath));
-	if(ismac) {
-		p = strrchr( objpath, ':' );
-	} else {
-		p = strrchr( objpath, '\\' );
-	}
-	if(p) {
-		p++;
-		strcpy( linkname, p );
-		if(ismac) {
-			pc_validate_charset( linkname );
-		} else {
-			char *extension = strrchr( linkname, '.' );
-			if(extension) *extension = 0;
-		}
-	}
-}
-
-int Launchers::check_shortcut_installation(Target emulator)
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-
-	switch( emulator ) {
-		case Target::ExecutorDos:
-			if(settings_.m_executor_dos_path == "") return(0);
-			break;
-		case Target::ExecutorWin32:
-			if(settings_.m_executor_win32_path == "") return(0);
-			break;
-		case Target::VMac:
-			if(settings_.m_vmac_path == "") return(0);
-			if(settings_.m_vmac_startup_folder_name == "") return(0);
-			if(settings_.m_vmac_system_file_path == "") return(0);
-			break;
-		case Target::ShapeShifter:
-			if(settings_.m_shapeshifter_path == "") return(0);
-			if(settings_.m_shapeshifter_startup_folder_name == "") return(0);
-			if(settings_.m_shapeshifter_system_file_path == "") return(0);
-			if(settings_.m_shapeshifter_preferences_file_path == "") return(0);
-			break;
-		case Target::Fusion:
-			if(settings_.m_fusion_startup_folder_name == "") return(0);
-			if(settings_.m_fusion_system_file_path == "") return(0);
-			break;
-		case Target::Windows:
-			return(1);
-			break;
-	}
-	return(1);
-}
-
-int Launchers::write_text_file( LPSTR name, LPSTR txt )
-{
-	int ret = 0;
-	CFile f;
-	if(name != "" && do_create_file( &f, name )) {
-		TRY
-		{
-			char *crlf = "\r\n";
-			f.Write( txt, strlen(txt) );
-			f.Write( crlf, strlen(crlf) );
-			ret = 1;
-		}
-		CATCH( CFileException, e )
-		{
-		}
-		END_CATCH
-		silent_close( &f );
-	}
-	return(ret);
-}
-
-/*
-"My Document.lnk"
-"My Document Win32.lnk"
-"My Document (Win32).lnk"
-"Win32 - My Document.lnk"
-*/
-void Launchers::add_link_tail( char *lpszPathLink, char *id )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	char basename[MAX_PATH];
-
-	strcpy( basename, lpszPathLink );
-	switch( settings_.m_link_name_style ) {
-		case 0:
-			break;
-		case 1:
-			sprintf( lpszPathLink, "%s %s", basename, id );
-			break;
-		case 2:
-			sprintf( lpszPathLink, "%s (%s)", basename, id );
-			break;
-		case 3:
-			sprintf( lpszPathLink, "%s - %s", id, basename );
-			break;
-	}
-}
-
-void make_short_name( CString &path )
-{
-	char *p, short_name[_MAX_PATH];
-
-	p = path.GetBuffer( _MAX_PATH );
-	*short_name = 0;
-	GetShortPathName( p, short_name, _MAX_PATH );
-	if(*short_name) lstrcpy( p, short_name );
-	path.ReleaseBuffer();
-}
-
-int Launchers::do_make_shortcut_e_dos( CString application, CString creator, int make_shortcut )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	CString document;
-	CString CmdLine;
-	char *p;
-
-	char lpszPathObj[MAX_PATH];
-  char lpszPathLink[MAX_PATH];
-	char lpszDesc[MAX_PATH];
-	char lpszIconFile[MAX_PATH];
-	char lpszWorkingDirectory[MAX_PATH];
-	char param_file_name[MAX_PATH];
-	int showCmd, retval = 0;
-	int is_doc = (application != "");
-
-	if(!LegacyDocument(document)) return(0);
-
-	const auto invocation=SplitExecutorCommand(settings_.m_executor_dos_path);
-	if(invocation.first.IsEmpty()||strcpy_s(lpszPathObj,invocation.first.GetString()))return 0;
-
-	if(make_shortcut) {
-		make_shortcut_name( document, lpszPathLink );
-		add_link_tail( lpszPathLink, "DOS" );
-		strcat( lpszPathLink, ".lnk" );
-		make_shortcut_name( document, lpszDesc );
-		make_icon_name( lpszIconFile );
-		make_e_dos_param_file_name( param_file_name );
-		if(!SaveFileIcon(request_.small,request_.large,lpszIconFile,is_doc)) {
-			CString cs = "Failed to save the icon to file \"" + CString(lpszIconFile) + ".\"";
-			AfxMessageBox( cs );
-			*lpszIconFile = 0;
-		}
-	} else {
-		GetModuleFileName( pApp->m_hInstance, param_file_name, _MAX_PATH );
-		p = strrchr( param_file_name, '\\' );
-		if(p) *p = 0;
-		strcat( param_file_name, "\\TmpParam.txt" );
-	}
-
-	strcpy( lpszWorkingDirectory, lpszPathObj );
-	p = strrchr( lpszWorkingDirectory, '\\' );
-	if(p) *p = 0;
-	showCmd = SW_SHOWMAXIMIZED;
-
-	CmdLine=ExecutorArguments(invocation.second,document,application,true);
-	LPSTR args = CmdLine.GetBuffer( MAX_PATH );
-	write_text_file( param_file_name, args );
-	CmdLine.ReleaseBuffer();
-
-	char param_string[MAX_PATH];
-	*param_string = '@';
-	GetShortPathName( param_file_name, &param_string[1], MAX_PATH-1 );
-
-	if(make_shortcut) {
-		HRESULT hs = CreateLinkDesktop(
-			session_.Owner()->GetSafeHwnd(),
-			lpszPathObj,
-			lpszPathLink,
-			lpszDesc,
-			lpszIconFile,
-			lpszWorkingDirectory,
-			param_string,
-			showCmd,
-			TRUE
-		);
-		retval = (hs == 0);
-	} else {
-		HINSTANCE hinst = ShellExecute(
-			NULL,
-			"open",
-			lpszPathObj,
-			param_string,
-			lpszWorkingDirectory,
-			showCmd
-		);
-		retval = (hinst > (HINSTANCE)32);
-	}
-
-	return(retval);
-}
-
-int Launchers::do_make_shortcut_e_win32( CString application, CString creator, int make_shortcut )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	CString document;
-	CString CmdLine;
-	char *p;
-
-	char lpszPathObj[MAX_PATH];
-  char lpszPathLink[MAX_PATH];
-	char lpszDesc[MAX_PATH];
-	char lpszIconFile[MAX_PATH];
-	char lpszWorkingDirectory[MAX_PATH];
-	int showCmd, retval = 0;
-	int is_doc = (application != "");
-
-	if(!LegacyDocument(document)) return(0);
-
-	const auto invocation=SplitExecutorCommand(settings_.m_executor_win32_path);
-	if(invocation.first.IsEmpty()||strcpy_s(lpszPathObj,invocation.first.GetString()))return 0;
-
-	if(make_shortcut) {
-		make_shortcut_name( document, lpszPathLink );
-		add_link_tail( lpszPathLink, "Win32" );
-		strcat( lpszPathLink, ".lnk" );
-		make_shortcut_name( document, lpszDesc );
-		make_icon_name( lpszIconFile );
-		if(!SaveFileIcon(request_.small,request_.large,lpszIconFile,is_doc)) {
-			CString cs = "Failed to save the icon to file \"" + CString(lpszIconFile) + ".\"";
-			AfxMessageBox( cs );
-			*lpszIconFile = 0;
-		}
-	}
-
-	strcpy( lpszWorkingDirectory, lpszPathObj );
-	p = strrchr( lpszWorkingDirectory, '\\' );
-	if(p) *p = 0;
-	showCmd = SW_SHOWNORMAL;
-
-	CmdLine=ExecutorArguments(invocation.second,document,application,false);
-	LPSTR args = CmdLine.GetBuffer( MAX_PATH );
-	if(make_shortcut) {
-		HRESULT hs = CreateLinkDesktop(
-			session_.Owner()->GetSafeHwnd(),
-			lpszPathObj,
-			lpszPathLink,
-			lpszDesc,
-			lpszIconFile,
-			lpszWorkingDirectory,
-			args,
-			showCmd,
-			TRUE
-		);
-		retval = (hs == 0);
-	} else {
-		HINSTANCE hinst = ShellExecute(
-			NULL,
-			"open",
-			lpszPathObj,
-			args,
-			lpszWorkingDirectory,
-			showCmd
-		);
-		retval = (hinst > (HINSTANCE)31);
-		if(retval) {
-			static_cast<CMainFrame*>(session_.Owner())->WaitEmulator( "Exewin32", "exec_win32" );
-		}
-	}
-	CmdLine.ReleaseBuffer();
-
-	return(retval);
-}
-
-int Launchers::do_make_shortcut_windows( CString type, CString creator, int make_shortcut )
+bool Launchers::OpenClassicDocument(CString type, CString creator)
 {
  CString document;
  char extension[_MAX_PATH];
@@ -657,357 +208,20 @@ int Launchers::do_make_shortcut_windows( CString type, CString creator, int make
  return TRUE;
 }
 
-int Launchers::do_make_shortcut_vmac( CString application, CString creator, int make_shortcut )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	CString document;
-	CString CmdLine;
-	char *p;
-
-	char lpszPathObj[MAX_PATH];
-  char lpszPathLink[MAX_PATH];
-	char lpszDesc[MAX_PATH];
-	char lpszIconFile[MAX_PATH];
-	char lpszWorkingDirectory[MAX_PATH];
-	int showCmd;
-	int is_doc = (application == "D:"), retval = 0;
-
-	if(settings_.m_launch_method == 0) {
-		application = CString("S:");
-	}
-
-	if(!LegacyDocument(document)) return(0);
-
-	get_vmac_launcher_name( lpszPathObj );
-
-	if(make_shortcut) {
-		make_shortcut_name( document, lpszPathLink );
-		add_link_tail( lpszPathLink, "vMac" );
-		strcat( lpszPathLink, ".lnk" );
-		make_shortcut_name( document, lpszDesc );
-		make_icon_name( lpszIconFile );
-		if(!SaveFileIcon(request_.small,request_.large,lpszIconFile,is_doc)) {
-			CString cs = "Failed to save the icon to file \"" + CString(lpszIconFile) + ".\"";
-			AfxMessageBox( cs );
-			*lpszIconFile = 0;
-		}
-	}
-
-	strcpy( lpszWorkingDirectory, lpszPathObj );
-	p = strrchr( lpszWorkingDirectory, '\\' );
-	if(p) *p = 0;
-	showCmd = SW_SHOWMAXIMIZED;
-
-	if(is_mac_path(document)) {
-		CmdLine =
-						DiskArguments(request_.selection,application);
-	} else {
-		AfxMessageBox( "Objects on FAT volumes cannot be launched to vMac. Please select a target that is located on a DSK or HFV volume file." );
-		return(0);
-	}
-
-	LPSTR args = CmdLine.GetBuffer( MAX_PATH );
-	if(make_shortcut) {
-		HRESULT hs = CreateLinkDesktop(
-			session_.Owner()->GetSafeHwnd(),
-			lpszPathObj,
-			lpszPathLink,
-			lpszDesc,
-			lpszIconFile,
-			lpszWorkingDirectory,
-			args,
-			showCmd,
-			TRUE
-		);
-		retval = (hs == 0);
-	} else {
-		HINSTANCE hinst = ShellExecute(
-			NULL,
-			"open",
-			lpszPathObj,
-			args,
-			lpszWorkingDirectory,
-			showCmd
-		);
-
-		retval = (hinst > (HINSTANCE)31);
-		if(retval) {
-			static_cast<CMainFrame*>(session_.Owner())->WaitEmulator( "vMac", "vMac Win32" );
-		}
-		/*
-		if(retval) {
-			if(pApp->GetProfileInt("Setup","TerminateWarningIssued",0) == 0) {
-				pApp->WriteProfileInt("Setup","TerminateWarningIssued",1);
-				CString cs = "For your safety, HFVExplorer will now quit.";
-				AfxMessageBox( cs );
-			}
-			session_.Owner()->PostMessage(WM_CLOSE);
-		}
-		*/
-	}
-	CmdLine.ReleaseBuffer();
-	return(retval);
-}
-
-int Launchers::do_make_shortcut_ss( CString application, CString creator, int make_shortcut )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	CString document;
-	CString CmdLine;
-	char *p;
-
-	char lpszPathObj[MAX_PATH];
-  char lpszPathLink[MAX_PATH];
-	char lpszDesc[MAX_PATH];
-	char lpszIconFile[MAX_PATH];
-	char lpszWorkingDirectory[MAX_PATH];
-	int showCmd;
-	int is_doc = (application == "D:"), retval = 0;
-
-	if(settings_.m_launch_method == 0) {
-		application = CString("S:");
-	}
-
-	if(!LegacyDocument(document)) return(0);
-
-	get_vmac_launcher_name( lpszPathObj );
-
-	if(make_shortcut) {
-		make_shortcut_name( document, lpszPathLink );
-		add_link_tail( lpszPathLink, "ShapeShifter" );
-		strcat( lpszPathLink, ".lnk" );
-		make_shortcut_name( document, lpszDesc );
-		make_icon_name( lpszIconFile );
-		if(!SaveFileIcon(request_.small,request_.large,lpszIconFile,is_doc)) {
-			CString cs = "Failed to save the icon to file \"" + CString(lpszIconFile) + ".\"";
-			AfxMessageBox( cs );
-			*lpszIconFile = 0;
-		}
-	}
-
-	strcpy( lpszWorkingDirectory, lpszPathObj );
-	p = strrchr( lpszWorkingDirectory, '\\' );
-	if(p) *p = 0;
-	showCmd = SW_SHOWMAXIMIZED;
-
-	if(is_mac_path(document)) {
-		CmdLine =
-						CString("-SS ") +
-						DiskArguments(request_.selection,application);
-	} else {
-		AfxMessageBox( "Objects on FAT volumes cannot be launched to ShapeShifter. Please select a target that is located on a DSK or HFV volume file." );
-		return(0);
-	}
-
-	LPSTR args = CmdLine.GetBuffer( MAX_PATH );
-	if(make_shortcut) {
-		HRESULT hs = CreateLinkDesktop(
-			session_.Owner()->GetSafeHwnd(),
-			lpszPathObj,
-			lpszPathLink,
-			lpszDesc,
-			lpszIconFile,
-			lpszWorkingDirectory,
-			args,
-			showCmd,
-			TRUE
-		);
-		retval = (hs == 0);
-	} else {
-		HINSTANCE hinst = ShellExecute(
-			NULL,
-			"open",
-			lpszPathObj,
-			args,
-			lpszWorkingDirectory,
-			showCmd
-		);
-
-		retval = (hinst > (HINSTANCE)31);
-		if(retval) {
-			// static_cast<CMainFrame*>(session_.Owner())->WaitEmulator( "", "" );
-		}
-	}
-	CmdLine.ReleaseBuffer();
-	return(retval);
-}
-
-int Launchers::do_make_shortcut_fusion( CString application, CString creator, int make_shortcut )
-{
-	CHFVExplorerApp	*pApp = (CHFVExplorerApp *)AfxGetApp();
-	CString document;
-	CString CmdLine;
-	char *p;
-
-	char lpszPathObj[MAX_PATH];
-  char lpszPathLink[MAX_PATH];
-	char lpszDesc[MAX_PATH];
-	char lpszIconFile[MAX_PATH];
-	char lpszWorkingDirectory[MAX_PATH];
-	int showCmd;
-	int is_doc = (application == "D:"), retval = 0;
-
-	if(settings_.m_launch_method == 0) {
-		application = CString("S:");
-	}
-
-	if(!LegacyDocument(document)) return(0);
-
-	get_vmac_launcher_name( lpszPathObj );
-
-	if(make_shortcut) {
-		make_shortcut_name( document, lpszPathLink );
-		add_link_tail( lpszPathLink, "Fusion" );
-		strcat( lpszPathLink, ".lnk" );
-		make_shortcut_name( document, lpszDesc );
-		make_icon_name( lpszIconFile );
-		if(!SaveFileIcon(request_.small,request_.large,lpszIconFile,is_doc)) {
-			CString cs = "Failed to save the icon to file \"" + CString(lpszIconFile) + ".\"";
-			AfxMessageBox( cs );
-			*lpszIconFile = 0;
-		}
-	}
-
-	strcpy( lpszWorkingDirectory, lpszPathObj );
-	p = strrchr( lpszWorkingDirectory, '\\' );
-	if(p) *p = 0;
-	showCmd = SW_SHOWMAXIMIZED;
-
-	if(is_mac_path(document)) {
-		CmdLine =
-						CString("-FU ") +
-						DiskArguments(request_.selection,application);
-	} else {
-		AfxMessageBox( "Objects on FAT volumes cannot be launched to Fusion. Please select a target that is located on a DSK or HFV volume file." );
-		return(0);
-	}
-
-	LPSTR args = CmdLine.GetBuffer( MAX_PATH );
-	if(make_shortcut) {
-		HRESULT hs = CreateLinkDesktop(
-			session_.Owner()->GetSafeHwnd(),
-			lpszPathObj,
-			lpszPathLink,
-			lpszDesc,
-			lpszIconFile,
-			lpszWorkingDirectory,
-			args,
-			showCmd,
-			TRUE
-		);
-		retval = (hs == 0);
-	} else {
-		HINSTANCE hinst = ShellExecute(
-			NULL,
-			"open",
-			lpszPathObj,
-			args,
-			lpszWorkingDirectory,
-			showCmd
-		);
-		retval = (hinst > (HINSTANCE)31);
-		if(retval) {
-			// static_cast<CMainFrame*>(session_.Owner())->WaitEmulator( "", "" );
-		}
-	}
-	CmdLine.ReleaseBuffer();
-	return(retval);
-}
-
-int Launchers::do_make_shortcut( CString application, CString creator, Target emulator, int make_shortcut )
-{
-	int ret = 0;
-
-	if(!check_shortcut_installation(emulator)) {
-		AfxMessageBox( "Please check the program locations and parameters in Options dialog before making shortcuts." );
-		return(0);
-	}
-
-	switch( emulator ) {
-		case Target::ExecutorDos:
-			ret = do_make_shortcut_e_dos(application,creator,make_shortcut);
-			break;
-		case Target::ExecutorWin32:
-			ret = do_make_shortcut_e_win32(application,creator,make_shortcut);
-			break;
-		case Target::VMac:
-			ret = do_make_shortcut_vmac(application,creator,make_shortcut);
-			break;
-		case Target::ShapeShifter:
-			ret = do_make_shortcut_ss(application,creator,make_shortcut);
-			break;
-		case Target::Fusion:
-			ret = do_make_shortcut_fusion(application,creator,make_shortcut);
-			break;
-		case Target::Windows:
-			ret = do_make_shortcut_windows(application,creator,make_shortcut);
-			break;
-	}
-	if(make_shortcut) {
-		if(ret) {
-			AfxMessageBox( "A shortcut was placed on your desktop." );
-		} else {
-			AfxMessageBox( "Failed to create a shortcut." );
-		}
-	}
-	return ret;
-}
-
 bool Launchers::Run()
 {
  StorageLocation::RequireCapturedIdentity(request_.selection);
  char typeBytes[5]{},creatorBytes[5]{};
  memcpy(typeBytes,request_.entry.finder.data(),4);memcpy(creatorBytes,request_.entry.finder.data()+4,4);
- CString type(typeBytes),creator(creatorBytes),program;
- auto target=request_.target;
- if(request_.selection.IsWindows()&&type.IsEmpty()){
-  if(request_.shortcut){AfxMessageBox("Please make Windows shortcuts in Explorer.");return false;}
+ const CString type(typeBytes), creator(creatorBytes);
+ if(request_.selection.IsWindows())
   return OpenWindows(session_.Owner(),request_.selection,nullptr);
+ if(type=="APPL"){
+  AfxMessageBox("Mac applications can be opened from inside an emulator.");
+  return false;
  }
- if(target==Target::Default&&request_.selection.IsClassic()){
-  static constexpr Target defaults[]={Target::ExecutorDos,Target::ExecutorWin32,Target::VMac,
-      Target::ShapeShifter,Target::Fusion,Target::Windows};
-  const auto choice=settings_.defaultEmulator;
-  target=choice>=0&&choice<int(ARRAYSIZE(defaults))?defaults[choice]:Target::ExecutorWin32;
- }
- if(target==Target::VMac||target==Target::ShapeShifter){
-  if(request_.selection.IsWindows()){
-   AfxMessageBox("vMac and ShapeShifter shortcuts cannot refer to DOS volumes.");
-   return false;
-  }
-  program=type=="APPL"?"A:":"D:";
- }else if(target==Target::Windows&&request_.selection.IsClassic()){
-  if(type=="APPL"){
-   AfxMessageBox("You cannot launch Mac applications with Windows programs, only documents.");
-   return false;
-  }
-  program=type;
- }else if(type!="APPL"){
-  program=session_.Document()->FindClassicLauncher("APPL",creator,request_.classicSlot);
-  if(program.IsEmpty()){
-   if(type=="TEXT"||type=="ttro"||type=="ttxt")program="System:Shareware:Tex-Edit:Tex-Edit";
-   else{
-    AfxMessageBox("Could not find association for "+CString(MacBrowser::Wide(request_.entry.name).c_str()));
-    return false;
-   }
-  }
- }
- if(target==Target::Default)return RunExecutor(session_.Owner(),settings_.m_executor_win32_path,request_.selection,program);
- return do_make_shortcut(program,creator,target,request_.shortcut)!=0;
+ return OpenClassicDocument(type,creator);
 }
-}
-
-Target FromMenuCommand(int command)
-{
- switch(command){
- case ID_OWN_SHORTCUT_CREATE_E_DOS:return Target::ExecutorDos;
- case ID_OWN_SHORTCUT_CREATE_E_WIN32:return Target::ExecutorWin32;
- case ID_OWN_SHORTCUT_CREATE_VMAC:return Target::VMac;
- case ID_OWN_SHORTCUT_CREATE_SS:return Target::ShapeShifter;
- case ID_OWN_SHORTCUT_CREATE_FUSION:return Target::Fusion;
- case ID_OWN_SHORTCUT_WINDOWS:return Target::Windows;
- default:return Target::Default;
- }
 }
 
 bool Launch(BrowserSession& session,Request request)
@@ -1016,17 +230,9 @@ bool Launch(BrowserSession& session,Request request)
  catch(const std::exception& error){session.Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);return false;}
 }
 
-bool OpenWith(BrowserSession& session,const Location& source,const Location& application,bool mac)
+bool OpenWith(BrowserSession& session,const Location& source,const Location& application)
 {
- try{
-  if(!mac)return OpenWindows(session.Owner(),source,&application);
-  if(source.IsClassic()&&!VolumeCoord::Readable(source.expectedResource))return false;
-  const Settings settings(*static_cast<CHFVExplorerApp*>(AfxGetApp()));
-  return RunExecutor(session.Owner(),settings.m_executor_win32_path,source,application.LegacyPath().c_str());
- }catch(const std::exception& error){
-  session.Owner()->MessageBox(error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);
-  return false;
- }
+ return OpenWindows(session.Owner(),source,&application);
 }
 
 bool SaveFileIcon(HICON small,HICON large,const char* path,bool document)
@@ -1037,19 +243,250 @@ bool SaveFileIcon(HICON small,HICON large,const char* path,bool document)
  return small&&large&&SaveIcon(small,large,const_cast<char*>(path))!=0;
 }
 
-CString ExecutorCommand(const CString& configured,const Location& source,CString application)
-{
- return ExecutorArguments(configured,source.LegacyPath().c_str(),std::move(application),false);
-}
-
-CString DiskArguments(const Location& source,const CString& operation)
-{
- if(!source.IsClassic())throw std::invalid_argument("An emulator disk argument requires a classic HFS volume");
- return CString(source.ClassicImage().c_str())+"?"+operation+make_mac_chrset(source.ClassicPath().c_str());
-}
-
 std::wstring WindowsArgument(const Location& source)
 {
  return L"\""+source.WindowsPath()+L"\"";
 }
+}
+
+namespace DocumentLaunch {
+namespace {
+enum class Emulator { BasiliskII, MiniVMac };
+
+std::wstring EmulatorCommand(Emulator emulator, const std::wstring& executable, const std::wstring& input)
+{
+    // Validated file paths cannot end in a separator or contain a quote.
+    auto command = L"\"" + executable + L"\"";
+    if (emulator == Emulator::BasiliskII)
+        command += L" --config";
+    if (!input.empty())
+        command += L" \"" + input + L"\"";
+    return command;
+}
+
+DWORD StartEmulator(Emulator emulator, const std::wstring& executable, const std::wstring& input,
+                    int& invalidField)
+{
+    invalidField = 0;
+    for (const auto& file : {std::pair{IDC_EMULATOR_EXECUTABLE, &executable},
+                             std::pair{IDC_EMULATOR_INPUT, &input}}) {
+        const auto& path = *file.second;
+        if (file.first == IDC_EMULATOR_INPUT && emulator == Emulator::MiniVMac && path.empty())
+            continue;
+        if (!std::filesystem::path(path).is_absolute() ||
+            path.find_first_of(L"\"\r\n") != std::wstring::npos) {
+            invalidField = file.first;
+            return ERROR_INVALID_NAME;
+        }
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD error = GetLastError();
+            invalidField = file.first;
+            return error;
+        }
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) || path.back() == L'\\' || path.back() == L'/') {
+            invalidField = file.first;
+            return ERROR_INVALID_NAME;
+        }
+    }
+
+    if (!input.empty()) {
+        const HANDLE file = CreateFileW(input.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            invalidField = IDC_EMULATOR_INPUT;
+            return error;
+        }
+        CloseHandle(file);
+    }
+
+    auto command = EmulatorCommand(emulator, executable, input);
+    const auto directory = std::filesystem::path(executable).parent_path();
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+                        0, nullptr, directory.c_str(), &startup, &child))
+        return GetLastError();
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    return ERROR_SUCCESS;
+}
+
+class EmulatorDialog final : public CDialog {
+public:
+    EmulatorDialog(Emulator emulator, CWnd* owner)
+        : CDialog(Template(emulator), owner), emulator_(emulator) {}
+
+    static UINT Template(Emulator emulator)
+    {
+        return emulator == Emulator::MiniVMac ? IDD_MINI_VMAC : IDD_BASILISK_II;
+    }
+
+protected:
+    BOOL OnInitDialog() override
+    {
+        CDialog::OnInitDialog();
+        InitPath(IDC_EMULATOR_EXECUTABLE, "Executable");
+        InitPath(IDC_EMULATOR_INPUT, InputKey());
+        return TRUE;
+    }
+
+    BOOL OnCommand(WPARAM w, LPARAM l) override
+    {
+        if (HIWORD(w) == BN_CLICKED && LOWORD(w) == IDC_EMULATOR_BROWSE_EXECUTABLE) {
+            Browse(IDC_EMULATOR_EXECUTABLE, L"Programs (*.exe)\0*.exe\0All files\0*.*\0");
+            return TRUE;
+        }
+        if (HIWORD(w) == BN_CLICKED && LOWORD(w) == IDC_EMULATOR_BROWSE_INPUT) {
+            Browse(IDC_EMULATOR_INPUT, IsMini() ?
+                L"Disk images (*.dsk;*.img;*.hfv;*.dc42)\0*.dsk;*.img;*.hfv;*.dc42\0All files\0*.*\0" :
+                L"All files\0*.*\0");
+            return TRUE;
+        }
+        return CDialog::OnCommand(w, l);
+    }
+
+    void OnOK() override
+    {
+        const auto executable = Path(IDC_EMULATOR_EXECUTABLE);
+        const auto input = Path(IDC_EMULATOR_INPUT);
+        int invalidField;
+        const auto error = StartEmulator(emulator_, executable, input, invalidField);
+        if (error != ERROR_SUCCESS) {
+            std::wstring message;
+            if (invalidField == IDC_EMULATOR_EXECUTABLE)
+                message = L"Choose an existing emulator executable.";
+            else if (invalidField == IDC_EMULATOR_INPUT)
+                message = IsMini() ? L"Choose an existing, readable disk image or leave it blank."
+                                   : L"Choose an existing, readable Basilisk II preferences file.";
+            else
+                message = L"Windows could not start the emulator.";
+            message += L"\n\nWindows error " + std::to_wstring(error) + L".";
+            ::MessageBoxW(m_hWnd, message.c_str(), IsMini() ? L"Launch Mini vMac" : L"Launch Basilisk II",
+                          MB_OK | MB_ICONERROR);
+            if (invalidField)
+                GetDlgItem(invalidField)->SetFocus();
+            return;
+        }
+        SavePath("Executable", executable);
+        SavePath(InputKey(), input);
+        CDialog::OnOK();
+    }
+
+private:
+    Emulator emulator_;
+    bool IsMini() const { return emulator_ == Emulator::MiniVMac; }
+    const char* Profile() const { return IsMini() ? "MiniVMac" : "BasiliskII"; }
+    const char* InputKey() const { return IsMini() ? "DiskImage" : "Preferences"; }
+
+    void InitPath(int id, const char* key)
+    {
+        BrowserPresentation::UnicodeEdit(m_hWnd, id);
+        const auto value = AfxGetApp()->GetProfileString(Profile(), key);
+        ::SetDlgItemTextW(m_hWnd, id, BrowserPresentation::FromUtf8(static_cast<LPCSTR>(value)).c_str());
+    }
+
+    void SavePath(const char* key, const std::wstring& path) const
+    {
+        const auto encoded = BrowserPresentation::Utf8(MacBrowser::U16(path));
+        AfxGetApp()->WriteProfileString(Profile(), key, encoded.c_str());
+    }
+
+    std::wstring Path(int id) const
+    {
+        return BrowserPresentation::Text(::GetDlgItem(m_hWnd, id));
+    }
+
+    void Browse(int id, const wchar_t* filter)
+    {
+        std::wstring buffer(32768, L'\0');
+        wcsncpy_s(buffer.data(), buffer.size(), Path(id).c_str(), _TRUNCATE);
+        OPENFILENAMEW file{sizeof(file)};
+        file.hwndOwner = m_hWnd;
+        file.lpstrFile = buffer.data();
+        file.nMaxFile = static_cast<DWORD>(buffer.size());
+        file.lpstrFilter = filter;
+        file.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (GetOpenFileNameW(&file))
+            ::SetDlgItemTextW(m_hWnd, id, buffer.c_str());
+    }
+};
+}
+
+void ShowBasiliskII(CWnd* owner)
+{
+    EmulatorDialog(Emulator::BasiliskII, owner).DoModal();
+}
+
+void ShowMiniVMac(CWnd* owner)
+{
+    EmulatorDialog(Emulator::MiniVMac, owner).DoModal();
+}
+
+#ifdef HFV_TESTING
+bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory)
+{
+    const auto base = std::filesystem::path(directory);
+    const auto executable = (base / L"Emulator test.exe").wstring();
+    const auto input = (base / L"System \u65e5\u672c.dsk").wstring();
+    const auto checkArguments = [](const std::wstring& command,
+                                   std::initializer_list<std::wstring> expected) {
+        int count = 0;
+        auto argv = CommandLineToArgvW(command.c_str(), &count);
+        if (!argv)
+            return false;
+        const bool match = count == static_cast<int>(expected.size()) &&
+                           std::equal(expected.begin(), expected.end(), argv);
+        LocalFree(argv);
+        return match;
+    };
+    if (!checkArguments(EmulatorCommand(Emulator::BasiliskII, executable, input),
+                        {executable, L"--config", input}) ||
+        !checkArguments(EmulatorCommand(Emulator::MiniVMac, executable, input),
+                        {executable, input}) ||
+        !checkArguments(EmulatorCommand(Emulator::MiniVMac, executable, {}),
+                        {executable}))
+        return false;
+
+    int invalidField;
+    for (const auto emulator : {Emulator::BasiliskII, Emulator::MiniVMac}) {
+        EmulatorDialog dialog(emulator, owner);
+        if (!dialog.Create(EmulatorDialog::Template(emulator), owner))
+            return false;
+        const bool controls = IsWindowUnicode(::GetDlgItem(dialog.m_hWnd, IDC_EMULATOR_EXECUTABLE)) &&
+                              IsWindowUnicode(::GetDlgItem(dialog.m_hWnd, IDC_EMULATOR_INPUT)) &&
+                              dialog.GetDlgItem(IDC_EMULATOR_BROWSE_EXECUTABLE) &&
+                              dialog.GetDlgItem(IDC_EMULATOR_BROWSE_INPUT);
+        dialog.DestroyWindow();
+        if (!controls || StartEmulator(emulator, executable, input, invalidField) == ERROR_SUCCESS ||
+            invalidField != IDC_EMULATOR_EXECUTABLE)
+            return false;
+    }
+
+    const auto writeFixture = [](const std::wstring& path) {
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path.c_str(), L"wb") || !file)
+            return false;
+        const bool wrote = fputs("fixture", file) >= 0;
+        return fclose(file) == 0 && wrote;
+    };
+    if (!writeFixture(executable))
+        return false;
+    for (const auto emulator : {Emulator::BasiliskII, Emulator::MiniVMac}) {
+        if (StartEmulator(emulator, executable, input, invalidField) == ERROR_SUCCESS ||
+            invalidField != IDC_EMULATOR_INPUT)
+            return false;
+    }
+    if (StartEmulator(Emulator::BasiliskII, executable, {}, invalidField) == ERROR_SUCCESS ||
+        invalidField != IDC_EMULATOR_INPUT ||
+        StartEmulator(Emulator::MiniVMac, executable, {}, invalidField) == ERROR_SUCCESS ||
+        invalidField || !writeFixture(input))
+        return false;
+    return StartEmulator(Emulator::MiniVMac, executable, input, invalidField) != ERROR_SUCCESS &&
+           invalidField == 0;
+}
+#endif
 }
