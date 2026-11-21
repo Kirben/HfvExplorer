@@ -434,6 +434,60 @@ int RunHfsPlusUiTest(const char *directory) {
                     general.m_dosicons == 0 && general.m_fat_icon_time_limit == 23 &&
                     general.m_font == "Tahoma" && general.m_psize == "10",
                     "General settings did not round-trip");
+            auto& attributes = options.m_Page3;
+            attributes.m_show_invisible_mac = TRUE;
+            require(options.SetActivePage(&attributes) != FALSE &&
+                    attributes.IsDlgButtonChecked(IDC_SHOW_INVISIBLE_MAC) == BST_CHECKED &&
+                    !attributes.GetDlgItem(IDC_PROTECT_LOCKED_MAC)->IsWindowEnabled() &&
+                    !attributes.GetDlgItem(IDC_PROTECT_LOCKED_PC)->IsWindowEnabled(),
+                    "File attributes visibility setting or disabled controls changed");
+            attributes.CheckDlgButton(IDC_SHOW_INVISIBLE_MAC, BST_UNCHECKED);
+            attributes.CheckDlgButton(IDC_SHOW_INVISIBLE_PC, BST_CHECKED);
+            require(attributes.UpdateData(TRUE) && !attributes.m_show_invisible_mac &&
+                    attributes.m_show_invisible_fat,
+                    "File attributes visibility settings did not round-trip");
+
+            auto& shortcuts = options.m_Page4;
+            shortcuts.m_default_emulator = 2;
+            shortcuts.m_link_name_style = 1;
+            require(options.SetActivePage(&shortcuts) != FALSE &&
+                    shortcuts.SendDlgItemMessage(IDC_COPT4_DEFAULT_EMULATOR, CB_GETCOUNT) == 6 &&
+                    shortcuts.SendDlgItemMessage(IDC_COPT4_LINK_NAME_STYLE, CB_GETCOUNT) == 4 &&
+                    shortcuts.SendDlgItemMessage(IDC_COPT4_DEFAULT_EMULATOR, CB_GETCURSEL) == 2 &&
+                    shortcuts.SendDlgItemMessage(IDC_COPT4_LINK_NAME_STYLE, CB_GETCURSEL) == 1,
+                    "Shortcuts emulator or naming choices changed");
+            shortcuts.SendDlgItemMessage(IDC_COPT4_DEFAULT_EMULATOR, CB_SETCURSEL, 5);
+            shortcuts.SendDlgItemMessage(IDC_COPT4_LINK_NAME_STYLE, CB_SETCURSEL, 3);
+            require(shortcuts.UpdateData(TRUE) && shortcuts.m_default_emulator == 5 &&
+                    shortcuts.m_link_name_style == 3, "Shortcuts settings did not round-trip");
+
+            auto& vmac = options.m_Page7;
+            vmac.m_vmac_path = "C:\\vMac\\vMac.exe";
+            vmac.m_vmac_system_file_path = "System7.hfv";
+            vmac.m_vmac_startup_folder_name = "System Folder:Startup Items";
+            vmac.m_launch_method = 0;
+            require(options.SetActivePage(&vmac) != FALSE &&
+                    Text(vmac.m_hWnd, IDC_COPT7_VMAC_PATH) == L"C:\\vMac\\vMac.exe" &&
+                    Text(vmac.m_hWnd, IDC_COPT7_VMAC_SYSTEM_FILE_PATH) == L"System7.hfv" &&
+                    Text(vmac.m_hWnd, IDC_COPT7_VMAC_STARTUP_FOLDER_NAME) == L"System Folder:Startup Items" &&
+                    vmac.SendDlgItemMessage(IDC_COPT7_LAUNCH_METHOD, CB_GETCOUNT) == 2 &&
+                    vmac.SendDlgItemMessage(IDC_COPT7_LAUNCH_METHOD, CB_GETCURSEL) == 0 &&
+                    vmac.GetDlgItem(IDC_COPT7_BROWSE_VMAC_PATH)->IsWindowEnabled() &&
+                    vmac.GetDlgItem(IDC_COPT7_BROWSE_VMAC_SYSTEM_FILE_PATH)->IsWindowEnabled() &&
+                    vmac.GetDlgItem(IDC_COPT7_VMAC_INSTALL)->IsWindowEnabled() &&
+                    !vmac.GetDlgItem(IDC_COPT7_BROWSE_VMAC_STARTUP_FOLDER_NAME)->IsWindowEnabled(),
+                    "vMac fields, launch methods or button availability changed");
+            vmac.SetDlgItemText(IDC_COPT7_VMAC_PATH, "C:\\Mac Emulators\\vMac.exe");
+            vmac.SetDlgItemText(IDC_COPT7_VMAC_SYSTEM_FILE_PATH, "System 7.dsk");
+            vmac.SetDlgItemText(IDC_COPT7_VMAC_STARTUP_FOLDER_NAME, "System:Startup Items");
+            vmac.SendDlgItemMessage(IDC_COPT7_LAUNCH_METHOD, CB_SETCURSEL, 1);
+            vmac.CheckDlgButton(IDC_USE_REMOVER, BST_CHECKED);
+            require(vmac.UpdateData(TRUE) && vmac.m_vmac_path == "C:\\Mac Emulators\\vMac.exe" &&
+                    vmac.m_vmac_system_file_path == "System 7.dsk" &&
+                    vmac.m_vmac_startup_folder_name == "System:Startup Items" &&
+                    vmac.m_launch_method == 1 && vmac.m_use_remover,
+                    "vMac settings did not round-trip");
+            fprintf(report, "PASS: File attributes, Shortcuts and vMac settings and disabled controls.\n");
             options.DestroyWindow();
         }
         {

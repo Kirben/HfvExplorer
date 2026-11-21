@@ -268,37 +268,38 @@ BEGIN
     PUSHBUTTON      "File &Type Mappings...",IDC_COPY_MAP,12,150,122,17
 END
 
-IDD_OPTIONS_PAGE_3 DIALOG DISCARDABLE  0, 0, 246, 166
+IDD_OPTIONS_PAGE_3 DIALOGEX 0, 0, 246, 166
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "File attributes"
-FONT 8, "Tahoma"
+FONT 9, "Segoe UI"
 BEGIN
-    LTEXT           "Specify here how to relate to different file system attributes.",
-                    IDC_STATIC,54,28,142,24
-    CONTROL         "Show invisible Mac files",IDC_SHOW_INVISIBLE_MAC,"Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP,56,60,133,10
-    CONTROL         "Show invisible Windows files",IDC_SHOW_INVISIBLE_PC,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,56,78,133,10
+    LTEXT           "File visibility",IDC_STATIC,12,10,222,11
+    CONTROL         "Show invisible &Mac files",IDC_SHOW_INVISIBLE_MAC,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,28,222,12
+    CONTROL         "Show invisible &Windows files",IDC_SHOW_INVISIBLE_PC,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,45,222,12
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,66,222,1
+    LTEXT           "Locked files",IDC_STATIC,12,76,222,11
     CONTROL         "Protect locked Mac files",IDC_PROTECT_LOCKED_MAC,"Button",
-                    BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,56,96,133,10
-    CONTROL         "Protect locked Windows files",IDC_PROTECT_LOCKED_PC,
-                    "Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,56,
-                    114,133,10
+                    BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,12,94,222,12
+    CONTROL         "Protect locked Windows files",IDC_PROTECT_LOCKED_PC,"Button",
+                    BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,12,111,222,12
 END
 
-IDD_OPTIONS_PAGE_4 DIALOG DISCARDABLE  0, 0, 246, 198
+IDD_OPTIONS_PAGE_4 DIALOGEX 0, 0, 246, 198
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Shortcuts"
-FONT 8, "Tahoma"
+FONT 9, "Segoe UI"
 BEGIN
-    COMBOBOX        IDC_COPT4_DEFAULT_EMULATOR,57,66,116,78,CBS_DROPDOWNLIST | 
-                    WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Default emulator (Launched when you hit ""Enter"" or double-click a document or an application)",
-                    IDC_STATIC,57,48,149,18
-    COMBOBOX        IDC_COPT4_LINK_NAME_STYLE,57,120,116,53,CBS_DROPDOWNLIST | 
-                    WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Link sample (applies to all emulators):",IDC_STATIC,58,
-                    110,130,8
+    LTEXT           "Opening Mac files",IDC_STATIC,12,10,222,11
+    LTEXT           "&Default emulator",IDC_STATIC,12,27,222,10
+    COMBOBOX        IDC_COPT4_DEFAULT_EMULATOR,12,40,222,78,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Used when you press Enter or double-click a Mac document or application.",
+                    IDC_STATIC,12,61,222,21
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,92,222,1
+    LTEXT           "Windows shortcuts",IDC_STATIC,12,102,222,11
+    LTEXT           "Shortcut &name style (all emulators)",IDC_STATIC,12,120,222,10
+    COMBOBOX        IDC_COPT4_LINK_NAME_STYLE,12,133,222,65,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 END
 
 IDD_ABOUTBOX DIALOG DISCARDABLE  0, 0, 258, 194
@@ -408,33 +409,28 @@ BEGIN
     PUSHBUTTON      "Cancel",IDCANCEL,345,270,54,15
 END
 
-IDD_OPTIONS_PAGE_7 DIALOG DISCARDABLE  0, 0, 246, 198
+IDD_OPTIONS_PAGE_7 DIALOGEX 0, 0, 246, 198
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "vMac Win32"
-FONT 8, "Tahoma"
+FONT 9, "Segoe UI"
 BEGIN
-    EDITTEXT        IDC_COPT7_VMAC_PATH,11,30,192,13,ES_AUTOHSCROLL
-    EDITTEXT        IDC_COPT7_VMAC_SYSTEM_FILE_PATH,11,55,192,13,
-                    ES_AUTOHSCROLL
-    EDITTEXT        IDC_COPT7_VMAC_STARTUP_FOLDER_NAME,11,80,192,13,
-                    ES_AUTOHSCROLL
-    PUSHBUTTON      "Install files required by vMac",IDC_COPT7_VMAC_INSTALL,
-                    12,104,115,14
-    COMBOBOX        IDC_COPT7_LAUNCH_METHOD,15,141,96,42,CBS_DROPDOWNLIST | 
-                    WS_VSCROLL | WS_TABSTOP
-    CONTROL         "Remove alias after launching",IDC_USE_REMOVER,"Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP,15,163,192,10
-    PUSHBUTTON      ">>",IDC_COPT7_BROWSE_VMAC_PATH,213,30,22,14
-    PUSHBUTTON      ">>",IDC_COPT7_BROWSE_VMAC_SYSTEM_FILE_PATH,213,55,22,14
-    PUSHBUTTON      ">>",IDC_COPT7_BROWSE_VMAC_STARTUP_FOLDER_NAME,213,80,22,
-                    14,WS_DISABLED
-    LTEXT           "vMac Win32 path:",IDC_STATIC,11,22,151,8
-    LTEXT           "vMac system volume file (System version 7 or later):",
-                    IDC_STATIC,11,47,190,8
-    LTEXT           "vMac ""startup item""s folder name:",IDC_STATIC,11,71,
-                    151,8
-    LTEXT           "Launch method (please use Alias method):",IDC_STATIC,15,
-                    130,174,8
+    LTEXT           "Emulator files",IDC_STATIC,12,9,222,11
+    LTEXT           "vMac &executable",IDC_STATIC,12,23,222,10
+    EDITTEXT        IDC_COPT7_VMAC_PATH,12,35,163,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "&Browse...",IDC_COPT7_BROWSE_VMAC_PATH,181,34,53,16
+    LTEXT           "System &volume image (System 7 or later)",IDC_STATIC,12,54,222,10
+    EDITTEXT        IDC_COPT7_VMAC_SYSTEM_FILE_PATH,12,66,163,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "B&rowse...",IDC_COPT7_BROWSE_VMAC_SYSTEM_FILE_PATH,181,65,53,16
+    LTEXT           "Startup Items &folder",IDC_STATIC,12,85,222,10
+    EDITTEXT        IDC_COPT7_VMAC_STARTUP_FOLDER_NAME,12,97,163,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...",IDC_COPT7_BROWSE_VMAC_STARTUP_FOLDER_NAME,181,96,53,16,WS_DISABLED
+    PUSHBUTTON      "&Install files required by vMac",IDC_COPT7_VMAC_INSTALL,12,116,139,16
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,139,222,1
+    LTEXT           "Launching",IDC_STATIC,12,145,222,11
+    LTEXT           "Launch &method",IDC_STATIC,12,160,63,10
+    COMBOBOX        IDC_COPT7_LAUNCH_METHOD,79,158,155,45,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "Remove &alias after launching",IDC_USE_REMOVER,"Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP,12,179,222,12
 END
 
 IDD_OPTIONS_PAGE_8 DIALOG DISCARDABLE  0, 0, 246, 198
