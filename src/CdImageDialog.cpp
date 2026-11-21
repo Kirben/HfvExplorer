@@ -15,7 +15,7 @@ public:
  BOOL OnInitDialog()override{
   CDialog::OnInitDialog();
   if(raw){
-   SetWindowText(session?"Choose CD session":"Choose raw CD track");
+   SetWindowText(session?"Choose CD Session":"Choose Raw CD Track");
    SetDlgItemText(IDC_CDI_TRACK_LABEL,session?"Session:":"Track:");
    SetDlgItemText(IDC_CDI_TRACK_SCOPE,"Includes the main channel from INDEX 01. Subchannels are excluded.");
    GetDlgItem(IDC_CDI_MAC_ONLY)->ShowWindow(SW_HIDE);
@@ -99,6 +99,18 @@ bool ProbeCdImageLayout()
   ok=ok&&visible==(mode==1+int(CdMedia::RawOutput::WaveTracks));
  }
  dialog.DestroyWindow();
+ for(const bool raw:{false,true}){
+  CdTrackDialog track(CWnd::GetDesktopWindow(),{CdMedia::Track{}},raw);
+  if(!track.Create(IDD_CD_DATA_TRACK,CWnd::GetDesktopWindow()))return false;
+  const bool choiceVisible=(track.GetDlgItem(IDC_CDI_MAC_ONLY)->GetStyle()&WS_VISIBLE)!=0;
+  ok=ok&&choiceVisible==!raw&&track.Capture()&&!track.macOnly&&
+      BrowserPresentation::Text(::GetDlgItem(track.m_hWnd,IDOK))==L"Save Image";
+  if(!raw){
+   track.CheckDlgButton(IDC_CDI_MAC_ONLY,BST_CHECKED);
+   ok=ok&&track.Capture()&&track.macOnly;
+  }
+  track.DestroyWindow();
+ }
  return ok;
 }
 #endif

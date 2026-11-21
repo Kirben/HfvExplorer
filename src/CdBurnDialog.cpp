@@ -5,6 +5,7 @@
 #include "CdBurnDialog.h"
 #include "StorageJobDialog.h"
 #include "BackgroundCopies.h"
+#include "BrowserPresentation.h"
 namespace {
 class BurnDialog : public CDialog {
  const std::vector<CdRecorder>& recorders_;
@@ -28,6 +29,21 @@ public:
  }
 };
 }
+#ifdef HFV_TESTING
+bool ProbeCdBurnLayout()
+{
+ const std::vector<CdRecorder> recorders{{L"fake", "Test recorder"}};
+ BurnDialog dialog(CWnd::GetDesktopWindow(),recorders,"Macintosh.iso");
+ if(!dialog.Create(IDD_CD_BURN,CWnd::GetDesktopWindow()))return false;
+ const auto text=[&](int id){return BrowserPresentation::Text(::GetDlgItem(dialog.m_hWnd,id));};
+ const bool ok=dialog.SendDlgItemMessage(IDC_CDB_RECORDER,CB_GETCURSEL)==0&&
+    text(IDC_CDB_IMAGE)==L"Macintosh.iso"&&text(IDOK)==L"Prepare\u2026"&&
+    text(IDC_CDB_MEDIA_NOTE).find(L"2,048-byte sectors")!=std::wstring::npos&&
+    text(IDC_CDB_VERIFY_NOTE)==L"The disc will be finalized and fully verified.";
+ dialog.DestroyWindow();
+ return ok;
+}
+#endif
 void ShowCdBurnDialog(CWnd* owner,const char* initialImage){
  auto recorders=std::make_shared<std::vector<CdRecorder>>();auto result=ShowStorageWaitJob(ListCdRecorders(recorders));
  if(result.code){AfxMessageBox(result.message.c_str(),MB_OK|MB_ICONERROR);return;}

@@ -10,6 +10,7 @@
 #include <imapi2error.h>
 #include <stdio.h>
 #include <stdexcept>
+extern bool ProbeCdBurnLayout();
 namespace {
 void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
 void save(const std::string& path,const std::vector<BYTE>& bytes){CFile f;check(f.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create source fixture");if(!bytes.empty())f.Write(bytes.data(),UINT(bytes.size()));}
@@ -41,6 +42,7 @@ int RunCdBurnTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory,path=root+"\\source.iso";
  FILE* report=nullptr;if(fopen_s(&report,(root+"\\cd-burn-report.txt").c_str(),"w")||!report)return 2;
  try {
+  check(ProbeCdBurnLayout(),"Burn CD layout, default recorder and preparation requirements");
   std::vector<BYTE> bytes(32768);for(size_t n=0;n<bytes.size();++n)bytes[n]=BYTE(n*37);save(path,bytes);
   auto prepare=[&](std::shared_ptr<FakeBurn> burner,std::shared_ptr<CdBurnPlan> plan,const std::string& image){auto job=Storage::worker().submit(PrepareCdBurn(image,L"simulated-recorder",plan,burner));job->wait();return job->result();};
   auto execute=[&](std::shared_ptr<FakeBurn> burner,const CdBurnPlan& plan){burner->path=path;auto job=Storage::worker().submit(MakeCdBurnJob(plan,burner));job->wait();return job;};

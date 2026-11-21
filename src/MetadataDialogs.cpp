@@ -238,6 +238,25 @@ struct ApfsEditor:CDialog,DialogActivity {
 };
 
 #ifdef HFV_TESTING
+bool FinderFieldFits(CDialog& editor,int labelId,const wchar_t* expected)
+{
+ auto* label=editor.GetDlgItem(labelId);
+ RECT labelRect{},fieldRect{},textRect{};
+ label->GetWindowRect(&labelRect);
+ editor.GetDlgItem(IDC_MFS_FINDER)->GetWindowRect(&fieldRect);
+ const auto text=Text(editor.m_hWnd,labelId);
+ auto dc=::GetDC(label->m_hWnd);
+ const auto font=reinterpret_cast<HFONT>(label->SendMessage(WM_GETFONT));
+ const auto old=font?::SelectObject(dc,font):nullptr;
+ DrawTextW(dc,text.c_str(),int(text.size()),&textRect,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
+ if(old)::SelectObject(dc,old);
+ ::ReleaseDC(label->m_hWnd,dc);
+ return text==expected&&
+    textRect.right<=labelRect.right-labelRect.left&&textRect.bottom<=labelRect.bottom-labelRect.top&&
+    labelRect.bottom<fieldRect.top&&labelRect.left==fieldRect.left&&labelRect.right==fieldRect.right&&
+    Text(editor.m_hWnd,IDC_MFS_FINDER).find(L"54 ")==0;
+}
+
 bool CheckEditorLayouts()
 {
  FileOperations::Completion value;
@@ -253,21 +272,7 @@ bool CheckEditorLayouts()
  value.entry.finder[0]=0x54;
  ApfsEditor editor({},value.entry,true,true);
  if(!editor.Create(IDD_APFS_PROPERTIES,CWnd::GetDesktopWindow()))return false;
- auto* label=editor.GetDlgItem(IDC_APFS_FINDER_LABEL);
- RECT labelRect{},fieldRect{},textRect{};
- label->GetWindowRect(&labelRect);
- editor.GetDlgItem(IDC_MFS_FINDER)->GetWindowRect(&fieldRect);
- const auto text=Text(editor.m_hWnd,IDC_APFS_FINDER_LABEL);
- auto dc=::GetDC(label->m_hWnd);
- const auto font=reinterpret_cast<HFONT>(label->SendMessage(WM_GETFONT));
- const auto old=font?::SelectObject(dc,font):nullptr;
- DrawTextW(dc,text.c_str(),int(text.size()),&textRect,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
- if(old)::SelectObject(dc,old);
- ::ReleaseDC(label->m_hWnd,dc);
- ok=ok&&text==L"Finder information (32 hexadecimal bytes)"&&
-    textRect.right<=labelRect.right-labelRect.left&&textRect.bottom<=labelRect.bottom-labelRect.top&&
-    labelRect.bottom<fieldRect.top&&labelRect.left==fieldRect.left&&labelRect.right==fieldRect.right&&
-    Text(editor.m_hWnd,IDC_MFS_FINDER).find(L"54 ")==0;
+ ok=ok&&FinderFieldFits(editor,IDC_APFS_FINDER_LABEL,L"Finder information (32 hexadecimal bytes)");
  editor.DestroyWindow();
  return ok;
 }
@@ -508,7 +513,24 @@ void Shutdown(){for(auto& window:windows)if(IsWindow(window->GetSafeHwnd()))wind
 bool ImportValue(HWND window,FileOperations::Location file,const std::u16string& name){auto dialog=dynamic_cast<AttributesDialog*>(CWnd::FromHandlePermanent(window));if(!dialog)return false;DialogDispatch active(*dialog);return dialog->BeginImport(std::move(file),name);}
 std::string LastError(){return lastError;}
 unsigned CloseDuringDispatch(HWND window){nestedRetained=0;SendMessage(window,WM_APP+173,0,0);auto count=nestedRetained;CollectClosed();return count;}
-bool ProbeEditorLayouts(){return CheckEditorLayouts();}
+bool ProbeEditorLayouts()
+{
+ if(!CheckEditorLayouts())return false;
+ FileOperations::Completion value;
+ value.entry.name=u"Read Me";
+ value.entry.version=3;
+ value.entry.protectedFile=true;
+ value.entry.finder[0]=0x54;
+ MfsEditor editor({},value,true);
+ if(!editor.Create(IDD_MFS_PROPERTIES,CWnd::GetDesktopWindow()))return false;
+ wchar_t title[40]{};
+ GetWindowTextW(editor.m_hWnd,title,ARRAYSIZE(title));
+ const bool ok=std::wstring_view(title)==L"Edit MFS Metadata"&&
+     FinderFieldFits(editor,IDC_MFS_FINDER_LABEL,L"Finder information (16 bytes, hexadecimal):")&&
+     editor.GetDlgItemInt(IDC_MFS_VERSION)==3&&editor.IsDlgButtonChecked(IDC_MFS_LOCKED)==BST_CHECKED;
+ editor.DestroyWindow();
+ return ok;
+}
 HWND Window(){for(auto at=windows.rbegin();at!=windows.rend();++at)if(IsWindow((*at)->GetSafeHwnd()))return (*at)->GetSafeHwnd();return nullptr;}
 #endif
 }

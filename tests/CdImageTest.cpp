@@ -40,7 +40,7 @@ int RunCdImageTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;
  FILE* report=nullptr;if(fopen_s(&report,(root+"\\cd-image-report.txt").c_str(),"w")||!report)return 2;
  try {
-  check(ProbeCdImageLayout(),"CD format choices and audio-only filename note");
+  check(ProbeCdImageLayout(),"CD format choices, audio-only filename note and data-track save options");
   CDROM_TOC toc={};toc.FirstTrack=toc.LastTrack=1;toc.TrackData[0].TrackNumber=1;toc.TrackData[0].Control=4;toc.TrackData[1].TrackNumber=0xaa;toc.TrackData[1].Address[2]=1;
   check(CdImageSupportedToc(toc,sizeof(toc))&&CdImageTocBytes(toc)==256*2048,"single data track and big-endian lead-out length");
   auto invalid=toc;invalid.TrackData[0].Control=0;check(!CdImageSupportedToc(invalid,sizeof(invalid)),"audio CD rejected");
