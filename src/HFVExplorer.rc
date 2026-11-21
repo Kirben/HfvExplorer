@@ -167,6 +167,7 @@ BEGIN
         MENUITEM "Dump CD to file ...",         ID_TOOLS_DUMPCDDEBUG
         MENUITEM "Burn CDR/CDRW ...",           ID_TOOLS_BURN
         MENUITEM "Manage APFS Snapshots...",      ID_TOOLS_APFS_SNAPSHOTS
+        MENUITEM "Restore from APFS Snapshot",   ID_TOOLS_APFS_RESTORE
 
     END
     POPUP "&Help"

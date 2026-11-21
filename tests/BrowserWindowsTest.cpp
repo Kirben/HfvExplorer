@@ -760,6 +760,19 @@ int RunBrowserWindowsTest(const char* directory){
    Check(volume&&volume==sb.MacBrowser().SelectedVolume(),"APFS browsers did not share the mounted image");
    const auto key=volume->ResourceKey();
    const auto originalRoot=MacBrowser::Wide(volume->Name());
+   MacBrowser::Entry liveFixture,liveFile;
+   Check(volume->FindChild(2,u"Fixture",liveFixture)&&volume->FindChild(liveFixture.id,u"entry-0",liveFile),
+         "locate the macOS file for snapshot restore");
+   HfsPlus::Bytes historicalBytes(size_t(liveFile.forks[0].size));
+   volume->Read(liveFile.id,0,0,historicalBytes.data(),historicalBytes.size());
+   const auto restoreFolder=volume->MakeDirectory(2,u"Snapshot restore folder");
+   MacBrowser::Entry folderFile;
+   folderFile.name=u"Historical child";
+   folderFile.forks[0].size=4201;
+   folderFile.forks[1].size=4603;
+   volume->Put(restoreFolder,folderFile,[](unsigned fork,uint64_t,void* bytes,size_t size){
+    memset(bytes,fork?0x36:0x52,size);
+   },false);
    const auto history=originalRoot+L" [Snapshot: Mounted test]";
    Check(sb.MacBrowser().Activate(Find(sb,L"Fixture"))&&sb.AwaitNavigationForTest()&&
          Find(sb,L"entry-0")>=0,"navigate the peer to the live APFS folder");
@@ -787,6 +800,64 @@ int RunBrowserWindowsTest(const char* directory){
          "open APFS browsers did not show the new snapshot and retain the live folder");
    Check(sa.MacBrowser().Activate(Find(sa,history.c_str()))&&sa.AwaitNavigationForTest()&&
          Find(sa,L"Fixture")>=0,"browse the new snapshot before deletion");
+   MacBrowser::Entry liveRoot;
+   Check(volume->FindChild(2,volume->Name(),liveRoot),"missing live APFS root");
+   auto changed=volume->Stat(liveFile.id);
+   const HfsPlus::Bytes replacement(113,0x9a);
+   changed.forks[0].size=replacement.size();
+   volume->Put(liveFixture.id,changed,[&](unsigned,uint64_t offset,void* bytes,size_t size){
+    std::copy_n(replacement.data()+offset,size,static_cast<uint8_t*>(bytes));
+   },true);
+   Storage::Job deleteFolder;
+   Check(volume->RemoveTreeAtomically(restoreFolder,deleteFolder),"remove the live folder before restoring it");
+   const auto selectRow=[](BrowserSession& session,const wchar_t* label){
+    auto& list=session.List()->GetListCtrl();
+    const auto row=Find(session,label);
+    Check(row>=0,"missing APFS snapshot restore selection");
+    list.SetItemState(-1,0,LVIS_SELECTED);
+    list.SetItemState(row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
+    Check(session.MacBrowser().CanRestoreSnapshotSelection(),"APFS snapshot selection did not enable Restore");
+   };
+   const auto readLive=[&]{
+    const auto file=volume->Stat(liveFile.id);
+    HfsPlus::Bytes data(size_t(file.forks[0].size));
+    volume->Read(file.id,0,0,data.data(),data.size());
+    return data;
+   };
+   const bool background=BackgroundCopies::enabled;
+   BackgroundCopies::enabled=false;
+   Check(sa.MacBrowser().Activate(Find(sa,L"Fixture"))&&sa.AwaitNavigationForTest(),"browse the snapshot folder to restore a file");
+   selectRow(sa,L"entry-0");
+   const auto savedAnswer=storageUiTest.answer;
+   storageUiTest.answer=Storage::ConflictChoice::Cancel;
+   a->SendMessage(WM_COMMAND,ID_TOOLS_APFS_RESTORE);
+   Check(readLive()==replacement,"Cancelling APFS restore changed the live file");
+   selectRow(sa,L"entry-0");
+   storageUiTest.answer=Storage::ConflictChoice::Replace;
+   a->SendMessage(WM_COMMAND,ID_TOOLS_APFS_RESTORE);
+   Check(readLive()==historicalBytes,"Approving APFS restore did not replace the live file");
+   const auto historyIndex=sa.MacBrowser().SelectedVolume();
+   const auto treeSelection=sa.Tree()->GetTreeCtrl().GetSelectedItem();
+   const auto historyRoot=sa.Tree()->GetTreeCtrl().GetParentItem(treeSelection);
+   Check(historyRoot&&historyIndex==volume,"missing APFS snapshot parent");
+   sa.Tree()->GetTreeCtrl().SelectItem(historyRoot);
+   Check(sa.AwaitNavigationForTest()&&Find(sa,L"Snapshot restore folder")>=0,"return to the snapshot root");
+   selectRow(sa,L"Snapshot restore folder");
+   a->SendMessage(WM_COMMAND,ID_TOOLS_APFS_RESTORE);
+   storageUiTest.answer=savedAnswer;
+   BackgroundCopies::enabled=background;
+   MacBrowser::Entry restoredFolder,restoredChild;
+   Check(volume->FindChild(liveRoot.id,folderFile.name,restoredChild)==false&&
+         volume->FindChild(liveRoot.id,u"Snapshot restore folder",restoredFolder)&&
+         volume->FindChild(restoredFolder.id,folderFile.name,restoredChild),
+         "Snapshot folder restore did not recreate the folder and child at the original path");
+   for(unsigned fork=0;fork<2;++fork){
+    HfsPlus::Bytes actual(size_t(restoredChild.forks[fork].size));
+    volume->Read(restoredChild.id,fork,0,actual.data(),actual.size());
+    Check(actual==HfsPlus::Bytes(size_t(folderFile.forks[fork].size),fork?0x36:0x52),
+          "Snapshot folder restore did not preserve both child forks");
+   }
+   fprintf(report,"PASS: APFS snapshot GUI restore prompted before overwrite, preserved data on cancellation and restored a folder with both forks.\n");
    Storage::Job remove;
    firstRefresh=sa.notificationRefreshes;
    secondRefresh=sb.notificationRefreshes;

@@ -591,6 +591,34 @@ std::shared_ptr<MacBrowser::Volume> MainMacBrowser::SelectedVolume()const
     if(!state_->Selected(index,folder))return {};
     return state_->mounts[index].volume;
 }
+bool MainMacBrowser::CanRestoreSnapshotSelection()const
+{
+    int index;
+    uint32_t folder;
+    return session_.ListingAvailable()&&state_->Selected(index,folder)&&
+           session_.List()->GetListCtrl().GetSelectedCount()>0&&
+           Apfs::CanRestoreSnapshotFolder(*state_->mounts[index].volume,folder);
+}
+bool MainMacBrowser::RestoreSnapshotSelection()
+{
+    int index;
+    uint32_t folder;
+    if(!CanRestoreSnapshotSelection()||!state_->Selected(index,folder))return false;
+    auto volume=state_->mounts[index].volume;
+    auto selected=SelectedItems(false).items;
+    if(selected.empty())return false;
+    Entry destination;
+    if(!Run(session_,[&](Storage::Job& job){
+        if(job.cancelled())throw Storage::Cancelled();
+        destination=Apfs::SnapshotRestoreDestination(*volume,folder);
+    }))return false;
+    auto target=Location::Mounted(volume,destination.id);
+    target.directory=true;
+    target.expectedIdentity=destination.identity;
+    FileOperations::OrdinaryCopy request{std::move(selected),std::move(target)};
+    if(BackgroundCopies::Enabled())return BackgroundCopies::Start({std::move(request)},session_.Owner(),false);
+    return RunOperation(session_,std::move(request),true,false);
+}
 std::string MainMacBrowser::SelectedResourceKey()const{int index;uint32_t id;if(state_->Selected(index,id))return state_->mounts[index].volume->ResourceKey();auto tree=session_.Tree();auto doc=session_.Document();if(!tree||!doc)return {};auto item=tree->m_ct->GetSelectedItem();auto p=item?tree->BrowserNodeAt(item):nullptr;if(!p)return {};if(p->LegacyType()==LIST_HFS&&p->mount.index>=0&&p->mount.index<doc->Mounts().ClassicCount())return doc->Mounts().ClassicAt(p->mount.index).m_file_name.IsEmpty()?std::string():VolumeCoord::ImageKey(std::string((LPCSTR)doc->Mounts().ClassicAt(p->mount.index).m_file_name));if(p->LegacyType()==LIST_FAT){const auto* folder=tree->BrowserFolderAt(item);return folder&&folder->location.IsWindows()?session_.ObservedWindowsKey(folder->location.WindowsPath()):std::string();}return {};}
 bool MainMacBrowser::Active()const{int index;uint32_t id;return state_->Selected(index,id);}
 bool MainMacBrowser::AllowsFolderOperation(bool MacBrowser::Capabilities::* capability)const
@@ -1232,6 +1260,8 @@ bool MainMacBrowser::ContextMenu(CPoint point){
     menu.AppendMenu(MF_STRING|(Writable()&&BrowserTransfers::Any()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_STRING|(CanPasteHardLink()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE_HARD_LINK,"Paste hard &link...");menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING|(CanCreateFolder()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(CanRename()?MF_ENABLED:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");
     menu.AppendMenu(MF_STRING|(CanDelete()?MF_ENABLED:MF_GRAYED),ID_OWN_DELETE,"&Delete");
+    if(CanRestoreSnapshotSelection())
+        menu.AppendMenu(MF_STRING,ID_TOOLS_APFS_RESTORE,"Restore from APFS snapshot");
     menu.AppendMenu(MF_STRING, ID_OWN_FILE_PROPERTIES, "P&roperties...");
     session_.List()->UpdateBrowserItemMenu(menu);
     const UINT command = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, session_.Owner());

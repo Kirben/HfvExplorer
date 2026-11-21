@@ -478,6 +478,46 @@ public:
             return ListSnapshotNames(*source,container);
         });
     }
+    bool CanRestoreFolder(uint32_t id){
+        VolumeCoord::BackendRead lease(key);
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        const auto item=entries.find(id);
+        return writable&&!requiresReopen&&item!=entries.end()&&item->second.entry.directory&&
+               mounts[item->second.mount].snapshotCreated.has_value();
+    }
+    Entry RestoreDestination(uint32_t id){
+        return Access([&]{
+            Check(CanRestoreFolder(id),"Select a folder in a snapshot of a writable APFS volume");
+            const auto view=At(id).mount;
+            const auto oid=mounts[view].oid;
+            std::vector<std::u16string> names;
+            std::set<uint32_t> seen;
+            for(auto current=id;;current=At(current).entry.parent){
+                const auto& item=At(current);
+                Check(item.mount==view&&item.entry.directory&&seen.insert(current).second,
+                      "The APFS snapshot folder changed");
+                if(item.oid==2)break;
+                names.push_back(item.entry.name);
+            }
+            Entry destination;
+            for(const auto root:listings.at(2)){
+                const auto& entry=At(root);
+                if(mounts[entry.mount].oid==oid&&!mounts[entry.mount].snapshotCreated){
+                    destination=entry.entry;
+                    break;
+                }
+            }
+            Check(destination.id!=0,"The live APFS volume is unavailable");
+            for(auto name=names.rbegin();name!=names.rend();++name){
+                Entry child;
+                Check(FindChild(destination.id,*name,child)&&child.directory,
+                      "The original folder is missing on the live volume. Restore its parent folder first.");
+                destination=std::move(child);
+            }
+            Check(!destination.protectedFile,"The live APFS destination folder is locked");
+            return destination;
+        });
+    }
     std::vector<uint32_t> FolderRoute(const std::vector<uint32_t>& previous){
         return Access([&]{
             for(const auto candidate:previous){
@@ -1606,6 +1646,20 @@ std::vector<uint32_t> RefreshedFolderRoute(MacBrowser::Volume& volume,const std:
 {
     auto* mounted=dynamic_cast<Volume*>(&volume);
     return mounted?mounted->FolderRoute(previous):std::vector<uint32_t>{};
+}
+
+bool CanRestoreSnapshotFolder(MacBrowser::Volume& volume,uint32_t folder)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    if(!mounted)return false;
+    try{return mounted->CanRestoreFolder(folder);}
+    catch(const VolumeCoord::Busy&){return false;}
+}
+MacBrowser::Entry SnapshotRestoreDestination(MacBrowser::Volume& volume,uint32_t folder)
+{
+    auto* mounted=dynamic_cast<Volume*>(&volume);
+    Check(mounted!=nullptr,"Select an APFS snapshot");
+    return mounted->RestoreDestination(folder);
 }
 
 void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password)
