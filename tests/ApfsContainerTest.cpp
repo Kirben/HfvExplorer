@@ -2912,6 +2912,14 @@ void ExternalSpaceLimitWrites(const std::string& root,FILE* report,const wchar_t
         volume->Read(file.id,0,file.forks[0].size-data.size(),data.data(),data.size());
         Check(data==Bytes(data.size(),0x5d),"APFS space-limited write read back different bytes");
     }
+    for(const auto& expected:std::array<std::pair<const char16_t*,const char*>,3>{{
+            {u"Limited","APFS quota: 8388608 bytes"},
+            {u"Reserved","APFS reserve: 1577058304 bytes"},
+            {u"Empty",""}}}){
+        MacBrowser::Entry rootEntry;
+        Check(volume->FindChild(2,expected.first,rootEntry)&&volume->PropertiesDetails(rootEntry.id)==expected.second,
+              "APFS volume Properties did not report the macOS quota or reserve");
+    }
     fprintf(report,"PASS: macOS APFS volume quota, sibling reserve, own reserve, cancellation, and unchanged rejected checkpoints.\n");
 }
 

@@ -49,6 +49,7 @@ struct Mounted {
     std::shared_ptr<const VolumeCipher> cipher;
     uint64_t mapTransaction=0,snapshotTree=0;
     std::optional<uint64_t> snapshotCreated;
+    uint64_t reserveBlocks,quotaBlocks;
 };
 
 Mounted ReadVolume(const Bytes& block,uint64_t oid,uint64_t liveMap=0)
@@ -68,7 +69,8 @@ Mounted ReadVolume(const Bytes& block,uint64_t oid,uint64_t liveMap=0)
     const bool software=(Le64(p+264)&8)&&!Le64(p+976)&&
         !(incompatible&~uint64_t(0x0f))&&Le32(p+116)==2&&Le64(p+128)&&Le64(p+136);
     Mounted mount{oid,Le64(p+16),map,Le64(p+136),!(incompatible&1),bool(incompatible&9),
-                  locked,software,Name(p+nameOffset,size_t(end-(p+nameOffset))+1),{},{},0,0,{}};
+                  locked,software,Name(p+nameOffset,size_t(end-(p+nameOffset))+1),{},{},0,0,{},
+                  Le64(p+72),Le64(p+80)};
     memcpy(mount.uuid.data(),p+240,mount.uuid.size());
     if(Le32(p+124)==0x40000002&&Le64(p+216))mount.snapshotTree=Le64(p+152);
     return mount;
@@ -705,6 +707,15 @@ public:
                 const auto& mount=mounts[file.mount];
                 if(mount.locked)return LockedMessage;
                 if(mount.snapshotCreated)return "APFS snapshot (transaction "+std::to_string(mount.xid)+")";
+                std::string limits;
+                const auto append=[&](const char* label,uint64_t blocks){
+                    if(!blocks||blocks>UINT64_MAX/container.blockSize)return;
+                    if(!limits.empty())limits+="\r\n";
+                    limits+=std::string(label)+std::to_string(blocks*container.blockSize)+" bytes";
+                };
+                append("APFS quota: ",mount.quotaBlocks);
+                append("APFS reserve: ",mount.reserveBlocks);
+                return limits;
             }
             if(!file.symlink)return {};
             const auto target=file.attributes.find(SymlinkAttribute);
