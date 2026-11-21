@@ -229,7 +229,7 @@ public:
         }
         auto desired=entry;
         auto destination=path.substr(0,path.find_last_of(':')+1)+Encode(Decode(desired.name));
-        DurableMutation(path!=destination,[&](bool){
+        DurableMutation([&](bool){
             RootScope scope(volume_);
             BeforeWrite();
             Check(hfs_editattrs(volume_,path.data(),destination.data(),&desired)==0);
@@ -394,7 +394,7 @@ public:
         LegacyEngine::Scope engine(context_);
         const auto leaf=Encode(name);
         uint32_t id=0;
-        DurableMutation(true,[&](bool){
+        DurableMutation([&](bool){
             RootScope scope(volume_);
             const auto folder=Path(parent);
             auto path=folder+(folder.back()==':'?"":":")+leaf;
@@ -410,7 +410,7 @@ public:
         if(!merge)ValidateEntry(desired);
         time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),
                          time_t(int64_t(desired.modified)-2082844800LL)};
-        DurableMutation(!merge,[&](bool){
+        DurableMutation([&](bool){
             RootScope scope(volume_);
             auto path=Path(id);
             BeforeWrite();
@@ -447,7 +447,7 @@ private:
         }
         if(exists&&!replace)throw HfsPlus::Error("Destination already exists");
         uint32_t id=0;
-        DurableMutation(true,[&](bool durable){
+        DurableMutation([&](bool durable){
             RootScope scope(volume_);
             BeforeWrite();
             char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);
@@ -478,9 +478,9 @@ private:
         });
         return id;
     }
-    void DurableMutation(bool enabled,const std::function<void(bool)>& work)
+    void DurableMutation(const std::function<void(bool)>& work)
     {
-        if(!enabled||registration_){work(false);return;}
+        if(registration_){work(false);return;}
         Check(Writable());
         if(!ClassicHfsRecovery::Transaction::Supported(volume_->fd)){work(false);return;}
         Check(hfs_flush(volume_)==0);
@@ -530,14 +530,14 @@ public:
     void Remove(uint32_t id)override{
         LegacyEngine::Scope engine(context_);
         Check(id!=2);
-        DurableMutation(true,[&](bool){RemoveEntry(id);});
+        DurableMutation([&](bool){RemoveEntry(id);});
     }
     bool RemoveTreeAtomically(uint32_t id,Storage::Job& job,bool deletionProgress)override{
         LegacyEngine::Scope engine(context_);
         Check(id!=2);
         if(job.cancelled())throw Storage::Cancelled();
         bool handled=false;
-        DurableMutation(true,[&](bool active){
+        DurableMutation([&](bool active){
             if(!active)return;
             ApplyRemovalPlan(*this,id,job,deletionProgress,[&](uint32_t entry){
                 RemoveEntry(entry);
@@ -569,7 +569,7 @@ private:
                     throw HfsPlus::Error("Rename or move destination already exists");
             }else if(errno!=ENOENT)Check(false);
         }
-        DurableMutation(true,[&](bool){
+        DurableMutation([&](bool){
             RootScope scope(volume_);
             BeforeWrite();
             Check(hfs_rename(volume_,from.data(),to.data())==0);

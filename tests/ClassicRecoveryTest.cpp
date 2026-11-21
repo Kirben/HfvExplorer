@@ -45,6 +45,17 @@ void Put(MacBrowser::Volume& volume,bool updated,bool cancelling=false,
         for(size_t i=0;i<size;++i)output[i]=Byte(updated,fork,offset+i);
     },updated);
 }
+void VerifyForks(MacBrowser::Volume& volume,const MacBrowser::Entry& actual,bool updated)
+{
+    const auto expected=Entry(updated);
+    for(unsigned fork=0;fork<2;++fork){
+        Check(actual.forks[fork].size==expected.forks[fork].size,"reopened HFS fork has the wrong length");
+        Bytes bytes(size_t(actual.forks[fork].size));
+        volume.Read(actual.id,fork,0,bytes.data(),bytes.size());
+        for(size_t i=0;i<bytes.size();++i)
+            Check(bytes[i]==Byte(updated,fork,i),"reopened HFS fork has different bytes");
+    }
+}
 void VerifyFile(MacBrowser::Volume& volume,uint32_t parent,const char16_t* name,bool updated,unsigned modified=0)
 {
     MacBrowser::Entry actual{};
@@ -53,13 +64,7 @@ void VerifyFile(MacBrowser::Volume& volume,uint32_t parent,const char16_t* name,
     Check(volume.FindChild(parent,name,actual)&&actual.name==name,"reopened HFS image lost the expected file name");
     Check(actual.finder==expected.finder&&actual.created==expected.created&&actual.modified==expected.modified,
           "reopened HFS image changed Finder information or timestamps");
-    for(unsigned fork=0;fork<2;++fork){
-        Check(actual.forks[fork].size==expected.forks[fork].size,"reopened HFS fork has the wrong length");
-        Bytes bytes(size_t(actual.forks[fork].size));
-        volume.Read(actual.id,fork,0,bytes.data(),bytes.size());
-        for(size_t i=0;i<bytes.size();++i)
-            Check(bytes[i]==Byte(updated,fork,i),"reopened HFS fork has different bytes");
-    }
+    VerifyForks(volume,actual,updated);
 }
 void Verify(MacBrowser::Volume& volume,bool updated)
 {
@@ -325,6 +330,89 @@ void CreationRecovery(const CString& root,const Bytes& original,FILE* report)
     fprintf(report,"PASS: classic HFS file and folder creation, imported-folder finalization and cancelled new files recover before and after commit.\n");
 }
 
+hfsdirent Properties(MacBrowser::Volume& volume,uint32_t id)
+{
+    hfsdirent entry{};
+    Check(volume.GetClassicProperties(id,entry),"read classic metadata recovery fixture");
+    return entry;
+}
+hfsdirent EditedProperties(hfsdirent entry)
+{
+    entry.fdflags=short((entry.fdflags&~14)|10);
+    entry.fdlocation.h=123;
+    entry.fdlocation.v=-45;
+    entry.crdate=1400000000;
+    entry.mddate=1400000100;
+    entry.bkdate=1400000200;
+    if(!(entry.flags&HFS_ISDIR)){
+        strcpy_s(entry.u.file.type,"BINA");
+        strcpy_s(entry.u.file.creator,"EDIT");
+    }
+    return entry;
+}
+void VerifyProperties(MacBrowser::Volume& volume,uint32_t id,const hfsdirent& expected)
+{
+    const auto actual=Properties(volume,id);
+    Check(actual.cnid==expected.cnid&&actual.parid==expected.parid&&
+          !strcmp(actual.name,expected.name)&&actual.fdflags==expected.fdflags&&
+          actual.fdlocation.h==expected.fdlocation.h&&actual.fdlocation.v==expected.fdlocation.v&&
+          actual.crdate==expected.crdate&&actual.mddate==expected.mddate&&actual.bkdate==expected.bkdate,
+          "reopened classic HFS entry has different identity, Finder information or dates");
+    if(!(expected.flags&HFS_ISDIR))
+        Check(!strcmp(actual.u.file.type,expected.u.file.type)&&
+              !strcmp(actual.u.file.creator,expected.u.file.creator),
+              "reopened classic HFS file has different Finder type or creator");
+}
+void MetadataRecovery(const CString& root,const Bytes& original,FILE* report)
+{
+    const CString seed=root+"\\metadata-seed.dsk";
+    Save(seed,original);
+    hfsdirent file{},folder{};
+    {
+        auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(seed.GetString()));
+        const auto directory=volume->MakeDirectory(2,u"Metadata folder");
+        Put(*volume,true,false,directory,u"Child");
+        file=Properties(*volume,Find(*volume,2,u"Document"));
+        folder=Properties(*volume,directory);
+        volume->Close();
+    }
+    const auto before=Load(seed);
+    for(const auto* action:{L"metadata-file",L"metadata-folder",L"metadata-merge"}){
+        const bool editFile=wcscmp(action,L"metadata-file")==0;
+        const bool merge=wcscmp(action,L"metadata-merge")==0;
+        for(unsigned phase:{2u,3u}){
+            CString image;
+            image.Format("%s\\%ls-%u.dsk",root.GetString(),action,phase);
+            Save(image,before);
+            const auto path=VolumeCoord::Wide(image.GetString());
+            CrashChild(image,phase,action);
+            Check(ClassicHfsRecovery::Pending(path)&&Load(image)!=before,"metadata edit left no recoverable journal");
+            auto volume=MacBrowser::OpenImage(path);
+            Check(volume&&volume->Writable(),"metadata recovery did not reopen writable");
+            const auto id=Find(*volume,2,u"Document");
+            const auto directory=Find(*volume,2,u"Metadata folder");
+            auto expectedFile=file;
+            auto expectedFolder=folder;
+            if(phase==3){
+                if(editFile)expectedFile=EditedProperties(file);
+                else if(merge){
+                    const auto desired=EditedProperties(folder);
+                    expectedFolder.crdate=desired.crdate;
+                    expectedFolder.mddate=desired.mddate;
+                }else expectedFolder=EditedProperties(folder);
+            }
+            VerifyProperties(*volume,id,expectedFile);
+            VerifyProperties(*volume,directory,expectedFolder);
+            VerifyForks(*volume,volume->Stat(id),false);
+            VerifyFile(*volume,directory,u"Child",true);
+            volume->Close();
+            Check(!ClassicHfsRecovery::Pending(path),"metadata recovery left a pending journal");
+            if(phase==2)Check(Load(image)==before,"metadata rollback did not restore every image byte");
+        }
+    }
+    fprintf(report,"PASS: classic HFS metadata-only file and folder edits and merge timestamps recover before and after commit, preserving both forks and unrelated entries.\n");
+}
+
 }
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -356,6 +444,26 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             desired.created=3500000000U;
             desired.modified=3500002000U;
             volume->FinalizeDirectory(id,desired,expected,false);
+        }else if(!strcmp(action,"metadata-file")||!strcmp(action,"metadata-folder")){
+            const auto id=!strcmp(action,"metadata-file")?document:Find(*volume,2,u"Metadata folder");
+            const auto original=Properties(*volume,id);
+            FileOperations::EditClassicProperties change{FileOperations::Location::Mounted(volume,id),
+                FileOperations::ClassicPropertyEdit{original,EditedProperties(original)}};
+            Storage::Job job;
+            FileOperations::Completion completion;
+            const auto result=FileOperations::ExecuteInWorker(change,job,completion);
+            if(result.code)throw HfsPlus::Error(result.message);
+        }else if(!strcmp(action,"metadata-merge")){
+            const auto id=Find(*volume,2,u"Metadata folder");
+            const auto expected=volume->Stat(id);
+            auto desired=expected;
+            const auto properties=EditedProperties(Properties(*volume,id));
+            desired.datesValid=true;
+            desired.created=uint64_t(properties.crdate)+2082844800ULL;
+            desired.modified=uint64_t(properties.mddate)+2082844800ULL;
+            // A merge restores the dates while retaining the destination's Finder fields.
+            desired.finder[9]^=0x0e;
+            volume->FinalizeDirectory(id,desired,expected,true);
         }else if(phase!=5)Put(*volume,true);
         volume->Close();
         return 3;
@@ -444,6 +552,7 @@ int RunClassicRecoveryTest(const char* directory)
         DeleteRecovery(root,original,report);
         RenameRecovery(root,original,report);
         CreationRecovery(root,original,report);
+        MetadataRecovery(root,original,report);
     }catch(const std::exception& error){
         fprintf(report,"FAIL: %s\n",error.what());
         result=1;
