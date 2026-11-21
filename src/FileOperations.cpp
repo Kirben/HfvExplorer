@@ -84,7 +84,20 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  // captured descendant path by renaming its selected ancestor first.
  for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&request.sources[i].IsClassic()&&request.sources[j].IsClassic()){auto a=request.sources[i].ClassicPath(),b=request.sources[j].ClassicPath();if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}
  Storage::Progress progress;progress.phase="Moving";progress.scanning=false;progress.fileCopy=progress.utf8=true;progress.totalFiles=unsigned(sources.size());job.progress(progress);
- for(size_t i=0;i<sources.size();++i){Cancel(job);Mark(completion,request.sources[i]);progress.path=Utf8(entries[i].name);job.progress(progress);target.MoveHereForJob(*sources[i].first,sources[i].second,parent,entries[i],job);Storage::OutcomeEvidence::NoteRetainedChange();++progress.files;job.progress(progress);}
+ const auto move=[&](bool){
+  for(size_t i=0;i<sources.size();++i){
+   Cancel(job);
+   Mark(completion,request.sources[i]);
+   progress.path=Utf8(entries[i].name);
+   job.progress(progress);
+   target.MoveHereForJob(*sources[i].first,sources[i].second,parent,entries[i],job);
+   Storage::OutcomeEvidence::NoteRetainedChange();
+   ++progress.files;
+   job.progress(progress);
+  }
+ };
+ if(sources.size()>1&&!strcmp(target.Kind(),"HFS"))target.RunWriteBatch(job,move);
+ else move(false);
  return true;
 }
 enum class ExecutionRoute { Local, TemporaryWorker };
