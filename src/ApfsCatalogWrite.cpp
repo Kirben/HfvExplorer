@@ -30,6 +30,7 @@ struct FileRun {
 constexpr uint64_t Physical=0x40000000,Ephemeral=0x80000000;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
 constexpr size_t MainFreeQueue=240,PoolFreeQueue=200;
+constexpr size_t SpaceReserveCount=184,SpaceReserveAllocated=192;
 
 Bytes ReadBlock(Source& source,uint64_t block)
 {
@@ -1548,9 +1549,7 @@ CatalogVolume ReadCatalogVolume(Source& source,const Container& container,uint64
     Check(mapping!=map.mappings.end(),"APFS selected volume is no longer present");
     const auto address=mapping->block;
     auto volume=ReadObject(source,container,address,oid,container.transaction,13);
-    if(container.volumes.size()>1)
-        Check(!Le64(volume.data()+72)&&!Le64(volume.data()+80),
-              "APFS multi-volume writes do not support volume reserves or quotas");
+
     return {std::move(map),address,std::move(volume)};
 }
 
@@ -2343,10 +2342,28 @@ void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup)
     }
 }
 
-std::vector<DataRun> SiblingVolumeRuns(Source& source,const Container& container,const WritableMap& containerMap,
-                                      uint64_t selected,const Bytes& selectedVolume)
+struct VolumeSpace {
+    uint64_t reserve,quota,used;
+};
+
+VolumeSpace ReadVolumeSpace(const Bytes& volume,uint64_t blockCount)
 {
+    const VolumeSpace limits{Le64(volume.data()+72),Le64(volume.data()+80),Le64(volume.data()+88)};
+    Check(limits.reserve<=blockCount&&limits.quota<=blockCount&&limits.used<=blockCount&&
+          (!limits.quota||limits.reserve<=limits.quota),"Invalid APFS volume space limits");
+    return limits;
+}
+
+struct SiblingAllocation {
     std::vector<DataRun> runs;
+    uint64_t totalReserve=0,allocatedReserve=0;
+};
+
+SiblingAllocation ReadSiblingAllocation(Source& source,const Container& container,const WritableMap& containerMap,
+                                        uint64_t selected,const Bytes& selectedVolume)
+{
+    SiblingAllocation siblings;
+    auto& runs=siblings.runs;
     const auto block=[&](uint64_t address){runs.push_back({address,1});};
     for(const auto& mapping:containerMap.mappings){
         if(mapping.oid==selected)continue;
@@ -2360,8 +2377,10 @@ std::vector<DataRun> SiblingVolumeRuns(Source& source,const Container& container
                              selectedVolume.begin()+VolumeGroupOffset),
                   "Unsupported APFS volume group membership");
         }
-        Check(!Le64(volume.data()+72)&&!Le64(volume.data()+80),
-              "APFS multi-volume writes do not support sibling reserves or quotas");
+        const auto limits=ReadVolumeSpace(volume,container.blockCount);
+        Check(limits.reserve<=container.blockCount-siblings.totalReserve,"Invalid APFS shared volume reserves");
+        siblings.totalReserve+=limits.reserve;
+        siblings.allocatedReserve+=(std::min)(limits.reserve,limits.used);
         const auto map=ReadWritableMap(source,container,Le64(volume.data()+128));
         block(map.headerBlock);
         block(map.rootBlock);
@@ -2399,7 +2418,7 @@ std::vector<DataRun> SiblingVolumeRuns(Source& source,const Container& container
               "Invalid or overlapping APFS sibling volume allocation");
         end=run.block+run.count;
     }
-    return runs;
+    return siblings;
 }
 
 void CheckNativeVolume(const Bytes& volume)
@@ -2472,7 +2491,7 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
 {
     const auto [containerMap,address,volume]=ReadCatalogVolume(source,container,selected);
     CheckExternalVolume(volume,container.volumes.size()==2);
-    const auto siblings=SiblingVolumeRuns(source,container,containerMap,selected?selected:container.volumes.front(),volume);
+    const auto siblings=ReadSiblingAllocation(source,container,containerMap,selected?selected:container.volumes.front(),volume);
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
     const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
     const auto extents=ReadExtentTree(source,container,Le64(volume.data()+144));
@@ -2492,7 +2511,7 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
     Writes discarded;
     std::vector<DataRun> data;
     const auto allocated=Allocate(discarded,source,container,space,superblock,ephemeral,
-                                  live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;},siblings);
+                                  live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;},siblings.runs);
     Check(allocated.size()==1&&data.size()==1&&data.front().count==1&&allocated.front()!=data.front().block,
           "APFS allocation preflight did not reserve distinct data and metadata blocks");
     return Le64(space.data()+72)*container.blockSize;
@@ -2543,7 +2562,7 @@ CatalogWritePlan PrepareCatalogMutation(
     if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
     const auto oid=selected?selected:current.volumes.front();
-    const auto siblings=SiblingVolumeRuns(source,current,containerMap,oid,volume);
+    const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
     const auto flags=Le64(volume.data()+56);
     const bool fold=flags==1;
     const auto fileCount=Le64(volume.data()+184);
@@ -2855,7 +2874,7 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             mapChildren=MapLeaves(children+1);
             return firstChild+children+extentChildren+mapChildren;
-        },siblings);
+        },siblings.runs);
     if(changeExtents){
         StageExtentTree(writes,extentLeaves,allocated,firstChild+children,transaction);
         Set(volume,144,allocated[6],8);
@@ -2870,12 +2889,26 @@ CatalogWritePlan PrepareCatalogMutation(
     StageMap(writes,volumeMap,allocated[1],allocated[2],mappings,transaction,allocated,firstChild+children+extentChildren);
     const auto oldChildren=existing.blocks.size()-1+volumeMap.leaves.size()+(changeExtents?extentTree.blocks.size()-1:0);
     const auto newChildren=children+extentChildren+mapChildren;
-    const auto volumeBlocks=Le64(volume.data()+88);
+    const auto spaceLimits=ReadVolumeSpace(volume,current.blockCount);
+    const auto volumeBlocks=spaceLimits.used;
     const auto removedVolumeBlocks=oldChildren+removedBlocks;
     Check(volumeBlocks>=removedVolumeBlocks&&volumeBlocks<=current.blockCount&&
           dataBlocks+newChildren<=current.blockCount-(volumeBlocks-removedVolumeBlocks),
           "Invalid APFS volume allocation count");
-    Set(volume,88,volumeBlocks-removedVolumeBlocks+newChildren+dataBlocks,8);
+    const auto updatedVolumeBlocks=volumeBlocks-removedVolumeBlocks+newChildren+dataBlocks;
+    Check(!spaceLimits.quota||updatedVolumeBlocks<=spaceLimits.quota,
+          "The APFS volume quota would be exceeded");
+    Check(spaceLimits.reserve<=current.blockCount-siblings.totalReserve,"Invalid APFS shared volume reserves");
+    const auto totalReserve=siblings.totalReserve+spaceLimits.reserve;
+    const auto oldAllocatedReserve=siblings.allocatedReserve+(std::min)(spaceLimits.reserve,volumeBlocks);
+    Check(Le64(space.data()+SpaceReserveCount)==totalReserve&&
+          Le64(space.data()+SpaceReserveAllocated)==oldAllocatedReserve,"APFS reserve counters disagree with the volumes");
+    const auto allocatedReserve=siblings.allocatedReserve+(std::min)(spaceLimits.reserve,updatedVolumeBlocks);
+    // Blocks retired by this transaction are still allocated in its published bitmap.
+    Check(Le64(space.data()+72)>=totalReserve-allocatedReserve,
+          "The APFS write would consume space reserved for another volume");
+    Set(space,SpaceReserveAllocated,allocatedReserve,8);
+    Set(volume,88,updatedVolumeBlocks,8);
     Set(volume,128,allocated[1],8);
     Set(volume,176,nextAvailable,8);
     if(create){

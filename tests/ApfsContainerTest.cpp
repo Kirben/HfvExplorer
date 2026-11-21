@@ -2690,6 +2690,106 @@ void ExternalMultiVolumeWrites(const std::string& root,FILE* report,const wchar_
             targetIndex+1);
 }
 
+void ExternalSpaceLimitWrites(const std::string& root,FILE* report,const wchar_t* fixture)
+{
+    constexpr uint64_t MiB=1024*1024;
+    const auto path=VolumeCoord::Wide(root+"apfs-macos-volume-space-edits.img");
+    Storage::Job conversion;
+    const auto result=Dmg::Convert(fixture,path,Dmg::Output::RawImage,conversion);
+    Check(!result.code,result.message.c_str());
+    {
+        auto volume=MacBrowser::OpenBrowserImage(path);
+        Check(volume&&volume->Supports().writable,"APFS quota and reserve image opened read-only");
+        VolumeCoord::OperationLease lease({{volume->ResourceKey(),VolumeCoord::Mode::Write}});
+        for(const auto name:{u"Limited",u"Empty"}){
+            MacBrowser::Entry selected,folder,pressure;
+            Check(volume->FindChild(2,name,selected)&&volume->FindChild(selected.id,u"Fixture",folder)&&
+                  volume->FindChild(folder.id,u"pressure",pressure),"Missing macOS APFS pressure directory");
+            const auto files=volume->List(pressure.id);
+            Check(files.size()>=2,"Missing macOS APFS pressure files");
+            volume->Remove(files[0].id);
+            volume->Remove(files[1].id);
+        }
+    }
+    class Payload final:public Source {
+        uint64_t size;
+        Storage::Job* cancel;
+    public:
+        unsigned reads=0;
+        Payload(uint64_t length,Storage::Job* job=nullptr):size(length),cancel(job){}
+        uint64_t Size()const override{return size;}
+        bool Writable()const override{return false;}
+        void Flush()override{}
+        void Write(uint64_t,const void*,size_t)override{throw Error("Unexpected APFS test input write");}
+        void Read(uint64_t offset,void* dest,size_t count)override{
+            ++reads;
+            memset(dest,0x5d,count);
+            if(cancel&&offset)cancel->cancel();
+        }
+    };
+    {
+        auto output=OpenImage(path.c_str(),true);
+        const auto checkpoint=[&]{auto value=Apfs::Probe(*output);Check(value.has_value(),"Missing APFS quota checkpoint");return *value;};
+        const auto target=[&](const std::string& name){
+            auto current=checkpoint();
+            const Apfs::ObjectMap map(*output,current,current.objectMap,current.transaction);
+            for(const auto oid:current.volumes){
+                const auto block=map.Lookup(oid);
+                Check(block.has_value(),"Missing APFS quota volume mapping");
+                const auto super=Apfs::ReadObject(*output,current,*block,oid,current.transaction,13);
+                const auto label=reinterpret_cast<const char*>(super.data()+704);
+                if(label[name.size()]||memcmp(label,name.data(),name.size()))continue;
+                current.writeVolume=oid;
+                return current;
+            }
+            throw Error("Missing APFS quota volume");
+        };
+        const auto unchanged=[&](const Apfs::Container& before){
+            const auto after=checkpoint();
+            Check(after.transaction==before.transaction&&after.checkpointBlock==before.checkpointBlock,
+                  "A rejected or cancelled APFS space-limited write published a checkpoint");
+        };
+        const auto create=[&](const Apfs::Container& selected,const std::u16string& name,Payload& data,Storage::Job& job){
+            return Apfs::CreateCatalogFile(*output,selected,2,name,data,job,{},nullptr,false,nullptr,nullptr,nullptr,true);
+        };
+        const auto reject=[&](const std::string& volume,uint64_t bytes,const char* reason){
+            const auto before=target(volume);
+            Payload payload(bytes);
+            Storage::Job job;
+            bool rejected=false;
+            try{create(before,u"Must not be created",payload,job);}
+            catch(const Error& failure){Check(strstr(failure.what(),reason)!=nullptr,failure.what());rejected=true;}
+            Check(rejected&&!payload.reads,"APFS space limit rejection read or wrote file data");
+            unchanged(before);
+        };
+        reject("Limited",9*MiB,"quota would be exceeded");
+        reject("Empty",64*MiB,"reserved for another volume");
+        Storage::Job job;
+        Payload small(16384);
+        create(target("Limited"),u"Within quota",small,job);
+        Payload ownReserve(40*MiB);
+        create(target("Reserved"),u"Within reserve",ownReserve,job);
+        const auto before=target("Limited");
+        Storage::Job cancel;
+        Payload cancelled(16384,&cancel);
+        bool stopped=false;
+        try{create(before,u"Must not be created",cancelled,cancel);}catch(const Storage::Cancelled&){stopped=true;}
+        Check(stopped&&cancelled.reads>=2,"APFS quota cancellation did not reach staging");
+        unchanged(before);
+    }
+    auto volume=MacBrowser::OpenBrowserImage(path);
+    for(const auto& target:std::array<std::pair<std::u16string,const char16_t*>,2>{{
+            {u"Limited",u"Within quota"},{u"Reserved",u"Within reserve"}}}){
+        MacBrowser::Entry selected,file,missing;
+        Check(volume&&volume->FindChild(2,target.first,selected)&&volume->FindChild(selected.id,target.second,file)&&
+              !volume->FindChild(selected.id,u"Must not be created",missing),"APFS space-limited writes did not reopen correctly");
+        Bytes data(4096);
+        volume->Read(file.id,0,file.forks[0].size-data.size(),data.data(),data.size());
+        Check(data==Bytes(data.size(),0x5d),"APFS space-limited write read back different bytes");
+    }
+    fprintf(report,"PASS: macOS APFS volume quota, sibling reserve, own reserve, cancellation, and unchanged rejected checkpoints.\n");
+}
+
 void WritableGptImages(const std::string& root,FILE* report,const wchar_t* macFixture=nullptr)
 {
     const auto baselinePath=macFixture?std::wstring(macFixture):VolumeCoord::Wide(root+"checkpoint-before.img");
@@ -2845,6 +2945,8 @@ int RunApfsContainerTest(const char* directory)
             for(size_t target=0;target<2;++target)
                 ExternalMultiVolumeWrites(root,report,mixed,target,true);
         }
+        if(const auto quota=_wgetenv(L"HFV_APFS_SPACE_LIMIT_FIXTURE"))
+            ExternalSpaceLimitWrites(root,report,quota);
         ExternalCaseSensitiveWrites(root,report,nullptr);
         if(const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"))
             ExternalCaseSensitiveWrites(root,report,fixture);
