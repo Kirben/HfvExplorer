@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "DocumentLaunch.h"
+#include "MacIcons.h"
 #include "HFVExplorer.h"
 #include "HFVCommandLineInfo.h"
 #include "BrowserSession.h"
@@ -25,6 +26,156 @@ extern "C" {
 }
 namespace {
 void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}
+
+void PutIconFixture(MacBrowser::Volume& volume)
+{
+    // The PNG is 32x32 RGBA. The binary plist uses a UTF-16 icon filename.
+    const HfsPlus::Bytes icns={
+     0x69,0x63,0x6e,0x73,0x00,0x00,0x00,0x77,0x69,0x63,0x31,0x31,0x00,0x00,0x00,0x6f,
+     0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
+     0x00,0x00,0x00,0x20,0x00,0x00,0x00,0x20,0x08,0x06,0x00,0x00,0x00,0x73,0x7a,0x7a,
+     0xf4,0x00,0x00,0x00,0x2e,0x49,0x44,0x41,0x54,0x78,0x9c,0xed,0xce,0x21,0x01,0x00,
+     0x00,0x08,0x03,0xb0,0x47,0xa3,0x19,0xd1,0x4f,0x0c,0xcc,0xc4,0xfc,0xd2,0xc9,0x7e,
+     0x8a,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x40,
+     0x9f,0x03,0x07,0x5b,0x4a,0xf8,0x5b,0x54,0xf0,0x5f,0x07,0x00,0x00,0x00,0x00,0x49,
+     0x45,0x4e,0x44,0xae,0x42,0x60,0x82
+    };
+    const auto decoded=MacIcons::Decode(icns);
+    Check(decoded&&decoded->small&&decoded->large,"standalone PNG ICNS decoder failed");
+    const HfsPlus::Bytes binary={
+     0x62,0x70,0x6c,0x69,0x73,0x74,0x30,0x30,0xd1,0x01,0x02,0x5f,0x10,0x10,0x43,0x46,
+     0x42,0x75,0x6e,0x64,0x6c,0x65,0x49,0x63,0x6f,0x6e,0x46,0x69,0x6c,0x65,0x6a,0x00,
+     0x49,0x00,0x63,0x00,0xf4,0x00,0x6e,0x00,0x65,0x00,0x2e,0x00,0x69,0x00,0x63,0x00,
+     0x6e,0x00,0x73,0x08,0x0b,0x1e,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x00,0x00,
+     0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+     0x00,0x00,0x00,0x00,0x00,0x33
+    };
+    const char xml[]="<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict>"
+        "<key>CFBundleIconFile</key><string>AppIcon</string></dict></plist>";
+    const char escaping[]="<plist><dict><key>CFBundleIconFile</key>"
+        "<string>../AppIcon</string></dict></plist>";
+    const auto write=[&](uint32_t parent,const std::u16string& name,const HfsPlus::Bytes& bytes,
+                         unsigned fork=0,bool custom=false) {
+        MacBrowser::Entry entry;
+        entry.name=name;
+        entry.forks[fork].size=bytes.size();
+        if(custom)entry.finder[8]=4;
+        volume.Put(parent,entry,[&](unsigned selected,uint64_t offset,void* into,size_t length) {
+            Check(selected==fork&&offset<=bytes.size()&&length<=bytes.size()-offset,
+                  "icon fixture wrote the wrong fork range");
+            memcpy(into,bytes.data()+size_t(offset),length);
+        },false);
+    };
+    const auto bundle=[&](const char16_t* name,const HfsPlus::Bytes& plist,const char16_t* iconName){
+        const auto app=volume.MakeDirectory(2,name);
+        const auto contents=volume.MakeDirectory(app,u"Contents");
+        const auto resources=volume.MakeDirectory(contents,u"Resources");
+        write(contents,u"Info.plist",plist);
+        write(resources,iconName,icns);
+    };
+    bundle(u"XML.app",HfsPlus::Bytes(xml,xml+sizeof(xml)-1),u"AppIcon.icns");
+    bundle(u"Binary.app",binary,u"Ic\u00f4ne.icns");
+    bundle(u"Invalid.app",HfsPlus::Bytes(escaping,escaping+sizeof(escaping)-1),u"AppIcon.icns");
+    for(const auto* label:{u"XML.app",u"Binary.app"}){
+        BrowserDirectory::Row row;
+        Check(volume.FindChild(2,label,row.entry),"bundle folder missing from test image");
+        MacIcons::Load(volume,row);
+        if(!row.ownedIcons)
+            throw HfsPlus::Error("Bundle discovery failed on the test volume");
+    }
+
+
+    auto truncated=icns;
+    truncated.resize(truncated.size()-1);
+    Check(!MacIcons::Decode(truncated),"accepted an out-of-bounds ICNS chunk");
+    auto badChunk=icns;
+    badChunk[15]=7;
+    Check(!MacIcons::Decode(badChunk),"accepted undersized ICNS chunk");
+
+    HfsPlus::Bytes resource(256+4+64+50,0);
+    const auto be=[&](size_t pos,uint32_t value,unsigned size) {
+        for(unsigned i=0;i<size;++i)resource[pos+i]=uint8_t(value>>(8*(size-1-i)));
+    };
+    const size_t map=324;
+    be(0,256,4);be(4,uint32_t(map),4);be(8,68,4);be(12,50,4);
+    be(256,64,4);
+    // First pixel is opaque black, the remaining pixels are transparent.
+    resource[260]=resource[292]=0x80;
+    std::copy_n(resource.begin(),16,resource.begin()+map);
+    be(map+24,28,2);be(map+26,50,2);
+    memcpy(resource.data()+map+30,"ics#",4);
+    be(map+36,10,2);
+    be(map+38,0xbfb9,2);be(map+40,0xffff,2);
+    write(2,u"Custom icon",resource,1,true);
+}
+
+void CheckClassicBundle(const CString& image,FILE* report)
+{
+    const char* fixture=std::getenv("HFV_BNDL_FIXTURE");
+    if(!fixture||!*fixture){
+        fprintf(report,"SKIP: set HFV_BNDL_FIXTURE to the shared Disk Copy resource fork.\n");
+        return;
+    }
+    CFile file;
+    CFileException error;
+    Check(file.Open(fixture,CFile::modeRead|CFile::shareDenyNone,&error),
+          "could not open the shared Disk Copy resource fork");
+    Check(file.GetLength()==24385,"unexpected Disk Copy fixture size");
+    HfsPlus::Bytes fork(24385);
+    Check(file.Read(fork.data(),UINT(fork.size()))==fork.size(),"could not read the Disk Copy resource fork");
+    const auto icons=MacIcons::DecodeBundle(fork);
+    const auto application=icons.find('APPL'), document=icons.find('dImg');
+    Check(application!=icons.end()&&document!=icons.end()&&application->second!=document->second,
+          "BNDL/FREF did not select separate application and document icons");
+    for(const auto* icon:{application->second.get(),document->second.get()})
+        Check(icon->small&&icon->large,"Disk Copy fixture lost an icon size");
+    auto truncated=fork;
+    truncated.resize(256);
+    Check(MacIcons::DecodeBundle(truncated).empty(),"truncated bundle was accepted");
+
+    BrowserFolderReader reader({});
+    reader.process_bundle2(&file,0,'dCpy');
+    auto appIcon=reader.map_type_and_creator('APPL','dCpy',0);
+    auto docIcon=reader.map_type_and_creator('dImg','dCpy',0);
+    Check(appIcon&&docIcon&&appIcon!=docIcon&&
+          !reader.map_type_and_creator('dImg','TEST',0),
+          "host resource fork did not register distinct icons by type and creator");
+
+    auto volume=MacBrowser::OpenClassic((LPCSTR)image,":",true);
+    const auto put=[&](const char16_t* name,const char* type,const HfsPlus::Bytes& bytes,bool bundle){
+        MacBrowser::Entry entry;
+        entry.name=name;
+        memcpy(entry.finder.data(),type,4);
+        memcpy(entry.finder.data()+4,"dCpy",4);
+        if(bundle)entry.finder[8]=0x20;
+        entry.forks[1].size=bytes.size();
+        volume->Put(2,entry,[&](unsigned selected,uint64_t offset,void* into,size_t length){
+            Check(selected==1&&offset<=bytes.size()&&length<=bytes.size()-offset,
+                  "Disk Copy fixture wrote the wrong fork range");
+            memcpy(into,bytes.data()+size_t(offset),length);
+        },false);
+    };
+    put(u"AAA Disk Image","dImg",{},false);
+    put(u"Disk Copy","APPL",fork,true);
+    volume->Close();
+
+    BrowserFolderReader classic({});
+    classic.ClassicState(0).m_file_name=image;
+    const auto snapshot=classic.read_classic_browser_directory(0,2,"Same:",false,0);
+    const auto row=[&](const char16_t* name)->const BrowserDirectory::Row*{
+        for(const auto& item:snapshot.rows)
+            if(item.entry.name==name)return &item;
+        return nullptr;
+    };
+    const auto* app=row(u"Disk Copy");
+    const auto* doc=row(u"AAA Disk Image");
+    Check(app&&doc&&app->icon16&&app->icon32&&doc->icon16&&doc->icon32&&
+          app->icon32!=doc->icon32,
+          "classic browsing did not inherit the icon on a document preceding its application");
+    fprintf(report,"PASS: real Disk Copy BNDL/FREF icons for both file types and sizes, including classic document inheritance before the application row.\n");
+}
+
 struct Doc:CHFVExplorerDoc {
  Doc():CHFVExplorerDoc(false){m_bAutoDelete=FALSE;}
  using CHFVExplorerDoc::my_chdir;
@@ -499,6 +650,11 @@ int RunBrowserSessionTest(const char* directory){
   }
   app.m_pMainWnd=nullptr;a.doc.open_fat_directory(0,const_cast<char*>((LPCSTR)wa),1);app.m_pMainWnd=&b.owner;Check(Find(a.list,L"first.txt")>=0,"startup before global main-window assignment");
   {
+   const CString image=root+"\\bundle-classic.dsk";
+   {Panes seed;seed.Classic(image,"Bundle fixture");}
+   CheckClassicBundle(image,report);
+  }
+  {
    const CString image=root+"\\refresh-classic.dsk", replacement=root+"\\replacement-classic.dsk";
    auto checking=std::make_unique<Panes>();
    checking->Classic(image,"before refresh");
@@ -730,6 +886,7 @@ int RunBrowserSessionTest(const char* directory){
     auto volume=MacBrowser::OpenImage(fixture.first);
     const auto child=volume->MakeDirectory(2,fixture.second);
     volume->MakeDirectory(child,u"Restored nested folder");
+    if(fixture.first==firstImage)PutIconFixture(*volume);
     volume->Close();
    }
 
@@ -748,6 +905,17 @@ int RunBrowserSessionTest(const char* directory){
    PumpUntil([&]{return !session.Navigating();},"startup image did not publish");
    Check(session.ListingAvailable()&&Find(*session.List(),L"Startup image")>=0&&
          session.MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}),"startup image lost its root or the Windows tree");
+
+   for(const auto* label:{L"XML.app",L"Binary.app",L"Custom icon"}){
+    const auto* row=session.List()->BrowserRowAt(Find(*session.List(),label));
+    if(!row||!row->ownedIcons||!row->icon16)
+     throw HfsPlus::Error("Mounted browser did not publish an icon for "+std::string(static_cast<LPCSTR>(CString(label))));
+    if(wcscmp(label,L"Custom icon"))
+     Check(row->icon32!=nullptr,"PNG ICNS did not produce both display sizes");
+   }
+   const auto* invalid=session.List()->BrowserRowAt(Find(*session.List(),L"Invalid.app"));
+   Check(invalid&&!invalid->ownedIcons,"unsafe app-bundle icon name was accepted");
+   fprintf(report,"PASS: mounted browser PNG ICNS, XML and binary bundle plists, unsafe filenames and classic custom icon masks.\n");
 
    HANDLE entered=CreateEvent(nullptr,TRUE,FALSE,nullptr);
    HANDLE release=CreateEvent(nullptr,TRUE,FALSE,nullptr);

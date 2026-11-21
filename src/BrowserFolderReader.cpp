@@ -218,7 +218,8 @@ int BrowserFolderReader::get_apple_double(
 					*do_show = 0;
 					return(1);
 				}
-				start = get_section_offset( fp, Resource_Fork, NULL );
+				unsigned long forkLength;
+				start = get_section_offset( fp, Resource_Fork, &forkLength );
 				if(start) {
 					if(finfo.fdFlags & kHasCustomIcon) {
 						// AfxMessageBox( "File " + CString(pure_name) + " has custom icon." );
@@ -231,7 +232,7 @@ int BrowserFolderReader::get_apple_double(
 
 					if(finfo.fdFlags & kHasBundle) {
 						if(!*phicon16 || !*phicon32) {
-							process_bundle2( fp, start, creator );
+							process_bundle2( fp, start, creator, forkLength );
 							if(!*phicon32) *phicon32 = map_type_and_creator (type, creator, 0 );
 							if(!*phicon16) *phicon16 = map_type_and_creator (type, creator, 1 );
 						}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "MacIcons.h"
 #ifdef HFV_TESTING
 #include <psapi.h>
 #endif
@@ -82,6 +83,7 @@ using Location=FileOperations::Location;
 
 // Windows share these snapshots on the browser UI thread. Weak mount
 // references keep cached listings from retaining image handles.
+using FolderIcons=std::map<uint32_t,std::shared_ptr<BrowserDirectory::OwnedIcons>>;
 struct FolderSnapshot {
     std::weak_ptr<Volume> volume;
     uint64_t revision;
@@ -90,6 +92,7 @@ struct FolderSnapshot {
     std::wstring title;
     std::vector<Entry> entries;
     uint64_t free;
+    FolderIcons icons;
 };
 constexpr size_t FolderCacheBudget=96*1024*1024;
 constexpr size_t FolderCacheLimit=64;
@@ -127,7 +130,8 @@ class FolderCache {
         if(!charge(sizeof(Record)+2*sizeof(void*))||
            !charge(snapshot.ancestry.capacity()*sizeof(uint32_t))||
            !charge(snapshot.entries.capacity()*sizeof(Entry))||
-           !charge(StringAllocation(snapshot.title)))return FolderCacheBudget+1;
+           !charge(StringAllocation(snapshot.title))||
+           !charge(snapshot.icons.size()*64*1024))return FolderCacheBudget+1;
         for(const auto& entry:snapshot.entries){
             if(!charge(StringAllocation(entry.name)+StringAllocation(entry.readError))||
                !charge(IdentityAllocation(entry.identity)+IdentityAllocation(entry.expectedDestinationIdentity)))
@@ -468,6 +472,7 @@ struct MainMacBrowser::State {
                     result.listing.folder.SetMounted(volume,id);
                     result.listing.folder.directory=true;
                     FillListing(snapshot,listing.entries,volume->Supports(),showInvisible,listing.mutableFolder);
+                    LoadListingIcons(snapshot,job);
                     result.payload=std::move(listing);
                 }catch(const Apfs::LockedVolume& locked){
                     result.listing.resourceKey.clear();
@@ -517,6 +522,18 @@ struct MainMacBrowser::State {
             if(showInvisible||!((uint16_t(entry.finder[8])<<8|entry.finder[9])&0x4000))
                 snapshot.rows.push_back(BrowserDirectory::FromMac(entry,snapshot.folder.Volume(),capabilities));
     }
+    static void LoadListingIcons(BrowserDirectory::Snapshot& snapshot,Storage::Job& job)
+    {
+        auto& volume=*snapshot.folder.Volume();
+        size_t loaded=0;
+        for(auto& row:snapshot.rows){
+            if(job.cancelled())throw Storage::Cancelled();
+            MacIcons::Load(volume,row);
+            // Bound the number of GDI objects retained by each folder snapshot.
+            if(row.ownedIcons&&++loaded==128)break;
+        }
+        if(loaded)StorageLocation::ValidateMedia(snapshot.folder);
+    }
     bool Publish(int index,uint32_t id,HTREEITEM item,bool rebuild,bool cached,
         const std::shared_ptr<Volume>& volume,uint64_t revision,const std::wstring& folderTitle,
         const std::vector<std::pair<uint32_t,std::vector<Entry>>>& levels,std::vector<Entry>& entries,
@@ -525,7 +542,13 @@ struct MainMacBrowser::State {
     {
         const auto key=volume->ResourceKey();
         const bool canCache=ExecutionFor(*volume).Persistent();
-        if(canCache&&!cached)folderCache.Store({volume,revision,id,ancestors,folderTitle,entries,free});
+        if(canCache&&!cached){
+            FolderSnapshot stored{volume,revision,id,ancestors,folderTitle,entries,free};
+            if(prepared)
+                for(const auto& row:prepared->rows)
+                    if(row.ownedIcons)stored.icons.emplace(row.entry.id,row.ownedIcons);
+            folderCache.Store(std::move(stored));
+        }
         auto tree=session_.Tree();auto& control=*tree->m_ct;BrowserPresentation::Batch treeBatch(control.m_hWnd),listBatch(session_.List()->GetListCtrl().m_hWnd,true);bool enabled=tree->m_selchange_enabled!=0;tree->enable_selchange(0);
         if(rebuild){
             auto root=MountedRoot(index);tree->delete_subdir_contents(root);std::map<uint32_t,HTREEITEM> pathItems;pathItems[2]=root;
@@ -543,6 +566,16 @@ struct MainMacBrowser::State {
             snapshot.folder=Location::Mounted(volume,id);
             snapshot.folder.directory=true;
             FillListing(snapshot,entries,volume->Supports(),App().m_show_invisible_mac!=FALSE,!cached&&mutableFolder);
+            if(cached){
+                if(const auto* retained=folderCache.Find(volume,revision,id,ancestors))
+                    for(auto& row:snapshot.rows){
+                        const auto icon=retained->icons.find(row.entry.id);
+                        if(icon==retained->icons.end())continue;
+                        row.ownedIcons=icon->second;
+                        row.icon16=row.ownedIcons->small;
+                        row.icon32=row.ownedIcons->large;
+                    }
+            }
             prepared=&snapshot;
         }
         CString status;
@@ -751,6 +784,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 folder.directory=true;
                 result.listing.folder=std::move(folder);
                 State::FillListing(result.listing,root.entries,volume->Supports(),showInvisible,true);
+                State::LoadListingIcons(result.listing,job);
                 if(job.cancelled()){
                     result.listing={};
                     throw Storage::Cancelled();

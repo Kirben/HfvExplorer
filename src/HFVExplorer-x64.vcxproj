@@ -25,6 +25,7 @@
     <ClCompile Include="AskVolumeToFloppy.cpp" />
     <ClCompile Include="aspecial.c" />
     <ClCompile Include="Bndl.cpp" />
+    <ClCompile Include="MacIcons.cpp" />
     <ClCompile Include="cache.cpp" />
     <ClCompile Include="CFATVolume.cpp" />
     <ClCompile Include="charset.c" />

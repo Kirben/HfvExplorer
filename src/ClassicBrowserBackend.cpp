@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "MacIcons.h"
 #include "LegacyEngine.h"
 #include "ClassicCatalog.h"
 #include "HfsPlusDisk.h"
@@ -80,14 +81,13 @@ bool BrowserFolderReader::prepare_classic_browser_row( hfs_item_type *pitem, Cat
 				id = pitem->catdatarec.u.d.dirDirID;
 
 				// Try to load folder custom icon
-				if(folderIcon) {
-#ifndef ZAPPER
-					load_custom_icons( 
-							pitem->volinx,
-							folderIcon,
-							&hicon16, 
-							&hicon32 );
-#endif
+				if(folderIcon && artworkVolume_){
+                    row.ownedIcons=MacIcons::ReadClassic(*artworkVolume_,folderIcon->u.f.filFlNum,
+                                                       folderIcon->u.f.filRLgLen);
+                    if(row.ownedIcons){
+                        hicon16=row.ownedIcons->small?row.ownedIcons->small:row.ownedIcons->large;
+                        hicon32=row.ownedIcons->large?row.ownedIcons->large:row.ownedIcons->small;
+                    }
 				}
 				p.x = (int)(signed short)pitem->catdatarec.u.d.dirUsrInfo.frLocation.h;
 				p.y = (int)(signed short)pitem->catdatarec.u.d.dirUsrInfo.frLocation.v;
@@ -112,32 +112,17 @@ bool BrowserFolderReader::prepare_classic_browser_row( hfs_item_type *pitem, Cat
 				long_to_string( fdType,(unsigned char *)stype );
 				long_to_string( fdCreator,(unsigned char *)screator );
 
-				// First try to find custom icons
-#ifndef ZAPPER
-				if(pitem->catdatarec.u.f.filUsrWds.fdFlags & kHasCustomIcon) {
-					load_custom_icons( 
-							pitem->volinx,
-							&pitem->catdatarec,
-							&hicon16, 
-							&hicon32 );
-				}
-#endif
+                if(artworkVolume_ && (pitem->catdatarec.u.f.filUsrWds.fdFlags & kHasCustomIcon)){
+                    row.ownedIcons=MacIcons::ReadClassic(*artworkVolume_,id,pitem->catdatarec.u.f.filRLgLen);
+                    if(row.ownedIcons){
+                        hicon16=row.ownedIcons->small?row.ownedIcons->small:row.ownedIcons->large;
+                        hicon32=row.ownedIcons->large?row.ownedIcons->large:row.ownedIcons->small;
+                    }
+                }
 
 				// Try to load from cache
 				if(!hicon32) hicon32 = map_type_and_creator ( fdType, fdCreator, 0 );
 				if(!hicon16) hicon16 = map_type_and_creator ( fdType, fdCreator, 1 );
-
-				// Check if it has a bundle...
-				if(!hicon16 || !hicon32) {
-					process_bundle(
-						pitem->volinx,
-						&pitem->catdatarec,
-						fdCreator
-					);
-					// ... and perhaps the icon is in cache now?
-					if(!hicon32) hicon32 = map_type_and_creator ( fdType, fdCreator, 0 );
-					if(!hicon16) hicon16 = map_type_and_creator ( fdType, fdCreator, 1 );
-				}
 
 				// File aliases
 				if(!hicon32 && fdType == 'adrp')
@@ -220,6 +205,17 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  } resetArtwork{artworkVolume_};
  artworkVolume_=volume;
  LegacyEngine::Scope finderResources;
+ // Register visible bundles before assigning document icons, regardless of catalog order.
+ for(const auto& record:records){
+  if(job&&job->cancelled())throw Storage::Cancelled();
+  CatDataRec catalog{};
+  static_assert(sizeof(catalog)==sizeof(MacBrowser::ClassicCatalogEntry::PackedRecord));
+  memcpy(&catalog,record.data.data(),sizeof(catalog));
+  if(catalog.cdrType!=cdrFilRec)continue;
+  const auto& finderInfo=catalog.u.f.filUsrWds;
+  if((finderInfo.fdFlags&fInvisible)&&!options_.showMacHidden)continue;
+  process_bundle(&catalog);
+ }
  int x=INT_MAX,y=INT_MAX;
  for(auto& record:records){
   if(job&&job->cancelled())throw Storage::Cancelled();

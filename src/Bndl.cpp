@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "MacIcons.h"
 #include "HFVExplorer.h"
 
 #include "BrowserFolderReader.h"
@@ -77,13 +78,9 @@ void BrowserFolderReader::init_hash_table()
 	}
 
 	get_icons_file_name( ini_name );
-    hash_file_writable=false;
-    if(ini_name!=""){
+    if(!ini_name.IsEmpty()){
         CFileException error;
-        if(fp->Open(ini_name,CFile::modeReadWrite|CFile::shareDenyWrite,&error))hash_file_ok=hash_file_writable=true;
-        else if(GetFileAttributesA(ini_name)==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND){
-            if(fp->Open(ini_name,CFile::modeCreate|CFile::modeNoTruncate|CFile::modeReadWrite|CFile::shareDenyWrite,&error))hash_file_ok=hash_file_writable=true;
-        }else if(fp->Open(ini_name,CFile::modeRead|CFile::shareDenyNone,&error))hash_file_ok=1;
+        hash_file_ok=fp->Open(ini_name,CFile::modeRead|CFile::shareDenyNone,&error);
     }
 
 	memset( hash_table, 0, sizeof(type_creator_link_t *) * HASH_SIZE );
@@ -275,88 +272,9 @@ void BrowserFolderReader::delete_cache()
 	silent_delete( name );
 }
 
-void BrowserFolderReader::save_hash_table(
-	OSType type, 
-	OSType creator, 
-	local_icn_sharp_t *ip16,
-	local_icn_sharp_t *ip32
-)
-{
-	CFile *fp;
-	int failure = 0;
-	char *buf;
-	long old_length;
-
-	if(!hash_file_ok || !hash_file_writable) return;
-
-	fp = &hash_file;
-
-	TRY
-	{
-		old_length = fp->Seek( 0, CFile::end );
-	}
-	CATCH( CFileException, e )
-	{
-		hash_file_ok = 0;
-		silent_close( fp );
-		return;
-	}
-	END_CATCH
-
-	TRY
-	{
-	fp->Write( &type, sizeof(OSType) );
-	fp->Write( &creator, sizeof(OSType) );
-	if(!ip16->h) ip16->bytes = 0;
-	fp->Write( &ip16->bytes, sizeof(ip16->bytes) );
-	if(ip16->h) {
-		buf = (char *)GlobalLock(ip16->h);
-		fp->Write( buf, ip16->bytes );
-		GlobalUnlock(ip16->h);
-		fp->Write( &ip16->color_icon_mask, sizeof(ip16->color_icon_mask) );
-		if(ip16->color_icon_mask) {
-			fp->Write( ip16->color_icon_mask, ip16->bytes );
-		}
-	}
-	fp->Write( &ip16->small, sizeof(ip16->small) );
-	fp->Write( &ip16->iscolor, sizeof(ip16->iscolor) );
-	fp->Write( &ip16->dim, sizeof(ip16->dim) );
-
-	if(!ip32->h) ip32->bytes = 0;
-	fp->Write( &ip32->bytes, sizeof(ip32->bytes) );
-	if(ip32->h) {
-		buf = (char *)GlobalLock(ip32->h);
-		fp->Write( buf, ip32->bytes );
-		GlobalUnlock(ip32->h);
-		fp->Write( &ip32->color_icon_mask, sizeof(ip32->color_icon_mask) );
-		if(ip32->color_icon_mask) {
-			fp->Write( ip32->color_icon_mask, ip32->bytes );
-		}
-	}
-	fp->Write( &ip32->small, sizeof(ip32->small) );
-	fp->Write( &ip32->iscolor, sizeof(ip32->iscolor) );
-	fp->Write( &ip32->dim, sizeof(ip32->dim) );
-	}
-	CATCH( CFileException, e )
-	{
-		failure = 1;
-	}
-	END_CATCH
-
-	if(failure) {
-		TRY {
-			fp->SetLength( old_length );
-		} 
-		CATCH( CFileException, e ) 
-		{
-			delete_cache();
-		}
-		END_CATCH
-	}
-}
-
 void BrowserFolderReader::clear_hash_table()
 {
+ bundleIcons_.clear();
 	int i;
   struct type_creator_link_str *next;
   struct type_creator_link_str *x;
@@ -377,30 +295,6 @@ void BrowserFolderReader::clear_hash_table()
 	memset( hash_table, 0, sizeof(type_creator_link_t *) * HASH_SIZE );
 	icons_in_cache = 0;
 	delete_mask_bitmaps();
-}
-
-HANDLE BrowserFolderReader::
-get_fref( int volinx, CatDataRec *pCDR, INTEGER id )
-{
-	HANDLE h = 0;
-
-	h = mac_load_any_resource ( 
-				volinx, pCDR,
-				(unsigned long)'FREF',
-				0, id );
-	return(h);
-}
-
-HANDLE BrowserFolderReader::
-get_fref( CFile *fp, unsigned long g_offset, INTEGER id )
-{
-	HANDLE h = 0;
-
-	h = mac_load_any_resource2 ( 
-				fp, g_offset,
-				(unsigned long)'FREF',
-				0, id );
-	return(h);
 }
 
 unsigned long BrowserFolderReader::
@@ -470,272 +364,17 @@ int BrowserFolderReader::insert_into_hash_table (
 	return(0);
 }
 
-void outss( char *s, int i )
-{
-	char a[100];
-	sprintf( a, "%d %08x", i, i );
-	OutputDebugString( s );
-	OutputDebugString( " " );
-	OutputDebugString( a );
-	OutputDebugString( "\r\n" );
-}
-
-// #define outs(s,i) outss(s,(int)i)
-#define outs(s,i) 
-
-#pragma optimize("g",off)
-bndl_section_t *BrowserFolderReader::
-extract_bndl_section (bndl_t **bndl_h, ResType code)
-{
-  bndl_section_t *retval;
-  int i, n_sects, n_mappings;
-	Integer nix;
-	unsigned long nixlong;
-
-outs( "bndl_h", bndl_h );
-outs( "*bndl_h", *bndl_h );
-outs( "code", code );
-
-// OutputDebugString( "extract_bndl_section @start\r\n" );
-	nix = (*bndl_h)->n_sections_minus_1;
-outs( "nix", nix );
-	MACPC_W( nix );
-
-	// avoid some buggy files.
-	if(nix > 255) {
-		// OutputDebugString( "extract_bndl_section: strange section count, probably corrupt file\r\n" );
-		nix &= 255;
-	}
-
-  n_sects = nix + 1;
-outs( "n_sects", n_sects );
-	retval = (*bndl_h)->section;
-outs( "retval", retval );
-  for (i = 0; i < n_sects; i++ ) {
-			nixlong = retval->code;
-			MACPC_D( nixlong );
-			if(nixlong == code) break;
-      
-			nix = retval->n_mappings_minus_1;
-			MACPC_W( nix );
-      n_mappings = nix + 1;
-      retval = (bndl_section_t *)
-        ((char *)retval + sizeof (bndl_section_t)
-                        + (n_mappings-1) * sizeof (local_mapping_t));
-                         /*^^^^^^^^^^^^*/
-                         /* we subtract one ANSI doesn't allow zero sized
-                            arrays */
-    }
-  if (i >= n_sects)
-    retval = 0;
-outs( "retval", retval );
-// OutputDebugString( "extract_bndl_section @end\r\n" );
-  return retval;
-}
-#pragma optimize("g",on)
-
-int BrowserFolderReader::
-find_local_icon(
-	INTEGER local_id, 
-	local_icn_sharp_t 
-	local_icns[],
-  INTEGER n_icn )
-{
-  int i, retval;
-  
-  for (i = 0; i < n_icn && local_icns[i].local_id != local_id; ++i)
-    ;
-  retval = i < n_icn ? i : -1;
-  return retval;
-}
-
-void BrowserFolderReader::
-process_bndl (
-	int volinx, 
-	CatDataRec *pCDR,
-	bndl_t **bndl_h, 
-	OSType creator
-)
-{
-  if (bndl_h) {
-	    bndl_section_t *sectp;
-	    int n_icn, n_fref;
-	    local_icn_sharp_t *local_icns16;
-	    local_icn_sharp_t *local_icns32;
-	    int i;
-			Integer nix;
-			LongInt nixlong;
-	
-	    sectp = extract_bndl_section (bndl_h, 'ICN#');
-	    if (sectp) {
-				nix = sectp->n_mappings_minus_1;
-				MACPC_W( nix );
-		    n_icn = nix + 1;
-		    local_icns16 = (local_icn_sharp_t *)malloc (n_icn * sizeof (*local_icns16));
-		    local_icns32 = (local_icn_sharp_t *)malloc (n_icn * sizeof (*local_icns32));
-		    for (i = 0; i < n_icn ; ++i) {
-						nix = sectp->mapping[i].local_id;
-						MACPC_W( nix );
-		        local_icns16[i].local_id = nix;
-		        local_icns32[i].local_id = nix;
-						nix = sectp->mapping[i].resource_id;
-						MACPC_W( nix );
-
-						// memset( &local_icns16[i], 0, sizeof(local_icn_sharp_t) );
-						// memset( &local_icns32[i], 0, sizeof(local_icn_sharp_t) );
-
-						mac_load_icon2( volinx, pCDR, nix, 1, &local_icns16[i] );
-						mac_load_icon2( volinx, pCDR, nix, 0, &local_icns32[i] );
-						add_to_icon_cache( local_icns16[i].icon );
-						add_to_icon_cache( local_icns32[i].icon );
-
-
-						// MISSING_FREE? Handled properly below?
-		    }
-		    sectp = extract_bndl_section (bndl_h, 'FREF');
-		    if (sectp) {
-					nix = sectp->n_mappings_minus_1;
-					MACPC_W( nix );
-			    n_fref = nix + 1;
-			    for (i = 0; i < n_fref ; ++i) {
-							HANDLE h;
-			        fref_hand fref_h;
-			
-							nix = sectp->mapping[i].resource_id;
-							MACPC_W( nix );
-			        h = get_fref( volinx, pCDR, nix );
-			        if (h) {
-									unsigned char *lpstr = (unsigned char *)GlobalLock( h );
-									int i16, i32;
-									fref_h = (fref_hand)&lpstr;
-									nix = (*fref_h)->local_id;
-									MACPC_W( nix );
-			            i16 = find_local_icon (nix, local_icns16, n_icn);
-									i32 = find_local_icon (nix, local_icns32, n_icn);
-									nixlong = (*fref_h)->type;
-									MACPC_D( nixlong );
-
-									// THIS VALIDATION WAS MISSING. lp 19980423
-									if(i16 >= 0 && i32 >= 0) {
-										if( insert_into_hash_table (
-												nixlong, creator, 
-												&local_icns16[i16], &local_icns32[i32] ) ) 
-										{
-											save_hash_table( 
-													nixlong, creator, 
-													&local_icns16[i16], &local_icns32[i32] );
-										}
-									}
-
-									GlobalUnlock( h );
-									GlobalFree( h );
-			          }
-			      }
-			    }
-			    for (i = 0; i < n_icn ; ++i) {
-						if(local_icns16[i].h) GlobalFree(local_icns16[i].h);
-						if(local_icns32[i].h) GlobalFree(local_icns32[i].h);
-						if(local_icns16[i].color_icon_mask) free(local_icns16[i].color_icon_mask);
-						if(local_icns32[i].color_icon_mask) free(local_icns32[i].color_icon_mask);
-					}
-		      free (local_icns16);
-		      free (local_icns32);
-		    }
-	}
-}
-
-void BrowserFolderReader::
-process_bndl2 (
-	CFile *fp,
-	unsigned long g_offset,
-	bndl_t **bndl_h, 
-	OSType creator
-)
-{
-  if (bndl_h) {
-	    bndl_section_t *sectp;
-	    int n_icn, n_fref;
-	    local_icn_sharp_t *local_icns16;
-	    local_icn_sharp_t *local_icns32;
-	    int i;
-			Integer nix;
-			LongInt nixlong;
-	
-	    sectp = extract_bndl_section (bndl_h, 'ICN#');
-	    if (sectp) {
-				nix = sectp->n_mappings_minus_1;
-				MACPC_W( nix );
-		    n_icn = nix + 1;
-		    local_icns16 = (local_icn_sharp_t *)malloc (n_icn * sizeof (*local_icns16));
-		    local_icns32 = (local_icn_sharp_t *)malloc (n_icn * sizeof (*local_icns32));
-		    for (i = 0; i < n_icn ; ++i) {
-						nix = sectp->mapping[i].local_id;
-						MACPC_W( nix );
-		        local_icns16[i].local_id = nix;
-		        local_icns32[i].local_id = nix;
-						nix = sectp->mapping[i].resource_id;
-						MACPC_W( nix );
-						mac_load_icon3( fp, g_offset, nix, 1, &local_icns16[i] );
-						mac_load_icon3( fp, g_offset, nix, 0, &local_icns32[i] );
-						add_to_icon_cache( local_icns16[i].icon );
-						add_to_icon_cache( local_icns32[i].icon );
-						// MISSING_FREE? Handled properly below?
-		    }
-		    sectp = extract_bndl_section (bndl_h, 'FREF');
-		    if (sectp) {
-					nix = sectp->n_mappings_minus_1;
-					MACPC_W( nix );
-			    n_fref = nix + 1;
-			    for (i = 0; i < n_fref ; ++i) {
-							HANDLE h;
-			        fref_hand fref_h;
-			
-							nix = sectp->mapping[i].resource_id;
-							MACPC_W( nix );
-			        h = get_fref( fp, g_offset, nix );
-			        if (h) {
-									unsigned char *lpstr = (unsigned char *)GlobalLock( h );
-									int i16, i32;
-									fref_h = (fref_hand)&lpstr;
-									nix = (*fref_h)->local_id;
-									MACPC_W( nix );
-			            i16 = find_local_icon (nix, local_icns16, n_icn);
-			            i32 = find_local_icon (nix, local_icns32, n_icn);
-									nixlong = (*fref_h)->type;
-									MACPC_D( nixlong );
-
-									// THIS VALIDATION WAS MISSING. lp 19980423
-									if(i16 >= 0 && i32 >= 0) {
-										if( insert_into_hash_table (
-											nixlong, creator, 
-											&local_icns16[i16], &local_icns32[i32] ) )
-										{
-											save_hash_table( 
-													nixlong, creator, 
-													&local_icns16[i16], &local_icns32[i32] );
-										}
-									}
-									GlobalUnlock( h );
-									GlobalFree( h );
-			          }
-			      }
-			    }
-			    for (i = 0; i < n_icn ; ++i) {
-						if(local_icns16[i].h) GlobalFree(local_icns16[i].h);
-						if(local_icns32[i].h) GlobalFree(local_icns32[i].h);
-					}
-		      free (local_icns16);
-		      free (local_icns32);
-		    }
-	}
-}
-
 icn_sharp_hand BrowserFolderReader::
 map_type_and_creator (
 	OSType type, 
 	OSType creator,
 	int prefer_small )
 {
+  const auto bundle=bundleIcons_.find((uint64_t(uint32_t(creator))<<32)|uint32_t(type));
+  if(bundle!=bundleIcons_.end()){
+    const auto& icon=*bundle->second;
+    return prefer_small?(icon.small?icon.small:icon.large):(icon.large?icon.large:icon.small);
+  }
   type_creator_link_t **linkpp;
   icn_sharp_hand retval = 0;
 
@@ -750,41 +389,38 @@ map_type_and_creator (
   return retval;
 }
 
-void BrowserFolderReader::process_bundle(
-	int volinx, 
-	CatDataRec *pCDR,
-	unsigned long creator )
+void BrowserFolderReader::process_bundle(const CatDataRec* record)
 {
-	HANDLE h = 0;
-	LPSTR lpstr;
-
-	if( (pCDR->u.f.filUsrWds.fdFlags & kHasBundle) == 0 ) return;
-	h = mac_load_any_resource ( volinx, pCDR, (unsigned long)'BNDL', 1, 0 );
-	if(!h) return;
-	lpstr = (LPSTR)GlobalLock( h );
-	if(lpstr) {
-		process_bndl( volinx, pCDR, (bndl_t **)&lpstr, creator );
-		GlobalUnlock( h );
-		GlobalFree( h );
-	}
+    const auto& finder=record->u.f.filUsrWds;
+    const auto creator=finder.fdCreator;
+    const auto key=(uint64_t(creator)<<32)|uint32_t(finder.fdType);
+    if(!artworkVolume_||!(finder.fdFlags&kHasBundle)||
+       bundleIcons_.size()>=512||bundleIcons_.count(key))return;
+    auto icons=MacIcons::ReadClassicBundle(*artworkVolume_,record->u.f.filFlNum,record->u.f.filRLgLen);
+    for(auto& item:icons)
+        if(bundleIcons_.size()<512)
+            bundleIcons_.try_emplace((uint64_t(creator)<<32)|item.first,std::move(item.second));
 }
 
-// here bundle is known to exist
-void BrowserFolderReader::process_bundle2 (
-	CFile *fp,
-	unsigned long fork_start,
-	unsigned long creator )
+void BrowserFolderReader::process_bundle2(CFile* file,unsigned long start,unsigned long creator,uint64_t forkLength)
 {
-	HANDLE h = 0;
-	LPSTR lpstr;
-	h = mac_load_any_resource2( fp, fork_start, (unsigned long)'BNDL', 1, 0 );
-	if(!h) return;
-	lpstr = (LPSTR)GlobalLock( h );
-	if(lpstr) {
-		process_bndl2( fp, fork_start, (bndl_t **)&lpstr, creator );
-		GlobalUnlock( h );
-		GlobalFree( h );
-	}
+    try{
+        HfsPlus::Bytes bytes(16);
+        const auto fileSize=file->GetLength();
+        if(start>fileSize)return;
+        const auto available=(std::min)(forkLength,fileSize-start);
+        if(available<bytes.size())return;
+        file->Seek(start,CFile::begin);
+        if(file->Read(bytes.data(),UINT(bytes.size()))!=bytes.size())return;
+        const auto size=MacIcons::ResourceForkLength(bytes);
+        if(!size||size>available)return;
+        bytes.resize(size);
+        if(file->Read(bytes.data()+16,UINT(size-16))!=size-16)return;
+        auto icons=MacIcons::DecodeBundle(bytes);
+        for(auto& item:icons)
+            if(bundleIcons_.size()<512)
+                bundleIcons_.try_emplace((uint64_t(creator)<<32)|item.first,std::move(item.second));
+    }catch(CFileException* error){error->Delete();}
 }
 
 /*
