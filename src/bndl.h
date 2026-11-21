@@ -78,10 +78,6 @@ typedef struct
 } bndl_t;
 #pragma pack()
 
-extern void process_bndl (bndl_t **bndl_h, OSType creator);
-
-extern icn_sharp_hand map_type_and_creator (OSType type, OSType creator);
-
 #define COLORICONSIZE 1024
 #define BW_ICONSIZE	256
 
