@@ -4354,6 +4354,41 @@ int RunApfsContainerTest(const char* directory)
             published->Read(imported.id,0,0,unrelated.data(),unrelated.size());
             Check(unrelated==importedBytes,"APFS in-place symbolic-link move changed the referenced file");
             fprintf(report,"PASS: same-volume APFS cut and paste moves a symbolic link in place without following it.\n");
+            const auto descendant=published->MakeDirectory(publishedFolder.id,u"Move cycle destination");
+            const auto originalFolder=published->Stat(publishedFolder.id);
+            const auto childrenBefore=published->List(originalFolder.id).size();
+            Storage::Job invalidMove;
+            Reject([&]{published->MoveHereForJob(*published,originalFolder.id,descendant,originalFolder,invalidMove);},
+                   "APFS allowed a folder to move into its descendant");
+            Storage::Job cancelledFolderMove;
+            cancelledFolderMove.cancel();
+            bool folderMoveStopped=false;
+            try{published->MoveHereForJob(*published,originalFolder.id,moveFolder,originalFolder,cancelledFolderMove);}
+            catch(const Storage::Cancelled&){folderMoveStopped=true;}
+            MacBrowser::Entry movedFolder;
+            Check(folderMoveStopped&&published->FindChild(2,originalFolder.name,movedFolder)&&
+                  movedFolder.id==originalFolder.id&&!published->FindChild(moveFolder,originalFolder.name,movedFolder),
+                  "Cancelled APFS directory move changed either parent");
+            auto cutFolder=FileOperations::Location::Mounted(published,originalFolder.id);
+            cutFolder.cut=true;
+            auto moveDirectory=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {cutFolder},FileOperations::Location::Mounted(published,moveFolder)});
+            Check(WaitForSingleObject(moveDirectory.Job()->event(),15000)==WAIT_OBJECT_0,"APFS directory move timed out");
+            const auto directoryMoveResult=moveDirectory.Job()->result();
+            Check(!directoryMoveResult.code,directoryMoveResult.message.c_str());
+            Check(!published->FindChild(2,originalFolder.name,movedFolder)&&
+                  published->FindChild(moveFolder,originalFolder.name,movedFolder)&&
+                  movedFolder.id==originalFolder.id&&movedFolder.created==originalFolder.created&&
+                  movedFolder.modified==originalFolder.modified&&movedFolder.finder==originalFolder.finder&&
+                  published->List(movedFolder.id).size()==childrenBefore,
+                  "APFS directory move changed the folder identity, metadata, or children");
+            MacBrowser::Entry movedChild,movedDescendant;
+            Check(published->FindChild(movedFolder.id,publishedFile.name,movedChild)&&movedChild.id==publishedFile.id&&
+                  published->FindChild(movedFolder.id,u"Move cycle destination",movedDescendant)&&movedDescendant.id==descendant,
+                  "APFS directory move changed descendant identities");
+            published->Read(movedChild.id,0,0,data,sizeof(data));
+            Check(!memcmp(data,"entry 222\n",sizeof(data)),"APFS directory move changed descendant file data");
+            fprintf(report,"PASS: same-volume APFS cut and paste moves a populated macOS folder in place and rejects ancestry cycles.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.

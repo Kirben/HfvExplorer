@@ -1291,7 +1291,7 @@ public:
         return Access([&]{
             const auto& item=At(id);
             const auto& folder=At(parent);
-            return item.entry.parent!=parent&&!item.entry.directory&&!item.entry.hardLink&&
+            return item.oid>2&&item.entry.parent!=parent&&!item.entry.hardLink&&
                    (item.symlink||item.entry.readError.empty())&&folder.oid&&folder.entry.directory&&
                    item.mount==folder.mount&&!mounts[item.mount].snapshotCreated;
         });
@@ -1299,7 +1299,7 @@ public:
     void MoveHereForJob(MacBrowser::Volume& source,uint32_t id,uint32_t parent,const Entry& entry,Storage::Job& job)override{
         WriteMount([&]{
             if(job.cancelled())throw Storage::Cancelled();
-            Check(CanMoveEntryFrom(source,id,parent),"The APFS file cannot be moved in place");
+            Check(CanMoveEntryFrom(source,id,parent),"The APFS entry cannot be moved in place");
             const auto current=At(id).entry;
             Check(current.identity==entry.identity&&current.name==entry.name,"The APFS move source changed");
             const auto oldParentOid=At(current.parent).oid,destinationOid=At(parent).oid;

@@ -2951,11 +2951,26 @@ CatalogWritePlan PrepareCatalogMutation(
                       Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
                       "Unsupported APFS hard-linked edit");
             }
-            Check(!moving||(!siblingId&&(kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink)),
-                  "APFS in-place moves require a regular file with one name or a symbolic link");
+            Check(!moving||!siblingId,"APFS in-place moves do not support hard-link aliases");
             directoryRecord=i;
         }
         Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");
+        if(moving&&kind==CatalogKind::Directory){
+            std::map<uint64_t,uint64_t> parents;
+            for(const auto& record:catalog){
+                if(record.key.size()!=8||Le64(record.key.data())>>60!=3||record.value.size()<92||
+                   (Le16(record.value.data()+80)&0170000)!=0040000)continue;
+                Check(parents.emplace(Le64(record.key.data())&IdMask,Le64(record.value.data())).second,
+                      "Duplicate APFS directory inode");
+            }
+            std::set<uint64_t> visited;
+            for(auto ancestor=destination;ancestor!=2;){
+                Check(ancestor!=entryOid,"Cannot move an APFS folder into itself or its descendants");
+                const auto link=parents.find(ancestor);
+                Check(link!=parents.end()&&visited.insert(ancestor).second,"Invalid APFS destination ancestry");
+                ancestor=link->second;
+            }
+        }
         std::optional<size_t> siblingLink;
         if(siblingId){
             const CatalogSibling sibling{entryOid,properties->parent,name};
