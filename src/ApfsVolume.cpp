@@ -572,7 +572,7 @@ public:
         const auto item=entries.find(id);
         if(item==entries.end()||item->second.oid!=2)return false;
         const auto& mount=mounts[item->second.mount];
-        return !mount.locked&&!mount.cipher&&!mount.snapshotTree&&!mount.snapshotCreated;
+        return !mount.locked&&!mount.snapshotTree&&!mount.snapshotCreated;
     }
     void RenameRoot(uint32_t id,const std::u16string& name,Storage::Job& job){
         VolumeCoord::Lease access({{key,VolumeCoord::Mode::Write}});

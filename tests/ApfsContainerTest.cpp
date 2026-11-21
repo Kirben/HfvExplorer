@@ -3204,7 +3204,45 @@ int RunApfsContainerTest(const char* directory)
                 if(secret.name==target)
                     Check(!image->FindChild(plain.id,u"Mixed write",created),"Mixed APFS write changed the sibling catalog");
             }
-            fprintf(report,"PASS: writes to both macOS mixed-encryption APFS volumes survive reopening and unlocking.\n");
+            {
+                auto image=MacBrowser::OpenBrowserImage(path);
+                MacBrowser::Entry secret;
+                Check(image&&image->FindChild(2,u"SECRETVOL",secret)&&!Apfs::CanRenameMountedVolume(*image,secret.id),
+                      "Locked mixed-encryption APFS volume offered rename");
+                Apfs::Unlock(*image,secret.id,password);
+                Check(Apfs::CanRenameMountedVolume(*image,secret.id),"Unlocked mixed-encryption APFS volume cannot be renamed");
+                Storage::Job cancelled;
+                cancelled.cancel();
+                bool stopped=false;
+                try{Apfs::RenameMountedVolume(*image,secret.id,u"Renamed secret",cancelled);}
+                catch(const Storage::Cancelled&){stopped=true;}
+                Check(stopped&&image->Stat(secret.id).name==u"SECRETVOL","Cancelled encrypted APFS rename changed the volume");
+                Storage::Job rename;
+                Apfs::RenameMountedVolume(*image,secret.id,u"Renamed secret",rename);
+                Check(image->Stat(secret.id).name==u"Renamed secret","Mounted APFS label did not refresh");
+            }
+            auto reopened=MacBrowser::OpenBrowserImage(path);
+            MacBrowser::Entry secret,plain,old;
+            Check(reopened&&reopened->FindChild(2,u"Renamed secret",secret)&&!secret.readError.empty()&&
+                  !reopened->FindChild(2,u"SECRETVOL",old)&&reopened->FindChild(2,u"PLAINVOL",plain),
+                  "Encrypted rename did not survive reopening or changed the sibling name");
+            Apfs::Unlock(*reopened,secret.id,password);
+            for(const auto id:{secret.id,plain.id}){
+                MacBrowser::Entry folder,file;
+                Check(reopened->FindChild(id,u"docs",folder)&&reopened->FindChild(folder.id,u"pattern.bin",file)&&
+                      file.forks[0].size==262144,"Missing original data after encrypted APFS rename");
+                Bytes bytes(262144);
+                reopened->Read(file.id,0,0,bytes.data(),bytes.size());
+                for(size_t i=0;i<bytes.size();++i)
+                    Check(bytes[i]==(i*131+17)%253,"Encrypted APFS rename changed original data");
+                Check(reopened->FindChild(id,u"Mixed write",folder)&&
+                      reopened->FindChild(folder.id,u"apfs-mixed-payload.bin",file)&&file.forks[0].size==sizeof(payload),
+                      "Missing copied file after encrypted APFS rename");
+                char actual[sizeof(payload)];
+                reopened->Read(file.id,0,0,actual,sizeof(actual));
+                Check(!memcmp(actual,payload,sizeof(payload)),"Encrypted APFS rename changed copied data");
+            }
+            fprintf(report,"PASS: mixed-encryption APFS writes and encrypted volume rename survive reopening and unlocking.\n");
         }
         Memory unknown(4096);
         Check(!Apfs::Probe(unknown),"Unrelated image recognized as APFS");
@@ -4870,10 +4908,10 @@ int RunApfsContainerTest(const char* directory)
             const auto path=VolumeCoord::Wide(root+"apfs-native-filevault-edits.img");
             Check(CopyFileW(encrypted,path.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS FileVault image");
             const Dmg::Password password(L"apfs-FV-TEST-2026");
-            const auto mount=[&]{
+            const auto mount=[&](const std::u16string& name=u"FVTEST"){
                 auto volume=MacBrowser::OpenBrowserImage(path);
                 MacBrowser::Entry locked;
-                Check(volume&&volume->FindChild(2,u"FVTEST",locked)&&!locked.readError.empty()&&!volume->Supports().writable,
+                Check(volume&&volume->FindChild(2,name,locked)&&!locked.readError.empty()&&!volume->Supports().writable,
                       "APFS FileVault image should open locked and read-only");
                 Apfs::Unlock(*volume,locked.id,password);
                 Check(volume->Supports().writable,"Unlocked macOS APFS FileVault image is read-only");
@@ -4907,7 +4945,13 @@ int RunApfsContainerTest(const char* directory)
                 Check(actual==payload,"Encrypted APFS overwrite did not survive reopening");
                 volume->Remove(file.id);
             }
-            auto [verify,root]=mount();
+            {
+                auto [volume,root]=mount();
+                Check(Apfs::CanRenameMountedVolume(*volume,root),"Unlocked standalone FileVault volume cannot be renamed");
+                Storage::Job rename;
+                Apfs::RenameMountedVolume(*volume,root,u"Renamed FileVault",rename);
+            }
+            auto [verify,root]=mount(u"Renamed FileVault");
             MacBrowser::Entry absent;
             Check(!verify->FindChild(root,u"Edited marker.txt",absent),"Encrypted APFS deletion did not survive reopening");
             MacBrowser::Entry created;
@@ -4916,7 +4960,7 @@ int RunApfsContainerTest(const char* directory)
             Bytes actual(payload.size());
             verify->Read(created.id,0,0,actual.data(),actual.size());
             Check(actual==payload,"New encrypted APFS file read back incorrect bytes");
-            fprintf(report,"PASS: macOS software-encrypted APFS overwrite, rename and deletion after reopening and password unlock.\n");
+            fprintf(report,"PASS: macOS software-encrypted APFS file edits and standalone FileVault volume rename survive reopening and unlocking.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
         if(const auto fixtures=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){

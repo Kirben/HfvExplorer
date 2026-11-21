@@ -2491,7 +2491,7 @@ WritableMap MapAt(const WritableMap& source,uint64_t xid)
     return result;
 }
 
-void ValidateSharedFileExtents(const CatalogRecords& catalog,const std::vector<OwnedRecord>& extents)
+void ValidateSharedFileExtents(const CatalogRecords& catalog,const std::vector<OwnedRecord>& extents,bool encrypted=false)
 {
     std::map<uint64_t,int64_t> references;
     const auto add=[&](uint64_t block,uint64_t count,int64_t change){
@@ -2510,8 +2510,10 @@ void ValidateSharedFileExtents(const CatalogRecords& catalog,const std::vector<O
     for(const auto& entry:catalog.records){
         if(Le64(entry.key.data())>>60!=8)continue;
         Check(entry.key.size()==16&&entry.value.size()==24,"Invalid APFS snapshot file extent");
-        const auto block=Le64(entry.value.data()+8),length=Le64(entry.value.data());
-        Check(length&&!(length%Block)&&!(length>>56),"Unsupported APFS snapshot file extent length");
+        const auto block=Le64(entry.value.data()+8),encoded=Le64(entry.value.data());
+        const auto flags=encoded>>56,length=encoded&((uint64_t(1)<<56)-1);
+        Check(length&&!(length%Block)&&(!flags||(encrypted&&flags==1)),
+              "Unsupported APFS file extent length or flags");
         if(block)add(block,length/Block,-1);
     }
     Check(std::all_of(references.begin(),references.end(),[](const auto& boundary){
@@ -2909,14 +2911,14 @@ CatalogWritePlan PrepareVolumeRename(Source& source,const Container& current,uin
     Bytes& superblock,const CheckpointObjectLookup& ephemeral,const CatalogVolumeRename& request,uint64_t selected)
 {
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
-    CheckExternalVolume(volume,current.volumes.size()==2);
+    CheckExternalVolume(volume,current.volumes.size()==2,false,bool(current.writeCipher));
     const auto oid=selected?selected:current.volumes.front();
     const auto name=EncodeCatalogName(request.name);
     const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
     const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128));
     const auto catalog=ReadWritableCatalog(source,current,volumeMap,Le64(volume.data()+136));
     const auto extents=ReadExtentTree(source,current,Le64(volume.data()+144));
-    ValidateSharedFileExtents(catalog,extents.records);
+    ValidateSharedFileExtents(catalog,extents.records,bool(current.writeCipher));
     std::vector<FileRun> files;
     for(const auto& extent:extents.records)
         files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
