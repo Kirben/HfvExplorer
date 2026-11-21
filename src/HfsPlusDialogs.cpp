@@ -8,6 +8,9 @@
 #include "HfsPlusDialogs.h"
 #include "MacBrowserModel.h"
 #include "ApfsFormat.h"
+#include "ApfsContainer.h"
+#include "ApfsCatalogWrite.h"
+#include "BrowserPresentation.h"
 #include "HfsPlusDisk.h"
 #include "DmgImage.h"
 #include "SparseDisk.h"
@@ -565,6 +568,123 @@ void StartDmgConversion(BrowserSession& session,DmgConversion paths,
         catch(const Dmg::PasswordRequired& error){*prompt=error;return Storage::Result{};}
     },session.Owner(),"Converting disk image","Convert disk image",std::move(complete),{true});
 }
+}
+
+namespace {
+void SnapshotError(CWnd* owner,const Storage::Result& result)
+{
+    if(result.error==ERROR_CANCELLED)return;
+    const auto detail=BrowserPresentation::FromUtf8(result.message);
+    MessageBoxW(owner->GetSafeHwnd(),detail.c_str(),L"Manage APFS Snapshots",MB_OK|MB_ICONERROR);
+}
+
+class ApfsSnapshotsDialog final : public CDialog {
+    std::unique_ptr<HfsPlus::Source> source;
+    Apfs::Container checkpoint;
+    std::vector<std::u16string> names;
+    std::wstring imageName;
+    void UpdateButtons(){
+        const auto selected=SendDlgItemMessage(IDC_APFS_SNAPSHOT_LIST,LB_GETCURSEL);
+        GetDlgItem(IDC_APFS_SNAPSHOT_DELETE)->EnableWindow(selected!=LB_ERR);
+        GetDlgItem(IDC_APFS_SNAPSHOT_CREATE)->EnableWindow(names.empty()&&
+            GetWindowTextLengthW(::GetDlgItem(m_hWnd,IDC_APFS_SNAPSHOT_NAME))>0);
+        GetDlgItem(IDC_APFS_SNAPSHOT_NAME)->EnableWindow(names.empty());
+    }
+    void ShowNames(){
+        const auto list=::GetDlgItem(m_hWnd,IDC_APFS_SNAPSHOT_LIST);
+        SendMessageW(list,LB_RESETCONTENT,0,0);
+        for(const auto& name:names){
+            const auto wide=MacBrowser::Wide(name);
+            SendMessageW(list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(wide.c_str()));
+        }
+        if(!names.empty())SendMessageW(list,LB_SETCURSEL,0,0);
+        UpdateButtons();
+    }
+    void Change(bool create){
+        std::u16string name;
+        if(create){
+            if(!names.empty())return;
+            name=U16(Text(m_hWnd,IDC_APFS_SNAPSHOT_NAME));
+            if(name.empty())return;
+        }else{
+            const auto selected=SendDlgItemMessage(IDC_APFS_SNAPSHOT_LIST,LB_GETCURSEL);
+            if(selected==LB_ERR||size_t(selected)>=names.size())return;
+            name=names[size_t(selected)];
+            const auto message=L"Delete snapshot \""+MacBrowser::Wide(name)+L"\"?";
+            if(MessageBoxW(m_hWnd,message.c_str(),L"Delete APFS snapshot",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+        }
+        bool reopen=false;
+        const auto result=ShowStorageJob([&](Storage::Job& job){
+            try{
+                if(create)Apfs::CreateSnapshot(*source,checkpoint,name,job);
+                else Apfs::DeleteSnapshot(*source,checkpoint,name,job);
+            }catch(const Apfs::CheckpointPublicationUncertain&){
+                reopen=true;
+                throw;
+            }
+            // A committed change requires a fresh catalog before the next command.
+            reopen=true;
+            const auto next=Apfs::Probe(*source);
+            if(!next)throw HfsPlus::Error("Reopen the image to check the snapshot change");
+            names=Apfs::ListSnapshotNames(*source,*next);
+            checkpoint=*next;
+            reopen=false;
+            return Storage::Result{};
+        },create?"Creating APFS snapshot":"Deleting APFS snapshot",false,true,true,this);
+        if(result.code){
+            SnapshotError(this,result);
+            if(reopen)EndDialog(IDCANCEL);
+            return;
+        }
+        SetDlgItemTextW(m_hWnd,IDC_APFS_SNAPSHOT_NAME,L"");
+        ShowNames();
+    }
+public:
+    ApfsSnapshotsDialog(CWnd* owner,std::unique_ptr<HfsPlus::Source> image,Apfs::Container container,
+                        std::vector<std::u16string> snapshots,std::wstring filename)
+        :CDialog(IDD_APFS_SNAPSHOTS,owner),source(std::move(image)),checkpoint(std::move(container)),
+         names(std::move(snapshots)),imageName(std::move(filename)){}
+    BOOL OnInitDialog() override{
+        CDialog::OnInitDialog();
+        BrowserPresentation::UnicodeControl(m_hWnd,IDC_APFS_SNAPSHOT_LIST,L"LISTBOX");
+        UnicodeEdit(m_hWnd,IDC_APFS_SNAPSHOT_NAME);
+        SetWindowTextW(m_hWnd,(L"Manage APFS Snapshots - "+imageName).c_str());
+        ShowNames();
+        return TRUE;
+    }
+    BOOL OnCommand(WPARAM w,LPARAM l) override{
+        switch(LOWORD(w)){
+        case IDC_APFS_SNAPSHOT_CREATE: Change(true);return TRUE;
+        case IDC_APFS_SNAPSHOT_DELETE: Change(false);return TRUE;
+        case IDC_APFS_SNAPSHOT_LIST:
+        case IDC_APFS_SNAPSHOT_NAME: UpdateButtons();return TRUE;
+        default:return CDialog::OnCommand(w,l);
+        }
+    }
+};
+}
+
+void ManageApfsSnapshots(CWnd* owner)
+{
+    std::wstring path;
+    if(!FileDialog(owner->GetSafeHwnd(),path,false,
+        L"Raw disk images\0*.img;*.raw;*.dsk;*.image\0All files\0*.*\0\0",nullptr,
+        L"Select a closed APFS image"))return;
+    std::unique_ptr<HfsPlus::Source> source;
+    std::optional<Apfs::Container> checkpoint;
+    std::vector<std::u16string> names;
+    const auto result=ShowStorageWaitJob([&](Storage::Job&){
+        source=HfsPlus::OpenImage(path.c_str(),true);
+        checkpoint=Apfs::Probe(*source);
+        if(!checkpoint)throw HfsPlus::Error("Select a raw APFS image");
+        names=Apfs::ListSnapshotNames(*source,*checkpoint);
+        Apfs::InspectFreeQueueAllocation(*source,*checkpoint);
+        return Storage::Result{};
+    },false,owner);
+    if(result.code){SnapshotError(owner,result);return;}
+    ApfsSnapshotsDialog dialog(owner,std::move(source),*checkpoint,std::move(names),
+                               path.substr(path.find_last_of(L"\\/")+1));
+    dialog.DoModal();
 }
 
 void ConvertDmgImage(BrowserSession& session)

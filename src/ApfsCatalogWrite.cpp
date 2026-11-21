@@ -853,7 +853,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& record=records[i];
         return Record{{record.key.data(),record.key.size()},{record.value.data(),record.value.size()}};
     };
-    const auto parent=std::visit([](const auto& edit){return edit.parent;},request);
+    const auto parent=std::visit([](const auto& edit)->uint64_t{
+        if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogSnapshot>)return 0;
+        else return edit.parent;
+    },request);
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* remove=std::get_if<CatalogDelete>(&request);
@@ -2462,6 +2465,7 @@ void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup,bool allowSna
 struct SnapshotAllocations {
     std::vector<Mapping> mappings;
     std::vector<OwnedRecord> historicalData;
+    uint64_t historicalSuper=0;
     std::set<uint64_t> sharedData;
     std::set<uint64_t> catalogBlocks;
     std::vector<DataRun> protectedRuns;
@@ -2644,6 +2648,7 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
               "Unsupported APFS historical object map entry");
 
     addProtected(super);
+    result.historicalSuper=super;
     addProtected(snapMap);
     for(const auto address:prior.blocks)addProtected(address);
     const auto priorExtents=ReadExtentTree(source,old,extents);
@@ -2888,11 +2893,144 @@ void ValidateWritableLayout(Source& source,const Container& container)
     ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
 }
 
+namespace {
+CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current,uint64_t transaction,
+    Bytes& superblock,const CheckpointObjectLookup& ephemeral,const CatalogSnapshot& request)
+{
+    Check(current.volumes.size()==1,"APFS snapshot changes require a single-volume image");
+    auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current);
+    CheckExternalVolume(volume,false,true);
+    const bool deleting=!request.create;
+    Check(Le64(volume.data()+216)==uint64_t(deleting),
+          deleting?"The APFS image has no snapshot to delete":"This APFS image already has a snapshot");
+    const auto name=EncodeCatalogName(request.name);
+    const auto volumeId=current.volumes.front();
+    const auto snapshotTree=Le64(volume.data()+152),extentRoot=Le64(volume.data()+144);
+    auto map=ReadWritableMap(source,current,Le64(volume.data()+128),deleting);
+    const auto currentMap=deleting?MapAt(map,current.transaction):map;
+    const auto catalog=ReadWritableCatalog(source,current,currentMap,Le64(volume.data()+136),deleting);
+    auto extents=ReadExtentTree(source,current,extentRoot,deleting);
+    const auto snapshot=ReadSnapshotAllocations(source,current,volume,map,catalog,extents);
+    if(deleting){
+        const Node tree(ReadObject(source,current,snapshotTree,snapshotTree,current.transaction,2,16,true),true,{});
+        const auto entry=tree.At(0).value;
+        Check(entry.size==51+name.size()&&!memcmp(entry.data+50,name.c_str(),name.size()+1),
+              "The selected APFS snapshot changed");
+    }
+    // After deletion the ordinary writer requires exclusive physical references.
+    std::vector<FileRun> live;
+    for(const auto& extent:extents.records){
+        Check(Le32(extent.value.data()+16)==1,"Snapshot changes require exclusive live file extents");
+        live.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
+    }
+    ValidateSnapshotFileExtents(catalog,extents.records);
+    Check(!Le64(volume.data()+1000),"APFS snapshot changes do not support extended snapshot metadata");
+    auto protectedRuns=snapshot.protectedRuns;
+    for(auto block:catalog.blocks)protectedRuns.push_back({block,1});
+    std::sort(protectedRuns.begin(),protectedRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
+    std::vector<uint64_t> retired{containerMap.headerBlock,containerMap.rootBlock,volumeAddress,
+                                  map.headerBlock,map.rootBlock,snapshotTree};
+    retired.insert(retired.end(),containerMap.leaves.begin(),containerMap.leaves.end());
+    retired.insert(retired.end(),map.leaves.begin(),map.leaves.end());
+    if(deleting)retired.insert(retired.end(),extents.blocks.begin(),extents.blocks.end());
+
+    auto extentLeaves=PartitionCatalog(deleting?std::move(extents.records):std::vector<OwnedRecord>{});
+    const auto extentChildren=extentLeaves.size()>1?extentLeaves.size():0;
+    auto mappings=currentMap.mappings;
+    const std::set<uint64_t> liveCatalog(catalog.blocks.begin(),catalog.blocks.end());
+    mappings.erase(std::remove_if(mappings.begin(),mappings.end(),[&](const auto& mapping){
+        return !liveCatalog.count(mapping.block);
+    }),mappings.end());
+    Check(mappings.size()==catalog.blocks.size(),"Incomplete APFS live catalog map");
+    for(auto& mapping:mappings)mapping.flags=0;
+    const auto mapChildren=MapLeaves(mappings.size());
+    const size_t firstChild=deleting?7:9;
+    auto& space=ephemeral(Le64(superblock.data()+152));
+    CatalogWritePlan plan;
+    std::vector<DataRun> unused;
+    const auto blocks=Allocate(plan.metadata,source,current,space,superblock,ephemeral,retired,extents.blocks,
+        snapshotTree,live,snapshot.protectedRuns,0,unused,transaction,
+        [&]{return firstChild+extentChildren+mapChildren;},protectedRuns);
+    StageExtentTree(plan.metadata,extentLeaves,blocks,firstChild,transaction);
+    FILETIME clock{};
+    GetSystemTimeAsFileTime(&clock);
+    const auto time=(((uint64_t(clock.dwHighDateTime)<<32)|clock.dwLowDateTime)-116444736000000000ULL)*100;
+    std::vector<OwnedRecord> snapshotRecords;
+    if(!deleting){
+        const auto next=Le64(volume.data()+176);
+        Check(next>=16&&next<IdMask&&transaction<=IdMask,"APFS snapshot object IDs exhausted");
+        OwnedRecord meta{Bytes(8),Bytes(51+name.size())},label{Bytes(11+name.size()),Bytes(8)};
+        Set(meta.key,0,(uint64_t(1)<<60)|transaction,8);
+        Set(meta.value,0,extentRoot,8);
+        Set(meta.value,8,blocks[7],8);
+        Set(meta.value,16,time,8);
+        Set(meta.value,24,time,8);
+        Set(meta.value,32,next,8);
+        Set(meta.value,40,Physical|2,4);
+        Set(meta.value,48,name.size()+1,2);
+        std::copy(name.begin(),name.end(),meta.value.begin()+50);
+        Set(label.key,0,(uint64_t(11)<<60)|IdMask,8);
+        Set(label.key,8,name.size()+1,2);
+        std::copy(name.begin(),name.end(),label.key.begin()+10);
+        Set(label.value,0,transaction,8);
+        snapshotRecords={std::move(meta),std::move(label)};
+        auto historical=volume;
+        for(auto field:{128,144,152})Set(historical,field,0,8);
+        StageObject(plan.metadata,blocks[7],std::move(historical),blocks[7],transaction,Physical|13);
+        OwnedRecord index{Bytes(8),Bytes(16)};
+        Set(index.key,0,transaction,8);
+        StageObject(plan.metadata,blocks[8],EncodeLeaf({index},0x10,8,16),blocks[8],transaction,Physical|2,19);
+        Set(volume,176,next+1,8);
+    }
+    StageObject(plan.metadata,blocks[0],EncodeLeaf(snapshotRecords,0x50),blocks[0],transaction,Physical|2,16);
+    Set(map.header,36,!deleting,4);
+    Set(map.header,56,deleting?0:blocks[8],8);
+    Set(map.header,64,deleting?0:transaction,8);
+    StageMap(plan.metadata,map,blocks[1],blocks[2],mappings,transaction,blocks,firstChild+extentChildren);
+    const auto limits=ReadVolumeSpace(volume,current.blockCount);
+    uint64_t dropped=map.leaves.size(),added=mapChildren;
+    if(deleting){
+        dropped+=extents.blocks.size()-1;
+        for(const auto& run:snapshot.protectedRuns)dropped+=run.count;
+        Check(snapshot.historicalSuper&&dropped,"Invalid APFS snapshot allocation history");
+        --dropped; // The physical snapshot superblock is excluded from the volume allocation count.
+        added+=extentChildren;
+    }else added+=2; // New live extent tree and object-map snapshot index.
+    Check(dropped<=limits.used&&added<=current.blockCount-(limits.used-dropped),"Invalid APFS snapshot allocation count");
+    const auto used=limits.used-dropped+added;
+    Check(!limits.quota||used<=limits.quota,"The APFS volume quota would be exceeded");
+    Check(Le64(space.data()+SpaceReserveCount)==limits.reserve&&
+          Le64(space.data()+SpaceReserveAllocated)==(std::min)(limits.reserve,limits.used),"Invalid APFS snapshot reserve");
+    const auto reserveAllocated=(std::min)(limits.reserve,used);
+    Check(Le64(space.data()+72)>=limits.reserve-reserveAllocated,"Insufficient space for the APFS reserve");
+    Set(space,SpaceReserveAllocated,reserveAllocated,8);
+    Set(volume,88,used,8);
+    Set(volume,128,blocks[1],8);
+    Set(volume,144,blocks[6],8);
+    Set(volume,152,blocks[0],8);
+    Set(volume,216,!deleting,8);
+    Set(volume,256,time,8);
+    Check(Le64(volume.data()+224)<=UINT64_MAX-added-3&&Le64(volume.data()+232)<=UINT64_MAX-dropped-3,
+          "APFS snapshot allocation history overflow");
+    Set(volume,224,Le64(volume.data()+224)+added+3,8);
+    Set(volume,232,Le64(volume.data()+232)+dropped+3,8);
+    StageObject(plan.metadata,blocks[3],std::move(volume),volumeId,transaction,13);
+    for(auto& mapping:containerMap.mappings)
+        if(mapping.oid==volumeId)mapping={volumeId,blocks[3]};
+    StageMap(plan.metadata,containerMap,blocks[4],blocks[5],containerMap.mappings,transaction,blocks,0);
+    Set(superblock,160,blocks[4],8);
+    return plan;
+}
+}
 CatalogWritePlan PrepareCatalogMutation(
     Source& source,const Container& current,uint64_t transaction,Bytes& superblock,
     const CheckpointObjectLookup& ephemeral,const CatalogMutation& request,uint64_t selected)
 {
     Check(current.blockSize==Block,"APFS catalog writes currently require 4096-byte blocks");
+    if(const auto* snapshot=std::get_if<CatalogSnapshot>(&request)){
+        Check(!selected||selected==current.volumes.front(),"The APFS snapshot volume changed");
+        return PrepareSnapshotMutation(source,current,transaction,superblock,ephemeral,*snapshot);
+    }
     const auto* create=std::get_if<CatalogCreate>(&request);
     const auto* rename=std::get_if<CatalogRename>(&request);
     const auto* hardLink=std::get_if<CatalogHardLink>(&request);
@@ -2983,7 +3121,7 @@ CatalogWritePlan PrepareCatalogMutation(
     size_t streamAt=0;
     const auto entryId=std::visit([nextId](const auto& edit){
         if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,CatalogCreate>)return nextId;
-        else if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,ExternalCatalogEdit>)return uint64_t(0);
+        else if constexpr(std::is_same_v<std::decay_t<decltype(edit)>,ExternalCatalogEdit>||std::is_same_v<std::decay_t<decltype(edit)>,CatalogSnapshot>)return uint64_t(0);
         else return edit.inode;
     },request);
     std::set<uint64_t> retiredStreams;

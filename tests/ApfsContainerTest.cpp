@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #ifdef HFV_TESTING
 #include "ApfsContainer.h"
+#include "resource.h"
 #include "BrowserPresentation.h"
 #include "ApfsCatalogWrite.h"
 #include "ApfsFormat.h"
@@ -3155,6 +3156,62 @@ int RunApfsContainerTest(const char* directory)
         }
         if(const auto quota=_wgetenv(L"HFV_APFS_SPACE_LIMIT_FIXTURE"))
             ExternalSpaceLimitWrites(root,report,quota);
+        if(const auto base=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE")){
+            const auto path=VolumeCoord::Wide(root+"apfs-macos-snapshot-created.img");
+            const auto deleted=VolumeCoord::Wide(root+"apfs-macos-snapshot-deleted.img");
+            Check(CopyFileW(base,path.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS snapshot baseline");
+            Check(FindResourceW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_APFS_SNAPSHOTS),
+                                MAKEINTRESOURCEW(5))!=nullptr,"Missing APFS snapshot manager dialog resource");
+            {
+                auto disk=OpenImage(path.c_str(),true);
+                const auto prior=Apfs::Probe(*disk);
+                Check(prior.has_value(),"Missing APFS snapshot baseline checkpoint");
+                Check(Apfs::ListSnapshotNames(*disk,*prior).empty(),"Snapshot manager listed a snapshot on the baseline");
+                CheckpointFaultImage interrupted(Disk::Read(*disk,0,size_t(disk->Size())));
+                Storage::Job cancel;
+                interrupted.onFlush=[&]{cancel.cancel();};
+                bool stopped=false;
+                try{Apfs::CreateSnapshot(interrupted,*prior,u"HFV baseline",cancel);}
+                catch(const Storage::Cancelled&){stopped=true;}
+                Check(stopped&&Apfs::Probe(interrupted)->transaction==prior->transaction,
+                      "Cancelled APFS snapshot creation published a checkpoint");
+                Storage::Job job;
+                Apfs::CreateSnapshot(*disk,*prior,u"HFV baseline",job);
+                Check(Apfs::ListSnapshotNames(*disk,*Apfs::Probe(*disk))==std::vector<std::u16string>{u"HFV baseline"},
+                      "Snapshot manager did not list the created snapshot");
+                Reject([&]{Apfs::CreateSnapshot(*disk,*Apfs::Probe(*disk),u"Another snapshot",job);},
+                       "APFS accepted an unsupported second snapshot");
+            }
+            SnapshotLiveWrites(path,report,u"Fixture",u"entry-0");
+            Check(CopyFileW(path.c_str(),deleted.c_str(),TRUE)!=FALSE,"Could not copy the APFS snapshot for deletion");
+            {
+                auto disk=OpenImage(deleted.c_str(),true);
+                const auto prior=Apfs::Probe(*disk);
+                Storage::Job job;
+                Reject([&]{Apfs::DeleteSnapshot(*disk,*prior,u"Wrong snapshot",job);},
+                       "APFS accepted deletion of a different snapshot");
+                Check(Apfs::Probe(*disk)->transaction==prior->transaction,"Rejected APFS snapshot deletion changed the checkpoint");
+                CheckpointFaultImage interrupted(Disk::Read(*disk,0,size_t(disk->Size())));
+                Storage::Job cancel;
+                interrupted.onFlush=[&]{cancel.cancel();};
+                bool stopped=false;
+                try{Apfs::DeleteSnapshot(interrupted,*prior,u"HFV baseline",cancel);}
+                catch(const Storage::Cancelled&){stopped=true;}
+                const auto retained=Apfs::Probe(interrupted);
+                Check(stopped&&retained&&retained->transaction==prior->transaction&&
+                      Apfs::ListSnapshotNames(interrupted,*retained)==std::vector<std::u16string>{u"HFV baseline"},
+                      "Cancelled APFS snapshot deletion changed the snapshot list");
+                Apfs::DeleteSnapshot(*disk,*prior,u"HFV baseline",job);
+                Check(Apfs::ListSnapshotNames(*disk,*Apfs::Probe(*disk)).empty(),
+                      "Snapshot manager still listed the deleted snapshot");
+            }
+            const auto reopened=MacBrowser::OpenBrowserImage(deleted);
+            MacBrowser::Entry folder,entry;
+            Check(reopened&&reopened->Supports().writable&&reopened->FindChild(2,u"Fixture",folder)&&
+                  !reopened->FindChild(folder.id,u"entry-0",entry)&&reopened->FindChild(folder.id,u"entry-1",entry),
+                  "APFS snapshot deletion changed the live catalog or kept a snapshot root");
+            fprintf(report,"PASS: APFS snapshot creation, historical reads after live writes, and deletion on a macOS image.\n");
+        }
         if(const auto snapshot=_wgetenv(L"HFV_APFS_APPLE_SNAPSHOT_WRITE_FIXTURE")){
             const auto path=VolumeCoord::Wide(root+"apple-snapshot-live-edits.img");
             Check(CopyFileW(snapshot,path.c_str(),TRUE)!=FALSE,"Could not copy APFS snapshot writer fixture");

@@ -225,6 +225,7 @@
 #define ID_FILE_EJECT                   32802
 #define ID_FILE_RELOAD                  32803
 #define ID_TOOLS_BURN                   32804
+#define ID_TOOLS_APFS_SNAPSHOTS         32805
 
 // Next default values for new objects
 // 
@@ -232,7 +233,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_3D_CONTROLS                     1
 #define _APS_NEXT_RESOURCE_VALUE        172
-#define _APS_NEXT_COMMAND_VALUE         32805
+#define _APS_NEXT_COMMAND_VALUE         32806
 #define _APS_NEXT_CONTROL_VALUE         1097
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
@@ -349,3 +350,8 @@
 #define IDC_CDI_TRACK_HINT 1294
 #define IDC_CDI_TRACK_LABEL 1295
 #define IDC_CDI_TRACK_SCOPE 1296
+#define IDD_APFS_SNAPSHOTS 1825
+#define IDC_APFS_SNAPSHOT_LIST 1300
+#define IDC_APFS_SNAPSHOT_NAME 1298
+#define IDC_APFS_SNAPSHOT_CREATE 1299
+#define IDC_APFS_SNAPSHOT_DELETE 1301

@@ -186,6 +186,7 @@ protected:
 	afx_msg void OnFileReload();
 	afx_msg void OnToolsBurn();
  afx_msg void OnToolsFind();
+ afx_msg void OnToolsApfsSnapshots();
 
  afx_msg void OnUpdatePhysicalMedia(CCmdUI* ui);
 	//}}AFX_MSG

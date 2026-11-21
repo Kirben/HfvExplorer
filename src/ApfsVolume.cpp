@@ -1433,6 +1433,28 @@ LockedVolume::LockedVolume(bool again,std::wstring passwordHint)
     :HfsPlus::Error(again?"The password did not unlock the APFS volume":LockedMessage),
      retry(again),hint(std::move(passwordHint)){}
 
+std::vector<std::u16string> ListSnapshotNames(Source& source,const Container& container)
+{
+    Check(!container.offset&&container.volumes.size()==1,"Snapshot management requires a single-volume raw APFS image");
+    const auto oid=container.volumes.front();
+    const ObjectMap map(source,container,container.objectMap,container.transaction);
+    const auto address=map.Lookup(oid);
+    Check(address.has_value(),"Missing APFS snapshot volume");
+    const auto bytes=ReadObject(source,container,*address,oid,container.transaction,13);
+    const auto live=ReadVolume(bytes,oid);
+    Check(!live.locked,"Snapshot management requires an unencrypted APFS volume");
+    std::vector<Snapshot> snapshots;
+    if(live.snapshotTree){
+        std::set<uint64_t> visited;
+        ReadSnapshotRecords(source,container,live,live.snapshotTree,{},TreeLayout{},visited,snapshots);
+    }
+    Check(snapshots.size()==Le64(bytes.data()+216)&&snapshots.size()<=1,
+          "Snapshot management requires at most one supported data-bearing snapshot");
+    std::vector<std::u16string> names;
+    for(auto& snapshot:snapshots)names.push_back(std::move(snapshot.name));
+    return names;
+}
+
 void Unlock(MacBrowser::Volume& volume,uint32_t id,const Dmg::Password& password)
 {
     const auto apfs=dynamic_cast<Volume*>(&volume);

@@ -140,6 +140,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_RELOAD, OnFileReload)
 	ON_COMMAND(ID_TOOLS_BURN, OnToolsBurn)
  ON_COMMAND(ID_TOOLS_FIND, OnToolsFind)
+ ON_COMMAND(ID_TOOLS_APFS_SNAPSHOTS, OnToolsApfsSnapshots)
 	//}}AFX_MSG_MAP
 	// Global help commands
 	ON_COMMAND(ID_HELP_FINDER, OnHelp)
@@ -1383,6 +1384,11 @@ void CMainFrame::OnFileVolumetofloppy()
  dialog.m_caption="Write a volume file to floppy";
  if(dialog.DoModal()!=IDOK)return;
  StartFloppyWrite(GetBrowserSession(),dialog.m_drive,ExistingFloppyImage{dialog.m_volname.GetString()});
+}
+
+void CMainFrame::OnToolsApfsSnapshots()
+{
+ if(!StorageUi::busy()&&!StorageUi::state().sessionOpen)ManageApfsSnapshots(this);
 }
 
 void CMainFrame::OnToolsFind()
