@@ -4,6 +4,8 @@
 #include "FileOperations.h"
 #include "ClassicHfsRecovery.h"
 #include "WindowsMoveUndo.h"
+#include "FloppyFileWrite.h"
+#include "RemovableUndo.h"
 #include "FileOperationWorkerPolicy.h"
 #include "OperationCompletion.h"
 #include "StorageLocation.h"
@@ -185,8 +187,8 @@ bool CanCoordinateWindowsMove(const OrdinaryCopy& copy,
  }
  return true;
 }
-void CoordinateClassicMove(Volume& source,Volume& target,Storage::Job& job,
-                           const std::function<void()>& transfer)
+void CoordinateClassicMove(Volume* outer,Volume& inner,Storage::Job& job,
+                           const std::function<void()>& transfer,const Location* floppy=nullptr)
 {
  ClassicHfsRecovery::MoveDecision decision;
  const auto previous=job.progress();
@@ -197,18 +199,25 @@ void CoordinateClassicMove(Volume& source,Volume& target,Storage::Job& job,
  {
   Storage::OutcomeEvidence evidence;
   try{
-   source.WithCopyTransaction([&](bool sourceActive){
-    Check(sourceActive,"The source cannot join a durable classic HFS move");
-    target.WithCopyTransaction([&](bool targetActive){
-     Check(targetActive,"The destination cannot join a durable classic HFS move");
+   const auto participate=[&](bool active){
+    Check(active,"The outer participant cannot join a durable classic HFS move");
+    inner.WithCopyTransaction([&](bool innerActive){
+     Check(innerActive,"The second participant cannot join a durable classic HFS move");
      transfer();
-     source.PrepareCopyTransaction();
-     target.PrepareCopyTransaction();
+     if(floppy)PrepareFloppyMove(floppy->Drive());
+     else outer->PrepareCopyTransaction();
+     inner.PrepareCopyTransaction();
      Cancel(job);
      deciding=true;
      decision.Commit();
     },decision.Id());
-   },decision.Id());
+   };
+   if(floppy){
+    Cancel(job);
+    StorageLocation::ValidateMedia(*floppy,StorageLocation::FloppyProbe::FreshHandle);
+    const auto generation=floppy->MediaGenerationKnown()?std::optional<DWORD>(floppy->MediaGeneration()):std::nullopt;
+    RunFloppyWrite(floppy->Drive(),generation,[&]{participate(true);},decision.Id());
+   }else outer->WithCopyTransaction(participate,decision.Id());
   }catch(...){failure=std::current_exception();}
   rollback=evidence.RollbackState();
   retained=evidence.RetainedChanges();
@@ -223,6 +232,44 @@ void CoordinateClassicMove(Volume& source,Volume& target,Storage::Job& job,
  decision.Forget();
 }
 
+struct FloppyWindowsMove {
+ const Location* floppy=nullptr;
+ std::wstring folder;
+};
+FloppyWindowsMove FloppyMoveEndpoints(const OrdinaryCopy& copy)
+{
+ if(!RemovableUndo::Enabled())return {};
+ const auto floppy=[](const Location& item){
+  return item.IsPhysical()&&item.Media()==ClassicMedia::Floppy;
+ };
+ const auto first=copy.sources.begin();
+ const auto last=copy.sources.end();
+ if(!std::all_of(first,last,[](const Location& item){return item.cut;}))return {};
+ const Location* disk=nullptr;
+ std::wstring folder;
+ if(copy.destination.IsWindows()&&floppy(*first)&&
+    std::all_of(first,last,[&](const Location& item){return floppy(item)&&item.Drive()==first->Drive();})){
+  disk=&*first;
+  folder=copy.destination.WindowsPath();
+ }else if(floppy(copy.destination)&&first->IsWindows()){
+  const auto parent=[](const Location& item){
+   auto path=item.WindowsPath();
+   const auto slash=path.find_last_of(L"\\/");
+   return slash==path.npos?std::wstring{}:path.substr(0,slash+1);
+  };
+  folder=parent(*first);
+  if(folder.empty()||!std::all_of(first,last,[&](const Location& item){
+   return item.IsWindows()&&VolumeCoord::PathKey(parent(item))==VolumeCoord::PathKey(folder);
+  }))return {};
+  disk=&copy.destination;
+ }
+ if(!disk)return {};
+ folder=BrowserPresentation::WindowsPath(folder);
+ while(folder.size()>7&&folder.back()==L'\\')folder.pop_back();
+ if(!WindowsMoveUndo::Supported(folder))return {};
+ return {disk,std::move(folder)};
+}
+
 Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkSource>& routes,
                             Storage::Job& job,Completion& completion){
  const auto& request=transfer.endpoints;
@@ -230,7 +277,8 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  Check(!request.sources.empty(),"Select a source file or folder");
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
- bool coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
+ const auto driveMove=FloppyMoveEndpoints(request);
+ bool coordinated=driveMove.floppy||(!transfer.adapter&&CanCoordinateClassicMove(request));
  // A Windows cut can join the disk transaction once its folder is resolved.
  const bool deferDiskScope=target.Volume()&&CanCoordinateRemovable(*target.Volume())&&
      std::all_of(request.sources.begin(),request.sources.end(),[](const Location& item){
@@ -270,12 +318,18 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
    }
    const bool windows=CanCoordinateWindowsMove(request,opened,*destination.first);
    coordinated=coordinated||windows;
-   if(coordinated){
+   if(driveMove.floppy){
+    // The shared floppy and Windows scopes are already open. Close the
+    // read mounts before reopening the floppy source for its final deletion.
+    complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,true,true);
+    for(const auto& entry:opened)entry.first->Close();
+    if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+   }else if(coordinated){
     auto& source=*opened.front().first;
     auto& dest=*destination.first;
     const bool windowsSource=windows&&request.sources.front().IsWindows();
     // Keep the HFS recovery record until the Windows participant finishes cleanup.
-    CoordinateClassicMove(windowsSource?dest:source,windowsSource?source:dest,job,[&]{
+    CoordinateClassicMove(windowsSource?&dest:&source,windowsSource?source:dest,job,[&]{
      complete=CopyMany(opened,dest,destination.second,job,transfer.adapter,routes,true,true);
      if(complete){
       if(windowsSource)for(const auto& entry:opened)entry.first->Close();
@@ -315,7 +369,10 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
  };
  // The coordinator opens both write scopes and retains their undo until it decides.
- if(coordinated||deferDiskScope)run();
+ if(driveMove.floppy){
+  auto windows=OpenWindows(driveMove.folder);
+  CoordinateClassicMove(nullptr,*windows,job,run,driveMove.floppy);
+ }else if(coordinated||deferDiskScope)run();
  else StorageLocation::WithVerifiedWrite(target,run);
  if(inPlace){
   completion.complete=true;

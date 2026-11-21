@@ -605,11 +605,12 @@ class UndoFloppy final : public FloppyWriteApi {
     std::string path_;
     FakeFloppy disk_;
     bool locked_=false;
+    const int drive_;
 public:
-    explicit UndoFloppy(const std::string& path):path_(path),disk_(*Load(path)){
-        Check(readonly_floppy_attach_api(UndoDrive,this),"attach recovery floppy fixture");
+    explicit UndoFloppy(const std::string& path,int drive=UndoDrive):path_(path),disk_(*Load(path)),drive_(drive){
+        Check(readonly_floppy_attach_api(drive_,this),"attach recovery floppy fixture");
     }
-    ~UndoFloppy(){physical_floppy_suspend(UndoDrive);readonly_floppy_attach_api(UndoDrive,nullptr);}
+    ~UndoFloppy(){physical_floppy_suspend(drive_);readonly_floppy_attach_api(drive_,nullptr);}
     UINT DriveType(int drive)override{return disk_.DriveType(drive);}
     HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{return disk_.Open(p,a,s,f);}
     bool Geometry(HANDLE h,DISK_GEOMETRY& g)override{return disk_.Geometry(h,g);}
@@ -837,6 +838,102 @@ void CheckCoordinatedDiskMoves(const std::string& root,const Bytes& populated,FI
     fprintf(report,"PASS: NTFS and separate removable disks share a verified move decision; swapped media is refused before and after commit.\n");
 }
 
+Storage::Result MoveDriveFloppy(const std::string& file,bool toFloppy,unsigned phase)
+{
+    constexpr int drive=0;
+    UndoFloppy floppy(file,drive);
+    ReadOnlyFloppy selected(&floppy);
+    Check(selected.OpenDrive(drive),"capture simulated A: generation");
+    const auto generation=selected.Generation();
+    selected.Close();
+    auto mac=FileOperations::Location::Physical(drive,FileOperations::ClassicMedia::Floppy,toFloppy?":":":Hello");
+    mac.BindMediaGeneration(generation);
+    const auto folder=VolumeCoord::Wide(file+".windows");
+    auto windows=FileOperations::Location::Windows(toFloppy?folder+L"\\Hello":folder);
+    auto from=toFloppy?windows:mac;
+    auto dest=toFloppy?mac:windows;
+    from.cut=true;
+    Storage::Job job;
+    job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
+    if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+        if(!strcmp(step,"data-published"))ExitProcess(97);
+    };
+    FileOperations::Completion completion;
+    if(toFloppy)
+        return FileOperations::ExecuteInWorker(FileOperations::LegacyConversion{
+            from,dest,false,true,false,LegacyCopyOptions{},FileOperations::ConversionTarget::Folder},job,completion);
+    return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{{from},dest},job,completion);
+}
+
+void CheckDriveFloppyMoves(const std::string& root,const Bytes& fixture,FILE* report)
+{
+    constexpr int drive=0;
+    const auto key=RemovableUndo::FloppyKey(drive);
+    const auto put=[](MacBrowser::Volume& volume){
+        MacBrowser::Entry entry;
+        entry.name=u"Hello";entry.forks[0].size=5003;entry.forks[1].size=723;
+        memcpy(entry.finder.data(),"TEXTTEST",8);
+        volume.Put(2,entry,[](unsigned fork,uint64_t at,void* data,size_t n){Payload(fork,at,data,n);},false);
+    };
+    for(bool toFloppy:{false,true}){
+        const auto adapter=toFloppy?"move-to-drive-floppy":"move-from-drive-floppy";
+        for(const unsigned phase:{0U,7U,8U,9U}){
+            if(toFloppy&&phase==7)continue;
+            const auto file=root+"\\"+adapter+"-"+std::to_string(phase)+".dsk";
+            const auto folder=VolumeCoord::Wide(file+".windows");
+            WriteFixture(file,0,fixture.data(),DWORD(fixture.size()),true);
+            Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"create A: move's NTFS folder");
+            if(toFloppy)put(*MacBrowser::OpenWindows(folder));
+            else put(*MacBrowser::OpenImage(VolumeCoord::Wide(file)));
+            const auto original=Load(file);
+
+            if(!phase){
+                const auto result=MoveDriveFloppy(file,toFloppy,phase);
+                if(result.code||!result.moved)throw HfsPlus::Error("Normal drive-letter floppy move failed: "+result.message);
+            }else{
+                CrashMedia(file,adapter,phase);
+                Check(RemovableUndo::Pending(key),"interrupted A: move did not retain its decision");
+                const auto interrupted=Load(file);
+                if(phase==7)Check(*interrupted==*original,"NTFS published after the floppy had already been modified");
+                const auto companion=folder+L"\\%Hello";
+                const auto hostData=folder+L"\\Hello";
+                const auto fileExists=[](const std::wstring& path){return GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES;};
+                const bool hasData=fileExists(hostData),hasCompanion=fileExists(companion);
+                auto other=*original;
+                other.back()^=0x20;
+                WriteFixture(file,0,other.data(),DWORD(other.size()),true);
+                {
+                    UndoFloppy swapped(file,drive);
+                    bool refused=false;
+                    try{RecoverFloppyWrite(drive);}catch(const Storage::MediaChanged&){refused=true;}
+                    Check(refused,"A: recovery did not explicitly refuse the swapped media");
+                }
+                Check(*Load(file)==other&&RemovableUndo::Pending(key)&&
+                      fileExists(hostData)==hasData&&fileExists(companion)==hasCompanion,
+                      "recovery changed the swapped disk or NTFS files");
+                WriteFixture(file,0,interrupted->data(),DWORD(interrupted->size()),true);
+            }
+            {
+                UndoFloppy restored(file,drive);
+                Storage::Job job;
+                const auto found=MediaDiscovery::ProbeDrive(drive,DRIVE_REMOVABLE,true,false,job);
+                auto host=MacBrowser::OpenWindows(folder);
+                Check(bool(found.floppy)&&!RemovableUndo::Pending(key),"A: discovery did not complete move recovery");
+                const bool committed=phase==0||phase==9;
+                const bool onDisk=committed==toFloppy;
+                MacBrowser::Entry diskEntry,hostEntry;
+                Check(found.floppy->FindChild(2,u"Hello",diskEntry)==onDisk&&
+                      host->FindChild(2,u"Hello",hostEntry)!=onDisk,"A: and NTFS disagreed on the move decision");
+                auto& entry=onDisk?diskEntry:hostEntry;
+                VerifyMovedPayload(onDisk?*found.floppy:*host,entry);
+                Check(!memcmp(entry.finder.data(),"TEXTTEST",8),"A: move did not preserve Finder type and creator");
+                if(!committed)Check(*Load(file)==*original,"A: rollback did not restore exact original sectors");
+            }
+        }
+    }
+    fprintf(report,"PASS: dedicated A: floppy and NTFS moves recover before and after commit, including a crash before the first floppy write; both forks and Finder metadata survive, and swapped disks leave both sides untouched.\n");
+}
+
 void CheckDurableMedia(const std::string& root,FILE* report)
 {
     Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_UNDO_DIR",VolumeCoord::Wide(root).c_str())!=FALSE,
@@ -880,6 +977,7 @@ void CheckDurableMedia(const std::string& root,FILE* report)
     }
     fprintf(report,"PASS: classic floppy, partitioned Zip, raw USB disk and image-to-floppy writes survive process loss, torn writes, interrupted replay and a lost commit reply; replacement disks are refused without writes.\n");
     CheckCoordinatedDiskMoves(root,*zip,report);
+    CheckDriveFloppyMoves(root,floppy,report);
 }
 }
 
@@ -891,7 +989,10 @@ int RunRemovableRecoveryChild(const char* target,const char* adapter,unsigned ph
         if(phase==3){DiscoverUndo(target,adapter,false);return 3;}
         if(strncmp(adapter,"move-",5)==0){
             ClassicHfsRecovery::Transaction::CrashAt(phase);
-            const auto result=MoveToOrFromDisk(target,adapter,false);
+            const bool toFloppy=!strcmp(adapter,"move-to-drive-floppy");
+            const bool fromFloppy=!strcmp(adapter,"move-from-drive-floppy");
+            const auto result=toFloppy||fromFloppy?MoveDriveFloppy(target,toFloppy,phase):
+                                                   MoveToOrFromDisk(target,adapter,false);
             if(result.code)throw HfsPlus::Error(result.message);
             return 3;
         }

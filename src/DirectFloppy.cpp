@@ -3,6 +3,7 @@
 #include "StorageOutcome.h"
 #ifdef HFV_APP_REMOVABLE_UNDO
 #include "HfsPlus.h"
+#include "ClassicHfsRecovery.h"
 #endif
 #include <string.h>
 namespace {
@@ -142,7 +143,7 @@ bool DirectFloppy::Finish(){
  }
  finished_=verify();
 #ifdef HFV_APP_REMOVABLE_UNDO
- if(finished_&&undo_){
+ if(finished_&&undo_&&move_.empty()){
   auto undo=std::move(undo_);
   undo->Commit();
  }
@@ -152,13 +153,31 @@ bool DirectFloppy::Finish(){
 
 
 #ifdef HFV_APP_REMOVABLE_UNDO
+void DirectFloppy::BeginMove(const std::string& decision)
+{
+ if(!verifyWrites_||undo_||decision.empty()||!RemovableUndo::Enabled())
+  throw HfsPlus::Error("Cannot start the coordinated floppy move");
+ // The Windows side can publish before the first floppy write. Make recovery
+ // discoverable even if the floppy still contains exactly its original bytes.
+ undo_=std::make_unique<RemovableUndo::Log>(RemovableUndo::FloppyKey(drive_),FloppyRecovery::Range,
+     [&](uint64_t at,DWORD size,void* buffer){FloppyRecovery::Read(*api_,handle_,generation_,at,size,buffer);},decision);
+ move_=decision;
+}
+void DirectFloppy::CommitMove()
+{
+ if(move_.empty()||!undo_||!finished_||pendingCount_)
+  throw HfsPlus::Error("The floppy move has not been verified");
+ undo_->Commit();
+ undo_.reset();
+}
 bool DirectFloppy::RollBack()
 {
  if(!undo_)return false;
+ const bool committed=!move_.empty()&&ClassicHfsRecovery::MoveIsCommitted(move_);
  undo_.reset();
  pendingCount_=0;
  FloppyRecovery::Replay(*api_,handle_,generation_,drive_);
  finished_=true;
- return true;
+ return !committed;
 }
 #endif

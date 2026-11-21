@@ -11,8 +11,15 @@ namespace {
      std::to_string(disk.Error())+"). The disk may be incomplete");
 }
 }
-void RunFloppyWrite(int drive,std::optional<DWORD> generation,const std::function<void()>& mutate)
+void RunFloppyWrite(int drive,std::optional<DWORD> generation,const std::function<void()>& mutate,
+                    const std::string& move)
 {
+ if(auto disk=DirectFloppy::Current(drive);disk&&disk->CoordinatedMove()&&move.empty()){
+  if(generation&&disk->Generation()!=*generation)
+   throw Storage::MediaIoError(ERROR_MEDIA_CHANGED,"Media changed after selection; select the volume again");
+  mutate();
+  return;
+ }
  physical_floppy_suspend(drive);
  FloppyWriteApi* api=nullptr;
 #ifdef HFV_FLOPPY_TESTING
@@ -25,8 +32,10 @@ void RunFloppyWrite(int drive,std::optional<DWORD> generation,const std::functio
  if(generation && disk.Generation()!=*generation)
   throw Storage::MediaIoError(ERROR_MEDIA_CHANGED,"Media changed after selection; select the volume again");
  try {
+  if(!move.empty())disk.BeginMove(move);
   mutate();
   if(!disk.Finish())ReportWriteFailure(disk);
+  if(!move.empty())disk.CommitMove();
  } catch (...) {
   bool restored=false;
   try {
@@ -42,6 +51,13 @@ void RunFloppyWrite(int drive,std::optional<DWORD> generation,const std::functio
   }
   throw;
  }
+}
+
+void PrepareFloppyMove(int drive)
+{
+ auto disk=DirectFloppy::Current(drive);
+ if(!disk||!disk->CoordinatedMove())throw HfsPlus::Error("No coordinated floppy move is active");
+ if(!disk->Finish())ReportWriteFailure(*disk);
 }
 
 void RecoverFloppyWrite(int drive)
