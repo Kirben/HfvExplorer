@@ -419,13 +419,8 @@ private:
             if(!exists && errno!=ENOENT)Check(false);
         }
         if(exists&&!replace)throw HfsPlus::Error("Destination already exists");
-        std::unique_ptr<ClassicHfsRecovery::Overwrite> recovery;
-        const bool wasDirty=markedDirty_;
-        if(exists&&!registration_){
-            Check(hfs_flush(volume_)==0);
-            recovery=std::make_unique<ClassicHfsRecovery::Overwrite>(volume_->fd);
-        }
-        try{
+        uint32_t id=0;
+        DurableMutation(exists,[&](bool){
             RootScope scope(volume_);
             BeforeWrite();
             char type[5]{},creator[5]{};memcpy(type,e.finder.data(),4);memcpy(creator,e.finder.data()+4,4);
@@ -448,16 +443,27 @@ private:
             replacement_finish(&state,&result,&error);
             if(result){if(!exists)hfs_note_rollback(hfs_delete(volume_,const_cast<char*>(path.c_str()))==0?1:3);if(failure)std::rethrow_exception(failure);throw HfsPlus::Error(error?error:"Classic HFS copy failed");}
             Check(hfs_flush(volume_)==0);
-            const auto id=Id(path);
-            if(recovery)recovery->Commit();
-            return id;
+            id=Id(path);
+        });
+        return id;
+    }
+    void DurableMutation(bool enabled,const std::function<void(bool)>& work)
+    {
+        if(!enabled||registration_){work(false);return;}
+        Check(Writable());
+        if(!ClassicHfsRecovery::Transaction::Supported(volume_->fd)){work(false);return;}
+        Check(hfs_flush(volume_)==0);
+        ClassicHfsRecovery::Transaction recovery(volume_->fd);
+        const bool wasDirty=markedDirty_;
+        try{
+            work(recovery.Active());
+            recovery.Commit();
         }catch(...){
-            if(recovery&&recovery->Active())
-                RecoverFailedOverwrite(*recovery,wasDirty);
+            if(recovery.Active())RecoverFailedMutation(recovery,wasDirty);
             throw;
         }
     }
-    void RecoverFailedOverwrite(ClassicHfsRecovery::Overwrite& recovery,bool wasDirty)
+    void RecoverFailedMutation(ClassicHfsRecovery::Transaction& recovery,bool wasDirty)
     {
         const bool commitUncertain=recovery.CommitStarted();
         recovery.Detach();
@@ -465,7 +471,7 @@ private:
         volume_=nullptr;
         const int partition=failed->pnum;
         const int fd=!commitUncertain&&failed->refs==1?_dup(failed->fd):-1;
-        b_quarantine_volume(failed,"Classic HFS overwrite needs recovery. Close all views and reopen the image.");
+        b_quarantine_volume(failed,"Classic HFS write needs recovery. Close all views and reopen the image.");
         hfs_umount(failed);
         if(fd>=0){
             volume_=hfs_remount_for_recovery(fd,partition,session_);
@@ -478,7 +484,7 @@ private:
         }
         hfs_note_rollback(3);
         closeFailed_=true;
-        throw HfsPlus::Error("Classic HFS overwrite recovery is pending. Close all views and reopen the image.");
+        throw HfsPlus::Error("Classic HFS write recovery is pending. Close all views and reopen the image.");
     }
 public:
     bool CanMoveFrom(const Volume& source)const override{return dynamic_cast<const Classic*>(&source)&&source.ResourceKey()==ResourceKey();}
@@ -501,7 +507,38 @@ public:
         Check(hfs_rename(volume_,from.data(),to.data())==0);
         paths_[id]=std::move(to);
     }
-    void Remove(uint32_t id)override{LegacyEngine::Scope engine(context_);BeforeWrite();RootScope scope(volume_);auto path=Path(id);Check(id!=2);auto e=Stat(id);Check((e.directory?hfs_rmdir(volume_,const_cast<char*>(path.c_str())):hfs_delete(volume_,const_cast<char*>(path.c_str())))==0);}
+    void Remove(uint32_t id)override{
+        LegacyEngine::Scope engine(context_);
+        Check(id!=2);
+        DurableMutation(true,[&](bool){RemoveEntry(id);});
+    }
+    bool RemoveTreeAtomically(uint32_t id,Storage::Job& job,bool deletionProgress)override{
+        LegacyEngine::Scope engine(context_);
+        Check(id!=2);
+        if(job.cancelled())throw Storage::Cancelled();
+        bool handled=false;
+        DurableMutation(true,[&](bool active){
+            if(!active)return;
+            ApplyRemovalPlan(*this,id,job,deletionProgress,[&](uint32_t entry){
+                RemoveEntry(entry);
+#ifdef HFV_TESTING
+                hfv_hfs_recovery_checkpoint(6);
+#endif
+            });
+            if(job.cancelled())throw Storage::Cancelled();
+            handled=true;
+        });
+        if(handled)Storage::OutcomeEvidence::NoteRetainedChange();
+        return handled;
+    }
+private:
+    void RemoveEntry(uint32_t id){
+        RootScope scope(volume_);
+        auto path=Path(id);
+        const auto entry=Stat(id);
+        BeforeWrite();
+        Check((entry.directory?hfs_rmdir(volume_,path.data()):hfs_delete(volume_,path.data()))==0);
+    }
 };
 }
 std::vector<ClassicCatalogEntry> ReadClassicCatalog(Volume& volume,Storage::Job* job) {

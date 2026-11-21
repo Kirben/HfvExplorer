@@ -16,12 +16,13 @@ void hfv_hfs_recovery_checkpoint(unsigned phase);
 #include <string>
 namespace ClassicHfsRecovery {
 bool Pending(const std::wstring& path);
-class Overwrite {
+class Transaction {
     struct State;
     std::unique_ptr<State> state_;
 public:
-    explicit Overwrite(int fd);
-    ~Overwrite();
+    static bool Supported(int fd);
+    explicit Transaction(int fd);
+    ~Transaction();
     bool Active() const;
     bool CommitStarted() const;
     void Commit();

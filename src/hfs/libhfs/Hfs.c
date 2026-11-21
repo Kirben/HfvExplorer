@@ -258,7 +258,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
         {
           close(vol->fd);
           v_destruct(vol);
-          ERROR(EIO,"Classic HFS overwrite recovery could not complete. Keep the image and reopen with exclusive writable access.");
+          ERROR(EIO,"Classic HFS recovery could not complete. Keep the image and reopen with exclusive writable access.");
           return 0;
         }
 #endif

@@ -545,7 +545,14 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
 }
 void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress) {
     Check(id != 2 && v.Supports().remove, "Cannot delete the volume root or a read-only item");
-    if(v.RemoveTreeAtomically(id,job))return;
+    if(v.RemoveTreeAtomically(id,job,deletionProgress))return;
+    ApplyRemovalPlan(v,id,job,deletionProgress,[&](uint32_t entry){
+        v.Remove(entry);
+        Storage::OutcomeEvidence::NoteRetainedChange();
+    });
+}
+void ApplyRemovalPlan(Volume& v,uint32_t id,Storage::Job& job,bool deletionProgress,
+                      const std::function<void(uint32_t)>& removeEntry) {
     std::set<uint32_t> parents; Storage::Progress p;if(deletionProgress){p.phase="Deleting";p.utf8=true;}auto plan = Scan(v, id, job, p, parents, 0,true,deletionProgress);
     std::function<void(const Planned &)> remove = [&](const Planned &n) {
         if (job.cancelled()) throw Storage::Cancelled();
@@ -555,8 +562,7 @@ void RemoveTree(Volume &v, uint32_t id, Storage::Job &job,bool deletionProgress)
         for (const auto &c : n.children) remove(c);
         if(job.cancelled())throw Storage::Cancelled();
         if(deletionProgress){p.path=BrowserPresentation::Utf8(n.entry.name);p.scanning=false;job.progress(p);}
-        v.Remove(n.entry.id);
-        Storage::OutcomeEvidence::NoteRetainedChange();
+        removeEntry(n.entry.id);
         if(deletionProgress){++p.files;job.progress(p);}
     };
     std::function<void(const Planned &)> validate=[&](const Planned& n){if(job.cancelled())throw Storage::Cancelled();v.ValidateRemoval(n.entry.id);for(const auto& c:n.children)validate(c);};

@@ -9,7 +9,7 @@
 #include <unordered_set>
 
 namespace {
-using ClassicHfsRecovery::Overwrite;
+using ClassicHfsRecovery::Transaction;
 constexpr wchar_t Stream[] = L":HFVExplorer.ClassicUndo";
 constexpr uint64_t Committed = UINT64_MAX;
 constexpr uint64_t Sector = 512;
@@ -153,9 +153,9 @@ struct Journal {
           stream(CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,0,nullptr)),
           header(Identify(image))
     {
-        Check(bool(stream),"Cannot open the classic HFS overwrite recovery stream");
+        Check(bool(stream),"Cannot open the classic HFS recovery stream");
         SameFile(stream.value,header);
-        Check(Length(stream.value)==0,"A classic HFS overwrite already needs recovery");
+        Check(Length(stream.value)==0,"A classic HFS operation already needs recovery");
         WriteAt(stream.value,0,&header,sizeof(header));
         Check(FlushFileBuffers(stream.value)!=FALSE,"Cannot flush the classic HFS recovery header");
     }
@@ -230,7 +230,7 @@ int Recover(HANDLE image,int writable)
         }
     }
     if (committed && !writable) return 0;
-    Check(writable!=0,"Classic HFS overwrite recovery requires writable access. Close other views and reopen the image.");
+    Check(writable!=0,"Classic HFS recovery requires writable access. Close other views and reopen the image.");
     if (!committed) {
         // A partial tail never preceded an image write. Validate the complete
         // records first, then replay; a second interruption can replay again.
@@ -249,32 +249,33 @@ int Recover(HANDLE image,int writable)
 }
 }
 
-struct Overwrite::State : Journal { using Journal::Journal; };
-Overwrite::Overwrite(int fd)
+struct Transaction::State : Journal { using Journal::Journal; };
+bool Transaction::Supported(int fd) { return SupportsRecovery(ImageHandle(fd)); }
+Transaction::Transaction(int fd)
 {
     const auto image=ImageHandle(fd);
     if (!SupportsRecovery(image)) return;
     const auto path=StreamPath(image);
     if (path.empty()) return;
-    Check(!ForFd(fd),"A classic HFS overwrite is already active");
+    Check(!ForFd(fd),"A classic HFS recovery transaction is already active");
     state_=std::make_unique<State>(fd,image,path);
     state_->previous=active;
     state_->attached=true;
     active=state_.get();
 }
-Overwrite::~Overwrite() { Detach(); }
-bool Overwrite::Active() const { return bool(state_); }
-bool Overwrite::CommitStarted() const { return state_ && state_->committing; }
-void Overwrite::Detach()
+Transaction::~Transaction() { Detach(); }
+bool Transaction::Active() const { return bool(state_); }
+bool Transaction::CommitStarted() const { return state_ && state_->committing; }
+void Transaction::Detach()
 {
     if (!state_) return;
     if (state_->attached) active=state_->previous;
     state_.reset();
 }
-void Overwrite::Commit()
+void Transaction::Commit()
 {
     if (!state_) return;
-    Check(!state_->faulted&&FlushFileBuffers(state_->image),"Cannot flush the classic HFS overwrite");
+    Check(!state_->faulted&&FlushFileBuffers(state_->image),"Cannot flush the classic HFS transaction");
     Crash(2);
     Record record{};
     record.offset=Committed;
@@ -296,7 +297,7 @@ bool ClassicHfsRecovery::Pending(const std::wstring& path)
     return Length(stream.value)!=0;
 }
 #ifdef HFV_TESTING
-void Overwrite::CrashAt(unsigned phase) { crashPhase=phase; }
+void Transaction::CrashAt(unsigned phase) { crashPhase=phase; }
 extern "C" void hfv_hfs_recovery_checkpoint(unsigned phase) { if(active) Crash(phase); }
 #endif
 extern "C" int hfv_hfs_recover_image(int fd,int writable)

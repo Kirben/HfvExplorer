@@ -811,7 +811,7 @@ int RunBrowserWindowsTest(const char* directory){
     std::copy_n(replacement.data()+offset,size,static_cast<uint8_t*>(bytes));
    },true);
    Storage::Job deleteFolder;
-   Check(volume->RemoveTreeAtomically(restoreFolder,deleteFolder),"remove the live folder before restoring it");
+   Check(volume->RemoveTreeAtomically(restoreFolder,deleteFolder,false),"remove the live folder before restoring it");
    const auto selectRow=[](BrowserSession& session,const wchar_t* label){
     auto& list=session.List()->GetListCtrl();
     const auto row=Find(session,label);

@@ -1623,7 +1623,7 @@ public:
             });
         },true);
     }
-    bool RemoveTreeAtomically(uint32_t id,Storage::Job& job)override{
+    bool RemoveTreeAtomically(uint32_t id,Storage::Job& job,bool)override{
         if(!limitedEdits)return false;
         WriteMount([&]{
             const auto& target=At(id);

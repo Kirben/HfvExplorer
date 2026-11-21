@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "VolumeSession.h"
+#include "ClassicHfsRecovery.h"
 #include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
@@ -58,7 +59,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     bool writeAllowed_ = false, initialized_ = false;
     std::atomic<bool> writable_{false}, lost_{false};
 #ifdef HFV_TESTING
-    bool crashRename_ = false, crashPut_ = false;
+    bool crashRename_ = false, crashPut_ = false, crashRemoveTree_ = false;
 #endif
     uint64_t generation_;
     static uint64_t NextGeneration() {
@@ -144,6 +145,9 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
         return origin;
     }
     void Start() {
+        // The original guard still owns the image after the worker exits.
+        if (lost_ && format_==ImageFormat::Classic && guard_->Writable() &&
+            ClassicHfsRecovery::Pending(path_)) writeAllowed_=true;
         auto process = std::make_unique<Process>();
         struct Inherited {
             std::vector<ImageHandleTransfer::File> files;
@@ -498,6 +502,38 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Simple(SessionCommandCode::Remove, Protocol::Encode(Protocol::CatalogItem{id}), true);
     }
+    bool RemoveTreeAtomically(uint32_t id,Storage::Job& job,bool deletionProgress) override {
+        if(format_!=ImageFormat::Classic)return false;
+        if(job.cancelled())throw Storage::Cancelled();
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto command=SessionCommandCode::RemoveTree;
+#ifdef HFV_TESTING
+        if(crashRemoveTree_){crashRemoveTree_=false;command=SessionCommandCode::TestCrashRemoveTree;}
+#endif
+        bool handled=false;
+        std::exception_ptr stopped;
+        try {
+            Call(command,Protocol::Encode(Protocol::CatalogItem{id}),true,[&]{
+                for(;;){
+                    Data packet;
+                    const auto message=Receive(worker_->output.value,packet);
+                    if(message==SessionResult)ReadResult(packet);
+                    if(message==SessionBytes){handled=packet.flag();packet.end();return;}
+                    Check(message==SessionProgress,"Unexpected volume removal response");
+                    const auto progress=DecodeProgress(packet);
+                    packet.end();
+                    try { if(deletionProgress)job.progress(progress); }
+                    catch (...) { stopped=std::current_exception(); }
+                    Send(worker_->input.value,stopped||job.cancelled()?Cancel:SessionContinue);
+                }
+            });
+        } catch(const SessionError&) {
+            if(stopped)std::rethrow_exception(stopped);
+            throw;
+        }
+        if(handled)Storage::OutcomeEvidence::NoteRetainedChange();
+        return handled;
+    }
     uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false) override {
         std::lock_guard<std::mutex> lock(mutex_);
         uint32_t id = 0;
@@ -522,6 +558,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Check(Alive(), "Fixture volume worker is not running");
         crashRename_ = true;
+    }
+    void CrashDuringRemoveTree() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Check(format_==ImageFormat::Classic&&Alive(),"Fixture classic volume worker is not running");
+        crashRemoveTree_=true;
     }
     void CrashDuringPut() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -647,6 +688,32 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             }
             case SessionCommandCode::Remove: {
                 volume.Remove(Protocol::DecodeItem(packet).id);
+                break;
+            }
+#ifdef HFV_TESTING
+            case SessionCommandCode::TestCrashRemoveTree:
+#endif
+            case SessionCommandCode::RemoveTree: {
+                const auto id=Protocol::DecodeItem(packet).id;
+                Check(!strcmp(volume.Kind(),"HFS"),"Unexpected classic subtree removal command");
+                Storage::Job removal;
+                removal.transport([&](const Storage::Progress& progress){
+                    Data update;
+                    EncodeProgress(update,progress);
+                    Send(output,SessionProgress,std::move(update));
+                    Data answer;
+                    const auto decision=Receive(input,answer);
+                    if(!Protocol::DecodeContinue(decision,answer))throw Storage::Cancelled();
+                },{});
+#ifdef HFV_TESTING
+                struct CrashScope {
+                    explicit CrashScope(bool enabled){ClassicHfsRecovery::Transaction::CrashAt(enabled?6:0);}
+                    ~CrashScope(){ClassicHfsRecovery::Transaction::CrashAt(0);}
+                } crashScope(command==SessionCommandCode::TestCrashRemoveTree);
+#endif
+                Data response;
+                response.put(volume.RemoveTreeAtomically(id,removal,true));
+                Send(output,SessionBytes,std::move(response));
                 break;
             }
             case SessionCommandCode::HardLink: {
@@ -806,6 +873,12 @@ void CrashVolumeSessionDuringPutForTest(const std::shared_ptr<MacBrowser::Volume
     Check(bool(persistent), "Fixture volume is not owned by a persistent worker");
     persistent->CrashDuringPut();
 }
+void CrashVolumeSessionDuringRemoveTreeForTest(const std::shared_ptr<MacBrowser::Volume>& volume) {
+    auto persistent=std::dynamic_pointer_cast<PersistentVolume>(volume);
+    Check(bool(persistent),"Fixture volume is not owned by a persistent worker");
+    persistent->CrashDuringRemoveTree();
+}
+
 #endif
 bool SharesMountedImage(const Location& source,const Location& destination) {
     return source.IsMounted() && destination.IsMounted() && source.Volume()==destination.Volume() &&

@@ -19,5 +19,6 @@ unsigned VolumeListingRequestsForTest();
 DWORD VolumeSessionPidForTest(const std::shared_ptr<MacBrowser::Volume>&);
 void CrashVolumeSessionOnRenameForTest(const std::shared_ptr<MacBrowser::Volume>&);
 void CrashVolumeSessionDuringPutForTest(const std::shared_ptr<MacBrowser::Volume>&);
+void CrashVolumeSessionDuringRemoveTreeForTest(const std::shared_ptr<MacBrowser::Volume>&);
 #endif
 }
