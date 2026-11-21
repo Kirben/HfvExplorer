@@ -3,6 +3,11 @@
 #include "stdafx.h"
 #include "WorkerEndpoint.h"
 #include "PhysicalRemovable.h"
+#include "FloppyFileWrite.h"
+#include "FloppyWriter.h"
+#include "FakeFloppy.h"
+#include "floppy.h"
+#include "RemovableUndo.h"
 #include "HfsPlusDisk.h"
 #include "DiskSlice.h"
 #include "MfsDiskSource.h"
@@ -88,6 +93,7 @@ std::shared_ptr<Bytes> Mfs(){MfsMemory memory;std::string error;Check(MfsImage::
 struct Store{Removable::Device device;Removable::Geometry geometry;std::map<uint64_t,std::shared_ptr<Bytes>> segments;DWORD generation=7,error=0;bool shortRead=false,noIdentity=false,changeAfterRead=false,pattern=false;bool writable=false,locked=false,denyLock=false,swapAtLock=false,swapOnWrite=false;
  bool corruptReadback=false,pendingReadback=false,failFlush=false;
  std::function<void(Store&)> changeAtLock;
+ std::function<void(uint64_t,DWORD,const void*)> persist;
  unsigned opens=0,closes=0,reads=0,checks=0,locks=0,writes=0,flushes=0;
  Removable::Partition target;};
 class Fake:public Removable::Api {
@@ -117,6 +123,7 @@ class Fake:public Removable::Api {
    }
    auto segment=store->segments.at(part.offset);
    memcpy(segment->data()+at-part.offset,data,n);
+   if(store->persist)store->persist(at-part.offset,n,data);
    got=n;
    ++store->writes;
    store->pendingReadback=true;
@@ -566,6 +573,210 @@ void ApfsRemovableTest(FILE* report)
     }
     fprintf(report,"PASS: raw and GPT APFS on 512/4096-byte fake removable transports, read-only and media replacement.\n");
 }
+namespace {
+constexpr int UndoDrive=25;
+void WriteFixture(const std::string& path,uint64_t offset,const void* data,DWORD size,bool create=false)
+{
+    CFile file;
+    Check(file.Open(path.c_str(),CFile::modeWrite|(create?CFile::modeCreate:0))!=FALSE,"open simulated media backing");
+    file.Seek(offset,CFile::begin);
+    file.Write(data,size);
+    file.Flush();
+}
+void PersistPhysicalWrite(const std::string& path,uint64_t at,DWORD size,const void* data)
+{
+    wchar_t crash[12]{};
+    if(GetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",crash,12)&&!wcscmp(crash,L"5")){
+        const auto original=Load(path);
+        const auto intended=static_cast<const BYTE*>(data);
+        for(DWORD i=0;i<size;++i){
+            if((*original)[size_t(at+i)]==intended[i])continue;
+            // Persist through the first changed byte, leaving the rest of the
+            // device write incomplete when the child disappears.
+            WriteFixture(path,at,data,i+1);
+            RemovableUndo::TestCheckpoint(5);
+        }
+    }
+    WriteFixture(path,at,data,size);
+}
+class UndoFloppy final : public FloppyWriteApi {
+    std::string path_;
+    FakeFloppy disk_;
+    bool locked_=false;
+public:
+    explicit UndoFloppy(const std::string& path):path_(path),disk_(*Load(path)){
+        Check(readonly_floppy_attach_api(UndoDrive,this),"attach recovery floppy fixture");
+    }
+    ~UndoFloppy(){physical_floppy_suspend(UndoDrive);readonly_floppy_attach_api(UndoDrive,nullptr);}
+    UINT DriveType(int drive)override{return disk_.DriveType(drive);}
+    HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{return disk_.Open(p,a,s,f);}
+    bool Geometry(HANDLE h,DISK_GEOMETRY& g)override{return disk_.Geometry(h,g);}
+    bool Verify(HANDLE h,DWORD& n)override{return disk_.Verify(h,n);}
+    bool Read(HANDLE h,ULONGLONG at,DWORD size,void* data,DWORD& got)override{return disk_.Read(h,at,size,data,got);}
+    void Close(HANDLE h)override{disk_.Close(h);}
+    bool Lock(HANDLE)override{locked_=true;return true;}
+    bool Dismount(HANDLE)override{return locked_;}
+    bool Unlock(HANDLE)override{locked_=false;return true;}
+    bool FormatTracks1440(HANDLE)override{return false;}
+    bool Write(HANDLE,ULONGLONG at,DWORD size,const void* bytes,DWORD& got)override{
+        Check(locked_&&B::Range(at,size,disk_.media.size())&&uintptr_t(bytes)%512==0,"unlocked or unaligned floppy write");
+        PersistPhysicalWrite(path_,at,size,bytes);
+        memcpy(disk_.media.data()+at,bytes,size);
+        got=size;
+        return true;
+    }
+    bool Flush(HANDLE)override{SetLastError(ERROR_INVALID_FUNCTION);return false;}
+};
+std::shared_ptr<MacBrowser::Volume> OpenUndoDisk(const std::string& path,bool zip)
+{
+    auto api=std::make_shared<Fake>();
+    auto sibling=std::make_shared<Bytes>(4096,0x47);
+    auto device=zip?Apm(*api,Load(path),sibling):api->Add(L"USB raw HFS",Load(path));
+    const auto map=zip?*device->segments.at(0):Bytes{};
+    device->writable=true;
+    device->persist=[path](uint64_t at,DWORD count,const void* data){PersistPhysicalWrite(path,at,count,data);};
+    auto volumes=Removable::Open(device->device,api);
+    if(zip)Check(*device->segments.at(0)==map&&std::all_of(sibling->begin(),sibling->end(),[](auto b){return b==0x47;}),
+                 "recovery altered a neighboring partition or the partition map");
+    Check(volumes.size()==1&&!strcmp(volumes.front().volume->Kind(),"HFS"),"reopen simulated removable HFS partition");
+    return volumes.front().volume;
+}
+void DiscoverUndo(const std::string& path,const std::string& adapter,bool committed)
+{
+    MacBrowser::Entry entry{};
+    if(adapter=="zip"||adapter=="usb"){
+        Check(OpenUndoDisk(path,adapter=="zip")->FindChild(2,u"Undo folder",entry)==committed,"removable catalog recovery result differs");
+        return;
+    }
+    UndoFloppy floppy(path);
+    Storage::Job job;
+    auto result=MediaDiscovery::ProbeDrive(UndoDrive,DRIVE_REMOVABLE,true,false,job);
+    Check(bool(result.floppy),"floppy discovery did not reopen classic HFS");
+    const bool edited=adapter=="image"?result.floppy->Name()==u"New floppy":
+        result.floppy->FindChild(2,u"Undo folder",entry);
+    Check(edited==committed,"floppy recovery result differs");
+}
+void CrashMedia(const std::string& path,const std::string& adapter,unsigned phase)
+{
+    wchar_t exe[MAX_PATH]{};
+    const auto length=GetModuleFileNameW(nullptr,exe,MAX_PATH);
+    Check(length&&length<MAX_PATH,"locate physical recovery test executable");
+    auto command=L"\""+std::wstring(exe)+L"\" --removable-recovery-child \""+VolumeCoord::Wide(path)+
+        L"\" "+VolumeCoord::Wide(adapter)+L" "+std::to_wstring(phase);
+    STARTUPINFOW startup{};
+    startup.cb=sizeof(startup);
+    PROCESS_INFORMATION child{};
+    Check(CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&child)!=FALSE,
+          "start simulated-media crash subprocess");
+    CloseHandle(child.hThread);
+    const auto wait=WaitForSingleObject(child.hProcess,45000);
+    if(wait!=WAIT_OBJECT_0)TerminateProcess(child.hProcess,2);
+    DWORD code=0;
+    GetExitCodeProcess(child.hProcess,&code);
+    CloseHandle(child.hProcess);
+    if(wait!=WAIT_OBJECT_0||code!=100+phase)
+        throw HfsPlus::Error("Simulated "+adapter+" missed crash phase "+std::to_string(phase)+
+                             " (exit "+std::to_string(code)+")");
+}
+void CheckDurableMedia(const std::string& root,FILE* report)
+{
+    Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_UNDO_DIR",VolumeCoord::Wide(root).c_str())!=FALSE,
+          "set isolated physical-media journal directory");
+    auto zip=Classic(root+"\\zip-seed.dsk");
+    Bytes floppy;
+    const auto fixture=_wgetenv(L"HFV_CLASSIC_FLOPPY_FIXTURE");
+    if(fixture&&*fixture){
+        const auto local=root+"\\floppy-seed.dsk";
+        Check(CopyFileW(fixture,VolumeCoord::Wide(local).c_str(),TRUE)!=FALSE,"copy shared floppy fixture");
+        floppy=*Load(local);
+    }else{
+        std::string error;
+        Check(PrepareFloppyHfs("Original floppy",floppy,error),"create classic floppy fixture");
+    }
+    for(const std::string adapter:{"floppy","zip","usb","image"}){
+        const bool floppyPath=adapter=="floppy"||adapter=="image";
+        const auto key=floppyPath?RemovableUndo::FloppyKey(UndoDrive):
+            std::wstring(adapter=="zip"?L"Zip APM":L"USB raw HFS");
+        const auto& before=floppyPath?floppy:*zip;
+        for(unsigned phase:{1u,5u,4u,2u}){
+            const auto path=root+"\\"+adapter+"-"+std::to_string(phase)+".dsk";
+            WriteFixture(path,0,before.data(),DWORD(before.size()),true);
+            CrashMedia(path,adapter,phase);
+            const auto interrupted=*Load(path);
+            Check(RemovableUndo::Pending(key)&&interrupted!=before,"interrupted write did not retain an undo log");
+            if(phase==4){
+                auto wrong=before;
+                wrong.back()^=0x5a;
+                WriteFixture(path,0,wrong.data(),DWORD(wrong.size()),true);
+                Reject([&]{DiscoverUndo(path,adapter,false);},"same-geometry replacement disk was accepted");
+                Check(*Load(path)==wrong&&RemovableUndo::Pending(key),"replacement media or pending log changed");
+                WriteFixture(path,0,interrupted.data(),DWORD(interrupted.size()),true);
+                CrashMedia(path,adapter,3);
+                Check(RemovableUndo::Pending(key),"interrupted recovery cleared the undo log");
+            }
+            DiscoverUndo(path,adapter,phase==2);
+            Check(!RemovableUndo::Pending(key),"successful recovery retained a pending log");
+            if(phase!=2)Check(*Load(path)==before,"physical recovery did not restore all original bytes");
+        }
+    }
+    fprintf(report,"PASS: classic floppy, partitioned Zip, raw USB disk and image-to-floppy writes survive process loss, torn writes, interrupted replay and a lost commit reply; replacement disks are refused without writes.\n");
+}
+}
+
+int RunRemovableRecoveryChild(const char* target,const char* adapter,unsigned phase)
+{
+    try{
+        SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",std::to_wstring(phase).c_str());
+        readonly_cd_backend_init();
+        if(phase==3){DiscoverUndo(target,adapter,false);return 3;}
+        if(!strcmp(adapter,"zip")||!strcmp(adapter,"usb"))OpenUndoDisk(target,!strcmp(adapter,"zip"))->MakeDirectory(2,u"Undo folder");
+        else{
+            UndoFloppy floppy(target);
+            if(!strcmp(adapter,"image")){
+                Bytes image;
+                std::string error;
+                Check(PrepareFloppyHfs("New floppy",image,error),"prepare image-to-floppy source");
+                FloppyWriter writer(&floppy);
+                if(!writer.WriteImage(UndoDrive,image))throw HfsPlus::Error(writer.Diagnostics());
+            }else{
+                RunFloppyWrite(UndoDrive,{},[]{
+                    char path[MAX_PATH];
+                    get_floppy_volume_file_name(UndoDrive,path);
+                    auto volume=MacBrowser::OpenClassic(path,":",true);
+                    volume->MakeDirectory(2,u"Undo folder");
+                    volume->Close();
+                });
+            }
+        }
+        return 3;
+    }catch(const std::exception& e){
+        FILE* log=nullptr;
+        if(!fopen_s(&log,(std::string(target)+".error.txt").c_str(),"w")&&log){
+            fprintf(log,"%s\n",e.what());
+            fclose(log);
+        }
+        return 4;
+    }
+}
+
+int RunRemovableRecoveryTest(const char* directory)
+{
+    if(!CreateDirectoryA(directory,nullptr))return 2;
+    const std::string root=directory;
+    FILE* report=nullptr;
+    if(fopen_s(&report,(root+"\\removable-recovery-report.txt").c_str(),"w")||!report)return 2;
+    int result=0;
+    try{
+        readonly_cd_backend_init();
+        CheckDurableMedia(root,report);
+    }catch(const std::exception& e){
+        fprintf(report,"FAIL: %s\n",e.what());
+        result=1;
+    }
+    fclose(report);
+    return result;
+}
+
 int RunPhysicalRemovableTest(const char* directory){if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;FILE* report=fopen((root+"\\physical-removable-report.txt").c_str(),"w");if(!report)return 2;int result=0;InitializeStorageUi();readonly_cd_backend_init();try{
  SourceAdapters(report);
  ApfsRemovableTest(report);

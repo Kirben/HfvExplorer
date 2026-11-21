@@ -245,6 +245,10 @@ BOOL CHFVExplorerApp::InitInstance()
  extern int RunPerVolumeCommandsTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-per-volume-commands"))ExitProcess(RunPerVolumeCommandsTest(__argv[2]));
  extern int RunPhysicalRemovableTest(const char*);
+ extern int RunRemovableRecoveryTest(const char*);
+ extern int RunRemovableRecoveryChild(const char*,const char*,unsigned);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-removable-recovery"))ExitProcess(RunRemovableRecoveryTest(__argv[2]));
+ if(__argc==5&&!strcmp(__argv[1],"--removable-recovery-child"))ExitProcess(RunRemovableRecoveryChild(__argv[2],__argv[3],strtoul(__argv[4],nullptr,10)));
  if(__argc==3&&!strcmp(__argv[1],"--verify-physical-removable"))ExitProcess(RunPhysicalRemovableTest(__argv[2]));
  extern int RunHardLinksBrowserTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-hard-links"))ExitProcess(RunHardLinksBrowserTest(__argv[2]));

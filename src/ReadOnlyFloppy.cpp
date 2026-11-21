@@ -34,6 +34,19 @@ unsigned be16(const BYTE* p) {return unsigned(p[0])*256+p[1];}
 DWORD be32(const BYTE* p) {return DWORD(be16(p))*65536+be16(p+2);}
 }
 FloppyReadApi& NativeFloppyReadApi() {return nativeApi;}
+bool VerifyFloppyWriteMedia(HANDLE handle,DWORD& generation)
+{
+    DWORD returned=0;
+    if(!HfvMediaControl(handle,IOCTL_STORAGE_CHECK_VERIFY,nullptr,0,&generation,sizeof(generation),&returned,nullptr))
+        return false;
+    if(returned!=sizeof(generation)){
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return false;
+    }
+    return true;
+}
+
+
 ReadOnlyFloppy::ReadOnlyFloppy(FloppyReadApi* api):api_(api?api:&nativeApi),handle_(INVALID_HANDLE_VALUE),
  scratch_(nullptr),geometry_(),size_(0),error_(0),changeCount_(0),hfs_(false),invalid_(false) {cache_init(&cache_);}
 ReadOnlyFloppy::~ReadOnlyFloppy() {Close();}

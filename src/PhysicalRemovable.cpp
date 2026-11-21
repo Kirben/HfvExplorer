@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "PhysicalRemovable.h"
+#include "RemovableUndo.h"
 #include "DiskPartitions.h"
 #include "DiskSlice.h"
 #include "MfsDiskSource.h"
@@ -355,6 +356,8 @@ public:
         Refresh();
         if(active_){work();return;}
 
+        if(kind_=="HFS"&&RemovableUndo::Pending(device_.path))
+            throw Error("Removable-media recovery is pending. Reinsert the original disk and refresh the drive.");
         auto writer=std::make_shared<Disk>(device_,api_,&partition_);
         const auto& old=disk_->MediaGeometry();
         const auto& locked=writer->MediaGeometry();
@@ -365,6 +368,7 @@ public:
             throw Storage::MediaChanged("Removable partition changed before writing; refresh the drive");
         if(!old.floppy)disk_->CheckMedia();
         writer->CheckMedia();
+        if(kind_=="HFS")writer->EnableClassicUndo(device_.path);
 
         auto reader=disk_;
         auto readBackend=backend_;
@@ -384,7 +388,20 @@ public:
             disk_=std::move(reader);
             active_=false;
         }
-        try{writer->CheckMedia();}catch(...){if(!failure)failure=std::current_exception();}
+        try{
+            writer->CheckMedia();
+            if(!failure)writer->CommitClassicUndo();
+        }catch(...){if(!failure)failure=std::current_exception();}
+        if(failure){
+            try{
+                if(writer->RollBackClassicUndo())
+                    Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Restored);
+            }catch(...){
+                fence_->tripped=true;
+                Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
+                failure=std::make_exception_ptr(Error("Removable-media recovery is pending. Reinsert the original disk and refresh the drive."));
+            }
+        }
         if(writer->WriteFenced())fence_->tripped=true;
         const bool changed=writer->WasWritten();
         writer.reset();
@@ -512,6 +529,8 @@ struct Disk::Impl {
  DWORD generation=0,error=0;
  BYTE *buffer=nullptr,*original=nullptr,*desired=nullptr;
  Partition allowed;
+ std::wstring undoKey;
+ std::unique_ptr<RemovableUndo::Log> undo;
  bool attempted=false;
  std::recursive_mutex mutex;
  std::list<uint64_t> ages;
@@ -543,6 +562,14 @@ struct Disk::Impl {
   if(now!=generation){
    error=ERROR_MEDIA_CHANGED;Clear();throw Storage::MediaChanged("Removable media changed; refresh the drive");
   }
+ }
+ RemovableUndo::Range UndoRange()const{return {allowed.offset,allowed.length,geometry.sector};}
+ void RawRead(uint64_t at,DWORD count,void* data){
+  Verify();
+  DWORD got=0;
+  if(!api->Read(handle,at,count,data,got)||got!=count)
+      IoError("Cannot read original removable-media sectors",ERROR_READ_FAULT);
+  Verify();
  }
  bool Replace(uint64_t at,DWORD bytes,const BYTE* value){
   Verify();
@@ -600,6 +627,35 @@ bool Disk::Writable()const{return p_->write!=nullptr;}
 bool Disk::WriteFenced()const{return p_->error!=0;}
 bool Disk::WasWritten()const{return p_->attempted;}
 void Disk::DropCache(){std::lock_guard<std::recursive_mutex> lock(p_->mutex);p_->Clear();}
+void Disk::EnableClassicUndo(const std::wstring& key){
+ std::lock_guard<std::recursive_mutex> lock(p_->mutex);
+ if(RemovableUndo::Enabled())p_->undoKey=key;
+}
+void Disk::CommitClassicUndo(){
+ std::lock_guard<std::recursive_mutex> lock(p_->mutex);
+ if(p_->undo){
+  auto undo=std::move(p_->undo);
+  undo->Commit();
+ }
+}
+void Disk::RecoverClassicUndo(const std::wstring& key){
+ std::lock_guard<std::recursive_mutex> lock(p_->mutex);
+ Check(Writable(),"Exclusive access is required for removable-media recovery");
+ p_->Clear();
+ RemovableUndo::Recover(key,p_->UndoRange(),
+  [&](uint64_t at,DWORD size,void* data){p_->RawRead(at,size,data);},
+  [&](uint64_t at,DWORD size,const void* data){
+   if(!p_->Replace(at,size,static_cast<const BYTE*>(data)))
+       p_->Fail("Removable-media recovery readback failed",ERROR_WRITE_FAULT);
+  });
+}
+bool Disk::RollBackClassicUndo(){
+ std::lock_guard<std::recursive_mutex> lock(p_->mutex);
+ if(!p_->undo)return false;
+ p_->undo.reset();
+ RecoverClassicUndo(p_->undoKey);
+ return true;
+}
 void Disk::CheckMedia(){std::lock_guard<std::recursive_mutex> lock(p_->mutex);Impl::ReadHandle handle(*p_);p_->Verify();}
 void Disk::Flush(){
  std::lock_guard<std::recursive_mutex> lock(p_->mutex);
@@ -628,11 +684,20 @@ void Disk::Write(uint64_t at,const void* input,size_t size){
   memcpy(p_->desired,p_->original,bytes);
   memcpy(p_->desired+skip,data,n);
   if(memcmp(p_->desired,p_->original,bytes)!=0){
+   if(!p_->undoKey.empty()){
+    if(!p_->undo)
+     p_->undo=std::make_unique<RemovableUndo::Log>(p_->undoKey,p_->UndoRange(),
+      [&](uint64_t at,DWORD count,void* data){p_->RawRead(at,count,data);});
+    p_->undo->BeforeWrite(start,bytes,p_->original,p_->desired);
+   }
    p_->Clear();
    p_->attempted=true;
    bool good=false;
    std::exception_ptr failure;
    try{good=p_->Replace(start,bytes,p_->desired);}catch(...){failure=std::current_exception();}
+#ifdef HFV_TESTING
+   if(good&&p_->undo)RemovableUndo::TestCheckpoint(1);
+#endif
    if(!good){
     bool restored=false;
     if(!p_->error)try{restored=p_->Replace(start,bytes,p_->original);}catch(...){}
@@ -649,6 +714,36 @@ void Disk::Read(uint64_t at,void* output,size_t size){std::lock_guard<std::recur
 std::vector<Mounted> Open(const Device& device,std::shared_ptr<Api> api){
     if(!api)api=NativeApi();
     auto disk=std::make_shared<Disk>(device,api);
+    if(device.floppyDrive<0&&RemovableUndo::Pending(device.path)){
+        const auto range=RemovableUndo::PendingRange(device.path);
+        if(!range.length)RemovableUndo::Recover(device.path,range,{},{});
+        else{
+            const auto sector=disk->MediaGeometry().sector;
+            const auto partitions=Partitions(*disk,sector);
+            const auto target=std::find_if(partitions.begin(),partitions.end(),[&](const Partition& part){
+                return part.offset==range.offset&&part.length==range.length&&!part.readOnly;
+            });
+            if(sector!=range.sector||target==partitions.end())
+                throw Storage::MediaChanged("Insert the original removable disk before recovery");
+            const auto diskKey=device.number==MAXDWORD?"removable-disk:"+Utf8(device.path):
+                               "removable-disk:"+std::to_string(device.number);
+            VolumeCoord::OperationLease lease({{diskKey,VolumeCoord::Mode::Write},
+                                               {Key(device,*target),VolumeCoord::Mode::Write}});
+            disk.reset();
+            {
+                Disk recovery(device,api,&*target);
+                if(recovery.MediaGeometry().sector!=sector)
+                    throw Storage::MediaChanged("Removable media changed before recovery");
+                const auto current=Partitions(recovery,sector);
+                if(std::find(current.begin(),current.end(),*target)==current.end())
+                    throw Storage::MediaChanged("Removable partition changed before recovery");
+                recovery.RecoverClassicUndo(device.path);
+                FenceFor(diskKey,recovery.Generation())->tripped=false;
+            }
+            disk=std::make_shared<Disk>(device,api);
+            VolumeCoord::Changed({Key(device,*target)});
+        }
+    }
     std::vector<Mounted> result;
     for(const auto& partition:Partitions(*disk,disk->MediaGeometry().sector)){
         auto key=Key(device,partition);

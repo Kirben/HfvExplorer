@@ -17,6 +17,7 @@ public:
     virtual void Close(HANDLE handle)=0;
 };
 FloppyReadApi& NativeFloppyReadApi();
+bool VerifyFloppyWriteMedia(HANDLE,DWORD& generation);
 class ReadOnlyFloppy {
 public:
     explicit ReadOnlyFloppy(FloppyReadApi* api=nullptr);

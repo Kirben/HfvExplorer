@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "FloppyWriter.h"
 #include "FloppyWriteLease.h"
+#ifdef HFV_APP_REMOVABLE_UNDO
+#include "OperationCompletion.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -15,7 +18,7 @@ public:
     UINT DriveType(int d) override {return NativeFloppyReadApi().DriveType(d);}
     HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f) override {return NativeFloppyReadApi().Open(p,a,s,f);}
     bool Geometry(HANDLE h,DISK_GEOMETRY& g) override {return NativeFloppyReadApi().Geometry(h,g);}
-    bool Verify(HANDLE h,DWORD& c) override {return NativeFloppyReadApi().Verify(h,c);}
+    bool Verify(HANDLE h,DWORD& c) override {return VerifyFloppyWriteMedia(h,c);}
     bool Read(HANDLE h,ULONGLONG o,DWORD n,void* p,DWORD& got) override {return NativeFloppyReadApi().Read(h,o,n,p,got);}
     void Close(HANDLE h) override {CloseHandle(h);}
     bool Lock(HANDLE h) override {return control(h,FSCTL_LOCK_VOLUME);}
@@ -42,6 +45,48 @@ bool geometry1440(const DISK_GEOMETRY& g) {
     return g.MediaType==F3_1Pt44_512 && g.Cylinders.QuadPart==80 && g.TracksPerCylinder==2 && g.SectorsPerTrack==18 && g.BytesPerSector==512;
 }
 }
+#ifdef HFV_APP_REMOVABLE_UNDO
+namespace FloppyRecovery {
+void Verify(FloppyWriteApi& api,HANDLE handle,DWORD generation)
+{
+    DWORD now=0;
+    if(!api.Verify(handle,now))
+        throw Storage::MediaIoError(GetLastError(),"Cannot verify floppy media for recovery");
+    if(now!=generation)throw Storage::MediaChanged("The floppy changed during recovery");
+}
+void Read(FloppyWriteApi& api,HANDLE handle,DWORD generation,uint64_t offset,DWORD bytes,void* buffer)
+{
+    Verify(api,handle,generation);
+    DWORD got=0;
+    if(!api.Read(handle,offset,bytes,buffer,got)||got!=bytes)
+        throw Storage::MediaIoError(ERROR_READ_FAULT,"Cannot read the original floppy sectors");
+    Verify(api,handle,generation);
+}
+void Replay(FloppyWriteApi& api,HANDLE handle,DWORD generation,int drive)
+{
+    auto* scratch=VirtualAlloc(nullptr,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    if(!scratch)throw std::bad_alloc();
+    struct Free {void* p;~Free(){VirtualFree(p,0,MEM_RELEASE);}} free{scratch};
+    RemovableUndo::Recover(RemovableUndo::FloppyKey(drive),Range,
+      [&](uint64_t at,DWORD bytes,void* data){Read(api,handle,generation,at,bytes,data);},
+      [&](uint64_t at,DWORD bytes,const void* data){
+        Verify(api,handle,generation);
+        DWORD got=0;
+        if(!api.Write(handle,at,bytes,data,got)||got!=bytes)
+            throw Storage::MediaIoError(ERROR_WRITE_FAULT,"Cannot restore the original floppy sectors");
+        if(!api.Flush(handle)){
+            const auto error=GetLastError();
+            if(error!=ERROR_NOT_SUPPORTED&&error!=ERROR_INVALID_FUNCTION)
+                throw Storage::MediaIoError(error,"Cannot flush the recovered floppy");
+        }
+        Read(api,handle,generation,at,bytes,scratch);
+        if(memcmp(scratch,data,bytes))
+            throw Storage::MediaIoError(ERROR_CRC,"Floppy recovery readback did not match");
+    });
+}
+}
+
+#endif
 bool ValidateFloppyHfs(const std::vector<BYTE>& image) {
     if(image.size()!=kImage) return false;const BYTE* m=image.data()+1024;
     unsigned count=word(m+18),first=word(m+28);DWORD block=number(m+20);
@@ -77,8 +122,26 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
     HANDLE handle=api_->Open(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH);
     if(handle==INVALID_HANDLE_VALUE) {error_=GetLastError();Report(false,drive);return false;}
     bool locked=false;BYTE* scratch=nullptr;
+#ifdef HFV_APP_REMOVABLE_UNDO
+    std::unique_ptr<RemovableUndo::Log> undo;
+#endif
+    DWORD generation=0,current=0;
     auto finish=[&](bool ok)->bool {
         DWORD failure=ok?ERROR_SUCCESS:GetLastError();
+#ifdef HFV_APP_REMOVABLE_UNDO
+        if(!ok&&undo){
+            undo.reset();
+            try{
+                FloppyRecovery::Replay(*api_,handle,generation,drive);
+                Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Restored);
+                diagnostics_+="Original floppy sectors restored and verified.\r\n";
+                writesStarted_=false;
+            }catch(const std::exception& error){
+                Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Unverified);
+                diagnostics_+=std::string("Floppy recovery is pending: ")+error.what()+"\r\n";
+            }
+        }
+#endif
         if(locked) {
             if(ok) Mark("Unlock volume",kImage);
             if(!api_->Unlock(handle) && ok) {failure=GetLastError();ok=false;}
@@ -86,7 +149,7 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
         api_->Close(handle);if(scratch) VirtualFree(scratch,0,MEM_RELEASE);
         error_=failure?failure:(ok?ERROR_SUCCESS:ERROR_WRITE_FAULT);Report(ok,drive);return ok;
     };
-    DISK_GEOMETRY geometry={};DWORD generation=0,current=0;
+    DISK_GEOMETRY geometry={};
     Mark("Query geometry");
     if(!api_->Geometry(handle,geometry)) return finish(false);
     if(!geometry1440(geometry)) {SetLastError(ERROR_NOT_SUPPORTED);return finish(false);}
@@ -104,6 +167,25 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
     Mark("Allocate transfer buffer");
     scratch=(BYTE*)VirtualAlloc(NULL,kTrack*2,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     if(!scratch) {SetLastError(ERROR_NOT_ENOUGH_MEMORY);return finish(false);}
+#ifdef HFV_APP_REMOVABLE_UNDO
+    const auto key=RemovableUndo::FloppyKey(drive);
+    try {
+        if(RemovableUndo::Pending(key)){
+            Mark("Recover interrupted floppy write");
+            FloppyRecovery::Replay(*api_,handle,generation,drive);
+        }
+        if(RemovableUndo::Enabled()&&!formatTracks&&plannedTracks_){
+            Mark("Read original floppy for recovery");
+            if(progress)progress("Preparing recovery",0,160,context);
+            undo=std::make_unique<RemovableUndo::Log>(key,FloppyRecovery::Range,
+              [&](uint64_t at,DWORD count,void* bytes){FloppyRecovery::Read(*api_,handle,generation,at,count,bytes);});
+        }
+    }catch(const std::exception& e){
+        diagnostics_+=std::string(e.what())+"\r\n";
+        SetLastError(ERROR_READ_FAULT);
+        return finish(false);
+    }
+#endif
     if(expectedOriginal) {
         for(DWORD offset=0;offset<kImage;offset+=kTrack) {
             Mark("Check original disk before copying",offset,kTrack);
@@ -139,12 +221,27 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
         if(progress) progress("Checking media before write",writtenTracks_,plannedTracks_,context);
         if(!api_->Verify(handle,current)) return finish(false);
         if(current!=generation) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
+#ifdef HFV_APP_REMOVABLE_UNDO
+        if(undo){
+            try{
+                FloppyRecovery::Read(*api_,handle,generation,offset,kTrack,scratch);
+                undo->BeforeWrite(offset,kTrack,scratch,image.data()+offset);
+            }catch(const std::exception& e){
+                diagnostics_+=std::string(e.what())+"\r\n";
+                SetLastError(ERROR_WRITE_FAULT);
+                return finish(false);
+            }
+        }
+#endif
         memcpy(scratch,image.data()+offset,kTrack);DWORD wrote=0;writesStarted_=true;
         Mark("WriteFile track transfer",offset,kTrack);
         if(progress) progress("Writing",writtenTracks_,plannedTracks_,context);
         bool wroteOk=api_->Write(handle,offset,kTrack,scratch,wrote);transferred_=wrote;
         if(!wroteOk) return finish(false);
         if(wrote!=kTrack) {SetLastError(ERROR_WRITE_FAULT);return finish(false);}
+#if defined(HFV_TESTING) && defined(HFV_APP_REMOVABLE_UNDO)
+        if(undo)RemovableUndo::TestCheckpoint(1);
+#endif
         ++writtenTracks_;
         if(progress) progress("Writing",writtenTracks_,plannedTracks_,context);
     }
@@ -177,6 +274,16 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
         SetLastError(flushError_);return finish(false);
     }
     if(flushError_) diagnostics_+="Flush unsupported; accepted only after every write and readback matched and the final media check passed.\r\n";
+#ifdef HFV_APP_REMOVABLE_UNDO
+    if(undo){
+        try{undo->Commit();}
+        catch(const std::exception& e){
+            diagnostics_+=std::string(e.what())+"\r\n";
+            SetLastError(ERROR_WRITE_FAULT);
+            return finish(false);
+        }
+    }
+#endif
     return finish(true);
 }
 bool LoadFloppyHfs(const char* path,std::vector<BYTE>& image,std::string& error) {

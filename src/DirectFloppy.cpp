@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "DirectFloppy.h"
 #include "StorageOutcome.h"
+#ifdef HFV_APP_REMOVABLE_UNDO
+#include "HfsPlus.h"
+#endif
 #include <string.h>
 namespace {
 const DWORD kSize=1474560,kBuffer=65536,kSector=512;
@@ -11,7 +14,7 @@ public:
  UINT DriveType(int d) override{return NativeFloppyReadApi().DriveType(d);}
  HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f) override{return NativeFloppyReadApi().Open(p,a,s,f);}
  bool Geometry(HANDLE h,DISK_GEOMETRY& g) override{return NativeFloppyReadApi().Geometry(h,g);}
- bool Verify(HANDLE h,DWORD& n) override{return NativeFloppyReadApi().Verify(h,n);}
+ bool Verify(HANDLE h,DWORD& n) override{return VerifyFloppyWriteMedia(h,n);}
  bool Read(HANDLE h,ULONGLONG o,DWORD n,void* p,DWORD& got) override{return NativeFloppyReadApi().Read(h,o,n,p,got);}
  void Close(HANDLE h) override{CloseHandle(h);}
  bool Lock(HANDLE h) override{return ctl(h,FSCTL_LOCK_VOLUME);}
@@ -39,14 +42,19 @@ bool DirectFloppy::fail(DWORD error){
  SetLastError(error_);return false;
 }
 bool DirectFloppy::verify(){DWORD n=0;if(error_)return fail(error_);if(!api_->Verify(handle_,n))return fail(GetLastError());return n==generation_?true:fail(ERROR_MEDIA_CHANGED);}
-bool DirectFloppy::Open(int drive,bool verifyWrites){
+bool DirectFloppy::Open(int drive,bool verifyWrites,bool recoveryOnly){
  verifyWrites_=verifyWrites;if(verifyWrites_){expected_.assign(kSize,0);dirty_.assign(kSize/kSector,0);}
 #ifdef HFV_FLOPPY_TESTING
  if(api_==&native)return fail(ERROR_NOT_SUPPORTED);
 #endif
  if(current||drive<0||drive>25)return fail(ERROR_INVALID_PARAMETER);
  if(!lease_.Acquire(drive))return fail(GetLastError());
- ReadOnlyFloppy probe(api_);if(!probe.OpenDrive(drive)||!probe.FindHfs())return fail(probe.Error());
+#ifdef HFV_APP_REMOVABLE_UNDO
+ const bool pending=(verifyWrites||recoveryOnly)&&RemovableUndo::Pending(RemovableUndo::FloppyKey(drive));
+ if(pending&&!recoveryOnly)
+  throw HfsPlus::Error("Floppy recovery is pending. Reinsert the original disk and refresh the drive.");
+#endif
+ ReadOnlyFloppy probe(api_);if(!probe.OpenDrive(drive)||(!recoveryOnly&&!probe.FindHfs()))return fail(probe.Error());
  if(probe.MediaSize()!=kSize)return fail(ERROR_NOT_SUPPORTED);
  if(!api_->Verify(probe.Handle(),generation_))return fail(GetLastError());probe.Close();
  char path[]="\\\\.\\A:";path[4]+=char(drive);
@@ -58,14 +66,29 @@ bool DirectFloppy::Open(int drive,bool verifyWrites){
  if(g.MediaType!=F3_1Pt44_512||g.Cylinders.QuadPart!=80||g.TracksPerCylinder!=2||g.SectorsPerTrack!=18||g.BytesPerSector!=512)return fail(ERROR_NOT_SUPPORTED);
  scratch_=(BYTE*)VirtualAlloc(nullptr,kBuffer,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);pending_=(BYTE*)VirtualAlloc(nullptr,kBuffer,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
  if(!scratch_||!pending_)return fail(ERROR_NOT_ENOUGH_MEMORY);
- drive_=drive;current=this;return true;
+ drive_=drive;current=this;
+#ifdef HFV_APP_REMOVABLE_UNDO
+ if(recoveryOnly&&pending)FloppyRecovery::Replay(*api_,handle_,generation_,drive_);
+#endif
+ return true;
 }
 bool DirectFloppy::flushWrites(){
  if(!pendingCount_)return !error_;
  if(!verify())return false;
+#ifdef HFV_APP_REMOVABLE_UNDO
+ if(verifyWrites_&&RemovableUndo::Enabled()){
+  auto read=[&](uint64_t at,DWORD size,void* buffer){FloppyRecovery::Read(*api_,handle_,generation_,at,size,buffer);};
+  if(!undo_)undo_=std::make_unique<RemovableUndo::Log>(RemovableUndo::FloppyKey(drive_),FloppyRecovery::Range,read);
+  read(pendingOffset_,pendingCount_,scratch_);
+  undo_->BeforeWrite(pendingOffset_,pendingCount_,scratch_,pending_);
+ }
+#endif
  DWORD got=0;writes_=true;finished_=false;
  if(!api_->Write(handle_,pendingOffset_,pendingCount_,pending_,got))return fail(GetLastError());
  if(got!=pendingCount_)return fail(ERROR_WRITE_FAULT);
+#if defined(HFV_TESTING) && defined(HFV_APP_REMOVABLE_UNDO)
+ if(undo_)RemovableUndo::TestCheckpoint(1);
+#endif
  pendingCount_=0;return verify();
 }
 
@@ -119,5 +142,24 @@ bool DirectFloppy::Finish(){
   }
  }
  finished_=verify();
+#ifdef HFV_APP_REMOVABLE_UNDO
+ if(finished_&&undo_){
+  auto undo=std::move(undo_);
+  undo->Commit();
+ }
+#endif
  return finished_;
 }
+
+
+#ifdef HFV_APP_REMOVABLE_UNDO
+bool DirectFloppy::RollBack()
+{
+ if(!undo_)return false;
+ undo_.reset();
+ pendingCount_=0;
+ FloppyRecovery::Replay(*api_,handle_,generation_,drive_);
+ finished_=true;
+ return true;
+}
+#endif

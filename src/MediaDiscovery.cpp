@@ -7,6 +7,8 @@
 #include <algorithm>
 #include "VolumeCoordinator.h"
 #include "ReadOnlyCdBackend.h"
+#include "FloppyFileWrite.h"
+#include "RemovableUndo.h"
 #include "floppy.h"
 #include <array>
 #include <chrono>
@@ -124,7 +126,12 @@ bool Floppy(int drive,Storage::Job& job)
 {
  CheckDrive(drive);
  return Probe(floppy,drive,driveEpoch[drive],job,[&]{
-  const VolumeCoord::OperationLease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});
+  const bool recovery=RemovableUndo::Pending(RemovableUndo::FloppyKey(drive));
+  const VolumeCoord::OperationLease lease({{VolumeCoord::DeviceKey(drive),recovery?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}});
+  if(recovery){
+   RecoverFloppyWrite(drive);
+   VolumeCoord::Changed({VolumeCoord::DeviceKey(drive)});
+  }
   return is_hfs_floppy_present(drive)!=0;
  });
 }
@@ -148,7 +155,8 @@ DriveMedia ProbeDrive(int drive,UINT type,bool checkFloppy,bool checkExternal,St
   return media;
  }
  if(type!=DRIVE_REMOVABLE&&type!=DRIVE_FIXED)return media;
- const VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),VolumeCoord::Mode::Read}});
+ const bool recovery=checkFloppy&&type==DRIVE_REMOVABLE&&RemovableUndo::Pending(RemovableUndo::FloppyKey(drive));
+ const VolumeCoord::Lease read({{VolumeCoord::DeviceKey(drive),recovery?VolumeCoord::Mode::Write:VolumeCoord::Mode::Read}});
  if(checkFloppy&&type==DRIVE_REMOVABLE&&Floppy(drive,job)){
   char image[MAX_PATH];
   get_floppy_volume_file_name(drive,image);

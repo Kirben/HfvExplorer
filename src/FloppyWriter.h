@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "ReadOnlyFloppy.h"
+#ifdef HFV_APP_REMOVABLE_UNDO
+#include "RemovableUndo.h"
+#endif
+
 #include <vector>
 #include <optional>
 #include <string>
@@ -14,6 +18,13 @@ public:
     virtual bool Write(HANDLE,ULONGLONG,DWORD,const void*,DWORD&)=0;
     virtual bool Flush(HANDLE)=0;
 };
+#ifdef HFV_APP_REMOVABLE_UNDO
+namespace FloppyRecovery {
+inline constexpr RemovableUndo::Range Range{0,1474560,512};
+void Read(FloppyWriteApi&,HANDLE,DWORD generation,uint64_t,DWORD,void*);
+void Replay(FloppyWriteApi&,HANDLE,DWORD generation,int drive);
+}
+#endif
 typedef void (*FloppyProgress)(const char* phase,unsigned completed,unsigned total,void* context);
 class FloppyWriter {
 public:

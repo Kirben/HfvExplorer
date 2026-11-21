@@ -11,12 +11,18 @@ class DirectFloppy {
  cachetype cache_={};bool finished_=false;
  bool locked_=false,writes_=false,verifyWrites_=false;
  std::vector<BYTE> expected_,dirty_;
+#ifdef HFV_APP_REMOVABLE_UNDO
+ std::unique_ptr<RemovableUndo::Log> undo_;
+#endif
  bool fail(DWORD error);bool verify();bool flushWrites();
 public:
  explicit DirectFloppy(FloppyWriteApi* api=nullptr);
  DirectFloppy(const DirectFloppy&)=delete;DirectFloppy& operator=(const DirectFloppy&)=delete;
  ~DirectFloppy();
- bool Open(int drive,bool verifyWrites=false);bool Read(ULONGLONG offset,DWORD count,void* buffer);bool Write(ULONGLONG offset,DWORD count,const void* buffer);bool Finish();
+ bool Open(int drive,bool verifyWrites=false,bool recoveryOnly=false);bool Read(ULONGLONG offset,DWORD count,void* buffer);bool Write(ULONGLONG offset,DWORD count,const void* buffer);bool Finish();
+#ifdef HFV_APP_REMOVABLE_UNDO
+ bool RollBack();
+#endif
  DWORD Error() const{return error_;}DWORD Generation()const{return generation_;}
  static DirectFloppy* Current(int drive);
 };
