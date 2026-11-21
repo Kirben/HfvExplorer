@@ -338,6 +338,12 @@ public:
     Image(std::vector<Part> parts,Layout layout,std::optional<uint64_t> direct={})
         :parts_(std::move(parts)),layout_(std::move(layout)),direct_(direct){}
     bool Editable()const{return direct_.has_value();}
+    std::optional<ClassicHfsRecovery::ImageRange> RecoveryRange()const{
+        if(!direct_)return {};
+        const auto files=parts_.front().dataFile->WorkerFiles();
+        if(files.size()!=1)return {};
+        return ClassicHfsRecovery::ImageRange{files.front().second,*direct_,layout_.length};
+    }
     uint64_t Size()const override{return layout_.length;}
     uint32_t ExpectedChecksum()const{return layout_.checksum;}
     void VerifySegments(Storage::Job& job){
@@ -434,6 +440,12 @@ bool IsEditable(const Source& source)
 {
     const auto image=dynamic_cast<const Image*>(&source);
     return image&&image->Editable();
+}
+
+std::optional<ClassicHfsRecovery::ImageRange> RecoveryRange(const Source& source)
+{
+    const auto image=dynamic_cast<const Image*>(&source);
+    return image?image->RecoveryRange():std::nullopt;
 }
 
 std::optional<uint32_t> ExpectedChecksum(const Source& source)

@@ -150,8 +150,8 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     }
     void Start() {
         // The original guard still owns the image after the worker exits.
-        if (lost_ && format_==ImageFormat::Classic && guard_->Writable() &&
-            ClassicHfsRecovery::Pending(path_)) writeAllowed_=true;
+        if (lost_ && Classic() && guard_->Writable() &&
+            ClassicHfsRecovery::Pending(path_,format_==ImageFormat::NdifClassic)) writeAllowed_=true;
         auto process = std::make_unique<Process>();
         struct Inherited {
             std::vector<ImageHandleTransfer::File> files;
@@ -507,7 +507,7 @@ public:
         Simple(SessionCommandCode::Remove, Protocol::Encode(Protocol::CatalogItem{id}), true);
     }
     bool RemoveTreeAtomically(uint32_t id,Storage::Job& job,bool deletionProgress) override {
-        if(format_!=ImageFormat::Classic)return false;
+        if(!Classic())return false;
         if(job.cancelled())throw Storage::Cancelled();
         std::lock_guard<std::mutex> lock(mutex_);
         auto command=SessionCommandCode::RemoveTree;
@@ -565,7 +565,7 @@ public:
     }
     void CrashDuringRemoveTree() {
         std::lock_guard<std::mutex> lock(mutex_);
-        Check(format_==ImageFormat::Classic&&Alive(),"Fixture classic volume worker is not running");
+        Check(Classic()&&Alive(),"Fixture classic volume worker is not running");
         crashRemoveTree_=true;
     }
     void CrashDuringPut() {

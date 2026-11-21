@@ -60,6 +60,7 @@ class Classic final : public Volume, public WorkerEndpoint {
     }
     std::unique_ptr<ReadOnlySources::Registration> registration_;
     std::shared_ptr<HfsPlus::Source> media_;
+    std::optional<ClassicHfsRecovery::ImageRange> ndifRecovery_;
     int cdDrive_=-1;
     std::map<uint32_t,std::string> paths_;
     std::map<uint32_t,uint32_t> artworkIds_;
@@ -128,7 +129,9 @@ public:
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
-    Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable):write_(write),session_(stable){
+    Classic(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable,
+            std::optional<ClassicHfsRecovery::ImageRange> ndif={},bool recovered=false)
+        :write_(write),session_(stable),ndifRecovery_(ndif){
         resourceKey_=key;context_=LegacyEngine::ForVolume(key);LegacyEngine::Scope engine(context_);
         media_=std::move(source);
         processLocal_=media_->ProcessLocal();
@@ -139,7 +142,7 @@ public:
         if((session_||media_->MediaDrive()>=0) && media_->MediaGeneration(generation))
             imageIdentity_=key+":"+std::to_string(generation);
         else imageIdentity_=media_->WorkerFiles().empty()?key+":"+image_:key;
-        volume_=(session_?hfs_mount_session:hfs_mount)(image_.data(),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
+        volume_=(session_&&!recovered?hfs_mount_session:hfs_mount)(image_.data(),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);paths_[2]=":";
         try{Check(Describe(":",2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
     }
     ~Classic(){LegacyEngine::Scope engine(context_);if(volume_)hfs_umount(volume_);}
@@ -480,11 +483,12 @@ private:
     }
     void DurableMutation(const std::function<void(bool)>& work)
     {
-        if(registration_){work(false);return;}
+        if(registration_&&!ndifRecovery_){work(false);return;}
         Check(Writable());
-        if(!ClassicHfsRecovery::Transaction::Supported(volume_->fd)){work(false);return;}
+        const auto* ndif=ndifRecovery_?&*ndifRecovery_:nullptr;
+        if(!ClassicHfsRecovery::Transaction::Supported(volume_->fd,ndif)){work(false);return;}
         Check(hfs_flush(volume_)==0);
-        ClassicHfsRecovery::Transaction recovery(volume_->fd);
+        ClassicHfsRecovery::Transaction recovery(volume_->fd,ndif);
         const bool wasDirty=markedDirty_;
         try{
             work(recovery.Active());
@@ -501,17 +505,22 @@ private:
         auto* failed=volume_;
         volume_=nullptr;
         const int partition=failed->pnum;
-        const int fd=!commitUncertain&&failed->refs==1?_dup(failed->fd):-1;
+        const bool remount=!commitUncertain&&failed->refs==1;
+        const int fd=remount&&!ndifRecovery_?_dup(failed->fd):-1;
         b_quarantine_volume(failed,"Classic HFS write needs recovery. Close all views and reopen the image.");
         hfs_umount(failed);
-        if(fd>=0){
-            volume_=hfs_remount_for_recovery(fd,partition,session_);
-            if(volume_){
-                markedDirty_=wasDirty;
-                hfs_take_rollback();
-                hfs_note_rollback(1);
-                return;
-            }
+        if(fd>=0)volume_=hfs_remount_for_recovery(fd,partition,session_);
+        else if(remount&&ndifRecovery_){
+            try{
+                if(ClassicHfsRecovery::RecoverNdif(*ndifRecovery_,true))
+                    volume_=hfs_mount(image_.data(),partition,O_RDWR);
+            }catch(const HfsPlus::Error&){}
+        }
+        if(volume_){
+            markedDirty_=wasDirty;
+            hfs_take_rollback();
+            hfs_note_rollback(1);
+            return;
         }
         hfs_note_rollback(3);
         closeFailed_=true;
@@ -617,4 +626,9 @@ std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path,bool writable)
 }
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key,write,stable));}
 std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return TrackWorkerVolume(std::make_shared<Classic>(image,path,write));}
+std::shared_ptr<Volume> OpenClassicNdif(std::shared_ptr<HfsPlus::Source> source,const std::string& key,
+                                      const ClassicHfsRecovery::ImageRange& range,bool recovered){
+    const bool write=source->Writable();
+    return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key,write,true,range,recovered));
+}
 }

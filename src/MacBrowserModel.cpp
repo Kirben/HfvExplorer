@@ -366,10 +366,13 @@ static std::optional<NdifVolume> FindNdifVolume(HfsPlus::Source& source)
 }
 
 std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
-                                          const DiskPartitions::Selection& expected)
+                                          const NdifVolume& expected)
 {
+    const bool classic=expected.format==VolumeSession::ImageFormat::NdifClassic;
+    auto backing=classic?Ndif::RecoveryRange(*source):std::nullopt;
+    const bool recovered=backing&&ClassicHfsRecovery::RecoverNdif(*backing,source->Writable());
     const auto selected=FindNdifVolume(*source);
-    if(!selected||selected->selection!=expected)
+    if(!selected||selected->format!=expected.format||selected->selection!=expected.selection)
         throw Storage::MediaChanged("The selected NDIF filesystem or partition changed");
     if(selected->format==VolumeSession::ImageFormat::NdifHfsPlus){
         const bool writable=source->Writable();
@@ -379,7 +382,11 @@ std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source> source
     const auto& part=selected->selection.partition;
     if(part.index)
         disk=std::make_shared<DiskImage::Slice>(disk,part.offset,part.length,!part.readOnly);
-    if(selected->format==VolumeSession::ImageFormat::NdifClassic){
+    if(classic){
+        if(backing){
+            if(part.index){backing->offset+=part.offset;backing->length=part.length;}
+            return OpenClassicNdif(std::move(disk),key,*backing,recovered);
+        }
         const bool writable=disk->Writable();
         return OpenClassicSource(std::move(disk),key,writable,true);
     }
@@ -435,7 +442,7 @@ std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin& origin)
                                     {write,origin.journal});
         StorageLocation::ValidateImage(origin.path,origin.identity);
         if(ndif)
-            return OpenEditableNdif(std::move(disk),key,*mount.selection);
+            return OpenEditableNdif(std::move(disk),key,{mount.format,*mount.selection});
         if(DiskPartitions::FindHfsPlus(*disk)!=mount.selection)
             throw Storage::MediaChanged("The selected HFS+ filesystem or partition changed");
         return FromHfsPlus(std::move(disk),write,key,origin.journal);
@@ -450,12 +457,16 @@ std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin& origin)
 static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr,const Dmg::PrivateKey* privateKey=nullptr) {
     using DiskImage::Container;
     auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
+    const bool pendingNdif=ClassicHfsRecovery::Pending(path,true);
     if(externalJournal.empty()&&ClassicHfsRecovery::Pending(path)){
+        Check(!pendingNdif,"The image has conflicting classic HFS recovery records");
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
         return OpenClassicImage(path,true);
     }
     auto opened=DiskImage::Open(path,{false,externalJournal,password,privateKey});
     auto& source=opened.source;
+    Check(!pendingNdif||opened.container==Container::Ndif,
+          "Pending classic HFS recovery requires the original NDIF wrapper and companions");
     if(!source)return {};
     if(opened.container==Container::SparseBundle)
         return OpenReadOnlyImage(std::move(source),key,{},"The sparse bundle contains no supported filesystem");
@@ -464,15 +475,30 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     if(opened.container==Container::Udif||opened.container==Container::EncryptedDisk)
         return OpenReadOnlyImage(std::move(source),key,externalJournal);
     if(opened.container==Container::Ndif){
+        if(pendingNdif){
+            // Replay before probing partition/MDB bytes. Leave the record until
+            // the owning mount recovers, so it can reopen an unclean volume.
+            source.reset();
+            source=DiskImage::Reopen(path,Container::Ndif,{true});
+            Check(VolumeCoord::ImageKey(path)==key,"The selected NDIF image changed before recovery");
+            const auto backing=Ndif::RecoveryRange(*source);
+            Check(backing.has_value(),"Pending classic HFS recovery requires a writable stored NDIF payload");
+            ClassicHfsRecovery::RecoverNdif(*backing,source->Writable(),true);
+        }
         const auto selected=FindNdifVolume(*source);
+        if(pendingNdif)Check(selected&&selected->format==VolumeSession::ImageFormat::NdifClassic,
+                         "Pending NDIF recovery did not identify a classic HFS volume");
         if(!selected)return OpenReadOnlyImage(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
         source.reset();
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},selected->format,selected->selection));
         try{source=DiskImage::Reopen(path,Container::Ndif,{true});}
-        catch(const HfsPlus::Error&){source=DiskImage::Reopen(path,Container::Ndif,{});}
+        catch(const HfsPlus::Error&){
+            if(pendingNdif)throw;
+            source=DiskImage::Reopen(path,Container::Ndif,{});
+        }
         Check(VolumeCoord::ImageKey(path)==key,
               "The selected NDIF image changed while it was being opened");
-        return OpenEditableNdif(std::move(source),key,selected->selection);
+        return OpenEditableNdif(std::move(source),key,*selected);
     }
     if(externalJournal.empty())
         if(auto tracks=CdMedia::OpenTrackImage(path,source,key))return OpenTrackImages(std::move(*tracks),key);

@@ -2,6 +2,7 @@
 #pragma once
 
 namespace DiskPartitions { struct Selection; }
+namespace ClassicHfsRecovery { struct ImageRange; }
 namespace MacBrowser { struct WorkerOrigin; }
 #include "HfsPlus.h"
 #include "EntryIdentity.h"
@@ -169,6 +170,8 @@ std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstrin
 bool WindowsResourceCompanion(const std::wstring &path);
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key,bool write=false,bool stable=false);
+std::shared_ptr<Volume> OpenClassicNdif(std::shared_ptr<HfsPlus::Source>,const std::string& key,
+                                       const ClassicHfsRecovery::ImageRange&,bool recovered);
 struct MfsCatalogIds {
     std::map<uint32_t,uint32_t> byFile;
     uint32_t next=3;

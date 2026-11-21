@@ -10,7 +10,9 @@
 
 namespace {
 using ClassicHfsRecovery::Transaction;
+using ClassicHfsRecovery::ImageRange;
 constexpr wchar_t Stream[] = L":HFVExplorer.ClassicUndo";
+constexpr wchar_t NdifStream[] = L":HFVExplorer.NdifClassicUndo";
 constexpr uint64_t Committed = UINT64_MAX;
 constexpr uint64_t Sector = 512;
 constexpr char Magic[8] = {'H','F','V','H','F','S','U','1'};
@@ -31,13 +33,18 @@ struct Header {
     FILETIME created;
     uint32_t crc;
 };
+struct NdifRegion {
+    uint64_t offset,length;
+    uint32_t reserved;
+    uint32_t crc;
+};
 struct Record {
     uint64_t offset;
     BYTE bytes[Sector];
     uint32_t reserved;
     uint32_t crc;
 };
-static_assert(sizeof(Header)==40 && sizeof(Record)==528);
+static_assert(sizeof(Header)==40 && sizeof(NdifRegion)==24 && sizeof(Record)==528);
 
 uint32_t Crc(const void* bytes, unsigned length)
 {
@@ -52,13 +59,13 @@ HANDLE ImageHandle(int fd)
     return fd >= 0 && fd < 0x10000000
         ? reinterpret_cast<HANDLE>(_get_osfhandle(fd)) : INVALID_HANDLE_VALUE;
 }
-std::wstring StreamPath(const std::wstring& path)
+std::wstring StreamPath(const std::wstring& path,bool ndif)
 {
     const size_t leaf = path.find_last_of(L"\\/");
     if ((leaf == path.npos && path.find(L':') != path.npos) ||
         (leaf != path.npos && path.find(L':',leaf+1) != path.npos))
         return {};
-    return path + Stream;
+    return path + (ndif?NdifStream:Stream);
 }
 bool SupportsRecovery(HANDLE image)
 {
@@ -67,7 +74,7 @@ bool SupportsRecovery(HANDLE image)
            GetVolumeInformationByHandleW(image,nullptr,0,nullptr,nullptr,&flags,nullptr,0) &&
            (flags & FILE_NAMED_STREAMS)!=0;
 }
-std::wstring StreamPath(HANDLE image)
+std::wstring StreamPath(HANDLE image,bool ndif)
 {
     if (image==INVALID_HANDLE_VALUE || GetFileType(image)!=FILE_TYPE_DISK) return {};
     const auto required = GetFinalPathNameByHandleW(image,nullptr,0,FILE_NAME_OPENED);
@@ -76,7 +83,7 @@ std::wstring StreamPath(HANDLE image)
     const auto used = GetFinalPathNameByHandleW(image,path.data(),required,FILE_NAME_OPENED);
     Check(used && used<required,"Cannot locate the classic HFS image recovery stream");
     path.resize(used);
-    return StreamPath(path);
+    return StreamPath(path,ndif);
 }
 uint64_t Length(HANDLE file)
 {
@@ -132,9 +139,18 @@ bool Missing(DWORD error)
     return error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND||
            error==ERROR_INVALID_NAME||error==ERROR_NOT_SUPPORTED;
 }
-bool ValidSector(uint64_t offset,uint64_t length)
+bool ValidSector(uint64_t offset,const ImageRange& range)
 {
-    return offset%Sector==0 && offset<=length && length-offset>=Sector;
+    if(offset<range.offset)return false;
+    const auto relative=offset-range.offset;
+    return relative%Sector==0 && relative<=range.length && range.length-relative>=Sector;
+}
+ImageRange CheckedRange(HANDLE image,uint64_t size,const ImageRange* ndif)
+{
+    if(!ndif)return {reinterpret_cast<uintptr_t>(image),0,size};
+    Check(ndif->offset<=size&&ndif->length<=size-ndif->offset,
+          "Classic HFS recovery range lies outside the NDIF container");
+    return *ndif;
 }
 
 struct Journal {
@@ -142,21 +158,28 @@ struct Journal {
     HANDLE image;
     Handle stream;
     Header header;
+    ImageRange range;
     uint64_t end=sizeof(Header);
     std::unordered_set<uint64_t> recorded;
     Journal* previous=nullptr;
     bool faulted=false;
     bool attached=false;
     bool committing=false;
-    Journal(int imageFd,HANDLE imageHandle,const std::wstring& path)
+    Journal(int imageFd,HANDLE imageHandle,const std::wstring& path,const ImageRange* ndif)
         : fd(imageFd),image(imageHandle),
           stream(CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,0,nullptr)),
-          header(Identify(image))
+          header(Identify(image)),range(CheckedRange(image,header.size,ndif))
     {
         Check(bool(stream),"Cannot open the classic HFS recovery stream");
         SameFile(stream.value,header);
         Check(Length(stream.value)==0,"A classic HFS operation already needs recovery");
         WriteAt(stream.value,0,&header,sizeof(header));
+        if(ndif){
+            NdifRegion region{range.offset,range.length,0,0};
+            region.crc=Crc(&region,offsetof(NdifRegion,crc));
+            WriteAt(stream.value,end,&region,sizeof(region));
+            end+=sizeof(region);
+        }
         Check(FlushFileBuffers(stream.value)!=FALSE,"Cannot flush the classic HFS recovery header");
     }
     void Append(Record& record)
@@ -168,7 +191,9 @@ struct Journal {
     }
     void Before(uint64_t offset)
     {
-        Check(!faulted&&ValidSector(offset,header.size),"Classic HFS recovery cannot log this sector");
+        Check(!faulted&&offset<=range.length&&range.length-offset>=Sector&&offset%Sector==0,
+              "Classic HFS recovery cannot log this sector");
+        offset+=range.offset;
         if (!recorded.insert(offset).second) return;
         Record record{};
         record.offset=offset;
@@ -195,9 +220,9 @@ Journal* ForFd(int fd)
         if (journal->fd==fd) return journal;
     return nullptr;
 }
-int Recover(HANDLE image,int writable)
+int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJournal=false)
 {
-    const auto path=StreamPath(image);
+    const auto path=StreamPath(image,ndif!=nullptr);
     if (path.empty()) return 0;
     Handle stream(CreateFileW(path.c_str(),GENERIC_READ|(writable?GENERIC_WRITE:0),
                               writable?0:(FILE_SHARE_READ|FILE_SHARE_WRITE),nullptr,OPEN_EXISTING,0,nullptr));
@@ -206,27 +231,40 @@ int Recover(HANDLE image,int writable)
     const auto size=Length(stream.value);
     if (!size) return 0;
     const auto identity=Identify(image);
+    auto range=CheckedRange(image,identity.size,ndif);
     SameFile(stream.value,identity);
     Header header{};
-    if (size<sizeof(header)) {
+    const uint64_t prefix=sizeof(header)+(ndif?sizeof(NdifRegion):0);
+    if (size<prefix) {
         // No image write can occur while the initial header is incomplete.
-        if (writable) Check(Clear(stream.value),"Cannot clear an incomplete classic HFS recovery header");
+        if (writable&&!keepJournal) Check(Clear(stream.value),"Cannot clear an incomplete classic HFS recovery header");
         return 0;
     }
     ReadAt(stream.value,0,&header,sizeof(header));
     Check(memcmp(&identity,&header,sizeof(header))==0,"Classic HFS recovery header or image identity is invalid");
-    const auto count=(size-sizeof(header))/sizeof(Record);
-    Check(count<=header.size/Sector+1,"Classic HFS recovery contains too many sector records");
+    if(ndif){
+        NdifRegion region{};
+        ReadAt(stream.value,sizeof(header),&region,sizeof(region));
+        Check(region.crc==Crc(&region,offsetof(NdifRegion,crc))&&
+              region.offset>=range.offset&&(region.offset-range.offset)%Sector==0&&
+              region.offset-range.offset<=range.length&&
+              region.length<=range.length-(region.offset-range.offset),
+              "Classic HFS recovery partition lies outside the stored NDIF payload");
+        range.offset=region.offset;
+        range.length=region.length;
+    }
+    const auto count=(size-prefix)/sizeof(Record);
+    Check(count<=range.length/Sector+1,"Classic HFS recovery contains too many sector records");
     bool committed=false;
     for (uint64_t i=0;i<count;++i) {
         Record record{};
-        ReadAt(stream.value,sizeof(header)+i*sizeof(record),&record,sizeof(record));
+        ReadAt(stream.value,prefix+i*sizeof(record),&record,sizeof(record));
         Check(record.crc==Crc(&record,offsetof(Record,crc)),"Classic HFS recovery record is damaged");
         if (record.offset==Committed) {
-            Check(size==sizeof(header)+(i+1)*sizeof(record),"Invalid classic HFS recovery commit record");
+            Check(size==prefix+(i+1)*sizeof(record),"Invalid classic HFS recovery commit record");
             committed=true;
         } else {
-            Check(ValidSector(record.offset,header.size),"Classic HFS recovery sector lies outside the image");
+            Check(ValidSector(record.offset,range),"Classic HFS recovery sector lies outside the image");
         }
     }
     if (committed && !writable) return 0;
@@ -236,7 +274,7 @@ int Recover(HANDLE image,int writable)
         // records first, then replay; a second interruption can replay again.
         for (uint64_t i=count;i>0;--i) {
             Record record{};
-            ReadAt(stream.value,sizeof(header)+(i-1)*sizeof(record),&record,sizeof(record));
+            ReadAt(stream.value,prefix+(i-1)*sizeof(record),&record,sizeof(record));
             WriteAt(image,record.offset,record.bytes,sizeof(record.bytes));
 #ifdef HFV_TESTING
             if (crashPhase==5&&FlushFileBuffers(image)) Crash(5);
@@ -244,21 +282,23 @@ int Recover(HANDLE image,int writable)
         }
         Check(FlushFileBuffers(image)!=FALSE,"Cannot flush recovered classic HFS sectors");
     }
-    Check(Clear(stream.value),"Cannot clear the classic HFS recovery stream");
+    if(!keepJournal)Check(Clear(stream.value),"Cannot clear the classic HFS recovery stream");
     return 1;
 }
 }
 
 struct Transaction::State : Journal { using Journal::Journal; };
-bool Transaction::Supported(int fd) { return SupportsRecovery(ImageHandle(fd)); }
-Transaction::Transaction(int fd)
+bool Transaction::Supported(int fd,const ImageRange* ndif) {
+    return SupportsRecovery(ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd));
+}
+Transaction::Transaction(int fd,const ImageRange* ndif)
 {
-    const auto image=ImageHandle(fd);
+    const auto image=ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd);
     if (!SupportsRecovery(image)) return;
-    const auto path=StreamPath(image);
+    const auto path=StreamPath(image,ndif!=nullptr);
     if (path.empty()) return;
     Check(!ForFd(fd),"A classic HFS recovery transaction is already active");
-    state_=std::make_unique<State>(fd,image,path);
+    state_=std::make_unique<State>(fd,image,path,ndif);
     state_->previous=active;
     state_->attached=true;
     active=state_.get();
@@ -285,9 +325,9 @@ void Transaction::Commit()
     Clear(state_->stream.value);
     Detach();
 }
-bool ClassicHfsRecovery::Pending(const std::wstring& path)
+bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
 {
-    const auto name=StreamPath(path);
+    const auto name=StreamPath(path,ndif);
     if (name.empty()) return false;
     Handle stream(CreateFileW(name.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
                               nullptr,OPEN_EXISTING,0,nullptr));
@@ -295,6 +335,10 @@ bool ClassicHfsRecovery::Pending(const std::wstring& path)
     if (!stream && GetLastError()==ERROR_DIRECTORY) return false;
     if (!stream) return false; // The normal image opener reports host access errors.
     return Length(stream.value)!=0;
+}
+bool ClassicHfsRecovery::RecoverNdif(const ImageRange& range,bool writable,bool keepJournal)
+{
+    return Recover(reinterpret_cast<HANDLE>(range.handle),writable,&range,keepJournal)>0;
 }
 #ifdef HFV_TESTING
 void Transaction::CrashAt(unsigned phase) { crashPhase=phase; }

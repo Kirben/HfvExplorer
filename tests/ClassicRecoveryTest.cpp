@@ -8,6 +8,9 @@
 #include "WorkerTransport.h"
 #include "VolumeCoordinator.h"
 #include "ReadOnlyCdBackend.h"
+#include "DiskImageOpen.h"
+#include "DiskPartitions.h"
+#include "NdifImage.h"
 #include <cstdio>
 #include <vector>
 extern "C" {
@@ -413,6 +416,123 @@ void MetadataRecovery(const CString& root,const Bytes& original,FILE* report)
     fprintf(report,"PASS: classic HFS metadata-only file and folder edits and merge timestamps recover before and after commit, preserving both forks and unrelated entries.\n");
 }
 
+void VerifyOutside(const Bytes& before,const Bytes& after,uint64_t start,uint64_t length)
+{
+    Check(before.size()==after.size()&&start<=before.size()&&length<=before.size()-start&&
+          std::equal(before.begin(),before.begin()+size_t(start),after.begin())&&
+          std::equal(before.begin()+size_t(start+length),before.end(),after.begin()+size_t(start+length)),
+          "NDIF recovery or commit changed bytes outside the selected HFS partition");
+}
+void NdifRecovery(const CString& root,FILE* report)
+{
+    const wchar_t* fixtures=_wgetenv(L"HFV_NDIF_INTERCHANGE_FIXTURES");
+    if(!fixtures||!*fixtures){
+        fprintf(report,"SKIP: set HFV_NDIF_INTERCHANGE_FIXTURES to the shared NDIF Interchange folder.\n");
+        return;
+    }
+    for(unsigned partitioned:{0u,1u}){
+        const auto fixture=std::wstring(fixtures)+(partitioned?L"\\partitioned-classic.bin":L"\\writable-HFS.bin");
+        CString seed;
+        seed.Format("%s\\ndif-seed-%u.bin",root.GetString(),partitioned);
+        const auto seedPath=VolumeCoord::Wide(seed.GetString());
+        Check(CopyFileW(fixture.c_str(),seedPath.c_str(),TRUE)!=FALSE,"copy the shared writable NDIF sample to scratch");
+        const auto original=Load(seed);
+        uint64_t start=0,length=0;
+        {
+            auto opened=DiskImage::Open(seedPath,{});
+            const auto backing=Ndif::RecoveryRange(*opened.source);
+            const auto volume=DiskPartitions::FindLegacy(*opened.source);
+            Check(opened.container==DiskImage::Container::Ndif&&backing&&volume&&
+                  volume->filesystem==DiskPartitions::Filesystem::Classic&&
+                  bool(volume->partition.index)==bool(partitioned),"shared NDIF sample has the wrong layout");
+            start=backing->offset+(partitioned?volume->partition.offset:0);
+            length=partitioned?volume->partition.length:backing->length;
+        }
+        {
+            auto volume=MacBrowser::OpenImage(seedPath);
+            Check(volume&&volume->Writable()&&!strcmp(volume->Kind(),"HFS"),"open shared RdWr scratch image writable");
+            Put(*volume,false);
+            Put(*volume,true,false,2,u"Unrelated");
+            if(partitioned){
+                const auto folder=volume->MakeDirectory(2,u"Tree");
+                Put(*volume,false,false,folder,u"Child");
+            }
+            volume->Close();
+        }
+        const auto before=Load(seed);
+        VerifyOutside(original,before,start,length);
+        for(const auto* action:{L"overwrite",L"delete"}){
+            for(unsigned phase:{2u,3u}){
+                CString image;
+                image.Format("%s\\ndif-%u-%ls-%u.bin",root.GetString(),partitioned,action,phase);
+                Save(image,before);
+                const auto path=VolumeCoord::Wide(image.GetString());
+                CrashChild(image,phase,action);
+                Check(ClassicHfsRecovery::Pending(path,true)&&!ClassicHfsRecovery::Pending(path)&&Load(image)!=before,
+                      "interrupted NDIF change did not leave a container recovery record");
+                if(!partitioned&&phase==2&&wcscmp(action,L"overwrite")==0){
+                    // A changed wrapper must leave the pending transaction intact.
+                    const auto replaceHeaderByte=[&](BYTE value){
+                        CFile file;
+                        Check(file.Open(image,CFile::modeWrite|CFile::shareExclusive)!=FALSE,
+                              "open scratch NDIF header");
+                        file.Write(&value,1);
+                        file.Flush();
+                    };
+                    replaceHeaderByte(0x7f);
+                    const auto damaged=Load(image);
+                    bool rejected=false;
+                    try { MacBrowser::OpenImage(path); }
+                    catch(const HfsPlus::Error&){rejected=true;}
+                    Check(rejected&&ClassicHfsRecovery::Pending(path,true)&&Load(image)==damaged,
+                          "missing NDIF wrapper did not fence pending recovery");
+                    replaceHeaderByte(before[0]);
+                }
+                auto volume=MacBrowser::OpenBrowserImage(path);
+                Check(volume&&volume->Writable()&&!strcmp(volume->Kind(),"HFS"),"browser did not recover writable NDIF");
+                MacBrowser::Entry item{};
+                if(phase==3&&wcscmp(action,L"delete")==0)
+                    Check(!volume->FindChild(2,u"Document",item),"committed delete returned after reopening NDIF");
+                else VerifyFile(*volume,2,u"Document",phase==3);
+                VerifyFile(*volume,2,u"Unrelated",true);
+                volume.reset();
+                const auto after=Load(image);
+                Check(!ClassicHfsRecovery::Pending(path,true),"NDIF recovery left a pending record");
+                VerifyOutside(before,after,start,length);
+                if(phase==2)Check(after==before,"interrupted NDIF change did not restore the exact container bytes");
+            }
+        }
+        if(partitioned){
+            const CString image=root+"\\ndif-worker-delete.bin";
+            Save(image,before);
+            const auto path=VolumeCoord::Wide(image.GetString());
+            auto volume=MacBrowser::OpenBrowserImage(path);
+            const auto pid=VolumeSession::VolumeSessionPidForTest(volume);
+            const auto tree=Find(*volume,2,u"Tree");
+            VolumeSession::CrashVolumeSessionDuringRemoveTreeForTest(volume);
+            bool crashed=false;
+            try{Storage::Job job;MacBrowser::RemoveTree(*volume,tree,job,true);}
+            catch(const HfsPlus::Error&){crashed=true;}
+            Check(crashed&&WorkerTransport::lastExitCode==96&&ClassicHfsRecovery::Pending(path,true),
+                  "NDIF worker did not stop during recursive deletion");
+            volume->Reload();
+            Check(volume->Writable()&&VolumeSession::VolumeSessionPidForTest(volume)!=pid,
+                  "NDIF worker did not resume writable after interrupted delete");
+            VerifyFile(*volume,Find(*volume,2,u"Tree"),u"Child",false);
+            VerifyFile(*volume,2,u"Unrelated",true);
+            bool cancelled=false;
+            try{Put(*volume,true,true);}
+            catch(const Storage::Cancelled&){cancelled=true;}
+            Check(cancelled&&volume->Writable(),"NDIF cancelled overwrite did not retain writable access");
+            VerifyFile(*volume,2,u"Document",false);
+            volume.reset();
+            Check(!ClassicHfsRecovery::Pending(path,true)&&Load(image)==before,
+                  "NDIF worker recovery or cancellation altered the original container");
+        }
+    }
+    fprintf(report,"PASS: shared writable NDIF images recover interrupted overwrites and deletes, including partitioned NDIF, worker restart, and cancelled overwrite.\n");
+}
+
 }
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -553,6 +673,7 @@ int RunClassicRecoveryTest(const char* directory)
         RenameRecovery(root,original,report);
         CreationRecovery(root,original,report);
         MetadataRecovery(root,original,report);
+        NdifRecovery(root,report);
     }catch(const std::exception& error){
         fprintf(report,"FAIL: %s\n",error.what());
         result=1;
