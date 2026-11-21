@@ -4327,6 +4327,33 @@ int RunApfsContainerTest(const char* directory)
                   readForks(moved)==actualForks&&published->GetAttributes(moved.id)==ordinary.attributes,
                   "APFS in-place move changed the browser ID, forks, or metadata");
             fprintf(report,"PASS: same-volume APFS cut and paste moves a regular file in place on a macOS image.\n");
+            linkToTarget.name=converted.name;
+            linkToTarget.expectedDestinationIdentity=converted.identity;
+            published->PutSymbolicLink(2,linkToTarget,targetName,createLink);
+            const auto beforeMoveLink=published->Stat(converted.id);
+            cancelledMove.cancel();
+            bool linkMoveStopped=false;
+            try{published->MoveHereForJob(*published,beforeMoveLink.id,moveFolder,beforeMoveLink,cancelledMove);}
+            catch(const Storage::Cancelled&){linkMoveStopped=true;}
+            MacBrowser::Entry movedLink;
+            Check(linkMoveStopped&&published->FindChild(2,beforeMoveLink.name,movedLink)&&
+                  movedLink.id==beforeMoveLink.id&&!published->FindChild(moveFolder,beforeMoveLink.name,movedLink),
+                  "Cancelled APFS symbolic-link move changed either folder");
+            auto cutLink=FileOperations::Location::Mounted(published,beforeMoveLink.id);
+            cutLink.cut=true;
+            auto moveLink=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {cutLink},FileOperations::Location::Mounted(published,moveFolder)});
+            Check(WaitForSingleObject(moveLink.Job()->event(),15000)==WAIT_OBJECT_0,"APFS symbolic-link move timed out");
+            const auto linkMoveResult=moveLink.Job()->result();
+            Check(!linkMoveResult.code,linkMoveResult.message.c_str());
+            Check(!published->FindChild(2,beforeMoveLink.name,movedLink)&&
+                  published->FindChild(moveFolder,beforeMoveLink.name,movedLink)&&movedLink.id==beforeMoveLink.id&&
+                  movedLink.symbolicLink&&movedLink.created==beforeMoveLink.created&&movedLink.modified==beforeMoveLink.modified&&
+                  published->SymbolicLinkTarget(movedLink.id)==std::optional<Bytes>(targetName),
+                  "APFS in-place move changed the symbolic-link inode or stored target");
+            published->Read(imported.id,0,0,unrelated.data(),unrelated.size());
+            Check(unrelated==importedBytes,"APFS in-place symbolic-link move changed the referenced file");
+            fprintf(report,"PASS: same-volume APFS cut and paste moves a symbolic link in place without following it.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.

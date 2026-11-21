@@ -2951,8 +2951,8 @@ CatalogWritePlan PrepareCatalogMutation(
                       Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
                       "Unsupported APFS hard-linked edit");
             }
-            Check(!moving||(kind==CatalogKind::RegularFile&&!siblingId),
-                  "APFS in-place moves require a regular file with one name");
+            Check(!moving||(!siblingId&&(kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink)),
+                  "APFS in-place moves require a regular file with one name or a symbolic link");
             directoryRecord=i;
         }
         Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");

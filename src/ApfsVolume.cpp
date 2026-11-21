@@ -1292,7 +1292,7 @@ public:
             const auto& item=At(id);
             const auto& folder=At(parent);
             return item.entry.parent!=parent&&!item.entry.directory&&!item.entry.hardLink&&
-                   !item.symlink&&item.entry.readError.empty()&&folder.oid&&folder.entry.directory&&
+                   (item.symlink||item.entry.readError.empty())&&folder.oid&&folder.entry.directory&&
                    item.mount==folder.mount&&!mounts[item.mount].snapshotCreated;
         });
     }
