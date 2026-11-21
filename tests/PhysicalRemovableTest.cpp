@@ -635,6 +635,7 @@ std::shared_ptr<MacBrowser::Volume> OpenUndoDisk(const std::string& path,bool zi
     auto sibling=std::make_shared<Bytes>(4096,0x47);
     auto device=zip?Apm(*api,Load(path),sibling):api->Add(L"USB raw HFS",Load(path));
     const auto map=zip?*device->segments.at(0):Bytes{};
+    if(zip)device->device.number=101;
     device->writable=true;
     device->persist=[path](uint64_t at,DWORD count,const void* data){PersistPhysicalWrite(path,at,count,data);};
     auto volumes=Removable::Open(device->device,api);
@@ -684,6 +685,19 @@ void CrashMedia(const std::string& path,const std::string& adapter,unsigned phas
 Storage::Result MoveToOrFromDisk(const std::string& path,const std::string& adapter,bool persistent)
 {
     const auto imagePath=VolumeCoord::Wide(path+".image.dsk");
+    if(adapter=="move-to-windows"||adapter=="move-from-windows"||adapter=="move-disk-pair"){
+        const bool fromWindows=adapter=="move-from-windows",pair=adapter=="move-disk-pair";
+        auto disk=OpenUndoDisk(path,false);
+        const auto folder=VolumeCoord::Wide(path+".windows");
+        auto from=fromWindows?FileOperations::Location::Windows(folder+L"\\Hello"):
+                              FileOperations::Location::Mounted(disk,Find(*disk,2,u"Hello"));
+        auto target=pair?OpenUndoDisk(path+".peer",true):fromWindows?disk:nullptr;
+        auto to=target?FileOperations::Location::Mounted(target,2):FileOperations::Location::Windows(folder);
+        from.cut=true;
+        Storage::Job job;
+        FileOperations::Completion completion;
+        return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{{from},to},job,completion);
+    }
     auto disk=OpenUndoDisk(path,adapter.find("zip")!=std::string::npos);
     auto image=persistent?MacBrowser::OpenBrowserImage(imagePath):MacBrowser::OpenImage(imagePath);
     Check(image&&image->Writable(),"open writable image for a coordinated removable move");
@@ -772,6 +786,56 @@ void CheckCoordinatedDiskMoves(const std::string& root,const Bytes& populated,FI
         }
     }
     fprintf(report,"PASS: image-to-Zip and USB-to-image moves agree before and after the shared decision, preserve both forks, and complete through a persistent image worker.\n");
+    for(const std::string adapter:{"move-to-windows","move-from-windows","move-disk-pair"}){
+        const bool fromWindows=adapter=="move-from-windows",pair=adapter=="move-disk-pair";
+        const auto& initial=fromWindows?*empty:populated;
+        for(const unsigned phase:{8U,9U,0U}){
+            const auto path=root+"\\"+adapter+"-"+std::to_string(phase)+".dsk";
+            WriteFixture(path,0,initial.data(),DWORD(initial.size()),true);
+            if(pair)WriteFixture(path+".peer",0,empty->data(),DWORD(empty->size()),true);
+            const auto folder=VolumeCoord::Wide(path+".windows");
+            if(!pair){
+                Check(CreateDirectoryW(folder.c_str(),nullptr)!=FALSE,"create NTFS removable move fixture");
+                if(fromWindows){
+                    auto host=MacBrowser::OpenWindows(folder);
+                    MacBrowser::Entry entry;
+                    entry.name=u"Hello";entry.forks[0].size=5003;entry.forks[1].size=723;
+                    host->Put(2,entry,[](unsigned fork,uint64_t at,void* data,size_t n){Payload(fork,at,data,n);},false);
+                }
+            }
+            if(phase){
+                CrashMedia(path,adapter,phase);
+                Check(RemovableUndo::Pending(L"USB raw HFS"),"interrupted move lost the disk recovery journal");
+                const auto interrupted=Load(path);
+                auto foreign=initial;
+                foreign.back()^=0x5a;
+                WriteFixture(path,0,foreign.data(),DWORD(foreign.size()),true);
+                Reject([&]{OpenUndoDisk(path,false);},"paired recovery accepted the wrong removable disk");
+                Check(*Load(path)==foreign&&RemovableUndo::Pending(L"USB raw HFS"),"wrong disk was changed or recovery was lost");
+                if(!pair){
+                    MacBrowser::Entry hostEntry;
+                    auto host=MacBrowser::OpenWindows(folder);
+                    Check(host->FindChild(2,u"Hello",hostEntry)==!fromWindows,
+                          "rejecting a replacement disk changed the Windows side");
+                }
+                WriteFixture(path,0,interrupted->data(),DWORD(interrupted->size()),true);
+            }else{
+                const auto result=MoveToOrFromDisk(path,adapter,false);
+                if(result.code||!result.moved)throw HfsPlus::Error("Paired removable move: "+result.message);
+            }
+            auto disk=OpenUndoDisk(path,false);
+            auto peer=pair?OpenUndoDisk(path+".peer",true):MacBrowser::OpenWindows(folder);
+            const bool onDisk=(phase==8)?!fromWindows:fromWindows;
+            MacBrowser::Entry actual;
+            Check(disk->FindChild(2,u"Hello",actual)==onDisk&&peer->FindChild(2,u"Hello",actual)!=onDisk,
+                  "paired removable recovery retained the file on the wrong endpoint");
+            auto& owner=onDisk?*disk:*peer;
+            VerifyMovedPayload(owner,owner.Stat(Find(owner,2,u"Hello")));
+            Check(!RemovableUndo::Pending(L"USB raw HFS")&&(!pair||!RemovableUndo::Pending(L"Zip APM")),
+                  "paired recovery did not clear both device journals");
+        }
+    }
+    fprintf(report,"PASS: NTFS and separate removable disks share a verified move decision; swapped media is refused before and after commit.\n");
 }
 
 void CheckDurableMedia(const std::string& root,FILE* report)

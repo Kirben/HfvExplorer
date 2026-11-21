@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "RemovableUndo.h"
 #include "ClassicHfsRecovery.h"
+#include "WindowsMoveUndo.h"
 #include "OperationCompletion.h"
 #include <bcrypt.h>
 #include <shlobj.h>
@@ -278,8 +279,10 @@ void Log::BeforeWrite(uint64_t offset,DWORD count,const void* before,const void*
 }
 void Log::Commit()
 {
-    if(!state_->move.empty())
+    if(!state_->move.empty()){
         Check(ClassicHfsRecovery::MoveIsCommitted(state_->move),"The removable-media move decision has not committed");
+        WindowsMoveUndo::Recover(state_->move,true);
+    }
 #ifdef HFV_TESTING
     TestCheckpoint(4);
 #endif
@@ -316,12 +319,13 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
 
     uint64_t firstRecord=sizeof(header);
     bool sharedCommit=false;
+    std::string move;
     if(HasMove(header)){
         if(size-firstRecord<MoveIdSize+sizeof(uint32_t)){
             Clear(file.handle);
             return;
         }
-        std::string move(MoveIdSize,0);
+        move.resize(MoveIdSize);
         uint32_t crc=0;
         Load(file.handle,firstRecord,move.data(),DWORD(move.size()));
         Load(file.handle,firstRecord+move.size(),&crc,sizeof(crc));
@@ -338,8 +342,8 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
         if(record.offset==CommitOffset){
             Check((!HasMove(header)||sharedCommit)&&!record.count&&size-at==sizeof(record)&&
                   record.crc==Crc(&record,offsetof(Record,crc)),"Invalid removable-media commit marker");
-            Clear(file.handle);
-            return;
+            if(!HasMove(header)){Clear(file.handle);return;}
+            break;
         }
         Check(ValidWrite(range,record.offset,record.count),"Invalid removable-media undo extent");
         const uint64_t data=at+sizeof(record),length=uint64_t(record.count)*2;
@@ -355,7 +359,7 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
         }
         at=data+length;
     }
-    if(sharedCommit||sectors.empty()){Clear(file.handle);return;}
+    if(move.empty()&&sectors.empty()){Clear(file.handle);return;}
     Bytes first(range.sector),previous(range.sector),next(range.sector);
     const auto current=Fingerprint(range,read,[&](uint64_t at,DWORD count,BYTE* bytes){
         for(auto iter=sectors.lower_bound(at);iter!=sectors.end()&&iter->first-at<count;++iter){
@@ -363,9 +367,13 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
             auto sector=bytes+(iter->first-at);
             Load(file.handle,patch.first,first.data(),range.sector);
             patch.restore=memcmp(sector,first.data(),range.sector)!=0;
-            if(patch.restore){
-                Load(file.handle,patch.before,previous.data(),range.sector);
+            if(sharedCommit||patch.restore)
                 Load(file.handle,patch.after,next.data(),range.sector);
+            if(sharedCommit){
+                if(memcmp(sector,next.data(),range.sector))
+                    throw Storage::MediaChanged("Insert the original committed disk to finish move recovery.");
+            }else if(patch.restore){
+                Load(file.handle,patch.before,previous.data(),range.sector);
                 for(DWORD i=0;i<range.sector;++i)
                     if(sector[i]!=first[i]&&sector[i]!=previous[i]&&sector[i]!=next[i])
                         throw Storage::MediaChanged("This disk does not match the interrupted write. Insert the original media to recover it.");
@@ -375,6 +383,9 @@ void Recover(const std::wstring& device,const Range& range,const Read& read,cons
     });
     if(current!=header.original)
         throw Storage::MediaChanged("This disk does not match the interrupted write. Insert the original media to recover it.");
+    // Coordinate Windows replay only after verifying the original disk.
+    if(!move.empty())WindowsMoveUndo::Recover(move,sharedCommit);
+    if(sharedCommit){Clear(file.handle);return;}
     Buffer aligned;
     for(auto sector=sectors.begin();sector!=sectors.end();){
         if(!sector->second.restore){++sector;continue;}

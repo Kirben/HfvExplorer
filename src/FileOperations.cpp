@@ -136,6 +136,11 @@ struct TransferPlan {
  TransferAdapter adapter;
 };
 
+bool CanCoordinateRemovable(const Volume& volume)
+{
+ const auto* media=dynamic_cast<const Storage::MediaWriteBackend*>(&volume);
+ return media&&media->SupportsCoordinatedMove();
+}
 bool CanCoordinateClassicMove(const OrdinaryCopy& copy)
 {
  const auto first=copy.sources.front().Volume();
@@ -143,13 +148,15 @@ bool CanCoordinateClassicMove(const OrdinaryCopy& copy)
  if(!first||!target||first->ResourceKey()==target->ResourceKey()||
     strcmp(first->Kind(),"HFS")||strcmp(target->Kind(),"HFS"))return false;
  const auto image=[](Volume& volume){return !ExecutionFor(volume).processLocal;};
- const auto removable=[](Volume& volume){
-  const auto* media=dynamic_cast<const Storage::MediaWriteBackend*>(&volume);
-  return media&&media->SupportsCoordinatedMove();
- };
- if(image(*first)){
-  if(!image(*target)&&!removable(*target))return false;
- }else if(!removable(*first)||!image(*target))return false;
+ if((!image(*first)&&!CanCoordinateRemovable(*first))||
+    (!image(*target)&&!CanCoordinateRemovable(*target)))return false;
+ if(!image(*first)&&!image(*target)){
+  const auto* source=WorkerEndpoint::Find(*first);
+  const auto* destination=WorkerEndpoint::Find(*target);
+  if(!source||!destination)return false;
+  const auto from=source->WorkerDescription(),to=destination->WorkerDescription();
+  if(from.path.empty()||to.path.empty()||_wcsicmp(from.path.c_str(),to.path.c_str())==0)return false;
+ }
  return std::all_of(copy.sources.begin(),copy.sources.end(),[&](const Location& item){
   return item.cut&&item.Volume()==first;
  });
@@ -158,17 +165,18 @@ bool CanCoordinateWindowsMove(const OrdinaryCopy& copy,
                               const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,
                               const Volume& target)
 {
- const auto classicImage=[](const Volume& volume){
-  return !strcmp(volume.Kind(),"HFS")&&volume.Writable()&&!ExecutionFor(volume).processLocal;
+ const auto classicParticipant=[](const Volume& volume){
+  return !strcmp(volume.Kind(),"HFS")&&volume.Writable()&&
+         (!ExecutionFor(volume).processLocal||CanCoordinateRemovable(volume));
  };
  const auto first=copy.sources.front().Volume();
- if(copy.destination.IsWindows()&&first&&classicImage(*first)){
+ if(copy.destination.IsWindows()&&first&&classicParticipant(*first)){
   return WindowsMoveUndo::Supported(target.HostPath(2))&&
          std::all_of(copy.sources.begin(),copy.sources.end(),[&](const Location& item){
    return item.cut&&item.Volume()==first;
   });
  }
- if(!copy.destination.Volume()||!classicImage(target)||!copy.sources.front().IsWindows())return false;
+ if(!copy.destination.Volume()||!classicParticipant(target)||!copy.sources.front().IsWindows())return false;
  const auto root=sources.front().first->HostPath(2);
  if(!WindowsMoveUndo::Supported(root))return false;
  for(size_t i=0;i<sources.size();++i){
@@ -223,6 +231,11 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
  bool coordinated=!transfer.adapter&&CanCoordinateClassicMove(request);
+ // A Windows cut can join the disk transaction once its folder is resolved.
+ const bool deferDiskScope=target.Volume()&&CanCoordinateRemovable(*target.Volume())&&
+     std::all_of(request.sources.begin(),request.sources.end(),[](const Location& item){
+         return item.cut&&item.IsWindows();
+     });
  bool complete=false,inPlace=false;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
@@ -292,13 +305,17 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     if(failure&&rollback==Storage::Rollback::Restored)job.progress(previous);
     else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
     if(failure)std::rethrow_exception(failure);
-   }else complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);
+   }else{
+    const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);};
+    if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);
+    else copy();
+   }
   }
   if(!target.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
  };
  // The coordinator opens both write scopes and retains their undo until it decides.
- if(coordinated)run();
+ if(coordinated||deferDiskScope)run();
  else StorageLocation::WithVerifiedWrite(target,run);
  if(inPlace){
   completion.complete=true;
