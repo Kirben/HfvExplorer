@@ -117,11 +117,16 @@ WritableMap ReadWritableMap(Source& source,const Container& container,uint64_t b
 
 void ProtectKeybags(const Container& container,std::vector<DataRun>& runs)
 {
-    if(!container.writeCipher)return;
-    const auto [block,count]=container.writeCipher->UnlockBlocks();
-    Check(block&&count&&container.keybagBlock&&container.keybagBlocks,"Missing writable APFS keybag");
+    if(!container.keybagBlock&&!container.keybagBlocks)return;
+    Check(container.keybagBlock&&container.keybagBlocks,"Missing writable APFS keybag");
     runs.push_back({container.keybagBlock,container.keybagBlocks});
-    runs.push_back({block,count});
+    const auto protect=[&](const VolumeCipher& cipher){
+        const auto [block,count]=cipher.UnlockBlocks();
+        Check(block&&count&&Range(block,count,container.blockCount),"Invalid APFS volume keybag");
+        runs.push_back({block,count});
+    };
+    if(container.writeCipher)protect(*container.writeCipher);
+    for(const auto& sibling:container.siblingCiphers)protect(*sibling.second);
     std::sort(runs.begin(),runs.end(),[](const auto& a,const auto& b){return a.block<b.block;});
     for(size_t i=1;i<runs.size();++i)
         Check(runs[i].block>=runs[i-1].block&&runs[i].block-runs[i-1].block>=runs[i-1].count,"Overlapping APFS protected blocks");
@@ -1575,7 +1580,7 @@ struct CatalogVolume {
 CatalogVolume ReadCatalogVolume(Source& source,const Container& container,uint64_t selected=0)
 {
     Check(!container.offset&&container.checkpointBlock&&container.blockSize==Block&&
-          (container.writeCipher||(!container.keybagBlock&&!container.keybagBlocks))&&!container.volumes.empty()&&
+          !container.volumes.empty()&&
           (selected||container.volumes.size()==1)&&source.Size()==container.blockCount*Block,
           "APFS writes require a raw image and an unambiguous volume selection");
     const auto oid=selected?selected:container.volumes.front();
@@ -2446,7 +2451,7 @@ void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup,bool allowSna
     const auto features=Le64(volume.data()+40);
     const auto group=allowVolumeGroup&&features==(2|VolumeGroupInodeSpace);
     Check(!memcmp(volume.data()+32,"APSB",4)&&(features==2||group)&&
-          !Le64(volume.data()+48)&&          (encrypted?(Le64(volume.data()+56)==5||Le64(volume.data()+56)==12)&&Le64(volume.data()+264)==8&&
+          !Le64(volume.data()+48)&&(encrypted?(Le64(volume.data()+56)==1||Le64(volume.data()+56)==5||Le64(volume.data()+56)==12)&&Le64(volume.data()+264)==8&&
                      !Le64(volume.data()+976)&&!Le64(volume.data()+216):
                      (Le64(volume.data()+56)==1||Le64(volume.data()+56)==8)&&Le64(volume.data()+264)==1)&&
           Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&Le64(volume.data()+216)<=(allowSnapshot?1u:0u),
@@ -2728,7 +2733,11 @@ SiblingAllocation ReadSiblingAllocation(Source& source,const Container& containe
         if(mapping.oid==selected)continue;
         block(mapping.block);
         const auto volume=ReadObject(source,container,mapping.block,mapping.oid,container.transaction,13);
-        CheckExternalVolume(volume,container.volumes.size()==2);
+        auto sibling=container;
+        sibling.writeCipher.reset();
+        const auto cipher=container.siblingCiphers.find(mapping.oid);
+        if(cipher!=container.siblingCiphers.end())sibling.writeCipher=cipher->second;
+        CheckExternalVolume(volume,container.volumes.size()==2,false,bool(sibling.writeCipher));
         if(InVolumeGroup(volume)||InVolumeGroup(selectedVolume)){
             Check(InVolumeGroup(volume)&&InVolumeGroup(selectedVolume)&&
                   Le16(volume.data()+VolumeRoleOffset)!=Le16(selectedVolume.data()+VolumeRoleOffset)&&
@@ -2740,12 +2749,12 @@ SiblingAllocation ReadSiblingAllocation(Source& source,const Container& containe
         Check(limits.reserve<=container.blockCount-siblings.totalReserve,"Invalid APFS shared volume reserves");
         siblings.totalReserve+=limits.reserve;
         siblings.allocatedReserve+=(std::min)(limits.reserve,limits.used);
-        const auto map=ReadWritableMap(source,container,Le64(volume.data()+128));
+        const auto map=ReadWritableMap(source,sibling,Le64(volume.data()+128));
         block(map.headerBlock);
         block(map.rootBlock);
         for(auto entry:map.leaves)block(entry);
         for(const auto& entry:map.mappings)block(entry.block);
-        const auto catalog=ReadWritableCatalog(source,container,map,Le64(volume.data()+136));
+        const auto catalog=ReadWritableCatalog(source,sibling,map,Le64(volume.data()+136));
         Check(catalog.blocks.size()==map.mappings.size(),"Unsupported APFS sibling catalog mappings");
         const auto snapshots=Le64(volume.data()+152);
         const Node snapshotTree(ReadObject(source,container,snapshots,snapshots,container.transaction,2,16,true),true,{});
@@ -2760,7 +2769,9 @@ SiblingAllocation ReadSiblingAllocation(Source& source,const Container& containe
             if(Le64(record.key.data())>>60!=8)continue;
             Check(record.key.size()==16&&record.value.size()==24,
                   "Invalid APFS sibling file extent");
-            const auto size=Le64(record.value.data()),start=Le64(record.value.data()+8);
+            const auto encoded=Le64(record.value.data());
+            Check(!(encoded>>56)||(sibling.writeCipher&&encoded>>56==1),"Unsupported APFS sibling file extent flags");
+            const auto size=encoded&((uint64_t(1)<<56)-1),start=Le64(record.value.data()+8);
             Check(size&&!(size%Block),"Unsupported APFS sibling file extent");
             if(!start)continue; // Sparse runs own no physical blocks.
             const auto next=std::upper_bound(data.begin(),data.end(),start,
@@ -2914,6 +2925,7 @@ CatalogWritePlan PrepareVolumeRename(Source& source,const Container& current,uin
     for(auto block:volumeMap.leaves)protectedRuns.push_back({block,1});
     protectedRuns.push_back({volumeMap.headerBlock,1});
     protectedRuns.push_back({volumeMap.rootBlock,1});
+    ProtectKeybags(current,protectedRuns);
     std::sort(protectedRuns.begin(),protectedRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
     CatalogWritePlan plan;
     std::vector<DataRun> unused;

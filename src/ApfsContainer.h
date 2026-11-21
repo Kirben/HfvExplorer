@@ -15,6 +15,7 @@ struct Container {
     uint64_t keybagBlock=0,keybagBlocks=0;
     uint64_t writeVolume=0;
     std::shared_ptr<const VolumeCipher> writeCipher;
+    std::map<uint64_t,std::shared_ptr<const VolumeCipher>> siblingCiphers;
 };
 
 // Locate an APFS container and validate its latest complete contiguous checkpoint.

@@ -662,17 +662,18 @@ public:
             if(!unlocked.cipher)throw LockedVolume(true,PasswordHint(*source,container,mount.uuid));
             auto root=ReadInode(Catalog(*source,container,unlocked),2);
             Check(root.entry.directory,"Invalid decrypted APFS root");
+            unlocked.locked=false;
             root.entry.id=item.entry.id;
             root.entry.resolvedId=item.entry.resolvedId;
             root.entry.parent=item.entry.parent;
             root.entry.name=item.entry.name;
             root.entry.identity=item.entry.identity;
             bool canWrite=false;
-            if(source->Writable()&&limitedEdits&&container.volumes.size()==1){
-                auto target=container;
-                target.writeCipher=unlocked.cipher;
+            if(source->Writable()&&limitedEdits){
                 try{
+                    auto target=WriteTarget(unlocked);
                     InspectFreeQueueAllocation(*source,target,unlocked.oid);
+
                     source->Flush();
                     canWrite=true;
                 }catch(const Error&){}
@@ -1145,10 +1146,19 @@ private:
     {
         const auto& folder=At(parent);
         Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
-        Check(!mounts[folder.mount].snapshotCreated,"APFS snapshots are read-only");
+        return WriteTarget(mounts[folder.mount]);
+    }
+
+    Container WriteTarget(const Mounted& mount)
+    {
+        Check(!mount.snapshotCreated,"APFS snapshots are read-only");
+        Check(!mount.locked,"Unlock the APFS volume before writing");
         auto target=container;
-        target.writeVolume=mounts[folder.mount].oid;
-        target.writeCipher=mounts[folder.mount].cipher;
+        target.writeVolume=mount.oid;
+        target.writeCipher=mount.cipher;
+        for(const auto& sibling:mounts)
+            if(sibling.cipher&&sibling.oid!=target.writeVolume)
+                target.siblingCiphers.emplace(sibling.oid,sibling.cipher);
         return target;
     }
 
@@ -1808,7 +1818,7 @@ std::shared_ptr<MacBrowser::Volume> OpenRawBrowserImage(std::unique_ptr<Source>&
     slice(false);
     const auto expected=partition?Probe(*source):whole;
     Check(bool(expected),"The APFS container could not be opened inside the selected partition");
-    const bool encrypted=expected->keybagBlock&&expected->keybagBlocks&&expected->volumes.size()==1&&
+    const bool encrypted=expected->keybagBlock&&expected->keybagBlocks&&
                          expected->blockSize==4096;
     bool limitedEdits=false;
     if(!encrypted)try{

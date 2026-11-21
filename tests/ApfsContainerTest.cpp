@@ -3138,6 +3138,74 @@ int RunApfsContainerTest(const char* directory)
     if(!report)return 2;
     int result=0;
     try{
+        if(const auto fixture=_wgetenv(L"HFV_APFS_LOCKED_FIXTURES")){
+            const auto path=VolumeCoord::Wide(root+"apfs-mixed-encryption-write.img");
+            Storage::Job conversion;
+            const auto source=std::wstring(fixture)+L"\\apfs-encrypted.sparseimage";
+            const auto extracted=Dmg::Convert(source,path,Dmg::Output::RawImage,conversion);
+            Check(!extracted.code,extracted.message.c_str());
+            const Dmg::Password password(L"qnxprobe-apfs-test");
+            constexpr char payload[]="Mixed encryption write verification";
+            const auto payloadPath=VolumeCoord::Wide(root+"apfs-mixed-payload.bin");
+            {
+                auto file=HfsPlus::CreateStagedOutput(payloadPath,512);
+                file->Write(0,payload,sizeof(payload));
+                file->Resize(sizeof(payload));
+                file->PublishTo(payloadPath);
+                file->Keep();
+            }
+            for(const auto* target:{u"SECRETVOL",u"PLAINVOL"}){
+                auto image=MacBrowser::OpenBrowserImage(path);
+                MacBrowser::Entry plain,secret;
+                Check(image&&image->FindChild(2,u"PLAINVOL",plain)&&image->FindChild(2,u"SECRETVOL",secret)&&
+                      !secret.readError.empty(),"Missing mixed APFS volumes or the encrypted volume reopened unlocked");
+                Apfs::Unlock(*image,secret.id,password);
+                const auto verify=[&](const MacBrowser::Entry& volume){
+                    MacBrowser::Entry docs,file;
+                    Check(image->FindChild(volume.id,u"docs",docs)&&image->FindChild(docs.id,u"pattern.bin",file)&&
+                          file.forks[0].size==262144,"Missing mixed APFS sibling data");
+                    Bytes bytes(262144);
+                    image->Read(file.id,0,0,bytes.data(),bytes.size());
+                    for(size_t i=0;i<bytes.size();++i)
+                        Check(bytes[i]==(i*131+17)%253,"Mixed APFS sibling data changed");
+                };
+                verify(plain);
+                verify(secret);
+                const auto selected=secret.name==target?secret:plain;
+                Check(image->Supports().writable,"Mixed APFS container stayed read-only after unlocking");
+                const auto operation=FileOperations::Submit(FileOperations::CreateFolder{
+                    FileOperations::Location::Mounted(image,selected.id),u"Mixed write"});
+                Check(WaitForSingleObject(operation.Job()->event(),15000)==WAIT_OBJECT_0,"Mixed APFS folder creation timed out");
+                const auto result=operation.Job()->result();
+                Check(!result.code,result.message.c_str());
+                MacBrowser::Entry destination;
+                Check(image->FindChild(selected.id,u"Mixed write",destination),"Missing newly created APFS folder");
+                const auto copy=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                    {FileOperations::Location::Windows(payloadPath)},FileOperations::Location::Mounted(image,destination.id)});
+                Check(WaitForSingleObject(copy.Job()->event(),60000)==WAIT_OBJECT_0,"Mixed APFS file copy timed out");
+                const auto copied=copy.Job()->result();
+                Check(!copied.code,copied.message.c_str());
+                image.reset();
+                image=MacBrowser::OpenBrowserImage(path);
+                Check(image&&image->FindChild(2,u"PLAINVOL",plain)&&image->FindChild(2,u"SECRETVOL",secret)&&
+                      !secret.readError.empty(),"Mixed APFS encrypted volume did not reopen locked");
+                Apfs::Unlock(*image,secret.id,password);
+                verify(plain);
+                verify(secret);
+                MacBrowser::Entry created;
+                Check(image->FindChild(secret.name==target?secret.id:plain.id,u"Mixed write",created)&&created.directory,
+                      "Mixed APFS write did not survive reopen and unlock");
+                MacBrowser::Entry imported;
+                Check(image->FindChild(created.id,u"apfs-mixed-payload.bin",imported)&&imported.forks[0].size==sizeof(payload),
+                      "Missing copied file after mixed APFS reopen");
+                char actual[sizeof(payload)];
+                image->Read(imported.id,0,0,actual,sizeof(actual));
+                Check(!memcmp(actual,payload,sizeof(payload)),"Mixed APFS copied file data changed");
+                if(secret.name==target)
+                    Check(!image->FindChild(plain.id,u"Mixed write",created),"Mixed APFS write changed the sibling catalog");
+            }
+            fprintf(report,"PASS: writes to both macOS mixed-encryption APFS volumes survive reopening and unlocking.\n");
+        }
         Memory unknown(4096);
         Check(!Apfs::Probe(unknown),"Unrelated image recognized as APFS");
         auto disk=Raw();
