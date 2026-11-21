@@ -838,7 +838,8 @@ void CheckCoordinatedDiskMoves(const std::string& root,const Bytes& populated,FI
     fprintf(report,"PASS: NTFS and separate removable disks share a verified move decision; swapped media is refused before and after commit.\n");
 }
 
-Storage::Result MoveDriveFloppy(const std::string& file,bool toFloppy,unsigned phase)
+Storage::Result MoveDriveFloppy(const std::string& file,bool toFloppy,unsigned phase,
+                                const std::string& peer={})
 {
     constexpr int drive=0;
     UndoFloppy floppy(file,drive);
@@ -852,6 +853,12 @@ Storage::Result MoveDriveFloppy(const std::string& file,bool toFloppy,unsigned p
     auto windows=FileOperations::Location::Windows(toFloppy?folder+L"\\Hello":folder);
     auto from=toFloppy?windows:mac;
     auto dest=toFloppy?mac:windows;
+    std::shared_ptr<MacBrowser::Volume> volume;
+    if(!peer.empty()){
+        volume=peer=="zip"?OpenUndoDisk(file+".peer",true):MacBrowser::OpenImage(VolumeCoord::Wide(file+".peer"));
+        if(toFloppy)from=FileOperations::Location::Mounted(volume,Find(*volume,2,u"Hello"));
+        else dest=FileOperations::Location::Mounted(volume,2);
+    }
     from.cut=true;
     Storage::Job job;
     job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
@@ -859,7 +866,7 @@ Storage::Result MoveDriveFloppy(const std::string& file,bool toFloppy,unsigned p
         if(!strcmp(step,"data-published"))ExitProcess(97);
     };
     FileOperations::Completion completion;
-    if(toFloppy)
+    if(toFloppy&&peer.empty())
         return FileOperations::ExecuteInWorker(FileOperations::LegacyConversion{
             from,dest,false,true,false,LegacyCopyOptions{},FileOperations::ConversionTarget::Folder},job,completion);
     return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{{from},dest},job,completion);
@@ -931,6 +938,31 @@ void CheckDriveFloppyMoves(const std::string& root,const Bytes& fixture,FILE* re
             }
         }
     }
+    for(const std::string peer:{"image","zip"}){
+        for(bool toFloppy:{false,true}){
+            const auto adapter=std::string("move-drive-")+(toFloppy?"in-":"out-")+peer;
+            for(const unsigned phase:{8U,9U}){
+                const auto file=root+"\\"+adapter+"-"+std::to_string(phase)+".dsk";
+                WriteFixture(file,0,fixture.data(),DWORD(fixture.size()),true);
+                WriteFixture(file+".peer",0,fixture.data(),DWORD(fixture.size()),true);
+                put(*MacBrowser::OpenImage(VolumeCoord::Wide(toFloppy?file+".peer":file)));
+
+                CrashMedia(file,adapter,phase);
+                Check(RemovableUndo::Pending(key),"direct floppy journal was lost");
+                UndoFloppy restored(file,drive);
+                Storage::Job job;
+                const auto found=MediaDiscovery::ProbeDrive(drive,DRIVE_REMOVABLE,true,false,job);
+                auto other=peer=="zip"?OpenUndoDisk(file+".peer",true):MacBrowser::OpenImage(VolumeCoord::Wide(file+".peer"));
+                Check(bool(found.floppy)&&!RemovableUndo::Pending(key),"direct floppy recovery did not complete");
+                const bool onFloppy=(phase==9)==toFloppy;
+                MacBrowser::Entry first,second;
+                Check(found.floppy->FindChild(2,u"Hello",first)==onFloppy&&
+                      other->FindChild(2,u"Hello",second)!=onFloppy,"floppy and HFS peer disagreed on commit");
+                VerifyMovedPayload(onFloppy?*found.floppy:*other,onFloppy?first:second);
+            }
+        }
+    }
+    fprintf(report,"PASS: A: moves with classic HFS images and simulated Zip media recover before and after commit.\n");
     fprintf(report,"PASS: dedicated A: floppy and NTFS moves recover before and after commit, including a crash before the first floppy write; both forks and Finder metadata survive, and swapped disks leave both sides untouched.\n");
 }
 
@@ -991,8 +1023,11 @@ int RunRemovableRecoveryChild(const char* target,const char* adapter,unsigned ph
             ClassicHfsRecovery::Transaction::CrashAt(phase);
             const bool toFloppy=!strcmp(adapter,"move-to-drive-floppy");
             const bool fromFloppy=!strcmp(adapter,"move-from-drive-floppy");
-            const auto result=toFloppy||fromFloppy?MoveDriveFloppy(target,toFloppy,phase):
-                                                   MoveToOrFromDisk(target,adapter,false);
+            const std::string route=adapter;
+            const bool otherPeer=route.find("move-drive-")==0;
+            const auto result=otherPeer?MoveDriveFloppy(target,route.find("move-drive-in-")==0,phase,
+                                                       route.substr(route.find_last_of('-')+1)):
+                toFloppy||fromFloppy?MoveDriveFloppy(target,toFloppy,phase):MoveToOrFromDisk(target,adapter,false);
             if(result.code)throw HfsPlus::Error(result.message);
             return 3;
         }
