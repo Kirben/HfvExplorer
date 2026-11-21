@@ -1170,7 +1170,9 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
               "APFS hard-link source must be a regular file");
         const auto& link=found->second;
         auto& inode=records[link.inodeRecord].value;
-        Check(!Le32(inode.data()+68),"Unlock the APFS file before creating a hard link");
+        const auto flags=Le32(inode.data()+68);
+        Check(!flags||(hardLink->copiedLockedInode&&flags==UserImmutable),
+              "Unlock the APFS file before creating a hard link");
         const auto count=Le32(inode.data()+56);
         Check(count<INT32_MAX,"Too many APFS hard links");
         Set(inode,56,count+1,4);
@@ -2351,7 +2353,8 @@ void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardL
     Check(inodeRecord.has_value()&&!names.empty(),"The APFS hard-link source no longer exists");
     auto& inode=catalog[*inodeRecord].value;
     const auto count=Le32(inode.data()+56);
-    Check((Le16(inode.data()+80)&0170000)==0100000&&!(Le32(inode.data()+68)&(UserImmutable|SystemImmutable))&&
+    const auto forbidden=request.copiedLockedInode?SystemImmutable:(UserImmutable|SystemImmutable);
+    Check((Le16(inode.data()+80)&0170000)==0100000&&!(Le32(inode.data()+68)&forbidden)&&
           names.size()==count&&count<INT32_MAX,"Invalid or locked APFS hard-link source");
     std::set<uint64_t> identifiers;
     for(const auto index:names){

@@ -60,7 +60,7 @@ uint64_t ReplaceCatalogSymlink(HfsPlus::Source&,const Container&,uint64_t parent
                                const HfsPlus::Bytes& target,Storage::Job&,std::optional<FileDates> dates,
                                const FinderBytes&,bool locked,const HfsPlus::Attributes&,bool external=false);
 uint64_t CreateCatalogHardLink(HfsPlus::Source&,const Container&,uint64_t parent,uint64_t inode,
-                               const std::u16string& name,Storage::Job&,uint64_t replaced=0,bool external=false);
+                               const std::u16string& name,Storage::Job&,uint64_t replaced=0,bool external=false,bool copiedLockedInode=false);
 uint64_t CreateEmptyFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,Storage::Job&);
 
 // Stream a data fork from a separate source into a newly created file.

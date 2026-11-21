@@ -947,7 +947,19 @@ public:
     }
     uint32_t MakeHardLinkForTransfer(uint32_t id,uint32_t parent,const std::u16string& name,
                                      bool replace,Storage::Job& job)override{
+        return LinkForTransfer(id,parent,name,replace,job,nullptr);
+    }
+    uint32_t MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t parent,const std::u16string& name,
+                                          bool replace,Storage::Job& job)override{
+        return LinkForTransfer(copied.id,parent,name,replace,job,&copied);
+    }
+private:
+    uint32_t LinkForTransfer(uint32_t id,uint32_t parent,const std::u16string& name,
+                             bool replace,Storage::Job& job,const Entry* copied){
         return WriteMount([&]{
+            const auto& current=At(id).entry;
+            if(copied)Check(current.identity==copied->identity&&current.protectedFile==copied->protectedFile,
+                            "The copied APFS hard-link source changed");
             if(job.cancelled())throw Storage::Cancelled();
             Check(At(id).mount==At(parent).mount,"APFS hard links cannot cross volumes");
             const auto oid=At(id).oid,folder=At(parent).oid;
@@ -961,7 +973,7 @@ public:
                 if(replaced==oid)return destination.id;
             }
             CommitMutation(parent,destination.id,job,[&](auto& job){
-                return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,limitedEdits);
+                return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,limitedEdits,copied&&copied->protectedFile);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
@@ -972,6 +984,7 @@ public:
             throw Error("APFS hard link committed but could not be found after refresh");
         },true);
     }
+public:
     uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{
         return CreateFolder(parent,name,{});
     }
@@ -1056,7 +1069,6 @@ public:
               (!entry.directory||(!entry.hardLink&&!entry.compressed))&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
         Check(!entry.compressed||!entry.forks[1].size,"APFS cannot retain a user resource fork on a compressed file");
-        Check(!entry.hardLink||!entry.protectedFile,"APFS copying cannot preserve locked hard-link groups yet");
         ValidateWritableAttributes(entry.attributes);
         if(entry.datesValid){
             CatalogTimestamp(entry.created);

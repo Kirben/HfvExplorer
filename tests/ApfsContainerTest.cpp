@@ -3543,6 +3543,50 @@ int RunApfsContainerTest(const char* directory)
                   caps.remove&&caps.CanEditBasicMetadata()&&caps.finderMetadata&&caps.CanEditAttributes()&&
                   caps.CanEditCompression()&&caps.CanCreateHardLinks(),
                   "External APFS mount exposed operations beyond rename");
+            auto unlockedSource=published->Stat(publishedA.id);
+            unlockedSource.protectedFile=false;
+            published->SetBasicMetadata(unlockedSource.id,unlockedSource);
+            auto addResource=published->Stat(publishedA.id);
+            addResource.forks[1].size=4301;
+            published->PutResourceReplacement(addResource.id,addResource,
+                [](unsigned fork,uint64_t,void* bytes,size_t size){
+                    Check(fork==1,"Unexpected APFS resource input fork");
+                    memset(bytes,0x9b,size);
+                },{});
+            auto lockedSource=published->Stat(publishedA.id);
+            lockedSource.protectedFile=true;
+            published->SetBasicMetadata(lockedSource.id,lockedSource);
+            const auto lockedCopies=published->MakeDirectory(2,u"Locked hard-link copies");
+            auto copyLocked=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                {FileOperations::Location::Mounted(published,publishedA.id),
+                 FileOperations::Location::Mounted(published,publishedB.id)},
+                FileOperations::Location::Mounted(published,lockedCopies)});
+            Check(WaitForSingleObject(copyLocked.Job()->event(),15000)==WAIT_OBJECT_0,"APFS locked hard-link copy timed out");
+            const auto lockedCopyResult=copyLocked.Job()->result();
+            Check(!lockedCopyResult.code,lockedCopyResult.message.c_str());
+            MacBrowser::Entry copyA,copyB;
+            Check(published->FindChild(lockedCopies,publishedA.name,copyA)&&
+                  published->FindChild(lockedCopies,publishedB.name,copyB)&&
+                  copyA.id!=copyB.id&&copyA.resolvedId==copyB.resolvedId&&copyA.resolvedId!=publishedA.resolvedId&&
+                  copyA.linkCount==2&&copyB.linkCount==2&&copyA.protectedFile&&copyB.protectedFile,
+                  "Copied APFS hard-link names did not share a new locked inode");
+            const auto originalLocked=published->Stat(publishedA.id);
+            for(unsigned fork=0;fork<2;++fork){
+                Bytes expected(size_t(originalLocked.forks[fork].size));
+                Check(!expected.empty(),"APFS locked hard-link test requires both forks");
+                published->Read(originalLocked.id,fork,0,expected.data(),expected.size());
+                if(fork)Check(expected==Bytes(4301,0x9b),"APFS locked source resource fork differs");
+                for(const auto* copy:{&copyA,&copyB}){
+                    Check(copy->forks[fork].size==expected.size(),"APFS locked hard-link copy lost a fork");
+                    Bytes actual(expected.size());
+                    published->Read(copy->id,fork,0,actual.data(),actual.size());
+                    Check(actual==expected,"APFS locked hard-link copy fork differs");
+                }
+            }
+            Reject([&]{published->MakeHardLink(copyA.id,lockedCopies,u"Direct locked hard link");},
+                   "APFS direct hard-link creation bypassed the lock");
+            Reject([&]{published->Remove(copyB.id);},"APFS copied alias lost its lock");
+            fprintf(report,"PASS: macOS APFS locked hard-link copy shares a new locked inode and preserves both forks.\n");
             const auto importPath=VolumeCoord::Wide(root+"apfs-import-source.img");
             {
                 auto image=CreateFormatOutput(importPath.c_str(),8*1024*1024);
@@ -4842,7 +4886,7 @@ int RunApfsContainerTest(const char* directory)
             Check(destination&&destination->Writable(),"Could not open writable APFS copy fixture");
             auto lockedAlias=sourceAlias;
             lockedAlias.protectedFile=true;
-            Reject([&]{destination->ValidateEntry(lockedAlias);},"APFS accepted a locked hard-link group in preflight");
+            destination->ValidateEntry(lockedAlias);
             Storage::Job copy;
             Check(MacBrowser::Copy(*linked,sourceFolder.id,*destination,2,copy),
                   "Copying hard-link groups into APFS failed");

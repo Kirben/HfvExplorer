@@ -226,7 +226,7 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     if(reportProgress)job.progress(p);
     return out;
 }
-using CopiedLinks=std::map<std::pair<std::string,uint32_t>,std::pair<uint32_t,std::u16string>>;
+using CopiedLinks=std::map<std::pair<std::string,uint32_t>,Entry>;
 void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
               Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route) {
@@ -234,7 +234,15 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     const auto &entry = plan.entry; Entry existing; bool found = false;
     found=dst.FindTransferChild(parent,entry,existing);
     bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
-    if(track&&prior!=copies.end()&&entry.directory&&!found){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLinkForTransfer(original.id,parent,entry.name,false,job);LinkedProgress(plan,progress);job.progress(progress);return true;}
+    const auto linkCopy=[&](bool replace){
+        const auto& copied=prior->second;
+        Entry original;
+        Check(dst.FindChild(copied.parent,copied.name,original)&&
+              (!copied.protectedFile||(original.protectedFile&&original.identity==copied.identity)),"Copied hard-link source disappeared or changed");
+        dst.MakeCopiedHardLinkForTransfer(original,parent,entry.name,replace,job);
+        LinkedProgress(plan,progress);
+    };
+    if(track&&prior!=copies.end()&&entry.directory&&!found){linkCopy(false);job.progress(progress);return true;}
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
@@ -245,7 +253,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         // child creates/renames can change its dates even on Skip/cancellation.
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
-        if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,std::make_pair(parent,dst.Stat(id).name));return complete;
+        if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,dst.Stat(id));return complete;
     }
 
     Check(!found || !existing.directory, "A folder blocks the destination file");
@@ -257,7 +265,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
-    if(track&&prior!=copies.end()){Entry original;Check(dst.FindChild(prior->second.first,prior->second.second,original),"Copied hard-link source disappeared");dst.MakeHardLinkForTransfer(original.id,parent,entry.name,found,job);LinkedProgress(plan,progress);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
+    if(track&&prior!=copies.end()){linkCopy(found);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     if(plan.linkTarget){
@@ -291,7 +299,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
-    if(track)copies.emplace(key,std::make_pair(parent,dst.Stat(published).name));++progress.files; job.progress(progress); return true;
+    if(track)copies.emplace(key,dst.Stat(published));++progress.files; job.progress(progress); return true;
 }
 }
 std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::string& key,std::shared_ptr<MfsCatalogIds> ids){return TrackWorkerVolume(std::make_shared<Mfs>(std::move(source),key,std::move(ids)));}
