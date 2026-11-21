@@ -1291,7 +1291,7 @@ public:
         return Access([&]{
             const auto& item=At(id);
             const auto& folder=At(parent);
-            return item.oid>2&&item.entry.parent!=parent&&!item.entry.hardLink&&
+            return item.oid>2&&item.entry.parent!=parent&&
                    (item.symlink||item.entry.readError.empty())&&folder.oid&&folder.entry.directory&&
                    item.mount==folder.mount&&!mounts[item.mount].snapshotCreated;
         });

@@ -2951,7 +2951,6 @@ CatalogWritePlan PrepareCatalogMutation(
                       Le16(value+20)==8&&value[22]==1&&Le16(value+24)==8,
                       "Unsupported APFS hard-linked edit");
             }
-            Check(!moving||!siblingId,"APFS in-place moves do not support hard-link aliases");
             directoryRecord=i;
         }
         Check(entryOid>=16&&entryOid<nextId,"APFS catalog edit target was not found");
@@ -3012,9 +3011,10 @@ CatalogWritePlan PrepareCatalogMutation(
             if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
             if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
             if(properties->newName&&(!siblingId||
-               (Le64(value.data())==properties->parent&&ExternalInodeName(value)==name)))
+               (Le64(value.data())==properties->parent&&ExternalInodeName(value)==name))){
                 RenameExternalInode(value,name,replacement);
-            if(moving)Set(value,0,destination,8);
+                if(moving)Set(value,0,destination,8);
+            }
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
             edited=true;
@@ -3022,7 +3022,7 @@ CatalogWritePlan PrepareCatalogMutation(
         Check(edited,"APFS Properties target inode was not found");
         if(properties->newName){
             if(siblingLink){
-                const CatalogSibling renamed{entryOid,properties->parent,replacement};
+                const CatalogSibling renamed{entryOid,destination,replacement};
                 catalog[*siblingLink]=renamed.LinkRecord(siblingId);
             }
             auto record=std::move(catalog[*directoryRecord]);

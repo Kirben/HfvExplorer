@@ -4389,6 +4389,43 @@ int RunApfsContainerTest(const char* directory)
             published->Read(movedChild.id,0,0,data,sizeof(data));
             Check(!memcmp(data,"entry 222\n",sizeof(data)),"APFS directory move changed descendant file data");
             fprintf(report,"PASS: same-volume APFS cut and paste moves a populated macOS folder in place and rejects ancestry cycles.\n");
+            const auto primaryName=published->Stat(retainedAlias.id);
+            const auto secondaryName=published->Stat(hardLinkReplacingSymlink);
+            Check(primaryName.hardLink&&secondaryName.hardLink&&primaryName.id!=secondaryName.id&&
+                  primaryName.resolvedId==secondaryName.resolvedId,"Missing APFS hard-link group for in-place move");
+            Storage::Job cancelledHardLinkMove;
+            cancelledHardLinkMove.cancel();
+            bool hardLinkMoveStopped=false;
+            try{published->MoveHereForJob(*published,secondaryName.id,movedFolder.id,secondaryName,cancelledHardLinkMove);}
+            catch(const Storage::Cancelled&){hardLinkMoveStopped=true;}
+            Check(hardLinkMoveStopped&&published->Stat(secondaryName.id).parent==secondaryName.parent&&
+                  readForks(secondaryName)==expectedForks,"Cancelled APFS hard-link move changed its name or forks");
+            const auto moveHardLink=[&](const MacBrowser::Entry& original,uint32_t destination){
+                auto source=FileOperations::Location::Mounted(published,original.id);
+                source.cut=true;
+                auto operation=FileOperations::Submit(FileOperations::OrdinaryCopy{
+                    {source},FileOperations::Location::Mounted(published,destination)});
+                Check(WaitForSingleObject(operation.Job()->event(),15000)==WAIT_OBJECT_0,"APFS hard-link move timed out");
+                const auto result=operation.Job()->result();
+                Check(!result.code,result.message.c_str());
+                MacBrowser::Entry now;
+                Check(!published->FindChild(original.parent,original.name,now)&&
+                      published->FindChild(destination,original.name,now)&&now.id==original.id&&
+                      now.linkCount==original.linkCount&&now.finder==original.finder&&
+                      now.created==original.created&&now.modified==original.modified&&
+                      readForks(now)==expectedForks&&published->GetAttributes(now.id)==expectedAttributes,
+                      "APFS hard-link move changed the selected inode, forks, or metadata");
+                return now;
+            };
+            const auto movedSecondary=moveHardLink(secondaryName,movedFolder.id);
+            Check(movedSecondary.resolvedId==published->Stat(primaryName.id).resolvedId&&
+                  published->Stat(primaryName.id).parent==primaryName.parent,
+                  "Moving an APFS alias changed its primary name");
+            const auto movedPrimary=moveHardLink(primaryName,moveFolder);
+            Check(movedPrimary.resolvedId==published->Stat(movedSecondary.id).resolvedId&&
+                  published->Stat(movedSecondary.id).parent==movedFolder.id,
+                  "Moving the APFS primary name changed its alias");
+            fprintf(report,"PASS: same-volume APFS cut and paste moves primary and secondary hard-link names and preserves both forks.\n");
             fprintf(report,"PASS: macOS-generated APFS checkpoint publication, cancellation, file dates, lock edits, folder Properties, file and symbolic-link renames, symbolic-link overwrite and cancellation.\n");
         }
         // Decompress apfs-encrypted and apfs-converted from qnxprobe's tests/fixtures.
