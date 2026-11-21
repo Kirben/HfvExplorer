@@ -141,6 +141,8 @@ BOOL CAskNewVolume::OnCommand(WPARAM wParam,LPARAM lParam) {
   if(HIWORD(wParam)==CBN_SELCHANGE&&selected!=CB_ERR)combo->GetLBText(selected,path);else combo->GetWindowText(path);
   bool floppy=m_allowFloppies&&FloppySelection(path)>=0;
   if(floppy)SetDlgItemText(IDC_VOLSIZE_EX,"1440 kB");
+  GetDlgItem(IDC_NEW_VOLUME_FLOPPY_WARNING)->ShowWindow(floppy?SW_SHOW:SW_HIDE);
+  SetDlgItemTextW(m_hWnd,IDOK,floppy?L"Format\u2026":L"Format");
   GetDlgItem(IDC_VOLSIZE_EX)->EnableWindow(!floppy);GetDlgItem(IDC_VOLNAME_BROWSE)->EnableWindow(!floppy);
  }
  if(LOWORD(wParam)==IDOK){

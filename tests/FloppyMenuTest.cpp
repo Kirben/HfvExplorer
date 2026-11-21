@@ -110,14 +110,22 @@ int RunFloppyMenuTest(const char* directory){
   page.DestroyWindow();
   NewVolumeDialogTest format;format.m_allowFloppies=true;format.m_volsize_ex="10 MB";
   require(format.Create(IDD_ASK_NEW_VOLUME,&owner)!=FALSE,"new-volume dialog");
+  CString caption;
+  format.GetWindowText(caption);
+  require(caption=="Format New Volume"&&!(format.GetDlgItem(IDC_NEW_VOLUME_FLOPPY_WARNING)->GetStyle()&WS_VISIBLE),
+          "format caption or initial floppy warning");
   auto paths=(CComboBox*)format.GetDlgItem(IDC_VOLPATH);
   int a=paths->FindStringExact(-1,CAskNewVolume::FloppyLabel(0));
   require(a!=CB_ERR&&paths->FindStringExact(-1,CAskNewVolume::FloppyLabel(25))!=CB_ERR&&paths->FindStringExact(-1,CAskNewVolume::FloppyLabel(2))==CB_ERR,"new-volume drive discovery and fixed-drive filtering");
   paths->SetCurSel(a);format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_VOLPATH,CBN_SELCHANGE),(LPARAM)paths->GetSafeHwnd());
   CString size;format.GetDlgItemText(IDC_VOLSIZE_EX,size);
   require(size=="1440 kB"&&!format.GetDlgItem(IDC_VOLSIZE_EX)->IsWindowEnabled()&&!format.GetDlgItem(IDC_VOLNAME_BROWSE)->IsWindowEnabled(),"floppy size fixed to 1.44 MB and image browse disabled");
+  require((format.GetDlgItem(IDC_NEW_VOLUME_FLOPPY_WARNING)->GetStyle()&WS_VISIBLE)!=0,
+          "physical format erase warning missing");
   paths->SetCurSel(-1);paths->SetWindowText("C:\\test.dsk");format.SendMessage(WM_COMMAND,MAKEWPARAM(IDC_VOLPATH,CBN_EDITCHANGE),(LPARAM)paths->GetSafeHwnd());
   require(format.GetDlgItem(IDC_VOLSIZE_EX)->IsWindowEnabled()&&format.GetDlgItem(IDC_VOLNAME_BROWSE)->IsWindowEnabled(),"image controls restored after floppy selection");
+  require(!(format.GetDlgItem(IDC_NEW_VOLUME_FLOPPY_WARNING)->GetStyle()&WS_VISIBLE),
+          "floppy erase warning remained when formatting an image");
   format.DestroyWindow();
   NewVolumeDialogTest image;image.m_volpath="C:\\existing.dsk";
   require(image.Create(IDD_ASK_NEW_VOLUME,&owner)!=FALSE,"existing-image dialog");
@@ -126,6 +134,13 @@ int RunFloppyMenuTest(const char* directory){
   for(bool write:{false,true}){
    OriginalFloppyDialogTest dialog;dialog.to_floppy=write;dialog.m_caption=write?"Write a volume file to floppy":"Create a volume file from floppy";
    require(dialog.Create(IDD_VOLUME_TO_FLOPPY,&owner)!=FALSE,"original File floppy dialog");
+   dialog.GetWindowText(caption);
+   wchar_t action[20]{};
+   GetDlgItemTextW(dialog.m_hWnd,IDOK,action,ARRAYSIZE(action));
+   require(caption==(write?"Write Image to Floppy":"Create a volume file from floppy")&&
+           std::wstring(action)==(write?L"Write\u2026":L"Save")&&
+           bool(dialog.GetDlgItem(IDC_FLOPPY_WRITE_WARNING)->GetStyle()&WS_VISIBLE)==write,
+           "write/read dialog title, action or erase warning");
    auto drives=(CComboBox*)dialog.GetDlgItem(IDC_DUMP_TO_FLOPPY);
    require(drives->GetCount()==2&&int(drives->GetItemData(0))==1&&int(drives->GetItemData(1))==25,"original drive combo stores actual B/Z letters instead of indices");
    drives->SetCurSel(1);dialog.SetDlgItemText(IDC_VOLPATH,"C:\\test.dsk");require(dialog.UpdateData(TRUE)&&dialog.m_drive==25,"original dialog drive selection binding");

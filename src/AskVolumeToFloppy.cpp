@@ -80,7 +80,12 @@ void CAskVolumeToFloppy::OnVolnameBrowse()
 BOOL CAskVolumeToFloppy::OnInitDialog() 
 {
 	CDialog::OnInitDialog();
-	SetWindowText(m_caption);
+	SetWindowText(to_floppy?"Write Image to Floppy":m_caption.GetString());
+ if(!to_floppy){
+  SetDlgItemText(IDC_FLOPPY_IMAGE_LABEL,"Output file:");
+  SetDlgItemText(IDOK,"Save");
+  GetDlgItem(IDC_FLOPPY_WRITE_WARNING)->ShowWindow(SW_HIDE);
+ }
  auto drives=(CComboBox*)GetDlgItem(IDC_DUMP_TO_FLOPPY);drives->ResetContent();
  for(int drive=0;drive<26;++drive)if(DriveKind(drive)==DRIVE_REMOVABLE){CString name;name.Format("%c:",'A'+drive);int n=drives->AddString(name);drives->SetItemData(n,drive);}
  if(drives->GetCount())drives->SetCurSel(0);
