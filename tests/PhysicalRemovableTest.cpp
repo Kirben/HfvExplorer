@@ -619,7 +619,6 @@ public:
     bool Lock(HANDLE)override{locked_=true;return true;}
     bool Dismount(HANDLE)override{return locked_;}
     bool Unlock(HANDLE)override{locked_=false;return true;}
-    bool FormatTracks1440(HANDLE)override{return false;}
     bool Write(HANDLE,ULONGLONG at,DWORD size,const void* bytes,DWORD& got)override{
         Check(locked_&&B::Range(at,size,disk_.media.size())&&uintptr_t(bytes)%512==0,"unlocked or unaligned floppy write");
         PersistPhysicalWrite(path_,at,size,bytes);
@@ -975,7 +974,7 @@ int RunNativeFloppyRecoveryCheck(const char* directory,const char* phase)
             Check(PrepareFloppyHfs("Recovery test",intended,error),"Cannot prepare the classic HFS test image");
             Check(SetEnvironmentVariableW(L"HFV_TEST_REMOVABLE_CRASH",L"1")!=FALSE,"Cannot arm hardware crash point");
             FloppyWriter writer(&api);
-            if(!writer.WriteImage(drive,intended,false,nullptr,nullptr,before.get()))
+            if(!writer.WriteImage(drive,intended,nullptr,nullptr,before.get()))
                 throw HfsPlus::Error(writer.Diagnostics());
             throw HfsPlus::Error("The write did not reach the expected crash checkpoint");
         }

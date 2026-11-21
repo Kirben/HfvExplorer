@@ -24,14 +24,6 @@ public:
     bool Lock(HANDLE h) override {return control(h,FSCTL_LOCK_VOLUME);}
     bool Dismount(HANDLE h) override {return control(h,FSCTL_DISMOUNT_VOLUME);}
     bool Unlock(HANDLE h) override {return control(h,FSCTL_UNLOCK_VOLUME);}
-    bool FormatTracks1440(HANDLE h) override {
-        FORMAT_PARAMETERS format={};format.MediaType=F3_1Pt44_512;
-        format.StartCylinderNumber=0;format.EndCylinderNumber=79;format.StartHeadNumber=0;format.EndHeadNumber=1;
-        BAD_TRACK_NUMBER bad[160];DWORD returned=0;
-        if(!DeviceIoControl(h,IOCTL_DISK_FORMAT_TRACKS,&format,sizeof(format),bad,sizeof(bad),&returned,NULL)) return false;
-        if(returned) {SetLastError(ERROR_DISK_CORRUPT);return false;}
-        return true;
-    }
     bool Write(HANDLE h,ULONGLONG o,DWORD n,const void* p,DWORD& wrote) override {
         LARGE_INTEGER position;position.QuadPart=o;wrote=0;
         return SetFilePointerEx(h,position,NULL,FILE_BEGIN)&&WriteFile(h,p,n,&wrote,NULL);
@@ -108,9 +100,9 @@ void FloppyWriter::Report(bool ok,int drive) {
  ok?"PASS":"FAIL",'A'+drive,error_,stage_.c_str(),offset_,offset_/512,track/2,track%2,(offset_%kTrack)/512+1,requested_,transferred_,writtenTracks_,plannedTracks_,verifiedTracks_,plannedTracks_,writesStarted_);
  diagnostics_+=line;
 }
-bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks,FloppyProgress progress,void* context,const std::vector<BYTE>* expectedOriginal,std::optional<DWORD> expectedGeneration) {
+bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,FloppyProgress progress,void* context,const std::vector<BYTE>* expectedOriginal,std::optional<DWORD> expectedGeneration) {
     error_=flushError_=0;writesStarted_=false;writtenTracks_=verifiedTracks_=0;plannedTracks_=160;diagnostics_.clear();Mark("Validate source image");
-    if(drive<0 || drive>25 || !ValidateFloppyHfs(image) || (expectedOriginal && (formatTracks || expectedOriginal->size()!=kImage))) {error_=ERROR_INVALID_PARAMETER;Report(false,drive);return false;}
+    if(drive<0 || drive>25 || !ValidateFloppyHfs(image) || (expectedOriginal && expectedOriginal->size()!=kImage)) {error_=ERROR_INVALID_PARAMETER;Report(false,drive);return false;}
     Mark("Acquire exclusive floppy access");
     FloppyWriteLease lease;
     if(!lease.Acquire(drive)){error_=GetLastError();Report(false,drive);return false;}
@@ -177,7 +169,7 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
             Mark("Recover interrupted floppy write");
             FloppyRecovery::Replay(*api_,handle,generation,drive);
         }
-        if(RemovableUndo::Enabled()&&!formatTracks&&plannedTracks_){
+        if(RemovableUndo::Enabled()&&plannedTracks_){
             Mark("Read original floppy for recovery");
             if(progress)progress("Preparing recovery",0,160,context);
             undo=std::make_unique<RemovableUndo::Log>(key,FloppyRecovery::Range,
@@ -207,17 +199,6 @@ bool FloppyWriter::WriteImage(int drive,const std::vector<BYTE>& image,bool form
         if(!api_->Verify(handle,current)) return finish(false);
         if(current!=generation) {SetLastError(ERROR_MEDIA_CHANGED);return finish(false);}
         return finish(true);
-    }
-    if(formatTracks) {
-        writesStarted_=true;
-        if(progress) progress("Formatting tracks",0,160,context);
-        Mark("Low-level format tracks");
-        if(!api_->FormatTracks1440(handle)) return finish(false);
-        Mark("Query geometry after track format");
-        if(!api_->Geometry(handle,geometry)) return finish(false);
-        if(!geometry1440(geometry)) {SetLastError(ERROR_NOT_SUPPORTED);return finish(false);}
-        Mark("Check media after track format");
-        if(!api_->Verify(handle,generation)) return finish(false);
     }
     for(DWORD offset:tracks) {
         Mark("Media readiness before write",offset,kTrack);

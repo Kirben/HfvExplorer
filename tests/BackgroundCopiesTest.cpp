@@ -96,7 +96,6 @@ public:FakeFloppy disk;bool locked=false;unsigned writes=0;
  UINT DriveType(int d)override{return disk.DriveType(d);}HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{return disk.Open(p,a,s,f);}
  bool Geometry(HANDLE h,DISK_GEOMETRY& g)override{return disk.Geometry(h,g);}bool Verify(HANDLE h,DWORD& n)override{return disk.Verify(h,n);}bool Read(HANDLE h,ULONGLONG at,DWORD n,void* p,DWORD& got)override{return disk.Read(h,at,n,p,got);}void Close(HANDLE h)override{disk.Close(h);}
  bool Lock(HANDLE)override{locked=true;return true;}bool Dismount(HANDLE)override{return locked;}bool Unlock(HANDLE)override{locked=false;return true;}
- bool FormatTracks1440(HANDLE)override{throw HfsPlus::Error("Copy must not format floppy");}
  bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{Check(locked&&at<=disk.media.size()&&n<=disk.media.size()-at,"unsafe floppy write");memcpy(disk.media.data()+size_t(at),p,n);got=n;++writes;return true;}
  bool Flush(HANDLE)override{SetLastError(ERROR_INVALID_FUNCTION);return false;}
 };
@@ -242,7 +241,6 @@ int RunFloppyCopyRegressionsTest(const char* directory){
   bool ok=disk.Read(h,at,n,p,got);if(ok&&checking){if(shortRead)--got;if(badRead&&got)static_cast<BYTE*>(p)[0]^=1;}return ok;
  }
  bool Lock(HANDLE)override{if(denyLock){SetLastError(ERROR_ACCESS_DENIED);return false;}locked=true;return true;}bool Dismount(HANDLE)override{return locked;}bool Unlock(HANDLE)override{locked=false;return true;}
- bool FormatTracks1440(HANDLE)override{throw HfsPlus::Error("File copy attempted to format floppy");}
  bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{Check(locked&&at<=disk.media.size()&&n<=disk.media.size()-at,"write outside locked simulated floppy");if(writeFail){SetLastError(ERROR_WRITE_FAULT);return false;}got=shortWrite?n-1:n;memcpy(disk.media.data()+size_t(at),p,got);++writes;return true;}
  bool Flush(HANDLE)override{++flushes;flushed=true;if(swapOnFlush)++disk.changeCount;if(flushError){SetLastError(flushError);return false;}return true;}
  void Reset(const std::vector<BYTE>& bytes){disk.media=bytes;++disk.changeCount;denyLock=writeProtect=writeFail=shortWrite=flushed=badRead=shortRead=readFail=swapOnFlush=gateRead=false;flushError=ERROR_INVALID_FUNCTION;writes=readbacks=flushes=0;ResetEvent(entered);ResetEvent(release);}

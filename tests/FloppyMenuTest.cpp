@@ -38,7 +38,7 @@ class OriginalFloppyDialogTest : public CAskVolumeToFloppy {
 };
 class DialogWriterTest : public FloppyWriteApi {
 public:
- FakeFloppy disk;unsigned writes=0,formats=0;bool locked=false,corrupt=false;DWORD openError=0;unsigned delay=0;
+ FakeFloppy disk;unsigned writes=0;bool locked=false,corrupt=false;DWORD openError=0;unsigned delay=0;
  DialogWriterTest():disk(std::vector<BYTE>(1474560)){}
  UINT DriveType(int d) override{return disk.DriveType(d);}
  HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f) override{disk.openError=openError;return disk.Open(p,a,s,f);}
@@ -49,7 +49,6 @@ public:
  bool Lock(HANDLE) override{locked=true;return true;}
  bool Dismount(HANDLE) override{return locked;}
  bool Unlock(HANDLE) override{locked=false;return true;}
- bool FormatTracks1440(HANDLE) override{++formats;return true;}
  bool Write(HANDLE,ULONGLONG o,DWORD n,const void* p,DWORD& got) override{if(!locked||o>disk.media.size()||n>disk.media.size()-o)return false;memcpy(disk.media.data()+size_t(o),p,n);got=n;++writes;return true;}
  bool Flush(HANDLE) override{SetLastError(ERROR_INVALID_FUNCTION);return false;}
 };
@@ -192,7 +191,7 @@ int RunFloppyMenuTest(const char* directory){
 #endif
   DialogWriterTest writer;writer.delay=1;
   auto written=ShowStorageJob(MakeFloppyWriteJob(1,formatted,&writer),"Hidden original floppy writer",true,true,false);
-  require(written.code==0&&writer.disk.media==formatted&&writer.writes==160&&writer.formats==0&&!writer.locked&&writer.disk.opens==writer.disk.closes,"original format/write worker verifies full image, accepts unsupported flush and does not low-level format");
+  require(written.code==0&&writer.disk.media==formatted&&writer.writes==160&&!writer.locked&&writer.disk.opens==writer.disk.closes,"format/write worker verifies the full image and accepts an unsupported flush");
   require(storageUiTest.copyBarCount==1&&storageUiTest.timerTicks>=2&&storageUiTest.ownerRestoredBeforeClose&&owner.IsWindowEnabled(),"original-dialog write uses responsive single progress bar and restores owner");
   DialogWriterTest denied;denied.openError=ERROR_ACCESS_DENIED;
   auto failed=Storage::worker().submit(MakeFloppyWriteJob(1,formatted,&denied));failed->wait();

@@ -20,7 +20,6 @@ public:
  bool Lock(HANDLE h) override{return ctl(h,FSCTL_LOCK_VOLUME);}
  bool Dismount(HANDLE h) override{return ctl(h,FSCTL_DISMOUNT_VOLUME);}
  bool Unlock(HANDLE h) override{return ctl(h,FSCTL_UNLOCK_VOLUME);}
- bool FormatTracks1440(HANDLE) override{SetLastError(ERROR_NOT_SUPPORTED);return false;}
  bool Write(HANDLE h,ULONGLONG o,DWORD n,const void* p,DWORD& got) override{LARGE_INTEGER at;at.QuadPart=o;got=0;return SetFilePointerEx(h,at,nullptr,FILE_BEGIN)&&WriteFile(h,p,n,&got,nullptr);}
  bool Flush(HANDLE h) override{return FlushFileBuffers(h)!=FALSE;}
 } native;

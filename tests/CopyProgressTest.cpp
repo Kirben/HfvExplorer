@@ -54,7 +54,6 @@ public:
  }
  bool Dismount(HANDLE) override{return locked;}
  bool Unlock(HANDLE) override{locked=false;return true;}
- bool FormatTracks1440(HANDLE) override{throw std::runtime_error("File copy must not format tracks");}
  bool Write(HANDLE,ULONGLONG o,DWORD n,const void* p,DWORD& wrote) override {
   if(!locked)throw std::runtime_error("Write without lock");++writes;
   wrote=failure==3?n-1:n;memcpy(disk.media.data()+size_t(o),p,wrote);return true;

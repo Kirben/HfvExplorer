@@ -69,7 +69,7 @@ std::vector<BYTE> bytes(const std::string& path){
 }
 class Writer : public FloppyWriteApi {
 public:
-    FakeFloppy disk;bool failLock=false,locked=false,checkPeer=false,peerBlocked=false;unsigned writes=0,formats=0;
+    FakeFloppy disk;bool failLock=false,locked=false,checkPeer=false,peerBlocked=false;unsigned writes=0;
     explicit Writer(const std::vector<BYTE>& image):disk(image){}
     UINT DriveType(int drive)override{return disk.DriveType(drive);}
     HANDLE Open(const char* p,DWORD a,DWORD s,DWORD f)override{return disk.Open(p,a,s,f);}
@@ -80,7 +80,6 @@ public:
     bool Lock(HANDLE)override{if(failLock){SetLastError(ERROR_ACCESS_DENIED);return false;}locked=true;return true;}
     bool Dismount(HANDLE)override{return locked;}
     bool Unlock(HANDLE)override{locked=false;return true;}
-    bool FormatTracks1440(HANDLE)override{++formats;return locked;}
     bool Write(HANDLE,ULONGLONG at,DWORD n,const void* p,DWORD& got)override{
         if(!locked){SetLastError(ERROR_ACCESS_DENIED);return false;}if(!writes&&checkPeer)peerBlocked=attempt("floppy","unused")==10;++writes;memcpy(disk.media.data()+size_t(at),p,n);got=n;return true;
     }
@@ -138,15 +137,15 @@ int RunExclusiveAccessTest(const char* directory){
         fprintf(report,"PASS: real child-process conflicts for classic HFS, HFS+ and both HFSX modes; hard-link aliases, cross-backend opens, shared readers, denied-write byte preservation and release after close.\n");
         std::vector<BYTE> image;std::string error;require(PrepareFloppyHfs("Lease",image,error),"prepare synthetic floppy");
         {Holder holder("floppy","unused");Writer api(image);FloppyWriter writer(&api);
-            require(!writer.WriteImage(25,image,true)&&writer.Error()==ERROR_SHARING_VIOLATION&&!writer.WritesStarted(),"full floppy writer bypassed another instance");
+            require(!writer.WriteImage(25,image)&&writer.Error()==ERROR_SHARING_VIOLATION&&!writer.WritesStarted(),"full floppy writer bypassed another instance");
             DirectFloppy direct(&api);require(!direct.Open(25)&&direct.Error()==ERROR_SHARING_VIOLATION,"direct floppy writer bypassed another instance");
-            require(!api.disk.opens&&!api.writes&&!api.formats&&api.disk.media==image,"conflicting writer touched simulated media");holder.Finish();}
+            require(!api.disk.opens&&!api.writes&&api.disk.media==image,"conflicting writer touched simulated media");holder.Finish();}
         {Writer api(image);DirectFloppy direct(&api);require(direct.Open(25),"direct writer after peer release");
             Writer second(image);FloppyWriter writer(&second);require(!writer.WriteImage(25,image)&&!second.disk.opens,"nested same-process writer was admitted");
             require(direct.Finish(),"finish direct writer");}
         {Writer api(image);api.failLock=true;DirectFloppy failed(&api);require(!failed.Open(25),"native lock failure ignored");
             FloppyWriteLease lease;require(lease.Acquire(25)&&api.disk.opens==api.disk.closes,"failed direct open leaked lease/device handle");}
-        {Writer api(image);api.failLock=true;FloppyWriter writer(&api);require(!writer.WriteImage(25,image)&&!api.writes&&!api.formats,"failed native lock allowed writes");
+        {Writer api(image);api.failLock=true;FloppyWriter writer(&api);require(!writer.WriteImage(25,image)&&!api.writes,"failed native lock allowed writes");
             FloppyWriteLease lease;require(lease.Acquire(25),"failed full-image operation leaked lease");}
         {Holder holder("floppy","unused");require(TerminateProcess(holder.process->info.hProcess,77)!=FALSE,"terminate simulated owner");
             require(holder.process->Exit()==77,"owner termination failed");require(attempt("floppy","unused")==0,"terminated owner left a permanent floppy lock");}

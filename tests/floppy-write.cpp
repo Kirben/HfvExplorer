@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "FloppyWriter.h"
+#include "ClassicHfsRecovery.h"
 #include "FakeFloppy.h"
 #include "ReadOnlyCdBackend.h"
 #include "floppy.h"
@@ -10,10 +11,16 @@
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 }
+// The standalone transport test formats disposable images. The application
+// recovery implementation is exercised by --verify-removable-recovery.
+extern "C" int hfv_hfs_recover_image(int,int){return 0;}
+extern "C" int hfv_hfs_before_sector_write(int,unsigned long long){return 0;}
+extern "C" void hfv_hfs_after_sector_write(int){}
+
 static void check(bool ok,const char* action) {if(!ok){fprintf(stderr,"FAIL: %s (Windows=%lu HFS=%s)\n",action,GetLastError(),hfs_error?hfs_error:"");exit(1);}}
 class FakeWriter : public FloppyWriteApi {
 public:
- FakeFloppy fake;DWORD flushOverride=0;int failure=0;bool locked=false,ordered=true,flags=true;unsigned writes=0,formats=0,flushes=0,unlocks=0;
+ FakeFloppy fake;DWORD flushOverride=0;int failure=0;bool locked=false,ordered=true,flags=true;unsigned writes=0,flushes=0,unlocks=0;
  std::vector<ULONGLONG> writeOffsets,readbackOffsets;
  explicit FakeWriter(const std::vector<BYTE>& media):fake(media) {}
  UINT DriveType(int d) override {return fake.DriveType(d);}
@@ -28,10 +35,6 @@ public:
  bool Lock(HANDLE) override {if(failure==3){SetLastError(ERROR_ACCESS_DENIED);return false;}locked=true;return true;}
  bool Dismount(HANDLE) override {ordered&=locked;if(failure==4){SetLastError(ERROR_ACCESS_DENIED);return false;}return true;}
  bool Unlock(HANDLE) override {++unlocks;locked=false;if(failure==11){SetLastError(ERROR_ACCESS_DENIED);return false;}return true;}
- bool FormatTracks1440(HANDLE) override {
-  ordered&=locked;++formats;if(failure==10){SetLastError(ERROR_NOT_SUPPORTED);return false;}
-  std::fill(fake.media.begin(),fake.media.end(),BYTE(0));++fake.changeCount;return true;
- }
  bool Write(HANDLE,ULONGLONG o,DWORD n,const void* p,DWORD& wrote) override {
   ordered&=locked && o%512==0 && n%512==0 && uintptr_t(p)%512==0;++writes;
   writeOffsets.push_back(o);
@@ -65,9 +68,9 @@ static void hardware(const char* driveArg,const char* input,const char* director
  std::vector<BYTE> original(1474560);check(reader.ReadBytes(0,DWORD(original.size()),original.data()),"read every original A: sector before writing");reader.Close();
  save(std::string(directory)+"\\A-before.dsk",original);puts("Original A: sectors backed up. Initializing HFS...");fflush(stdout);
  FloppyWriter writer;
- if(!writer.WriteImage(0,empty,false,progress)) {fprintf(stderr,"HFS initialization failed: Windows %lu; writes started=%d\n",writer.Error(),writer.WritesStarted());exit(1);}
+ if(!writer.WriteImage(0,empty,progress)) {fprintf(stderr,"HFS initialization failed: Windows %lu; writes started=%d\n",writer.Error(),writer.WritesStarted());exit(1);}
  puts("PASS: physical HFS initialization and full readback. Writing populated image...");fflush(stdout);
- if(!writer.WriteImage(0,populated,false,progress)) {fprintf(stderr,"Image write failed: Windows %lu; writes started=%d\n",writer.Error(),writer.WritesStarted());exit(1);}
+ if(!writer.WriteImage(0,populated,progress)) {fprintf(stderr,"Image write failed: Windows %lu; writes started=%d\n",writer.Error(),writer.WritesStarted());exit(1);}
  reader.Close();check(reader.OpenDrive(0)&&reader.FindHfs(),"reopen newly written physical HFS floppy");
  std::vector<BYTE> actual(1474560);check(reader.ReadBytes(0,DWORD(actual.size()),actual.data())&&actual==populated,"fresh-handle full-disc byte comparison");reader.Close();
  floppy_module_global_init();char path[64];get_floppy_volume_file_name(0,path);hfsvol* volume=hfs_mount(path,0,O_RDONLY);check(volume!=NULL,"mount actual written HFS filesystem");
@@ -76,49 +79,48 @@ static void hardware(const char* driveArg,const char* input,const char* director
  check(hfs_setfork(file,1)==0&&hfs_read(file,data,1025)==1025,"read physical resource fork");for(unsigned i=0;i<1025;++i)check(data[i]==BYTE(i*71),"physical resource fork fidelity");
  hfs_close(file);hfs_umount(volume);floppy_module_global_final();
  save(std::string(directory)+"\\A-verified.dsk",actual);
- puts("PASS: A: HFS format, image write, fresh-handle full readback and production HFS data/resource extraction. Low-level track formatting was not requested.");
+ puts("PASS: A: HFS format, image write, fresh-handle full readback and production HFS data/resource extraction.");
 }
 int main(int argc,char** argv) {
  if(argc==5 && !strcmp(argv[1],"--hardware")) {hardware(argv[2],argv[3],argv[4]);return 0;}
  check(argc==1,"Usage: floppy-write [--hardware A: POPULATED_TEST_IMAGE NEW_OUTPUT_DIRECTORY]");
  std::vector<BYTE> image;std::string error;check(PrepareFloppyHfs("WriteTest",image,error),"prepare 1.44 MB HFS format image");
- for(bool tracks:{false,true}) {
+ {
   FakeWriter api(std::vector<BYTE>(1474560,0xa5));FloppyWriter writer(&api);
-  check(writer.WriteImage(25,image,tracks)&&api.fake.media==image&&api.flags&&api.ordered&&api.writes==160&&api.flushes==1&&api.fake.opens==api.fake.closes,"aligned locked image write and full readback");
-  check(api.formats==(tracks?1:0),"track format is explicitly optional");
+  check(writer.WriteImage(25,image)&&api.fake.media==image&&api.flags&&api.ordered&&api.writes==160&&api.flushes==1&&api.fake.opens==api.fake.closes,"aligned locked image write and full readback");
  }
  auto modified=image;modified[400]^=1;modified[79*9216+1234]^=1;modified[159*9216+9215]^=1;
  const std::vector<ULONGLONG> changed={0,79*9216,159*9216};
  {
   FakeWriter api(image);FloppyWriter writer(&api);ChangedProgress p;api.flushOverride=ERROR_INVALID_FUNCTION;
-  check(writer.WriteImage(0,modified,false,changedProgress,&p,&image),"changed-track write succeeds with verified unsupported flush");
+  check(writer.WriteImage(0,modified,changedProgress,&p,&image),"changed-track write succeeds with verified unsupported flush");
   check(api.fake.media==modified&&api.writeOffsets==changed&&api.readbackOffsets==changed&&api.fake.reads==163,"only first/middle/last changed tracks written and read back after full original comparison");
   check(writer.PlannedTracks()==3&&writer.WrittenTracks()==3&&writer.VerifiedTracks()==3&&p.valid&&p.checked==160&&p.written==3&&p.verified==3,"progress and diagnostics count changed tracks rather than all 160");
-  check(api.fake.aligned&&api.ordered&&api.formats==0&&api.fake.opens==api.fake.closes&&!api.locked,"changed-track transfer alignment, lock and cleanup");
+  check(api.fake.aligned&&api.ordered&&api.fake.opens==api.fake.closes&&!api.locked,"changed-track transfer alignment, lock and cleanup");
  }
  {
   FakeWriter api(image);FloppyWriter writer(&api);
-  check(writer.WriteImage(0,image,false,nullptr,nullptr,&image)&&writer.PlannedTracks()==0&&!writer.WritesStarted()&&api.writes==0&&api.flushes==0&&api.fake.reads==160,"unchanged image is checked without writes or flush");
+  check(writer.WriteImage(0,image,nullptr,nullptr,&image)&&writer.PlannedTracks()==0&&!writer.WritesStarted()&&api.writes==0&&api.flushes==0&&api.fake.reads==160,"unchanged image is checked without writes or flush");
  }
  {
   FakeWriter api(image);api.fake.media[6*9216+8]^=1;FloppyWriter writer(&api);
-  check(!writer.WriteImage(0,modified,false,nullptr,nullptr,&image)&&writer.Error()==ERROR_MEDIA_CHANGED&&api.writes==0,"change on an otherwise untouched track rejected before any write");
+  check(!writer.WriteImage(0,modified,nullptr,nullptr,&image)&&writer.Error()==ERROR_MEDIA_CHANGED&&api.writes==0,"change on an otherwise untouched track rejected before any write");
  }
  for(int fail:{6,7,9,17,18}) {
   FakeWriter api(image);api.failure=fail;FloppyWriter writer(&api);
-  check(!writer.WriteImage(0,modified,false,nullptr,nullptr,&image)&&writer.Error()!=0,"changed-track short writes, real flush errors, media changes and readback errors remain failures");
+  check(!writer.WriteImage(0,modified,nullptr,nullptr,&image)&&writer.Error()!=0,"changed-track short writes, real flush errors, media changes and readback errors remain failures");
   check(api.fake.opens==api.fake.closes&&!api.locked&&api.unlocks==1,"changed-track errors release lock and handle");
   if(fail==9)check(writer.Error()==ERROR_MEDIA_CHANGED&&api.writes==1,"media change checked between changed-track writes");
   if(fail==17)check(writer.Error()==ERROR_CRC&&writer.VerifiedTracks()==0,"changed-track readback corruption not accepted");
  }
  {
   FakeWriter api(image);api.fake.changeAfterRead=163;FloppyWriter writer(&api);
-  check(!writer.WriteImage(0,modified,false,nullptr,nullptr,&image)&&writer.Error()==ERROR_MEDIA_CHANGED&&writer.VerifiedTracks()==3,"final media check retained after final changed-track readback");
+  check(!writer.WriteImage(0,modified,nullptr,nullptr,&image)&&writer.Error()==ERROR_MEDIA_CHANGED&&writer.VerifiedTracks()==3,"final media check retained after final changed-track readback");
  }
  puts("PASS: changed-track writes/readbacks, full original-disk guard, no-change operation, changed-track progress totals, unsupported flush, short transfers, corruption, media changes and cleanup; simulated media only");
- for(int fail=1;fail<=11;++fail) {
+ for(const int fail:{1,2,3,4,5,6,7,8,9,11}) {
   std::vector<BYTE> original(1474560,0xa5);FakeWriter api(original);api.failure=fail;FloppyWriter writer(&api);
-  check(!writer.WriteImage(0,image,fail==10)&&writer.Error()!=0,"operation failures are reported");
+  check(!writer.WriteImage(0,image)&&writer.Error()!=0,"operation failures are reported");
   check(api.fake.closes==api.fake.opens-(fail==1?1:0)&&api.ordered,"failure closes/unlocks target");
   if(fail<=4) check(!writer.WritesStarted()&&api.writes==0&&api.fake.media==original,"validation/locking failure issues no target writes");
  }
@@ -150,5 +152,5 @@ int main(int argc,char** argv) {
  for(DWORD realError:{DWORD(ERROR_NOT_READY),DWORD(ERROR_ACCESS_DENIED),DWORD(ERROR_WRITE_FAULT)}) {
   FakeWriter api(std::vector<BYTE>(1474560));api.flushOverride=realError;FloppyWriter writer(&api);
   check(!writer.WriteImage(0,image) && writer.Error()==realError && writer.VerifiedTracks()==160,"other flush errors remain failures even after matching readback");
- } puts("PASS: 1.44 MB HFS preparation, optional track format, locked aligned image writes, flush/readback, write protection, short writes, corruption, media change, target/size guards, cleanup and exact failure diagnostics; all writes simulated");return 0;
+ } puts("PASS: 1.44 MB HFS preparation, locked aligned image writes, flush/readback, write protection, short writes, corruption, media change, target/size guards, cleanup and exact failure diagnostics; all writes simulated");return 0;
 }

@@ -67,9 +67,6 @@ class ProcessFloppy final : public FloppyWriteApi {
         locked = false;
         return true;
     }
-    bool FormatTracks1440(HANDLE) override {
-        throw std::runtime_error("Copy worker must not format its simulated floppy");
-    }
     bool Write(HANDLE, ULONGLONG at, DWORD n, const void *p, DWORD &got) override {
         ++writes;
         got = 0;

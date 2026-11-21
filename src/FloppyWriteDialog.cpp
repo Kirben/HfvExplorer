@@ -38,7 +38,7 @@ std::function<Storage::Result(Storage::Job&)> MakeFloppyWriteJob(int drive,std::
 #endif
   if(job.cancelled())throw Storage::Cancelled();
   FloppyWriter writer(api);
-  if(!writer.WriteImage(drive,image,false,progress,&job,nullptr,generation)){
+  if(!writer.WriteImage(drive,image,progress,&job,nullptr,generation)){
    DWORD error=writer.Error();char system[512]={};FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,nullptr,error,0,system,sizeof(system),nullptr);
    std::string message="Floppy operation failed (Windows error "+std::to_string(error)+"). "+system+"\r\nStage: "+writer.Stage()+"\r\nByte offset: "+std::to_string(writer.Offset())+"\r\nCompleted: "+std::to_string(writer.WrittenTracks())+" / 160 writes; "+std::to_string(writer.VerifiedTracks())+" / 160 readbacks.\r\n";
    message+=writer.WritesStarted()?"Writing started; the disk may be incomplete. Do not treat it as a successful format.":"No data writes were issued.";

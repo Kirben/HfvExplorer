@@ -14,7 +14,6 @@ public:
     virtual bool Lock(HANDLE)=0;
     virtual bool Dismount(HANDLE)=0;
     virtual bool Unlock(HANDLE)=0;
-    virtual bool FormatTracks1440(HANDLE)=0;
     virtual bool Write(HANDLE,ULONGLONG,DWORD,const void*,DWORD&)=0;
     virtual bool Flush(HANDLE)=0;
 };
@@ -31,8 +30,8 @@ public:
     explicit FloppyWriter(FloppyWriteApi* api=nullptr);
     // Without expectedOriginal, write/verify the complete 1.44 MB image.
     // With it, compare the whole original disk under lock, then write/verify
-    // only tracks whose bytes differ. No low-level format in this mode.
-    bool WriteImage(int drive,const std::vector<BYTE>& image,bool formatTracks=false,
+    // only tracks whose bytes differ. Media must already have 1.44 MB geometry.
+    bool WriteImage(int drive,const std::vector<BYTE>& image,
                     FloppyProgress progress=nullptr,void* context=nullptr,
                     const std::vector<BYTE>* expectedOriginal=nullptr,std::optional<DWORD> expectedGeneration={});
     DWORD Error() const {return error_;}
