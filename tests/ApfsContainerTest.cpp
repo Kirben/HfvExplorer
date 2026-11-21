@@ -579,6 +579,10 @@ void CheckpointWrites(const std::string& root,FILE* report)
                "APFS writable preflight accepted an unaccounted-for file extent");
         Reject([&]{Apfs::CreateCatalogDirectory(inconsistent,*dataCheckpoint,2,u"Unrelated",controlJob,{},nullptr,nullptr,true);},
                "APFS allowed an unrelated write with an unaccounted-for file extent");
+        Reject([&]{Apfs::RenameVolume(inconsistent,*dataCheckpoint,u"Unsafe label",controlJob);},
+               "APFS volume rename accepted an unaccounted-for file extent");
+        Reject([&]{Apfs::CreateSnapshot(inconsistent,*dataCheckpoint,u"Unsafe snapshot",controlJob);},
+               "APFS snapshot creation accepted an unaccounted-for file extent");
         Check(!inconsistent.event&&inconsistent.durable==fragmentedBase,
               "APFS modified a disk with inconsistent extent references");
     }

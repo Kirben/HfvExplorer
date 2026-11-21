@@ -2874,20 +2874,42 @@ uint64_t VerifyAllocationBitmaps(Source& source,const Container& container,const
     return ReadAllocationBitmaps(source,container,space).available*container.blockSize;
 }
 
+namespace {
+struct WriteAllocationState {
+    SiblingAllocation siblings;
+    WritableMap volumeMap;
+    CatalogRecords catalog,extents;
+    SnapshotAllocations snapshot;
+    std::vector<DataRun> protectedRuns;
+};
+
+WriteAllocationState ReadWriteAllocationState(Source& source,const Container& container,
+                                               const WritableMap& containerMap,uint64_t oid,const Bytes& volume)
+{
+    const bool historical=Le64(volume.data()+216)!=0;
+    auto siblings=ReadSiblingAllocation(source,container,containerMap,oid,volume);
+    auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128),historical);
+    auto catalog=ReadWritableCatalog(source,container,
+        historical?MapAt(volumeMap,container.transaction):volumeMap,Le64(volume.data()+136),historical);
+    auto extents=ReadExtentTree(source,container,Le64(volume.data()+144),historical);
+    extents.encrypted=bool(container.writeCipher);
+    auto snapshot=ReadSnapshotAllocations(source,container,volume,volumeMap,catalog,extents);
+    if(!historical)ValidateSharedFileExtents(catalog,extents.records,extents.encrypted);
+    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
+    ProtectKeybags(container,protectedRuns);
+    return {std::move(siblings),std::move(volumeMap),std::move(catalog),std::move(extents),
+            std::move(snapshot),std::move(protectedRuns)};
+}
+}
+
 uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uint64_t transaction,
                                    Bytes& superblock,const CheckpointObjectLookup& ephemeral,uint64_t selected)
 {
     const auto [containerMap,address,volume]=ReadCatalogVolume(source,container,selected);
-    const bool historical=Le64(volume.data()+216)!=0;
     CheckExternalVolume(volume,container.volumes.size()==2,container.volumes.size()==1,bool(container.writeCipher));
-    const auto siblings=ReadSiblingAllocation(source,container,containerMap,selected?selected:container.volumes.front(),volume);
-    const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128),historical);
-    const auto liveMap=historical?MapAt(volumeMap,container.transaction):volumeMap;
-    const auto catalog=ReadWritableCatalog(source,container,liveMap,Le64(volume.data()+136),historical);
-    auto extents=ReadExtentTree(source,container,Le64(volume.data()+144),historical);
+    const auto [siblings,volumeMap,catalog,extents,snapshot,protectedRuns]=ReadWriteAllocationState(
+        source,container,containerMap,selected?selected:container.volumes.front(),volume);
     const auto snapshots=Le64(volume.data()+152);
-    const auto snapshot=ReadSnapshotAllocations(source,container,volume,volumeMap,catalog,extents);
-    if(!historical)ValidateSharedFileExtents(catalog,extents.records,bool(container.writeCipher));
     std::vector<uint64_t> live{containerMap.headerBlock,containerMap.rootBlock,address,
                                volumeMap.headerBlock,volumeMap.rootBlock};
     live.insert(live.end(),containerMap.leaves.begin(),containerMap.leaves.end());
@@ -2901,8 +2923,6 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
     auto& space=ephemeral(Le64(superblock.data()+152));
     Writes discarded;
     std::vector<DataRun> data;
-    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
-    ProtectKeybags(container,protectedRuns);
     const auto allocated=Allocate(discarded,source,container,space,superblock,ephemeral,
                                   live,extents.blocks,snapshots,files,{},1,data,transaction,[]{return 1;},protectedRuns);
     Check(allocated.size()==1&&data.size()==1&&data.front().count==1&&allocated.front()!=data.front().block,
@@ -2928,27 +2948,19 @@ CatalogWritePlan PrepareVolumeRename(Source& source,const Container& current,uin
     Bytes& superblock,const CheckpointObjectLookup& ephemeral,const CatalogVolumeRename& request,uint64_t selected)
 {
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
-    const bool historical=Le64(volume.data()+216)!=0;
     CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     const auto oid=selected?selected:current.volumes.front();
     const auto name=EncodeCatalogName(request.name);
-    const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
-    const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128),historical);
-    const auto liveMap=historical?MapAt(volumeMap,current.transaction):volumeMap;
-    const auto catalog=ReadWritableCatalog(source,current,liveMap,Le64(volume.data()+136),historical);
-    auto extents=ReadExtentTree(source,current,Le64(volume.data()+144),historical);
-    const auto snapshot=ReadSnapshotAllocations(source,current,volume,volumeMap,catalog,extents);
-    if(!historical)ValidateSharedFileExtents(catalog,extents.records,bool(current.writeCipher));
+    auto [siblings,volumeMap,catalog,extents,snapshot,protectedRuns]=ReadWriteAllocationState(
+        source,current,containerMap,oid,volume);
     std::vector<FileRun> files;
     for(const auto& extent:extents.records)
         files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
-    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
     for(auto block:catalog.blocks)
         if(!snapshot.catalogBlocks.count(block))protectedRuns.push_back({block,1});
     for(auto block:volumeMap.leaves)protectedRuns.push_back({block,1});
     protectedRuns.push_back({volumeMap.headerBlock,1});
     protectedRuns.push_back({volumeMap.rootBlock,1});
-    ProtectKeybags(current,protectedRuns);
     std::sort(protectedRuns.begin(),protectedRuns.end(),[](const auto& a,const auto& b){return a.block<b.block;});
     CatalogWritePlan plan;
     std::vector<DataRun> unused;
@@ -2984,11 +2996,8 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
     const auto name=EncodeCatalogName(request.name);
     const auto volumeId=current.volumes.front();
     const auto snapshotTree=Le64(volume.data()+152),extentRoot=Le64(volume.data()+144);
-    auto map=ReadWritableMap(source,current,Le64(volume.data()+128),deleting);
-    const auto currentMap=deleting?MapAt(map,current.transaction):map;
-    const auto catalog=ReadWritableCatalog(source,current,currentMap,Le64(volume.data()+136),deleting);
-    auto extents=ReadExtentTree(source,current,extentRoot,deleting);
-    const auto snapshot=ReadSnapshotAllocations(source,current,volume,map,catalog,extents);
+    auto [siblings,map,catalog,extents,snapshot,snapshotOnlyRuns]=ReadWriteAllocationState(
+        source,current,containerMap,volumeId,volume);
     if(deleting){
         const Node tree(ReadObject(source,current,snapshotTree,snapshotTree,current.transaction,2,16,true),true,{});
         const auto entry=tree.At(0).value;
@@ -3001,10 +3010,9 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
         Check(deleting||Le32(extent.value.data()+16)==1,"Creating a snapshot requires exclusive live file extents");
         live.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
     }
-    ValidateSharedFileExtents(catalog,extents.records);
     Check(deleting||!Le64(volume.data()+1000),"APFS snapshot creation requires no existing snapshot extension");
     const std::set<uint64_t> liveCatalog(catalog.blocks.begin(),catalog.blocks.end());
-    auto snapshotOnlyRuns=snapshot.protectedRuns;
+
     snapshotOnlyRuns.erase(std::remove_if(snapshotOnlyRuns.begin(),snapshotOnlyRuns.end(),[&](const auto& run){
         return run.count==1&&snapshot.catalogBlocks.count(run.block)&&liveCatalog.count(run.block);
     }),snapshotOnlyRuns.end());
@@ -3019,7 +3027,7 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
 
     auto extentLeaves=PartitionCatalog(deleting?std::move(extents.records):std::vector<OwnedRecord>{});
     const auto extentChildren=extentLeaves.size()>1?extentLeaves.size():0;
-    auto mappings=currentMap.mappings;
+    auto mappings=deleting?MapAt(map,current.transaction).mappings:map.mappings;
     mappings.erase(std::remove_if(mappings.begin(),mappings.end(),[&](const auto& mapping){
         return !liveCatalog.count(mapping.block);
     }),mappings.end());
@@ -3144,14 +3152,13 @@ CatalogWritePlan PrepareCatalogMutation(
     if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
     const auto oid=selected?selected:current.volumes.front();
-    const auto siblings=ReadSiblingAllocation(source,current,containerMap,oid,volume);
     const auto flags=Le64(volume.data()+56);
     const bool fold=(flags&1)!=0;
     const auto fileCount=Le64(volume.data()+184);
     const auto directoryCount=Le64(volume.data()+192);
     const auto symlinkCount=Le64(volume.data()+200);
     const auto catalogOid=Le64(volume.data()+136);
-    const auto extents=Le64(volume.data()+144),snapshots=Le64(volume.data()+152);
+    const auto snapshots=Le64(volume.data()+152);
     const bool externalCreate=create&&create->external;
     const bool externalHardLink=hardLink&&hardLink->external;
     const bool externalReplace=replace&&replace->external;
@@ -3165,19 +3172,15 @@ CatalogWritePlan PrepareCatalogMutation(
     if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)
         CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     else CheckNativeVolume(volume);
-    auto extentTree=ReadExtentTree(source,current,extents,historical);
-    extentTree.encrypted=bool(current.writeCipher);
-    const auto volumeMap=ReadWritableMap(source,current,Le64(volume.data()+128),historical);
-    const auto liveMap=historical?MapAt(volumeMap,current.transaction):volumeMap;
-    auto existing=ReadWritableCatalog(source,current,liveMap,catalogOid,historical);
-    const auto snapshot=ReadSnapshotAllocations(source,current,volume,volumeMap,existing,extentTree);
+    auto [siblings,volumeMap,existing,extentTree,snapshot,protectedRuns]=ReadWriteAllocationState(
+        source,current,containerMap,oid,volume);
     const bool liveClones=!historical&&!current.writeCipher&&(clone||std::any_of(existing.records.begin(),existing.records.end(),
         [](const auto& record){
             constexpr uint64_t cloneFlags=0x10|0x400;
             return record.key.size()==8&&Le64(record.key.data())>>60==3&&record.value.size()>=56&&
                    (Le64(record.value.data()+48)&cloneFlags);
         }));
-    if(!historical)ValidateSharedFileExtents(existing,extentTree.records,bool(current.writeCipher));
+
     if(liveClones)extentTree.verifiedPhysicalReferences=true;
     const bool reconcileReferences=extentTree.verifiedPhysicalReferences;
     const auto nextId=Le64(volume.data()+176);
@@ -3528,8 +3531,6 @@ CatalogWritePlan PrepareCatalogMutation(
     retired.insert(retired.end(),containerMap.leaves.begin(),containerMap.leaves.end());
     if(changeExtents)retired.insert(retired.end(),extentTree.blocks.begin(),extentTree.blocks.end());
 
-    auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
-    ProtectKeybags(current,protectedRuns);
     const size_t firstChild=changeExtents?7:6;
     CatalogLeaves leaves;
     size_t children=0,extentChildren=0,mapChildren=0;
