@@ -23,6 +23,7 @@
 //#include "afx.h"
 #include "stdafx.h"
 #include "LegacyEngine.h"
+#include "ClassicFormatCommand.h"
 #include "BackgroundCopies.h"
 #include "BrowserLifetime.h"
 #include "BrowserSession.h"
@@ -116,7 +117,10 @@ int check_zero_size( char *lpszPathName )
 			if(sizehi == 0 && sizelo == 0) {
 				*vname = 0;
 				if(ask_new_volume( lpszPathName, vname, &file_size, &init )) {
-					if(0 != HFSIFACE_format( lpszPathName, vname, file_size, init )) {
+					try {
+						FormatClassicImage(VolumeCoord::Wide(lpszPathName),vname,file_size);
+					} catch(const std::exception& error) {
+						AfxMessageBox(error.what(),MB_OK|MB_ICONERROR);
 						ret = 0;
 					}
 				} else {

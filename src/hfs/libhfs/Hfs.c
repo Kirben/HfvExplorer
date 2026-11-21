@@ -909,17 +909,17 @@ int hfs_format(char *path, int pnum, char *vname)
       /* write boot blocks */
 
       memset(&b, 0, sizeof(b));
-      b_writelb(&vol, 0, &b);
-      b_writelb(&vol, 1, &b);
-
-      /* flush other disk state */
-
-      vol.flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB | HFS_UPDATE_VBM;
-
-      if (v_flush(&vol, 1) < 0 ||
-	  b_finish(&vol) < 0)
+      if (b_writelb(&vol, 0, &b) < 0 || b_writelb(&vol, 1, &b) < 0)
 	result = -1;
     }
+
+  if (result == 0)
+    {
+      vol.flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB | HFS_UPDATE_VBM;
+      if (v_flush(&vol, 1) < 0 || b_finish(&vol) < 0)
+	result = -1;
+    }
+  FREE(vol.cache);
 
   if (close(vol.fd) < 0 && result == 0)
     {

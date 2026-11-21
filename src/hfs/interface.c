@@ -23,7 +23,6 @@
 #ifdef WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <winioctl.h>
 #undef ERROR
 #endif
 
@@ -1136,28 +1135,6 @@ int fill_with_nulls( HANDLE hf, long size )
 	return(1);
 }
 
-int init_format( char *volpath, hfv_size_t size )
-{
- HANDLE file;LARGE_INTEGER end;DWORD ignored;int ok;
- if(size < 800*1024 || size % 512 || size > 0xffffffffULL*512) {
-  hfs_error="Invalid classic HFS image size";return 0;
- }
- file=CreateFileA(volpath,GENERIC_READ|GENERIC_WRITE|DELETE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
- if(file==INVALID_HANDLE_VALUE) {
-  hfs_error="Cannot create a new image; choose an unused filename";return 0;
- }
- DeviceIoControl(file,FSCTL_SET_SPARSE,NULL,0,NULL,0,&ignored,NULL);
- end.QuadPart=size;
- ok=SetFilePointerEx(file,end,NULL,FILE_BEGIN)&&SetEndOfFile(file)&&FlushFileBuffers(file);
- if(!ok) {
-  FILE_DISPOSITION_INFO removeCreated={TRUE};
-  hfs_error="Could not size or flush the new image";
-  /* Delete only the file we opened, never a replacement at the same pathname. */
-  SetFileInformationByHandle(file,FileDispositionInfo,&removeCreated,sizeof(removeCreated));
- }
- CloseHandle(file);return ok;
-}
-
 unsigned char desktopData[384] = {
 	0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0F, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x32, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -1234,44 +1211,6 @@ void make_desktop( char *volpath )
 	if(result != 0) {
 		hfs_perror("Could not create desktop");
 	}
-}
-
-int HFSIFACE_format( 
-	char *volpath, 
-	char *vname, 
-	hfv_size_t size,
-	BOOL initialize
-)
-{
-	int result = 1;
-	int partno = 0;
-	char mac_vname[_MAX_PATH];
-	
-	if(!volpath || !vname || !*vname || strlen(vname)>HFS_MAX_VLEN || strchr(vname, ':')) {
-		hfs_error="Use an HFS volume name of 1 to 27 bytes without a colon";
-		return 1;
-	}
-	HFSIFACE_internal_init();
-	strcpy( mac_vname, vname );
-	pc_to_mac_charset(mac_vname);
-
-	START_TIME_CONSUMING(100);
-	if(!initialize || init_format(volpath,size)) {
-		SetCursor( LoadCursor(NULL,IDC_WAIT) );
-		if (hfs_format(volpath, partno, mac_vname) < 0) {
-			END_TIME_CONSUMING;
-		  hfs_perror(volpath);
-		} else {
-			result = 0;
-			// make_desktop(volpath);
-			END_TIME_CONSUMING;
-		}
-		SetCursor( LoadCursor(NULL,IDC_ARROW) );
-	} else {
-		END_TIME_CONSUMING;
-		hfs_perror("Could not format volume");
-	}
-	return( result );
 }
 
 int HFSIFACE_silencer( int shutup )

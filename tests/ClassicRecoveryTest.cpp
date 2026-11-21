@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "ClassicHfsRecovery.h"
+#include "ClassicFormatCommand.h"
 #include "MacBrowserModel.h"
 #include "VolumeSession.h"
 #include "OperationCompletion.h"
@@ -116,6 +117,94 @@ void CrashChild(const CString& image,unsigned phase,const wchar_t* action=L"over
         throw HfsPlus::Error("Classic recovery subprocess missed crash phase "+std::to_string(phase)+
                              " (exit "+std::to_string(exit)+")");
 }
+constexpr uint64_t FormatBytes=1474560;
+constexpr char FormatLabel[]="Verified";
+
+unsigned StagedImages(const CString& root)
+{
+    WIN32_FIND_DATAA data{};
+    HANDLE search=FindFirstFileA(root+"\\.hfv-image-*.tmp",&data);
+    if(search==INVALID_HANDLE_VALUE){
+        Check(GetLastError()==ERROR_FILE_NOT_FOUND,"enumerate temporary sibling images");
+        return 0;
+    }
+    unsigned count=1;
+    while(FindNextFileA(search,&data))++count;
+    const auto last=GetLastError();
+    FindClose(search);
+    Check(last==ERROR_NO_MORE_FILES,"finish enumerating temporary sibling images");
+    return count;
+}
+
+void FormatRecovery(const CString& root,FILE* report)
+{
+    const CString folder=root+"\\format";
+    Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create formatting crash-test directory");
+    const auto verify=[](const CString& image){
+        const auto path=VolumeCoord::Wide(image.GetString());
+        Check(Load(image).size()==FormatBytes,"published image has the wrong length");
+        auto volume=MacBrowser::OpenImage(path);
+        Check(volume&&volume->Name()==u"Verified"&&volume->List(2).empty(),
+              "published image cannot be reopened as the expected empty HFS volume");
+        volume->Close();
+    };
+    for(unsigned phase:{10u,11u,12u}){
+        CString image;
+        image.Format("%s\\crash-%u.dsk",folder.GetString(),phase);
+        const auto previous=StagedImages(folder);
+        CrashChild(image,phase,L"format");
+        if(phase==12){
+            verify(image);
+            Check(StagedImages(folder)==previous,"publication left a temporary sibling");
+        }else{
+            Check(GetFileAttributesA(image)==INVALID_FILE_ATTRIBUTES,
+                  "interrupted format exposed the destination");
+            Check(StagedImages(folder)==previous+1,"interrupted format did not use a temporary sibling");
+            FormatClassicImage(VolumeCoord::Wide(image.GetString()),FormatLabel,FormatBytes);
+            verify(image);
+            Check(StagedImages(folder)==previous+1,"retry changed an earlier staged file");
+        }
+    }
+
+    const auto previous=StagedImages(folder);
+    const CString image=folder+"\\failed.dsk";
+    const auto path=VolumeCoord::Wide(image.GetString());
+    Storage::Job job;
+    const Bytes sentinel{1,2,3,4};
+    for(unsigned failure=0;failure<4;++failure){
+        struct Reset {
+            ~Reset(){classicFormatTestStage={};HfsPlus::workerIoFault={};}
+        } reset;
+        if(failure==0){
+            HfsPlus::workerIoFault=[](bool write,uint64_t offset,size_t){
+                if(write&&offset==0)throw HfsPlus::Error("Injected format boot write failure");
+            };
+        }
+        classicFormatTestStage=[&](ClassicFormatStage stage,HfsPlus::Source& output){
+            if(failure==1&&stage==ClassicFormatStage::Verifying){
+                const uint8_t invalid=0;
+                output.Write(output.Size()-1024,&invalid,1);
+            }
+            if(failure==2&&stage==ClassicFormatStage::Publishing)Save(image,sentinel);
+            if(failure==3&&stage==ClassicFormatStage::Publishing)job.cancel();
+        };
+        bool failed=false;
+        try{FormatClassicImage(path,FormatLabel,FormatBytes,&job);}
+        catch(const HfsPlus::Error&){failed=failure!=3;}
+        catch(const Storage::Cancelled&){failed=failure==3;}
+        Check(failed,"failed, conflicting or cancelled format was reported as successful");
+        Check(StagedImages(folder)==previous,"ordinary format failure left a temporary image");
+        if(failure==2){
+            Check(Load(image)==sentinel,"publication replaced a concurrently created destination");
+            Check(DeleteFileA(image)!=FALSE,"remove competing test output");
+        }else{
+            Check(GetFileAttributesA(image)==INVALID_FILE_ATTRIBUTES,
+                  "failed verification or cancellation exposed a destination");
+        }
+    }
+    fprintf(report,"PASS: interrupted classic HFS formatting publishes only after verification; retries, write errors, corrupt headers, name collisions and cancellation preserve the destination.\n");
+}
+
 void DeleteRecovery(const CString& root,const Bytes& original,FILE* report)
 {
     const CString seed=root+"\\delete-seed.dsk";
@@ -539,6 +628,19 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
 {
     try{
         readonly_cd_backend_init();
+        if(!strcmp(action,"format")){
+            if(phase==10){
+                HfsPlus::workerIoFault=[writes=0u](bool write,uint64_t,size_t) mutable {
+                    if(write&&++writes==2)ExitProcess(100);
+                };
+            }
+            classicFormatTestStage=[phase](ClassicFormatStage stage,HfsPlus::Source&){
+                if((phase==11&&stage==ClassicFormatStage::Publishing)||
+                   (phase==12&&stage==ClassicFormatStage::Published))ExitProcess(90+phase);
+            };
+            FormatClassicImage(VolumeCoord::Wide(image),FormatLabel,FormatBytes);
+            return 3;
+        }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
         auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image));
         Check(bool(volume),"open classic HFS image in subprocess");
@@ -599,6 +701,7 @@ int RunClassicRecoveryTest(const char* directory)
     int result=0;
     try{
         readonly_cd_backend_init();
+        FormatRecovery(root,report);
         Save(seed,Bytes(4*1024*1024));
         CString formatPath=seed;
         char label[]="Undo";

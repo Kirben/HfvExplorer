@@ -746,6 +746,7 @@ int RunBackgroundMetadataTest(const char* directory){
 int RunPerVolumeCommandsTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\per-volume-commands-report.txt","w");if(!report)return 2;int result=0;Gate stalled;
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();BackgroundCopies::enabled=true;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;
+ readonly_cd_backend_init();
  try{
   app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto frame=app.CreateBrowser(FALSE);Check(frame!=nullptr,"create command-policy browser");auto a=Image(host+"\\busy-a.dsk"),b=Image(host+"\\busy-b.dsk"),c=Image(host+"\\idle.dsk");auto slow=std::make_shared<Slow>(a,stalled);auto id=Put(*a,u"Slow");FileOperations::Request copy;FileOperations::Location from,to;from.SetMounted(slow,id);to.SetMounted(b);copy.Copy().sources={from};copy.Copy().destination=to;Check(BackgroundCopies::Start({copy},frame,true),"start policy copy");Until([&]{return WaitForSingleObject(stalled.entered,0)==WAIT_OBJECT_0;});
   auto& session=frame->GetBrowserSession();int idle=session.MacBrowser().AttachTestVolume(c,"idle"),busy=session.MacBrowser().AttachTestVolume(slow,"busy");Check(session.MacBrowser().ShowTestFolder(idle,2),"browse idle volume");
