@@ -3238,6 +3238,63 @@ int RunApfsContainerTest(const char* directory)
                 output->Flush();
                 output->Keep();
             }
+            const auto deletion=VolumeCoord::Wide(root+"apfs-macos-clone-snapshot-deleted.img");
+            Check(CopyFileW(path.c_str(),deletion.c_str(),TRUE)!=FALSE,"Could not copy the macOS clone snapshot");
+            const auto readClones=[](MacBrowser::Volume& volume,uint32_t rootId){
+                MacBrowser::Entry folder;
+                Check(volume.FindChild(rootId,u"Fixture",folder),"Missing APFS clone directory");
+                std::array<Bytes,2> contents;
+                size_t index=0;
+                for(const auto name:{u"binary.bin",u"clone.bin"}){
+                    MacBrowser::Entry clone;
+                    Check(volume.FindChild(folder.id,name,clone),"Missing APFS clone after snapshot deletion");
+                    auto& bytes=contents[index++];
+                    bytes.resize(size_t(clone.forks[0].size));
+                    volume.Read(clone.id,0,0,bytes.data(),bytes.size());
+                }
+                return contents;
+            };
+            std::array<Bytes,2> expected;
+            {
+                auto volume=MacBrowser::OpenBrowserImage(deletion);
+                Check(volume&&volume->Supports().writable,"Could not mount the macOS clone snapshot");
+                const auto roots=volume->List(2);
+                const auto names=Apfs::MountedSnapshotNames(*volume);
+                Check(roots.size()==2&&names.size()==1,"Missing APFS snapshot manager selection");
+                expected=readClones(*volume,roots.front().id);
+                Check(!expected[0].empty()&&expected[0]!=expected[1],"APFS clone fixture lacks distinct data");
+                Storage::Job cancelled;
+                cancelled.cancel();
+                bool stopped=false;
+                try{Apfs::ChangeMountedSnapshot(*volume,names.front(),false,cancelled);}
+                catch(const Storage::Cancelled&){stopped=true;}
+                Check(stopped&&Apfs::MountedSnapshotNames(*volume)==names&&
+                      readClones(*volume,roots.front().id)==expected,
+                      "Cancelled APFS snapshot deletion changed live clone data");
+                Storage::Job remove;
+                Check(Apfs::ChangeMountedSnapshot(*volume,names.front(),false,remove).empty()&&
+                      readClones(*volume,2)==expected,"Deleting the mounted snapshot changed a live clone");
+            }
+            {
+                auto volume=MacBrowser::OpenBrowserImage(deletion);
+                Check(volume&&volume->Supports().writable&&Apfs::MountedSnapshotNames(*volume).empty()&&
+                      readClones(*volume,2)==expected,
+                      "Reopening the macOS image after snapshot deletion changed a live clone");
+            }
+            // The bundled apfsck cannot parse the fixture's existing LZVN resource fork.
+            // Validate a separate output with only that live file removed.
+            const auto checker=VolumeCoord::Wide(root+"apfs-macos-clone-snapshot-apfsck.img");
+            Check(CopyFileW(deletion.c_str(),checker.c_str(),TRUE)!=FALSE,"Could not prepare the apfsck derivative");
+            {
+                auto volume=MacBrowser::OpenBrowserImage(checker);
+                MacBrowser::Entry folder,compressed;
+                Check(volume&&volume->FindChild(2,u"Fixture",folder)&&
+                      volume->FindChild(folder.id,u"compressed",compressed)&&compressed.compressed,
+                      "Missing the macOS compression record excluded from the checker derivative");
+                volume->Remove(compressed.id);
+                Check(readClones(*volume,2)==expected,"Removing the checker-incompatible file changed a live clone");
+            }
+            fprintf(report,"PASS: macOS APFS GUI snapshot deletion preserves both live clones after reopening.\n");
             SnapshotLiveWrites(path,report,u"Fixture",u"generation.txt",true);
         }
         ExternalCaseSensitiveWrites(root,report,nullptr);

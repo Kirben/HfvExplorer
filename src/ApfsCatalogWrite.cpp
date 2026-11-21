@@ -176,7 +176,7 @@ void StageMap(Writes& writes,WritableMap map,uint64_t headerBlock,uint64_t rootB
 struct CatalogRecords {
     std::vector<OwnedRecord> records;
     std::vector<uint64_t> blocks;
-    bool verifiedSnapshotReferences=false;
+    bool verifiedPhysicalReferences=false;
     bool encrypted=false;
 };
 CatalogRecords ReadWritableCatalog(Source& source,const Container& container,const WritableMap& map,uint64_t oid,bool historical=false)
@@ -1720,8 +1720,8 @@ void CollectExternalRetiredExtents(const std::vector<OwnedRecord>& catalog,uint6
                                    const std::set<uint64_t>& removeStreams,const CatalogRecords& extentTree,
                                    std::set<uint64_t>& retired)
 {
-    // The snapshot path reconciles all extent references against the edited catalog.
-    if(extentTree.verifiedSnapshotReferences)return;
+    // The shared-extent path reconciles references against the edited catalog.
+    if(extentTree.verifiedPhysicalReferences)return;
     std::map<uint64_t,uint64_t> owned;
     for(const auto& extent:extentTree.records){
         if(Le64(extent.value.data()+8)==inode&&Le32(extent.value.data()+16)==1)
@@ -1846,7 +1846,7 @@ uint64_t ExclusiveExternalDataStream(const std::vector<OwnedRecord>& catalog,uin
                                      const Bytes& value,const CatalogRecords& extents)
 {
     const auto stream=Le64(value.data()+8);
-    if(!extents.verifiedSnapshotReferences){
+    if(!extents.verifiedPhysicalReferences){
         Check(stream==inode,"APFS edit requires a private data stream");
         return stream;
     }
@@ -2486,7 +2486,7 @@ WritableMap MapAt(const WritableMap& source,uint64_t xid)
     return result;
 }
 
-void ValidateSnapshotFileExtents(const CatalogRecords& catalog,const std::vector<OwnedRecord>& extents)
+void ValidateSharedFileExtents(const CatalogRecords& catalog,const std::vector<OwnedRecord>& extents)
 {
     std::map<uint64_t,int64_t> references;
     const auto add=[&](uint64_t block,uint64_t count,int64_t change){
@@ -2656,7 +2656,7 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
     std::map<uint64_t,OwnedRecord> priorData;
     for(const auto& entry:priorExtents.records)
         priorData.emplace(Le64(entry.key.data())&IdMask,entry);
-    ValidateSnapshotFileExtents(prior,priorExtents.records);
+    ValidateSharedFileExtents(prior,priorExtents.records);
     std::map<uint64_t,int64_t> adjustments;
     std::vector<OwnedRecord> liveData;
     for(auto& entry:extentTree.records){
@@ -2687,9 +2687,9 @@ SnapshotAllocations ReadSnapshotAllocations(Source& source,const Container& cont
     std::sort(liveData.begin(),liveData.end(),[](const auto& a,const auto& b){
         return Le64(a.key.data())<Le64(b.key.data());
     });
-    ValidateSnapshotFileExtents(catalog,liveData);
+    ValidateSharedFileExtents(catalog,liveData);
     extentTree.records=std::move(liveData);
-    extentTree.verifiedSnapshotReferences=true;
+    extentTree.verifiedPhysicalReferences=true;
     std::sort(result.protectedRuns.begin(),result.protectedRuns.end(),[](const auto& a,const auto& b){
         return a.block<b.block;
     });
@@ -2917,14 +2917,14 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
         Check(entry.size==51+name.size()&&!memcmp(entry.data+50,name.c_str(),name.size()+1),
               "The selected APFS snapshot changed");
     }
-    // After deletion the ordinary writer requires exclusive physical references.
+    // Collapse the snapshot deltas into the live physical reference tree.
     std::vector<FileRun> live;
     for(const auto& extent:extents.records){
-        Check(Le32(extent.value.data()+16)==1,"Snapshot changes require exclusive live file extents");
+        Check(deleting||Le32(extent.value.data()+16)==1,"Creating a snapshot requires exclusive live file extents");
         live.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,Le64(extent.value.data())&IdMask});
     }
-    ValidateSnapshotFileExtents(catalog,extents.records);
-    Check(!Le64(volume.data()+1000),"APFS snapshot changes do not support extended snapshot metadata");
+    ValidateSharedFileExtents(catalog,extents.records);
+    Check(deleting||!Le64(volume.data()+1000),"APFS snapshot creation requires no existing snapshot extension");
     const std::set<uint64_t> liveCatalog(catalog.blocks.begin(),catalog.blocks.end());
     auto snapshotOnlyRuns=snapshot.protectedRuns;
     snapshotOnlyRuns.erase(std::remove_if(snapshotOnlyRuns.begin(),snapshotOnlyRuns.end(),[&](const auto& run){
@@ -3013,6 +3013,7 @@ CatalogWritePlan PrepareSnapshotMutation(Source& source,const Container& current
     Set(volume,144,blocks[6],8);
     Set(volume,152,blocks[0],8);
     Set(volume,216,!deleting,8);
+    if(deleting)Set(volume,1000,0,8);
     Set(volume,256,time,8);
     Check(Le64(volume.data()+224)<=UINT64_MAX-added-3&&Le64(volume.data()+232)<=UINT64_MAX-dropped-3,
           "APFS snapshot allocation history overflow");
@@ -3090,6 +3091,17 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto liveMap=historical?MapAt(volumeMap,current.transaction):volumeMap;
     auto existing=ReadWritableCatalog(source,current,liveMap,catalogOid,historical);
     const auto snapshot=ReadSnapshotAllocations(source,current,volume,volumeMap,existing,extentTree);
+    const bool liveClones=!historical&&!current.writeCipher&&std::any_of(existing.records.begin(),existing.records.end(),
+        [](const auto& record){
+            constexpr uint64_t cloneFlags=0x10|0x400;
+            return record.key.size()==8&&Le64(record.key.data())>>60==3&&record.value.size()>=56&&
+                   (Le64(record.value.data()+48)&cloneFlags);
+        });
+    if(liveClones){
+        ValidateSharedFileExtents(existing,extentTree.records);
+        extentTree.verifiedPhysicalReferences=true;
+    }
+    const bool reconcileReferences=extentTree.verifiedPhysicalReferences;
     if(clone&&!historical)throw CloneUnavailable("APFS cloning requires a supported snapshot");
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
@@ -3368,17 +3380,18 @@ CatalogWritePlan PrepareCatalogMutation(
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});
     }
-    if(!historical)ValidateExtentReferences(extentTree,files);
+    if(!reconcileReferences)ValidateExtentReferences(extentTree,files);
     if(!retiredStreams.empty()){
         catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
             const auto key=Le64(record.key.data());
             return key>>60==8&&retiredStreams.count(key&IdMask);
         }),catalog.end());
     }
-    std::set<uint64_t> historicalRetired;
+    std::set<uint64_t> reconciledRetired;
+    std::map<uint64_t,uint32_t> updatedReferences;
     std::vector<OwnedRecord> snapshotUpdates;
-    bool snapshotReferencesChanged=false;
-    if(historical){
+    bool extentReferencesChanged=false;
+    if(reconcileReferences){
         const auto counts=CatalogReferenceCounts(catalog);
         for(const auto& prior:snapshot.historicalData){
             const auto start=Le64(prior.key.data())&IdMask,blocks=Le64(prior.value.data())&IdMask;
@@ -3396,23 +3409,23 @@ CatalogWritePlan PrepareCatalogMutation(
             const auto before=Le32(current.value.data()+16),after=CatalogReferences(counts,start,blocks);
             Check(after<=before||(clone&&snapshot.sharedData.count(start)),"APFS extent references increased");
             if(after==before)continue;
-            if(snapshot.sharedData.count(start))snapshotReferencesChanged=true;
-            else{
-                Check(!after&&before==1,"APFS cannot retire a shared extent created after the snapshot");
-                historicalRetired.insert(start);
-            }
+            extentReferencesChanged=true;
+            if(snapshot.sharedData.count(start))continue;
+            if(historical)Check(!after&&before==1,"APFS cannot retire a shared extent created after the snapshot");
+            if(after)updatedReferences.emplace(start,after);
+            else reconciledRetired.insert(start);
         }
     }
     const bool retireFile=replace||removedKind.has_value();
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
-        if(historical)return historicalRetired.count(run.block)!=0;
+        if(reconcileReferences)return reconciledRetired.count(run.block)!=0;
         if(externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;
     uint64_t removedBlocks=0;
-    bool removeExtents=snapshotReferencesChanged;
+    bool removeExtents=extentReferencesChanged;
     for(const auto& run:files){
         if(!retiredRun(run))continue;
         removeExtents=true;
@@ -3483,9 +3496,11 @@ CatalogWritePlan PrepareCatalogMutation(
                     const auto key=(uint64_t(2)<<60)|run.block;
                     const auto old=std::lower_bound(extentTree.records.begin(),extentTree.records.end(),key,
                         [](const auto& record,uint64_t wanted){return Le64(record.key.data())<wanted;});
-                    if(historical&&old!=extentTree.records.end()&&Le64(old->key.data())==key)
+                    if(reconcileReferences&&old!=extentTree.records.end()&&Le64(old->key.data())==key){
                         references.push_back(*old);
-                    else references.push_back(ExtentReference(run));
+                        const auto changed=updatedReferences.find(run.block);
+                        if(changed!=updatedReferences.end())Set(references.back().value,16,changed->second,4);
+                    }else references.push_back(ExtentReference(run));
                 }
 
                 std::sort(references.begin(),references.end(),[](const auto& a,const auto& b){
