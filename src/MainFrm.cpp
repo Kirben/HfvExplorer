@@ -81,8 +81,6 @@ static char THIS_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////
 // CMainFrame
 
-#define CHILDMAGIC 0x12345678
-UINT our_child_registration = RegisterWindowMessage("HFVRegisterChild");
 
 IMPLEMENT_DYNCREATE(CMainFrame, CFrameWnd)
 
@@ -768,13 +766,6 @@ void CMainFrame::OnDropFiles(HDROP drop)
     GetBrowserSession().MacBrowser().OpenImages(std::move(images));
 }
 
-void CMainFrame::OnChildRegistration(WPARAM wParam, LPARAM lParam) 
-{
-	CHFVExplorerApp	*pApp;
-	pApp = (CHFVExplorerApp *)AfxGetApp();
-	pApp->add_child( (HWND)lParam );
-}
-
 LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) 
 {
  if(message==NativeDpi::Changed){
@@ -804,7 +795,6 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
   }
  }
  if(HfvDeviceWait::busy()&&(message==WM_COMMAND||message==WM_CLOSE))return 0;
- if(message==our_child_registration)OnChildRegistration(wParam,lParam);
 	return CFrameWnd::WindowProc(message, wParam, lParam);
 }
 

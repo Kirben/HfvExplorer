@@ -61,15 +61,11 @@ public:
  afx_msg void OnExitBrowsers();
 	void LoadSettings(void);
 	void SaveSettings(void);
-	void kill_childs();
-	void add_child( HWND hi );
 	BOOL EnableTimer( BOOL onoff );
 	HFONT get_font(UINT dpi = 96);
 	void ClearBrowserFonts();
 
 	CString m_opendir;
-	HWND m_parent_hwnd;
-	int is_desktop_application;
 
 	int		m_dosicons;
 	int		m_fat_icon_time_limit;
@@ -107,7 +103,6 @@ public:
 
 
 protected:
-	CPointerWordArray child_array;
 /*
 	CString m_title;
 	CString m_current_directory;

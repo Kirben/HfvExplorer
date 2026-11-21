@@ -79,8 +79,6 @@ CHFVExplorerApp::CHFVExplorerApp()
 {
 
 	m_opendir = "";
-	is_desktop_application = 1;
-	m_parent_hwnd = 0;
 	m_dosicons = 1;
 	m_fat_icon_time_limit = 0;
 	m_mountall = TRUE;
@@ -124,7 +122,6 @@ HFONT CHFVExplorerApp::get_font(UINT dpi)
 CHFVExplorerApp::~CHFVExplorerApp()
 {
  StorageUi::state().wait=nullptr;StorageUi::state().thread=0;
-	kill_childs();
 	floppy_module_global_final();
 	SaveSettings();
     for (const auto& font : m_browserFonts) DeleteObject(font.second);
@@ -440,8 +437,6 @@ void CHFVExplorerApp::OnAppAbout()
 /////////////////////////////////////////////////////////////////////////////
 // CHFVExplorerApp commands
 
-#define CHILDMAGIC 0x12345678
-static UINT our_child_registration = RegisterWindowMessage("HFVRegisterChild");
 
 void CHFVExplorerApp::OpenStartupDirectory(BrowserSession& session)
 {
@@ -451,40 +446,10 @@ void CHFVExplorerApp::OpenStartupDirectory(BrowserSession& session)
  auto frame=session.Owner();
  const bool windows=directory.Mid(1,2)==":\\";
  session.Document()->NavigateStartupDirectory((LPCSTR)directory,!windows);
- if(is_desktop_application){
-  frame->SetWindowPos(nullptr,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW|SWP_NOZORDER);
-  frame->ShowWindow(SW_SHOWMAXIMIZED);
- }else{
-  ::PostMessage(m_parent_hwnd,our_child_registration,CHILDMAGIC,reinterpret_cast<LPARAM>(frame->GetSafeHwnd()));
-  frame->SetWindowPos(nullptr,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW);
- }
+ frame->SetWindowPos(nullptr,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_SHOWWINDOW|SWP_NOZORDER);
+ frame->ShowWindow(SW_SHOWMAXIMIZED);
  frame->SetForegroundWindow();
 }
-
-void CHFVExplorerApp::add_child( HWND hi ) 
-{
-	child_array.Add( (DWORD_PTR) hi );
-}
-
-void CHFVExplorerApp::kill_childs() 
-{
-	int i, count = child_array.GetSize();
-	HWND w;
-
-	for(i=0; i<count; i++) {
-		w = (HWND)child_array.GetAt(i);
-		::PostMessage( w, WM_CLOSE, 0, 0 );
-	}
-}
-/*
-	get_last_directory( &dir, &mac );
-
-	int mac;
-	CString dir
-	if(is_desktop_application) {
-		dir = get_directory( 0, &mac );
-		save_last_directory( dir, mac );
-*/
 
 BOOL CHFVExplorerApp::EnableTimer( BOOL onoff )
 {

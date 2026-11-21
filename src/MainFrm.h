@@ -75,7 +75,6 @@ protected: // create from serialization only
 public:
  BrowserSession& GetBrowserSession()const;
  bool CommandAllowed(UINT)const;
-	void OnChildRegistration(WPARAM wParam, LPARAM lParam);
 
 // Operations
 public:

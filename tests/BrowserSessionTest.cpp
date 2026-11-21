@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "DocumentLaunch.h"
 #include "HFVExplorer.h"
+#include "HFVCommandLineInfo.h"
 #include "BrowserSession.h"
 #include "CopyProgress.h"
 #include "BrowserDirectory.h"
@@ -810,10 +811,20 @@ int RunBrowserSessionTest(const char* directory){
    Check(after.IsMounted()&&after.Volume()==before.Volume()&&after.Id()==before.Id(),
          "mounted tree restoration selected the wrong folder");
 
-   const auto startupPath=wa+"\\StartupFolder";
+   const auto startupPath=wa+"\\Startup Folder";
    Check(CreateDirectoryA(startupPath,nullptr)!=FALSE,"create unexpanded Windows startup folder");
    {CFile file;Check(file.Open(startupPath+"\\Marker",CFile::modeCreate|CFile::modeWrite)!=FALSE,"create startup folder marker");}
-   Check(imageDocument.NavigateStartupDirectory((LPCSTR)startupPath,false),"queue named Windows startup folder");
+   CHFVCommandLineInfo startupArguments;
+   startupArguments.ParseParam("@!42 Same:Nested",FALSE,TRUE);
+   Check(app.m_opendir.IsEmpty(),"retired browser protocol selected a startup folder");
+   startupArguments.ParseParam("@Same:Nested",FALSE,TRUE);
+   Check(app.m_opendir=="Same:Nested","classic @directory argument was changed");
+   const CString startupArgument=CString("@")+startupPath;
+   startupArguments.ParseParam(startupArgument,FALSE,TRUE);
+   Check(app.m_opendir==startupPath,"Windows @directory argument lost spaces or changed its path");
+   const CString requested=app.m_opendir;
+   app.m_opendir.Empty();
+   Check(imageDocument.NavigateStartupDirectory((LPCSTR)requested,false),"queue named Windows startup folder");
    PumpUntil([&]{return !session.Navigating();},"named Windows startup folder did not publish");
    Check(Find(*session.List(),L"Marker")>=0&&session.MacBrowser().TargetFolder().IsWindows(),
          "named Windows startup path did not materialize the containing tree");
