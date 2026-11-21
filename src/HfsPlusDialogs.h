@@ -22,8 +22,9 @@ Dmg::Credentials PromptDmgCredentials(CWnd*,Dmg::UnlockMethod,bool retry,const s
 void ConvertDmgImage(BrowserSession&);
 void ManageApfsSnapshots(CWnd*,std::shared_ptr<MacBrowser::Volume> selected);
 void HfvUnicodeNameEdit(HWND,int);
-bool EditWindowsName(CWnd *parent, std::wstring &name);
-bool EditMacVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume);
+enum class NameEdit { Generic, RenameFile, RenameFolder, NewFolder };
+bool EditWindowsName(CWnd *parent,std::wstring& name,NameEdit edit);
+bool EditMacVolumeName(CWnd *parent,std::wstring& name,const MacBrowser::Volume& volume,NameEdit edit=NameEdit::Generic);
 bool EditApfsVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume);
 
 bool SelectHfsPlusExternalJournal(CWnd*,std::wstring&,const std::string&);

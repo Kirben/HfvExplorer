@@ -608,6 +608,10 @@ int RunBackgroundMetadataTest(const char* directory){
   Check(IsWindow(capturedProperties) &&
         BrowserPresentation::Text(GetDlgItem(capturedProperties,IDC_CP_PHASE))==L"File",
         "Delayed Properties used the new folder instead of its captured entry");
+  Check(BrowserPresentation::Text(GetDlgItem(capturedProperties,IDC_PROP_DATA_SIZE))==L"8 KiB (8,192 bytes)"&&
+        BrowserPresentation::Text(GetDlgItem(capturedProperties,IDC_PROP_RESOURCE_SIZE))==L"31 bytes"&&
+        BrowserPresentation::Text(GetDlgItem(capturedProperties,IDCANCEL))==L"Close",
+        "Properties did not show the exact sizes of both forks and the Close action");
   dismiss(capturedProperties);
   Check(session.MacBrowser().ShowTestFolder(mount,2),"show properties source");start(1);Check(session.MacBrowser().Properties(Row(session,L"File")),"start slow Properties");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(frame->IsWindowEnabled()&&!MetadataDialogs::Window(),"properties blocked browser or opened before metadata");auto next=app.CreateBrowser(FALSE);Check(next!=nullptr,"new browser during properties");HWND old=frame->GetSafeHwnd();frame->SendMessage(WM_CLOSE);Check(!IsWindow(old)&&BackgroundCopies::Active(),"properties owner cannot close");Host(next->GetBrowserSession(),host);SetEvent(gate.release);finished();HWND properties=MetadataDialogs::Window();Check(IsWindow(properties)&&next->IsWindowEnabled(),"modeless Properties lost after owner closure");Check(BrowserPresentation::Text(GetDlgItem(properties,IDC_CP_PHASE))==L"File","Properties retargeted after navigation");dismiss(properties);frame=next;
   FileOperations::Location selected;selected.SetMounted(slow,file);selected.expectedName=u"File";start(1);Check(MetadataDialogs::Show(selected,frame),"start canceled Properties");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});progress=BackgroundCopies::DialogWindow();SendMessage(progress,WM_COMMAND,IDCANCEL,0);SetEvent(gate.release);finished();Check(!MetadataDialogs::Window(),"canceled inspection opened Properties");outcome(progress,"Properties read cancelled");dismiss(progress);

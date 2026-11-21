@@ -23,6 +23,7 @@
 
 #if _MSC_VER >= 1000
 #pragma once
+#include <string>
 #endif // _MSC_VER >= 1000
 // DynCopyModeSelect.h : header file
 //
@@ -41,7 +42,7 @@ public:
 	enum { IDD = IDD_DYNAMIC_COPYMODE_SELECT };
 	BOOL	m_appledouble;
 	int		m_copy_mode;
-	CString	m_copying_fname;
+	std::wstring	m_copying_fname;
 	//}}AFX_DATA
 
 	int m_said_ok_all;

@@ -21,6 +21,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "DynCopyModeSelect.h"
+#include "BrowserPresentation.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -38,7 +39,7 @@ CDynCopyModeSelect::CDynCopyModeSelect(CWnd* pParent /*=NULL*/)
 	//{{AFX_DATA_INIT(CDynCopyModeSelect)
 	m_appledouble = FALSE;
 	m_copy_mode = -1;
-	m_copying_fname = _T("");
+
 	m_said_ok_all = 0;
 	//}}AFX_DATA_INIT
 }
@@ -53,8 +54,7 @@ void CDynCopyModeSelect::DoDataExchange(CDataExchange* pDX)
     int selected = m_copy_mode >= 7 ? m_copy_mode - 1 : m_copy_mode;
     DDX_CBIndex(pDX, IDC_COPY_MODE, selected);
     if (pDX->m_bSaveAndValidate) m_copy_mode = selected >= 6 ? selected + 1 : selected;
-	DDX_Text(pDX, IDC_COPYING_FNAME, m_copying_fname);
-	DDV_MaxChars(pDX, m_copying_fname, 255);
+
 	//}}AFX_DATA_MAP
 }
 
@@ -82,6 +82,8 @@ void CDynCopyModeSelect::OnOkall()
 BOOL CDynCopyModeSelect::OnInitDialog() 
 {
 	CDialog::OnInitDialog();
+    BrowserPresentation::UnicodeControl(m_hWnd,IDC_COPYING_FNAME,L"STATIC");
+    SetDlgItemTextW(m_hWnd,IDC_COPYING_FNAME,(L"Copying "+m_copying_fname).c_str());
     SendDlgItemMessage(IDC_COPY_MODE, CB_ADDSTRING, 0, (LPARAM)"BinHex 5.0 (MacBinary I)");
     SendDlgItemMessage(IDC_COPY_MODE, CB_ADDSTRING, 0, (LPARAM)"MacBinary III");
     SendDlgItemMessage(IDC_COPY_MODE, CB_SETCURSEL, m_copy_mode >= 7 ? m_copy_mode - 1 : m_copy_mode, 0);

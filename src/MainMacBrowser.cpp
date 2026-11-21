@@ -1161,7 +1161,7 @@ bool MainMacBrowser::PasteHardLink(){
 }
 bool MainMacBrowser::NewFolder(){if(!Active())return false;if(!CanCreateFolder())return true;
  auto target=state_->Target();std::wstring name=L"New Folder";
- if(EditMacVolumeName(session_.Owner(),name,*target.Volume())){CreateFolder(target,U16(name));if(!BackgroundCopies::Enabled())Refresh();}return true;}
+ if(EditMacVolumeName(session_.Owner(),name,*target.Volume(),NameEdit::NewFolder)){CreateFolder(target,U16(name));if(!BackgroundCopies::Enabled())Refresh();}return true;}
 FileOperations::Location MainMacBrowser::CaptureItem(int row)
 {
  return state_->Item(row,false);
@@ -1176,7 +1176,7 @@ bool MainMacBrowser::RenameWindowsItem(int row){
  try{
   auto name=Wide(selected->entry.name);
   auto item=CaptureItem(row);
-  if(EditWindowsName(session_.Owner(),name))
+  if(EditWindowsName(session_.Owner(),name,selected->entry.directory?NameEdit::RenameFolder:NameEdit::RenameFile))
    RunOperation(session_,FileOperations::RenameEntry{std::move(item),U16(name),{},false},false,true);
  }catch(const std::exception& error){MessageBoxA(session_.Owner()->GetSafeHwnd(),error.what(),"HFVExplorer",MB_OK|MB_ICONERROR);}
  return true;
@@ -1184,7 +1184,9 @@ bool MainMacBrowser::RenameWindowsItem(int row){
 bool MainMacBrowser::Rename(){if(!Active())return false;if(!CanRename())return true;
  auto& list=session_.List()->GetListCtrl();int row=list.GetNextItem(-1,LVNI_SELECTED);if(row<0)return true;
  auto item=state_->Item(row,false);auto name=Wide(item.expectedName);
- if(EditMacVolumeName(session_.Owner(),name,*item.Volume())){FileOperations::RenameEntry request{item, U16(name)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
+ const auto* selected=session_.List()->BrowserRowAt(row);
+ if(!selected)return true;
+ if(EditMacVolumeName(session_.Owner(),name,*item.Volume(),selected->entry.directory?NameEdit::RenameFolder:NameEdit::RenameFile)){FileOperations::RenameEntry request{item, U16(name)};RunOperation(session_,std::move(request),false,true);if(!BackgroundCopies::Enabled())Refresh();}return true;
 }
 bool MainMacBrowser::Delete(bool confirm){if(!Active())return false;if(!CanDelete())return true;
     std::vector<Location> selected;auto& list=session_.List()->GetListCtrl();for(int i=-1;(i=list.GetNextItem(i,LVNI_SELECTED))>=0;){const auto row=session_.List()->BrowserRowAt(i);if(row&&row->location.IsMounted())selected.push_back(state_->Item(i,false));}

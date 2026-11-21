@@ -460,10 +460,10 @@ struct Batch {
    mode->m_copy_mode = lastMode[direction];
    mode->m_appledouble = lastAd < 0 ? static_cast<CHFVExplorerApp*>(AfxGetApp())->m_copyin_appledouble : lastAd;
    if(pending.source.IsMounted())
-    mode->m_copying_fname=pending.source.expectedName.empty()?CString("Selected file"):CString(MacBrowser::Wide(pending.source.expectedName).c_str());
+    mode->m_copying_fname=pending.source.expectedName.empty()?L"selected file":MacBrowser::Wide(pending.source.expectedName);
    else if(pending.source.IsWindows())
-    mode->m_copying_fname=CString(pending.source.WindowsPath().c_str());
-   else mode->m_copying_fname=pending.source.ClassicPath().c_str();
+    mode->m_copying_fname=pending.source.WindowsPath();
+   else mode->m_copying_fname=VolumeCoord::Wide(pending.source.ClassicPath());
    if (!mode->Create(IDD_DYNAMIC_COPYMODE_SELECT, CWnd::GetDesktopWindow()))
     throw std::runtime_error("Cannot create copy mode window");
    NativeDpi::CenterPopup(mode->GetSafeHwnd(),dialog->GetSafeHwnd());

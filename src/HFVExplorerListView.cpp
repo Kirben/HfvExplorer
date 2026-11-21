@@ -44,6 +44,7 @@
 #include "hfs\libhfs\hfs.h"
 #include "hfs\interface.h"
 #include "AskDir.h"
+#include "HfsPlusDialogs.h"
 #include "icon.h"
 #include "floppy.h"
 #include "FileTypeMapping.h"
@@ -539,6 +540,11 @@ BOOL CHFVExplorerListView::new_folder(void)
    }
    if(!exists)break;
    dialog.m_new_dir_name.Format("New Folder (%d)",suffix);
+  }
+  if(target.IsWindows()){
+   auto name=VolumeCoord::Wide(dialog.m_new_dir_name.GetString());
+   if(!EditWindowsName(session.Owner(),name,NameEdit::NewFolder))return FALSE;
+   return browser.CreateFolder(target,MacBrowser::U16(name));
   }
   if(dialog.DoModal()!=IDOK)return FALSE;
   return browser.CreateFolder(target,BrowserDirectory::FromAnsi(dialog.m_new_dir_name.GetString()));

@@ -88,6 +88,22 @@ bool IsApfs(const FileOperations::Location& source)
  const auto volume=source.Volume();
  return volume&&std::string_view(volume->Kind())=="APFS";
 }
+std::wstring ForkSize(uint64_t bytes)
+{
+ auto exact=std::to_wstring(bytes);
+ for(size_t at=exact.size();at>3;){at-=3;exact.insert(at,1,L',');}
+ exact+=L" bytes";
+ const wchar_t* units[]={L"KiB",L"MiB",L"GiB",L"TiB",L"PiB",L"EiB"};
+ uint64_t unit=1024;
+ if(bytes<unit)return exact;
+ size_t index=0;
+ while(index+1<ARRAYSIZE(units)&&bytes/unit>=1024){unit*=1024;++index;}
+ auto display=std::to_wstring(bytes/unit);
+ const auto tenth=(bytes%unit)*10/unit;
+ if(tenth)display+=L"."+std::to_wstring(tenth);
+ return display+L" "+units[index]+L" ("+exact+L")";
+}
+
 struct Summary:CDialog,DialogActivity {
  METADATA_DISPATCH(CDialog)
  FileOperations::Completion value;FileOperations::Location source;bool hidden;
@@ -95,14 +111,28 @@ struct Summary:CDialog,DialogActivity {
  bool CanEditApfsProperties()const{return value.capabilities.CanEditBasicMetadata()&&value.entry.id!=2&&IsApfs(source);}
  BOOL OnInitDialog()override{CDialog::OnInitDialog();for(int id:{IDC_CP_PHASE,IDC_CP_FILE,IDC_CP_STATUS})BrowserPresentation::UnicodeControl(m_hWnd,id,L"STATIC");auto e=value.entry;SetDlgItemTextW(m_hWnd,IDC_CP_PHASE,MacBrowser::Wide(e.name).c_str());
  auto description=BrowserPresentation::FromUtf8(value.description)+(value.capabilities.writable?L"":L" (read-only)");SetDlgItemTextW(m_hWnd,IDC_CP_FILE,description.c_str());
- auto sizes=e.directory?L"Folder":L"Data fork: "+std::to_wstring(e.forks[0].size)+L" bytes\r\nResource fork: "+std::to_wstring(e.forks[1].size)+L" bytes";if(e.hardLink)sizes+=L"\r\nHard links: "+std::to_wstring(e.linkCount);if(!value.details.empty())sizes+=L"\r\n"+BrowserPresentation::FromUtf8(value.details);SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,sizes.c_str());GetDlgItem(IDC_ATTR_OPEN)->ShowWindow(value.capabilities.attributes&&!(IsApfs(source)&&value.capabilities.writable&&e.id==2)?SW_SHOW:SW_HIDE);
+ for(int id:{IDC_PROP_DATA_LABEL,IDC_PROP_DATA_SIZE,IDC_PROP_RESOURCE_LABEL,IDC_PROP_RESOURCE_SIZE})
+  GetDlgItem(id)->ShowWindow(e.directory?SW_HIDE:SW_SHOW);
+ if(!e.directory){
+  SetDlgItemTextW(m_hWnd,IDC_PROP_DATA_SIZE,ForkSize(e.forks[0].size).c_str());
+  SetDlgItemTextW(m_hWnd,IDC_PROP_RESOURCE_SIZE,ForkSize(e.forks[1].size).c_str());
+ }
+ std::wstring details;
+ if(e.directory)details=L"Folder";
+ if(e.hardLink)details=L"Hard links: "+std::to_wstring(e.linkCount);
+ if(!value.details.empty()){
+  if(!details.empty())details+=L"\r\n";
+  details+=BrowserPresentation::FromUtf8(value.details);
+ }
+ SetDlgItemTextW(m_hWnd,IDC_CP_STATUS,details.c_str());
+ GetDlgItem(IDC_ATTR_OPEN)->ShowWindow(value.capabilities.attributes&&!(IsApfs(source)&&value.capabilities.writable&&e.id==2)?SW_SHOW:SW_HIDE);
  GetDlgItem(IDC_APFS_EDIT_METADATA)->ShowWindow(CanEditApfsProperties()?SW_SHOW:SW_HIDE);
- bool compression=value.capabilities.compression&&!e.directory;GetDlgItem(IDC_FILE_COMPRESSION)->ShowWindow(compression?SW_SHOW:SW_HIDE);GetDlgItem(IDC_FILE_COMPRESSION)->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());SetDlgItemText(IDC_FILE_COMPRESSION,e.compressed?"Decompress":"Compress");
+ bool compression=value.capabilities.compression&&!e.directory;GetDlgItem(IDC_FILE_COMPRESSION)->ShowWindow(compression?SW_SHOW:SW_HIDE);GetDlgItem(IDC_FILE_COMPRESSION)->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());SetDlgItemTextW(m_hWnd,IDC_FILE_COMPRESSION,e.compressed?L"Decompress\u2026":L"Compress\u2026");
  for(int id:{IDC_COMPRESSION_LABEL,IDC_COMPRESSION_METHOD})GetDlgItem(id)->ShowWindow(compression?SW_SHOW:SW_HIDE);
  auto combo=static_cast<CComboBox*>(GetDlgItem(IDC_COMPRESSION_METHOD));
  for(const char* label:{"Uncompressed","zlib","LZVN","LZFSE","LZBITMAP","Stored (no size reduction)","Legacy stored (inline, up to 3786 bytes)"})combo->AddString(label);
  combo->SetCurSel(e.compressed?0:1);combo->EnableWindow(compression&&value.capabilities.CanEditCompression()&&!e.protectedFile&&e.readError.empty());return TRUE;}
- BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemText(IDC_FILE_COMPRESSION,selected?"Compress":"Decompress");return TRUE;}if(LOWORD(wp)==IDC_APFS_EDIT_METADATA&&CanEditApfsProperties()){
+ BOOL OnCommand(WPARAM wp,LPARAM lp)override{if(LOWORD(wp)==IDC_COMPRESSION_METHOD&&HIWORD(wp)==CBN_SELCHANGE){auto selected=SendDlgItemMessage(IDC_COMPRESSION_METHOD,CB_GETCURSEL);SetDlgItemTextW(m_hWnd,IDC_FILE_COMPRESSION,selected?L"Compress\u2026":L"Decompress\u2026");return TRUE;}if(LOWORD(wp)==IDC_APFS_EDIT_METADATA&&CanEditApfsProperties()){
   PresentApfsProperties(source,value.entry,value.capabilities.finderMetadata,hidden,m_hWnd);
   DestroyWindow();
   return TRUE;

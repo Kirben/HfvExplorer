@@ -6,6 +6,7 @@
 #include "resource.h"
 #include "HfsPlus.h"
 #include "HfsPlusDialogs.h"
+#include "DynCopyModeSelect.h"
 #include "MacBrowserModel.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -117,6 +118,7 @@ class NameDialog : public CDialog {
     std::wstring value;
     const MacBrowser::Volume* volume = nullptr;
     bool windows = false;
+    NameEdit edit=NameEdit::Generic;
     explicit NameDialog(CWnd *p,UINT resource=IDD_HPLUS_NAME)
         : CDialog(resource,p),selectName(resource==IDD_APFS_RENAME_VOLUME) {}
   private:
@@ -125,10 +127,25 @@ class NameDialog : public CDialog {
     BOOL OnInitDialog() override {
         CDialog::OnInitDialog();
         UnicodeEdit(m_hWnd, IDC_HPLUS_NAME);
-        if(windows)SetWindowText("Rename");
+        switch(edit){
+        case NameEdit::RenameFile:
+            SetWindowText("Rename File");
+            SetDlgItemText(IDC_EDIT_NAME_LABEL,"File name:");
+            break;
+        case NameEdit::RenameFolder:
+            SetWindowText("Rename Folder");
+            SetDlgItemText(IDC_EDIT_NAME_LABEL,"Folder name:");
+            break;
+        case NameEdit::NewFolder:
+            SetWindowText("New Folder");
+            SetDlgItemText(IDC_EDIT_NAME_LABEL,"Folder name:");
+            break;
+        case NameEdit::Generic: break;
+        }
         SetDlgItemTextW(m_hWnd, IDC_HPLUS_NAME, value.c_str());
         SendDlgItemMessage(IDC_HPLUS_NAME, EM_SETLIMITTEXT, 255);
-        if(selectName)SendDlgItemMessage(IDC_HPLUS_NAME, EM_SETSEL, 0, -1);
+        if(selectName||edit==NameEdit::RenameFile||edit==NameEdit::RenameFolder)
+            SendDlgItemMessage(IDC_HPLUS_NAME,EM_SETSEL,0,-1);
         return TRUE;
     }
     void OnOK() override {
@@ -224,12 +241,12 @@ class FormatDialog : public CDialog {
 } // namespace
 bool SelectHfsPlusExternalJournal(CWnd* owner,std::wstring& path,const std::string& prompt){auto title=std::wstring(prompt.begin(),prompt.end());return FileDialog(owner->m_hWnd,path,false,L"External journal disk images\0*.img;*.dsk\0All files\0*.*\0\0",L"img",title.c_str());}
 void HfvUnicodeNameEdit(HWND parent,int id){UnicodeEdit(parent,id);}
-bool EditWindowsName(CWnd *parent, std::wstring &name) {
- NameDialog dialog(parent);dialog.value=name;dialog.windows=true;
+bool EditWindowsName(CWnd *parent,std::wstring& name,NameEdit edit) {
+ NameDialog dialog(parent);dialog.value=name;dialog.windows=true;dialog.edit=edit;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
 }
-bool EditMacVolumeName(CWnd *parent, std::wstring &name, const MacBrowser::Volume& volume) {
- NameDialog dialog(parent);dialog.value=name;dialog.volume=&volume;
+bool EditMacVolumeName(CWnd *parent,std::wstring& name,const MacBrowser::Volume& volume,NameEdit edit) {
+ NameDialog dialog(parent);dialog.value=name;dialog.volume=&volume;dialog.edit=edit;
  if(dialog.DoModal()!=IDOK)return false;name=dialog.value;return true;
 }
 bool EditApfsVolumeName(CWnd *parent,std::wstring& name,const MacBrowser::Volume& volume)
@@ -369,6 +386,35 @@ int RunHfsPlusUiTest(const char *directory) {
         require(IsWindowUnicode(::GetDlgItem(name.m_hWnd, IDC_HPLUS_NAME)) != FALSE, "Name field is ANSI");
         require(Text(name.m_hWnd, IDC_HPLUS_NAME) == name.value, "Unicode name round trip");
         name.DestroyWindow();
+        for(const auto edit:{NameEdit::RenameFile,NameEdit::RenameFolder,NameEdit::NewFolder}){
+            NameDialog editor(&owner);
+            editor.edit=edit;
+            editor.value=edit==NameEdit::NewFolder?L"New Folder":L"Documents \u03b1";
+            require(editor.Create(IDD_HPLUS_NAME,&owner)!=FALSE,"Create task-specific name dialog");
+            wchar_t caption[32]{};
+            GetWindowTextW(editor.m_hWnd,caption,32);
+            const auto expected=edit==NameEdit::RenameFile?L"Rename File":edit==NameEdit::RenameFolder?L"Rename Folder":L"New Folder";
+            require(std::wstring(caption)==expected&&Text(editor.m_hWnd,IDC_HPLUS_NAME)==editor.value&&
+                    Text(editor.m_hWnd,IDC_EDIT_NAME_LABEL)==(edit==NameEdit::RenameFile?L"File name:":L"Folder name:"),
+                    "Name dialog title, label or initial name changed");
+            if(edit!=NameEdit::NewFolder){
+                const auto selection=editor.SendDlgItemMessage(IDC_HPLUS_NAME,EM_GETSEL);
+                require(LOWORD(selection)==0&&HIWORD(selection)==editor.value.size(),"Rename text was not selected");
+            }
+            editor.DestroyWindow();
+        }
+        CDynCopyModeSelect mode(&owner);
+        mode.m_outcopy=0;
+        mode.m_copy_mode=7;
+        mode.m_copying_fname=L"Read Me \u03b1";
+        require(mode.Create(IDD_DYNAMIC_COPYMODE_SELECT,&owner)!=FALSE,"Create Copy Mode dialog");
+        require(Text(mode.m_hWnd,IDC_COPYING_FNAME)==L"Copying Read Me \u03b1"&&
+                Text(mode.m_hWnd,IDOKALL)==L"&Apply to All"&&
+                mode.SendDlgItemMessage(IDC_COPY_MODE,CB_GETCURSEL)==6&&
+                mode.GetDlgItem(IDC_COPYIN_APPLEDOUBLE)->IsWindowEnabled(),
+                "Copy Mode lost the Unicode filename, selected mode, or import options");
+        mode.DestroyWindow();
+        fprintf(report,"PASS: task-specific name dialogs and Copy Mode labels, Unicode and mode selection.\n");
         VerifyApfsDialogs(owner);
         fprintf(report,"PASS: APFS rename and snapshot labels, Unicode, selection and button states.\n");
         FormatDialog format(&owner);
