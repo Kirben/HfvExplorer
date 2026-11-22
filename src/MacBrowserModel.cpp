@@ -45,7 +45,7 @@ void ValidateHfsPlusCopyNames(const std::vector<Entry>& entries, bool caseSensit
 
 bool IsHfsPlusSymlinkReplacementFile(const Entry& entry)
 {
-    return !entry.directory&&!entry.symbolicLink&&!entry.hardLink&&!entry.protectedFile&&entry.readError.empty();
+    return !entry.directory&&!entry.symbolicLink&&!entry.protectedFile&&entry.readError.empty();
 }
 
 namespace {
@@ -358,16 +358,17 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
 
     Check(!found || !existing.directory, "A folder blocks the destination file");
     const std::string_view destinationKind=dst.Kind();
+    const bool hfsPlus=destinationKind=="HFS+"||destinationKind=="HFSX";
     using Scope=HfsPlus::Volume::OverwriteScope;
     auto hfsScope=Scope::SharedInode;
-    if(found&&!plan.linkTarget&&std::string_view(src.Kind())=="APFS"&&
-       (destinationKind=="HFS+"||destinationKind=="HFSX")){
+    if(found&&!plan.linkTarget&&hfsPlus&&std::string_view(src.Kind())=="APFS"){
         if(existing.hardLink)hfsScope=Scope::SelectedName;
         else if(existing.symbolicLink)hfsScope=Scope::SymbolicLink;
     }
     if (found) {
         auto label=BrowserPresentation::Utf8(entry.name);
-        if(hfsScope==Scope::SelectedName)label+=" (replace this hard-link name only)";
+        if(hfsScope==Scope::SelectedName||(hfsPlus&&plan.linkTarget&&existing.hardLink))
+            label+=" (replace this hard-link name only)";
         else if(hfsScope==Scope::SymbolicLink)label+=" (replace the symbolic link itself)";
         else if(existing.hardLink)label+=" (shared by "+std::to_string(existing.linkCount)+" hard links)";
         auto choice = job.replace(label);

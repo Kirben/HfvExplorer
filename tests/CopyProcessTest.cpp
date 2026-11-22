@@ -1050,7 +1050,7 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
                 Entry folder;
                 Check(source&&target&&source->FindChild(2,u"Links",folder)&&VolumeSession::VolumeSessionPidForTest(target),
                       "Could not mount symlink copy fixtures");
-                Put(*target,2,u"target",1024);
+                const auto referent=Put(*target,2,u"target",1024);
                 const auto destination=target->MakeDirectory(2,u"Links");
                 const bool fromApfs=std::string_view(source->Kind())=="APFS";
                 Entry relative;
@@ -1066,20 +1066,66 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
                     original=Put(*target,destination,hfsRelativeName,4099,11);
                     target->SetAttributes(original,originalAttrs);
 
-                    // An existing hard-link name is outside regular-file replacement.
-                    const auto guarded=target->MakeDirectory(2,u"Guarded");
-                    const auto shared=Put(*target,guarded,hfsRelativeName,3011,13);
-                    const auto alias=target->MakeHardLink(shared,2,u"Guarded alias");
-                    bool prompted=false;
-                    Storage::Job blocked;
-                    blocked.transport({},[&](const auto&){prompted=true;return Storage::ConflictChoice::Replace;});
-                    Completion refused;
-                    Entry visible;
-                    Check(copyRelative(guarded,blocked,refused).code&&!prompted&&
-                          target->FindChild(guarded,hfsRelativeName,visible)&&visible.hardLink,
-                          "APFS symlink copy bypassed the HFS hard-link guard");
-                    Verify(*target,visible.id,3011,13);
-                    Verify(*target,alias,3011,13);
+                    const auto group=target->MakeDirectory(2,u"Hard links");
+                    const auto shared=Put(*target,group,hfsRelativeName,3011,13);
+                    const auto firstAlias=target->MakeHardLink(shared,2,u"First retained alias");
+                    const auto secondAlias=target->MakeHardLink(firstAlias,2,u"Second retained alias");
+                    const auto verifyGroup=[&](bool replaced){
+                        Entry selected;
+                        const auto first=target->Stat(firstAlias);
+                        const auto second=target->Stat(secondAlias);
+                        Check(first.hardLink&&second.hardLink&&first.resolvedId==shared&&second.resolvedId==shared&&
+                              first.linkCount==(replaced?2u:3u)&&second.linkCount==first.linkCount,
+                              "The surviving HFS aliases changed inode or link count");
+                        Verify(*target,first.id,3011,13);
+                        Verify(*target,second.id,3011,13);
+                        Check(target->FindChild(group,hfsRelativeName,selected),"The selected HFS name disappeared");
+                        if(replaced){
+                            Check(selected.symbolicLink&&!selected.hardLink&&selected.resolvedId!=shared&&
+                                  selected.posix==relative.posix&&
+                                  target->SymbolicLinkTarget(selected.id)==source->SymbolicLinkTarget(relative.id),
+                                  "Replacing a hard-link name did not publish the APFS symlink");
+                        }else{
+                            Check(selected.hardLink&&selected.resolvedId==shared&&selected.linkCount==3,
+                                  "Cancellation detached the selected hard-link name");
+                            Verify(*target,selected.id,3011,13);
+                        }
+                        Verify(*target,referent,1024);
+                    };
+                    bool approvedGroup=false,atWrite=false;
+                    Storage::Job cancelGroup;
+                    cancelGroup.transport([&](const Storage::Progress& progress){
+                        if(approvedGroup&&!progress.scanning&&progress.path==u8"relativ\u00e9"){
+                            atWrite=true;
+                            cancelGroup.cancel();
+                        }
+                    },[&](const auto&){
+                        approvedGroup=true;
+                        return Storage::ConflictChoice::Replace;
+                    });
+                    Completion cancelledGroup;
+                    const auto stopped=copyRelative(group,cancelGroup,cancelledGroup);
+                    Check(atWrite&&stopped.outcome==Storage::Outcome::Cancelled&&!stopped.partial&&
+                          !cancelledGroup.complete,"Expected cancellation before publishing the replacement symlink");
+                    target.reset();
+                    target=OpenBrowserImage(targetPath);
+                    Check(bool(target),"Could not reopen the cancelled hard-link destination");
+                    verifyGroup(false);
+
+                    unsigned groupPrompts=0;
+                    Storage::Job replaceGroup;
+                    replaceGroup.transport({},[&](const auto&){
+                        ++groupPrompts;
+                        return Storage::ConflictChoice::Replace;
+                    });
+                    Completion replacedGroup;
+                    const auto replaced=copyRelative(group,replaceGroup,replacedGroup);
+                    if(replaced.code)throw HfsPlus::Error(replaced.message);
+                    Check(replacedGroup.complete&&groupPrompts==1,"Missing hard-link overwrite approval");
+                    target.reset();
+                    target=OpenBrowserImage(targetPath);
+                    Check(bool(target),"Could not reopen the replaced hard-link destination");
+                    verifyGroup(true);
                 }else{
                     Entry existing;existing.name=hfsRelativeName;existing.symbolicLink=true;
                     existing.posix=oldPosix;
@@ -1152,7 +1198,8 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
             Verify(*target,ordinary.id,1024);
         }
     }
-    fprintf(report,"PASS: APFS symlinks replace regular files on HFS+ and both HFSX variants without following targets. Cancellation preserves the original forks and attributes, and hard-link names are refused.\n");
+    fprintf(report,"PASS: APFS symlinks replace regular files on HFS+ and both HFSX variants without following targets. Cancellation preserves the original forks and attributes.\n");
+    fprintf(report,"PASS: APFS symlink overwrite changes only the selected HFS+ or HFSX hard-link name. After reopening, the other aliases share their original inode and retain both forks. Cancellation preserves all three names.\n");
     fprintf(report,"PASS: APFS, HFS+ and HFSX symlinks reopen on HFS+ and both HFSX variants with unchanged UID, GID, mode, and target. Cancel, rename and delete preserve link metadata or leave the target intact.\n");
 }
 

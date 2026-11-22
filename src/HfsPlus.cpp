@@ -1629,10 +1629,11 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
               "The HFS+ symbolic link destination changed after overwrite approval");
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
-        if(symbolicLink||scope==OverwriteScope::SymbolicLink){
+        const bool replaceFileAlias=symbolicLink&&p.LinkKind(existing)==1;
+        if((symbolicLink&&!replaceFileAlias)||scope==OverwriteScope::SymbolicLink){
             const auto& target=p.Get(existing);
             Check(!target.directory&&!p.LinkKind(existing),
-                  "An HFS+ symbolic link cannot replace a folder or hard-link name");
+                  "An HFS+ symbolic link cannot replace a directory");
             Check(!target.symbolicLink||(!target.compressed&&!target.forks[1].size),
                   "Cannot replace an HFS+ symbolic link with unsupported forks");
             p.Mutable(target,false,true);
