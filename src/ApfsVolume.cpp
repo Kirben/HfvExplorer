@@ -38,9 +38,9 @@ std::u16string Name(const uint8_t* bytes,size_t size)
           "Invalid UTF-8 APFS name");
     return MacBrowser::U16(out);
 }
+constexpr int64_t NanosecondsPerSecond=1000000000;
 uint64_t Date(const uint8_t* p)
 {
-    constexpr int64_t NanosecondsPerSecond=1000000000;
     const auto timestamp=int64_t(Le64(p));
     const auto seconds=timestamp/NanosecondsPerSecond;
     // Floor fractional instants on either side of the Unix epoch.
@@ -283,6 +283,8 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         auto& entry=out.entry;
         entry.created=Date(p+16);entry.modified=Date(p+24);entry.datesValid=true;
         entry.additionalDates={Date(p+40),Date(p+32)};
+        for(unsigned offset:{16,24,32,40})
+            entry.fractionalDates|=int64_t(Le64(p+offset))%NanosecondsPerSecond!=0;
         const auto fullMode=Le16(p+80);
         const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;

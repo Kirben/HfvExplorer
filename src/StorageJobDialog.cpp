@@ -318,7 +318,8 @@ public:
      try{result=finished_();}catch(CException* error){char text[512]{};error->GetErrorMessage(text,ARRAYSIZE(text));displayError=text[0]?text:"MFC completion error";error->Delete();}catch(const std::exception& error){displayError=error.what();if(displayError.empty())displayError="Completion callback failed";}catch(...){displayError="Unknown completion error";}
      if(!GetSafeHwnd()||!IsWindow(m_hWnd))return 0;
      if(!displayError.empty()){auto status=operation_+(result.code?" failed; completion display failed":" completed; completion display failed");SetDlgItemText(IDC_CP_PHASE,status.c_str());ResultDetails(result.message.empty()?displayError:result.message+"; "+displayError);SetDlgItemText(IDCANCEL,"Close");GetDlgItem(IDCANCEL)->EnableWindow(TRUE);GetDlgItem(IDCANCEL)->ShowWindow(SW_SHOW);if(!hidden_)ShowWindow(SW_SHOWNOACTIVATE);return 0;}
-     if(dismissOnCompletion_||(result.outcome==Storage::Outcome::Succeeded&&successMessage_.empty())){DestroyWindow();return 0;}
+     const bool roundedDates=result.timestampPrecisionReduced;
+     if(dismissOnCompletion_||(result.outcome==Storage::Outcome::Succeeded&&successMessage_.empty()&&!roundedDates)){DestroyWindow();return 0;}
      const bool succeeded=result.outcome==Storage::Outcome::Succeeded;
      const char* ending=succeeded?" completed":result.outcome==Storage::Outcome::Cancelled ? " cancelled" :
                        result.outcome==Storage::Outcome::Failed ? " failed" : " finished with skipped files";
@@ -328,6 +329,7 @@ public:
      auto detail=succeeded?successMessage_:result.message;
      auto append=[&](const char* message){if(!detail.empty())detail+=" ";detail+=message;};
      if(result.partial)append("Completed changes were retained.");
+     if(roundedDates)append("HFS+/HFSX stored the copied timestamps at whole-second precision.");
      switch(result.rollback){
      case Storage::Rollback::Restored: append("The failed change was rolled back."); break;
      case Storage::Rollback::Failed: append("Rollback failed. Inspect the destination before retrying."); break;

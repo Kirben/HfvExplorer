@@ -3198,7 +3198,7 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
     verify(*source,u"Fractional",fractional,50);
 
     const auto transfer=[](const std::shared_ptr<Volume>& from,const std::shared_ptr<Volume>& to,
-                           const std::vector<std::u16string>& names,bool cut,unsigned& prompts){
+                           const std::vector<std::u16string>& names,bool cut,unsigned& prompts,bool& rounded){
         std::vector<Location> inputs;
         for(const auto& name:names){
             Entry entry;
@@ -3210,7 +3210,9 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
         Storage::Job job;
         job.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
         Completion completion;
-        return ExecuteInWorker(OrdinaryCopy{inputs,Native(to)},job,completion);
+        const auto result=ExecuteInWorker(OrdinaryCopy{inputs,Native(to)},job,completion);
+        rounded=job.progress().timestampPrecisionReduced;
+        return result;
     };
     unsigned index=0;
     for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
@@ -3230,8 +3232,9 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             dated(*hfs,valid,original,32);
             dated(*hfs,invalid,original,33);
             unsigned prompts=0;
-            const auto rejected=transfer(source,hfs,{invalid},true,prompts);
-            Check(rejected.outcome==Storage::Outcome::Failed&&!rejected.partial&&!rejected.moved&&!prompts,
+            bool rounded=false;
+            const auto rejected=transfer(source,hfs,{invalid},true,prompts,rounded);
+            Check(rejected.outcome==Storage::Outcome::Failed&&!rejected.partial&&!rejected.moved&&!prompts&&!rounded,
                   "Unrepresentable date should fail preflight before overwrite or source removal");
             hfs.reset();
             source.reset();
@@ -3241,8 +3244,9 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             verify(*hfs,invalid,original,33);
             verify(*source,invalid,wide?tooLate:expanded,wide?49:48);
             const auto copied=transfer(source,hfs,wide?std::vector<std::u16string>{valid}:
-                                                       std::vector<std::u16string>{valid,u"Fractional"},false,prompts);
+                                                       std::vector<std::u16string>{valid,u"Fractional"},false,prompts,rounded);
             Check(!copied.code&&prompts==1,copied.message.c_str());
+            Check(rounded==!wide,"Missing or unexpected timestamp precision notice");
             hfs.reset();
             hfs=OpenBrowserImage(hfsPath);
             Check(bool(hfs),"Cannot reopen timestamp-rich HFS copy");
@@ -3261,8 +3265,9 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
                 dated(*apfs,valid,original,34);
                 const auto before=prompts;
                 const auto returned=transfer(hfs,apfs,wide?std::vector<std::u16string>{valid}:
-                                                            std::vector<std::u16string>{valid,u"Fractional"},false,prompts);
+                                                            std::vector<std::u16string>{valid,u"Fractional"},false,prompts,rounded);
                 Check(!returned.code&&prompts==before+1,returned.message.c_str());
+                Check(!rounded,"Copying whole-second HFS dates to APFS should not report precision loss");
                 apfs.reset();
                 apfs=OpenBrowserImage(apfsPath);
                 Check(bool(apfs),"Cannot reopen APFS timestamp copy");
@@ -3271,7 +3276,7 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             }
         }
     }
-    fprintf(report,"PASS: APFS and HFS+/HFSX creation, modification, access and attribute-change dates and both forks survive copies and overwrites after reopening. Invalid cut/paste preserves the source and destination. Fractional dates floor to whole seconds.\n");
+    fprintf(report,"PASS: APFS and HFS+/HFSX creation, modification, access and attribute-change dates and both forks survive copies and overwrites after reopening. Invalid cut/paste preserves the source and destination. Fractional dates floor to whole seconds and set the completion notice.\n");
 }
 
 void TestSparseApfsCopy(const std::string& root,FILE* report)

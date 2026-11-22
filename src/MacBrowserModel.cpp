@@ -389,6 +389,11 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
               Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route) {
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
+    const std::string_view destinationKind=dst.Kind();
+    const bool hfsPlus=destinationKind=="HFS+"||destinationKind=="HFSX";
+    const auto noteDatePrecision=[&]{
+        if(hfsPlus&&entry.datesValid&&entry.fractionalDates)progress.timestampPrecisionReduced=true;
+    };
     found=dst.FindTransferChild(parent,entry,existing);
     bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
     const auto linkCopy=[&](const Entry* approvedDestination){
@@ -404,14 +409,12 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
         // child creates/renames can change its dates even on Skip/cancellation.
-        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete)dst.FinalizeDirectory(id,entry,expected,false);}
+        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,entry,expected,false);noteDatePrecision();job.progress(progress);}}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
         if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,dst.Stat(id));return complete;
     }
 
     Check(!found || !existing.directory, "A folder blocks the destination file");
-    const std::string_view destinationKind=dst.Kind();
-    const bool hfsPlus=destinationKind=="HFS+"||destinationKind=="HFSX";
     using Scope=HfsPlus::Volume::OverwriteScope;
     auto hfsScope=Scope::SharedInode;
     if(found&&!plan.linkTarget&&hfsPlus&&std::string_view(src.Kind())=="APFS"){
@@ -440,6 +443,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     outgoing.hfsOverwriteScope=hfsScope;
     if(plan.linkTarget){
         dst.PutSymbolicLink(parent,outgoing,*plan.linkTarget,job);
+        noteDatePrecision();
         ++progress.files;
         job.progress(progress);
         return true;
@@ -492,6 +496,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
+    noteDatePrecision();
     const auto remaining=progress.fileTotal-progress.fileBytes;
     progress.fileBytes+=remaining;
     progress.bytes+=remaining;

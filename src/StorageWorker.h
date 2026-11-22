@@ -26,6 +26,7 @@ struct Progress {
  unsigned long long bytes=0,processed=0,fileBytes=0,fileTotal=0,totalBytes=0;
  unsigned files=0,skipped=0,totalFiles=0;
  bool scanning=true,fileCopy=false,byteTransfer=false,utf8=false;
+ bool timestampPrecisionReduced=false;
 };
 struct Result {
  int code=0;
@@ -36,6 +37,7 @@ struct Result {
  Rollback rollback=Rollback::None;
  unsigned completed=0, skipped=0;
  bool partial=false;
+ bool timestampPrecisionReduced=false;
 
  void Finalize(const OutcomeEvidence& evidence, unsigned items, unsigned skippedItems) {
   if(items>completed)completed=items;
@@ -82,6 +84,7 @@ public:
    std::lock_guard<std::mutex> lock(mutex_);
    OutcomeEvidence evidence;
    result.Finalize(evidence,0,0);
+   result.timestampPrecisionReduced|=progress_.timestampPrecisionReduced;
    result_=std::move(result);
    done_=true;
    notify=std::move(completion_);

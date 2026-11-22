@@ -35,6 +35,7 @@ void JobController::CollectResult()
     result_.skipped += previous.skipped;
     result_.rollback = (std::max)(previous.rollback, result_.rollback);
     result_.partial = result_.partial || previous.partial;
+    result_.timestampPrecisionReduced |= previous.timestampPrecisionReduced;
     if (operation_) {
         snapshot_ = operation_->Snapshot();
         complete_ = complete_ && snapshot_.complete;

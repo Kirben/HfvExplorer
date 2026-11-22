@@ -31,6 +31,7 @@ struct Entry {
     uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
     HfsPlus::AdditionalFileDates additionalDates;
     bool datesValid = false;
+    bool fractionalDates = false; // At least one stored timestamp has subsecond precision.
     HfsPlus::Attributes attributes;
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
     unsigned version = 0; // optional legacy file version, not part of its identity
