@@ -379,7 +379,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     auto id = d.get();
                     auto path = d.text();
                     auto kind = d.get();
-                    Check(kind <= uint64_t(Storage::CopyPrompt::IndependentFolders),"Invalid copy prompt");
+                    Check(kind <= uint64_t(Storage::CopyPrompt::ClassicMetadataLoss),"Invalid copy prompt");
                     d.end();
                     auto choice = job.requestChoice(Storage::CopyPrompt(kind),path);
                     Data reply;

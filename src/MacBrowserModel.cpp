@@ -1198,6 +1198,45 @@ void RestoreDirectoryLinks(Volume& source,Planned& plan,SavedDirectoryLinks& gro
     for(auto& child:plan.children)RestoreDirectoryLinks(source,child,groups,job);
 }
 
+struct ClassicCopyLoss {
+    bool permissions=false, protection=false, dates=false, links=false, compression=false, allocation=false, attributes=false;
+
+    void Inspect(Volume& source,const Planned& plan,Storage::Job& job){
+        if(job.cancelled())throw Storage::Cancelled();
+        const auto& entry=plan.entry;
+        permissions|=entry.posix.has_value();
+        protection|=entry.directory&&entry.protectedFile;
+        if(entry.posix)
+            protection|=(entry.posix->protection&~PosixMetadata::UserImmutable)!=0||entry.posix->flags!=0;
+        dates|=entry.fractionalDates||entry.additionalDates.accessed.has_value()||entry.additionalDates.changed.has_value();
+        links|=entry.hardLink;
+        compression|=entry.compressed;
+        attributes|=!entry.attributes.empty();
+        if(!allocation&&!entry.directory&&!entry.symbolicLink){
+            const auto holes=source.SparseRanges(entry.id);
+            allocation=entry.apfsCloneMarked||!holes[0].empty()||!holes[1].empty();
+        }
+        for(const auto& child:plan.children)Inspect(source,child,job);
+    }
+
+    std::string Details(const char* separator)const{
+        std::string result;
+        const auto add=[&](bool loss,const char* label){
+            if(!loss)return;
+            if(!result.empty())result+=separator;
+            result+=label;
+        };
+        add(permissions,"Unix ownership and permissions");
+        add(protection,"BSD protection flags");
+        add(dates,"Access time, attribute-change time, or subsecond precision");
+        add(links,"Hard-link relationships");
+        add(compression,"Native filesystem compression");
+        add(allocation,"Sparse allocation or clone sharing");
+        add(attributes,"Extended attributes or ACLs");
+        return result;
+    }
+};
+
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){
@@ -1314,6 +1353,21 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     Check(!moving||firstLinkedFolder.empty(),
           "APFS cannot preserve directory hard links during Cut/Paste. Use Copy to keep the linked source folders.");
     ValidatePlans(dst,plans,parent,true);
+    if(std::string_view(dst.Kind())=="HFS"&&!adapter){
+        ClassicCopyLoss loss;
+        for(size_t i=0;i<plans.size();++i){
+            auto& source=*sources[i].first;
+            const std::string_view kind=source.Kind();
+            if(kind=="APFS"||kind=="HFS+"||kind=="HFSX")loss.Inspect(source,plans[i],job);
+        }
+        const auto details=loss.Details(moving?", ":"\r\n");
+        if(!details.empty()){
+            if(moving)
+                throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
+            if(job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details)!=Storage::ConflictChoice::Replace)
+                throw Storage::Cancelled();
+        }
+    }
     if(!firstLinkedFolder.empty()&&
        job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace)
         throw Storage::Cancelled();

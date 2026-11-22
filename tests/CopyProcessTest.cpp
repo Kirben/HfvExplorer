@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include <future>
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -440,13 +441,14 @@ void TestMountedForkJobs(const std::shared_ptr<Volume>& image, const std::wstrin
     Check(!CopyProcess::lastProcess && VolumeSession::VolumeSessionPidForTest(image)==pid,
           "fork operations restarted the persistent worker");
 }
-void Conflict(const Operation &op) {
+void Conflict(const Operation &op,uint64_t after=0) {
+    const auto pending=[&]{const auto prompt=op.Job()->conflictState();return prompt.id>after&&!prompt.path.empty();};
     DWORD until = GetTickCount() + 10000;
-    while (op.Job()->conflict().empty() && !op.Job()->done() && LONG(until - GetTickCount()) > 0)
+    while (!pending() && !op.Job()->done() && LONG(until - GetTickCount()) > 0)
         Sleep(10);
     if (op.Job()->done() && op.Job()->result().code)
         throw HfsPlus::Error(op.Job()->result().message);
-    Check(!op.Job()->conflict().empty(), "worker overwrite prompt missing");
+    Check(pending(), "worker copy prompt missing");
 }
 void Denied(const std::wstring &path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -585,7 +587,11 @@ int RunCopyReleaseTest(const char *directory) {
         auto classic = ClassicImage(root + "\\classic.dsk");
         request.Copy().sources = {Native(source, plain)};
         request.Copy().destination = Native(classic);
-        Pass(Submit(request));
+        auto classicCopy=Submit(request);
+        Conflict(classicCopy);
+        Check(classicCopy.Job()->conflictState().kind==Storage::CopyPrompt::ClassicMetadataLoss,"Missing shipping classic copy warning");
+        classicCopy.Job()->resolve(Storage::ConflictChoice::Replace);
+        Pass(classicCopy);
         Check(classic->FindChild(2, u"Plain", copied), "shipping classic output");
         Verify(*classic, copied.id, 4096);
         auto mfs = MfsImageFixture(Wide(root + "\\mfs.img"), false);
@@ -2560,6 +2566,71 @@ void TestMfsTransferVersions(const std::string& root,FILE* report)
     fprintf(report,"PASS: ordinary MFS copies preserve distinct versions, identify the precise overwrite and reject nonzero versions on versionless targets before prompting or deleting; version zero still exports.\n");
 }
 
+void TestClassicCopyLoss(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    for(unsigned i=0;i<3;++i){
+        const auto base=root+"\\classic-copy-loss-"+std::to_string(i);
+        const auto path=Wide(base+"-source.img");
+        if(i==2){
+            auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"Classic copy preflight",true,format);
+        }else Image(path,i?Kind::HfsXCaseSensitive:Kind::HfsPlus);
+        auto source=OpenBrowserImage(path);
+        auto destination=ClassicImage(base+"-destination.dsk");
+        Check(source&&destination,"Cannot mount classic preflight fixtures");
+        const auto folder=source->MakeDirectory(2,u"Linked files");
+        const auto original=Put(*source,folder,u"Original",4097,44);
+        source->MakeHardLink(original,folder,u"Alias");
+        const auto sentinel=Put(*destination,2,u"Existing",4096,57);
+        const auto free=destination->FreeBytes();
+        auto item=Native(source,folder);
+        auto run=[&]{return Submit(OrdinaryCopy{{item},Native(destination)});};
+
+        auto declined=run();
+        Conflict(declined);
+        const auto prompt=declined.Job()->conflictState();
+        Check(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss&&
+              prompt.path.find("Unix ownership and permissions")!=std::string::npos&&
+              prompt.path.find("Hard-link relationships")!=std::string::npos,
+              "Classic warning omitted nested hard links or permissions");
+        declined.Job()->resolve(prompt.id,Storage::ConflictChoice::Cancel);
+        Wait(declined);
+        Check(declined.Job()->result().outcome==Storage::Outcome::Cancelled,"Classic warning cancellation failed");
+
+        item.cut=true;
+        auto cut=run();
+        Wait(cut);
+        const auto refused=cut.Job()->result();
+        Check(refused.outcome==Storage::Outcome::Failed&&!refused.partial&&!refused.moved&&
+              refused.message.find("Hard-link relationships")!=std::string::npos,
+              "Lossy classic Cut/Paste was not refused");
+        Entry found;
+        Check(destination->FreeBytes()==free&&!destination->FindChild(2,u"Linked files",found)&&
+              source->FindChild(folder,u"Original",found)&&source->FindChild(folder,u"Alias",found),
+              "Declining or refusing classic copy changed either volume");
+        Verify(*destination,sentinel,4096,57);
+
+        item.cut=false;
+        auto approved=run();
+        Conflict(approved);
+        const auto warning=approved.Job()->conflictState();
+        Check(warning.kind==Storage::CopyPrompt::ClassicMetadataLoss,"Expected one classic preflight warning");
+        approved.Job()->resolve(warning.id,Storage::ConflictChoice::Replace);
+        Pass(approved);
+        destination.reset();
+        destination=OpenBrowserImage(Wide(base+"-destination.dsk"));
+        Entry copied,a,b;
+        Check(destination&&destination->FindChild(2,u"Linked files",copied)&&
+              destination->FindChild(copied.id,u"Original",a)&&destination->FindChild(copied.id,u"Alias",b)&&
+              a.resolvedId!=b.resolvedId,"Classic HFS did not publish independent copies");
+        Verify(*destination,a.id,4097,44);
+        Verify(*destination,b.id,4097,44);
+    }
+    fprintf(report,"PASS: classic HFS warns once before copying nested APFS/HFS+/HFSX hard links, retains both forks on approval, and refuses destructive Cut/Paste.\n");
+}
+
 void TestClassicLockRoundTrip(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2593,7 +2664,24 @@ void TestClassicLockRoundTrip(const std::string& root,FILE* report)
             if(cancel&&p.fileBytes)job.cancel();
         },[](const auto&){return Storage::ConflictChoice::Replace;});
         Completion completion;
-        return ExecuteInWorker(OrdinaryCopy{inputs,Native(to)},job,completion);
+        auto result=std::async(std::launch::async,[&]{
+            return ExecuteInWorker(OrdinaryCopy{inputs,Native(to)},job,completion);
+        });
+        const auto start=GetTickCount();
+        bool warned=false,unexpected=false;
+        while(result.wait_for(std::chrono::milliseconds(5))!=std::future_status::ready){
+            const auto prompt=job.conflictState();
+            if(!prompt.path.empty()&&!warned){
+                warned=true;
+                unexpected=prompt.kind!=Storage::CopyPrompt::ClassicMetadataLoss;
+                job.resolve(prompt.id,unexpected?Storage::ConflictChoice::Cancel:Storage::ConflictChoice::Replace);
+            }
+            if(GetTickCount()-start>30000){job.cancel();break;}
+        }
+        const auto outcome=result.get();
+        Check(!unexpected&&warned==(!strcmp(to->Kind(),"HFS")&&strcmp(from->Kind(),"HFS")),
+              "Unexpected classic lock round-trip warning");
+        return outcome;
     };
     auto source=OpenBrowserImage(Wide(sourcePath));
     Check(bool(source),"Cannot reopen classic lock source");
@@ -4119,6 +4207,7 @@ int RunCopyProcessTest(const char *directory) {
         TestCopySpecialFiles(root,report);
         TestCopyDirectoryHardLinksToApfs(root,report);
         TestMfsTransferVersions(root,report);
+        TestClassicCopyLoss(root,report);
         TestClassicLockRoundTrip(root,report);
         TestClassicAndMfsCopyNameCollisions(root,report);
         TestHfsSystemImmutableToApfs(root,report);
@@ -5063,7 +5152,11 @@ int RunCopyProcessTest(const char *directory) {
         roundtrip.background = true;
         roundtrip.Copy().sources = {Native(source, plain)};
         roundtrip.Copy().destination = Native(classic);
-        Pass(Submit(roundtrip));
+        auto classicCopy=Submit(roundtrip);
+        Conflict(classicCopy);
+        Check(classicCopy.Job()->conflictState().kind==Storage::CopyPrompt::ClassicMetadataLoss,"Missing classic copy warning");
+        classicCopy.Job()->resolve(Storage::ConflictChoice::Replace);
+        Pass(classicCopy);
         Entry classicFile;
         Check(classic->FindChild(2, u"Plain", classicFile), "classic worker output");
         Verify(*classic, classicFile.id, 4096);
@@ -5524,20 +5617,26 @@ int RunCopyProcessTest(const char *directory) {
                 char path[MAX_PATH];
                 get_floppy_volume_file_name(25, path);
                 physical.Copy().destination.SetClassic(path, "Floppy:");
-                Pass(Submit(physical));
-                auto overwrite = Submit(physical);
-                Conflict(overwrite);
+                const auto copyToFloppy=[&](bool replacing){
+                    auto operation=Submit(physical);
+                    Conflict(operation);
+                    const auto warning=operation.Job()->conflictState();
+                    Check(warning.kind==Storage::CopyPrompt::ClassicMetadataLoss,"Missing floppy copy warning");
+                    operation.Job()->resolve(warning.id,Storage::ConflictChoice::Replace);
+                    if(replacing)Conflict(operation,warning.id);
+                    return operation;
+                };
+                Pass(copyToFloppy(false));
+                auto overwrite = copyToFloppy(true);
                 overwrite.Job()->resolve(Storage::ConflictChoice::Skip);
                 Wait(overwrite);
                 Check(!overwrite.Job()->result().code && !overwrite.Snapshot().complete,
                       "process floppy skip");
-                overwrite = Submit(physical);
-                Conflict(overwrite);
+                overwrite = copyToFloppy(true);
                 overwrite.Job()->cancel();
                 Wait(overwrite);
                 Check(overwrite.Job()->result().error == ERROR_CANCELLED, "process floppy cancel");
-                overwrite = Submit(physical);
-                Conflict(overwrite);
+                overwrite = copyToFloppy(true);
                 overwrite.Job()->resolve(Storage::ConflictChoice::Replace);
                 Pass(overwrite);
                 CopyProcess::floppyGeneration = 8;
