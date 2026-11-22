@@ -43,7 +43,7 @@ struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.
 };
 uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                                Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr,bool external=false);
+                                Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr,bool external=false,std::optional<PosixMetadata> posix={});
 uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job&);
 
@@ -77,7 +77,7 @@ uint64_t CreateCatalogClone(HfsPlus::Source&,const Container&,uint64_t parent,co
 
 // Stream a data fork from a separate source into a newly created file.
 uint64_t CreateCatalogFile(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
-                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t replacedEntry=0);
+                    HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t replacedEntry=0,std::optional<PosixMetadata> posix={});
 // Rename within the same directory, using on-disk inode IDs and the expected checkpoint.
 uint64_t RenameEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                      const std::u16string& name,Storage::Job&,uint64_t alias=0);
@@ -86,5 +86,5 @@ uint64_t DeleteEntry(HfsPlus::Source&,const Container& expected,uint64_t parent,
                      Storage::Job&,uint64_t alias=0,bool external=false,bool recursive=false);
 // Replace a regular file's data fork in one checkpoint, preserving its inode.
 uint64_t ReplaceFileData(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                         HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t alias=0,bool preserveDates=false);
+                         HfsPlus::Source& data,Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,bool locked=false,const HfsPlus::Attributes* attributes=nullptr,HfsPlus::Source* resource=nullptr,const HfsPlus::Bytes* compression=nullptr,bool external=false,uint64_t alias=0,bool preserveDates=false,std::optional<PosixMetadata> posix={});
 }

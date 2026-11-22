@@ -378,10 +378,11 @@ uint64_t CommitCheckpoint(Source& source,const Container& expected,Storage::Job&
 }
 
 uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                                Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,const HfsPlus::Attributes* attributes,bool external)
+                                Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,const HfsPlus::Attributes* attributes,bool external,std::optional<PosixMetadata> posix)
 {
     CatalogCreate create{parent,name,CatalogKind::Directory,nullptr,dates,finder,false,attributes};
     create.external=external;
+    create.posix=posix;
     const CatalogMutation request=create;
     return Commit(source,expected,job,&request);
 }
@@ -494,13 +495,14 @@ uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t paren
 }
 
 uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t replacedEntry)
+                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t replacedEntry,std::optional<PosixMetadata> posix)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
     Check(!replacedEntry||external,"APFS entry replacement requires the external catalog writer");
     CatalogCreate create{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked,attributes,resource,compression};
     create.external=external;
     create.replacedEntry=replacedEntry;
+    create.posix=posix;
     const CatalogMutation request=create;
     return Commit(source,expected,job,&request);
 }
@@ -519,10 +521,10 @@ uint64_t DeleteEntry(Source& source,const Container& expected,uint64_t parent,ui
 }
 
 uint64_t ReplaceFileData(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
-                         Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t alias,bool preserveDates)
+                         Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t alias,bool preserveDates,std::optional<PosixMetadata> posix)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
-    const CatalogMutation request=CatalogReplaceData{parent,inode,data,dates,finder,locked,attributes,resource,compression,external,alias,preserveDates};
+    const CatalogMutation request=CatalogReplaceData{parent,inode,data,dates,finder,locked,attributes,resource,compression,external,alias,preserveDates,posix};
     return Commit(source,expected,job,&request);
 }
 }

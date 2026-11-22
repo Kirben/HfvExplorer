@@ -271,8 +271,11 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         out.stream=Le64(p+8);
         auto& entry=out.entry;
         entry.created=Date(p+16);entry.modified=Date(p+24);entry.datesValid=true;
-        const auto mode=Le16(p+80)&0170000;
+        const auto fullMode=Le16(p+80);
+        const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;
+        if(entry.directory||mode==0100000)
+            entry.posix=PosixMetadata{Le32(p+72),Le32(p+76),uint16_t(fullMode&PosixMetadata::ModeMask)};
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
@@ -1189,11 +1192,12 @@ private:
         });
     }
 
-    uint32_t CreateFolder(uint32_t parent,const std::u16string& name,std::optional<FileDates> dates,const FinderBytes* finder=nullptr,const Attributes* attributes=nullptr){
+    uint32_t CreateFolder(uint32_t parent,const std::u16string& name,std::optional<FileDates> dates,const FinderBytes* finder=nullptr,
+                          const Attributes* attributes=nullptr,std::optional<PosixMetadata> posix={}){
         return WriteMount([&]{
             const auto oid=At(parent).oid;
             Storage::Job job;
-            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,WriteTarget(parent),oid,name,job,dates,finder,attributes,limitedEdits);});
+            CommitMutation(parent,0,job,[&](auto& job){return CreateCatalogDirectory(*source,WriteTarget(parent),oid,name,job,dates,finder,attributes,limitedEdits,posix);});
             for(const auto id:listings.at(parent))if(At(id).entry.name==name)return id;
             throw Error("APFS folder was created but could not be found after reopening");
         },true);
@@ -1253,7 +1257,7 @@ public:
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& entry)override{
         ValidateEntry(entry);
         Check(entry.directory,"The APFS copy source is not a folder");
-        return CreateFolder(parent,entry.name,CopyDates(entry),&entry.finder,&entry.attributes);
+        return CreateFolder(parent,entry.name,CopyDates(entry),&entry.finder,&entry.attributes,entry.posix);
     }
     void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
         const auto dates=CopyDates(desired);
@@ -1332,6 +1336,7 @@ public:
               "This APFS writer cannot preserve the source entry's Mac metadata");
         Check(!entry.compressed||!entry.forks[1].size,"APFS cannot retain a user resource fork on a compressed file");
         ValidateWritableAttributes(entry.attributes);
+        Check(!entry.posix||entry.posix->mode<=PosixMetadata::ModeMask,"Invalid POSIX permissions");
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
             CatalogTimestamp(entry.modified);
@@ -1415,20 +1420,20 @@ public:
                 if(existing.symbolicLink){
                     CommitMutation(parent,existing.id,job,[&](auto& job){
                         return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,
-                                                 &entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,oid);
+                                                 &entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,oid,entry.posix);
                     });
                     Entry replacement;
                     if(FindChild(parent,entry.name,replacement))return replacement.id;
                     throw Error("APFS replacement was committed but could not be found after reopening");
                 }
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling);
+                    return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling,false,entry.posix);
                 },existing.id);
                 return existing.id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits);
+                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,0,entry.posix);
             });
             if(FindChild(parent,entry.name,existing))return existing.id;
             throw Error("APFS file was committed but could not be found after reopening");

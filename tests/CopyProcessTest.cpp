@@ -2,6 +2,8 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "CopyProcess.h"
+#include "ApfsFormat.h"
+#include "HfsPlusDisk.h"
 #include "VolumeSession.h"
 #include "VolumeSessionProtocol.h"
 #include "StorageLocation.h"
@@ -623,6 +625,135 @@ int RunCopyReleaseTest(const char *directory) {
     fclose(report);
     return result;
 }
+
+namespace {
+// Patch the two catalog records in a small, disposable HFS fixture. The HFS
+// writer does not need a new permission-editing API to generate this input.
+void SetHfsFixtureModes(HfsPlus::Source& disk,
+                        const std::array<std::pair<uint32_t,PosixMetadata>,2>& entries)
+{
+    using HfsPlus::Disk::Read;
+    using HfsPlus::Disk::U16;
+    using HfsPlus::Disk::U32;
+    using HfsPlus::Disk::P16;
+    using HfsPlus::Disk::P32;
+    const auto header=Read(disk,1024,512);
+    const auto blockSize=U32(header.data()+40);
+    const auto base=uint64_t(U32(header.data()+288))*blockSize;
+    const auto length=uint64_t(U32(header.data()+292))*blockSize;
+    const auto tree=Read(disk,base,64);
+    const auto nodeSize=U16(tree.data()+32);
+    const auto nodeNumber=U32(tree.data()+24);
+    const auto offset=uint64_t(nodeSize)*nodeNumber;
+    Check(nodeSize>=512&&nodeNumber&&offset+nodeSize<=length,"Expected a bounded fixture catalog leaf");
+    auto node=Read(disk,base+offset,nodeSize);
+    Check(node[8]==0xff&&!U32(node.data()),"Expected a single fixture catalog leaf");
+    std::array<bool,2> found{};
+    for(unsigned i=0;i<U16(node.data()+10);++i){
+        Check((i+2)*2<node.size(),"Invalid fixture catalog offsets");
+        const auto start=U16(node.data()+node.size()-(i+1)*2);
+        const auto end=U16(node.data()+node.size()-(i+2)*2);
+        Check(start+2u<=end&&end<=node.size(),"Invalid fixture catalog record");
+        const auto value=start+2u+U16(node.data()+start);
+        Check(value+2<=end,"Truncated fixture catalog record");
+        auto record=node.data()+value;
+        const auto type=U16(record);
+        if(type!=1&&type!=2)continue;
+        Check(value+44<=end,"Truncated fixture BSD metadata");
+        for(size_t j=0;j<entries.size();++j){
+            if(U32(record+8)!=entries[j].first)continue;
+            const auto& info=entries[j].second;
+            P32(record+32,info.uid);
+            P32(record+36,info.gid);
+            P16(record+42,uint16_t((type==1?0040000:0100000)|info.mode));
+            found[j]=true;
+        }
+    }
+    Check(found[0]&&found[1],"Missing fixture catalog permissions");
+    disk.Write(base+offset,node.data(),node.size());
+    disk.Flush();
+}
+
+void TestHfsToApfsPosix(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const PosixMetadata folderMode{501,80,02750};
+    const PosixMetadata fileMode{0,20,04751};
+    const PosixMetadata existingMode{502,81,0700};
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive}){
+        const char* format=kind==Kind::HfsPlus?"hfsplus":"hfsx";
+        const auto sourcePath=Wide(root+"\\"+format+"-posix.dsk");
+        const auto targetPath=Wide(root+"\\"+format+"-posix-apfs.img");
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"POSIX source",true,kind);
+            uint32_t folder,file;
+            {
+                HfsPlus::Volume hfs(*disk,true);
+                folder=hfs.MakeDirectory(2,u"System");
+                file=hfs.Put(folder,u"launchd",4096,0,[](unsigned,uint64_t,void* out,size_t size){
+                    memset(out,0x5b,size);
+                });
+            }
+            SetHfsFixtureModes(*disk,{{{folder,folderMode},{file,fileMode}}});
+        }
+        const auto external=kind==Kind::HfsXCaseSensitive?_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"):nullptr;
+        if(external){
+            Check(CopyFileW(external,targetPath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+        }else{
+            auto disk=HfsPlus::CreateImage(targetPath.c_str(),32*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*disk,u"POSIX destination",true,job);
+        }
+        auto source=OpenBrowserImage(sourcePath);
+        auto target=OpenBrowserImage(targetPath);
+        Entry sourceFolder,sourceFile;
+        Check(source&&VolumeSession::VolumeSessionPidForTest(source)&&target&&target->CaseSensitive()&&
+              source->FindChild(2,u"System",sourceFolder)&&sourceFolder.posix==folderMode&&
+              source->FindChild(sourceFolder.id,u"launchd",sourceFile)&&sourceFile.posix==fileMode,
+              "The mounted HFS worker did not return source ownership and permissions");
+        const auto copy=[&](uint32_t parent,bool overwrite){
+            Storage::Job job;
+            job.transport({},[&](const auto&){
+                return overwrite?Storage::ConflictChoice::Replace:Storage::ConflictChoice::Cancel;
+            });
+            Completion completion;
+            const auto result=ExecuteInWorker(
+                OrdinaryCopy{{Native(source,sourceFolder.id)},Native(target,parent)},job,completion);
+            if(result.code)throw HfsPlus::Error(result.message);
+            Check(completion.complete,"Incomplete HFS to APFS POSIX copy");
+        };
+        const auto checkCopy=[&](uint32_t parent,const PosixMetadata& expectedFolder){
+            Entry folder,file;
+            Check(target->FindChild(parent,u"System",folder)&&folder.directory&&folder.posix==expectedFolder&&
+                  target->FindChild(folder.id,u"launchd",file)&&!file.directory&&file.posix==fileMode&&
+                  file.forks[0].size==4096,"APFS copy lost source ownership or permission bits");
+            std::array<uint8_t,4096> bytes{};
+            target->Read(file.id,0,0,bytes.data(),bytes.size());
+            Check(std::all_of(bytes.begin(),bytes.end(),[](auto b){return b==0x5b;}),
+                  "APFS copy changed executable bytes");
+        };
+        copy(2,false);
+        checkCopy(2,folderMode);
+        const auto mergeParent=target->MakeDirectory(2,u"Merge");
+        Entry existingFolder;existingFolder.name=u"System";existingFolder.directory=true;existingFolder.posix=existingMode;
+        const auto folder=target->MakeDirectoryWithAttributes(mergeParent,existingFolder);
+        Entry prior;prior.name=u"launchd";prior.posix=existingMode;prior.forks[0].size=512;
+        target->Put(folder,prior,[](unsigned,uint64_t,void* out,size_t size){memset(out,0,size);},false);
+        copy(mergeParent,true);
+        checkCopy(mergeParent,existingMode);
+        target.reset();
+        target=OpenBrowserImage(targetPath);
+        Entry merge;
+        Check(target&&target->FindChild(2,u"Merge",merge),"Missing reopened APFS transfer fixture");
+        checkCopy(2,folderMode);
+        checkCopy(merge.id,existingMode);
+        if(external)fprintf(report,"PASS: ownership and permissions persisted on a copy of the shared macOS APFS fixture.\n");
+    }
+    fprintf(report,"PASS: HFS+/HFSX worker copies preserve APFS UID/GID, executable and special mode bits, and nested folder permissions after reopening. Overwrites use source permissions and folder merges retain destination permissions.\n");
+}
+} // namespace
+
 int RunCopyProcessTest(const char *directory) {
     if (!CreateDirectoryA(directory, nullptr))
         return 2;
@@ -635,6 +766,7 @@ int RunCopyProcessTest(const char *directory) {
     try {
         TestWorkerTransport();
         TestVolumeSessionProtocol();
+        TestHfsToApfsPosix(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {

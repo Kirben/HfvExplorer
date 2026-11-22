@@ -20,6 +20,7 @@ struct CatalogCreate {
     bool external=false;
     uint64_t replacedEntry=0;
     uint64_t cloneSource=0,cloneSize=0;
+    std::optional<PosixMetadata> posix;
 };
 struct CatalogRename {
     uint64_t parent,inode;
@@ -43,6 +44,7 @@ struct CatalogReplaceData {
     bool external=false;
     uint64_t alias=0;
     bool preserveDates=false;
+    std::optional<PosixMetadata> posix;
 };
 struct CatalogMetadata {
     uint64_t parent,inode;

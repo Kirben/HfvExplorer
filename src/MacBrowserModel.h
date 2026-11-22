@@ -36,6 +36,7 @@ struct Entry {
     EntryIdentity expectedDestinationIdentity; // transient overwrite approval; never filesystem metadata
     EntryIdentity identity;
     bool symbolicLink = false;
+    std::optional<PosixMetadata> posix;
 };
 struct Capabilities {
     bool read = true, create = false, rename = false, remove = false;

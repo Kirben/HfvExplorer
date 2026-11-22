@@ -5,10 +5,12 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <stdexcept>
 #include <vector>
 #include "HfsPlusAttributeData.h"
+#include "PosixMetadata.h"
 namespace HfsPlus {
 using Bytes = std::vector<uint8_t>;
 struct ExternalJournalRequired : std::runtime_error {using std::runtime_error::runtime_error;};
@@ -73,6 +75,7 @@ struct Entry {
     Fork forks[2];
     std::array<uint8_t, 32> finder{};
     uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
+    std::optional<PosixMetadata> posix;
 };
 // Unicode 3.2 canonical decomposition, with the exclusions required by TN1150.
 std::u16string Normalize(const std::u16string &, bool caseSensitive = false);

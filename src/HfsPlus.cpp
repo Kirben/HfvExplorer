@@ -468,6 +468,10 @@ struct Volume::Impl {
             e.parent = U32(r.key.data() + 2);
             e.name = String(r.key.data() + 6, r.key.size() - 6);
             e.directory = type == 1;
+            const auto mode=U16(r.value.data()+42);
+            if((mode&0170000)==(e.directory?0040000:0100000))
+                e.posix=PosixMetadata{U32(r.value.data()+32),U32(r.value.data()+36),
+                                      uint16_t(mode&PosixMetadata::ModeMask)};
             e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
             e.created = Time::Decode(U32(r.value.data() + 12),(U16(r.value.data()+2)&0x1000)!=0);

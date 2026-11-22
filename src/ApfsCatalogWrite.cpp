@@ -26,6 +26,15 @@ constexpr uint64_t Physical=0x40000000;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
 constexpr size_t SpaceReserveCount=184,SpaceReserveAllocated=192;
 
+void SetPosixMetadata(Bytes& inode,const std::optional<PosixMetadata>& metadata)
+{
+    if(!metadata)return;
+    Check(metadata->mode<=PosixMetadata::ModeMask,"Invalid APFS POSIX permissions");
+    Set(inode,72,metadata->uid,4);
+    Set(inode,76,metadata->gid,4);
+    Set(inode,80,(Le16(inode.data()+80)&0170000)|metadata->mode,2);
+}
+
 struct Mapping {
     uint64_t oid,block,xid=0;
     uint32_t flags=0;
@@ -749,6 +758,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     Set(expected.value,68,Le32(value+68)&UserImmutable,4);
+                    SetPosixMetadata(expected.value,PosixMetadata{
+                        Le32(value+72),Le32(value+76),uint16_t(Le16(value+80)&PosixMetadata::ModeMask)});
                     const auto compression=link->second.compressionRecord;
                     if(compression){
                         Check(!size,"Compressed APFS files cannot have a data stream");
@@ -883,6 +894,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:0100644,isDirectory?0:1,dataSize,create->finder));
+        SetPosixMetadata(records.back().value,create->posix);
         if(create->locked)Set(records.back().value,68,UserImmutable,4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
@@ -1058,6 +1070,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(updated.value,48,(Le64(inode.data()+48)&~WriterDisk::HasFinderInfo)|newFinderFlag,8);
         Set(updated.value,32,time,8);
         if(replace){
+            SetPosixMetadata(updated.value,replace->posix);
             if(replace->locked)Set(updated.value,68,bsdFlags|UserImmutable,4);
             if(!replace->preserveDates){
                 Set(updated.value,24,time,8);
@@ -1624,6 +1637,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     SetResourceFlag(updated.value,resource->size!=0);
     if(edit.attributes)SetSecurityFlag(updated.value,*edit.attributes);
     if(edit.locked)Set(updated.value,68,flags|UserImmutable,4);
+    SetPosixMetadata(updated.value,edit.posix);
     if(!edit.preserveDates){
         Set(updated.value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
         if(edit.dates)Set(updated.value,16,CatalogTimestamp(edit.dates->created),8);
@@ -2938,6 +2952,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(inode.value,16,CatalogTimestamp(dates->created),8);
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
         }
+        SetPosixMetadata(inode.value,create->posix);
         if(create->locked)Set(inode.value,68,UserImmutable,4);
         if(clone){
             constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;

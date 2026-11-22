@@ -304,6 +304,8 @@ void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
+    d.put(e.posix.has_value());
+    if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);}
 }
 Entry DecodeEntry(Data& d) {
     Entry e;
@@ -315,6 +317,12 @@ Entry DecodeEntry(Data& d) {
     auto finder=d.text();
     Check(finder.size()==e.finder.size(), "Invalid Finder metadata length");
     memcpy(e.finder.data(),finder.data(),finder.size());
+    if(d.flag()){
+        const auto uid=CatalogNumber(d),gid=CatalogNumber(d);
+        const auto mode=d.get();
+        Check(mode<=PosixMetadata::ModeMask,"Invalid POSIX permissions in worker metadata");
+        e.posix=PosixMetadata{uid,gid,uint16_t(mode)};
+    }
     return e;
 }
 void EncodeClassic(Data& d, const hfsdirent& e) {

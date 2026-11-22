@@ -158,6 +158,7 @@ void Carrier(Entry& entry, const char16_t* extension, uint64_t size) {
     entry.finder = {};
     entry.protectedFile = false;
     entry.portableContainer = true;
+    entry.posix.reset();
 }
 
 Reader MacBinary(char mode, bool importing, Volume& volume, Entry& entry) {

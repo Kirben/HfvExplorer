@@ -56,6 +56,7 @@ class Plus final : public Volume, public WorkerEndpoint {
         e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile;
         e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
         e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
+        e.posix=in.posix;
         for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;return e;
     }
 public:
@@ -624,6 +625,13 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
         const auto session=e.identity.session.value_or(0);
         bytes(&session,sizeof(session));bytes(e.name.data(),e.name.size()*2);
         bytes(&e.created,sizeof(e.created));bytes(&e.modified,sizeof(e.modified));bytes(e.finder.data(),e.finder.size());
+        const bool hasPosix=e.posix.has_value();
+        bytes(&hasPosix,sizeof(hasPosix));
+        if(e.posix){
+            bytes(&e.posix->uid,sizeof(e.posix->uid));
+            bytes(&e.posix->gid,sizeof(e.posix->gid));
+            bytes(&e.posix->mode,sizeof(e.posix->mode));
+        }
         bytes(&e.forks[0].size,sizeof(uint64_t));bytes(&e.forks[1].size,sizeof(uint64_t));
         if(e.directory){auto children=v.List(at);std::sort(children.begin(),children.end(),[](const Entry& a,const Entry& b){return a.name==b.name?a.identity<b.identity:a.name<b.name;});for(auto& child:children)walk(child.id,depth+1);}
         else if(const auto target=e.readError.empty()?std::optional<HfsPlus::Bytes>{}:v.SymbolicLinkTarget(at)){
