@@ -487,7 +487,7 @@ struct CatalogSibling {
 };
 
 std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const CatalogMutation& request,const std::string& name,
-    uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t symlinkCount,
+    uint64_t nextId,uint64_t entryId,uint64_t time,bool fold,uint64_t directoryCount,uint64_t fileCount,uint64_t symlinkCount,uint64_t specialCount,
     uint64_t dataSize,uint64_t blockCount,std::vector<FileRun>& fileRuns,std::optional<CatalogKind>& removedKind,
     size_t& streamAt,const std::optional<FileDates>& dates,const ResourceWrite* resourceWrite,const AttributeStreams& streams,std::set<uint64_t>& retiredStreams)
 {
@@ -590,7 +590,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     }
     struct AttributeStream {uint64_t inode,blocks;};
     std::map<uint64_t,AttributeStream> attributeStreams;
-    uint64_t files=0,symlinks=0;
+    uint64_t files=0,symlinks=0,special=0;
     for(size_t i=0;i<records.size();++i){
         const auto view=at(i);
         size_t streamRecords=0;
@@ -612,7 +612,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(inode!=3&&folder!=directories.end()&&view.key.size>=14&&
                       (view.value.size==18||view.value.size==34),"Invalid APFS directory entry");
                 const auto kind=CatalogKind(Le16(view.value.data+16));
-                Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink,
+                Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink||kind==CatalogKind::Fifo,
                       "APFS catalog contains an unsupported entry type");
                 const auto nameKey=Le32(view.key.data+8);
                 Check((nameKey&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
@@ -760,12 +760,12 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const auto size=view.value.size==streamEnd?Le64(value+stream):0;
                     Check(DivideUp(size,Block)<=blockCount,"Unsupported APFS file size in writable catalog");
                     const bool symlink=kind==CatalogKind::SymbolicLink;
-                    Check(!symlink||(!size&&!link->second.resourceRecord&&!link->second.compressionRecord),
-                          "APFS symbolic link cannot have file streams");
+                    Check(kind==CatalogKind::RegularFile||(!size&&!link->second.resourceRecord&&!link->second.compressionRecord),
+                          "APFS special entry cannot have file streams");
                     const auto group=siblingGroups.find(inode);
                     const auto count=group==siblingGroups.end()?1:group->second.size();
                     Check(count<=INT32_MAX,"Too many APFS hard links");
-                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,symlink?0120777:0100644,
+                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,symlink?0120777:kind==CatalogKind::Fifo?0010644:0100644,
                                                     uint32_t(count),size,finder?&*finder:nullptr);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
@@ -777,7 +777,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                         Check(!size,"Compressed APFS files cannot have a data stream");
                         SetCompressionFlags(expected.value,Le64(records[*compression].value.data()+12),true);
                     }
-                    Check(mode==(symlink?0120000:0100000)&&view.value.size==expected.value.size()&&
+                    Check(mode==(uint16_t(kind)<<12)&&view.value.size==expected.value.size()&&
                           !memcmp(value+48,expected.value.data()+48,view.value.size-48),
                           "APFS writes require native regular-file data streams");
                     if(size){
@@ -807,7 +807,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     }
                     link->second.dataSize=size;
                     link->second.streamRecords=streamRecords-link->second.attributes;
-                    if(symlink)++symlinks;else ++files;
+                    if(symlink)++symlinks;else if(kind==CatalogKind::Fifo)++special;else ++files;
                 }
             }
             // Catalog keys sort by inode ID, record type, then directory name hash.
@@ -821,7 +821,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         i+=streamRecords;
     }
     Check(attributeStreams.empty()&&directories.count(2)&&directories.count(3)&&directories.size()==directoryCount+2&&
-          files==fileCount&&symlinks==symlinkCount&&links.size()==directoryCount+fileCount+symlinkCount,"APFS catalog records and volume counts disagree");
+          files==fileCount&&symlinks==symlinkCount&&special==specialCount&&
+          links.size()==directoryCount+fileCount+symlinkCount+specialCount,"APFS catalog records and volume counts disagree");
     for(const auto& entry:directories){
         const auto& folder=entry.second;
         Check(Le32(records[folder.record].value.data()+56)==folder.children,"Invalid APFS directory child count");
@@ -905,7 +906,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const bool symlink=create->kind==CatalogKind::SymbolicLink;
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
-        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:0100644,isDirectory?0:1,dataSize,create->finder));
+        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:create->kind==CatalogKind::Fifo?0010644:0100644,isDirectory?0:1,dataSize,create->finder));
         SetPosixMetadata(records.back().value,create->posix);
         if(create->locked)Set(records.back().value,68,Le32(records.back().value.data()+68)|CopiedProtectionFlags(create->posix),4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
@@ -2123,7 +2124,7 @@ void CheckExternalVolume(const Bytes& volume,bool allowVolumeGroup,bool allowSna
           !Le64(volume.data()+48)&&(encrypted?(Le64(volume.data()+56)==1||Le64(volume.data()+56)==5||Le64(volume.data()+56)==12)&&Le64(volume.data()+264)==8&&
                      !Le64(volume.data()+976)&&!Le64(volume.data()+216):
                      (Le64(volume.data()+56)==1||Le64(volume.data()+56)==8)&&Le64(volume.data()+264)==1)&&
-          Le32(volume.data()+116)==2&&!Le64(volume.data()+208)&&Le64(volume.data()+216)<=(allowSnapshot?1u:0u),
+          Le32(volume.data()+116)==2&&Le64(volume.data()+216)<=(allowSnapshot?1u:0u),
           "Unsupported APFS volume features for external edits");
     if(group){
         const auto role=Le16(volume.data()+VolumeRoleOffset);
@@ -2467,7 +2468,7 @@ void CheckNativeVolume(const Bytes& volume)
     const auto flags=Le64(volume.data()+56);
     Check(!memcmp(volume.data()+32,"APSB",4)&&!memcmp(volume.data()+272,"HFVExplorer",12)&&
           (flags==1||flags==8)&&Le64(volume.data()+264)==1&&Le32(volume.data()+116)==2&&
-          !Le64(volume.data()+208)&&!Le64(volume.data()+216),
+          !Le64(volume.data()+216),
           "APFS catalog writes currently require an unencrypted volume formatted by HFVExplorer");
 }
 }
@@ -2808,6 +2809,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto fileCount=Le64(volume.data()+184);
     const auto directoryCount=Le64(volume.data()+192);
     const auto symlinkCount=Le64(volume.data()+200);
+    const auto specialCount=Le64(volume.data()+208);
     const auto catalogOid=Le64(volume.data()+136);
     const auto snapshots=Le64(volume.data()+152);
     const bool externalCreate=create&&create->external;
@@ -2924,9 +2926,10 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(externalCreate){
         const bool directory=create->kind==CatalogKind::Directory;
         const bool symlink=create->kind==CatalogKind::SymbolicLink;
-        Check((directory||symlink?!input&&!clone:create->kind==CatalogKind::RegularFile&&(input||clone))&&
+        const bool fifo=create->kind==CatalogKind::Fifo;
+        Check((directory||symlink||fifo?!input&&!clone:create->kind==CatalogKind::RegularFile&&(input||clone))&&
               create->parent>=2&&create->parent!=3&&create->parent<nextId&&
-              (!(directory||symlink)||(!resource&&!create->compression))&&(!directory||!create->locked)&&
+              (!(directory||symlink||fifo)||(!resource&&!create->compression))&&(!directory||!create->locked)&&
               (!symlink||create->linkTarget),
               "Unsupported APFS creation request for this image");
         catalog=std::move(existing.records);
@@ -2970,7 +2973,7 @@ CatalogWritePlan PrepareCatalogMutation(
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,fold,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name,fold);
         auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
-                                     directory?0040755:symlink?0120777:0100644,directory?0:1,dataSize,create->finder);
+                                     directory?0040755:symlink?0120777:fifo?0010644:0100644,directory?0:1,dataSize,create->finder);
         if(current.writeCipher&&dataSize){
             const auto stream=96+size_t(Le16(inode.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
             Set(inode.value,stream+16,4,8);
@@ -3114,7 +3117,7 @@ CatalogWritePlan PrepareCatalogMutation(
         }
     }else{
         catalog=EditCatalog(std::move(existing.records),request,name,nextId,entryId,time,flags==1,
-                            directoryCount,fileCount,symlinkCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
+                            directoryCount,fileCount,symlinkCount,specialCount,dataSize,current.blockCount,files,removedKind,streamAt,dates,resource?&*resource:nullptr,attributeIds,retiredStreams);
     }
     if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink){
         for(const auto& extent:extentTree.records)
@@ -3304,6 +3307,7 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,176,nextAvailable,8);
     if(create){
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
+        else if(create->kind==CatalogKind::Fifo)Set(volume,208,specialCount+1,8);
         else if(create->kind==CatalogKind::SymbolicLink){
             Set(volume,200,symlinkCount+1,8);
             if(removedKind)Set(volume,184,fileCount-1,8);
@@ -3321,6 +3325,7 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(removedKind){
         if(*removedKind==CatalogKind::Directory)Set(volume,192,directoryCount-1,8);
         else if(*removedKind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount-1,8);
+        else if(*removedKind==CatalogKind::Fifo)Set(volume,208,specialCount-1,8);
         else Set(volume,184,fileCount-1,8);
     }
     Set(volume,256,time,8);

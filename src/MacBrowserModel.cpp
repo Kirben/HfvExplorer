@@ -359,7 +359,7 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     if(out.entry.hardLink)out.entry.attributes.erase(u"com.apple.system.hfs.firstlink");
     if (out.entry.directory){
         if (adapter) out.reader=adapter(v,out.entry,job,depth==0);if(!removal||!out.entry.hardLink||out.entry.linkCount<=1)for(auto &child:v.List(id))out.children.push_back(Scan(v,child.id,job,p,ancestors,depth+1,removal,reportProgress,adapter));}
-    else { if(!removal&&!out.linkTarget){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
+    else { if(!removal&&!out.linkTarget&&(!out.entry.posix||!out.entry.posix->fifo)){v.Read(id,0,0,nullptr,0);if(out.entry.forks[1].size)v.Read(id,1,0,nullptr,0);}
         if (adapter) out.reader=adapter(v,out.entry,job,depth==0);
         ++p.totalFiles; Check(UINT64_MAX - p.totalBytes >= out.entry.forks[0].size,
         "Copy size overflow"); p.totalBytes += out.entry.forks[0].size;
@@ -843,6 +843,14 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
                         std::to_string(plan.entry.version)+" for "+BrowserPresentation::Utf8(plan.entry.name)+
                         ". Choose a writable MFS image.");
   Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
+  Check(!exists||!found.posix||!found.posix->fifo,"A named pipe blocks the destination name");
+  if(plan.entry.posix&&plan.entry.posix->fifo){
+   const std::string_view kind=dst.Kind();
+   Check(kind=="HFS+"||kind=="HFSX"||kind=="APFS","The destination cannot preserve a named pipe");
+   Check(!exists&&!plan.entry.directory&&!plan.entry.symbolicLink&&!plan.entry.compressed&&
+         !plan.entry.hardLink&&!plan.entry.forks[0].size&&!plan.entry.forks[1].size,
+         "Named pipe copies must create a new entry without forks");
+  }
   if(plan.linkTarget){
    Check(!exists||(!found.protectedFile&&(dst.SymbolicLinkTarget(found.id).has_value()||
                                         dst.CanReplaceFileWithSymbolicLink(found))),

@@ -14,7 +14,9 @@ struct PosixMetadata {
     static constexpr uint8_t NoDump=1, Opaque=2, Archived=4, HintMask=NoDump|Opaque|Archived;
     uint8_t flags = 0;
 
+    bool fifo = false;
+
     bool operator==(const PosixMetadata& other) const {
-        return uid == other.uid && gid == other.gid && mode == other.mode && protection == other.protection && flags == other.flags;
+        return uid == other.uid && gid == other.gid && mode == other.mode && protection == other.protection && flags == other.flags && fifo == other.fifo;
     }
 };

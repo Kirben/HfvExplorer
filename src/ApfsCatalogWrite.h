@@ -4,7 +4,7 @@
 #include <variant>
 
 namespace Apfs {
-enum class CatalogKind : uint16_t { Directory=4, RegularFile=8, SymbolicLink=10 };
+enum class CatalogKind : uint16_t { Fifo=1, Directory=4, RegularFile=8, SymbolicLink=10 };
 struct CatalogCreate {
     uint64_t parent;
     const std::u16string& name;
