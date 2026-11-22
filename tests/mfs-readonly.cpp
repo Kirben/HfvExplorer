@@ -202,7 +202,37 @@ static void writeTests(){
  for(bool flush:{false,true})for(bool shortWrite:{false,true})for(unsigned step=0;step<(flush?flushes:writes);++step){auto disk=base;disk.shortWrite=shortWrite;if(flush)disk.failFlush=int(disk.flushes+step);else disk.failWrite=int(disk.writes+step);MfsImage image;check(image.Open(disk),"open injected MFS source");uint32_t target;Storage::OutcomeEvidence evidence;check(!image.Put(changed,reader,true,target)&&evidence.RollbackState()==Storage::Rollback::Restored,"MFS write/flush failure did not report restored rollback");check(disk.bytes==base.bytes,"MFS rollback did not restore exact image bytes");disk.failWrite=disk.failFlush=-1;check(image.Open(disk)&&image.Entries()[0].forks[0].length==7301,"MFS rollback not readable");}
  {auto disk=base;MfsImage image;check(image.Open(disk),"open canceled source");bool failed=false;try{image.Put(changed,[](unsigned,uint64_t,void*,size_t){throw std::runtime_error("Canceled source read");},true,id);}catch(const std::exception&){failed=true;}check(failed&&disk.bytes==base.bytes,"source error changed MFS image");auto huge=changed;huge.forks[0].length=400*1024;check(!image.Put(huge,reader,true,id)&&disk.bytes==base.bytes,"disk-full overwrite changed image");}
  {WritableMemory disk(400*1024);check(MfsImage::Format(disk,"Directory",disk.Length(),false,error),"format directory-full test");MfsImage image;check(image.Open(disk),"open directory-full test");for(unsigned i=0;i<12;++i){MfsEntry item;item.name=std::string(254,'a')+char('A'+i);uint32_t file;check(image.Put(item,reader,false,file),"fill directory sectors");}auto saved=disk.bytes;MfsEntry item;item.name=std::string(255,'z');uint32_t file;check(!image.Put(item,reader,false,file)&&disk.bytes==saved,"directory-full create changed image");}
- {auto disk=base;disk.failWrite=int(disk.writes);disk.persistent=true;disk.shortWrite=true;MfsImage image;check(image.Open(disk),"open failed rollback test");Storage::OutcomeEvidence evidence;check(!image.Put(changed,reader,true,id)&&evidence.RollbackState()==Storage::Rollback::Failed&&image.RecoveryRequired()&&!disk.Writable()&&image.Error().find("Original complete image saved")!=std::string::npos,"failed rollback did not retain recovery image and disable writes");}
+ {
+  auto disk=base;
+  disk.failWrite=int(disk.writes);
+  disk.persistent=true;
+  disk.shortWrite=true;
+  MfsImage image;
+  check(image.Open(disk),"open failed rollback test");
+  Storage::OutcomeEvidence evidence;
+  check(!image.Put(changed,reader,true,id)&&evidence.RollbackState()==Storage::Rollback::Failed&&
+        image.RecoveryRequired()&&!disk.Writable(),"failed rollback did not disable writes");
+  const std::string marker="Original complete image saved at: ";
+  const auto& message=image.Error();
+  const auto start=message.find(marker);
+  check(start!=std::string::npos,"failed rollback did not retain recovery image");
+  const auto begin=start+marker.size(),end=message.find(". Verify",begin);
+  check(end!=std::string::npos,"missing recovery path terminator");
+  const auto path=message.substr(begin,end-begin);
+  wchar_t wide[MAX_PATH]{};
+  check(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.c_str(),-1,wide,MAX_PATH)!=0,
+        "invalid recovery path encoding");
+  const auto backup=CreateFileW(wide,GENERIC_READ|DELETE,0,nullptr,OPEN_EXISTING,
+                                FILE_FLAG_DELETE_ON_CLOSE,nullptr);
+  check(backup!=INVALID_HANDLE_VALUE,"open saved recovery image");
+  std::vector<BYTE> saved(base.bytes.size());
+  LARGE_INTEGER length{};
+  DWORD read=0;
+  const bool complete=GetFileSizeEx(backup,&length)&&length.QuadPart==LONGLONG(saved.size())&&
+                      ReadFile(backup,saved.data(),DWORD(saved.size()),&read,nullptr)&&read==saved.size();
+  CloseHandle(backup);
+  check(complete&&saved==base.bytes,"recovery image did not preserve exact pre-operation bytes");
+ }
  puts("PASS: writable MFS raw/DC42 format, both forks, 255-byte MacRoman names, versions, rename, metadata/lock, shrink, delete, checksum updates; exact rollback on every write/short-write/flush failure; disk/directory full and source errors; recovery backup after rollback failure");
 }
 int wmain(int argc,wchar_t** argv) {

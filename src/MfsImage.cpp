@@ -3,6 +3,7 @@
 #include "StorageOutcome.h"
 #include "MfsImage.h"
 #include "ImageHandleTransfer.h"
+#include "WindowsTemporaryFile.h"
 #include <algorithm>
 #include <set>
 #include <limits>
@@ -60,10 +61,20 @@ struct VectorSource:MfsSource {
  bool ReadAt(uint64_t at,void* p,size_t n)override{if(at>bytes.size()||n>bytes.size()-at)return false;if(n)memcpy(p,bytes.data()+size_t(at),n);return true;}
 };
 std::string RecoveryFile(const std::vector<BYTE>& original){
- wchar_t folder[MAX_PATH],path[MAX_PATH];if(!GetTempPathW(MAX_PATH,folder)||!GetTempFileNameW(folder,L"MFS",0,path))return {};
- HANDLE h=CreateFileW(path,GENERIC_WRITE,0,nullptr,TRUNCATE_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);if(h==INVALID_HANDLE_VALUE){DeleteFileW(path);return {};}
- DWORD written=0;bool ok=WriteFile(h,original.data(),DWORD(original.size()),&written,nullptr)&&written==original.size()&&FlushFileBuffers(h);CloseHandle(h);if(!ok){DeleteFileW(path);return {};}
- int n=WideCharToMultiByte(CP_UTF8,0,path,-1,nullptr,0,nullptr,nullptr);std::string name(size_t(n),0);WideCharToMultiByte(CP_UTF8,0,path,-1,&name[0],n,nullptr,nullptr);name.pop_back();return name;
+ if(original.size()>MAXDWORD)return {};
+ wchar_t path[MAX_PATH];
+ const auto file=CreateWindowsTemporaryFile(L"MFS",path,GENERIC_WRITE|DELETE,FILE_ATTRIBUTE_NORMAL);
+ if(file==INVALID_HANDLE_VALUE)return {};
+ struct Close{HANDLE file;~Close(){CloseHandle(file);}} close{file};
+ char utf8[4*MAX_PATH];
+ const auto bytes=WideCharToMultiByte(CP_UTF8,0,path,-1,utf8,ARRAYSIZE(utf8),nullptr,nullptr);
+ DWORD written=0;
+ if(bytes>0&&WriteFile(file,original.data(),DWORD(original.size()),&written,nullptr)&&
+    written==original.size()&&FlushFileBuffers(file))
+  return std::string(utf8,bytes-1);
+ FILE_DISPOSITION_INFO remove{TRUE};
+ SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove));
+ return {};
 }
 bool Apply(MfsSource& source,const std::vector<BYTE>& original,const std::vector<BYTE>& desired,
            uint64_t metadataEnd,uint64_t directoryStart,uint64_t directoryEnd,uint64_t dataEnd,

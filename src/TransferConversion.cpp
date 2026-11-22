@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "TransferConversion.h"
+#include "WindowsTemporaryFile.h"
 #include <algorithm>
 #include <fcntl.h>
 #include <io.h>
@@ -26,14 +27,14 @@ class Spool {
     uint64_t size_ = 0;
 public:
     Spool() {
-        wchar_t folder[MAX_PATH], file[MAX_PATH];
-        auto length = GetTempPathW(MAX_PATH, folder);
-        Check(length && length < MAX_PATH && GetTempFileNameW(folder, L"hfc", 0, file),
-              "Cannot make conversion staging file");
-        fd_ = _wopen(file, _O_RDWR | _O_BINARY | _O_TEMPORARY | _O_NOINHERIT);
-        if (fd_ < 0) {
-            DeleteFileW(file);
-            throw HfsPlus::Error("Cannot open conversion staging file");
+        wchar_t path[MAX_PATH];
+        const auto file=CreateWindowsTemporaryFile(L"hfc",path,GENERIC_READ|GENERIC_WRITE|DELETE,
+                                                   FILE_ATTRIBUTE_TEMPORARY|FILE_FLAG_DELETE_ON_CLOSE);
+        Check(file!=INVALID_HANDLE_VALUE,"Cannot create conversion staging file");
+        fd_=_open_osfhandle(reinterpret_cast<intptr_t>(file),_O_RDWR|_O_BINARY|_O_NOINHERIT);
+        if(fd_<0){
+            CloseHandle(file);
+            throw HfsPlus::Error("Cannot attach conversion staging file");
         }
     }
     Spool(const Spool&) = delete;

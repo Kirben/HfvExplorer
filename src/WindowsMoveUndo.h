@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <functional>
+#include <windows.h>
 #include <memory>
 #include <string>
+#include "EntryIdentity.h"
 
 namespace WindowsMoveUndo {
 bool Supported(const std::wstring& folder);
@@ -20,8 +22,9 @@ public:
     Session& operator=(const Session&)=delete;
     static Session* Current();
     std::wstring Slot();
-    std::wstring StageTemporary(const std::wstring& path);
-    void Rename(const std::wstring& from,const std::wstring& to);
+    std::wstring StageTemporary(const std::wstring& path,HANDLE created=INVALID_HANDLE_VALUE);
+    void Rename(const std::wstring& from,const std::wstring& to,
+                const MacBrowser::ObjectIdentity* expected=nullptr);
     void PreserveDirectoryDates(const std::wstring& path);
     void Finish();
 };

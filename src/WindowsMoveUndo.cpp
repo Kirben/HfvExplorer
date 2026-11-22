@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "WindowsMoveUndo.h"
 #include "WindowsHandleRename.h"
+#include "WindowsEntryIdentity.h"
 #include "ClassicHfsRecovery.h"
 #include "CopyWorkerProtocol.h"
 #include "StorageWorker.h"
@@ -24,6 +25,7 @@ struct Handle {
     explicit Handle(HANDLE h):value(h){}
     ~Handle(){Close();}
     void Close(){if(value!=INVALID_HANDLE_VALUE){CloseHandle(value);value=INVALID_HANDLE_VALUE;}}
+    HANDLE Release(){const auto handle=value;value=INVALID_HANDLE_VALUE;return handle;}
     Handle(const Handle&)=delete;
     explicit operator bool()const{return value!=INVALID_HANDLE_VALUE;}
 };
@@ -413,13 +415,17 @@ Session::Session(const std::wstring& root,const std::string& decision,bool expor
 Session::~Session(){if(current==this)current=nullptr;}
 Session* Session::Current(){return current;}
 std::wstring Session::Slot(){return Child(state_->stage,std::to_wstring(++state_->next));}
-std::wstring Session::StageTemporary(const std::wstring& path)
+std::wstring Session::StageTemporary(const std::wstring& path,HANDLE created)
 {
     const auto staged=Slot();
     Paths(state_->root,state_->stage,path,staged);
-    auto file=Open(path,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
-    Check(bool(file),"Cannot protect a Windows temporary file");
-    const auto id=IdentityOf(Info(file.value));
+    Handle directory(created==INVALID_HANDLE_VALUE?Open(path,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ).Release():INVALID_HANDLE_VALUE);
+    const auto file=directory?directory.value:created;
+    Check(file!=INVALID_HANDLE_VALUE,"Cannot protect a Windows temporary entry");
+    const auto info=Info(file);
+    Check(!directory||((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Children(path).empty()),
+          "The temporary Windows folder was replaced or is not empty");
+    const auto id=IdentityOf(info);
     Check(id.file&&!Identify(staged).file,"The Windows staging name is occupied");
     Data record;
     record.put(uint64_t(Op::Owned));
@@ -427,20 +433,25 @@ std::wstring Session::StageTemporary(const std::wstring& path)
     id.Encode(record);
     try{
         Frame(state_->journal.value,record);
-        Move(file.value,staged);
+        Move(file,staged);
     }catch(...){
-        FILE_DISPOSITION_INFO remove{TRUE};
-        SetFileInformationByHandle(file.value,FileDispositionInfo,&remove,sizeof(remove));
+        if(!directory){
+            FILE_DISPOSITION_INFO remove{TRUE};
+            SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove));
+        }
         throw;
     }
     return staged;
 }
-void Session::Rename(const std::wstring& from,const std::wstring& to)
+void Session::Rename(const std::wstring& from,const std::wstring& to,
+                     const MacBrowser::ObjectIdentity* expected)
 {
     Paths(state_->root,state_->stage,from,to);
     auto handle=Open(from,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
     Check(bool(handle),"Cannot protect Windows move entry");
     const auto info=Info(handle.value);
+    Check(!expected||MacBrowser::WindowsIdentity(info)==*expected,
+          "A Windows move participant changed before publication; it was retained");
     Check(Under(from,state_->stage)||!(info.dwFileAttributes&FILE_ATTRIBUTE_READONLY),
           "Cannot stage a read-only Windows move entry");
     const auto id=IdentityOf(info);

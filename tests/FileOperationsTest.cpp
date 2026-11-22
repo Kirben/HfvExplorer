@@ -66,6 +66,45 @@ void Pass(const Operation& op){Wait(op);if(op.Job()->result().code)throw HfsPlus
 void Conflict(const std::shared_ptr<Storage::Job>& job){DWORD until=GetTickCount()+5000;while(!job->done()&&job->conflict().empty()&&LONG(until-GetTickCount())>0)Sleep(10);Check(!job->conflict().empty(),"expected overwrite conflict");}
 std::vector<BYTE> Load(const std::string& path){CFile file;Check(file.Open(path.c_str(),CFile::modeRead|CFile::shareDenyNone)!=FALSE,"read fixture");std::vector<BYTE> bytes(size_t(file.GetLength()));Check(file.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"read fixture bytes");return bytes;}
 void Save(const std::string& path,const char* data){CFile file;Check(file.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"write fixture");file.Write(data,UINT(strlen(data)));}
+void WindowsStagingSafety(const std::string& root,FILE* report)
+{
+ for(const auto phase:{"export-files-reserved","staged","metadata-file-reserved"}){
+  const auto folder=root+"\\swap-"+phase;
+  Check(CreateDirectoryA(folder.c_str(),nullptr)!=FALSE,"create staging substitution fixture");
+  auto host=OpenWindows(W(folder));
+  const auto id=Put(*host,u"Original");
+  host->Close();
+  const auto data=folder+"\\Original",companion=folder+"\\%Original";
+  const auto priorData=Load(data),priorCompanion=Load(companion);
+  std::string decoy;
+  bool replaced=false;
+  bool rejected=false;
+  struct Reset{~Reset(){windowsPublicationFault={};}} reset;
+  windowsPublicationFault=[&](const char* current){
+   if(strcmp(current,phase))return;
+   WIN32_FIND_DATAA found{};
+   const auto search=FindFirstFileA((folder+"\\HFV*.tmp").c_str(),&found);
+   Check(search!=INVALID_HANDLE_VALUE,"locate reserved staging file");
+   FindClose(search);
+   decoy=folder+"\\"+found.cFileName;
+   Check(MoveFileA(decoy.c_str(),(decoy+".original").c_str())!=FALSE,"move reserved staging file aside");
+   Save(decoy,"UNRELATED");
+   replaced=true;
+  };
+  try{
+   if(!strcmp(phase,"metadata-file-reserved"))host->SetAttributes(id,{{u"user.New",{1,2,3}}});
+   else{
+    auto entry=host->Stat(id);
+    host->Put(2,entry,[](unsigned,uint64_t,void* out,size_t count){memset(out,0x81,count);},true);
+   }
+  }catch(const HfsPlus::Error&){rejected=true;}
+  windowsPublicationFault={};
+  Check(replaced&&rejected&&Load(decoy)==std::vector<BYTE>({'U','N','R','E','L','A','T','E','D'})&&
+        Load(data)==priorData&&Load(companion)==priorCompanion,
+        "Windows staging truncated, published or removed an unrelated replacement");
+ }
+ fprintf(report,"PASS: export and metadata staging refuse substituted files before writing and publication, preserving both original forks.\n");
+}
 void WindowsStreamSafety(const std::string& root,const std::shared_ptr<Volume>& mac,FILE* report)
 {
  const auto winFolder=root+"\\streams";
@@ -294,6 +333,7 @@ int RunFileOperationsTest(const char* directory){
          "Captured object identity accepted a replacement at the same path");
    fprintf(report,"PASS: stale Windows companion and same-path replacement identities refused.\n");
   }
+  WindowsStagingSafety(root,report);
   Request classicRename = FileOperations::RenameEntry{classicSource, u"Renamed"};Pass(Submit(classicRename));
   Request legacy;legacy = FileOperations::LegacyConversion{};legacy.Legacy().source=FileOperations::Location::FromLegacy(classic,"Classic:Renamed");legacy.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\raw.dat");legacy.Legacy().options.output='r';legacy.Legacy().options.input='r';legacy.Legacy().options.appledouble=false;
   {Gate gate;auto captured=Submit(legacy);legacy.Legacy().options.output='5';HFSIFACE_restore_copy_settings('5','m',1);gate.Release();Pass(captured);char out,in;int ad;HFSIFACE_copy_settings(&out,&in,&ad);Check(out=='5'&&in=='m'&&ad==1&&Load(root+"\\raw.dat")==std::vector<BYTE>({'D','A','T','A'}),"queued conversion settings were not captured/restored");}

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "WindowsMoveUndo.h"
 #include "WindowsEntryIdentity.h"
+#include "WindowsHandleRename.h"
 #include "ClassicHfsRecovery.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
@@ -18,14 +19,27 @@ std::function<void(const char*)> windowsPublicationFault;
 namespace {
 using namespace HfsPlus::Disk;
 void Check(bool ok, const char *text) { if (!ok) throw HfsPlus::Error(text); }
+struct StagedIdentity {
+    DWORD volume=0,high=0,low=0;
+    StagedIdentity()=default;
+    explicit StagedIdentity(const BY_HANDLE_FILE_INFORMATION& info)
+        :volume(info.dwVolumeSerialNumber),high(info.nFileIndexHigh),low(info.nFileIndexLow){}
+    bool Matches(const BY_HANDLE_FILE_INFORMATION& info)const{
+        return volume==info.dwVolumeSerialNumber&&high==info.nFileIndexHigh&&low==info.nFileIndexLow;
+    }
+};
 struct File {
     HANDLE h = INVALID_HANDLE_VALUE;
     bool sparse = false;
-    File(const std::wstring &path, DWORD access, DWORD disposition)
+    File(const std::wstring &path, DWORD access, DWORD disposition,const StagedIdentity* stagedId=nullptr)
         : h(CreateFileW(path.c_str(), access, FILE_SHARE_READ, nullptr, disposition,
                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)) {
         Check(h != INVALID_HANDLE_VALUE, "Cannot open Windows file");
-        BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(h,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))){CloseHandle(h);h=INVALID_HANDLE_VALUE;throw HfsPlus::Error("Windows file was replaced by a directory or reparse point");}
+        BY_HANDLE_FILE_INFORMATION info{};if(!GetFileInformationByHandle(h,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))||
+           (stagedId&&!stagedId->Matches(info))){
+            CloseHandle(h);h=INVALID_HANDLE_VALUE;
+            throw HfsPlus::Error("Windows file was replaced");
+        }
     }
     ~File() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); }
     uint64_t Size() { LARGE_INTEGER n; Check(GetFileSizeEx(h, &n) != FALSE, "Cannot get Windows file size"); return n.QuadPart; }
@@ -65,14 +79,59 @@ struct File {
 // Keep writers off the captured version. Renames are allowed so our own
 // publication can move it, but every moved version is checked by file identity.
 struct FileVersion {
- HANDLE handle=INVALID_HANDLE_VALUE;BY_HANDLE_FILE_INFORMATION info{};
- explicit FileVersion(const std::wstring& path){handle=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,nullptr);if(handle==INVALID_HANDLE_VALUE){auto error=GetLastError();Check(error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND,"Cannot protect destination from competing writes");return;}if(!GetFileInformationByHandle(handle,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))){CloseHandle(handle);handle=INVALID_HANDLE_VALUE;throw HfsPlus::Error("Destination became a directory or reparse point");}}
- ~FileVersion(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
- FileVersion(const FileVersion&)=delete;FileVersion& operator=(const FileVersion&)=delete;
+ HANDLE handle=INVALID_HANDLE_VALUE;
+ BY_HANDLE_FILE_INFORMATION info{};
+ explicit FileVersion(const std::wstring& path){
+  handle=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+                     FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+  if(handle==INVALID_HANDLE_VALUE){
+   const auto error=GetLastError();
+   Check(error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND,"Cannot protect destination from competing writes");
+   return;
+  }
+  if(!GetFileInformationByHandle(handle,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))){
+   CloseHandle(handle);
+   handle=INVALID_HANDLE_VALUE;
+   throw HfsPlus::Error("Destination became a directory or reparse point");
+  }
+ }
+ ~FileVersion(){Close();}
+ void Close(){if(handle!=INVALID_HANDLE_VALUE){CloseHandle(handle);handle=INVALID_HANDLE_VALUE;}}
+ FileVersion(const FileVersion&)=delete;
+ FileVersion& operator=(const FileVersion&)=delete;
  bool Present()const{return handle!=INVALID_HANDLE_VALUE;}
- bool Matches(const std::wstring& path)const{try{FileVersion other(path);if(Present()!=other.Present())return false;if(!Present())return true;const auto& a=info;const auto& b=other.info;return a.dwVolumeSerialNumber==b.dwVolumeSerialNumber&&a.nFileIndexHigh==b.nFileIndexHigh&&a.nFileIndexLow==b.nFileIndexLow&&a.nFileSizeHigh==b.nFileSizeHigh&&a.nFileSizeLow==b.nFileSizeLow&&a.ftLastWriteTime.dwHighDateTime==b.ftLastWriteTime.dwHighDateTime&&a.ftLastWriteTime.dwLowDateTime==b.ftLastWriteTime.dwLowDateTime;}catch(...){return false;}}
  ObjectIdentity Identity()const{return Present()?WindowsIdentity(info):ObjectIdentity{};}
- void Verify(const std::wstring& path)const{Check(Matches(path),"Destination changed during staging/publication; replacement was refused");}
+ bool SameVersion(const BY_HANDLE_FILE_INFORMATION& other)const{
+  return Present()&&!(other.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))&&
+         WindowsIdentity(info)==WindowsIdentity(other)&&info.nFileSizeHigh==other.nFileSizeHigh&&
+         info.nFileSizeLow==other.nFileSizeLow;
+ }
+ bool Matches(const std::wstring& path)const{
+  try{
+   FileVersion other(path);
+   return Present()?other.Present()&&SameVersion(other.info):!other.Present();
+  }catch(...){return false;}
+ }
+ void Verify(const std::wstring& path)const{
+  Check(Matches(path),"Destination changed during staging/publication; replacement was refused");
+ }
+ bool Change(const std::wstring& path,const std::wstring* destination)const{
+  const auto target=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+  if(target==INVALID_HANDLE_VALUE)return false;
+  struct Close{HANDLE handle;~Close(){CloseHandle(handle);}} close{target};
+  BY_HANDLE_FILE_INFORMATION current{};
+  if(!GetFileInformationByHandle(target,&current)||!SameVersion(current))return false;
+  if(destination)return RenameWindowsHandle(target,*destination);
+  FILE_DISPOSITION_INFO remove{TRUE};
+  return SetFileInformationByHandle(target,FileDispositionInfo,&remove,sizeof(remove))!=FALSE;
+ }
+ bool MoveTo(const std::wstring& from,const std::wstring& to)const{return Change(from,&to);}
+ bool RemoveAt(const std::wstring& path){
+  if(!Change(path,nullptr))return false;
+  Close(); // Allow rollback to reopen the original name after delete-on-close.
+  return true;
+ }
 };
 template<class Visit>
 void VisitNamedStreams(const std::wstring& path,Visit visit)
@@ -334,39 +393,64 @@ std::wstring Companion(const std::wstring& path){
     const auto slash=path.find_last_of(L"\\/");
     return path.substr(0,slash+1)+L"%"+path.substr(slash+1);
 }
-std::wstring Temp(const std::wstring& directory,bool folder=false) {
+std::wstring TemporaryName(const std::wstring& directory) {
     static LONG serial=0;
+    wchar_t leaf[64];
+    swprintf_s(leaf,L"HFV%08lX%08lX%08lX.tmp",GetCurrentProcessId(),GetTickCount(),DWORD(InterlockedIncrement(&serial)));
+    return Child(directory,leaf);
+}
+std::wstring Temp(const std::wstring& directory,bool folder,StagedIdentity* identity=nullptr) {
+    auto move=WindowsMoveUndo::Session::Current();
     for(unsigned attempt=0;attempt<1000;++attempt){
-        wchar_t leaf[64];
-        swprintf_s(leaf,L"HFV%08lX%08lX%08lX.tmp",GetCurrentProcessId(),GetTickCount(),DWORD(InterlockedIncrement(&serial)));
-        const auto path=Child(directory,leaf);
-        bool created;
-        if(folder)created=CreateDirectoryW(path.c_str(),nullptr)!=FALSE;
-        else{
-            const auto handle=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-            created=handle!=INVALID_HANDLE_VALUE;
-            if(created)CloseHandle(handle);
-        }
-        if(created){
-            auto move=WindowsMoveUndo::Session::Current();
-            if(!move)return path;
-            // Create in the real destination parent to inherit its permissions.
-            // Move only this empty temporary object before writing anything to it.
-            return move->StageTemporary(path);
+        const auto path=TemporaryName(directory);
+        if(folder){
+            if(CreateDirectoryW(path.c_str(),nullptr))return move?move->StageTemporary(path):path;
+        }else{
+            const auto file=CreateFileW(path.c_str(),GENERIC_WRITE|FILE_READ_ATTRIBUTES|(move?DELETE:0),0,nullptr,CREATE_NEW,
+                                        FILE_ATTRIBUTE_NORMAL,nullptr);
+            if(file!=INVALID_HANDLE_VALUE){
+                struct Close{HANDLE file;~Close(){CloseHandle(file);}} close{file};
+                BY_HANDLE_FILE_INFORMATION info{};
+                Check(identity&&GetFileInformationByHandle(file,&info),"Cannot identify the Windows staging file");
+                *identity=StagedIdentity(info);
+                return move?move->StageTemporary(path,file):path;
+            }
         }
         const auto error=GetLastError();
         Check(error==ERROR_FILE_EXISTS||error==ERROR_ALREADY_EXISTS,"Cannot create a staging object in the destination folder");
     }
     throw HfsPlus::Error("Cannot reserve a staging filename");
 }
+struct StagedFile {
+    StagedIdentity identity;
+    std::wstring path;
+    void Create(const std::wstring& folder){path=Temp(folder,false,&identity);}
+    ~StagedFile(){
+        if(path.empty()||WindowsMoveUndo::Session::Current())return;
+        const auto file=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ,nullptr,
+                                    OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(file==INVALID_HANDLE_VALUE)return;
+        BY_HANDLE_FILE_INFORMATION info{};
+        if(GetFileInformationByHandle(file,&info)&&!(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))&&
+           identity.Matches(info)){
+            FILE_DISPOSITION_INFO remove{TRUE};
+            SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove));
+        }
+        CloseHandle(file);
+    }
+    void Verify(const FileVersion& version)const{
+        Check(version.Present()&&identity.Matches(version.info),"Windows staging file changed; replacement was refused");
+    }
+};
 std::wstring Backup(const std::wstring& directory) {
     if(auto move=WindowsMoveUndo::Session::Current())return move->Slot();
-    return Temp(directory);
+    return TemporaryName(directory);
 }
-void PublishRename(const std::wstring& from,const std::wstring& to,const char* message,bool placeholder=false) {
-    if(auto move=WindowsMoveUndo::Session::Current())move->Rename(from,to);
-    else Check(MoveFileExW(from.c_str(),to.c_str(),MOVEFILE_WRITE_THROUGH|
-                          (placeholder?MOVEFILE_REPLACE_EXISTING:0))!=FALSE,message);
+void PublishRename(const FileVersion& ver,const std::wstring& from,const std::wstring& to,const char* message) {
+    if(auto move=WindowsMoveUndo::Session::Current()){
+        const auto expected=ver.Identity();
+        move->Rename(from,to,&expected);
+    }else Check(ver.MoveTo(from,to),message);
 }
 class Windows final : public Volume, public WorkerEndpoint {
     mutable std::recursive_mutex mutex_;
@@ -451,12 +535,13 @@ public:
         Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
         Check(original.Identity()==e.identity.companion,"The metadata companion changed before publication");
         Check(newResource||old.size==e.forks[1].size,"Resource fork changed before metadata publication");
-        std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
+        StagedFile staged;std::wstring backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
         try{
-            staged=Temp(root);
-            reserve(staged);
+            staged.Create(root);
+            reserve(staged.path);
+            Publication("metadata-file-reserved");
             {
-                File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);
+                File output(staged.path,GENERIC_WRITE,OPEN_EXISTING,&staged.identity);
                 header.Write(output);
                 if(e.forks[1].size){
                     std::unique_ptr<File> input;
@@ -473,14 +558,44 @@ public:
                 output.SealSparse();
                 output.Flush();
             }
-            if(exists)CopyNamedStreams(companion,staged,job);
+            if(exists){
+                File guard(staged.path,FILE_READ_ATTRIBUTES,OPEN_EXISTING,&staged.identity);
+                CopyNamedStreams(companion,staged.path,job);
+            }
             if(job&&job->cancelled())throw Storage::Cancelled();
             {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
-            replacement.reset(new FileVersion(staged));Publication("metadata-staged");if(primary)primary->Verify(path);original.Verify(companion);
-            if(exists){backup=Backup(root);reserve(backup);PublishRename(companion,backup,"Cannot preserve old metadata companion",true);backed=true;original.Verify(backup);}
-            PublishRename(staged,companion,"Cannot publish metadata companion");staged.clear();published=true;Publication("metadata-published");if(finish)finish();if(primary)primary->Verify(path);replacement->Verify(companion);if(backed)original.Verify(backup);
-        }catch(...){if(WindowsMoveUndo::Session::Current())throw;bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(backed||published)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
-        if(!WindowsMoveUndo::Session::Current()&&!backup.empty())DeleteFileW(backup.c_str());
+            replacement.reset(new FileVersion(staged.path));
+            staged.Verify(*replacement);
+            Publication("metadata-staged");
+            if(primary)primary->Verify(path);
+            original.Verify(companion);
+            if(exists){
+                backup=Backup(root);
+                reserve(backup);
+                PublishRename(original,companion,backup,"Cannot preserve old metadata companion");
+                backed=true;
+                original.Verify(backup);
+            }
+            PublishRename(*replacement,staged.path,companion,"Cannot publish metadata companion");
+            staged.path.clear();
+            published=true;
+            Publication("metadata-published");
+            if(finish)finish();
+            if(primary)primary->Verify(path);
+            replacement->Verify(companion);
+            if(backed)original.Verify(backup);
+        }catch(...){
+            if(WindowsMoveUndo::Session::Current())throw;
+            bool restored=!published||replacement->RemoveAt(companion);
+            if(backed&&((primary&&!primary->Matches(path))||!original.MoveTo(backup,companion)))restored=false;
+            if(backed||published)
+                Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
+            if(!restored)
+                throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},
+                                             backed?(Missing(backup)?companion:backup):std::wstring{}));
+            throw;
+        }
+        if(!WindowsMoveUndo::Session::Current()&&backed)original.RemoveAt(backup);
     }
     uint32_t PutResourceReplacementForJob(uint32_t id,const Entry& entry,Reader reader,
                                           std::function<void(uint64_t,size_t)> keptData,Storage::Job& job)override{
@@ -649,19 +764,21 @@ private:
         auto outgoing=e;if(!e.attributesKnown&&sidecar)outgoing.attributes=DoubleAttributes(companion,old);const bool withCompanion = !outgoing.portableContainer || !outgoing.attributes.empty() ||
             outgoing.forks[1].size != 0;
         auto header=DoubleHeader(outgoing);
-        std::wstring staged, resource, backup, backupResource;
+        StagedFile staged,resource;
+        std::wstring backup,backupResource;
         bool published = false, publishedResource = false, backed = false, backedResource = false;
         std::unique_ptr<FileVersion> newData,newResource;
         std::vector<std::unique_ptr<VolumeCoord::OperationLease>> staging;
         auto reserve=[&](const std::wstring& name){staging.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(name),VolumeCoord::Mode::Write}}));};
         try {
-            staged = Temp(root);reserve(staged);
-            if (withCompanion) { resource = Temp(root); reserve(resource); }
+            staged.Create(root);reserve(staged.path);
+            if(withCompanion){resource.Create(root);reserve(resource.path);}
+            Publication("export-files-reserved");
             {
-                File data(staged, GENERIC_WRITE, TRUNCATE_EXISTING);
+                File data(staged.path,GENERIC_WRITE,OPEN_EXISTING,&staged.identity);
                 std::unique_ptr<File> rsrc;
                 if (withCompanion) {
-                    rsrc = std::make_unique<File>(resource, GENERIC_WRITE, TRUNCATE_EXISTING);
+                    rsrc = std::make_unique<File>(resource.path,GENERIC_WRITE,OPEN_EXISTING,&resource.identity);
                     header.Write(*rsrc);
                 }
                 Publication("before-data-write");
@@ -680,18 +797,21 @@ private:
                 FileVersion version(source);
                 Check(version.Present()&&version.Identity()==e.identity.primary,
                       "Windows source changed before copying its alternate data streams");
-                CopyNamedStreams(source,staged,job);
+                File guard(staged.path,FILE_READ_ATTRIBUTES,OPEN_EXISTING,&staged.identity);
+                CopyNamedStreams(source,staged.path,job);
                 version.Verify(source);
             }
-            if(job&&e.datesValid){File data(staged,GENERIC_WRITE,OPEN_EXISTING);data.Dates(e);data.Flush();}
+            if(job&&e.datesValid){File data(staged.path,GENERIC_WRITE,OPEN_EXISTING,&staged.identity);data.Dates(e);data.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
-            newData.reset(new FileVersion(staged));if (withCompanion) newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
-            if (existed) { backup=Backup(root);reserve(backup); PublishRename(path,backup,"Cannot preserve old destination",true); backed=true;original.Verify(backup); }
-            if (sidecar) { backupResource=Backup(root);reserve(backupResource); PublishRename(companion,backupResource,"Cannot preserve old resource fork",true); backedResource=true;originalResource.Verify(backupResource); }
-            PublishRename(staged,path,"Cannot publish exported data"); staged.clear(); published=true;Publication("data-published");
+            newData.reset(new FileVersion(staged.path));staged.Verify(*newData);
+            if(withCompanion){newResource.reset(new FileVersion(resource.path));resource.Verify(*newResource);}
+            Publication("staged");original.Verify(path);originalResource.Verify(companion);
+            if (existed) { backup=Backup(root);reserve(backup); PublishRename(original,path,backup,"Cannot preserve old destination"); backed=true;original.Verify(backup); }
+            if (sidecar) { backupResource=Backup(root);reserve(backupResource); PublishRename(originalResource,companion,backupResource,"Cannot preserve old resource fork"); backedResource=true;originalResource.Verify(backupResource); }
+            PublishRename(*newData,staged.path,path,"Cannot publish exported data"); staged.path.clear(); published=true;Publication("data-published");
             if (withCompanion) {
-                PublishRename(resource,companion,"Cannot publish exported resource fork");
-                resource.clear();
+                PublishRename(*newResource,resource.path,companion,"Cannot publish exported resource fork");
+                resource.path.clear();
                 publishedResource = true;
                 Publication("resource-published");
                 newResource->Verify(companion);
@@ -702,19 +822,17 @@ private:
         } catch (...) {
             if(WindowsMoveUndo::Session::Current())throw;
             bool restored=true;
-            if(publishedResource && (!newResource->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;
-            if(published && (!newData->Matches(path)||!DeleteFileW(path.c_str())))restored=false;
+            if(publishedResource && !newResource->RemoveAt(companion))restored=false;
+            if(published && !newData->RemoveAt(path))restored=false;
             bool slots=(!backed||Missing(path))&&(!backedResource||Missing(companion));if(!slots)restored=false;
-            if(slots){if(backedResource && !MoveFileExW(backupResource.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;
-            if(backed && !MoveFileExW(backup.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}
-            if(!staged.empty())DeleteFileW(staged.c_str()); if(!resource.empty())DeleteFileW(resource.c_str());
-            if(!backed&&!backup.empty())DeleteFileW(backup.c_str()); if(!backedResource&&!backupResource.empty())DeleteFileW(backupResource.c_str());
-            if(published||publishedResource||backed||backedResource)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
+            if(slots){if(backedResource && !originalResource.MoveTo(backupResource,companion))restored=false;
+            if(backed && !original.MoveTo(backup,path))restored=false;}
+             if(published||publishedResource||backed||backedResource)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);
             if(!restored)throw HfsPlus::Error(Recovery("Export rollback could not restore the original pair",backed?(Missing(backup)?path:backup):std::wstring{},backedResource?(Missing(backupResource)?companion:backupResource):std::wstring{})); throw;
         }
         if(!WindowsMoveUndo::Session::Current()){
-            if(!backup.empty())DeleteFileW(backup.c_str());
-            if(!backupResource.empty())DeleteFileW(backupResource.c_str());
+            if(backed)original.RemoveAt(backup);
+            if(backedResource)originalResource.RemoveAt(backupResource);
         }
         return Id(path);
     }
@@ -777,8 +895,9 @@ void StageWindowsCut(Volume& volume,uint32_t id){
     const auto entry=volume.Stat(id);
     volume.Close();
     Check(volume.Stat(id).identity==entry.identity,"The Windows source changed before move completion");
-    if(!entry.identity.companion.key.empty())move->Rename(Companion(path),move->Slot());
-    move->Rename(path,move->Slot());
+    if(!entry.identity.companion.key.empty())
+        move->Rename(Companion(path),move->Slot(),&entry.identity.companion);
+    move->Rename(path,move->Slot(),&entry.identity.primary);
     Storage::OutcomeEvidence::NoteRetainedChange();
 }
 bool WindowsResourceCompanion(const std::wstring& path){Double data;return AppleDouble(path,data);}
