@@ -279,7 +279,8 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         const auto fullMode=Le16(p+80);
         const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;
-        if(entry.directory||mode==0100000||mode==0120000||mode==0010000)
+        const auto special=SpecialType(mode>>12);
+        if(entry.directory||mode==0100000||mode==0120000||special!=SpecialFileType::None)
             entry.posix=PosixMetadata{Le32(p+72),Le32(p+76),uint16_t(fullMode&PosixMetadata::ModeMask),
                                      uint8_t(((Le32(p+68)&UserImmutable)?PosixMetadata::UserImmutable:0)|
                                              ((Le32(p+68)&SystemImmutable)?PosixMetadata::SystemImmutable:0)|
@@ -287,7 +288,7 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
                                              ((Le32(p+68)&SystemAppendOnly)?PosixMetadata::SystemAppendOnly:0)),
                                      uint8_t(((Le32(p+68)&NoDump)?PosixMetadata::NoDump:0)|
                                              ((Le32(p+68)&Opaque)?PosixMetadata::Opaque:0)|
-                                             ((Le32(p+68)&Archived)?PosixMetadata::Archived:0)),mode==0010000};
+                                             ((Le32(p+68)&Archived)?PosixMetadata::Archived:0)),special};
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
@@ -295,8 +296,8 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         out.symlink=mode==0120000;
         entry.symbolicLink=out.symlink;
         if(out.symlink)entry.readError="APFS symbolic links cannot be exported";
-        else if(!entry.directory&&mode!=0100000&&mode!=0010000)entry.readError="APFS special files are unsupported";
-        if(record.value.size==inodeSize)return;
+        else if(!entry.directory&&mode!=0100000&&special==SpecialFileType::None)entry.readError="APFS special files are unsupported";
+        if(record.value.size==inodeSize){Check(!IsDevice(special),"Missing APFS device identifier");return;}
         const auto fields=p+inodeSize;
         Check(record.value.size>=inodeSize+4,"Truncated APFS inode extended-field header");
         const auto count=Le16(fields),used=Le16(fields+2);
@@ -304,7 +305,7 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         Check(first<=record.value.size&&used<=record.value.size-inodeSize-4,"Invalid APFS inode extended fields");
         size_t at=first;
         const size_t end=record.value.size;
-        bool hasStream=false;
+        bool hasStream=false,hasDevice=false;
         for(unsigned i=0;i<count;++i){
             const auto field=fields+4+i*4;
             const size_t size=Le16(field+2),aligned=(size+7)&~size_t(7);
@@ -312,12 +313,17 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
             if(field[0]==8){
                 Check(size==40&&!hasStream,"Invalid APFS inode data stream");
                 entry.forks[0].size=Le64(p+at);hasStream=true;
+            }else if(field[0]==14){
+                Check(IsDevice(special)&&size==4&&!hasDevice,"Invalid APFS device identifier");
+                entry.posix->device=Le32(p+at);
+                hasDevice=true;
             }else if(field[0]==7){
                 Check(size==entry.finder.size(),"Invalid APFS Finder information");
                 memcpy(entry.finder.data(),p+at,size);
             }
             at+=aligned;
         }
+        Check(hasDevice==IsDevice(special),"Missing APFS device identifier");
         Check(used==at-first||used==at-inodeSize-4,"Invalid APFS extended-field size");
     });
     Check(found,"Missing APFS file inode");
@@ -936,7 +942,7 @@ public:
             const auto& entry=file.entry;
             Check(fork<2&&!entry.directory&&Range(at,size,entry.forks[fork].size),"Invalid APFS fork range");
             if(!entry.readError.empty())throw Error(entry.readError);
-            Check(!entry.posix||!entry.posix->fifo,"A named pipe has no file forks");
+            Check(!entry.posix||!entry.posix->IsSpecial(),"A special file has no file forks");
             if(size){
                 if(fork==1)ReadAttribute(file.mount,file.attributes.at(ResourceFork),at,data,size);
                 else if(entry.compressed){
@@ -1416,9 +1422,9 @@ public:
                      Storage::Job& job,bool allowPrompt){
         ValidateEntry(entry);
         Check(!entry.directory,"Select a file for APFS transfer");
-        Check(!entry.posix||!entry.posix->fifo||(!replace&&!entry.compressed&&!entry.hardLink&&
+        Check(!entry.posix||!entry.posix->IsSpecial()||(!replace&&!entry.compressed&&!entry.hardLink&&
               !entry.forks[0].size&&!entry.forks[1].size),
-              "Named pipe copies must create a new entry without forks");
+              "Special file copies must create a new entry without forks");
         const auto dates=CopyDates(entry);
         const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
         std::optional<HfsPlus::EncodedCompression> encoded;

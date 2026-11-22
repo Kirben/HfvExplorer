@@ -309,7 +309,7 @@ void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
     d.put(e.posix.has_value());
-    if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);d.put(e.posix->protection);d.put(e.posix->flags);d.put(e.posix->fifo);}
+    if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);d.put(e.posix->protection);d.put(e.posix->flags);d.put(uint8_t(e.posix->special));d.put(e.posix->device);}
 }
 Entry DecodeEntry(Data& d) {
     Entry e;
@@ -331,7 +331,12 @@ Entry DecodeEntry(Data& d) {
         Check(protection<=PosixMetadata::ProtectionMask,"Invalid BSD protection flags");
         const auto flags=d.get();
         Check(flags<=PosixMetadata::HintMask,"Invalid BSD metadata flags");
-        e.posix=PosixMetadata{uid,gid,uint16_t(mode),uint8_t(protection),uint8_t(flags),d.flag()};
+        const auto rawType=d.get();
+        Check(rawType<=12,"Invalid special file type");
+        const auto special=SpecialType(unsigned(rawType));
+        const auto device=CatalogNumber(d);
+        Check((!rawType||special!=SpecialFileType::None)&&(!device||IsDevice(special)),"Invalid special file metadata");
+        e.posix=PosixMetadata{uid,gid,uint16_t(mode),uint8_t(protection),uint8_t(flags),special,device};
     }
     return e;
 }

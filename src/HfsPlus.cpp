@@ -470,7 +470,8 @@ struct Volume::Impl {
             e.directory = type == 1;
             const auto mode=U16(r.value.data()+42);
             e.symbolicLink = !e.directory && (mode & 0170000) == 0120000;
-            if(e.symbolicLink||(!e.directory&&(mode&0170000)==0010000)||(mode&0170000)==(e.directory?0040000:0100000))
+            const auto special=e.directory?SpecialFileType::None:SpecialType(mode>>12);
+            if(e.symbolicLink||special!=SpecialFileType::None||(mode&0170000)==(e.directory?0040000:0100000))
                 e.posix=PosixMetadata{U32(r.value.data()+32),U32(r.value.data()+36),
                                       uint16_t(mode&PosixMetadata::ModeMask),
                                       uint8_t(((r.value[41]&2)?PosixMetadata::UserImmutable:0)|
@@ -479,7 +480,8 @@ struct Volume::Impl {
                                               ((r.value[40]&4)?PosixMetadata::SystemAppendOnly:0)),
                                       uint8_t(((r.value[41]&1)?PosixMetadata::NoDump:0)|
                                               ((r.value[41]&8)?PosixMetadata::Opaque:0)|
-                                              ((r.value[40]&1)?PosixMetadata::Archived:0)),(mode&0170000)==0010000};
+                                              ((r.value[40]&1)?PosixMetadata::Archived:0)),special,
+                                      IsDevice(special)?U32(r.value.data()+44):0};
             e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
             e.created = Time::Decode(U32(r.value.data() + 12),(U16(r.value.data()+2)&0x1000)!=0);
@@ -793,7 +795,7 @@ struct Volume::Impl {
         const bool expanded=(U16(dates+2)&0x1000)!=0;
         result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
         const auto type=U16(dates+42)&0170000;
-        if(!result.directory&&(type==0020000||type==0060000||type==0140000||type==0160000))
+        if(!result.directory&&type==0160000)
             result.readError="HFS+/HFSX special files cannot be copied";
         const bool catalogLocked=!result.directory&&(U16(dates+2)&1);
         if(catalogLocked&&result.posix)result.posix->protection|=PosixMetadata::UserImmutable;
@@ -1568,7 +1570,7 @@ uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer,
     auto &e = p_->Get(target);
     Check(!e.directory, "Cannot read a folder fork");
     Check(!e.symbolicLink, "Use the symbolic link target instead of reading file forks");
-    Check(!e.posix||!e.posix->fifo,"A named pipe has no file forks");
+    Check(!e.posix||!e.posix->IsSpecial(),"A special file has no file forks");
     if (p_->IsCompressed(target)) {
         auto &compressed = p_->Compressed(target);
         if (!fork)
@@ -1639,8 +1641,9 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
-    Check(!posix||!posix->fifo||(!symbolicLink&&!overwrite&&!dataSize&&!resourceSize),
-          "Named pipe copies must create a new entry without forks");
+    Check(!posix||!posix->IsSpecial()||(!symbolicLink&&!overwrite&&!dataSize&&!resourceSize&&
+          (compression==CompressionMode::Preserve||compression==CompressionMode::Uncompressed)),
+          "Special file copies must create a new entry without forks");
     parent=p.WriteParent(parent);
     if(attributes)ValidateAttributes(*attributes);
     Entry e;
@@ -1754,7 +1757,10 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         }
         auto timeRecord=p.CatalogRecord(e.id);
         if(posix){
-            if(posix->fifo)P16(timeRecord->value.data()+42,0010000);
+            if(posix->IsSpecial()){
+                P16(timeRecord->value.data()+42,uint16_t(posix->special)<<12);
+                if(IsDevice(posix->special))P32(timeRecord->value.data()+44,posix->device);
+            }
             SetPosixMetadata(timeRecord->value,*posix);
             e.posix=posix;
         }

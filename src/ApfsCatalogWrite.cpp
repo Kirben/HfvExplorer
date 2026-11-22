@@ -26,6 +26,20 @@ constexpr uint64_t Physical=0x40000000;
 constexpr uint64_t IdMask=(uint64_t(1)<<60)-1;
 constexpr size_t SpaceReserveCount=184,SpaceReserveAllocated=192;
 
+bool IsSpecialKind(CatalogKind kind)
+{
+    return SpecialType(unsigned(kind))!=SpecialFileType::None;
+}
+uint16_t EntryMode(CatalogKind kind)
+{
+    const unsigned permissions=kind==CatalogKind::Directory?0755:kind==CatalogKind::SymbolicLink?0777:0644;
+    return uint16_t((unsigned(kind)<<12)|permissions);
+}
+std::optional<uint32_t> DeviceNumber(const std::optional<PosixMetadata>& metadata)
+{
+    return metadata&&IsDevice(metadata->special)?std::optional<uint32_t>(metadata->device):std::nullopt;
+}
+
 void SetPosixMetadata(Bytes& inode,const std::optional<PosixMetadata>& metadata)
 {
     if(!metadata)return;
@@ -543,8 +557,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto readFinder=[](const uint8_t* value,size_t size)->std::optional<FinderBytes>{
         if(!(Le64(value+48)&WriterDisk::HasFinderInfo))return {};
         FinderBytes finder{};
-        Check(size>=100+WriterDisk::FinderFieldSize,"Truncated APFS Finder information");
-        std::copy_n(value+size-finder.size(),finder.size(),finder.begin());
+        const auto kind=SpecialType(Le16(value+80)>>12);
+        const size_t deviceBytes=IsDevice(kind)?8:0;
+        Check(size>=100+WriterDisk::FinderFieldSize+deviceBytes,"Truncated APFS Finder information");
+        std::copy_n(value+size-finder.size()-deviceBytes,finder.size(),finder.begin());
         return finder;
     };
     struct Link {
@@ -612,7 +628,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                 Check(inode!=3&&folder!=directories.end()&&view.key.size>=14&&
                       (view.value.size==18||view.value.size==34),"Invalid APFS directory entry");
                 const auto kind=CatalogKind(Le16(view.value.data+16));
-                Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink||kind==CatalogKind::Fifo,
+                Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink||IsSpecialKind(kind),
                       "APFS catalog contains an unsupported entry type");
                 const auto nameKey=Le32(view.key.data+8);
                 Check((nameKey&1023u)==view.key.size-12&&view.key.data[view.key.size-1]==0,
@@ -765,8 +781,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     const auto group=siblingGroups.find(inode);
                     const auto count=group==siblingGroups.end()?1:group->second.size();
                     Check(count<=INT32_MAX,"Too many APFS hard links");
-                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,symlink?0120777:kind==CatalogKind::Fifo?0010644:0100644,
-                                                    uint32_t(count),size,finder?&*finder:nullptr);
+                    std::optional<uint32_t> device;
+                    if(IsDevice(SpecialType(unsigned(kind))))device=Le32(value+view.value.size-8);
+                    auto expected=WriterDisk::Inode(primaryName,inode,0,parentId,EntryMode(kind),
+                                                    uint32_t(count),size,finder?&*finder:nullptr,device);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
                     SetPosixMetadata(expected.value,PosixMetadata{
@@ -807,7 +825,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                     }
                     link->second.dataSize=size;
                     link->second.streamRecords=streamRecords-link->second.attributes;
-                    if(symlink)++symlinks;else if(kind==CatalogKind::Fifo)++special;else ++files;
+                    if(symlink)++symlinks;else if(IsSpecialKind(kind))++special;else ++files;
                 }
             }
             // Catalog keys sort by inode ID, record type, then directory name hash.
@@ -906,7 +924,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const bool symlink=create->kind==CatalogKind::SymbolicLink;
         Set(parentInode,56,target->second.children+1,4);
         records.insert(records.begin()+insertAt,std::move(added));
-        records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:create->kind==CatalogKind::Fifo?0010644:0100644,isDirectory?0:1,dataSize,create->finder));
+        records.push_back(WriterDisk::Inode(name,entryId,time,parent,EntryMode(create->kind),isDirectory?0:1,dataSize,create->finder,DeviceNumber(create->posix)));
         SetPosixMetadata(records.back().value,create->posix);
         if(create->locked)Set(records.back().value,68,Le32(records.back().value.data()+68)|CopiedProtectionFlags(create->posix),4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
@@ -2926,10 +2944,10 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(externalCreate){
         const bool directory=create->kind==CatalogKind::Directory;
         const bool symlink=create->kind==CatalogKind::SymbolicLink;
-        const bool fifo=create->kind==CatalogKind::Fifo;
-        Check((directory||symlink||fifo?!input&&!clone:create->kind==CatalogKind::RegularFile&&(input||clone))&&
+        const bool special=IsSpecialKind(create->kind);
+        Check((directory||symlink||special?!input&&!clone:create->kind==CatalogKind::RegularFile&&(input||clone))&&
               create->parent>=2&&create->parent!=3&&create->parent<nextId&&
-              (!(directory||symlink||fifo)||(!resource&&!create->compression))&&(!directory||!create->locked)&&
+              (!(directory||symlink||special)||(!resource&&!create->compression))&&(!directory||!create->locked)&&
               (!symlink||create->linkTarget),
               "Unsupported APFS creation request for this image");
         catalog=std::move(existing.records);
@@ -2973,7 +2991,7 @@ CatalogWritePlan PrepareCatalogMutation(
         auto entry=WriterDisk::DirectoryEntry(name,entryId,time,create->parent,fold,uint16_t(create->kind));
         InsertExternalDirectoryRecord(catalog,std::move(entry),create->parent,name,fold);
         auto inode=WriterDisk::Inode(name,entryId,time,create->parent,
-                                     directory?0040755:symlink?0120777:fifo?0010644:0100644,directory?0:1,dataSize,create->finder);
+                                     EntryMode(create->kind),directory?0:1,dataSize,create->finder,DeviceNumber(create->posix));
         if(current.writeCipher&&dataSize){
             const auto stream=96+size_t(Le16(inode.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
             Set(inode.value,stream+16,4,8);
@@ -3307,7 +3325,7 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,176,nextAvailable,8);
     if(create){
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
-        else if(create->kind==CatalogKind::Fifo)Set(volume,208,specialCount+1,8);
+        else if(IsSpecialKind(create->kind))Set(volume,208,specialCount+1,8);
         else if(create->kind==CatalogKind::SymbolicLink){
             Set(volume,200,symlinkCount+1,8);
             if(removedKind)Set(volume,184,fileCount-1,8);
@@ -3325,7 +3343,7 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(removedKind){
         if(*removedKind==CatalogKind::Directory)Set(volume,192,directoryCount-1,8);
         else if(*removedKind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount-1,8);
-        else if(*removedKind==CatalogKind::Fifo)Set(volume,208,specialCount-1,8);
+        else if(IsSpecialKind(*removedKind))Set(volume,208,specialCount-1,8);
         else Set(volume,184,fileCount-1,8);
     }
     Set(volume,256,time,8);

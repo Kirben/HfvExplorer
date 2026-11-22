@@ -503,11 +503,11 @@ uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t par
     Check(&source!=&data,"APFS file data requires a separate source");
     Check(!replacedEntry||external,"APFS entry replacement requires the external catalog writer");
     Check(!replacedAlias||replacedEntry,"APFS alias replacement requires its backing inode");
-    const bool fifo=posix&&posix->fifo;
-    Check(!fifo||(!data.Size()&&(!resource||!resource->Size())&&!compression&&!replacedEntry),
-          "Invalid APFS named pipe transfer");
-    CatalogCreate create{parent,name,fifo?CatalogKind::Fifo:CatalogKind::RegularFile,fifo?nullptr:&data,
-                         dates,finder,locked,attributes,fifo?nullptr:resource,compression};
+    const bool special=posix&&posix->IsSpecial();
+    Check(!special||(!data.Size()&&(!resource||!resource->Size())&&!compression&&!replacedEntry),
+          "Invalid APFS special file transfer");
+    CatalogCreate create{parent,name,special?CatalogKind(posix->special):CatalogKind::RegularFile,special?nullptr:&data,
+                         dates,finder,locked,attributes,special?nullptr:resource,compression};
     create.external=external;
     create.replacedEntry=replacedEntry;
     create.replacedAlias=replacedAlias;

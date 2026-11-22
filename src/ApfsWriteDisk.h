@@ -113,15 +113,16 @@ inline constexpr uint64_t HasFinderInfo=0x100;
 inline constexpr size_t FinderFieldSize=4+FinderBytes{}.size();
 
 inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t parent,
-                    uint16_t mode,uint32_t linksOrChildren,uint64_t dataSize=0,const FinderBytes* finder=nullptr)
+                    uint16_t mode,uint32_t linksOrChildren,uint64_t dataSize=0,const FinderBytes* finder=nullptr,
+                    std::optional<uint32_t> device={})
 {
     const size_t nameSpace=size_t(DivideUp(name.size()+1,8)*8);
     const bool hasFinder=finder&&std::any_of(finder->begin(),finder->end(),[](uint8_t value){return value!=0;});
     const size_t dataField=dataSize?4:0;
     const size_t finderHeader=hasFinder?4:0;
-    const size_t fields=100+dataField+finderHeader;
+    const size_t fields=100+dataField+finderHeader+(device?4:0);
     const size_t dataBytes=dataSize?40:0;
-    Record record{Bytes(8),Bytes(fields+nameSpace+dataBytes+(hasFinder?finder->size():0))};
+    Record record{Bytes(8),Bytes(fields+nameSpace+dataBytes+(hasFinder?finder->size():0)+(device?8:0))};
     Set(record.key,0,(uint64_t(3)<<60)|inode,8);
     Set(record.value,0,parent,8);
     Set(record.value,8,inode,8);
@@ -129,8 +130,8 @@ inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t p
     Set(record.value,48,0x8000|(hasFinder?HasFinderInfo:0),8);
     Set(record.value,56,linksOrChildren,4);
     Set(record.value,80,mode,2);
-    Set(record.value,92,1+bool(dataSize)+hasFinder,2);
-    Set(record.value,94,nameSpace+dataBytes+(hasFinder?finder->size():0),2);
+    Set(record.value,92,1+bool(dataSize)+hasFinder+bool(device),2);
+    Set(record.value,94,nameSpace+dataBytes+(hasFinder?finder->size():0)+(device?8:0),2);
     record.value[96]=4;
     record.value[97]=2;
     Set(record.value,98,name.size()+1,2);
@@ -148,7 +149,14 @@ inline Record Inode(std::string_view name,uint64_t inode,uint64_t now,uint64_t p
         record.value[descriptor]=7;
         record.value[descriptor+1]=0x20; // System field.
         Set(record.value,descriptor+2,finder->size(),2);
-        std::copy(finder->begin(),finder->end(),record.value.end()-finder->size());
+        std::copy(finder->begin(),finder->end(),record.value.begin()+fields+nameSpace+dataBytes);
+    }
+    if(device){
+        const size_t descriptor=100+dataField+finderHeader;
+        record.value[descriptor]=14;
+        record.value[descriptor+1]=0x20;
+        Set(record.value,descriptor+2,4,2);
+        Set(record.value,record.value.size()-8,*device,4);
     }
     return record;
 }

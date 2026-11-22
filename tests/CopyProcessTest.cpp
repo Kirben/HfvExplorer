@@ -2023,48 +2023,58 @@ void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
 }
 
-void TestCopyNamedPipes(const std::string& root,FILE* report)
+void TestCopySpecialFiles(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
     const auto hfsPath=Wide(root+"\\named-pipe-source.dsk");
-    constexpr auto name=u"Input pipe";
-    const PosixMetadata metadata{123,456,0620,0,PosixMetadata::NoDump,true};
+    const std::u16string names[]={u"Input pipe",u"Character node",u"Block node",u"Socket"};
+    const SpecialFileType types[]={SpecialFileType::Fifo,SpecialFileType::CharacterDevice,
+                                   SpecialFileType::BlockDevice,SpecialFileType::Socket};
+    const auto metadata=[&](size_t index){
+        const auto type=types[index];
+        return PosixMetadata{123,456,0620,0,PosixMetadata::NoDump,type,
+                             IsDevice(type)?0x0e000040u+uint32_t(index):0u};
+    };
     const HfsPlus::Attributes attributes{{u"user.pipe",{2,7,4}}};
     {
         auto source=Image(hfsPath,Kind::HfsXCaseSensitive);
-        Entry pipe;
-        pipe.name=name;
-        pipe.posix=metadata;
-        pipe.attributes=attributes;
-        pipe.attributesKnown=true;
-        source->Put(2,pipe,[](unsigned,uint64_t,void*,size_t){
-            throw HfsPlus::Error("Unexpected named-pipe payload read");
-        },false);
+        for(size_t i=0;i<ARRAYSIZE(names);++i){
+            Entry entry;
+            entry.name=names[i];
+            entry.posix=metadata(i);
+            entry.finder[0]=42;
+            entry.attributes=attributes;
+            entry.attributesKnown=true;
+            source->Put(2,entry,[](unsigned,uint64_t,void*,size_t){
+                throw HfsPlus::Error("Unexpected special-file payload read");
+            },false);
+        }
     }
-    const auto verify=[&](Volume& volume){
+    const auto verify=[&](Volume& volume,size_t i){
         Entry pipe;
-        Check(volume.FindChild(2,name,pipe)&&!pipe.directory&&!pipe.symbolicLink&&
-              pipe.posix==metadata&&!pipe.forks[0].size&&!pipe.forks[1].size&&
-              volume.GetAttributes(pipe.id)==attributes,"Named pipe metadata changed after reopening");
+        Check(volume.FindChild(2,names[i],pipe)&&!pipe.directory&&!pipe.symbolicLink&&
+              pipe.posix==metadata(i)&&pipe.finder[0]==42&&!pipe.forks[0].size&&!pipe.forks[1].size&&
+              volume.GetAttributes(pipe.id)==attributes,"Special-file metadata changed after reopening");
         bool refused=false;
         try{volume.Read(pipe.id,0,0,nullptr,0);}catch(const std::exception&){refused=true;}
-        Check(refused,"Named pipe exposed a regular file fork");
+        Check(refused,"Special file exposed a regular file fork");
         return pipe.id;
     };
     auto hfs=OpenBrowserImage(hfsPath);
     Check(bool(hfs),"Cannot reopen HFSX pipe fixture");
-    const auto hfsId=verify(*hfs);
-    const auto transfer=[](Location input,Location destination){
+    std::vector<Location> selection;
+    for(size_t i=0;i<ARRAYSIZE(names);++i)selection.push_back(Native(hfs,verify(*hfs,i)));
+    const auto transfer=[](std::vector<Location> inputs,Location destination){
         Storage::Job job;
         job.transport({},[](const auto&){return Storage::ConflictChoice::Cancel;});
         Completion completion;
-        return ExecuteInWorker(OrdinaryCopy{{input},destination},job,completion);
+        return ExecuteInWorker(OrdinaryCopy{std::move(inputs),destination},job,completion);
     };
     const auto host=Wide(root+"\\named-pipe-windows");
     Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"Cannot create pipe test folder");
-    const auto refused=transfer(Native(hfs,hfsId),Location::Windows(host));
-    Check(refused.code&&!refused.partial&&refused.message.find("cannot preserve a named pipe")!=std::string::npos,
-          "Windows should reject a named pipe before publication");
+    const auto refused=transfer(selection,Location::Windows(host));
+    Check(refused.code&&!refused.partial&&refused.message.find("cannot preserve a special file")!=std::string::npos,
+          "Windows should reject special files before publication");
     const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
     for(bool external:{false,true}){
         if(external&&!fixture)continue;
@@ -2078,27 +2088,28 @@ void TestCopyNamedPipes(const std::string& root,FILE* report)
         }
         auto apfs=OpenBrowserImage(path);
         Check(bool(apfs),"Cannot open APFS named-pipe target");
-        auto result=transfer(Native(hfs,hfsId),Native(apfs));
+        auto result=transfer(selection,Native(apfs));
         Check(!result.code,result.message.c_str());
         apfs.reset();
         apfs=OpenBrowserImage(path);
         Check(apfs&&apfs->Supports().create,"Cannot reopen writable APFS pipe target");
-        const auto apfsId=verify(*apfs);
+        std::vector<Location> apfsSelection;
+        for(size_t i=0;i<ARRAYSIZE(names);++i)apfsSelection.push_back(Native(apfs,verify(*apfs,i)));
         apfs->MakeDirectory(2,u"After pipe");
         const auto roundTrip=Wide(root+(external?"\\pipe-return-macos.dsk":"\\pipe-return-native.dsk"));
         auto returned=Image(roundTrip,Kind::HfsPlus);
-        result=transfer(Native(apfs,apfsId),Native(returned));
+        result=transfer(apfsSelection,Native(returned));
         Check(!result.code,result.message.c_str());
         returned.reset();
         returned=OpenBrowserImage(roundTrip);
         Check(bool(returned),"Cannot reopen HFS+ named-pipe copy");
-        verify(*returned);
-        result=transfer(Native(apfs,apfsId),Native(returned));
-        Check(result.code&&!result.partial&&result.message.find("named pipe blocks")!=std::string::npos,
-              "A named pipe overwrite should fail before publication");
-        verify(*returned);
+        for(size_t i=0;i<ARRAYSIZE(names);++i)verify(*returned,i);
+        result=transfer(apfsSelection,Native(returned));
+        Check(result.code&&!result.partial&&result.message.find("special file blocks")!=std::string::npos,
+              "A special-file overwrite should fail before publication");
+        for(size_t i=0;i<ARRAYSIZE(names);++i)verify(*returned,i);
     }
-    fprintf(report,"PASS: named pipes copy as metadata between HFS+/HFSX and both APFS writers; reopen preserves mode, owner, flags and attributes, with no file forks or Windows export.\n");
+    fprintf(report,"PASS: named pipes, device nodes and socket entries round-trip through HFS+/HFSX and both APFS writers; reopening preserves node type, device number and other metadata.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)
@@ -3669,7 +3680,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
-        TestCopyNamedPipes(root,report);
+        TestCopySpecialFiles(root,report);
         TestCopyDirectoryHardLinksToApfs(root,report);
         TestMfsTransferVersions(root,report);
         TestClassicLockRoundTrip(root,report);

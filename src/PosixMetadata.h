@@ -2,6 +2,22 @@
 #pragma once
 #include <cstdint>
 
+enum class SpecialFileType : uint8_t { None=0, Fifo=1, CharacterDevice=2, BlockDevice=6, Socket=12 };
+constexpr bool IsDevice(SpecialFileType type)
+{
+    return type==SpecialFileType::CharacterDevice||type==SpecialFileType::BlockDevice;
+}
+constexpr SpecialFileType SpecialType(unsigned type)
+{
+    switch(type){
+    case 1:return SpecialFileType::Fifo;
+    case 2:return SpecialFileType::CharacterDevice;
+    case 6:return SpecialFileType::BlockDevice;
+    case 12:return SpecialFileType::Socket;
+    default:return SpecialFileType::None;
+    }
+}
+
 struct PosixMetadata {
     static constexpr uint16_t ModeMask = 07777;
     static constexpr uint8_t UserImmutable = 1, SystemImmutable = 2,
@@ -14,9 +30,11 @@ struct PosixMetadata {
     static constexpr uint8_t NoDump=1, Opaque=2, Archived=4, HintMask=NoDump|Opaque|Archived;
     uint8_t flags = 0;
 
-    bool fifo = false;
+    SpecialFileType special = SpecialFileType::None;
+    uint32_t device = 0;
+    bool IsSpecial() const { return special!=SpecialFileType::None; }
 
     bool operator==(const PosixMetadata& other) const {
-        return uid == other.uid && gid == other.gid && mode == other.mode && protection == other.protection && flags == other.flags && fifo == other.fifo;
+        return uid == other.uid && gid == other.gid && mode == other.mode && protection == other.protection && flags == other.flags && special == other.special && device == other.device;
     }
 };
