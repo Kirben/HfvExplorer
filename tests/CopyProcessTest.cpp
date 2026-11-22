@@ -2023,6 +2023,89 @@ void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
 }
 
+void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)
+{
+    const auto sourcePath=Wide(root+"\\linked-directory-source.dsk");
+    auto source=Image(sourcePath,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+    Check(bool(source),"Cannot open directory hard-link fixture");
+    const auto tree=source->MakeDirectory(2,u"Tree");
+    const auto original=source->MakeDirectory(tree,u"Original folder");
+    Put(*source,original,u"Child",7001,17);
+    source->MakeHardLink(original,tree,u"Alias folder");
+    const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    for(bool external:{false,true}){
+        if(external&&!fixture)continue;
+        const auto path=Wide(root+(external?"\\linked-folders-macos.img":"\\linked-folders-native.img"));
+        if(external){
+            Check(CopyFileW(fixture,path.c_str(),TRUE)!=FALSE,"Cannot copy macOS APFS fixture");
+        }else{
+            auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*disk,u"Linked folder copies",true,job);
+        }
+        auto target=OpenBrowserImage(path);
+        Check(target&&target->Supports().create&&target->Writable()!=external,"Wrong APFS destination writer");
+        const auto run=[&](bool cut,Storage::ConflictChoice answer,unsigned expectedPrompts){
+            auto item=Native(source,tree);
+            item.cut=cut;
+            auto operation=Submit(OrdinaryCopy{{item},Native(target)});
+            auto job=operation.Job();
+            const auto start=GetTickCount();
+            unsigned prompts=0;
+            uint64_t responded=0;
+            while(!job->done()){
+                if(GetTickCount()-start>30000){
+                    job->cancel();
+                    throw HfsPlus::Error("Linked folder copy timed out");
+                }
+                const auto prompt=job->conflictState();
+                if(!prompt.path.empty()&&responded!=prompt.id){
+                    responded=prompt.id;
+                    ++prompts;
+                    if(prompt.kind!=Storage::CopyPrompt::IndependentFolders){
+                        job->cancel();
+                        throw HfsPlus::Error("Wrong prompt for directory hard-link conversion");
+                    }
+                    job->resolve(prompt.id,answer);
+                }
+                Sleep(5);
+            }
+            Check(prompts==expectedPrompts,"Incorrect number of directory conversion prompts");
+            return job->result();
+        };
+        const auto cut=run(true,Storage::ConflictChoice::Replace,0);
+        Check(cut.outcome==Storage::Outcome::Failed&&!cut.partial&&!cut.moved&&
+              cut.message.find("cannot preserve directory hard links")!=std::string::npos,
+              cut.message.empty()?"Expected directory hard-link cut refusal":cut.message.c_str());
+        const auto cancelled=run(false,Storage::ConflictChoice::Cancel,1);
+        Check(cancelled.outcome==Storage::Outcome::Cancelled&&!cancelled.partial,"Conversion should cancel before writing");
+        target.reset();
+        target=OpenBrowserImage(path);
+        Entry folder;
+        Check(target&&!target->FindChild(2,u"Tree",folder),"Declining conversion created a destination folder");
+        const auto copied=run(false,Storage::ConflictChoice::Replace,1);
+        Check(!copied.code,copied.message.c_str());
+        target.reset();
+        source.reset();
+        target=OpenBrowserImage(path);
+        source=OpenBrowserImage(sourcePath);
+        Check(target&&source&&target->FindChild(2,u"Tree",folder),"Cannot reopen copied linked folder tree");
+        Entry first,second,child;
+        Check(target->FindChild(folder.id,u"Original folder",first)&&
+              target->FindChild(folder.id,u"Alias folder",second)&&first.directory&&second.directory&&
+              !first.hardLink&&!second.hardLink&&first.resolvedId!=second.resolvedId,
+              "APFS should contain two independent directory copies");
+        for(auto id:{first.id,second.id}){
+            Check(target->FindChild(id,u"Child",child),"Converted folder lost a file");
+            Verify(*target,child.id,7001,17);
+        }
+        Check(source->FindChild(tree,u"Original folder",first)&&
+              source->FindChild(tree,u"Alias folder",second)&&first.hardLink&&first.resolvedId==second.resolvedId,
+              "Source directory hard links changed");
+    }
+    fprintf(report,"PASS: HFSX directory hard-link copies to both APFS writers require approval, preserve both folder trees and forks after reopening, and refuse Cut/Paste before publication.\n");
+}
+
 void TestMfsTransferVersions(const std::string& root,FILE* report)
 {
     const auto sourcePath=Wide(root+"\\versioned-source.dsk");
@@ -3480,6 +3563,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestCopyDirectoryHardLinksToApfs(root,report);
         TestMfsTransferVersions(root,report);
         TestClassicLockRoundTrip(root,report);
         TestClassicAndMfsCopyNameCollisions(root,report);

@@ -39,15 +39,17 @@ public:
   CDialog::OnInitDialog();
   if(job_)SetTimer(1,50,nullptr);
   const bool uncompressed=prompt_.kind==Storage::CopyPrompt::Uncompressed;
-  if(uncompressed||utf8_){
+  const bool folders=prompt_.kind==Storage::CopyPrompt::IndependentFolders;
+  if(uncompressed||folders||utf8_){
    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");
    SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
   }else SetDlgItemText(IDC_CONFLICT_PATH,prompt_.path.c_str());
-  if(uncompressed){
-   SetWindowText("Copy without compression");
-   SetDlgItemText(IDC_CONFLICT_FILE_LABEL,"File");
-   SetDlgItemText(IDC_CONFLICT_QUESTION,"Copy without compression to preserve both forks?");
-   SetDlgItemText(IDC_REPLACE,"Copy &uncompressed");
+  if(uncompressed||folders){
+   SetWindowText(folders?"Copy linked folders":"Copy without compression");
+   SetDlgItemText(IDC_CONFLICT_FILE_LABEL,folders?"First linked folder":"File");
+   SetDlgItemText(IDC_CONFLICT_QUESTION,folders?"APFS cannot share folders this way. Copy them as independent folders?":
+                                              "Copy without compression to preserve both forks?");
+   SetDlgItemText(IDC_REPLACE,folders?"&Copy folders":"Copy &uncompressed");
    GetDlgItem(IDC_REPLACE_ALL)->ShowWindow(SW_HIDE);
    GetDlgItem(IDC_SKIP)->ShowWindow(SW_HIDE);
    CRect button(174,72,278,90);

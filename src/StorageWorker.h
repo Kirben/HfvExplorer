@@ -15,7 +15,7 @@
 #include <optional>
 namespace Storage {
 enum class ConflictChoice {None,Replace,ReplaceAll,Skip,Cancel};
-enum class CopyPrompt {Overwrite,Uncompressed};
+enum class CopyPrompt {Overwrite,Uncompressed,IndependentFolders};
 struct PendingCopyPrompt {
  uint64_t id=0;
  std::string path;

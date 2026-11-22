@@ -826,6 +826,15 @@ void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
         Check(p!=id&&visited.insert(p).second,"Cannot copy a folder into itself or its descendants");p=dst.Stat(p).parent;}
         Check(src.Stat(id).parent!=parent,"Source and destination are the same folder");}
 }
+void MaterializeDirectoryLinks(Planned& plan,std::string& first)
+{
+    if(plan.entry.directory&&plan.entry.hardLink){
+        if(first.empty())first=BrowserPresentation::Utf8(plan.entry.name);
+        plan.entry.hardLink=false;
+        plan.entry.linkCount=1;
+    }
+    for(auto& child:plan.children)MaterializeDirectoryLinks(child,first);
+}
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){
@@ -901,7 +910,15 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
         plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));}
+    std::string firstLinkedFolder;
+    if(std::string_view(dst.Kind())=="APFS")
+        for(auto& plan:plans)MaterializeDirectoryLinks(plan,firstLinkedFolder);
+    Check(!moving||firstLinkedFolder.empty(),
+          "APFS cannot preserve directory hard links during Cut/Paste. Use Copy to keep the linked source folders.");
     ValidatePlans(dst,plans,parent,true);
+    if(!firstLinkedFolder.empty()&&
+       job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace)
+        throw Storage::Cancelled();
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     CopiedLinks copies;
     const auto transfer=[&](bool){
