@@ -2970,6 +2970,32 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                           recorded!=copiedAttributes.end()&&Bytes(recorded->second)==layout,
                           "APFS clone extent provenance did not survive reopening the HFS+ copy");
                 }
+                first.attributes=target->GetAttributes(first.id);
+                second.attributes=target->GetAttributes(second.id);
+                const auto makeReader=[&](uint32_t id)->MacBrowser::Reader{
+                    return [&,id](unsigned fork,uint64_t at,void* output,size_t count){
+                        target->Read(id,fork,at,output,count);
+                    };
+                };
+                Storage::Job match;
+                const auto left=makeReader(first.id),right=makeReader(second.id);
+                const auto shared=MacBrowser::MatchApfsCloneRanges(first,left,second,right,match);
+                Check(!shared.empty(),"The saved macOS clone layouts did not identify shared data");
+                const auto range=shared.front();
+                const auto changed=MacBrowser::MatchApfsCloneRanges(first,left,second,
+                    [&](unsigned fork,uint64_t at,void* output,size_t count){
+                        right(fork,at,output,count);
+                        if(at<=range.partnerOffset&&range.partnerOffset-at<count)
+                            static_cast<uint8_t*>(output)[range.partnerOffset-at]^=1;
+                    },match);
+                Check(std::none_of(changed.begin(),changed.end(),[&](const auto& item){
+                    return item.offset<=range.offset&&range.offset-item.offset<item.length;
+                }),"A later write to an HFS clone copy was treated as shared");
+                auto malformed=Bytes(second.attributes.at(MacBrowser::ApfsCloneLayoutAttribute));
+                malformed.pop_back();
+                second.attributes[MacBrowser::ApfsCloneLayoutAttribute]=std::move(malformed);
+                Check(MacBrowser::MatchApfsCloneRanges(first,left,second,right,match).empty(),
+                      "Malformed clone marker was used to match shared data");
             }
             fprintf(report,"PASS: macOS APFS clone copies allocate independent space on HFS+ and HFSX and report the allocation change.\n");
         }

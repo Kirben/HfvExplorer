@@ -117,6 +117,101 @@ SparseForks ValidateApfsSparseLayout(const Entry& entry,const Reader& read,Stora
     return holes;
 }
 
+std::vector<SharedCloneRange> MatchApfsCloneRanges(const Entry& entry,const Reader& read,
+                                                  const Entry& partner,const Reader& readPartner,Storage::Job& job)
+{
+    struct Run { uint64_t offset,length,physical; };
+    struct Layout {
+        std::array<uint8_t,56> scope{};
+        std::vector<Run> runs;
+    };
+    const auto little=[](const uint8_t* bytes){
+        uint64_t value=0;
+        for(unsigned i=0;i<8;++i)value|=uint64_t(bytes[i])<<(8*i);
+        return value;
+    };
+    const auto parse=[&](const Entry& file)->std::optional<Layout>{
+        const auto found=file.attributes.find(ApfsCloneLayoutAttribute);
+        if(found==file.attributes.end()||file.directory||file.symbolicLink||file.compressed)return {};
+        const auto& attribute=found->second;
+        constexpr std::array<uint8_t,8> signature{'H','F','V','C',1,0,0,0};
+        std::array<uint8_t,64> header{};
+        if(attribute.size()<=header.size()||(attribute.size()-header.size())%24)return {};
+        attribute.Read(0,header.data(),header.size());
+        if(!std::equal(signature.begin(),signature.end(),header.begin()))return {};
+        const auto block=little(header.data()+48),size=little(header.data()+56);
+        if(!little(header.data()+40)||block<512||block>65536||(block&(block-1))||
+           size!=file.forks[0].size)return {};
+        Layout layout;
+        std::copy_n(header.begin(),layout.scope.size(),layout.scope.begin());
+        uint64_t end=0;
+        for(uint64_t at=header.size();at<attribute.size();at+=24){
+            if(job.cancelled())throw Storage::Cancelled();
+            std::array<uint8_t,24> bytes{};
+            attribute.Read(at,bytes.data(),bytes.size());
+            const auto offset=little(bytes.data()),length=little(bytes.data()+8),sector=little(bytes.data()+16);
+            if(offset<end||offset%block||offset>size||!length||length>size-offset||
+               (length%block&&length!=size-offset)||!sector||sector>UINT64_MAX/block)return {};
+            const auto physical=sector*block;
+            if(length>UINT64_MAX-physical)return {};
+            layout.runs.push_back({offset,length,physical});
+            end=offset+length;
+        }
+        std::sort(layout.runs.begin(),layout.runs.end(),[](const Run& a,const Run& b){return a.physical<b.physical;});
+        end=0;
+        for(const auto& run:layout.runs){
+            if(run.physical<end)return {};
+            end=run.physical+run.length;
+        }
+        return layout;
+    };
+
+    if(!read||!readPartner)return {};
+    const auto left=parse(entry),right=parse(partner);
+    if(!left||!right||left->scope!=right->scope)return {};
+    constexpr uint64_t block=4096;
+    HfsPlus::Bytes bytes(256*1024),other(bytes.size());
+    std::vector<SharedCloneRange> matches;
+    size_t a=0,b=0;
+    while(a<left->runs.size()&&b<right->runs.size()){
+        const auto& first=left->runs[a];
+        const auto& second=right->runs[b];
+        const auto begin=(std::max)(first.physical,second.physical);
+        const auto end=(std::min)(first.physical+first.length,second.physical+second.length);
+        if(begin<end){
+            auto offset=first.offset+(begin-first.physical);
+            auto partnerOffset=second.offset+(begin-second.physical);
+            if(offset%block==partnerOffset%block){
+                const auto skip=(block-offset%block)%block;
+                uint64_t remaining=skip<end-begin?(end-begin-skip)/block*block:0;
+                offset+=skip;
+                partnerOffset+=skip;
+                while(remaining){
+                    if(job.cancelled())throw Storage::Cancelled();
+                    const auto count=size_t((std::min)(remaining,uint64_t(bytes.size())));
+                    read(0,offset,bytes.data(),count);
+                    readPartner(0,partnerOffset,other.data(),count);
+                    for(size_t at=0;at<count;at+=block){
+                        if(!std::equal(bytes.begin()+at,bytes.begin()+at+block,other.begin()+at))continue;
+                        if(!matches.empty()&&matches.back().offset+matches.back().length==offset+at&&
+                           matches.back().partnerOffset+matches.back().length==partnerOffset+at)
+                            matches.back().length+=block;
+                        else matches.push_back({offset+at,partnerOffset+at,block});
+                    }
+                    remaining-=count;
+                    offset+=count;
+                    partnerOffset+=count;
+                }
+            }
+        }
+        if(first.physical+first.length<=second.physical+second.length)++a;
+        else ++b;
+    }
+    if(job.cancelled())throw Storage::Cancelled();
+    std::sort(matches.begin(),matches.end(),[](const auto& a,const auto& b){return a.offset<b.offset;});
+    return matches;
+}
+
 bool IsHfsPlusSymlinkReplacementFile(const Entry& entry)
 {
     return !entry.directory&&!entry.symbolicLink&&!entry.protectedFile&&entry.readError.empty();

@@ -73,6 +73,9 @@ using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
 inline constexpr auto ApfsSparseLayoutAttribute=u"org.hfvexplorer.apfs-sparse-ranges";
 inline constexpr auto ApfsCloneLayoutAttribute=u"org.hfvexplorer.apfs-clone-layout";
 SparseForks ValidateApfsSparseLayout(const Entry&,const Reader&,Storage::Job&);
+struct SharedCloneRange { uint64_t offset,partnerOffset,length; };
+std::vector<SharedCloneRange> MatchApfsCloneRanges(const Entry&,const Reader&,
+                                                  const Entry&,const Reader&,Storage::Job&);
 class Volume;
 // Adapt a scanned entry before destination validation. Return a reader for
 // transformed forks, or an empty reader to use the original storage adapter.
