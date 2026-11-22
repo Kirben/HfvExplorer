@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
+#include "ApfsContainer.h"
 #include "ApfsVolume.h"
 #include "HfsPlusDisk.h"
 #include "VolumeSession.h"
@@ -1772,6 +1773,116 @@ void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
 }
 
+void TestHfsxToApfsNameCollisions(const std::string& root,FILE* report)
+{
+    const auto sourcePath=Wide(root+"\\hfsx-apfs-collision-source.dsk");
+    {
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+        HfsPlus::Volume::Format(*disk,u"Collision source",true,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+    }
+    auto source=OpenBrowserImage(sourcePath);
+    Check(source&&source->CaseSensitive()&&VolumeSession::VolumeSessionPidForTest(source),
+          "Missing case-sensitive HFSX source");
+    constexpr auto lower=u"HFV readme";
+    constexpr auto upper=u"HFV README";
+    const auto first=Put(*source,2,lower,4097,3);
+    const auto second=Put(*source,2,upper,4111,11);
+    const auto folder=source->MakeDirectory(2,u"Collision subtree");
+    const auto independent=Put(*source,folder,u"Independent file",513,7);
+    const auto nested=source->MakeDirectory(folder,u"Nested");
+    const auto nestedFirst=Put(*source,nested,lower,917,19);
+    const auto nestedSecond=Put(*source,nested,upper,929,23);
+    std::vector<Location> selected{Native(source,first),Native(source,second)};
+    auto moving=selected;
+    for(auto& item:moving)item.cut=true;
+
+    const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    for(unsigned index=0;index<3;++index){
+        const bool external=index==1,sensitive=index==2;
+        if(external&&!fixture)continue;
+        const auto targetPath=Wide(root+"\\hfsx-apfs-collision-destination-"+std::to_string(index)+".img");
+        if(external){
+            Check(CopyFileW(fixture,targetPath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+        }else{
+            auto disk=HfsPlus::CreateImage(targetPath.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"Collision destination",sensitive,format);
+        }
+        const auto checkpoint=[&]{
+            auto disk=HfsPlus::OpenImage(targetPath.c_str(),false);
+            const auto current=Apfs::Probe(*disk);
+            Check(current.has_value(),"Missing APFS destination checkpoint");
+            return current->transaction;
+        };
+        auto target=OpenBrowserImage(targetPath);
+        Check(target&&target->Supports().create&&target->CaseSensitive()==sensitive&&
+              target->Writable()!=external,"Wrong APFS destination writer or comparison mode");
+        Put(*target,2,lower,3001,41);
+        const auto originalNames=target->List().size();
+        target.reset();
+        const auto before=checkpoint();
+        target=OpenBrowserImage(targetPath);
+        Check(bool(target),"Could not reopen the APFS destination before copying");
+
+        const auto copy=[&](const std::vector<Location>& entries){
+            unsigned prompts=0;
+            bool beganCopy=false;
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){beganCopy|=!progress.scanning;},
+                          [&](const auto&){
+                              ++prompts;
+                              return Storage::ConflictChoice::ReplaceAll;
+                          });
+            Completion completion;
+            const auto result=ExecuteInWorker(OrdinaryCopy{entries,Native(target,2)},job,completion);
+            if(sensitive){
+                if(result.code)throw HfsPlus::Error(result.message);
+                Check(completion.complete&&prompts==1&&beganCopy,
+                      "Case-sensitive APFS did not accept distinct names and an ordinary overwrite");
+            }else{
+                Check(result.code&&!result.partial&&!completion.complete&&
+                      result.message.find("same APFS destination name")!=std::string::npos&&
+                      !prompts&&!beganCopy,"An APFS collision reached overwrite handling or the copy phase");
+            }
+        };
+        copy(selected);
+        if(!sensitive){
+            copy(moving);
+            copy({Native(source,folder)});
+        }
+        target.reset();
+        if(!sensitive)Check(checkpoint()==before,"An APFS name collision published a checkpoint");
+        target=OpenBrowserImage(targetPath);
+        Entry copied,other;
+        Check(target&&target->FindChild(2,lower,copied),"Missing APFS destination file after reopening");
+        if(sensitive){
+            Check(target->FindChild(2,upper,other)&&copied.id!=other.id,
+                  "Case-sensitive APFS merged distinct names");
+            Verify(*target,copied.id,4097,3);
+            Verify(*target,other.id,4111,11);
+        }else{
+            Check(target->List().size()==originalNames&&!target->FindChild(2,u"Collision subtree",other),
+                  "Rejected APFS copy published a file or folder");
+            Verify(*target,copied.id,3001,41);
+        }
+        if(external)fprintf(report,"PASS: macOS APFS compatibility writer rejects HFSX collisions before writing.\n");
+    }
+    selected.clear();
+    moving.clear();
+    source.reset();
+    source=OpenBrowserImage(sourcePath);
+    Entry a,b,tree,child,leaf;
+    Check(source&&source->FindChild(2,lower,a)&&source->FindChild(2,upper,b)&&
+          source->FindChild(2,u"Collision subtree",tree)&&source->FindChild(tree.id,u"Nested",child),
+          "Rejected cut/paste removed an HFSX source entry");
+    Verify(*source,a.id,4097,3);
+    Verify(*source,b.id,4111,11);
+    Verify(*source,independent,513,7);
+    Verify(*source,nestedFirst,917,19);
+    Verify(*source,nestedSecond,929,23);
+    fprintf(report,"PASS: HFSX case collisions, including nested copies and cut/paste with Replace All, leave the APFS checkpoint and both source forks intact. Case-sensitive APFS keeps both names.\n");
+}
+
 void TestApfsToHfsCompression(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2095,6 +2206,7 @@ int RunCopyProcessTest(const char *directory) {
         TestCrossFormatAttributes(root,report);
         TestApfsToHfsCompression(root,report);
         TestApfsToHfsNameCollisions(root,report);
+        TestHfsxToApfsNameCollisions(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {

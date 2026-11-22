@@ -1347,23 +1347,21 @@ public:
         }
     }
     void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool)override{
-        if(limitedEdits){
-            const auto fold=Access([&]{
-                const auto& folder=At(parent);
-                Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
-        Check(!mounts[folder.mount].snapshotCreated,"APFS snapshots are read-only");
-                return !mounts[folder.mount].sensitive;
-            });
-            std::set<std::u32string> names;
-            for(const auto& entry:entries){
-                if(entry.directory)ValidateEntry(entry);
-                Check(names.insert(NormalizedName(entry.name,fold)).second,
-                      "More than one file has the same APFS destination name");
-            }
-            return;
+        // A not-yet-created folder has the same comparison rules as its ancestor.
+        const auto fold=Access([&]{
+            const auto& folder=At(parent);
+            Check(folder.oid&&folder.entry.directory,"Select an APFS volume or a folder");
+            const auto& mount=mounts[folder.mount];
+            Check(!mount.snapshotCreated,"APFS snapshots are read-only");
+            return !mount.sensitive;
+        });
+        std::set<std::u32string> names;
+        for(const auto& entry:entries){
+            // The common planner skips per-entry validation for folder merges.
+            if(entry.directory)ValidateEntry(entry);
+            Check(names.insert(NormalizedName(entry.name,fold)).second,
+                  "More than one file has the same APFS destination name");
         }
-        // The common planner skips per-entry validation for folders it will merge.
-        for(const auto& entry:entries)if(entry.directory)ValidateEntry(entry);
     }
     uint32_t Put(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace)override{
         Storage::Job job;
