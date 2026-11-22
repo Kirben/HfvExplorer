@@ -1070,7 +1070,9 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto mode=Le16(inode.data()+80);
         const auto count=Le32(inode.data()+56);
         const auto existingFinder=link.finder?&*link.finder:nullptr;
-        const auto old=WriterDisk::Inode(link.name,entryId,0,link.parent,mode,count,link.dataSize,existingFinder);
+        const auto device=IsDevice(SpecialType(mode>>12))?
+            std::optional<uint32_t>(Le32(inode.data()+inode.size()-8)):std::nullopt;
+        const auto old=WriterDisk::Inode(link.name,entryId,0,link.parent,mode,count,link.dataSize,existingFinder,device);
         constexpr size_t inodeHeader=92;
         Check(inode.size()==old.value.size()&&
               !memcmp(inode.data()+inodeHeader,old.value.data()+inodeHeader,inode.size()-inodeHeader),
@@ -1096,7 +1098,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto updatedFinder=metadata?metadata->finder:replace&&replace->finder?replace->finder:existingFinder;
         const auto& updatedName=(replace||metadata)?link.name:name;
         auto updated=WriterDisk::Inode(updatedName,entryId,0,link.parent,mode,count,
-                                       replace?dataSize:link.dataSize,updatedFinder);
+                                       replace?dataSize:link.dataSize,updatedFinder,device);
         const auto newFinderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
         std::copy_n(inode.begin(),inodeHeader,updated.value.begin());
         Set(updated.value,48,(Le64(inode.data()+48)&~WriterDisk::HasFinderInfo)|newFinderFlag,8);
@@ -1847,8 +1849,8 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
         if(Le64(record.key.data())!=entryKey||record.value.size()<18||Le64(record.value.data())!=edit.inode)continue;
         Check(!directoryRecord&&record.value.size()==18,"APFS deletion requires an unlinked entry");
         kind=CatalogKind(Le16(record.value.data()+16));
-        Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink,
-              "APFS can only delete a regular file, symbolic link, or empty folder");
+        Check(kind==CatalogKind::Directory||kind==CatalogKind::RegularFile||kind==CatalogKind::SymbolicLink||IsSpecialKind(kind),
+              "APFS deletion target type is unsupported");
         directoryRecord=i;
     }
     Check(directoryRecord.has_value(),"The APFS deletion target no longer exists");
@@ -1935,7 +1937,7 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
     return kind;
 }
 
-std::tuple<uint64_t,uint64_t,uint64_t> DeleteExternalTree(Source& source,std::vector<OwnedRecord>& catalog,const CatalogDelete& root,
+std::tuple<uint64_t,uint64_t,uint64_t,uint64_t> DeleteExternalTree(Source& source,std::vector<OwnedRecord>& catalog,const CatalogDelete& root,
                                                uint64_t time,const CatalogRecords& extentTree,
                                                std::set<uint64_t>& retired)
 {
@@ -1961,15 +1963,16 @@ std::tuple<uint64_t,uint64_t,uint64_t> DeleteExternalTree(Source& source,std::ve
             order.push_back(child);
         }
     }
-    uint64_t files=0,folders=0,symlinks=0;
+    uint64_t files=0,folders=0,symlinks=0,special=0;
     for(auto at=order.rbegin();at!=order.rend();++at){
         if(UnlinkExternalAlias(catalog,*at,time))continue;
         const auto kind=DeleteExternalEntry(source,catalog,*at,time,extentTree,retired);
         if(kind==CatalogKind::Directory)++folders;
         else if(kind==CatalogKind::SymbolicLink)++symlinks;
+        else if(IsSpecialKind(kind))++special;
         else ++files;
     }
-    return {files,folders,symlinks};
+    return {files,folders,symlinks,special};
 }
 
 void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogReplaceSymlink& edit,
@@ -2893,7 +2896,7 @@ CatalogWritePlan PrepareCatalogMutation(
     },request);
     std::set<uint64_t> retiredStreams;
     std::set<uint64_t> externalRetired;
-    uint64_t deletedFiles=0,deletedFolders=0,deletedSymlinks=0;
+    uint64_t deletedFiles=0,deletedFolders=0,deletedSymlinks=0,deletedSpecial=0;
     std::vector<OwnedRecord> catalog;
     if(externalHardLink){
         catalog=std::move(existing.records);
@@ -2925,7 +2928,7 @@ CatalogWritePlan PrepareCatalogMutation(
     }else if(externalDelete){
         catalog=std::move(existing.records);
         if(remove->recursive)
-            std::tie(deletedFiles,deletedFolders,deletedSymlinks)=DeleteExternalTree(source,catalog,*remove,time,extentTree,externalRetired);
+            std::tie(deletedFiles,deletedFolders,deletedSymlinks,deletedSpecial)=DeleteExternalTree(source,catalog,*remove,time,extentTree,externalRetired);
         else if(!UnlinkExternalAlias(catalog,*remove,time))
             removedKind=DeleteExternalEntry(source,catalog,*remove,time,extentTree,externalRetired);
     }else if(externalLinkReplace){
@@ -2957,8 +2960,8 @@ CatalogWritePlan PrepareCatalogMutation(
         }
         if(create->replacedEntry){
             const bool replacesFile=symlink||create->replacedAlias;
-            Check(!directory&&(replacesFile?fileCount!=0:symlinkCount!=0),"Invalid APFS entry replacement");
-            const auto victimKind=replacesFile?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
+            Check(!directory&&(special?specialCount!=0:replacesFile?fileCount!=0:symlinkCount!=0),"Invalid APFS entry replacement");
+            const auto victimKind=special?create->kind:replacesFile?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
             const auto parentKey=(uint64_t(9)<<60)|create->parent;
             const auto wanted=NormalizedName(name,fold);
             const auto victim=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
@@ -3325,7 +3328,10 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,176,nextAvailable,8);
     if(create){
         if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
-        else if(IsSpecialKind(create->kind))Set(volume,208,specialCount+1,8);
+        else if(IsSpecialKind(create->kind)){
+            Check(removedKind.has_value()||specialCount<UINT64_MAX,"APFS special file count overflow");
+            Set(volume,208,specialCount+!removedKind.has_value(),8);
+        }
         else if(create->kind==CatalogKind::SymbolicLink){
             Set(volume,200,symlinkCount+1,8);
             if(removedKind)Set(volume,184,fileCount-1,8);
@@ -3335,15 +3341,19 @@ CatalogWritePlan PrepareCatalogMutation(
             if(removedKind)Set(volume,200,symlinkCount-1,8);
         }
     }else if(externalDelete&&remove->recursive){
-        Check(deletedFiles<=fileCount&&deletedFolders<=directoryCount&&deletedSymlinks<=symlinkCount,
+        Check(deletedFiles<=fileCount&&deletedFolders<=directoryCount&&deletedSymlinks<=symlinkCount&&deletedSpecial<=specialCount,
               "Invalid APFS volume entry counts");
         Set(volume,184,fileCount-deletedFiles,8);
         Set(volume,192,directoryCount-deletedFolders,8);
         Set(volume,200,symlinkCount-deletedSymlinks,8);
+        Set(volume,208,specialCount-deletedSpecial,8);
     }else if(removedKind){
         if(*removedKind==CatalogKind::Directory)Set(volume,192,directoryCount-1,8);
         else if(*removedKind==CatalogKind::SymbolicLink)Set(volume,200,symlinkCount-1,8);
-        else if(IsSpecialKind(*removedKind))Set(volume,208,specialCount-1,8);
+        else if(IsSpecialKind(*removedKind)){
+            Check(specialCount,"Invalid APFS special file count");
+            Set(volume,208,specialCount-1,8);
+        }
         else Set(volume,184,fileCount-1,8);
     }
     Set(volume,256,time,8);

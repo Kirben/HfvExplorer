@@ -843,13 +843,20 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
                         std::to_string(plan.entry.version)+" for "+BrowserPresentation::Utf8(plan.entry.name)+
                         ". Choose a writable MFS image.");
   Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
-  Check(!exists||!found.posix||!found.posix->IsSpecial(),"A special file blocks the destination name");
-  if(plan.entry.posix&&plan.entry.posix->IsSpecial()){
+  const auto incomingType=plan.entry.posix?plan.entry.posix->special:SpecialFileType::None;
+  if(exists){
+   const auto existingType=found.posix?found.posix->special:SpecialFileType::None;
+   Check(incomingType==existingType,"The destination has a different special file type");
+   if(incomingType!=SpecialFileType::None)
+    Check(!found.protectedFile&&!found.hardLink&&!found.forks[0].size&&!found.forks[1].size,
+          "The destination special file cannot be replaced");
+  }
+  if(incomingType!=SpecialFileType::None){
    const std::string_view kind=dst.Kind();
    Check(kind=="HFS+"||kind=="HFSX"||kind=="APFS","The destination cannot preserve a special file");
-   Check(!exists&&!plan.entry.directory&&!plan.entry.symbolicLink&&!plan.entry.compressed&&
+   Check(!plan.entry.directory&&!plan.entry.symbolicLink&&!plan.entry.compressed&&
          !plan.entry.hardLink&&!plan.entry.forks[0].size&&!plan.entry.forks[1].size,
-         "Special file copies must create a new entry without forks");
+         "Special file copies cannot contain forks");
   }
   if(plan.linkTarget){
    Check(!exists||(!found.protectedFile&&(dst.SymbolicLinkTarget(found.id).has_value()||

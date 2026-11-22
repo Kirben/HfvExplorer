@@ -1102,7 +1102,7 @@ struct Volume::Impl {
         UpdateEntry(e);
         Thread(e);
     }
-    void Mutable(const Entry &e,bool inodeAccess=false,bool allowSymbolicLink=false,bool copiedImmutable=false) {
+    void Mutable(const Entry &e,bool inodeAccess=false,bool allowSymbolicLink=false,bool copiedImmutable=false,bool allowSpecial=false) {
         ValidateLinkAncestors(e.id);Check((!e.protectedFile||inodeAccess) && e.id >= 16, "Protected HFS+ metadata cannot be modified");
         auto r = CatalogRecord(e.id);
         const unsigned forbidden = copiedImmutable ? 0 : 6;
@@ -1114,7 +1114,8 @@ struct Volume::Impl {
             Check(memcmp(e.finder.data(), "hlnkhfs+", 8) && memcmp(e.finder.data(), "fdrpMACS", 8),
                   "HFS+ hard links cannot be modified");
             const auto type=U16(r->value.data()+42)&0170000;
-            Check(type==0100000||(allowSymbolicLink&&e.symbolicLink&&type==0120000),
+            Check(type==0100000||(allowSymbolicLink&&e.symbolicLink&&type==0120000)||
+                  (allowSpecial&&e.posix&&e.posix->IsSpecial()),
                   "This operation cannot modify the HFS+ entry type");
         }
         if(e.compressed)(void)Compressed(e.id); // Reject missing/malformed compression metadata before mutation.
@@ -1641,9 +1642,9 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
-    Check(!posix||!posix->IsSpecial()||(!symbolicLink&&!overwrite&&!dataSize&&!resourceSize&&
+    Check(!posix||!posix->IsSpecial()||(!symbolicLink&&!dataSize&&!resourceSize&&
           (compression==CompressionMode::Preserve||compression==CompressionMode::Uncompressed)),
-          "Special file copies must create a new entry without forks");
+          "Special file copies cannot contain forks");
     parent=p.WriteParent(parent);
     if(attributes)ValidateAttributes(*attributes);
     Entry e;
@@ -1668,6 +1669,12 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
             Check(!target.symbolicLink||(!target.compressed&&!target.forks[1].size),
                   "Cannot replace an HFS+ symbolic link with unsupported forks");
             p.Mutable(target,false,true);
+        }else if(posix&&posix->IsSpecial()){
+            const auto& target=p.Get(existing);
+            Check(!p.LinkKind(existing)&&target.posix&&target.posix->special==posix->special&&
+                  !target.forks[0].size&&!target.forks[1].size,
+                  "The HFS+ special file destination changed after overwrite approval");
+            p.Mutable(target,false,false,false,true);
         }else{
             existing=p.Content(existing);
         }

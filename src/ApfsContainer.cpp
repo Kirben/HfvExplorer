@@ -504,7 +504,7 @@ uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t par
     Check(!replacedEntry||external,"APFS entry replacement requires the external catalog writer");
     Check(!replacedAlias||replacedEntry,"APFS alias replacement requires its backing inode");
     const bool special=posix&&posix->IsSpecial();
-    Check(!special||(!data.Size()&&(!resource||!resource->Size())&&!compression&&!replacedEntry),
+    Check(!special||(!data.Size()&&(!resource||!resource->Size())&&!compression&&!replacedAlias),
           "Invalid APFS special file transfer");
     CatalogCreate create{parent,name,special?CatalogKind(posix->special):CatalogKind::RegularFile,special?nullptr:&data,
                          dates,finder,locked,attributes,special?nullptr:resource,compression};

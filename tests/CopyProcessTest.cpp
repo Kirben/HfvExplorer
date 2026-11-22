@@ -2064,11 +2064,34 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
     Check(bool(hfs),"Cannot reopen HFSX pipe fixture");
     std::vector<Location> selection;
     for(size_t i=0;i<ARRAYSIZE(names);++i)selection.push_back(Native(hfs,verify(*hfs,i)));
-    const auto transfer=[](std::vector<Location> inputs,Location destination){
+    const auto transfer=[](std::vector<Location> inputs,Location destination,bool approve=false){
         Storage::Job job;
-        job.transport({},[](const auto&){return Storage::ConflictChoice::Cancel;});
+        job.transport({},[&](const auto&){
+            return approve?Storage::ConflictChoice::ReplaceAll:Storage::ConflictChoice::Cancel;
+        });
         Completion completion;
         return ExecuteInWorker(OrdinaryCopy{std::move(inputs),destination},job,completion);
+    };
+    const auto oldMetadata=[](PosixMetadata value){
+        value.uid=51;
+        if(IsDevice(value.special))value.device=0x0b000022;
+        return value;
+    };
+    const auto seedOld=[&](Volume& volume){
+        Entry old;
+        old.name=names[1];
+        old.posix=oldMetadata(metadata(1));
+        old.attributes={{u"user.old",{91}}};
+        old.attributesKnown=true;
+        volume.Put(2,old,[](unsigned,uint64_t,void*,size_t){
+            throw HfsPlus::Error("Unexpected special-file payload read");
+        },false);
+    };
+    const auto verifyOld=[&](Volume& volume){
+        Entry old;
+        Check(volume.FindChild(2,names[1],old)&&old.posix==oldMetadata(metadata(1))&&
+              volume.GetAttributes(old.id)==HfsPlus::Attributes{{u"user.old",{91}}},
+              "Cancelled overwrite changed the original device node");
     };
     const auto host=Wide(root+"\\named-pipe-windows");
     Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"Cannot create pipe test folder");
@@ -2088,7 +2111,15 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         }
         auto apfs=OpenBrowserImage(path);
         Check(bool(apfs),"Cannot open APFS named-pipe target");
-        auto result=transfer(selection,Native(apfs));
+        seedOld(*apfs);
+        auto result=transfer({selection[1]},Native(apfs));
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              result.message.empty()?"Expected device overwrite cancellation":result.message.c_str());
+        apfs.reset();
+        apfs=OpenBrowserImage(path);
+        Check(bool(apfs),"Cannot reopen cancelled APFS special overwrite");
+        verifyOld(*apfs);
+        result=transfer(selection,Native(apfs),true);
         Check(!result.code,result.message.c_str());
         apfs.reset();
         apfs=OpenBrowserImage(path);
@@ -2098,18 +2129,30 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         apfs->MakeDirectory(2,u"After pipe");
         const auto roundTrip=Wide(root+(external?"\\pipe-return-macos.dsk":"\\pipe-return-native.dsk"));
         auto returned=Image(roundTrip,Kind::HfsPlus);
-        result=transfer(apfsSelection,Native(returned));
+        seedOld(*returned);
+        result=transfer({apfsSelection[1]},Native(returned));
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              result.message.empty()?"Expected HFS device overwrite cancellation":result.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(roundTrip);
+        Check(bool(returned),"Cannot reopen cancelled HFS special overwrite");
+        verifyOld(*returned);
+        result=transfer(apfsSelection,Native(returned),true);
         Check(!result.code,result.message.c_str());
         returned.reset();
         returned=OpenBrowserImage(roundTrip);
         Check(bool(returned),"Cannot reopen HFS+ named-pipe copy");
         for(size_t i=0;i<ARRAYSIZE(names);++i)verify(*returned,i);
-        result=transfer(apfsSelection,Native(returned));
-        Check(result.code&&!result.partial&&result.message.find("special file blocks")!=std::string::npos,
-              "A special-file overwrite should fail before publication");
-        for(size_t i=0;i<ARRAYSIZE(names);++i)verify(*returned,i);
+        Entry existing;
+        Check(apfs->FindChild(2,names[1],existing),"Cannot find overwritten device node");
+        apfs->Remove(existing.id);
+        apfsSelection.clear();
+        apfs.reset();
+        apfs=OpenBrowserImage(path);
+        Check(apfs&&!apfs->FindChild(2,names[1],existing),"APFS device node survived deletion");
+        apfs->MakeDirectory(2,u"After device deletion");
     }
-    fprintf(report,"PASS: named pipes, device nodes and socket entries round-trip through HFS+/HFSX and both APFS writers; reopening preserves node type, device number and other metadata.\n");
+    fprintf(report,"PASS: named pipes, device nodes and socket entries round-trip through HFS+/HFSX and both APFS writers; same-type overwrite preserves metadata and cancelling retains the old node after reopening.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)

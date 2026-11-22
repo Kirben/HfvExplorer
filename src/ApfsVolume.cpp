@@ -1422,9 +1422,10 @@ public:
                      Storage::Job& job,bool allowPrompt){
         ValidateEntry(entry);
         Check(!entry.directory,"Select a file for APFS transfer");
-        Check(!entry.posix||!entry.posix->IsSpecial()||(!replace&&!entry.compressed&&!entry.hardLink&&
+        const bool special=entry.posix&&entry.posix->IsSpecial();
+        Check(!special||(!entry.compressed&&!entry.hardLink&&
               !entry.forks[0].size&&!entry.forks[1].size),
-              "Special file copies must create a new entry without forks");
+              "Special file copies cannot contain forks");
         const auto dates=CopyDates(entry);
         const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
         std::optional<HfsPlus::EncodedCompression> encoded;
@@ -1463,7 +1464,11 @@ public:
                 const auto oid=At(existing.id).oid,sibling=At(existing.id).siblingId;
                 // An approved copy targets a name. In-place edits still use ReplaceFileData.
                 const bool replaceAlias=existing.hardLink&&!entry.expectedDestinationIdentity.empty();
-                if(existing.symbolicLink||replaceAlias){
+                if(special)
+                    Check(existing.posix&&existing.posix->special==entry.posix->special&&!sibling&&
+                          !existing.forks[0].size&&!existing.forks[1].size,
+                          "The APFS special file destination changed after overwrite approval");
+                if(existing.symbolicLink||replaceAlias||special){
                     Check(!replaceAlias||sibling,"The APFS hard-link destination has no sibling ID");
                     const auto& name=replaceAlias?existing.name:entry.name;
                     CommitMutation(parent,existing.id,job,[&](auto& job){
