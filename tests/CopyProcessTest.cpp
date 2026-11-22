@@ -1810,6 +1810,118 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS hard-link groups replace HFS+ and HFSX symlinks, preserve both forks and one shared inode, and leave all referents untouched. Cancellation during the first resource fork preserves every original symlink.\n");
 }
 
+void TestLateHardLinkOverwriteCancellation(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const std::u16string names[]={u"First overwrite",u"Second overwrite",u"Third overwrite"};
+    constexpr auto survivor=u"Unselected destination alias";
+    constexpr uint64_t sourceSize=8191,oldSize=6311;
+    constexpr BYTE sourceBias=23,oldBias=81;
+    const auto macosFixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    const auto format=[&](const std::wstring& path,bool apfs,Kind kind,bool compatibility){
+        if(compatibility){
+            Check(CopyFileW(macosFixture,path.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS fixture");
+            return;
+        }
+        auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+        if(apfs){
+            Storage::Job formatJob;
+            Apfs::Format(*disk,u"Late cancellation",false,formatJob);
+        }else{
+            HfsPlus::Volume::Format(*disk,u"Late cancellation",true,kind);
+        }
+    };
+    const auto seed=[&](Volume& volume,uint64_t size,BYTE bias){
+        auto member=Put(volume,2,names[0],size,bias);
+        for(size_t i=1;i<ARRAYSIZE(names);++i)member=volume.MakeHardLink(member,2,names[i]);
+        return member;
+    };
+    unsigned index=0;
+    for(const bool apfsSource:{true,false}){
+        for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+            const auto base=root+"\\late-link-cancel-"+std::to_string(index++);
+            const auto sourcePath=Wide(base+"-source.img");
+            format(sourcePath,apfsSource,kind,false);
+            {
+                auto source=OpenBrowserImage(sourcePath);
+                Check(source&&source->Writable()&&source->Supports().CanCreateHardLinks(),"Source cannot participate in cut/paste");
+                seed(*source,sourceSize,sourceBias);
+            }
+            const bool compatibility=!apfsSource&&kind==Kind::HfsXCaseSensitive&&macosFixture;
+            for(const bool cut:{false,true}){
+                const auto targetPath=Wide(base+(cut?"-cut.img":"-copy.img"));
+                format(targetPath,!apfsSource,kind,compatibility);
+                Storage::Result result;
+                Completion completion;
+                unsigned prompts=0;
+                bool firstPrompt=false,secondPrompt=false;
+                Storage::Progress pending;
+                {
+                    auto source=OpenBrowserImage(sourcePath);
+                    auto target=OpenBrowserImage(targetPath);
+                    Check(source&&target&&target->Supports().CanCreateHardLinks(),"Cannot mount overwrite fixtures");
+                    if(!apfsSource)Check(target->Writable()!=compatibility,"Wrong APFS writer for cancellation test");
+                    const auto member=seed(*target,oldSize,oldBias);
+                    target->MakeHardLink(member,2,survivor);
+                    std::vector<Location> selected;
+                    for(const auto& name:names){
+                        Entry item;
+                        Check(source->FindChild(2,name,item)&&item.hardLink&&item.linkCount==3,
+                              "Missing source hard-link name before transfer");
+                        auto location=Native(source,item.id);
+                        location.cut=cut;
+                        selected.push_back(std::move(location));
+                    }
+                    Storage::Job job;
+                    job.transport({},[&](const std::string& label){
+                        ++prompts;
+                        if(prompts==1){
+                            firstPrompt=label.find("First overwrite")==0;
+                            return Storage::ConflictChoice::Replace;
+                        }
+                        secondPrompt=label.find("Second overwrite")==0;
+                        pending=job.progress();
+                        return Storage::ConflictChoice::Cancel;
+                    });
+                    result=ExecuteInWorker(OrdinaryCopy{selected,Native(target,2)},job,completion);
+                }
+                auto source=OpenBrowserImage(sourcePath);
+                auto target=OpenBrowserImage(targetPath);
+                Check(source&&target,"Could not reopen images after cancellation");
+                Check(prompts==2&&firstPrompt&&secondPrompt&&pending.files==1&&pending.totalFiles==3&&
+                      pending.processed==sourceSize+173,"Cancellation did not stop at the second overwrite");
+                Check(result.outcome==Storage::Outcome::Cancelled&&result.partial&&result.completed==1&&
+                      result.skipped==0&&!result.moved&&!completion.complete,
+                      "Cancellation failed to report the one completed overwrite");
+
+                Entry preserved;
+                Check(target->FindChild(2,survivor,preserved)&&preserved.hardLink&&preserved.linkCount==3,
+                      "The untouched destination alias lost its original inode");
+                Verify(*target,preserved.id,oldSize,oldBias);
+                uint32_t sourceInode=0;
+                for(size_t i=0;i<ARRAYSIZE(names);++i){
+                    Entry original,published;
+                    Check(source->FindChild(2,names[i],original)&&original.hardLink&&original.linkCount==3&&
+                          (!sourceInode||original.resolvedId==sourceInode),"A cancelled transfer changed the source group");
+                    sourceInode=original.resolvedId;
+                    Verify(*source,original.id,sourceSize,sourceBias);
+                    Check(target->FindChild(2,names[i],published),"A destination name disappeared on cancellation");
+                    if(i==0){
+                        Check(!published.hardLink&&published.resolvedId!=preserved.resolvedId,
+                              "The completed overwrite changed the shared destination inode");
+                        Verify(*target,published.id,sourceSize,sourceBias);
+                    }else{
+                        Check(published.hardLink&&published.linkCount==3&&published.resolvedId==preserved.resolvedId,
+                              "A pending overwrite detached a destination alias");
+                        Verify(*target,published.id,oldSize,oldBias);
+                    }
+                }
+            }
+        }
+    }
+    fprintf(report,"PASS: cancellation before the second hard-link overwrite reports one completed file on copy and cut/paste in both APFS/HFS+/HFSX directions. Reopening confirms source retention, original alias sharing and exact data and resource forks.\n");
+}
+
 void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2338,6 +2450,7 @@ int RunCopyProcessTest(const char *directory) {
         TestHfsToApfsHardLinks(root,report);
         TestHfsToApfsOverwriteTypes(root,report);
         TestApfsToHfsHardLinks(root,report);
+        TestLateHardLinkOverwriteCancellation(root,report);
         TestCrossFormatAttributes(root,report);
         TestApfsToHfsCompression(root,report);
         TestApfsToHfsNameCollisions(root,report);
