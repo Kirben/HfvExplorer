@@ -3594,6 +3594,29 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         };
         Check(layout!=attributes.end()&&HfsPlus::Bytes(layout->second)==expected,
               "HFS+ copy did not retain the exact sparse fork layout after reopening");
+        auto candidate=target->Stat(copied.id);
+        candidate.attributes=attributes;
+        Storage::Job validation;
+        const Reader readSparseCopy=[&](unsigned fork,uint64_t offset,void* bytes,size_t size){
+            target->Read(copied.id,fork,offset,bytes,size);
+        };
+        Check(ValidateApfsSparseLayout(candidate,readSparseCopy,validation)==holes,
+              "Valid sparse layout could not be recovered from both reopened forks");
+        const auto stale=ValidateApfsSparseLayout(candidate,[&](unsigned fork,uint64_t offset,void* bytes,size_t size){
+            readSparseCopy(fork,offset,bytes,size);
+            if(fork==0&&offset==4096&&size)static_cast<uint8_t*>(bytes)[0]=1;
+        },validation);
+        Check(stale[0].empty()&&stale[1].empty(),"Sparse marker would discard a later nonzero write");
+
+        auto bad=expected;
+        bad[39]=0xff; // Make the first range length exceed the entire fork.
+        candidate.attributes[ApfsSparseLayoutAttribute]=std::move(bad);
+        bool readPayload=false;
+        const auto malformed=ValidateApfsSparseLayout(candidate,[&](unsigned,uint64_t,void*,size_t){
+            readPayload=true;
+        },validation);
+        Check(!readPayload&&malformed[0].empty()&&malformed[1].empty(),
+              "Malformed sparse layout reached the payload reader");
     }
     fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen with a dense allocation notice; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
 }

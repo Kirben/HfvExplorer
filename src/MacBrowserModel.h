@@ -75,6 +75,8 @@ struct Capabilities {
     void RestrictWrites() { writable = create = rename = remove = false; }
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
+inline constexpr auto ApfsSparseLayoutAttribute=u"org.hfvexplorer.apfs-sparse-ranges";
+SparseForks ValidateApfsSparseLayout(const Entry&,const Reader&,Storage::Job&);
 class Volume;
 // Adapt a scanned entry before destination validation. Return a reader for
 // transformed forks, or an empty reader to use the original storage adapter.

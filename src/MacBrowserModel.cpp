@@ -62,6 +62,61 @@ void ValidateMfsCopyNames(const std::vector<Entry>& entries)
     }
 }
 
+SparseForks ValidateApfsSparseLayout(const Entry& entry,const Reader& read,Storage::Job& job)
+{
+    const auto attribute=entry.attributes.find(ApfsSparseLayoutAttribute);
+    if(attribute==entry.attributes.end()||!read)return {};
+    const auto& data=attribute->second;
+    const std::array<uint8_t,8> signature{'H','F','V','S',1,0,0,0};
+    if(data.size()<40||(data.size()-40)%16)return {};
+    std::array<uint8_t,8> header{};
+    data.Read(0,header.data(),header.size());
+    if(header!=signature)return {};
+
+    uint64_t cursor=header.size();
+    const auto number=[&]{
+        std::array<uint8_t,8> bytes{};
+        data.Read(cursor,bytes.data(),bytes.size());
+        cursor+=bytes.size();
+        uint64_t value=0;
+        for(unsigned byte=0;byte<bytes.size();++byte)value|=uint64_t(bytes[byte])<<(8*byte);
+        return value;
+    };
+    SparseForks holes;
+    for(unsigned fork=0;fork<holes.size();++fork){
+        if(job.cancelled())throw Storage::Cancelled();
+        if(data.size()-cursor<16)return {};
+        const auto length=number(),count=number();
+        if(length!=entry.forks[fork].size||count>(data.size()-cursor)/16)return {};
+        uint64_t end=0;
+        for(uint64_t i=0;i<count;++i){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto offset=number(),size=number();
+            if(offset<end||offset>length||!size||size>length-offset)return {};
+            holes[fork].push_back({offset,size});
+            end=offset+size;
+        }
+    }
+    if(cursor!=data.size())return {};
+
+    // Marker contents are untrusted. A file edited on HFS+ may have data
+    // in a former hole. Treat the whole layout as stale if any byte changed.
+    HfsPlus::Bytes buffer(256*1024);
+    for(unsigned fork=0;fork<holes.size();++fork){
+        for(const auto& hole:holes[fork]){
+            for(uint64_t done=0;done<hole.length;){
+                if(job.cancelled())throw Storage::Cancelled();
+                const auto size=size_t((std::min)(uint64_t(buffer.size()),hole.length-done));
+                read(fork,hole.offset+done,buffer.data(),size);
+                if(std::any_of(buffer.begin(),buffer.begin()+size,[](uint8_t byte){return byte!=0;}))return {};
+                done+=size;
+            }
+        }
+    }
+    if(job.cancelled())throw Storage::Cancelled();
+    return holes;
+}
+
 bool IsHfsPlusSymlinkReplacementFile(const Entry& entry)
 {
     return !entry.directory&&!entry.symbolicLink&&!entry.protectedFile&&entry.readError.empty();
@@ -397,8 +452,7 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
 // APFS layout without affecting logical fork contents or occupying either fork.
 void RecordApfsSparseRanges(Entry& entry,const SparseForks& holes)
 {
-    constexpr auto name=u"org.hfvexplorer.apfs-sparse-ranges";
-    if(entry.attributes.count(name))return; // Preserve an existing source attribute.
+    if(entry.attributes.count(ApfsSparseLayoutAttribute))return; // Preserve an existing source attribute.
     HfsPlus::Bytes value{'H','F','V','S',1,0,0,0};
     const auto append=[&](uint64_t number){
         for(unsigned byte=0;byte<8;++byte)value.push_back(uint8_t(number>>(8*byte)));
@@ -411,7 +465,7 @@ void RecordApfsSparseRanges(Entry& entry,const SparseForks& holes)
             append(hole.length);
         }
     }
-    entry.attributes.emplace(name,std::move(value));
+    entry.attributes.emplace(ApfsSparseLayoutAttribute,std::move(value));
 }
 using CopiedLinks=std::map<std::pair<std::string,uint32_t>,Entry>;
 void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
