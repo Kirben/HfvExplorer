@@ -65,9 +65,13 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
                         Storage::Job& job,Completion& completion,bool windowsDestination){
  std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
+ std::vector<WindowsCutPlan> windowsPlans(sources.size());
  for(size_t i=0;i<sources.size();++i)
   if(sources[i].cut){
-   checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job);
+   checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job,[&](Volume& volume,const Entry& entry){
+    if(ExecutionFor(volume).windowsPaths)
+     windowsPlans[i].push_back({volume.HostPath(entry.id),entry.identity,entry.directory});
+   });
    if(ExecutionFor(*checked[i].volume).windowsPaths)
     ValidateWindowsCut(*checked[i].volume,checked[i].id,job,windowsDestination);
   }
@@ -75,7 +79,7 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
   if(sources[i].cut)StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
     [&](Volume& volume,uint32_t id){
      Mark(completion,sources[i]);
-     if(sources[i].IsWindows()&&WindowsMoveUndo::Session::Current())StageWindowsCut(volume,id);
+     if(!windowsPlans[i].empty())FinishWindowsCut(volume,windowsPlans[i],job);
      else RemoveTree(volume,id,job);
     });
 }

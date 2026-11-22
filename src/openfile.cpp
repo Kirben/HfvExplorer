@@ -87,9 +87,9 @@ int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const MacBrow
  }
  return delete_host_tree(full,0,job,selected);
 }
-}
-int DeleteHostSelectionJob(const std::wstring& path,bool directory,
-                           const MacBrowser::EntryIdentity& expected,Storage::Job* job)
+enum class DeleteMode { Selection, CutEntry };
+int DeleteHostEntry(const std::wstring& path,bool directory,const MacBrowser::EntryIdentity& expected,
+                    Storage::Job* job,DeleteMode mode)
 {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(path.empty()||expected.empty()){SetLastError(ERROR_FILE_INVALID);return 0;}
@@ -97,14 +97,17 @@ int DeleteHostSelectionJob(const std::wstring& path,bool directory,
  const auto slash=full.find_last_of(L'\\');
  if(slash==full.npos){SetLastError(ERROR_INVALID_NAME);return 0;}
 
- const auto pin=[](DeleteHandle& file,const std::wstring& name,const MacBrowser::ObjectIdentity& identity){
+ const auto pin=[](DeleteHandle& file,const std::wstring& name,const MacBrowser::ObjectIdentity& identity,
+                   bool directory=false){
   file.value=CreateFileW(name.c_str(),DELETE|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
-                        FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+                        FILE_FLAG_OPEN_REPARSE_POINT|(directory?FILE_FLAG_BACKUP_SEMANTICS:0),nullptr);
   if(file.value==INVALID_HANDLE_VALUE)return false;
   BY_HANDLE_FILE_INFORMATION info{};
   if(!GetFileInformationByHandle(file.value,&info))return false;
-  if((info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
-      MacBrowser::WindowsIdentity(info)!=identity){
+  const auto actual=MacBrowser::WindowsIdentity(info);
+  if((info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)||
+     ((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0)!=directory||
+     actual.key!=identity.key||(!directory&&actual.version!=identity.version)){
    SetLastError(ERROR_FILE_INVALID);
    return false;
   }
@@ -119,13 +122,26 @@ int DeleteHostSelectionJob(const std::wstring& path,bool directory,
  // companion through deletion, or leave both entries intact if it changed.
  DeleteHandle companion;
  const auto leaf=full.substr(slash+1);
- if(!leaf.empty()&&leaf.front()!=L'%'&&!expected.companion.key.empty()&&
+ if(!leaf.empty()&&(leaf.front()!=L'%'||mode==DeleteMode::CutEntry)&&!expected.companion.key.empty()&&
     !pin(companion,full.substr(0,slash+1)+L"%"+leaf,expected.companion))return 0;
 
  DeleteHandle primary;
- if(directory){
+ if(directory&&mode==DeleteMode::Selection){
   if(!DeleteHostDirectory(full,job,&expected.primary))return 0;
- }else if(!pin(primary,full,expected.primary)||!remove(primary.value))return 0;
+ }else if(!pin(primary,full,expected.primary,directory)||!remove(primary.value))return 0;
  Storage::OutcomeEvidence::NoteRetainedChange();
  return companion.value==INVALID_HANDLE_VALUE||remove(companion.value);
+}
+}
+int DeleteHostSelectionJob(const std::wstring& path,bool directory,
+                           const MacBrowser::EntryIdentity& expected,Storage::Job* job)
+{
+ return DeleteHostEntry(path,directory,expected,job,DeleteMode::Selection);
+}
+
+int DeleteHostCutEntry(const MacBrowser::WindowsCutEntry& entry,Storage::Job& job)
+{
+ // The OS refuses to remove a directory with children. A recursive Cut must
+ // never acquire permission over an entry that was absent from its snapshot.
+ return DeleteHostEntry(entry.path,entry.directory,entry.identity,&job,DeleteMode::CutEntry);
 }

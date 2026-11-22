@@ -595,12 +595,13 @@ void ApplyRemovalPlan(Volume& v,uint32_t id,Storage::Job& job,bool deletionProgr
     validate(plan);
     remove(plan);
 }
-std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovable){
+std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovable,const SnapshotVisitor& visit){
     uint64_t hash=14695981039346656037ULL,count=0;std::set<uint32_t> ancestors;
     auto bytes=[&](const void* p,size_t n){auto b=static_cast<const uint8_t*>(p);while(n--){hash^=*b++;hash*=1099511628211ULL;}};
     std::function<void(uint32_t,unsigned)> walk=[&](uint32_t at,unsigned depth){
         if(job.cancelled())throw Storage::Cancelled();Check(depth<=128&&ancestors.insert(at).second,"Cyclic source folder");
         auto e=v.Stat(at);Check(!e.identity.empty(),"Cannot verify source identity; source items were retained");++count;
+        if(visit)visit(v,e);
         if(requireRemovable)v.ValidateRemoval(at);
         auto attributes=v.GetAttributes(at);for(const auto& a:attributes){auto size=a.second.size();bytes(a.first.data(),a.first.size()*2);bytes(&size,sizeof(size));HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<a.second.size();){auto n=size_t((std::min)(uint64_t(buffer.size()),a.second.size()-at));a.second.Read(at,buffer.data(),n);bytes(buffer.data(),n);at+=n;}}
         const auto object=[&](const ObjectIdentity& value){

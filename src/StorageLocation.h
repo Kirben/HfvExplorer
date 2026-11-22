@@ -33,7 +33,8 @@ bool ClassicPropertiesWritable(const Location&);
 
 // Recheck every Cut source before deleting any, then reopen legacy media
 // under its exclusive write scope for the final identity check and removal.
-ResolvedEntry PrepareCutSource(const Location&, const std::string& snapshot, Storage::Job&);
+ResolvedEntry PrepareCutSource(const Location&, const std::string& snapshot, Storage::Job&,
+                               const MacBrowser::SnapshotVisitor& visit={});
 void FinalizeCutSource(const Location&, ResolvedEntry prepared, const std::string& snapshot,
                        Storage::Job&, const std::function<void(MacBrowser::Volume&,uint32_t)>& remove);
 std::vector<uint8_t> ReadDataPrefix(const Location&, size_t maximum, bool& truncated, Storage::Job&);

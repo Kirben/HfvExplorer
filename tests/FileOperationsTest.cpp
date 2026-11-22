@@ -105,6 +105,57 @@ void WindowsStagingSafety(const std::string& root,FILE* report)
  }
  fprintf(report,"PASS: export and metadata staging refuse substituted files before writing and publication, preserving both original forks.\n");
 }
+void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& native,FILE* report)
+{
+ auto image=root+"\\cut-race.dsk";
+ {
+  CFile file;
+  Check(file.Open(image.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create classic cut fixture");
+  file.SetLength(4*1024*1024);
+ }
+ char label[]="Cut tests";
+ Check(hfs_format(image.data(),0,label)==0,"format classic cut fixture");
+ const auto classic=OpenImage(W(image));
+ for(const auto& destination:{native,classic}){
+  const bool coordinated=destination==classic;
+  for(const bool replace:{false,true}){
+   const auto parent=root+(coordinated?"\\classic-cut-":"\\native-cut-")+(replace?"replace":"new");
+   const auto subtree=parent+"\\Transfer",nested=subtree+"\\Nested",file=nested+"\\Original";
+   const auto unrelated=replace?file:nested+"\\Unrelated";
+   Check(CreateDirectoryA(parent.c_str(),nullptr)&&CreateDirectoryA(subtree.c_str(),nullptr)&&
+         CreateDirectoryA(nested.c_str(),nullptr),"create Windows cut safety fixture");
+   Save(file,"ORIGINAL");
+   auto source=Host(subtree,true);
+   source.cut=true;
+   const auto folder=destination->MakeDirectory(2,coordinated?(replace?u"Replace C":u"New C"):(replace?u"Replace N":u"New N"));
+   bool injected=false;
+   struct Reset{~Reset(){windowsPublicationFault={};}} reset;
+   windowsPublicationFault=[&](const char* phase){
+    if(strcmp(phase,"cut-source-verified"))return;
+    if(replace)Check(MoveFileA(file.c_str(),(parent+"\\Saved original").c_str()),"replace a verified source entry");
+    Save(unrelated,"UNRELATED");
+    injected=true;
+   };
+   Storage::Job job;
+   Completion completion;
+   const auto result=ExecuteInWorker(OrdinaryCopy{{source},Native(destination,folder)},job,completion);
+   windowsPublicationFault={};
+   Check(injected&&result.code&&!result.moved&&
+         Load(unrelated)==std::vector<BYTE>({'U','N','R','E','L','A','T','E','D'}),
+         "Windows cut discarded a file that was absent from the verified source version");
+   if(coordinated){
+    Check(destination->List(folder).empty(),"coordinated cut failure did not roll back its destination");
+    if(!replace)Check(Load(file)==std::vector<BYTE>({'O','R','I','G','I','N','A','L'}),
+                      "coordinated cut failure removed an original source entry");
+   }else{
+    const auto destinationTree=destination->List(folder);
+    Check(destinationTree.size()==1&&destinationTree.front().name==u"Transfer",
+          "a non-coordinated Cut lost the copied destination after source cleanup was refused");
+   }
+  }
+ }
+ fprintf(report,"PASS: coordinated and ordinary Windows cuts retain new and replaced files at source cleanup.\n");
+}
 void WindowsStreamSafety(const std::string& root,const std::shared_ptr<Volume>& mac,FILE* report)
 {
  const auto winFolder=root+"\\streams";
@@ -191,6 +242,7 @@ int RunFileOperationsTest(const char* directory){
  try{
   Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden operation owner",WS_OVERLAPPED,0,0,600,400,nullptr,0)&&other.CreateEx(0,AfxRegisterWndClass(0),"Other browser",WS_OVERLAPPED,0,0,600,400,nullptr,0),"create hidden owners");app.m_pMainWnd=&other;app.m_mac_window_mode=0;
   auto source=Image(W(root+"\\source.dsk"),u"Source",HfsPlus::Volume::FormatKind::HfsPlus),target=Image(W(root+"\\target.dsk"),u"Target",HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+  WindowsCutSafety(root,target,report);
   WindowsStreamSafety(root,target,report);
   uint32_t file=Put(*source,u"Payload"),folder=target->MakeDirectory(2,u"Copies");auto expected=source->Stat(file);auto delayed=std::make_shared<Delayed>(source);delayed->delay=120;delayed->owner=&owner;delayed->other=&other;
   Request copy;copy.Copy().sources={Native(delayed,file,&expected)};copy.Copy().destination=Native(target,folder);

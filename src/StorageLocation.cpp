@@ -102,11 +102,12 @@ bool ClassicPropertiesWritable(const Location& location) {
         (GetFileAttributesA(location.ClassicImage().c_str())&FILE_ATTRIBUTE_READONLY)==0);
 }
 
-ResolvedEntry PrepareCutSource(const Location& location,const std::string& snapshot,Storage::Job& job) {
+ResolvedEntry PrepareCutSource(const Location& location,const std::string& snapshot,Storage::Job& job,
+                               const MacBrowser::SnapshotVisitor& visit) {
     Cancel(job);
     const bool reopen=ClassicFloppy(location);
     auto checked=ResolveEntry(location,!reopen);
-    if(MacBrowser::Snapshot(*checked.volume,checked.id,job)!=snapshot)
+    if(MacBrowser::Snapshot(*checked.volume,checked.id,job,false,visit)!=snapshot)
         throw Storage::MediaChanged("Source changed during the copy; source items were retained");
     if(reopen) checked.volume->Close();
     return checked;

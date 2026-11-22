@@ -6,6 +6,7 @@
 #include "ClassicHfsRecovery.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
+#include "OperationCompletion.h"
 #include "VolumeCoordinator.h"
 #include "HfsPlusDisk.h"
 #include "BrowserPresentation.h"
@@ -888,17 +889,24 @@ void ValidateWindowsCut(Volume& volume,uint32_t id,Storage::Job& job,bool window
     });
 }
 
-void StageWindowsCut(Volume& volume,uint32_t id){
-    auto move=WindowsMoveUndo::Session::Current();
-    Check(move&&id!=2,"Cannot stage the Windows cut source");
-    const auto path=volume.HostPath(id);
-    const auto entry=volume.Stat(id);
+void FinishWindowsCut(Volume& volume,const WindowsCutPlan& plan,Storage::Job& job)
+{
     volume.Close();
-    Check(volume.Stat(id).identity==entry.identity,"The Windows source changed before move completion");
-    if(!entry.identity.companion.key.empty())
-        move->Rename(Companion(path),move->Slot(),&entry.identity.companion);
-    move->Rename(path,move->Slot(),&entry.identity.primary);
-    Storage::OutcomeEvidence::NoteRetainedChange();
+    Publication("cut-source-verified");
+    if(job.cancelled())throw Storage::Cancelled();
+    if(auto move=WindowsMoveUndo::Session::Current()){
+        move->StageCut(plan);
+        Storage::OutcomeEvidence::NoteRetainedChange();
+        return;
+    }
+    // Snapshot visits parents before children. Remove only those entries in
+    // reverse order, and let Windows reject a folder that has gained new data.
+    for(auto item=plan.rbegin();item!=plan.rend();++item){
+        if(DeleteHostCutEntry(*item,job))continue;
+        const auto error=GetLastError();
+        if(job.cancelled())throw Storage::Cancelled();
+        throw Storage::OperationError(error,"Could not completely remove the Windows cut source; remaining files were retained");
+    }
 }
 bool WindowsResourceCompanion(const std::wstring& path){Double data;return AppleDouble(path,data);}
 std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring& path){

@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include "EntryIdentity.h"
+#include <vector>
 
 namespace Storage { class Job; }
 
@@ -13,7 +14,16 @@ inline ObjectIdentity WindowsIdentity(const BY_HANDLE_FILE_INFORMATION& info)
             (uint64_t(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime};
 }
 
+struct WindowsCutEntry {
+    std::wstring path;
+    EntryIdentity identity;
+    bool directory;
+};
+using WindowsCutPlan=std::vector<WindowsCutEntry>;
+class Volume;
+void FinishWindowsCut(Volume&,const WindowsCutPlan&,Storage::Job&);
 }
 
 int DeleteHostSelectionJob(const std::wstring& path,bool directory,
                            const MacBrowser::EntryIdentity& expected,Storage::Job* job);
+int DeleteHostCutEntry(const MacBrowser::WindowsCutEntry&,Storage::Job&);

@@ -3,8 +3,9 @@
 #include <functional>
 #include <windows.h>
 #include <memory>
+#include <map>
 #include <string>
-#include "EntryIdentity.h"
+#include "WindowsEntryIdentity.h"
 
 namespace WindowsMoveUndo {
 bool Supported(const std::wstring& folder);
@@ -15,6 +16,9 @@ void RunExport(const std::wstring& folder,const std::function<void()>& work);
 class Session {
     struct State;
     std::unique_ptr<State> state_;
+    void RenameChecked(const std::wstring& from,const std::wstring& to,
+                       const MacBrowser::ObjectIdentity* expected,
+                       const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree);
 public:
     Session(const std::wstring& folder,const std::string& decision,bool exportOnly=false);
     ~Session();
@@ -25,6 +29,7 @@ public:
     std::wstring StageTemporary(const std::wstring& path,HANDLE created=INVALID_HANDLE_VALUE);
     void Rename(const std::wstring& from,const std::wstring& to,
                 const MacBrowser::ObjectIdentity* expected=nullptr);
+    void StageCut(const MacBrowser::WindowsCutPlan&);
     void PreserveDirectoryDates(const std::wstring& path);
     void Finish();
 };

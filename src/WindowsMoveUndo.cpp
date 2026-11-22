@@ -2,7 +2,6 @@
 #include "stdafx.h"
 #include "WindowsMoveUndo.h"
 #include "WindowsHandleRename.h"
-#include "WindowsEntryIdentity.h"
 #include "ClassicHfsRecovery.h"
 #include "CopyWorkerProtocol.h"
 #include "StorageWorker.h"
@@ -335,15 +334,21 @@ void ClearStagedEntries(const Loaded& log,const std::wstring& folder,unsigned de
         Remove(file.value,"Cannot remove Windows staging entry; remaining contents were retained");
     }
 }
-void RecordStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,unsigned depth=0)
+size_t RecordStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,
+                        const std::map<std::wstring,MacBrowser::ObjectIdentity>& expected,unsigned depth=0)
 {
     Check(depth<=128,"Windows staging tree is too deep");
+    size_t recorded=0;
     for(const auto& name:Children(folder)){
         const auto path=Child(folder,name),staged=Child(slot,name);
         Check(Under(staged,slot),"Invalid name in Windows move staging");
         auto file=Open(path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ);
         Check(bool(file),"Cannot protect an entry in the Windows move source");
         const auto info=Info(file.value);
+        const auto known=expected.find(path);
+        Check(known!=expected.end()&&MacBrowser::WindowsIdentity(info)==known->second,
+              "The Windows source folder changed after copying; it was retained");
+        ++recorded;
         const bool directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
         Data record;
         record.put(uint64_t(Op::TreeEntry));
@@ -356,8 +361,9 @@ void RecordStagedTree(HANDLE journal,const std::wstring& folder,const std::wstri
         }
         // The rename frame flushes the full inventory before the folder moves.
         WriteFrame(journal,record);
-        if(directory)RecordStagedTree(journal,path,staged,depth+1);
+        if(directory)recorded+=RecordStagedTree(journal,path,staged,expected,depth+1);
     }
+    return recorded;
 }
 thread_local Session* current=nullptr;
 void RecoverJournal(const std::string& id,bool committed,const std::wstring* exportRoot,bool skipBusy);
@@ -446,6 +452,30 @@ std::wstring Session::StageTemporary(const std::wstring& path,HANDLE created)
 void Session::Rename(const std::wstring& from,const std::wstring& to,
                      const MacBrowser::ObjectIdentity* expected)
 {
+    RenameChecked(from,to,expected,nullptr);
+}
+void Session::StageCut(const MacBrowser::WindowsCutPlan& plan)
+{
+    Check(!plan.empty(),"Cannot stage a Windows cut source without a snapshot");
+    const auto& root=plan.front();
+    const auto companion=[](const std::wstring& path){
+        return Child(Parent(path),L"%"+path.substr(path.find_last_of(L'\\')+1));
+    };
+    std::map<std::wstring,MacBrowser::ObjectIdentity> tree;
+    for(auto i=plan.begin()+1;i!=plan.end();++i){
+        Check(Under(i->path,root.path)&&tree.emplace(i->path,i->identity.primary).second,
+              "Invalid Windows cut source snapshot");
+        if(!i->identity.companion.key.empty())
+            Check(tree.emplace(companion(i->path),i->identity.companion).second,"Conflicting Windows cut companion");
+    }
+    if(!root.identity.companion.key.empty())
+        Rename(companion(root.path),Slot(),&root.identity.companion);
+    RenameChecked(root.path,Slot(),&root.identity.primary,root.directory?&tree:nullptr);
+}
+void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
+                            const MacBrowser::ObjectIdentity* expected,
+                            const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree)
+{
     Paths(state_->root,state_->stage,from,to);
     auto handle=Open(from,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
     Check(bool(handle),"Cannot protect Windows move entry");
@@ -459,7 +489,8 @@ void Session::Rename(const std::wstring& from,const std::wstring& to,
     Check(id.file&&fromParent.file&&toParent.file&&id.serial==fromParent.serial&&
           id.serial==toParent.serial&&!Identify(to).file,"Windows move path changed");
     if((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(to,state_->stage))
-        RecordStagedTree(state_->journal.value,from,to);
+        Check(tree&&RecordStagedTree(state_->journal.value,from,to,*tree)==tree->size(),
+              "The Windows source folder changed after copying; it was retained");
     Data record;
     record.put(uint64_t(Op::Rename));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
