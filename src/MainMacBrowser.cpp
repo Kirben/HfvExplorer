@@ -796,7 +796,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 result.payload=ImageUnlock{error.retry,error.method,key};
             }catch(const HfsPlus::ExternalJournalRequired& error){
                 result.listing.resourceKey.clear();
-                result.payload=ExternalJournal{error.what()};
+                result.payload=ExternalJournal{error.what(),key};
             }catch(const VolumeCoord::Busy&){
                 return Storage::Result{1,ERROR_BUSY,"The image is busy."};
             }
@@ -816,7 +816,7 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 }
                 std::wstring journal;
                 if(SelectHfsPlusExternalJournal(session_.Owner(),journal,prompt->prompt))
-                    QueueImageOpen(path,journal,next,credentials,expectedImage);
+                    QueueImageOpen(path,journal,next,credentials,prompt->image);
                 else if(next)next();
                 return;
             }

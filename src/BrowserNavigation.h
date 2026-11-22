@@ -33,7 +33,7 @@ struct ClassicFolder {
 struct FloppyFolder {BrowserMountInventory::ClassicMount mount;};
 struct OpticalMount {std::shared_ptr<MacBrowser::Volume> volume;};
 struct ExternalMounts {std::vector<Removable::Mounted> volumes;};
-struct ExternalJournal {std::string prompt;};
+struct ExternalJournal {std::string prompt,image;};
 struct ImageUnlock {bool retry;Dmg::UnlockMethod method;std::string image;};
 struct ApfsUnlock {bool retry;std::wstring hint,volumeName;};
 struct MountedFolder {
