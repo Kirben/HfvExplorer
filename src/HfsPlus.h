@@ -13,6 +13,7 @@
 #include "PosixMetadata.h"
 namespace HfsPlus {
 using Bytes = std::vector<uint8_t>;
+struct SharedBlockRange { uint64_t offset,physical,blocks,partner; };
 struct SparseRange {
     uint64_t offset,length;
     bool operator==(const SparseRange& other) const {
@@ -29,6 +30,7 @@ class Source {
     virtual ~Source() = default;
     virtual uint64_t Size() const = 0;
     virtual std::vector<SparseRange> KnownZeroRanges() const { return {}; }
+    virtual std::vector<SharedBlockRange> VerifiedSharedBlocks() const { return {}; }
     virtual bool Writable() const = 0;
     virtual bool ProcessLocal()const{return false;}
     virtual void Read(uint64_t, void *, size_t) = 0;

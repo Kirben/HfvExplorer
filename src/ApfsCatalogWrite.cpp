@@ -2218,7 +2218,8 @@ void ValidateSharedFileExtents(const CatalogRecords& catalog,const std::vector<O
 }
 
 
-std::map<uint64_t,uint32_t> CatalogReferenceCounts(const std::vector<OwnedRecord>& catalog)
+std::map<uint64_t,uint32_t> CatalogReferenceCounts(const std::vector<OwnedRecord>& catalog,
+                                                  const std::vector<HfsPlus::SharedBlockRange>& reused={})
 {
     std::map<uint64_t,int64_t> boundaries;
     for(const auto& entry:catalog){
@@ -2231,6 +2232,10 @@ std::map<uint64_t,uint32_t> CatalogReferenceCounts(const std::vector<OwnedRecord
         Check(start<=UINT64_MAX-blocks,"Invalid APFS file extent range");
         ++boundaries[start];
         --boundaries[start+blocks];
+    }
+    for(const auto& run:reused){
+        ++boundaries[run.physical];
+        --boundaries[run.physical+run.blocks];
     }
     std::map<uint64_t,uint32_t> counts;
     int64_t active=0;
@@ -2658,7 +2663,14 @@ void ValidateWritableLayout(Source& source,const Container& container)
     const Node snapshotTree(ReadObject(source,container,snapshots,snapshots,container.transaction,2,16,true),true,{});
     Check(!snapshotTree.Level()&&!snapshotTree.Count(),"Unsupported APFS extent or snapshot tree");
     const auto volumeMap=ReadWritableMap(source,container,Le64(volume.data()+128));
-    ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
+    const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
+    constexpr uint64_t cloneFlags=0x10|0x400;
+    for(const auto& record:catalog.records){
+        if(record.key.size()<8||(Le64(record.key.data())>>60)!=3)continue;
+        Check(record.value.size()>=56,"Truncated APFS inode");
+        Check(!(Le64(record.value.data()+48)&cloneFlags),
+              "APFS clones require the shared-extent writer");
+    }
 }
 
 namespace {
@@ -2866,7 +2878,22 @@ CatalogWritePlan PrepareCatalogMutation(
         return stream.AllocatedBlocks();
     };
     const auto dataHoles=input?input->KnownZeroRanges():std::vector<HfsPlus::SparseRange>{};
-    const auto fileBlocks=input&&dataSize?addStream(*input,dataSize,dataHoles):0;
+    const auto shared=input?input->VerifiedSharedBlocks():std::vector<HfsPlus::SharedBlockRange>{};
+    const auto fileBlocks=[&]{
+        if(!input||!dataSize)return uint64_t(0);
+        const auto blocks=addStream(*input,dataSize,dataHoles);
+        if(shared.empty())return blocks;
+        auto& stream=plan.streams.front();
+        for(const auto& range:shared){
+            Check(!(range.offset%Block)&&range.blocks&&range.offset<=dataSize&&
+                  range.blocks<=(dataSize-range.offset)/Block&&range.physical&&range.partner>=16&&
+                  Range(range.physical,range.blocks,current.blockCount),"Invalid APFS reuse range");
+            stream.existingExtents.push_back({range.offset/Block,range.blocks,range.physical});
+        }
+        std::sort(stream.existingExtents.begin(),stream.existingExtents.end(),
+                  [](const auto& a,const auto& b){return a.block<b.block;});
+        return stream.AllocatedBlocks();
+    }();
     const auto* resourceEdit=std::get_if<CatalogResourceFork>(&request);
     auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
     std::optional<ResourceWrite> resource;
@@ -2877,6 +2904,7 @@ CatalogWritePlan PrepareCatalogMutation(
                                             resource&&resource->size;
     const auto resourceHoles=resourceInput?resourceInput->KnownZeroRanges():std::vector<HfsPlus::SparseRange>{};
     const bool hasSparseInput=!dataHoles.empty()||!resourceHoles.empty();
+    const bool restoresSharing=!shared.empty();
     const bool streamedResource=resource&&(resource->size>=EmbeddedAttributeLimit||streamCompressedFileResource||!resourceHoles.empty());
     const auto resourceBlocks=streamedResource?addStream(*resourceInput,resource->size,resourceHoles):0;
     if(streamedResource)resource->allocatedBytes=resourceBlocks*Block;
@@ -2903,12 +2931,27 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
     const bool historical=Le64(volume.data()+216)!=0;
+    Check(!restoresSharing||(externalCreate&&!historical&&!current.writeCipher),
+          "APFS shared range restoration requires an unencrypted volume without snapshots");
     if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)
         CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     else CheckNativeVolume(volume);
     auto [siblings,volumeMap,existing,extentTree,snapshot,protectedRuns]=ReadWriteAllocationState(
         source,current,containerMap,oid,volume);
-    const bool liveClones=!historical&&!current.writeCipher&&(clone||std::any_of(existing.records.begin(),existing.records.end(),
+    for(const auto& run:shared){
+        uint64_t at=run.physical;
+        const auto end=at+run.blocks;
+        auto next=std::upper_bound(extentTree.records.begin(),extentTree.records.end(),at,
+            [](uint64_t block,const auto& record){return block<(Le64(record.key.data())&IdMask);});
+        Check(next!=extentTree.records.begin(),"APFS reuse range does not belong to this volume");
+        for(--next;at<end&&next!=extentTree.records.end();++next){
+            const auto start=Le64(next->key.data())&IdMask,length=Le64(next->value.data())&IdMask;
+            if(start>at||start+length<=at)break;
+            at=(std::min)(end,start+length);
+        }
+        Check(at==end,"APFS reuse range does not belong to this volume");
+    }
+    const bool liveClones=!historical&&!current.writeCipher&&(clone||restoresSharing||std::any_of(existing.records.begin(),existing.records.end(),
         [](const auto& record){
             constexpr uint64_t cloneFlags=0x10|0x400;
             return record.key.size()==8&&Le64(record.key.data())>>60==3&&record.value.size()>=56&&
@@ -3034,7 +3077,7 @@ CatalogWritePlan PrepareCatalogMutation(
                     if(create->replacedAlias||linked){if(kind!=CatalogKind::RegularFile)return false;}
                     else if(kind!=CatalogKind::RegularFile&&kind!=CatalogKind::SymbolicLink&&!IsSpecialKind(kind))return false;
                 }else if(kind!=victimKind&&(linked||create->replacedAlias||
-                         (!IsSpecialKind(kind)&&!(hasSparseInput&&kind==CatalogKind::RegularFile))))return false;
+                         (!IsSpecialKind(kind)&&!((hasSparseInput||restoresSharing)&&kind==CatalogKind::RegularFile))))return false;
                 if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
                     return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
@@ -3088,7 +3131,7 @@ CatalogWritePlan PrepareCatalogMutation(
         }
         SetPosixMetadata(inode.value,create->posix);
         if(create->locked)Set(inode.value,68,Le32(inode.value.data()+68)|CopiedProtectionFlags(create->posix),4);
-        if(clone){
+        if(clone||restoresSharing){
             constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;
             Set(inode.value,48,Le64(inode.value.data()+48)|wasCloned|wasEverCloned,8);
         }
@@ -3227,6 +3270,28 @@ CatalogWritePlan PrepareCatalogMutation(
             files.push_back({Le64(extent.value.data()+8),Le64(extent.key.data())&IdMask,
                              Le64(extent.value.data())&IdMask});
     }
+    if(restoresSharing){
+        std::map<uint64_t,uint64_t> partnerStreams;
+        for(const auto& run:shared)partnerStreams.emplace(run.partner,0);
+        for(auto& record:catalog){
+            if(record.key.size()!=8||Le64(record.key.data())>>60!=3)continue;
+            const auto found=partnerStreams.find(Le64(record.key.data())&IdMask);
+            if(found==partnerStreams.end())continue;
+            Check(record.value.size()>=92&&(Le16(record.value.data()+80)&0170000)==0100000,
+                  "Invalid APFS reuse partner inode");
+            found->second=Le64(record.value.data()+8);
+            Set(record.value,48,Le64(record.value.data()+48)|0x400,8); // INODE_WAS_EVER_CLONED
+        }
+        for(const auto& run:shared){
+            const auto stream=partnerStreams.at(run.partner);
+            Check(stream&&std::any_of(catalog.begin(),catalog.end(),[&](const auto& record){
+                if(record.key.size()!=16||record.value.size()!=24||
+                   Le64(record.key.data())!=((uint64_t(8)<<60)|stream))return false;
+                const auto start=Le64(record.value.data()+8),blocks=Le64(record.value.data())/Block;
+                return start&&run.physical>=start&&Range(run.physical-start,run.blocks,blocks);
+            }),"APFS reuse range is no longer covered by its partner");
+        }
+    }
     if(!reconcileReferences)ValidateExtentReferences(extentTree,files);
     if(!retiredStreams.empty()){
         catalog.erase(std::remove_if(catalog.begin(),catalog.end(),[&](const auto& record){
@@ -3239,7 +3304,7 @@ CatalogWritePlan PrepareCatalogMutation(
     std::vector<OwnedRecord> snapshotUpdates;
     bool extentReferencesChanged=false;
     if(reconcileReferences){
-        const auto counts=CatalogReferenceCounts(catalog);
+        const auto counts=CatalogReferenceCounts(catalog,shared);
         for(const auto& prior:snapshot.historicalData){
             const auto start=Le64(prior.key.data())&IdMask,blocks=Le64(prior.value.data())&IdMask;
             const auto before=Le32(prior.value.data()+16),after=CatalogReferences(counts,start,blocks);
@@ -3257,7 +3322,7 @@ CatalogWritePlan PrepareCatalogMutation(
             if(!historical){
                 auto spans=SplitExtentReferences(counts,start,blocks);
                 for(const auto& span:spans)
-                    Check(span.references<=before||clone,"APFS extent references increased");
+                    Check(span.references<=before||clone||restoresSharing,"APFS extent references increased");
                 if(spans.size()==1&&spans.front().references==before)continue;
                 extentReferencesChanged=true;
                 if(spans.size()==1&&!spans.front().references)reconciledRetired.insert(start);

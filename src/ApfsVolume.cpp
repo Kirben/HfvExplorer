@@ -1498,10 +1498,13 @@ public:
         const unsigned fork;
         const MacBrowser::Reader& read;
         const std::vector<SparseRange> holes;
+        std::vector<SharedBlockRange> reused;
     public:
         ForkInput(uint64_t length,unsigned selector,const MacBrowser::Reader& reader,std::vector<SparseRange> sparse={}):
             size(length),fork(selector),read(reader),holes(std::move(sparse)){}
         std::vector<SparseRange> KnownZeroRanges()const override{return holes;}
+        std::vector<SharedBlockRange> VerifiedSharedBlocks()const override{return reused;}
+        void Share(std::vector<SharedBlockRange> ranges){reused=std::move(ranges);}
         uint64_t Size()const override{return size;}
         bool Writable()const override{return false;}
         void Read(uint64_t at,void* bytes,size_t length)override{
@@ -1572,8 +1575,51 @@ public:
         ForkInput resource(compressionResource?encoded->ResourceSize():entry.forks[1].size,1,payload,std::move(sparse[1]));
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
+            const auto mount=At(parent).mount;
             Entry existing;
-            if(FindChild(parent,entry.name,existing)){
+            const bool found=FindChild(parent,entry.name,existing);
+            std::vector<SharedBlockRange> shared;
+            const bool hasSnapshots=std::any_of(mounts.begin(),mounts.end(),[&](const auto& view){
+                return view.oid==mounts[mount].oid&&view.snapshotCreated.has_value();
+            });
+            if(allowPrompt&&!compression&&!special&&!mounts[mount].cipher&&!hasSnapshots&&
+               entry.attributes.count(MacBrowser::ApfsCloneLayoutAttribute)){
+                ListDirectory(parent);
+                for(const auto& [row,candidate]:entries){
+                    if(candidate.mount!=mount||(found&&candidate.oid==At(existing.id).oid)||
+                       !candidate.attributes.count(MacBrowser::ApfsCloneLayoutAttribute))continue;
+                    auto partner=candidate.entry;
+                    const auto& marker=candidate.attributes.at(MacBrowser::ApfsCloneLayoutAttribute);
+                    if(marker.stream)
+                        partner.attributes.emplace(MacBrowser::ApfsCloneLayoutAttribute,
+                            AttributeData::Snapshot(marker.size,[&](uint64_t at,void* bytes,size_t size){
+                                ReadAttribute(mount,marker,at,bytes,size);
+                            },true));
+                    else partner.attributes.emplace(MacBrowser::ApfsCloneLayoutAttribute,marker.embedded);
+                    const auto spans=MacBrowser::MatchApfsCloneRanges(entry,reader,partner,
+                        [&](unsigned fork,uint64_t at,void* output,size_t size){Read(row,fork,at,output,size);},job);
+                    if(spans.empty())continue;
+                    const auto holes=data.KnownZeroRanges();
+                    for(const auto& span:spans){
+                        if(std::any_of(holes.begin(),holes.end(),[&](const auto& hole){
+                            return span.offset<hole.offset+hole.length&&hole.offset<span.offset+span.length;
+                        }))continue;
+                        for(const auto& extent:StreamExtents(mount,candidate.stream)){
+                            if(!extent.block)continue;
+                            const auto begin=(std::max)(span.partnerOffset,extent.offset);
+                            const auto end=(std::min)(span.partnerOffset+span.length,extent.offset+extent.length);
+                            if(begin>=end)continue;
+                            constexpr auto block=WriterDisk::Block;
+                            shared.push_back({span.offset+(begin-span.partnerOffset),
+                                              extent.block+(begin-extent.offset)/block,(end-begin)/block,candidate.oid});
+                        }
+                    }
+                    if(!shared.empty())break;
+                }
+            }
+            const bool restoresSharing=!shared.empty();
+            data.Share(std::move(shared));
+            if(found){
                 Check(replace&&!existing.directory&&!existing.protectedFile&&
                       (existing.symbolicLink||existing.readError.empty()),
                       "The APFS destination already exists or cannot be replaced");
@@ -1587,7 +1633,7 @@ public:
                     Check(((!existing.hardLink&&!sibling)||(special&&!existingSpecial&&replaceAlias&&sibling))&&
                           (!existingSpecial||(!existing.forks[0].size&&!existing.forks[1].size)),
                           "The APFS special file destination changed after overwrite approval");
-                if(existing.symbolicLink||replaceAlias||special||existingSpecial||restoreSparse){
+                if(existing.symbolicLink||replaceAlias||special||existingSpecial||restoreSparse||restoresSharing){
                     Check(!replaceAlias||sibling,"The APFS hard-link destination has no sibling ID");
                     const auto& name=replaceAlias?existing.name:entry.name;
                     CommitMutation(parent,existing.id,job,[&](auto& job){
@@ -1595,7 +1641,7 @@ public:
                                                  &entry.finder,entry.protectedFile,attributes,&resource,compression,
                                                  true,oid,entry.posix,replaceAlias?sibling:0);
                     });
-                    if(restoreSparse)limitedEdits=true;
+                    if(restoreSparse||restoresSharing)limitedEdits=true;
                     Entry replacement;
                     if(FindChild(parent,entry.name,replacement))return replacement.id;
                     throw Error("APFS replacement was committed but could not be found after reopening");
@@ -1607,9 +1653,9 @@ public:
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits||restoreSparse,0,entry.posix);
+                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits||restoreSparse||restoresSharing,0,entry.posix);
             });
-            if(restoreSparse)limitedEdits=true;
+            if(restoreSparse||restoresSharing)limitedEdits=true;
             if(FindChild(parent,entry.name,existing))return existing.id;
             throw Error("APFS file was committed but could not be found after reopening");
         },true);
