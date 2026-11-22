@@ -1674,8 +1674,9 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         method=type==3||type==4?CompressionMode::Zlib:type==7||type==8?CompressionMode::Lzvn:type==11||type==12?CompressionMode::Lzfse:type==13||type==14?CompressionMode::Lzbitmap:type==1&&dataSize<=3786?CompressionMode::StoredInline:CompressionMode::Stored;
     }
     if(method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
-        encoded.reset(new EncodedCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);},method));
-        if(resourceSize&&encoded->UsesResource()){
+        encoded.reset(new EncodedCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);},method,
+            resourceSize?EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource));
+        if(encoded->Attribute().empty()){
             Check(compression==CompressionMode::Preserve||compression==CompressionMode::CopyCompressed,
                   "Compression needs the resource fork; this file has a genuine resource fork. Decompress it or retain it uncompressed.");
             encoded.reset(); // A transfer must preserve both incoming forks.

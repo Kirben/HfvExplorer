@@ -10,6 +10,7 @@
 #include "OpticalVolume.h"
 #include "CueImage.h"
 #include "HfsPlusDisk.h"
+#include "HfsPlusCompression.h"
 #include "DiskImageOpen.h"
 #include "ClassicHfsRecovery.h"
 #include "DiskSlice.h"
@@ -411,6 +412,19 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(track)copies.emplace(key,dst.Stat(published));
         job.progress(progress);
         return true;
+    }
+    if(hfsPlus&&std::string_view(src.Kind())=="APFS"&&entry.compressed&&entry.forks[1].size){
+        // Check before handing the write to a persistent HFS worker. Both
+        // encoders see the same logical fork under the transfer's read lease.
+        const HfsPlus::EncodedCompression inlineEncoding(entry.forks[0].size,
+            [&](uint64_t offset,void* bytes,size_t count){
+                if(plan.reader)plan.reader(0,offset,bytes,count);
+                else src.Read(entry.id,0,offset,bytes,count);
+            },HfsPlus::Volume::CompressionMode::Zlib,HfsPlus::EncodedCompression::Layout::InlineOnly);
+        if(inlineEncoding.Attribute().empty()&&
+           job.requestChoice(Storage::CopyPrompt::Uncompressed,progress.path)!=Storage::ConflictChoice::Replace)
+            throw Storage::Cancelled();
+        if(job.cancelled())throw Storage::Cancelled();
     }
     if(route==ForkSource::MountedWorker)
         published=VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);

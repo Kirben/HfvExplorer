@@ -6,6 +6,7 @@
 #include "ApfsContainer.h"
 #include "ApfsVolume.h"
 #include "HfsPlusDisk.h"
+#include "HfsPlusCompression.h"
 #include "VolumeSession.h"
 #include "VolumeSessionProtocol.h"
 #include "StorageLocation.h"
@@ -2259,6 +2260,95 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
             verify(*source,1,true);
         }
     }
+    class ForkFixture final : public HfsPlus::Source {
+        const Bytes& bytes_;
+    public:
+        explicit ForkFixture(const Bytes& bytes):bytes_(bytes){}
+        uint64_t Size()const override{return bytes_.size();}
+        bool Writable()const override{return false;}
+        void Read(uint64_t at,void* output,size_t count)override{
+            Check(at<=bytes_.size()&&count<=bytes_.size()-at,"Fixture fork read out of range");
+            memcpy(output,bytes_.data()+at,count);
+        }
+        void Write(uint64_t,const void*,size_t)override{throw HfsPlus::Error("Read-only fixture fork");}
+        void Flush()override{}
+    };
+    // LZFSE can match the repeated bytes across a distance beyond zlib's
+    // window while keeping the encoded record small enough for an APFS leaf.
+    const Bytes seed(data[1].begin(),data[1].begin()+2500);
+    data[1].assign(62000,0);
+    std::copy(seed.begin(),seed.end(),data[1].begin());
+    std::copy(seed.begin(),seed.end(),data[1].begin()+40000);
+    const auto apfsPath=Wide(root+"\\reverse-compressed-source.img");
+    {
+        auto disk=HfsPlus::CreateImage(apfsPath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"APFS dual forks",true,job);
+        const Bytes empty;
+        ForkFixture noData(empty);
+        for(size_t i=0;i<names.size();++i){
+            ForkFixture fork(resource[i]);
+            HfsPlus::EncodedCompression encoded(data[i].size(),[&](uint64_t at,void* out,size_t count){
+                memcpy(out,data[i].data()+at,count);
+            },i?Mode::Lzfse:Mode::Zlib);
+            const auto container=Apfs::Probe(*disk);
+            Check(container&&!encoded.UsesResource(),"Cannot seed inline APFS compression fixture");
+            Apfs::CreateCatalogFile(*disk,*container,2,names[i],noData,job,{},nullptr,false,
+                                    &attributes,&fork,&encoded.Attribute());
+        }
+    }
+    auto apfs=OpenBrowserImage(apfsPath);
+    Check(bool(apfs),"Cannot reopen compressed APFS source");
+    const std::vector<Location> reverseInputs{Native(apfs,verify(*apfs,0,true)),
+                                               Native(apfs,verify(*apfs,1,true))};
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto path=Wide(root+"\\reverse-compressed-"+std::to_string(index++)+".dsk");
+        auto target=Image(path,kind);
+        Check(bool(target),"Cannot open reverse compression destination");
+        Put(*target,2,names[1],6301,59);
+        const auto transfer=[&](const std::vector<Location>& inputs,Storage::ConflictChoice answer){
+            auto operation=Submit(OrdinaryCopy{inputs,Native(target)});
+            auto job=operation.Job();
+            const auto start=GetTickCount();
+            uint64_t last=0;
+            unsigned fallbacks=0;
+            while(!job->done()){
+                if(GetTickCount()-start>30000){
+                    job->cancel();
+                    throw HfsPlus::Error("Reverse compressed copy timed out");
+                }
+                const auto prompt=job->conflictState();
+                if(!prompt.path.empty()&&prompt.id!=last){
+                    last=prompt.id;
+                    if(prompt.kind==Storage::CopyPrompt::Uncompressed){
+                        ++fallbacks;
+                        job->resolve(last,answer);
+                    }else job->resolve(last,Storage::ConflictChoice::ReplaceAll);
+                }
+                Sleep(5);
+            }
+            Check(fallbacks==1,"Reverse copy must request fallback exactly once");
+            return job->result();
+        };
+        auto result=transfer({reverseInputs[1]},Storage::ConflictChoice::Cancel);
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              "Declining reverse fallback did not cancel before publication");
+        target.reset();
+        target=OpenBrowserImage(path);
+        Entry original;
+        Check(target&&target->FindChild(2,names[1],original),"Declining reverse fallback lost the destination");
+        Verify(*target,original.id,6301,59);
+        result=transfer(reverseInputs,Storage::ConflictChoice::Replace);
+        Check(!result.code,result.message.c_str());
+        target.reset();
+        target=OpenBrowserImage(path);
+        Check(bool(target),"Cannot reopen HFS destination");
+        verify(*target,0,true);
+        verify(*target,1,false);
+    }
+    verify(*apfs,0,true);
+    verify(*apfs,1,true);
+    fprintf(report,"PASS: APFS inline compression and genuine resource forks copy to HFS+ and both HFSX variants; approved fallback preserves both forks and decline preserves the destination.\n");
     fprintf(report,"PASS: compressed HFS+ and both HFSX variants preserve both forks and attributes on APFS after reopen; inline compression stays enabled and uncompressed overwrite requires separate approval.\n");
     if(fixture)fprintf(report,"PASS: dual-fork compressed and fallback transfers also work on disposable macOS APFS fixtures.\n");
 }
