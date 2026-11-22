@@ -37,6 +37,7 @@ void JobController::CollectResult()
     result_.partial = result_.partial || previous.partial;
     result_.timestampPrecisionReduced |= previous.timestampPrecisionReduced;
     result_.sparseHolesAllocated |= previous.sparseHolesAllocated;
+    result_.apfsCloneCopiedIndependently |= previous.apfsCloneCopiedIndependently;
     if (operation_) {
         snapshot_ = operation_->Snapshot();
         complete_ = complete_ && snapshot_.complete;

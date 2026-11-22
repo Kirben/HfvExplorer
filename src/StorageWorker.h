@@ -28,6 +28,7 @@ struct Progress {
  bool scanning=true,fileCopy=false,byteTransfer=false,utf8=false;
  bool timestampPrecisionReduced=false;
  bool sparseHolesAllocated=false;
+ bool apfsCloneCopiedIndependently=false;
 };
 struct Result {
  int code=0;
@@ -40,6 +41,7 @@ struct Result {
  bool partial=false;
  bool timestampPrecisionReduced=false;
  bool sparseHolesAllocated=false;
+ bool apfsCloneCopiedIndependently=false;
 
  void Finalize(const OutcomeEvidence& evidence, unsigned items, unsigned skippedItems) {
   if(items>completed)completed=items;
@@ -88,6 +90,7 @@ public:
    result.Finalize(evidence,0,0);
    result.timestampPrecisionReduced|=progress_.timestampPrecisionReduced;
    result.sparseHolesAllocated|=progress_.sparseHolesAllocated;
+   result.apfsCloneCopiedIndependently|=progress_.apfsCloneCopiedIndependently;
    result_=std::move(result);
    done_=true;
    notify=std::move(completion_);

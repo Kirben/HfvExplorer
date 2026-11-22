@@ -518,6 +518,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     }
     noteDatePrecision();
     progress.sparseHolesAllocated|=materializesHoles;
+    progress.apfsCloneCopiedIndependently|=hfsPlus&&!plan.reader&&entry.apfsCloneMarked;
     const auto remaining=progress.fileTotal-progress.fileBytes;
     progress.fileBytes+=remaining;
     progress.bytes+=remaining;

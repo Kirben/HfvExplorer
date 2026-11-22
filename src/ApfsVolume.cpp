@@ -283,6 +283,8 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         auto& entry=out.entry;
         entry.created=Date(p+16);entry.modified=Date(p+24);entry.datesValid=true;
         entry.additionalDates={Date(p+40),Date(p+32)};
+        constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;
+        entry.apfsCloneMarked=(Le64(p+48)&(wasCloned|wasEverCloned))!=0;
         for(unsigned offset:{16,24,32,40})
             entry.fractionalDates|=int64_t(Le64(p+offset))%NanosecondsPerSecond!=0;
         const auto fullMode=Le16(p+80);

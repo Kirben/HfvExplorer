@@ -2910,6 +2910,38 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
             Check(!clones[0].empty()&&clones[0]!=clones[1],"The APFS clone fixture must contain distinct data");
             historicalDeleted=bytes(*volume,locate(*volume,snapshot.id,u"vanished"));
 
+            using Format=HfsPlus::Volume::FormatKind;
+            for(const auto kind:{Format::HfsPlus,Format::HfsXCaseSensitive}){
+                const auto hfsPath=path+(kind==Format::HfsPlus?L"-clones.hfs":L"-clones.hfsx");
+                {
+                    auto image=CreateFormatOutput(hfsPath.c_str(),16*1024*1024);
+                    HfsPlus::Volume::Format(*image,u"Clone transfer",true,kind);
+                    image->Keep();
+                }
+                auto target=MacBrowser::OpenImage(hfsPath);
+                Check(bool(target),"Cannot mount clone transfer target");
+                const auto before=target->FreeBytes();
+                bool noticed=false;
+                for(const auto file:{u"binary.bin",u"clone.bin"}){
+                    const auto entry=locate(*volume,live.id,file);
+                    const auto wasMarked=volume->Stat(entry.id).apfsCloneMarked;
+                    Storage::Job copy;
+                    Check(MacBrowser::Copy(*volume,entry.id,*target,2,copy),"APFS clone copy failed");
+                    Check(copy.progress().apfsCloneCopiedIndependently==wasMarked,"Incorrect APFS clone allocation notice");
+                    noticed|=wasMarked;
+                }
+                target.reset();
+                target=MacBrowser::OpenImage(hfsPath);
+                Check(target&&noticed&&target->FreeBytes()<=before&&
+                      before-target->FreeBytes()>=clones[0].size()+clones[1].size(),
+                      "APFS clone copies did not reserve independent space");
+                MacBrowser::Entry first,second;
+                Check(target->FindChild(2,u"binary.bin",first)&&target->FindChild(2,u"clone.bin",second)&&
+                      first.resolvedId!=second.resolvedId&&!first.hardLink&&!second.hardLink&&
+                      bytes(*target,first)==clones[0]&&bytes(*target,second)==clones[1],
+                      "Reopened HFS clone copies share an inode or have changed bytes");
+            }
+            fprintf(report,"PASS: macOS APFS clone copies allocate independent space on HFS+ and HFSX and report the allocation change.\n");
         }
         const auto original=locate(*volume,live.id,name);
         const auto originalBytes=bytes(*volume,original);
