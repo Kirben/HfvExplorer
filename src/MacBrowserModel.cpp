@@ -521,7 +521,7 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=EncodeMfsName(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -652,7 +652,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         // child creates/renames can change its dates even on Skip/cancellation.
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,entry,expected,false);noteDatePrecision();job.progress(progress);}}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
-        if(failure)std::rethrow_exception(failure);if(complete&&track)copies.emplace(key,dst.Stat(id));return complete;
+        if(failure)std::rethrow_exception(failure);if(complete&&track&&(!plan.restoredDirectoryLink||!found))copies.emplace(key,dst.Stat(id));return complete;
     }
 
     Check(!found || !existing.directory, "A folder blocks the destination file");
@@ -1107,15 +1107,100 @@ void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
         Check(p!=id&&visited.insert(p).second,"Cannot copy a folder into itself or its descendants");p=dst.Stat(p).parent;}
         Check(src.Stat(id).parent!=parent,"Source and destination are the same folder");}
 }
-void MaterializeDirectoryLinks(Planned& plan,std::string& first)
+constexpr auto DirectoryLinkAttribute=u"org.hfvexplorer.hfs-directory-link";
+using DirectoryLinkGroups=std::map<std::pair<std::string,uint32_t>,GUID>;
+
+void MaterializeDirectoryLinks(Planned& plan,const std::string& volumeKey,
+                               DirectoryLinkGroups& groups,std::string& first)
 {
-    if(plan.entry.directory&&plan.entry.hardLink){
-        if(first.empty())first=BrowserPresentation::Utf8(plan.entry.name);
-        plan.entry.hardLink=false;
-        plan.entry.linkCount=1;
+    auto& entry=plan.entry;
+    if(entry.directory&&entry.hardLink){
+        if(first.empty())first=BrowserPresentation::Utf8(entry.name);
+        if(entry.resolvedId&&entry.linkCount>1&&!entry.attributes.count(DirectoryLinkAttribute)){
+            const auto group=groups.try_emplace({volumeKey,entry.resolvedId});
+            if(group.second)Check(SUCCEEDED(CoCreateGuid(&group.first->second)),
+                                  "Cannot allocate a directory hard-link group identifier");
+            const auto* guid=reinterpret_cast<const uint8_t*>(&group.first->second);
+            HfsPlus::Bytes marker{'H','F','V','D',1,0,0,0};
+            marker.insert(marker.end(),guid,guid+sizeof(GUID));
+            entry.attributes.emplace(DirectoryLinkAttribute,std::move(marker));
+        }
+        entry.hardLink=false;
+        entry.linkCount=1;
     }
-    for(auto& child:plan.children)MaterializeDirectoryLinks(child,first);
+    for(auto& child:plan.children)MaterializeDirectoryLinks(child,volumeKey,groups,first);
 }
+bool EquivalentDirectoryCopies(Volume& source,const Planned& lhs,const Planned& rhs,
+                               Storage::Job& job,bool groupRoot)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    const auto& a=lhs.entry;
+    const auto& b=rhs.entry;
+    if((!groupRoot&&a.name!=b.name)||a.directory!=b.directory||a.symbolicLink!=b.symbolicLink||
+       a.protectedFile!=b.protectedFile||a.finder!=b.finder||!(a.posix==b.posix)||
+       a.datesValid!=b.datesValid||a.apfsTimestamps!=b.apfsTimestamps||a.created!=b.created||
+       a.modified!=b.modified||a.additionalDates.changed!=b.additionalDates.changed||
+       a.additionalDates.accessed!=b.additionalDates.accessed||a.compressed!=b.compressed||
+       a.inlineCompression!=b.inlineCompression||a.resourceCompressionHeader!=b.resourceCompressionHeader||
+       a.compressionResourceSize!=b.compressionResourceSize||a.attributes!=b.attributes||
+       lhs.linkTarget!=rhs.linkTarget||
+       (!groupRoot&&(a.hardLink||b.hardLink)&&a.resolvedId!=b.resolvedId))return false;
+    if(a.directory){
+        if(lhs.children.size()!=rhs.children.size())return false;
+        for(size_t i=0;i<lhs.children.size();++i)
+            if(!EquivalentDirectoryCopies(source,lhs.children[i],rhs.children[i],job,false))return false;
+        return true;
+    }
+    if(lhs.linkTarget||(a.posix&&a.posix->IsSpecial()))return true;
+    if(a.resolvedId!=b.resolvedId&&(a.apfsCloneMarked||b.apfsCloneMarked))return false;
+    if(source.SparseRanges(a.id)!=source.SparseRanges(b.id))return false;
+    const auto readMatches=[&](uint64_t size,const auto& read){
+        if(!size)return true;
+        HfsPlus::Bytes first(64*1024),second(first.size());
+        for(uint64_t offset=0;offset<size;){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto count=size_t(std::min<uint64_t>(first.size(),size-offset));
+            read(a.id,offset,first.data(),count);
+            read(b.id,offset,second.data(),count);
+            if(memcmp(first.data(),second.data(),count))return false;
+            offset+=count;
+        }
+        return true;
+    };
+    for(unsigned fork=0;fork<2;++fork){
+        if(a.forks[fork].size!=b.forks[fork].size||
+           !readMatches(a.forks[fork].size,[&](auto id,auto offset,auto buffer,auto count){
+               source.Read(id,fork,offset,buffer,count);
+           }))return false;
+    }
+    return readMatches(a.compressionResourceSize,[&](auto id,auto offset,auto buffer,auto count){
+        source.ReadCompressionResource(id,offset,buffer,count);
+    });
+}
+
+using SavedDirectoryLinks=std::map<std::pair<std::string,HfsPlus::Bytes>,Planned*>;
+
+void RestoreDirectoryLinks(Volume& source,Planned& plan,SavedDirectoryLinks& groups,Storage::Job& job)
+{
+    auto& entry=plan.entry;
+    const auto marker=entry.attributes.find(DirectoryLinkAttribute);
+    constexpr std::array<uint8_t,8> header{'H','F','V','D',1,0,0,0};
+    if(entry.directory&&marker!=entry.attributes.end()&&marker->second.size()==header.size()+sizeof(GUID)){
+        const HfsPlus::Bytes value(marker->second);
+        if(std::equal(header.begin(),header.end(),value.begin())){
+            const auto group=groups.try_emplace({source.ResourceKey(),value},&plan);
+            auto& first=*group.first->second;
+            if(!group.second&&EquivalentDirectoryCopies(source,first,plan,job,true)){
+                first.restoredDirectoryLink=plan.restoredDirectoryLink=true;
+                first.entry.hardLink=entry.hardLink=true;
+                first.entry.linkCount=entry.linkCount=2;
+                entry.resolvedId=first.entry.resolvedId;
+            }
+        }
+    }
+    for(auto& child:plan.children)RestoreDirectoryLinks(source,child,groups,job);
+}
+
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
  for(const auto& plan:plans){
@@ -1218,8 +1303,17 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         }
     }
     std::string firstLinkedFolder;
-    if(std::string_view(dst.Kind())=="APFS")
-        for(auto& plan:plans)MaterializeDirectoryLinks(plan,firstLinkedFolder);
+    if(std::string_view(dst.Kind())=="APFS"){
+        DirectoryLinkGroups groups;
+        for(size_t i=0;i<plans.size();++i)
+            MaterializeDirectoryLinks(plans[i],sources[i].first->ResourceKey(),groups,firstLinkedFolder);
+    }
+    if(dst.HfsPlusDateRange()&&!adapter){
+        SavedDirectoryLinks saved;
+        for(size_t i=0;i<plans.size();++i)
+            if(std::string_view(sources[i].first->Kind())=="APFS")
+                RestoreDirectoryLinks(*sources[i].first,plans[i],saved,job);
+    }
     Check(!moving||firstLinkedFolder.empty(),
           "APFS cannot preserve directory hard links during Cut/Paste. Use Copy to keep the linked source folders.");
     ValidatePlans(dst,plans,parent,true);

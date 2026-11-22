@@ -2399,11 +2399,48 @@ void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)
             Check(target->FindChild(id,u"Child",child),"Converted folder lost a file");
             Verify(*target,child.id,7001,17);
         }
+        for(const bool changed:{false,true}){
+            if(changed)Put(*target,second.id,u"Added after copy",257,72);
+            for(const bool hfsx:{false,true}){
+                const auto output=path+(changed?L"-diverged":L"-returned")+(hfsx?L".hfsx":L".hfs");
+                auto returned=Image(output,hfsx?HfsPlus::Volume::FormatKind::HfsXCaseSensitive:
+                                                 HfsPlus::Volume::FormatKind::HfsPlus);
+                Storage::Job job;
+                Completion done;
+                const auto result=ExecuteInWorker(OrdinaryCopy{{Native(target,folder.id)},Native(returned)},job,done);
+                Check(!result.code&&done.complete,result.message.c_str());
+                returned.reset();
+                returned=OpenBrowserImage(output);
+                Entry treeCopy,a,b,extra;
+                Check(returned&&returned->FindChild(2,u"Tree",treeCopy)&&
+                      returned->FindChild(treeCopy.id,u"Original folder",a)&&
+                      returned->FindChild(treeCopy.id,u"Alias folder",b),
+                      "Missing directory names after returning to HFS Plus");
+                if(!changed&&a.resolvedId!=b.resolvedId){
+                    const auto m=target->Stat(first.id),n=target->Stat(second.id);
+                    fprintf(report,"Directory diagnostic equal: times=%d finder=%d posix=%d attrs=%d; attrs=%zu/%zu\n",
+                            int(m.apfsTimestamps==n.apfsTimestamps),int(m.finder==n.finder),int(m.posix==n.posix),
+                            int(target->GetAttributes(m.id)==target->GetAttributes(n.id)),
+                            target->GetAttributes(m.id).size(),target->GetAttributes(n.id).size());
+                    if(m.apfsTimestamps&&n.apfsTimestamps)for(unsigned i=0;i<4;++i)
+                        fprintf(report,"Timestamp %u %llu / %llu\n",i,(*m.apfsTimestamps)[i],(*n.apfsTimestamps)[i]);
+                }
+                Check((a.resolvedId==b.resolvedId)==!changed&&a.hardLink==!changed&&b.hardLink==!changed,
+                      "Returned directory link layout did not reflect whether the copies diverged");
+                for(auto id:{a.id,b.id}){
+                    Check(returned->FindChild(id,u"Child",child),"Returned folder lost a file");
+                    Verify(*returned,child.id,7001,17);
+                }
+                Check(!returned->FindChild(a.id,u"Added after copy",extra)&&
+                      returned->FindChild(b.id,u"Added after copy",extra)==changed,
+                      "Restoration discarded a change to one independent copy");
+            }
+        }
         Check(source->FindChild(tree,u"Original folder",first)&&
               source->FindChild(tree,u"Alias folder",second)&&first.hardLink&&first.resolvedId==second.resolvedId,
               "Source directory hard links changed");
     }
-    fprintf(report,"PASS: HFSX directory hard-link copies to both APFS writers require approval, preserve both folder trees and forks after reopening, and refuse Cut/Paste before publication.\n");
+    fprintf(report,"PASS: HFSX directory hard-link copies to both APFS writers require approval, preserve both folder trees and forks after reopening, and refuse Cut/Paste before publication. Verified copies regain directory hard links on HFS+ and HFSX; divergent copies remain independent.\n");
 }
 
 void TestMfsTransferVersions(const std::string& root,FILE* report)

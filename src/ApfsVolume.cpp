@@ -1394,18 +1394,10 @@ public:
             const auto& current=item.entry;
             Check(current.directory&&current.identity==expected.identity&&current.parent==expected.parent&&
                   current.name==expected.name,"The APFS destination folder changed during copying");
+            // Child writes can change on-disk timestamps while the browser
+            // still holds the folder entry from before those writes.
             TimestampEdits changes;
-            if(dates){
-                if(dates->exact&&dates->exact!=current.apfsTimestamps)changes.exact=dates->exact;
-                if(!current.datesValid||current.created!=dates->created)changes.created=dates->created;
-                if(!current.datesValid||current.modified!=dates->modified)changes.modified=dates->modified;
-                if(current.additionalDates.accessed!=dates->additionalDates.accessed)
-                    changes.additionalDates.accessed=dates->additionalDates.accessed;
-                if(current.additionalDates.changed!=dates->additionalDates.changed)
-                    changes.additionalDates.changed=dates->additionalDates.changed;
-            }
-            if(!changes.created&&!changes.modified&&!changes.additionalDates.accessed&&
-               !changes.additionalDates.changed&&!changes.exact&&!lockAfterCopy)return;
+            if(dates)changes={dates->created,dates->modified,dates->additionalDates,dates->exact};
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             // Restore destination folder dates even if the transfer was cancelled.

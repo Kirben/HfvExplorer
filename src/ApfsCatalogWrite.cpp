@@ -3245,7 +3245,6 @@ CatalogWritePlan PrepareCatalogMutation(
                   "Unlock the APFS file before editing its properties");
             if(properties->locked)
                 Set(value,68,(flags&~UserImmutable)|(*properties->locked?properties->lockFlags:0),4);
-            ApplyTimestampEdits(value,properties->dates);
             if(properties->newName&&(!siblingId||
                (Le64(value.data())==properties->parent&&ExternalInodeName(value)==name))){
                 RenameExternalInode(value,name,replacement);
@@ -3253,6 +3252,7 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
+            ApplyTimestampEdits(value,properties->dates);
             edited=true;
         }
         Check(edited,"APFS Properties target inode was not found");
