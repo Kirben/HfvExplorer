@@ -45,7 +45,7 @@ Command DecodeCommand(Data& packet,bool primaryAttributes,bool secondaryAttribut
 #ifdef HFV_TESTING
     constexpr auto maximum=Command::TestCrashRemoveTree;
 #else
-    constexpr auto maximum=Command::PrepareCopyTransaction;
+    constexpr auto maximum=Command::ReadSymbolicLink;
 #endif
     Check(opcode<=uint64_t(maximum),"Invalid volume session command");
     const auto command=Command(opcode);

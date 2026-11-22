@@ -469,6 +469,7 @@ struct Volume::Impl {
             e.name = String(r.key.data() + 6, r.key.size() - 6);
             e.directory = type == 1;
             const auto mode=U16(r.value.data()+42);
+            e.symbolicLink = !e.directory && (mode & 0170000) == 0120000;
             if((mode&0170000)==(e.directory?0040000:0100000))
                 e.posix=PosixMetadata{U32(r.value.data()+32),U32(r.value.data()+36),
                                       uint16_t(mode&PosixMetadata::ModeMask)};
@@ -655,7 +656,7 @@ struct Volume::Impl {
     }
     int LinkKind(uint32_t id) {
         auto &e = Get(id);
-        if (e.directory)
+        if (e.directory || e.symbolicLink)
             return 0;
         bool file = !memcmp(e.finder.data(), "hlnkhfs+", 8);
         bool folder =
@@ -780,7 +781,7 @@ struct Volume::Impl {
         result.hardLink = target != id;
         result.protectedFile = result.hardLink ? false : visible.protectedFile;try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
         if(result.hardLink){result.linkCount=uint32_t(Links(target).size());try{ValidateLinks(target);}catch(const Error&){result.protectedFile=true;}}
-        if (!result.directory && IsCompressed(target)) {
+        if (!result.directory && !result.symbolicLink && IsCompressed(target)) {
             auto &c = Compressed(target);
             result.compressed = true;
             result.forks[0].size = c.Size();
@@ -1516,6 +1517,22 @@ Entry Volume::Stat(uint32_t id) const {
     Check(p_->usable, "Reopen HFS+ image after error");
     return p_->Presented(id);
 }
+std::optional<Bytes> Volume::SymbolicLinkTarget(uint32_t id) {
+    p_->source.CheckMedia();
+    Check(p_->usable, "Reopen HFS+ image after error");
+    const auto& entry = p_->Get(p_->Resolve(id));
+    if (!entry.symbolicLink)
+        return {};
+    const auto& data = entry.forks[0];
+    Check(!entry.compressed && !entry.forks[1].size && data.size && data.size <= 1024,
+          "Invalid HFS+ symbolic link forks");
+    // The HFS+ data fork contains the path bytes without a terminator.
+    // The shared link transfer expects a NUL-terminated path for APFS.
+    Bytes target(size_t(data.size) + 1, 0);
+    ForkRead(p_->view, data, p_->bs, 0, target.data(), size_t(data.size));
+    Check(!memchr(target.data(), 0, size_t(data.size)), "Invalid HFS+ symbolic link target");
+    return target;
+}
 uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer, size_t n) {
     p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
@@ -1523,6 +1540,7 @@ uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer,
     uint32_t target = p_->Resolve(id);
     auto &e = p_->Get(target);
     Check(!e.directory, "Cannot read a folder fork");
+    Check(!e.symbolicLink, "Use the symbolic link target instead of reading file forks");
     if (p_->IsCompressed(target)) {
         auto &compressed = p_->Compressed(target);
         if (!fork)
@@ -1568,6 +1586,7 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
         Check(overwrite, "HFS+ name already exists");
         existing=p.Content(existing);e = p.Get(existing);
         Check(!e.directory, "Cannot overwrite an HFS+ directory");
+        Check(!e.symbolicLink, "Replacing an HFS+ symbolic link with a regular file is unsupported");
         p.RemovalParent(parent);
         old[0] = e.forks[0];
         old[1] = e.forks[1];

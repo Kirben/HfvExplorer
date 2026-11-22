@@ -69,7 +69,7 @@ struct Entry {
     bool directory = false, protectedFile = false;
     // Stat/List expose logical fork sizes and resolved content, while retaining
     // the visible link's catalog ID, name and parent. Mutations use raw records.
-    bool compressed = false, hardLink = false;
+    bool compressed = false, hardLink = false, symbolicLink = false;
     uint32_t resolvedId = 0, linkCount = 1;
     std::string readError; // List can report a broken item without hiding its siblings.
     Fork forks[2];
@@ -91,6 +91,7 @@ class Volume {
     std::vector<Entry> List(uint32_t parent = 2) const;
     bool FindChild(uint32_t parent, const std::u16string& name, Entry& found) const;
     Entry Stat(uint32_t id) const;
+    std::optional<Bytes> SymbolicLinkTarget(uint32_t id);
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline };

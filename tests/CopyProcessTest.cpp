@@ -627,10 +627,13 @@ int RunCopyReleaseTest(const char *directory) {
 }
 
 namespace {
-// Patch the two catalog records in a small, disposable HFS fixture. The HFS
-// writer does not need a new permission-editing API to generate this input.
-void SetHfsFixtureModes(HfsPlus::Source& disk,
-                        const std::array<std::pair<uint32_t,PosixMetadata>,2>& entries)
+// Patch BSD metadata in the single leaf of a small, disposable HFS fixture.
+struct HfsFixtureMode {
+    uint32_t id;
+    uint32_t uid, gid;
+    uint16_t mode;
+};
+void SetHfsFixtureModes(HfsPlus::Source& disk,const std::vector<HfsFixtureMode>& entries)
 {
     using HfsPlus::Disk::Read;
     using HfsPlus::Disk::U16;
@@ -648,7 +651,7 @@ void SetHfsFixtureModes(HfsPlus::Source& disk,
     Check(nodeSize>=512&&nodeNumber&&offset+nodeSize<=length,"Expected a bounded fixture catalog leaf");
     auto node=Read(disk,base+offset,nodeSize);
     Check(node[8]==0xff&&!U32(node.data()),"Expected a single fixture catalog leaf");
-    std::array<bool,2> found{};
+    size_t found=0;
     for(unsigned i=0;i<U16(node.data()+10);++i){
         Check((i+2)*2<node.size(),"Invalid fixture catalog offsets");
         const auto start=U16(node.data()+node.size()-(i+1)*2);
@@ -660,16 +663,17 @@ void SetHfsFixtureModes(HfsPlus::Source& disk,
         const auto type=U16(record);
         if(type!=1&&type!=2)continue;
         Check(value+44<=end,"Truncated fixture BSD metadata");
-        for(size_t j=0;j<entries.size();++j){
-            if(U32(record+8)!=entries[j].first)continue;
-            const auto& info=entries[j].second;
+        for(const auto& info:entries){
+            if(U32(record+8)!=info.id)continue;
             P32(record+32,info.uid);
             P32(record+36,info.gid);
-            P16(record+42,uint16_t((type==1?0040000:0100000)|info.mode));
-            found[j]=true;
+            P16(record+42,info.mode);
+            if ((info.mode & 0170000) == 0120000) memcpy(record+48,"slnkrhap",8);
+            ++found;
+            break;
         }
     }
-    Check(found[0]&&found[1],"Missing fixture catalog permissions");
+    Check(found==entries.size(),"Missing fixture catalog permissions");
     disk.Write(base+offset,node.data(),node.size());
     disk.Flush();
 }
@@ -695,7 +699,9 @@ void TestHfsToApfsPosix(const std::string& root,FILE* report)
                     memset(out,0x5b,size);
                 });
             }
-            SetHfsFixtureModes(*disk,{{{folder,folderMode},{file,fileMode}}});
+            SetHfsFixtureModes(*disk,{
+                {folder,folderMode.uid,folderMode.gid,uint16_t(0040000|folderMode.mode)},
+                {file,fileMode.uid,fileMode.gid,uint16_t(0100000|fileMode.mode)}});
         }
         const auto external=kind==Kind::HfsXCaseSensitive?_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"):nullptr;
         if(external){
@@ -752,6 +758,93 @@ void TestHfsToApfsPosix(const std::string& root,FILE* report)
     }
     fprintf(report,"PASS: HFS+/HFSX worker copies preserve APFS UID/GID, executable and special mode bits, and nested folder permissions after reopening. Overwrites use source permissions and folder merges retain destination permissions.\n");
 }
+
+void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const std::array<std::pair<std::u16string,std::string>,3> links{{
+        {u"relative","../target"},
+        {u"absolute",u8"/System/Library/\u00e9"},
+        {u"loop","loop"}
+    }};
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive}){
+        const char* format=kind==Kind::HfsPlus?"hfsplus":"hfsx";
+        const auto sourcePath=Wide(root+"\\"+format+"-symlinks.dsk");
+        const auto targetPath=Wide(root+"\\"+format+"-symlinks-apfs.img");
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Link source",true,kind);
+            std::vector<HfsFixtureMode> modes;
+            {
+                HfsPlus::Volume hfs(*disk,true);
+                const auto folder=hfs.MakeDirectory(2,u"Links");
+                hfs.Put(2,u"target",1024,0,[](unsigned,uint64_t,void* out,size_t size){
+                    memset(out,0x37,size);
+                });
+                for(const auto& [name,path]:links){
+                    const auto id=hfs.Put(folder,name,path.size(),0,[&](unsigned,uint64_t at,void* out,size_t size){
+                        memcpy(out,path.data()+at,size);
+                    });
+                    modes.push_back({id,501,80,0120777});
+                }
+                constexpr char badTarget[]={'a',0,'b'};
+                const auto bad=hfs.Put(2,u"invalid",sizeof(badTarget),0,
+                    [&](unsigned,uint64_t at,void* out,size_t size){memcpy(out,badTarget+at,size);});
+                modes.push_back({bad,501,80,0120777});
+            }
+            SetHfsFixtureModes(*disk,modes);
+        }
+        const auto external=kind==Kind::HfsXCaseSensitive?_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"):nullptr;
+        if(external){
+            Check(CopyFileW(external,targetPath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+        }else{
+            auto disk=HfsPlus::CreateImage(targetPath.c_str(),32*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*disk,u"Link destination",true,job);
+        }
+        const auto verifyLinks=[&](MacBrowser::Volume& volume,const Entry& folder){
+            const auto children=volume.List(folder.id);
+            Check(children.size()==links.size(),"Unexpected files in copied link folder");
+            for(const auto& [name,path]:links){
+                Entry link;
+                HfsPlus::Bytes expected(path.begin(),path.end());expected.push_back(0);
+                Check(volume.FindChild(folder.id,name,link)&&link.symbolicLink&&!link.directory&&
+                      !link.forks[0].size&&!link.forks[1].size&&volume.SymbolicLinkTarget(link.id)==expected,
+                      "Symbolic link type or target bytes changed");
+            }
+        };
+        {
+            auto source=OpenBrowserImage(sourcePath);
+            auto target=OpenBrowserImage(targetPath);
+            Entry folder;
+            Check(source&&VolumeSession::VolumeSessionPidForTest(source)&&target&&
+                  source->FindChild(2,u"Links",folder),"Unable to mount symlink copy fixtures");
+            verifyLinks(*source,folder);
+            Entry regular;
+            Check(source->FindChild(2,u"target",regular)&&!source->SymbolicLinkTarget(regular.id),
+                  "An ordinary file was classified as a symbolic link");
+            Entry bad,unexpected;
+            Check(source->FindChild(2,u"invalid",bad)&&bad.symbolicLink,"Missing invalid symlink fixture");
+            Storage::Job rejected;
+            Completion refusal;
+            const auto failed=ExecuteInWorker(OrdinaryCopy{{Native(source,bad.id)},Native(target,2)},rejected,refusal);
+            Check(failed.code&&failed.message.find("Invalid HFS+ symbolic link target")!=std::string::npos&&
+                  !target->FindChild(2,u"invalid",unexpected),"Malformed HFS+ symlink was copied");
+            Storage::Job job;
+            Completion completion;
+            const auto result=ExecuteInWorker(OrdinaryCopy{{Native(source,folder.id)},Native(target,2)},job,completion);
+            if(result.code)throw HfsPlus::Error(result.message);
+            Check(completion.complete,"Incomplete HFS to APFS symlink copy");
+        }
+        auto target=OpenBrowserImage(targetPath);
+        Entry folder,unexpected;
+        Check(target&&target->FindChild(2,u"Links",folder)&&!target->FindChild(2,u"target",unexpected),
+              "The copied folder is missing or the relative link target was followed");
+        verifyLinks(*target,folder);
+        if(external)fprintf(report,"PASS: HFSX symbolic links reopen on the shared macOS APFS fixture.\n");
+    }
+    fprintf(report,"PASS: HFS+/HFSX worker copies preserve relative, absolute UTF-8, and self-referential symbolic links without traversing them.\n");
+}
 } // namespace
 
 int RunCopyProcessTest(const char *directory) {
@@ -767,6 +860,7 @@ int RunCopyProcessTest(const char *directory) {
         TestWorkerTransport();
         TestVolumeSessionProtocol();
         TestHfsToApfsPosix(root,report);
+        TestHfsToApfsSymlinks(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {

@@ -337,6 +337,18 @@ public:
         Call(SessionCommandCode::Stat,Protocol::Encode(Protocol::StatRequest{id}),false,[&]{entry=ReadEntry();});
         return entry;
     }
+    std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t id) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::optional<HfsPlus::Bytes> target;
+        Call(SessionCommandCode::ReadSymbolicLink,Protocol::Encode(Protocol::CatalogItem{id}),false,[&]{
+            auto packet=Response(SessionBytes);
+            if (!packet.bytes.empty()) {
+                Check(packet.bytes.size()<=4096, "Invalid volume session symbolic link target size");
+                target=std::move(packet.bytes);
+            }
+        });
+        return target;
+    }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t bytes) override {
         auto output = static_cast<uint8_t*>(out);
         uint64_t generation=0;
@@ -690,6 +702,13 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 Data bytes;
                 bytes.bytes.resize(size_t(request.count));
                 volume.Read(request.id,request.fork,request.offset,bytes.bytes.data(),bytes.bytes.size());
+                Send(output, SessionBytes, std::move(bytes));
+                break;
+            }
+            case SessionCommandCode::ReadSymbolicLink: {
+                auto target=volume.SymbolicLinkTarget(Protocol::DecodeItem(packet).id);
+                Data bytes;
+                if (target) bytes.bytes=std::move(*target);
                 Send(output, SessionBytes, std::move(bytes));
                 break;
             }

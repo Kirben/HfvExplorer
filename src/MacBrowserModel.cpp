@@ -57,7 +57,13 @@ class Plus final : public Volume, public WorkerEndpoint {
         e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
         e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
         e.posix=in.posix;
-        for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;return e;
+        e.symbolicLink=in.symbolicLink;
+        if (e.symbolicLink) {
+            if (e.readError.empty()) e.readError="This transfer must preserve the HFS+ symbolic link";
+        } else {
+            for(unsigned f=0;f<2;++f)e.forks[f].size=in.forks[f].size;
+        }
+        return e;
     }
 public:
     Plus(std::unique_ptr<HfsPlus::Source> source, bool write,std::string key,std::wstring externalJournal)
@@ -111,6 +117,9 @@ public:
         return true;
     }
     Entry Stat(uint32_t id) override { Call call(*this);Ready(); return Describe(volume_->Stat(id)); }
+    std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t id) override {
+        Call call(*this);Ready();return volume_->SymbolicLinkTarget(id);
+    }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
         Call call(*this);Ready(); Check(volume_->Read(id, fork, offset, p, n) == n, "Short Macintosh fork read");
     }
