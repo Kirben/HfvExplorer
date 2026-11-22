@@ -5,6 +5,7 @@
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
 #include "ApfsTree.h"
+#include "ApfsWriteDisk.h"
 #include "ApfsVolume.h"
 #include "HfsPlusDisk.h"
 #include "HfsPlusCompression.h"
@@ -2354,6 +2355,33 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
     if(fixture)fprintf(report,"PASS: dual-fork compressed and fallback transfers also work on disposable macOS APFS fixtures.\n");
 }
 
+void EditApfsFixtureLeaf(const std::wstring& path,
+                         const std::function<void(const Apfs::Node&,const uint8_t*,HfsPlus::Bytes&)>& edit)
+{
+    auto disk=HfsPlus::OpenImage(path.c_str(),true);
+    const auto container=Apfs::Probe(*disk);
+    Check(container&&container->volumes.size()==1,"Missing APFS fixture container");
+    const auto volume=container->volumes.front();
+    const Apfs::ObjectMap mappings(*disk,*container,container->objectMap,container->transaction);
+    const auto volumeBlock=mappings.Lookup(volume);
+    Check(bool(volumeBlock),"Missing APFS fixture volume mapping");
+    const auto superblock=Apfs::ReadObject(*disk,*container,*volumeBlock,volume,container->transaction,13);
+    const auto treeOid=Apfs::Le64(superblock.data()+136);
+    const Apfs::ObjectMap objects(*disk,*container,Apfs::Le64(superblock.data()+128),container->transaction);
+    const auto leafBlock=objects.Lookup(treeOid);
+    Check(bool(leafBlock),"Missing APFS fixture catalog mapping");
+    auto leaf=Apfs::ReadObject(*disk,*container,*leafBlock,treeOid,container->transaction,2,14);
+    auto viewBytes=leaf;
+    const auto* base=viewBytes.data();
+    const Apfs::Node node(std::move(viewBytes),true,{});
+    Check(!node.Level(),"Expected APFS fixture catalog to fit one leaf");
+    edit(node,base,leaf);
+    const auto checksum=Apfs::ObjectChecksum(leaf);
+    for(unsigned i=0;i<8;++i)leaf[i]=uint8_t(checksum>>(8*i));
+    disk->Write(container->offset+*leafBlock*container->blockSize,leaf.data(),leaf.size());
+    disk->Flush();
+}
+
 void TestApfsImmutableCopy(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2376,26 +2404,8 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
     lock(single);
     lock(original);
     source.reset();
-    {
-        // The APFS UI can set user immutability. Set system immutability
-        // directly on the single test file in this disposable catalog leaf.
-        auto disk=HfsPlus::OpenImage(sourcePath.c_str(),true);
-        const auto container=Apfs::Probe(*disk);
-        Check(container&&container->volumes.size()==1,"Missing APFS fixture container");
-        const auto volume=container->volumes.front();
-        const Apfs::ObjectMap mappings(*disk,*container,container->objectMap,container->transaction);
-        const auto volumeBlock=mappings.Lookup(volume);
-        Check(bool(volumeBlock),"Missing APFS fixture volume mapping");
-        const auto superblock=Apfs::ReadObject(*disk,*container,*volumeBlock,volume,container->transaction,13);
-        const auto treeOid=Apfs::Le64(superblock.data()+136);
-        const Apfs::ObjectMap objects(*disk,*container,Apfs::Le64(superblock.data()+128),container->transaction);
-        const auto leafBlock=objects.Lookup(treeOid);
-        Check(bool(leafBlock),"Missing APFS fixture catalog mapping");
-        auto leaf=Apfs::ReadObject(*disk,*container,*leafBlock,treeOid,container->transaction,2,14);
-        auto viewBytes=leaf;
-        const auto* base=viewBytes.data();
-        const Apfs::Node node(std::move(viewBytes),true,{});
-        Check(!node.Level(),"Expected APFS fixture catalog to fit one leaf");
+    // Set system immutability directly on the single disposable fixture file.
+    EditApfsFixtureLeaf(sourcePath,[](const auto& node,const auto* base,auto& leaf){
         unsigned patched=0;
         for(size_t i=0;i<node.Count();++i){
             const auto record=node.At(i);
@@ -2406,11 +2416,7 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
             ++patched;
         }
         Check(patched==1,"Expected one singly linked immutable test file");
-        const auto checksum=Apfs::ObjectChecksum(leaf);
-        for(unsigned i=0;i<8;++i)leaf[i]=uint8_t(checksum>>(8*i));
-        disk->Write(container->offset+*leafBlock*container->blockSize,leaf.data(),leaf.size());
-        disk->Flush();
-    }
+    });
     source=OpenBrowserImage(sourcePath);
     Check(bool(source),"Cannot reopen immutable APFS source");
     std::vector<Location> inputs;
@@ -2468,6 +2474,149 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
         }
     }
     fprintf(report,"PASS: APFS immutable overwrite and new hard-link copies keep HFS+/HFSX locks and both forks after reopening; cancellation preserves the original.\n");
+}
+
+void TestSparseApfsCopy(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    constexpr uint64_t logical=8*1024*1024, resource=24*1024+7;
+    constexpr auto name=u"Sparse dual-fork file";
+    const auto sourcePath=Wide(root+"\\sparse-apfs-source.img");
+    {
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Sparse transfer",true,job);
+    }
+    {
+        auto mounted=OpenBrowserImage(sourcePath);
+        Check(bool(mounted),"Cannot open sparse APFS test source");
+        Entry entry;
+        entry.name=name;
+        entry.forks[0].size=4096;
+        entry.forks[1].size=resource;
+        mounted->Put(2,entry,[](unsigned fork,uint64_t at,void* out,size_t count){
+            auto* bytes=static_cast<BYTE*>(out);
+            for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+24);
+        },false);
+    }
+    // Add a large logical hole after the one allocated data extent. Leave
+    // the physical allocation and independent resource stream intact.
+    EditApfsFixtureLeaf(sourcePath,[logical](const auto& node,const auto* base,auto& leaf){
+        unsigned modified=0;
+        uint64_t stream=0;
+        for(size_t i=0;i<node.Count();++i){
+            const auto rec=node.At(i);
+            if(rec.key.size!=8||Apfs::Le64(rec.key.data)>>60!=3||rec.value.size<96||
+               (Apfs::Le16(rec.value.data+80)&0170000)!=0100000)continue;
+            const auto fields=Apfs::Le16(rec.value.data+92);
+            size_t offset=96+4*size_t(fields);
+            for(unsigned i=0;i<fields;++i){
+                const auto* field=rec.value.data+96+i*4;
+                const auto size=Apfs::Le16(field+2);
+                Check(offset<=rec.value.size&&size<=rec.value.size-offset,"Invalid sparse fixture inode");
+                if(field[0]==8){
+                    Check(size==40&&Apfs::Le64(rec.value.data+offset)==4096,"Unexpected sparse fixture stream");
+                    auto* length=leaf.data()+(rec.value.data-base)+offset;
+                    for(unsigned b=0;b<8;++b)length[b]=uint8_t(logical>>(8*b));
+                    stream=Apfs::Le64(rec.value.data+8);
+                    ++modified;
+                }
+                offset+=(size+7)&~size_t(7);
+            }
+        }
+        Check(modified==1&&stream,"Sparse APFS fixture must have exactly one changed stream");
+        namespace Disk=Apfs::WriterDisk;
+        std::vector<Disk::Record> records;
+        bool addedHole=false;
+        for(size_t i=0;i<node.Count();++i){
+            const auto rec=node.At(i);
+            const auto key=leaf.data()+(rec.key.data-base);
+            const auto value=leaf.data()+(rec.value.data-base);
+            records.push_back({HfsPlus::Bytes(key,key+rec.key.size),HfsPlus::Bytes(value,value+rec.value.size)});
+            if(rec.key.size!=16||Apfs::Le64(key)!=((uint64_t(8)<<60)|stream))continue;
+            Check(!addedHole&&Apfs::Le64(key+8)==0&&rec.value.size==24&&
+                  Apfs::Le64(value)==4096,"Unexpected allocated extent in sparse fixture");
+            Disk::Record hole{records.back().key,HfsPlus::Bytes(24)};
+            Disk::Set(hole.key,8,4096,8);
+            Disk::Set(hole.value,0,logical-4096,8);
+            records.push_back(std::move(hole));
+            addedHole=true;
+        }
+        Check(addedHole,"Missing sparse fixture data extent");
+        const auto rebuilt=Disk::EncodeLeaf(records,Apfs::Le32(leaf.data()+leaf.size()-40));
+        std::copy(rebuilt.begin()+32,rebuilt.end(),leaf.begin()+32);
+    });
+    const auto verifySparse=[&](Volume& volume){
+        Entry entry;
+        Check(volume.FindChild(2,name,entry)&&entry.forks[0].size==logical&&entry.forks[1].size==resource,
+              "Sparse copy lost a fork or changed its length");
+        std::vector<BYTE> bytes(256*1024);
+        for(unsigned fork=0;fork<2;++fork){
+            for(uint64_t at=0;at<entry.forks[fork].size;at+=bytes.size()){
+                const size_t count=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));
+                volume.Read(entry.id,fork,at,bytes.data(),count);
+                for(size_t i=0;i<count;++i){
+                    const BYTE expected=(fork||at+i<4096)?BYTE((at+i)*7+fork*13+24):0;
+                    Check(bytes[i]==expected,"Sparse copy changed payload, hole or resource bytes");
+                }
+            }
+        }
+        return entry;
+    };
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto path=Wide(root+"\\sparse-hfs-"+std::to_string(index++)+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(path.c_str(),64*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Nearly full HFS",true,kind);
+        }
+        auto target=OpenBrowserImage(path);
+        auto source=OpenBrowserImage(sourcePath);
+        Check(target&&source&&source->Writable(),"Sparse fixture must be eligible for cut/paste");
+        const auto sparse=verifySparse(*source);
+        Put(*target,2,name,131072,91);
+        const auto filler=Put(*target,2,u"Space filler",target->FreeBytes()-logical-8192);
+        const auto free=target->FreeBytes();
+        Check(free>=logical&&free<logical+resource,"Failure fixture must run out at resource allocation");
+        const auto run=[&](bool cut){
+            auto selection=Native(source,sparse.id);
+            selection.cut=cut;
+            unsigned prompts=0;
+            uint64_t read=0;
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){read=(std::max)(read,uint64_t(progress.fileBytes));},
+                          [&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+            Completion completion;
+            const auto result=ExecuteInWorker(OrdinaryCopy{{selection},Native(target)},job,completion);
+            Check(prompts==1,"Sparse overwrite must request approval");
+            return std::make_pair(result,read);
+        };
+        for(bool cut:{false,true}){
+            const auto [result,read]=run(cut);
+            Check(result.outcome==Storage::Outcome::Failed&&!result.partial&&!result.moved&&read>=logical&&
+                  result.message.find("Not enough free HFS+ blocks")!=std::string::npos,
+                  result.message.empty()?"Expected late out-of-space failure":result.message.c_str());
+            target.reset();
+            source.reset();
+            target=OpenBrowserImage(path);
+            source=OpenBrowserImage(sourcePath);
+            Entry old;
+            Check(target&&source&&target->FreeBytes()==free&&target->FindChild(2,name,old),
+                  "Failed sparse overwrite lost destination data or free space");
+            Verify(*target,old.id,131072,91);
+            Check(verifySparse(*source).identity==sparse.identity,"Failed cut/paste changed the source");
+        }
+        target->Remove(filler);
+        Put(*target,2,u"Smaller filler",target->FreeBytes()-logical-resource-128*1024);
+        Check(target->FreeBytes()<logical+resource+256*1024,"Success fixture has too much free space");
+        const auto [result,read]=run(false);
+        Check(!result.code,result.message.c_str());
+        target.reset();
+        target=OpenBrowserImage(path);
+        Check(bool(target),"Cannot reopen the copied sparse file");
+        verifySparse(*target);
+    }
+    fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen; late out-of-space copy and cut/paste retain both source and original destination forks and free space.\n");
 }
 
 void TestApfsToHfsCompression(const std::string& root,FILE* report)
@@ -2796,6 +2945,7 @@ int RunCopyProcessTest(const char *directory) {
         TestHfsCompressionWithResourceToApfs(root,report);
         TestApfsToHfsCompression(root,report);
         TestApfsImmutableCopy(root,report);
+        TestSparseApfsCopy(root,report);
         TestApfsToHfsNameCollisions(root,report);
         TestHfsxToApfsNameCollisions(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
