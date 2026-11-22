@@ -3617,6 +3617,31 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         },validation);
         Check(!readPayload&&malformed[0].empty()&&malformed[1].empty(),
               "Malformed sparse layout reached the payload reader");
+
+        const auto nativePath=path+L".apfs";
+        {
+            auto disk=HfsPlus::CreateImage(nativePath.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"Restored sparse forks",true,format);
+        }
+        const auto macos=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+        const auto macosPath=path+L"-macos.apfs";
+        if(macos)Check(CopyFileW(macos,macosPath.c_str(),TRUE)!=FALSE,"Cannot copy the shared APFS fixture");
+        for(const auto& returnedPath:{nativePath,macos?macosPath:L""}){
+            if(returnedPath.empty())continue;
+            auto returned=OpenBrowserImage(returnedPath);
+            Check(returned&&returned->Supports().create,"Cannot mount writable sparse round-trip target");
+            Storage::Job copy;
+            Completion completion;
+            const auto restored=ExecuteInWorker(OrdinaryCopy{{Native(target,copied.id)},Native(returned)},copy,completion);
+            Check(!restored.code&&completion.complete,restored.message.c_str());
+            returned.reset();
+            returned=OpenBrowserImage(returnedPath);
+            Check(returned&&returned->Supports().create,"Sparse restoration made APFS unwritable after reopening");
+            const auto restoredEntry=verifySparse(*returned);
+            Check(returned->SparseRanges(restoredEntry.id)==holes,
+                  "Reopened APFS copy did not restore the exact data-fork hole");
+        }
     }
     fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen with a dense allocation notice; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
 }

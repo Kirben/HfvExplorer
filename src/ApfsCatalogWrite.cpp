@@ -2832,8 +2832,17 @@ CatalogWritePlan PrepareCatalogMutation(
     auto* input=replace?&replace->data:create?create->data:nullptr;
     const bool clone=create&&create->cloneSource;
     const auto dataSize=input?input->Size():clone?create->cloneSize:0;
-    if(input&&dataSize)plan.streams.push_back({*input,dataSize});
-    const auto fileBlocks=input?DivideUp(dataSize,Block):0;
+    uint64_t fileBlocks=0;
+    if(input&&dataSize){
+        auto& stream=plan.streams.emplace_back(DataStreamWrite{*input,dataSize});
+        for(const auto& range:input->KnownZeroRanges()){
+            Check(!(range.offset%Block)&&range.length&&Range(range.offset,range.length,dataSize)&&
+                  (!(range.length%Block)||range.offset+range.length==dataSize),
+                  "Invalid APFS sparse source range");
+            stream.holes.push_back({range.offset/Block,DivideUp(range.length,Block)});
+        }
+        fileBlocks=stream.AllocatedBlocks();
+    }
     const auto* resourceEdit=std::get_if<CatalogResourceFork>(&request);
     auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
     std::optional<ResourceWrite> resource;
@@ -2998,7 +3007,9 @@ CatalogWritePlan PrepareCatalogMutation(
                 if(special){
                     if(create->replacedAlias||linked){if(kind!=CatalogKind::RegularFile)return false;}
                     else if(kind!=CatalogKind::RegularFile&&kind!=CatalogKind::SymbolicLink&&!IsSpecialKind(kind))return false;
-                }else if(kind!=victimKind&&(linked||create->replacedAlias||!IsSpecialKind(kind)))return false;
+                }else if(kind!=victimKind&&(linked||create->replacedAlias||
+                         (!IsSpecialKind(kind)&&!(input&&!plan.streams.empty()&&!plan.streams.front().holes.empty()&&
+                                                   kind==CatalogKind::RegularFile))))return false;
                 if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
                     return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
@@ -3032,6 +3043,22 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(inode.value,16,CatalogTimestamp(dates->created),8);
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
             SetAdditionalDates(inode.value,dates->additionalDates);
+        }
+        if(input&&dataSize&&!plan.streams.front().holes.empty()){
+            auto& value=inode.value;
+            const auto count=Le16(value.data()+92);
+            const auto payload=96+size_t(count)*4;
+            const auto stream=payload+size_t(DivideUp(name.size()+1,8)*8);
+            Check(count>=2&&value[100]==8&&stream+40<=value.size(),"Missing APFS sparse data stream");
+            const auto allocated=fileBlocks*Block;
+            Set(value,stream+8,allocated,8);
+            Set(value,48,Le64(value.data()+48)|0x200,8); // INODE_IS_SPARSE
+            Set(value,92,count+1,2);
+            Set(value,94,Le16(value.data()+94)+8,2);
+            value.insert(value.begin()+payload,{13,0x20,8,0}); // INO_EXT_TYPE_SPARSE_BYTES
+            const auto end=value.size();
+            value.resize(end+8);
+            Set(value,end,(DivideUp(dataSize,Block)-fileBlocks)*Block,8);
         }
         SetPosixMetadata(inode.value,create->posix);
         if(create->locked)Set(inode.value,68,Le32(inode.value.data()+68)|CopiedProtectionFlags(create->posix),4);

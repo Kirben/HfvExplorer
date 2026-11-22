@@ -18,12 +18,7 @@ namespace Dmg { class Password; class PrivateKey; }
 namespace MacBrowser {
 struct DetectedVolumeError : HfsPlus::Error { using HfsPlus::Error::Error; };
 struct Fork { uint64_t size = 0; };
-struct SparseRange {
-    uint64_t offset, length;
-    bool operator==(const SparseRange& other) const {
-        return offset==other.offset&&length==other.length;
-    }
-};
+using HfsPlus::SparseRange;
 using SparseForks = std::array<std::vector<SparseRange>,2>;
 // Presentation and transfer data: deliberately independent of catalog layouts,
 // allocation extents, filesystem encodings and journal structures.

@@ -13,6 +13,12 @@
 #include "PosixMetadata.h"
 namespace HfsPlus {
 using Bytes = std::vector<uint8_t>;
+struct SparseRange {
+    uint64_t offset,length;
+    bool operator==(const SparseRange& other) const {
+        return offset==other.offset&&length==other.length;
+    }
+};
 struct ExternalJournalRequired : std::runtime_error {using std::runtime_error::runtime_error;};
 struct Error : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -22,6 +28,7 @@ class Source {
   public:
     virtual ~Source() = default;
     virtual uint64_t Size() const = 0;
+    virtual std::vector<SparseRange> KnownZeroRanges() const { return {}; }
     virtual bool Writable() const = 0;
     virtual bool ProcessLocal()const{return false;}
     virtual void Read(uint64_t, void *, size_t) = 0;

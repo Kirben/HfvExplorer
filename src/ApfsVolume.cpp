@@ -363,7 +363,7 @@ std::vector<Extent> Extents(const Catalog& catalog,const Container& container,ui
         // macOS marks software-encrypted runs with bit 0 in the extent flags.
         Check((flags==0||(flags==1&&decrypted))&&length&&offset<=UINT64_MAX-length&&
               !(offset%container.blockSize)&&!(length%container.blockSize)&&
-              Range(block,length/container.blockSize,container.blockCount)&&
+              (!block||Range(block,length/container.blockSize,container.blockCount))&&
               (out.empty()||out.back().offset+out.back().length<=offset),
               "Overlapping or unsupported APFS file extent");
         out.push_back({offset,length,block,Le64(record.value.data+16)});
@@ -1470,8 +1470,11 @@ public:
         const uint64_t size;
         const unsigned fork;
         const MacBrowser::Reader& read;
+        const std::vector<SparseRange> holes;
     public:
-        ForkInput(uint64_t length,unsigned selector,const MacBrowser::Reader& reader):size(length),fork(selector),read(reader){}
+        ForkInput(uint64_t length,unsigned selector,const MacBrowser::Reader& reader,std::vector<SparseRange> sparse={}):
+            size(length),fork(selector),read(reader),holes(std::move(sparse)){}
+        std::vector<SparseRange> KnownZeroRanges()const override{return holes;}
         uint64_t Size()const override{return size;}
         bool Writable()const override{return false;}
         void Read(uint64_t at,void* bytes,size_t length)override{
@@ -1527,7 +1530,15 @@ public:
             if(compressionResource&&fork==1)encoded->ReadResource(offset,bytes,count);
             else reader(fork,offset,bytes,count);
         };
-        ForkInput data(compression?0:entry.forks[0].size,0,payload);
+        auto sparse=MacBrowser::SparseForks{};
+        if(allowPrompt&&!compression&&!special)
+            sparse=MacBrowser::ValidateApfsSparseLayout(entry,reader,job);
+        const bool restoreSparse=!sparse[0].empty()&&std::all_of(sparse[0].begin(),sparse[0].end(),[&](const auto& hole){
+            constexpr auto block=WriterDisk::Block;
+            return !(hole.offset%block)&&(!(hole.length%block)||hole.offset+hole.length==entry.forks[0].size);
+        });
+        ForkInput data(compression?0:entry.forks[0].size,0,payload,
+                       restoreSparse?std::move(sparse[0]):std::vector<SparseRange>{});
         ForkInput resource(compressionResource?encoded->ResourceSize():entry.forks[1].size,1,payload);
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
@@ -1546,7 +1557,7 @@ public:
                     Check(((!existing.hardLink&&!sibling)||(special&&!existingSpecial&&replaceAlias&&sibling))&&
                           (!existingSpecial||(!existing.forks[0].size&&!existing.forks[1].size)),
                           "The APFS special file destination changed after overwrite approval");
-                if(existing.symbolicLink||replaceAlias||special||existingSpecial){
+                if(existing.symbolicLink||replaceAlias||special||existingSpecial||restoreSparse){
                     Check(!replaceAlias||sibling,"The APFS hard-link destination has no sibling ID");
                     const auto& name=replaceAlias?existing.name:entry.name;
                     CommitMutation(parent,existing.id,job,[&](auto& job){
@@ -1554,6 +1565,7 @@ public:
                                                  &entry.finder,entry.protectedFile,attributes,&resource,compression,
                                                  true,oid,entry.posix,replaceAlias?sibling:0);
                     });
+                    if(restoreSparse)limitedEdits=true;
                     Entry replacement;
                     if(FindChild(parent,entry.name,replacement))return replacement.id;
                     throw Error("APFS replacement was committed but could not be found after reopening");
@@ -1565,8 +1577,9 @@ public:
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,0,entry.posix);
+                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits||restoreSparse,0,entry.posix);
             });
+            if(restoreSparse)limitedEdits=true;
             if(FindChild(parent,entry.name,existing))return existing.id;
             throw Error("APFS file was committed but could not be found after reopening");
         },true);
