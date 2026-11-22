@@ -39,6 +39,7 @@ struct Entry {
     std::optional<PosixMetadata> posix;
     bool replaceHardLinkName = false; // transient copy intent to leave other destination aliases intact
 };
+void ValidateHfsPlusCopyNames(const std::vector<Entry>& entries, bool caseSensitive);
 struct Capabilities {
     bool read = true, create = false, rename = false, remove = false;
     bool unicodeNames = true, resourceForks = true, createFolders = true;

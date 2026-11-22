@@ -27,6 +27,22 @@
 namespace MacBrowser {
 std::wstring Wide(const std::u16string &s) { return {s.begin(), s.end()}; }
 std::u16string U16(const std::wstring &s) { return {s.begin(), s.end()}; }
+
+void ValidateHfsPlusCopyNames(const std::vector<Entry>& entries, bool caseSensitive)
+{
+    const auto less = [caseSensitive](const std::u16string& left, const std::u16string& right) {
+        return HfsPlus::CompareNames(left, right, caseSensitive) < 0;
+    };
+    std::map<std::u16string, const Entry*, decltype(less)> names(less);
+    for (const auto& entry : entries) {
+        const auto [previous, inserted] = names.emplace(HfsPlus::Normalize(entry.name, caseSensitive), &entry);
+        if (!inserted)
+            throw HfsPlus::Error("Source names collide on the HFS+/HFSX destination: \"" +
+                                 BrowserPresentation::Utf8(previous->second->name) + "\" and \"" +
+                                 BrowserPresentation::Utf8(entry.name) + "\". Rename one before copying.");
+    }
+}
+
 namespace {
 void Check(bool ok, const char *message) { if (!ok) throw HfsPlus::Error(message); }
 class Plus final : public Volume, public WorkerEndpoint {
@@ -105,6 +121,9 @@ public:
         Check(!e.posix||e.posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
         if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}
         HfsPlus::ValidateAttributes(e.attributes);
+    }
+    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
+        ValidateHfsPlusCopyNames(entries,CaseSensitive());
     }
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
         ValidateEntry(e);

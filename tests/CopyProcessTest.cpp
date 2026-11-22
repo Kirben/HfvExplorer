@@ -1270,6 +1270,103 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS copies into HFS+ and both HFSX variants share one inode per link group and preserve both forks after reopening. An overwritten name is detached from unrelated aliases.\n");
 }
 
+void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto sourcePath=Wide(root+"\\collision-source.img");
+    {
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Case-sensitive source",true,job);
+    }
+    auto source=OpenBrowserImage(sourcePath);
+    Check(source&&source->CaseSensitive(),"Missing case-sensitive APFS source");
+    const auto first=Put(*source,2,u"Readme",4097,3);
+    const auto second=Put(*source,2,u"README",4111,11);
+    const auto folder=source->MakeDirectory(2,u"Nested");
+    const auto nested=source->MakeDirectory(folder,u"Notes folder");
+    const auto plain=Put(*source,nested,u"Notes",919,19);
+    const auto ignorable=Put(*source,nested,u"Notes\u200c",929,29);
+    // Separate source folders can contain equivalent spellings even when
+    // APFS would reject them as siblings. Both will land in the same folder.
+    const auto composed=Put(*source,folder,u"Caf\u00e9",1001,31);
+    const auto decomposed=Put(*source,nested,u"Cafe\u0301",1009,37);
+    Check(source->Stat(composed).name!=source->Stat(decomposed).name,
+          "APFS fixture did not store distinct Unicode spellings");
+
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseInsensitive,Kind::HfsXCaseSensitive}){
+        const auto path=Wide(root+"\\collision-destination-"+std::to_string(index++)+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Collision destination",true,kind);
+        }
+        const bool sensitive=kind==Kind::HfsXCaseSensitive;
+        auto target=OpenBrowserImage(path);
+        Check(target&&VolumeSession::VolumeSessionPidForTest(target)&&target->CaseSensitive()==sensitive,
+              "Wrong HFS+/HFSX destination comparison mode");
+        const auto existing=Put(*target,2,u"Readme",3001,41);
+        const auto before=target->List().size();
+        const auto copy=[&](const std::vector<Location>& inputs,bool expectCollision,unsigned expectedPrompts){
+            unsigned prompts=0;
+            Storage::Job job;
+            job.transport({},[&](const auto&){
+                ++prompts;
+                return Storage::ConflictChoice::ReplaceAll;
+            });
+            Completion completion;
+            const auto result=ExecuteInWorker(OrdinaryCopy{inputs,Native(target,2)},job,completion);
+            if(expectCollision){
+                Check(result.code&&!completion.complete&&
+                      result.message.find("Source names collide")!=std::string::npos,
+                      "Copy did not report colliding HFS+/HFSX destination names");
+            }else if(result.code||!completion.complete){
+                throw HfsPlus::Error("Copy of distinct destination names failed: "+result.message);
+            }
+            Check(prompts==expectedPrompts,"A collision reached overwrite handling, or ordinary overwrite was bypassed");
+        };
+        copy({Native(source,composed),Native(source,decomposed)},true,0);
+        Entry duplicate;
+        Check(!target->FindChild(2,u"Cafe\u0301",duplicate),
+              "A Unicode-normalization collision published a destination file");
+        const std::vector<Location> selected{Native(source,first),Native(source,second)};
+        copy(selected,!sensitive,sensitive?1:0);
+        if(!sensitive){
+            Verify(*target,existing,3001,41);
+            // Cut/paste uses the same preflight before removing any source entries.
+            auto moving=selected;
+            for(auto& entry:moving)entry.cut=true;
+            copy(moving,true,0);
+            Verify(*source,first,4097,3);
+            Verify(*source,second,4111,11);
+        }
+        copy({Native(source,folder)},!sensitive,0);
+        target.reset();
+        target=OpenImage(path);
+        Check(bool(target),"Could not reopen HFS collision destination");
+        Entry readme,upper,outer,inner,note,joined;
+        Check(target->FindChild(2,u"Readme",readme),"Missing destination file after reopening");
+        if(sensitive){
+            Check(target->FindChild(2,u"README",upper)&&upper.id!=readme.id&&
+                  target->FindChild(2,u"Nested",outer)&&target->FindChild(outer.id,u"Notes folder",inner)&&
+                  target->FindChild(inner.id,u"Notes",note)&&target->FindChild(inner.id,u"Notes\u200c",joined)&&note.id!=joined.id,
+                  "Case-sensitive HFSX lost one of the distinct source names");
+            Verify(*target,readme.id,4097,3);
+            Verify(*target,upper.id,4111,11);
+            Verify(*target,note.id,919,19);
+            Verify(*target,joined.id,929,29);
+        }else{
+            Verify(*target,readme.id,3001,41);
+            Check(!target->FindChild(2,u"Nested",outer)&&target->List().size()==before,
+                  "A rejected copy published files or folders");
+            copy({Native(source,folder)},true,0); // In-process destination uses the same collation.
+        }
+    }
+    Verify(*source,plain,919,19);
+    Verify(*source,ignorable,929,29);
+    fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
+}
+
 void TestApfsToHfsCompression(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -1591,6 +1688,7 @@ int RunCopyProcessTest(const char *directory) {
         TestApfsToHfsHardLinks(root,report);
         TestCrossFormatAttributes(root,report);
         TestApfsToHfsCompression(root,report);
+        TestApfsToHfsNameCollisions(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {

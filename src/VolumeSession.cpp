@@ -245,6 +245,9 @@ public:
     bool Writable() const override { return writable_ && !lost_; }
     bool CaseSensitive() const override { return caseSensitive_; }
     bool Journaled() const override { return journaled_; }
+    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool) override {
+        if (Plus()) ValidateHfsPlusCopyNames(entries,CaseSensitive());
+    }
     Capabilities Supports() const override {
         auto result = capabilities_;
         if (!Writable()) result.RestrictWrites();
