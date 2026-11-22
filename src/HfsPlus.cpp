@@ -1074,15 +1074,16 @@ struct Volume::Impl {
         P32(r.value.data() + 8, id);
         for (unsigned i = 12; i <= 28; i += 4)
             P32(r.value.data() + i, Time::Encode(e.created,(U16(r.value.data()+2)&0x1000)!=0));
-        const uint16_t permissions=e.directory?0755:0644;
-        P16(r.value.data() + 42, (e.directory?0040000:0100000)|permissions);
-        e.posix=PosixMetadata{0,0,permissions};
+        const uint16_t permissions=e.directory?0755:e.symbolicLink?0777:0644;
+        const uint16_t type=e.directory?0040000:e.symbolicLink?0120000:0100000;
+        P16(r.value.data() + 42,type|permissions);
+        if(!e.symbolicLink)e.posix=PosixMetadata{0,0,permissions};
         InsertCatalogRecord(std::move(r));
         entries[id] = e;
         UpdateEntry(e);
         Thread(e);
     }
-    void Mutable(const Entry &e,bool inodeAccess=false) {
+    void Mutable(const Entry &e,bool inodeAccess=false,bool allowSymbolicLink=false) {
         ValidateLinkAncestors(e.id);Check((!e.protectedFile||inodeAccess) && e.id >= 16, "Protected HFS+ metadata cannot be modified");
         auto r = CatalogRecord(e.id);
         Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & 6) && !(r->value[41] & 6),
@@ -1092,8 +1093,9 @@ struct Volume::Impl {
         if (!e.directory) {
             Check(memcmp(e.finder.data(), "hlnkhfs+", 8) && memcmp(e.finder.data(), "fdrpMACS", 8),
                   "HFS+ hard links cannot be modified");
-            Check((U16(r->value.data() + 42) & 0170000) == 0100000,
-                  "Only ordinary HFS+ files can be modified");
+            const auto type=U16(r->value.data()+42)&0170000;
+            Check(type==0100000||(allowSymbolicLink&&e.symbolicLink&&type==0120000),
+                  "This operation cannot modify the HFS+ entry type");
         }
         if(e.compressed)(void)Compressed(e.id); // Reject missing/malformed compression metadata before mutation.
         // Encryption and hard-link metadata still require their
@@ -1520,6 +1522,10 @@ Entry Volume::Stat(uint32_t id) const {
     Check(p_->usable, "Reopen HFS+ image after error");
     return p_->Presented(id);
 }
+void Volume::ValidateSymbolicLinkTarget(const Bytes& target) {
+    Check(target.size()>1&&target.size()<=MaxSymbolicLinkPath+1&&target.back()==0&&
+          !memchr(target.data(),0,target.size()-1),"Invalid HFS+ symbolic link target");
+}
 std::optional<Bytes> Volume::SymbolicLinkTarget(uint32_t id) {
     p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
@@ -1527,13 +1533,13 @@ std::optional<Bytes> Volume::SymbolicLinkTarget(uint32_t id) {
     if (!entry.symbolicLink)
         return {};
     const auto& data = entry.forks[0];
-    Check(!entry.compressed && !entry.forks[1].size && data.size && data.size <= 1024,
+    Check(!entry.compressed && !entry.forks[1].size && data.size && data.size <= MaxSymbolicLinkPath,
           "Invalid HFS+ symbolic link forks");
     // The HFS+ data fork contains the path bytes without a terminator.
     // The shared link transfer expects a NUL-terminated path for APFS.
     Bytes target(size_t(data.size) + 1, 0);
     ForkRead(p_->view, data, p_->bs, 0, target.data(), size_t(data.size));
-    Check(!memchr(target.data(), 0, size_t(data.size)), "Invalid HFS+ symbolic link target");
+    ValidateSymbolicLinkTarget(target);
     return target;
 }
 uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer, size_t n) {
@@ -1586,6 +1592,23 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                      const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates,
                      const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates,
                      std::optional<PosixMetadata> posix) {
+    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false);
+}
+void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
+                             const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
+                             const std::array<uint64_t,2>* dates) {
+    ValidateSymbolicLinkTarget(target);
+    // APFS and the transfer interface include a terminator. HFS+ stores only
+    // the target bytes in its data fork.
+    PutFile(parent,name,target.size()-1,0,[&](unsigned,uint64_t at,void* out,size_t size){
+        memcpy(out,target.data()+at,size);
+    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,{},true);
+}
+uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
+                         const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
+                         const std::array<uint8_t,32>* finder,bool overwrite,
+                         const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
+                         const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink) {
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
@@ -1594,13 +1617,21 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     Entry e;
     e.parent = parent;
     e.name = Normalize(name, p.caseSensitive);
+    e.symbolicLink=symbolicLink;
     uint32_t existing = p.Existing(parent, e.name);
     Fork old[2];uint32_t visible=existing;
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
-        existing=p.Content(existing);e = p.Get(existing);
+        if(symbolicLink){
+            const auto& link=p.Get(existing);
+            Check(link.symbolicLink&&!link.compressed&&!link.forks[1].size,
+                  "An HFS+ symbolic link can only overwrite another ordinary symbolic link");
+            p.Mutable(link,false,true);
+        }else{
+            existing=p.Content(existing);
+        }
+        e = p.Get(existing);
         Check(!e.directory, "Cannot overwrite an HFS+ directory");
-        Check(!e.symbolicLink, "Replacing an HFS+ symbolic link with a regular file is unsupported");
         p.RemovalParent(parent);
         old[0] = e.forks[0];
         old[1] = e.forks[1];
@@ -1631,6 +1662,7 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
     if(encoded)desired[u"com.apple.decmpfs"]=encoded->Attribute();
     if (finder)
         e.finder = *finder;
+    if(symbolicLink)memcpy(e.finder.data(),"slnkrhap",8);
     return p.Mutate(fault,[&]{
         uint64_t sizes[] = {encoded?0:dataSize, encoded&&encoded->UsesResource()?encoded->ResourceSize():resourceSize};
         Bytes buffer(1024 * 1024, 0);
@@ -1745,7 +1777,7 @@ void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
     p.Guard();
     parent=p.WriteParent(parent);
     Entry e = p.Get(id);
-    if(p.LinkKind(id))p.Content(id);else p.Mutable(e);
+    if(p.LinkKind(id))p.Content(id);else p.Mutable(e,false,e.symbolicLink);
     p.WriteParent(e.parent,true);p.RemovalParent(e.parent);
     auto normalized = Normalize(name, p.caseSensitive);
     uint32_t existing = p.Existing(parent, normalized);
@@ -1783,7 +1815,7 @@ uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16stri
 }
 void Volume::ValidateCopyTo(uint32_t id,uint32_t parent)const{auto& p=*p_;p.source.CheckMedia();Check(p.usable,"Reopen HFS+ image after error");auto target=p.Resolve(parent);Check(p.Get(target).directory,"Copy destination is not a folder");if(p.Get(p.Resolve(id)).directory)Check(!p.DirectoryReaches(id,target),"Cannot copy a folder into itself or a directory hard-link descendant");}
 void Volume::ValidateRemoval(uint32_t id)const {
-    auto& p=*p_;p.Guard();auto entry=p.Get(id);if(p.LinkKind(id))p.Content(id);else p.Mutable(entry);p.WriteParent(entry.parent,true);p.RemovalParent(entry.parent);
+    auto& p=*p_;p.Guard();auto entry=p.Get(id);if(p.LinkKind(id))p.Content(id);else p.Mutable(entry,false,entry.symbolicLink);p.WriteParent(entry.parent,true);p.RemovalParent(entry.parent);
 }
 void Volume::Remove(uint32_t id) {
     auto& p=*p_;ValidateRemoval(id);auto e=p.Get(id);bool link=p.LinkKind(id)!=0;uint32_t inode=link?p.Resolve(id):id;auto target=p.Get(inode);std::vector<uint32_t> links;

@@ -355,6 +355,21 @@ public:
         });
         return target;
     }
+    void ValidateSymbolicLink(const Entry& entry,const HfsPlus::Bytes& target) const override {
+        auto& self=*const_cast<PersistentVolume*>(this);
+        std::lock_guard<std::recursive_mutex> lock(self.mutex_);
+        self.Call(SessionCommandCode::SymbolicLink,Protocol::EncodeSymbolicLink({},entry,target),
+                  false,[]{},&entry.attributes);
+    }
+    void PutSymbolicLink(uint32_t parent,const Entry& entry,const HfsPlus::Bytes& target,Storage::Job& job) override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if(job.cancelled())throw Storage::Cancelled();
+        const auto& approved=entry.expectedDestinationIdentity;
+        if(!approved.empty()&&approved.session!=generation_)
+            throw Storage::MediaChanged("The symbolic link destination session changed after overwrite approval");
+        Call(SessionCommandCode::SymbolicLink,Protocol::EncodeSymbolicLink(parent,entry,target),
+             true,[]{},&entry.attributes);
+    }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t bytes) override {
         auto output = static_cast<uint8_t*>(out);
         uint64_t generation=0;
@@ -713,6 +728,16 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 Data bytes;
                 if (target) bytes.bytes=std::move(*target);
                 Send(output, SessionBytes, std::move(bytes));
+                break;
+            }
+            case SessionCommandCode::SymbolicLink: {
+                auto request=Protocol::DecodeSymbolicLink(packet);
+                request.entry.attributes=std::move(*attributes[0]);
+                request.entry.attributesKnown=true;
+                if(request.parent){
+                    Storage::Job job;
+                    volume.PutSymbolicLink(*request.parent,request.entry,request.target,job);
+                }else volume.ValidateSymbolicLink(request.entry,request.target);
                 break;
             }
             case SessionCommandCode::Attributes: {

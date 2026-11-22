@@ -134,6 +134,30 @@ public:
     std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t id) override {
         Call call(*this);Ready();return volume_->SymbolicLinkTarget(id);
     }
+    void ValidateSymbolicLink(const Entry& entry,const HfsPlus::Bytes& target) const override {
+        Check(Writable(),"HFS+ image is read-only");
+        Check(entry.symbolicLink&&!entry.directory&&!entry.hardLink&&!entry.compressed&&
+              !entry.forks[0].size&&!entry.forks[1].size&&!entry.version,
+              "Unsupported HFS+ symbolic link metadata");
+        HfsPlus::Volume::ValidateSymbolicLinkTarget(target);
+        ValidateEntry(entry);
+    }
+    void PutSymbolicLink(uint32_t parent,const Entry& entry,const HfsPlus::Bytes& target,Storage::Job& job) override {
+        ValidateSymbolicLink(entry,target);
+        Mutate([&]{
+            if(job.cancelled())throw Storage::Cancelled();
+            const bool replace=!entry.expectedDestinationIdentity.empty();
+            if(replace){
+                HfsPlus::Entry existing;
+                Check(volume_->FindChild(parent,entry.name,existing)&&existing.symbolicLink&&
+                      Describe(existing).identity==entry.expectedDestinationIdentity,
+                      "The HFS+ symbolic link destination changed after overwrite approval");
+            }
+            const std::array<uint64_t,2> dates{entry.created,entry.modified};
+            volume_->PutSymbolicLink(parent,entry.name,target,entry.finder,replace,entry.attributes,
+                                     entry.datesValid?&dates:nullptr);
+        });
+    }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
         Call call(*this);Ready(); Check(volume_->Read(id, fork, offset, p, n) == n, "Short Macintosh fork read");
     }

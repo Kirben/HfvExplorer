@@ -45,12 +45,13 @@ Command DecodeCommand(Data& packet,bool primaryAttributes,bool secondaryAttribut
 #ifdef HFV_TESTING
     constexpr auto maximum=Command::TestCrashRemoveTree;
 #else
-    constexpr auto maximum=Command::ReadSymbolicLink;
+    constexpr auto maximum=Command::SymbolicLink;
 #endif
     Check(opcode<=uint64_t(maximum),"Invalid volume session command");
     const auto command=Command(opcode);
     const bool carriesAttributes=command==Command::SetAttributes||command==Command::Put||
-        command==Command::TestCrashPut||command==Command::FinalizeDirectory||command==Command::ValidateEntry;
+        command==Command::TestCrashPut||command==Command::FinalizeDirectory||command==Command::ValidateEntry||
+        command==Command::SymbolicLink;
     Check(primaryAttributes==carriesAttributes&&!secondaryAttributes,"Unexpected volume session attributes");
     return command;
 }
@@ -307,6 +308,35 @@ PutRequest DecodePut(Data& packet)
     Check(!header.source||entry.id==header.source,"Invalid in-worker fork source");
     entry.attributesKnown=header.attributesKnown;
     return {header,std::move(entry)};
+}
+
+Data EncodeSymbolicLink(std::optional<uint32_t> parent,const MacBrowser::Entry& entry,const HfsPlus::Bytes& target)
+{
+    HfsPlus::Volume::ValidateSymbolicLinkTarget(target);
+    Data payload;
+    payload.put(parent.has_value());
+    if(parent)payload.put(*parent);
+    CopyWorkerProtocol::EncodeEntry(payload,entry);
+    payload.put(entry.expectedDestinationIdentity.primary.key);
+    payload.put(std::string(target.begin(),target.end()));
+    return payload;
+}
+SymbolicLinkRequest DecodeSymbolicLink(Data& packet)
+{
+    std::optional<uint32_t> parent;
+    if(packet.flag()){
+        parent=CatalogNumber(packet);
+        Check(*parent>=2,"Invalid symbolic link parent");
+    }
+    auto entry=CopyWorkerProtocol::DecodeEntry(packet);
+    entry.expectedDestinationIdentity=MacBrowser::EntryIdentity(packet.text());
+    Check(parent||entry.expectedDestinationIdentity.empty(),"Unexpected symbolic link overwrite approval");
+    auto target=packet.text();
+    packet.end();
+    Check(target.size()<=HfsPlus::Volume::MaxSymbolicLinkPath+1,"Oversized symbolic link target");
+    HfsPlus::Bytes bytes(target.begin(),target.end());
+    HfsPlus::Volume::ValidateSymbolicLinkTarget(bytes);
+    return {parent,std::move(entry),std::move(bytes)};
 }
 
 Data EncodeDirectoryUpdate(const DirectoryUpdateHeader& header,const MacBrowser::Entry& desired,

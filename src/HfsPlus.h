@@ -91,7 +91,12 @@ class Volume {
     std::vector<Entry> List(uint32_t parent = 2) const;
     bool FindChild(uint32_t parent, const std::u16string& name, Entry& found) const;
     Entry Stat(uint32_t id) const;
+    static constexpr size_t MaxSymbolicLinkPath=1024;
+    static void ValidateSymbolicLinkTarget(const Bytes& target);
     std::optional<Bytes> SymbolicLinkTarget(uint32_t id);
+    void PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
+                         const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
+                         const std::array<uint64_t,2>* dates);
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline };
@@ -126,6 +131,11 @@ class Volume {
     std::function<void(const char *)> fault;
 
   private:
+    uint32_t PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
+                     const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
+                     const std::array<uint8_t,32>* finder,bool overwrite,
+                     const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
+                     const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

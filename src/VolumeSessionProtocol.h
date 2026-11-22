@@ -8,7 +8,7 @@ enum class Command {
     HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory,
     ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindChild,
     SetBasicMetadata, RemoveTree, BeginCopyTransaction, CommitCopyTransaction, AbortCopyTransaction, PrepareCopyTransaction,
-    ReadSymbolicLink, TestCrashRename, TestCrashPut, TestCrashRemoveTree
+    ReadSymbolicLink, SymbolicLink, TestCrashRename, TestCrashPut, TestCrashRemoveTree
 };
 inline constexpr size_t ReadLimit=256*1024;
 
@@ -26,6 +26,7 @@ struct CompressionProgress {uint64_t done,total;};
 struct ForkRange {uint32_t fork;uint64_t offset,count;};
 struct PutHeader {uint32_t parent;bool replace,attributesKnown;uint32_t original,source;};
 struct PutRequest {PutHeader header;MacBrowser::Entry entry;};
+struct SymbolicLinkRequest {std::optional<uint32_t> parent;MacBrowser::Entry entry;HfsPlus::Bytes target;};
 struct DirectoryUpdateHeader {uint32_t id;bool merge,attributesKnown;};
 struct DirectoryUpdate {DirectoryUpdateHeader header;MacBrowser::Entry desired,expected;};
 struct BasicMetadataRequest {uint32_t id;MacBrowser::Entry entry;};
@@ -62,6 +63,8 @@ CopyWorkerProtocol::Data Encode(const CompressionRequest&);
 CopyWorkerProtocol::Data Encode(const CompressionProgress&);
 CopyWorkerProtocol::Data Encode(const ForkRange&);
 CopyWorkerProtocol::Data EncodePut(const PutHeader&,const MacBrowser::Entry&);
+CopyWorkerProtocol::Data EncodeSymbolicLink(std::optional<uint32_t> parent,const MacBrowser::Entry&,
+                                           const HfsPlus::Bytes& target);
 CopyWorkerProtocol::Data EncodeDirectoryUpdate(const DirectoryUpdateHeader&,const MacBrowser::Entry& desired,
                                                const MacBrowser::Entry& expected);
 CopyWorkerProtocol::Data EncodeEntryCheck(const MacBrowser::Entry&);
@@ -77,6 +80,7 @@ CompressionRequest DecodeCompression(CopyWorkerProtocol::Data&);
 CompressionProgress DecodeCompressionProgress(CopyWorkerProtocol::Data&);
 ForkRange DecodeForkRange(CopyWorkerProtocol::Data&,const MacBrowser::Entry&);
 PutRequest DecodePut(CopyWorkerProtocol::Data&);
+SymbolicLinkRequest DecodeSymbolicLink(CopyWorkerProtocol::Data&);
 DirectoryUpdate DecodeDirectoryUpdate(CopyWorkerProtocol::Data&);
 MacBrowser::Entry DecodeEntryCheck(CopyWorkerProtocol::Data&);
 BasicMetadataRequest DecodeBasicMetadata(CopyWorkerProtocol::Data&);

@@ -204,6 +204,25 @@ void TestVolumeSessionProtocol()
     reject([]{auto data=Protocol::Encode(Protocol::Reply{1,"Missing error",Storage::Rollback::None});
               Protocol::DecodeReply(data);},"accepted a failed session result without an error code");
 
+    Entry link;
+    link.name=u"Shortcut";link.symbolicLink=true;link.expectedDestinationIdentity=EntryIdentity("42");
+    const HfsPlus::Bytes path{'.','.','/','a',0};
+    auto linkPacket=Protocol::EncodeSymbolicLink(2,link,path);
+    const auto linkRequest=Protocol::DecodeSymbolicLink(linkPacket);
+    Check(linkRequest.parent==2&&linkRequest.target==path&&linkRequest.entry.symbolicLink&&
+          linkRequest.entry.expectedDestinationIdentity==link.expectedDestinationIdentity,
+          "Symbolic link request lost its target or approved destination");
+    reject([&]{
+        auto data=Protocol::EncodeSymbolicLink(2,link,path);
+        data.bytes.back()='b';
+        Protocol::DecodeSymbolicLink(data);
+    },"accepted a symbolic link without a terminator");
+    reject([&]{
+        auto data=Protocol::EncodeSymbolicLink(2,link,path);
+        data.bytes.push_back(0);
+        Protocol::DecodeSymbolicLink(data);
+    },"accepted trailing symbolic link request data");
+
     Entry entry;
     entry.id=42;
     entry.name=u"Both forks \u03a9";
@@ -883,7 +902,7 @@ void TestCopyPosixIntoHfs(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS, HFS+ and HFSX copies into HFS+ and HFSX preserve file and folder UID/GID, executable and special bits, zero permissions and both forks after reopen. Folder merges retain destination permissions.\n");
 }
 
-void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
+void TestSymbolicLinkCopies(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
     const std::array<std::pair<std::u16string,std::string>,3> links{{
@@ -891,6 +910,17 @@ void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
         {u"absolute",u8"/System/Library/\u00e9"},
         {u"loop","loop"}
     }};
+    const auto verifyLinks=[&](MacBrowser::Volume& volume,const Entry& folder){
+        const auto children=volume.List(folder.id);
+        Check(children.size()==links.size(),"Unexpected files in copied link folder");
+        for(const auto& [name,path]:links){
+            Entry link;
+            HfsPlus::Bytes expected(path.begin(),path.end());expected.push_back(0);
+            Check(volume.FindChild(folder.id,name,link)&&link.symbolicLink&&!link.directory&&
+                  !link.forks[0].size&&!link.forks[1].size&&volume.SymbolicLinkTarget(link.id)==expected,
+                  "Symbolic link type or target bytes changed");
+        }
+    };
     for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive}){
         const char* format=kind==Kind::HfsPlus?"hfsplus":"hfsx";
         const auto sourcePath=Wide(root+"\\"+format+"-symlinks.dsk");
@@ -926,17 +956,6 @@ void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
             Storage::Job job;
             Apfs::Format(*disk,u"Link destination",true,job);
         }
-        const auto verifyLinks=[&](MacBrowser::Volume& volume,const Entry& folder){
-            const auto children=volume.List(folder.id);
-            Check(children.size()==links.size(),"Unexpected files in copied link folder");
-            for(const auto& [name,path]:links){
-                Entry link;
-                HfsPlus::Bytes expected(path.begin(),path.end());expected.push_back(0);
-                Check(volume.FindChild(folder.id,name,link)&&link.symbolicLink&&!link.directory&&
-                      !link.forks[0].size&&!link.forks[1].size&&volume.SymbolicLinkTarget(link.id)==expected,
-                      "Symbolic link type or target bytes changed");
-            }
-        };
         {
             auto source=OpenBrowserImage(sourcePath);
             auto target=OpenBrowserImage(targetPath);
@@ -967,7 +986,78 @@ void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
         verifyLinks(*target,folder);
         if(external)fprintf(report,"PASS: HFSX symbolic links reopen on the shared macOS APFS fixture.\n");
     }
-    fprintf(report,"PASS: HFS+/HFSX worker copies preserve relative, absolute UTF-8, and self-referential symbolic links without traversing them.\n");
+    fprintf(report,"PASS: HFS+/HFSX worker copies preserve relative, absolute UTF-8, and self-referential symbolic links on APFS without traversing them.\n");
+
+    const char* images[]={"hfsplus-symlinks.dsk","hfsx-symlinks.dsk","hfsx-symlinks-apfs.img"};
+    for(unsigned from=0;from<3;++from){
+        const auto sourcePath=Wide(root+"\\"+images[from]);
+        for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive}){
+            const bool extended=kind==Kind::HfsXCaseSensitive;
+            const auto targetPath=Wide(root+"\\symlinks-to-"+std::to_string(from)+(extended?"-x.dsk":"-plus.dsk"));
+            {
+                auto disk=HfsPlus::CreateImage(targetPath.c_str(),16*1024*1024);
+                HfsPlus::Volume::Format(*disk,u"Link destination",true,kind);
+            }
+            {
+                auto source=OpenBrowserImage(sourcePath);
+                auto target=OpenBrowserImage(targetPath);
+                Entry folder;
+                Check(source&&target&&source->FindChild(2,u"Links",folder)&&VolumeSession::VolumeSessionPidForTest(target),
+                      "Could not mount symlink copy fixtures");
+                Put(*target,2,u"target",1024);
+                const auto destination=target->MakeDirectory(2,u"Links");
+                Entry existing;existing.name=u"relative";existing.symbolicLink=true;
+                const HfsPlus::Bytes original{'/','o','l','d',0};
+                Storage::Job seed;
+                target->PutSymbolicLink(destination,existing,original,seed);
+                Entry relative;
+                Check(source->FindChild(folder.id,u"relative",relative),"Missing relative source link");
+                Storage::Job cancelled;
+                cancelled.transport({},[](const auto&){return Storage::ConflictChoice::Cancel;});
+                Completion aborted;
+                const auto stopped=ExecuteInWorker(OrdinaryCopy{{Native(source,relative.id)},Native(target,destination)},
+                                                   cancelled,aborted);
+                Entry retained;
+                Check(stopped.error==ERROR_CANCELLED&&target->FindChild(destination,u"relative",retained)&&
+                      target->SymbolicLinkTarget(retained.id)==original,"Cancelled overwrite changed the old symlink");
+
+                Storage::Job job;
+                bool prompted=false;
+                job.transport({},[&](const auto&){prompted=true;return Storage::ConflictChoice::Replace;});
+                Completion completion;
+                const auto result=ExecuteInWorker(OrdinaryCopy{{Native(source,folder.id)},Native(target,2)},job,completion);
+                if(result.code)throw HfsPlus::Error(result.message);
+                Check(completion.complete&&prompted,"Incomplete HFS symlink copy or missing overwrite prompt");
+            }
+            {
+                auto disk=HfsPlus::OpenImage(targetPath.c_str(),false);
+                HfsPlus::Volume hfs(*disk);
+                HfsPlus::Entry folder,link;
+                Check(hfs.FindChild(2,u"Links",folder),"Missing HFS links folder after reopen");
+                for(const auto& [name,path]:links){
+                    Check(hfs.FindChild(folder.id,name,link)&&link.symbolicLink&&
+                          link.forks[0].size==path.size()&&!link.forks[1].size&&
+                          !memcmp(link.finder.data(),"slnkrhap",8),"HFS on-disk symlink type or fork length changed");
+                }
+            }
+            auto target=OpenBrowserImage(targetPath);
+            Entry folder,link,ordinary;
+            Check(target&&target->FindChild(2,u"Links",folder)&&target->FindChild(2,u"target",ordinary)&&
+                  target->FindChild(folder.id,u"relative",link),"Missing copied HFS links after reopen");
+            verifyLinks(*target,folder);
+            bool refused=false;
+            try{target->Read(link.id,0,0,nullptr,0);}
+            catch(const HfsPlus::Error&){refused=true;}
+            Check(refused,"HFS read treated a symlink as an ordinary file");
+            target->Rename(link.id,folder.id,u"renamed link");
+            Check(target->FindChild(folder.id,u"renamed link",link)&&link.symbolicLink,
+                  "HFS renamed the wrong object");
+            target->Remove(link.id);
+            Check(!target->FindChild(folder.id,u"renamed link",link),"HFS did not remove the symlink");
+            Verify(*target,ordinary.id,1024);
+        }
+    }
+    fprintf(report,"PASS: APFS, HFS+ and HFSX copy relative, absolute UTF-8 and self-referential symbolic links into HFS+ and HFSX. Overwrite cancellation retains the old link, and rename and delete leave the target intact.\n");
 }
 
 void TestHfsToApfsHardLinks(const std::string& root,FILE* report)
@@ -1195,7 +1285,7 @@ int RunCopyProcessTest(const char *directory) {
         TestVolumeSessionProtocol();
         TestHfsToApfsPosix(root,report);
         TestCopyPosixIntoHfs(root,report);
-        TestHfsToApfsSymlinks(root,report);
+        TestSymbolicLinkCopies(root,report);
         TestHfsToApfsHardLinks(root,report);
         TestHfsToApfsAttributes(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
