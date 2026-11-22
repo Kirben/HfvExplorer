@@ -191,12 +191,13 @@ Data Encode(const HardLinkRequest& request)
     payload.put(request.parent);
     payload.u16(request.name);
     payload.put(request.replace);
+    payload.put(request.copied);
     return payload;
 }
 
 HardLinkRequest DecodeHardLink(Data& packet)
 {
-    HardLinkRequest request{CatalogNumber(packet),CatalogNumber(packet),packet.u16(),packet.flag()};
+    HardLinkRequest request{CatalogNumber(packet),CatalogNumber(packet),packet.u16(),packet.flag(),packet.flag()};
     packet.end();
     return request;
 }

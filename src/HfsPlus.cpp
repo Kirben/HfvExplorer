@@ -472,7 +472,9 @@ struct Volume::Impl {
             e.symbolicLink = !e.directory && (mode & 0170000) == 0120000;
             if(e.symbolicLink||(mode&0170000)==(e.directory?0040000:0100000))
                 e.posix=PosixMetadata{U32(r.value.data()+32),U32(r.value.data()+36),
-                                      uint16_t(mode&PosixMetadata::ModeMask)};
+                                      uint16_t(mode&PosixMetadata::ModeMask),
+                                      uint8_t(((r.value[41]&2)?PosixMetadata::UserImmutable:0)|
+                                              ((r.value[40]&2)?PosixMetadata::SystemImmutable:0))};
             e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
             e.created = Time::Decode(U32(r.value.data() + 12),(U16(r.value.data()+2)&0x1000)!=0);
@@ -728,8 +730,8 @@ struct Volume::Impl {
             for(auto& child:entries)if(child.second.parent==id&&(child.second.directory||LinkKind(child.first)==2))if(walk(child.first))return true;
             active.erase(id);done.insert(id);return false;};return walk(start);
     }
-    uint32_t Content(uint32_t id) {
-        ValidateLinkAncestors(id);auto target=Resolve(id);if(target!=id){ValidateLinks(target);Mutable(Get(target),true);}else Mutable(Get(id));return target;
+    uint32_t Content(uint32_t id,bool copiedImmutable=false) {
+        ValidateLinkAncestors(id);auto target=Resolve(id);if(target!=id){ValidateLinks(target);Mutable(Get(target),true,false,copiedImmutable);}else Mutable(Get(id),false,false,copiedImmutable);return target;
     }
     uint32_t WriteParent(uint32_t id,bool internal=false) {
         ValidateLinkAncestors(id);auto target=Resolve(id);auto& e=Get(target);Check(e.directory,"Destination is not a folder");
@@ -1083,10 +1085,11 @@ struct Volume::Impl {
         UpdateEntry(e);
         Thread(e);
     }
-    void Mutable(const Entry &e,bool inodeAccess=false,bool allowSymbolicLink=false) {
+    void Mutable(const Entry &e,bool inodeAccess=false,bool allowSymbolicLink=false,bool copiedImmutable=false) {
         ValidateLinkAncestors(e.id);Check((!e.protectedFile||inodeAccess) && e.id >= 16, "Protected HFS+ metadata cannot be modified");
         auto r = CatalogRecord(e.id);
-        Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & 6) && !(r->value[41] & 6),
+        const unsigned forbidden = copiedImmutable ? 4 : 6;
+        Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & forbidden) && !(r->value[41] & forbidden),
               "HFS+ entry is locked");
         Check(!e.directory || inodeAccess || !(U16(r->value.data() + 2) & 0x20),
               "Directory hard-link topology cannot be modified");
@@ -1583,6 +1586,8 @@ static void SetPosixMetadata(Bytes& record, const PosixMetadata& metadata)
 {
     P32(record.data()+32,metadata.uid);
     P32(record.data()+36,metadata.gid);
+    record[40]=uint8_t((record[40]&~2)|((metadata.immutable&PosixMetadata::SystemImmutable)?2:0));
+    record[41]=uint8_t((record[41]&~2)|((metadata.immutable&PosixMetadata::UserImmutable)?2:0));
     const auto type=U16(record.data()+42)&0170000;
     P16(record.data()+42,uint16_t(type|metadata.mode));
 }
@@ -1817,9 +1822,9 @@ void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {
         p.Thread(e);
     });
 }
-uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace) {
+uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace,bool copiedImmutable) {
     auto& p=*p_;p.Guard();parent=p.WriteParent(parent);auto normalized=Normalize(name,p.caseSensitive);auto existing=p.Existing(parent,normalized);Check(!existing||replace,"HFS+ name already exists");
-    auto visible=p.Get(source);uint32_t inode=p.Content(source);auto original=p.Get(inode);Check(inode!=2,"Cannot hard-link the volume root");
+    auto visible=p.Get(source);uint32_t inode=p.Content(source,copiedImmutable);auto original=p.Get(inode);Check(inode!=2,"Cannot hard-link the volume root");
     if(original.directory)Check(!p.DirectoryReaches(inode,parent),"Directory hard link would create a cycle");
     if(existing){
         const auto& target=p.Get(existing);

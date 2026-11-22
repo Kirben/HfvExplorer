@@ -104,6 +104,10 @@ public:
                                             bool replace,Storage::Job&){
         return MakeHardLink(source,parent,name,replace);
     }
+    virtual uint32_t AddCopiedHardLink(uint32_t source,uint32_t parent,const std::u16string& name,
+                                       bool replace,Storage::Job& job){
+        return MakeHardLinkForTransfer(source,parent,name,replace,job);
+    }
     virtual uint32_t MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t parent,const std::u16string& name,
                                                   const Entry* approvedDestination,Storage::Job& job);
     virtual void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){if(method!=HfsPlus::Volume::CompressionMode::Zlib&&method!=HfsPlus::Volume::CompressionMode::Uncompressed)throw HfsPlus::Error("This format cannot create this compression method");SetCompression(id,method!=HfsPlus::Volume::CompressionMode::Uncompressed,std::move(progress));}

@@ -275,7 +275,9 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;
         if(entry.directory||mode==0100000||mode==0120000)
-            entry.posix=PosixMetadata{Le32(p+72),Le32(p+76),uint16_t(fullMode&PosixMetadata::ModeMask)};
+            entry.posix=PosixMetadata{Le32(p+72),Le32(p+76),uint16_t(fullMode&PosixMetadata::ModeMask),
+                                     uint8_t(((Le32(p+68)&UserImmutable)?PosixMetadata::UserImmutable:0)|
+                                             ((Le32(p+68)&SystemImmutable)?PosixMetadata::SystemImmutable:0))};
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;

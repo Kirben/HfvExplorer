@@ -116,7 +116,7 @@ class Volume {
                               std::optional<PosixMetadata> posix = {});
     Attributes GetAttributes(uint32_t id) const;
     void SetAttributes(uint32_t id, const Attributes &);
-    uint32_t MakeHardLink(uint32_t source, uint32_t parent, const std::u16string &name,bool replace=false);
+    uint32_t MakeHardLink(uint32_t source, uint32_t parent, const std::u16string &name,bool replace=false,bool copiedImmutable=false);
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name);
     void Remove(uint32_t id);
     void ValidateRemoval(uint32_t id) const;

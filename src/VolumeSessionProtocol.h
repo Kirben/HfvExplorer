@@ -18,7 +18,7 @@ struct ReadRequest {uint32_t id,fork;uint64_t offset,count;};
 struct RenameRequest {uint32_t id,parent;std::u16string name;};
 struct CatalogItem {uint32_t id;};
 struct DirectoryName {uint32_t parent;std::u16string name;};
-struct HardLinkRequest {uint32_t source,parent;std::u16string name;bool replace;};
+struct HardLinkRequest {uint32_t source,parent;std::u16string name;bool replace;bool copied=false;};
 struct CopyCheck {uint32_t id,parent;};
 struct FindChildRequest {uint32_t parent;std::u16string name;std::optional<uint32_t> version;};
 struct CompressionRequest {uint32_t id;HfsPlus::Volume::CompressionMode method;};

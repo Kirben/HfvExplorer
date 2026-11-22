@@ -622,9 +622,17 @@ public:
         return handled;
     }
     uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false) override {
+        return Link(source,parent,name,replace,false);
+    }
+    uint32_t AddCopiedHardLink(uint32_t source,uint32_t parent,const std::u16string& name,
+                               bool replace,Storage::Job& job) override {
+        if(job.cancelled())throw Storage::Cancelled();
+        return Link(source,parent,name,replace,true);
+    }
+    uint32_t Link(uint32_t source,uint32_t parent,const std::u16string& name,bool replace,bool copied) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         uint32_t id = 0;
-        auto args=Protocol::Encode(Protocol::HardLinkRequest{source,parent,name,replace});
+        auto args=Protocol::Encode(Protocol::HardLinkRequest{source,parent,name,replace,copied});
         Call(SessionCommandCode::HardLink,std::move(args),true,[&] {
             auto packet = Response(SessionBytes); id = uint32_t(packet.get()); packet.end();
         });
@@ -837,7 +845,10 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             }
             case SessionCommandCode::HardLink: {
                 const auto request=Protocol::DecodeHardLink(packet);
-                writeNumber(volume.MakeHardLink(request.source,request.parent,request.name,request.replace));
+                if(request.copied){
+                    Storage::Job job;
+                    writeNumber(volume.AddCopiedHardLink(request.source,request.parent,request.name,request.replace,job));
+                }else writeNumber(volume.MakeHardLink(request.source,request.parent,request.name,request.replace));
                 break;
             }
             case SessionCommandCode::Compression: {

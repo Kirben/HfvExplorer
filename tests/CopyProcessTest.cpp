@@ -4,6 +4,7 @@
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
+#include "ApfsTree.h"
 #include "ApfsVolume.h"
 #include "HfsPlusDisk.h"
 #include "HfsPlusCompression.h"
@@ -2353,6 +2354,122 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
     if(fixture)fprintf(report,"PASS: dual-fork compressed and fallback transfers also work on disposable macOS APFS fixtures.\n");
 }
 
+void TestApfsImmutableCopy(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto sourcePath=Wide(root+"\\immutable-apfs.img");
+    {
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Immutable APFS source",true,job);
+    }
+    auto source=OpenBrowserImage(sourcePath);
+    Check(bool(source),"Cannot open immutable APFS fixture");
+    const auto single=Put(*source,2,u"Locked single",7901,24);
+    const auto original=Put(*source,2,u"Locked original",8303,25);
+    source->MakeHardLink(original,2,u"Locked alias");
+    const auto lock=[&](uint32_t id){
+        auto entry=source->Stat(id);
+        entry.protectedFile=true;
+        source->SetBasicMetadata(id,entry);
+    };
+    lock(single);
+    lock(original);
+    source.reset();
+    {
+        // The APFS UI can set user immutability. Set system immutability
+        // directly on the single test file in this disposable catalog leaf.
+        auto disk=HfsPlus::OpenImage(sourcePath.c_str(),true);
+        const auto container=Apfs::Probe(*disk);
+        Check(container&&container->volumes.size()==1,"Missing APFS fixture container");
+        const auto volume=container->volumes.front();
+        const Apfs::ObjectMap mappings(*disk,*container,container->objectMap,container->transaction);
+        const auto volumeBlock=mappings.Lookup(volume);
+        Check(bool(volumeBlock),"Missing APFS fixture volume mapping");
+        const auto superblock=Apfs::ReadObject(*disk,*container,*volumeBlock,volume,container->transaction,13);
+        const auto treeOid=Apfs::Le64(superblock.data()+136);
+        const Apfs::ObjectMap objects(*disk,*container,Apfs::Le64(superblock.data()+128),container->transaction);
+        const auto leafBlock=objects.Lookup(treeOid);
+        Check(bool(leafBlock),"Missing APFS fixture catalog mapping");
+        auto leaf=Apfs::ReadObject(*disk,*container,*leafBlock,treeOid,container->transaction,2,14);
+        auto viewBytes=leaf;
+        const auto* base=viewBytes.data();
+        const Apfs::Node node(std::move(viewBytes),true,{});
+        Check(!node.Level(),"Expected APFS fixture catalog to fit one leaf");
+        unsigned patched=0;
+        for(size_t i=0;i<node.Count();++i){
+            const auto record=node.At(i);
+            if(record.key.size!=8||Apfs::Le64(record.key.data)>>60!=3||record.value.size<84||
+               !(Apfs::Le32(record.value.data+68)&Apfs::UserImmutable)||
+               Apfs::Le32(record.value.data+56)!=1)continue;
+            leaf[size_t(record.value.data-base)+70]|=2;
+            ++patched;
+        }
+        Check(patched==1,"Expected one singly linked immutable test file");
+        const auto checksum=Apfs::ObjectChecksum(leaf);
+        for(unsigned i=0;i<8;++i)leaf[i]=uint8_t(checksum>>(8*i));
+        disk->Write(container->offset+*leafBlock*container->blockSize,leaf.data(),leaf.size());
+        disk->Flush();
+    }
+    source=OpenBrowserImage(sourcePath);
+    Check(bool(source),"Cannot reopen immutable APFS source");
+    std::vector<Location> inputs;
+    const std::u16string names[]={u"Locked single",u"Locked original",u"Locked alias"};
+    for(const auto& name:names){
+        Entry file;
+        Check(source->FindChild(2,name,file)&&file.protectedFile&&file.posix&&
+              file.posix->immutable==(PosixMetadata::UserImmutable|(inputs.empty()?PosixMetadata::SystemImmutable:0)),
+              "Missing APFS immutable fixture");
+        inputs.push_back(Native(source,file.id));
+    }
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto path=Wide(root+"\\immutable-hfs-"+std::to_string(index++)+".dsk");
+        auto target=Image(path,kind);
+        Check(bool(target),"Cannot open immutable HFS destination");
+        Put(*target,2,u"Locked single",4001,31);
+        const auto copy=[&](bool stop){
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){
+                if(stop&&progress.fileBytes)job.cancel();
+            },[](const auto&){return Storage::ConflictChoice::Replace;});
+            Completion completion;
+            return ExecuteInWorker(OrdinaryCopy{inputs,Native(target)},job,completion);
+        };
+        const auto cancelled=copy(true);
+        Check(cancelled.outcome==Storage::Outcome::Cancelled&&!cancelled.partial,
+              "Immutable overwrite did not cancel before publication");
+        target.reset();
+        target=OpenBrowserImage(path);
+        Entry old;
+        Check(target&&target->FindChild(2,u"Locked single",old)&&!old.protectedFile,
+              "Cancellation changed original HFS lock flags");
+        Verify(*target,old.id,4001,31);
+        Check(!target->FindChild(2,u"Locked original",old),"Cancellation published a new file");
+        const auto copied=copy(false);
+        Check(!copied.code,copied.message.c_str());
+        target.reset();
+        target=OpenBrowserImage(path);
+        Check(bool(target),"Cannot reopen immutable HFS destination");
+        uint32_t inode=0;
+        for(size_t i=0;i<inputs.size();++i){
+            Entry origin;
+            Check(source->FindChild(2,names[i],origin),"Missing immutable source during verification");
+            Entry entry;
+            Check(target->FindChild(2,origin.name,entry)&&entry.protectedFile&&entry.posix&&
+                  entry.posix->immutable==origin.posix->immutable,"Copy lost immutable flags after reopening");
+            Verify(*target,entry.id,i?8303:7901,i?25:24);
+            if(i==1)inode=entry.resolvedId;
+            if(i)Check(entry.hardLink&&entry.resolvedId==inode&&entry.linkCount==2,
+                       "Copied locked names do not share an inode");
+            bool refused=false;
+            try{target->Remove(entry.id);}catch(const std::exception&){refused=true;}
+            Check(refused,"HFS allowed deletion of an immutable entry");
+        }
+    }
+    fprintf(report,"PASS: APFS immutable overwrite and new hard-link copies keep HFS+/HFSX locks and both forks after reopening; cancellation preserves the original.\n");
+}
+
 void TestApfsToHfsCompression(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2678,6 +2795,7 @@ int RunCopyProcessTest(const char *directory) {
         TestCrossFormatAttributes(root,report);
         TestHfsCompressionWithResourceToApfs(root,report);
         TestApfsToHfsCompression(root,report);
+        TestApfsImmutableCopy(root,report);
         TestApfsToHfsNameCollisions(root,report);
         TestHfsxToApfsNameCollisions(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");

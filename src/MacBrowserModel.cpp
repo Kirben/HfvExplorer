@@ -76,7 +76,7 @@ class Plus final : public Volume, public WorkerEndpoint {
     void Ready() { if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access"); }
     static Entry Describe(const HfsPlus::Entry &in) {
         Entry e; e.id=in.id; e.parent=in.parent; e.resolvedId=in.resolvedId;
-        e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile;
+        e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile||(in.posix&&in.posix->immutable);
         e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
         e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
         e.posix=in.posix;
@@ -118,6 +118,13 @@ public:
         return capabilities;
     }
     uint32_t MakeHardLink(uint32_t source,uint32_t parent,const std::u16string& name,bool replace=false)override{return Mutate([&]{return volume_->MakeHardLink(source,parent,name,replace);});}
+    uint32_t AddCopiedHardLink(uint32_t source,uint32_t parent,const std::u16string& name,
+                               bool replace,Storage::Job& job)override{
+        return Mutate([&]{
+            if(job.cancelled())throw Storage::Cancelled();
+            return volume_->MakeHardLink(source,parent,name,replace,true);
+        });
+    }
     void SetCompressionMethod(uint32_t id,HfsPlus::Volume::CompressionMode method,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,method,progress);});}
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,compressed,progress);});}
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);attributes.erase(u"com.apple.system.hfs.firstlink");if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
@@ -806,7 +813,7 @@ uint32_t Volume::MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t pare
     // its first alias. Find that name again before adding another alias.
     Entry original;
     Check(FindChild(copied.parent,copied.name,original)&&original.resolvedId==copied.resolvedId&&
-          (!copied.protectedFile||(original.protectedFile&&original.identity==copied.identity)),
+          (!copied.protectedFile||(original.protectedFile&&original.posix==copied.posix)),
           "Copied hard-link source disappeared or changed");
     if(approvedDestination){
         Entry destination;
@@ -815,7 +822,7 @@ uint32_t Volume::MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t pare
         Check(FindTransferChild(parent,destination,current)&&current.identity==approvedDestination->identity,
               "The hard-link destination changed after overwrite approval");
     }
-    return MakeHardLinkForTransfer(original.id,parent,name,approvedDestination!=nullptr,job);
+    return AddCopiedHardLink(original.id,parent,name,approvedDestination!=nullptr,job);
 }
 
 void Volume::WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move)
