@@ -173,7 +173,8 @@ std::shared_ptr<Volume> OpenCdRoot(const char *root,
 Entry DescribeWindowsFile(const std::wstring &path);
 std::pair<std::shared_ptr<Volume>,uint32_t> ResolveWindowsFile(const std::wstring &path);
 bool WindowsResourceCompanion(const std::wstring &path);
-void StageWindowsCut(Volume&,uint32_t,Storage::Job&);
+void ValidateWindowsCut(Volume&,uint32_t,Storage::Job&,bool windowsDestination);
+void StageWindowsCut(Volume&,uint32_t);
 std::shared_ptr<Volume> OpenWindows(const std::wstring &directory);
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source>,const std::string& key,bool write=false,bool stable=false);
 std::shared_ptr<Volume> OpenClassicNdif(std::shared_ptr<HfsPlus::Source>,const std::string& key,

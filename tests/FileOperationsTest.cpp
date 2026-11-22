@@ -66,6 +66,71 @@ void Pass(const Operation& op){Wait(op);if(op.Job()->result().code)throw HfsPlus
 void Conflict(const std::shared_ptr<Storage::Job>& job){DWORD until=GetTickCount()+5000;while(!job->done()&&job->conflict().empty()&&LONG(until-GetTickCount())>0)Sleep(10);Check(!job->conflict().empty(),"expected overwrite conflict");}
 std::vector<BYTE> Load(const std::string& path){CFile file;Check(file.Open(path.c_str(),CFile::modeRead|CFile::shareDenyNone)!=FALSE,"read fixture");std::vector<BYTE> bytes(size_t(file.GetLength()));Check(file.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"read fixture bytes");return bytes;}
 void Save(const std::string& path,const char* data){CFile file;Check(file.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"write fixture");file.Write(data,UINT(strlen(data)));}
+void WindowsStreamSafety(const std::string& root,const std::shared_ptr<Volume>& mac,FILE* report)
+{
+ const auto winFolder=root+"\\streams";
+ const auto windowsCopy=root+"\\streams-copy";
+ Check(CreateDirectoryA(winFolder.c_str(),nullptr)&&CreateDirectoryA(windowsCopy.c_str(),nullptr),
+       "create NTFS stream test folders");
+ const auto file=winFolder+"\\Payload ADS";
+ Save(file,"DATA");
+ Save(file+":extra","PRIVATE");
+ const auto execute=[&](const std::string& path,const Location& destination,bool cut){
+  Storage::Job job;
+  job.transport({},[](const auto&){return Storage::ConflictChoice::Replace;});
+  auto source=Host(path);
+  source.cut=cut;
+  Completion completion;
+  return ExecuteInWorker(OrdinaryCopy{{source},destination},job,completion);
+ };
+ const auto destination=Native(mac,mac->MakeDirectory(2,u"Windows streams"));
+ const auto refused=execute(file,destination,true);
+ Check(refused.code&&refused.message.find("alternate data streams")!=std::string::npos&&
+       Load(file+":extra").size()==7&&mac->List(destination.Id()).empty(),
+       "Mac cut discarded Windows streams or wrote a partial destination");
+ Check(!execute(file,destination,false).code&&Load(file+":extra").size()==7,
+       "copy-only import should leave the original stream intact");
+ Check(!execute(file,Host(windowsCopy),true).code&&GetFileAttributesA(file.c_str())==INVALID_FILE_ATTRIBUTES&&
+       Load(windowsCopy+"\\Payload ADS:extra")==std::vector<BYTE>({'P','R','I','V','A','T','E'}),
+       "Windows file move failed to preserve the named stream");
+ const auto directory=winFolder+"\\Directory";
+ Check(CreateDirectoryA(directory.c_str(),nullptr)!=FALSE,"create folder stream fixture");
+ Save(directory+"\\Child","KEEP");
+ Save(directory+":metadata","FOLDER");
+ Check(execute(directory,Host(windowsCopy),true).code&&Load(directory+":metadata").size()==6&&
+       GetFileAttributesA((windowsCopy+"\\Directory").c_str())==INVALID_FILE_ATTRIBUTES,
+       "a Windows folder move discarded a directory stream");
+
+ auto host=OpenWindows(W(winFolder));
+ Entry entry;
+ entry.name=u"Fork and streams";
+ entry.forks[0].size=4;
+ entry.forks[1].size=3;
+ memcpy(entry.finder.data(),"TEXTTEST",8);
+ const auto id=host->Put(2,entry,[](unsigned fork,uint64_t,void* data,size_t n){
+  memcpy(data,fork?"OLD":"DATA",n);
+ },false);
+ const auto item=winFolder+"\\Fork and streams";
+ const auto companion=winFolder+"\\%Fork and streams";
+ Save(item+":primary","PRIMARY");
+ Save(companion+":companion","COMPANION");
+ auto original=host->Stat(id);
+ HfsPlus::Attributes attrs;
+ attrs[u"user.audit"]={7,5,3};
+ host->SetAttributes(id,attrs);
+ Check(Load(companion+":companion").size()==9,"attribute edit dropped companion stream");
+ const auto input=winFolder+"\\Resource input";
+ Save(input,"NEWFORK");
+ Pass(Submit(ImportResourceFork{Host(input),Host(item)}));
+ auto replaced=host->Stat(id);
+ char resource[7]{};
+ host->Read(id,1,0,resource,sizeof(resource));
+ Check(replaced.identity.primary==original.identity.primary&&Load(item)==std::vector<BYTE>({'D','A','T','A'})&&
+       Load(item+":primary").size()==7&&Load(companion+":companion").size()==9&&
+       !memcmp(resource,"NEWFORK",7)&&host->GetAttributes(id)==attrs,
+       "Windows resource-fork replacement changed unrelated data or streams");
+ fprintf(report,"PASS: Windows cuts retain unsupported streams and preserve transferable ones; metadata and resource edits keep the primary file and both NTFS streams.\n");
+}
 #ifdef HFV_FLOPPY_TESTING
 class OperationFloppy:public FloppyWriteApi {
 public:
@@ -87,6 +152,7 @@ int RunFileOperationsTest(const char* directory){
  try{
   Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden operation owner",WS_OVERLAPPED,0,0,600,400,nullptr,0)&&other.CreateEx(0,AfxRegisterWndClass(0),"Other browser",WS_OVERLAPPED,0,0,600,400,nullptr,0),"create hidden owners");app.m_pMainWnd=&other;app.m_mac_window_mode=0;
   auto source=Image(W(root+"\\source.dsk"),u"Source",HfsPlus::Volume::FormatKind::HfsPlus),target=Image(W(root+"\\target.dsk"),u"Target",HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+  WindowsStreamSafety(root,target,report);
   uint32_t file=Put(*source,u"Payload"),folder=target->MakeDirectory(2,u"Copies");auto expected=source->Stat(file);auto delayed=std::make_shared<Delayed>(source);delayed->delay=120;delayed->owner=&owner;delayed->other=&other;
   Request copy;copy.Copy().sources={Native(delayed,file,&expected)};copy.Copy().destination=Native(target,folder);
   // Destroy the originating session and its panes while its captured request waits.

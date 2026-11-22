@@ -2,6 +2,9 @@
 #include "stdafx.h"
 #include "CommandStorage.h"
 #include "CdImage.h"
+#include "HfsPlus.h"
+#include "BrowserPresentation.h"
+#include "MacBrowserModel.h"
 #include "DeviceWait.h"
 #include "ReadOnlyCd.h"
 #include "CdImageToc.h"
@@ -67,10 +70,19 @@ public:
  bool Read(unsigned long long at,DWORD n,void* p,DWORD& got)override{if(at>size_||n>size_-at){error_=ERROR_HANDLE_EOF;got=0;return false;}if(!source_->Read(base_+at,n,p,got)){error_=source_->Error();return false;}return true;}
  DWORD Error()const override{return error_?error_:source_->Error();}
 };
-struct Output {
- char temporary[MAX_PATH]={};HANDLE handle=INVALID_HANDLE_VALUE;
- ~Output(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);if(*temporary)DeleteFileA(temporary);}
+struct DestinationGuard {
+ HANDLE handle=INVALID_HANDLE_VALUE;
+ ~DestinationGuard(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
 };
+bool RenameGuardedFile(HANDLE handle,const std::wstring& path) {
+ const auto nameBytes=path.size()*sizeof(wchar_t);
+ std::vector<BYTE> buffer((std::max)(sizeof(FILE_RENAME_INFO),
+     offsetof(FILE_RENAME_INFO,FileName)+nameBytes+sizeof(wchar_t)),0);
+ auto rename=reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+ rename->FileNameLength=DWORD(nameBytes);
+ memcpy(rename->FileName,path.data(),nameBytes);
+ return SetFileInformationByHandle(handle,FileRenameInfo,rename,DWORD(buffer.size()))!=FALSE;
+}
 Storage::Result failure(DWORD error,const std::string& reason,unsigned long long offset=0) {
  if(!error)error=ERROR_IO_DEVICE;
  return {1,error,reason+" (Windows error "+std::to_string(error)+", byte offset "+std::to_string(offset)+")."};
@@ -95,8 +107,17 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   if(destination[1]==':' && (destination[0]==char('A'+drive)||destination[0]==char('a'+drive)))
    return failure(ERROR_INVALID_PARAMETER,"Save the image on a different drive from the source");
   DWORD attributes=GetFileAttributesA(destination);bool replace=attributes!=INVALID_FILE_ATTRIBUTES;
+  const auto outputPath=BrowserPresentation::WindowsPath(VolumeCoord::Wide(destination));
+  DestinationGuard original;
   if(replace){
-   if(attributes&FILE_ATTRIBUTE_DIRECTORY)return failure(ERROR_ACCESS_DENIED,"The output path is a folder");
+   // Bind approval to this file and prevent competing writes or renames.
+   original.handle=CreateFileW(outputPath.c_str(),FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ,
+       nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+   if(original.handle==INVALID_HANDLE_VALUE)return failure(GetLastError(),"Cannot protect the current destination");
+   BY_HANDLE_FILE_INFORMATION info{};
+   if(!GetFileInformationByHandle(original.handle,&info)||
+      (info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
+    return failure(ERROR_ACCESS_DENIED,"Choose an ordinary output file");
    auto choice=job.replace(destination);
    if(choice==Storage::ConflictChoice::Skip)return {};
    if(choice==Storage::ConflictChoice::Cancel)throw Storage::Cancelled();
@@ -111,36 +132,53 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   if(!size||size%512||size>0x7fffffffffffffffULL)return failure(ERROR_INVALID_DATA,"The drive reported an invalid data-image length");
   DWORD generation=0,current=0;
   if(!source->Verify(generation))return failure(source->Error(),"Could not establish "+medium+" media identity");
-  char directory[MAX_PATH];strcpy_s(directory,destination);char* slash=strrchr(directory,'\\');
-  if(!slash)return failure(ERROR_INVALID_NAME,"The output path has no folder");slash[1]=0;
-  Output file;
-  if(!GetTempFileNameA(directory,"hcd",0,file.temporary))return failure(GetLastError(),"Could not create the temporary image");
-  file.handle=CreateFileA(file.temporary,GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-  if(file.handle==INVALID_HANDLE_VALUE)return failure(GetLastError(),"Could not open the temporary image");
+  auto file=HfsPlus::CreateStagedOutput(outputPath,size,replace);
   std::vector<BYTE> buffer(64*1024);p.scanning=false;p.totalBytes=size;p.phase="Reading "+medium+" image";job.progress(p);
   for(unsigned long long offset=0;offset<size;){
    if(job.cancelled())throw Storage::Cancelled();
    if(!source->Verify(current))return failure(source->Error(),medium+" media check failed",offset);
    if(current!=generation)return failure(ERROR_MEDIA_CHANGED,medium+" media changed; the image was discarded",offset);
-   DWORD count=DWORD(min(size-offset,(unsigned long long)buffer.size())),got=0,wrote=0;
+   DWORD count=DWORD(min(size-offset,(unsigned long long)buffer.size())),got=0;
    if(!source->Read(offset,count,buffer.data(),got))return failure(source->Error(),medium+" sector read failed; missing sectors were not synthesized",offset);
    if(got!=count)return failure(ERROR_READ_FAULT,"Short "+medium+" sector read; the image was discarded",offset);
    if(!source->Verify(current))return failure(source->Error(),medium+" media check failed after reading",offset);
    if(current!=generation)return failure(ERROR_MEDIA_CHANGED,medium+" media changed while reading; the image was discarded",offset);
-   if(!WriteFile(file.handle,buffer.data(),count,&wrote,nullptr))return failure(GetLastError(),"Writing the image file failed",offset);
-   if(wrote!=count)return failure(ERROR_WRITE_FAULT,"Short write to the image file",offset);
+   try{file->Write(offset,buffer.data(),count);}
+   catch(const HfsPlus::Error&){return failure(GetLastError(),"Writing the image file failed",offset);}
    offset+=count;p.bytes=p.processed=offset;job.progress(p);
   }
   if(job.cancelled())throw Storage::Cancelled();
   if(!source->Verify(current))return failure(source->Error(),"Final "+medium+" media check failed",size);
   if(current!=generation)return failure(ERROR_MEDIA_CHANGED,medium+" media changed at completion; the image was discarded",size);
   p.phase="Saving "+medium+" image";job.progress(p);
-  if(!FlushFileBuffers(file.handle))return failure(GetLastError(),"Flushing the image file failed",size);
-  HANDLE handle=file.handle;file.handle=INVALID_HANDLE_VALUE;
-  if(!CloseHandle(handle))return failure(GetLastError(),"Closing the image file failed",size);
+  file->Flush();
   if(job.cancelled())throw Storage::Cancelled();
-  if(!MoveFileExA(file.temporary,destination,MOVEFILE_WRITE_THROUGH|(replace?MOVEFILE_REPLACE_EXISTING:0)))return failure(GetLastError(),"Could not publish the completed image",size);
-  file.temporary[0]=0;p.phase=medium+" image saved";job.progress(p);return {};
+  std::wstring backup;
+  if(replace){
+   backup=file->WorkerFiles().front().first+L".previous";
+   if(!RenameGuardedFile(original.handle,backup))return failure(GetLastError(),"Could not retain the old image",size);
+  }
+  try{file->PublishTo(outputPath);}
+  catch(const HfsPlus::Error& error){
+   const auto code=GetLastError();
+   if(replace&&!RenameGuardedFile(original.handle,outputPath)){
+    Storage::OutcomeEvidence::NoteRetainedChange();
+    return failure(code,std::string(error.what())+" The original image remains at "+
+                   BrowserPresentation::Utf8(MacBrowser::U16(backup)),size);
+   }
+   return failure(code,error.what(),size);
+  }
+  file->Keep();
+  if(replace){
+   FILE_DISPOSITION_INFO remove{TRUE};
+   if(!SetFileInformationByHandle(original.handle,FileDispositionInfo,&remove,sizeof(remove))){
+    const auto code=GetLastError();
+    Storage::OutcomeEvidence::NoteRetainedChange();
+    return failure(code,"The new image was saved. The original remains at "+
+                   BrowserPresentation::Utf8(MacBrowser::U16(backup)),size);
+   }
+  }
+  p.phase=medium+" image saved";job.progress(p);return {};
  };
  if(drive<0||drive>25)return work;
  auto wide=VolumeCoord::Wide(output);auto changed=VolumeCoord::PathKey(wide);

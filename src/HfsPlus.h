@@ -46,7 +46,7 @@ public:
 };
 // Owns a newly created file and deletes it by handle unless kept.
 std::unique_ptr<NewImage> CreateFormatOutput(const wchar_t*,uint64_t size,const wchar_t* externalJournal=nullptr);
-std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size);
+std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size,bool allowExisting=false);
 std::string InitializeExternalJournalImage(Source&);
 std::string CreateExternalJournalImage(const wchar_t*,uint64_t size = 64ULL*1024*1024);
 struct Extent {

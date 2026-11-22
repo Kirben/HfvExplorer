@@ -80,41 +80,52 @@ struct FileVersion {
  ObjectIdentity Identity()const{return Present()?WindowsIdentity(info):ObjectIdentity{};}
  void Verify(const std::wstring& path)const{Check(Matches(path),"Destination changed during staging/publication; replacement was refused");}
 };
-void CopyNamedStreams(const std::wstring& source,const std::wstring& staged,const Entry& entry,Storage::Job& job)
+template<class Visit>
+void VisitNamedStreams(const std::wstring& path,Visit visit)
 {
-    FileVersion version(source);
-    Check(version.Present()&&version.Identity()==entry.identity.primary,
-          "Windows source changed before copying its alternate data streams");
-
     WIN32_FIND_STREAM_DATA stream{};
-    HANDLE search=FindFirstStreamW(source.c_str(),FindStreamInfoStandard,&stream,0);
+    const auto search=FindFirstStreamW(path.c_str(),FindStreamInfoStandard,&stream,0);
     if(search==INVALID_HANDLE_VALUE){
         const auto error=GetLastError();
-        Check(error==ERROR_HANDLE_EOF||error==ERROR_INVALID_PARAMETER||error==ERROR_NOT_SUPPORTED,
-              "Cannot enumerate Windows alternate data streams");
-        return;
+        if(error==ERROR_HANDLE_EOF)return;
+        if(error==ERROR_INVALID_PARAMETER||error==ERROR_NOT_SUPPORTED||error==ERROR_INVALID_FUNCTION){
+            const auto handle=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+            if(handle!=INVALID_HANDLE_VALUE){
+                DWORD flags=0;
+                const bool unavailable=GetVolumeInformationByHandleW(handle,nullptr,0,nullptr,nullptr,
+                    &flags,nullptr,0)&&!(flags&FILE_NAMED_STREAMS);
+                CloseHandle(handle);
+                if(unavailable)return;
+            }
+        }
+        throw HfsPlus::Error("Cannot verify Windows alternate data streams");
     }
     struct Close {HANDLE search;~Close(){FindClose(search);}} close{search};
-    std::vector<uint8_t> buffer;
     do{
-        if(job.cancelled())throw Storage::Cancelled();
-        const std::wstring name=stream.cStreamName;
-        if(name==L"::$DATA")continue;
+        if(wcscmp(stream.cStreamName,L"::$DATA"))visit(std::wstring(stream.cStreamName));
+    }while(FindNextStreamW(search,&stream));
+    Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot enumerate Windows alternate data streams");
+}
+void CopyNamedStreams(const std::wstring& source,const std::wstring& staged,Storage::Job* job)
+{
+    std::vector<uint8_t> buffer;
+    VisitNamedStreams(source,[&](const std::wstring& name){
+        if(job&&job->cancelled())throw Storage::Cancelled();
         File input(source+name,GENERIC_READ,OPEN_EXISTING);
         File output(staged+name,GENERIC_WRITE,CREATE_NEW);
         const auto size=input.Size();
         if(buffer.empty())buffer.resize(1024*1024);
         for(uint64_t offset=0;offset<size;){
-            if(job.cancelled())throw Storage::Cancelled();
+            if(job&&job->cancelled())throw Storage::Cancelled();
             const auto count=size_t((std::min)(uint64_t(buffer.size()),size-offset));
             input.Read(offset,buffer.data(),count);
             output.Write(buffer.data(),count);
             offset+=count;
         }
         output.Flush();
-    }while(FindNextStreamW(search,&stream));
-    Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot enumerate Windows alternate data streams");
-    version.Verify(source);
+    });
 }
 
 struct DirectoryLease {
@@ -433,19 +444,55 @@ public:
         return capabilities;
     }
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Double d;auto path=Companion(Path(id));return AppleDouble(path,d)?DoubleAttributes(path,d):HfsPlus::Attributes{};}
-    void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={}){
+    void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={},
+                         Reader newResource={},Storage::Job* job=nullptr){
         auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
         DirectoryLease directory(root);FileVersion original(companion);std::unique_ptr<FileVersion> replacement,primary;std::unique_ptr<DirectoryLease> folder;
         if(e.directory){folder.reset(new DirectoryLease(path));Check(e.identity.primary.key==folder->identity.key,"Primary folder changed before metadata publication");}else{primary.reset(new FileVersion(path));Check(primary->Present()&&e.identity.primary==primary->Identity(),"Primary file changed before metadata publication");}
-        Double old;bool exists=original.Present();Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");Check(old.size==e.forks[1].size,"Resource fork changed before metadata publication");
+        Double old;
+        const bool exists=original.Present();
+        Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
+        Check(original.Identity()==e.identity.companion,"The metadata companion changed before publication");
+        Check(newResource||old.size==e.forks[1].size,"Resource fork changed before metadata publication");
         std::wstring staged,backup;bool backed=false,published=false;std::vector<std::unique_ptr<VolumeCoord::OperationLease>> leases;auto reserve=[&](const std::wstring& p){leases.emplace_back(new VolumeCoord::OperationLease({{VolumeCoord::PathKey(p),VolumeCoord::Mode::Write}}));};
-        try{staged=Temp(root);reserve(staged);{File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);header.Write(output);if(e.forks[1].size){File input(companion,GENERIC_READ,OPEN_EXISTING);HfsPlus::Bytes buffer(65536);for(uint64_t at=0;at<old.size;){auto n=size_t((std::min)(uint64_t(buffer.size()),old.size-at));input.Read(old.offset+at,buffer.data(),n);output.WriteForkBytes(buffer.data(),n);at+=n;}}output.SealSparse();output.Flush();}
+        try{
+            staged=Temp(root);
+            reserve(staged);
+            {
+                File output(staged,GENERIC_WRITE,TRUNCATE_EXISTING);
+                header.Write(output);
+                if(e.forks[1].size){
+                    std::unique_ptr<File> input;
+                    if(!newResource)input=std::make_unique<File>(companion,GENERIC_READ,OPEN_EXISTING);
+                    HfsPlus::Bytes buffer(65536);
+                    for(uint64_t at=0;at<e.forks[1].size;){
+                        const auto count=size_t((std::min)(uint64_t(buffer.size()),e.forks[1].size-at));
+                        if(newResource)newResource(1,at,buffer.data(),count);
+                        else input->Read(old.offset+at,buffer.data(),count);
+                        output.WriteForkBytes(buffer.data(),count);
+                        at+=count;
+                    }
+                }
+                output.SealSparse();
+                output.Flush();
+            }
+            if(exists)CopyNamedStreams(companion,staged,job);
+            if(job&&job->cancelled())throw Storage::Cancelled();
             {std::lock_guard<std::recursive_mutex> lock(mutex_);resourceReaders_.erase(id);}
             replacement.reset(new FileVersion(staged));Publication("metadata-staged");if(primary)primary->Verify(path);original.Verify(companion);
             if(exists){backup=Backup(root);reserve(backup);PublishRename(companion,backup,"Cannot preserve old metadata companion",true);backed=true;original.Verify(backup);}
             PublishRename(staged,companion,"Cannot publish metadata companion");staged.clear();published=true;Publication("metadata-published");if(finish)finish();if(primary)primary->Verify(path);replacement->Verify(companion);if(backed)original.Verify(backup);
         }catch(...){if(WindowsMoveUndo::Session::Current())throw;bool restored=true;if(published&&(!replacement->Matches(companion)||!DeleteFileW(companion.c_str())))restored=false;if(backed){if((primary&&!primary->Matches(path))||!MoveFileExW(backup.c_str(),companion.c_str(),MOVEFILE_WRITE_THROUGH))restored=false;}if(!staged.empty())DeleteFileW(staged.c_str());if(!backed&&!backup.empty())DeleteFileW(backup.c_str());if(backed||published)Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);if(!restored)throw HfsPlus::Error(Recovery("Metadata rollback could not restore the original companion",{},backed?(Missing(backup)?companion:backup):std::wstring{}));throw;}
         if(!WindowsMoveUndo::Session::Current()&&!backup.empty())DeleteFileW(backup.c_str());
+    }
+    uint32_t PutResourceReplacementForJob(uint32_t id,const Entry& entry,Reader reader,
+                                          std::function<void(uint64_t,size_t)> keptData,Storage::Job& job)override{
+        auto updated=entry;
+        updated.attributes=GetAttributes(id);
+        updated.attributesKnown=true;
+        if(keptData)keptData(0,size_t(entry.forks[0].size));
+        PublishMetadata(id,updated,{},std::move(reader),&job);
+        return id;
     }
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& attributes)override{auto e=Describe(id);e.attributes=attributes;e.attributesKnown=true;PublishMetadata(id,e);}
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
@@ -632,7 +679,13 @@ private:
                 Publication("before-data-flush");data.Flush();
                 if (rsrc) { rsrc->SealSparse(); rsrc->Dates(e); rsrc->Flush(); }
             }
-            if(job)CopyNamedStreams(source,staged,e,*job);
+            if(job){
+                FileVersion version(source);
+                Check(version.Present()&&version.Identity()==e.identity.primary,
+                      "Windows source changed before copying its alternate data streams");
+                CopyNamedStreams(source,staged,job);
+                version.Verify(source);
+            }
             if(job&&e.datesValid){File data(staged,GENERIC_WRITE,OPEN_EXISTING);data.Dates(e);data.Flush();}
             {std::lock_guard<std::recursive_mutex> lock(mutex_);for(const auto& entry:paths_)if(!_wcsicmp(entry.second.c_str(),path.c_str())){dataReaders_.erase(entry.first);resourceReaders_.erase(entry.first);}}
             newData.reset(new FileVersion(staged));if (withCompanion) newResource.reset(new FileVersion(resource));Publication("staged");original.Verify(path);originalResource.Verify(companion);
@@ -699,35 +752,32 @@ private:
     }
 };
 }
-void StageWindowsCut(Volume& volume,uint32_t id,Storage::Job& job){
+void ValidateWindowsCut(Volume& volume,uint32_t id,Storage::Job& job,bool windowsDestination)
+{
+    const auto validate=[](const std::wstring& path,bool transfersStreams){
+        const auto attributes=GetFileAttributesW(path.c_str());
+        Check(attributes!=INVALID_FILE_ATTRIBUTES&&
+              !(attributes&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_REPARSE_POINT)),
+              "The Windows source contains a read-only file or reparse point");
+        if(!transfersStreams)VisitNamedStreams(path,[](const auto&){
+            throw HfsPlus::Error("The move would discard alternate data streams. Use Copy to leave the source intact.");
+        });
+    };
+    ApplyRemovalPlan(volume,id,job,false,[&](uint32_t child){
+        const auto entry=volume.Stat(child);
+        const auto path=volume.HostPath(child);
+        // Windows copies transfer the primary file's named streams. Folder
+        // streams and streams on an AppleDouble companion are separate.
+        validate(path,windowsDestination&&!entry.directory);
+        if(!entry.identity.companion.key.empty())validate(Companion(path),false);
+    });
+}
+
+void StageWindowsCut(Volume& volume,uint32_t id){
     auto move=WindowsMoveUndo::Session::Current();
     Check(move&&id!=2,"Cannot stage the Windows cut source");
     const auto path=volume.HostPath(id);
     const auto entry=volume.Stat(id);
-    const auto eligible=[](const std::wstring& file){
-        const auto attributes=GetFileAttributesW(file.c_str());
-        Check(attributes!=INVALID_FILE_ATTRIBUTES&&
-              !(attributes&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_REPARSE_POINT)),
-              "The Windows source contains a read-only file or reparse point");
-        WIN32_FIND_STREAM_DATA data{};
-        const auto search=FindFirstStreamW(file.c_str(),FindStreamInfoStandard,&data,0);
-        if(search==INVALID_HANDLE_VALUE){
-            Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot verify Windows source streams");
-            return;
-        }
-        bool named=false;
-        do{if(wcscmp(data.cStreamName,L"::$DATA")){named=true;break;}}
-        while(FindNextStreamW(search,&data));
-        const auto error=GetLastError();
-        FindClose(search);
-        Check(!named,"The Windows source has alternate data streams that classic HFS cannot preserve");
-        Check(error==ERROR_HANDLE_EOF,"Cannot verify Windows source streams");
-    };
-    ApplyRemovalPlan(volume,id,job,false,[&](uint32_t child){
-        const auto name=volume.HostPath(child);
-        eligible(name);
-        if(!volume.Stat(child).identity.companion.key.empty())eligible(Companion(name));
-    });
     volume.Close();
     Check(volume.Stat(id).identity==entry.identity,"The Windows source changed before move completion");
     if(!entry.identity.companion.key.empty())move->Rename(Companion(path),move->Slot());

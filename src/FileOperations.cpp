@@ -62,15 +62,20 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  }
  return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true),2};
 }
-void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,Storage::Job& job,Completion& completion){
+void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
+                        Storage::Job& job,Completion& completion,bool windowsDestination){
  std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
  for(size_t i=0;i<sources.size();++i)
-  if(sources[i].cut)checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job);
+  if(sources[i].cut){
+   checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job);
+   if(ExecutionFor(*checked[i].volume).windowsPaths)
+    ValidateWindowsCut(*checked[i].volume,checked[i].id,job,windowsDestination);
+  }
  for(size_t i=0;i<sources.size();++i)
   if(sources[i].cut)StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
     [&](Volume& volume,uint32_t id){
      Mark(completion,sources[i]);
-     if(sources[i].IsWindows()&&WindowsMoveUndo::Session::Current())StageWindowsCut(volume,id,job);
+     if(sources[i].IsWindows()&&WindowsMoveUndo::Session::Current())StageWindowsCut(volume,id);
      else RemoveTree(volume,id,job);
     });
 }
@@ -318,11 +323,12 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      std::all_of(request.sources.begin(),request.sources.end(),[](const Location& item){
          return item.cut&&item.IsWindows();
      });
- bool complete=false,inPlace=false;
+ bool complete=false,inPlace=false,windowsDestination=false;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
   auto destination=Destination(target);
+  windowsDestination=ExecutionFor(*destination.first).windowsPaths;
   const auto folder=destination.first->Stat(destination.second);
   Check(folder.directory&&destination.first->Supports().create,"The destination does not support file creation");
   if(target.IsClassic()&&target.expectedCatalogId)
@@ -348,6 +354,8 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
    for(size_t i=0;i<request.sources.size();++i){
     const auto& item=request.sources[i];
     if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
+    if(item.cut&&ExecutionFor(*opened[i].first).windowsPaths)
+     ValidateWindowsCut(*opened[i].first,opened[i].second,job,windowsDestination);
     snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
    }
    const bool windows=CanCoordinateWindowsMove(request,opened,*destination.first);
@@ -357,7 +365,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     // read mounts before reopening the floppy source for its final deletion.
     complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,true,true);
     for(size_t i=0;i<opened.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
-    if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+    if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination);
    }else if(coordinated){
     auto& source=*opened.front().first;
     auto& dest=*destination.first;
@@ -367,7 +375,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      complete=CopyMany(opened,dest,destination.second,job,transfer.adapter,routes,true,true);
      if(complete){
       if(windowsSource)for(const auto& entry:opened)entry.first->Close();
-      DeleteMovedSources(request.sources,snapshots,job,completion);
+      DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination);
      }
     },nullptr,classicSources);
    }else if(!moving&&target.IsWindows()&&
@@ -419,7 +427,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   // Without a shared decision, keep the source through destination close and readback.
   for(const auto& source:request.sources)
    StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
-  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion);
+  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination);
  }
  completion.complete=complete;
  completion.completed=job.progress().files;
@@ -609,10 +617,10 @@ MetadataPlan DescribeMetadata(const ExportAttributeValue& output)
   MetadataProgress(job,"Updating properties");
   const auto& bytes=output.value;
   const auto& path=output.item.WindowsPath();
-  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
   if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot create attribute output; choose a new filename");
-  Mark(result,output.item);
   try{
+   Mark(result,output.item);
    HfsPlus::Bytes buffer(65536);
    for(uint64_t offset=0;offset<bytes.size();){
     Cancel(job);
@@ -626,7 +634,17 @@ MetadataPlan DescribeMetadata(const ExportAttributeValue& output)
    Cancel(job);
    if(!FlushFileBuffers(file))throw OperationError(GetLastError(),"Attribute export flush failed");
    CloseHandle(file);
-  }catch(...){CloseHandle(file);DeleteFileW(path.c_str());throw;}
+  }catch(...){
+   FILE_DISPOSITION_INFO remove{TRUE};
+   const bool deleted=SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove))!=FALSE;
+   const auto error=GetLastError();
+   CloseHandle(file);
+   if(!deleted){
+    Storage::OutcomeEvidence::NoteRetainedChange();
+    throw OperationError(error,"Could not remove the incomplete attribute export");
+   }
+   throw;
+  }
  }};
 }
 

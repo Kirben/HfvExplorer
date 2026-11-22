@@ -183,6 +183,23 @@ void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
                 Check(ClassicHfsRecovery::Pending(path),"interrupted Windows/HFS move lost HFS recovery");
             }
             if(!importing&&phase==8){
+                const CString journal=image+":HFVExplorer.ClassicUndo";
+                const CString published=image+".windows\\Tree\\Document";
+                const CString companion=image+".windows\\Tree\\%Document";
+                const auto validJournal=Load(journal);
+                const auto movedData=Load(published),movedResource=Load(companion),movedImage=Load(image);
+                Check(!validJournal.empty(),"interrupted move has no HFS undo data");
+                auto damaged=validJournal;
+                damaged.back()^=0x80;
+                Save(journal,damaged);
+                bool invalidRejected=false;
+                try{auto open=MacBrowser::OpenImage(path);}
+                catch(const HfsPlus::Error&){invalidRejected=true;}
+                Check(invalidRejected&&ClassicHfsRecovery::Pending(path)&&Load(journal)==damaged&&
+                      Load(image)==movedImage&&Load(published)==movedData&&Load(companion)==movedResource,
+                      "invalid HFS journal changed the image or Windows side before validation");
+                Save(journal,validJournal);
+                fprintf(report,"PASS: a damaged classic HFS move journal leaves both participants untouched.\n");
                 const CString intruder=image+".windows\\Tree\\New folder\\Unrelated";
                 const CString saved=image+".external-file";
                 const Bytes external{1,2,3,4};

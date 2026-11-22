@@ -174,10 +174,10 @@ std::unique_ptr<NewImage> CreateFormatOutput(const wchar_t* path,uint64_t size,c
  return std::make_unique<Image>(path,true,size,journal,true);
 }
 
-std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size)
+std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size,bool allowExisting)
 {
-    Disk::Check(GetFileAttributesW(destination.c_str())==INVALID_FILE_ATTRIBUTES&&
-                GetLastError()==ERROR_FILE_NOT_FOUND,"An image output already exists or its folder is unavailable");
+    Disk::Check(allowExisting||(GetFileAttributesW(destination.c_str())==INVALID_FILE_ATTRIBUTES&&
+                GetLastError()==ERROR_FILE_NOT_FOUND),"An image output already exists or its folder is unavailable");
     const auto parent=destination.substr(0,destination.find_last_of(L"\\/")+1);
     GUID guid{};
     Disk::Check(SUCCEEDED(CoCreateGuid(&guid)),"Cannot create a temporary image name");

@@ -358,18 +358,18 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
         range.length=region.length;
     }
     bool sharedCommit=false;
+    std::string move;
     if(shared){
         if(size-prefix<MoveIdSize+sizeof(uint32_t)){
             if(writable&&!keepJournal)Check(Clear(stream.value),"Cannot clear incomplete classic HFS move header");
             return 0;
         }
-        std::string move(MoveIdSize,0);
+        move.resize(MoveIdSize);
         uint32_t crc=0;
         ReadAt(stream.value,prefix,move.data(),DWORD(move.size()));
         ReadAt(stream.value,prefix+move.size(),&crc,sizeof(crc));
         Check(crc==Crc(move.data(),DWORD(move.size())),"Classic HFS move header is damaged");
         sharedCommit=MoveCommitted(move);
-        if(writable&&!keepJournal)WindowsMoveUndo::Recover(move,sharedCommit);
         prefix+=move.size()+sizeof(crc);
     }
     const auto count=(size-prefix)/sizeof(Record);
@@ -389,6 +389,8 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
     }
     if (committed && !writable) return 0;
     Check(writable!=0,"Classic HFS recovery requires writable access. Close other views and reopen the image.");
+    // Reject an invalid participant before touching the Windows side.
+    if(shared&&!keepJournal)WindowsMoveUndo::Recover(move,sharedCommit);
     if (!committed) {
         // A partial tail never preceded an image write. Validate the complete
         // records first, then replay; a second interruption can replay again.

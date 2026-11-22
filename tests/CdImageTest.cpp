@@ -36,7 +36,7 @@ public:
 };
 void save(const std::string& path,const std::vector<BYTE>& data){CFile file;check(file.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create host fixture");file.Write(data.data(),UINT(data.size()));}
 std::vector<BYTE> load(const std::string& path){CFile file;check(file.Open(path.c_str(),CFile::modeRead)!=FALSE,"open image");std::vector<BYTE> data(size_t(file.GetLength()));check(file.Read(data.data(),UINT(data.size()))==data.size(),"read image");return data;}
-void noTemporary(const std::string& root){WIN32_FIND_DATAA found;HANDLE h=FindFirstFileA((root+"\\hcd*.tmp").c_str(),&found);if(h!=INVALID_HANDLE_VALUE)FindClose(h);check(h==INVALID_HANDLE_VALUE,"partial temporary image leaked");}
+void noTemporary(const std::string& root){WIN32_FIND_DATAA found;HANDLE h=FindFirstFileA((root+"\\.hfv-image-*").c_str(),&found);if(h!=INVALID_HANDLE_VALUE)FindClose(h);check(h==INVALID_HANDLE_VALUE,"partial temporary image leaked");}
 }
 int RunCdImageTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;
@@ -72,7 +72,15 @@ int RunCdImageTest(const char* directory){
    check(untouched->opens==0&&load(image)==keep,"skip/cancel preserve destination without opening CD");
    check(choice==Storage::ConflictChoice::Skip?job->result().code==0:job->result().error==ERROR_CANCELLED,"overwrite choice delivered");
   }
-  auto replaced=std::make_shared<FakeCdImage>();check(run(image,replaced)->result().code==0&&load(image)==replaced->data,"explicit replacement publishes complete image");
+  auto replaced=std::make_shared<FakeCdImage>();
+  bool guarded=false;
+  replaced->onRead=[&]{
+   if(replaced->reads!=1)return;
+   const auto other=image+".outside";
+   guarded=!MoveFileA(image.c_str(),other.c_str())&&GetLastError()==ERROR_SHARING_VIOLATION;
+  };
+  check(run(image,replaced)->result().code==0&&guarded&&load(image)==replaced->data,
+        "replacement must protect the exact approved image during reads");
   std::string race=root+"\\race.iso";auto racing=std::make_shared<FakeCdImage>();racing->onRead=[&]{if(racing->reads==1)save(race,keep);};
   check(run(race,racing)->result().code!=0&&load(race)==keep,"newly appearing destination is not overwritten");racing->onRead=nullptr;
   auto missing=std::make_shared<FakeCdImage>();check(run(root+"\\missing\\disc.iso",missing)->result().code!=0,"destination creation errors reported");
