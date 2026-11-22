@@ -969,19 +969,28 @@ public:
             return out;
         });
     }
-    bool HasSparseForks(uint32_t id)override{
+    MacBrowser::SparseForks SparseRanges(uint32_t id)override{
         return Access([&]{
             const auto& file=At(id);
-            const auto hasHole=[&](uint64_t stream,uint64_t size){
-                if(!stream||!size)return false;
-                const auto& runs=StreamExtents(file.mount,stream);
-                return std::any_of(runs.begin(),runs.end(),[&](const Extent& extent){
-                    return !extent.block&&extent.offset<size;
-                });
+            MacBrowser::SparseForks holes;
+            const auto collect=[&](unsigned fork,uint64_t stream){
+                const auto size=file.entry.forks[fork].size;
+                if(!stream||!size)return;
+                for(const auto& extent:StreamExtents(file.mount,stream)){
+                    if(extent.offset>=size)break;
+                    if(!extent.block){
+                        const auto length=(std::min)(extent.length,size-extent.offset);
+                        auto& ranges=holes[fork];
+                        if(!ranges.empty()&&ranges.back().offset+ranges.back().length==extent.offset)
+                            ranges.back().length+=length;
+                        else ranges.push_back({extent.offset,length});
+                    }
+                }
             };
-            if(!file.entry.compressed&&hasHole(file.stream,file.entry.forks[0].size))return true;
+            if(!file.entry.compressed)collect(0,file.stream);
             const auto resource=file.attributes.find(ResourceFork);
-            return resource!=file.attributes.end()&&hasHole(resource->second.stream,file.entry.forks[1].size);
+            if(resource!=file.attributes.end())collect(1,resource->second.stream);
+            return holes;
         });
     }
     void ReadCompressionResource(uint32_t id,uint64_t at,void* data,size_t size)override{

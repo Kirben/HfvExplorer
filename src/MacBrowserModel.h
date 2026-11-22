@@ -18,6 +18,13 @@ namespace Dmg { class Password; class PrivateKey; }
 namespace MacBrowser {
 struct DetectedVolumeError : HfsPlus::Error { using HfsPlus::Error::Error; };
 struct Fork { uint64_t size = 0; };
+struct SparseRange {
+    uint64_t offset, length;
+    bool operator==(const SparseRange& other) const {
+        return offset==other.offset&&length==other.length;
+    }
+};
+using SparseForks = std::array<std::vector<SparseRange>,2>;
 // Presentation and transfer data: deliberately independent of catalog layouts,
 // allocation extents, filesystem encodings and journal structures.
 struct Entry {
@@ -150,7 +157,7 @@ public:
     virtual std::string PropertiesDetails(uint32_t) { return {}; }
     virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
-    virtual bool HasSparseForks(uint32_t) { return false; }
+    virtual SparseForks SparseRanges(uint32_t) { return {}; }
     virtual void ReadCompressionResource(uint32_t, uint64_t, void*, size_t) {
         throw HfsPlus::Error("This volume cannot read a stored compression resource");
     }

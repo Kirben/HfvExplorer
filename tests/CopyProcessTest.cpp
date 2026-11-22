@@ -3538,6 +3538,9 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         auto source=OpenBrowserImage(sourcePath);
         Check(target&&source&&source->Writable(),"Sparse fixture must be eligible for cut/paste");
         const auto sparse=verifySparse(*source);
+        const auto holes=source->SparseRanges(sparse.id);
+        Check(holes[0]==std::vector<SparseRange>{{4096,logical-4096}}&&holes[1].empty(),
+              "APFS sparse ranges lost the hole or included the genuine resource fork");
         Put(*target,2,name,131072,91);
         const auto filler=Put(*target,2,u"Space filler",target->FreeBytes()-logical-8192);
         const auto free=target->FreeBytes();

@@ -453,7 +453,8 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
                               entry.compressionResourceSize&&!entry.forks[1].size;
     uint64_t readThrough[2]={};
     auto outgoing=entry;
-    const bool materializesHoles=hfsPlus&&!plan.reader&&src.HasSparseForks(entry.id);
+    const auto sparse=hfsPlus&&!plan.reader?src.SparseRanges(entry.id):SparseForks{};
+    const bool materializesHoles=!sparse[0].empty()||!sparse[1].empty();
     if(storedResource)outgoing.forks[1].size=entry.compressionResourceSize;
     else {outgoing.compressionResourceSize=0;outgoing.resourceCompressionHeader.clear();}outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     outgoing.hfsOverwriteScope=hfsScope;
