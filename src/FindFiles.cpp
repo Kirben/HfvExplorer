@@ -113,7 +113,7 @@ public:
   auto start=origin.ClassicPath();
   if(start.find(':')==std::string::npos)start+=':';
   StorageLocation::ValidateImage(VolumeCoord::Wide(origin.ClassicImage()),origin.expectedResource);
-  auto volume=MacBrowser::OpenClassic(origin.ClassicImage(),start,false);
+  auto volume=MacBrowser::OpenClassic(origin.ClassicImage(),start,false,origin.expectedResource);
   StorageLocation::ValidateMedia(origin);
   const auto root=volume->Stat(2);
   if(origin.expectedCatalogId&&root.resolvedId!=origin.expectedCatalogId)

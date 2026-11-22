@@ -165,7 +165,7 @@ ResolvedEntry ResolveEntry(const Location& location, bool writable) {
     ValidateImage(VolumeCoord::Wide(location.ClassicImage()),location.expectedResource);
     const auto& path=location.ClassicPath();
     const auto separator=path.find_last_of(':');
-    auto volume=MacBrowser::OpenClassic(location.ClassicImage(),path.substr(0,separator+1),writable);
+    auto volume=MacBrowser::OpenClassic(location.ClassicImage(),path.substr(0,separator+1),writable,location.expectedResource);
     ValidateMedia(location);
     const auto name=MacBrowser::U16(VolumeCoord::Wide(path.substr(separator+1)));
     for (auto& entry:volume->List()) {

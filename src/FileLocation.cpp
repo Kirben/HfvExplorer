@@ -157,7 +157,7 @@ std::string Location::ResourceKey() const {
         return VolumeCoord::PathKey(path);
     if (IsMounted())
         return Volume()->ResourceKey();
-    return VolumeCoord::ImageKey(ClassicImage());
+    return expectedResource.empty()?VolumeCoord::ImageKey(ClassicImage()):expectedResource;
 }
 std::string Location::StorageKey() const {
     if (IsWindows())
@@ -165,7 +165,7 @@ std::string Location::StorageKey() const {
     if (IsMounted())
         return Volume()->ResourceKey();
     Check(IsClassic(), "No storage location was supplied");
-    return VolumeCoord::ImageKey(ClassicImage());
+    return expectedResource.empty()?VolumeCoord::ImageKey(ClassicImage()):expectedResource;
 }
 int Location::LegacyType() const {
     switch (kind()) {

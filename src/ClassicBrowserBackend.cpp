@@ -170,7 +170,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  auto& selected=slots_[volinx];
  const std::string image=(LPCSTR)selected.m_file_name;
  std::string directory=(LPCSTR)doc_name;
- snapshot.resourceKey=VolumeCoord::ImageKey(image);
+ snapshot.resourceKey=mounted?mounted->ResourceKey():VolumeCoord::ImageKey(image);
  VolumeCoord::Lease read({{snapshot.resourceKey,VolumeCoord::Mode::Read}});
  snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
 
@@ -178,7 +178,7 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_classic_browser_directory(i
  const bool writable=!selected.m_is_cd&&(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY));
  snapshot.capabilities.create=snapshot.capabilities.rename=snapshot.capabilities.remove=writable;
 
- auto opened=mounted?nullptr:MacBrowser::OpenClassic(image,id==2?":":directory,false);
+ auto opened=mounted?nullptr:MacBrowser::OpenClassic(image,id==2?":":directory,false,snapshot.resourceKey);
  auto* volume=mounted?mounted:opened.get();
  if(opened){
   auto location=FileOperations::Location::Classic(image,directory);
@@ -310,7 +310,7 @@ bool CHFVExplorerDoc::NavigateClassicFolder(int index,uint32_t id,bool refresh,c
    if(job.cancelled())throw Storage::Cancelled();
    auto& volume=reader->ClassicState(index);
    StorageLocation::ValidateImage(VolumeCoord::Wide(request.folder.ClassicImage()),request.resource);
-   auto backend=MacBrowser::OpenClassic(request.folder.ClassicImage(),":",false);
+   auto backend=MacBrowser::OpenClassic(request.folder.ClassicImage(),":",false,request.resource);
    volume.ReadMount(MacBrowser::ReadClassicMountInfo(*backend));
    StorageLocation::ValidateClassicGeneration(request.folder,volume.m_mediaGenerationKnown?
        std::optional<DWORD>(volume.m_mediaGeneration):std::nullopt);

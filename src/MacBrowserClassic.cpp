@@ -17,7 +17,7 @@ extern "C" {
 #include "hfs/libhfs/internal.h"
 #include "hfs/Replacement.h"
 #include "hfs/libhfs/block.h"
-int hfs_recognizes_image(char*);
+int hfs_recognizes_image_fd(int);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
 #include "ClassicCatalog.h"
@@ -27,8 +27,25 @@ int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 namespace MacBrowser {
 namespace {
 void Check(bool ok) { if (!ok) throw HfsPlus::Error(hfs_error ? hfs_error : "Classic HFS operation failed"); }
-hfsvol* MountHostImage(const std::wstring& path,const std::string& expected,bool write)
+int AttachImage(HANDLE opened,int mode)
 {
+    const auto handle=ImageHandleTransfer::Duplicate(opened);
+    const int fd=_open_osfhandle(intptr_t(handle),mode|O_BINARY|_O_NOINHERIT);
+    if(fd<0){CloseHandle(handle);throw HfsPlus::Error("Cannot attach the verified classic HFS image");}
+    return fd;
+}
+hfsvol* MountHostImage(const std::wstring& path,const std::string& expected,bool write,bool session)
+{
+    // Legacy aliases share one catalog cache. Match its held handle, since
+    // asking libhfs to resolve the pathname again can select a different file.
+    if(!session){
+        for(auto* mounted=hfs_mounts;mounted;mounted=mounted->next){
+            if(mounted->fd<0||mounted->fd>=0x10000000||(mounted->pnum!=0&&mounted->pnum!=1)||
+               (write&&(mounted->flags&HFS_READONLY)))continue;
+            const auto handle=reinterpret_cast<HANDLE>(_get_osfhandle(mounted->fd));
+            if(VolumeCoord::ImageFileKey(handle)==expected)return hfs_retain_mount(mounted);
+        }
+    }
     std::unique_ptr<HfsPlus::Source> image;
     try{image=HfsPlus::OpenImage(path.c_str(),write);}
     catch(const HfsPlus::Error&){
@@ -37,11 +54,8 @@ hfsvol* MountHostImage(const std::wstring& path,const std::string& expected,bool
     }
     const auto opened=reinterpret_cast<HANDLE>(image->WorkerFiles().front().second);
     StorageLocation::ValidateImageFile(opened,expected);
-    const auto handle=ImageHandleTransfer::Duplicate(opened);
     const int mode=image->Writable()?O_RDWR:O_RDONLY;
-    const int fd=_open_osfhandle(intptr_t(handle),mode|O_BINARY|_O_NOINHERIT);
-    if(fd<0){CloseHandle(handle);throw HfsPlus::Error("Cannot attach the verified classic HFS image");}
-    return hfs_mount_session_fd(fd,1,mode);
+    return hfs_mount_image_fd(AttachImage(opened,mode),1,mode,session);
 }
 std::u16string Decode(const std::string &s) {
     int n = MultiByteToWideChar(10000, 0, s.data(), int(s.size()), nullptr, 0);
@@ -137,21 +151,19 @@ public:
             const std::string& expectedImage={})
         :hostImage_(std::move(hostImage)),image_(image),write_(write),session_(session)
     {
-        resourceKey_=hostImage_.empty()?VolumeCoord::ImageKey(image):expectedImage;
+        if(hostImage_.empty()&&!ReadOnlySources::IsPath(image.c_str())&&!readonly_media_path(image.c_str())&&
+           physical_floppy_path(image.c_str())<0)
+            hostImage_=ClassicImagePath::IsEncoded(image.c_str())?ClassicImagePath::Decode(image.c_str()):VolumeCoord::Wide(image);
+        resourceKey_=hostImage_.empty()?VolumeCoord::ImageKey(image):VolumeCoord::ImageKey(hostImage_);
+        if(!expectedImage.empty()&&resourceKey_!=expectedImage)
+            throw Storage::MediaChanged("The selected classic HFS image was replaced.");
         context_=LegacyEngine::ForVolume(resourceKey_);LegacyEngine::Scope engine(context_);
-        imageIdentity_=image;
         std::vector<char> converted(root.begin(),root.end());converted.push_back(0);pc_to_mac_charset((unsigned char*)converted.data());root=converted.data();
         if(hostImage_.empty()){
-            const auto sharing=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
-            HANDLE identity=CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,sharing,nullptr,OPEN_EXISTING,0,nullptr);
-            if(identity!=INVALID_HANDLE_VALUE){
-                const auto key=VolumeCoord::ImageFileKey(identity);
-                if(!key.empty())imageIdentity_=key.substr(6);
-                CloseHandle(identity);
-            }
-            volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image.c_str()),1,write?O_RDWR:O_RDONLY);
+            imageIdentity_=image;
+            volume_=(session_?hfs_mount_session:hfs_mount)(image_.data(),1,write?O_RDWR:O_RDONLY);
         }else{
-            volume_=MountHostImage(hostImage_,resourceKey_,write);
+            volume_=MountHostImage(hostImage_,resourceKey_,write,session_);
             imageIdentity_=resourceKey_.substr(6);
         }
         Check(volume_!=nullptr);
@@ -197,10 +209,10 @@ public:
             return out;
         }
         if (ReadOnlySources::IsPath(image_.c_str())) return out;
-        out.kind=hostImage_.empty()?WorkerOrigin::Classic:WorkerOrigin::Image;
+        out.kind=session_&&!hostImage_.empty()?WorkerOrigin::Image:WorkerOrigin::Classic;
         out.path=hostImage_.empty()?VolumeCoord::Wide(image_):hostImage_;
         out.root=paths_.at(2);
-        out.identity=hostImage_.empty()?imageIdentity_:resourceKey_;
+        out.identity=resourceKey_;
         out.writable=Writable();
         return out;
     }
@@ -224,7 +236,7 @@ public:
         if(!suspended_)return;
         if(hostImage_.empty())
             volume_=(session_?hfs_mount_session:hfs_mount)(image_.data(),1,write_?O_RDWR:O_RDONLY);
-        else volume_=MountHostImage(hostImage_,resourceKey_,write_);
+        else volume_=MountHostImage(hostImage_,resourceKey_,write_,session_);
         Check(volume_!=nullptr);
         suspended_=false;
         markedDirty_=false;
@@ -707,16 +719,19 @@ std::vector<ClassicAncestor> ResolveClassicFolders(Volume& volume,const std::str
 void ReadClassicArtwork(Volume& volume,uint32_t catalogId,uint64_t offset,void* data,size_t size) {
     dynamic_cast<Classic&>(volume).ReadArtwork(catalogId,offset,data,size);
 }
-bool RecognizesClassicImage(const std::wstring& path) {
-    auto encoded=ClassicImagePath::Encode(path);
-    // The worker validates and mounts the catalog after the header probe.
-    return hfs_recognizes_image(encoded.data())!=0;
+bool RecognizesClassicImage(HANDLE opened) {
+    const int fd=AttachImage(opened,O_RDONLY);
+    const bool recognized=hfs_recognizes_image_fd(fd)!=0;
+    _close(fd);
+    return recognized;
 }
 std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path,bool writable,const std::string& expectedImage) {
     return TrackWorkerVolume(std::make_shared<Classic>(ClassicImagePath::Encode(path),":",writable,true,path,expectedImage));
 }
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key,write,stable));}
-std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return TrackWorkerVolume(std::make_shared<Classic>(image,path,write));}
+std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write,const std::string& expectedImage){
+    return TrackWorkerVolume(std::make_shared<Classic>(image,path,write,false,std::wstring{},expectedImage));
+}
 std::shared_ptr<Volume> OpenClassicNdif(std::shared_ptr<HfsPlus::Source> source,const std::string& key,
                                       const ClassicHfsRecovery::ImageRange& range,bool recovered){
     const bool write=source->Writable();

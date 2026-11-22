@@ -60,7 +60,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
   if(!value.expectedIdentity.empty())StorageLocation::ValidateFolderIdentity(value,volume->Stat(2));
   return {volume,2};
  }
- return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true),2};
+ return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true,value.expectedResource),2};
 }
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
                         Storage::Job& job,Completion& completion,bool windowsDestination){
@@ -787,7 +787,7 @@ Storage::Result MakeFolder(const CreateFolder& folder,Storage::Job& job,Completi
   Check(item.IsClassic(),"Invalid folder destination");
   StorageLocation::ValidateImage(VolumeCoord::Wide(item.ClassicImage()),item.expectedResource);
   StorageLocation::WithVerifiedWrite(item,[&]{
-   auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true);
+   auto volume=OpenClassic(item.ClassicImage(),item.ClassicPath(),true,item.expectedResource);
    const auto entry=volume->Stat(2);
    Cancel(job);
    Check(entry.directory,"Destination is not a folder");
@@ -1211,7 +1211,7 @@ TransferPlan PlanConversion(const LegacyConversion& conversion) {
    const auto end=path.find_last_of(':');
    const auto parentPath=path.substr(0,end+1);
    StorageLocation::ValidateImage(VolumeCoord::Wide(image),folder.expectedResource);
-   auto parent=OpenClassic(image,parentPath,false);
+   auto parent=OpenClassic(image,parentPath,false,folder.expectedResource);
    StorageLocation::ValidateMedia(folder);
    Entry child;
    auto leaf=Ansi(path.substr(end+1));

@@ -76,21 +76,13 @@ struct hfs_engine_context *hfs_context_use(struct hfs_engine_context *context) {
 
 /* High-Level Volume Routines ============================================== */
 
-int hfs_recognizes_image(char *path) {
+int hfs_recognizes_image_fd(int fd) {
   hfsvol vol;
-  int recognized;
   memset(&vol,0,sizeof(vol));
-#ifdef WIN32
-  vol.fd=open(path,O_RDONLY|O_BINARY);
-#else
-  vol.fd=open(path,O_RDONLY);
-#endif
-  if(vol.fd<0)return 0;
+  vol.fd=fd;
   vol.pnum=1;
   vol.flags=HFS_READONLY;
-  recognized=l_readblock0(&vol)==0 && l_readmdb(&vol)==0 && vol.mdb.drSigWord==HFS_SIGWORD;
-  close(vol.fd);
-  return recognized;
+  return l_readblock0(&vol)==0 && l_readmdb(&vol)==0 && vol.mdb.drSigWord==HFS_SIGWORD;
 }
 
 /*
@@ -348,8 +340,12 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       hfs_mounts = vol;
     }
 
-  ++vol->refs;
+  return hfs_retain_mount(vol);
+}
 
+hfsvol *hfs_retain_mount(hfsvol *vol)
+{
+  ++vol->refs;
   return hfs_curvol = vol;
 }
 
@@ -376,9 +372,9 @@ hfsvol *hfs_mount_session(char *path, int pnum, int flags) {
 }
 
 /* Takes ownership of an open image descriptor with its sharing lock held. */
-hfsvol *hfs_mount_session_fd(int fd, int pnum, int flags) {
+hfsvol *hfs_mount_image_fd(int fd, int pnum, int flags, int session) {
   if (fd < 0) { ERROR(EBADF, "invalid HFS image descriptor"); return 0; }
-  return mount_impl(0,pnum,flags,1,fd);
+  return mount_impl(0,pnum,flags,session,fd);
 }
 
 /* Takes ownership of a duplicate of the image's writable descriptor. */

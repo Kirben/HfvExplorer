@@ -569,8 +569,8 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring& path,const std:
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);
     StorageLocation::ValidateImageFile(reinterpret_cast<HANDLE>(mfs->WorkerFiles().front().second),key);
     if (!MfsImage::Recognizes(*mfs)) {
+        if (!externalJournal.empty() || !RecognizesClassicImage(mfs->NativeHandle())) return {};
         mfs.reset();
-        if (!externalJournal.empty() || !RecognizesClassicImage(path)) return {};
         if (persistent) return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
         return OpenClassicImage(path,true,key);
     }

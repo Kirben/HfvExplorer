@@ -53,6 +53,8 @@ Endpoint Capture(const Location &location) {
     Endpoint out;
     out.location = location;
     if (!location.IsMounted()) {
+        if(out.location.IsClassic()&&out.location.expectedResource.empty())
+            out.location.expectedResource=out.location.ResourceKey();
         CaptureMedia(out.location);
         return out;
     }
@@ -125,7 +127,7 @@ std::shared_ptr<Volume> OpenOrigin(const WorkerOrigin &o) {
         std::vector<char> converted(root.begin(), root.end());
         converted.push_back(0);
         mac_to_pc_charset(reinterpret_cast<unsigned char *>(converted.data()));
-        volume = MacBrowser::OpenClassic(AnsiPath(o.path), converted.data(), o.writable);
+        volume = MacBrowser::OpenClassic(AnsiPath(o.path), converted.data(), o.writable, o.identity);
     } else if (o.kind == WorkerOrigin::Cd)
         volume = MacBrowser::OpenCd(o.drive);
     else if (o.kind == WorkerOrigin::Removable)

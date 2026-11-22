@@ -117,7 +117,36 @@ void VerifyImageReopenIdentity(const std::string& root,FILE* report)
  try{auto volume=OpenClassicImage(W(path),true,expected);}
  catch(const Storage::MediaChanged&){refused=true;}
  Check(refused&&Load(path)==replacement&&Load(parked)==original,"classic HFS accepted a different file descriptor");
- fprintf(report,"PASS: substituted HFS+ images at open/reopen and substituted classic HFS images at mount are refused with both files unchanged.\n");
+ const auto legacy=root+"\\legacy-classic-mount.dsk",legacyParked=legacy+".original";
+ auto legacyPath=legacy,legacyDecoy=legacy+".replacement";
+ formatClassic(legacyPath,oldLabel);
+ formatClassic(legacyDecoy,newLabel);
+ const auto legacyOriginal=Load(legacy),legacyReplacement=Load(legacyDecoy);
+ auto folder=Location::Classic(legacy,":");
+ folder.expectedResource=folder.ResourceKey();
+ bool swapped=false;
+ struct ClearObserver { ~ClearObserver(){VolumeCoord::SetPathLookupObserver({});} } clear;
+ VolumeCoord::SetPathLookupObserver([&](const std::wstring& opening){
+  if(swapped||opening!=W(legacy))return;
+  Check(MoveFileA(legacy.c_str(),legacyParked.c_str())&&MoveFileA(legacyDecoy.c_str(),legacy.c_str()),
+        "substitute legacy classic HFS image after identity lookup");
+  swapped=true;
+ });
+ // The first pathname lookup selected the old image. A later open must
+ // verify its descriptor before libhfs is allowed to read or recover it.
+ refused=false;
+ try{OpenClassic(legacy,":",true);}
+ catch(const Storage::MediaChanged&){refused=true;}
+ Check(swapped&&refused,"Legacy classic HFS accepted a substituted path");
+ Storage::Job job;
+ Completion completion;
+ auto rejected=ExecuteInWorker(CreateFolder{folder,u"Wrong volume"},job,completion);
+ Check(rejected.error==ERROR_MEDIA_CHANGED&&Load(legacy)==legacyReplacement&&Load(legacyParked)==legacyOriginal,
+       "A stale legacy HFS mutation touched the original or replacement image");
+ auto explicitRetry=OpenClassic(legacy,":",true);
+ Check(explicitRetry->Name()==u"Replacement Classic","An explicit legacy mount could not select the new image");
+ explicitRetry->Close();
+ fprintf(report,"PASS: HFS+ open/reopen and classic HFS session and legacy mounts reject substituted images before recovery or mutation. Both files remain unchanged.\n");
 }
 void WindowsStagingSafety(const std::string& root,FILE* report)
 {
