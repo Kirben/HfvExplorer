@@ -3142,9 +3142,9 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         };
         for(bool cut:{false,true}){
             const auto [result,read]=run(cut);
-            Check(result.outcome==Storage::Outcome::Failed&&!result.partial&&!result.moved&&read>=logical&&
+            Check(result.outcome==Storage::Outcome::Failed&&!result.partial&&!result.moved&&read==0&&
                   result.message.find("Not enough free HFS+ blocks")!=std::string::npos,
-                  result.message.empty()?"Expected late out-of-space failure":result.message.c_str());
+                  result.message.empty()?"Expected out-of-space failure before streaming either fork":result.message.c_str());
             target.reset();
             source.reset();
             target=OpenBrowserImage(path);
@@ -3165,7 +3165,7 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         Check(bool(target),"Cannot reopen the copied sparse file");
         verifySparse(*target);
     }
-    fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen; late out-of-space copy and cut/paste retain both source and original destination forks and free space.\n");
+    fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
 }
 
 void TestApfsToHfsCompression(const std::string& root,FILE* report)

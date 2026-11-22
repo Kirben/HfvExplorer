@@ -1703,9 +1703,12 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     if(symbolicLink)memcpy(e.finder.data(),"slnkrhap",8);
     return p.Mutate(fault,[&]{
         uint64_t sizes[] = {encoded?0:dataSize, encoded&&encoded->UsesResource()?encoded->ResourceSize():resourceSize};
+        // Reserve both replacement forks while the old forks are still live.
+        // If either allocation fails, the transaction rolls back before writing payload.
+        for (unsigned f = 0; f < 2; ++f)
+            e.forks[f] = p.Allocate(sizes[f]);
         Bytes buffer(1024 * 1024, 0);
         for (unsigned f = 0; f < 2; ++f) {
-            e.forks[f] = p.Allocate(sizes[f]);
             uint64_t logical = 0;
             for (auto extent : e.forks[f].extents) {
                 uint64_t bytes = uint64_t(extent.count) * p.bs, physical = uint64_t(extent.start) * p.bs;
