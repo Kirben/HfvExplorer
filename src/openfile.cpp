@@ -21,18 +21,17 @@
 #include "stdafx.h"
 #include "BrowserPresentation.h"
 #include "StorageWorker.h"
+#include "WindowsEntryIdentity.h"
 
 #include <vector>
-#include <set>
 
 namespace {
 struct DeleteHandle {
  HANDLE value=INVALID_HANDLE_VALUE;
  ~DeleteHandle(){DWORD error=GetLastError();if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);SetLastError(error);}
 };
-struct DeleteIdentity {DWORD serial;uint64_t id;};
 int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
-                     const DeleteIdentity* expected=nullptr) {
+                     const MacBrowser::ObjectIdentity* selected=nullptr) {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(depth>128||path.size()>=32764){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
  DeleteHandle directory;
@@ -43,9 +42,8 @@ int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
  if(directory.value==INVALID_HANDLE_VALUE)return 0;
  BY_HANDLE_FILE_INFORMATION info;
  if(!GetFileInformationByHandle(directory.value,&info))return 0;
- if(expected&&(expected->serial!=info.dwVolumeSerialNumber||
-              expected->id!=((uint64_t(info.nFileIndexHigh)<<32)|info.nFileIndexLow)||
-              (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))){
+ if(selected&&(MacBrowser::WindowsIdentity(info)!=*selected||
+               (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))){
   SetLastError(ERROR_FILE_INVALID);
   return 0;
  }
@@ -74,7 +72,7 @@ int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
  if(removed)Storage::OutcomeEvidence::NoteRetainedChange();
  return removed;
 }
-int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const DeleteIdentity* expected=nullptr)
+int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const MacBrowser::ObjectIdentity* selected)
 {
  auto full=path;
  while(full.size()>7&&full.back()==L'\\')full.pop_back();
@@ -87,47 +85,47 @@ int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const DeleteI
  }else if(full.size()<=7||full[5]!=L':'||full[6]!=L'\\'){
   SetLastError(ERROR_ACCESS_DENIED);return 0;
  }
- return delete_host_tree(full,0,job,expected);
+ return delete_host_tree(full,0,job,selected);
 }
 }
-int DeleteHostMoveStaging(const std::wstring& path,DWORD serial,uint64_t id)
-{
- const DeleteIdentity expected{serial,id};
- return DeleteHostDirectory(path,nullptr,&expected);
-}
-int DeleteHostSelectionJob(const std::wstring& path,bool directory,Storage::Job* job)
+int DeleteHostSelectionJob(const std::wstring& path,bool directory,
+                           const MacBrowser::EntryIdentity& expected,Storage::Job* job)
 {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
- if(path.empty()){SetLastError(ERROR_INVALID_NAME);return 0;}
- auto full=BrowserPresentation::WindowsPath(path);
- if(!(directory?DeleteHostDirectory(full,job):DeleteFileW(full.c_str())))return 0;
+ if(path.empty()||expected.empty()){SetLastError(ERROR_FILE_INVALID);return 0;}
+ const auto full=BrowserPresentation::WindowsPath(path);
+ const auto slash=full.find_last_of(L'\\');
+ if(slash==full.npos){SetLastError(ERROR_INVALID_NAME);return 0;}
+
+ const auto pin=[](DeleteHandle& file,const std::wstring& name,const MacBrowser::ObjectIdentity& identity){
+  file.value=CreateFileW(name.c_str(),DELETE|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+  if(file.value==INVALID_HANDLE_VALUE)return false;
+  BY_HANDLE_FILE_INFORMATION info{};
+  if(!GetFileInformationByHandle(file.value,&info))return false;
+  if((info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
+      MacBrowser::WindowsIdentity(info)!=identity){
+   SetLastError(ERROR_FILE_INVALID);
+   return false;
+  }
+  return true;
+ };
+ const auto remove=[](HANDLE file){
+  FILE_DISPOSITION_INFO disposition{TRUE};
+  return SetFileInformationByHandle(file,FileDispositionInfo,&disposition,sizeof(disposition))!=FALSE;
+ };
+
+ // ResolveEntry already validated the AppleDouble contents. Hold that exact
+ // companion through deletion, or leave both entries intact if it changed.
+ DeleteHandle companion;
+ const auto leaf=full.substr(slash+1);
+ if(!leaf.empty()&&leaf.front()!=L'%'&&!expected.companion.key.empty()&&
+    !pin(companion,full.substr(0,slash+1)+L"%"+leaf,expected.companion))return 0;
+
+ DeleteHandle primary;
+ if(directory){
+  if(!DeleteHostDirectory(full,job,&expected.primary))return 0;
+ }else if(!pin(primary,full,expected.primary)||!remove(primary.value))return 0;
  Storage::OutcomeEvidence::NoteRetainedChange();
- const auto slash=full.find_last_of(L'\\');const auto name=full.substr(slash+1);
- // Selecting a metadata file never authorizes deleting the associated data file.
- if(name.empty()||name[0]==L'%')return 1;
- const auto companion=full.substr(0,slash+1)+L"%"+name;
- DeleteHandle file;
- file.value=CreateFileW(companion.c_str(),GENERIC_READ|DELETE,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
-   FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
- if(file.value==INVALID_HANDLE_VALUE)return 1; // Unverified entries are retained.
- BY_HANDLE_FILE_INFORMATION info;LARGE_INTEGER size;BYTE header[26];DWORD got;
- if(!GetFileInformationByHandle(file.value,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
-    !GetFileSizeEx(file.value,&size)||size.QuadPart<26||!ReadFile(file.value,header,sizeof(header),&got,nullptr)||got!=sizeof(header))return 1;
- auto word=[](const BYTE* p){return unsigned(p[0])*256+p[1];};
- auto number=[&](const BYTE* p){return DWORD(word(p))*65536+word(p+2);};
- if(number(header)!=0x00051607||number(header+4)!=0x00020000)return 1;
- unsigned count=word(header+24);ULONGLONG table=26ULL+count*12ULL;
- if(!count||table>ULONGLONG(size.QuadPart))return 1;
- bool metadata=false;std::set<DWORD> ids;
- std::vector<BYTE> entries(count*12);
- if(!ReadFile(file.value,entries.data(),DWORD(entries.size()),&got,nullptr)||got!=entries.size())return 1;
- for(unsigned i=0;i<count;++i) {
-  const BYTE* entry=entries.data()+i*12;
-  DWORD id=number(entry),offset=number(entry+4),length=number(entry+8);
-  if(!id||!ids.insert(id).second||offset<table||offset>ULONGLONG(size.QuadPart)||length>ULONGLONG(size.QuadPart)-offset)return 1;
-  if(id==2||(id==9&&length>=32))metadata=true;
- }
- if(!metadata)return 1;
- FILE_DISPOSITION_INFO removeVerified={TRUE};
- return SetFileInformationByHandle(file.value,FileDispositionInfo,&removeVerified,sizeof(removeVerified))!=FALSE;
+ return companion.value==INVALID_HANDLE_VALUE||remove(companion.value);
 }

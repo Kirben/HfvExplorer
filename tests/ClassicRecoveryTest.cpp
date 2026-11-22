@@ -198,6 +198,35 @@ void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
                 Check(MoveFileA(staged,image+".staged-unrelated")!=FALSE,"move foreign staging file aside");
                 fprintf(report,"PASS: committed Windows recovery retained an untracked file in staging.\n");
             }
+            if(importing&&phase==9){
+                WIN32_FIND_DATAA found{};
+                auto search=FindFirstFileA(image+".windows\\.hfv-move-*",&found);
+                Check(search!=INVALID_HANDLE_VALUE,"locate the staged Windows import");
+                FindClose(search);
+                const CString stage=image+".windows\\"+found.cFileName;
+                search=FindFirstFileA(stage+"\\*",&found);
+                Check(search!=INVALID_HANDLE_VALUE,"locate the staged Windows source folder");
+                CString nested;
+                do{
+                    if((found.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&strcmp(found.cFileName,".")&&strcmp(found.cFileName,"..")){
+                        nested=stage+"\\"+found.cFileName+"\\New folder";
+                        break;
+                    }
+                }while(FindNextFileA(search,&found));
+                FindClose(search);
+                Check(!nested.IsEmpty(),"missing staged Windows source tree");
+                const CString intruder=nested+"\\Unrelated";
+                const Bytes unrelated{4,6,8};
+                Save(intruder,unrelated);
+                bool rejected=false;
+                try{auto open=MacBrowser::OpenImage(path);}
+                catch(const HfsPlus::Error&){rejected=true;}
+                Check(rejected&&ClassicHfsRecovery::Pending(path)&&Load(intruder)==unrelated,
+                      "committed recovery removed an untracked nested Windows file");
+                Check(MoveFileA(intruder,image+".nested-unrelated")!=FALSE,
+                      "move the nested Windows file aside for recovery retry");
+                fprintf(report,"PASS: committed recovery retained an untracked file inside a staged Windows source tree.\n");
+            }
             if(!importing&&phase==8){
                 const CString journal=image+":HFVExplorer.ClassicUndo";
                 const CString published=image+".windows\\Tree\\Document";

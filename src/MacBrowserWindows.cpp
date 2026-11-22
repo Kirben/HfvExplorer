@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "WindowsMoveUndo.h"
+#include "WindowsEntryIdentity.h"
 #include "ClassicHfsRecovery.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
@@ -61,13 +62,6 @@ struct File {
         Check(SetFileTime(h,&a,nullptr,&b)!=FALSE,"Cannot preserve Windows file timestamps");
     }
 };
-ObjectIdentity WindowsIdentity(const BY_HANDLE_FILE_INFORMATION& info)
-{
-    return {std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+
-            std::to_string(info.nFileIndexLow),
-            (uint64_t(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime};
-}
-
 // Keep writers off the captured version. Renames are allowed so our own
 // publication can move it, but every moved version is checked by file identity.
 struct FileVersion {
@@ -395,10 +389,11 @@ class Windows final : public Volume, public WorkerEndpoint {
         e.name = U16(p.substr(p.find_last_of(L"\\/") + 1));
         auto identity=[](const std::wstring& path){
             ObjectIdentity result;
-            HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+            HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
             if(h!=INVALID_HANDLE_VALUE){
                 BY_HANDLE_FILE_INFORMATION info{};
-                if(GetFileInformationByHandle(h,&info))result=WindowsIdentity(info);
+                if(GetFileInformationByHandle(h,&info)&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
+                    result=WindowsIdentity(info);
                 CloseHandle(h);
             }
             return result;
@@ -412,12 +407,18 @@ class Windows final : public Volume, public WorkerEndpoint {
         }
         if(id==2)e.parent=1;else{auto parent=p.substr(0,p.find_last_of(L"\\/"));if((parent.size()==2||parent.size()==6)&&parent.back()==L':')parent+=L'\\';e.parent=Id(parent);}
         if(!e.directory)e.forks[0].size=(uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
-        Double d;if(AppleDouble(Companion(p),d)){
-            Check(!e.directory||!d.size,"Directory companion contains unexpected resource data; it was preserved");
-            if(!e.directory)e.forks[1].size=d.size;e.finder=d.finder;
-            const auto companion=identity(Companion(p));
-            if(e.identity.empty()||companion.key.empty())e.identity.clear();
-            else e.identity.companion=companion;
+        const auto sidecar=Companion(p);
+        if(GetFileAttributesW(sidecar.c_str())!=INVALID_FILE_ATTRIBUTES){
+            File file(sidecar,GENERIC_READ,OPEN_EXISTING);
+            Double d;
+            if(AppleDouble(file,d)){
+                Check(!e.directory||!d.size,"Directory companion contains unexpected resource data; it was preserved");
+                if(!e.directory)e.forks[1].size=d.size;
+                e.finder=d.finder;
+                BY_HANDLE_FILE_INFORMATION info{};
+                if(e.identity.empty()||!GetFileInformationByHandle(file.h,&info))e.identity.clear();
+                else e.identity.companion=WindowsIdentity(info);
+            }
         }
         return e;
     }

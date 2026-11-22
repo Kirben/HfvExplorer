@@ -4,6 +4,7 @@
 #include "FileOperations.h"
 #include "ClassicHfsRecovery.h"
 #include "WindowsMoveUndo.h"
+#include "WindowsEntryIdentity.h"
 #include "FloppyFileWrite.h"
 #include "RemovableUndo.h"
 #include "FileOperationWorkerPolicy.h"
@@ -28,7 +29,6 @@
 #include <string_view>
 #include <fcntl.h>
 #include <optional>
-extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
 namespace FileOperations {
 struct Operation::State {mutable std::mutex mutex;Completion completion;};
 struct Registry {
@@ -467,10 +467,10 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
    if(grouped)mutate();
    else StorageLocation::WithVerifiedWrite(item,mutate);
   }else if(item.IsWindows()){
-   auto source=Source(item,true);Cancel(job);source.first->Close();
+   auto source=StorageLocation::ResolveEntry(item,true);Cancel(job);source.volume->Close();
    Mark(completion,item);
-   if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);auto entry=source.first->Stat(source.second);Cancel(job);source.first->Rename(source.second,entry.parent,rename->name);
-   }else if(!DeleteHostSelectionJob(item.WindowsPath(),item.directory,&job)){Cancel(job);throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
+   if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);Cancel(job);source.volume->Rename(source.id,source.entry.parent,rename->name);
+   }else if(!DeleteHostSelectionJob(item.WindowsPath(),source.entry.directory,source.entry.identity,&job)){Cancel(job);throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
   }
   if(!grouped)++completion.completed;
   ++progress.files;

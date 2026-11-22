@@ -9,8 +9,9 @@
 #include <stdexcept>
 #include <winioctl.h>
 #include "RenameName.h"
+#include "WindowsEntryIdentity.h"
+#include "MacBrowserModel.h"
 extern int fat_rename(char*,char*);
-extern int DeleteHostSelectionJob(const std::wstring&,bool,Storage::Job*);
 extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
@@ -183,25 +184,49 @@ int RunFileMutationTest(const char* directory) {
   check(CreateDirectoryA(external,nullptr)&&CreateDirectoryA(selected,nullptr),"create directory deletion fixtures");
   save(external+"\\Keep","OUTSIDE");save(selected+"\\.hidden","DELETE");
   check(junction(link,external),"create unprivileged directory junction fixture");
-  check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)selected),true,nullptr)!=0,"delete selected tree containing a junction");
+  const auto hostPath=[](const CString& path){return VolumeCoord::Wide((LPCSTR)path);};
+  const auto removeHost=[&](const CString& path,bool directory){
+   const auto wide=hostPath(path);
+   return DeleteHostSelectionJob(wide,directory,MacBrowser::DescribeWindowsFile(wide).identity,nullptr);
+  };
+  check(removeHost(selected,true)!=0,"delete selected tree containing a junction");
   check(GetFileAttributesA(selected)==INVALID_FILE_ATTRIBUTES&&load(external+"\\Keep")==std::vector<BYTE>({'O','U','T','S','I','D','E'}),"recursive Windows deletion followed a junction outside its target");
   CString protectedDirectory=root+"\\Locked";check(CreateDirectoryA(protectedDirectory,nullptr)!=FALSE,"create locked deletion fixture");
   save(protectedDirectory+"\\Keep","LOCKED");check(SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_READONLY)!=FALSE,"protect deletion fixture");
-  check(!DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)protectedDirectory),true,nullptr)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");
+  check(!removeHost(protectedDirectory,true)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");
   SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_NORMAL);
-  CString driveRoot=root.Left(3);check(!DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)driveRoot),true,nullptr),"drive-root deletion accepted");
+  CString driveRoot=root.Left(3);check(!DeleteHostSelectionJob(hostPath(driveRoot),true,MacBrowser::DescribeWindowsFile(hostPath(protectedDirectory)).identity,nullptr),"drive-root deletion accepted");
   CString ordinary=root+"\\Ordinary",unrelated=root+"\\%Ordinary";
-  save(ordinary,"SELECTED");save(unrelated,"UNRELATED");check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)ordinary),false,nullptr)!=0,"delete ordinary file");
+  save(ordinary,"SELECTED");save(unrelated,"UNRELATED");check(removeHost(ordinary,false)!=0,"delete ordinary file");
   check(load(unrelated)==std::vector<BYTE>({'U','N','R','E','L','A','T','E','D'}),"deletion removed an unrelated percent-prefixed file");
   CString reverse=root+"\\Reverse",reverseMetadata=root+"\\%Reverse";save(reverse,"KEEP");save(reverseMetadata,"SELECTED");
-  check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)reverseMetadata),false,nullptr)!=0&&load(reverse)==std::vector<BYTE>({'K','E','E','P'}),"metadata selection removed unselected data file");
+  check(removeHost(reverseMetadata,false)!=0&&load(reverse)==std::vector<BYTE>({'K','E','E','P'}),"metadata selection removed unselected data file");
   std::vector<BYTE> appleDouble(70,0);appleDouble[1]=5;appleDouble[2]=0x16;appleDouble[3]=7;appleDouble[5]=2;appleDouble[25]=1;appleDouble[29]=9;appleDouble[33]=38;appleDouble[37]=32;
   CString paired=root+"\\Paired",sidecar=root+"\\%Paired";save(paired,"DATA");
   {CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create genuine AppleDouble");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
-  check(DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)paired),false,nullptr)!=0&&GetFileAttributesA(sidecar)==INVALID_FILE_ATTRIBUTES,"verified AppleDouble companion not deleted");
+  check(removeHost(paired,false)!=0&&GetFileAttributesA(sidecar)==INVALID_FILE_ATTRIBUTES,"verified AppleDouble companion not deleted");
   save(paired,"KEEP");{CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create protected pair");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
   check(SetFileAttributesA(paired,FILE_ATTRIBUTE_READONLY)!=FALSE,"protect selected data file");
-  check(!DeleteHostSelectionJob(VolumeCoord::Wide((LPCSTR)paired),false,nullptr)&&load(sidecar)==appleDouble,"failed data deletion removed its companion");SetFileAttributesA(paired,FILE_ATTRIBUTE_NORMAL);
+  check(!removeHost(paired,false)&&load(sidecar)==appleDouble,"failed data deletion removed its companion");SetFileAttributesA(paired,FILE_ATTRIBUTE_NORMAL);
+  const auto expectedPair=MacBrowser::DescribeWindowsFile(hostPath(paired)).identity;
+  const CString oldSidecar=sidecar+".original";
+  check(MoveFileA(sidecar,oldSidecar)!=FALSE,"move original sidecar aside");
+  {CFile f;check(f.Open(sidecar,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacement AppleDouble");f.Write(appleDouble.data(),UINT(appleDouble.size()));}
+  check(!DeleteHostSelectionJob(hostPath(paired),false,expectedPair,nullptr)&&load(sidecar)==appleDouble&&
+        load(paired)==std::vector<BYTE>({'K','E','E','P'}),"stale sidecar deleted a replacement or selected data");
+  const auto expectedPrimary=MacBrowser::DescribeWindowsFile(hostPath(paired)).identity;
+  const CString oldPrimary=paired+".original";
+  check(MoveFileA(paired,oldPrimary)!=FALSE,"move selected Windows file aside");
+  save(paired,"REPLACEMENT");
+  check(!DeleteHostSelectionJob(hostPath(paired),false,expectedPrimary,nullptr)&&load(sidecar)==appleDouble&&
+        load(paired)==std::vector<BYTE>({'R','E','P','L','A','C','E','M','E','N','T'}),"stale primary deleted a replacement or its sidecar");
+  const auto expectedFolder=MacBrowser::DescribeWindowsFile(hostPath(protectedDirectory)).identity;
+  check(MoveFileA(protectedDirectory,protectedDirectory+".original")&&CreateDirectoryA(protectedDirectory,nullptr),
+        "replace selected Windows folder");
+  save(protectedDirectory+"\\Keep","REPLACEMENT");
+  check(!DeleteHostSelectionJob(hostPath(protectedDirectory),true,expectedFolder,nullptr)&&
+        GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"stale folder deletion removed a replacement child");
+  fprintf(report,"PASS: Windows delete pins verified entries and refuses replaced primary files, folders and AppleDouble companions.\n");
   CString renameDirectory=root+"\\Rename",cwdDirectory=root+"\\Decoys";check(CreateDirectoryA(renameDirectory,nullptr)&&CreateDirectoryA(cwdDirectory,nullptr),"create rename fixtures");
   save(renameDirectory+"\\Before","SELECTED");save(cwdDirectory+"\\Before","DECOY");
   char cwd[MAX_PATH];check(GetCurrentDirectoryA(sizeof(cwd),cwd)!=0&&SetCurrentDirectoryA(cwdDirectory)!=FALSE,"set decoy working directory");

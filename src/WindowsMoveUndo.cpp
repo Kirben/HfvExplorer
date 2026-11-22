@@ -11,7 +11,6 @@
 #define Z_PREFIX
 #include "compression/zlib/zlib.h"
 
-extern int DeleteHostMoveStaging(const std::wstring&,DWORD,uint64_t);
 namespace WindowsMoveUndo {
 namespace {
 using CopyWorkerProtocol::Data;
@@ -132,14 +131,18 @@ void Read(HANDLE handle,void* bytes,DWORD size)
     Check(ReadFile(handle,bytes,size,&done,nullptr)&&done==size,"Cannot read Windows move recovery");
 }
 uint32_t Crc(const Bytes& bytes){return crc32(0,bytes.data(),uInt(bytes.size()));}
-void Frame(HANDLE handle,const Data& data)
+void WriteFrame(HANDLE handle,const Data& data)
 {
     const uint32_t header[]={uint32_t(data.bytes.size()),Crc(data.bytes)};
     Write(handle,header,sizeof(header));
     Write(handle,data.bytes.data(),header[0]);
+}
+void Frame(HANDLE handle,const Data& data)
+{
+    WriteFrame(handle,data);
     Flush(handle);
 }
-enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned};
+enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry};
 uint64_t FileLength(const BY_HANDLE_FILE_INFORMATION& info)
 {
     return (uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
@@ -151,19 +154,24 @@ struct Record {
     uint64_t creation=0,modified=0,length=0;
     bool directory=false;
 };
+struct StagedEntry {
+    Identity identity;
+    std::optional<uint64_t> modified;
+    std::optional<uint64_t> length;
+};
 struct Loaded {
     std::wstring root;
     Identity rootIdentity,stageIdentity;
     std::vector<Record> records;
-    std::map<std::wstring,Identity> owned;
+    std::map<std::wstring,StagedEntry> owned;
     bool done=false;
     uint64_t end=0;
 };
-void AddOwned(Loaded& log,const std::wstring& stage,const std::wstring& path,const Identity& id)
+void AddOwned(Loaded& log,const std::wstring& stage,const std::wstring& path,StagedEntry entry,bool nested=false)
 {
-    Check(Under(path,stage)&&Parent(path)==stage,"Invalid Windows staging entry");
-    const auto [known,inserted]=log.owned.try_emplace(path,id);
-    Check(inserted||known->second==id,"Conflicting Windows staging identities");
+    Check(Under(path,stage)&&(Parent(path)!=stage)==nested,"Invalid Windows staging entry");
+    const auto [known,inserted]=log.owned.try_emplace(path,entry);
+    Check(inserted||(known->second.identity==entry.identity&&!nested),"Conflicting Windows staging identities");
 }
 Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
 {
@@ -212,9 +220,16 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                     record.modified=data.get();
                     record.length=data.get();
                     Paths(log.root,stage,record.from,record.to);
-                    AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,record.object);
+                    AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,{record.object});
                 }else if(record.op==Op::Owned){
-                    AddOwned(log,stage,record.from,record.object);
+                    AddOwned(log,stage,record.from,{record.object});
+                }else if(record.op==Op::TreeEntry){
+                    StagedEntry entry{record.object};
+                    if(!data.flag()){
+                        entry.modified=data.get();
+                        entry.length=data.get();
+                    }
+                    AddOwned(log,stage,record.from,entry,true);
                 }else if(record.op==Op::Dates){
                     Check(Under(record.from,log.root)&&!Under(record.from,stage),"Invalid Windows folder timestamp record");
                     record.creation=data.get();
@@ -270,45 +285,77 @@ void UndoRename(const std::wstring& stage,const Record& record)
         Move(file.value,record.from);
     }
 }
-// Only recorded top-level objects belong to staging. Compare their IDs
-// before replay, then pin and verify each object again before disposing of it.
-void CheckStage(const std::wstring& stage,const Loaded& log)
+std::vector<std::wstring> Children(const std::wstring& folder)
 {
     WIN32_FIND_DATAW found{};
-    const auto search=FindFirstFileW(Child(stage,L"*").c_str(),&found);
+    const auto search=FindFirstFileW(Child(folder,L"*").c_str(),&found);
     if(search==INVALID_HANDLE_VALUE){
         Check(GetLastError()==ERROR_FILE_NOT_FOUND,"Cannot inspect Windows move staging");
-        return;
+        return {};
     }
     struct Search{HANDLE handle;~Search(){FindClose(handle);}} guard{search};
+    std::vector<std::wstring> names;
     do{
-        const std::wstring name=found.cFileName;
-        if(name==L"."||name==L"..")continue;
-        const auto path=Child(stage,name);
-        const auto known=log.owned.find(path);
-        Check(known!=log.owned.end()&&Identify(path)==known->second,
-              "Windows move staging contains an unrelated or changed entry; all remaining files were retained");
+        std::wstring name=found.cFileName;
+        if(name!=L"."&&name!=L"..")names.push_back(std::move(name));
     }while(FindNextFileW(search,&found));
     Check(GetLastError()==ERROR_NO_MORE_FILES,"Cannot inspect Windows move staging");
+    return names;
 }
-void ClearStage(const Loaded& log,HANDLE directory)
+void CheckStagedEntry(const Loaded& log,const std::wstring& path,
+                      const BY_HANDLE_FILE_INFORMATION& info)
 {
-    for(const auto& [path,id]:log.owned){
-        // Release the inspection handle before entering the recursive remover.
-        bool folder=false;
-        {
-            auto file=Open(path,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
-            if(!file){Check(Missing(GetLastError()),"Cannot protect a Windows staging entry");continue;}
-            const auto info=Info(file.value);
-            Check(IdentityOf(info)==id,"A Windows staging entry was replaced; it was retained");
-            folder=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
-            if(!folder)Remove(file.value,"Cannot delete a Windows staging file");
-        }
-        if(folder)Check(DeleteHostMoveStaging(path,DWORD(id.serial),id.file)!=0,
-                        "Cannot delete a Windows staging folder");
+    const auto known=log.owned.find(path);
+    Check(known!=log.owned.end()&&known->second.identity==IdentityOf(info)&&
+          (!known->second.modified||*known->second.modified==Date(info.ftLastWriteTime))&&
+          (!known->second.length||*known->second.length==FileLength(info)),
+          "Windows move staging contains an unrelated or changed entry; it was retained");
+}
+void CheckStage(const std::wstring& stage,const Loaded& log)
+{
+    for(const auto& name:Children(stage)){
+        const auto path=Child(stage,name);
+        auto file=Open(path,FILE_READ_ATTRIBUTES);
+        Check(bool(file),"Cannot inspect a Windows staging entry");
+        CheckStagedEntry(log,path,Info(file.value));
     }
-    // An entry that appeared after the scan makes this fail without removal.
-    Remove(directory,"Windows move staging is not empty; unrelated files were retained");
+}
+void ClearStagedEntries(const Loaded& log,const std::wstring& folder,unsigned depth=0)
+{
+    Check(depth<=128,"Windows staging tree is too deep");
+    for(const auto& name:Children(folder)){
+        const auto path=Child(folder,name);
+        auto file=Open(path,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
+        if(!file){Check(Missing(GetLastError()),"Cannot protect a Windows staging entry");continue;}
+        const auto info=Info(file.value);
+        CheckStagedEntry(log,path,info);
+        if(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ClearStagedEntries(log,path,depth+1);
+        Remove(file.value,"Cannot remove Windows staging entry; remaining contents were retained");
+    }
+}
+void RecordStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,unsigned depth=0)
+{
+    Check(depth<=128,"Windows staging tree is too deep");
+    for(const auto& name:Children(folder)){
+        const auto path=Child(folder,name),staged=Child(slot,name);
+        Check(Under(staged,slot),"Invalid name in Windows move staging");
+        auto file=Open(path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ);
+        Check(bool(file),"Cannot protect an entry in the Windows move source");
+        const auto info=Info(file.value);
+        const bool directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
+        Data record;
+        record.put(uint64_t(Op::TreeEntry));
+        record.wide(staged);
+        IdentityOf(info).Encode(record);
+        record.put(uint64_t(directory));
+        if(!directory){
+            record.put(Date(info.ftLastWriteTime));
+            record.put(FileLength(info));
+        }
+        // The rename frame flushes the full inventory before the folder moves.
+        WriteFrame(journal,record);
+        if(directory)RecordStagedTree(journal,path,staged,depth+1);
+    }
 }
 thread_local Session* current=nullptr;
 void RecoverJournal(const std::string& id,bool committed,const std::wstring* exportRoot,bool skipBusy);
@@ -400,6 +447,8 @@ void Session::Rename(const std::wstring& from,const std::wstring& to)
     const auto fromParent=Identify(Parent(from)),toParent=Identify(Parent(to));
     Check(id.file&&fromParent.file&&toParent.file&&id.serial==fromParent.serial&&
           id.serial==toParent.serial&&!Identify(to).file,"Windows move path changed");
+    if((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(to,state_->stage))
+        RecordStagedTree(state_->journal.value,from,to);
     Data record;
     record.put(uint64_t(Op::Rename));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
@@ -495,7 +544,8 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                     auto cleanup=Open(stage,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
                     Check(cleanup&&IdentityOf(Info(cleanup.value))==log.stageIdentity,
                           "The Windows move staging folder was replaced before cleanup");
-                    ClearStage(log,cleanup.value);
+                    ClearStagedEntries(log,stage);
+                    Remove(cleanup.value,"Windows move staging is not empty; unrelated files were retained");
                 }
             }
         }
