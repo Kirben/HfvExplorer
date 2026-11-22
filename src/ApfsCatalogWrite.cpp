@@ -765,7 +765,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                                                     uint32_t(count),size,finder?&*finder:nullptr);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
-                    Set(expected.value,68,Le32(value+68)&ImmutableMask,4);
+                    Set(expected.value,68,Le32(value+68)&WriteProtectionMask,4);
                     SetPosixMetadata(expected.value,PosixMetadata{
                         Le32(value+72),Le32(value+76),uint16_t(Le16(value+80)&PosixMetadata::ModeMask)});
                     const auto compression=link->second.compressionRecord;
@@ -827,7 +827,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto target=directories.find(parent);
     Check(parent!=3&&target!=directories.end(),"The APFS destination folder does not exist");
     auto& parentInode=records[target->second.record].value;
-    Check(!(Le32(parentInode.data()+68)&(UserImmutable|SystemImmutable)),
+    Check(!(Le32(parentInode.data()+68)&WriteProtectionMask),
           "Unlock the APFS destination folder before making changes");
     if(!replace&&!metadata&&!attributesEdit&&!resourceEdit&&!linkEdit){
         Set(parentInode,24,time,8);
@@ -840,7 +840,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& link=found->second;
         auto& inode=records[link.inodeRecord].value;
         const auto flags=Le32(inode.data()+68);
-        Check(!(flags&ImmutableMask)||hardLink->copiedLockedInode,
+        Check(!(flags&WriteProtectionMask)||hardLink->copiedLockedInode,
               "Unlock the APFS file before creating a hard link");
         const auto count=Le32(inode.data()+56);
         Check(count<INT32_MAX,"Too many APFS hard links");
@@ -903,7 +903,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:0100644,isDirectory?0:1,dataSize,create->finder));
         SetPosixMetadata(records.back().value,create->posix);
-        if(create->locked)Set(records.back().value,68,CopiedImmutableFlags(create->posix),4);
+        if(create->locked)Set(records.back().value,68,CopiedProtectionFlags(create->posix),4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite,streams);
@@ -930,7 +930,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Check(!replace||link.kind==CatalogKind::RegularFile,"APFS data replacement requires a regular file");
         auto& inode=records[link.inodeRecord].value;
         const auto bsdFlags=Le32(inode.data()+68);
-        Check(!(bsdFlags&SystemImmutable)&&(!(bsdFlags&UserImmutable)||(metadata&&metadata->finder&&!metadata->locked)),
+        Check(!(bsdFlags&(SystemImmutable|AppendOnlyMask))&&(!(bsdFlags&UserImmutable)||(metadata&&metadata->finder&&!metadata->locked)),
               "Unlock the APFS entry before making changes");
         if(remove&&selectedSibling){
             const auto& deleted=siblings.at(selectedSibling);
@@ -1023,7 +1023,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                              (Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo);
             std::copy_n(inode.begin(),92,updated.value.begin());
             Set(updated.value,48,flags,8);
-            Set(updated.value,68,linkEdit->locked?bsdFlags|CopiedImmutableFlags(linkEdit->posix):bsdFlags,4);
+            Set(updated.value,68,linkEdit->locked?bsdFlags|CopiedProtectionFlags(linkEdit->posix):bsdFlags,4);
             SetPosixMetadata(updated.value,linkEdit->posix);
             Set(updated.value,24,time,8);
             Set(updated.value,32,time,8);
@@ -1080,7 +1080,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(updated.value,32,time,8);
         if(replace){
             SetPosixMetadata(updated.value,replace->posix);
-            if(replace->locked)Set(updated.value,68,bsdFlags|CopiedImmutableFlags(replace->posix),4);
+            if(replace->locked)Set(updated.value,68,bsdFlags|CopiedProtectionFlags(replace->posix),4);
             if(!replace->preserveDates){
                 Set(updated.value,24,time,8);
                 copyDates(updated.value);
@@ -1351,7 +1351,7 @@ void TouchExternalParent(std::vector<OwnedRecord>& catalog,uint64_t parent,uint6
         value=&entry.value;
     }
     Check(value,"APFS parent inode was not found");
-    Check(!(Le32(value->data()+68)&(UserImmutable|SystemImmutable)),
+    Check(!(Le32(value->data()+68)&WriteProtectionMask),
           "Unlock the APFS folder before changing its entries");
     if(childDelta){
         const auto children=int64_t(Le32(value->data()+56))+childDelta;
@@ -1449,7 +1449,7 @@ void ReplaceExternalAttributes(std::vector<OwnedRecord>& catalog,uint64_t parent
     const auto kind=(Le16(value.data()+80)&0170000)>>12;
     const auto flags=Le32(value.data()+68);
     const bool symlink=kind==uint16_t(CatalogKind::SymbolicLink);
-    Check((kind==8||((kind==4||symlink)&&!resource))&&!(flags&(UserImmutable|SystemImmutable))&&
+    Check((kind==8||((kind==4||symlink)&&!resource))&&!(flags&WriteProtectionMask)&&
           (!resource||!(flags&BsdCompressed)),
           "The APFS entry is locked or does not support this attribute edit");
     Check(std::any_of(catalog.begin(),catalog.end(),[&](const auto& record){
@@ -1545,7 +1545,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     const auto mode=Le16(old.data()+80);
     const auto primaryParent=Le64(old.data());
     Check(count&&bool(edit.alias)==(count>1)&&
-          (mode&0170000)==0100000&&!(flags&(UserImmutable|SystemImmutable)),
+          (mode&0170000)==0100000&&!(flags&WriteProtectionMask),
           "External APFS overwrite cannot replace this file");
     const auto privateStream=ExclusiveExternalDataStream(catalog,edit.inode,old,extentTree);
     const auto name=ExternalInodeName(old);
@@ -1645,7 +1645,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     Set(updated.value,48,(Le64(old.data()+48)&~WriterDisk::HasFinderInfo)|finderFlag,8);
     SetResourceFlag(updated.value,resource->size!=0);
     if(edit.attributes)SetSecurityFlag(updated.value,*edit.attributes);
-    if(edit.locked)Set(updated.value,68,flags|CopiedImmutableFlags(edit.posix),4);
+    if(edit.locked)Set(updated.value,68,flags|CopiedProtectionFlags(edit.posix),4);
     SetPosixMetadata(updated.value,edit.posix);
     Set(updated.value,32,time,8);
     if(!edit.preserveDates){
@@ -1771,7 +1771,7 @@ bool UnlinkExternalAlias(std::vector<OwnedRecord>& catalog,const CatalogDelete& 
     Check(inodeIndex.has_value()&&group.size()>=2,"The APFS hard-link group no longer exists");
     auto& inode=catalog[*inodeIndex].value;
     Check(Le32(inode.data()+56)==group.size()&&(Le16(inode.data()+80)&0170000)==0100000&&
-          !(Le32(inode.data()+68)&(UserImmutable|SystemImmutable)),
+          !(Le32(inode.data()+68)&WriteProtectionMask),
           "Invalid or locked APFS hard-link inode");
     std::sort(group.begin(),group.end(),[](const Alias& a,const Alias& b){return a.id<b.id;});
     std::vector<size_t> discard;
@@ -1839,7 +1839,7 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
     const bool directory=kind==CatalogKind::Directory;
     Check(Le64(value.data())==edit.parent&&
           (Le16(value.data()+80)&0170000)==(uint16_t(kind)<<12)&&
-          !(Le32(value.data()+68)&(UserImmutable|SystemImmutable)),
+          !(Le32(value.data()+68)&WriteProtectionMask),
           "APFS deletion requires a supported unlocked inode");
     const bool compressed=(Le32(value.data()+68)&BsdCompressed)!=0;
     Check(!compressed||kind==CatalogKind::RegularFile,"Invalid APFS compressed inode type");
@@ -1972,7 +1972,7 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     auto& value=inode->value;
     const auto flags=Le32(value.data()+68);
     Check(Le64(value.data())==edit.parent&&Le32(value.data()+56)==1&&
-          (Le16(value.data()+80)&0170000)==0120000&&!(flags&(UserImmutable|SystemImmutable|BsdCompressed)),
+          (Le16(value.data()+80)&0170000)==0120000&&!(flags&(WriteProtectionMask|BsdCompressed)),
           "APFS symbolic-link destination is locked or unsupported");
     std::set<uint64_t> oldStreams;
     bool hadTarget=false;
@@ -1999,7 +1999,7 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     SetExternalFinderInfo(value,edit.finder);
     SetSecurityFlag(value,edit.attributes);
     SetPosixMetadata(value,edit.posix);
-    if(edit.locked)Set(value,68,flags|CopiedImmutableFlags(edit.posix),4);
+    if(edit.locked)Set(value,68,flags|CopiedProtectionFlags(edit.posix),4);
     Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
     Set(value,32,time,8);
     if(edit.dates){
@@ -2051,7 +2051,7 @@ void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardL
     Check(inodeRecord.has_value()&&!names.empty(),"The APFS hard-link source no longer exists");
     auto& inode=catalog[*inodeRecord].value;
     const auto count=Le32(inode.data()+56);
-    const auto forbidden=request.copiedLockedInode?0u:ImmutableMask;
+    const auto forbidden=request.copiedLockedInode?0u:WriteProtectionMask;
     Check((Le16(inode.data()+80)&0170000)==0100000&&!(Le32(inode.data()+68)&forbidden)&&
           names.size()==count&&count<INT32_MAX,"Invalid or locked APFS hard-link source");
     std::set<uint64_t> identifiers;
@@ -2977,7 +2977,7 @@ CatalogWritePlan PrepareCatalogMutation(
             SetAdditionalDates(inode.value,dates->additionalDates);
         }
         SetPosixMetadata(inode.value,create->posix);
-        if(create->locked)Set(inode.value,68,CopiedImmutableFlags(create->posix),4);
+        if(create->locked)Set(inode.value,68,CopiedProtectionFlags(create->posix),4);
         if(clone){
             constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;
             Set(inode.value,48,Le64(inode.value.data()+48)|wasCloned|wasEverCloned,8);
@@ -3074,7 +3074,7 @@ CatalogWritePlan PrepareCatalogMutation(
                   "APFS catalog edit target inode is unsupported");
             const auto flags=Le32(value.data()+68);
             const bool unlocking=properties->locked==false;
-            Check(!(flags&SystemImmutable)&&(!(flags&UserImmutable)||unlocking),
+            Check(!(flags&(SystemImmutable|AppendOnlyMask))&&(!(flags&UserImmutable)||unlocking),
                   "Unlock the APFS file before editing its properties");
             if(properties->locked)
                 Set(value,68,(flags&~UserImmutable)|(*properties->locked?properties->lockFlags:0),4);

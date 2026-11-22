@@ -282,11 +282,13 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         if(entry.directory||mode==0100000||mode==0120000)
             entry.posix=PosixMetadata{Le32(p+72),Le32(p+76),uint16_t(fullMode&PosixMetadata::ModeMask),
                                      uint8_t(((Le32(p+68)&UserImmutable)?PosixMetadata::UserImmutable:0)|
-                                             ((Le32(p+68)&SystemImmutable)?PosixMetadata::SystemImmutable:0))};
+                                             ((Le32(p+68)&SystemImmutable)?PosixMetadata::SystemImmutable:0)|
+                                             ((Le32(p+68)&UserAppendOnly)?PosixMetadata::UserAppendOnly:0)|
+                                             ((Le32(p+68)&SystemAppendOnly)?PosixMetadata::SystemAppendOnly:0))};
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
-        entry.protectedFile=(Le32(p+68)&(UserImmutable|SystemImmutable))!=0;
+        entry.protectedFile=(Le32(p+68)&WriteProtectionMask)!=0;
         out.symlink=mode==0120000;
         entry.symbolicLink=out.symlink;
         if(out.symlink)entry.readError="APFS symbolic links cannot be exported";
@@ -1298,10 +1300,10 @@ public:
                 if(limitedEdits)
                     return SetExternalCatalogProperties(*source,WriteTarget(parent),parentOid,current.name,changes,job,
                                                         lockAfterCopy?std::optional<bool>(true):std::nullopt,nullptr,
-                                                        CopiedImmutableFlags(desired.posix));
+                                                        CopiedProtectionFlags(desired.posix));
                 if(lockAfterCopy)
                     return SetEntryProperties(*source,WriteTarget(parent),parentOid,oid,current.finder,changes,true,job,
-                                              CopiedImmutableFlags(desired.posix));
+                                              CopiedProtectionFlags(desired.posix));
                 return SetDirectoryDates(*source,WriteTarget(parent),parentOid,oid,*dates,job);
             });
         },true);

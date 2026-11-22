@@ -39,12 +39,16 @@ struct CloneUnavailable : HfsPlus::Error {
 // The same exclusive image ownership is required as for CommitCheckpoint.
 using FinderBytes=std::array<uint8_t,32>;
 inline constexpr uint32_t UserImmutable=0x00000002,SystemImmutable=0x00020000;
-inline constexpr uint32_t ImmutableMask=UserImmutable|SystemImmutable;
-inline uint32_t CopiedImmutableFlags(const std::optional<PosixMetadata>& posix)
+inline constexpr uint32_t UserAppendOnly=0x00000004,SystemAppendOnly=0x00040000;
+inline constexpr uint32_t AppendOnlyMask=UserAppendOnly|SystemAppendOnly;
+inline constexpr uint32_t WriteProtectionMask=UserImmutable|SystemImmutable|AppendOnlyMask;
+inline uint32_t CopiedProtectionFlags(const std::optional<PosixMetadata>& posix)
 {
-    if(!posix||!posix->immutable)return UserImmutable;
-    return ((posix->immutable&PosixMetadata::UserImmutable)?UserImmutable:0)|
-           ((posix->immutable&PosixMetadata::SystemImmutable)?SystemImmutable:0);
+    if(!posix||!posix->protection)return UserImmutable;
+    return ((posix->protection&PosixMetadata::UserImmutable)?UserImmutable:0)|
+           ((posix->protection&PosixMetadata::SystemImmutable)?SystemImmutable:0)|
+           ((posix->protection&PosixMetadata::UserAppendOnly)?UserAppendOnly:0)|
+           ((posix->protection&PosixMetadata::SystemAppendOnly)?SystemAppendOnly:0);
 }
 struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.

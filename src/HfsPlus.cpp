@@ -474,7 +474,9 @@ struct Volume::Impl {
                 e.posix=PosixMetadata{U32(r.value.data()+32),U32(r.value.data()+36),
                                       uint16_t(mode&PosixMetadata::ModeMask),
                                       uint8_t(((r.value[41]&2)?PosixMetadata::UserImmutable:0)|
-                                              ((r.value[40]&2)?PosixMetadata::SystemImmutable:0))};
+                                              ((r.value[40]&2)?PosixMetadata::SystemImmutable:0)|
+                                              ((r.value[41]&4)?PosixMetadata::UserAppendOnly:0)|
+                                              ((r.value[40]&4)?PosixMetadata::SystemAppendOnly:0))};
             e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
             e.created = Time::Decode(U32(r.value.data() + 12),(U16(r.value.data()+2)&0x1000)!=0);
@@ -787,8 +789,11 @@ struct Volume::Impl {
         const auto* dates=CatalogRecord(target)->value.data();
         const bool expanded=(U16(dates+2)&0x1000)!=0;
         result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
+        const auto type=U16(dates+42)&0170000;
+        if(!result.directory&&(type==0010000||type==0020000||type==0060000||type==0140000))
+            result.readError="HFS+/HFSX special files cannot be copied";
         const bool catalogLocked=!result.directory&&(U16(dates+2)&1);
-        if(catalogLocked&&result.posix)result.posix->immutable|=PosixMetadata::UserImmutable;
+        if(catalogLocked&&result.posix)result.posix->protection|=PosixMetadata::UserImmutable;
         result.protectedFile = catalogLocked||(!result.hardLink&&visible.protectedFile);try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
         if(result.hardLink){result.linkCount=uint32_t(Links(target).size());try{ValidateLinks(target);}catch(const Error&){result.protectedFile=true;}}
         if (!result.directory && !result.symbolicLink && IsCompressed(target)) {
@@ -1095,7 +1100,7 @@ struct Volume::Impl {
     void Mutable(const Entry &e,bool inodeAccess=false,bool allowSymbolicLink=false,bool copiedImmutable=false) {
         ValidateLinkAncestors(e.id);Check((!e.protectedFile||inodeAccess) && e.id >= 16, "Protected HFS+ metadata cannot be modified");
         auto r = CatalogRecord(e.id);
-        const unsigned forbidden = copiedImmutable ? 4 : 6;
+        const unsigned forbidden = copiedImmutable ? 0 : 6;
         Check(!(U16(r->value.data() + 2) & 1) && !(r->value[40] & forbidden) && !(r->value[41] & forbidden),
               "HFS+ entry is locked");
         Check(!e.directory || inodeAccess || !(U16(r->value.data() + 2) & 0x20),
@@ -1593,8 +1598,10 @@ static void SetPosixMetadata(Bytes& record, const PosixMetadata& metadata)
 {
     P32(record.data()+32,metadata.uid);
     P32(record.data()+36,metadata.gid);
-    record[40]=uint8_t((record[40]&~2)|((metadata.immutable&PosixMetadata::SystemImmutable)?2:0));
-    record[41]=uint8_t((record[41]&~2)|((metadata.immutable&PosixMetadata::UserImmutable)?2:0));
+    record[40]=uint8_t((record[40]&~6)|((metadata.protection&PosixMetadata::SystemImmutable)?2:0)|
+                       ((metadata.protection&PosixMetadata::SystemAppendOnly)?4:0));
+    record[41]=uint8_t((record[41]&~6)|((metadata.protection&PosixMetadata::UserImmutable)?2:0)|
+                       ((metadata.protection&PosixMetadata::UserAppendOnly)?4:0));
     const auto type=U16(record.data()+42)&0170000;
     P16(record.data()+42,uint16_t(type|metadata.mode));
 }

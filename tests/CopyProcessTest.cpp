@@ -2289,7 +2289,7 @@ void TestClassicLockRoundTrip(const std::string& root,FILE* report)
         const auto id=verify(*middle,locked,true,5003,34);
         if(i!=3){
             const auto metadata=middle->Stat(id);
-            Check(metadata.posix&&metadata.posix->immutable==PosixMetadata::UserImmutable,
+            Check(metadata.posix&&metadata.posix->protection==PosixMetadata::UserImmutable,
                   "Classic lock did not map to user immutability");
         }
         verify(*middle,unlocked,false,5007,35);
@@ -2784,18 +2784,20 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
     lock(single);
     lock(original);
     source.reset();
-    // Set system immutability directly on the single disposable fixture file.
+    // Use both append-only flags, independently of immutability, on the single fixture file.
     EditApfsFixtureLeaf(sourcePath,[](const auto& node,const auto* base,auto& leaf){
         unsigned patched=0;
         for(size_t i=0;i<node.Count();++i){
             const auto record=node.At(i);
             if(record.key.size!=8||Apfs::Le64(record.key.data)>>60!=3||record.value.size<84||
-               !(Apfs::Le32(record.value.data+68)&Apfs::UserImmutable)||
-               Apfs::Le32(record.value.data+56)!=1)continue;
-            leaf[size_t(record.value.data-base)+70]|=2;
+               !(Apfs::Le32(record.value.data+68)&Apfs::UserImmutable))continue;
+            auto* flags=leaf.data()+size_t(record.value.data-base)+68;
+            const auto single=Apfs::Le32(record.value.data+56)==1;
+            flags[0]=single?4:2;
+            flags[2]=single?4:2;
             ++patched;
         }
-        Check(patched==1,"Expected one singly linked immutable test file");
+        Check(patched==2,"Expected a single file and a hard-link inode");
     });
     source=OpenBrowserImage(sourcePath);
     Check(bool(source),"Cannot reopen immutable APFS source");
@@ -2804,7 +2806,8 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
     for(const auto& name:names){
         Entry file;
         Check(source->FindChild(2,name,file)&&file.protectedFile&&file.posix&&
-              file.posix->immutable==(PosixMetadata::UserImmutable|(inputs.empty()?PosixMetadata::SystemImmutable:0)),
+              file.posix->protection==(inputs.empty()?(PosixMetadata::UserAppendOnly|PosixMetadata::SystemAppendOnly):
+                                                        (PosixMetadata::UserImmutable|PosixMetadata::SystemImmutable)),
               "Missing APFS immutable fixture");
         inputs.push_back(Native(source,file.id));
     }
@@ -2843,7 +2846,7 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
             Check(source->FindChild(2,names[i],origin),"Missing immutable source during verification");
             Entry entry;
             Check(target->FindChild(2,origin.name,entry)&&entry.protectedFile&&entry.posix&&
-                  entry.posix->immutable==origin.posix->immutable,"Copy lost immutable flags after reopening");
+                  entry.posix->protection==origin.posix->protection,"Copy lost immutable flags after reopening");
             Verify(*target,entry.id,i?8303:7901,i?25:24);
             if(i==1)inode=entry.resolvedId;
             if(i)Check(entry.hardLink&&entry.resolvedId==inode&&entry.linkCount==2,
@@ -2853,7 +2856,7 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
             Check(refused,"HFS allowed deletion of an immutable entry");
         }
     }
-    fprintf(report,"PASS: APFS immutable overwrite and new hard-link copies keep HFS+/HFSX locks and both forks after reopening; cancellation preserves the original.\n");
+    fprintf(report,"PASS: APFS append-only overwrite and new immutable hard-link copies keep HFS+/HFSX protection and both forks after reopening; cancellation preserves the original.\n");
 }
 
 void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
@@ -2861,8 +2864,8 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
     using Kind=HfsPlus::Volume::FormatKind;
     const auto macos=_wgetenv(L"HFV_APFS_TEST_IMAGE");
     const std::u16string names[]={u"System overwrite",u"System original",u"System alias",u"System folder"};
-    const uint8_t system=PosixMetadata::SystemImmutable;
-    const uint8_t both=system|PosixMetadata::UserImmutable;
+    const uint8_t system=PosixMetadata::SystemAppendOnly;
+    const uint8_t both=PosixMetadata::SystemImmutable|PosixMetadata::UserImmutable|PosixMetadata::UserAppendOnly;
     unsigned index=0;
     for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
         const auto base=root+"\\system-lock-copy-"+std::to_string(index++);
@@ -2894,7 +2897,7 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
         for(size_t i=0;i<ARRAYSIZE(names);++i){
             Entry entry;
             Check(source->FindChild(2,names[i],entry)&&entry.posix&&
-                  entry.posix->immutable==(i==1||i==2?both:system),"Wrong HFS immutable fixture flags");
+                  entry.posix->protection==(i==1||i==2?both:system),"Wrong HFS immutable fixture flags");
             inputs.push_back(Native(source,entry.id));
         }
         for(bool external:{false,true}){
@@ -2936,7 +2939,7 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
             uint32_t inode=0;
             for(size_t i=0;i<ARRAYSIZE(names);++i){
                 Check(target->FindChild(2,names[i],current)&&current.protectedFile&&current.posix&&
-                      current.posix->immutable==(i==1||i==2?both:system),
+                      current.posix->protection==(i==1||i==2?both:system),
                       "APFS copy lost the exact immutable flags after reopening");
                 if(i==3){
                     Entry child;
@@ -2954,7 +2957,7 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
             }
         }
     }
-    fprintf(report,"PASS: HFS+/HFSX system-only and combined locks survive APFS copy, overwrite, hard-link creation and reopen; cancelling preserves the original destination.\n");
+    fprintf(report,"PASS: HFS+/HFSX append-only and combined protection flags survive APFS copy, overwrite, hard-link creation and reopen; cancelling preserves the original destination.\n");
     if(macos)fprintf(report,"PASS: system-immutable copies also passed on the macOS APFS compatibility writer.\n");
 }
 

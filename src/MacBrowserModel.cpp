@@ -94,7 +94,7 @@ class Plus final : public Volume, public WorkerEndpoint {
     void Ready() { if (!usable_) throw HfsPlus::Error("Close and reopen this volume before further access"); }
     static Entry Describe(const HfsPlus::Entry &in) {
         Entry e; e.id=in.id; e.parent=in.parent; e.resolvedId=in.resolvedId;
-        e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile||(in.posix&&in.posix->immutable);
+        e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile||(in.posix&&in.posix->protection);
         e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
         e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.additionalDates=in.additionalDates;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
         e.posix=in.posix;
@@ -237,7 +237,7 @@ public:
                 if(replace&&volume_->FindChild(parent,HfsPlus::Normalize(e.name,CaseSensitive()),old))
                     posix=old.posix;
                 if(!posix)posix=PosixMetadata{0,0,0644};
-                posix->immutable|=PosixMetadata::UserImmutable;
+                posix->protection|=PosixMetadata::UserImmutable;
             }
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
                                 e.attributesKnown?&e.attributes:nullptr,compression,
