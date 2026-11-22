@@ -1514,7 +1514,7 @@ public:
                 const bool replaceAlias=existing.hardLink&&!entry.expectedDestinationIdentity.empty();
                 const bool existingSpecial=existing.posix&&existing.posix->IsSpecial();
                 if(special||existingSpecial)
-                    Check(!existing.symbolicLink&&!existing.hardLink&&!sibling&&
+                    Check(!existing.hardLink&&!sibling&&
                           (!existingSpecial||(!existing.forks[0].size&&!existing.forks[1].size)),
                           "The APFS special file destination changed after overwrite approval");
                 if(existing.symbolicLink||replaceAlias||special||existingSpecial){

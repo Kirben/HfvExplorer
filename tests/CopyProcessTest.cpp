@@ -2199,8 +2199,63 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         Verify(*apfs,existing.id,16385,74);
         verify(*apfs,2);
         apfs->MakeDirectory(2,u"After cross-type replacement");
+        const auto exerciseLinks=[&](const std::shared_ptr<Volume>& from,std::shared_ptr<Volume>& to,
+                                     const std::wstring& targetPath){
+            const HfsPlus::Bytes targetText{'R','e','f','e','r','e','n','t',0};
+            const auto makeLink=[&](Volume& volume,uint32_t parent,const std::u16string& name){
+                Entry link;
+                link.name=name;
+                link.symbolicLink=true;
+                Storage::Job job;
+                volume.PutSymbolicLink(parent,link,targetText,job);
+            };
+            const auto sourceFolder=from->MakeDirectory(2,u"Link test source");
+            makeLink(*from,sourceFolder,names[2]);
+            Entry link;
+            Check(from->FindChild(sourceFolder,names[2],link),"Missing source symbolic link");
+            auto cancelled=transfer({Native(from,link.id)},Native(to));
+            Check(cancelled.outcome==Storage::Outcome::Cancelled&&!cancelled.partial,
+                  "Cancelling a symbolic link over a special entry should retain the entry");
+            to.reset();
+            to=OpenBrowserImage(targetPath);
+            Check(bool(to),"Cannot reopen cancelled symbolic link copy");
+            verify(*to,2);
+            auto changed=transfer({Native(from,link.id)},Native(to),true);
+            Check(!changed.code,changed.message.c_str());
+            to.reset();
+            to=OpenBrowserImage(targetPath);
+            Check(to&&to->FindChild(2,names[2],link)&&to->SymbolicLinkTarget(link.id)==targetText,
+                  "Symbolic link did not replace the special entry");
+
+            const auto targetFolder=to->MakeDirectory(2,u"Link test destination");
+            Put(*to,targetFolder,u"Referent",4097,93);
+            makeLink(*to,targetFolder,names[3]);
+            const auto special=verify(*from,3);
+            cancelled=transfer({Native(from,special)},Native(to,targetFolder));
+            Check(cancelled.outcome==Storage::Outcome::Cancelled&&!cancelled.partial,
+                  "Cancelling a special entry over a symbolic link should retain the link");
+            const auto reopenFolder=[&]{
+                to.reset();
+                to=OpenBrowserImage(targetPath);
+                Entry dir,referent;
+                Check(to&&to->FindChild(2,u"Link test destination",dir)&&
+                      to->FindChild(dir.id,u"Referent",referent),"Missing symbolic link referent after reopen");
+                Verify(*to,referent.id,4097,93);
+                return dir.id;
+            };
+            auto parent=reopenFolder();
+            Check(to->FindChild(parent,names[3],link)&&to->SymbolicLinkTarget(link.id)==targetText,
+                  "Cancelled overwrite changed the symbolic link");
+            changed=transfer({Native(from,special)},Native(to,parent),true);
+            Check(!changed.code,changed.message.c_str());
+            parent=reopenFolder();
+            Check(to->FindChild(parent,names[3],link)&&!link.symbolicLink&&link.posix==metadata(3)&&
+                  to->GetAttributes(link.id)==attributes,"Special entry did not replace the symbolic link");
+        };
+        exerciseLinks(returned,apfs,path);
+        exerciseLinks(apfs,returned,roundTrip);
     }
-    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify regular-to-special and special-to-regular replacement and cancellation.\n");
+    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify replacement and cancellation between regular files, symbolic links, and special entries.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)

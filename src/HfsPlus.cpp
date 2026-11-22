@@ -1678,10 +1678,11 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         const bool changeSpecialType=incomingSpecial!=targetSpecial;
         const bool replaceFileAlias=symbolicLink&&p.LinkKind(existing)==1;
         if(changeSpecialType){
-            Check(!symbolicLink&&!target.symbolicLink&&!p.LinkKind(existing)&&scope==OverwriteScope::SharedInode&&
-                  (!targetSpecial||(!target.forks[0].size&&!target.forks[1].size)),
+            Check(!p.LinkKind(existing)&&scope!=OverwriteScope::SelectedName&&
+                  (!targetSpecial||(!target.forks[0].size&&!target.forks[1].size))&&
+                  (!target.symbolicLink||(!target.compressed&&!target.forks[1].size)),
                   "Cannot replace this HFS+ entry with a different file type");
-            p.Mutable(target,false,false,false,true);
+            p.Mutable(target,false,true,false,true);
         }else if((symbolicLink&&!replaceFileAlias)||scope==OverwriteScope::SymbolicLink){
             const auto& target=p.Get(existing);
             Check(!target.directory&&!p.LinkKind(existing),
