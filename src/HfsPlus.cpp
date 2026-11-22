@@ -1677,7 +1677,8 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         const bool targetSpecial=target.posix&&target.posix->IsSpecial();
         const bool changeSpecialType=incomingSpecial!=targetSpecial;
         const bool replaceFileAlias=symbolicLink&&p.LinkKind(existing)==1;
-        if(changeSpecialType){
+        const bool replaceSpecialAlias=incomingSpecial&&scope==OverwriteScope::SelectedName;
+        if(changeSpecialType&&!replaceSpecialAlias){
             Check(!p.LinkKind(existing)&&scope!=OverwriteScope::SelectedName&&
                   (!targetSpecial||(!target.forks[0].size&&!target.forks[1].size))&&
                   (!target.symbolicLink||(!target.compressed&&!target.forks[1].size)),
@@ -1690,7 +1691,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
             Check(!target.symbolicLink||(!target.compressed&&!target.forks[1].size),
                   "Cannot replace an HFS+ symbolic link with unsupported forks");
             p.Mutable(target,false,true);
-        }else if(posix&&posix->IsSpecial()){
+        }else if(incomingSpecial&&!replaceSpecialAlias){
             const auto& target=p.Get(existing);
             Check(!p.LinkKind(existing)&&target.posix&&target.posix->IsSpecial()&&
                   !target.forks[0].size&&!target.forks[1].size,

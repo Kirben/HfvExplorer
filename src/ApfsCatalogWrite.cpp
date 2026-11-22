@@ -2971,7 +2971,8 @@ CatalogWritePlan PrepareCatalogMutation(
                    Le64(record.value.data())!=create->replacedEntry)return false;
                 const auto kind=CatalogKind(Le16(record.value.data()+16));
                 if(special){
-                    if(kind!=CatalogKind::RegularFile&&kind!=CatalogKind::SymbolicLink&&!IsSpecialKind(kind))return false;
+                    if(create->replacedAlias||linked){if(kind!=CatalogKind::RegularFile)return false;}
+                    else if(kind!=CatalogKind::RegularFile&&kind!=CatalogKind::SymbolicLink&&!IsSpecialKind(kind))return false;
                 }else if(kind!=victimKind&&(linked||create->replacedAlias||!IsSpecialKind(kind)))return false;
                 if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
                     return false;

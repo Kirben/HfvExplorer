@@ -427,7 +427,8 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     Check(!found || !existing.directory, "A folder blocks the destination file");
     using Scope=HfsPlus::Volume::OverwriteScope;
     auto hfsScope=Scope::SharedInode;
-    if(found&&!plan.linkTarget&&hfsPlus&&std::string_view(src.Kind())=="APFS"){
+    if(found&&!plan.linkTarget&&hfsPlus&&
+       (std::string_view(src.Kind())=="APFS"||(entry.posix&&entry.posix->IsSpecial()))){
         if(existing.hardLink)hfsScope=Scope::SelectedName;
         else if(existing.symbolicLink)hfsScope=Scope::SymbolicLink;
     }
@@ -891,10 +892,10 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
    const std::string_view kind=dst.Kind();
    if(incomingSpecial!=existingSpecial)
     Check((kind=="HFS+"||kind=="HFSX"||kind=="APFS")&&!found.directory&&!plan.entry.directory&&
-          !found.hardLink&&!plan.entry.hardLink,
+          !plan.entry.hardLink&&(!found.hardLink||incomingSpecial),
           "The destination cannot replace these file types");
    if(incomingSpecial||existingSpecial)
-    Check(!found.protectedFile&&!found.hardLink&&(!existingSpecial||(!found.forks[0].size&&!found.forks[1].size)),
+    Check(!found.protectedFile&&(!existingSpecial||(!found.hardLink&&!found.forks[0].size&&!found.forks[1].size)),
           "The destination special file cannot be replaced");
   }
   if(incomingType!=SpecialFileType::None){

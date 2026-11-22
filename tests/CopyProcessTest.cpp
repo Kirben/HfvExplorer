@@ -2254,8 +2254,40 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         };
         exerciseLinks(returned,apfs,path);
         exerciseLinks(apfs,returned,roundTrip);
+        const auto exerciseHardLink=[&](const std::shared_ptr<Volume>& from,std::shared_ptr<Volume>& to,
+                                        const std::wstring& targetPath){
+            auto parent=to->MakeDirectory(2,u"Special over hard link");
+            const auto regular=Put(*to,parent,u"Keep this alias",16385,119);
+            to->MakeHardLink(regular,parent,names[3]);
+            const auto source=verify(*from,3);
+            const auto reopen=[&]{
+                to.reset();
+                to=OpenBrowserImage(targetPath);
+                Entry dir;
+                Check(to&&to->FindChild(2,u"Special over hard link",dir),"Missing hard-link test folder");
+                return dir.id;
+            };
+            auto result=transfer({Native(from,source)},Native(to,parent));
+            Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+                  "Cancelling special entry replacement should preserve both aliases");
+            parent=reopen();
+            Entry kept,selected;
+            Check(to->FindChild(parent,u"Keep this alias",kept)&&to->FindChild(parent,names[3],selected)&&
+                  kept.hardLink&&selected.hardLink&&kept.resolvedId==selected.resolvedId,
+                  "Cancelled special entry replacement broke the hard-link group");
+            Verify(*to,kept.id,16385,119);
+            result=transfer({Native(from,source)},Native(to,parent),true);
+            Check(!result.code,result.message.c_str());
+            parent=reopen();
+            Check(to->FindChild(parent,u"Keep this alias",kept)&&to->FindChild(parent,names[3],selected)&&
+                  selected.posix==metadata(3)&&!selected.hardLink&&to->GetAttributes(selected.id)==attributes,
+                  "Special entry did not replace only the selected hard-link name");
+            Verify(*to,kept.id,16385,119);
+        };
+        exerciseHardLink(returned,apfs,path);
+        exerciseHardLink(apfs,returned,roundTrip);
     }
-    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify replacement and cancellation between regular files, symbolic links, and special entries.\n");
+    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify replacement and cancellation between regular files, symbolic links, and special entries. Replacing a hard-link name with a special entry preserves both forks of its surviving alias.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)
