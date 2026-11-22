@@ -2910,12 +2910,12 @@ CatalogWritePlan PrepareCatalogMutation(
                    record.key.back())return false;
                 const auto kind=CatalogKind(Le16(record.value.data()+16));
                 if(kind!=CatalogKind::RegularFile&&
-                   (kind!=CatalogKind::SymbolicLink||record.value.size()!=18))return false;
+                   ((kind!=CatalogKind::SymbolicLink&&!IsSpecialKind(kind))||record.value.size()!=18))return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
                 return NormalizedName(candidate,fold)==destinationName;
             };
             const auto victim=std::find_if(catalog.begin(),catalog.end(),matches);
-            Check(victim!=catalog.end(),"APFS hard-link overwrite requires a regular file or symbolic link at the chosen name");
+            Check(victim!=catalog.end(),"APFS hard-link overwrite requires a supported file entry at the chosen name");
             if(victim->value.size()==34){
                 const auto alias=Le64(victim->value.data()+26);
                 Check(UnlinkExternalAlias(catalog,{hardLink->parent,hardLink->replaced,alias},time),

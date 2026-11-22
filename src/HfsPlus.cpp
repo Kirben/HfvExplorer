@@ -1914,6 +1914,10 @@ uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16stri
             Check(!original.directory&&!target.compressed&&!target.forks[1].size,
                   "Cannot replace this symbolic link with a hard link");
             p.Mutable(target,false,true);
+        }else if(target.posix&&target.posix->IsSpecial()){
+            Check(!original.directory&&!target.forks[0].size&&!target.forks[1].size,
+                  "Cannot replace this special entry with a hard link");
+            p.Mutable(target,false,false,false,true);
         }else{
             Check(!p.Get(p.Resolve(existing)).directory,"Cannot replace a folder with a hard link");
             destinationInode=p.Content(existing);

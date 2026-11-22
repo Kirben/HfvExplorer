@@ -2283,11 +2283,37 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
                   selected.posix==metadata(3)&&!selected.hardLink&&to->GetAttributes(selected.id)==attributes,
                   "Special entry did not replace only the selected hard-link name");
             Verify(*to,kept.id,16385,119);
+
+            auto whiteout=verify(*from,4);
+            result=transfer({Native(from,whiteout)},Native(to,parent),true);
+            Check(!result.code,result.message.c_str());
+            const auto sourceFolder=from->MakeDirectory(2,u"Hard links over special entries");
+            const auto file=Put(*from,sourceFolder,names[3],8193,73);
+            from->MakeHardLink(file,sourceFolder,names[4]);
+            Entry first,second;
+            Check(from->FindChild(sourceFolder,names[3],first)&&from->FindChild(sourceFolder,names[4],second),
+                  "Missing source hard-link group");
+            const std::vector<Location> links{Native(from,first.id),Native(from,second.id)};
+            result=transfer(links,Native(to,parent));
+            Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+                  "Cancelling hard-link overwrite should retain the special entries");
+            parent=reopen();
+            Check(to->FindChild(parent,names[3],first)&&first.posix==metadata(3)&&
+                  to->FindChild(parent,names[4],second)&&second.posix==metadata(4),
+                  "Cancelled hard-link overwrite changed a special entry");
+            result=transfer(links,Native(to,parent),true);
+            Check(!result.code,result.message.c_str());
+            parent=reopen();
+            Check(to->FindChild(parent,names[3],first)&&to->FindChild(parent,names[4],second)&&
+                  first.hardLink&&second.hardLink&&first.resolvedId==second.resolvedId,
+                  "Overwriting special entries broke the incoming hard-link group");
+            Verify(*to,first.id,8193,73);
+            Verify(*to,second.id,8193,73);
         };
         exerciseHardLink(returned,apfs,path);
         exerciseHardLink(apfs,returned,roundTrip);
     }
-    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify replacement and cancellation between regular files, symbolic links, and special entries. Replacing a hard-link name with a special entry preserves both forks of its surviving alias.\n");
+    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify replacement and cancellation between regular files, symbolic links, and special entries. Replacing a hard-link name with a special entry preserves both forks of its surviving alias. A hard-link group can also replace special entries while sharing both forks.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)
