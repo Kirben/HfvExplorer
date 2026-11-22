@@ -2027,9 +2027,9 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
     const auto hfsPath=Wide(root+"\\named-pipe-source.dsk");
-    const std::u16string names[]={u"Input pipe",u"Character node",u"Block node",u"Socket"};
+    const std::u16string names[]={u"Input pipe",u"Character node",u"Block node",u"Socket",u"Whiteout"};
     const SpecialFileType types[]={SpecialFileType::Fifo,SpecialFileType::CharacterDevice,
-                                   SpecialFileType::BlockDevice,SpecialFileType::Socket};
+                                   SpecialFileType::BlockDevice,SpecialFileType::Socket,SpecialFileType::Whiteout};
     const auto metadata=[&](size_t index){
         const auto type=types[index];
         return PosixMetadata{123,456,0620,0,PosixMetadata::NoDump,type,
@@ -2080,7 +2080,7 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
     const auto seedOld=[&](Volume& volume){
         Entry old;
         old.name=names[1];
-        old.posix=oldMetadata(metadata(1));
+        old.posix=oldMetadata(metadata(2));
         old.attributes={{u"user.old",{91}}};
         old.attributesKnown=true;
         volume.Put(2,old,[](unsigned,uint64_t,void*,size_t){
@@ -2089,7 +2089,7 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
     };
     const auto verifyOld=[&](Volume& volume){
         Entry old;
-        Check(volume.FindChild(2,names[1],old)&&old.posix==oldMetadata(metadata(1))&&
+        Check(volume.FindChild(2,names[1],old)&&old.posix==oldMetadata(metadata(2))&&
               volume.GetAttributes(old.id)==HfsPlus::Attributes{{u"user.old",{91}}},
               "Cancelled overwrite changed the original device node");
     };
@@ -2097,7 +2097,7 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
     Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"Cannot create pipe test folder");
     const auto refused=transfer(selection,Location::Windows(host));
     Check(refused.code&&!refused.partial&&refused.message.find("cannot preserve a special file")!=std::string::npos,
-          "Windows should reject special files before publication");
+          ("Windows should reject special files before publication: "+refused.message).c_str());
     const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
     for(bool external:{false,true}){
         if(external&&!fixture)continue;
@@ -2152,7 +2152,7 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         Check(apfs&&!apfs->FindChild(2,names[1],existing),"APFS device node survived deletion");
         apfs->MakeDirectory(2,u"After device deletion");
     }
-    fprintf(report,"PASS: named pipes, device nodes and socket entries round-trip through HFS+/HFSX and both APFS writers; same-type overwrite preserves metadata and cancelling retains the old node after reopening.\n");
+    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)

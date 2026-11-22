@@ -348,7 +348,7 @@ Entry DecodeEntry(Data& d) {
         const auto flags=d.get();
         Check(flags<=PosixMetadata::HintMask,"Invalid BSD metadata flags");
         const auto rawType=d.get();
-        Check(rawType<=12,"Invalid special file type");
+        Check(rawType<=uint8_t(SpecialFileType::Whiteout),"Invalid special file type");
         const auto special=SpecialType(unsigned(rawType));
         const auto device=CatalogNumber(d);
         Check((!rawType||special!=SpecialFileType::None)&&(!device||IsDevice(special)),"Invalid special file metadata");

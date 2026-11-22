@@ -5,7 +5,7 @@
 
 namespace Apfs {
 enum class CatalogKind : uint16_t { Fifo=1, CharacterDevice=2, Directory=4, BlockDevice=6,
-                                    RegularFile=8, SymbolicLink=10, Socket=12 };
+                                    RegularFile=8, SymbolicLink=10, Socket=12, Whiteout=14 };
 struct CatalogCreate {
     uint64_t parent;
     const std::u16string& name;

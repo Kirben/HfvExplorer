@@ -2961,7 +2961,7 @@ CatalogWritePlan PrepareCatalogMutation(
         if(create->replacedEntry){
             const bool replacesFile=symlink||create->replacedAlias;
             Check(!directory&&(special?specialCount!=0:replacesFile?fileCount!=0:symlinkCount!=0),"Invalid APFS entry replacement");
-            const auto victimKind=special?create->kind:replacesFile?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
+            const auto victimKind=replacesFile?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
             const auto parentKey=(uint64_t(9)<<60)|create->parent;
             const auto wanted=NormalizedName(name,fold);
             const auto victim=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
@@ -2969,7 +2969,8 @@ CatalogWritePlan PrepareCatalogMutation(
                 if(record.key.size()<14||Le64(record.key.data())!=parentKey||record.key.back()||
                    (record.value.size()!=18&&(!replacesFile||!linked))||
                    Le64(record.value.data())!=create->replacedEntry||
-                   Le16(record.value.data()+16)!=uint16_t(victimKind))return false;
+                   (special?!IsSpecialKind(CatalogKind(Le16(record.value.data()+16))):
+                    Le16(record.value.data()+16)!=uint16_t(victimKind)))return false;
                 if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
                     return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);

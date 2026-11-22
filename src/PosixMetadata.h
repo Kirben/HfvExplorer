@@ -2,7 +2,7 @@
 #pragma once
 #include <cstdint>
 
-enum class SpecialFileType : uint8_t { None=0, Fifo=1, CharacterDevice=2, BlockDevice=6, Socket=12 };
+enum class SpecialFileType : uint8_t { None=0, Fifo=1, CharacterDevice=2, BlockDevice=6, Socket=12, Whiteout=14 };
 constexpr bool IsDevice(SpecialFileType type)
 {
     return type==SpecialFileType::CharacterDevice||type==SpecialFileType::BlockDevice;
@@ -14,6 +14,7 @@ constexpr SpecialFileType SpecialType(unsigned type)
     case 2:return SpecialFileType::CharacterDevice;
     case 6:return SpecialFileType::BlockDevice;
     case 12:return SpecialFileType::Socket;
+    case 14:return SpecialFileType::Whiteout;
     default:return SpecialFileType::None;
     }
 }

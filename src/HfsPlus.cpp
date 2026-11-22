@@ -795,8 +795,9 @@ struct Volume::Impl {
         const bool expanded=(U16(dates+2)&0x1000)!=0;
         result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
         const auto type=U16(dates+42)&0170000;
-        if(!result.directory&&type==0160000)
-            result.readError="HFS+/HFSX special files cannot be copied";
+        if(!result.directory&&type&&type!=0100000&&type!=0120000&&
+           SpecialType(type>>12)==SpecialFileType::None)
+            result.readError="The HFS+/HFSX catalog entry has an unsupported file type";
         const bool catalogLocked=!result.directory&&(U16(dates+2)&1);
         if(catalogLocked&&result.posix)result.posix->protection|=PosixMetadata::UserImmutable;
         result.protectedFile = catalogLocked||(!result.hardLink&&visible.protectedFile);try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
@@ -1681,7 +1682,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
             p.Mutable(target,false,true);
         }else if(posix&&posix->IsSpecial()){
             const auto& target=p.Get(existing);
-            Check(!p.LinkKind(existing)&&target.posix&&target.posix->special==posix->special&&
+            Check(!p.LinkKind(existing)&&target.posix&&target.posix->IsSpecial()&&
                   !target.forks[0].size&&!target.forks[1].size,
                   "The HFS+ special file destination changed after overwrite approval");
             p.Mutable(target,false,false,false,true);
@@ -1782,7 +1783,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         if(posix){
             if(posix->IsSpecial()){
                 P16(timeRecord->value.data()+42,uint16_t(posix->special)<<12);
-                if(IsDevice(posix->special))P32(timeRecord->value.data()+44,posix->device);
+                P32(timeRecord->value.data()+44,IsDevice(posix->special)?posix->device:0);
             }
             SetPosixMetadata(timeRecord->value,*posix);
             e.posix=posix;

@@ -1513,7 +1513,7 @@ public:
                 // An approved copy targets a name. In-place edits still use ReplaceFileData.
                 const bool replaceAlias=existing.hardLink&&!entry.expectedDestinationIdentity.empty();
                 if(special)
-                    Check(existing.posix&&existing.posix->special==entry.posix->special&&!sibling&&
+                    Check(existing.posix&&existing.posix->IsSpecial()&&!sibling&&
                           !existing.forks[0].size&&!existing.forks[1].size,
                           "The APFS special file destination changed after overwrite approval");
                 if(existing.symbolicLink||replaceAlias||special){
