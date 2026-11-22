@@ -101,9 +101,11 @@ class Volume {
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
-                 const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr);
+                 const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr,
+                 std::optional<PosixMetadata> posix = {});
     void SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,
-                              const std::array<uint64_t,2>* dates,const Attributes* attributes);
+                              const std::array<uint64_t,2>* dates,const Attributes* attributes,
+                              std::optional<PosixMetadata> posix = {});
     Attributes GetAttributes(uint32_t id) const;
     void SetAttributes(uint32_t id, const Attributes &);
     uint32_t MakeHardLink(uint32_t source, uint32_t parent, const std::u16string &name,bool replace=false);

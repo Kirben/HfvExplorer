@@ -759,6 +759,130 @@ void TestHfsToApfsPosix(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+/HFSX worker copies preserve APFS UID/GID, executable and special mode bits, and nested folder permissions after reopening. Overwrites use source permissions and folder merges retain destination permissions.\n");
 }
 
+void TestCopyPosixIntoHfs(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const PosixMetadata folderMode{503,81,02750};
+    const PosixMetadata executableMode{0,20,04751};
+    const PosixMetadata noAccessMode{0xf0000123,0x80000056,0000};
+    const PosixMetadata retainedMode{504,82,0710};
+    const size_t forkSizes[]={5003,719};
+    const auto payload=[](unsigned fork,uint64_t at,void* out,size_t size){
+        auto bytes=static_cast<uint8_t*>(out);
+        for(size_t i=0;i<size;++i)bytes[i]=uint8_t((at+i)*17+fork*29);
+    };
+    const auto formatHfs=[](const std::wstring& path,Kind kind){
+        auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+        HfsPlus::Volume::Format(*disk,u"Unix modes",true,kind);
+        return disk;
+    };
+    const auto apfsPath=Wide(root+"\\unix-source-apfs.img");
+    const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE");
+    if(fixture){
+        Check(CopyFileW(fixture,apfsPath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+    }else{
+        auto disk=HfsPlus::CreateImage(apfsPath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Unix source",true,job);
+    }
+    {
+        auto source=OpenBrowserImage(apfsPath);
+        Check(source&&source->Supports().create,"Cannot seed the APFS POSIX source");
+        Entry folder;folder.directory=true;folder.name=u"Unix metadata";folder.posix=folderMode;
+        const auto id=source->MakeDirectoryWithAttributes(2,folder);
+        Entry executable;executable.name=u"Executable";executable.posix=executableMode;
+        for(unsigned fork=0;fork<2;++fork)executable.forks[fork].size=forkSizes[fork];
+        source->Put(id,executable,payload,false);
+        Entry noAccess;noAccess.name=u"No access";noAccess.posix=noAccessMode;
+        source->Put(id,noAccess,payload,false);
+    }
+    for(unsigned from=0;from<3;++from){
+        const auto sourcePath=from==0?apfsPath:Wide(root+"\\unix-source-"+std::to_string(from)+".dsk");
+        if(from){
+            auto disk=formatHfs(sourcePath,from==1?Kind::HfsPlus:Kind::HfsXCaseSensitive);
+            uint32_t folder,file,noAccess;
+            {
+                HfsPlus::Volume hfs(*disk,true);
+                folder=hfs.MakeDirectory(2,u"Unix metadata");
+                file=hfs.Put(folder,u"Executable",forkSizes[0],forkSizes[1],payload);
+                noAccess=hfs.Put(folder,u"No access",0,0,payload);
+                Check(hfs.Stat(folder).posix==PosixMetadata{0,0,0755}&&
+                      hfs.Stat(file).posix==PosixMetadata{0,0,0644},
+                      "Fresh HFS entries did not expose their written default permissions");
+            }
+            SetHfsFixtureModes(*disk,{
+                {folder,folderMode.uid,folderMode.gid,uint16_t(0040000|folderMode.mode)},
+                {file,executableMode.uid,executableMode.gid,uint16_t(0100000|executableMode.mode)},
+                {noAccess,noAccessMode.uid,noAccessMode.gid,uint16_t(0100000|noAccessMode.mode)}});
+        }
+
+        for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive}){
+            const auto targetPath=Wide(root+"\\unix-target-"+std::to_string(from)+
+                (kind==Kind::HfsPlus?"-plus.dsk":"-x.dsk"));
+            {
+                auto disk=formatHfs(targetPath,kind);
+                uint32_t folder,file;
+                {
+                    HfsPlus::Volume hfs(*disk,true);
+                    const auto merge=hfs.MakeDirectory(2,u"Merge");
+                    folder=hfs.MakeDirectory(merge,u"Unix metadata");
+                    file=hfs.Put(folder,u"Executable",512,0,payload);
+                }
+                SetHfsFixtureModes(*disk,{
+                    {folder,retainedMode.uid,retainedMode.gid,uint16_t(0040000|retainedMode.mode)},
+                    {file,retainedMode.uid,retainedMode.gid,uint16_t(0100000|retainedMode.mode)}});
+            }
+            const auto verify=[&](Volume& volume,uint32_t parent,const PosixMetadata& expectedFolder){
+                Entry folder,file,noAccess;
+                Check(volume.FindChild(parent,u"Unix metadata",folder)&&folder.directory&&folder.posix==expectedFolder&&
+                      volume.FindChild(folder.id,u"Executable",file)&&!file.directory&&file.posix==executableMode&&
+                      volume.FindChild(folder.id,u"No access",noAccess)&&noAccess.posix==noAccessMode,
+                      "Copied ownership, execute bits or folder permissions differ");
+                for(unsigned fork=0;fork<2;++fork){
+                    Check(file.forks[fork].size==forkSizes[fork],"Executable copy lost a fork");
+                    HfsPlus::Bytes actual(forkSizes[fork]),expected(forkSizes[fork]);
+                    volume.Read(file.id,fork,0,actual.data(),actual.size());
+                    payload(fork,0,expected.data(),expected.size());
+                    Check(actual==expected,"Executable copy changed fork bytes");
+                }
+            };
+            {
+                auto source=OpenBrowserImage(sourcePath);
+                auto target=OpenBrowserImage(targetPath);
+                Entry folder,merge;
+                Check(source&&target&&VolumeSession::VolumeSessionPidForTest(target)&&
+                      (!from||VolumeSession::VolumeSessionPidForTest(source))&&
+                      source->FindChild(2,u"Unix metadata",folder)&&target->FindChild(2,u"Merge",merge),
+                      "Could not mount Unix metadata copy fixtures");
+                verify(*source,2,folderMode);
+                const auto copy=[&](uint32_t parent,bool overwrite){
+                    bool prompted=false;
+                    Storage::Job job;
+                    job.transport({},[&](const auto&){
+                        prompted=true;
+                        return overwrite?Storage::ConflictChoice::Replace:Storage::ConflictChoice::Cancel;
+                    });
+                    Completion completion;
+                    const auto result=ExecuteInWorker(OrdinaryCopy{{Native(source,folder.id)},Native(target,parent)},job,completion);
+                    if(result.code)throw HfsPlus::Error(result.message);
+                    Check(completion.complete&&prompted==overwrite,"Unexpected HFS copy completion or overwrite prompt");
+                };
+                copy(2,false);
+                copy(merge.id,true);
+                verify(*target,2,folderMode);
+                verify(*target,merge.id,retainedMode);
+            }
+            auto target=OpenBrowserImage(targetPath);
+            Entry merge;
+            Check(target&&target->FindChild(2,u"Merge",merge),"Missing reopened HFS merge fixture");
+            verify(*target,2,folderMode);
+            verify(*target,merge.id,retainedMode);
+        }
+    }
+    if(fixture)fprintf(report,"PASS: Unix ownership and permissions copied from the shared macOS APFS fixture into HFS+ and HFSX.\n");
+    fprintf(report,"PASS: APFS, HFS+ and HFSX copies into HFS+ and HFSX preserve file and folder UID/GID, executable and special bits, zero permissions and both forks after reopen. Folder merges retain destination permissions.\n");
+}
+
 void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -1070,6 +1194,7 @@ int RunCopyProcessTest(const char *directory) {
         TestWorkerTransport();
         TestVolumeSessionProtocol();
         TestHfsToApfsPosix(root,report);
+        TestCopyPosixIntoHfs(root,report);
         TestHfsToApfsSymlinks(root,report);
         TestHfsToApfsHardLinks(root,report);
         TestHfsToApfsAttributes(root,report);

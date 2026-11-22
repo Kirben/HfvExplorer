@@ -768,6 +768,7 @@ struct Volume::Impl {
     uint32_t Stub(uint32_t inode,uint32_t parent,const std::u16string& name,uint32_t reference,bool chained) {
         bool directory=Get(inode).directory;Entry e;e.parent=parent;e.name=name;memcpy(e.finder.data(),directory?"fdrpMACS":"hlnkhfs+",8);P16(e.finder.data()+8,directory?0x8000:0x0100);if(directory)e.forks[1]=Alias(inode);New(e);
         auto r=CatalogRecord(e.id);P16(r->value.data()+2,U16(r->value.data()+2)|((chained||directory)?0x20:0));r->value[41]|=2;P16(r->value.data()+42,0100444);P32(r->value.data()+44,reference);
+        entries[e.id].posix=PosixMetadata{0,0,0444};
         auto metadata=directory?directoryMetadata:fileMetadata;entries[e.id].created=Get(metadata).created;P32(r->value.data()+12,Time::Encode(entries[e.id].created,(U16(r->value.data()+2)&0x1000)!=0));return e.id;
     }
     Entry Presented(uint32_t id) {
@@ -1073,7 +1074,9 @@ struct Volume::Impl {
         P32(r.value.data() + 8, id);
         for (unsigned i = 12; i <= 28; i += 4)
             P32(r.value.data() + i, Time::Encode(e.created,(U16(r.value.data()+2)&0x1000)!=0));
-        P16(r.value.data() + 42, e.directory ? 0040755 : 0100644);
+        const uint16_t permissions=e.directory?0755:0644;
+        P16(r.value.data() + 42, (e.directory?0040000:0100000)|permissions);
+        e.posix=PosixMetadata{0,0,permissions};
         InsertCatalogRecord(std::move(r));
         entries[id] = e;
         UpdateEntry(e);
@@ -1570,11 +1573,22 @@ uint32_t Volume::MakeDirectory(uint32_t parent, const std::u16string &name, cons
         return e.id;
     });
 }
+static void SetPosixMetadata(Bytes& record, const PosixMetadata& metadata)
+{
+    P32(record.data()+32,metadata.uid);
+    P32(record.data()+36,metadata.gid);
+    const auto type=U16(record.data()+42)&0170000;
+    P16(record.data()+42,uint16_t(type|metadata.mode));
+}
+
 uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
-                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates, const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates) {
+                     const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates,
+                     const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates,
+                     std::optional<PosixMetadata> posix) {
     auto &p = *p_;
     p.Guard();
+    Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
     parent=p.WriteParent(parent);
     if(attributes)ValidateAttributes(*attributes);
     Entry e;
@@ -1648,6 +1662,10 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
         } else
             p.New(e);
         auto timeRecord=p.CatalogRecord(e.id);
+        if(posix){
+            SetPosixMetadata(timeRecord->value,*posix);
+            e.posix=posix;
+        }
         if(convertTimes){for(unsigned at=12;at<=28;at+=4){auto raw=U32(timeRecord->value.data()+at);P32(timeRecord->value.data()+at,raw?Time::Encode(raw,true):0);}P16(timeRecord->value.data()+2,U16(timeRecord->value.data()+2)|0x1000);}
         e.created=desiredDates[0];e.modified=desiredDates[1];
         P32(timeRecord->value.data()+12,Time::Encode(e.created,expanded));P32(timeRecord->value.data()+16,Time::Encode(e.modified,expanded));
@@ -1671,14 +1689,17 @@ void Volume::SetCompression(uint32_t id,CompressionMode method,std::function<voi
     uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint64_t,2> dates{e.created,e.modified};
     Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,method,&dates);
 }
-void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,const std::array<uint64_t,2>* dates,const Attributes* attributes){
+void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,const std::array<uint64_t,2>* dates,
+                                  const Attributes* attributes,std::optional<PosixMetadata> posix){
  auto& p=*p_;p.Guard();id=p.Content(id);auto e=p.Get(id);Check(e.directory,"Select a folder for directory metadata");if(attributes)ValidateAttributes(*attributes);
+ Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
  auto record=p.CatalogRecord(id);bool expanded=(U16(record->value.data()+2)&0x1000)!=0,convert=false;
  if(dates){if(!expanded&&((*dates)[0]>UINT32_MAX||(*dates)[1]>UINT32_MAX)){Check(ExpandedTimes(),"This folder requires expanded timestamps");expanded=convert=true;}for(auto date:*dates)(void)Time::Encode(date,expanded);
   if(convert)for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);if(raw)(void)Time::Encode(raw,true);}}
  p.Mutate(fault,[&]{
   if(convert){for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);P32(record->value.data()+at,raw?Time::Encode(raw,true):0);}P16(record->value.data()+2,U16(record->value.data()+2)|0x1000);}
   if(finder){e.finder=*finder;memcpy(record->value.data()+48,e.finder.data(),32);}
+  if(posix){SetPosixMetadata(record->value,*posix);e.posix=posix;}
   if(dates){e.created=(*dates)[0];e.modified=(*dates)[1];P32(record->value.data()+12,Time::Encode(e.created,expanded));P32(record->value.data()+16,Time::Encode(e.modified,expanded));}
   p.entries[id]=e;if(attributes){auto desired=*attributes;auto old=p.GetAttributes(id);if(old.count(u"com.apple.system.hfs.firstlink"))desired[u"com.apple.system.hfs.firstlink"]=old.at(u"com.apple.system.hfs.firstlink");p.ReplaceAttributes(id,desired,true,true);}
  });

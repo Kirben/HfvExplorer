@@ -100,10 +100,23 @@ public:
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,compressed,progress);});}
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);attributes.erase(u"com.apple.system.hfs.firstlink");if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
-    void ValidateEntry(const Entry& e)const override{Volume::ValidateEntry(e);if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}HfsPlus::ValidateAttributes(e.attributes);}
+    void ValidateEntry(const Entry& e)const override{
+        Volume::ValidateEntry(e);
+        Check(!e.posix||e.posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
+        if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}
+        HfsPlus::ValidateAttributes(e.attributes);
+    }
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name);});}
     void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
-        Mutate([&]{auto now=volume_->Stat(id);Check(now.directory&&now.id==expected.id&&now.parent==expected.parent&&now.name==expected.name,"Destination folder changed during copying");std::array<uint64_t,2> dates{desired.created,desired.modified};volume_->SetDirectoryMetadata(id,merge?nullptr:&desired.finder,desired.datesValid?&dates:nullptr,!merge&&desired.attributesKnown?&desired.attributes:nullptr);});
+        Mutate([&]{
+            const auto now=volume_->Stat(id);
+            Check(now.directory&&now.id==expected.id&&now.parent==expected.parent&&now.name==expected.name,
+                  "Destination folder changed during copying");
+            const std::array<uint64_t,2> dates{desired.created,desired.modified};
+            volume_->SetDirectoryMetadata(id,merge?nullptr:&desired.finder,desired.datesValid?&dates:nullptr,
+                                          !merge&&desired.attributesKnown?&desired.attributes:nullptr,
+                                          merge?std::nullopt:desired.posix);
+        });
     }
     bool CaseSensitive() const override { return caseSensitive_; }
     uint64_t FreeBytes() const override { Call call(*this);if(!usable_)throw HfsPlus::Error("Media was released; select the drive again");return volume_->FreeBytes(); }
@@ -129,7 +142,7 @@ public:
     }
     uint32_t Put(uint32_t p, const Entry &e, Reader read, bool replace) override {
         std::array<uint64_t,2> dates{e.created,e.modified};
-        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,nullptr,e.attributesKnown?&e.attributes:nullptr,HfsPlus::Volume::CompressionMode::Preserve,e.datesValid?&dates:nullptr); });
+        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,nullptr,e.attributesKnown?&e.attributes:nullptr,HfsPlus::Volume::CompressionMode::Preserve,e.datesValid?&dates:nullptr,e.posix); });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
         Mutate([&] { volume_->Rename(id, p, s); });
