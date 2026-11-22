@@ -294,23 +294,28 @@ Data EncodePut(const PutHeader& header,const MacBrowser::Entry& entry)
     payload.put(header.attributesKnown);
     payload.put(header.original);
     payload.put(header.source);
-    payload.put(header.replaceHardLinkName);
+    payload.put(uint64_t(header.hfsOverwriteScope));
     CopyWorkerProtocol::EncodeEntry(payload,entry);
     return payload;
 }
 
 PutRequest DecodePut(Data& packet)
 {
-    const PutHeader header{CatalogNumber(packet),packet.flag(),packet.flag(),CatalogNumber(packet),CatalogNumber(packet),packet.flag()};
+    using Scope=HfsPlus::Volume::OverwriteScope;
+    PutHeader header{CatalogNumber(packet),packet.flag(),packet.flag(),CatalogNumber(packet),CatalogNumber(packet)};
+    const auto scope=packet.get();
+    Check(scope<=uint64_t(Scope::SymbolicLink),"Invalid HFS+ overwrite scope");
+    header.hfsOverwriteScope=Scope(scope);
     Check(!header.original||!header.source,"Conflicting in-worker fork sources");
     auto entry=CopyWorkerProtocol::DecodeEntry(packet);
     packet.end();
     Check(!header.original||(header.replace&&entry.id==header.original),"Invalid resource fork replacement");
     Check(!header.source||entry.id==header.source,"Invalid in-worker fork source");
-    Check(!header.replaceHardLinkName||(header.replace&&!header.original&&!entry.directory&&!entry.symbolicLink),
-          "Invalid hard-link name replacement");
+    Check(header.hfsOverwriteScope==Scope::SharedInode||
+          (header.replace&&!header.original&&!entry.directory&&!entry.symbolicLink),
+          "Invalid HFS+ name replacement");
     entry.attributesKnown=header.attributesKnown;
-    entry.replaceHardLinkName=header.replaceHardLinkName;
+    entry.hfsOverwriteScope=header.hfsOverwriteScope;
     return {header,std::move(entry)};
 }
 

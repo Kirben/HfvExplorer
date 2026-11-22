@@ -198,15 +198,13 @@ public:
         return Mutate([&] { return volume_->MakeDirectory(p, s); });
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace) override {
-        using Scope=HfsPlus::Volume::OverwriteScope;
         using Mode=HfsPlus::Volume::CompressionMode;
-        const auto scope=e.replaceHardLinkName?Scope::SelectedName:Scope::SharedInode;
         const auto compression=e.compressed?Mode::CopyCompressed:Mode::Preserve;
         const std::array<uint64_t,2> dates{e.created,e.modified};
         return Mutate([&]{
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
                                 e.attributesKnown?&e.attributes:nullptr,compression,
-                                e.datesValid?&dates:nullptr,e.posix,scope);
+                                e.datesValid?&dates:nullptr,e.posix,e.hfsOverwriteScope);
         });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
@@ -360,11 +358,17 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
 
     Check(!found || !existing.directory, "A folder blocks the destination file");
     const std::string_view destinationKind=dst.Kind();
-    const bool replaceHardLinkName=found&&existing.hardLink&&std::string_view(src.Kind())=="APFS"&&
-                                   (destinationKind=="HFS+"||destinationKind=="HFSX");
+    using Scope=HfsPlus::Volume::OverwriteScope;
+    auto hfsScope=Scope::SharedInode;
+    if(found&&!plan.linkTarget&&std::string_view(src.Kind())=="APFS"&&
+       (destinationKind=="HFS+"||destinationKind=="HFSX")){
+        if(existing.hardLink)hfsScope=Scope::SelectedName;
+        else if(existing.symbolicLink)hfsScope=Scope::SymbolicLink;
+    }
     if (found) {
         auto label=BrowserPresentation::Utf8(entry.name);
-        if(replaceHardLinkName)label+=" (replace this hard-link name only)";
+        if(hfsScope==Scope::SelectedName)label+=" (replace this hard-link name only)";
+        else if(hfsScope==Scope::SymbolicLink)label+=" (replace the symbolic link itself)";
         else if(existing.hardLink)label+=" (shared by "+std::to_string(existing.linkCount)+" hard links)";
         auto choice = job.replace(label);
         if (choice == Storage::ConflictChoice::Cancel) throw Storage::Cancelled();
@@ -377,7 +381,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
-    outgoing.replaceHardLinkName=replaceHardLinkName;
+    outgoing.hfsOverwriteScope=hfsScope;
     if(plan.linkTarget){
         dst.PutSymbolicLink(parent,outgoing,*plan.linkTarget,job);
         ++progress.files;

@@ -234,17 +234,23 @@ void TestVolumeSessionProtocol()
     auto linked=entry;
     linked.hardLink=true;
     linked.linkCount=2;
-    auto transfer=Protocol::EncodePut({2,true,true,0,0,true},linked);
+    using Scope=HfsPlus::Volume::OverwriteScope;
+    auto transfer=Protocol::EncodePut({2,true,true,0,0,Scope::SelectedName},linked);
     const auto decodedTransfer=Protocol::DecodePut(transfer);
-    Check(decodedTransfer.entry.replaceHardLinkName,"Hard-link name replacement intent did not survive the wire");
-    auto ordinaryTransfer=Protocol::EncodePut({2,true,true,0,0,true},entry);
-    const auto decodedOrdinary=Protocol::DecodePut(ordinaryTransfer);
-    Check(decodedOrdinary.entry.replaceHardLinkName&&!decodedOrdinary.entry.hardLink,
-          "An ordinary file must be able to replace a destination hard-link name");
-    reject([&]{auto data=Protocol::EncodePut({2,false,true,0,0,true},entry);Protocol::DecodePut(data);},
-           "accepted hard-link name replacement without overwrite approval");
-    reject([&]{auto data=Protocol::EncodePut({2,true,true,42,0,true},linked);Protocol::DecodePut(data);},
-           "accepted an alias replacement during a resource fork edit");
+    Check(decodedTransfer.entry.hfsOverwriteScope==Scope::SelectedName,
+          "Hard-link name replacement intent did not survive the wire");
+    for(auto scope:{Scope::SelectedName,Scope::SymbolicLink}){
+        auto ordinaryTransfer=Protocol::EncodePut({2,true,true,0,0,scope},entry);
+        const auto decodedOrdinary=Protocol::DecodePut(ordinaryTransfer);
+        Check(decodedOrdinary.entry.hfsOverwriteScope==scope&&!decodedOrdinary.entry.hardLink,
+              "Ordinary file name replacement intent did not survive the wire");
+        reject([&]{auto data=Protocol::EncodePut({2,false,true,0,0,scope},entry);Protocol::DecodePut(data);},
+               "accepted name replacement without overwrite approval");
+        reject([&]{auto data=Protocol::EncodePut({2,true,true,42,0,scope},entry);Protocol::DecodePut(data);},
+               "accepted name replacement during a resource fork edit");
+    }
+    reject([&]{auto data=Protocol::EncodePut({2,true,true,0,0,Scope(3)},entry);Protocol::DecodePut(data);},
+           "accepted an unknown HFS+ overwrite scope");
     auto put=Protocol::EncodePut({2,true,true,42,0},entry);
     const auto decodedPut=Protocol::DecodePut(put);
     Check(decodedPut.header.original==42&&decodedPut.header.replace&&decodedPut.entry.attributesKnown&&
@@ -1150,6 +1156,83 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS, HFS+ and HFSX symlinks reopen on HFS+ and both HFSX variants with unchanged UID, GID, mode, and target. Cancel, rename and delete preserve link metadata or leave the target intact.\n");
 }
 
+void TestApfsRegularOverwritesHfsSymlink(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    constexpr uint64_t fileSize=8199,referentSize=4111;
+    constexpr BYTE fileBias=17,referentBias=71;
+    const PosixMetadata linkPosix{417,52,0751};
+    const HfsPlus::Attributes linkAttributes{{u"user.old-link",{9,0,4}}};
+    const HfsPlus::Bytes linkTarget{'.','.','/','t','a','r','g','e','t',0};
+    const auto sourcePath=Wide(root+"\\apfs-ordinary-overwrite.img");
+    const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE");
+    if(fixture){
+        Check(CopyFileW(fixture,sourcePath.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS fixture");
+    }else{
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"APFS regular overwrite",true,job);
+    }
+    auto source=OpenBrowserImage(sourcePath);
+    Check(source&&source->Supports().create,"Cannot seed the APFS overwrite fixture");
+    const auto file=Put(*source,2,u"Replacement file",fileSize,fileBias);
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto path=Wide(root+"\\hfs-link-to-regular-"+std::to_string(index++)+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"HFS overwrite destination",true,kind);
+        }
+        auto target=OpenBrowserImage(path);
+        Check(target&&VolumeSession::VolumeSessionPidForTest(target),"Cannot mount the HFS overwrite fixture");
+        const auto referent=Put(*target,2,u"target",referentSize,referentBias);
+        const auto parent=target->MakeDirectory(2,u"Links");
+        Entry original;
+        original.name=u"Replacement file";
+        original.symbolicLink=true;
+        original.posix=linkPosix;
+        original.attributes=linkAttributes;
+        Storage::Job seed;
+        target->PutSymbolicLink(parent,original,linkTarget,seed);
+        const auto copy=[&](Storage::Job& job,Completion& completion){
+            return ExecuteInWorker(OrdinaryCopy{{Native(source,file)},Native(target,parent)},job,completion);
+        };
+        bool readResource=false;
+        unsigned prompts=0;
+        Storage::Job cancel;
+        cancel.transport([&](const Storage::Progress& progress){
+            if(progress.fileBytes>fileSize){readResource=true;cancel.cancel();}
+        },[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+        Completion aborted;
+        const auto cancelled=copy(cancel,aborted);
+        Check(readResource&&prompts==1&&cancelled.outcome==Storage::Outcome::Cancelled&&
+              !cancelled.partial&&!aborted.complete,"Regular overwrite did not cancel during the resource fork");
+        target.reset();
+        target=OpenBrowserImage(path);
+        Entry link;
+        Check(target&&target->FindChild(parent,original.name,link)&&link.symbolicLink&&link.posix==linkPosix&&
+              target->SymbolicLinkTarget(link.id)==linkTarget&&target->GetAttributes(link.id)==linkAttributes,
+              "Cancellation changed the original symlink, target bytes or metadata on disk");
+        Verify(*target,referent,referentSize,referentBias);
+
+        Storage::Job replace;
+        replace.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+        Completion done;
+        const auto completed=copy(replace,done);
+        if(completed.code)throw HfsPlus::Error(completed.message);
+        Check(done.complete&&prompts==2,"Missing regular-file overwrite approval");
+        target.reset();
+        target=OpenBrowserImage(path);
+        Entry replacement;
+        Check(target&&target->FindChild(parent,original.name,replacement)&&!replacement.symbolicLink&&
+              !target->SymbolicLinkTarget(replacement.id)&&target->GetAttributes(replacement.id).empty(),
+              "HFS overwrite did not store a regular file in place of the symbolic link");
+        Verify(*target,replacement.id,fileSize,fileBias);
+        Verify(*target,referent,referentSize,referentBias);
+    }
+    fprintf(report,"PASS: Regular APFS files replace symlinks on HFS+ and both HFSX variants. Both forks and the untouched target survive reopening. Cancellation preserves the link and its metadata.\n");
+}
+
 void TestHfsToApfsHardLinks(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -1819,6 +1902,7 @@ int RunCopyProcessTest(const char *directory) {
         TestHfsToApfsPosix(root,report);
         TestCopyPosixIntoHfs(root,report);
         TestSymbolicLinkCopies(root,report);
+        TestApfsRegularOverwritesHfsSymlink(root,report);
         TestHfsToApfsHardLinks(root,report);
         TestApfsToHfsHardLinks(root,report);
         TestCrossFormatAttributes(root,report);

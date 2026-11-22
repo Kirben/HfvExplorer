@@ -37,7 +37,7 @@ struct Entry {
     EntryIdentity identity;
     bool symbolicLink = false;
     std::optional<PosixMetadata> posix;
-    bool replaceHardLinkName = false; // transient copy intent to leave other destination aliases intact
+    HfsPlus::Volume::OverwriteScope hfsOverwriteScope = HfsPlus::Volume::OverwriteScope::SharedInode;
 };
 void ValidateHfsPlusCopyNames(const std::vector<Entry>& entries, bool caseSensitive);
 bool IsHfsPlusSymlinkReplacementFile(const Entry& entry);

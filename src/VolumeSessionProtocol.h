@@ -24,7 +24,12 @@ struct FindChildRequest {uint32_t parent;std::u16string name;std::optional<uint3
 struct CompressionRequest {uint32_t id;HfsPlus::Volume::CompressionMode method;};
 struct CompressionProgress {uint64_t done,total;};
 struct ForkRange {uint32_t fork;uint64_t offset,count;};
-struct PutHeader {uint32_t parent;bool replace,attributesKnown;uint32_t original,source;bool replaceHardLinkName=false;};
+struct PutHeader {
+    uint32_t parent;
+    bool replace,attributesKnown;
+    uint32_t original,source;
+    HfsPlus::Volume::OverwriteScope hfsOverwriteScope=HfsPlus::Volume::OverwriteScope::SharedInode;
+};
 struct PutRequest {PutHeader header;MacBrowser::Entry entry;};
 struct SymbolicLinkRequest {std::optional<uint32_t> parent;MacBrowser::Entry entry;HfsPlus::Bytes target;};
 struct DirectoryUpdateHeader {uint32_t id;bool merge,attributesKnown;};

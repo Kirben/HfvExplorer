@@ -466,7 +466,7 @@ public:
         return id;
     }
     uint32_t Put(uint32_t parent, const Entry& entry, Reader reader, bool replace) override {
-        return StreamPut(entry,std::move(reader),{parent,replace,entry.attributesKnown,0,0,entry.replaceHardLinkName},{});
+        return StreamPut(entry,std::move(reader),{parent,replace,entry.attributesKnown,0,0,entry.hfsOverwriteScope},{});
     }
     uint32_t PutResourceReplacement(uint32_t id, const Entry& entry, Reader reader,
                                      std::function<void(uint64_t,size_t)> localProgress) override {
@@ -477,7 +477,7 @@ public:
     }
     uint32_t PutFromSource(uint32_t parent,const Entry& entry,bool replace,
                        std::function<void(unsigned,uint64_t,size_t)> progress) {
-        return StreamPut(entry,{},{parent,replace,entry.attributesKnown,0,entry.id,entry.replaceHardLinkName},
+        return StreamPut(entry,{},{parent,replace,entry.attributesKnown,0,entry.id,entry.hfsOverwriteScope},
                          std::move(progress));
     }
 private:

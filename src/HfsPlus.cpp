@@ -1624,9 +1624,12 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     uint32_t visible=existing,detached=0;
     if(scope==OverwriteScope::SelectedName)
         Check(existing&&p.LinkKind(existing)==1,"The HFS+ hard-link destination changed after overwrite approval");
+    if(scope==OverwriteScope::SymbolicLink)
+        Check(!symbolicLink&&existing&&p.Get(existing).symbolicLink,
+              "The HFS+ symbolic link destination changed after overwrite approval");
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
-        if(symbolicLink){
+        if(symbolicLink||scope==OverwriteScope::SymbolicLink){
             const auto& target=p.Get(existing);
             Check(!target.directory&&!p.LinkKind(existing),
                   "An HFS+ symbolic link cannot replace a folder or hard-link name");
@@ -1639,7 +1642,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         const auto& current=p.Get(existing);
         Check(!current.directory, "Cannot overwrite an HFS+ directory");
         p.RemovalParent(parent);
-        if(scope==OverwriteScope::SelectedName||(symbolicLink&&!current.symbolicLink)){
+        if(scope!=OverwriteScope::SharedInode||(symbolicLink&&!current.symbolicLink)){
             // Publish the replacement entry and unlink the old name in the
             // same transaction. Other names of a shared inode stay intact.
             e.name=p.Get(visible).name;

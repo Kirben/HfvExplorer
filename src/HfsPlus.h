@@ -102,9 +102,9 @@ class Volume {
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline, CopyCompressed };
     void SetCompression(uint32_t id,CompressionMode,std::function<void(uint64_t,uint64_t)> progress = {});
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress = {});
-    // A file edit follows its shared inode. Copying a new link group may instead
-    // replace just the selected directory entry.
-    enum class OverwriteScope { SharedInode, SelectedName };
+    // A file edit follows its shared inode. A transfer can replace a
+    // selected hard-link or symbolic-link entry instead.
+    enum class OverwriteScope { SharedInode, SelectedName, SymbolicLink };
     // Streaming, copy-on-write replacement. Source callback must return exact bytes.
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
