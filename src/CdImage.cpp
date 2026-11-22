@@ -5,6 +5,7 @@
 #include "HfsPlus.h"
 #include "BrowserPresentation.h"
 #include "MacBrowserModel.h"
+#include "WindowsHandleRename.h"
 #include "DeviceWait.h"
 #include "ReadOnlyCd.h"
 #include "CdImageToc.h"
@@ -74,15 +75,6 @@ struct DestinationGuard {
  HANDLE handle=INVALID_HANDLE_VALUE;
  ~DestinationGuard(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
 };
-bool RenameGuardedFile(HANDLE handle,const std::wstring& path) {
- const auto nameBytes=path.size()*sizeof(wchar_t);
- std::vector<BYTE> buffer((std::max)(sizeof(FILE_RENAME_INFO),
-     offsetof(FILE_RENAME_INFO,FileName)+nameBytes+sizeof(wchar_t)),0);
- auto rename=reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
- rename->FileNameLength=DWORD(nameBytes);
- memcpy(rename->FileName,path.data(),nameBytes);
- return SetFileInformationByHandle(handle,FileRenameInfo,rename,DWORD(buffer.size()))!=FALSE;
-}
 Storage::Result failure(DWORD error,const std::string& reason,unsigned long long offset=0) {
  if(!error)error=ERROR_IO_DEVICE;
  return {1,error,reason+" (Windows error "+std::to_string(error)+", byte offset "+std::to_string(offset)+")."};
@@ -156,12 +148,12 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   std::wstring backup;
   if(replace){
    backup=file->WorkerFiles().front().first+L".previous";
-   if(!RenameGuardedFile(original.handle,backup))return failure(GetLastError(),"Could not retain the old image",size);
+   if(!RenameWindowsHandle(original.handle,backup))return failure(GetLastError(),"Could not retain the old image",size);
   }
   try{file->PublishTo(outputPath);}
   catch(const HfsPlus::Error& error){
    const auto code=GetLastError();
-   if(replace&&!RenameGuardedFile(original.handle,outputPath)){
+   if(replace&&!RenameWindowsHandle(original.handle,outputPath)){
     Storage::OutcomeEvidence::NoteRetainedChange();
     return failure(code,std::string(error.what())+" The original image remains at "+
                    BrowserPresentation::Utf8(MacBrowser::U16(backup)),size);

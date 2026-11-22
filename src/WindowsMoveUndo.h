@@ -20,6 +20,7 @@ public:
     Session& operator=(const Session&)=delete;
     static Session* Current();
     std::wstring Slot();
+    std::wstring StageTemporary(const std::wstring& path);
     void Rename(const std::wstring& from,const std::wstring& to);
     void PreserveDirectoryDates(const std::wstring& path);
     void Finish();

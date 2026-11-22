@@ -29,19 +29,26 @@ namespace {
 struct DeleteHandle {
  HANDLE value=INVALID_HANDLE_VALUE;
  ~DeleteHandle(){DWORD error=GetLastError();if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);SetLastError(error);}
- void close(){if(value!=INVALID_HANDLE_VALUE){CloseHandle(value);value=INVALID_HANDLE_VALUE;}}
 };
-int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job) {
+struct DeleteIdentity {DWORD serial;uint64_t id;};
+int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
+                     const DeleteIdentity* expected=nullptr) {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(depth>128||path.size()>=32764){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
  DeleteHandle directory;
  // Pin the actual entry without following a junction, and prevent replacement
  // or reparse-point changes while enumerating its children.
- directory.value=CreateFileW(path.c_str(),0,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+ directory.value=CreateFileW(path.c_str(),DELETE|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
    FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
  if(directory.value==INVALID_HANDLE_VALUE)return 0;
  BY_HANDLE_FILE_INFORMATION info;
  if(!GetFileInformationByHandle(directory.value,&info))return 0;
+ if(expected&&(expected->serial!=info.dwVolumeSerialNumber||
+              expected->id!=((uint64_t(info.nFileIndexHigh)<<32)|info.nFileIndexLow)||
+              (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))){
+  SetLastError(ERROR_FILE_INVALID);
+  return 0;
+ }
  if(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)){SetLastError(ERROR_DIRECTORY);return 0;}
  if(!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {
   WIN32_FIND_DATAW entry;HANDLE search=FindFirstFileW((path+L"\\*").c_str(),&entry);
@@ -60,12 +67,14 @@ int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job) 
    FindClose(search);if(!ok){SetLastError(error);return 0;}
   }
  }
- directory.close();
- const bool removed=RemoveDirectoryW(path.c_str())!=FALSE; // A reparse point itself, never its target.
+ // Remove precisely the pinned entry, including when it is a junction.
+ FILE_DISPOSITION_INFO disposition{TRUE};
+ const bool removed=SetFileInformationByHandle(directory.value,FileDispositionInfo,
+                                               &disposition,sizeof(disposition))!=FALSE;
  if(removed)Storage::OutcomeEvidence::NoteRetainedChange();
  return removed;
 }
-int DeleteHostDirectory(const std::wstring& path,Storage::Job* job)
+int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const DeleteIdentity* expected=nullptr)
 {
  auto full=path;
  while(full.size()>7&&full.back()==L'\\')full.pop_back();
@@ -78,12 +87,13 @@ int DeleteHostDirectory(const std::wstring& path,Storage::Job* job)
  }else if(full.size()<=7||full[5]!=L':'||full[6]!=L'\\'){
   SetLastError(ERROR_ACCESS_DENIED);return 0;
  }
- return delete_host_tree(full,0,job);
+ return delete_host_tree(full,0,job,expected);
 }
 }
-int DeleteHostMoveStaging(const std::wstring& path)
+int DeleteHostMoveStaging(const std::wstring& path,DWORD serial,uint64_t id)
 {
- return DeleteHostDirectory(path,nullptr);
+ const DeleteIdentity expected{serial,id};
+ return DeleteHostDirectory(path,nullptr,&expected);
 }
 int DeleteHostSelectionJob(const std::wstring& path,bool directory,Storage::Job* job)
 {

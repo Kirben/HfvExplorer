@@ -182,6 +182,22 @@ void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
                 CrashChild(image,phase,importing?L"windows-import":L"windows-export");
                 Check(ClassicHfsRecovery::Pending(path),"interrupted Windows/HFS move lost HFS recovery");
             }
+            if(!importing&&phase==9){
+                WIN32_FIND_DATAA found{};
+                const auto search=FindFirstFileA(image+".windows\\.hfv-move-*",&found);
+                Check(search!=INVALID_HANDLE_VALUE,"locate interrupted Windows staging");
+                FindClose(search);
+                const CString staged=image+".windows\\"+found.cFileName+"\\Unrelated";
+                const Bytes unrelated{9,7,5};
+                Save(staged,unrelated);
+                bool rejected=false;
+                try{auto open=MacBrowser::OpenImage(path);}
+                catch(const HfsPlus::Error&){rejected=true;}
+                Check(rejected&&ClassicHfsRecovery::Pending(path)&&Load(staged)==unrelated,
+                      "committed recovery deleted an untracked file in staging");
+                Check(MoveFileA(staged,image+".staged-unrelated")!=FALSE,"move foreign staging file aside");
+                fprintf(report,"PASS: committed Windows recovery retained an untracked file in staging.\n");
+            }
             if(!importing&&phase==8){
                 const CString journal=image+":HFVExplorer.ClassicUndo";
                 const CString published=image+".windows\\Tree\\Document";
@@ -221,6 +237,28 @@ void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
                 Check(rejected&&ClassicHfsRecovery::Pending(path)&&Load(output)==external,
                       "recovery overwrote a competing Windows file");
                 Check(DeleteFileA(output)&&MoveFileA(moved,output),"restore the published file for recovery retry");
+                const CString stream=published+":unrelated";
+                const auto times=CreateFileA(published,FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,
+                    FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+                FILETIME date{};
+                Check(times!=INVALID_HANDLE_VALUE&&GetFileTime(times,nullptr,nullptr,&date),
+                      "capture Windows output timestamp before adding a stream");
+                const Bytes unrelated{9,7,5,3};
+                Save(stream,unrelated);
+                Check(SetFileTime(times,nullptr,nullptr,&date)!=FALSE,"restore the original publication timestamp");
+                CloseHandle(times);
+                bool streamRejected=false;
+                try{auto open=MacBrowser::OpenImage(path);}
+                catch(const HfsPlus::Error&){streamRejected=true;}
+                Check(streamRejected&&ClassicHfsRecovery::Pending(path)&&Load(stream)==unrelated&&
+                      Load(published)==movedData,"recovery discarded a newly added NTFS stream");
+                Check(DeleteFileA(stream)!=FALSE,"remove the injected stream before replay");
+                const auto restoredTime=CreateFileA(published,FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ,
+                    nullptr,OPEN_EXISTING,0,nullptr);
+                Check(restoredTime!=INVALID_HANDLE_VALUE&&SetFileTime(restoredTime,nullptr,nullptr,&date),
+                      "restore the publication timestamp for retry");
+                CloseHandle(restoredTime);
+                fprintf(report,"PASS: aborted recovery retained a Windows output with a newly added NTFS stream.\n");
             }
             auto hfs=MacBrowser::OpenImage(path);
             auto host=MacBrowser::OpenWindows(hostPath);

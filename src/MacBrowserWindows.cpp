@@ -358,11 +358,7 @@ std::wstring Temp(const std::wstring& directory,bool folder=false) {
             if(!move)return path;
             // Create in the real destination parent to inherit its permissions.
             // Move only this empty temporary object before writing anything to it.
-            const auto staged=move->Slot();
-            if(MoveFileExW(path.c_str(),staged.c_str(),MOVEFILE_WRITE_THROUGH))return staged;
-            if(folder)RemoveDirectoryW(path.c_str());
-            else DeleteFileW(path.c_str());
-            throw HfsPlus::Error("Cannot place a temporary object in Windows move staging");
+            return move->StageTemporary(path);
         }
         const auto error=GetLastError();
         Check(error==ERROR_FILE_EXISTS||error==ERROR_ALREADY_EXISTS,"Cannot create a staging object in the destination folder");
