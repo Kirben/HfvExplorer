@@ -1241,7 +1241,9 @@ private:
                 if(replaced==oid)return destination.id;
             }
             CommitMutation(parent,destination.id,job,[&](auto& job){
-                return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,limitedEdits,copied&&copied->protectedFile);
+                return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,
+                                             limitedEdits||(approvedDestination&&destination.hardLink),
+                                             copied&&copied->protectedFile);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
@@ -1419,10 +1421,15 @@ public:
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==existing.identity,
                       "The APFS destination changed after overwrite approval");
                 const auto oid=At(existing.id).oid,sibling=At(existing.id).siblingId;
-                if(existing.symbolicLink){
+                // An approved copy targets a name. In-place edits still use ReplaceFileData.
+                const bool replaceAlias=existing.hardLink&&!entry.expectedDestinationIdentity.empty();
+                if(existing.symbolicLink||replaceAlias){
+                    Check(!replaceAlias||sibling,"The APFS hard-link destination has no sibling ID");
+                    const auto& name=replaceAlias?existing.name:entry.name;
                     CommitMutation(parent,existing.id,job,[&](auto& job){
-                        return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,
-                                                 &entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,oid,entry.posix);
+                        return CreateCatalogFile(*source,WriteTarget(parent),parentOid,name,data,job,dates,
+                                                 &entry.finder,entry.protectedFile,attributes,&resource,compression,
+                                                 true,oid,entry.posix,replaceAlias?sibling:0);
                     });
                     Entry replacement;
                     if(FindChild(parent,entry.name,replacement))return replacement.id;

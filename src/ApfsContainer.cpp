@@ -498,13 +498,15 @@ uint64_t CreateEmptyFile(Source& source,const Container& expected,uint64_t paren
 }
 
 uint64_t CreateCatalogFile(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
-                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t replacedEntry,std::optional<PosixMetadata> posix)
+                    Source& data,Storage::Job& job,std::optional<FileDates> dates,const FinderBytes* finder,bool locked,const HfsPlus::Attributes* attributes,Source* resource,const HfsPlus::Bytes* compression,bool external,uint64_t replacedEntry,std::optional<PosixMetadata> posix,uint64_t replacedAlias)
 {
     Check(&source!=&data,"APFS file data requires a separate source");
     Check(!replacedEntry||external,"APFS entry replacement requires the external catalog writer");
+    Check(!replacedAlias||replacedEntry,"APFS alias replacement requires its backing inode");
     CatalogCreate create{parent,name,CatalogKind::RegularFile,&data,dates,finder,locked,attributes,resource,compression};
     create.external=external;
     create.replacedEntry=replacedEntry;
+    create.replacedAlias=replacedAlias;
     create.posix=posix;
     const CatalogMutation request=create;
     return Commit(source,expected,job,&request);

@@ -21,6 +21,7 @@ struct CatalogCreate {
     uint64_t replacedEntry=0;
     uint64_t cloneSource=0,cloneSize=0;
     std::optional<PosixMetadata> posix;
+    uint64_t replacedAlias=0;
 };
 struct CatalogRename {
     uint64_t parent,inode;

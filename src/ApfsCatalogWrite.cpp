@@ -2914,15 +2914,19 @@ CatalogWritePlan PrepareCatalogMutation(
                   "APFS catalog contains an object at or after its next ID");
         }
         if(create->replacedEntry){
-            Check(symlink?fileCount!=0:!directory&&symlinkCount!=0,"Invalid APFS entry replacement");
-            const auto victimKind=symlink?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
+            const bool replacesFile=symlink||create->replacedAlias;
+            Check(!directory&&(replacesFile?fileCount!=0:symlinkCount!=0),"Invalid APFS entry replacement");
+            const auto victimKind=replacesFile?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
             const auto parentKey=(uint64_t(9)<<60)|create->parent;
             const auto wanted=NormalizedName(name,fold);
             const auto victim=std::find_if(catalog.begin(),catalog.end(),[&](const auto& record){
+                const bool linked=record.value.size()==34;
                 if(record.key.size()<14||Le64(record.key.data())!=parentKey||record.key.back()||
-                   (record.value.size()!=18&&(!symlink||record.value.size()!=34))||
+                   (record.value.size()!=18&&(!replacesFile||!linked))||
                    Le64(record.value.data())!=create->replacedEntry||
                    Le16(record.value.data()+16)!=uint16_t(victimKind))return false;
+                if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
+                    return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
                 return NormalizedName(candidate,fold)==wanted;
             });
@@ -2930,7 +2934,7 @@ CatalogWritePlan PrepareCatalogMutation(
             if(victim->value.size()==34){
                 const auto alias=Le64(victim->value.data()+26);
                 Check(UnlinkExternalAlias(catalog,{create->parent,create->replacedEntry,alias},time),
-                      "Invalid APFS symbolic-link replacement alias");
+                      "Invalid APFS replacement alias");
             }else{
                 removedKind=DeleteExternalEntry(source,catalog,{create->parent,create->replacedEntry},
                                                 time,extentTree,externalRetired);

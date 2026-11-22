@@ -367,7 +367,8 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     }
     if (found) {
         auto label=BrowserPresentation::Utf8(entry.name);
-        if(hfsScope==Scope::SelectedName||(hfsPlus&&plan.linkTarget&&existing.hardLink))
+        if(hfsScope==Scope::SelectedName||
+           (existing.hardLink&&(destinationKind=="APFS"||(hfsPlus&&plan.linkTarget))))
             label+=" (replace this hard-link name only)";
         else if(hfsScope==Scope::SymbolicLink)label+=" (replace the symbolic link itself)";
         else if(existing.hardLink)label+=" (shared by "+std::to_string(existing.linkCount)+" hard links)";

@@ -5348,9 +5348,15 @@ int RunApfsContainerTest(const char* directory)
                     {FileOperations::Location::Mounted(volume,file.id)},FileOperations::Location::Mounted(destination,2)});
                 Check(confirmLink(duplicate,Storage::ConflictChoice::Cancel).code&&
                       destination->Stat(copied.id).name==file.name,"APFS symbolic link copy replaced an existing entry");
+                unsigned prompts=0;
                 Storage::Job job;
-                Reject([&]{MacBrowser::Copy(*volume,file.id,*targetMac,2,job);},
-                       "APFS symbolic link was flattened into an unsupported destination");
+                job.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+                MacBrowser::Entry hfsLink;
+                const auto hfsName=HfsPlus::Normalize(file.name,targetMac->CaseSensitive());
+                Check(MacBrowser::Copy(*volume,file.id,*targetMac,2,job)&&prompts==1&&
+                      targetMac->FindChild(2,hfsName,hfsLink)&&hfsLink.symbolicLink&&
+                      targetMac->SymbolicLinkTarget(hfsLink.id)==volume->SymbolicLinkTarget(file.id),
+                      "APFS symlink did not replace the matching HFS+ file as a symlink");
             }
         }
         if(const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE")){
