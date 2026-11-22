@@ -245,15 +245,11 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     const auto &entry = plan.entry; Entry existing; bool found = false;
     found=dst.FindTransferChild(parent,entry,existing);
     bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
-    const auto linkCopy=[&](bool replace){
-        const auto& copied=prior->second;
-        Entry original;
-        Check(dst.FindChild(copied.parent,copied.name,original)&&
-              (!copied.protectedFile||(original.protectedFile&&original.identity==copied.identity)),"Copied hard-link source disappeared or changed");
-        dst.MakeCopiedHardLinkForTransfer(original,parent,entry.name,replace,job);
+    const auto linkCopy=[&](const Entry* approvedDestination){
+        dst.MakeCopiedHardLinkForTransfer(prior->second,parent,entry.name,approvedDestination,job);
         LinkedProgress(plan,progress);
     };
-    if(track&&prior!=copies.end()&&entry.directory&&!found){linkCopy(false);job.progress(progress);return true;}
+    if(track&&prior!=copies.end()&&entry.directory&&!found){linkCopy(nullptr);job.progress(progress);return true;}
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
@@ -276,7 +272,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
-    if(track&&prior!=copies.end()){linkCopy(found);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
+    if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     if(plan.linkTarget){
@@ -672,6 +668,18 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
  }
 }
 }
+uint32_t Volume::MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t parent,const std::u16string& name,
+                                               const Entry* approvedDestination,Storage::Job& job)
+{
+    // HFS+ assigns a new catalog ID to the original name when it gains
+    // its first alias. Find that name again before adding another alias.
+    Entry original;
+    Check(FindChild(copied.parent,copied.name,original)&&original.resolvedId==copied.resolvedId&&
+          (!copied.protectedFile||(original.protectedFile&&original.identity==copied.identity)),
+          "Copied hard-link source disappeared or changed");
+    return MakeHardLinkForTransfer(original.id,parent,name,approvedDestination!=nullptr,job);
+}
+
 void Volume::WithCopyTransaction(const std::function<void(bool)>& work,const std::string& move)
 {
     if(!BeginCopyTransaction(move)){work(false);return;}

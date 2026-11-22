@@ -1213,15 +1213,15 @@ public:
     }
     uint32_t MakeHardLinkForTransfer(uint32_t id,uint32_t parent,const std::u16string& name,
                                      bool replace,Storage::Job& job)override{
-        return LinkForTransfer(id,parent,name,replace,job,nullptr);
+        return LinkForTransfer(id,parent,name,replace,job,nullptr,nullptr);
     }
     uint32_t MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t parent,const std::u16string& name,
-                                          bool replace,Storage::Job& job)override{
-        return LinkForTransfer(copied.id,parent,name,replace,job,&copied);
+                                          const Entry* approvedDestination,Storage::Job& job)override{
+        return LinkForTransfer(copied.id,parent,name,approvedDestination!=nullptr,job,&copied,approvedDestination);
     }
 private:
     uint32_t LinkForTransfer(uint32_t id,uint32_t parent,const std::u16string& name,
-                             bool replace,Storage::Job& job,const Entry* copied){
+                             bool replace,Storage::Job& job,const Entry* copied,const Entry* approvedDestination){
         return WriteMount([&]{
             const auto& current=At(id).entry;
             if(copied)Check(current.identity==copied->identity&&current.protectedFile==copied->protectedFile,
@@ -1235,6 +1235,8 @@ private:
             uint64_t replaced=0;
             if(replace){
                 Check(FindChild(parent,name,destination),"The APFS hard-link destination disappeared");
+                Check(!approvedDestination||destination.identity==approvedDestination->identity,
+                      "The APFS hard-link destination changed after overwrite approval");
                 replaced=At(destination.id).oid;
                 if(replaced==oid)return destination.id;
             }

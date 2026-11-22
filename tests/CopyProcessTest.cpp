@@ -845,6 +845,106 @@ void TestHfsToApfsSymlinks(const std::string& root,FILE* report)
     }
     fprintf(report,"PASS: HFS+/HFSX worker copies preserve relative, absolute UTF-8, and self-referential symbolic links without traversing them.\n");
 }
+
+void TestHfsToApfsHardLinks(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const size_t sizes[]={5003,7321};
+    const auto pattern=[](unsigned group,unsigned fork,uint64_t offset){
+        return uint8_t(group*73+fork*31+offset*17+offset/256);
+    };
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const char* format=kind==Kind::HfsPlus?"hfsplus":kind==Kind::HfsXCaseSensitive?"hfsx":"hfsx-folded";
+        const auto sourcePath=Wide(root+"\\"+format+"-hard-links.dsk");
+        const auto targetPath=Wide(root+"\\"+format+"-hard-links-apfs.img");
+        const std::u16string names[]={u"First file",u"Second file"};
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Hard-link source",true,kind);
+            HfsPlus::Volume hfs(*disk,true);
+            const auto folder=hfs.MakeDirectory(2,u"Hard-link transfer");
+            const auto nested=hfs.MakeDirectory(folder,u"Aliases");
+            for(unsigned group=0;group<2;++group){
+                const auto id=hfs.Put(folder,names[group],sizes[0],sizes[1],
+                    [&](unsigned fork,uint64_t offset,void* out,size_t count){
+                        auto bytes=static_cast<uint8_t*>(out);
+                        for(size_t i=0;i<count;++i)bytes[i]=pattern(group,fork,offset+i);
+                    });
+                hfs.MakeHardLink(id,nested,names[group]);
+            }
+        }
+        const auto external=kind==Kind::HfsXCaseSensitive?_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"):nullptr;
+        if(external){
+            Check(CopyFileW(external,targetPath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+        }else{
+            auto disk=HfsPlus::CreateImage(targetPath.c_str(),32*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*disk,u"Hard-link destination",true,job);
+        }
+        {
+            auto source=OpenBrowserImage(sourcePath);
+            auto target=OpenBrowserImage(targetPath);
+            Entry folder;
+            Check(source&&VolumeSession::VolumeSessionPidForTest(source)&&target&&
+                  source->FindChild(2,u"Hard-link transfer",folder),"Unable to mount hard-link copy fixtures");
+            const auto existingFolder=target->MakeDirectory(2,u"Hard-link transfer");
+            Put(*target,existingFolder,names[0],512);
+            bool approved=false;
+            Storage::Job job;
+            job.transport({},[&](const auto&){
+                approved=true;
+                return Storage::ConflictChoice::Replace;
+            });
+            Completion completion;
+            const auto result=ExecuteInWorker(OrdinaryCopy{{Native(source,folder.id)},Native(target,2)},job,completion);
+            if(result.code)throw HfsPlus::Error(result.message);
+            Check(completion.complete&&approved,"Incomplete HFS to APFS hard-link copy or missing overwrite prompt");
+        }
+        auto target=OpenBrowserImage(targetPath);
+        Entry folder,nested;
+        Check(target&&target->FindChild(2,u"Hard-link transfer",folder)&&target->FindChild(folder.id,u"Aliases",nested),
+              "Missing copied hard-link folders");
+        std::array<uint32_t,2> inodes{};
+        for(unsigned group=0;group<2;++group){
+            Entry original,alias;
+            Check(target->FindChild(folder.id,names[group],original)&&target->FindChild(nested.id,names[group],alias)&&
+                  original.id!=alias.id&&original.hardLink&&alias.hardLink&&original.linkCount==2&&alias.linkCount==2&&
+                  original.resolvedId&&original.resolvedId==alias.resolvedId,"Copied APFS names did not share one inode");
+            inodes[group]=original.resolvedId;
+            for(const auto* entry:{&original,&alias}){
+                for(unsigned fork=0;fork<2;++fork){
+                    Check(entry->forks[fork].size==sizes[fork],"Copied APFS hard link lost a fork");
+                    HfsPlus::Bytes actual(sizes[fork]),expected(sizes[fork]);
+                    target->Read(entry->id,fork,0,actual.data(),actual.size());
+                    for(size_t i=0;i<expected.size();++i)expected[i]=pattern(group,fork,i);
+                    Check(actual==expected,"Copied APFS hard-link fork bytes differ");
+                }
+            }
+        }
+        Check(inodes[0]!=inodes[1],"Independent HFS hard-link groups merged on APFS");
+        if(kind==Kind::HfsPlus){
+            Entry original,approved,current;
+            Check(target->FindChild(folder.id,names[0],original),"Missing APFS hard-link source");
+            Put(*target,folder.id,u"Victim",512);
+            Check(target->FindChild(folder.id,u"Victim",approved),"Missing approved APFS link destination");
+            target->Remove(approved.id);
+            Put(*target,folder.id,u"Victim",1024);
+            bool rejected=false;
+            Storage::Job job;
+            try{
+                target->MakeCopiedHardLinkForTransfer(original,folder.id,u"Victim",&approved,job);
+            }catch(const HfsPlus::Error& error){
+                rejected=std::string(error.what()).find("changed after overwrite approval")!=std::string::npos;
+            }
+            Check(rejected&&target->FindChild(folder.id,u"Victim",current)&&current.forks[0].size==1024&&
+                  current.linkCount==1&&current.resolvedId!=original.resolvedId,
+                  "A stale hard-link overwrite changed the new destination");
+            Verify(*target,current.id,1024);
+        }
+        if(external)fprintf(report,"PASS: HFSX hard-link groups and forks reopen on the shared macOS APFS fixture.\n");
+    }
+    fprintf(report,"PASS: HFS+ and both HFSX variants copy separate hard-link groups to APFS, sharing one inode per group and preserving both forks across folders and reopen.\n");
+}
 } // namespace
 
 int RunCopyProcessTest(const char *directory) {
@@ -861,6 +961,7 @@ int RunCopyProcessTest(const char *directory) {
         TestVolumeSessionProtocol();
         TestHfsToApfsPosix(root,report);
         TestHfsToApfsSymlinks(root,report);
+        TestHfsToApfsHardLinks(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {
