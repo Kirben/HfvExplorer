@@ -2682,6 +2682,31 @@ uint64_t VerifyFreeQueueAllocation(Source& source,const Container& container,uin
     return Le64(space.data()+72)*container.blockSize;
 }
 
+std::vector<HfsPlus::SharedBlockRange> SnapshotCloneReferenceRanges(Source& source,const Container& container,
+                                                                const std::vector<HfsPlus::SharedBlockRange>& ranges)
+{
+    const auto [map,address,volume]=ReadCatalogVolume(source,container,container.writeVolume);
+    const auto [siblings,volumeMap,catalog,extents,snapshot,protectedRuns]=ReadWriteAllocationState(
+        source,container,map,container.writeVolume?container.writeVolume:container.volumes.front(),volume);
+    std::vector<HfsPlus::SharedBlockRange> whole;
+    for(const auto& range:ranges){
+        const auto end=range.physical+range.blocks;
+        auto next=std::upper_bound(extents.records.begin(),extents.records.end(),range.physical,
+            [](uint64_t start,const auto& record){return start<(Le64(record.key.data())&IdMask);});
+        if(next!=extents.records.begin())--next;
+        for(;next!=extents.records.end();++next){
+            const auto start=Le64(next->key.data())&IdMask,blocks=Le64(next->value.data())&IdMask;
+            if(start>=end)break;
+            const auto first=(std::max)(start,range.physical),last=(std::min)(start+blocks,end);
+            if(first>=last)continue;
+            // Snapshot reference adjustments describe the historical record as a whole.
+            if(snapshot.sharedData.count(start)&&(first!=start||last!=start+blocks))continue;
+            whole.push_back({range.offset+(first-range.physical)*Block,first,last-first,range.partner});
+        }
+    }
+    return whole;
+}
+
 void ValidateWritableLayout(Source& source,const Container& container)
 {
     const auto layout=ReadCatalogVolume(source,container);
@@ -2967,8 +2992,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
     const bool historical=Le64(volume.data()+216)!=0;
-    Check(!restoresSharing||(externalCreate&&!historical&&!current.writeCipher),
-          "APFS shared range restoration requires an unencrypted volume without snapshots");
+    Check(!restoresSharing||(externalCreate&&!current.writeCipher),
+          "APFS shared range restoration requires an unencrypted volume");
     if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)
         CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     else CheckNativeVolume(volume);
@@ -2983,6 +3008,8 @@ CatalogWritePlan PrepareCatalogMutation(
         for(--next;at<end&&next!=extentTree.records.end();++next){
             const auto start=Le64(next->key.data())&IdMask,length=Le64(next->value.data())&IdMask;
             if(start>at||start+length<=at)break;
+            Check(!snapshot.sharedData.count(start)||(start==at&&length<=end-at),
+                  "APFS snapshot reuse requires whole allocation records");
             at=(std::min)(end,start+length);
         }
         Check(at==end,"APFS reuse range does not belong to this volume");
@@ -3324,7 +3351,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(stream&&std::any_of(catalog.begin(),catalog.end(),[&](const auto& record){
                 if(record.key.size()!=16||record.value.size()!=24||
                    Le64(record.key.data())!=((uint64_t(8)<<60)|stream))return false;
-                const auto start=Le64(record.value.data()+8),blocks=Le64(record.value.data())/Block;
+                const auto start=Le64(record.value.data()+8),blocks=(Le64(record.value.data())&IdMask)/Block;
                 return start&&run.physical>=start&&Range(run.physical-start,run.blocks,blocks);
             }),"APFS reuse range is no longer covered by its partner");
         }
@@ -3356,7 +3383,7 @@ CatalogWritePlan PrepareCatalogMutation(
         for(const auto& current:extentTree.records){
             const auto start=Le64(current.key.data())&IdMask,blocks=Le64(current.value.data())&IdMask;
             const auto before=Le32(current.value.data()+16);
-            if(!historical){
+            if(!snapshot.sharedData.count(start)){
                 auto spans=SplitExtentReferences(counts,start,blocks);
                 for(const auto& span:spans)
                     Check(span.references<=before||clone||restoresSharing,"APFS extent references increased");
@@ -3367,13 +3394,8 @@ CatalogWritePlan PrepareCatalogMutation(
                 continue;
             }
             const auto after=CatalogReferences(counts,start,blocks);
-            Check(after<=before||(clone&&(!historical||snapshot.sharedData.count(start))),"APFS extent references increased");
-            if(after==before)continue;
-            extentReferencesChanged=true;
-            if(snapshot.sharedData.count(start))continue;
-            if(historical)Check(!after&&before==1,"APFS cannot retire a shared extent created after the snapshot");
-            if(after)updatedReferences.emplace(start,std::vector<ReferenceSpan>{{start,blocks,after}});
-            else reconciledRetired.insert(start);
+            Check(after<=before||restoresSharing||clone,"APFS snapshot extent references increased");
+            extentReferencesChanged|=after!=before;
         }
     }
     const bool retireFile=replace||removedKind.has_value();

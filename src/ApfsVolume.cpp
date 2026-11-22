@@ -1583,7 +1583,7 @@ public:
             const bool hasSnapshots=std::any_of(mounts.begin(),mounts.end(),[&](const auto& view){
                 return view.oid==mounts[mount].oid&&view.snapshotCreated.has_value();
             });
-            if(allowPrompt&&!compression&&!special&&!mounts[mount].cipher&&!hasSnapshots&&
+            if(allowPrompt&&!compression&&!special&&!mounts[mount].cipher&&
                entry.attributes.count(MacBrowser::ApfsCloneLayoutAttribute)){
                 ListDirectory(parent);
                 for(const auto& [row,candidate]:entries){
@@ -1618,6 +1618,7 @@ public:
                     if(!shared.empty())break;
                 }
             }
+            if(hasSnapshots&&!shared.empty())shared=SnapshotCloneReferenceRanges(*source,WriteTarget(parent),shared);
             const bool restoresSharing=!shared.empty();
             data.Share(std::move(shared));
             if(found){

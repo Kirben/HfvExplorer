@@ -2996,41 +2996,62 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                 const auto shared=MacBrowser::MatchApfsCloneRanges(first,left,second,right,match);
                 Check(!shared.empty(),"The saved macOS clone layouts did not identify shared data");
 
-                const auto roundTripPath=hfsPath+L".apfs";
-                {
-                    auto image=CreateFormatOutput(roundTripPath.c_str(),32*1024*1024);
-                    Storage::Job format;
-                    Apfs::Format(*image,u"Restored APFS clones",true,format);
-                    image->Keep();
-                }
-                auto restored=MacBrowser::OpenBrowserImage(roundTripPath);
-                Check(restored&&restored->Supports().create,"Cannot open APFS clone restoration target");
-                for(const auto id:{first.id,second.id}){
-                    Storage::Job copy;
-                    Check(MacBrowser::Copy(*target,id,*restored,2,copy),"APFS clone restoration failed");
-                }
-                restored.reset();
-                restored=MacBrowser::OpenBrowserImage(roundTripPath);
-                MacBrowser::Entry restoredFirst,restoredSecond;
-                Check(restored&&restored->Supports().create&&
-                      restored->FindChild(2,first.name,restoredFirst)&&restored->FindChild(2,second.name,restoredSecond)&&
-                      restoredFirst.resolvedId!=restoredSecond.resolvedId&&
-                      bytes(*restored,restoredFirst)==clones[0]&&bytes(*restored,restoredSecond)==clones[1],
-                      "Restored APFS clones lost independent identity or current file data");
-                restoredFirst.attributes[MacBrowser::ApfsCloneLayoutAttribute]=restored->ApfsCloneLayout(restoredFirst.id);
-                restoredSecond.attributes[MacBrowser::ApfsCloneLayoutAttribute]=restored->ApfsCloneLayout(restoredSecond.id);
-                const auto makeRestoredReader=[&](uint32_t id)->MacBrowser::Reader{
-                    return [&,id](unsigned fork,uint64_t at,void* output,size_t count){
-                        restored->Read(id,fork,at,output,count);
+                for(const bool withSnapshot:{false,true}){
+                    const auto roundTripPath=hfsPath+(withSnapshot?L"-snapshot.apfs":L".apfs");
+                    {
+                        auto image=CreateFormatOutput(roundTripPath.c_str(),32*1024*1024);
+                        Storage::Job format;
+                        Apfs::Format(*image,u"Restored APFS clones",true,format);
+                        if(withSnapshot){
+                            Apfs::CreateCatalogDirectory(*image,*Apfs::Probe(*image),2,u"Snapshot baseline",format);
+                            Apfs::CreateSnapshot(*image,*Apfs::Probe(*image),u"Before restoration",format);
+                        }
+                        image->Keep();
+                    }
+                    auto restored=MacBrowser::OpenBrowserImage(roundTripPath);
+                    Check(restored&&restored->Supports().create,"Cannot open APFS clone restoration target");
+                    const auto liveRoot=withSnapshot?restored->List(2).front().id:2;
+                    for(const auto id:{first.id,second.id}){
+                        Storage::Job copy;
+                        Check(MacBrowser::Copy(*target,id,*restored,liveRoot,copy),"APFS clone restoration failed");
+                    }
+                    restored.reset();
+                    restored=MacBrowser::OpenBrowserImage(roundTripPath);
+                    MacBrowser::Entry restoredFirst,restoredSecond;
+                    Check(restored&&restored->Supports().create,"Cannot reopen APFS clone restoration target");
+                    const auto reopenedRoot=withSnapshot?restored->List(2).front().id:2;
+                    Check(
+                          restored->FindChild(reopenedRoot,first.name,restoredFirst)&&restored->FindChild(reopenedRoot,second.name,restoredSecond)&&
+                          restoredFirst.resolvedId!=restoredSecond.resolvedId&&
+                          bytes(*restored,restoredFirst)==clones[0]&&bytes(*restored,restoredSecond)==clones[1],
+                          "Restored APFS clones lost independent identity or current file data");
+                    restoredFirst.attributes[MacBrowser::ApfsCloneLayoutAttribute]=restored->ApfsCloneLayout(restoredFirst.id);
+                    restoredSecond.attributes[MacBrowser::ApfsCloneLayoutAttribute]=restored->ApfsCloneLayout(restoredSecond.id);
+                    const auto makeRestoredReader=[&](uint32_t id)->MacBrowser::Reader{
+                        return [&,id](unsigned fork,uint64_t at,void* output,size_t count){
+                            restored->Read(id,fork,at,output,count);
+                        };
                     };
-                };
-                const auto restoredRanges=MacBrowser::MatchApfsCloneRanges(
-                    restoredFirst,makeRestoredReader(restoredFirst.id),
-                    restoredSecond,makeRestoredReader(restoredSecond.id),match);
-                Check(!restoredRanges.empty(),"Reopened APFS clones did not regain shared physical blocks");
-                restored->Remove(restoredFirst.id);
-                Check(restored->FindChild(2,second.name,restoredSecond)&&bytes(*restored,restoredSecond)==clones[1],
-                      "Deleting one restored APFS clone changed its surviving partner");
+                    const auto restoredRanges=MacBrowser::MatchApfsCloneRanges(
+                        restoredFirst,makeRestoredReader(restoredFirst.id),
+                        restoredSecond,makeRestoredReader(restoredSecond.id),match);
+                    Check(!restoredRanges.empty(),"Reopened APFS clones did not regain shared physical blocks");
+                    restored->Remove(restoredFirst.id);
+                    Check(restored->FindChild(reopenedRoot,second.name,restoredSecond)&&bytes(*restored,restoredSecond)==clones[1],
+                          "Deleting one restored APFS clone changed its surviving partner");
+                    if(withSnapshot){
+                        const auto snapshotRoot=restored->List(2).back();
+                        MacBrowser::Entry baseline,unexpected;
+                        Check(snapshotRoot.name.find(u" [Snapshot: ")!=snapshotRoot.name.npos&&
+                              restored->FindChild(snapshotRoot.id,u"Snapshot baseline",baseline)&&baseline.directory&&
+                              !restored->FindChild(snapshotRoot.id,first.name,unexpected)&&
+                              !restored->FindChild(snapshotRoot.id,second.name,unexpected),
+                              "Restoring APFS sharing changed snapshot contents");
+                    }
+                    restored.reset();
+                    auto rawRestored=OpenImage(roundTripPath.c_str(),false);
+                    Apfs::InspectFreeQueueAllocation(*rawRestored,*Apfs::Probe(*rawRestored));
+                }
                 const auto range=shared.front();
                 const auto changed=MacBrowser::MatchApfsCloneRanges(first,left,second,
                     [&](unsigned fork,uint64_t at,void* output,size_t count){

@@ -125,6 +125,8 @@ CatalogLayoutCounts InspectCatalogLayout(HfsPlus::Source&,const Container&);
 void ValidateWritableLayout(HfsPlus::Source&,const Container&);
 uint64_t WritableFreeBytes(HfsPlus::Source&,const Container&);
 uint64_t InspectAllocationFreeBytes(HfsPlus::Source&,const Container&);
+std::vector<HfsPlus::SharedBlockRange> SnapshotCloneReferenceRanges(HfsPlus::Source&,const Container&,
+                                                                const std::vector<HfsPlus::SharedBlockRange>&);
 uint64_t InspectFreeQueueAllocation(HfsPlus::Source&,const Container&,uint64_t selected=0);
 uint64_t VerifyFreeQueueAllocation(HfsPlus::Source&,const Container&,uint64_t,HfsPlus::Bytes&,const CheckpointObjectLookup&,uint64_t selected);
 CatalogWritePlan PrepareCatalogMutation(
