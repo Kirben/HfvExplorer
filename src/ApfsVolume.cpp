@@ -1583,7 +1583,7 @@ public:
             const bool hasSnapshots=std::any_of(mounts.begin(),mounts.end(),[&](const auto& view){
                 return view.oid==mounts[mount].oid&&view.snapshotCreated.has_value();
             });
-            if(allowPrompt&&!compression&&!special&&!mounts[mount].cipher&&
+            if(allowPrompt&&!compression&&!special&&
                entry.attributes.count(MacBrowser::ApfsCloneLayoutAttribute)){
                 ListDirectory(parent);
                 for(const auto& [row,candidate]:entries){
@@ -1606,7 +1606,8 @@ public:
                             return span.offset<hole.offset+hole.length&&hole.offset<span.offset+span.length;
                         }))continue;
                         for(const auto& extent:StreamExtents(mount,candidate.stream)){
-                            if(!extent.block)continue;
+                            if(!extent.block||
+                               (mounts[mount].cipher&&extent.cryptoId!=extent.block))continue;
                             const auto begin=(std::max)(span.partnerOffset,extent.offset);
                             const auto end=(std::min)(span.partnerOffset+span.length,extent.offset+extent.length);
                             if(begin>=end)continue;

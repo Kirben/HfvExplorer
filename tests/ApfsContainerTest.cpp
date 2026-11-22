@@ -2996,9 +2996,17 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                 const auto shared=MacBrowser::MatchApfsCloneRanges(first,left,second,right,match);
                 Check(!shared.empty(),"The saved macOS clone layouts did not identify shared data");
 
-                for(const bool withSnapshot:{false,true}){
-                    const auto roundTripPath=hfsPath+(withSnapshot?L"-snapshot.apfs":L".apfs");
-                    {
+                enum class Destination{Plain,Snapshot,Encrypted};
+                for(const auto destination:{Destination::Plain,Destination::Snapshot,Destination::Encrypted}){
+                    const bool withSnapshot=destination==Destination::Snapshot;
+                    const bool encrypted=destination==Destination::Encrypted;
+                    const auto fixture=_wgetenv(L"HFV_APFS_NATIVE_FILEVAULT");
+                    if(encrypted&&!fixture)continue;
+                    const auto roundTripPath=hfsPath+(encrypted?L"-encrypted.apfs":withSnapshot?L"-snapshot.apfs":L".apfs");
+                    if(encrypted){
+                        Check(CopyFileW(fixture,roundTripPath.c_str(),TRUE)!=FALSE,
+                              "Cannot copy encrypted APFS clone restoration fixture");
+                    }else{
                         auto image=CreateFormatOutput(roundTripPath.c_str(),32*1024*1024);
                         Storage::Job format;
                         Apfs::Format(*image,u"Restored APFS clones",true,format);
@@ -3008,18 +3016,29 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                         }
                         image->Keep();
                     }
-                    auto restored=MacBrowser::OpenBrowserImage(roundTripPath);
-                    Check(restored&&restored->Supports().create,"Cannot open APFS clone restoration target");
-                    const auto liveRoot=withSnapshot?restored->List(2).front().id:2;
+                    const auto reopen=[&]{
+                        auto volume=MacBrowser::OpenBrowserImage(roundTripPath);
+                        Check(bool(volume),"Cannot open APFS clone restoration target");
+                        uint32_t root=withSnapshot?volume->List(2).front().id:2;
+                        if(encrypted){
+                            MacBrowser::Entry locked;
+                            Check(volume->FindChild(2,u"FVTEST",locked),"Missing encrypted APFS clone restoration volume");
+                            Apfs::Unlock(*volume,locked.id,Dmg::Password(L"apfs-FV-TEST-2026"));
+                            root=locked.id;
+                        }
+                        Check(volume->Supports().create,"Cannot write APFS clone restoration target");
+                        return std::make_pair(std::move(volume),root);
+                    };
+                    auto [restored,liveRoot]=reopen();
                     for(const auto id:{first.id,second.id}){
                         Storage::Job copy;
                         Check(MacBrowser::Copy(*target,id,*restored,liveRoot,copy),"APFS clone restoration failed");
                     }
                     restored.reset();
-                    restored=MacBrowser::OpenBrowserImage(roundTripPath);
+                    auto reopened=reopen();
+                    restored=std::move(reopened.first);
+                    const auto reopenedRoot=reopened.second;
                     MacBrowser::Entry restoredFirst,restoredSecond;
-                    Check(restored&&restored->Supports().create,"Cannot reopen APFS clone restoration target");
-                    const auto reopenedRoot=withSnapshot?restored->List(2).front().id:2;
                     Check(
                           restored->FindChild(reopenedRoot,first.name,restoredFirst)&&restored->FindChild(reopenedRoot,second.name,restoredSecond)&&
                           restoredFirst.resolvedId!=restoredSecond.resolvedId&&
@@ -3049,8 +3068,16 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                               "Restoring APFS sharing changed snapshot contents");
                     }
                     restored.reset();
-                    auto rawRestored=OpenImage(roundTripPath.c_str(),false);
-                    Apfs::InspectFreeQueueAllocation(*rawRestored,*Apfs::Probe(*rawRestored));
+                    if(encrypted){
+                        auto [checked,root]=reopen();
+                        MacBrowser::Entry marker,remaining;
+                        Check(checked->FindChild(root,u"marker.txt",marker)&&
+                              checked->FindChild(root,second.name,remaining)&&bytes(*checked,remaining)==clones[1],
+                              "Encrypted APFS clone or original marker was lost after reopening");
+                    }else{
+                        auto rawRestored=OpenImage(roundTripPath.c_str(),false);
+                        Apfs::InspectFreeQueueAllocation(*rawRestored,*Apfs::Probe(*rawRestored));
+                    }
                 }
                 const auto range=shared.front();
                 const auto changed=MacBrowser::MatchApfsCloneRanges(first,left,second,

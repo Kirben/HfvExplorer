@@ -2248,14 +2248,15 @@ void ValidateSharedFileExtents(const CatalogRecords& catalog,const std::vector<O
 
 
 std::map<uint64_t,uint32_t> CatalogReferenceCounts(const std::vector<OwnedRecord>& catalog,
-                                                  const std::vector<HfsPlus::SharedBlockRange>& reused={})
+                                                  const std::vector<HfsPlus::SharedBlockRange>& reused,bool encrypted)
 {
     std::map<uint64_t,int64_t> boundaries;
     for(const auto& entry:catalog){
         if(Le64(entry.key.data())>>60!=8)continue;
         Check(entry.key.size()==16&&entry.value.size()==24,"Invalid APFS file extent");
-        const auto start=Le64(entry.value.data()+8),bytes=Le64(entry.value.data());
-        Check(bytes&&!(bytes%Block)&&!(bytes>>56),"Invalid APFS file extent length");
+        const auto start=Le64(entry.value.data()+8),encoded=Le64(entry.value.data());
+        const auto flags=encoded>>56,bytes=encoded&((uint64_t(1)<<56)-1);
+        Check(bytes&&!(bytes%Block)&&(!flags||(encrypted&&flags==1)),"Invalid APFS file extent length or flags");
         if(!start)continue;
         const auto blocks=bytes/Block;
         Check(start<=UINT64_MAX-blocks,"Invalid APFS file extent range");
@@ -2992,8 +2993,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
     const bool historical=Le64(volume.data()+216)!=0;
-    Check(!restoresSharing||(externalCreate&&!current.writeCipher),
-          "APFS shared range restoration requires an unencrypted volume");
+    Check(!restoresSharing||externalCreate,"APFS shared range restoration requires the compatibility writer");
     if(properties||externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)
         CheckExternalVolume(volume,current.volumes.size()==2,current.volumes.size()==1,bool(current.writeCipher));
     else CheckNativeVolume(volume);
@@ -3014,7 +3014,7 @@ CatalogWritePlan PrepareCatalogMutation(
         }
         Check(at==end,"APFS reuse range does not belong to this volume");
     }
-    const bool liveClones=!historical&&!current.writeCipher&&(clone||restoresSharing||std::any_of(existing.records.begin(),existing.records.end(),
+    const bool liveClones=!historical&&(clone||restoresSharing||std::any_of(existing.records.begin(),existing.records.end(),
         [](const auto& record){
             constexpr uint64_t cloneFlags=0x10|0x400;
             return record.key.size()==8&&Le64(record.key.data())>>60==3&&record.value.size()>=56&&
@@ -3351,7 +3351,9 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(stream&&std::any_of(catalog.begin(),catalog.end(),[&](const auto& record){
                 if(record.key.size()!=16||record.value.size()!=24||
                    Le64(record.key.data())!=((uint64_t(8)<<60)|stream))return false;
-                const auto start=Le64(record.value.data()+8),blocks=(Le64(record.value.data())&IdMask)/Block;
+                const auto start=Le64(record.value.data()+8),encoded=Le64(record.value.data());
+                const auto blocks=(encoded&((uint64_t(1)<<56)-1))/Block;
+                if(current.writeCipher&&((encoded>>56)!=1||Le64(record.value.data()+16)!=start))return false;
                 return start&&run.physical>=start&&Range(run.physical-start,run.blocks,blocks);
             }),"APFS reuse range is no longer covered by its partner");
         }
@@ -3368,7 +3370,7 @@ CatalogWritePlan PrepareCatalogMutation(
     std::vector<OwnedRecord> snapshotUpdates;
     bool extentReferencesChanged=false;
     if(reconcileReferences){
-        const auto counts=CatalogReferenceCounts(catalog,shared);
+        const auto counts=CatalogReferenceCounts(catalog,shared,bool(current.writeCipher));
         for(const auto& prior:snapshot.historicalData){
             const auto start=Le64(prior.key.data())&IdMask,blocks=Le64(prior.value.data())&IdMask;
             const auto before=Le32(prior.value.data()+16),after=CatalogReferences(counts,start,blocks);
