@@ -247,6 +247,8 @@ public:
     bool Journaled() const override { return journaled_; }
     void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool) override {
         if (Plus()) ValidateHfsPlusCopyNames(entries,CaseSensitive());
+        else if (Classic()) ValidateClassicCopyNames(entries);
+        else if (Mfs()) ValidateMfsCopyNames(entries);
     }
     Capabilities Supports() const override {
         auto result = capabilities_;

@@ -77,6 +77,7 @@ public:
     bool SetMetadata(uint32_t id,const MfsEntry&);
     bool RenameVolume(const std::string& name);
     // MacRoman names are compared in the original byte space, not HFS+ folds.
+    static std::string NameKey(std::string name);
     static bool EqualNames(const std::string&,const std::string&);
     static bool EncodeName(const std::wstring&,std::string&,std::string& error,unsigned maximum=255);
     bool ReadFork(size_t entry,unsigned fork,uint64_t offset,void* bytes,size_t requested,size_t& read);

@@ -127,9 +127,21 @@ bool MfsImage::EncodeName(const std::wstring& name,std::string& bytes,std::strin
  if(!n||lost||unsigned(n)>maximum){error="Name cannot be represented within the MFS MacRoman name limit.";return false;}
  bytes.assign(size_t(n),0);lost=FALSE;if(!WideCharToMultiByte(10000,WC_NO_BEST_FIT_CHARS|WC_COMPOSITECHECK,name.data(),int(name.size()),&bytes[0],n,nullptr,&lost)||lost){error="Name is not losslessly representable in MacRoman.";return false;}return true;
 }
-bool MfsImage::EqualNames(const std::string& a,const std::string& b){
+namespace {
+const std::array<BYTE,256>& MfsNameOrder(){
  static const std::array<BYTE,256> upper=[](){std::array<BYTE,256> table{};for(unsigned i=0;i<256;++i){table[i]=BYTE(i);std::string byte(1,char(i));auto wide=MfsDisplayName(byte);wchar_t capital[4]{};if(!wide.empty()&&LCMapStringW(LOCALE_INVARIANT,LCMAP_UPPERCASE,wide.data(),int(wide.size()),capital,4)==1){BOOL lost=FALSE;char encoded=0;if(WideCharToMultiByte(10000,WC_NO_BEST_FIT_CHARS,capital,1,&encoded,1,nullptr,&lost)==1&&!lost)table[i]=BYTE(encoded);}}return table;}();
- if(a.size()!=b.size())return false;for(size_t i=0;i<a.size();++i)if(upper[BYTE(a[i])]!=upper[BYTE(b[i])])return false;return true;
+ return upper;
+}
+}
+std::string MfsImage::NameKey(std::string name){
+ const auto& order=MfsNameOrder();
+ for(auto& byte:name)byte=char(order[BYTE(byte)]);
+ return name;
+}
+bool MfsImage::EqualNames(const std::string& a,const std::string& b){
+ const auto& order=MfsNameOrder();
+ return a.size()==b.size()&&std::equal(a.begin(),a.end(),b.begin(),
+     [&](char left,char right){return order[BYTE(left)]==order[BYTE(right)];});
 }
 void MfsImage::AuditWrites(const std::vector<bool>& claimed){
  if(volumeFlags_&0x8080)writeError_="MFS volume is locked.";

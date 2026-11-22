@@ -93,6 +93,8 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
   if(request.sources[i].Volume()&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
   Check(!entry.protectedFile&&(entry.readError.empty()||entry.symbolicLink)&&!(HfsPlus::Disk::U16(entry.finder.data()+8)&HFS_FNDR_NAMELOCKED),"The selected entry cannot be moved");entries.push_back(entry);
  }
+ const std::string_view targetKind=target.Kind();
+ if(targetKind=="HFS"||targetKind=="MFS")target.ValidateCopyNames(parent,entries,true);
  // Classic adapters use root-relative paths. Avoid invalidating a later
  // captured descendant path by renaming its selected ancestor first.
  for(size_t i=0;i<sources.size();++i)for(size_t j=0;j<sources.size();++j)if(i!=j&&request.sources[i].IsClassic()&&request.sources[j].IsClassic()){auto a=request.sources[i].ClassicPath(),b=request.sources[j].ClassicPath();if(b.size()>a.size()&&b[a.size()]==':'&&!_strnicmp(a.c_str(),b.c_str(),a.size()))return false;}

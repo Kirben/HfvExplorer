@@ -64,7 +64,7 @@ std::u16string Decode(const std::string &s) {
 std::string Encode(const std::u16string &s) {
     BOOL lost = FALSE; auto w = Wide(s); char out[32];
     int n = WideCharToMultiByte(10000, WC_NO_BEST_FIT_CHARS, w.data(), int(w.size()), out, sizeof(out)-1, nullptr, &lost);
-    if (!n || lost || n > HFS_MAX_FLEN || s.empty() || s.find(u':') != s.npos)
+    if (!n || lost || n > HFS_MAX_FLEN || s.empty() || (s.find(u':') != s.npos || s.find(u'\0') != s.npos))
         throw HfsPlus::Error("This name cannot be represented in classic HFS (31 MacRoman bytes maximum)");
     return {out, size_t(n)};
 }
@@ -289,6 +289,9 @@ public:
             Check(hfs_editattrs(volume_,path.data(),destination.data(),&desired)==0);
         });
         paths_[id]=std::move(destination);
+    }
+    void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
+        ValidateClassicCopyNames(entries);
     }
     void ValidateEntry(const Entry& e)const override{
         Volume::ValidateEntry(e);if(e.datesValid&&(e.created>UINT32_MAX||e.modified>UINT32_MAX))throw HfsPlus::Error("Classic HFS cannot preserve dates after February 2040");Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
@@ -725,6 +728,18 @@ bool RecognizesClassicImage(HANDLE opened) {
     _close(fd);
     return recognized;
 }
+void ValidateClassicCopyNames(const std::vector<Entry>& entries)
+{
+    std::set<std::string> names;
+    for(const auto& entry:entries){
+        auto key=Encode(entry.name);
+        // libhfs compares MacRoman names by these catalog collation weights.
+        for(auto& byte:key)byte=char(hfs_charorder[static_cast<unsigned char>(byte)]);
+        if(!names.insert(std::move(key)).second)
+            throw HfsPlus::Error("Source names collide on the classic HFS destination. Rename one before copying.");
+    }
+}
+
 std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path,bool writable,const std::string& expectedImage) {
     return TrackWorkerVolume(std::make_shared<Classic>(ClassicImagePath::Encode(path),":",writable,true,path,expectedImage));
 }

@@ -2023,6 +2023,90 @@ void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
 }
 
+void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
+{
+    const auto sourcePath=Wide(root+"\\classic-mfs-collision-source.dsk");
+    auto source=Image(sourcePath,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+    Check(source&&source->CaseSensitive(),"Missing case-sensitive collision source");
+    constexpr auto lower=u"Case file";
+    constexpr auto upper=u"CASE FILE";
+    Put(*source,2,lower,5003,11);
+    Put(*source,2,upper,5011,13);
+    const auto tree=source->MakeDirectory(2,u"Tree");
+    Put(*source,tree,u"Earlier file",513,15);
+    const auto nested=source->MakeDirectory(tree,u"Nested");
+    Put(*source,nested,lower,739,17);
+    Put(*source,nested,upper,741,19);
+    source.reset();
+
+    const auto bytes=[](const std::wstring& path){
+        auto disk=HfsPlus::OpenImage(path.c_str(),false);
+        HfsPlus::Bytes data(size_t(disk->Size()));
+        disk->Read(0,data.data(),data.size());
+        return data;
+    };
+    const auto sourceBefore=bytes(sourcePath);
+    for(const unsigned kind:{0u,1u,2u,3u}){
+        const auto path=root+"\\classic-mfs-collision-"+std::to_string(kind)+".dsk";
+        const auto widePath=Wide(path);
+        const auto open=[&]{
+            if(kind==0)return OpenClassic(path,"Classic:",true);
+            return OpenBrowserImage(widePath);
+        };
+        auto seeded=kind<2?ClassicImage(path):MfsImageFixture(widePath,kind==3);
+        Check(bool(seeded),"Cannot seed classic HFS or MFS destination");
+        Put(*seeded,2,lower,9721,81);
+        seeded.reset();
+        if(kind==1){
+            auto mounted=open();
+            Check(mounted&&VolumeSession::VolumeSessionPidForTest(mounted),"Missing persistent classic HFS destination");
+        }
+        const auto targetBefore=bytes(widePath);
+        const auto run=[&](bool cut,bool recursive){
+            auto target=open();
+            source=OpenBrowserImage(sourcePath);
+            Check(target&&source&&target->Supports().create,"Cannot reopen collision fixtures");
+            std::vector<Location> inputs;
+            const auto select=[&](const std::u16string& name){
+                Entry entry;
+                Check(source->FindChild(2,name,entry),"Rejected move lost a source entry");
+                auto item=Native(source,entry.id);
+                item.cut=cut;
+                inputs.push_back(std::move(item));
+            };
+            if(recursive)select(u"Tree");else{select(lower);select(upper);}
+            unsigned prompts=0;
+            bool copying=false;
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& p){copying|=!p.scanning;},
+                          [&](const auto&){++prompts;return Storage::ConflictChoice::ReplaceAll;});
+            Completion completion;
+            {
+                auto result=ExecuteInWorker(OrdinaryCopy{inputs,Native(target)},job,completion);
+                const std::string expected=kind<2?"collide on the classic HFS destination":"collide on the MFS destination";
+                Check(result.outcome==Storage::Outcome::Failed&&!result.partial&&!result.moved&&
+                      !completion.complete&&!prompts&&!copying&&result.message.find(expected)!=std::string::npos,
+                      result.message.empty()?"Collision reached overwrite or move handling":result.message.c_str());
+            }
+            inputs.clear();
+            target.reset();
+            source.reset();
+            Check(bytes(widePath)==targetBefore&&bytes(sourcePath)==sourceBefore,
+                  "Rejected collision changed destination or source image bytes");
+        };
+        for(bool cut:{false,true}){
+            run(cut,false);
+            if(kind<2)run(cut,true);
+        }
+    }
+    Entry first,second;
+    first.name=lower;
+    second.name=upper;
+    second.version=1;
+    ValidateMfsCopyNames({first,second});
+    fprintf(report,"PASS: classic HFS and raw/DC42 MFS reject copy and cut/paste name collisions before Replace All or any image changes. Classic HFS also rejects nested collisions; MFS compares names within each version.\n");
+}
+
 void TestHfsxToApfsNameCollisions(const std::string& root,FILE* report)
 {
     const auto sourcePath=Wide(root+"\\hfsx-apfs-collision-source.dsk");
@@ -3184,6 +3268,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestClassicAndMfsCopyNameCollisions(root,report);
         TestHfsSystemImmutableToApfs(root,report);
         TestCrossFormatTimestamps(root,report);
         TestWorkerTransport();
