@@ -2945,10 +2945,11 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                 for(const auto file:{u"binary.bin",u"clone.bin"}){
                     const auto entry=locate(*volume,live.id,file);
                     const auto wasMarked=volume->Stat(entry.id).apfsCloneMarked;
+                    const auto layout=volume->ApfsCloneLayout(entry.id);
                     Storage::Job copy;
                     Check(MacBrowser::Copy(*volume,entry.id,*target,2,copy),"APFS clone copy failed");
                     Check(copy.progress().apfsCloneCopiedIndependently==wasMarked,"Incorrect APFS clone allocation notice");
-                    noticed|=wasMarked;
+                    noticed|=!layout.empty();
                 }
                 target.reset();
                 target=MacBrowser::OpenImage(hfsPath);
@@ -2960,6 +2961,15 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                       first.resolvedId!=second.resolvedId&&!first.hardLink&&!second.hardLink&&
                       bytes(*target,first)==clones[0]&&bytes(*target,second)==clones[1],
                       "Reopened HFS clone copies share an inode or have changed bytes");
+                for(const auto& transferred:{first,second}){
+                    const auto original=locate(*volume,live.id,transferred.name.c_str());
+                    const auto layout=volume->ApfsCloneLayout(original.id);
+                    const auto copiedAttributes=target->GetAttributes(transferred.id);
+                    const auto recorded=copiedAttributes.find(MacBrowser::ApfsCloneLayoutAttribute);
+                    Check(layout.empty()?recorded==copiedAttributes.end():
+                          recorded!=copiedAttributes.end()&&Bytes(recorded->second)==layout,
+                          "APFS clone extent provenance did not survive reopening the HFS+ copy");
+                }
             }
             fprintf(report,"PASS: macOS APFS clone copies allocate independent space on HFS+ and HFSX and report the allocation change.\n");
         }

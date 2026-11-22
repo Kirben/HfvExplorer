@@ -71,6 +71,7 @@ struct Capabilities {
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
 inline constexpr auto ApfsSparseLayoutAttribute=u"org.hfvexplorer.apfs-sparse-ranges";
+inline constexpr auto ApfsCloneLayoutAttribute=u"org.hfvexplorer.apfs-clone-layout";
 SparseForks ValidateApfsSparseLayout(const Entry&,const Reader&,Storage::Job&);
 class Volume;
 // Adapt a scanned entry before destination validation. Return a reader for
@@ -155,6 +156,7 @@ public:
     virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
     virtual SparseForks SparseRanges(uint32_t) { return {}; }
+    virtual HfsPlus::Bytes ApfsCloneLayout(uint32_t) { return {}; }
     virtual void ReadCompressionResource(uint32_t, uint64_t, void*, size_t) {
         throw HfsPlus::Error("This volume cannot read a stored compression resource");
     }

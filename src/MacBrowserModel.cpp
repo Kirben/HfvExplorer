@@ -530,6 +530,10 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     const auto sparse=hfsPlus&&!plan.reader?src.SparseRanges(entry.id):SparseForks{};
     const bool materializesHoles=!sparse[0].empty()||!sparse[1].empty();
     if(materializesHoles)RecordApfsSparseRanges(outgoing,sparse);
+    if(hfsPlus&&!plan.reader&&entry.apfsCloneMarked&&!outgoing.attributes.count(ApfsCloneLayoutAttribute)){
+        auto layout=src.ApfsCloneLayout(entry.id);
+        if(!layout.empty())outgoing.attributes.emplace(ApfsCloneLayoutAttribute,std::move(layout));
+    }
     if(storedResource)outgoing.forks[1].size=entry.compressionResourceSize;
     else {outgoing.compressionResourceSize=0;outgoing.resourceCompressionHeader.clear();}outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     outgoing.hfsOverwriteScope=hfsScope;

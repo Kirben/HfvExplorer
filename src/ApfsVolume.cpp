@@ -969,6 +969,33 @@ public:
             return out;
         });
     }
+    Bytes ApfsCloneLayout(uint32_t id)override{
+        return Access([&]{
+            const auto& file=At(id);
+            const auto size=file.entry.forks[0].size;
+            if(!file.entry.apfsCloneMarked||file.entry.compressed||!file.stream||!size)return Bytes{};
+            const auto& mount=mounts[file.mount];
+            Bytes layout{'H','F','V','C',1,0,0,0};
+            layout.insert(layout.end(),container.uuid.begin(),container.uuid.end());
+            layout.insert(layout.end(),mount.uuid.begin(),mount.uuid.end());
+            const auto append=[&](uint64_t value){
+                for(unsigned byte=0;byte<8;++byte)layout.push_back(uint8_t(value>>(8*byte)));
+            };
+            append(mount.xid);
+            append(container.blockSize);
+            append(size);
+            const auto firstExtent=layout.size();
+            for(const auto& extent:StreamExtents(file.mount,file.stream)){
+                if(extent.offset>=size)break;
+                if(!extent.block)continue;
+                append(extent.offset);
+                append((std::min)(extent.length,size-extent.offset));
+                append(extent.block);
+            }
+            if(layout.size()==firstExtent)return Bytes{};
+            return layout;
+        });
+    }
     MacBrowser::SparseForks SparseRanges(uint32_t id)override{
         return Access([&]{
             const auto& file=At(id);
