@@ -2129,6 +2129,140 @@ void TestHfsxToApfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFSX case collisions, including nested copies and cut/paste with Replace All, leave the APFS checkpoint and both source forks intact. Case-sensitive APFS keeps both names.\n");
 }
 
+void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    using Mode=HfsPlus::Volume::CompressionMode;
+    using HfsPlus::Bytes;
+    const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    const std::array<std::u16string,2> names{u"Inline with resource",u"Fallback with resource"};
+    std::array<Bytes,2> data{Bytes(18000,0x4a),Bytes(3786)};
+    std::array<Bytes,2> resource{Bytes(173),Bytes(7209)};
+    const HfsPlus::Attributes attributes{{u"user.transfer",{4,0,9}}};
+    // Type 1 fits 3786 stored bytes plus its header. For incompressible bytes
+    // the zlib representation needs one more byte and cannot be stored inline.
+    uint32_t random=0x13426abd;
+    for(auto& byte:data[1]){
+        random^=random<<13;
+        random^=random>>17;
+        random^=random<<5;
+        byte=uint8_t(random);
+    }
+    for(auto& fork:resource)
+        for(size_t i=0;i<fork.size();++i)fork[i]=uint8_t(i*17+i/256);
+
+    const auto verify=[&](Volume& volume,size_t i,bool compressed){
+        Entry entry;
+        Check(volume.FindChild(2,names[i],entry)&&entry.compressed==compressed,
+              "Compression state differs after reopening");
+        const Bytes* expected[]={&data[i],&resource[i]};
+        for(unsigned fork=0;fork<2;++fork){
+            Bytes actual(expected[fork]->size());
+            Check(entry.forks[fork].size==actual.size(),"Compressed transfer changed a fork size");
+            volume.Read(entry.id,fork,0,actual.data(),actual.size());
+            Check(actual==*expected[fork],"Compressed transfer changed a logical fork");
+        }
+        auto metadata=volume.GetAttributes(entry.id);
+        const auto found=metadata.find(u"user.transfer");
+        Check(found!=metadata.end()&&found->second==attributes.begin()->second,
+              "Compressed transfer lost an ordinary attribute");
+        return entry.id;
+    };
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto base=root+"\\compressed-with-resource-"+std::to_string(index++);
+        const auto sourcePath=Wide(base+"-source.dsk");
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Compressed dual forks",true,kind);
+            HfsPlus::Volume source(*disk,true);
+            for(size_t i=0;i<names.size();++i)
+                source.Put(2,names[i],data[i].size(),resource[i].size(),
+                    [&](unsigned fork,uint64_t at,void* out,size_t size){
+                        const auto& bytes=fork?resource[i]:data[i];
+                        memcpy(out,bytes.data()+at,size);
+                    },nullptr,false,nullptr,&attributes,i?Mode::StoredInline:Mode::Zlib);
+        }
+        auto source=OpenBrowserImage(sourcePath);
+        Check(bool(source),"Cannot reopen compressed HFS source");
+        const std::vector<Location> inputs{Native(source,verify(*source,0,true)),
+                                           Native(source,verify(*source,1,true))};
+        for(bool external:{false,true}){
+            if(external&&!fixture)continue;
+            const auto path=Wide(base+(external?"-macos.img":"-native.img"));
+            if(external){
+                Check(CopyFileW(fixture,path.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+            }else{
+                auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+                Storage::Job job;
+                Apfs::Format(*disk,u"Compressed transfer destination",true,job);
+            }
+            auto target=OpenBrowserImage(path);
+            Check(target&&target->Supports().create&&target->Writable()!=external,
+                  "Wrong APFS writer for dual-fork copy");
+            Put(*target,2,names[1],6301,59);
+            unsigned overwritePrompts=0,fallbackPrompts=0;
+            const auto transfer=[&](std::vector<Location> selected,Storage::ConflictChoice answer){
+                auto operation=Submit(OrdinaryCopy{std::move(selected),Native(target,2)});
+                auto job=operation.Job();
+                const auto start=GetTickCount();
+                uint64_t responded=0;
+                while(!job->done()){
+                    if(GetTickCount()-start>30000){
+                        job->cancel();
+                        throw HfsPlus::Error("Compressed dual-fork transfer timed out");
+                    }
+                    const auto prompt=job->conflictState();
+                    if(!prompt.path.empty()&&responded!=prompt.id){
+                        responded=prompt.id;
+                        if(prompt.kind==Storage::CopyPrompt::Overwrite){
+                            ++overwritePrompts;
+                            job->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+                        }else{
+                            ++fallbackPrompts;
+                            if(prompt.path!="Fallback with resource"){
+                                job->cancel();
+                                throw HfsPlus::Error("Unexpected uncompressed prompt");
+                            }
+                            job->resolve(prompt.id,answer);
+                        }
+                    }
+                    Sleep(5);
+                }
+                return job->result();
+            };
+            auto result=transfer({inputs[1]},Storage::ConflictChoice::Cancel);
+            Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial&&
+                  overwritePrompts==1&&fallbackPrompts==1,"Declining uncompressed copy did not cancel before publication");
+            target.reset();
+            target=OpenBrowserImage(path);
+            Entry original;
+            Check(target&&target->FindChild(2,names[1],original)&&!original.compressed,
+                  "Declining uncompressed copy lost the destination");
+            Verify(*target,original.id,6301,59);
+            result=transfer(inputs,Storage::ConflictChoice::Replace);
+            Check(!result.code,result.message.c_str());
+            Check(overwritePrompts==2&&fallbackPrompts==2,"Inline copy prompted or fallback was silently approved");
+            target.reset();
+            target=OpenBrowserImage(path);
+            Check(bool(target),"Cannot reopen dual-fork APFS target");
+            const auto compressed=verify(*target,0,true);
+            verify(*target,1,false);
+            target->Remove(compressed);
+            target.reset();
+            target=OpenBrowserImage(path);
+            Entry removed;
+            Check(target&&!target->FindChild(2,names[0],removed),
+                  "Could not delete the compressed file with independent resource data");
+            verify(*target,1,false);
+            verify(*source,0,true);
+            verify(*source,1,true);
+        }
+    }
+    fprintf(report,"PASS: compressed HFS+ and both HFSX variants preserve both forks and attributes on APFS after reopen; inline compression stays enabled and uncompressed overwrite requires separate approval.\n");
+    if(fixture)fprintf(report,"PASS: dual-fork compressed and fallback transfers also work on disposable macOS APFS fixtures.\n");
+}
+
 void TestApfsToHfsCompression(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2452,6 +2586,7 @@ int RunCopyProcessTest(const char *directory) {
         TestApfsToHfsHardLinks(root,report);
         TestLateHardLinkOverwriteCancellation(root,report);
         TestCrossFormatAttributes(root,report);
+        TestHfsCompressionWithResourceToApfs(root,report);
         TestApfsToHfsCompression(root,report);
         TestApfsToHfsNameCollisions(root,report);
         TestHfsxToApfsNameCollisions(root,report);

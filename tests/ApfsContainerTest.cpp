@@ -4768,7 +4768,7 @@ int RunApfsContainerTest(const char* directory)
             const auto replaceStart=GetTickCount();
             while(!replaceLink.Job()->done()){
                 Check(GetTickCount()-replaceStart<15000,"External APFS symbolic-link overwrite timed out");
-                const auto [id,message]=replaceLink.Job()->conflictState();
+                const auto [id,message,kind]=replaceLink.Job()->conflictState();
                 if(!message.empty())replaceLink.Job()->resolve(id,Storage::ConflictChoice::Replace);
                 Sleep(5);
             }
@@ -4829,7 +4829,7 @@ int RunApfsContainerTest(const char* directory)
                 bool prompted=false;
                 while(!copy.Job()->done()){
                     Check(GetTickCount()-start<15000,"APFS symbolic-link file replacement timed out");
-                    const auto [id,message]=copy.Job()->conflictState();
+                    const auto [id,message,kind]=copy.Job()->conflictState();
                     if(!message.empty()){
                         prompted=true;
                         copy.Job()->resolve(id,choice);

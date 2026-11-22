@@ -1338,7 +1338,6 @@ public:
         Check(entry.readError.empty()&&
               (!entry.directory||(!entry.hardLink&&!entry.compressed))&&!entry.version,
               "This APFS writer cannot preserve the source entry's Mac metadata");
-        Check(!entry.compressed||!entry.forks[1].size,"APFS cannot retain a user resource fork on a compressed file");
         ValidateWritableAttributes(entry.attributes);
         Check(!entry.posix||entry.posix->mode<=PosixMetadata::ModeMask,"Invalid POSIX permissions");
         if(entry.datesValid){
@@ -1365,7 +1364,7 @@ public:
     }
     uint32_t Put(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace)override{
         Storage::Job job;
-        return PutForTransfer(parent,entry,std::move(reader),replace,job);
+        return PutFile(parent,entry,std::move(reader),replace,job,false);
     }
     uint32_t PutFromHost(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
                          const std::wstring&,Storage::Job& job)override{
@@ -1388,6 +1387,10 @@ public:
     };
     uint32_t PutForTransfer(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
                             Storage::Job& job)override{
+        return PutFile(parent,entry,std::move(reader),replace,job,true);
+    }
+    uint32_t PutFile(uint32_t parent,const Entry& entry,MacBrowser::Reader reader,bool replace,
+                     Storage::Job& job,bool allowPrompt){
         ValidateEntry(entry);
         Check(!entry.directory,"Select a regular file for APFS data transfer");
         const auto dates=CopyDates(entry);
@@ -1397,8 +1400,15 @@ public:
             encoded.emplace(entry.forks[0].size,[&](uint64_t offset,void* bytes,size_t count){
                 if(job.cancelled())throw Storage::Cancelled();
                 reader(0,offset,bytes,count);
-            });
-
+            },HfsPlus::Volume::CompressionMode::Zlib,entry.forks[1].size?
+                EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource);
+            if(encoded->Attribute().empty()){
+                Check(allowPrompt,"Copying both forks without compression requires approval");
+                if(job.requestChoice(Storage::CopyPrompt::Uncompressed,EncodeCatalogName(entry.name))!=
+                   Storage::ConflictChoice::Replace||job.cancelled())
+                    throw Storage::Cancelled();
+                encoded.reset();
+            }
         }
         const bool compressionResource=encoded&&encoded->UsesResource();
         const MacBrowser::Reader payload=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){

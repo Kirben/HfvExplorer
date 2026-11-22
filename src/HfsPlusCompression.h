@@ -8,7 +8,10 @@ namespace HfsPlus {
 class EncodedCompression {
 public:
     using Reader=std::function<void(uint64_t,void*,size_t)>;
-    EncodedCompression(uint64_t size,Reader,Volume::CompressionMode = Volume::CompressionMode::Zlib);
+    enum class Layout { InlineOrResource, InlineOnly };
+    // An empty attribute means the requested inline-only encoding would not fit.
+    EncodedCompression(uint64_t size,Reader,Volume::CompressionMode = Volume::CompressionMode::Zlib,
+                       Layout = Layout::InlineOrResource);
     const Bytes& Attribute()const{return attribute_;}
     bool UsesResource()const{return !units_.empty();}
     uint64_t ResourceSize()const{return resourceSize_;}

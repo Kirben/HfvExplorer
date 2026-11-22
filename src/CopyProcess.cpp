@@ -378,7 +378,10 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                 else if (message == Conflict) {
                     auto id = d.get();
                     auto path = d.text();
-                    auto choice = job.replace(path);
+                    auto kind = d.get();
+                    Check(kind <= uint64_t(Storage::CopyPrompt::Uncompressed),"Invalid copy prompt");
+                    d.end();
+                    auto choice = job.requestChoice(Storage::CopyPrompt(kind),path);
                     Data reply;
                     reply.put(id);
                     reply.put(uint64_t(choice));
@@ -518,15 +521,16 @@ int Child(const char *inputText, const char *outputText) {
                         d.end();
                     }
                     auto pending = job.conflictState();
-                    if (!pending.second.empty() && pending.first != conflict) {
+                    if (!pending.path.empty() && pending.id != conflict) {
                         Data d;
-                        d.put(pending.first);
-                        d.put(pending.second);
+                        d.put(pending.id);
+                        d.put(pending.path);
+                        d.put(uint64_t(pending.kind));
                         {
                             std::lock_guard<std::mutex> lock(sending);
                             Send(output, Conflict, std::move(d));
                         }
-                        conflict = pending.first;
+                        conflict = pending.id;
                     }
                     Sleep(10);
                 }

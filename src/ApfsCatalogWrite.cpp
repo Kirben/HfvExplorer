@@ -1880,7 +1880,7 @@ CatalogKind DeleteExternalEntry(Source& source,std::vector<OwnedRecord>& catalog
         }
     }
     Check(hadTarget==(kind==CatalogKind::SymbolicLink),"Missing APFS symbolic-link target");
-    Check(hadCompression==compressed&&(!compressed||hadResource==needsResource),
+    Check(hadCompression==compressed&&(!needsResource||hadResource),
           "APFS compression records disagree with the inode");
     CollectExternalRetiredExtents(catalog,edit.inode,streams,extentTree,retired);
     const auto first=size_t(inode-catalog.begin()),last=size_t(after-catalog.begin());
@@ -2773,8 +2773,11 @@ CatalogWritePlan PrepareCatalogMutation(
     auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
     std::optional<ResourceWrite> resource;
     if(resourceInput)resource=ResourceWrite{resourceInput,resourceInput->Size(),0};
-    const bool compressionResource=(replace?replace->compression:create?create->compression:nullptr)&&resource&&resource->size;
-    const auto resourceBlocks=resource&&(resource->size>=EmbeddedAttributeLimit||compressionResource)?
+    // Compressed files with a resource fork use a streamed attribute for that
+    // fork, whether it holds compressed units or independent user data.
+    const bool streamCompressedFileResource=(replace?replace->compression:create?create->compression:nullptr)&&
+                                            resource&&resource->size;
+    const auto resourceBlocks=resource&&(resource->size>=EmbeddedAttributeLimit||streamCompressedFileResource)?
                               DivideUp(resource->size,Block):0;
     Check(fileBlocks<=current.blockCount&&resourceBlocks<=current.blockCount-fileBlocks,
           "APFS forks exceed the container size");

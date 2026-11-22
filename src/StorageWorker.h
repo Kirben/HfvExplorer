@@ -15,6 +15,12 @@
 #include <optional>
 namespace Storage {
 enum class ConflictChoice {None,Replace,ReplaceAll,Skip,Cancel};
+enum class CopyPrompt {Overwrite,Uncompressed};
+struct PendingCopyPrompt {
+ uint64_t id=0;
+ std::string path;
+ CopyPrompt kind=CopyPrompt::Overwrite;
+};
 struct Progress {
  std::string path,phase="Preparing",detail;
  unsigned long long bytes=0,processed=0,fileBytes=0,fileTotal=0,totalBytes=0;
@@ -46,8 +52,8 @@ class Job {
  mutable std::mutex mutex_;
  std::condition_variable condition_;
  Progress progress_;Result result_;bool done_=false;
- uint64_t conflictId_=0;
- std::string conflict_;ConflictChoice choice_=ConflictChoice::None;bool replaceAll_=false,cancelled_=false;
+ PendingCopyPrompt prompt_;
+ ConflictChoice choice_=ConflictChoice::None;bool replaceAll_=false,cancelled_=false;
  HANDLE event_;
  std::function<void(const Progress&)> report_;
  std::function<ConflictChoice(const std::string&)> ask_;
@@ -84,21 +90,23 @@ public:
   if(notify)notify();
  }
  void wait()const{WaitForSingleObject(event_,INFINITE);}
- std::string conflict()const{std::lock_guard<std::mutex> lock(mutex_);return conflict_;}
- std::pair<uint64_t,std::string> conflictState()const{std::lock_guard<std::mutex> lock(mutex_);return {conflictId_,conflict_};}
- void resolve(uint64_t id,ConflictChoice choice){{std::lock_guard<std::mutex> lock(mutex_);if(id!=conflictId_||conflict_.empty())return;choice_=cancelled_?ConflictChoice::Cancel:choice;}condition_.notify_all();}
+ std::string conflict()const{std::lock_guard<std::mutex> lock(mutex_);return prompt_.path;}
+ PendingCopyPrompt conflictState()const{std::lock_guard<std::mutex> lock(mutex_);return prompt_;}
+ void resolve(uint64_t id,ConflictChoice choice){{std::lock_guard<std::mutex> lock(mutex_);if(id!=prompt_.id||prompt_.path.empty())return;choice_=cancelled_?ConflictChoice::Cancel:choice;}condition_.notify_all();}
  bool cancelled()const{std::lock_guard<std::mutex> lock(mutex_);return cancelled_;}
  void cancel(){ {std::lock_guard<std::mutex> lock(mutex_);cancelled_=true;choice_=ConflictChoice::Cancel;}condition_.notify_all();}
  void resolve(ConflictChoice choice){ {std::lock_guard<std::mutex> lock(mutex_);choice_=cancelled_?ConflictChoice::Cancel:choice;}condition_.notify_all();}
- ConflictChoice replace(const std::string& path) {
-  if(ask_)return ask_(path);
+ ConflictChoice replace(const std::string& path) {return requestChoice(CopyPrompt::Overwrite,path);}
+ ConflictChoice requestChoice(CopyPrompt kind,const std::string& path) {
+  const bool overwrite=kind==CopyPrompt::Overwrite;
+  if(overwrite&&ask_)return ask_(path);
   std::unique_lock<std::mutex> lock(mutex_);
   if(cancelled_)return ConflictChoice::Cancel;
-  if(replaceAll_)return ConflictChoice::Replace;
-  ++conflictId_;conflict_=path;choice_=ConflictChoice::None;
+  if(overwrite&&replaceAll_)return ConflictChoice::Replace;
+  prompt_={prompt_.id+1,path,kind};choice_=ConflictChoice::None;
   condition_.wait(lock,[&]{return choice_!=ConflictChoice::None;});
-  ConflictChoice result=choice_;conflict_.clear();
-  if(result==ConflictChoice::ReplaceAll){replaceAll_=true;return ConflictChoice::Replace;}
+  ConflictChoice result=choice_;prompt_.path.clear();
+  if(overwrite&&result==ConflictChoice::ReplaceAll){replaceAll_=true;return ConflictChoice::Replace;}
   if(result==ConflictChoice::Cancel)cancelled_=true;
   return result;
  }

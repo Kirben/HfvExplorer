@@ -29,10 +29,33 @@ bool StorageOwnerShouldActivate(bool originallyEnabled,HWND owner,HWND dialog,HW
 }
 namespace {
 class ConflictDialog : public CDialog {
- std::string path_;bool utf8_;std::shared_ptr<Storage::Job> job_;
+ Storage::PendingCopyPrompt prompt_;
+ bool utf8_;
+ std::shared_ptr<Storage::Job> job_;
 public:
- ConflictDialog(const std::string& path,CWnd* owner,bool utf8,std::shared_ptr<Storage::Job> job={}):CDialog(IDD_COPY_CONFLICT,owner),path_(path),utf8_(utf8),job_(std::move(job)){}
- BOOL OnInitDialog() override {CDialog::OnInitDialog();if(job_)SetTimer(1,50,nullptr);if(utf8_){BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(path_).c_str());}else SetDlgItemText(IDC_CONFLICT_PATH,path_.c_str());return TRUE;}
+ ConflictDialog(const Storage::PendingCopyPrompt& prompt,CWnd* owner,bool utf8,std::shared_ptr<Storage::Job> job)
+  :CDialog(IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
+ BOOL OnInitDialog() override {
+  CDialog::OnInitDialog();
+  if(job_)SetTimer(1,50,nullptr);
+  const bool uncompressed=prompt_.kind==Storage::CopyPrompt::Uncompressed;
+  if(uncompressed||utf8_){
+   BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");
+   SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
+  }else SetDlgItemText(IDC_CONFLICT_PATH,prompt_.path.c_str());
+  if(uncompressed){
+   SetWindowText("Copy without compression");
+   SetDlgItemText(IDC_CONFLICT_FILE_LABEL,"File");
+   SetDlgItemText(IDC_CONFLICT_QUESTION,"Copy without compression to preserve both forks?");
+   SetDlgItemText(IDC_REPLACE,"Copy &uncompressed");
+   GetDlgItem(IDC_REPLACE_ALL)->ShowWindow(SW_HIDE);
+   GetDlgItem(IDC_SKIP)->ShowWindow(SW_HIDE);
+   CRect button(174,72,278,90);
+   MapDialogRect(&button);
+   GetDlgItem(IDC_REPLACE)->MoveWindow(&button);
+  }
+  return TRUE;
+ }
  BOOL OnCommand(WPARAM w,LPARAM l) override {
   if(LOWORD(w)>=IDC_REPLACE && LOWORD(w)<=IDC_COPY_CANCEL){EndDialog(LOWORD(w));return TRUE;}
   return CDialog::OnCommand(w,l);
@@ -269,8 +292,8 @@ public:
    if(owner_&&!::IsWindowEnabled(owner_))storageUiTest.disabledDuring=true;
 #endif
    update();
-   auto [conflictId, conflict]=job_->conflictState();
-   if(!conflict.empty()){
+   const auto promptState=job_->conflictState();
+   if(!promptState.path.empty()){
     KillTimer(1);
     auto answer = Storage::ConflictChoice::None;
 #ifdef HFV_TESTING
@@ -278,11 +301,11 @@ public:
     else
 #endif
     {
-     ConflictDialog prompt(conflict,this,job_->progress().utf8,modeless_?job_:nullptr);INT_PTR choice=prompt.DoModal();
+     ConflictDialog prompt(promptState,this,job_->progress().utf8,modeless_?job_:nullptr);INT_PTR choice=prompt.DoModal();
      answer=choice==IDC_REPLACE?Storage::ConflictChoice::Replace:choice==IDC_REPLACE_ALL?Storage::ConflictChoice::ReplaceAll:choice==IDC_SKIP?Storage::ConflictChoice::Skip:Storage::ConflictChoice::Cancel;
     }
-    if(modeless_)resolve_(conflictId,answer);
-    else if(answer!=Storage::ConflictChoice::None)job_->resolve(conflictId,answer);
+    if(modeless_)resolve_(promptState.id,answer);
+    else if(answer!=Storage::ConflictChoice::None)job_->resolve(promptState.id,answer);
     SetTimer(1,50,nullptr);
    }
    if(modeless_||job_->done()){
