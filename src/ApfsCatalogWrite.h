@@ -114,6 +114,8 @@ struct CatalogWritePlan {
     std::vector<DataStreamWrite> streams;
 };
 void AssignDataRuns(std::vector<DataStreamWrite>&,const std::vector<DataRun>&);
+struct ReferenceSpan { uint64_t start,blocks; uint32_t references; };
+std::vector<ReferenceSpan> SplitExtentReferences(const std::map<uint64_t,uint32_t>&,uint64_t start,uint64_t blocks);
 void ValidateWritableAttributes(const HfsPlus::Attributes&);
 uint64_t CatalogTimestamp(uint64_t secondsSince1904);
 struct CatalogLayoutCounts {

@@ -2499,6 +2499,24 @@ void CheckNativeVolume(const Bytes& volume)
 }
 }
 
+std::vector<ReferenceSpan> SplitExtentReferences(const std::map<uint64_t,uint32_t>& counts,
+                                                  uint64_t start,uint64_t blocks)
+{
+    Check(blocks&&blocks<=UINT64_MAX-start,"Invalid APFS physical extent range");
+    const auto end=start+blocks;
+    auto next=counts.upper_bound(start);
+    auto references=next==counts.begin()?0:std::prev(next)->second;
+    std::vector<ReferenceSpan> spans;
+    for(auto at=start;at<end;){
+        const auto stop=next==counts.end()?end:(std::min)(end,next->first);
+        if(!spans.empty()&&spans.back().references==references)spans.back().blocks+=stop-at;
+        else spans.push_back({at,stop-at,references});
+        at=stop;
+        if(at<end)references=(next++)->second;
+    }
+    return spans;
+}
+
 uint64_t DataStreamWrite::AllocatedBlocks() const
 {
     const auto blocks=DivideUp(size,Block);
@@ -3217,7 +3235,7 @@ CatalogWritePlan PrepareCatalogMutation(
         }),catalog.end());
     }
     std::set<uint64_t> reconciledRetired;
-    std::map<uint64_t,uint32_t> updatedReferences;
+    std::map<uint64_t,std::vector<ReferenceSpan>> updatedReferences;
     std::vector<OwnedRecord> snapshotUpdates;
     bool extentReferencesChanged=false;
     if(reconcileReferences){
@@ -3235,13 +3253,24 @@ CatalogWritePlan PrepareCatalogMutation(
         }
         for(const auto& current:extentTree.records){
             const auto start=Le64(current.key.data())&IdMask,blocks=Le64(current.value.data())&IdMask;
-            const auto before=Le32(current.value.data()+16),after=CatalogReferences(counts,start,blocks);
+            const auto before=Le32(current.value.data()+16);
+            if(!historical){
+                auto spans=SplitExtentReferences(counts,start,blocks);
+                for(const auto& span:spans)
+                    Check(span.references<=before||clone,"APFS extent references increased");
+                if(spans.size()==1&&spans.front().references==before)continue;
+                extentReferencesChanged=true;
+                if(spans.size()==1&&!spans.front().references)reconciledRetired.insert(start);
+                else updatedReferences.emplace(start,std::move(spans));
+                continue;
+            }
+            const auto after=CatalogReferences(counts,start,blocks);
             Check(after<=before||(clone&&(!historical||snapshot.sharedData.count(start))),"APFS extent references increased");
             if(after==before)continue;
             extentReferencesChanged=true;
             if(snapshot.sharedData.count(start))continue;
             if(historical)Check(!after&&before==1,"APFS cannot retire a shared extent created after the snapshot");
-            if(after)updatedReferences.emplace(start,after);
+            if(after)updatedReferences.emplace(start,std::vector<ReferenceSpan>{{start,blocks,after}});
             else reconciledRetired.insert(start);
         }
     }
@@ -3263,6 +3292,13 @@ CatalogWritePlan PrepareCatalogMutation(
         removedBlocks+=run.count;
     }
 
+    for(const auto& [start,spans]:updatedReferences){
+        for(const auto& span:spans){
+            if(span.references)continue;
+            retiredData.push_back({span.start,span.blocks});
+            removedBlocks+=span.blocks;
+        }
+    }
     const bool changeExtents=dataBlocks||removeExtents;
     auto& space=ephemeral(Le64(superblock.data()+152));
     auto& writes=plan.metadata;
@@ -3324,9 +3360,16 @@ CatalogWritePlan PrepareCatalogMutation(
                     const auto old=std::lower_bound(extentTree.records.begin(),extentTree.records.end(),key,
                         [](const auto& record,uint64_t wanted){return Le64(record.key.data())<wanted;});
                     if(reconcileReferences&&old!=extentTree.records.end()&&Le64(old->key.data())==key){
-                        references.push_back(*old);
                         const auto changed=updatedReferences.find(run.block);
-                        if(changed!=updatedReferences.end())Set(references.back().value,16,changed->second,4);
+                        if(changed==updatedReferences.end())references.push_back(*old);
+                        else for(const auto& span:changed->second){
+                            if(!span.references)continue;
+                            auto split=*old;
+                            Set(split.key,0,(uint64_t(2)<<60)|span.start,8);
+                            Set(split.value,0,(Le64(old->value.data())&~IdMask)|span.blocks,8);
+                            Set(split.value,16,span.references,4);
+                            references.push_back(std::move(split));
+                        }
                     }else references.push_back(ExtentReference(run));
                 }
 

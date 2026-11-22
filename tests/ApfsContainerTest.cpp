@@ -138,7 +138,15 @@ void DataStreamAllocation(FILE* report)
           sparseStreams[0].runs[1].count==2&&sparseStreams[0].runs[1].reused&&
           !sparseStreams[0].runs[2].reused&&sparseStreams[2].runs[0].block==22,
           "Shared APFS blocks consumed new allocation or were marked writable");
-    fprintf(report,"PASS: APFS stream allocation preserves logical holes, reused ranges and independent physical stream boundaries.\n");
+    const auto spans=Apfs::SplitExtentReferences({{70,1},{77,2},{79,1},{82,0},{84,1}},75,10);
+    Check(spans.size()==5&&spans[0].start==75&&spans[0].blocks==2&&spans[0].references==1&&
+          spans[1].start==77&&spans[1].blocks==2&&spans[1].references==2&&
+          spans[2].start==79&&spans[2].blocks==3&&spans[2].references==1&&
+          spans[3].start==82&&spans[3].blocks==2&&!spans[3].references&&
+          spans[4].start==84&&spans[4].blocks==1&&spans[4].references==1,
+          "APFS physical reference boundaries did not account for a partial clone and retirement");
+    Reject([&]{Apfs::SplitExtentReferences({},UINT64_MAX,1);},"APFS accepted an overflowing physical extent");
+    fprintf(report,"PASS: APFS stream allocation preserves logical holes, reused ranges, split references and independent physical stream boundaries.\n");
 }
 
 void CheckpointWrites(const std::string& root,FILE* report)
