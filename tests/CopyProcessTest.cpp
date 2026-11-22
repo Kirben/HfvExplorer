@@ -2696,7 +2696,7 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
                     [&](unsigned fork,uint64_t at,void* out,size_t size){
                         const auto& bytes=fork?resource[i]:data[i];
                         memcpy(out,bytes.data()+at,size);
-                    },nullptr,false,nullptr,&attributes,i?Mode::StoredInline:Mode::Zlib);
+                    },nullptr,false,nullptr,&attributes,i?Mode::StoredInline:Mode::Lzvn);
         }
         auto source=OpenBrowserImage(sourcePath);
         Check(bool(source),"Cannot reopen compressed HFS source");
@@ -2762,6 +2762,9 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
             target=OpenBrowserImage(path);
             Check(bool(target),"Cannot reopen dual-fork APFS target");
             const auto compressed=verify(*target,0,true);
+            const auto header=source->Stat(verify(*source,0,true)).inlineCompression;
+            Check(!header.empty()&&target->Stat(compressed).inlineCompression==header,
+                  "APFS re-encoded the original inline compression");
             verify(*target,1,false);
             target->Remove(compressed);
             target.reset();
@@ -2836,33 +2839,36 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
                     last=prompt.id;
                     if(prompt.kind==Storage::CopyPrompt::Uncompressed){
                         ++fallbacks;
-                        job->resolve(last,answer);
-                    }else job->resolve(last,Storage::ConflictChoice::ReplaceAll);
+                        job->resolve(last,Storage::ConflictChoice::Cancel);
+                    }else job->resolve(last,answer);
                 }
                 Sleep(5);
             }
-            Check(fallbacks==1,"Reverse copy must request fallback exactly once");
+            Check(!fallbacks,"Reverse copy unexpectedly asked to discard inline compression");
             return job->result();
         };
         auto result=transfer({reverseInputs[1]},Storage::ConflictChoice::Cancel);
         Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
-              "Declining reverse fallback did not cancel before publication");
+              "Cancelling the reverse overwrite did not cancel before publication");
         target.reset();
         target=OpenBrowserImage(path);
         Entry original;
-        Check(target&&target->FindChild(2,names[1],original),"Declining reverse fallback lost the destination");
+        Check(target&&target->FindChild(2,names[1],original),"Cancelling the reverse overwrite lost the destination");
         Verify(*target,original.id,6301,59);
         result=transfer(reverseInputs,Storage::ConflictChoice::Replace);
         Check(!result.code,result.message.c_str());
         target.reset();
         target=OpenBrowserImage(path);
         Check(bool(target),"Cannot reopen HFS destination");
-        verify(*target,0,true);
-        verify(*target,1,false);
+        for(size_t i=0;i<names.size();++i){
+            const auto header=apfs->Stat(verify(*apfs,i,true)).inlineCompression;
+            Check(!header.empty()&&target->Stat(verify(*target,i,true)).inlineCompression==header,
+                  "HFS Plus re-encoded the original inline compression");
+        }
     }
     verify(*apfs,0,true);
     verify(*apfs,1,true);
-    fprintf(report,"PASS: APFS inline compression and genuine resource forks copy to HFS+ and both HFSX variants; approved fallback preserves both forks and decline preserves the destination.\n");
+    fprintf(report,"PASS: APFS inline compression and genuine resource forks copy to HFS+ and both HFSX variants; exact encoded bytes survive reopening and cancellation preserves the destination.\n");
     fprintf(report,"PASS: compressed HFS+ and both HFSX variants preserve both forks and attributes on APFS after reopen; inline compression stays enabled and uncompressed overwrite requires separate approval.\n");
     if(fixture)fprintf(report,"PASS: dual-fork compressed and fallback transfers also work on disposable macOS APFS fixtures.\n");
 }
@@ -3455,6 +3461,7 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
     }
 
     std::shared_ptr<Volume> apple;
+    Bytes appleInline;
     const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
     if(fixture){
         auto disk=HfsPlus::OpenImage(fixture,false);
@@ -3463,6 +3470,7 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
         Check(apple&&apple->FindChild(2,u"decmpfs.txt",entry)&&entry.compressed&&
               entry.forks[0].size==112000&&!entry.forks[1].size,
               "Missing compressed file in the shared macOS APFS image");
+        appleInline=apple->Stat(entry.id).inlineCompression;
         inputs.push_back(Native(apple,entry.id));
     }
 
@@ -3509,8 +3517,10 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
                   "Compressed copy lost its encoding or logical fork size after reopening");
             auto attributes=reopened.GetAttributes(entry.id);
             const auto header=attributes.find(u"com.apple.decmpfs");
-            Check(header!=attributes.end()&&(i==0?header->second.size()>16:header->second.size()==16),
-                  "Destination has the wrong decmpfs storage layout");
+            Check(header!=attributes.end(),"Destination has no decmpfs header");
+            if(i==0)Check(header->second.size()>16,"Destination lost inline compression");
+            else if(i==1||appleInline.empty())Check(header->second.size()==16,"Destination lost resource compression");
+            else Check(Bytes(header->second)==appleInline,"Destination re-encoded the macOS inline stream");
             attributes.erase(header);
             if(i<names.size())Check(attributes==metadata,"Compression copy lost an ordinary extended attribute");
             Bytes readback(length);

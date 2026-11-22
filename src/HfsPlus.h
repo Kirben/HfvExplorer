@@ -115,7 +115,7 @@ class Volume {
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
                  const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr,
                  std::optional<PosixMetadata> posix = {},OverwriteScope scope=OverwriteScope::SharedInode,
-                 AdditionalFileDates additionalDates={});
+                 AdditionalFileDates additionalDates={}, const Bytes* inlineCompression=nullptr);
     void SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,
                               const std::array<uint64_t,2>* dates,const Attributes* attributes,
                               std::optional<PosixMetadata> posix = {},AdditionalFileDates additionalDates={});
@@ -144,7 +144,7 @@ class Volume {
                      const std::array<uint8_t,32>* finder,bool overwrite,
                      const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
                      const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
-                     OverwriteScope scope,AdditionalFileDates additionalDates);
+                     OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* inlineCompression);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

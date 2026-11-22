@@ -4,6 +4,7 @@
 #include "ApfsUnicode.h"
 #include "StorageWorker.h"
 #include "ApfsTree.h"
+#include "ApfsWriteDisk.h"
 #include "ApfsCrypto.h"
 #include "HfsPlusDisk.h"
 #include "DiskPartitions.h"
@@ -221,6 +222,12 @@ std::pair<uint64_t,bool> ReadSiblingId(const Catalog& catalog,Record drec,uint64
 constexpr auto ResourceFork=u"com.apple.ResourceFork";
 constexpr auto FinderInfo=u"com.apple.FinderInfo";
 constexpr auto CompressionAttribute=u"com.apple.decmpfs";
+
+size_t InlineCompressionCapacity(){
+    constexpr auto attributeOverhead=10+sizeof("com.apple.decmpfs")+4;
+    return WriterDisk::Block-WriterDisk::NodeHeader-WriterDisk::TreeFooter-
+           WriterDisk::VariableToc(1)-attributeOverhead;
+}
 constexpr auto SymlinkAttribute=u"com.apple.fs.symlink";
 constexpr auto LockedMessage="This APFS volume is encrypted and locked";
 struct Attribute {
@@ -794,7 +801,19 @@ private:
         return out;
     }
 public:
-    Entry Stat(uint32_t id)override{return Access([&]{return At(id).entry;});}
+    Entry Stat(uint32_t id)override{return Access([&]{
+        const auto& file=At(id);
+        auto entry=file.entry;
+        if(entry.compressed&&entry.readError.empty()){
+            const auto found=file.attributes.find(CompressionAttribute);
+            if(found!=file.attributes.end()&&found->second.size<=InlineCompressionLimit){
+                Bytes bytes(size_t(found->second.size));
+                ReadAttribute(file.mount,found->second,0,bytes.data(),bytes.size());
+                if(IsInlineCompression(bytes,entry.forks[0].size))entry.inlineCompression=std::move(bytes);
+            }
+        }
+        return entry;
+    });}
     bool FindChild(uint32_t parent,const std::u16string& name,Entry& found)override{
         const auto [sensitive,normalized]=Access([&]{
             const auto& folder=At(parent);
@@ -1429,29 +1448,32 @@ public:
         const auto dates=CopyDates(entry);
         const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
         std::optional<HfsPlus::EncodedCompression> encoded;
-        if(entry.compressed){
+        const Bytes* compression=nullptr;
+        const auto inlineLimit=InlineCompressionCapacity();
+        if(entry.compressed&&!entry.inlineCompression.empty()&&entry.inlineCompression.size()<=inlineLimit){
+            ValidateInlineCompression(entry.inlineCompression,entry.forks[0].size);
+            compression=&entry.inlineCompression;
+        }else if(entry.compressed){
             encoded.emplace(entry.forks[0].size,[&](uint64_t offset,void* bytes,size_t count){
                 if(job.cancelled())throw Storage::Cancelled();
                 reader(0,offset,bytes,count);
             },HfsPlus::Volume::CompressionMode::Zlib,entry.forks[1].size?
-                EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource);
+                EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource,inlineLimit);
             if(encoded->Attribute().empty()){
                 Check(allowPrompt,"Copying both forks without compression requires approval");
                 if(job.requestChoice(Storage::CopyPrompt::Uncompressed,EncodeCatalogName(entry.name))!=
                    Storage::ConflictChoice::Replace||job.cancelled())
                     throw Storage::Cancelled();
                 encoded.reset();
-            }
+            }else compression=&encoded->Attribute();
         }
         const bool compressionResource=encoded&&encoded->UsesResource();
         const MacBrowser::Reader payload=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
             if(compressionResource&&fork==1)encoded->ReadResource(offset,bytes,count);
             else reader(fork,offset,bytes,count);
         };
-        ForkInput data(encoded?0:entry.forks[0].size,0,payload);
+        ForkInput data(compression?0:entry.forks[0].size,0,payload);
         ForkInput resource(compressionResource?encoded->ResourceSize():entry.forks[1].size,1,payload);
-        const auto* compression=encoded?&encoded->Attribute():nullptr;
-
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
             Entry existing;

@@ -174,14 +174,14 @@ Bytes EncodedCompression::Encode(uint64_t index){
  if(!bytes||bytes>=plain.size()+1){output=plain;output.insert(output.begin(),marker);}else output.resize(bytes);
  return output;
 }
-EncodedCompression::EncodedCompression(uint64_t size,Reader reader,Volume::CompressionMode method,Layout layout):method_(method),reader_(std::move(reader)),size_(size){
+EncodedCompression::EncodedCompression(uint64_t size,Reader reader,Volume::CompressionMode method,Layout layout,size_t inlineLimit):method_(method),reader_(std::move(reader)),size_(size){
  using Mode=Volume::CompressionMode;
  Check(method==Mode::Zlib||method==Mode::Lzvn||method==Mode::Lzfse||method==Mode::Lzbitmap||method==Mode::Stored||method==Mode::StoredInline,"Choose an explicit compression method");
  Check(size<=INT64_MAX,"Compressed logical size exceeds Apple limit");
  Check(method!=Mode::StoredInline||size<=3786,"Legacy type-1 stored data must fit the 3802-byte inline attribute limit; use Stored for larger files");
  if(layout==Layout::InlineOnly&&size>65536)return;
  auto count=size/65536+(size%65536!=0);Bytes first=Encode(0);
- const bool fitsInline=size<=65536&&first.size()+16<=3802;
+ const bool fitsInline=size<=65536&&first.size()+16<=inlineLimit;
  if(layout==Layout::InlineOnly&&!fitsInline)return;
  attribute_.resize(16);PutLittle(attribute_.data(),0x636d7066);PutLittle(attribute_.data()+8,size,8);
  uint32_t type=method==Mode::Zlib?3:method==Mode::Lzvn?7:method==Mode::Lzfse?11:method==Mode::Lzbitmap?13:method==Mode::Stored?9:1;
@@ -223,6 +223,17 @@ Compression::Compression(Bytes attribute, uint64_t resourceSize, Reader resource
 }
 bool Compression::UsesResource() const {
     return type_ == 4 || type_ == 8 || type_ == 10 || type_ == 12 || type_ == 14;
+}
+bool IsInlineCompression(const Bytes& bytes,uint64_t logicalSize) {
+    if(bytes.size()>InlineCompressionLimit)return false;
+    Compression descriptor(bytes,0,{});
+    return !descriptor.UsesResource()&&descriptor.Size()==logicalSize;
+}
+void ValidateInlineCompression(const Bytes& bytes,uint64_t logicalSize) {
+    Check(IsInlineCompression(bytes,logicalSize),"Invalid inline compression in transfer");
+    Compression decoder(bytes,0,{});
+    uint8_t tail;
+    if(logicalSize)decoder.Read(logicalSize-1,&tail,1);
 }
 Bytes Compression::Resource(uint64_t offset, size_t n) {
     Check(Range(offset, n, resourceSize_), "decmpfs resource offset outside fork");

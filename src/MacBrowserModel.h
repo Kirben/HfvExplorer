@@ -26,6 +26,7 @@ struct Entry {
     bool directory = false, protectedFile = false, compressed = false, hardLink = false;
     std::string readError;
     Fork forks[2];
+    HfsPlus::Bytes inlineCompression; // Exact decmpfs bytes supplied by Stat for transfers.
     std::array<uint8_t,32> finder{};
     uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
     HfsPlus::AdditionalFileDates additionalDates;

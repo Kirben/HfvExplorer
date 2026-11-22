@@ -1620,8 +1620,8 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
                      const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates,
                      const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates,
-                     std::optional<PosixMetadata> posix,OverwriteScope scope,AdditionalFileDates additionalDates) {
-    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope,additionalDates);
+                     std::optional<PosixMetadata> posix,OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* inlineCompression) {
+    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope,additionalDates,inlineCompression);
 }
 void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                              const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
@@ -1631,14 +1631,14 @@ void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const By
     // the target bytes in its data fork.
     PutFile(parent,name,target.size()-1,0,[&](unsigned,uint64_t at,void* out,size_t size){
         memcpy(out,target.data()+at,size);
-    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode,additionalDates);
+    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode,additionalDates,nullptr);
 }
 uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
                          const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
                          const std::array<uint8_t,32>* finder,bool overwrite,
                          const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
                          const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
-                         OverwriteScope scope,AdditionalFileDates additionalDates) {
+                         OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* inlineCompression) {
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
@@ -1705,8 +1705,11 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
     std::unique_ptr<EncodedCompression> encoded;
-    // Transfers supply logical forks. Re-encode compressed source data in the
-    // destination format, independently of the previous destination entry.
+    if(inlineCompression){
+        Check(compression==CompressionMode::CopyCompressed,"Inline compression requires a compressed copy");
+        ValidateInlineCompression(*inlineCompression,dataSize);
+        desired[u"com.apple.decmpfs"]=*inlineCompression;
+    }
     auto method=compression==CompressionMode::CopyCompressed?CompressionMode::Zlib:compression;
     if(method==CompressionMode::Preserve&&e.compressed){
         auto oldAttribute=p.GetAttributes(existing).at(u"com.apple.decmpfs");
@@ -1714,7 +1717,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         auto a=oldAttribute.data()+4;uint32_t type=uint32_t(a[0])|uint32_t(a[1])<<8|uint32_t(a[2])<<16|uint32_t(a[3])<<24;
         method=type==3||type==4?CompressionMode::Zlib:type==7||type==8?CompressionMode::Lzvn:type==11||type==12?CompressionMode::Lzfse:type==13||type==14?CompressionMode::Lzbitmap:type==1&&dataSize<=3786?CompressionMode::StoredInline:CompressionMode::Stored;
     }
-    if(method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
+    if(!inlineCompression&&method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
         encoded.reset(new EncodedCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);},method,
             resourceSize?EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource));
         if(encoded->Attribute().empty()){
@@ -1724,11 +1727,12 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         }
     }
     if(encoded)desired[u"com.apple.decmpfs"]=encoded->Attribute();
+    const bool compressedOutput=encoded||inlineCompression;
     if (finder)
         e.finder = *finder;
     if(symbolicLink)memcpy(e.finder.data(),"slnkrhap",8);
     return p.Mutate(fault,[&]{
-        uint64_t sizes[] = {encoded?0:dataSize, encoded&&encoded->UsesResource()?encoded->ResourceSize():resourceSize};
+        uint64_t sizes[] = {compressedOutput?0:dataSize, encoded&&encoded->UsesResource()?encoded->ResourceSize():resourceSize};
         // Reserve both replacement forks while the old forks are still live.
         // If either allocation fails, the transaction rolls back before writing payload.
         for (unsigned f = 0; f < 2; ++f)
@@ -1776,8 +1780,8 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         P32(timeRecord->value.data()+12,Time::Encode(e.created,expanded));P32(timeRecord->value.data()+16,Time::Encode(e.modified,expanded));
         if(additionalDates.accessed)P32(timeRecord->value.data()+24,Time::Encode(*additionalDates.accessed,expanded));
         if(additionalDates.changed)P32(timeRecord->value.data()+20,Time::Encode(*additionalDates.changed,expanded));
-        e.compressed=bool(encoded);p.entries[e.id]=e;
-        auto flags=p.CatalogRecord(e.id);flags->value[41]=uint8_t((flags->value[41]&~0x20)|(encoded?0x20:0));
+        e.compressed=compressedOutput;p.entries[e.id]=e;
+        auto flags=p.CatalogRecord(e.id);flags->value[41]=uint8_t((flags->value[41]&~0x20)|(compressedOutput?0x20:0));
         p.ReplaceAttributes(e.id,desired,true);
         p.Overflow(e.id, 0, e.forks[0]);
         p.Overflow(e.id, 1, e.forks[1]);

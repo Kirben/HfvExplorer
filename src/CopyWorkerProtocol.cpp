@@ -3,6 +3,7 @@
 #include "CopyWorkerProtocol.h"
 #include "FileOperationWorkerPolicy.h"
 #include "StorageLocation.h"
+#include "HfsPlusCompression.h"
 
 namespace CopyWorkerProtocol {
 using namespace FileOperations;
@@ -307,6 +308,7 @@ void EncodeEntry(Data& d, const Entry& e) {
     if(e.additionalDates.changed)d.put(*e.additionalDates.changed);
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
+    d.put(std::string(e.inlineCompression.begin(),e.inlineCompression.end()));
     d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
     d.put(e.posix.has_value());
     if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);d.put(e.posix->protection);d.put(e.posix->flags);d.put(uint8_t(e.posix->special));d.put(e.posix->device);}
@@ -320,6 +322,10 @@ Entry DecodeEntry(Data& d) {
     if(d.flag())e.additionalDates.changed=d.get();
     e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
     e.forks[0].size=d.get(); e.forks[1].size=d.get();
+    const auto compression=d.text();
+    Check(compression.empty()||(e.compressed&&compression.size()<=HfsPlus::InlineCompressionLimit),
+          "Invalid inline compression metadata");
+    e.inlineCompression.assign(compression.begin(),compression.end());
     auto finder=d.text();
     Check(finder.size()==e.finder.size(), "Invalid Finder metadata length");
     memcpy(e.finder.data(),finder.data(),finder.size());

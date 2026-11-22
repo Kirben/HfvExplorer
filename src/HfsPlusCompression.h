@@ -5,13 +5,17 @@ namespace HfsPlus {
 // Plans decmpfs output in 64 KiB units before any filesystem mutation.
 // Re-encoding validates per-unit checksums so a changing input cannot publish
 // a resource table that describes different data. Memory is bounded by the table.
+inline constexpr size_t InlineCompressionLimit = 3802;
+bool IsInlineCompression(const Bytes&, uint64_t logicalSize);
+void ValidateInlineCompression(const Bytes&, uint64_t logicalSize);
+
 class EncodedCompression {
 public:
     using Reader=std::function<void(uint64_t,void*,size_t)>;
     enum class Layout { InlineOrResource, InlineOnly };
     // An empty attribute means the requested inline-only encoding would not fit.
     EncodedCompression(uint64_t size,Reader,Volume::CompressionMode = Volume::CompressionMode::Zlib,
-                       Layout = Layout::InlineOrResource);
+                       Layout = Layout::InlineOrResource, size_t inlineLimit = InlineCompressionLimit);
     const Bytes& Attribute()const{return attribute_;}
     bool UsesResource()const{return !units_.empty();}
     uint64_t ResourceSize()const{return resourceSize_;}

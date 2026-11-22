@@ -187,7 +187,19 @@ public:
     bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found) override {
         return FindChild(parent,HfsPlus::Normalize(entry.name,CaseSensitive()),found);
     }
-    Entry Stat(uint32_t id) override { Call call(*this);Ready(); return Describe(volume_->Stat(id)); }
+    Entry Stat(uint32_t id) override {
+        Call call(*this);Ready();
+        auto entry=Describe(volume_->Stat(id));
+        if(entry.compressed&&entry.readError.empty()){
+            const auto attributes=volume_->GetAttributes(id);
+            const auto found=attributes.find(u"com.apple.decmpfs");
+            if(found!=attributes.end()&&found->second.size()<=HfsPlus::InlineCompressionLimit){
+                HfsPlus::Bytes bytes(found->second);
+                if(HfsPlus::IsInlineCompression(bytes,entry.forks[0].size))entry.inlineCompression=std::move(bytes);
+            }
+        }
+        return entry;
+    }
     std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t id) override {
         Call call(*this);Ready();return volume_->SymbolicLinkTarget(id);
     }
@@ -241,7 +253,8 @@ public:
             }
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
                                 e.attributesKnown?&e.attributes:nullptr,compression,
-                                e.datesValid?&dates:nullptr,posix,e.hfsOverwriteScope,e.additionalDates);
+                                e.datesValid?&dates:nullptr,posix,e.hfsOverwriteScope,e.additionalDates,
+                                e.compressed&&!e.inlineCompression.empty()?&e.inlineCompression:nullptr);
         });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
@@ -453,7 +466,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         job.progress(progress);
         return true;
     }
-    if(hfsPlus&&std::string_view(src.Kind())=="APFS"&&entry.compressed&&entry.forks[1].size){
+    if(hfsPlus&&std::string_view(src.Kind())=="APFS"&&entry.compressed&&entry.forks[1].size&&entry.inlineCompression.empty()){
         // Check before handing the write to a persistent HFS worker. Both
         // encoders see the same logical fork under the transfer's read lease.
         const HfsPlus::EncodedCompression inlineEncoding(entry.forks[0].size,
@@ -479,6 +492,10 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
+    const auto remaining=progress.fileTotal-progress.fileBytes;
+    progress.fileBytes+=remaining;
+    progress.bytes+=remaining;
+    progress.processed+=remaining;
     if(track)copies.emplace(key,dst.Stat(published));++progress.files; job.progress(progress); return true;
 }
 }
