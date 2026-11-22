@@ -3030,17 +3030,28 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                         return std::make_pair(std::move(volume),root);
                     };
                     auto [restored,liveRoot]=reopen();
-                    for(const auto id:{first.id,second.id}){
-                        Storage::Job copy;
-                        Check(MacBrowser::Copy(*target,id,*restored,liveRoot,copy),"APFS clone restoration failed");
-                    }
+                    const bool crossFolder=destination==Destination::Plain;
+                    auto firstParent=crossFolder?restored->MakeDirectory(liveRoot,u"Other folder"):liveRoot;
+                    Storage::Job copyFirst;
+                    Check(MacBrowser::Copy(*target,first.id,*restored,firstParent,copyFirst),"APFS first clone copy failed");
+                    restored.reset();
+                    auto secondMount=reopen();
+                    restored=std::move(secondMount.first);
+                    Storage::Job copySecond;
+                    Check(MacBrowser::Copy(*target,second.id,*restored,secondMount.second,copySecond),
+                          "APFS second clone copy failed");
                     restored.reset();
                     auto reopened=reopen();
                     restored=std::move(reopened.first);
                     const auto reopenedRoot=reopened.second;
-                    MacBrowser::Entry restoredFirst,restoredSecond;
+                    MacBrowser::Entry restoredFirst,restoredSecond,otherFolder;
+                    if(crossFolder){
+                        Check(restored->FindChild(reopenedRoot,u"Other folder",otherFolder),
+                              "Missing cross-folder APFS clone partner");
+                        firstParent=otherFolder.id;
+                    }else firstParent=reopenedRoot;
                     Check(
-                          restored->FindChild(reopenedRoot,first.name,restoredFirst)&&restored->FindChild(reopenedRoot,second.name,restoredSecond)&&
+                          restored->FindChild(firstParent,first.name,restoredFirst)&&restored->FindChild(reopenedRoot,second.name,restoredSecond)&&
                           restoredFirst.resolvedId!=restoredSecond.resolvedId&&
                           bytes(*restored,restoredFirst)==clones[0]&&bytes(*restored,restoredSecond)==clones[1],
                           "Restored APFS clones lost independent identity or current file data");

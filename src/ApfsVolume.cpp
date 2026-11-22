@@ -149,7 +149,7 @@ class Catalog {
     const Mounted& volume;
     ObjectMap map;
     using Visit=std::function<void(Record)>;
-    void Scan(uint64_t oid,unsigned level,bool root,TreeLayout layout,uint64_t wanted,
+    void Scan(uint64_t oid,unsigned level,bool root,TreeLayout layout,std::optional<uint64_t> wanted,
               std::set<uint64_t>& seen,const Visit& visit)const
     {
         Check(seen.insert(oid).second,"Repeated APFS filesystem node");
@@ -167,14 +167,14 @@ class Catalog {
             Check(current>=previous,"Unordered APFS filesystem keys");
             if(node.Level()){
                 Check(record.value.size==8,"Invalid APFS child record");
-                if(child&&previous<=wanted&&wanted<=current)
+                if(child&&(!wanted||(previous<=*wanted&&*wanted<=current)))
                     Scan(child,node.Level()-1,false,node.Layout(),wanted,seen,visit);
                 child=Le64(record.value.data);
                 Check(child,"Missing APFS filesystem child identifier");
-            }else if(current==wanted)visit(record);
+            }else if(!wanted||current==*wanted)visit(record);
             previous=current;
         }
-        if(child&&previous<=wanted)
+        if(child&&(!wanted||previous<=*wanted))
             Scan(child,node.Level()-1,false,node.Layout(),wanted,seen,visit);
     }
 public:
@@ -185,6 +185,17 @@ public:
         std::set<uint64_t> seen;
         Scan(volume.tree,0,true,{},oid,seen,[&](Record record){
             if(Le64(record.key.data)>>60==type)visit(record);
+        });
+    }
+    void VisitNamedAttribute(std::string_view name,Storage::Job& job,const std::function<void(uint64_t)>& visit)const
+    {
+        std::set<uint64_t> seen;
+        Scan(volume.tree,0,true,{},std::nullopt,seen,[&](Record record){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto raw=Le64(record.key.data);
+            if((raw>>60)==4&&record.key.size==11+name.size()&&
+               Le16(record.key.data+8)==name.size()+1&&record.key.data[10+name.size()]==0&&
+               !memcmp(record.key.data+10,name.data(),name.size()))visit(raw&IdMask);
         });
     }
 };
@@ -1585,11 +1596,13 @@ public:
             });
             if(allowPrompt&&!compression&&!special&&
                entry.attributes.count(MacBrowser::ApfsCloneLayoutAttribute)){
-                ListDirectory(parent);
-                for(const auto& [row,candidate]:entries){
-                    if(candidate.mount!=mount||(found&&candidate.oid==At(existing.id).oid)||
-                       !candidate.attributes.count(MacBrowser::ApfsCloneLayoutAttribute))continue;
+                const Catalog catalog(*source,container,mounts[mount]);
+                const auto overwritten=found?At(existing.id).oid:0;
+                catalog.VisitNamedAttribute("org.hfvexplorer.apfs-clone-layout",job,[&](uint64_t oid){
+                    if(oid==overwritten)return;
+                    const auto candidate=LoadInode(catalog,mount,oid);
                     auto partner=candidate.entry;
+                    if(!partner.linkCount||!candidate.stream||!partner.readError.empty())return;
                     const auto& marker=candidate.attributes.at(MacBrowser::ApfsCloneLayoutAttribute);
                     if(marker.stream)
                         partner.attributes.emplace(MacBrowser::ApfsCloneLayoutAttribute,
@@ -1598,8 +1611,9 @@ public:
                             },true));
                     else partner.attributes.emplace(MacBrowser::ApfsCloneLayoutAttribute,marker.embedded);
                     const auto spans=MacBrowser::MatchApfsCloneRanges(entry,reader,partner,
-                        [&](unsigned fork,uint64_t at,void* output,size_t size){Read(row,fork,at,output,size);},job);
-                    if(spans.empty())continue;
+                        [&](unsigned,uint64_t at,void* output,size_t size){ReadStream(mount,candidate.stream,at,output,size);},job);
+                    if(spans.empty())return;
+                    std::vector<SharedBlockRange> available;
                     const auto holes=data.KnownZeroRanges();
                     for(const auto& span:spans){
                         if(std::any_of(holes.begin(),holes.end(),[&](const auto& hole){
@@ -1612,14 +1626,22 @@ public:
                             const auto end=(std::min)(span.partnerOffset+span.length,extent.offset+extent.length);
                             if(begin>=end)continue;
                             constexpr auto block=WriterDisk::Block;
-                            shared.push_back({span.offset+(begin-span.partnerOffset),
-                                              extent.block+(begin-extent.offset)/block,(end-begin)/block,candidate.oid});
+                            available.push_back({span.offset+(begin-span.partnerOffset),
+                                                 extent.block+(begin-extent.offset)/block,(end-begin)/block,oid});
                         }
                     }
-                    if(!shared.empty())break;
-                }
+                    if(hasSnapshots&&!available.empty())
+                        available=SnapshotCloneReferenceRanges(*source,WriteTarget(parent),available);
+                    for(const auto& range:available){
+                        constexpr auto block=WriterDisk::Block;
+                        const auto end=range.offset+range.blocks*block;
+                        if(std::none_of(shared.begin(),shared.end(),[&](const auto& previous){
+                            return range.offset<previous.offset+previous.blocks*block&&previous.offset<end;
+                        }))shared.push_back(range);
+                    }
+                });
+                std::sort(shared.begin(),shared.end(),[](const auto& a,const auto& b){return a.offset<b.offset;});
             }
-            if(hasSnapshots&&!shared.empty())shared=SnapshotCloneReferenceRanges(*source,WriteTarget(parent),shared);
             const bool restoresSharing=!shared.empty();
             data.Share(std::move(shared));
             if(found){
