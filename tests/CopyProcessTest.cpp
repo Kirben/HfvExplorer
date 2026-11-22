@@ -237,6 +237,12 @@ void TestVolumeSessionProtocol()
     auto transfer=Protocol::EncodePut({2,true,true,0,0,true},linked);
     const auto decodedTransfer=Protocol::DecodePut(transfer);
     Check(decodedTransfer.entry.replaceHardLinkName,"Hard-link name replacement intent did not survive the wire");
+    auto ordinaryTransfer=Protocol::EncodePut({2,true,true,0,0,true},entry);
+    const auto decodedOrdinary=Protocol::DecodePut(ordinaryTransfer);
+    Check(decodedOrdinary.entry.replaceHardLinkName&&!decodedOrdinary.entry.hardLink,
+          "An ordinary file must be able to replace a destination hard-link name");
+    reject([&]{auto data=Protocol::EncodePut({2,false,true,0,0,true},entry);Protocol::DecodePut(data);},
+           "accepted hard-link name replacement without overwrite approval");
     reject([&]{auto data=Protocol::EncodePut({2,true,true,42,0,true},linked);Protocol::DecodePut(data);},
            "accepted an alias replacement during a resource fork edit");
     auto put=Protocol::EncodePut({2,true,true,42,0},entry);
@@ -1183,6 +1189,26 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
         Storage::Job job;
         Apfs::Format(*disk,u"Hard-link source",true,job);
     }
+    constexpr auto overwriteName=u"Ordinary overwrite";
+    constexpr uint64_t replacementSize=4099,originalSize=3203;
+    constexpr BYTE replacementBias=93,originalBias=117;
+    const auto verifyOverwrite=[&](Volume& volume,bool replaced){
+        Entry folder,selected,firstAlias,secondAlias;
+        Check(volume.FindChild(2,u"Copied groups",folder)&&
+              volume.FindChild(folder.id,overwriteName,selected)&&
+              volume.FindChild(2,u"Retained first alias",firstAlias)&&
+              volume.FindChild(2,u"Retained second alias",secondAlias),
+              "Missing selected HFS name or its surviving aliases");
+        Check(firstAlias.hardLink&&secondAlias.hardLink&&firstAlias.resolvedId==secondAlias.resolvedId&&
+              firstAlias.linkCount==(replaced?2u:3u)&&secondAlias.linkCount==firstAlias.linkCount,
+              "HFS overwrite changed the inode shared by surviving names");
+        Check(replaced?(!selected.hardLink&&selected.resolvedId!=firstAlias.resolvedId):
+                       (selected.hardLink&&selected.resolvedId==firstAlias.resolvedId&&selected.linkCount==3),
+              "HFS overwrite did not isolate the selected name");
+        Verify(volume,firstAlias.id,originalSize,originalBias);
+        Verify(volume,secondAlias.id,originalSize,originalBias);
+        Verify(volume,selected.id,replaced?replacementSize:originalSize,replaced?replacementBias:originalBias);
+    };
     const size_t sizes[]={5003,7321};
     const std::u16string names[][3]={{u"Alpha",u"Beta",u"Gamma"},{u"Delta",u"Epsilon",u"Zeta"}};
     const auto pattern=[](unsigned group,unsigned fork,uint64_t at){
@@ -1191,6 +1217,7 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
     {
         auto volume=OpenBrowserImage(sourcePath);
         Check(volume&&volume->Supports().CanCreateHardLinks(),"Could not seed the APFS link fixture");
+        Put(*volume,2,overwriteName,replacementSize,replacementBias);
         const auto a=volume->MakeDirectory(2,u"APFS Originals");
         const auto b=volume->MakeDirectory(2,u"APFS Aliases");
         for(unsigned group=0;group<2;++group){
@@ -1220,6 +1247,39 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
             const auto folder=target->MakeDirectory(2,u"Copied groups");
             const auto victim=Put(*target,folder,names[0][0],513,145);
             target->MakeHardLink(victim,2,u"Unrelated alias");
+            const auto original=Put(*target,folder,overwriteName,originalSize,originalBias);
+            const auto firstAlias=target->MakeHardLink(original,2,u"Retained first alias");
+            target->MakeHardLink(firstAlias,2,u"Retained second alias");
+            Entry replacement;
+            Check(source->FindChild(2,overwriteName,replacement)&&!replacement.hardLink,
+                  "Missing ordinary APFS replacement file");
+            const auto overwrite=[&](Storage::Job& job,Completion& completion){
+                return ExecuteInWorker(OrdinaryCopy{{Native(source,replacement.id)},Native(target,folder)},job,completion);
+            };
+            const auto worker=VolumeSession::VolumeSessionPidForTest(target);
+            bool readResource=false;
+            Storage::Job cancellation;
+            cancellation.transport([&](const Storage::Progress& progress){
+                if(progress.fileBytes>replacementSize){
+                    readResource=true;
+                    cancellation.cancel();
+                }
+            },[](const auto&){return Storage::ConflictChoice::Replace;});
+            Completion aborted;
+            const auto cancelled=overwrite(cancellation,aborted);
+            Check(readResource&&cancelled.outcome==Storage::Outcome::Cancelled&&!cancelled.partial&&
+                  !aborted.complete&&VolumeSession::VolumeSessionPidForTest(target)==worker,
+                  "Cancelling selected-name replacement did not retain the original group and worker");
+            verifyOverwrite(*target,false);
+
+            unsigned overwritePrompts=0;
+            Storage::Job replace;
+            replace.transport({},[&](const auto&){++overwritePrompts;return Storage::ConflictChoice::Replace;});
+            Completion overwritten;
+            const auto replacementResult=overwrite(replace,overwritten);
+            if(replacementResult.code)throw HfsPlus::Error(replacementResult.message);
+            Check(overwritten.complete&&overwritePrompts==1,"Missing selected-name overwrite approval");
+
             std::vector<Location> selected;
             for(unsigned group=0;group<2;++group){
                 uint32_t inode=0;
@@ -1245,6 +1305,7 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
         Check(target&&target->FindChild(2,u"Copied groups",folder)&&target->FindChild(2,u"Unrelated alias",unrelated),
               "Missing reopened HFS link fixtures");
         Verify(*target,unrelated.id,513,145);
+        verifyOverwrite(*target,true);
         std::array<uint32_t,2> inodes{};
         for(unsigned group=0;group<2;++group){
             std::set<uint32_t> namesSeen;
@@ -1266,6 +1327,7 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
         }
         Check(inodes[0]!=inodes[1],"Independent APFS hard-link groups merged on HFS");
     }
+    fprintf(report,"PASS: ordinary APFS overwrite replaces only one HFS+ or HFSX name; cancellation and reopening preserve both forks of its other aliases.\n");
     if(fixture)fprintf(report,"PASS: hard-link copies from a disposable macOS-created APFS image.\n");
     fprintf(report,"PASS: APFS copies into HFS+ and both HFSX variants share one inode per link group and preserve both forks after reopening. An overwritten name is detached from unrelated aliases.\n");
 }

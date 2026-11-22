@@ -1622,6 +1622,8 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     uint32_t existing = p.Existing(parent, e.name);
     Fork old[2];
     uint32_t visible=existing,detached=0;
+    if(scope==OverwriteScope::SelectedName)
+        Check(existing&&p.LinkKind(existing)==1,"The HFS+ hard-link destination changed after overwrite approval");
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
         if(symbolicLink){
@@ -1635,9 +1637,9 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         const auto& current=p.Get(existing);
         Check(!current.directory, "Cannot overwrite an HFS+ directory");
         p.RemovalParent(parent);
-        if(scope==OverwriteScope::SelectedName&&visible!=existing){
-            // The incoming group needs its own inode. Siblings of this
-            // destination name must keep their original inode and forks.
+        if(scope==OverwriteScope::SelectedName){
+            // Replace the catalog name in the same transaction as the new
+            // file. The other names keep their original inode and forks.
             e.name=p.Get(visible).name;
             detached=visible;
             existing=visible=0;

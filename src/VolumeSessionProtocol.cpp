@@ -307,8 +307,8 @@ PutRequest DecodePut(Data& packet)
     packet.end();
     Check(!header.original||(header.replace&&entry.id==header.original),"Invalid resource fork replacement");
     Check(!header.source||entry.id==header.source,"Invalid in-worker fork source");
-    Check(!header.replaceHardLinkName||(header.replace&&!header.original&&!entry.directory&&
-          entry.hardLink&&entry.linkCount>1),"Invalid hard-link name replacement");
+    Check(!header.replaceHardLinkName||(header.replace&&!header.original&&!entry.directory&&!entry.symbolicLink),
+          "Invalid hard-link name replacement");
     entry.attributesKnown=header.attributesKnown;
     entry.replaceHardLinkName=header.replaceHardLinkName;
     return {header,std::move(entry)};

@@ -347,8 +347,14 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     }
 
     Check(!found || !existing.directory, "A folder blocks the destination file");
+    const std::string_view destinationKind=dst.Kind();
+    const bool replaceHardLinkName=found&&existing.hardLink&&std::string_view(src.Kind())=="APFS"&&
+                                   (destinationKind=="HFS+"||destinationKind=="HFSX");
     if (found) {
-        auto choice = job.replace(BrowserPresentation::Utf8(entry.name)+(existing.hardLink?" (shared by "+std::to_string(existing.linkCount)+" hard links)":""));
+        auto label=BrowserPresentation::Utf8(entry.name);
+        if(replaceHardLinkName)label+=" (replace this hard-link name only)";
+        else if(existing.hardLink)label+=" (shared by "+std::to_string(existing.linkCount)+" hard links)";
+        auto choice = job.replace(label);
         if (choice == Storage::ConflictChoice::Cancel) throw Storage::Cancelled();
         if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped;progress.processed+=entry.forks[0].size+entry.forks[1].size;job.progress(progress);return false; }
     }
@@ -359,9 +365,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
-    // APFS copies reconstruct each selected group independently. Its first
-    // name must not claim an HFS inode still used by other destination names.
-    outgoing.replaceHardLinkName=found&&existing.hardLink&&track&&std::string_view(src.Kind())=="APFS";
+    outgoing.replaceHardLinkName=replaceHardLinkName;
     if(plan.linkTarget){
         dst.PutSymbolicLink(parent,outgoing,*plan.linkTarget,job);
         ++progress.files;
