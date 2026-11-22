@@ -3090,6 +3090,85 @@ void SnapshotLiveWrites(const std::wstring& path,FILE* report,const char16_t* di
                         Apfs::InspectFreeQueueAllocation(*rawRestored,*Apfs::Probe(*rawRestored));
                     }
                 }
+                if(kind==Format::HfsPlus){
+                    constexpr uint64_t block=4096;
+                    constexpr auto size=3*block;
+                    const auto provenance=Bytes(first.attributes.at(MacBrowser::ApfsCloneLayoutAttribute));
+                    const auto marker=[&](uint64_t offset,uint64_t length){
+                        Check(provenance.size()>=64&&Apfs::Le64(provenance.data()+48)==block,
+                              "Unexpected APFS clone provenance fixture geometry");
+                        Bytes value(provenance.begin(),provenance.begin()+64);
+                        value.resize(88);
+                        Apfs::WriterDisk::Set(value,56,size,8);
+                        Apfs::WriterDisk::Set(value,64,offset,8);
+                        Apfs::WriterDisk::Set(value,72,length,8);
+                        Apfs::WriterDisk::Set(value,80,100+offset/block,8);
+                        return value;
+                    };
+                    const auto output=hfsPath+L"-overlap.apfs";
+                    {
+                        auto image=CreateFormatOutput(output.c_str(),32*1024*1024);
+                        Storage::Job format;
+                        Apfs::Format(*image,u"Overlapping clone partners",true,format);
+                        image->Keep();
+                    }
+                    auto destination=MacBrowser::OpenBrowserImage(output);
+                    Check(bool(destination),"Cannot mount overlapping clone destination");
+                    const auto data=[block](unsigned,uint64_t at,void* out,size_t count){
+                        auto* p=static_cast<uint8_t*>(out);
+                        for(size_t i=0;i<count;++i)p[i]=static_cast<uint8_t>((at+i)/block+1);
+                    };
+                    MacBrowser::Entry item;
+                    item.forks[0].size=size;
+                    item.name=u"Left";
+                    const auto a=destination->Put(2,item,data,false);
+                    item.name=u"Right";
+                    const auto b=destination->Put(2,item,data,false);
+                    destination->SetAttributes(a,{{MacBrowser::ApfsCloneLayoutAttribute,marker(0,2*block)}});
+                    destination->SetAttributes(b,{{MacBrowser::ApfsCloneLayoutAttribute,marker(block,2*block)}});
+                    item.name=u"Incoming";
+                    item.attributes={{MacBrowser::ApfsCloneLayoutAttribute,marker(0,size)}};
+                    item.attributesKnown=true;
+                    const auto input=target->Put(2,item,data,false);
+                    Storage::Job copy;
+                    Check(MacBrowser::Copy(*target,input,*destination,2,copy),"Overlapping clone copy failed");
+                    destination.reset();
+                    destination=MacBrowser::OpenBrowserImage(output);
+                    Check(bool(destination),"Cannot reopen overlapping clone destination");
+                    const auto lookup=[&](const char16_t* name){
+                        MacBrowser::Entry entry;
+                        Check(destination->FindChild(2,name,entry),"Missing overlapping clone file");
+                        entry.attributes[MacBrowser::ApfsCloneLayoutAttribute]=destination->ApfsCloneLayout(entry.id);
+                        return entry;
+                    };
+                    const auto incoming=lookup(u"Incoming");
+                    const auto read=[&](uint32_t id)->MacBrowser::Reader{
+                        return [&,id](unsigned fork,uint64_t at,void* out,size_t count){
+                            destination->Read(id,fork,at,out,count);
+                        };
+                    };
+                    for(const auto* name:{u"Left",u"Right"}){
+                        const auto partner=lookup(name);
+                        const bool left=partner.name==u"Left";
+                        const auto actual=MacBrowser::MatchApfsCloneRanges(incoming,read(incoming.id),
+                                                                           partner,read(partner.id),match);
+                        Check(actual.size()==1&&actual.front().offset==(left?0:2*block)&&
+                              actual.front().length==(left?2*block:block),
+                              "Clone overlap discarded a non-overlapping block");
+                    }
+                    destination->Remove(incoming.id);
+                    destination.reset();
+                    destination=MacBrowser::OpenBrowserImage(output);
+                    Check(bool(destination),"Cannot reopen surviving clone partners");
+                    Bytes expected(size);
+                    data(0,0,expected.data(),expected.size());
+                    for(const auto* name:{u"Left",u"Right"})
+                        Check(bytes(*destination,lookup(name))==expected,"Deleting the new clone changed a partner");
+                    destination.reset();
+                    auto raw=OpenImage(output.c_str(),false);
+                    Apfs::InspectFreeQueueAllocation(*raw,*Apfs::Probe(*raw));
+                    fprintf(report,"PASS: overlapping APFS clone partners contribute distinct verified blocks; both survive deletion and reopen.\n");
+                }
                 const auto range=shared.front();
                 const auto changed=MacBrowser::MatchApfsCloneRanges(first,left,second,
                     [&](unsigned fork,uint64_t at,void* output,size_t count){

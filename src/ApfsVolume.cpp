@@ -1597,6 +1597,7 @@ public:
             if(allowPrompt&&!compression&&!special&&
                entry.attributes.count(MacBrowser::ApfsCloneLayoutAttribute)){
                 const Catalog catalog(*source,container,mounts[mount]);
+                std::vector<SharedBlockRange> available;
                 const auto overwritten=found?At(existing.id).oid:0;
                 catalog.VisitNamedAttribute("org.hfvexplorer.apfs-clone-layout",job,[&](uint64_t oid){
                     if(oid==overwritten)return;
@@ -1613,7 +1614,6 @@ public:
                     const auto spans=MacBrowser::MatchApfsCloneRanges(entry,reader,partner,
                         [&](unsigned,uint64_t at,void* output,size_t size){ReadStream(mount,candidate.stream,at,output,size);},job);
                     if(spans.empty())return;
-                    std::vector<SharedBlockRange> available;
                     const auto holes=data.KnownZeroRanges();
                     for(const auto& span:spans){
                         if(std::any_of(holes.begin(),holes.end(),[&](const auto& hole){
@@ -1630,17 +1630,30 @@ public:
                                                  extent.block+(begin-extent.offset)/block,(end-begin)/block,oid});
                         }
                     }
-                    if(hasSnapshots&&!available.empty())
-                        available=SnapshotCloneReferenceRanges(*source,WriteTarget(parent),available);
-                    for(const auto& range:available){
-                        constexpr auto block=WriterDisk::Block;
-                        const auto end=range.offset+range.blocks*block;
-                        if(std::none_of(shared.begin(),shared.end(),[&](const auto& previous){
-                            return range.offset<previous.offset+previous.blocks*block&&previous.offset<end;
-                        }))shared.push_back(range);
-                    }
                 });
-                std::sort(shared.begin(),shared.end(),[](const auto& a,const auto& b){return a.offset<b.offset;});
+                if(hasSnapshots&&!available.empty())
+                    available=SnapshotCloneReferenceRanges(*source,WriteTarget(parent),available);
+                std::stable_sort(available.begin(),available.end(),[](const auto& a,const auto& b){
+                    return a.offset<b.offset||(a.offset==b.offset&&a.blocks>b.blocks);
+                });
+                constexpr auto block=WriterDisk::Block;
+                uint64_t covered=0;
+                for(auto range:available){
+                    if(job.cancelled())throw Storage::Cancelled();
+                    const auto end=range.offset+range.blocks*block;
+                    if(end<=covered)continue;
+                    if(range.offset<covered){
+                        const auto skipped=(covered-range.offset)/block;
+                        range.offset=covered;
+                        range.physical+=skipped;
+                        range.blocks-=skipped;
+                        // A clipped historical extent must still satisfy snapshot boundaries.
+                        if(hasSnapshots&&SnapshotCloneReferenceRanges(*source,WriteTarget(parent),{range}).empty())
+                            continue;
+                    }
+                    shared.push_back(range);
+                    covered=end;
+                }
             }
             const bool restoresSharing=!shared.empty();
             data.Share(std::move(shared));
