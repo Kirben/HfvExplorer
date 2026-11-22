@@ -1820,7 +1820,20 @@ uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16stri
     auto& p=*p_;p.Guard();parent=p.WriteParent(parent);auto normalized=Normalize(name,p.caseSensitive);auto existing=p.Existing(parent,normalized);Check(!existing||replace,"HFS+ name already exists");
     auto visible=p.Get(source);uint32_t inode=p.Content(source);auto original=p.Get(inode);Check(inode!=2,"Cannot hard-link the volume root");
     if(original.directory)Check(!p.DirectoryReaches(inode,parent),"Directory hard link would create a cycle");
-    if(existing){Check(!p.Get(p.Resolve(existing)).directory,"Cannot replace a folder with a hard link");p.Content(existing);p.RemovalParent(parent);if(p.Resolve(existing)==inode)return existing;}
+    if(existing){
+        const auto& target=p.Get(existing);
+        uint32_t destinationInode=existing;
+        if(target.symbolicLink){
+            Check(!original.directory&&!target.compressed&&!target.forks[1].size,
+                  "Cannot replace this symbolic link with a hard link");
+            p.Mutable(target,false,true);
+        }else{
+            Check(!p.Get(p.Resolve(existing)).directory,"Cannot replace a folder with a hard link");
+            destinationInode=p.Content(existing);
+        }
+        p.RemovalParent(parent);
+        if(destinationInode==inode)return existing;
+    }
     bool linked=inode!=source;std::vector<uint32_t> links;if(linked)links=p.ValidateLinks(inode);
     Check(!linked||links.size()<32767,"HFS+ supports at most 32767 hard links to an inode");
     bool chained=!linked||(U16(p.CatalogRecord(inode)->value.data()+2)&0x20)!=0;

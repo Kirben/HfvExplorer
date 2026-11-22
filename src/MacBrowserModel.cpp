@@ -794,8 +794,10 @@ uint32_t Volume::MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t pare
           (!copied.protectedFile||(original.protectedFile&&original.identity==copied.identity)),
           "Copied hard-link source disappeared or changed");
     if(approvedDestination){
+        Entry destination;
+        destination.name=name;
         Entry current;
-        Check(FindChild(parent,name,current)&&current.identity==approvedDestination->identity,
+        Check(FindTransferChild(parent,destination,current)&&current.identity==approvedDestination->identity,
               "The hard-link destination changed after overwrite approval");
     }
     return MakeHardLinkForTransfer(original.id,parent,name,approvedDestination!=nullptr,job);

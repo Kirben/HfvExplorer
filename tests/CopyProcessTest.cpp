@@ -1413,7 +1413,22 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
         Verify(volume,selected.id,replaced?replacementSize:originalSize,replaced?replacementBias:originalBias);
     };
     const size_t sizes[]={5003,7321};
-    const std::u16string names[][3]={{u"Alpha",u"Beta",u"Gamma"},{u"Delta",u"Epsilon",u"Zeta"}};
+    const std::u16string names[][3]={{u"Alpha",u"Beta",u"Gamma"},{u"Delta",u"\u00c9psilon",u"Zeta"}};
+    const std::array<std::u16string,3> referentNames{u"Target A",u"Target B",u"Target C"};
+    const std::array<std::string,3> paths{"../Target A","/Target B","../Target C"};
+    const auto linkTarget=[&](size_t index){
+        HfsPlus::Bytes bytes(paths[index].begin(),paths[index].end());
+        bytes.push_back(0);
+        return bytes;
+    };
+    const auto verifyReferents=[&](Volume& volume){
+        for(size_t index=0;index<referentNames.size();++index){
+            Entry referent;
+            Check(volume.FindChild(2,referentNames[index],referent)&&!referent.symbolicLink,
+                  "An HFS symlink referent was removed or replaced");
+            Verify(volume,referent.id,5111+index,BYTE(61+index));
+        }
+    };
     const auto pattern=[](unsigned group,unsigned fork,uint64_t at){
         return uint8_t(group*53+fork*71+at*17+(at>>8));
     };
@@ -1450,6 +1465,14 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
             const auto folder=target->MakeDirectory(2,u"Copied groups");
             const auto victim=Put(*target,folder,names[0][0],513,145);
             target->MakeHardLink(victim,2,u"Unrelated alias");
+            for(size_t index=0;index<referentNames.size();++index){
+                Put(*target,2,referentNames[index],5111+index,BYTE(61+index));
+                Entry link;
+                link.name=names[1][index];
+                link.symbolicLink=true;
+                Storage::Job seed;
+                target->PutSymbolicLink(folder,link,linkTarget(index),seed);
+            }
             const auto original=Put(*target,folder,overwriteName,originalSize,originalBias);
             const auto firstAlias=target->MakeHardLink(original,2,u"Retained first alias");
             target->MakeHardLink(firstAlias,2,u"Retained second alias");
@@ -1495,13 +1518,39 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
                     selected.push_back(Native(source,entry.id));
                 }
             }
+            const std::vector<Location> overSymlinks(selected.begin()+3,selected.end());
+            bool resourceStarted=false;
+            Storage::Job cancelGroup;
+            cancelGroup.transport([&](const Storage::Progress& progress){
+                if(progress.fileBytes>sizes[0]){
+                    resourceStarted=true;
+                    cancelGroup.cancel();
+                }
+            },[](const auto&){return Storage::ConflictChoice::Replace;});
+            Completion cancelledGroup;
+            const auto interrupted=ExecuteInWorker(OrdinaryCopy{overSymlinks,Native(target,folder)},
+                                                   cancelGroup,cancelledGroup);
+            Check(resourceStarted&&interrupted.outcome==Storage::Outcome::Cancelled&&!interrupted.partial&&
+                  !cancelledGroup.complete,"Expected cancellation before publishing the first copied group member");
+            target.reset();
+            target=OpenBrowserImage(targetPath);
+            Check(bool(target),"Could not reopen the cancelled HFS destination");
+            for(size_t index=0;index<paths.size();++index){
+                Entry retained;
+                const auto name=HfsPlus::Normalize(names[1][index],target->CaseSensitive());
+                Check(target->FindChild(folder,name,retained)&&retained.symbolicLink&&
+                      target->SymbolicLinkTarget(retained.id)==linkTarget(index),
+                      "Cancelling the group copy changed a destination symlink");
+            }
+            verifyReferents(*target);
+
             unsigned prompts=0;
             Storage::Job job;
             job.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
             Completion completion;
             const auto result=ExecuteInWorker(OrdinaryCopy{std::move(selected),Native(target,folder)},job,completion);
             if(result.code)throw HfsPlus::Error(result.message);
-            Check(completion.complete&&prompts==1,"Incomplete APFS hard-link copy or missing approval");
+            Check(completion.complete&&prompts==4,"Incomplete APFS hard-link copy or missing approval");
         }
         auto target=OpenBrowserImage(targetPath);
         Entry folder,unrelated;
@@ -1509,13 +1558,16 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
               "Missing reopened HFS link fixtures");
         Verify(*target,unrelated.id,513,145);
         verifyOverwrite(*target,true);
+        verifyReferents(*target);
         std::array<uint32_t,2> inodes{};
         for(unsigned group=0;group<2;++group){
             std::set<uint32_t> namesSeen;
             for(const auto& name:names[group]){
                 Entry entry;
-                Check(target->FindChild(folder.id,name,entry)&&entry.hardLink&&entry.linkCount==3&&
-                      namesSeen.insert(entry.id).second,"HFS did not reopen all three hard-link names");
+                const auto normalized=HfsPlus::Normalize(name,target->CaseSensitive());
+                Check(target->FindChild(folder.id,normalized,entry)&&!entry.symbolicLink&&entry.hardLink&&
+                      entry.linkCount==3&&namesSeen.insert(entry.id).second,
+                      "HFS did not reopen all three hard-link names");
                 if(!inodes[group])inodes[group]=entry.resolvedId;
                 Check(inodes[group]&&entry.resolvedId==inodes[group]&&entry.resolvedId!=unrelated.resolvedId,
                       "Copied HFS aliases did not share a new inode");
@@ -1533,6 +1585,7 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: ordinary APFS overwrite replaces only one HFS+ or HFSX name; cancellation and reopening preserve both forks of its other aliases.\n");
     if(fixture)fprintf(report,"PASS: hard-link copies from a disposable macOS-created APFS image.\n");
     fprintf(report,"PASS: APFS copies into HFS+ and both HFSX variants share one inode per link group and preserve both forks after reopening. An overwritten name is detached from unrelated aliases.\n");
+    fprintf(report,"PASS: APFS hard-link groups replace HFS+ and HFSX symlinks, preserve both forks and one shared inode, and leave all referents untouched. Cancellation during the first resource fork preserves every original symlink.\n");
 }
 
 void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
