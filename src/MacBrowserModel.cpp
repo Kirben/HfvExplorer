@@ -168,11 +168,13 @@ public:
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace) override {
         using Scope=HfsPlus::Volume::OverwriteScope;
+        using Mode=HfsPlus::Volume::CompressionMode;
         const auto scope=e.replaceHardLinkName?Scope::SelectedName:Scope::SharedInode;
+        const auto compression=e.compressed?Mode::CopyCompressed:Mode::Preserve;
         const std::array<uint64_t,2> dates{e.created,e.modified};
         return Mutate([&]{
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
-                                e.attributesKnown?&e.attributes:nullptr,HfsPlus::Volume::CompressionMode::Preserve,
+                                e.attributesKnown?&e.attributes:nullptr,compression,
                                 e.datesValid?&dates:nullptr,e.posix,scope);
         });
     }

@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
+#include "ApfsVolume.h"
 #include "HfsPlusDisk.h"
 #include "VolumeSession.h"
 #include "VolumeSessionProtocol.h"
@@ -1269,6 +1270,121 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS copies into HFS+ and both HFSX variants share one inode per link group and preserve both forks after reopening. An overwritten name is detached from unrelated aliases.\n");
 }
 
+void TestApfsToHfsCompression(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    using Bytes=HfsPlus::Bytes;
+    using Mode=HfsPlus::Volume::CompressionMode;
+    const auto sourcePath=Wide(root+"\\compressed-source.img");
+    {
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Compressed APFS source",true,job);
+    }
+
+    const HfsPlus::Attributes metadata{{u"user.transfer",{4,0,9}}};
+    const std::array<std::u16string,2> names{u"Inline compressed",u"Resource compressed"};
+    std::array<Bytes,2> contents{Bytes(1500),Bytes(2*65536+91)};
+    {
+        auto source=OpenBrowserImage(sourcePath);
+        Check(source&&source->Supports().CanEditCompression(),"Cannot seed compressed APFS source");
+        for(size_t i=0;i<names.size();++i){
+            auto& bytes=contents[i];
+            for(size_t j=0;j<bytes.size();++j)bytes[j]=uint8_t(j%251+j/65536);
+            Entry entry;
+            entry.name=names[i];
+            entry.forks[0].size=bytes.size();
+            entry.attributes=metadata;
+            entry.attributesKnown=true;
+            const auto id=source->Put(2,entry,[&](unsigned,uint64_t at,void* data,size_t count){
+                memcpy(data,bytes.data()+at,count);
+            },false);
+            Storage::Job job;
+            source->SetCompressionMethodForJob(id,i?Mode::Lzvn:Mode::Zlib,{},job);
+        }
+    }
+    auto source=OpenBrowserImage(sourcePath);
+    Check(bool(source),"Cannot reopen compressed APFS source");
+    std::vector<Location> inputs;
+    for(const auto& name:names){
+        Entry entry;
+        Check(source->FindChild(2,name,entry)&&entry.compressed&&!entry.forks[1].size,
+              "APFS source file was not stored compressed");
+        inputs.push_back(Native(source,entry.id));
+    }
+
+    std::shared_ptr<Volume> apple;
+    const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    if(fixture){
+        auto disk=HfsPlus::OpenImage(fixture,false);
+        apple=Apfs::Open(disk,"macos-apfs-compression-source");
+        Entry entry;
+        Check(apple&&apple->FindChild(2,u"decmpfs.txt",entry)&&entry.compressed&&
+              entry.forks[0].size==112000&&!entry.forks[1].size,
+              "Missing compressed file in the shared macOS APFS image");
+        inputs.push_back(Native(apple,entry.id));
+    }
+
+    unsigned index=0;
+    for(auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto path=Wide(root+"\\compressed-destination-"+std::to_string(index++)+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Compression destination",true,kind);
+        }
+        auto target=OpenBrowserImage(path);
+        Check(target&&VolumeSession::VolumeSessionPidForTest(target),"Missing HFS compression worker");
+        const auto copy=[&](const std::vector<Location>& files,Storage::Job& job){
+            Completion completion;
+            auto result=ExecuteInWorker(OrdinaryCopy{files,Native(target,2)},job,completion);
+            if(!result.code)Check(completion.complete,"Incomplete compressed-file copy");
+            return result;
+        };
+        const auto original=Put(*target,2,names[1],4096);
+        const auto pid=VolumeSession::VolumeSessionPidForTest(target);
+        Storage::Job cancel;
+        cancel.transport([&](const Storage::Progress& progress){
+            if(progress.fileBytes)cancel.cancel();
+        },[](const auto&){return Storage::ConflictChoice::Replace;});
+        Check(copy({inputs[1]},cancel).outcome==Storage::Outcome::Cancelled&&
+              VolumeSession::VolumeSessionPidForTest(target)==pid&&!target->Stat(original).compressed,
+              "Cancelled compressed overwrite did not retain the original file and worker");
+        Verify(*target,original,4096);
+        Storage::Job job;
+        job.transport({},[](const auto&){return Storage::ConflictChoice::Replace;});
+        const auto result=copy(inputs,job);
+        Check(!result.code,result.message.c_str());
+        target.reset();
+
+        // Inspect the stored decmpfs headers as well as logical fork readback.
+        auto disk=HfsPlus::OpenImage(path.c_str(),false);
+        HfsPlus::Volume reopened(*disk,false);
+        for(size_t i=0;i<inputs.size();++i){
+            const auto name=i<names.size()?names[i]:u"decmpfs.txt";
+            const auto length=i<contents.size()?contents[i].size():112000;
+            HfsPlus::Entry entry;
+            Check(reopened.FindChild(2,name,entry)&&entry.compressed&&
+                  entry.forks[0].size==length&&!entry.forks[1].size,
+                  "Compressed copy lost its encoding or logical fork size after reopening");
+            auto attributes=reopened.GetAttributes(entry.id);
+            const auto header=attributes.find(u"com.apple.decmpfs");
+            Check(header!=attributes.end()&&(i==0?header->second.size()>16:header->second.size()==16),
+                  "Destination has the wrong decmpfs storage layout");
+            attributes.erase(header);
+            if(i<names.size())Check(attributes==metadata,"Compression copy lost an ordinary extended attribute");
+            Bytes readback(length);
+            Check(reopened.Read(entry.id,0,0,readback.data(),readback.size())==length,
+                  "Short read from reopened compressed copy");
+            if(i<contents.size())Check(readback==contents[i],"Compressed copy changed logical bytes");
+            else for(size_t at=0;at<readback.size();at+=28)
+                Check(!memcmp(readback.data()+at,"a compressible line of text\n",28),
+                      "Compressed copy changed macOS fixture bytes");
+        }
+    }
+    if(apple)fprintf(report,"PASS: macOS-compressed APFS file copied into HFS+ and both HFSX variants.\n");
+    fprintf(report,"PASS: APFS inline and resource-backed compression survived HFS+/HFSX copy, overwrite and reopen with exact bytes; cancelled overwrite retained both original forks.\n");
+}
+
 void TestCrossFormatAttributes(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -1474,6 +1590,7 @@ int RunCopyProcessTest(const char *directory) {
         TestHfsToApfsHardLinks(root,report);
         TestApfsToHfsHardLinks(root,report);
         TestCrossFormatAttributes(root,report);
+        TestApfsToHfsCompression(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {

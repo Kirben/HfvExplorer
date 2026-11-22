@@ -1656,7 +1656,9 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
     std::unique_ptr<EncodedCompression> encoded;
-    auto method=compression;
+    // Transfers supply logical forks. Re-encode compressed source data in the
+    // destination format, independently of the previous destination entry.
+    auto method=compression==CompressionMode::CopyCompressed?CompressionMode::Zlib:compression;
     if(method==CompressionMode::Preserve&&e.compressed){
         auto oldAttribute=p.GetAttributes(existing).at(u"com.apple.decmpfs");
         Compression validate(Bytes(oldAttribute),old[1].size,{}); // Validate before inspecting possibly corrupt metadata.
@@ -1666,8 +1668,9 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     if(method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
         encoded.reset(new EncodedCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);},method));
         if(resourceSize&&encoded->UsesResource()){
-            Check(compression==CompressionMode::Preserve,"Compression needs the resource fork; this file has a genuine resource fork. Decompress it or retain it uncompressed.");
-            encoded.reset(); // A normal overwrite must preserve both incoming forks.
+            Check(compression==CompressionMode::Preserve||compression==CompressionMode::CopyCompressed,
+                  "Compression needs the resource fork; this file has a genuine resource fork. Decompress it or retain it uncompressed.");
+            encoded.reset(); // A transfer must preserve both incoming forks.
         }
     }
     if(encoded)desired[u"com.apple.decmpfs"]=encoded->Attribute();
@@ -1729,7 +1732,8 @@ void Volume::SetCompression(uint32_t id,bool compressed,std::function<void(uint6
 }
 void Volume::SetCompression(uint32_t id,CompressionMode method,std::function<void(uint64_t,uint64_t)> progress){
     auto& p=*p_;p.Guard();auto raw=p.Get(p.Content(id));Check(!raw.directory,"Select an ordinary file for compression");
-    Check(method!=CompressionMode::Preserve,"Choose a compression method or Uncompressed");
+    Check(method!=CompressionMode::Preserve&&method!=CompressionMode::CopyCompressed,
+          "Choose a compression method or Uncompressed");
     auto e=Stat(id);Check(e.readError.empty(),"Cannot convert an unreadable compressed file");
     uint64_t done=0,total=e.forks[0].size+e.forks[1].size;std::array<uint64_t,2> dates{e.created,e.modified};
     Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,method,&dates);
