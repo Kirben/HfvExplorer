@@ -297,6 +297,10 @@ public:
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress)override{Mutate([&]{volume_->SetCompression(id,compressed,progress);});}
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Call call(*this);Ready();auto attributes=volume_->GetAttributes(id);attributes.erase(u"com.apple.system.hfs.firstlink");if(volume_->Stat(id).compressed)attributes.erase(u"com.apple.decmpfs");return attributes;}
     void SetAttributes(uint32_t id,const HfsPlus::Attributes& a)override{Mutate([&]{volume_->SetAttributes(id,a);});}
+    std::optional<std::pair<uint64_t,uint64_t>> HfsPlusDateRange()const override{
+        return expanded_?std::make_pair(HfsPlus::Time::Epoch,HfsPlus::Time::Maximum):
+                         std::make_pair(uint64_t(0),uint64_t(UINT32_MAX));
+    }
     void ValidateEntry(const Entry& e)const override{
         Volume::ValidateEntry(e);
         Check(!e.posix||e.posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
@@ -561,6 +565,64 @@ void RecordApfsSparseRanges(Entry& entry,const SparseForks& holes)
         }
     }
     entry.attributes.emplace(ApfsSparseLayoutAttribute,std::move(value));
+}
+int64_t ApfsTimeInHfsSeconds(uint64_t raw)
+{
+    const auto time=int64_t(raw);
+    constexpr int64_t second=1000000000;
+    return time/second-(time%second<0)+int64_t(HfsPlus::Time::Epoch);
+}
+
+void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs,bool fromHfsPlus)
+{
+    auto& entry=plan.entry;
+    if(entry.datesValid&&entry.additionalDates.changed&&entry.additionalDates.accessed){
+        std::array<uint64_t,4> seconds{entry.created,entry.modified,*entry.additionalDates.changed,*entry.additionalDates.accessed};
+        const auto range=destination.HfsPlusDateRange();
+        auto projected=seconds;
+        if(range&&fromApfs&&entry.apfsTimestamps)
+            for(size_t i=0;i<projected.size();++i)
+                projected[i]=uint64_t(std::clamp(ApfsTimeInHfsSeconds((*entry.apfsTimestamps)[i]),
+                                                int64_t(range->first),int64_t(range->second)));
+        if(fromApfs&&range&&(entry.fractionalDates||projected!=seconds)&&entry.apfsTimestamps&&
+           !entry.attributes.count(ApfsTimesAttribute)){
+            HfsPlus::Bytes value{'H','F','V','T',1,0,0,0};
+            for(const auto& values:{projected,*entry.apfsTimestamps})
+                for(const auto number:values)
+                    for(unsigned byte=0;byte<8;++byte)value.push_back(uint8_t(number>>(byte*8)));
+            entry.attributes.emplace(ApfsTimesAttribute,std::move(value));
+            entry.fractionalDates=true;
+            entry.created=projected[0];entry.modified=projected[1];
+            entry.additionalDates={projected[3],projected[2]};
+        }else if(fromHfsPlus&&std::string_view(destination.Kind())=="APFS"){
+            const auto marker=entry.attributes.find(ApfsTimesAttribute);
+            if(marker!=entry.attributes.end()){
+                const auto& value=marker->second;
+                constexpr std::array<uint8_t,8> header{'H','F','V','T',1,0,0,0};
+                if(value.size()==72&&std::equal(header.begin(),header.end(),value.begin())){
+                    const auto word=[&](size_t offset){
+                        uint64_t number=0;
+                        for(unsigned byte=0;byte<8;++byte)number|=uint64_t(value[offset+byte])<<(byte*8);
+                        return number;
+                    };
+                    std::array<uint64_t,4> raw{};
+                    bool unchanged=true;
+                    for(size_t i=0;i<raw.size();++i){
+                        unchanged&=seconds[i]==word(8+i*8);
+                        raw[i]=word(40+i*8);
+                    }
+                    if(unchanged){
+                        for(size_t i=0;i<raw.size();++i)seconds[i]=uint64_t(ApfsTimeInHfsSeconds(raw[i]));
+                        entry.created=seconds[0];entry.modified=seconds[1];
+                        entry.additionalDates={seconds[3],seconds[2]};
+                        entry.apfsTimestamps=raw;
+                        entry.attributes.erase(marker);
+                    }
+                }
+            }
+        }
+    }
+    for(auto& child:plan.children)PrepareCopyTimestamps(child,destination,fromApfs,fromHfsPlus);
 }
 using CopiedLinks=std::map<std::pair<std::string,uint32_t>,Entry>;
 void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
@@ -1149,7 +1211,12 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
-        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));}
+        plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));
+        if(!adapter){
+            const std::string_view kind=source.first->Kind();
+            PrepareCopyTimestamps(plans.back(),dst,kind=="APFS",kind=="HFS+"||kind=="HFSX");
+        }
+    }
     std::string firstLinkedFolder;
     if(std::string_view(dst.Kind())=="APFS")
         for(auto& plan:plans)MaterializeDirectoryLinks(plan,firstLinkedFolder);

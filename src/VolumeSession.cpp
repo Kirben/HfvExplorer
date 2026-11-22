@@ -64,6 +64,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     bool Classic()const{return format_==ImageFormat::Classic||format_==ImageFormat::NdifClassic;}
     bool Mfs()const{return format_==ImageFormat::Mfs||format_==ImageFormat::NdifMfs;}
     bool Plus()const{return !Classic()&&!Mfs();}
+    std::optional<std::pair<uint64_t,uint64_t>> hfsPlusDateRange_;
     bool hfsx_ = false, caseSensitive_ = false, journaled_ = false;
     bool writeAllowed_ = false, initialized_ = false;
     std::atomic<bool> writable_{false}, lost_{false};
@@ -180,6 +181,12 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
             auto name = info.u16();
             auto description = info.text();
             auto hfsx = info.flag(), caseSensitive = info.flag(), journaled = info.flag();
+            std::optional<std::pair<uint64_t,uint64_t>> hfsPlusDateRange;
+            if(info.flag()){
+                const auto minimum=info.get(),maximum=info.get();
+                Check(Plus()&&minimum<=maximum,"Invalid volume timestamp range");
+                hfsPlusDateRange.emplace(minimum,maximum);
+            }
             const auto capabilities = Protocol::DecodeCapabilities(info);
             info.end();
             Response(SessionResult);
@@ -190,6 +197,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
                 name_ = std::move(name);
                 description_ = std::move(description);
                 hfsx_ = hfsx;
+                hfsPlusDateRange_ = hfsPlusDateRange;
                 caseSensitive_ = caseSensitive;
                 journaled_ = journaled;
                 capabilities_ = capabilities;
@@ -245,6 +253,7 @@ public:
     bool Writable() const override { return writable_ && !lost_; }
     bool CaseSensitive() const override { return caseSensitive_; }
     bool Journaled() const override { return journaled_; }
+    std::optional<std::pair<uint64_t,uint64_t>> HfsPlusDateRange()const override{return hfsPlusDateRange_;}
     void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool) override {
         if (Plus()) ValidateHfsPlusCopyNames(entries,CaseSensitive());
         else if (Classic()) ValidateClassicCopyNames(entries);
@@ -1006,6 +1015,9 @@ int Child(const char* inputText, const char* outputText) {
             Data info;
             info.u16(volume->Name()); info.put(volume->Description()); info.put(!strcmp(volume->Kind(), "HFSX"));
             info.put(volume->CaseSensitive()); info.put(volume->Journaled());
+            const auto range=volume->HfsPlusDateRange();
+            info.put(range.has_value());
+            if(range){info.put(range->first);info.put(range->second);}
             Protocol::EncodeCapabilities(info,volume->Supports());
             Send(output, SessionBytes, std::move(info));
             SessionReply(output);

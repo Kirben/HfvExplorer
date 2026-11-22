@@ -40,6 +40,7 @@ struct Entry {
     HfsPlus::AdditionalFileDates additionalDates;
     bool datesValid = false;
     bool apfsCloneMarked = false;
+    std::optional<std::array<uint64_t,4>> apfsTimestamps; // On-disk creation, modification, change and access times.
     bool fractionalDates = false; // At least one stored timestamp has subsecond precision.
     HfsPlus::Attributes attributes;
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.
@@ -70,6 +71,7 @@ struct Capabilities {
     void RestrictWrites() { writable = create = rename = remove = false; }
 };
 using Reader = std::function<void(unsigned, uint64_t, void *, size_t)>;
+inline constexpr auto ApfsTimesAttribute=u"org.hfvexplorer.apfs-timestamps";
 inline constexpr auto ApfsSparseLayoutAttribute=u"org.hfvexplorer.apfs-sparse-ranges";
 inline constexpr auto ApfsCloneLayoutAttribute=u"org.hfvexplorer.apfs-clone-layout";
 SparseForks ValidateApfsSparseLayout(const Entry&,const Reader&,Storage::Job&);
@@ -145,6 +147,7 @@ public:
     virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool) {}
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
     virtual void ValidateName(const std::u16string& name) const { HfsPlus::Normalize(name,CaseSensitive()); }
+    virtual std::optional<std::pair<uint64_t,uint64_t>> HfsPlusDateRange() const { return {}; }
     virtual void ValidateEntry(const Entry &e) const { ValidateName(e.name);if(!e.attributes.empty()&&!Supports().attributes)throw HfsPlus::Error("The destination format cannot preserve extended attributes or Mac ACLs; source retained"); }
     virtual bool BeginCopyTransaction(const std::string&) { return false; }
     virtual void FinishCopyTransaction(bool) {}

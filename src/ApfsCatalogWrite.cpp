@@ -59,6 +59,28 @@ void SetAdditionalDates(Bytes& inode,const HfsPlus::AdditionalFileDates& dates)
     if(dates.changed)Set(inode,32,CatalogTimestamp(*dates.changed),8);
 }
 
+void SetFileDates(Bytes& inode,const FileDates& dates)
+{
+    if(dates.exact){
+        for(size_t i=0;i<dates.exact->size();++i)Set(inode,16+i*8,(*dates.exact)[i],8);
+        return;
+    }
+    Set(inode,16,CatalogTimestamp(dates.created),8);
+    Set(inode,24,CatalogTimestamp(dates.modified),8);
+    SetAdditionalDates(inode,dates.additionalDates);
+}
+
+void ApplyTimestampEdits(Bytes& inode,const TimestampEdits& dates)
+{
+    if(dates.exact){
+        for(size_t i=0;i<dates.exact->size();++i)Set(inode,16+i*8,(*dates.exact)[i],8);
+        return;
+    }
+    if(dates.created)Set(inode,16,CatalogTimestamp(*dates.created),8);
+    if(dates.modified)Set(inode,24,CatalogTimestamp(*dates.modified),8);
+    SetAdditionalDates(inode,dates.additionalDates);
+}
+
 struct Mapping {
     uint64_t oid,block,xid=0;
     uint32_t flags=0;
@@ -529,14 +551,10 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
     const auto* linkEdit=std::get_if<CatalogReplaceSymlink>(&request);
     const auto copyDates=[&](Bytes& inode){
         if(!dates)return;
-        Set(inode,16,CatalogTimestamp(dates->created),8);
-        Set(inode,24,CatalogTimestamp(dates->modified),8);
-        SetAdditionalDates(inode,dates->additionalDates);
+        SetFileDates(inode,*dates);
     };
     const auto editDates=[&](Bytes& inode){
-        if(metadata->dates.created)Set(inode,16,CatalogTimestamp(*metadata->dates.created),8);
-        if(metadata->dates.modified)Set(inode,24,CatalogTimestamp(*metadata->dates.modified),8);
-        SetAdditionalDates(inode,metadata->dates.additionalDates);
+        ApplyTimestampEdits(inode,metadata->dates);
     };
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
@@ -1679,10 +1697,9 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     SetPosixMetadata(updated.value,edit.posix);
     Set(updated.value,32,time,8);
     if(!edit.preserveDates){
-        Set(updated.value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
+        Set(updated.value,24,edit.dates?(edit.dates->exact?(*edit.dates->exact)[1]:CatalogTimestamp(edit.dates->modified)):time,8);
         if(edit.dates){
-            Set(updated.value,16,CatalogTimestamp(edit.dates->created),8);
-            SetAdditionalDates(updated.value,edit.dates->additionalDates);
+            SetFileDates(updated.value,*edit.dates);
         }
     }
 
@@ -2031,11 +2048,10 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     SetSecurityFlag(value,edit.attributes);
     SetPosixMetadata(value,edit.posix);
     if(edit.locked)Set(value,68,Le32(value.data()+68)|CopiedProtectionFlags(edit.posix),4);
-    Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
+    Set(value,24,edit.dates?(edit.dates->exact?(*edit.dates->exact)[1]:CatalogTimestamp(edit.dates->modified)):time,8);
     Set(value,32,time,8);
     if(edit.dates){
-        Set(value,16,CatalogTimestamp(edit.dates->created),8);
-        SetAdditionalDates(value,edit.dates->additionalDates);
+        SetFileDates(value,*edit.dates);
     }
     auto attributes=EncodeAttributes(edit.inode,&edit.attributes,nullptr,streams);
     attributes.push_back(LinkTargetRecord(edit.inode,edit.target));
@@ -3108,9 +3124,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(inode.value,stream+16,4,8);
         }
         if(dates){
-            Set(inode.value,16,CatalogTimestamp(dates->created),8);
-            Set(inode.value,24,CatalogTimestamp(dates->modified),8);
-            SetAdditionalDates(inode.value,dates->additionalDates);
+            SetFileDates(inode.value,*dates);
         }
         if(!dataHoles.empty()){
             auto& value=inode.value;
@@ -3231,8 +3245,7 @@ CatalogWritePlan PrepareCatalogMutation(
                   "Unlock the APFS file before editing its properties");
             if(properties->locked)
                 Set(value,68,(flags&~UserImmutable)|(*properties->locked?properties->lockFlags:0),4);
-            if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
-            if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
+            ApplyTimestampEdits(value,properties->dates);
             if(properties->newName&&(!siblingId||
                (Le64(value.data())==properties->parent&&ExternalInodeName(value)==name))){
                 RenameExternalInode(value,name,replacement);
@@ -3240,7 +3253,6 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
-            SetAdditionalDates(value,properties->dates.additionalDates);
             edited=true;
         }
         Check(edited,"APFS Properties target inode was not found");

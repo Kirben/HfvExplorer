@@ -65,6 +65,13 @@ uint32_t Put(Volume &v, uint32_t parent, const std::u16string &name, uint64_t si
         },
         false);
 }
+HfsPlus::Attributes UserCopyAttributes(Volume& volume,uint32_t id)
+{
+    auto attributes=volume.GetAttributes(id);
+    attributes.erase(MacBrowser::ApfsTimesAttribute);
+    return attributes;
+}
+
 void Verify(Volume &v, uint32_t id, uint64_t size = 300000, BYTE bias = 0) {
     auto e = v.Stat(id);
     Check(e.forks[0].size == size && e.forks[1].size == 173 && e.finder[0] == 42,
@@ -1277,7 +1284,7 @@ void TestApfsRegularOverwritesHfsSymlink(const std::string& root,FILE* report)
         target=OpenBrowserImage(path);
         Entry replacement;
         Check(target&&target->FindChild(parent,original.name,replacement)&&!replacement.symbolicLink&&
-              !target->SymbolicLinkTarget(replacement.id)&&target->GetAttributes(replacement.id).empty(),
+              !target->SymbolicLinkTarget(replacement.id)&&UserCopyAttributes(*target,replacement.id).empty(),
               "HFS overwrite did not store a regular file in place of the symbolic link");
         Verify(*target,replacement.id,fileSize,fileBias);
         Verify(*target,referent,referentSize,referentBias);
@@ -3291,7 +3298,7 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
     using Dates=std::array<uint64_t,2>;
     constexpr auto epoch=HfsPlus::Time::Epoch, maximum=HfsPlus::Time::Maximum;
     const Dates legacy{0,UINT32_MAX}, expanded{epoch,maximum};
-    const Dates tooLate{epoch,maximum+1}, fractional{epoch-1,epoch};
+    const Dates tooLate{UINT64_MAX,maximum+1}, fractional{epoch-1,epoch};
     const Dates original{epoch+10,epoch+20};
     const auto extraDates=[=](const Dates& dates,BYTE seed){
         return HfsPlus::AdditionalFileDates{dates[1]>UINT32_MAX?dates[1]:epoch+1000+seed,
@@ -3334,7 +3341,7 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
         Check(bool(source),"Cannot open APFS timestamp source");
         dated(*source,u"Legacy limits",legacy,47);
         dated(*source,u"Expanded limits",expanded,48);
-        dated(*source,u"Too late",tooLate,49);
+        dated(*source,u"Too late",Dates{epoch,tooLate[1]},49);
         dated(*source,u"Fractional",Dates{epoch,epoch},50);
     }
     EditApfsFixtureLeaf(sourcePath,[](const auto& node,const auto* base,auto& leaf){
@@ -3343,13 +3350,21 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             const auto record=node.At(i);
             if(record.key.size!=8||Apfs::Le64(record.key.data)>>60!=3||record.value.size<84||
                (Apfs::Le16(record.value.data+80)&0170000)!=0100000||
-               Apfs::Le64(record.value.data+16)||Apfs::Le64(record.value.data+24))continue;
+               Apfs::Le64(record.value.data+16))continue;
             auto* fields=leaf.data()+(record.value.data-base);
+            const auto modification=Apfs::Le64(record.value.data+24);
+            if(modification==(UINT64_C(1)+UINT32_MAX)*1000000000){
+                const auto before1904=uint64_t(-int64_t(HfsPlus::Time::Epoch)*1000000000-1);
+                Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+16,before1904,8);
+                ++changed;
+                continue;
+            }
+            if(modification)continue;
             Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+16,UINT64_MAX,8); // -1 ns
             Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+24,1,8);
             ++changed;
         }
-        Check(changed==1,"Expected exactly one fractional timestamp fixture");
+        Check(changed==2,"Expected both signed fractional timestamp fixtures");
     });
     auto source=OpenBrowserImage(sourcePath);
     Check(bool(source),"Cannot reopen APFS date fixture");
@@ -3394,25 +3409,19 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             dated(*hfs,invalid,original,33);
             unsigned prompts=0;
             bool rounded=false;
-            const auto rejected=transfer(source,hfs,{invalid},true,prompts,rounded);
-            Check(rejected.outcome==Storage::Outcome::Failed&&!rejected.partial&&!rejected.moved&&!prompts&&!rounded,
-                  "Unrepresentable date should fail preflight before overwrite or source removal");
-            hfs.reset();
-            source.reset();
-            hfs=OpenBrowserImage(hfsPath);
-            source=OpenBrowserImage(sourcePath);
-            Check(hfs&&source,"Cannot reopen rejected timestamp transfer");
-            verify(*hfs,invalid,original,33);
-            verify(*source,invalid,wide?tooLate:expanded,wide?49:48);
-            const auto copied=transfer(source,hfs,wide?std::vector<std::u16string>{valid}:
-                                                       std::vector<std::u16string>{valid,u"Fractional"},false,prompts,rounded);
-            Check(!copied.code&&prompts==1,copied.message.c_str());
-            Check(rounded==!wide,"Missing or unexpected timestamp precision notice");
+            const std::vector<std::u16string> selected{valid,invalid,u"Fractional"};
+            const auto copied=transfer(source,hfs,selected,false,prompts,rounded);
+            Check(!copied.code&&prompts==2,copied.message.c_str());
+            Check(rounded,"Missing native timestamp precision notice");
             hfs.reset();
             hfs=OpenBrowserImage(hfsPath);
             Check(bool(hfs),"Cannot reopen timestamp-rich HFS copy");
             verify(*hfs,valid,validDates,seed);
-            if(!wide)verify(*hfs,u"Fractional",fractional,50);
+            Entry projected;
+            const auto limit=wide?maximum:uint64_t(UINT32_MAX);
+            Check(hfs->FindChild(2,invalid,projected)&&projected.modified==limit&&
+                  projected.additionalDates.accessed==limit&&(!wide||projected.created==epoch),"HFS timestamp did not use the representable boundary");
+            verify(*hfs,u"Fractional",wide?Dates{epoch,epoch}:fractional,50);
 
             const auto macos=_wgetenv(L"HFV_APFS_TEST_IMAGE");
             for(bool external:{false,true}){
@@ -3425,19 +3434,25 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
                 Check(apfs&&apfs->Supports().create&&apfs->Writable()!=external,"Wrong APFS timestamp writer");
                 dated(*apfs,valid,original,34);
                 const auto before=prompts;
-                const auto returned=transfer(hfs,apfs,wide?std::vector<std::u16string>{valid}:
-                                                            std::vector<std::u16string>{valid,u"Fractional"},false,prompts,rounded);
+                const auto returned=transfer(hfs,apfs,selected,false,prompts,rounded);
                 Check(!returned.code&&prompts==before+1,returned.message.c_str());
                 Check(!rounded,"Copying whole-second HFS dates to APFS should not report precision loss");
                 apfs.reset();
                 apfs=OpenBrowserImage(apfsPath);
                 Check(bool(apfs),"Cannot reopen APFS timestamp copy");
                 verify(*apfs,valid,validDates,seed);
-                if(!wide)verify(*apfs,u"Fractional",fractional,50);
+                const auto checkExact=[&](const auto* name,const Dates& dates,BYTE seed){
+                    const auto expected=verify(*source,name,dates,seed);
+                    const auto actual=verify(*apfs,name,dates,seed);
+                    Check(expected.apfsTimestamps&&actual.apfsTimestamps==expected.apfsTimestamps,
+                          "APFS nanosecond timestamps were not restored after reopening");
+                };
+                checkExact(invalid,wide?tooLate:expanded,wide?49:48);
+                checkExact(u"Fractional",fractional,50);
             }
         }
     }
-    fprintf(report,"PASS: APFS and HFS+/HFSX creation, modification, access and attribute-change dates and both forks survive copies and overwrites after reopening. Invalid cut/paste preserves the source and destination. Fractional dates floor to whole seconds and set the completion notice.\n");
+    fprintf(report,"PASS: APFS and HFS+/HFSX creation, modification, access and attribute-change dates and both forks survive copies and overwrites after reopening. HFS Plus projects native dates to whole seconds and its supported range; exact APFS dates return after reopening.\n");
 }
 
 void TestSparseApfsCopy(const std::string& root,FILE* report)
@@ -3778,6 +3793,7 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
             else if(appleInline.empty())Check(header->second.size()==16,"Destination lost resource compression");
             else Check(Bytes(header->second)==appleInline,"Destination re-encoded the macOS inline stream");
             attributes.erase(header);
+            attributes.erase(MacBrowser::ApfsTimesAttribute);
             if(i<names.size())Check(attributes==metadata,"Compression copy lost an ordinary extended attribute");
             Bytes readback(length);
             Check(reopened.Read(entry.id,0,0,readback.data(),readback.size())==length,
@@ -3963,7 +3979,7 @@ void TestCrossFormatAttributes(const std::string& root,FILE* report)
                       "Could not find the folder created before cancelling the APFS copy");
                 Check(!destination->FindChild(staged.id,u"Document",absent),
                       "Cancelling the APFS attribute copy published an incomplete file");
-                Check(destination->GetAttributes(staged.id)==folderAttrs,
+                Check(UserCopyAttributes(*destination,staged.id)==folderAttrs,
                       "A partial APFS copy published an HFS folder without its original attributes and ACL");
             }
 
@@ -3994,9 +4010,9 @@ void TestCrossFormatAttributes(const std::string& root,FILE* report)
             Entry copiedFolder,copiedFile;
             Check(destination->FindChild(parent,u"Attribute transfer",copiedFolder)&&
                   destination->FindChild(copiedFolder.id,u"Document",copiedFile)&&
-                  destination->GetAttributes(copiedFolder.id)==(parent==2?folderAttrs:staleAttrs),
+                  UserCopyAttributes(*destination,copiedFolder.id)==(parent==2?folderAttrs:staleAttrs),
                   "Reopened HFS folder lost attributes or changed existing merge metadata");
-            const auto attributes=destination->GetAttributes(copiedFile.id);
+            const auto attributes=UserCopyAttributes(*destination,copiedFile.id);
             Check(attributes==fileAttrs&&attributes.at(u"user.large").FileBacked(),
                   "Reopened HFS file lost inline attributes, streamed attributes or its ACL");
             for(unsigned fork=0;fork<2;++fork){

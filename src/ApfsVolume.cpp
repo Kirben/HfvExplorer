@@ -39,13 +39,14 @@ std::u16string Name(const uint8_t* bytes,size_t size)
     return MacBrowser::U16(out);
 }
 constexpr int64_t NanosecondsPerSecond=1000000000;
-uint64_t Date(const uint8_t* p)
+uint64_t TimestampSeconds(uint64_t raw)
 {
-    const auto timestamp=int64_t(Le64(p));
+    const auto timestamp=int64_t(raw);
     const auto seconds=timestamp/NanosecondsPerSecond;
     // Floor fractional instants on either side of the Unix epoch.
     return uint64_t(seconds-(timestamp%NanosecondsPerSecond<0)+2082844800);
 }
+uint64_t Date(const uint8_t* p){return TimestampSeconds(Le64(p));}
 struct Mounted {
     uint64_t oid,xid,map,tree;
     bool sensitive,hashedNames,locked,softwareEncryption;
@@ -285,8 +286,11 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         entry.additionalDates={Date(p+40),Date(p+32)};
         constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;
         entry.apfsCloneMarked=(Le64(p+48)&(wasCloned|wasEverCloned))!=0;
-        for(unsigned offset:{16,24,32,40})
-            entry.fractionalDates|=int64_t(Le64(p+offset))%NanosecondsPerSecond!=0;
+        auto& timestamps=entry.apfsTimestamps.emplace();
+        for(size_t i=0;i<timestamps.size();++i){
+            timestamps[i]=Le64(p+16+i*8);
+            entry.fractionalDates|=int64_t(timestamps[i])%NanosecondsPerSecond!=0;
+        }
         const auto fullMode=Le16(p+80);
         const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;
@@ -1317,7 +1321,12 @@ private:
     }
     static std::optional<FileDates> CopyDates(const Entry& entry){
         if(!entry.datesValid)return {};
-        return FileDates{entry.created,entry.modified,entry.additionalDates};
+        auto exact=entry.apfsTimestamps;
+        if(exact&&(TimestampSeconds((*exact)[0])!=entry.created||
+                   TimestampSeconds((*exact)[1])!=entry.modified||
+                   TimestampSeconds((*exact)[2])!=entry.additionalDates.changed||
+                   TimestampSeconds((*exact)[3])!=entry.additionalDates.accessed))exact.reset();
+        return FileDates{entry.created,entry.modified,entry.additionalDates,exact};
     }
 public:
     uint32_t MakeHardLink(uint32_t id,uint32_t parent,const std::u16string& name,bool replace=false)override{
@@ -1387,6 +1396,7 @@ public:
                   current.name==expected.name,"The APFS destination folder changed during copying");
             TimestampEdits changes;
             if(dates){
+                if(dates->exact&&dates->exact!=current.apfsTimestamps)changes.exact=dates->exact;
                 if(!current.datesValid||current.created!=dates->created)changes.created=dates->created;
                 if(!current.datesValid||current.modified!=dates->modified)changes.modified=dates->modified;
                 if(current.additionalDates.accessed!=dates->additionalDates.accessed)
@@ -1395,7 +1405,7 @@ public:
                     changes.additionalDates.changed=dates->additionalDates.changed;
             }
             if(!changes.created&&!changes.modified&&!changes.additionalDates.accessed&&
-               !changes.additionalDates.changed&&!lockAfterCopy)return;
+               !changes.additionalDates.changed&&!changes.exact&&!lockAfterCopy)return;
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             // Restore destination folder dates even if the transfer was cancelled.
@@ -1461,6 +1471,8 @@ public:
               "This APFS writer cannot preserve the source entry's Mac metadata");
         ValidateWritableAttributes(entry.attributes);
         Check(!entry.posix||entry.posix->mode<=PosixMetadata::ModeMask,"Invalid POSIX permissions");
+        const auto dates=CopyDates(entry);
+        if(dates&&dates->exact)return;
         if(entry.datesValid){
             CatalogTimestamp(entry.created);
             CatalogTimestamp(entry.modified);

@@ -329,7 +329,7 @@ public:
      auto detail=succeeded?successMessage_:result.message;
      auto append=[&](const char* message){if(!detail.empty())detail+=" ";detail+=message;};
      if(result.partial)append("Completed changes were retained.");
-     if(roundedDates)append("HFS+/HFSX stored the copied timestamps at whole-second precision.");
+     if(roundedDates)append("HFS+/HFSX stored some dates at whole-second precision or at the nearest supported date. The saved APFS timestamp attribute allows exact dates to be restored on a round trip.");
      if(result.sparseHolesAllocated)append("HFS+/HFSX allocated space for holes in sparse APFS files.");
      if(result.apfsCloneCopiedIndependently)append("Files marked as APFS clones were stored independently on HFS+/HFSX.");
      switch(result.rollback){

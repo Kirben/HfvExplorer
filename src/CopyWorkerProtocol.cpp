@@ -308,6 +308,8 @@ void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.id); d.put(e.parent); d.u16(e.name); d.put(e.version);
     d.put(e.resolvedId); d.put(e.linkCount); d.put(e.hardLink); EncodeIdentity(d,e.identity); d.put(e.readError); d.put(e.symbolicLink);
     d.put(e.created); d.put(e.modified); d.put(e.datesValid); d.put(e.fractionalDates); d.put(e.apfsCloneMarked);
+    d.put(e.apfsTimestamps.has_value());
+    if(e.apfsTimestamps)for(auto date:*e.apfsTimestamps)d.put(date);
     d.put(e.additionalDates.accessed.has_value());
     if(e.additionalDates.accessed)d.put(*e.additionalDates.accessed);
     d.put(e.additionalDates.changed.has_value());
@@ -326,6 +328,10 @@ Entry DecodeEntry(Data& d) {
     e.id=CatalogNumber(d); e.parent=CatalogNumber(d); e.name=d.u16(); e.version=CatalogNumber(d);
     e.resolvedId=CatalogNumber(d); e.linkCount=CatalogNumber(d); e.hardLink=d.flag(); e.identity=DecodeIdentity(d); e.readError=d.text(); e.symbolicLink=d.flag();
     e.created=d.get(); e.modified=d.get(); e.datesValid=d.flag(); e.fractionalDates=d.flag(); e.apfsCloneMarked=d.flag();
+    if(d.flag()){
+        e.apfsTimestamps.emplace();
+        for(auto& date:*e.apfsTimestamps)date=d.get();
+    }
     if(d.flag())e.additionalDates.accessed=d.get();
     if(d.flag())e.additionalDates.changed=d.get();
     e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
