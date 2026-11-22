@@ -3410,6 +3410,8 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             if(modification)continue;
             Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+16,UINT64_MAX,8); // -1 ns
             Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+24,1,8);
+            for(unsigned offset:{32,40})
+                Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+offset,Apfs::Le64(record.value.data+offset)+1,8);
             ++changed;
         }
         Check(changed==2,"Expected both signed fractional timestamp fixtures");
@@ -3497,6 +3499,33 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
                 };
                 checkExact(invalid,wide?tooLate:expanded,wide?49:48);
                 checkExact(u"Fractional",fractional,50);
+                const auto rewriteHfsDate=[&](uint64_t modified){
+                    Entry entry;
+                    Check(hfs->FindChild(2,u"Fractional",entry),"Missing HFS timestamp edit fixture");
+                    entry.modified=modified;
+                    entry.attributes=hfs->GetAttributes(entry.id);
+                    entry.attributesKnown=true;
+                    hfs->Put(2,entry,[](unsigned fork,uint64_t at,void* output,size_t count){
+                        auto* bytes=static_cast<BYTE*>(output);
+                        for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+50);
+                    },true);
+                    hfs.reset();
+                    hfs=OpenBrowserImage(hfsPath);
+                    Check(bool(hfs),"Cannot reopen HFS timestamp edit fixture");
+                };
+                constexpr auto edited=epoch+123;
+                rewriteHfsDate(edited);
+                const auto changed=transfer(hfs,apfs,{u"Fractional"},false,prompts,rounded);
+                Check(!changed.code,changed.message.c_str());
+                apfs.reset();
+                apfs=OpenBrowserImage(apfsPath);
+                Check(bool(apfs),"Cannot reopen APFS after copying edited timestamps");
+                const auto actual=verify(*apfs,u"Fractional",Dates{epoch-1,edited},50);
+                auto expected=verify(*source,u"Fractional",fractional,50).apfsTimestamps;
+                Check(bool(expected),"Missing source APFS timestamps");
+                (*expected)[1]=UINT64_C(123)*1000000000;
+                Check(actual.apfsTimestamps==expected,"Editing modification time discarded untouched APFS timestamps");
+                rewriteHfsDate(epoch);
             }
         }
     }

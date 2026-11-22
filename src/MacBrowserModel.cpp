@@ -18,6 +18,7 @@
 #include "MfsRecovery.h"
 #include "NdifImage.h"
 #include "ApfsVolume.h"
+#include "ApfsCatalogWrite.h"
 #include "DiskPartitions.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
@@ -606,18 +607,14 @@ void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs
                         return number;
                     };
                     std::array<uint64_t,4> raw{};
-                    bool unchanged=true;
                     for(size_t i=0;i<raw.size();++i){
-                        unchanged&=seconds[i]==word(8+i*8);
-                        raw[i]=word(40+i*8);
+                        raw[i]=seconds[i]==word(8+i*8)?word(40+i*8):Apfs::CatalogTimestamp(seconds[i]);
+                        seconds[i]=uint64_t(ApfsTimeInHfsSeconds(raw[i]));
                     }
-                    if(unchanged){
-                        for(size_t i=0;i<raw.size();++i)seconds[i]=uint64_t(ApfsTimeInHfsSeconds(raw[i]));
-                        entry.created=seconds[0];entry.modified=seconds[1];
-                        entry.additionalDates={seconds[3],seconds[2]};
-                        entry.apfsTimestamps=raw;
-                        entry.attributes.erase(marker);
-                    }
+                    entry.created=seconds[0];entry.modified=seconds[1];
+                    entry.additionalDates={seconds[3],seconds[2]};
+                    entry.apfsTimestamps=raw;
+                    entry.attributes.erase(marker);
                 }
             }
         }
