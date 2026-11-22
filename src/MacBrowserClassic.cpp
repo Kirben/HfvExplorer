@@ -553,10 +553,9 @@ private:
                         read(fork,at,bytes.data(),n);Check(hfs_write(file,bytes.data(),(unsigned long)n)==n);at+=n;}}
                 hfsdirent meta;Check(hfs_fstat(file,&meta)==0);meta.fdflags=HfsPlus::Disk::U16(e.finder.data()+8);
                 if(e.datesValid){meta.crdate=time_t(int64_t(e.created)-2082844800LL);meta.mddate=time_t(int64_t(e.modified)-2082844800LL);}
-                if(original){
-                    meta.bkdate=original->bkdate;
-                    meta.flags=(meta.flags&~HFS_ISLOCKED)|(original->flags&HFS_ISLOCKED);
-                }
+                if(original)meta.bkdate=original->bkdate;
+                const bool locked=original?(original->flags&HFS_ISLOCKED)!=0:e.protectedFile;
+                meta.flags=(meta.flags&~HFS_ISLOCKED)|(locked?HFS_ISLOCKED:0);
                 Check(hfs_fsetattr(file,&meta)==0);Check(hfs_fsetfinderinfo(file,e.finder.data())==0);
             }catch(...){result=-1;failure=std::current_exception();}
             if(hfs_close(file)<0){result=-1;error=hfs_error;}

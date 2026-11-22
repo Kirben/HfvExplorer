@@ -2023,6 +2023,101 @@ void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
 }
 
+void TestClassicLockRoundTrip(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto sourcePath=root+"\\classic-lock-source.dsk";
+    constexpr auto locked=u"Locked file", unlocked=u"Unlocked file";
+    {
+        auto classic=ClassicImage(sourcePath);
+        const auto id=Put(*classic,2,locked,5003,34);
+        Put(*classic,2,unlocked,5007,35);
+        hfsdirent properties{};
+        Check(classic->GetClassicProperties(id,properties),"Cannot read classic lock fixture");
+        properties.flags|=HFS_ISLOCKED;
+        classic->SetClassicProperties(id,properties);
+    }
+    const auto verify=[](Volume& volume,const std::u16string& name,bool expectLocked,uint64_t size,BYTE seed){
+        Entry entry;
+        Check(volume.FindChild(2,name,entry)&&entry.protectedFile==expectLocked,
+              "Copy did not preserve the lock after reopening");
+        Verify(volume,entry.id,size,seed);
+        return entry.id;
+    };
+    const auto transfer=[](const std::shared_ptr<Volume>& from,const std::shared_ptr<Volume>& to,bool cancel){
+        std::vector<Location> inputs;
+        for(auto name:{u"Locked file",u"Unlocked file"}){
+            Entry entry;
+            Check(from->FindChild(2,name,entry),"Missing classic lock test input");
+            inputs.push_back(Native(from,entry.id));
+        }
+        Storage::Job job;
+        job.transport([&](const Storage::Progress& p){
+            if(cancel&&p.fileBytes)job.cancel();
+        },[](const auto&){return Storage::ConflictChoice::Replace;});
+        Completion completion;
+        return ExecuteInWorker(OrdinaryCopy{inputs,Native(to)},job,completion);
+    };
+    auto source=OpenBrowserImage(Wide(sourcePath));
+    Check(bool(source),"Cannot reopen classic lock source");
+    verify(*source,locked,true,5003,34);
+    const Kind kinds[]={Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive};
+    const auto macos=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    for(unsigned i=0;i<6;++i){
+        if(i==5&&!macos)continue;
+        const auto base=root+"\\classic-lock-"+std::to_string(i);
+        const auto middlePath=Wide(base+(i>=4?".img":".dsk"));
+        if(i==5){
+            Check(CopyFileW(macos,middlePath.c_str(),TRUE)!=FALSE,"Cannot copy macOS APFS lock fixture");
+        }else if(i==4){
+            auto disk=HfsPlus::CreateImage(middlePath.c_str(),32*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*disk,u"Classic lock round trip",true,job);
+        }else if(i==3){
+            ClassicImage(base+".dsk");
+        }else{
+            Image(middlePath,kinds[i]);
+        }
+        auto middle=OpenBrowserImage(middlePath);
+        Check(middle&&middle->Supports().create,"Cannot open intermediate lock fixture");
+        Put(*middle,2,locked,4001,72);
+        auto result=transfer(source,middle,false);
+        Check(!result.code,result.message.c_str());
+        middle.reset();
+        middle=OpenBrowserImage(middlePath);
+        Check(bool(middle),"Cannot reopen intermediate lock copy");
+        const auto id=verify(*middle,locked,true,5003,34);
+        if(i!=3){
+            const auto metadata=middle->Stat(id);
+            Check(metadata.posix&&metadata.posix->immutable==PosixMetadata::UserImmutable,
+                  "Classic lock did not map to user immutability");
+        }
+        verify(*middle,unlocked,false,5007,35);
+        const auto destinationPath=base+"-returned.dsk";
+        auto returned=ClassicImage(destinationPath);
+        Put(*returned,2,locked,4077,73);
+        result=transfer(middle,returned,true);
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              result.message.empty()?"Classic lock overwrite did not cancel":result.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(Wide(destinationPath));
+        Check(bool(returned),"Cannot reopen cancelled classic overwrite");
+        verify(*returned,locked,false,4077,73);
+        result=transfer(middle,returned,false);
+        Check(!result.code,result.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(Wide(destinationPath));
+        Check(bool(returned),"Cannot reopen classic lock round trip");
+        const auto resultId=verify(*returned,locked,true,5003,34);
+        verify(*returned,unlocked,false,5007,35);
+        hfsdirent properties{};
+        Check(returned->GetClassicProperties(resultId,properties)&&(properties.flags&HFS_ISLOCKED),
+              "The classic catalog lock bit was lost");
+    }
+    fprintf(report,"PASS: classic HFS lock bit round-trips through classic HFS, HFS+/HFSX and APFS with both forks; canceled overwrites preserve the original unlocked file.\n");
+    if(macos)fprintf(report,"PASS: the classic lock round trip also works through a macOS APFS image.\n");
+}
+
 void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
 {
     const auto sourcePath=Wide(root+"\\classic-mfs-collision-source.dsk");
@@ -3268,6 +3363,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestClassicLockRoundTrip(root,report);
         TestClassicAndMfsCopyNameCollisions(root,report);
         TestHfsSystemImmutableToApfs(root,report);
         TestCrossFormatTimestamps(root,report);

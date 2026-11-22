@@ -787,7 +787,9 @@ struct Volume::Impl {
         const auto* dates=CatalogRecord(target)->value.data();
         const bool expanded=(U16(dates+2)&0x1000)!=0;
         result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
-        result.protectedFile = result.hardLink ? false : visible.protectedFile;try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
+        const bool catalogLocked=!result.directory&&(U16(dates+2)&1);
+        if(catalogLocked&&result.posix)result.posix->immutable|=PosixMetadata::UserImmutable;
+        result.protectedFile = catalogLocked||(!result.hardLink&&visible.protectedFile);try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
         if(result.hardLink){result.linkCount=uint32_t(Links(target).size());try{ValidateLinks(target);}catch(const Error&){result.protectedFile=true;}}
         if (!result.directory && !result.symbolicLink && IsCompressed(target)) {
             auto &c = Compressed(target);

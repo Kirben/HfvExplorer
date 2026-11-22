@@ -230,9 +230,18 @@ public:
         const auto compression=e.compressed?Mode::CopyCompressed:Mode::Preserve;
         const std::array<uint64_t,2> dates{e.created,e.modified};
         return Mutate([&]{
+            auto posix=e.posix;
+            if(e.protectedFile&&!posix){
+                // Classic HFS supplies a single lock bit without POSIX metadata.
+                HfsPlus::Entry old;
+                if(replace&&volume_->FindChild(parent,HfsPlus::Normalize(e.name,CaseSensitive()),old))
+                    posix=old.posix;
+                if(!posix)posix=PosixMetadata{0,0,0644};
+                posix->immutable|=PosixMetadata::UserImmutable;
+            }
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
                                 e.attributesKnown?&e.attributes:nullptr,compression,
-                                e.datesValid?&dates:nullptr,e.posix,e.hfsOverwriteScope,e.additionalDates);
+                                e.datesValid?&dates:nullptr,posix,e.hfsOverwriteScope,e.additionalDates);
         });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
