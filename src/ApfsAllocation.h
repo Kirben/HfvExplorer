@@ -11,6 +11,7 @@ using CheckpointObjectLookup=std::function<HfsPlus::Bytes&(uint64_t oid)>;
 
 struct DataRun {
     uint64_t block,count;
+    bool reused=false;
 };
 
 struct FileRun {

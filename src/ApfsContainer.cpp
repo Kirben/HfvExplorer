@@ -304,7 +304,7 @@ uint64_t Commit(Source& source,const Container& expected,Storage::Job& job,const
         Bytes buffer(plan.blockSize);
         uint64_t offset=0;
         for(const auto& run:stream.runs){
-            if(!run.block){
+            if(!run.block||run.reused){
                 const auto remaining=stream.size-offset;
                 offset+=run.count>remaining/plan.blockSize?remaining:run.count*plan.blockSize;
                 continue;

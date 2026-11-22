@@ -128,11 +128,17 @@ void DataStreamAllocation(FILE* report)
           !sparseStreams[1].runs[0].block&&sparseStreams[1].runs[0].count==2&&
           sparseStreams[2].runs.size()==2&&sparseStreams[2].runs[0].block==22,
           "APFS holes consumed physical allocation or displaced the next stream");
-    sparseStreams[0].holes={{1,3},{3,1}};
+    sparseStreams[0].existingExtents={{1,3},{3,1}};
     Reject([&]{Apfs::AssignDataRuns(sparseStreams,{{20,3},{42,2}});},"APFS accepted overlapping holes");
-    sparseStreams[0].holes={{5,1}};
+    sparseStreams[0].existingExtents={{5,1}};
     Reject([&]{Apfs::AssignDataRuns(sparseStreams,{{20,3},{42,2}});},"APFS accepted a hole beyond EOF");
-    fprintf(report,"PASS: APFS stream allocation preserves logical holes, partial blocks and independent physical stream boundaries.\n");
+    sparseStreams[0].existingExtents={{1,2,77},{4,1}};
+    Apfs::AssignDataRuns(sparseStreams,{{20,3},{42,2}});
+    Check(sparseStreams[0].AllocatedBlocks()==2&&sparseStreams[0].runs[1].block==77&&
+          sparseStreams[0].runs[1].count==2&&sparseStreams[0].runs[1].reused&&
+          !sparseStreams[0].runs[2].reused&&sparseStreams[2].runs[0].block==22,
+          "Shared APFS blocks consumed new allocation or were marked writable");
+    fprintf(report,"PASS: APFS stream allocation preserves logical holes, reused ranges and independent physical stream boundaries.\n");
 }
 
 void CheckpointWrites(const std::string& root,FILE* report)

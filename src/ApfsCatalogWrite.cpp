@@ -2503,11 +2503,11 @@ uint64_t DataStreamWrite::AllocatedBlocks() const
 {
     const auto blocks=DivideUp(size,Block);
     uint64_t allocated=blocks,end=0;
-    for(const auto& hole:holes){
-        Check(hole.count&&hole.block>=end&&hole.block<=blocks&&hole.count<=blocks-hole.block,
-              "Invalid APFS sparse stream allocation");
-        end=hole.block+hole.count;
-        allocated-=hole.count;
+    for(const auto& extent:existingExtents){
+        Check(extent.count&&extent.block>=end&&extent.block<=blocks&&extent.count<=blocks-extent.block&&
+              extent.count<=UINT64_MAX-extent.physical,"Invalid APFS existing stream extent");
+        end=extent.block+extent.count;
+        allocated-=extent.count;
     }
     return allocated;
 }
@@ -2521,16 +2521,16 @@ void AssignDataRuns(std::vector<DataStreamWrite>& streams,const std::vector<Data
         const auto allocation=stream.AllocatedBlocks();
         const auto blocks=DivideUp(stream.size,Block);
         uint64_t logical=0,assigned=0;
-        size_t hole=0;
+        size_t extentIndex=0;
         while(logical<blocks){
-            if(hole<stream.holes.size()&&stream.holes[hole].block==logical){
-                const auto count=stream.holes[hole++].count;
-                stream.runs.push_back({0,count});
-                logical+=count;
+            if(extentIndex<stream.existingExtents.size()&&stream.existingExtents[extentIndex].block==logical){
+                const auto& extent=stream.existingExtents[extentIndex++];
+                stream.runs.push_back({extent.physical,extent.count,extent.physical!=0});
+                logical+=extent.count;
                 continue;
             }
-            const auto stop=hole<stream.holes.size()?stream.holes[hole].block:blocks;
-            Check(index<runs.size()&&runs[index].block&&consumed<runs[index].count,"APFS data allocation is incomplete");
+            const auto stop=extentIndex<stream.existingExtents.size()?stream.existingExtents[extentIndex].block:blocks;
+            Check(index<runs.size()&&runs[index].block&&!runs[index].reused&&consumed<runs[index].count,"APFS data allocation is incomplete");
             const auto& run=runs[index];
             const auto count=(std::min)(stop-logical,run.count-consumed);
             Check(consumed<=UINT64_MAX-run.block,"APFS data allocation overflows");
@@ -2843,7 +2843,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(!(range.offset%Block)&&range.length&&Range(range.offset,range.length,size)&&
                   (!(range.length%Block)||range.offset+range.length==size),
                   "Invalid APFS sparse source range");
-            stream.holes.push_back({range.offset/Block,DivideUp(range.length,Block)});
+            stream.existingExtents.push_back({range.offset/Block,DivideUp(range.length,Block)});
         }
         return stream.AllocatedBlocks();
     };
@@ -3051,21 +3051,22 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
             SetAdditionalDates(inode.value,dates->additionalDates);
         }
-        if(input&&dataSize&&!plan.streams.front().holes.empty()){
+        if(!dataHoles.empty()){
             auto& value=inode.value;
             const auto count=Le16(value.data()+92);
             const auto payload=96+size_t(count)*4;
             const auto stream=payload+size_t(DivideUp(name.size()+1,8)*8);
             Check(count>=2&&value[100]==8&&stream+40<=value.size(),"Missing APFS sparse data stream");
-            const auto allocated=fileBlocks*Block;
-            Set(value,stream+8,allocated,8);
+            uint64_t sparseBytes=0;
+            for(const auto& hole:dataHoles)sparseBytes+=DivideUp(hole.length,Block)*Block;
+            Set(value,stream+8,DivideUp(dataSize,Block)*Block-sparseBytes,8);
             Set(value,48,Le64(value.data()+48)|0x200,8); // INODE_IS_SPARSE
             Set(value,92,count+1,2);
             Set(value,94,Le16(value.data()+94)+8,2);
             value.insert(value.begin()+payload,{13,0x20,8,0}); // INO_EXT_TYPE_SPARSE_BYTES
             const auto end=value.size();
             value.resize(end+8);
-            Set(value,end,(DivideUp(dataSize,Block)-fileBlocks)*Block,8);
+            Set(value,end,sparseBytes,8);
         }
         SetPosixMetadata(inode.value,create->posix);
         if(create->locked)Set(inode.value,68,Le32(inode.value.data()+68)|CopiedProtectionFlags(create->posix),4);
@@ -3314,7 +3315,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 std::vector<FileRun> updated;
                 for(const auto& run:files)if(!retiredRun(run))updated.push_back(run);
                 for(const auto& stream:plan.streams)
-                    for(const auto& run:stream.runs)if(run.block)updated.push_back({entryId,run.block,run.count,stream.id});
+                    for(const auto& run:stream.runs)if(run.block&&!run.reused)updated.push_back({entryId,run.block,run.count,stream.id});
                 std::sort(updated.begin(),updated.end(),[](const auto& a,const auto& b){return a.block<b.block;});
                 auto references=snapshotUpdates;
                 for(const auto& run:updated){
