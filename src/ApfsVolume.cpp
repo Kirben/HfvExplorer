@@ -863,8 +863,7 @@ private:
             within+=take;out+=take;size-=take;
         }
     }
-    void ReadStream(size_t mount,uint64_t stream,uint64_t at,void* data,size_t size){
-        if(!size)return;
+    const std::vector<Extent>& StreamExtents(size_t mount,uint64_t stream){
         Check(stream!=0,"Missing APFS stream identifier");
         const Address address{mount,stream};
         auto it=extents.find(address);
@@ -872,7 +871,11 @@ private:
             const Catalog catalog(*source,container,mounts[mount]);
             it=extents.emplace(address,Extents(catalog,container,stream,bool(mounts[mount].cipher))).first;
         }
-        const auto& list=it->second;
+        return it->second;
+    }
+    void ReadStream(size_t mount,uint64_t stream,uint64_t at,void* data,size_t size){
+        if(!size)return;
+        const auto& list=StreamExtents(mount,stream);
         auto run=std::lower_bound(list.begin(),list.end(),at,[](const Extent& extent,uint64_t offset){
             return extent.offset+extent.length<=offset;
         });
@@ -962,6 +965,21 @@ public:
                 else out.emplace(pair.first,AttributeData(attr.embedded));
             }
             return out;
+        });
+    }
+    bool HasSparseForks(uint32_t id)override{
+        return Access([&]{
+            const auto& file=At(id);
+            const auto hasHole=[&](uint64_t stream,uint64_t size){
+                if(!stream||!size)return false;
+                const auto& runs=StreamExtents(file.mount,stream);
+                return std::any_of(runs.begin(),runs.end(),[&](const Extent& extent){
+                    return !extent.block&&extent.offset<size;
+                });
+            };
+            if(!file.entry.compressed&&hasHole(file.stream,file.entry.forks[0].size))return true;
+            const auto resource=file.attributes.find(ResourceFork);
+            return resource!=file.attributes.end()&&hasHole(resource->second.stream,file.entry.forks[1].size);
         });
     }
     void ReadCompressionResource(uint32_t id,uint64_t at,void* data,size_t size)override{

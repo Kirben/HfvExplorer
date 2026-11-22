@@ -3553,6 +3553,8 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
             Completion completion;
             const auto result=ExecuteInWorker(OrdinaryCopy{{selection},Native(target)},job,completion);
             Check(prompts==1,"Sparse overwrite must request approval");
+            Check(job.progress().sparseHolesAllocated==!result.code,
+                  "Sparse allocation notice must only report a published copy");
             return std::make_pair(result,read);
         };
         for(bool cut:{false,true}){
@@ -3580,7 +3582,7 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         Check(bool(target),"Cannot reopen the copied sparse file");
         verifySparse(*target);
     }
-    fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
+    fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen with a dense allocation notice; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
 }
 
 void TestApfsToHfsCompression(const std::string& root,FILE* report)

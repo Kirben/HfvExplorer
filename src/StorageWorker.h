@@ -27,6 +27,7 @@ struct Progress {
  unsigned files=0,skipped=0,totalFiles=0;
  bool scanning=true,fileCopy=false,byteTransfer=false,utf8=false;
  bool timestampPrecisionReduced=false;
+ bool sparseHolesAllocated=false;
 };
 struct Result {
  int code=0;
@@ -38,6 +39,7 @@ struct Result {
  unsigned completed=0, skipped=0;
  bool partial=false;
  bool timestampPrecisionReduced=false;
+ bool sparseHolesAllocated=false;
 
  void Finalize(const OutcomeEvidence& evidence, unsigned items, unsigned skippedItems) {
   if(items>completed)completed=items;
@@ -85,6 +87,7 @@ public:
    OutcomeEvidence evidence;
    result.Finalize(evidence,0,0);
    result.timestampPrecisionReduced|=progress_.timestampPrecisionReduced;
+   result.sparseHolesAllocated|=progress_.sparseHolesAllocated;
    result_=std::move(result);
    done_=true;
    notify=std::move(completion_);

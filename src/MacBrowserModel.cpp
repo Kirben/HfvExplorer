@@ -453,6 +453,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
                               entry.compressionResourceSize&&!entry.forks[1].size;
     uint64_t readThrough[2]={};
     auto outgoing=entry;
+    const bool materializesHoles=hfsPlus&&!plan.reader&&src.HasSparseForks(entry.id);
     if(storedResource)outgoing.forks[1].size=entry.compressionResourceSize;
     else {outgoing.compressionResourceSize=0;outgoing.resourceCompressionHeader.clear();}outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     outgoing.hfsOverwriteScope=hfsScope;
@@ -516,6 +517,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
     noteDatePrecision();
+    progress.sparseHolesAllocated|=materializesHoles;
     const auto remaining=progress.fileTotal-progress.fileBytes;
     progress.fileBytes+=remaining;
     progress.bytes+=remaining;

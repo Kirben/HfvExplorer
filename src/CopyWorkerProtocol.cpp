@@ -54,6 +54,7 @@ void EncodeProgress(Data &d, const Storage::Progress &p) {
     d.put(p.byteTransfer);
     d.put(p.utf8);
     d.put(p.timestampPrecisionReduced);
+    d.put(p.sparseHolesAllocated);
 }
 Storage::Progress DecodeProgress(Data &d) {
     Storage::Progress p;
@@ -73,6 +74,7 @@ Storage::Progress DecodeProgress(Data &d) {
     p.byteTransfer = d.get() != 0;
     p.utf8 = d.get() != 0;
     p.timestampPrecisionReduced = d.flag();
+    p.sparseHolesAllocated = d.flag();
     return p;
 }
 void EncodeOrigin(Data &d, const WorkerOrigin &o) {
