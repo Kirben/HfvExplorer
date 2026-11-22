@@ -443,6 +443,20 @@ public:
         });
         return id;
     }
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& entry) override {
+        if(entry.attributes.empty())return MakeDirectory(parent,entry.name);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        uint32_t id=0;
+        Call(SessionCommandCode::MakeAttributedDirectory,Protocol::Encode(Protocol::DirectoryName{parent,entry.name}),
+             true,[&]{
+                auto packet=Response(SessionBytes);
+                const auto value=packet.get();
+                packet.end();
+                Check(value>=2&&value<=UINT32_MAX,"Invalid attributed folder ID");
+                id=uint32_t(value);
+             },&entry.attributes);
+        return id;
+    }
     uint32_t Put(uint32_t parent, const Entry& entry, Reader reader, bool replace) override {
         return StreamPut(entry,std::move(reader),{parent,replace,entry.attributesKnown,0,0,entry.replaceHardLinkName},{});
     }
@@ -517,8 +531,11 @@ public:
     }
     void FinalizeDirectory(uint32_t id, const Entry& desired, const Entry& expected, bool merge) override {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        auto args=Protocol::EncodeDirectoryUpdate({id,merge,desired.attributesKnown},desired,expected);
-        Call(SessionCommandCode::FinalizeDirectory,std::move(args),true,[]{},&desired.attributes);
+        // HFS+/HFSX already wrote the attributes with the new folder.
+        const HfsPlus::Attributes noAttributes;
+        const auto& attributes=Plus()?noAttributes:desired.attributes;
+        auto args=Protocol::EncodeDirectoryUpdate({id,merge,!Plus()&&desired.attributesKnown},desired,expected);
+        Call(SessionCommandCode::FinalizeDirectory,std::move(args),true,[]{},&attributes);
     }
     bool CanMoveFrom(const Volume& source) const override {
         return &source == this && Writable() && !Mfs();
@@ -754,6 +771,16 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             case SessionCommandCode::MakeDirectory: {
                 const auto request=Protocol::DecodeDirectoryName(packet);
                 writeNumber(volume.MakeDirectory(request.parent,request.name));
+                break;
+            }
+            case SessionCommandCode::MakeAttributedDirectory: {
+                auto request=Protocol::DecodeDirectoryName(packet);
+                Entry folder;
+                folder.name=std::move(request.name);
+                folder.directory=true;
+                folder.attributesKnown=true;
+                folder.attributes=std::move(*attributes[0]);
+                writeNumber(volume.MakeDirectoryWithAttributes(request.parent,folder));
                 break;
             }
 #ifdef HFV_TESTING

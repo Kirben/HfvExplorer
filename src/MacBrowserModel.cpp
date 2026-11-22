@@ -106,7 +106,10 @@ public:
         if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}
         HfsPlus::ValidateAttributes(e.attributes);
     }
-    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{ValidateEntry(e);return Mutate([&]{return volume_->MakeDirectory(parent,e.name);});}
+    uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
+        ValidateEntry(e);
+        return Mutate([&]{return volume_->MakeDirectory(parent,e.name,e.attributes.empty()?nullptr:&e.attributes);});
+    }
     void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
         Mutate([&]{
             const auto now=volume_->Stat(id);
@@ -114,8 +117,7 @@ public:
                   "Destination folder changed during copying");
             const std::array<uint64_t,2> dates{desired.created,desired.modified};
             volume_->SetDirectoryMetadata(id,merge?nullptr:&desired.finder,desired.datesValid?&dates:nullptr,
-                                          !merge&&desired.attributesKnown?&desired.attributes:nullptr,
-                                          merge?std::nullopt:desired.posix);
+                                          nullptr,merge?std::nullopt:desired.posix);
         });
     }
     bool CaseSensitive() const override { return caseSensitive_; }
@@ -332,6 +334,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
+    if (job.cancelled()) throw Storage::Cancelled();
     if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};

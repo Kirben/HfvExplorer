@@ -183,6 +183,8 @@ void TestVolumeSessionProtocol()
     reject([]{Data data;data.put(1000);Protocol::DecodeCommand(data,false,false);},"accepted unknown volume opcode");
     reject([]{auto data=Protocol::EncodeCommand(Command::Put,{});Protocol::DecodeCommand(data,false,false);},
            "accepted missing streamed attributes");
+    reject([]{auto data=Protocol::EncodeCommand(Command::MakeAttributedDirectory,{});Protocol::DecodeCommand(data,false,false);},
+           "accepted an attributed folder request without attributes");
     reject([]{auto data=Protocol::EncodeCommand(Command::List,{});Protocol::DecodeCommand(data,false,true);},
            "accepted unexpected secondary attributes");
     reject([]{Data data;data.put(UINT64_C(0x100000000));Protocol::DecodeStat(data);},"accepted a wider catalog number");
@@ -1267,7 +1269,7 @@ void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS copies into HFS+ and both HFSX variants share one inode per link group and preserve both forks after reopening. An overwritten name is detached from unrelated aliases.\n");
 }
 
-void TestHfsToApfsAttributes(const std::string& root,FILE* report)
+void TestCrossFormatAttributes(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
     const auto acl=[](unsigned count){
@@ -1372,9 +1374,85 @@ void TestHfsToApfsAttributes(const std::string& root,FILE* report)
             Check(std::all_of(contents.begin(),contents.end(),[&](uint8_t b){return b==(fork?0x79:0x34);}),
                   "Attribute copy changed file fork data");
         }
-        if(external)fprintf(report,"PASS: HFSX extended attributes and ACLs reopen on the shared macOS APFS fixture.\n");
+        const auto destinationPath=Wide(root+"\\"+format+"-xattrs-return.dsk");
+        {
+            auto disk=HfsPlus::CreateImage(destinationPath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Attribute return destination",true,kind);
+        }
+        {
+            auto destination=OpenBrowserImage(destinationPath);
+            Check(destination&&VolumeSession::VolumeSessionPidForTest(destination),"Missing HFS+ attribute-copy worker");
+            const auto copyToHfs=[&](uint32_t parent,Storage::Job& job,Completion& completion){
+                return ExecuteInWorker(OrdinaryCopy{{Native(target,folder.id)},Native(destination,parent)},job,completion);
+            };
+            const auto workerPid=VolumeSession::VolumeSessionPidForTest(destination);
+            for(const bool afterForkRead:{false,true}){
+                bool interrupted=false;
+                Storage::Job cancellation;
+                cancellation.transport([&](const Storage::Progress& progress){
+                    if(!interrupted&&progress.path=="Document"&&(!afterForkRead||progress.fileBytes)){
+                        interrupted=true;
+                        cancellation.cancel();
+                    }
+                },{});
+                Completion aborted;
+                const auto cancelled=copyToHfs(2,cancellation,aborted);
+                if(!interrupted||cancelled.outcome!=Storage::Outcome::Cancelled)
+                    throw HfsPlus::Error("Expected cancellation during APFS attribute copy: "+cancelled.message);
+                Check(VolumeSession::VolumeSessionPidForTest(destination)==workerPid,
+                      "Cancelling the APFS attribute copy stopped the destination worker");
+                Entry staged,absent;
+                Check(destination->FindChild(2,u"Attribute transfer",staged),
+                      "Could not find the folder created before cancelling the APFS copy");
+                Check(!destination->FindChild(staged.id,u"Document",absent),
+                      "Cancelling the APFS attribute copy published an incomplete file");
+                Check(destination->GetAttributes(staged.id)==folderAttrs,
+                      "A partial APFS copy published an HFS folder without its original attributes and ACL");
+            }
+
+            Storage::Job retry;
+            Completion done;
+            const auto result=copyToHfs(2,retry,done);
+            if(result.code)throw HfsPlus::Error(result.message);
+            Check(done.complete,"Incomplete APFS attribute copy to HFS+");
+
+            const auto merge=destination->MakeDirectory(2,u"Merge");
+            const auto oldFolder=destination->MakeDirectory(merge,u"Attribute transfer");
+            destination->SetAttributes(oldFolder,staleAttrs);
+            const auto oldFile=Put(*destination,oldFolder,u"Document",512);
+            destination->SetAttributes(oldFile,staleAttrs);
+            Storage::Job overwrite;
+            bool approved=false;
+            overwrite.transport({},[&](const auto&){approved=true;return Storage::ConflictChoice::Replace;});
+            Completion merged;
+            const auto replacement=copyToHfs(merge,overwrite,merged);
+            if(replacement.code)throw HfsPlus::Error(replacement.message);
+            Check(merged.complete&&approved,"Missing APFS to HFS attribute overwrite approval");
+        }
+
+        auto destination=OpenBrowserImage(destinationPath);
+        Entry merge;
+        Check(destination&&destination->FindChild(2,u"Merge",merge),"Could not reopen the HFS attribute fixture");
+        for(const auto parent:{uint32_t(2),merge.id}){
+            Entry copiedFolder,copiedFile;
+            Check(destination->FindChild(parent,u"Attribute transfer",copiedFolder)&&
+                  destination->FindChild(copiedFolder.id,u"Document",copiedFile)&&
+                  destination->GetAttributes(copiedFolder.id)==(parent==2?folderAttrs:staleAttrs),
+                  "Reopened HFS folder lost attributes or changed existing merge metadata");
+            const auto attributes=destination->GetAttributes(copiedFile.id);
+            Check(attributes==fileAttrs&&attributes.at(u"user.large").FileBacked(),
+                  "Reopened HFS file lost inline attributes, streamed attributes or its ACL");
+            for(unsigned fork=0;fork<2;++fork){
+                Check(copiedFile.forks[fork].size==sizes[fork],"Reopened HFS attribute copy lost a fork");
+                HfsPlus::Bytes contents(sizes[fork]),original(sizes[fork]);
+                destination->Read(copiedFile.id,fork,0,contents.data(),contents.size());
+                target->Read(file.id,fork,0,original.data(),original.size());
+                Check(contents==original,"APFS to HFS attribute copy changed fork contents");
+            }
+        }
+        if(external)fprintf(report,"PASS: attributes and ACLs round-trip through the shared macOS APFS fixture.\n");
     }
-    fprintf(report,"PASS: HFS+ and both HFSX variants preserve file and folder ACLs and inline, empty, Unicode-named, and streamed extended attributes on APFS, including overwrite and reopen.\n");
+    fprintf(report,"PASS: APFS, HFS+ and both HFSX variants preserve file and folder ACLs and inline, empty, Unicode-named, and streamed extended attributes after reopening. Interrupted copies retain new folder ACLs, and merges keep existing folder attributes.\n");
 }
 } // namespace
 
@@ -1395,7 +1473,7 @@ int RunCopyProcessTest(const char *directory) {
         TestSymbolicLinkCopies(root,report);
         TestHfsToApfsHardLinks(root,report);
         TestApfsToHfsHardLinks(root,report);
-        TestHfsToApfsAttributes(root,report);
+        TestCrossFormatAttributes(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {

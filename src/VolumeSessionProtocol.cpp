@@ -45,13 +45,13 @@ Command DecodeCommand(Data& packet,bool primaryAttributes,bool secondaryAttribut
 #ifdef HFV_TESTING
     constexpr auto maximum=Command::TestCrashRemoveTree;
 #else
-    constexpr auto maximum=Command::SymbolicLink;
+    constexpr auto maximum=Command::MakeAttributedDirectory;
 #endif
     Check(opcode<=uint64_t(maximum),"Invalid volume session command");
     const auto command=Command(opcode);
     const bool carriesAttributes=command==Command::SetAttributes||command==Command::Put||
         command==Command::TestCrashPut||command==Command::FinalizeDirectory||command==Command::ValidateEntry||
-        command==Command::SymbolicLink;
+        command==Command::SymbolicLink||command==Command::MakeAttributedDirectory;
     Check(primaryAttributes==carriesAttributes&&!secondaryAttributes,"Unexpected volume session attributes");
     return command;
 }

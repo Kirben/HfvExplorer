@@ -8,7 +8,7 @@ enum class Command {
     HardLink, ValidateRemoval, ValidateCopy, Compression, Put, FinalizeDirectory,
     ValidateEntry, GetClassicProperties, SetClassicProperties, CloseClassic, FindChild,
     SetBasicMetadata, RemoveTree, BeginCopyTransaction, CommitCopyTransaction, AbortCopyTransaction, PrepareCopyTransaction,
-    ReadSymbolicLink, SymbolicLink, TestCrashRename, TestCrashPut, TestCrashRemoveTree
+    ReadSymbolicLink, SymbolicLink, MakeAttributedDirectory, TestCrashRename, TestCrashPut, TestCrashRemoveTree
 };
 inline constexpr size_t ReadLimit=256*1024;
 
