@@ -2494,26 +2494,51 @@ void CheckNativeVolume(const Bytes& volume)
 }
 }
 
+uint64_t DataStreamWrite::AllocatedBlocks() const
+{
+    const auto blocks=DivideUp(size,Block);
+    uint64_t allocated=blocks,end=0;
+    for(const auto& hole:holes){
+        Check(hole.count&&hole.block>=end&&hole.block<=blocks&&hole.count<=blocks-hole.block,
+              "Invalid APFS sparse stream allocation");
+        end=hole.block+hole.count;
+        allocated-=hole.count;
+    }
+    return allocated;
+}
+
 void AssignDataRuns(std::vector<DataStreamWrite>& streams,const std::vector<DataRun>& runs)
 {
     size_t index=0;
     uint64_t consumed=0;
     for(auto& stream:streams){
         stream.runs.clear();
-        auto remaining=DivideUp(stream.size,Block);
-        while(remaining){
-            Check(index<runs.size()&&consumed<runs[index].count,"APFS data allocation is incomplete");
+        const auto allocation=stream.AllocatedBlocks();
+        const auto blocks=DivideUp(stream.size,Block);
+        uint64_t logical=0,assigned=0;
+        size_t hole=0;
+        while(logical<blocks){
+            if(hole<stream.holes.size()&&stream.holes[hole].block==logical){
+                const auto count=stream.holes[hole++].count;
+                stream.runs.push_back({0,count});
+                logical+=count;
+                continue;
+            }
+            const auto stop=hole<stream.holes.size()?stream.holes[hole].block:blocks;
+            Check(index<runs.size()&&runs[index].block&&consumed<runs[index].count,"APFS data allocation is incomplete");
             const auto& run=runs[index];
-            const auto count=(std::min)(remaining,run.count-consumed);
+            const auto count=(std::min)(stop-logical,run.count-consumed);
             Check(consumed<=UINT64_MAX-run.block,"APFS data allocation overflows");
             stream.runs.push_back({run.block+consumed,count});
-            remaining-=count;
+            logical+=count;
+            assigned+=count;
             consumed+=count;
             if(consumed==run.count){
                 ++index;
                 consumed=0;
             }
         }
+        Check(assigned==allocation,"APFS sparse stream allocation has inconsistent size");
     }
     Check(index==runs.size(),"APFS data allocation has unused blocks");
 }
@@ -3225,13 +3250,13 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto allocated=AllocateWriteBlocks(writes,source,current,space,superblock,ephemeral,
         retired,extentTree.blocks,snapshots,files,std::move(retiredData),dataBlocks,allocatedData,transaction,[&]{
             AssignDataRuns(plan.streams,allocatedData);
-            if(fileBlocks){
+            if(input&&dataSize){
                 std::vector<OwnedRecord> stream;
                 stream.push_back(StreamReference(entryId));
                 uint64_t logical=0;
                 for(const auto& data:plan.streams.front().runs){
                     const FileRun run{entryId,data.block,data.count};
-                    stream.push_back(FileExtent(run,logical,bool(current.writeCipher)));
+                    stream.push_back(FileExtent(run,logical,data.block&&bool(current.writeCipher)));
                     logical+=data.count;
                 }
                 catalog.insert(catalog.begin()+streamAt,std::make_move_iterator(stream.begin()),
@@ -3241,7 +3266,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 if(!stream.id)continue;
                 uint64_t logical=0;
                 for(const auto& data:stream.runs){
-                    catalog.push_back(FileExtent({entryId,data.block,data.count,stream.id},logical,bool(current.writeCipher)));
+                    catalog.push_back(FileExtent({entryId,data.block,data.count,stream.id},logical,data.block&&bool(current.writeCipher)));
                     logical+=data.count;
                 }
             }
@@ -3255,7 +3280,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 std::vector<FileRun> updated;
                 for(const auto& run:files)if(!retiredRun(run))updated.push_back(run);
                 for(const auto& stream:plan.streams)
-                    for(const auto& run:stream.runs)updated.push_back({entryId,run.block,run.count,stream.id});
+                    for(const auto& run:stream.runs)if(run.block)updated.push_back({entryId,run.block,run.count,stream.id});
                 std::sort(updated.begin(),updated.end(),[](const auto& a,const auto& b){return a.block<b.block;});
                 auto references=snapshotUpdates;
                 for(const auto& run:updated){

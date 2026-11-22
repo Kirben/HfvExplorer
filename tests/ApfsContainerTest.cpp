@@ -112,7 +112,27 @@ void DataStreamAllocation(FILE* report)
           "APFS streams shared a partial block or lost a fragmented extent");
     Reject([&]{Apfs::AssignDataRuns(streams,{{20,4}});},"APFS accepted too few blocks for its streams");
     Reject([&]{Apfs::AssignDataRuns(streams,{{20,6}});},"APFS accepted surplus blocks for its streams");
-    fprintf(report,"PASS: APFS stream allocation splits runs at independently padded stream boundaries.\n");
+    Memory sparse(4*4096+1),allHoles(4097);
+    std::vector<Apfs::DataStreamWrite> sparseStreams{
+        {sparse,sparse.Size(),{},0,{{1,2},{4,1}}},
+        {allHoles,allHoles.Size(),{},0,{{0,2}}},
+        {resource,resource.Size()}
+    };
+    Check(sparseStreams[0].AllocatedBlocks()==2&&sparseStreams[1].AllocatedBlocks()==0,
+          "APFS sparse allocation counted a hole as physical storage");
+    Apfs::AssignDataRuns(sparseStreams,{{20,3},{42,2}});
+    const auto& mixed=sparseStreams[0].runs;
+    Check(mixed.size()==4&&mixed[0].block==20&&mixed[0].count==1&&
+          !mixed[1].block&&mixed[1].count==2&&mixed[2].block==21&&mixed[2].count==1&&
+          !mixed[3].block&&mixed[3].count==1&&sparseStreams[1].runs.size()==1&&
+          !sparseStreams[1].runs[0].block&&sparseStreams[1].runs[0].count==2&&
+          sparseStreams[2].runs.size()==2&&sparseStreams[2].runs[0].block==22,
+          "APFS holes consumed physical allocation or displaced the next stream");
+    sparseStreams[0].holes={{1,3},{3,1}};
+    Reject([&]{Apfs::AssignDataRuns(sparseStreams,{{20,3},{42,2}});},"APFS accepted overlapping holes");
+    sparseStreams[0].holes={{5,1}};
+    Reject([&]{Apfs::AssignDataRuns(sparseStreams,{{20,3},{42,2}});},"APFS accepted a hole beyond EOF");
+    fprintf(report,"PASS: APFS stream allocation preserves logical holes, partial blocks and independent physical stream boundaries.\n");
 }
 
 void CheckpointWrites(const std::string& root,FILE* report)
@@ -5328,8 +5348,12 @@ int RunApfsContainerTest(const char* directory)
         preserved=targets.front();
         Check(preserved.name==HfsPlus::Normalize(withMetadata.name,targetMac->CaseSensitive()),"APFS transfer changed its name");
         Check(preserved.forks[1].size==8,"APFS transfer lost the resource fork");
-        const auto copiedAttributes=targetMac->GetAttributes(preserved.id);
-        Check(copiedAttributes==attributes,"APFS transfer lost the extended attribute");
+        preserved.attributes=targetMac->GetAttributes(preserved.id);
+        Check(MacBrowser::ValidateApfsSparseLayout(preserved,[&](unsigned fork,uint64_t at,void* bytes,size_t count){
+            targetMac->Read(preserved.id,fork,at,bytes,count);
+        },job)==macFile->SparseRanges(withMetadata.id),"APFS transfer did not preserve its sparse layout");
+        preserved.attributes.erase(MacBrowser::ApfsSparseLayoutAttribute);
+        Check(preserved.attributes==attributes,"APFS transfer lost the extended attribute");
         Bytes restored(8);
         targetMac->Read(preserved.id,1,0,restored.data(),restored.size());
         Check(restored==resource,"APFS transfer changed the resource fork");

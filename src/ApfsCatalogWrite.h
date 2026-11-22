@@ -97,11 +97,14 @@ struct CatalogVolumeRename { const std::u16string& name; };
 struct CatalogSnapshot { const std::u16string& name; bool create; };
 using CatalogMutation=std::variant<ExternalCatalogEdit,CatalogCreate,CatalogRename,CatalogDelete,CatalogReplaceData,CatalogMetadata,CatalogAttributes,CatalogResourceFork,CatalogReplaceSymlink,CatalogHardLink,CatalogSnapshot,CatalogVolumeRename>;
 
+struct LogicalHole { uint64_t block,count; };
 struct DataStreamWrite {
     HfsPlus::Source& input;
     uint64_t size;
     std::vector<DataRun> runs;
     uint64_t id=0;
+    std::vector<LogicalHole> holes;
+    uint64_t AllocatedBlocks() const;
 };
 struct CatalogWritePlan {
     std::vector<CheckpointBlockWrite> metadata;
