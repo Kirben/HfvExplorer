@@ -738,8 +738,10 @@ struct Volume::Impl {
         if(target!=id||(internal&&target!=2&&e.parent==directoryMetadata)){ValidateLinks(target);Mutable(e,true);}
         else Parent(target);return target;
     }
-    void SyncLinks(uint32_t inode,const std::vector<uint32_t>& links,bool chained) {
-        auto raw=CatalogRecord(inode);P32(raw->value.data()+20,Time::Encode(Now(),(U16(raw->value.data()+2)&0x1000)!=0));P32(raw->value.data()+44,uint32_t(links.size()));
+    void SyncLinks(uint32_t inode,const std::vector<uint32_t>& links,bool chained,bool copied=false) {
+        auto raw=CatalogRecord(inode);
+        if(!copied)P32(raw->value.data()+20,Time::Encode(Now(),(U16(raw->value.data()+2)&0x1000)!=0));
+        P32(raw->value.data()+44,uint32_t(links.size()));
         if(!chained)return;
         P16(raw->value.data()+2,U16(raw->value.data()+2)|0x20);
         if(Get(inode).directory){auto desired=GetAttributes(inode);auto number=std::to_string(links.empty()?0:links.front());desired[u"com.apple.system.hfs.firstlink"]=Bytes(number.begin(),number.end());desired[u"com.apple.system.hfs.firstlink"].push_back(0);ReplaceAttributes(inode,desired,true,true);}
@@ -782,6 +784,9 @@ struct Volume::Impl {
         result.name = visible.name;
         result.resolvedId = target;
         result.hardLink = target != id;
+        const auto* dates=CatalogRecord(target)->value.data();
+        const bool expanded=(U16(dates+2)&0x1000)!=0;
+        result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
         result.protectedFile = result.hardLink ? false : visible.protectedFile;try{ValidateLinkAncestors(id);}catch(const Error&){result.protectedFile=true;}
         if(result.hardLink){result.linkCount=uint32_t(Links(target).size());try{ValidateLinks(target);}catch(const Error&){result.protectedFile=true;}}
         if (!result.directory && !result.symbolicLink && IsCompressed(target)) {
@@ -1596,25 +1601,25 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
                      const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates,
                      const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates,
-                     std::optional<PosixMetadata> posix,OverwriteScope scope) {
-    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope);
+                     std::optional<PosixMetadata> posix,OverwriteScope scope,AdditionalFileDates additionalDates) {
+    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope,additionalDates);
 }
 void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                              const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
-                             const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix) {
+                             const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix,AdditionalFileDates additionalDates) {
     ValidateSymbolicLinkTarget(target);
     // APFS and the transfer interface include a terminator. HFS+ stores only
     // the target bytes in its data fork.
     PutFile(parent,name,target.size()-1,0,[&](unsigned,uint64_t at,void* out,size_t size){
         memcpy(out,target.data()+at,size);
-    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode);
+    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode,additionalDates);
 }
 uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
                          const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
                          const std::array<uint8_t,32>* finder,bool overwrite,
                          const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
                          const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
-                         OverwriteScope scope) {
+                         OverwriteScope scope,AdditionalFileDates additionalDates) {
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
@@ -1663,8 +1668,11 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     std::array<uint64_t,2> desiredDates{existing?e.created:Now(),Now()};
     if(dates)desiredDates={(*dates)[0],(*dates)[1]};if(wideDates)desiredDates=*wideDates;
     bool expanded=existing?(U16(p.CatalogRecord(e.id)->value.data()+2)&0x1000)!=0:ExpandedTimes();
-    bool convertTimes=false;if(!expanded&&(desiredDates[0]>UINT32_MAX||desiredDates[1]>UINT32_MAX)){Check(ExpandedTimes(),"Format this image with expanded timestamps to store dates after February 2040");expanded=convertTimes=true;}
+    bool convertTimes=false;if(!expanded&&(desiredDates[0]>UINT32_MAX||desiredDates[1]>UINT32_MAX||
+        additionalDates.accessed.value_or(0)>UINT32_MAX||additionalDates.changed.value_or(0)>UINT32_MAX)){Check(ExpandedTimes(),"Format this image with expanded timestamps to store dates after February 2040");expanded=convertTimes=true;}
     for(auto date:desiredDates)(void)Time::Encode(date,expanded);
+    if(additionalDates.accessed)(void)Time::Encode(*additionalDates.accessed,expanded);
+    if(additionalDates.changed)(void)Time::Encode(*additionalDates.changed,expanded);
     if(convertTimes)for(unsigned at=12;at<=28;at+=4){auto raw=U32(p.CatalogRecord(e.id)->value.data()+at);if(raw)(void)Time::Encode(raw,true);}
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
@@ -1731,6 +1739,8 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         if(convertTimes){for(unsigned at=12;at<=28;at+=4){auto raw=U32(timeRecord->value.data()+at);P32(timeRecord->value.data()+at,raw?Time::Encode(raw,true):0);}P16(timeRecord->value.data()+2,U16(timeRecord->value.data()+2)|0x1000);}
         e.created=desiredDates[0];e.modified=desiredDates[1];
         P32(timeRecord->value.data()+12,Time::Encode(e.created,expanded));P32(timeRecord->value.data()+16,Time::Encode(e.modified,expanded));
+        if(additionalDates.accessed)P32(timeRecord->value.data()+24,Time::Encode(*additionalDates.accessed,expanded));
+        if(additionalDates.changed)P32(timeRecord->value.data()+20,Time::Encode(*additionalDates.changed,expanded));
         e.compressed=bool(encoded);p.entries[e.id]=e;
         auto flags=p.CatalogRecord(e.id);flags->value[41]=uint8_t((flags->value[41]&~0x20)|(encoded?0x20:0));
         p.ReplaceAttributes(e.id,desired,true);
@@ -1753,17 +1763,25 @@ void Volume::SetCompression(uint32_t id,CompressionMode method,std::function<voi
     Put(e.parent,e.name,e.forks[0].size,e.forks[1].size,[&](unsigned fork,uint64_t at,void* output,size_t n){if(progress)progress(done,total);Check(Read(id,fork,at,output,n)==n,"Short file read during compression conversion");done=(std::min)(total,done+uint64_t(n));},&e.finder,true,nullptr,nullptr,method,&dates);
 }
 void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,const std::array<uint64_t,2>* dates,
-                                  const Attributes* attributes,std::optional<PosixMetadata> posix){
+                                  const Attributes* attributes,std::optional<PosixMetadata> posix,AdditionalFileDates additionalDates){
  auto& p=*p_;p.Guard();id=p.Content(id);auto e=p.Get(id);Check(e.directory,"Select a folder for directory metadata");if(attributes)ValidateAttributes(*attributes);
  Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
  auto record=p.CatalogRecord(id);bool expanded=(U16(record->value.data()+2)&0x1000)!=0,convert=false;
- if(dates){if(!expanded&&((*dates)[0]>UINT32_MAX||(*dates)[1]>UINT32_MAX)){Check(ExpandedTimes(),"This folder requires expanded timestamps");expanded=convert=true;}for(auto date:*dates)(void)Time::Encode(date,expanded);
-  if(convert)for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);if(raw)(void)Time::Encode(raw,true);}}
+ if(!expanded&&((dates&&((*dates)[0]>UINT32_MAX||(*dates)[1]>UINT32_MAX))||
+    additionalDates.accessed.value_or(0)>UINT32_MAX||additionalDates.changed.value_or(0)>UINT32_MAX)){
+  Check(ExpandedTimes(),"This folder requires expanded timestamps");expanded=convert=true;
+ }
+ if(dates)for(auto date:*dates)(void)Time::Encode(date,expanded);
+ if(additionalDates.accessed)(void)Time::Encode(*additionalDates.accessed,expanded);
+ if(additionalDates.changed)(void)Time::Encode(*additionalDates.changed,expanded);
+ if(convert)for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);if(raw)(void)Time::Encode(raw,true);}
  p.Mutate(fault,[&]{
   if(convert){for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);P32(record->value.data()+at,raw?Time::Encode(raw,true):0);}P16(record->value.data()+2,U16(record->value.data()+2)|0x1000);}
   if(finder){e.finder=*finder;memcpy(record->value.data()+48,e.finder.data(),32);}
   if(posix){SetPosixMetadata(record->value,*posix);e.posix=posix;}
   if(dates){e.created=(*dates)[0];e.modified=(*dates)[1];P32(record->value.data()+12,Time::Encode(e.created,expanded));P32(record->value.data()+16,Time::Encode(e.modified,expanded));}
+  if(additionalDates.accessed)P32(record->value.data()+24,Time::Encode(*additionalDates.accessed,expanded));
+  if(additionalDates.changed)P32(record->value.data()+20,Time::Encode(*additionalDates.changed,expanded));
   p.entries[id]=e;if(attributes){auto desired=*attributes;auto old=p.GetAttributes(id);if(old.count(u"com.apple.system.hfs.firstlink"))desired[u"com.apple.system.hfs.firstlink"]=old.at(u"com.apple.system.hfs.firstlink");p.ReplaceAttributes(id,desired,true,true);}
  });
 }
@@ -1853,7 +1871,7 @@ uint32_t Volume::MakeHardLink(uint32_t source,uint32_t parent,const std::u16stri
             original.parent=metadata;original.protectedFile=true;p.entries[inode]=original;p.ChangeCatalogKey(p.CatalogRecord(inode),Key(original.parent,original.name));p.Thread(original);
             links.push_back(p.Stub(inode,visible.parent,visible.name,reference,true));
         }
-        auto added=p.Stub(inode,parent,normalized,reference,chained);links.push_back(added);p.SyncLinks(inode,links,chained);
+        auto added=p.Stub(inode,parent,normalized,reference,chained);links.push_back(added);p.SyncLinks(inode,links,chained,copiedImmutable);
         return added;
     });
 }

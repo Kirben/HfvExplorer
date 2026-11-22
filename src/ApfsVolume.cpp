@@ -275,6 +275,7 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         out.stream=Le64(p+8);
         auto& entry=out.entry;
         entry.created=Date(p+16);entry.modified=Date(p+24);entry.datesValid=true;
+        entry.additionalDates={Date(p+40),Date(p+32)};
         const auto fullMode=Le16(p+80);
         const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;
@@ -1210,7 +1211,7 @@ private:
     }
     static std::optional<FileDates> CopyDates(const Entry& entry){
         if(!entry.datesValid)return {};
-        return FileDates{entry.created,entry.modified};
+        return FileDates{entry.created,entry.modified,entry.additionalDates};
     }
 public:
     uint32_t MakeHardLink(uint32_t id,uint32_t parent,const std::u16string& name,bool replace=false)override{
@@ -1249,7 +1250,7 @@ private:
             }
             CommitMutation(parent,destination.id,job,[&](auto& job){
                 return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,
-                                             limitedEdits||replace,copied&&copied->protectedFile);
+                                             limitedEdits||replace,copied!=nullptr);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
@@ -1282,8 +1283,13 @@ public:
             if(dates){
                 if(!current.datesValid||current.created!=dates->created)changes.created=dates->created;
                 if(!current.datesValid||current.modified!=dates->modified)changes.modified=dates->modified;
+                if(current.additionalDates.accessed!=dates->additionalDates.accessed)
+                    changes.additionalDates.accessed=dates->additionalDates.accessed;
+                if(current.additionalDates.changed!=dates->additionalDates.changed)
+                    changes.additionalDates.changed=dates->additionalDates.changed;
             }
-            if(!changes.created&&!changes.modified&&!lockAfterCopy)return;
+            if(!changes.created&&!changes.modified&&!changes.additionalDates.accessed&&
+               !changes.additionalDates.changed&&!lockAfterCopy)return;
             const auto parent=current.parent;
             const auto parentOid=At(parent).oid,oid=item.oid;
             // Restore destination folder dates even if the transfer was cancelled.
@@ -1353,6 +1359,8 @@ public:
             CatalogTimestamp(entry.created);
             CatalogTimestamp(entry.modified);
         }
+        if(entry.additionalDates.accessed)CatalogTimestamp(*entry.additionalDates.accessed);
+        if(entry.additionalDates.changed)CatalogTimestamp(*entry.additionalDates.changed);
     }
     void ValidateCopyNames(uint32_t parent,const std::vector<Entry>& entries,bool)override{
         // A not-yet-created folder has the same comparison rules as its ancestor.

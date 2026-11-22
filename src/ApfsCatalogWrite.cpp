@@ -35,6 +35,12 @@ void SetPosixMetadata(Bytes& inode,const std::optional<PosixMetadata>& metadata)
     Set(inode,80,(Le16(inode.data()+80)&0170000)|metadata->mode,2);
 }
 
+void SetAdditionalDates(Bytes& inode,const HfsPlus::AdditionalFileDates& dates)
+{
+    if(dates.accessed)Set(inode,40,CatalogTimestamp(*dates.accessed),8);
+    if(dates.changed)Set(inode,32,CatalogTimestamp(*dates.changed),8);
+}
+
 struct Mapping {
     uint64_t oid,block,xid=0;
     uint32_t flags=0;
@@ -502,10 +508,12 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         if(!dates)return;
         Set(inode,16,CatalogTimestamp(dates->created),8);
         Set(inode,24,CatalogTimestamp(dates->modified),8);
+        SetAdditionalDates(inode,dates->additionalDates);
     };
     const auto editDates=[&](Bytes& inode){
         if(metadata->dates.created)Set(inode,16,CatalogTimestamp(*metadata->dates.created),8);
         if(metadata->dates.modified)Set(inode,24,CatalogTimestamp(*metadata->dates.modified),8);
+        SetAdditionalDates(inode,metadata->dates.additionalDates);
     };
     const bool privateFirst=WriterDisk::DirectoryHash("private-dir")<WriterDisk::DirectoryHash("root");
     const uint64_t reserved[]={privateFirst?3u:2u,privateFirst?2u:3u};
@@ -837,7 +845,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto count=Le32(inode.data()+56);
         Check(count<INT32_MAX,"Too many APFS hard links");
         Set(inode,56,count+1,4);
-        Set(inode,32,time,8);
+        if(!hardLink->copiedLockedInode)Set(inode,32,time,8);
         if(!hardLink->replaced)Set(parentInode,56,target->second.children+1,4);
         auto afterLinks=link.inodeRecord+1+link.attributes+(count==1?0:count);
         std::vector<OwnedRecord> newLinks,newMaps;
@@ -966,8 +974,8 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         if(metadata&&!metadata->finder){
             Check(link.kind==CatalogKind::Directory,"APFS folder timestamps require a directory");
-            editDates(inode);
             Set(inode,32,time,8);
+            editDates(inode);
             return records;
         }
 
@@ -1639,11 +1647,14 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     if(edit.attributes)SetSecurityFlag(updated.value,*edit.attributes);
     if(edit.locked)Set(updated.value,68,flags|CopiedImmutableFlags(edit.posix),4);
     SetPosixMetadata(updated.value,edit.posix);
+    Set(updated.value,32,time,8);
     if(!edit.preserveDates){
         Set(updated.value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
-        if(edit.dates)Set(updated.value,16,CatalogTimestamp(edit.dates->created),8);
+        if(edit.dates){
+            Set(updated.value,16,CatalogTimestamp(edit.dates->created),8);
+            SetAdditionalDates(updated.value,edit.dates->additionalDates);
+        }
     }
-    Set(updated.value,32,time,8);
 
     auto attributes=EncodeAttributes(edit.inode,edit.attributes,resource,streams);
     WriteCompressionAttribute(attributes,updated.value,edit.inode,size,edit.compression);
@@ -1990,8 +2001,11 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     SetPosixMetadata(value,edit.posix);
     if(edit.locked)Set(value,68,flags|CopiedImmutableFlags(edit.posix),4);
     Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
-    if(edit.dates)Set(value,16,CatalogTimestamp(edit.dates->created),8);
     Set(value,32,time,8);
+    if(edit.dates){
+        Set(value,16,CatalogTimestamp(edit.dates->created),8);
+        SetAdditionalDates(value,edit.dates->additionalDates);
+    }
     auto attributes=EncodeAttributes(edit.inode,&edit.attributes,nullptr,streams);
     attributes.push_back(LinkTargetRecord(edit.inode,edit.target));
     SortAttributes(attributes);
@@ -2063,7 +2077,7 @@ void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardL
               "APFS sibling records do not match the selected inode");
     }
     Set(inode,56,count+1,4);
-    Set(inode,32,time,8);
+    if(!request.copiedLockedInode)Set(inode,32,time,8);
     TouchExternalParent(catalog,request.parent,time,1);
     std::vector<OwnedRecord> links,maps;
     const auto append=[&](const CatalogSibling& sibling,uint64_t id){
@@ -2960,6 +2974,7 @@ CatalogWritePlan PrepareCatalogMutation(
         if(dates){
             Set(inode.value,16,CatalogTimestamp(dates->created),8);
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
+            SetAdditionalDates(inode.value,dates->additionalDates);
         }
         SetPosixMetadata(inode.value,create->posix);
         if(create->locked)Set(inode.value,68,CopiedImmutableFlags(create->posix),4);
@@ -3072,6 +3087,7 @@ CatalogWritePlan PrepareCatalogMutation(
             }
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
             Set(value,32,time,8);
+            SetAdditionalDates(value,properties->dates.additionalDates);
             edited=true;
         }
         Check(edited,"APFS Properties target inode was not found");

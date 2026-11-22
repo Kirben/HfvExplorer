@@ -2587,17 +2587,22 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
     const Dates legacy{0,UINT32_MAX}, expanded{epoch,maximum};
     const Dates tooLate{epoch,maximum+1}, fractional{epoch-1,epoch};
     const Dates original{epoch+10,epoch+20};
+    const auto extraDates=[=](const Dates& dates,BYTE seed){
+        return HfsPlus::AdditionalFileDates{dates[1]>UINT32_MAX?dates[1]:epoch+1000+seed,
+                                           epoch+2000+seed};
+    };
     const auto formatApfs=[](const std::wstring& path){
         auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
         Storage::Job job;
         Apfs::Format(*disk,u"Timestamp transfer",true,job);
     };
-    const auto dated=[](Volume& volume,const std::u16string& name,const Dates& dates,BYTE seed){
+    const auto dated=[&](Volume& volume,const std::u16string& name,const Dates& dates,BYTE seed){
         Entry entry;
         entry.name=name;
         entry.datesValid=true;
         entry.created=dates[0];
         entry.modified=dates[1];
+        entry.additionalDates=extraDates(dates,seed);
         entry.finder[0]=42;
         entry.forks[0].size=5003;
         entry.forks[1].size=173;
@@ -2606,10 +2611,13 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+seed);
         },false);
     };
-    const auto verify=[](Volume& volume,const std::u16string& name,const Dates& dates,BYTE seed){
+    const auto verify=[&](Volume& volume,const std::u16string& name,const Dates& dates,BYTE seed){
         Entry entry;
         Check(volume.FindChild(2,name,entry)&&entry.datesValid&&entry.created==dates[0]&&entry.modified==dates[1],
               "Creation or modification timestamp changed after reopening");
+        const auto expected=extraDates(dates,seed);
+        Check(entry.additionalDates.accessed==expected.accessed&&entry.additionalDates.changed==expected.changed,
+              "Access or attribute-change timestamp changed after reopening");
         Verify(volume,entry.id,5003,seed);
         return entry;
     };
@@ -2696,22 +2704,29 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
             verify(*hfs,valid,validDates,seed);
             if(!wide)verify(*hfs,u"Fractional",fractional,50);
 
-            const auto apfsPath=Wide(base+".img");
-            formatApfs(apfsPath);
-            auto apfs=OpenBrowserImage(apfsPath);
-            Check(bool(apfs),"Cannot open APFS timestamp destination");
-            dated(*apfs,valid,original,34);
-            const auto returned=transfer(hfs,apfs,wide?std::vector<std::u16string>{valid}:
-                                                        std::vector<std::u16string>{valid,u"Fractional"},false,prompts);
-            Check(!returned.code&&prompts==2,returned.message.c_str());
-            apfs.reset();
-            apfs=OpenBrowserImage(apfsPath);
-            Check(bool(apfs),"Cannot reopen APFS timestamp copy");
-            verify(*apfs,valid,validDates,seed);
-            if(!wide)verify(*apfs,u"Fractional",fractional,50);
+            const auto macos=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+            for(bool external:{false,true}){
+                if(external&&!macos)continue;
+                const auto apfsPath=Wide(base+(external?"-macos.img":"-native.img"));
+                if(external){
+                    Check(CopyFileW(macos,apfsPath.c_str(),TRUE)!=FALSE,"Cannot copy APFS timestamp fixture");
+                }else formatApfs(apfsPath);
+                auto apfs=OpenBrowserImage(apfsPath);
+                Check(apfs&&apfs->Supports().create&&apfs->Writable()!=external,"Wrong APFS timestamp writer");
+                dated(*apfs,valid,original,34);
+                const auto before=prompts;
+                const auto returned=transfer(hfs,apfs,wide?std::vector<std::u16string>{valid}:
+                                                            std::vector<std::u16string>{valid,u"Fractional"},false,prompts);
+                Check(!returned.code&&prompts==before+1,returned.message.c_str());
+                apfs.reset();
+                apfs=OpenBrowserImage(apfsPath);
+                Check(bool(apfs),"Cannot reopen APFS timestamp copy");
+                verify(*apfs,valid,validDates,seed);
+                if(!wide)verify(*apfs,u"Fractional",fractional,50);
+            }
         }
     }
-    fprintf(report,"PASS: APFS and HFS+/HFSX boundary timestamps and both forks survive copies and overwrites after reopening. Invalid cut/paste preserves the source and destination. Fractional dates floor to whole seconds.\n");
+    fprintf(report,"PASS: APFS and HFS+/HFSX creation, modification, access and attribute-change dates and both forks survive copies and overwrites after reopening. Invalid cut/paste preserves the source and destination. Fractional dates floor to whole seconds.\n");
 }
 
 void TestSparseApfsCopy(const std::string& root,FILE* report)

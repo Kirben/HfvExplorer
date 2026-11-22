@@ -390,7 +390,7 @@ uint64_t CreateCatalogDirectory(Source& source,const Container& expected,uint64_
 uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
                            FileDates dates,Storage::Job& job)
 {
-    const CatalogMutation request=CatalogMetadata{parent,inode,{dates.created,dates.modified}};
+    const CatalogMutation request=CatalogMetadata{parent,inode,{dates.created,dates.modified,dates.additionalDates}};
     return Commit(source,expected,job,&request);
 }
 
@@ -398,7 +398,7 @@ uint64_t SetExternalCatalogProperties(Source& source,const Container& expected,u
                                   const std::u16string& name,TimestampEdits dates,Storage::Job& job,
                                   std::optional<bool> locked,const FinderBytes* finder,uint32_t lockFlags)
 {
-    Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified||locked.has_value()||finder),
+    Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified||dates.additionalDates.accessed||dates.additionalDates.changed||locked.has_value()||finder),
           "Select an APFS folder and at least one property to edit");
     const CatalogMutation request=ExternalCatalogEdit{parent,name,dates,locked,nullptr,finder,0,lockFlags};
     return Commit(source,expected,job,&request);

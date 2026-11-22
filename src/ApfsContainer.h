@@ -48,6 +48,7 @@ inline uint32_t CopiedImmutableFlags(const std::optional<PosixMetadata>& posix)
 }
 struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.
+    HfsPlus::AdditionalFileDates additionalDates;
 };
 uint64_t CreateCatalogDirectory(HfsPlus::Source&,const Container& expected,uint64_t parent,const std::u16string& name,
                                 Storage::Job&,std::optional<FileDates> dates={},const FinderBytes* finder=nullptr,const HfsPlus::Attributes* attributes=nullptr,bool external=false,std::optional<PosixMetadata> posix={});
@@ -56,6 +57,7 @@ uint64_t SetDirectoryDates(HfsPlus::Source&,const Container& expected,uint64_t p
 
 struct TimestampEdits {
     std::optional<uint64_t> created,modified;
+    HfsPlus::AdditionalFileDates additionalDates;
 };
 // Edits fixed inode fields on supported independently formatted volumes.
 uint64_t SetExternalCatalogProperties(HfsPlus::Source&,const Container&,uint64_t parent,

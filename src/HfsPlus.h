@@ -63,6 +63,9 @@ using Attributes = std::map<std::u16string, AttributeData>;
 // On-disk Mac ACLs retain owner/group UUIDs, ACE order, rights and inheritance flags.
 // These are filesystem metadata, not Windows access-control enforcement.
 void ValidateAttributes(const Attributes &);
+struct AdditionalFileDates {
+    std::optional<uint64_t> accessed, changed; // Seconds since 1904.
+};
 struct Entry {
     uint32_t id = 0, parent = 0;
     std::u16string name;
@@ -75,6 +78,7 @@ struct Entry {
     Fork forks[2];
     std::array<uint8_t, 32> finder{};
     uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
+    AdditionalFileDates additionalDates;
     std::optional<PosixMetadata> posix;
 };
 // Unicode 3.2 canonical decomposition, with the exclusions required by TN1150.
@@ -96,7 +100,7 @@ class Volume {
     std::optional<Bytes> SymbolicLinkTarget(uint32_t id);
     void PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                          const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
-                         const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix={});
+                         const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix={},AdditionalFileDates additionalDates={});
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline, CopyCompressed };
@@ -110,10 +114,11 @@ class Volume {
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
                  const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr,
-                 std::optional<PosixMetadata> posix = {},OverwriteScope scope=OverwriteScope::SharedInode);
+                 std::optional<PosixMetadata> posix = {},OverwriteScope scope=OverwriteScope::SharedInode,
+                 AdditionalFileDates additionalDates={});
     void SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,
                               const std::array<uint64_t,2>* dates,const Attributes* attributes,
-                              std::optional<PosixMetadata> posix = {});
+                              std::optional<PosixMetadata> posix = {},AdditionalFileDates additionalDates={});
     Attributes GetAttributes(uint32_t id) const;
     void SetAttributes(uint32_t id, const Attributes &);
     uint32_t MakeHardLink(uint32_t source, uint32_t parent, const std::u16string &name,bool replace=false,bool copiedImmutable=false);
@@ -139,7 +144,7 @@ class Volume {
                      const std::array<uint8_t,32>* finder,bool overwrite,
                      const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
                      const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
-                     OverwriteScope scope);
+                     OverwriteScope scope,AdditionalFileDates additionalDates);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

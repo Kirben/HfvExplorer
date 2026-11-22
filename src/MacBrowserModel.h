@@ -28,6 +28,7 @@ struct Entry {
     Fork forks[2];
     std::array<uint8_t,32> finder{};
     uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
+    HfsPlus::AdditionalFileDates additionalDates;
     bool datesValid = false;
     HfsPlus::Attributes attributes;
     bool attributesKnown = false; // Copy requests carry an explicit source metadata snapshot.

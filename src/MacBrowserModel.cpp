@@ -78,7 +78,7 @@ class Plus final : public Volume, public WorkerEndpoint {
         Entry e; e.id=in.id; e.parent=in.parent; e.resolvedId=in.resolvedId;
         e.name=in.name; e.directory=in.directory; e.protectedFile=in.protectedFile||(in.posix&&in.posix->immutable);
         e.compressed=in.compressed; e.hardLink=in.hardLink;e.linkCount=in.linkCount; e.readError=in.readError;
-        e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
+        e.finder=in.finder; e.created=in.created; e.modified=in.modified;e.additionalDates=in.additionalDates;e.datesValid=true;e.identity=EntryIdentity(std::to_string(in.id));
         e.posix=in.posix;
         e.symbolicLink=in.symbolicLink;
         if (e.symbolicLink) {
@@ -133,6 +133,8 @@ public:
         Volume::ValidateEntry(e);
         Check(!e.posix||e.posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
         if(e.datesValid){(void)HfsPlus::Time::Encode(e.created,expanded_);(void)HfsPlus::Time::Encode(e.modified,expanded_);}
+        if(e.additionalDates.accessed)(void)HfsPlus::Time::Encode(*e.additionalDates.accessed,expanded_);
+        if(e.additionalDates.changed)(void)HfsPlus::Time::Encode(*e.additionalDates.changed,expanded_);
         HfsPlus::ValidateAttributes(e.attributes);
     }
     void ValidateCopyNames(uint32_t,const std::vector<Entry>& entries,bool)override{
@@ -149,7 +151,7 @@ public:
                   "Destination folder changed during copying");
             const std::array<uint64_t,2> dates{desired.created,desired.modified};
             volume_->SetDirectoryMetadata(id,merge?nullptr:&desired.finder,desired.datesValid?&dates:nullptr,
-                                          nullptr,merge?std::nullopt:desired.posix);
+                                          nullptr,merge?std::nullopt:desired.posix,desired.additionalDates);
         });
     }
     bool CaseSensitive() const override { return caseSensitive_; }
@@ -196,7 +198,7 @@ public:
             }
             const std::array<uint64_t,2> dates{entry.created,entry.modified};
             volume_->PutSymbolicLink(parent,entry.name,target,entry.finder,replace,entry.attributes,
-                                     entry.datesValid?&dates:nullptr,entry.posix);
+                                     entry.datesValid?&dates:nullptr,entry.posix,entry.additionalDates);
         });
     }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
@@ -212,7 +214,7 @@ public:
         return Mutate([&]{
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
                                 e.attributesKnown?&e.attributes:nullptr,compression,
-                                e.datesValid?&dates:nullptr,e.posix,e.hfsOverwriteScope);
+                                e.datesValid?&dates:nullptr,e.posix,e.hfsOverwriteScope,e.additionalDates);
         });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
