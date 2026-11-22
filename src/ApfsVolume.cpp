@@ -1230,7 +1230,8 @@ private:
                              bool replace,Storage::Job& job,const Entry* copied,const Entry* approvedDestination){
         return WriteMount([&]{
             const auto& current=At(id).entry;
-            if(copied)Check(current.identity==copied->identity&&current.protectedFile==copied->protectedFile,
+            if(copied)Check(current.identity==copied->identity&&current.protectedFile==copied->protectedFile&&
+                            current.posix==copied->posix,
                             "The copied APFS hard-link source changed");
             if(job.cancelled())throw Storage::Cancelled();
             Check(At(id).mount==At(parent).mount,"APFS hard links cannot cross volumes");
@@ -1290,9 +1291,11 @@ public:
             CommitMutation(parent,0,metadata,[&](auto& job){
                 if(limitedEdits)
                     return SetExternalCatalogProperties(*source,WriteTarget(parent),parentOid,current.name,changes,job,
-                                                        lockAfterCopy?std::optional<bool>(true):std::nullopt);
+                                                        lockAfterCopy?std::optional<bool>(true):std::nullopt,nullptr,
+                                                        CopiedImmutableFlags(desired.posix));
                 if(lockAfterCopy)
-                    return SetEntryProperties(*source,WriteTarget(parent),parentOid,oid,current.finder,changes,true,job);
+                    return SetEntryProperties(*source,WriteTarget(parent),parentOid,oid,current.finder,changes,true,job,
+                                              CopiedImmutableFlags(desired.posix));
                 return SetDirectoryDates(*source,WriteTarget(parent),parentOid,oid,*dates,job);
             });
         },true);

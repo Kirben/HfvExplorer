@@ -2477,6 +2477,108 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS immutable overwrite and new hard-link copies keep HFS+/HFSX locks and both forks after reopening; cancellation preserves the original.\n");
 }
 
+void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto macos=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    const std::u16string names[]={u"System overwrite",u"System original",u"System alias",u"System folder"};
+    const uint8_t system=PosixMetadata::SystemImmutable;
+    const uint8_t both=system|PosixMetadata::UserImmutable;
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto base=root+"\\system-lock-copy-"+std::to_string(index++);
+        const auto sourcePath=Wide(base+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"System locks",true,kind);
+            HfsPlus::Volume volume(*disk,true);
+            Apfs::FinderBytes finder{};
+            finder[0]=42;
+            const auto put=[&](const std::u16string& name,BYTE seed,uint8_t flags){
+                return volume.Put(2,name,5003,173,[seed](unsigned fork,uint64_t at,void* output,size_t count){
+                    auto* bytes=static_cast<BYTE*>(output);
+                    for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+seed);
+                },&finder,false,nullptr,nullptr,flags==both?HfsPlus::Volume::CompressionMode::Zlib:
+                                                          HfsPlus::Volume::CompressionMode::Uncompressed,
+                nullptr,PosixMetadata{123,456,0644,flags});
+            };
+            put(names[0],77,system);
+            const auto member=put(names[1],78,both);
+            volume.MakeHardLink(member,2,names[2],false,true);
+            const auto folder=volume.MakeDirectory(2,names[3]);
+            volume.MakeDirectory(folder,u"Child");
+            volume.SetDirectoryMetadata(folder,nullptr,nullptr,nullptr,PosixMetadata{123,456,0755,system});
+        }
+        auto source=OpenBrowserImage(sourcePath);
+        Check(bool(source),"Cannot reopen HFS system-lock fixture");
+        std::vector<Location> inputs;
+        for(size_t i=0;i<ARRAYSIZE(names);++i){
+            Entry entry;
+            Check(source->FindChild(2,names[i],entry)&&entry.posix&&
+                  entry.posix->immutable==(i==1||i==2?both:system),"Wrong HFS immutable fixture flags");
+            inputs.push_back(Native(source,entry.id));
+        }
+        for(bool external:{false,true}){
+            if(external&&!macos)continue;
+            const auto path=Wide(base+(external?"-macos.img":"-native.img"));
+            if(external){
+                Check(CopyFileW(macos,path.c_str(),TRUE)!=FALSE,"Cannot copy the shared macOS APFS fixture");
+            }else{
+                auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+                Storage::Job job;
+                Apfs::Format(*disk,u"System lock destination",true,job);
+            }
+            auto target=OpenBrowserImage(path);
+            Check(target&&target->Supports().create&&target->Writable()!=external,"Wrong APFS writer for lock test");
+            Put(*target,2,names[0],4801,32);
+            const auto run=[&](bool cancel){
+                Storage::Job job;
+                job.transport([&](const Storage::Progress& p){
+                    if(cancel&&p.fileBytes)job.cancel();
+                },[](const auto&){return Storage::ConflictChoice::Replace;});
+                Completion completion;
+                return ExecuteInWorker(OrdinaryCopy{inputs,Native(target)},job,completion);
+            };
+            const auto stopped=run(true);
+            Check(stopped.outcome==Storage::Outcome::Cancelled&&!stopped.partial,
+                  stopped.message.empty()?"Expected cancellation during immutable overwrite":stopped.message.c_str());
+            target.reset();
+            target=OpenBrowserImage(path);
+            Entry current;
+            Check(target&&target->FindChild(2,names[0],current)&&!current.protectedFile,
+                  "Cancelled system-lock copy changed the destination flags");
+            Verify(*target,current.id,4801,32);
+            Check(!target->FindChild(2,names[1],current),"Cancelled copy published a new alias");
+            const auto result=run(false);
+            Check(!result.code,result.message.c_str());
+            target.reset();
+            target=OpenBrowserImage(path);
+            Check(bool(target),"Cannot reopen APFS system-lock destination");
+            uint32_t inode=0;
+            for(size_t i=0;i<ARRAYSIZE(names);++i){
+                Check(target->FindChild(2,names[i],current)&&current.protectedFile&&current.posix&&
+                      current.posix->immutable==(i==1||i==2?both:system),
+                      "APFS copy lost the exact immutable flags after reopening");
+                if(i==3){
+                    Entry child;
+                    Check(current.directory&&target->FindChild(current.id,u"Child",child),
+                          "APFS folder locked before its children were copied");
+                    continue;
+                }
+                Verify(*target,current.id,5003,i?78:77);
+                if(i==1)inode=current.resolvedId;
+                if(i)Check(current.hardLink&&current.compressed&&current.resolvedId==inode&&current.linkCount==2,
+                           "APFS system-immutable aliases did not share one inode");
+                bool refused=false;
+                try{target->Rename(current.id,2,u"Invalid unlocked rename");}catch(const std::exception&){refused=true;}
+                Check(refused,"APFS allowed rename of a system-immutable file");
+            }
+        }
+    }
+    fprintf(report,"PASS: HFS+/HFSX system-only and combined locks survive APFS copy, overwrite, hard-link creation and reopen; cancelling preserves the original destination.\n");
+    if(macos)fprintf(report,"PASS: system-immutable copies also passed on the macOS APFS compatibility writer.\n");
+}
+
 void TestCrossFormatTimestamps(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -3067,6 +3169,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestHfsSystemImmutableToApfs(root,report);
         TestCrossFormatTimestamps(root,report);
         TestWorkerTransport();
         TestVolumeSessionProtocol();

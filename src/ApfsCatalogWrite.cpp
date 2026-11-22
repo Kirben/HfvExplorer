@@ -757,7 +757,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                                                     uint32_t(count),size,finder?&*finder:nullptr);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
-                    Set(expected.value,68,Le32(value+68)&UserImmutable,4);
+                    Set(expected.value,68,Le32(value+68)&ImmutableMask,4);
                     SetPosixMetadata(expected.value,PosixMetadata{
                         Le32(value+72),Le32(value+76),uint16_t(Le16(value+80)&PosixMetadata::ModeMask)});
                     const auto compression=link->second.compressionRecord;
@@ -832,7 +832,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         const auto& link=found->second;
         auto& inode=records[link.inodeRecord].value;
         const auto flags=Le32(inode.data()+68);
-        Check(!flags||(hardLink->copiedLockedInode&&flags==UserImmutable),
+        Check(!(flags&ImmutableMask)||hardLink->copiedLockedInode,
               "Unlock the APFS file before creating a hard link");
         const auto count=Le32(inode.data()+56);
         Check(count<INT32_MAX,"Too many APFS hard links");
@@ -895,7 +895,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:0100644,isDirectory?0:1,dataSize,create->finder));
         SetPosixMetadata(records.back().value,create->posix);
-        if(create->locked)Set(records.back().value,68,UserImmutable,4);
+        if(create->locked)Set(records.back().value,68,CopiedImmutableFlags(create->posix),4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite,streams);
@@ -1015,7 +1015,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                              (Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo);
             std::copy_n(inode.begin(),92,updated.value.begin());
             Set(updated.value,48,flags,8);
-            Set(updated.value,68,linkEdit->locked?bsdFlags|UserImmutable:bsdFlags,4);
+            Set(updated.value,68,linkEdit->locked?bsdFlags|CopiedImmutableFlags(linkEdit->posix):bsdFlags,4);
             SetPosixMetadata(updated.value,linkEdit->posix);
             Set(updated.value,24,time,8);
             Set(updated.value,32,time,8);
@@ -1072,7 +1072,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(updated.value,32,time,8);
         if(replace){
             SetPosixMetadata(updated.value,replace->posix);
-            if(replace->locked)Set(updated.value,68,bsdFlags|UserImmutable,4);
+            if(replace->locked)Set(updated.value,68,bsdFlags|CopiedImmutableFlags(replace->posix),4);
             if(!replace->preserveDates){
                 Set(updated.value,24,time,8);
                 copyDates(updated.value);
@@ -1080,7 +1080,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         }
         inode=std::move(updated.value);
         if(metadata){
-            Set(inode,68,(bsdFlags&~UserImmutable)|(metadata->locked?UserImmutable:0),4);
+            Set(inode,68,(bsdFlags&~UserImmutable)|(metadata->locked?metadata->lockFlags:0),4);
             editDates(inode);
             return records;
         }
@@ -1637,7 +1637,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     Set(updated.value,48,(Le64(old.data()+48)&~WriterDisk::HasFinderInfo)|finderFlag,8);
     SetResourceFlag(updated.value,resource->size!=0);
     if(edit.attributes)SetSecurityFlag(updated.value,*edit.attributes);
-    if(edit.locked)Set(updated.value,68,flags|UserImmutable,4);
+    if(edit.locked)Set(updated.value,68,flags|CopiedImmutableFlags(edit.posix),4);
     SetPosixMetadata(updated.value,edit.posix);
     if(!edit.preserveDates){
         Set(updated.value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
@@ -1988,7 +1988,7 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     SetExternalFinderInfo(value,edit.finder);
     SetSecurityFlag(value,edit.attributes);
     SetPosixMetadata(value,edit.posix);
-    if(edit.locked)Set(value,68,flags|UserImmutable,4);
+    if(edit.locked)Set(value,68,flags|CopiedImmutableFlags(edit.posix),4);
     Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
     if(edit.dates)Set(value,16,CatalogTimestamp(edit.dates->created),8);
     Set(value,32,time,8);
@@ -2037,7 +2037,7 @@ void CreateExternalHardLink(std::vector<OwnedRecord>& catalog,const CatalogHardL
     Check(inodeRecord.has_value()&&!names.empty(),"The APFS hard-link source no longer exists");
     auto& inode=catalog[*inodeRecord].value;
     const auto count=Le32(inode.data()+56);
-    const auto forbidden=request.copiedLockedInode?SystemImmutable:(UserImmutable|SystemImmutable);
+    const auto forbidden=request.copiedLockedInode?0u:ImmutableMask;
     Check((Le16(inode.data()+80)&0170000)==0100000&&!(Le32(inode.data()+68)&forbidden)&&
           names.size()==count&&count<INT32_MAX,"Invalid or locked APFS hard-link source");
     std::set<uint64_t> identifiers;
@@ -2962,7 +2962,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Set(inode.value,24,CatalogTimestamp(dates->modified),8);
         }
         SetPosixMetadata(inode.value,create->posix);
-        if(create->locked)Set(inode.value,68,UserImmutable,4);
+        if(create->locked)Set(inode.value,68,CopiedImmutableFlags(create->posix),4);
         if(clone){
             constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;
             Set(inode.value,48,Le64(inode.value.data()+48)|wasCloned|wasEverCloned,8);
@@ -3062,7 +3062,7 @@ CatalogWritePlan PrepareCatalogMutation(
             Check(!(flags&SystemImmutable)&&(!(flags&UserImmutable)||unlocking),
                   "Unlock the APFS file before editing its properties");
             if(properties->locked)
-                Set(value,68,(flags&~UserImmutable)|(*properties->locked?UserImmutable:0),4);
+                Set(value,68,(flags&~UserImmutable)|(*properties->locked?properties->lockFlags:0),4);
             if(properties->dates.created)Set(value,16,CatalogTimestamp(*properties->dates.created),8);
             if(properties->dates.modified)Set(value,24,CatalogTimestamp(*properties->dates.modified),8);
             if(properties->newName&&(!siblingId||

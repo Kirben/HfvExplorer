@@ -52,6 +52,7 @@ struct CatalogMetadata {
     TimestampEdits dates;
     bool locked=false;
     const FinderBytes* finder=nullptr;
+    uint32_t lockFlags=UserImmutable;
 };
 struct CatalogAttributes {
     uint64_t parent,inode;
@@ -89,6 +90,7 @@ struct ExternalCatalogEdit {
     const std::u16string* newName=nullptr;
     const FinderBytes* finder=nullptr;
     uint64_t destinationParent=0;
+    uint32_t lockFlags=UserImmutable;
 };
 struct CatalogVolumeRename { const std::u16string& name; };
 struct CatalogSnapshot { const std::u16string& name; bool create; };

@@ -39,6 +39,13 @@ struct CloneUnavailable : HfsPlus::Error {
 // The same exclusive image ownership is required as for CommitCheckpoint.
 using FinderBytes=std::array<uint8_t,32>;
 inline constexpr uint32_t UserImmutable=0x00000002,SystemImmutable=0x00020000;
+inline constexpr uint32_t ImmutableMask=UserImmutable|SystemImmutable;
+inline uint32_t CopiedImmutableFlags(const std::optional<PosixMetadata>& posix)
+{
+    if(!posix||!posix->immutable)return UserImmutable;
+    return ((posix->immutable&PosixMetadata::UserImmutable)?UserImmutable:0)|
+           ((posix->immutable&PosixMetadata::SystemImmutable)?SystemImmutable:0);
+}
 struct FileDates {
     uint64_t created,modified; // Seconds since 1904, as used by the shared browser.
 };
@@ -53,11 +60,11 @@ struct TimestampEdits {
 // Edits fixed inode fields on supported independently formatted volumes.
 uint64_t SetExternalCatalogProperties(HfsPlus::Source&,const Container&,uint64_t parent,
                                   const std::u16string& name,TimestampEdits,Storage::Job&,
-                                  std::optional<bool> locked={},const FinderBytes* finder=nullptr);
+                                  std::optional<bool> locked={},const FinderBytes* finder=nullptr,uint32_t lockFlags=UserImmutable);
 uint64_t RenameExternalCatalogEntry(HfsPlus::Source&,const Container&,uint64_t parent,
                                    const std::u16string& name,const std::u16string& newName,Storage::Job&,uint64_t destinationParent=0);
 uint64_t SetEntryProperties(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
-                            const FinderBytes&,TimestampEdits,bool locked,Storage::Job&);
+                            const FinderBytes&,TimestampEdits,bool locked,Storage::Job&,uint32_t lockFlags=UserImmutable);
 inline constexpr size_t EmbeddedAttributeLimit=3804;
 uint64_t SetResourceFork(HfsPlus::Source&,const Container& expected,uint64_t parent,uint64_t inode,
                                  HfsPlus::Source&,uint64_t modified,Storage::Job&,bool external=false);
