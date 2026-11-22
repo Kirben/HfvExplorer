@@ -1852,6 +1852,15 @@ int RunCopyProcessTest(const char *directory) {
             std::weak_ptr<Volume> previous=volume;
             volume.reset();
             Until([&]{return previous.expired();});
+            const auto imageBytes=[&]{
+                MfsImageSource disk;
+                std::string message;
+                if(!disk.Open(path.c_str(),message))throw HfsPlus::Error(message);
+                HfsPlus::Bytes bytes(size_t(disk.Length()));
+                Check(disk.ReadAt(0,bytes.data(),bytes.size()),"Cannot read MFS test image");
+                return bytes;
+            };
+            const auto baseline=imageBytes();
             volume=OpenBrowserImage(path);
             Check(volume && volume->Writable(),"clean MFS image did not reopen writable");
             const auto beforeCrash=VolumeSession::VolumeSessionPidForTest(volume);
@@ -1870,26 +1879,40 @@ int RunCopyProcessTest(const char *directory) {
             Check(failed && WorkerTransport::lastExitCode==81 && !volume->Writable(),
                   "MFS worker did not stop after a flushed sector write");
             volume->Reload();
-            Check(!volume->Writable() && VolumeSession::VolumeSessionPidForTest(volume)!=beforeCrash,
-                  "MFS crash refresh did not restore read-only browsing");
+            Check(volume->Writable() && VolumeSession::VolumeSessionPidForTest(volume)!=beforeCrash,
+                  "MFS crash refresh did not recover a writable image");
             Entry afterRestart;
             Check(volume->FindChild(2,u"Renamed payload",afterRestart)&&
                   afterRestart.identity.primary==beforeRestart.identity.primary&&
                   !StorageLocation::MatchesEntry(stale,afterRestart),"Worker restart accepted a stale selection");
             stale={};
             volume.reset();
+            Check(imageBytes()==baseline,"MFS payload crash recovery did not restore the exact image");
+
             volume=OpenBrowserImage(path);
-            Entry retained;
-            Check(volume && !volume->Writable() && volume->FindChild(2,u"Renamed payload",retained),
-                  "fresh MFS mount did not enforce the durable write lock");
+            Check(volume&&volume->FindChild(2,u"Renamed payload",afterRestart),"Missing MFS rename fixture");
+            VolumeSession::CrashVolumeSessionOnRenameForTest(volume);
+            failed=false;
+            try{volume->Rename(afterRestart.id,2,u"Name interrupted during catalog write");}
+            catch(const HfsPlus::Error&){failed=true;}
+            Check(failed&&WorkerTransport::lastExitCode==81&&!volume->Writable(),
+                  "MFS worker did not stop inside the catalog update");
+            volume.reset();
+            Check(imageBytes()!=baseline,"Catalog crash did not change the MFS image");
+            volume=OpenBrowserImage(path);
+            Entry retained,unexpected;
+            Check(volume&&volume->Writable()&&volume->FindChild(2,u"Renamed payload",retained)&&
+                  !volume->FindChild(2,u"Name interrupted during catalog write",unexpected),
+                  "Fresh MFS mount did not recover the old catalog");
             Verify(*volume,retained.id,8192);
             Check(retained.version==beforeRestart.version&&retained.finder==beforeRestart.finder,
-                  "interrupted MFS overwrite changed the old catalog entry");
-            bool denied=false;
-            try{Put(*volume,2,u"Rejected",4096);}
-            catch(const HfsPlus::Error&){denied=true;}
-            Check(denied,"MFS crash recovery allowed a new write");
-            fprintf(report,"PASS: %s MFS shared read/write worker, version metadata, fork-safe cancellation and original forks preserved after an interrupted overwrite\n",dc42?"Disk Copy 4.2":"raw");
+                  "Interrupted MFS catalog write changed file metadata");
+            volume.reset();
+            Check(imageBytes()==baseline,"MFS catalog recovery did not restore the exact image or DC42 checksums");
+            volume=OpenBrowserImage(path);
+            const auto retry=Put(*volume,2,u"Write after recovery",4096);
+            Verify(*volume,retry,4096);
+            fprintf(report,"PASS: %s MFS payload and catalog crashes recover byte-for-byte, restore both forks and metadata, invalidate stale selections, and allow a retry.\n",dc42?"Disk Copy 4.2":"raw");
         }
         CopyProcess::fault = 1;
         auto crash = Submit(request);

@@ -175,6 +175,9 @@ bool MfsImage::Commit(std::vector<BYTE>& desired){
   Storage::OutcomeEvidence::NoteRollback(Storage::Rollback::Failed);
   return Fail(error);
  };
+ std::unique_ptr<MfsSource::CatalogUndo> undo;
+ try{undo=source_->StageCatalogUndo(original);}
+ catch(const std::exception& failure){return Fail(failure.what());}
  if(fileImage){
   // Keep the on-disk MFS software lock set throughout writes and rollback.
   original[flags]|=0x80;
@@ -193,6 +196,11 @@ bool MfsImage::Commit(std::vector<BYTE>& desired){
    if(applied)Storage::OutcomeEvidence::NoteRetainedChange();
    return fence("Cannot confirm the MFS write lock was cleared.");
   }
+ }
+ if(undo&&!recoveryRequired_){
+  // Both a successful update and a verified rollback leave a complete image.
+  try{undo->Complete();}
+  catch(...){return fence("Cannot confirm the MFS catalog update. Reopen the image for recovery.");}
  }
  if(!applied){usable_=false;return false;}
  auto source=source_;return Open(*source);

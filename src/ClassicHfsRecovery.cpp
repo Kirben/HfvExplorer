@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "stdafx.h"
 #include "ClassicHfsRecovery.h"
+#include "MfsRecovery.h"
 #include "WindowsMoveUndo.h"
 #include "HfsPlus.h"
 #include <io.h>
@@ -79,7 +80,7 @@ bool OrdinaryImage(HANDLE image)
 {
     return image!=INVALID_HANDLE_VALUE && GetFileType(image)==FILE_TYPE_DISK;
 }
-JournalPath LocateJournal(HANDLE image,bool ndif)
+JournalPath LocateJournal(HANDLE image,const wchar_t* stream,const wchar_t* siblingName)
 {
     if (!OrdinaryImage(image)) return {};
     BY_HANDLE_FILE_INFORMATION info{};
@@ -101,8 +102,16 @@ JournalPath LocateJournal(HANDLE image,bool ndif)
 #ifdef HFV_TESTING
     if(GetEnvironmentVariableW(L"HFV_TEST_CLASSIC_SIBLING_UNDO",nullptr,0))sibling=true;
 #endif
-    path+=sibling?(ndif?NdifSibling:Sibling):(ndif?NdifStream:Stream);
+    path+=sibling?siblingName:stream;
     return {std::move(path),sibling};
+}
+JournalPath LocateJournal(HANDLE image,bool ndif)
+{
+    return LocateJournal(image,ndif?NdifStream:Stream,ndif?NdifSibling:Sibling);
+}
+JournalPath LocateMfsUndo(HANDLE image)
+{
+    return LocateJournal(image,L":HFVExplorer.MfsUndo",L".hfv-mfs-undo");
 }
 uint64_t Length(HANDLE file)
 {
@@ -502,12 +511,11 @@ bool ClassicHfsRecovery::MoveIsCommitted(const std::string& id)
 {
     return MoveCommitted(id);
 }
-bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
+namespace {
+template<class Locate>
+bool PendingJournal(HANDLE image,Locate locate)
 {
-    Handle image(CreateFileW(path.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
-                             nullptr,OPEN_EXISTING,0,nullptr));
-    if(!image)return false;
-    const auto journal=LocateJournal(image.value,ndif);
+    const auto journal=locate(image);
     if(journal.name.empty())return false;
     Handle stream(CreateFileW(journal.name.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
                               nullptr,OPEN_EXISTING,journal.OpenFlags(),nullptr));
@@ -517,6 +525,110 @@ bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
         return false;
     }
     return Length(stream.value)!=0;
+}
+template<class Locate>
+bool PendingJournal(const std::wstring& path,Locate locate)
+{
+    Handle image(CreateFileW(path.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                             nullptr,OPEN_EXISTING,0,nullptr));
+    return image&&PendingJournal(image.value,locate);
+}
+
+constexpr uint64_t MfsMaxImage=22*1024*1024;
+constexpr uint64_t MfsCommitted=0x314d4f434653464dULL;
+Header IdentifyMfs(HANDLE image)
+{
+    auto header=Identify(image);
+    Check(header.size>=128*1024&&header.size<=MfsMaxImage,"Invalid MFS recovery image length");
+    memcpy(header.magic,"HFVMFSU1",sizeof(header.magic));
+    header.crc=Crc(&header,offsetof(Header,crc));
+    return header;
+}
+class MfsUndo final : public MfsSource::CatalogUndo {
+    Handle stream_;
+    uint64_t end_;
+public:
+    MfsUndo(HANDLE image,const JournalPath& path,const std::vector<BYTE>& original)
+        :stream_(CreateFileW(path.name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,path.OpenFlags(),nullptr))
+    {
+        Check(bool(stream_),"Cannot create the MFS catalog recovery record");
+        const auto header=IdentifyMfs(image);
+        CheckJournalFile(stream_.value,header,path.sibling);
+        Check(Length(stream_.value)==0&&original.size()==header.size,
+              "An MFS catalog update already needs recovery");
+        const auto crc=Crc(original.data(),DWORD(original.size()));
+        WriteAt(stream_.value,0,&header,sizeof(header));
+        WriteAt(stream_.value,sizeof(header),original.data(),DWORD(original.size()));
+        WriteAt(stream_.value,sizeof(header)+header.size,&crc,sizeof(crc));
+        end_=sizeof(header)+header.size+sizeof(crc);
+        Check(FlushFileBuffers(stream_.value)!=FALSE,"Cannot flush the MFS catalog recovery record");
+    }
+    void Complete() override
+    {
+        WriteAt(stream_.value,end_,&MfsCommitted,sizeof(MfsCommitted));
+        Check(FlushFileBuffers(stream_.value)!=FALSE,"Cannot flush the MFS catalog commit record");
+        // If cleanup fails, reopening can safely discard the committed record.
+        Clear(stream_.value);
+    }
+};
+}
+
+bool ClassicHfsRecovery::Pending(const std::wstring& path,bool ndif)
+{
+    return PendingJournal(path,[&](HANDLE image){return LocateJournal(image,ndif);});
+}
+bool MfsRecovery::Pending(const std::wstring& path)
+{
+    return PendingJournal(path,LocateMfsUndo);
+}
+bool MfsRecovery::Pending(HANDLE image)
+{
+    return PendingJournal(image,LocateMfsUndo);
+}
+std::unique_ptr<MfsSource::CatalogUndo> MfsRecovery::Stage(HANDLE image,const std::vector<BYTE>& original)
+{
+    const auto path=LocateMfsUndo(image);
+    Check(!path.name.empty(),"MFS catalog recovery needs an ordinary image file");
+    return std::make_unique<MfsUndo>(image,path,original);
+}
+void MfsRecovery::Recover(HANDLE image,bool writable)
+{
+    const auto path=LocateMfsUndo(image);
+    if(path.name.empty())return;
+    Handle stream(CreateFileW(path.name.c_str(),GENERIC_READ|(writable?GENERIC_WRITE:0),
+                              writable?0:(FILE_SHARE_READ|FILE_SHARE_WRITE),nullptr,OPEN_EXISTING,path.OpenFlags(),nullptr));
+    if(!stream&&Missing(GetLastError()))return;
+    Check(bool(stream),"Cannot open the pending MFS catalog recovery record");
+    const auto size=Length(stream.value);
+    if(!size)return;
+    const auto expected=IdentifyMfs(image);
+    CheckJournalFile(stream.value,expected,path.sibling);
+    Header header{};
+    const auto prefix=DWORD((std::min)(size,uint64_t(sizeof(header))));
+    ReadAt(stream.value,0,&header,prefix);
+    Check(memcmp(&header,&expected,prefix)==0,"MFS recovery record belongs to another image or is damaged");
+    const auto end=sizeof(header)+expected.size+sizeof(uint32_t);
+    if(size<end){
+        // Image writes never start until the full preimage is durable.
+        if(writable)Check(Clear(stream.value),"Cannot clear an incomplete MFS recovery record");
+        return;
+    }
+    Check(size<=end+sizeof(MfsCommitted),"Invalid MFS catalog recovery record length");
+    uint64_t marker=0;
+    const auto markerBytes=DWORD(size-end);
+    if(markerBytes)ReadAt(stream.value,end,&marker,markerBytes);
+    Check(memcmp(&marker,&MfsCommitted,markerBytes)==0,"Invalid MFS catalog commit record");
+    if(markerBytes!=sizeof(MfsCommitted)){
+        Check(writable,"MFS catalog recovery requires writable access. Close other views and reopen the image.");
+        std::vector<BYTE> original(size_t(expected.size));
+        uint32_t crc=0;
+        ReadAt(stream.value,sizeof(header),original.data(),DWORD(original.size()));
+        ReadAt(stream.value,sizeof(header)+expected.size,&crc,sizeof(crc));
+        Check(crc==Crc(original.data(),DWORD(original.size())),"MFS catalog recovery data is damaged");
+        WriteAt(image,0,original.data(),DWORD(original.size()));
+        Check(FlushFileBuffers(image)!=FALSE,"Cannot flush the recovered MFS image");
+    }
+    if(writable)Check(Clear(stream.value),"Cannot clear the MFS catalog recovery record");
 }
 bool ClassicHfsRecovery::RecoverNdif(const ImageRange& range,bool writable,bool keepJournal)
 {

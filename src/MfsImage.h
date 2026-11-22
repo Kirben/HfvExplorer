@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <memory>
 
 // Default write methods retain compatibility with read-only media/fixtures.
 class MfsSource {
@@ -17,6 +18,11 @@ public:
     virtual bool WriteAt(uint64_t,const void*,size_t){return false;}
     virtual bool Flush(){return false;}
     virtual void DisableWrites(){}
+    struct CatalogUndo {
+        virtual ~CatalogUndo()=default;
+        virtual void Complete()=0;
+    };
+    virtual std::unique_ptr<CatalogUndo> StageCatalogUndo(const std::vector<BYTE>&){return {};}
     virtual std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const{return {};}
 };
 class MfsImageSource : public MfsSource {
@@ -33,6 +39,7 @@ public:
     bool WriteAt(uint64_t,const void*,size_t)override;
     bool Flush()override;
     void DisableWrites()override{writable_=false;}
+    HANDLE NativeHandle()const{return file_;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return {{path_,uintptr_t(file_)}};}
 private:
     std::wstring path_;

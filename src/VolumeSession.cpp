@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "VolumeSession.h"
 #include "ClassicHfsRecovery.h"
+#include "MfsRecovery.h"
 #include "VolumeSessionProtocol.h"
 #include "WorkerTransport.h"
 #include "StorageHandoff.h"
@@ -22,6 +23,10 @@ using SessionCommandCode=Protocol::Command;
 struct RecoveryCrashScope {
     explicit RecoveryCrashScope(unsigned phase){ClassicHfsRecovery::Transaction::CrashAt(phase);}
     ~RecoveryCrashScope(){ClassicHfsRecovery::Transaction::CrashAt(0);}
+};
+struct CrashMfsWriteScope {
+    explicit CrashMfsWriteScope(bool enabled){MfsImageSource::crashAfterSectorWrite=enabled;}
+    ~CrashMfsWriteScope(){MfsImageSource::crashAfterSectorWrite=false;}
 };
 std::atomic<unsigned> listingRequests{0};
 std::atomic<HANDLE> readPauseEntered{nullptr}, readPauseRelease{nullptr};
@@ -150,8 +155,9 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     }
     void Start() {
         // The original guard still owns the image after the worker exits.
-        if (lost_ && Classic() && guard_->Writable() &&
-            ClassicHfsRecovery::Pending(path_,format_==ImageFormat::NdifClassic)) writeAllowed_=true;
+        if (lost_ && guard_->Writable() &&
+            ((Classic()&&ClassicHfsRecovery::Pending(path_,format_==ImageFormat::NdifClassic))||
+             (Mfs()&&MfsRecovery::Pending(path_)))) writeAllowed_=true;
         auto process = std::make_unique<Process>();
         struct Inherited {
             std::vector<ImageHandleTransfer::File> files;
@@ -632,10 +638,7 @@ uint32_t WriteStream(HANDLE input,HANDLE output,Volume& volume,Protocol::PutRequ
     }
 #ifdef HFV_TESTING
     const bool crashMfs=command==SessionCommandCode::TestCrashPut && !strcmp(volume.Kind(),"MFS");
-    struct CrashMfs {
-        explicit CrashMfs(bool enabled){MfsImageSource::crashAfterSectorWrite=enabled;}
-        ~CrashMfs(){MfsImageSource::crashAfterSectorWrite=false;}
-    } crashGuard(crashMfs);
+    CrashMfsWriteScope crashGuard(crashMfs);
 #endif
     auto read = [&](unsigned fork, uint64_t offset, void* out, size_t size) {
 #ifdef HFV_TESTING
@@ -736,6 +739,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 const bool crash=command==SessionCommandCode::TestCrashRename;
                 // Keep the durable record on disk when simulating a lost reply.
                 RecoveryCrashScope crashScope(crash&&!strcmp(volume.Kind(),"HFS")?3:0);
+                CrashMfsWriteScope crashMfs(crash&&!strcmp(volume.Kind(),"MFS"));
 #endif
                 volume.Rename(request.id,request.parent,request.name);
 #ifdef HFV_TESTING

@@ -14,6 +14,7 @@
 #include "ClassicHfsRecovery.h"
 #include "DiskSlice.h"
 #include "MfsDiskSource.h"
+#include "MfsRecovery.h"
 #include "NdifImage.h"
 #include "ApfsVolume.h"
 #include "DiskPartitions.h"
@@ -140,6 +141,12 @@ public:
     void MoveHere(Volume& source,uint32_t id,uint32_t parent,const Entry& entry)override{Check(CanMoveFrom(source),"Move must stay on the same volume");Rename(id,parent,entry.name);}
 };
 
+class RecoverableMfsImageSource final : public MfsImageSource {
+public:
+    std::unique_ptr<CatalogUndo> StageCatalogUndo(const std::vector<BYTE>& original) override {
+        return MfsRecovery::Stage(NativeHandle(),original);
+    }
+};
 class Mfs final : public Volume, public WorkerEndpoint {
     std::unique_ptr<MfsSource> source_;
     MfsImage image_;
@@ -172,9 +179,19 @@ public:
     explicit Mfs(std::unique_ptr<MfsSource> source,std::string key,std::shared_ptr<MfsCatalogIds> ids):source_(std::move(source)),resourceKey_(std::move(key)),ids_(ids?std::move(ids):std::make_shared<MfsCatalogIds>()){if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();}
     WorkerOrigin WorkerDescription()const override{WorkerOrigin out;auto files=source_->WorkerFiles();if(!files.empty()){out.kind=WorkerOrigin::Image;out.path=files.front().first;}out.writable=source_->Writable();return out;}
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{return source_->WorkerFiles();}
-    void WorkerUncleanExit()override{source_->DisableWrites();writable_=false;}
+    void WorkerUncleanExit()override{
+        const auto disk=dynamic_cast<RecoverableMfsImageSource*>(source_.get());
+        if(disk&&disk->Writable()&&MfsRecovery::Pending(disk->NativeHandle()))return;
+        source_->DisableWrites();writable_=false;
+    }
     void SuspendWorker()override{Call call(*this);usable_=false;image_=MfsImage();}
-    void ResumeWorker()override{Call call(*this);if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());Sync();usable_=true;}
+    void ResumeWorker()override{
+        Call call(*this);
+        if(const auto disk=dynamic_cast<RecoverableMfsImageSource*>(source_.get()))
+            MfsRecovery::Recover(disk->NativeHandle(),disk->Writable());
+        if(!image_.Open(*source_))throw HfsPlus::Error(image_.Error());
+        Sync();usable_=true;
+    }
     std::string ResourceKey()const override{return resourceKey_;}
     std::u16string Name()const override{return *std::atomic_load(&name_);}
     const char* Kind()const override{return "MFS";}
@@ -324,11 +341,12 @@ std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool wri
     return TrackWorkerVolume(std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal)));
 }
 static std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable,const std::string& key) {
-    auto source=std::make_unique<MfsImageSource>();
+    auto source=std::make_unique<RecoverableMfsImageSource>();
     std::string error;
     if(!source->Open(path.c_str(),error,writable) &&
        (!writable || !source->Open(path.c_str(),error,false)))throw HfsPlus::Error(error);
-    StorageLocation::ValidateImageFile(reinterpret_cast<HANDLE>(source->WorkerFiles().front().second),key);
+    StorageLocation::ValidateImageFile(source->NativeHandle(),key);
+    MfsRecovery::Recover(source->NativeHandle(),source->Writable());
     return FromMfs(std::move(source),key);
 }
 namespace {
@@ -477,7 +495,14 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring& path,const std:
         return DiskImage::Reopen(path,type,{write,externalJournal,nullptr,nullptr,nullptr,key});
     };
     const bool pendingNdif=ClassicHfsRecovery::Pending(path,true);
-    if(externalJournal.empty()&&ClassicHfsRecovery::Pending(path)){
+    const bool pendingClassic=externalJournal.empty()&&ClassicHfsRecovery::Pending(path);
+    if(externalJournal.empty()&&MfsRecovery::Pending(path)){
+        Check(!pendingClassic&&!pendingNdif,"The image has conflicting filesystem recovery records");
+        // Recover before probing the MFS signature or Disk Copy header.
+        if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Mfs));
+        return OpenMfsImage(path,true,key);
+    }
+    if(pendingClassic){
         Check(!pendingNdif,"The image has conflicting classic HFS recovery records");
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
         return OpenClassicImage(path,true,key);
