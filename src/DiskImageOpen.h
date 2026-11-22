@@ -6,6 +6,9 @@ namespace Dmg { class Password; class PrivateKey; }
 namespace Storage { class Job; }
 
 namespace DiskImage {
+#ifdef HFV_TESTING
+extern thread_local std::function<void(const std::wstring&)> beforeReopenTest;
+#endif
 enum class Container { Raw, Udif, EncryptedDisk, SparseImage, SparseBundle, Ndif };
 
 struct OpenOptions {
@@ -14,6 +17,7 @@ struct OpenOptions {
     const Dmg::Password* password = nullptr;
     const Dmg::PrivateKey* privateKey = nullptr;
     Storage::Job* job = nullptr;
+    std::string expectedImage;
 };
 
 struct Opened {

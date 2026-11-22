@@ -209,7 +209,11 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       /* open and lock the device */
 
       if (supplied_fd >= 0)
-        vol->fd = supplied_fd;
+        {
+          vol->fd = supplied_fd;
+          if (!(flags & (O_WRONLY | O_RDWR)))
+            vol->flags |= HFS_READONLY;
+        }
       else if (flags & (O_WRONLY | O_RDWR))
 	{
 #ifdef __EMX__
@@ -369,6 +373,12 @@ hfsvol *hfs_mount(char *path, int pnum, int flags) {
 
 hfsvol *hfs_mount_session(char *path, int pnum, int flags) {
   return mount_impl(path,pnum,flags,1,-1);
+}
+
+/* Takes ownership of an open image descriptor with its sharing lock held. */
+hfsvol *hfs_mount_session_fd(int fd, int pnum, int flags) {
+  if (fd < 0) { ERROR(EBADF, "invalid HFS image descriptor"); return 0; }
+  return mount_impl(0,pnum,flags,1,fd);
 }
 
 /* Takes ownership of a duplicate of the image's writable descriptor. */

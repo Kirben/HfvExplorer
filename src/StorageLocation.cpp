@@ -43,6 +43,12 @@ void ValidateImage(const std::wstring& path, const std::string& expectedResource
         throw Storage::MediaChanged("The selected image was replaced.");
 }
 
+void ValidateImageFile(HANDLE file,const std::string& expectedResource)
+{
+    if(!expectedResource.empty()&&VolumeCoord::ImageFileKey(file)!=expectedResource)
+        throw Storage::MediaChanged("The opened image does not match the selected file.");
+}
+
 void ValidateClassicGeneration(const Location& location, std::optional<DWORD> observed) {
     if (location.MediaGenerationKnown() && observed!=location.MediaGeneration())
         throw Storage::MediaChanged("The selected media changed. Select its drive again.");

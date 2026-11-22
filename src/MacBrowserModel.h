@@ -164,7 +164,8 @@ public:
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source>, bool writable,std::string resourceKey = {},std::wstring externalJournal = {});
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal = {}); // null = unrecognized
 std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal = {},
-                                         const Dmg::Password* password = nullptr,const Dmg::PrivateKey* key=nullptr);
+                                         const Dmg::Password* password = nullptr,const Dmg::PrivateKey* key=nullptr,
+                                         const std::string& expectedImage={});
 std::shared_ptr<Volume> OpenCd(int drive,std::shared_ptr<::MediaImageSource> media = {}); // null = no recognized filesystem
 // Drive roots only; unrecognized/unreadable media falls back, recognized mount errors propagate.
 std::shared_ptr<Volume> OpenCdRoot(const char *root,
@@ -185,11 +186,10 @@ struct MfsCatalogIds {
 std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource>,const std::string& key,
                                 std::shared_ptr<MfsCatalogIds> ids={});
 std::shared_ptr<Volume> OpenClassic(const std::string &image, const std::string &directory, bool writable);
-std::shared_ptr<Volume> OpenMfsImage(const std::wstring&, bool writable);
 bool RecognizesClassicImage(const std::wstring&);
 std::shared_ptr<Volume> OpenEditableNdif(std::unique_ptr<HfsPlus::Source>,const std::string& key,
                                           const DiskPartitions::Selection&);
-std::shared_ptr<Volume> OpenClassicImage(const std::wstring&, bool writable);
+std::shared_ptr<Volume> OpenClassicImage(const std::wstring&,bool writable,const std::string& expectedImage);
 std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin&);
 // Recursive transfers retain both forks and reject self/descendant copies.
 // A move removes its source only after the entire selected tree was copied.

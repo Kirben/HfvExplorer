@@ -66,12 +66,18 @@ bool Contains(const Bus& bus,const std::string& a,const std::string& b){
 }
 bool Overlap(const Bus& bus,const std::string& a,const std::string& b){if(Related(bus,a,b))return true;auto ia=bus.imagePaths.find(a),ib=bus.imagePaths.find(b);if(ia!=bus.imagePaths.end()){for(const auto& key:ia->second){if(Related(bus,key,b))return true;if(ib!=bus.imagePaths.end())for(const auto& other:ib->second)if(Related(bus,key,other))return true;}}if(ib!=bus.imagePaths.end())for(const auto& key:ib->second)if(Related(bus,a,key))return true;return false;}
 }
+std::string ImageFileKey(HANDLE file){
+ BY_HANDLE_FILE_INFORMATION info{};
+ if(!GetFileInformationByHandle(file,&info))return {};
+ return "image:"+std::to_string(info.dwVolumeSerialNumber)+":"+
+        std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);
+}
 std::string ImageKey(const std::wstring& path){
  auto ansi=Utf8(path); // Physical pseudo-images have ASCII drive/root markers.
  if(physical_floppy_path(ansi.c_str())>=0)return DeviceKey(physical_floppy_path(ansi.c_str()));
  if(path.size()>4&&!_wcsicmp(path.c_str()+1,L":\\NP~1_2~3.DSK"))return DeviceKey(towupper(path[0])-L'A');
  HANDLE h=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);std::string key;
- if(h!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(h,&info))key="image:"+std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);CloseHandle(h);}
+ if(h!=INVALID_HANDLE_VALUE){key=ImageFileKey(h);CloseHandle(h);}
  if(key.empty()){wchar_t full[32768]{};DWORD n=GetFullPathNameW(path.c_str(),ARRAYSIZE(full),full,nullptr);if(!n||n>=ARRAYSIZE(full))throw std::runtime_error("Cannot identify image path");key="image-path:"+Utf8(Upper(full));}
  auto host=HostKey(path),file=PathKey(path);auto& bus=Get();std::lock_guard<std::mutex> lock(bus.mutex);bus.hosts[key]=host;bus.imagePaths[key].insert(file);return key;
 }

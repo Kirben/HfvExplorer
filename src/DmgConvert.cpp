@@ -312,7 +312,7 @@ Storage::Result Convert(const std::wstring& source,const std::wstring& destinati
     const auto changed=access.back().key;
     access.push_back({inputKey,VolumeCoord::Mode::Read});
     return CommandStorage::Guard(std::move(access),[&](Storage::Job& current){
-        auto opened=DiskImage::Open(source,{false,{},password,key,&current});
+        auto opened=DiskImage::Open(source,{false,{},password,key,&current,inputKey});
         Check(bool(opened.source),"The input is not a supported disk image");
         auto& input=opened.source;
         Check(format!=Output::RawImage||opened.container!=DiskImage::Container::Raw,

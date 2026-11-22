@@ -769,7 +769,8 @@ int MainMacBrowser::QueueImageOpen(const std::wstring& path,const std::wstring& 
                 VolumeCoord::Lease lease(std::move(access));
                 auto volume=existing;
                 if(!volume||volume->ResourceKey()!=key)
-                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal,source.credentials.password.get(),source.credentials.privateKey.get());
+                    volume=MacBrowser::OpenBrowserImage(source.path,source.externalJournal,
+                        source.credentials.password.get(),source.credentials.privateKey.get(),key);
                 if(!volume)return Storage::Result{1,ERROR_UNRECOGNIZED_VOLUME,"This file does not contain a supported disk image volume."};
                 result.listing.revision=VolumeCoord::Revision(key);
                 if(job.cancelled())throw Storage::Cancelled();

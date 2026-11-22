@@ -1435,7 +1435,7 @@ int RunClassicRecoveryTest(const char* directory)
             Check(ClassicHfsRecovery::Pending(path)&&Load(image)!=original,"crash left no interrupted overwrite on disk");
             if(phase!=3){
                 bool rejected=false;
-                try { MacBrowser::OpenClassicImage(path,false); }
+                try { MacBrowser::OpenClassicImage(path,false,VolumeCoord::ImageKey(path)); }
                 catch(const HfsPlus::Error&){ rejected=true; }
                 Check(rejected&&ClassicHfsRecovery::Pending(path),"read-only open consumed pending rollback");
             }

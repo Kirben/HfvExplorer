@@ -11,6 +11,7 @@
 #include "DeviceWait.h"
 #include "FloppyWriter.h"
 #include "ReadOnlyCdBackend.h"
+#include "DiskImageOpen.h"
 #include "FakeFloppy.h"
 #include "floppy.h"
 #include <cstdio>
@@ -66,6 +67,58 @@ void Pass(const Operation& op){Wait(op);if(op.Job()->result().code)throw HfsPlus
 void Conflict(const std::shared_ptr<Storage::Job>& job){DWORD until=GetTickCount()+5000;while(!job->done()&&job->conflict().empty()&&LONG(until-GetTickCount())>0)Sleep(10);Check(!job->conflict().empty(),"expected overwrite conflict");}
 std::vector<BYTE> Load(const std::string& path){CFile file;Check(file.Open(path.c_str(),CFile::modeRead|CFile::shareDenyNone)!=FALSE,"read fixture");std::vector<BYTE> bytes(size_t(file.GetLength()));Check(file.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"read fixture bytes");return bytes;}
 void Save(const std::string& path,const char* data){CFile file;Check(file.Open(path.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"write fixture");file.Write(data,UINT(strlen(data)));}
+void VerifyImageReopenIdentity(const std::string& root,FILE* report)
+{
+ for(const bool initial:{false,true}){
+  const auto path=root+(initial?"\\initial-open.dsk":"\\writable-reopen.dsk");
+  const auto parked=path+".original",decoy=path+".replacement";
+  const auto format=[](const std::string& name,const std::u16string& label){
+   auto file=HfsPlus::CreateImage(W(name).c_str(),8*1024*1024);
+   HfsPlus::Volume::Format(*file,label,true,HfsPlus::Volume::FormatKind::HfsPlus);
+  };
+  format(path,u"Selected");
+  format(decoy,u"Replacement");
+  const auto originalBytes=Load(path),replacementBytes=Load(decoy);
+  bool swapped=false;
+  const auto substitute=[&](const std::wstring& opening){
+   if(swapped||opening!=W(path))return;
+   Check(MoveFileA(path.c_str(),parked.c_str())&&MoveFileA(decoy.c_str(),path.c_str()),
+         "substitute same-geometry disk image fixture");
+   swapped=true;
+  };
+  struct Reset{
+   ~Reset(){DiskImage::beforeReopenTest={};VolumeCoord::SetPathLookupObserver({});}
+  } reset;
+  if(initial)VolumeCoord::SetPathLookupObserver(substitute);
+  else DiskImage::beforeReopenTest=substitute;
+  bool refused=false;
+  try{auto volume=OpenImage(W(path));}
+  catch(const Storage::MediaChanged&){refused=true;}
+  Check(swapped&&refused&&Load(path)==replacementBytes&&Load(parked)==originalBytes,
+        "opening a substituted image did not fail or changed one of the files");
+  const auto replacement=OpenImage(W(path));
+  Check(replacement&&replacement->Name()==u"Replacement","explicit retry could not open the replacement");
+ }
+ auto path=root+"\\classic-mount.dsk",replacementPath=path+".replacement";
+ const auto formatClassic=[](std::string& name,char* label){
+  {CFile file;Check(file.Open(name.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create classic identity fixture");
+   file.SetLength(4*1024*1024);}
+  Check(hfs_format(name.data(),0,label)==0,"format classic identity fixture");
+ };
+ char oldLabel[]="Chosen Classic",newLabel[]="Replacement Classic";
+ formatClassic(path,oldLabel);
+ formatClassic(replacementPath,newLabel);
+ const auto expected=VolumeCoord::ImageKey(W(path));
+ const auto parked=path+".original";
+ const auto original=Load(path),replacement=Load(replacementPath);
+ Check(MoveFileA(path.c_str(),parked.c_str())&&MoveFileA(replacementPath.c_str(),path.c_str()),
+       "substitute classic HFS mount fixture");
+ bool refused=false;
+ try{auto volume=OpenClassicImage(W(path),true,expected);}
+ catch(const Storage::MediaChanged&){refused=true;}
+ Check(refused&&Load(path)==replacement&&Load(parked)==original,"classic HFS accepted a different file descriptor");
+ fprintf(report,"PASS: substituted HFS+ images at open/reopen and substituted classic HFS images at mount are refused with both files unchanged.\n");
+}
 void WindowsStagingSafety(const std::string& root,FILE* report)
 {
  for(const auto phase:{"export-files-reserved","staged","metadata-file-reserved"}){
@@ -242,6 +295,7 @@ int RunFileOperationsTest(const char* directory){
  try{
   Check(owner.CreateEx(0,AfxRegisterWndClass(0),"Hidden operation owner",WS_OVERLAPPED,0,0,600,400,nullptr,0)&&other.CreateEx(0,AfxRegisterWndClass(0),"Other browser",WS_OVERLAPPED,0,0,600,400,nullptr,0),"create hidden owners");app.m_pMainWnd=&other;app.m_mac_window_mode=0;
   auto source=Image(W(root+"\\source.dsk"),u"Source",HfsPlus::Volume::FormatKind::HfsPlus),target=Image(W(root+"\\target.dsk"),u"Target",HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+  VerifyImageReopenIdentity(root,report);
   WindowsCutSafety(root,target,report);
   WindowsStreamSafety(root,target,report);
   uint32_t file=Put(*source,u"Payload"),folder=target->MakeDirectory(2,u"Copies");auto expected=source->Stat(file);auto delayed=std::make_shared<Delayed>(source);delayed->delay=120;delayed->owner=&owner;delayed->other=&other;

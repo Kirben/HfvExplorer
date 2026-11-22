@@ -2,6 +2,8 @@
 #include "stdafx.h"
 #include "MacBrowserModel.h"
 #include "StorageHandoff.h"
+#include "StorageLocation.h"
+#include "ImageHandleTransfer.h"
 #include <io.h>
 #include "VolumeCoordinator.h"
 #include "LegacyEngine.h"
@@ -25,6 +27,22 @@ int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 namespace MacBrowser {
 namespace {
 void Check(bool ok) { if (!ok) throw HfsPlus::Error(hfs_error ? hfs_error : "Classic HFS operation failed"); }
+hfsvol* MountHostImage(const std::wstring& path,const std::string& expected,bool write)
+{
+    std::unique_ptr<HfsPlus::Source> image;
+    try{image=HfsPlus::OpenImage(path.c_str(),write);}
+    catch(const HfsPlus::Error&){
+        if(!write)throw;
+        image=HfsPlus::OpenImage(path.c_str(),false);
+    }
+    const auto opened=reinterpret_cast<HANDLE>(image->WorkerFiles().front().second);
+    StorageLocation::ValidateImageFile(opened,expected);
+    const auto handle=ImageHandleTransfer::Duplicate(opened);
+    const int mode=image->Writable()?O_RDWR:O_RDONLY;
+    const int fd=_open_osfhandle(intptr_t(handle),mode|O_BINARY|_O_NOINHERIT);
+    if(fd<0){CloseHandle(handle);throw HfsPlus::Error("Cannot attach the verified classic HFS image");}
+    return hfs_mount_session_fd(fd,1,mode);
+}
 std::u16string Decode(const std::string &s) {
     int n = MultiByteToWideChar(10000, 0, s.data(), int(s.size()), nullptr, 0);
     std::wstring w(n, 0); MultiByteToWideChar(10000, 0, s.data(), int(s.size()), &w[0], n); return U16(w);
@@ -115,18 +133,28 @@ class Classic final : public Volume, public WorkerEndpoint {
         Check(hfs_getfinderinfo(volume_,const_cast<char*>(path.c_str()),e.finder.data())==0);return e;
     }
 public:
-    Classic(const std::string& image,std::string root,bool write,bool session=false,std::wstring hostImage={})
+    Classic(const std::string& image,std::string root,bool write,bool session=false,std::wstring hostImage={},
+            const std::string& expectedImage={})
         :hostImage_(std::move(hostImage)),image_(image),write_(write),session_(session)
     {
-        resourceKey_=hostImage_.empty()?VolumeCoord::ImageKey(image):VolumeCoord::ImageKey(hostImage_);
+        resourceKey_=hostImage_.empty()?VolumeCoord::ImageKey(image):expectedImage;
         context_=LegacyEngine::ForVolume(resourceKey_);LegacyEngine::Scope engine(context_);
         imageIdentity_=image;
-        const auto sharing=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
-        HANDLE identity=hostImage_.empty()?CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,sharing,nullptr,OPEN_EXISTING,0,nullptr):
-            CreateFileW(hostImage_.c_str(),FILE_READ_ATTRIBUTES,sharing,nullptr,OPEN_EXISTING,0,nullptr);
-        if(identity!=INVALID_HANDLE_VALUE){BY_HANDLE_FILE_INFORMATION info{};if(GetFileInformationByHandle(identity,&info))imageIdentity_=std::to_string(info.dwVolumeSerialNumber)+":"+std::to_string(info.nFileIndexHigh)+":"+std::to_string(info.nFileIndexLow);CloseHandle(identity);}
         std::vector<char> converted(root.begin(),root.end());converted.push_back(0);pc_to_mac_charset((unsigned char*)converted.data());root=converted.data();
-        volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image.c_str()),1,write?O_RDWR:O_RDONLY);Check(volume_!=nullptr);
+        if(hostImage_.empty()){
+            const auto sharing=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
+            HANDLE identity=CreateFileA(image.c_str(),FILE_READ_ATTRIBUTES,sharing,nullptr,OPEN_EXISTING,0,nullptr);
+            if(identity!=INVALID_HANDLE_VALUE){
+                const auto key=VolumeCoord::ImageFileKey(identity);
+                if(!key.empty())imageIdentity_=key.substr(6);
+                CloseHandle(identity);
+            }
+            volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image.c_str()),1,write?O_RDWR:O_RDONLY);
+        }else{
+            volume_=MountHostImage(hostImage_,resourceKey_,write);
+            imageIdentity_=resourceKey_.substr(6);
+        }
+        Check(volume_!=nullptr);
         auto colon=root.find(':');root=colon==root.npos?":":root.substr(colon);
         while(root.size()>1&&root.back()==':'&&root.find(':')<root.size()-1)root.pop_back();paths_[2]=root;
         try {Check(Describe(root,2).directory);}catch(...){hfs_umount(volume_);volume_=nullptr;throw;}
@@ -172,7 +200,7 @@ public:
         out.kind=hostImage_.empty()?WorkerOrigin::Classic:WorkerOrigin::Image;
         out.path=hostImage_.empty()?VolumeCoord::Wide(image_):hostImage_;
         out.root=paths_.at(2);
-        out.identity=imageIdentity_;
+        out.identity=hostImage_.empty()?imageIdentity_:resourceKey_;
         out.writable=Writable();
         return out;
     }
@@ -191,7 +219,16 @@ public:
     std::vector<std::pair<std::wstring,uintptr_t>> WorkerFiles()const override{LegacyEngine::Scope engine(context_);if(media_)return media_->WorkerFiles();if(registration_||!volume_||volume_->fd>=0x10000000)return {};auto file=_get_osfhandle(volume_->fd);if(file==-1)throw HfsPlus::Error("Cannot transfer classic image handle");return {{hostImage_.empty()?VolumeCoord::Wide(image_):hostImage_,uintptr_t(file)}};}
     void WorkerUncleanExit()override{LegacyEngine::Scope engine(context_);write_=false;}
     void SuspendWorker()override{LegacyEngine::Scope engine(context_);if(registration_)return;if(volume_){auto v=volume_;volume_=nullptr;suspended_=true;int closed=hfs_umount(v);if(closed)write_=false;Check(closed==0);}}
-    void ResumeWorker()override{LegacyEngine::Scope engine(context_);if(!suspended_)return;volume_=(session_?hfs_mount_session:hfs_mount)(const_cast<char*>(image_.c_str()),1,write_?O_RDWR:O_RDONLY);Check(volume_!=nullptr);suspended_=false;markedDirty_=false;}
+    void ResumeWorker()override{
+        LegacyEngine::Scope engine(context_);
+        if(!suspended_)return;
+        if(hostImage_.empty())
+            volume_=(session_?hfs_mount_session:hfs_mount)(image_.data(),1,write_?O_RDWR:O_RDONLY);
+        else volume_=MountHostImage(hostImage_,resourceKey_,write_);
+        Check(volume_!=nullptr);
+        suspended_=false;
+        markedDirty_=false;
+    }
     void Close()override {
         LegacyEngine::Scope engine(context_);
         if (volume_) {
@@ -675,8 +712,8 @@ bool RecognizesClassicImage(const std::wstring& path) {
     // The worker validates and mounts the catalog after the header probe.
     return hfs_recognizes_image(encoded.data())!=0;
 }
-std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path,bool writable) {
-    return TrackWorkerVolume(std::make_shared<Classic>(ClassicImagePath::Encode(path),":",writable,true,path));
+std::shared_ptr<Volume> OpenClassicImage(const std::wstring& path,bool writable,const std::string& expectedImage) {
+    return TrackWorkerVolume(std::make_shared<Classic>(ClassicImagePath::Encode(path),":",writable,true,path,expectedImage));
 }
 std::shared_ptr<Volume> OpenClassicSource(std::shared_ptr<HfsPlus::Source> source,const std::string& key,bool write,bool stable){return TrackWorkerVolume(std::make_shared<Classic>(std::move(source),key,write,stable));}
 std::shared_ptr<Volume> OpenClassic(const std::string& image,const std::string& path,bool write){return TrackWorkerVolume(std::make_shared<Classic>(image,path,write));}

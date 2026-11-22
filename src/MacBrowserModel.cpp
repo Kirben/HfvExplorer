@@ -317,12 +317,13 @@ std::shared_ptr<Volume> FromMfs(std::unique_ptr<MfsSource> source,const std::str
 std::shared_ptr<Volume> FromHfsPlus(std::unique_ptr<HfsPlus::Source> s, bool write,std::string key,std::wstring externalJournal) {
     return TrackWorkerVolume(std::make_shared<Plus>(std::move(s), write,std::move(key),std::move(externalJournal)));
 }
-std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable) {
+static std::shared_ptr<Volume> OpenMfsImage(const std::wstring& path,bool writable,const std::string& key) {
     auto source=std::make_unique<MfsImageSource>();
     std::string error;
     if(!source->Open(path.c_str(),error,writable) &&
        (!writable || !source->Open(path.c_str(),error,false)))throw HfsPlus::Error(error);
-    return FromMfs(std::move(source),VolumeCoord::ImageKey(path));
+    StorageLocation::ValidateImageFile(reinterpret_cast<HANDLE>(source->WorkerFiles().front().second),key);
+    return FromMfs(std::move(source),key);
 }
 namespace {
 std::shared_ptr<Volume> OpenReadOnlyImage(std::unique_ptr<HfsPlus::Source> source,const std::string& key,
@@ -420,27 +421,30 @@ static std::shared_ptr<Volume> OpenTrackImages(
     throw HfsPlus::Error("No supported data filesystem was found in the optical track image");
 }
 
+static std::shared_ptr<Volume> OpenImageImpl(const std::wstring& path,const std::wstring& externalJournal,
+                                             bool persistent,const Dmg::Password* password=nullptr,
+                                             const Dmg::PrivateKey* privateKey=nullptr,
+                                             const std::string& expectedImage={});
+
 std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin& origin)
 {
     if(!origin.imageMount)
-        return OpenImage(origin.path,origin.journal);
+        return OpenImageImpl(origin.path,origin.journal,false,nullptr,nullptr,origin.identity);
 
-    StorageLocation::ValidateImage(origin.path,origin.identity);
     const auto& mount=*origin.imageMount;
+    const auto key=origin.identity.empty()?VolumeCoord::ImageKey(origin.path):origin.identity;
     if(mount.format==ImageFormat::Mfs)
-        return OpenMfsImage(origin.path,origin.writable);
+        return OpenMfsImage(origin.path,origin.writable,key);
     if(mount.format==ImageFormat::Classic){
         floppy_module_global_init();
-        return OpenClassicImage(origin.path,origin.writable);
+        return OpenClassicImage(origin.path,origin.writable,key);
     }
 
     const bool ndif=mount.format!=ImageFormat::HfsPlus;
     if(ndif)floppy_module_global_init();
-    const auto key=VolumeCoord::ImageKey(origin.path);
     const auto open=[&](bool write){
         auto disk=DiskImage::Reopen(origin.path,ndif?DiskImage::Container::Ndif:DiskImage::Container::Raw,
-                                    {write,origin.journal});
-        StorageLocation::ValidateImage(origin.path,origin.identity);
+                                    {write,origin.journal,nullptr,nullptr,nullptr,key});
         if(ndif)
             return OpenEditableNdif(std::move(disk),key,{mount.format,*mount.selection});
         if(DiskPartitions::FindHfsPlus(*disk)!=mount.selection)
@@ -454,16 +458,25 @@ std::shared_ptr<Volume> OpenWorkerImage(const WorkerOrigin& origin)
     }
 }
 
-static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std::wstring &externalJournal,bool persistent,const Dmg::Password* password=nullptr,const Dmg::PrivateKey* privateKey=nullptr) {
+static std::shared_ptr<Volume> OpenImageImpl(const std::wstring& path,const std::wstring& externalJournal,
+                                             bool persistent,const Dmg::Password* password,
+                                             const Dmg::PrivateKey* privateKey,const std::string& expectedImage)
+{
     using DiskImage::Container;
-    auto key=VolumeCoord::ImageKey(path);return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
+    const auto key=VolumeCoord::ImageKey(path);
+    if(!expectedImage.empty()&&key!=expectedImage)
+        throw Storage::MediaChanged("The selected image was replaced.");
+    return VolumeCoord::SharedImage(key,[&]()->std::shared_ptr<Volume>{
+    const auto reopen=[&](Container type,bool write){
+        return DiskImage::Reopen(path,type,{write,externalJournal,nullptr,nullptr,nullptr,key});
+    };
     const bool pendingNdif=ClassicHfsRecovery::Pending(path,true);
     if(externalJournal.empty()&&ClassicHfsRecovery::Pending(path)){
         Check(!pendingNdif,"The image has conflicting classic HFS recovery records");
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
-        return OpenClassicImage(path,true);
+        return OpenClassicImage(path,true,key);
     }
-    auto opened=DiskImage::Open(path,{false,externalJournal,password,privateKey});
+    auto opened=DiskImage::Open(path,{false,externalJournal,password,privateKey,nullptr,key});
     auto& source=opened.source;
     Check(!pendingNdif||opened.container==Container::Ndif,
           "Pending classic HFS recovery requires the original NDIF wrapper and companions");
@@ -479,8 +492,7 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
             // Replay before probing partition/MDB bytes. Leave the record until
             // the owning mount recovers, so it can reopen an unclean volume.
             source.reset();
-            source=DiskImage::Reopen(path,Container::Ndif,{true});
-            Check(VolumeCoord::ImageKey(path)==key,"The selected NDIF image changed before recovery");
+            source=reopen(Container::Ndif,true);
             const auto backing=Ndif::RecoveryRange(*source);
             Check(backing.has_value(),"Pending classic HFS recovery requires a writable stored NDIF payload");
             ClassicHfsRecovery::RecoverNdif(*backing,source->Writable(),true);
@@ -491,13 +503,11 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
         if(!selected)return OpenReadOnlyImage(std::move(source),key,externalJournal,"The NDIF image contains no supported filesystem");
         source.reset();
         if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},selected->format,selected->selection));
-        try{source=DiskImage::Reopen(path,Container::Ndif,{true});}
+        try{source=reopen(Container::Ndif,true);}
         catch(const HfsPlus::Error&){
             if(pendingNdif)throw;
-            source=DiskImage::Reopen(path,Container::Ndif,{});
+            source=reopen(Container::Ndif,false);
         }
-        Check(VolumeCoord::ImageKey(path)==key,
-              "The selected NDIF image changed while it was being opened");
         return OpenEditableNdif(std::move(source),key,*selected);
     }
     if(externalJournal.empty())
@@ -508,7 +518,7 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
             return TrackWorkerVolume(VolumeSession::MountPersistentImage(
                 path,key,externalJournal,VolumeSession::ImageFormat::HfsPlus,*selected));
         const auto open=[&](bool write){
-            auto disk=DiskImage::Reopen(path,Container::Raw,{write,externalJournal});
+            auto disk=reopen(Container::Raw,write);
             if(DiskPartitions::FindHfsPlus(*disk)!=selected)
                 throw Storage::MediaChanged("The selected HFS+ filesystem or partition changed");
             return FromHfsPlus(std::move(disk),write,key,externalJournal);
@@ -519,35 +529,32 @@ static std::shared_ptr<Volume> OpenImageImpl(const std::wstring &path,const std:
     }
     if(externalJournal.empty()){
         if(persistent){
-            const auto reopen=[&](bool writable){
-                auto image=DiskImage::Reopen(path,Container::Raw,{writable});
-                if(VolumeCoord::ImageKey(path)!=key)
-                    throw Storage::MediaChanged("The selected APFS image changed while it was being opened");
-                return image;
-            };
-            if(auto apfs=Apfs::OpenRawBrowserImage(source,key,reopen))return apfs;
+            const auto openApfs=[&](bool writable){return reopen(Container::Raw,writable);};
+            if(auto apfs=Apfs::OpenRawBrowserImage(source,key,openApfs))return apfs;
         }else if(auto apfs=Apfs::Open(source,key))return apfs;
         if(auto optical=Optical::Open(source,key))return optical;
     }
     source.reset(); std::unique_ptr<MfsImageSource> mfs(new MfsImageSource); std::string error;
     if (!mfs->Open(path.c_str(), error)) throw HfsPlus::Error(error);
+    StorageLocation::ValidateImageFile(reinterpret_cast<HANDLE>(mfs->WorkerFiles().front().second),key);
     if (!MfsImage::Recognizes(*mfs)) {
         mfs.reset();
         if (!externalJournal.empty() || !RecognizesClassicImage(path)) return {};
         if (persistent) return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Classic));
-        return OpenClassicImage(path,true);
+        return OpenClassicImage(path,true,key);
     }
     mfs.reset();
     if(persistent)return TrackWorkerVolume(VolumeSession::MountPersistentImage(path,key,{},VolumeSession::ImageFormat::Mfs));
-    return OpenMfsImage(path,true);
+    return OpenMfsImage(path,true,key);
     });
 }
 std::shared_ptr<Volume> OpenImage(const std::wstring &path,const std::wstring &externalJournal) {
     return OpenImageImpl(path,externalJournal,false);
 }
 std::shared_ptr<Volume> OpenBrowserImage(const std::wstring &path,const std::wstring &externalJournal,
-                                         const Dmg::Password* password,const Dmg::PrivateKey* privateKey) {
-    return OpenImageImpl(path,externalJournal,true,password,privateKey);
+                                         const Dmg::Password* password,const Dmg::PrivateKey* privateKey,
+                                         const std::string& expectedImage) {
+    return OpenImageImpl(path,externalJournal,true,password,privateKey,expectedImage);
 }
 std::shared_ptr<Volume> OpenCd(int drive, std::shared_ptr<::MediaImageSource> media) {
     uint16_t signature=0;

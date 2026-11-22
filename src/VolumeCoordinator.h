@@ -11,6 +11,7 @@
 namespace MacBrowser {class Volume;}
 namespace VolumeCoord {
 std::wstring Wide(const std::string&);
+std::string ImageFileKey(HANDLE);
 std::string ImageKey(const std::wstring&);
 inline std::string ImageKey(const std::string& path){return ImageKey(Wide(path));}
 // Mounted filesystems also reserve their external journal image's paths.

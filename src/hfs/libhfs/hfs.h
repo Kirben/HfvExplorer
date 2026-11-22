@@ -162,6 +162,7 @@ hfsvol *hfs_mount_session(char *, int, int);
 int hfs_mark_session_dirty(hfsvol *);
 int hfs_mark_session_clean(hfsvol *);
 hfsvol *hfs_remount_for_recovery(int fd, int pnum, int session);
+hfsvol *hfs_mount_session_fd(int fd, int pnum, int flags);
 int hfs_session_mounts(int enabled);
 int hfs_editattrs(hfsvol *, char *, char *, hfsdirent *);
 int hfs_fsetattr(hfsfile *, hfsdirent *);

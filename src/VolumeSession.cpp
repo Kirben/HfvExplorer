@@ -216,8 +216,7 @@ public:
         try { open(true); }
         catch (const HfsPlus::Error&) { guard_.reset(); open(false); }
         writeAllowed_ = guard_->Writable();
-        if(selection_)
-            StorageLocation::ValidateImage(path_,key_);
+        StorageLocation::ValidateImageFile(reinterpret_cast<HANDLE>(guard_->WorkerFiles().front().second),key_);
         if (!journal_.empty())
             dependency_ = std::make_unique<VolumeCoord::ImageDependency>(key_, journal_);
         Start();

@@ -9,6 +9,7 @@ using FileOperations::Location;
 bool RevisionCurrent(const std::string& resource, uint64_t revision);
 std::optional<DWORD> WindowsSerial(const std::wstring& path);
 void ValidateImage(const std::wstring& path, const std::string& expectedResource);
+void ValidateImageFile(HANDLE file,const std::string& expectedResource);
 void ValidateClassicGeneration(const Location&, std::optional<DWORD> observed);
 enum class FloppyProbe { OpenMount, FreshHandle };
 void RequireCapturedIdentity(const Location&);
