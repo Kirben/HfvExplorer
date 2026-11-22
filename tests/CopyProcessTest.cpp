@@ -3583,7 +3583,17 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         target.reset();
         target=OpenBrowserImage(path);
         Check(bool(target),"Cannot reopen the copied sparse file");
-        verifySparse(*target);
+        const auto copied=verifySparse(*target);
+        const auto attributes=target->GetAttributes(copied.id);
+        const auto layout=attributes.find(u"org.hfvexplorer.apfs-sparse-ranges");
+        const HfsPlus::Bytes expected{
+            'H','F','V','S',1,0,0,0,
+            0,0,128,0,0,0,0,0, 1,0,0,0,0,0,0,0,
+            0,16,0,0,0,0,0,0, 0,240,127,0,0,0,0,0,
+            7,96,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+        };
+        Check(layout!=attributes.end()&&HfsPlus::Bytes(layout->second)==expected,
+              "HFS+ copy did not retain the exact sparse fork layout after reopening");
     }
     fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen with a dense allocation notice; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
 }

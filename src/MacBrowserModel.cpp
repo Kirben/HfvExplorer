@@ -393,6 +393,26 @@ Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
     if(reportProgress)job.progress(p);
     return out;
 }
+// The file remains an ordinary HFS+ file. This attribute records the
+// APFS layout without affecting logical fork contents or occupying either fork.
+void RecordApfsSparseRanges(Entry& entry,const SparseForks& holes)
+{
+    constexpr auto name=u"org.hfvexplorer.apfs-sparse-ranges";
+    if(entry.attributes.count(name))return; // Preserve an existing source attribute.
+    HfsPlus::Bytes value{'H','F','V','S',1,0,0,0};
+    const auto append=[&](uint64_t number){
+        for(unsigned byte=0;byte<8;++byte)value.push_back(uint8_t(number>>(8*byte)));
+    };
+    for(unsigned fork=0;fork<2;++fork){
+        append(entry.forks[fork].size);
+        append(holes[fork].size());
+        for(const auto& hole:holes[fork]){
+            append(hole.offset);
+            append(hole.length);
+        }
+    }
+    entry.attributes.emplace(name,std::move(value));
+}
 using CopiedLinks=std::map<std::pair<std::string,uint32_t>,Entry>;
 void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
@@ -455,6 +475,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     auto outgoing=entry;
     const auto sparse=hfsPlus&&!plan.reader?src.SparseRanges(entry.id):SparseForks{};
     const bool materializesHoles=!sparse[0].empty()||!sparse[1].empty();
+    if(materializesHoles)RecordApfsSparseRanges(outgoing,sparse);
     if(storedResource)outgoing.forks[1].size=entry.compressionResourceSize;
     else {outgoing.compressionResourceSize=0;outgoing.resourceCompressionHeader.clear();}outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     outgoing.hfsOverwriteScope=hfsScope;
