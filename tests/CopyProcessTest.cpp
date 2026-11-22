@@ -2023,6 +2023,123 @@ void TestApfsToHfsNameCollisions(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and case-insensitive HFSX reject APFS name collisions before Replace All, including nested ignorable characters and cut/paste. Both HFSX modes reject canonically equivalent names; case-sensitive HFSX preserves case-distinct names.\n");
 }
 
+void TestMfsTransferVersions(const std::string& root,FILE* report)
+{
+    const auto sourcePath=Wide(root+"\\versioned-source.dsk");
+    const auto targetPath=Wide(root+"\\versioned-target.dc42");
+    constexpr auto name=u"Versioned";
+    const auto seed=[](Volume& volume,const std::u16string& name,unsigned version,BYTE bias){
+        Entry entry;
+        entry.name=name;
+        entry.version=version;
+        entry.finder[0]=42;
+        entry.forks[0].size=5011;
+        entry.forks[1].size=173;
+        return volume.Put(2,entry,[bias](unsigned fork,uint64_t at,void* output,size_t count){
+            auto* bytes=static_cast<BYTE*>(output);
+            for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+bias);
+        },false);
+    };
+    {
+        auto source=MfsImageFixture(sourcePath,false);
+        seed(*source,name,0,41);
+        seed(*source,name,7,42);
+        auto target=MfsImageFixture(targetPath,true);
+        seed(*target,name,0,51);
+        seed(*target,name,7,52);
+    }
+    const auto select=[&](Volume& volume,unsigned version){
+        Entry key,entry;
+        key.name=name;
+        key.version=version;
+        Check(volume.FindTransferChild(2,key,entry)&&entry.version==version,"Wrong MFS version selected");
+        return entry.id;
+    };
+    auto source=OpenBrowserImage(sourcePath);
+    Check(bool(source),"Cannot reopen versioned source");
+    const auto transfer=[&](Location target,unsigned version,bool cut,unsigned& prompts){
+        auto input=Native(source,select(*source,version));
+        input.cut=cut;
+        Storage::Job job;
+        job.transport({},[&](const auto& label){
+            ++prompts;
+            Check(label.find("[version 7]")!=std::string::npos,"Overwrite did not identify the MFS version");
+            return Storage::ConflictChoice::ReplaceAll;
+        });
+        Completion completion;
+        return ExecuteInWorker(OrdinaryCopy{{input},std::move(target)},job,completion);
+    };
+    const auto hfsPath=Wide(root+"\\versionless-target.dsk");
+    const auto classicPath=root+"\\versionless-classic.dsk";
+    const auto apfsPath=Wide(root+"\\versionless-apfs.img");
+    {
+        auto disk=HfsPlus::CreateImage(apfsPath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Versionless",true,job);
+    }
+    {
+        auto hfs=Image(hfsPath,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+        auto classic=ClassicImage(classicPath);
+        auto apfs=OpenBrowserImage(apfsPath);
+        const auto host=Wide(root+"\\versionless-windows");
+        Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"Cannot create Windows version test folder");
+        auto windows=OpenWindows(host);
+        for(const auto& target:{hfs,classic,apfs,windows}){
+            Check(bool(target),"Cannot open versionless destination");
+            Put(*target,2,name,4081,60);
+            unsigned prompts=0;
+            for(bool cut:{false,true}){
+                const auto destination=target==windows?Location::Windows(host):Native(target);
+                const auto result=transfer(destination,7,cut,prompts);
+                Check(result.outcome==Storage::Outcome::Failed&&!result.partial&&!result.moved&&!prompts&&
+                      result.message.find("cannot preserve MFS file version 7")!=std::string::npos,
+                      result.message.empty()?"Nonzero MFS version was silently discarded":result.message.c_str());
+            }
+            Entry original;
+            Check(target->FindChild(2,name,original),"Rejected MFS transfer changed destination");
+            Verify(*target,original.id,4081,60);
+        }
+    }
+    source.reset();
+    source=OpenBrowserImage(sourcePath);
+    Check(bool(source),"Cannot reopen rejected cut source");
+    Verify(*source,select(*source,0),5011,41);
+    Verify(*source,select(*source,7),5011,42);
+    auto target=OpenBrowserImage(targetPath);
+    Check(bool(target),"Cannot reopen versioned target");
+    unsigned prompts=0;
+    const auto copied=transfer(Native(target),7,false,prompts);
+    Check(!copied.code&&prompts==1,copied.message.c_str());
+    target.reset();
+    target=OpenBrowserImage(targetPath);
+    Check(bool(target),"Cannot reopen MFS version overwrite");
+    Verify(*target,select(*target,0),5011,51);
+    Verify(*target,select(*target,7),5011,42);
+    const auto moved=transfer(Native(target),7,true,prompts);
+    Check(!moved.code&&moved.moved&&prompts==2,moved.message.c_str());
+    target.reset();
+    source.reset();
+    target=OpenBrowserImage(targetPath);
+    source=OpenBrowserImage(sourcePath);
+    Check(target&&source,"Cannot reopen version-specific cut/paste");
+    Entry removed,selection;
+    selection.name=name;
+    selection.version=7;
+    Check(!source->FindTransferChild(2,selection,removed),"Cut retained the moved MFS version");
+    Verify(*source,select(*source,0),5011,41);
+    Verify(*target,select(*target,0),5011,51);
+    Verify(*target,select(*target,7),5011,42);
+    const auto host=Wide(root+"\\default-version-export");
+    Check(CreateDirectoryW(host.c_str(),nullptr)!=FALSE,"Cannot create default version export folder");
+    const auto exported=transfer(Location::Windows(host),0,false,prompts);
+    Check(!exported.code&&prompts==2,exported.message.c_str());
+    auto windows=OpenWindows(host);
+    Entry file;
+    Check(windows&&windows->FindChild(2,name,file)&&!file.version,"MFS version zero did not export normally");
+    Verify(*windows,file.id,5011,41);
+    fprintf(report,"PASS: ordinary MFS copies preserve distinct versions, identify the precise overwrite and reject nonzero versions on versionless targets before prompting or deleting; version zero still exports.\n");
+}
+
 void TestClassicLockRoundTrip(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -3363,6 +3480,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestMfsTransferVersions(root,report);
         TestClassicLockRoundTrip(root,report);
         TestClassicAndMfsCopyNameCollisions(root,report);
         TestHfsSystemImmutableToApfs(root,report);

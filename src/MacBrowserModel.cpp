@@ -407,6 +407,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     }
     if (found) {
         auto label=BrowserPresentation::Utf8(entry.name);
+        if(destinationKind=="MFS")label+=" [version "+std::to_string(entry.version)+"]";
         if(hfsScope==Scope::SelectedName||
            (existing.hardLink&&(destinationKind=="APFS"||(hfsPlus&&plan.linkTarget))))
             label+=" (replace this hard-link name only)";
@@ -827,7 +828,12 @@ void ValidateCopy(Volume &src,uint32_t id,Volume &dst,uint32_t parent){
 }
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
  std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
- for(const auto& plan:plans){Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
+ for(const auto& plan:plans){
+  if(plan.entry.version&&std::string_view(dst.Kind())!="MFS")
+   throw HfsPlus::Error("The destination cannot preserve MFS file version "+
+                        std::to_string(plan.entry.version)+" for "+BrowserPresentation::Utf8(plan.entry.name)+
+                        ". Choose a writable MFS image.");
+  Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
   if(plan.linkTarget){
    Check(!exists||(!found.protectedFile&&(dst.SymbolicLinkTarget(found.id).has_value()||
                                         dst.CanReplaceFileWithSymbolicLink(found))),
