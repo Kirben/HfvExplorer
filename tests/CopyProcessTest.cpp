@@ -2112,13 +2112,20 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         auto apfs=OpenBrowserImage(path);
         Check(bool(apfs),"Cannot open APFS named-pipe target");
         seedOld(*apfs);
-        auto result=transfer({selection[1]},Native(apfs));
+        Put(*apfs,2,names[0],8193,43);
+        auto result=transfer({selection[0]},Native(apfs));
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              "Cancelling a special file over a regular APFS destination should retain the destination");
+        result=transfer({selection[1]},Native(apfs));
         Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
               result.message.empty()?"Expected device overwrite cancellation":result.message.c_str());
         apfs.reset();
         apfs=OpenBrowserImage(path);
         Check(bool(apfs),"Cannot reopen cancelled APFS special overwrite");
         verifyOld(*apfs);
+        Entry oldRegular;
+        Check(apfs->FindChild(2,names[0],oldRegular),"Missing cancelled APFS regular destination");
+        Verify(*apfs,oldRegular.id,8193,43);
         result=transfer(selection,Native(apfs),true);
         Check(!result.code,result.message.c_str());
         apfs.reset();
@@ -2173,8 +2180,27 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         Check(returned&&returned->FindChild(2,names[1],existing)&&existing.posix&&!existing.posix->IsSpecial(),
               "Regular copy did not replace the special entry");
         Verify(*returned,existing.id,16385,118);
+
+        const auto folder=returned->MakeDirectory(2,u"Regular counterparts");
+        const auto copiedFile=Put(*returned,folder,names[0],16385,74);
+        result=transfer({Native(returned,copiedFile)},Native(apfs));
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              "Cancelling a regular file over an APFS special entry should retain the destination");
+        apfs.reset();
+        apfs=OpenBrowserImage(path);
+        Check(bool(apfs),"Cannot reopen APFS after cancelling regular replacement");
+        verify(*apfs,0);
+        result=transfer({Native(returned,copiedFile)},Native(apfs),true);
+        Check(!result.code,result.message.c_str());
+        apfs.reset();
+        apfs=OpenBrowserImage(path);
+        Check(apfs&&apfs->Supports().create&&apfs->FindChild(2,names[0],existing)&&existing.posix&&
+              !existing.posix->IsSpecial(),"Regular copy did not replace the APFS special entry");
+        Verify(*apfs,existing.id,16385,74);
+        verify(*apfs,2);
+        apfs->MakeDirectory(2,u"After cross-type replacement");
     }
-    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ also verifies regular-to-special and special-to-regular replacement and cancellation.\n");
+    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ and both APFS writers also verify regular-to-special and special-to-regular replacement and cancellation.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)

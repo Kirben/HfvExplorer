@@ -2960,7 +2960,7 @@ CatalogWritePlan PrepareCatalogMutation(
         }
         if(create->replacedEntry){
             const bool replacesFile=symlink||create->replacedAlias;
-            Check(!directory&&(special?specialCount!=0:replacesFile?fileCount!=0:symlinkCount!=0),"Invalid APFS entry replacement");
+            Check(!directory,"Invalid APFS entry replacement");
             const auto victimKind=replacesFile?CatalogKind::RegularFile:CatalogKind::SymbolicLink;
             const auto parentKey=(uint64_t(9)<<60)|create->parent;
             const auto wanted=NormalizedName(name,fold);
@@ -2968,9 +2968,11 @@ CatalogWritePlan PrepareCatalogMutation(
                 const bool linked=record.value.size()==34;
                 if(record.key.size()<14||Le64(record.key.data())!=parentKey||record.key.back()||
                    (record.value.size()!=18&&(!replacesFile||!linked))||
-                   Le64(record.value.data())!=create->replacedEntry||
-                   (special?!IsSpecialKind(CatalogKind(Le16(record.value.data()+16))):
-                    Le16(record.value.data()+16)!=uint16_t(victimKind)))return false;
+                   Le64(record.value.data())!=create->replacedEntry)return false;
+                const auto kind=CatalogKind(Le16(record.value.data()+16));
+                if(special){
+                    if(kind!=CatalogKind::RegularFile&&!IsSpecialKind(kind))return false;
+                }else if(kind!=victimKind&&(replacesFile||!IsSpecialKind(kind)))return false;
                 if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
                     return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);
@@ -3328,19 +3330,16 @@ CatalogWritePlan PrepareCatalogMutation(
     Set(volume,128,allocated[1],8);
     Set(volume,176,nextAvailable,8);
     if(create){
-        if(create->kind==CatalogKind::Directory)Set(volume,192,directoryCount+1,8);
-        else if(IsSpecialKind(create->kind)){
-            Check(removedKind.has_value()||specialCount<UINT64_MAX,"APFS special file count overflow");
-            Set(volume,208,specialCount+!removedKind.has_value(),8);
-        }
-        else if(create->kind==CatalogKind::SymbolicLink){
-            Set(volume,200,symlinkCount+1,8);
-            if(removedKind)Set(volume,184,fileCount-1,8);
-        }
-        else{
-            Set(volume,184,fileCount+1,8);
-            if(removedKind)Set(volume,200,symlinkCount-1,8);
-        }
+        const auto updateCount=[&](size_t offset,uint64_t count,bool added,bool removed){
+            Check(!removed||count,"Invalid APFS replacement entry count");
+            count-=removed;
+            Check(!added||count<UINT64_MAX,"APFS entry count overflow");
+            Set(volume,offset,count+added,8);
+        };
+        updateCount(184,fileCount,create->kind==CatalogKind::RegularFile,removedKind==CatalogKind::RegularFile);
+        updateCount(192,directoryCount,create->kind==CatalogKind::Directory,removedKind==CatalogKind::Directory);
+        updateCount(200,symlinkCount,create->kind==CatalogKind::SymbolicLink,removedKind==CatalogKind::SymbolicLink);
+        updateCount(208,specialCount,IsSpecialKind(create->kind),removedKind&&IsSpecialKind(*removedKind));
     }else if(externalDelete&&remove->recursive){
         Check(deletedFiles<=fileCount&&deletedFolders<=directoryCount&&deletedSymlinks<=symlinkCount&&deletedSpecial<=specialCount,
               "Invalid APFS volume entry counts");

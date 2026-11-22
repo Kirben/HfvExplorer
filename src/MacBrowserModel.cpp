@@ -890,7 +890,7 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
    const bool existingSpecial=existingType!=SpecialFileType::None;
    const std::string_view kind=dst.Kind();
    if(incomingSpecial!=existingSpecial)
-    Check((kind=="HFS+"||kind=="HFSX")&&!found.directory&&!plan.entry.directory&&
+    Check((kind=="HFS+"||kind=="HFSX"||kind=="APFS")&&!found.directory&&!plan.entry.directory&&
           !found.symbolicLink&&!plan.entry.symbolicLink&&!found.hardLink&&!plan.entry.hardLink,
           "The destination cannot replace these file types");
    if(incomingSpecial||existingSpecial)

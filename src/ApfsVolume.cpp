@@ -1512,11 +1512,12 @@ public:
                 const auto oid=At(existing.id).oid,sibling=At(existing.id).siblingId;
                 // An approved copy targets a name. In-place edits still use ReplaceFileData.
                 const bool replaceAlias=existing.hardLink&&!entry.expectedDestinationIdentity.empty();
-                if(special)
-                    Check(existing.posix&&existing.posix->IsSpecial()&&!sibling&&
-                          !existing.forks[0].size&&!existing.forks[1].size,
+                const bool existingSpecial=existing.posix&&existing.posix->IsSpecial();
+                if(special||existingSpecial)
+                    Check(!existing.symbolicLink&&!existing.hardLink&&!sibling&&
+                          (!existingSpecial||(!existing.forks[0].size&&!existing.forks[1].size)),
                           "The APFS special file destination changed after overwrite approval");
-                if(existing.symbolicLink||replaceAlias||special){
+                if(existing.symbolicLink||replaceAlias||special||existingSpecial){
                     Check(!replaceAlias||sibling,"The APFS hard-link destination has no sibling ID");
                     const auto& name=replaceAlias?existing.name:entry.name;
                     CommitMutation(parent,existing.id,job,[&](auto& job){
