@@ -1468,6 +1468,140 @@ void TestHfsToApfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+/HFSX regular files and hard-link groups replace only selected APFS names. Cancellation preserves the old group and both forks of surviving aliases stay intact after reopening.\n");
 }
 
+void TestHfsToApfsOverwriteTypes(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const std::u16string symlinks[]={u"Link over file",u"Link over alias",u"Link over link"};
+    const std::u16string names[]={u"Group first",u"Group second",u"Group third"};
+    constexpr auto ordinary=u"File over link";
+    constexpr auto referent=u"Untouched target";
+    constexpr auto survivor=u"Surviving destination alias";
+    constexpr uint64_t regularSize=5309,groupSize=7313;
+    const PosixMetadata linkMode{451,81,0711};
+    const std::string freshPath="/Untouched target",oldPath="Untouched target";
+    const HfsPlus::Bytes freshTarget(freshPath.c_str(),freshPath.c_str()+freshPath.size()+1);
+    const HfsPlus::Bytes oldTarget(oldPath.c_str(),oldPath.c_str()+oldPath.size()+1);
+    const auto makeSymlink=[&](Volume& volume,const std::u16string& name,bool incoming){
+        Entry link;
+        link.name=name;
+        link.symbolicLink=true;
+        if(incoming)link.posix=linkMode;
+        Storage::Job job;
+        volume.PutSymbolicLink(2,link,incoming?freshTarget:oldTarget,job);
+    };
+    const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const auto base=root+"\\apfs-overwrite-matrix-"+std::to_string(index++);
+        const auto sourcePath=Wide(base+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Overwrite sources",true,kind);
+        }
+        auto source=OpenBrowserImage(sourcePath);
+        Check(source&&VolumeSession::VolumeSessionPidForTest(source),"Could not mount HFS overwrite source");
+        for(const auto& name:symlinks)makeSymlink(*source,name,true);
+        const auto file=Put(*source,2,ordinary,regularSize,17);
+        const auto group=Put(*source,2,names[0],groupSize,22);
+        const auto firstAlias=source->MakeHardLink(group,2,names[1]);
+        source->MakeHardLink(firstAlias,2,names[2]);
+        const auto input=[&](const std::u16string& name){
+            Entry entry;
+            Check(source->FindChild(2,name,entry),"Missing HFS overwrite input");
+            return Native(source,entry.id);
+        };
+        std::vector<Location> inputs;
+        for(const auto& name:symlinks)inputs.push_back(input(name));
+        inputs.push_back(Native(source,file));
+        for(const auto& name:names)inputs.push_back(input(name));
+
+        for(const bool external:{false,true}){
+            if(external&&!fixture)continue;
+            const auto path=Wide(base+(external?"-macos.img":"-native.img"));
+            if(external){
+                Check(CopyFileW(fixture,path.c_str(),TRUE)!=FALSE,"Could not copy the macOS APFS fixture");
+            }else{
+                auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+                Storage::Job job;
+                Apfs::Format(*disk,u"Overwrite destination",false,job);
+            }
+            auto target=OpenBrowserImage(path);
+            Check(target&&target->Supports().create&&target->Writable()!=external,"Wrong APFS writer for overwrite test");
+            Put(*target,2,referent,3203,97);
+            Put(*target,2,symlinks[0],909,31);
+            const auto linked=Put(*target,2,symlinks[1],1109,77);
+            target->MakeHardLink(linked,2,survivor);
+            for(const auto name:{symlinks[2],std::u16string(ordinary),names[0],names[1]})
+                makeSymlink(*target,name,false);
+            Put(*target,2,names[2],1801,41);
+            const auto copy=[&](const std::vector<Location>& files,Storage::Job& job,Completion& completion){
+                return ExecuteInWorker(OrdinaryCopy{files,Native(target,2)},job,completion);
+            };
+            unsigned prompts=0;
+            bool startedResource=false;
+            Storage::Job cancelFile;
+            cancelFile.transport([&](const Storage::Progress& progress){
+                if(progress.fileBytes>regularSize){
+                    startedResource=true;
+                    cancelFile.cancel();
+                }
+            },[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+            Completion aborted;
+            const auto cancelled=copy({Native(source,file)},cancelFile,aborted);
+            Check(startedResource&&prompts==1&&cancelled.outcome==Storage::Outcome::Cancelled&&
+                  !cancelled.partial,"File over symlink did not cancel during its resource fork");
+            Storage::Job cancelLink;
+            cancelLink.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Cancel;});
+            Completion refused;
+            Check(copy({inputs[1]},cancelLink,refused).outcome==Storage::Outcome::Cancelled&&prompts==2,
+                  "Symlink over a hard-link name did not honor Cancel");
+            target.reset();
+            target=OpenBrowserImage(path);
+            Entry originalLink,originalAlias,oldPeer;
+            Check(target&&target->FindChild(2,ordinary,originalLink)&&
+                  target->SymbolicLinkTarget(originalLink.id)==oldTarget&&
+                  target->FindChild(2,symlinks[1],originalAlias)&&target->FindChild(2,survivor,oldPeer)&&
+                  originalAlias.hardLink&&originalAlias.linkCount==2&&originalAlias.resolvedId==oldPeer.resolvedId,
+                  "Cancellation changed an APFS symlink or hard-link group");
+            Verify(*target,originalAlias.id,1109,77);
+
+            prompts=0;
+            Storage::Job replace;
+            replace.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+            Completion done;
+            const auto result=copy(inputs,replace,done);
+            if(result.code)throw HfsPlus::Error(result.message);
+            Check(done.complete&&prompts==inputs.size(),"Incomplete APFS overwrite matrix");
+            target.reset();
+            target=OpenBrowserImage(path);
+            Check(target&&target->Supports().create&&target->Writable()!=external,
+                  "Overwrites changed APFS writer eligibility after reopening");
+            for(const auto& name:symlinks){
+                Entry link;
+                Check(target->FindChild(2,name,link)&&link.symbolicLink&&!link.hardLink&&link.posix==linkMode&&
+                      target->SymbolicLinkTarget(link.id)==freshTarget,"APFS overwrite changed the incoming symlink");
+            }
+            Entry ordinaryCopy,untouched,peer;
+            Check(target->FindChild(2,ordinary,ordinaryCopy)&&!ordinaryCopy.symbolicLink&&!ordinaryCopy.hardLink&&
+                  target->FindChild(2,referent,untouched)&&target->FindChild(2,survivor,peer)&&!peer.hardLink,
+                  "An APFS overwrite lost an ordinary file or an unrelated name");
+            Verify(*target,ordinaryCopy.id,regularSize,17);
+            Verify(*target,untouched.id,3203,97);
+            Verify(*target,peer.id,1109,77);
+            uint32_t inode=0;
+            for(const auto& name:names){
+                Entry alias;
+                Check(target->FindChild(2,name,alias)&&alias.hardLink&&!alias.symbolicLink&&
+                      alias.linkCount==3&&(!inode||alias.resolvedId==inode),
+                      "The APFS overwrite did not recreate one shared hard-link group");
+                inode=alias.resolvedId;
+                Verify(*target,alias.id,groupSize,22);
+            }
+        }
+    }
+    fprintf(report,"PASS: HFS+, case-sensitive HFSX and case-insensitive HFSX exercise regular-file, symlink and hard-link overwrites on both APFS writers when the shared macOS fixture is available. Cancellation and reopening preserve both forks, symlink targets and surviving aliases.\n");
+}
+
 void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2202,6 +2336,7 @@ int RunCopyProcessTest(const char *directory) {
         TestSymbolicLinkCopies(root,report);
         TestApfsRegularOverwritesHfsSymlink(root,report);
         TestHfsToApfsHardLinks(root,report);
+        TestHfsToApfsOverwriteTypes(root,report);
         TestApfsToHfsHardLinks(root,report);
         TestCrossFormatAttributes(root,report);
         TestApfsToHfsCompression(root,report);

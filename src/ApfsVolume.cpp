@@ -1242,8 +1242,7 @@ private:
             }
             CommitMutation(parent,destination.id,job,[&](auto& job){
                 return CreateCatalogHardLink(*source,WriteTarget(parent),folder,oid,name,job,replaced,
-                                             limitedEdits||(approvedDestination&&destination.hardLink),
-                                             copied&&copied->protectedFile);
+                                             limitedEdits||replace,copied&&copied->protectedFile);
             });
             if(sourceParent!=parent)ListDirectory(sourceParent);
             for(auto& [row,item]:entries){
@@ -1294,7 +1293,7 @@ public:
     }
     void ValidateName(const std::u16string& name)const override{EncodeCatalogName(name);}
     bool CanReplaceFileWithSymbolicLink(const Entry& entry)const override{
-        return writable&&limitedEdits&&!entry.directory&&!entry.symbolicLink&&
+        return writable&&!entry.directory&&!entry.symbolicLink&&
                !entry.protectedFile&&entry.readError.empty();
     }
     void ValidateSymbolicLink(const Entry& entry,const Bytes& target)const override{
@@ -1326,7 +1325,8 @@ public:
                     return ReplaceCatalogSymlink(*source,WriteTarget(parent),parentOid,At(child.id).oid,target,job,
                                                  CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,entry.posix);
                 return CreateCatalogSymlink(*source,WriteTarget(parent),parentOid,entry.name,target,job,
-                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,replacedEntry,entry.posix);
+                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,
+                                            limitedEdits||replacedEntry,replacedEntry,entry.posix);
             });
         },true);
     }
@@ -1414,7 +1414,7 @@ public:
             Entry existing;
             if(FindChild(parent,entry.name,existing)){
                 Check(replace&&!existing.directory&&!existing.protectedFile&&
-                      (existing.symbolicLink?limitedEdits.load():existing.readError.empty()),
+                      (existing.symbolicLink||existing.readError.empty()),
                       "The APFS destination already exists or cannot be replaced");
                 Check(entry.expectedDestinationIdentity.empty()||entry.expectedDestinationIdentity==existing.identity,
                       "The APFS destination changed after overwrite approval");
