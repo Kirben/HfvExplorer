@@ -410,6 +410,7 @@ OwnedRecord StreamAttribute(uint64_t inode,std::string_view name,uint64_t id,uin
 struct ResourceWrite {
     Source* input;
     uint64_t size,id;
+    uint64_t allocatedBytes=0;
 };
 std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attributes* attributes,
                                           const ResourceWrite* resource,const AttributeStreams& streams)
@@ -430,7 +431,11 @@ std::vector<OwnedRecord> EncodeAttributes(uint64_t inode,const HfsPlus::Attribut
         }
     }
     if(resource&&resource->size){
-        if(resource->id)records.push_back(StreamAttribute(inode,ResourceAttribute,resource->id,resource->size));
+        if(resource->id){
+            auto record=StreamAttribute(inode,ResourceAttribute,resource->id,resource->size);
+            Set(record.value,20,resource->allocatedBytes,8);
+            records.push_back(std::move(record));
+        }
         else{
             auto record=EmbeddedAttribute(inode,ResourceAttribute,size_t(resource->size));
             resource->input->Read(0,record.value.data()+4,size_t(resource->size));
@@ -2832,17 +2837,18 @@ CatalogWritePlan PrepareCatalogMutation(
     auto* input=replace?&replace->data:create?create->data:nullptr;
     const bool clone=create&&create->cloneSource;
     const auto dataSize=input?input->Size():clone?create->cloneSize:0;
-    uint64_t fileBlocks=0;
-    if(input&&dataSize){
-        auto& stream=plan.streams.emplace_back(DataStreamWrite{*input,dataSize});
-        for(const auto& range:input->KnownZeroRanges()){
-            Check(!(range.offset%Block)&&range.length&&Range(range.offset,range.length,dataSize)&&
-                  (!(range.length%Block)||range.offset+range.length==dataSize),
+    const auto addStream=[&](Source& source,uint64_t size,const std::vector<HfsPlus::SparseRange>& holes){
+        auto& stream=plan.streams.emplace_back(DataStreamWrite{source,size});
+        for(const auto& range:holes){
+            Check(!(range.offset%Block)&&range.length&&Range(range.offset,range.length,size)&&
+                  (!(range.length%Block)||range.offset+range.length==size),
                   "Invalid APFS sparse source range");
             stream.holes.push_back({range.offset/Block,DivideUp(range.length,Block)});
         }
-        fileBlocks=stream.AllocatedBlocks();
-    }
+        return stream.AllocatedBlocks();
+    };
+    const auto dataHoles=input?input->KnownZeroRanges():std::vector<HfsPlus::SparseRange>{};
+    const auto fileBlocks=input&&dataSize?addStream(*input,dataSize,dataHoles):0;
     const auto* resourceEdit=std::get_if<CatalogResourceFork>(&request);
     auto* resourceInput=resourceEdit?&resourceEdit->resource:replace?replace->resource:create?create->resource:nullptr;
     std::optional<ResourceWrite> resource;
@@ -2851,12 +2857,14 @@ CatalogWritePlan PrepareCatalogMutation(
     // fork, whether it holds compressed units or independent user data.
     const bool streamCompressedFileResource=(replace?replace->compression:create?create->compression:nullptr)&&
                                             resource&&resource->size;
-    const auto resourceBlocks=resource&&(resource->size>=EmbeddedAttributeLimit||streamCompressedFileResource)?
-                              DivideUp(resource->size,Block):0;
+    const auto resourceHoles=resourceInput?resourceInput->KnownZeroRanges():std::vector<HfsPlus::SparseRange>{};
+    const bool hasSparseInput=!dataHoles.empty()||!resourceHoles.empty();
+    const bool streamedResource=resource&&(resource->size>=EmbeddedAttributeLimit||streamCompressedFileResource||!resourceHoles.empty());
+    const auto resourceBlocks=streamedResource?addStream(*resourceInput,resource->size,resourceHoles):0;
+    if(streamedResource)resource->allocatedBytes=resourceBlocks*Block;
     Check(fileBlocks<=current.blockCount&&resourceBlocks<=current.blockCount-fileBlocks,
           "APFS forks exceed the container size");
     auto dataBlocks=fileBlocks+resourceBlocks;
-    if(resourceBlocks)plan.streams.push_back({*resourceInput,resource->size});
     auto [containerMap,volumeAddress,volume]=ReadCatalogVolume(source,current,selected);
     const auto oid=selected?selected:current.volumes.front();
     const auto flags=Le64(volume.data()+56);
@@ -2893,10 +2901,10 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool reconcileReferences=extentTree.verifiedPhysicalReferences;
     const auto nextId=Le64(volume.data()+176);
     Check(nextId>=16&&nextId<IdMask,"Invalid APFS next inode ID");
-    auto nextAvailable=nextId+bool(create)+bool(resourceBlocks)+(hardLink?2:0);
+    auto nextAvailable=nextId+bool(create)+streamedResource+(hardLink?2:0);
     const auto idLimit=InVolumeGroup(volume)&&Le16(volume.data()+VolumeRoleOffset)==DataVolumeRole?UnifiedInodeMark:IdMask;
     Check(nextAvailable<idLimit,"APFS file-system object IDs are exhausted");
-    if(resourceBlocks){
+    if(streamedResource){
         resource->id=nextId+bool(create);
         plan.streams.back().id=resource->id;
     }
@@ -3008,8 +3016,7 @@ CatalogWritePlan PrepareCatalogMutation(
                     if(create->replacedAlias||linked){if(kind!=CatalogKind::RegularFile)return false;}
                     else if(kind!=CatalogKind::RegularFile&&kind!=CatalogKind::SymbolicLink&&!IsSpecialKind(kind))return false;
                 }else if(kind!=victimKind&&(linked||create->replacedAlias||
-                         (!IsSpecialKind(kind)&&!(input&&!plan.streams.empty()&&!plan.streams.front().holes.empty()&&
-                                                   kind==CatalogKind::RegularFile))))return false;
+                         (!IsSpecialKind(kind)&&!(hasSparseInput&&kind==CatalogKind::RegularFile))))return false;
                 if(create->replacedAlias&&(!linked||Le64(record.value.data()+26)!=create->replacedAlias))
                     return false;
                 const std::string_view candidate(reinterpret_cast<const char*>(record.key.data()+12),record.key.size()-13);

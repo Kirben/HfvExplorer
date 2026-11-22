@@ -3443,7 +3443,7 @@ void TestCrossFormatTimestamps(const std::string& root,FILE* report)
 void TestSparseApfsCopy(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
-    constexpr uint64_t logical=8*1024*1024, resource=24*1024+7;
+    constexpr uint64_t logical=8*1024*1024, resourceStored=24*1024+7, resourceHole=28*1024, resource=32*1024+7;
     constexpr auto name=u"Sparse dual-fork file";
     const auto sourcePath=Wide(root+"\\sparse-apfs-source.img");
     {
@@ -3457,19 +3457,23 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         Entry entry;
         entry.name=name;
         entry.forks[0].size=4096;
-        entry.forks[1].size=resource;
+        entry.forks[1].size=resourceStored;
         mounted->Put(2,entry,[](unsigned fork,uint64_t at,void* out,size_t count){
             auto* bytes=static_cast<BYTE*>(out);
             for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+24);
         },false);
     }
-    // Add a large logical hole after the one allocated data extent. Leave
-    // the physical allocation and independent resource stream intact.
-    EditApfsFixtureLeaf(sourcePath,[logical](const auto& node,const auto* base,auto& leaf){
+    // Append holes to both streams without changing physical allocation.
+    EditApfsFixtureLeaf(sourcePath,[=](const auto& node,const auto* base,auto& leaf){
         unsigned modified=0;
-        uint64_t stream=0;
+        uint64_t stream=0,resourceStream=0;
         for(size_t i=0;i<node.Count();++i){
             const auto rec=node.At(i);
+            if(rec.key.size>10&&Apfs::Le64(rec.key.data)>>60==4&&rec.value.size==52&&
+               std::string_view(reinterpret_cast<const char*>(rec.key.data+10),rec.key.size-11)=="com.apple.ResourceFork"){
+                resourceStream=Apfs::Le64(rec.value.data+4);
+                Apfs::WriterDisk::Set(leaf,size_t(rec.value.data-base)+12,resource,8);
+            }
             if(rec.key.size!=8||Apfs::Le64(rec.key.data)>>60!=3||rec.value.size<96||
                (Apfs::Le16(rec.value.data+80)&0170000)!=0100000)continue;
             const auto fields=Apfs::Le16(rec.value.data+92);
@@ -3488,25 +3492,30 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
                 offset+=(size+7)&~size_t(7);
             }
         }
-        Check(modified==1&&stream,"Sparse APFS fixture must have exactly one changed stream");
+        Check(modified==1&&stream&&resourceStream,"Missing sparse fixture streams");
         namespace Disk=Apfs::WriterDisk;
         std::vector<Disk::Record> records;
-        bool addedHole=false;
+        unsigned addedHoles=0;
         for(size_t i=0;i<node.Count();++i){
             const auto rec=node.At(i);
             const auto key=leaf.data()+(rec.key.data-base);
             const auto value=leaf.data()+(rec.value.data-base);
             records.push_back({HfsPlus::Bytes(key,key+rec.key.size),HfsPlus::Bytes(value,value+rec.value.size)});
-            if(rec.key.size!=16||Apfs::Le64(key)!=((uint64_t(8)<<60)|stream))continue;
-            Check(!addedHole&&Apfs::Le64(key+8)==0&&rec.value.size==24&&
-                  Apfs::Le64(value)==4096,"Unexpected allocated extent in sparse fixture");
+            if(rec.key.size!=16)continue;
+            const auto extentKey=Apfs::Le64(key);
+            const bool resourceExtent=extentKey==((uint64_t(8)<<60)|resourceStream);
+            if(!resourceExtent&&extentKey!=((uint64_t(8)<<60)|stream))continue;
+            const auto allocated=resourceExtent?resourceHole:4096;
+            const auto end=resourceExtent?36*1024:logical;
+            Check(Apfs::Le64(key+8)==0&&rec.value.size==24&&Apfs::Le64(value)==allocated,
+                  "Unexpected allocated extent in sparse fixture");
             Disk::Record hole{records.back().key,HfsPlus::Bytes(24)};
-            Disk::Set(hole.key,8,4096,8);
-            Disk::Set(hole.value,0,logical-4096,8);
+            Disk::Set(hole.key,8,allocated,8);
+            Disk::Set(hole.value,0,end-allocated,8);
             records.push_back(std::move(hole));
-            addedHole=true;
+            ++addedHoles;
         }
-        Check(addedHole,"Missing sparse fixture data extent");
+        Check(addedHoles==2,"Missing sparse fixture extents");
         const auto rebuilt=Disk::EncodeLeaf(records,Apfs::Le32(leaf.data()+leaf.size()-40));
         std::copy(rebuilt.begin()+32,rebuilt.end(),leaf.begin()+32);
     });
@@ -3520,7 +3529,7 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
                 const size_t count=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));
                 volume.Read(entry.id,fork,at,bytes.data(),count);
                 for(size_t i=0;i<count;++i){
-                    const BYTE expected=(fork||at+i<4096)?BYTE((at+i)*7+fork*13+24):0;
+                    const BYTE expected=(at+i<(fork?resourceStored:4096))?BYTE((at+i)*7+fork*13+24):0;
                     Check(bytes[i]==expected,"Sparse copy changed payload, hole or resource bytes");
                 }
             }
@@ -3539,8 +3548,9 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         Check(target&&source&&source->Writable(),"Sparse fixture must be eligible for cut/paste");
         const auto sparse=verifySparse(*source);
         const auto holes=source->SparseRanges(sparse.id);
-        Check(holes[0]==std::vector<SparseRange>{{4096,logical-4096}}&&holes[1].empty(),
-              "APFS sparse ranges lost the hole or included the genuine resource fork");
+        Check(holes[0]==std::vector<SparseRange>{{4096,logical-4096}}&&
+              holes[1]==std::vector<SparseRange>{{resourceHole,resource-resourceHole}},
+              "APFS sparse ranges did not describe both forks");
         Put(*target,2,name,131072,91);
         const auto filler=Put(*target,2,u"Space filler",target->FreeBytes()-logical-8192);
         const auto free=target->FreeBytes();
@@ -3590,7 +3600,8 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
             'H','F','V','S',1,0,0,0,
             0,0,128,0,0,0,0,0, 1,0,0,0,0,0,0,0,
             0,16,0,0,0,0,0,0, 0,240,127,0,0,0,0,0,
-            7,96,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+            7,128,0,0,0,0,0,0, 1,0,0,0,0,0,0,0,
+            0,112,0,0,0,0,0,0, 7,16,0,0,0,0,0,0
         };
         Check(layout!=attributes.end()&&HfsPlus::Bytes(layout->second)==expected,
               "HFS+ copy did not retain the exact sparse fork layout after reopening");
@@ -3640,7 +3651,7 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
             Check(returned&&returned->Supports().create,"Sparse restoration made APFS unwritable after reopening");
             const auto restoredEntry=verifySparse(*returned);
             Check(returned->SparseRanges(restoredEntry.id)==holes,
-                  "Reopened APFS copy did not restore the exact data-fork hole");
+                  "Reopened APFS copy did not restore the exact holes in both forks");
         }
     }
     fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen with a dense allocation notice; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");

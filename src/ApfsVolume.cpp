@@ -1533,13 +1533,16 @@ public:
         auto sparse=MacBrowser::SparseForks{};
         if(allowPrompt&&!compression&&!special)
             sparse=MacBrowser::ValidateApfsSparseLayout(entry,reader,job);
-        const bool restoreSparse=!sparse[0].empty()&&std::all_of(sparse[0].begin(),sparse[0].end(),[&](const auto& hole){
-            constexpr auto block=WriterDisk::Block;
-            return !(hole.offset%block)&&(!(hole.length%block)||hole.offset+hole.length==entry.forks[0].size);
-        });
-        ForkInput data(compression?0:entry.forks[0].size,0,payload,
-                       restoreSparse?std::move(sparse[0]):std::vector<SparseRange>{});
-        ForkInput resource(compressionResource?encoded->ResourceSize():entry.forks[1].size,1,payload);
+        for(unsigned fork=0;fork<sparse.size();++fork){
+            const auto fits=[&](const auto& hole){
+                constexpr auto block=WriterDisk::Block;
+                return !(hole.offset%block)&&(!(hole.length%block)||hole.offset+hole.length==entry.forks[fork].size);
+            };
+            if(!std::all_of(sparse[fork].begin(),sparse[fork].end(),fits))sparse[fork].clear();
+        }
+        const bool restoreSparse=!sparse[0].empty()||!sparse[1].empty();
+        ForkInput data(compression?0:entry.forks[0].size,0,payload,std::move(sparse[0]));
+        ForkInput resource(compressionResource?encoded->ResourceSize():entry.forks[1].size,1,payload,std::move(sparse[1]));
         return WriteMount([&]{
             const auto parentOid=At(parent).oid;
             Entry existing;
