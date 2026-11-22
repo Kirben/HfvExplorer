@@ -164,9 +164,15 @@ public:
     uint32_t MakeDirectory(uint32_t p, const std::u16string &s) override {
         return Mutate([&] { return volume_->MakeDirectory(p, s); });
     }
-    uint32_t Put(uint32_t p, const Entry &e, Reader read, bool replace) override {
-        std::array<uint64_t,2> dates{e.created,e.modified};
-        return Mutate([&] { return volume_->Put(p, e.name, e.forks[0].size, e.forks[1].size, read, &e.finder, replace,nullptr,e.attributesKnown?&e.attributes:nullptr,HfsPlus::Volume::CompressionMode::Preserve,e.datesValid?&dates:nullptr,e.posix); });
+    uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace) override {
+        using Scope=HfsPlus::Volume::OverwriteScope;
+        const auto scope=e.replaceHardLinkName?Scope::SelectedName:Scope::SharedInode;
+        const std::array<uint64_t,2> dates{e.created,e.modified};
+        return Mutate([&]{
+            return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
+                                e.attributesKnown?&e.attributes:nullptr,HfsPlus::Volume::CompressionMode::Preserve,
+                                e.datesValid?&dates:nullptr,e.posix,scope);
+        });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
         Mutate([&] { volume_->Rename(id, p, s); });
@@ -329,6 +335,9 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     uint64_t readThrough[2]={};
     auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
+    // APFS copies reconstruct each selected group independently. Its first
+    // name must not claim an HFS inode still used by other destination names.
+    outgoing.replaceHardLinkName=found&&existing.hardLink&&track&&std::string_view(src.Kind())=="APFS";
     if(plan.linkTarget){
         dst.PutSymbolicLink(parent,outgoing,*plan.linkTarget,job);
         ++progress.files;
@@ -739,6 +748,11 @@ uint32_t Volume::MakeCopiedHardLinkForTransfer(const Entry& copied,uint32_t pare
     Check(FindChild(copied.parent,copied.name,original)&&original.resolvedId==copied.resolvedId&&
           (!copied.protectedFile||(original.protectedFile&&original.identity==copied.identity)),
           "Copied hard-link source disappeared or changed");
+    if(approvedDestination){
+        Entry current;
+        Check(FindChild(parent,name,current)&&current.identity==approvedDestination->identity,
+              "The hard-link destination changed after overwrite approval");
+    }
     return MakeHardLinkForTransfer(original.id,parent,name,approvedDestination!=nullptr,job);
 }
 

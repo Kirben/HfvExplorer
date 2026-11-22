@@ -102,12 +102,15 @@ class Volume {
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline };
     void SetCompression(uint32_t id,CompressionMode,std::function<void(uint64_t,uint64_t)> progress = {});
     void SetCompression(uint32_t id,bool compressed,std::function<void(uint64_t,uint64_t)> progress = {});
+    // A file edit follows its shared inode. Copying a new link group may instead
+    // replace just the selected directory entry.
+    enum class OverwriteScope { SharedInode, SelectedName };
     // Streaming, copy-on-write replacement. Source callback must return exact bytes.
     uint32_t Put(uint32_t parent, const std::u16string &name, uint64_t dataSize, uint64_t resourceSize,
                  std::function<void(unsigned, uint64_t, void *, size_t)> read,
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
                  const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr,
-                 std::optional<PosixMetadata> posix = {});
+                 std::optional<PosixMetadata> posix = {},OverwriteScope scope=OverwriteScope::SharedInode);
     void SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,
                               const std::array<uint64_t,2>* dates,const Attributes* attributes,
                               std::optional<PosixMetadata> posix = {});
@@ -135,7 +138,8 @@ class Volume {
                      const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
                      const std::array<uint8_t,32>* finder,bool overwrite,
                      const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
-                     const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink);
+                     const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
+                     OverwriteScope scope);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

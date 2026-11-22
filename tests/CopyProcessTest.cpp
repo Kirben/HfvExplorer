@@ -228,6 +228,14 @@ void TestVolumeSessionProtocol()
     entry.name=u"Both forks \u03a9";
     entry.forks[0].size=300000;
     entry.forks[1].size=71;
+    auto linked=entry;
+    linked.hardLink=true;
+    linked.linkCount=2;
+    auto transfer=Protocol::EncodePut({2,true,true,0,0,true},linked);
+    const auto decodedTransfer=Protocol::DecodePut(transfer);
+    Check(decodedTransfer.entry.replaceHardLinkName,"Hard-link name replacement intent did not survive the wire");
+    reject([&]{auto data=Protocol::EncodePut({2,true,true,42,0,true},linked);Protocol::DecodePut(data);},
+           "accepted an alias replacement during a resource fork edit");
     auto put=Protocol::EncodePut({2,true,true,42,0},entry);
     const auto decodedPut=Protocol::DecodePut(put);
     Check(decodedPut.header.original==42&&decodedPut.header.replace&&decodedPut.entry.attributesKnown&&
@@ -1160,6 +1168,105 @@ void TestHfsToApfsHardLinks(const std::string& root,FILE* report)
     fprintf(report,"PASS: HFS+ and both HFSX variants copy separate hard-link groups to APFS, sharing one inode per group and preserving both forks across folders and reopen.\n");
 }
 
+void TestApfsToHfsHardLinks(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto sourcePath=Wide(root+"\\apfs-hard-link-source.img");
+    const auto fixture=_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE");
+    if(fixture){
+        Check(CopyFileW(fixture,sourcePath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+    }else{
+        auto disk=HfsPlus::CreateImage(sourcePath.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Hard-link source",true,job);
+    }
+    const size_t sizes[]={5003,7321};
+    const std::u16string names[][3]={{u"Alpha",u"Beta",u"Gamma"},{u"Delta",u"Epsilon",u"Zeta"}};
+    const auto pattern=[](unsigned group,unsigned fork,uint64_t at){
+        return uint8_t(group*53+fork*71+at*17+(at>>8));
+    };
+    {
+        auto volume=OpenBrowserImage(sourcePath);
+        Check(volume&&volume->Supports().CanCreateHardLinks(),"Could not seed the APFS link fixture");
+        const auto a=volume->MakeDirectory(2,u"APFS Originals");
+        const auto b=volume->MakeDirectory(2,u"APFS Aliases");
+        for(unsigned group=0;group<2;++group){
+            Entry file;file.name=names[group][0];file.forks[0].size=sizes[0];file.forks[1].size=sizes[1];
+            const auto id=volume->Put(a,file,[&](unsigned fork,uint64_t at,void* out,size_t size){
+                auto bytes=static_cast<uint8_t*>(out);
+                for(size_t i=0;i<size;++i)bytes[i]=pattern(group,fork,at+i);
+            },false);
+            volume->MakeHardLink(id,b,names[group][1]);
+            volume->MakeHardLink(id,b,names[group][2]);
+        }
+    }
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const char* format=kind==Kind::HfsPlus?"plus":kind==Kind::HfsXCaseSensitive?"x":"folded-x";
+        const auto targetPath=Wide(root+"\\apfs-hard-links-to-"+format+".dsk");
+        {
+            auto disk=HfsPlus::CreateImage(targetPath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Hard-link destination",true,kind);
+        }
+        {
+            auto source=OpenBrowserImage(sourcePath);
+            auto target=OpenBrowserImage(targetPath);
+            Entry a,b;
+            Check(source&&target&&VolumeSession::VolumeSessionPidForTest(target)&&
+                  source->FindChild(2,u"APFS Originals",a)&&source->FindChild(2,u"APFS Aliases",b),
+                  "Missing mounted hard-link copy fixtures");
+            const auto folder=target->MakeDirectory(2,u"Copied groups");
+            const auto victim=Put(*target,folder,names[0][0],513,145);
+            target->MakeHardLink(victim,2,u"Unrelated alias");
+            std::vector<Location> selected;
+            for(unsigned group=0;group<2;++group){
+                uint32_t inode=0;
+                for(unsigned alias=0;alias<3;++alias){
+                    Entry entry;
+                    Check(source->FindChild(alias?b.id:a.id,names[group][alias],entry)&&entry.hardLink&&entry.linkCount==3,
+                          "Missing APFS hard-link group member");
+                    if(!alias)inode=entry.resolvedId;
+                    Check(inode&&entry.resolvedId==inode,"The APFS source names do not share an inode");
+                    selected.push_back(Native(source,entry.id));
+                }
+            }
+            unsigned prompts=0;
+            Storage::Job job;
+            job.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+            Completion completion;
+            const auto result=ExecuteInWorker(OrdinaryCopy{std::move(selected),Native(target,folder)},job,completion);
+            if(result.code)throw HfsPlus::Error(result.message);
+            Check(completion.complete&&prompts==1,"Incomplete APFS hard-link copy or missing approval");
+        }
+        auto target=OpenBrowserImage(targetPath);
+        Entry folder,unrelated;
+        Check(target&&target->FindChild(2,u"Copied groups",folder)&&target->FindChild(2,u"Unrelated alias",unrelated),
+              "Missing reopened HFS link fixtures");
+        Verify(*target,unrelated.id,513,145);
+        std::array<uint32_t,2> inodes{};
+        for(unsigned group=0;group<2;++group){
+            std::set<uint32_t> namesSeen;
+            for(const auto& name:names[group]){
+                Entry entry;
+                Check(target->FindChild(folder.id,name,entry)&&entry.hardLink&&entry.linkCount==3&&
+                      namesSeen.insert(entry.id).second,"HFS did not reopen all three hard-link names");
+                if(!inodes[group])inodes[group]=entry.resolvedId;
+                Check(inodes[group]&&entry.resolvedId==inodes[group]&&entry.resolvedId!=unrelated.resolvedId,
+                      "Copied HFS aliases did not share a new inode");
+                for(unsigned fork=0;fork<2;++fork){
+                    Check(entry.forks[fork].size==sizes[fork],"Copied HFS hard link lost a fork");
+                    HfsPlus::Bytes actual(sizes[fork]),expected(sizes[fork]);
+                    target->Read(entry.id,fork,0,actual.data(),actual.size());
+                    for(size_t i=0;i<expected.size();++i)expected[i]=pattern(group,fork,i);
+                    Check(actual==expected,"Copied HFS hard-link fork bytes differ");
+                }
+            }
+        }
+        Check(inodes[0]!=inodes[1],"Independent APFS hard-link groups merged on HFS");
+    }
+    if(fixture)fprintf(report,"PASS: hard-link copies from a disposable macOS-created APFS image.\n");
+    fprintf(report,"PASS: APFS copies into HFS+ and both HFSX variants share one inode per link group and preserve both forks after reopening. An overwritten name is detached from unrelated aliases.\n");
+}
+
 void TestHfsToApfsAttributes(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -1287,6 +1394,7 @@ int RunCopyProcessTest(const char *directory) {
         TestCopyPosixIntoHfs(root,report);
         TestSymbolicLinkCopies(root,report);
         TestHfsToApfsHardLinks(root,report);
+        TestApfsToHfsHardLinks(root,report);
         TestHfsToApfsAttributes(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");

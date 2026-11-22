@@ -1591,8 +1591,8 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
                      const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates,
                      const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates,
-                     std::optional<PosixMetadata> posix) {
-    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false);
+                     std::optional<PosixMetadata> posix,OverwriteScope scope) {
+    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope);
 }
 void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                              const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
@@ -1602,13 +1602,14 @@ void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const By
     // the target bytes in its data fork.
     PutFile(parent,name,target.size()-1,0,[&](unsigned,uint64_t at,void* out,size_t size){
         memcpy(out,target.data()+at,size);
-    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,{},true);
+    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,{},true,OverwriteScope::SharedInode);
 }
 uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
                          const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
                          const std::array<uint8_t,32>* finder,bool overwrite,
                          const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
-                         const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink) {
+                         const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
+                         OverwriteScope scope) {
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
@@ -1619,7 +1620,8 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     e.name = Normalize(name, p.caseSensitive);
     e.symbolicLink=symbolicLink;
     uint32_t existing = p.Existing(parent, e.name);
-    Fork old[2];uint32_t visible=existing;
+    Fork old[2];
+    uint32_t visible=existing,detached=0;
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
         if(symbolicLink){
@@ -1630,11 +1632,20 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         }else{
             existing=p.Content(existing);
         }
-        e = p.Get(existing);
-        Check(!e.directory, "Cannot overwrite an HFS+ directory");
+        const auto& current=p.Get(existing);
+        Check(!current.directory, "Cannot overwrite an HFS+ directory");
         p.RemovalParent(parent);
-        old[0] = e.forks[0];
-        old[1] = e.forks[1];
+        if(scope==OverwriteScope::SelectedName&&visible!=existing){
+            // The incoming group needs its own inode. Siblings of this
+            // destination name must keep their original inode and forks.
+            e.name=p.Get(visible).name;
+            detached=visible;
+            existing=visible=0;
+        }else{
+            e=current;
+            old[0]=e.forks[0];
+            old[1]=e.forks[1];
+        }
     }
     std::array<uint64_t,2> desiredDates{existing?e.created:Now(),Now()};
     if(dates)desiredDates={(*dates)[0],(*dates)[1]};if(wideDates)desiredDates=*wideDates;
@@ -1691,8 +1702,10 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
                 p.Free(f);
             p.entries[e.id] = e;
             p.UpdateEntry(e);
-        } else
+        } else {
+            if(detached)p.Unlink(detached);
             p.New(e);
+        }
         auto timeRecord=p.CatalogRecord(e.id);
         if(posix){
             SetPosixMetadata(timeRecord->value,*posix);

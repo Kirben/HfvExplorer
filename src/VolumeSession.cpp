@@ -444,24 +444,25 @@ public:
         return id;
     }
     uint32_t Put(uint32_t parent, const Entry& entry, Reader reader, bool replace) override {
-        return StreamPut(parent, entry, std::move(reader), replace, 0, 0, {});
+        return StreamPut(entry,std::move(reader),{parent,replace,entry.attributesKnown,0,0,entry.replaceHardLinkName},{});
     }
     uint32_t PutResourceReplacement(uint32_t id, const Entry& entry, Reader reader,
                                      std::function<void(uint64_t,size_t)> localProgress) override {
-        return StreamPut(entry.parent, entry, std::move(reader), true, id, 0,
+        return StreamPut(entry,std::move(reader),{entry.parent,true,entry.attributesKnown,id,0},
             [progress=std::move(localProgress)](unsigned,uint64_t offset,size_t size){
                 if(progress)progress(offset,size);
             });
     }
     uint32_t PutFromSource(uint32_t parent,const Entry& entry,bool replace,
                        std::function<void(unsigned,uint64_t,size_t)> progress) {
-        return StreamPut(parent,entry,{},replace,0,entry.id,std::move(progress));
+        return StreamPut(entry,{},{parent,replace,entry.attributesKnown,0,entry.id,entry.replaceHardLinkName},
+                         std::move(progress));
     }
 private:
-    uint32_t StreamPut(uint32_t parent, const Entry& entry, Reader reader, bool replace, uint32_t original,
-                       uint32_t source,std::function<void(unsigned,uint64_t,size_t)> localProgress) {
+    uint32_t StreamPut(const Entry& entry,Reader reader,const Protocol::PutHeader& header,
+                       std::function<void(unsigned,uint64_t,size_t)> localProgress) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        auto args=Protocol::EncodePut({parent,replace,entry.attributesKnown,original,source},entry);
+        auto args=Protocol::EncodePut(header,entry);
         uint32_t id = 0;
         std::exception_ptr sourceFailure;
         try {
@@ -482,7 +483,7 @@ private:
                     }
                     Check(message == SessionReadRequest && !sourceFailure, "Unexpected fork transfer response");
                     const auto [fork,offset,size]=Protocol::DecodeForkRange(packet,entry);
-                    const bool localRead = source || (original && !fork);
+                    const bool localRead = header.source || (header.original && !fork);
                     Data bytes;
                     try {
 #ifdef HFV_TESTING
@@ -672,8 +673,8 @@ uint32_t WriteStream(HANDLE input,HANDLE output,Volume& volume,Protocol::PutRequ
             offset += count; buffer += count; size -= count;
         }
     };
-    return original ? volume.PutResourceReplacement(original, entry, std::move(read), {})
-                             : volume.Put(parent, entry, std::move(read), header.replace);
+    return original ? volume.PutResourceReplacement(original,entry,std::move(read),{})
+                    : volume.Put(parent,entry,std::move(read),header.replace);
 }
 
 void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {

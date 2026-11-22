@@ -37,6 +37,7 @@ struct Entry {
     EntryIdentity identity;
     bool symbolicLink = false;
     std::optional<PosixMetadata> posix;
+    bool replaceHardLinkName = false; // transient copy intent to leave other destination aliases intact
 };
 struct Capabilities {
     bool read = true, create = false, rename = false, remove = false;
