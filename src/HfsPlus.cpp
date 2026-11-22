@@ -1704,7 +1704,19 @@ void ValidateAttributes(const Attributes& attributes) {
         Check(name!=u"com.apple.FinderInfo"&&name!=u"com.apple.ResourceFork","Finder information and resource forks use their dedicated fields");
         Check(name!=u"com.apple.decmpfs"&&name!=u"com.apple.cprotect"&&name!=u"com.apple.system.cprotect"&&name!=u"com.apple.system.hfs.firstlink"&&name!=u"system.xattrextents","Compression/encryption/link attributes cannot be written by the ordinary attribute editor");
 
-        if(name==u"com.apple.system.Security"){const auto& b=item.second;Check(b.size()>=44&&b.size()<=44+24*128&&U32(b.data())==0x012cc16d,"Invalid Mac ACL header (expected disk byte order)");auto count=U32(b.data()+36);Check(count==0xffffffff||count<=128,"Mac ACL has too many entries");Check(b.size()==44ULL+(count==0xffffffff?0:24ULL*count),"Mac ACL entry count/length mismatch");}
+        if(name==u"com.apple.system.Security"){
+            constexpr unsigned maxEntries=128,entrySize=24;
+            const auto& acl=item.second;
+            std::array<uint8_t,44> header{};
+            Check(acl.size()>=header.size()&&acl.size()<=header.size()+entrySize*maxEntries,
+                  "Invalid Mac ACL length");
+            acl.Read(0,header.data(),header.size());
+            Check(U32(header.data())==0x012cc16d,"Invalid Mac ACL header (expected disk byte order)");
+            const auto count=U32(header.data()+36);
+            Check(count==UINT32_MAX||count<=maxEntries,"Mac ACL has too many entries");
+            Check(acl.size()==header.size()+(count==UINT32_MAX?0:entrySize*count),
+                  "Mac ACL entry count/length mismatch");
+        }
     }
 }
 void Volume::Rename(uint32_t id, uint32_t parent, const std::u16string &name) {

@@ -945,6 +945,116 @@ void TestHfsToApfsHardLinks(const std::string& root,FILE* report)
     }
     fprintf(report,"PASS: HFS+ and both HFSX variants copy separate hard-link groups to APFS, sharing one inode per group and preserving both forks across folders and reopen.\n");
 }
+
+void TestHfsToApfsAttributes(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto acl=[](unsigned count){
+        HfsPlus::Bytes bytes(44+24*count);
+        HfsPlus::Disk::P32(bytes.data(),0x012cc16d);
+        for(unsigned i=0;i<32;++i)bytes[4+i]=uint8_t(i+1);
+        HfsPlus::Disk::P32(bytes.data()+36,count);
+        for(unsigned i=0;i<count;++i){
+            auto* ace=bytes.data()+44+24*i;
+            ace[0]=uint8_t(i+1);
+            HfsPlus::Disk::P32(ace+16,i%2?2:1);
+            HfsPlus::Disk::P32(ace+20,2);
+        }
+        // Use the same file-backed interface as a staged attribute edit.
+        return HfsPlus::AttributeData::Snapshot(bytes.size(),[&](uint64_t at,void* data,size_t size){
+            memcpy(data,bytes.data()+at,size);
+        },true);
+    };
+    const auto streamed=[](uint64_t length,unsigned seed){
+        return HfsPlus::AttributeData::Snapshot(length,[seed](uint64_t at,void* data,size_t count){
+            auto bytes=static_cast<uint8_t*>(data);
+            for(size_t i=0;i<count;++i)bytes[i]=uint8_t((at+i)*17+((at+i)>>8)+seed);
+        },true);
+    };
+    const HfsPlus::Attributes folderAttrs{
+        {u"com.apple.system.Security",acl(128)},
+        {u"user.folder.inline",{5,3,0,1}},
+        {u"user.folder.large",streamed(137023,29)}
+    };
+    const HfsPlus::Attributes fileAttrs{
+        {u"com.apple.system.Security",acl(2)},
+        {u"user.inline",{0x80,0,0x7f}},
+        {u"user.empty",HfsPlus::Bytes{}},
+        {u"user.accent.\u00e9",{3,2,1}},
+        {u"user."+std::u16string(61,u'\u00e9'),{4,5,6}},
+        {u"user.large",streamed(2*1024*1024+17,73)}
+    };
+    const HfsPlus::Attributes staleAttrs{
+        {u"com.apple.system.Security",acl(1)},
+        {u"user.old",streamed(8193,5)}
+    };
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        const char* format=kind==Kind::HfsPlus?"hfsplus":kind==Kind::HfsXCaseSensitive?"hfsx":"hfsx-folded";
+        const auto sourcePath=Wide(root+"\\"+format+"-xattrs.dsk");
+        const auto targetPath=Wide(root+"\\"+format+"-xattrs-apfs.img");
+        {
+            auto disk=HfsPlus::CreateImage(sourcePath.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Attribute source",true,kind);
+            HfsPlus::Volume hfs(*disk,true);
+            const auto folder=hfs.MakeDirectory(2,u"Attribute transfer",&folderAttrs);
+            hfs.Put(folder,u"Document",4097,711,[](unsigned fork,uint64_t,void* data,size_t count){
+                memset(data,fork?0x79:0x34,count);
+            },nullptr,false,nullptr,&fileAttrs);
+        }
+        const auto external=kind==Kind::HfsXCaseSensitive?_wgetenv(L"HFV_APFS_CASE_SENSITIVE_FIXTURE"):nullptr;
+        if(external){
+            Check(CopyFileW(external,targetPath.c_str(),TRUE)!=FALSE,"Could not copy macOS APFS fixture");
+        }else{
+            auto disk=HfsPlus::CreateImage(targetPath.c_str(),32*1024*1024);
+            Storage::Job job;
+            Apfs::Format(*disk,u"Attribute destination",true,job);
+        }
+        {
+            auto source=OpenBrowserImage(sourcePath);
+            auto target=OpenBrowserImage(targetPath);
+            Entry folder,file;
+            Check(source&&VolumeSession::VolumeSessionPidForTest(source)&&target&&
+                  source->FindChild(2,u"Attribute transfer",folder)&&source->FindChild(folder.id,u"Document",file)&&
+                  source->GetAttributes(folder.id)==folderAttrs&&source->GetAttributes(file.id)==fileAttrs,
+                  "HFS+ worker did not return the source attributes and ACLs");
+            const auto copy=[&](bool replace){
+                bool prompted=false;
+                Storage::Job job;
+                job.transport({},[&](const auto&){
+                    prompted=true;
+                    return replace?Storage::ConflictChoice::Replace:Storage::ConflictChoice::Cancel;
+                });
+                Completion completion;
+                const auto result=ExecuteInWorker(OrdinaryCopy{{Native(source,folder.id)},Native(target,2)},job,completion);
+                if(result.code)throw HfsPlus::Error(result.message);
+                Check(completion.complete&&prompted==replace,"Unexpected attribute copy completion or overwrite prompt");
+            };
+            copy(false);
+            Entry copiedFolder,copiedFile;
+            Check(target->FindChild(2,u"Attribute transfer",copiedFolder)&&
+                  target->FindChild(copiedFolder.id,u"Document",copiedFile)&&
+                  target->GetAttributes(copiedFolder.id)==folderAttrs&&target->GetAttributes(copiedFile.id)==fileAttrs,
+                  "APFS copy lost source folder or file attributes");
+            target->SetAttributes(copiedFile.id,staleAttrs);
+            copy(true);
+        }
+        auto target=OpenBrowserImage(targetPath);
+        Entry folder,file;
+        Check(target&&target->FindChild(2,u"Attribute transfer",folder)&&target->FindChild(folder.id,u"Document",file)&&
+              target->GetAttributes(folder.id)==folderAttrs&&target->GetAttributes(file.id)==fileAttrs,
+              "Reopened APFS copy lost attributes or retained stale overwrite metadata");
+        const size_t sizes[]={4097,711};
+        for(unsigned fork=0;fork<2;++fork){
+            Check(file.forks[fork].size==sizes[fork],"Attribute copy lost a file fork");
+            HfsPlus::Bytes contents(sizes[fork]);
+            target->Read(file.id,fork,0,contents.data(),contents.size());
+            Check(std::all_of(contents.begin(),contents.end(),[&](uint8_t b){return b==(fork?0x79:0x34);}),
+                  "Attribute copy changed file fork data");
+        }
+        if(external)fprintf(report,"PASS: HFSX extended attributes and ACLs reopen on the shared macOS APFS fixture.\n");
+    }
+    fprintf(report,"PASS: HFS+ and both HFSX variants preserve file and folder ACLs and inline, empty, Unicode-named, and streamed extended attributes on APFS, including overwrite and reopen.\n");
+}
 } // namespace
 
 int RunCopyProcessTest(const char *directory) {
@@ -962,6 +1072,7 @@ int RunCopyProcessTest(const char *directory) {
         TestHfsToApfsPosix(root,report);
         TestHfsToApfsSymlinks(root,report);
         TestHfsToApfsHardLinks(root,report);
+        TestHfsToApfsAttributes(root,report);
         fprintf(report,"PASS: typed persistent volume command round trips and rejected malformed packets\n");
         fprintf(report,"PASS: shared pipe framing, inherited image codec, streamed attributes and oversized-frame rejection\n");
         for (bool create : {false, true}) {
