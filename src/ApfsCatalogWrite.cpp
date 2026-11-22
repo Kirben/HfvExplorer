@@ -207,7 +207,7 @@ struct CatalogRecords {
     std::vector<OwnedRecord> records;
     std::vector<uint64_t> blocks;
     bool verifiedPhysicalReferences=false;
-    bool encrypted=false;
+    std::shared_ptr<const VolumeCipher> cipher;
 };
 CatalogRecords ReadWritableCatalog(Source& source,const Container& container,const WritableMap& map,uint64_t oid,bool historical=false)
 {
@@ -411,9 +411,9 @@ void SortAttributes(std::vector<OwnedRecord>& records)
 }
 using AttributeStreams=std::map<std::u16string,uint64_t>;
 class AttributeInput final:public Source {
-    const HfsPlus::AttributeData& value;
+    const HfsPlus::AttributeData value;
 public:
-    explicit AttributeInput(const HfsPlus::AttributeData& data):value(data){}
+    explicit AttributeInput(HfsPlus::AttributeData data):value(std::move(data)){}
     uint64_t Size()const override{return value.size();}
     bool Writable()const override{return false;}
     void Read(uint64_t offset,void* data,size_t size)override{value.Read(offset,data,size);}
@@ -478,15 +478,22 @@ OwnedRecord LinkTargetRecord(uint64_t inode,const Bytes& path)
 }
 
 void WriteCompressionAttribute(std::vector<OwnedRecord>& attributes,Bytes& inode,
-                               uint64_t id,uint64_t dataSize,const Bytes* compression)
+                               uint64_t id,uint64_t dataSize,const Bytes* compression,const AttributeStreams& streams)
 {
     uint64_t logicalSize=0;
     if(compression){
         Check(compression->size()>=16&&compression->size()<EmbeddedAttributeLimit&&
               Le32(compression->data())==0x636d7066&&!dataSize,"Invalid APFS compressed file output");
-        auto record=EmbeddedAttribute(id,CompressionAttribute,compression->size());
-        std::copy(compression->begin(),compression->end(),record.value.begin()+4);
-        attributes.push_back(std::move(record));
+        const auto stream=streams.find(u"com.apple.decmpfs");
+        if(stream!=streams.end())
+            attributes.push_back(StreamAttribute(id,CompressionAttribute,stream->second,compression->size()));
+        else{
+            Check(compression->size()<=WriterDisk::InlineCompressionCapacity(),
+                  "Missing APFS compression attribute stream");
+            auto record=EmbeddedAttribute(id,CompressionAttribute,compression->size());
+            std::copy(compression->begin(),compression->end(),record.value.begin()+4);
+            attributes.push_back(std::move(record));
+        }
         logicalSize=Le64(compression->data()+8);
     }
     SetCompressionFlags(inode,logicalSize,compression!=nullptr);
@@ -954,7 +961,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite,streams);
         if(resourceWrite)SetResourceFlag(records.back().value,resourceWrite->size!=0);
-        if(create->compression)WriteCompressionAttribute(attributes,records.back().value,entryId,dataSize,create->compression);
+        if(create->compression)WriteCompressionAttribute(attributes,records.back().value,entryId,dataSize,create->compression,streams);
         if(symlink){
             Check(create->linkTarget!=nullptr,"Missing APFS symbolic link target");
             attributes.push_back(LinkTargetRecord(entryId,*create->linkTarget));
@@ -1049,7 +1056,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             if(linkEdit)attributes.push_back(LinkTargetRecord(entryId,linkEdit->target));
             if(ordinary)SetSecurityFlag(inode,*ordinary);
             if(resource)SetResourceFlag(inode,resource->size!=0);
-            if(replace)WriteCompressionAttribute(attributes,inode,entryId,dataSize,replace->compression);
+            if(replace)WriteCompressionAttribute(attributes,inode,entryId,dataSize,replace->compression,streams);
             SortAttributes(attributes);
             // Replacing the data stream also removes the records following the
             // attributes. Keep sibling links ahead of the new stream records.
@@ -1474,7 +1481,13 @@ uint32_t ReadExternalCompressionMode(Source& source,const std::vector<OwnedRecor
         });
         Check(block&&block<source.Size()/Block&&owned!=extentTree.records.end(),
               "APFS compression header has no exclusive extent");
-        streamedHeader=HfsPlus::Disk::Read(source,block*Block,16);
+        if(extentTree.cipher){
+            const auto crypto=Le64(first->value.data()+16);
+            Check((Le64(first->value.data())>>56)==1&&crypto&&crypto<=UINT64_MAX/(Block/512),
+                  "Invalid encrypted APFS compression stream extent");
+            streamedHeader=HfsPlus::Disk::Read(source,block*Block,512);
+            extentTree.cipher->Decrypt(crypto*(Block/512),streamedHeader.data(),streamedHeader.size());
+        }else streamedHeader=HfsPlus::Disk::Read(source,block*Block,16);
         header=streamedHeader.data();
     }else Check(storage==2&&attribute.size()>=20,"Truncated APFS compression header");
     Check(Le32(header)==0x636d7066&&Le64(header+8)==logicalSize,
@@ -1658,7 +1671,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
                                            oldFinder?&*oldFinder:nullptr);
     if(oldStream&&old.size()==oldLayout.value.size()){
         const auto canonicalStream=96+size_t(Le16(oldLayout.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
-        const auto first=extentTree.encrypted?16u:24u;
+        const auto first=extentTree.cipher?16u:24u;
         std::copy_n(old.data()+*oldStream+first,40-first,oldLayout.value.data()+canonicalStream+first);
     }
     const auto fieldsByType=[](const Bytes& inode){
@@ -1684,7 +1697,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
                                    edit.finder?edit.finder:oldFinder?&*oldFinder:nullptr);
     if(oldStream&&size){
         const auto newStream=96+size_t(Le16(updated.value.data()+92))*4+DivideUp(name.size()+1,8)*8;
-        const auto first=extentTree.encrypted?16u:24u;
+        const auto first=extentTree.cipher?16u:24u;
         std::copy_n(old.data()+*oldStream+first,40-first,updated.value.data()+newStream+first);
     }
     const auto finderFlag=Le64(updated.value.data()+48)&WriterDisk::HasFinderInfo;
@@ -1704,7 +1717,7 @@ size_t ReplaceExternalFile(Source& source,std::vector<OwnedRecord>& catalog,cons
     }
 
     auto attributes=EncodeAttributes(edit.inode,edit.attributes,resource,streams);
-    WriteCompressionAttribute(attributes,updated.value,edit.inode,size,edit.compression);
+    WriteCompressionAttribute(attributes,updated.value,edit.inode,size,edit.compression,streams);
     bool foundCompression=false;
     std::set<uint64_t> removeStreams{privateStream};
     std::vector<OwnedRecord> links;
@@ -2631,9 +2644,9 @@ WriteAllocationState ReadWriteAllocationState(Source& source,const Container& co
     auto catalog=ReadWritableCatalog(source,container,
         historical?MapAt(volumeMap,container.transaction):volumeMap,Le64(volume.data()+136),historical);
     auto extents=ReadExtentTree(source,container,Le64(volume.data()+144),historical);
-    extents.encrypted=bool(container.writeCipher);
+    extents.cipher=container.writeCipher;
     auto snapshot=ReadSnapshotAllocations(source,container,volume,volumeMap,catalog,extents);
-    if(!historical)ValidateSharedFileExtents(catalog,extents.records,extents.encrypted);
+    if(!historical)ValidateSharedFileExtents(catalog,extents.records,bool(extents.cipher));
     auto protectedRuns=historical?snapshot.protectedRuns:siblings.runs;
     ProtectKeybags(container,protectedRuns);
     return {std::move(siblings),std::move(volumeMap),std::move(catalog),std::move(extents),
@@ -2682,6 +2695,11 @@ void ValidateWritableLayout(Source& source,const Container& container)
     const auto catalog=ReadWritableCatalog(source,container,volumeMap,Le64(volume.data()+136));
     constexpr uint64_t cloneFlags=0x10|0x400;
     for(const auto& record:catalog.records){
+        constexpr std::string_view compressionKey=CompressionAttribute;
+        if(record.key.size()==11+compressionKey.size()&&(Le64(record.key.data())>>60)==4&&
+           !memcmp(record.key.data()+10,compressionKey.data(),compressionKey.size())&&
+           record.value.size()>=4&&Le16(record.value.data())==1)
+            throw HfsPlus::Error("APFS streamed compression requires the compatibility writer");
         if(record.key.size()<8||(Le64(record.key.data())>>60)!=3)continue;
         Check(record.value.size()>=56,"Truncated APFS inode");
         Check(!(Le64(record.value.data()+48)&cloneFlags),
@@ -2937,9 +2955,11 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto specialCount=Le64(volume.data()+208);
     const auto catalogOid=Le64(volume.data()+136);
     const auto snapshots=Le64(volume.data()+152);
-    const bool externalCreate=create&&create->external;
+    const auto* compression=create?create->compression:replace?replace->compression:nullptr;
+    const bool streamCompression=compression&&compression->size()>WriterDisk::InlineCompressionCapacity();
+    const bool externalCreate=create&&(create->external||streamCompression);
     const bool externalHardLink=hardLink&&hardLink->external;
-    const bool externalReplace=replace&&replace->external;
+    const bool externalReplace=replace&&(replace->external||streamCompression);
     const bool externalResource=resourceEdit&&resourceEdit->external;
     const auto* attributeEdit=std::get_if<CatalogAttributes>(&request);
     const bool externalAttributes=attributeEdit&&attributeEdit->external;
@@ -2988,18 +3008,23 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto* attributes=attributeEdit?&attributeEdit->attributes:replace?replace->attributes:
                            create?create->attributes:linkReplacement?&linkReplacement->attributes:nullptr;
     AttributeStreams attributeIds;
+    const auto addAttributeStream=[&](const std::u16string& name,const HfsPlus::AttributeData& value){
+        const auto blocks=DivideUp(value.size(),Block);
+        Check(blocks<=current.blockCount-dataBlocks,"APFS streams exceed the container size");
+        Check(nextAvailable<IdMask-1,"APFS file-system object IDs are exhausted");
+        attributeIds.emplace(name,nextAvailable);
+        auto input=std::make_unique<AttributeInput>(value);
+        plan.streams.push_back({*input,value.size(),{},nextAvailable++});
+        plan.attributeInputs.push_back(std::move(input));
+        dataBlocks+=blocks;
+    };
+    if(streamCompression)
+        addAttributeStream(u"com.apple.decmpfs",*compression);
     if(attributes){
         ValidateWritableAttributes(*attributes);
         for(const auto& [name,value]:*attributes){
             if(value.size()<EmbeddedAttributeLimit)continue;
-            const auto blocks=DivideUp(value.size(),Block);
-            Check(blocks<=current.blockCount-dataBlocks,"APFS streams exceed the container size");
-            Check(nextAvailable<IdMask-1,"APFS file-system object IDs are exhausted");
-            attributeIds.emplace(name,nextAvailable);
-            auto input=std::make_unique<AttributeInput>(value);
-            plan.streams.push_back({*input,value.size(),{},nextAvailable++});
-            plan.attributeInputs.push_back(std::move(input));
-            dataBlocks+=blocks;
+            addAttributeStream(name,value);
         }
     }
     FILETIME fileTime{};
@@ -3153,7 +3178,7 @@ CatalogWritePlan PrepareCatalogMutation(
         if(resource)SetResourceFlag(inode.value,resource->size!=0);
         auto records=EncodeAttributes(entryId,attributes,resource?&*resource:nullptr,attributeIds);
         if(symlink)records.push_back(LinkTargetRecord(entryId,*create->linkTarget));
-        if(create->compression)WriteCompressionAttribute(records,inode.value,entryId,dataSize,create->compression);
+        if(create->compression)WriteCompressionAttribute(records,inode.value,entryId,dataSize,create->compression,attributeIds);
         SortAttributes(records);
         catalog.push_back(std::move(inode));
         catalog.insert(catalog.end(),std::make_move_iterator(records.begin()),std::make_move_iterator(records.end()));

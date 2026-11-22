@@ -224,11 +224,6 @@ constexpr auto ResourceFork=u"com.apple.ResourceFork";
 constexpr auto FinderInfo=u"com.apple.FinderInfo";
 constexpr auto CompressionAttribute=u"com.apple.decmpfs";
 
-size_t InlineCompressionCapacity(){
-    constexpr auto attributeOverhead=10+sizeof("com.apple.decmpfs")+4;
-    return WriterDisk::Block-WriterDisk::NodeHeader-WriterDisk::TreeFooter-
-           WriterDisk::VariableToc(1)-attributeOverhead;
-}
 constexpr auto SymlinkAttribute=u"com.apple.fs.symlink";
 constexpr auto LockedMessage="This APFS volume is encrypted and locked";
 struct Attribute {
@@ -1534,7 +1529,7 @@ public:
         const auto* attributes=entry.attributesKnown||!entry.attributes.empty()?&entry.attributes:nullptr;
         std::optional<HfsPlus::EncodedCompression> encoded;
         const Bytes* compression=nullptr;
-        const auto inlineLimit=InlineCompressionCapacity();
+        const auto inlineLimit=WriterDisk::InlineCompressionCapacity();
         if(entry.WritesStoredCompressionResource()){
             ValidateResourceCompression(entry.resourceCompressionHeader,entry.forks[0].size,entry.forks[1].size,
                 [&](uint64_t offset,void* bytes,size_t size){
@@ -1542,7 +1537,7 @@ public:
                     reader(1,offset,bytes,size);
                 });
             compression=&entry.resourceCompressionHeader;
-        }else if(entry.compressed&&!entry.inlineCompression.empty()&&entry.inlineCompression.size()<=inlineLimit){
+        }else if(entry.compressed&&!entry.inlineCompression.empty()){
             ValidateInlineCompression(entry.inlineCompression,entry.forks[0].size);
             compression=&entry.inlineCompression;
         }else if(entry.compressed){
@@ -1550,7 +1545,8 @@ public:
                 if(job.cancelled())throw Storage::Cancelled();
                 reader(0,offset,bytes,count);
             },HfsPlus::Volume::CompressionMode::Zlib,entry.forks[1].size?
-                EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource,inlineLimit);
+                EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource,
+                entry.forks[1].size?InlineCompressionLimit:inlineLimit);
             if(encoded->Attribute().empty()){
                 Check(allowPrompt,"Copying both forks without compression requires approval");
                 if(job.requestChoice(Storage::CopyPrompt::Uncompressed,EncodeCatalogName(entry.name))!=
@@ -1559,6 +1555,7 @@ public:
                 encoded.reset();
             }else compression=&encoded->Attribute();
         }
+        const bool streamCompression=compression&&compression->size()>inlineLimit;
         const bool compressionResource=encoded&&encoded->UsesResource();
         const MacBrowser::Reader payload=[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
             if(compressionResource&&fork==1)encoded->ReadResource(offset,bytes,count);
@@ -1645,21 +1642,22 @@ public:
                                                  &entry.finder,entry.protectedFile,attributes,&resource,compression,
                                                  true,oid,entry.posix,replaceAlias?sibling:0);
                     });
-                    if(restoreSparse||restoresSharing)limitedEdits=true;
+                    if(restoreSparse||restoresSharing||streamCompression)limitedEdits=true;
                     Entry replacement;
                     if(FindChild(parent,entry.name,replacement))return replacement.id;
                     throw Error("APFS replacement was committed but could not be found after reopening");
                 }
                 CommitMutation(parent,0,job,[&](auto& job){
-                    return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits,sibling,false,entry.posix);
+                    return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits||streamCompression,sibling,false,entry.posix);
                 },existing.id);
+                if(streamCompression)limitedEdits=true;
                 return existing.id;
             }
             Check(entry.expectedDestinationIdentity.empty(),"The APFS destination disappeared after overwrite approval");
             CommitMutation(parent,0,job,[&](auto& job){
-                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits||restoreSparse||restoresSharing,0,entry.posix);
+                return CreateCatalogFile(*source,WriteTarget(parent),parentOid,entry.name,data,job,dates,&entry.finder,entry.protectedFile,attributes,&resource,compression,limitedEdits||restoreSparse||restoresSharing||streamCompression,0,entry.posix);
             });
-            if(restoreSparse||restoresSharing)limitedEdits=true;
+            if(restoreSparse||restoresSharing||streamCompression)limitedEdits=true;
             if(FindChild(parent,entry.name,existing))return existing.id;
             throw Error("APFS file was committed but could not be found after reopening");
         },true);
@@ -1720,6 +1718,7 @@ public:
             };
             std::optional<HfsPlus::EncodedCompression> encoded;
             if(compress)encoded.emplace(size,logical,method);
+            const bool streamCompression=encoded&&encoded->Attribute().size()>WriterDisk::InlineCompressionCapacity();
             const bool compressionResource=encoded&&encoded->UsesResource();
 
             const bool oldCompressionResource=current.compressed&&!current.forks[1].size&&
@@ -1741,8 +1740,9 @@ public:
             CommitMutation(parent,0,job,[&](auto& job){
                 return ReplaceFileData(*source,WriteTarget(parent),parentOid,oid,data,job,{},
                                        nullptr,false,nullptr,limitedEdits||resourceSize||oldCompressionResource?&resource:nullptr,
-                                       encoded?&encoded->Attribute():nullptr,limitedEdits,sibling,true);
+                                       encoded?&encoded->Attribute():nullptr,limitedEdits||streamCompression,sibling,true);
             },id);
+            if(streamCompression)limitedEdits=true;
         },true);
     }
     void SetAttributes(uint32_t id,const Attributes& attributes)override{

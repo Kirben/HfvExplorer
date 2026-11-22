@@ -24,6 +24,10 @@ struct Record {Bytes key,value;};
 
 inline constexpr size_t NodeHeader=56,TreeFooter=40;
 inline size_t VariableToc(size_t count){return size_t((std::max)(uint64_t(1),DivideUp(count,32))*32*8);}
+inline size_t InlineCompressionCapacity(){
+    constexpr auto attributeOverhead=10+sizeof("com.apple.decmpfs")+4;
+    return Block-NodeHeader-TreeFooter-VariableToc(1)-attributeOverhead;
+}
 inline bool FitsCatalogLeaf(size_t count,size_t recordBytes)
 {
     return NodeHeader+VariableToc(count)+recordBytes<=Block-TreeFooter;

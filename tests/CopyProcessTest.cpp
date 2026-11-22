@@ -2855,12 +2855,12 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
     using Mode=HfsPlus::Volume::CompressionMode;
     using HfsPlus::Bytes;
     const auto fixture=_wgetenv(L"HFV_APFS_TEST_IMAGE");
-    const std::array<std::u16string,2> names{u"Inline with resource",u"Fallback with resource"};
+    const std::array<std::u16string,2> names{u"Inline with resource",u"Maximum inline with resource"};
     std::array<Bytes,2> data{Bytes(18000,0x4a),Bytes(3786)};
     std::array<Bytes,2> resource{Bytes(173),Bytes(7209)};
     const HfsPlus::Attributes attributes{{u"user.transfer",{4,0,9}}};
-    // Type 1 fits 3786 stored bytes plus its header. For incompressible bytes
-    // the zlib representation needs one more byte and cannot be stored inline.
+    // Type 1 uses the full 3802-byte decmpfs attribute. Its encoded bytes
+    // exceed the APFS writer's single-record capacity.
     uint32_t random=0x13426abd;
     for(auto& byte:data[1]){
         random^=random<<13;
@@ -2937,14 +2937,10 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
                         responded=prompt.id;
                         if(prompt.kind==Storage::CopyPrompt::Overwrite){
                             ++overwritePrompts;
-                            job->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+                            job->resolve(prompt.id,answer);
                         }else{
                             ++fallbackPrompts;
-                            if(prompt.path!="Fallback with resource"){
-                                job->cancel();
-                                throw HfsPlus::Error("Unexpected uncompressed prompt");
-                            }
-                            job->resolve(prompt.id,answer);
+                            job->resolve(prompt.id,Storage::ConflictChoice::Cancel);
                         }
                     }
                     Sleep(5);
@@ -2953,7 +2949,7 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
             };
             auto result=transfer({inputs[1]},Storage::ConflictChoice::Cancel);
             Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial&&
-                  overwritePrompts==1&&fallbackPrompts==1,"Declining uncompressed copy did not cancel before publication");
+                  overwritePrompts==1&&fallbackPrompts==0,"Declining the overwrite did not cancel before publication");
             target.reset();
             target=OpenBrowserImage(path);
             Entry original;
@@ -2962,7 +2958,7 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
             Verify(*target,original.id,6301,59);
             result=transfer(inputs,Storage::ConflictChoice::Replace);
             Check(!result.code,result.message.c_str());
-            Check(overwritePrompts==2&&fallbackPrompts==2,"Inline copy prompted or fallback was silently approved");
+            Check(overwritePrompts==2&&fallbackPrompts==0,"Exact compression copy asked to discard compression");
             target.reset();
             target=OpenBrowserImage(path);
             Check(bool(target),"Cannot reopen dual-fork APFS target");
@@ -2970,14 +2966,29 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
             const auto header=source->Stat(verify(*source,0,true)).inlineCompression;
             Check(!header.empty()&&target->Stat(compressed).inlineCompression==header,
                   "APFS re-encoded the original inline compression");
-            verify(*target,1,false);
+            const auto full=verify(*target,1,true);
+            const auto fullHeader=source->Stat(verify(*source,1,true)).inlineCompression;
+            Check(fullHeader.size()==HfsPlus::InlineCompressionLimit&&
+                  target->Stat(full).inlineCompression==fullHeader,
+                  "APFS did not preserve the maximum-size compressed attribute");
+            const auto returnedPath=path+L"-returned.dsk";
+            auto returned=Image(returnedPath,kind);
+            Storage::Job returnJob;
+            Completion returnCompletion;
+            const auto roundTrip=ExecuteInWorker(OrdinaryCopy{{Native(target,full)},Native(returned)},returnJob,returnCompletion);
+            Check(!roundTrip.code&&returnCompletion.complete,roundTrip.message.c_str());
+            returned.reset();
+            returned=OpenBrowserImage(returnedPath);
+            Check(returned&&returned->Stat(verify(*returned,1,true)).inlineCompression==fullHeader,
+                  "Round trip re-encoded the streamed APFS compression attribute");
+            target->Remove(full);
             target->Remove(compressed);
             target.reset();
             target=OpenBrowserImage(path);
             Entry removed;
             Check(target&&!target->FindChild(2,names[0],removed),
                   "Could not delete the compressed file with independent resource data");
-            verify(*target,1,false);
+            Check(!target->FindChild(2,names[1],removed),"Could not delete the APFS file with streamed compression");
             verify(*source,0,true);
             verify(*source,1,true);
         }
@@ -3074,8 +3085,8 @@ void TestHfsCompressionWithResourceToApfs(const std::string& root,FILE* report)
     verify(*apfs,0,true);
     verify(*apfs,1,true);
     fprintf(report,"PASS: APFS inline compression and genuine resource forks copy to HFS+ and both HFSX variants; exact encoded bytes survive reopening and cancellation preserves the destination.\n");
-    fprintf(report,"PASS: compressed HFS+ and both HFSX variants preserve both forks and attributes on APFS after reopen; inline compression stays enabled and uncompressed overwrite requires separate approval.\n");
-    if(fixture)fprintf(report,"PASS: dual-fork compressed and fallback transfers also work on disposable macOS APFS fixtures.\n");
+    fprintf(report,"PASS: compressed HFS+ and both HFSX variants preserve both forks and attributes on APFS after reopen; maximum inline compression survives as an APFS stream and returns byte for byte.\n");
+    if(fixture)fprintf(report,"PASS: dual-fork compressed transfers also work on disposable macOS APFS fixtures.\n");
 }
 
 void EditApfsFixtureLeaf(const std::wstring& path,
