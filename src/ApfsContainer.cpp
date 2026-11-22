@@ -436,19 +436,22 @@ uint64_t SetCatalogAttributes(Source& source,const Container& expected,uint64_t 
 uint64_t CreateCatalogSymlink(Source& source,const Container& expected,uint64_t parent,const std::u16string& name,
                               const HfsPlus::Bytes& target,Storage::Job& job,std::optional<FileDates> dates,
                               const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external,
-                              uint64_t replacedEntry)
+                              uint64_t replacedEntry,std::optional<PosixMetadata> posix)
 {
     Check(!replacedEntry||external,"APFS symbolic-link replacement requires the external catalog writer");
-    const CatalogMutation request=CatalogCreate{parent,name,CatalogKind::SymbolicLink,nullptr,dates,&finder,
-                                                locked,&attributes,nullptr,nullptr,&target,external,replacedEntry};
-    return Commit(source,expected,job,&request);
+    CatalogCreate request{parent,name,CatalogKind::SymbolicLink,nullptr,dates,&finder,
+                          locked,&attributes,nullptr,nullptr,&target,external,replacedEntry};
+    request.posix=posix;
+    const CatalogMutation mutation=request;
+    return Commit(source,expected,job,&mutation);
 }
 
 uint64_t ReplaceCatalogSymlink(Source& source,const Container& expected,uint64_t parent,uint64_t inode,
                                const HfsPlus::Bytes& target,Storage::Job& job,std::optional<FileDates> dates,
-                               const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external)
+                               const FinderBytes& finder,bool locked,const HfsPlus::Attributes& attributes,bool external,
+                               std::optional<PosixMetadata> posix)
 {
-    const CatalogMutation request=CatalogReplaceSymlink{parent,inode,target,dates,finder,locked,attributes,external};
+    const CatalogMutation request=CatalogReplaceSymlink{parent,inode,target,dates,finder,locked,attributes,external,posix};
     return Commit(source,expected,job,&request);
 }
 

@@ -96,7 +96,7 @@ class Volume {
     std::optional<Bytes> SymbolicLinkTarget(uint32_t id);
     void PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                          const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
-                         const std::array<uint64_t,2>* dates);
+                         const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix={});
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline, CopyCompressed };

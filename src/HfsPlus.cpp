@@ -470,7 +470,7 @@ struct Volume::Impl {
             e.directory = type == 1;
             const auto mode=U16(r.value.data()+42);
             e.symbolicLink = !e.directory && (mode & 0170000) == 0120000;
-            if((mode&0170000)==(e.directory?0040000:0100000))
+            if(e.symbolicLink||(mode&0170000)==(e.directory?0040000:0100000))
                 e.posix=PosixMetadata{U32(r.value.data()+32),U32(r.value.data()+36),
                                       uint16_t(mode&PosixMetadata::ModeMask)};
             e.compressed = !e.directory && (r.value[41] & 0x20);
@@ -1077,7 +1077,7 @@ struct Volume::Impl {
         const uint16_t permissions=e.directory?0755:e.symbolicLink?0777:0644;
         const uint16_t type=e.directory?0040000:e.symbolicLink?0120000:0100000;
         P16(r.value.data() + 42,type|permissions);
-        if(!e.symbolicLink)e.posix=PosixMetadata{0,0,permissions};
+        e.posix=PosixMetadata{0,0,permissions};
         InsertCatalogRecord(std::move(r));
         entries[id] = e;
         UpdateEntry(e);
@@ -1596,13 +1596,13 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
 }
 void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                              const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
-                             const std::array<uint64_t,2>* dates) {
+                             const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix) {
     ValidateSymbolicLinkTarget(target);
     // APFS and the transfer interface include a terminator. HFS+ stores only
     // the target bytes in its data fork.
     PutFile(parent,name,target.size()-1,0,[&](unsigned,uint64_t at,void* out,size_t size){
         memcpy(out,target.data()+at,size);
-    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,{},true,OverwriteScope::SharedInode);
+    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode);
 }
 uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
                          const std::function<void(unsigned,uint64_t,void*,size_t)>& read,

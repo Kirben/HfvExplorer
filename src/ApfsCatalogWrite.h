@@ -71,6 +71,7 @@ struct CatalogReplaceSymlink {
     bool locked;
     const HfsPlus::Attributes& attributes;
     bool external=false;
+    std::optional<PosixMetadata> posix;
 };
 struct CatalogHardLink {
     uint64_t parent,inode;

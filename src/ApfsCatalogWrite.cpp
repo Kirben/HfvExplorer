@@ -1016,6 +1016,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
             std::copy_n(inode.begin(),92,updated.value.begin());
             Set(updated.value,48,flags,8);
             Set(updated.value,68,linkEdit->locked?bsdFlags|UserImmutable:bsdFlags,4);
+            SetPosixMetadata(updated.value,linkEdit->posix);
             Set(updated.value,24,time,8);
             Set(updated.value,32,time,8);
             copyDates(updated.value);
@@ -1986,6 +1987,7 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     CollectExternalRetiredExtents(catalog,edit.inode,oldStreams,extentTree,retired);
     SetExternalFinderInfo(value,edit.finder);
     SetSecurityFlag(value,edit.attributes);
+    SetPosixMetadata(value,edit.posix);
     if(edit.locked)Set(value,68,flags|UserImmutable,4);
     Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
     if(edit.dates)Set(value,16,CatalogTimestamp(edit.dates->created),8);

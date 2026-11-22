@@ -274,7 +274,7 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
         const auto fullMode=Le16(p+80);
         const auto mode=fullMode&0170000;
         entry.directory=mode==0040000;
-        if(entry.directory||mode==0100000)
+        if(entry.directory||mode==0100000||mode==0120000)
             entry.posix=PosixMetadata{Le32(p+72),Le32(p+76),uint16_t(fullMode&PosixMetadata::ModeMask)};
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
@@ -1322,9 +1322,9 @@ public:
             CommitMutation(parent,replacedEntry?child.id:0,job,[&](auto& job){
                 if(child.symbolicLink)
                     return ReplaceCatalogSymlink(*source,WriteTarget(parent),parentOid,At(child.id).oid,target,job,
-                                                 CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits);
+                                                 CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,entry.posix);
                 return CreateCatalogSymlink(*source,WriteTarget(parent),parentOid,entry.name,target,job,
-                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,replacedEntry);
+                                            CopyDates(entry),entry.finder,entry.protectedFile,entry.attributes,limitedEdits,replacedEntry,entry.posix);
             });
         },true);
     }

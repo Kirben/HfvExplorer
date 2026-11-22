@@ -176,7 +176,7 @@ public:
             }
             const std::array<uint64_t,2> dates{entry.created,entry.modified};
             volume_->PutSymbolicLink(parent,entry.name,target,entry.finder,replace,entry.attributes,
-                                     entry.datesValid?&dates:nullptr);
+                                     entry.datesValid?&dates:nullptr,entry.posix);
         });
     }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
