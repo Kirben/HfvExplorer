@@ -43,6 +43,11 @@ void ValidateHfsPlusCopyNames(const std::vector<Entry>& entries, bool caseSensit
     }
 }
 
+bool IsHfsPlusSymlinkReplacementFile(const Entry& entry)
+{
+    return !entry.directory&&!entry.symbolicLink&&!entry.hardLink&&!entry.protectedFile&&entry.readError.empty();
+}
+
 namespace {
 void Check(bool ok, const char *message) { if (!ok) throw HfsPlus::Error(message); }
 class Plus final : public Volume, public WorkerEndpoint {
@@ -151,9 +156,15 @@ public:
         found=Describe(entry);
         return true;
     }
+    bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found) override {
+        return FindChild(parent,HfsPlus::Normalize(entry.name,CaseSensitive()),found);
+    }
     Entry Stat(uint32_t id) override { Call call(*this);Ready(); return Describe(volume_->Stat(id)); }
     std::optional<HfsPlus::Bytes> SymbolicLinkTarget(uint32_t id) override {
         Call call(*this);Ready();return volume_->SymbolicLinkTarget(id);
+    }
+    bool CanReplaceFileWithSymbolicLink(const Entry& entry) const override {
+        return Writable()&&IsHfsPlusSymlinkReplacementFile(entry);
     }
     void ValidateSymbolicLink(const Entry& entry,const HfsPlus::Bytes& target) const override {
         Check(Writable(),"HFS+ image is read-only");
@@ -170,7 +181,8 @@ public:
             const bool replace=!entry.expectedDestinationIdentity.empty();
             if(replace){
                 HfsPlus::Entry existing;
-                Check(volume_->FindChild(parent,entry.name,existing)&&existing.symbolicLink&&
+                const auto name=HfsPlus::Normalize(entry.name,CaseSensitive());
+                Check(volume_->FindChild(parent,name,existing)&&
                       Describe(existing).identity==entry.expectedDestinationIdentity,
                       "The HFS+ symbolic link destination changed after overwrite approval");
             }

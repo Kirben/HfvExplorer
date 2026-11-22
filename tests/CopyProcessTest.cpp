@@ -922,13 +922,15 @@ void TestCopyPosixIntoHfs(const std::string& root,FILE* report)
 void TestSymbolicLinkCopies(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
+    constexpr auto relativeName=u"relativ\u00e9";
+    const auto hfsRelativeName=HfsPlus::Normalize(relativeName);
     struct LinkFixture {
         std::u16string name;
         std::string target;
         PosixMetadata posix;
     };
     const std::array<LinkFixture,3> links{{
-        {u"relative","../target",{501,80,0751}},
+        {hfsRelativeName,"../target",{501,80,0751}},
         {u"absolute",u8"/System/Library/\u00e9",{0xf0000123,0x80000056,0000}},
         {u"loop","loop",{502,20,04777}}
     }};
@@ -940,7 +942,8 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
         for(const auto& [name,path,posix]:links){
             Entry link;
             HfsPlus::Bytes expected(path.begin(),path.end());expected.push_back(0);
-            Check(volume.FindChild(folder.id,name,link)&&link.symbolicLink&&!link.directory&&
+            const auto lookup=std::string_view(volume.Kind())=="APFS"&&name==hfsRelativeName?relativeName:name;
+            Check(volume.FindChild(folder.id,lookup,link)&&link.symbolicLink&&!link.directory&&
                   !link.forks[0].size&&!link.forks[1].size&&link.posix==posix&&
                   volume.SymbolicLinkTarget(link.id)==expected,
                   "Symbolic link type, ownership, permissions or target bytes changed");
@@ -1000,7 +1003,7 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
                   !target->FindChild(2,u"invalid",unexpected),"Malformed HFS+ symlink was copied");
             const auto destination=target->MakeDirectory(2,u"Links");
             Entry old;
-            old.name=u"relative";
+            old.name=relativeName;
             old.symbolicLink=true;
             old.posix=oldPosix;
             Storage::Job seed;
@@ -1043,21 +1046,66 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
                       "Could not mount symlink copy fixtures");
                 Put(*target,2,u"target",1024);
                 const auto destination=target->MakeDirectory(2,u"Links");
-                Entry existing;existing.name=u"relative";existing.symbolicLink=true;
-                existing.posix=oldPosix;
-                Storage::Job seed;
-                target->PutSymbolicLink(destination,existing,oldTarget,seed);
+                const bool fromApfs=std::string_view(source->Kind())=="APFS";
                 Entry relative;
-                Check(source->FindChild(folder.id,u"relative",relative),"Missing relative source link");
+                Check(source->FindChild(folder.id,fromApfs?relativeName:hfsRelativeName,relative),
+                      "Missing relative source link");
+                Check(!fromApfs||relative.name==relativeName,"APFS fixture lost the composed source spelling");
+                const auto copyRelative=[&](uint32_t parent,Storage::Job& job,Completion& completion){
+                    return ExecuteInWorker(OrdinaryCopy{{Native(source,relative.id)},Native(target,parent)},job,completion);
+                };
+                const HfsPlus::Attributes originalAttrs{{u"user.original",{0x32,0,0x41}}};
+                uint32_t original=0;
+                if(fromApfs){
+                    original=Put(*target,destination,hfsRelativeName,4099,11);
+                    target->SetAttributes(original,originalAttrs);
+
+                    // An existing hard-link name is outside regular-file replacement.
+                    const auto guarded=target->MakeDirectory(2,u"Guarded");
+                    const auto shared=Put(*target,guarded,hfsRelativeName,3011,13);
+                    const auto alias=target->MakeHardLink(shared,2,u"Guarded alias");
+                    bool prompted=false;
+                    Storage::Job blocked;
+                    blocked.transport({},[&](const auto&){prompted=true;return Storage::ConflictChoice::Replace;});
+                    Completion refused;
+                    Entry visible;
+                    Check(copyRelative(guarded,blocked,refused).code&&!prompted&&
+                          target->FindChild(guarded,hfsRelativeName,visible)&&visible.hardLink,
+                          "APFS symlink copy bypassed the HFS hard-link guard");
+                    Verify(*target,visible.id,3011,13);
+                    Verify(*target,alias,3011,13);
+                }else{
+                    Entry existing;existing.name=hfsRelativeName;existing.symbolicLink=true;
+                    existing.posix=oldPosix;
+                    Storage::Job seed;
+                    target->PutSymbolicLink(destination,existing,oldTarget,seed);
+                }
                 Storage::Job cancelled;
-                cancelled.transport({},[](const auto&){return Storage::ConflictChoice::Cancel;});
+                bool approved=false;
+                bool reachedWrite=false;
+                cancelled.transport([&](const Storage::Progress& progress){
+                    if(fromApfs&&approved&&progress.path==u8"relativ\u00e9"&&!progress.scanning){
+                        reachedWrite=true;
+                        cancelled.cancel();
+                    }
+                },[&](const auto&){
+                    approved=true;
+                    return fromApfs?Storage::ConflictChoice::Replace:Storage::ConflictChoice::Cancel;
+                });
                 Completion aborted;
-                const auto stopped=ExecuteInWorker(OrdinaryCopy{{Native(source,relative.id)},Native(target,destination)},
-                                                   cancelled,aborted);
+                const auto stopped=copyRelative(destination,cancelled,aborted);
                 Entry retained;
-                Check(stopped.error==ERROR_CANCELLED&&target->FindChild(destination,u"relative",retained)&&
-                      retained.posix==oldPosix&&target->SymbolicLinkTarget(retained.id)==oldTarget,
-                      "Cancelled overwrite changed the old symlink or its POSIX metadata");
+                Check(stopped.outcome==Storage::Outcome::Cancelled&&!stopped.partial&&approved&&
+                      target->FindChild(destination,hfsRelativeName,retained),"Expected a cancelled symlink overwrite");
+                if(fromApfs){
+                    Check(reachedWrite&&retained.id==original&&!retained.symbolicLink&&
+                          target->GetAttributes(retained.id)==originalAttrs,
+                          "Cancelling a symlink overwrite changed the original file or its attributes");
+                    Verify(*target,retained.id,4099,11);
+                }else{
+                    Check(retained.posix==oldPosix&&target->SymbolicLinkTarget(retained.id)==oldTarget,
+                          "Cancelled overwrite changed the old symlink or its POSIX metadata");
+                }
 
                 Storage::Job job;
                 bool prompted=false;
@@ -1076,13 +1124,16 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
                     Check(hfs.FindChild(folder.id,name,link)&&link.symbolicLink&&
                           link.forks[0].size==path.size()&&!link.forks[1].size&&link.posix==posix&&
                           !memcmp(link.finder.data(),"slnkrhap",8),"HFS on-disk symlink type, fork length or POSIX fields changed");
+                    Check(!hfs.GetAttributes(link.id).count(u"user.original"),
+                          "The replacement symlink retained the original file's attributes");
                 }
             }
             auto target=OpenBrowserImage(targetPath);
             Entry folder,link,ordinary;
             Check(target&&target->FindChild(2,u"Links",folder)&&target->FindChild(2,u"target",ordinary)&&
-                  target->FindChild(folder.id,u"relative",link),"Missing copied HFS links after reopen");
+                  target->FindChild(folder.id,hfsRelativeName,link),"Missing copied HFS links after reopen");
             verifyLinks(*target,folder);
+            Verify(*target,ordinary.id,1024);
             bool refused=false;
             try{target->Read(link.id,0,0,nullptr,0);}
             catch(const HfsPlus::Error&){refused=true;}
@@ -1095,6 +1146,7 @@ void TestSymbolicLinkCopies(const std::string& root,FILE* report)
             Verify(*target,ordinary.id,1024);
         }
     }
+    fprintf(report,"PASS: APFS symlinks replace regular files on HFS+ and both HFSX variants without following targets. Cancellation preserves the original forks and attributes, and hard-link names are refused.\n");
     fprintf(report,"PASS: APFS, HFS+ and HFSX symlinks reopen on HFS+ and both HFSX variants with unchanged UID, GID, mode, and target. Cancel, rename and delete preserve link metadata or leave the target intact.\n");
 }
 

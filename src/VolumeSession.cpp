@@ -266,7 +266,9 @@ public:
         return Classic()?Volume::FindChild(parent,name,found):LookupChild(parent,name,{},found);
     }
     bool FindTransferChild(uint32_t parent,const Entry& source,Entry& found)override {
-        return Mfs()?LookupChild(parent,source.name,source.version,found):Volume::FindTransferChild(parent,source,found);
+        if (Mfs()) return LookupChild(parent,source.name,source.version,found);
+        if (Plus()) return FindChild(parent,HfsPlus::Normalize(source.name,CaseSensitive()),found);
+        return Volume::FindTransferChild(parent,source,found);
     }
     bool LookupChild(uint32_t parent,const std::u16string& name,std::optional<unsigned> version,Entry& found) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -357,6 +359,9 @@ public:
             }
         });
         return target;
+    }
+    bool CanReplaceFileWithSymbolicLink(const Entry& entry) const override {
+        return Plus()&&Writable()&&IsHfsPlusSymlinkReplacementFile(entry);
     }
     void ValidateSymbolicLink(const Entry& entry,const HfsPlus::Bytes& target) const override {
         auto& self=*const_cast<PersistentVolume*>(this);

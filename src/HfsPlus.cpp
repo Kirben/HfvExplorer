@@ -1627,19 +1627,21 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
         if(symbolicLink){
-            const auto& link=p.Get(existing);
-            Check(link.symbolicLink&&!link.compressed&&!link.forks[1].size,
-                  "An HFS+ symbolic link can only overwrite another ordinary symbolic link");
-            p.Mutable(link,false,true);
+            const auto& target=p.Get(existing);
+            Check(!target.directory&&!p.LinkKind(existing),
+                  "An HFS+ symbolic link cannot replace a folder or hard-link name");
+            Check(!target.symbolicLink||(!target.compressed&&!target.forks[1].size),
+                  "Cannot replace an HFS+ symbolic link with unsupported forks");
+            p.Mutable(target,false,true);
         }else{
             existing=p.Content(existing);
         }
         const auto& current=p.Get(existing);
         Check(!current.directory, "Cannot overwrite an HFS+ directory");
         p.RemovalParent(parent);
-        if(scope==OverwriteScope::SelectedName){
-            // Replace the catalog name in the same transaction as the new
-            // file. The other names keep their original inode and forks.
+        if(scope==OverwriteScope::SelectedName||(symbolicLink&&!current.symbolicLink)){
+            // Publish the replacement entry and unlink the old name in the
+            // same transaction. Other names of a shared inode stay intact.
             e.name=p.Get(visible).name;
             detached=visible;
             existing=visible=0;
