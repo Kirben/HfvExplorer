@@ -202,13 +202,20 @@ bool MfsImage::Put(const MfsEntry& input,Reader read,bool overwrite,uint32_t& id
  for(size_t i=0;i<entries_.size();++i)if(entries_[i].version==e.version&&EqualNames(entries_[i].name,e.name)){found=i;break;}
  if(found<entries_.size()&&(!overwrite||(entries_[found].flags&1)))return Fail("MFS destination exists or is locked.");
  auto entries=entries_;auto map=map_;uint32_t next=nextId_;
- if(found<entries.size()){e.id=entries[found].id;if(!e.created)e.created=entries[found].created;for(auto& f:entries[found].forks)for(auto block:f.blocks)map[block-2]=0;}
+ if(found<entries.size()){e.id=entries[found].id;if(!e.created)e.created=entries[found].created;}
  else {uint64_t candidate=(std::max)(uint64_t(next),uint64_t(1));for(auto& item:entries)candidate=(std::max)(candidate,uint64_t(item.id)+1);if(candidate>=UINT32_MAX)return Fail("MFS file numbers are exhausted.");e.id=uint32_t(candidate);next=e.id+1;}
  if(!e.datesValid&&!e.created)e.created=MacNow();if(!e.datesValid&&!e.modified)e.modified=MacNow();e.flags=BYTE((found<entries_.size()?entries_[found].flags&~1:0x80)|(e.flags&1));
- // Reserve both forks before invoking a source callback or changing any image bytes.
+ // Keep the original forks allocated until both replacement forks have space.
+ // Payload writes must leave the data referenced by the old catalog intact.
  for(unsigned f=0;f<2;++f){uint64_t blocks=(uint64_t(e.forks[f].length)+allocationSize_-1)/allocationSize_;if(blocks>map.size())return Fail("File exceeds MFS volume capacity.");e.forks[f].blocks.clear();for(size_t block=0;block<map.size()&&e.forks[f].blocks.size()<blocks;++block)if(!map[block]){e.forks[f].blocks.push_back(uint16_t(block+2));map[block]=1;}
-  if(e.forks[f].blocks.size()!=blocks)return Fail("MFS disk is full.");if(blocks*allocationSize_>UINT32_MAX)return Fail("MFS physical fork length overflow.");e.forks[f].physicalLength=uint32_t(blocks*allocationSize_);for(size_t i=0;i<e.forks[f].blocks.size();++i)map[e.forks[f].blocks[i]-2]=i+1<e.forks[f].blocks.size()?e.forks[f].blocks[i+1]:1;}
- if(found<entries.size())entries[found]=e;else entries.push_back(e);
+  if(e.forks[f].blocks.size()!=blocks)
+   return Fail(found<entries.size()?"Not enough free space to overwrite without reusing the original forks.":"MFS disk is full.");
+  if(blocks*allocationSize_>UINT32_MAX)return Fail("MFS physical fork length overflow.");e.forks[f].physicalLength=uint32_t(blocks*allocationSize_);for(size_t i=0;i<e.forks[f].blocks.size();++i)map[e.forks[f].blocks[i]-2]=i+1<e.forks[f].blocks.size()?e.forks[f].blocks[i+1]:1;}
+ if(found<entries.size()){
+  for(const auto& original:entries[found].forks)
+   for(const auto block:original.blocks)map[block-2]=0;
+  entries[found]=e;
+ }else entries.push_back(e);
  std::vector<BYTE> desired;if(!Snapshot(desired)||!Serialize(desired,entries,map,next))return false;
  for(unsigned f=0;f<2;++f){uint64_t logical=0;for(auto block:e.forks[f].blocks){auto p=desired.data()+size_t(base_+allocationStart_+uint64_t(block-2)*allocationSize_);memset(p,0,allocationSize_);size_t n=size_t((std::min)(uint64_t(allocationSize_),uint64_t(e.forks[f].length)-logical));if(n)read(f,logical,p,n);logical+=n;}}
  if(!Commit(desired))return false;id=e.id;return true;

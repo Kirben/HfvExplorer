@@ -1423,8 +1423,12 @@ int RunCopyProcessTest(const char *directory) {
             stale.expectedIdentity=beforeRestart.identity;
             VolumeSession::CrashVolumeSessionDuringPutForTest(volume);
             bool failed=false;
-            try{Put(*volume,2,u"Interrupted write",4096);}
-            catch(const HfsPlus::Error&){failed=true;}
+            try{
+                auto replacement=beforeRestart;
+                volume->Put(2,replacement,[](unsigned fork,uint64_t,void* bytes,size_t size){
+                    memset(bytes,fork?0xA7:0x5B,size);
+                },true);
+            }catch(const HfsPlus::Error&){failed=true;}
             Check(failed && WorkerTransport::lastExitCode==81 && !volume->Writable(),
                   "MFS worker did not stop after a flushed sector write");
             volume->Reload();
@@ -1441,11 +1445,13 @@ int RunCopyProcessTest(const char *directory) {
             Check(volume && !volume->Writable() && volume->FindChild(2,u"Renamed payload",retained),
                   "fresh MFS mount did not enforce the durable write lock");
             Verify(*volume,retained.id,8192);
+            Check(retained.version==beforeRestart.version&&retained.finder==beforeRestart.finder,
+                  "interrupted MFS overwrite changed the old catalog entry");
             bool denied=false;
             try{Put(*volume,2,u"Rejected",4096);}
             catch(const HfsPlus::Error&){denied=true;}
             Check(denied,"MFS crash recovery allowed a new write");
-            fprintf(report,"PASS: %s MFS shared read/write worker, version metadata, fork-safe cancellation and durable read-only crash recovery\n",dc42?"Disk Copy 4.2":"raw");
+            fprintf(report,"PASS: %s MFS shared read/write worker, version metadata, fork-safe cancellation and original forks preserved after an interrupted overwrite\n",dc42?"Disk Copy 4.2":"raw");
         }
         CopyProcess::fault = 1;
         auto crash = Submit(request);

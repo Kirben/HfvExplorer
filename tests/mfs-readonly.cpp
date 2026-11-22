@@ -201,6 +201,17 @@ static void writeTests(){
  WritableMemory probe=base;MfsImage p;check(p.Open(probe)&&p.Put(changed,reader,true,id),"probe MFS overwrite");unsigned writes=probe.writes-base.writes,flushes=probe.flushes-base.flushes;
  for(bool flush:{false,true})for(bool shortWrite:{false,true})for(unsigned step=0;step<(flush?flushes:writes);++step){auto disk=base;disk.shortWrite=shortWrite;if(flush)disk.failFlush=int(disk.flushes+step);else disk.failWrite=int(disk.writes+step);MfsImage image;check(image.Open(disk),"open injected MFS source");uint32_t target;Storage::OutcomeEvidence evidence;check(!image.Put(changed,reader,true,target)&&evidence.RollbackState()==Storage::Rollback::Restored,"MFS write/flush failure did not report restored rollback");check(disk.bytes==base.bytes,"MFS rollback did not restore exact image bytes");disk.failWrite=disk.failFlush=-1;check(image.Open(disk)&&image.Entries()[0].forks[0].length==7301,"MFS rollback not readable");}
  {auto disk=base;MfsImage image;check(image.Open(disk),"open canceled source");bool failed=false;try{image.Put(changed,[](unsigned,uint64_t,void*,size_t){throw std::runtime_error("Canceled source read");},true,id);}catch(const std::exception&){failed=true;}check(failed&&disk.bytes==base.bytes,"source error changed MFS image");auto huge=changed;huge.forks[0].length=400*1024;check(!image.Put(huge,reader,true,id)&&disk.bytes==base.bytes,"disk-full overwrite changed image");}
+ {
+  auto disk=base;
+  MfsImage image;
+  check(image.Open(disk),"open full overwrite fixture");
+  MfsEntry filler;filler.name="Filler";filler.forks[0].length=uint32_t(image.FreeBytes());
+  check(image.Put(filler,reader,false,id)&&image.FreeBytes()==0,"fill all free blocks");
+  const auto saved=disk.bytes;
+  bool read=false;
+  check(!image.Put(e,[&](unsigned,uint64_t,void*,size_t){read=true;},true,id)&&!read&&disk.bytes==saved,
+        "full MFS overwrite reused the original forks or changed the image");
+ }
  {WritableMemory disk(400*1024);check(MfsImage::Format(disk,"Directory",disk.Length(),false,error),"format directory-full test");MfsImage image;check(image.Open(disk),"open directory-full test");for(unsigned i=0;i<12;++i){MfsEntry item;item.name=std::string(254,'a')+char('A'+i);uint32_t file;check(image.Put(item,reader,false,file),"fill directory sectors");}auto saved=disk.bytes;MfsEntry item;item.name=std::string(255,'z');uint32_t file;check(!image.Put(item,reader,false,file)&&disk.bytes==saved,"directory-full create changed image");}
  {
   auto disk=base;
