@@ -2130,6 +2130,10 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         const auto roundTrip=Wide(root+(external?"\\pipe-return-macos.dsk":"\\pipe-return-native.dsk"));
         auto returned=Image(roundTrip,Kind::HfsPlus);
         seedOld(*returned);
+        Put(*returned,2,names[0],8193,127);
+        result=transfer({apfsSelection[0]},Native(returned));
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              "Cancelling a special file over a regular destination should retain the destination");
         result=transfer({apfsSelection[1]},Native(returned));
         Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
               result.message.empty()?"Expected HFS device overwrite cancellation":result.message.c_str());
@@ -2137,6 +2141,9 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         returned=OpenBrowserImage(roundTrip);
         Check(bool(returned),"Cannot reopen cancelled HFS special overwrite");
         verifyOld(*returned);
+        Entry oldFile;
+        Check(returned->FindChild(2,names[0],oldFile),"Missing cancelled regular destination");
+        Verify(*returned,oldFile.id,8193,127);
         result=transfer(apfsSelection,Native(returned),true);
         Check(!result.code,result.message.c_str());
         returned.reset();
@@ -2151,8 +2158,23 @@ void TestCopySpecialFiles(const std::string& root,FILE* report)
         apfs=OpenBrowserImage(path);
         Check(apfs&&!apfs->FindChild(2,names[1],existing),"APFS device node survived deletion");
         apfs->MakeDirectory(2,u"After device deletion");
+        const auto ordinary=Put(*apfs,2,names[1],16385,118);
+        result=transfer({Native(apfs,ordinary)},Native(returned));
+        Check(result.outcome==Storage::Outcome::Cancelled&&!result.partial,
+              "Cancelling a regular file over a special destination should retain the destination");
+        returned.reset();
+        returned=OpenBrowserImage(roundTrip);
+        Check(bool(returned),"Cannot reopen HFS+ after cancelling regular replacement");
+        verify(*returned,1);
+        result=transfer({Native(apfs,ordinary)},Native(returned),true);
+        Check(!result.code,result.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(roundTrip);
+        Check(returned&&returned->FindChild(2,names[1],existing)&&existing.posix&&!existing.posix->IsSpecial(),
+              "Regular copy did not replace the special entry");
+        Verify(*returned,existing.id,16385,118);
     }
-    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening.\n");
+    fprintf(report,"PASS: named pipes, device nodes, sockets and whiteouts round-trip through HFS+/HFSX and both APFS writers; replacement across special-file types preserves metadata and cancelling retains the old node after reopening. HFS+ also verifies regular-to-special and special-to-regular replacement and cancellation.\n");
 }
 
 void TestCopyDirectoryHardLinksToApfs(const std::string& root,FILE* report)

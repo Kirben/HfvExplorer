@@ -886,10 +886,15 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
   const auto incomingType=plan.entry.posix?plan.entry.posix->special:SpecialFileType::None;
   if(exists){
    const auto existingType=found.posix?found.posix->special:SpecialFileType::None;
-   Check((incomingType==SpecialFileType::None)==(existingType==SpecialFileType::None),
-         "A special file can only replace another special file");
-   if(incomingType!=SpecialFileType::None)
-    Check(!found.protectedFile&&!found.hardLink&&!found.forks[0].size&&!found.forks[1].size,
+   const bool incomingSpecial=incomingType!=SpecialFileType::None;
+   const bool existingSpecial=existingType!=SpecialFileType::None;
+   const std::string_view kind=dst.Kind();
+   if(incomingSpecial!=existingSpecial)
+    Check((kind=="HFS+"||kind=="HFSX")&&!found.directory&&!plan.entry.directory&&
+          !found.symbolicLink&&!plan.entry.symbolicLink&&!found.hardLink&&!plan.entry.hardLink,
+          "The destination cannot replace these file types");
+   if(incomingSpecial||existingSpecial)
+    Check(!found.protectedFile&&!found.hardLink&&(!existingSpecial||(!found.forks[0].size&&!found.forks[1].size)),
           "The destination special file cannot be replaced");
   }
   if(incomingType!=SpecialFileType::None){

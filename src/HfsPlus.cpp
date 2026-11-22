@@ -1665,6 +1665,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     uint32_t existing = p.Existing(parent, e.name);
     Fork old[2];
     uint32_t visible=existing,detached=0;
+    const bool incomingSpecial=posix&&posix->IsSpecial();
     if(scope==OverwriteScope::SelectedName)
         Check(existing&&p.LinkKind(existing)==1,"The HFS+ hard-link destination changed after overwrite approval");
     if(scope==OverwriteScope::SymbolicLink)
@@ -1672,8 +1673,16 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
               "The HFS+ symbolic link destination changed after overwrite approval");
     if (existing) {
         Check(overwrite, "HFS+ name already exists");
+        const auto& target=p.Get(existing);
+        const bool targetSpecial=target.posix&&target.posix->IsSpecial();
+        const bool changeSpecialType=incomingSpecial!=targetSpecial;
         const bool replaceFileAlias=symbolicLink&&p.LinkKind(existing)==1;
-        if((symbolicLink&&!replaceFileAlias)||scope==OverwriteScope::SymbolicLink){
+        if(changeSpecialType){
+            Check(!symbolicLink&&!target.symbolicLink&&!p.LinkKind(existing)&&scope==OverwriteScope::SharedInode&&
+                  (!targetSpecial||(!target.forks[0].size&&!target.forks[1].size)),
+                  "Cannot replace this HFS+ entry with a different file type");
+            p.Mutable(target,false,false,false,true);
+        }else if((symbolicLink&&!replaceFileAlias)||scope==OverwriteScope::SymbolicLink){
             const auto& target=p.Get(existing);
             Check(!target.directory&&!p.LinkKind(existing),
                   "An HFS+ symbolic link cannot replace a directory");
@@ -1692,7 +1701,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         const auto& current=p.Get(existing);
         Check(!current.directory, "Cannot overwrite an HFS+ directory");
         p.RemovalParent(parent);
-        if(scope!=OverwriteScope::SharedInode||(symbolicLink&&!current.symbolicLink)){
+        if(changeSpecialType||scope!=OverwriteScope::SharedInode||(symbolicLink&&!current.symbolicLink)){
             // Publish the replacement entry and unlink the old name in the
             // same transaction. Other names of a shared inode stay intact.
             e.name=p.Get(visible).name;
