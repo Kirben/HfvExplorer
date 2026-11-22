@@ -381,6 +381,12 @@ public:
              true,[]{},&entry.attributes);
     }
     void Read(uint32_t id, unsigned fork, uint64_t offset, void* out, size_t bytes) override {
+        ReadStream(SessionCommandCode::Read,id,fork,offset,out,bytes);
+    }
+    void ReadCompressionResource(uint32_t id,uint64_t offset,void* out,size_t bytes) override {
+        ReadStream(SessionCommandCode::ReadStoredCompression,id,1,offset,out,bytes);
+    }
+    void ReadStream(SessionCommandCode command,uint32_t id,unsigned fork,uint64_t offset,void* out,size_t bytes) {
         auto output = static_cast<uint8_t*>(out);
         uint64_t generation=0;
         do {
@@ -390,7 +396,7 @@ public:
                 std::lock_guard<std::recursive_mutex> lock(mutex_);
                 Check(!generation || generation == generation_, "The mounted volume changed during a fork read");
                 generation=generation_;
-                Call(SessionCommandCode::Read,Protocol::Encode(Protocol::ReadRequest{id,fork,offset,count}),false,[&] {
+                Call(command,Protocol::Encode(Protocol::ReadRequest{id,fork,offset,count}),false,[&] {
                     auto packet = Response(SessionBytes);
                     Check(packet.bytes.size() == count, "Short volume session read");
                     if (count) memcpy(output, packet.bytes.data(), count);
@@ -678,7 +684,11 @@ uint32_t WriteStream(HANDLE input,HANDLE output,Volume& volume,Protocol::PutRequ
     if(source){
         const auto current=volume.Stat(source);
         Check(!current.directory && current.parent!=parent &&
-              current.forks[0].size==entry.forks[0].size && current.forks[1].size==entry.forks[1].size,
+              current.forks[0].size==entry.forks[0].size &&
+              (entry.WritesStoredCompressionResource()?
+                current.compressionResourceSize==entry.compressionResourceSize&&
+                current.resourceCompressionHeader==entry.resourceCompressionHeader:
+                current.forks[1].size==entry.forks[1].size),
               "The same-image fork source changed");
     }
     if (original) {
@@ -699,7 +709,9 @@ uint32_t WriteStream(HANDLE input,HANDLE output,Volume& volume,Protocol::PutRequ
         while (size) {
             const auto count = (std::min)(size, Protocol::ReadLimit);
             const auto localSource = source ? source : !fork ? original : 0;
-            if (localSource) volume.Read(localSource, fork, offset, buffer, count);
+            if(localSource&&fork==1&&source&&entry.WritesStoredCompressionResource())
+                volume.ReadCompressionResource(localSource,offset,buffer,count);
+            else if(localSource)volume.Read(localSource,fork,offset,buffer,count);
             Send(output,SessionReadRequest,Protocol::Encode(Protocol::ForkRange{fork,offset,count}));
             Data bytes;
             const auto reply=Receive(input,bytes);
@@ -751,11 +763,15 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
                 writeEntry(volume.Stat(request.id));
                 break;
             }
-            case SessionCommandCode::Read: {
+            case SessionCommandCode::Read:
+            case SessionCommandCode::ReadStoredCompression: {
                 const auto request=Protocol::DecodeRead(packet);
                 Data bytes;
                 bytes.bytes.resize(size_t(request.count));
-                volume.Read(request.id,request.fork,request.offset,bytes.bytes.data(),bytes.bytes.size());
+                if(command==SessionCommandCode::ReadStoredCompression){
+                    Check(request.fork==1,"Invalid stored compression request");
+                    volume.ReadCompressionResource(request.id,request.offset,bytes.bytes.data(),bytes.bytes.size());
+                }else volume.Read(request.id,request.fork,request.offset,bytes.bytes.data(),bytes.bytes.size());
                 Send(output, SessionBytes, std::move(bytes));
                 break;
             }

@@ -196,6 +196,10 @@ public:
             if(found!=attributes.end()&&found->second.size()<=HfsPlus::InlineCompressionLimit){
                 HfsPlus::Bytes bytes(found->second);
                 if(HfsPlus::IsInlineCompression(bytes,entry.forks[0].size))entry.inlineCompression=std::move(bytes);
+                else if(bytes.size()==16){
+                    entry.compressionResourceSize=volume_->CompressionResourceSize(id);
+                    if(entry.compressionResourceSize)entry.resourceCompressionHeader=std::move(bytes);
+                }
             }
         }
         return entry;
@@ -234,6 +238,9 @@ public:
     void Read(uint32_t id, unsigned fork, uint64_t offset, void *p, size_t n) override {
         Call call(*this);Ready(); Check(volume_->Read(id, fork, offset, p, n) == n, "Short Macintosh fork read");
     }
+    void ReadCompressionResource(uint32_t id,uint64_t offset,void* output,size_t count) override {
+        Call call(*this);Ready();volume_->ReadCompressionResource(id,offset,output,count);
+    }
     uint32_t MakeDirectory(uint32_t p, const std::u16string &s) override {
         return Mutate([&] { return volume_->MakeDirectory(p, s); });
     }
@@ -251,10 +258,13 @@ public:
                 if(!posix)posix=PosixMetadata{0,0,0644};
                 posix->protection|=PosixMetadata::UserImmutable;
             }
+            const bool storedResource=e.WritesStoredCompressionResource();
+            const auto* compressionBytes=storedResource?&e.resourceCompressionHeader:
+                e.compressed&&!e.inlineCompression.empty()?&e.inlineCompression:nullptr;
             return volume_->Put(parent,e.name,e.forks[0].size,e.forks[1].size,read,&e.finder,replace,nullptr,
                                 e.attributesKnown?&e.attributes:nullptr,compression,
                                 e.datesValid?&dates:nullptr,posix,e.hfsOverwriteScope,e.additionalDates,
-                                e.compressed&&!e.inlineCompression.empty()?&e.inlineCompression:nullptr);
+                                compressionBytes,storedResource);
         });
     }
     void Rename(uint32_t id, uint32_t p, const std::u16string &s) override {
@@ -438,8 +448,12 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
     if (job.cancelled()) throw Storage::Cancelled();
     if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
+    const bool storedResource=!plan.reader&&(hfsPlus||destinationKind=="APFS")&&entry.compressed&&
+                              entry.compressionResourceSize&&!entry.forks[1].size;
     uint64_t readThrough[2]={};
-    auto outgoing=entry;outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
+    auto outgoing=entry;
+    if(storedResource)outgoing.forks[1].size=entry.compressionResourceSize;
+    else {outgoing.compressionResourceSize=0;outgoing.resourceCompressionHeader.clear();}outgoing.expectedDestinationIdentity=found?existing.identity:EntryIdentity{};
     outgoing.hfsOverwriteScope=hfsScope;
     if(plan.linkTarget){
         dst.PutSymbolicLink(parent,outgoing,*plan.linkTarget,job);
@@ -450,7 +464,10 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     }
     const auto advance=[&](unsigned fork,uint64_t offset,size_t count){
         if(job.cancelled())throw Storage::Cancelled();
-        const auto end=offset+count;
+        // The stored stream is validated and copied separately from the logical forks.
+        const bool encodedFork=storedResource&&fork==1;
+        if(encodedFork)fork=0;
+        const auto end=encodedFork?(std::min)(offset+count,entry.forks[0].size):offset+count;
         const auto added=end>readThrough[fork]?end-readThrough[fork]:0;
         readThrough[fork]=(std::max)(readThrough[fork],end);
         progress.fileBytes+=added;
@@ -489,6 +506,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         Reader reader=[&](unsigned fork,uint64_t offset,void* p,size_t count){
             if(job.cancelled())throw Storage::Cancelled();
             if(plan.reader)plan.reader(fork,offset,p,count);
+            else if(storedResource&&fork==1)src.ReadCompressionResource(entry.id,offset,p,count);
             else src.Read(entry.id,fork,offset,p,count);
             advance(fork,offset,count);
         };

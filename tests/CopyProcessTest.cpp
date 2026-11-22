@@ -3479,9 +3479,17 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
         inputs.push_back(Native(apple,entry.id));
     }
 
+    Entry resourceEntry;
+    Check(source->FindChild(2,names[1],resourceEntry),"Missing source compression resource");
+    resourceEntry=source->Stat(resourceEntry.id);
+    Check(resourceEntry.compressionResourceSize&&resourceEntry.resourceCompressionHeader.size()==16,
+          "Missing raw decmpfs metadata on the source");
+    Bytes stored(size_t(resourceEntry.compressionResourceSize));
+    source->ReadCompressionResource(resourceEntry.id,0,stored.data(),stored.size());
     unsigned index=0;
+    std::wstring path;
     for(auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
-        const auto path=Wide(root+"\\compressed-destination-"+std::to_string(index++)+".dsk");
+        path=Wide(root+"\\compressed-destination-"+std::to_string(index++)+".dsk");
         {
             auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
             HfsPlus::Volume::Format(*disk,u"Compression destination",true,kind);
@@ -3524,7 +3532,15 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
             const auto header=attributes.find(u"com.apple.decmpfs");
             Check(header!=attributes.end(),"Destination has no decmpfs header");
             if(i==0)Check(header->second.size()>16,"Destination lost inline compression");
-            else if(i==1||appleInline.empty())Check(header->second.size()==16,"Destination lost resource compression");
+            else if(i==1){
+                Check(Bytes(header->second)==resourceEntry.resourceCompressionHeader&&
+                      reopened.CompressionResourceSize(entry.id)==stored.size(),
+                      "Destination re-encoded the resource compression header");
+                Bytes actual(stored.size());
+                reopened.ReadCompressionResource(entry.id,0,actual.data(),actual.size());
+                Check(actual==stored,"Destination re-encoded the stored compression resource");
+            }
+            else if(appleInline.empty())Check(header->second.size()==16,"Destination lost resource compression");
             else Check(Bytes(header->second)==appleInline,"Destination re-encoded the macOS inline stream");
             attributes.erase(header);
             if(i<names.size())Check(attributes==metadata,"Compression copy lost an ordinary extended attribute");
@@ -3537,6 +3553,40 @@ void TestApfsToHfsCompression(const std::string& root,FILE* report)
                       "Compressed copy changed macOS fixture bytes");
         }
     }
+    auto hfs=OpenBrowserImage(path);
+    Entry hfsEntry;
+    Check(hfs&&hfs->FindChild(2,names[1],hfsEntry),"Cannot reopen HFS compression source");
+    for(bool external:{false,true}){
+        if(external&&!fixture)continue;
+        const auto out=Wide(root+(external?"\\resource-compression-macos.img":"\\resource-compression-native.img"));
+        if(external)Check(CopyFileW(fixture,out.c_str(),TRUE)!=FALSE,"Cannot copy APFS fixture");
+        else{
+            auto disk=HfsPlus::CreateImage(out.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"Resource compression round trip",true,format);
+        }
+        auto target=OpenBrowserImage(out);
+        Check(target&&target->Supports().create&&target->Writable()!=external,"Wrong APFS compression writer");
+        Storage::Job job;
+        Completion completion;
+        const auto result=ExecuteInWorker(OrdinaryCopy{{Native(hfs,hfsEntry.id)},Native(target)},job,completion);
+        Check(!result.code&&completion.complete,result.message.c_str());
+        target.reset();
+        target=OpenBrowserImage(out);
+        Entry entry;
+        Check(target&&target->FindChild(2,names[1],entry)&&entry.compressed&&!entry.forks[1].size,
+              "APFS reopened the compression resource as a genuine resource fork");
+        entry=target->Stat(entry.id);
+        Check(entry.resourceCompressionHeader==resourceEntry.resourceCompressionHeader&&
+              entry.compressionResourceSize==stored.size(),"APFS re-encoded the compression resource header");
+        Bytes actual(stored.size());
+        target->ReadCompressionResource(entry.id,0,actual.data(),actual.size());
+        Check(actual==stored,"APFS re-encoded the stored compression resource");
+        Bytes logical(contents[1].size());
+        target->Read(entry.id,0,0,logical.data(),logical.size());
+        Check(logical==contents[1]&&target->GetAttributes(entry.id)==metadata,"Compression round trip changed file or metadata");
+    }
+    fprintf(report,"PASS: exact resource-backed compression bytes survive APFS to HFS Plus and back through both APFS writers.\n");
     if(apple)fprintf(report,"PASS: macOS-compressed APFS file copied into HFS+ and both HFSX variants.\n");
     fprintf(report,"PASS: APFS inline and resource-backed compression survived HFS+/HFSX copy, overwrite and reopen with exact bytes; cancelled overwrite retained both original forks.\n");
 }

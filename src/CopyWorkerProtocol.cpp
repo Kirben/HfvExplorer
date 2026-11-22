@@ -311,6 +311,8 @@ void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(e.inlineCompression.begin(),e.inlineCompression.end()));
+    d.put(std::string(e.resourceCompressionHeader.begin(),e.resourceCompressionHeader.end()));
+    d.put(e.compressionResourceSize);
     d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
     d.put(e.posix.has_value());
     if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);d.put(e.posix->protection);d.put(e.posix->flags);d.put(uint8_t(e.posix->special));d.put(e.posix->device);}
@@ -328,6 +330,12 @@ Entry DecodeEntry(Data& d) {
     Check(compression.empty()||(e.compressed&&compression.size()<=HfsPlus::InlineCompressionLimit),
           "Invalid inline compression metadata");
     e.inlineCompression.assign(compression.begin(),compression.end());
+    const auto resourceHeader=d.text();
+    e.compressionResourceSize=d.get();
+    Check(e.compressionResourceSize?(e.compressed&&compression.empty()&&resourceHeader.size()==16&&
+          (!e.forks[1].size||e.forks[1].size==e.compressionResourceSize)):resourceHeader.empty(),
+          "Invalid stored compression metadata");
+    e.resourceCompressionHeader.assign(resourceHeader.begin(),resourceHeader.end());
     auto finder=d.text();
     Check(finder.size()==e.finder.size(), "Invalid Finder metadata length");
     memcpy(e.finder.data(),finder.data(),finder.size());

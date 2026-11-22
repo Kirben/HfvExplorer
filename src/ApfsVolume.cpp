@@ -812,6 +812,13 @@ public:
                 Bytes bytes(size_t(found->second.size));
                 ReadAttribute(file.mount,found->second,0,bytes.data(),bytes.size());
                 if(IsInlineCompression(bytes,entry.forks[0].size))entry.inlineCompression=std::move(bytes);
+                else if(bytes.size()==16){
+                    const Compression descriptor(bytes,0,{});
+                    if(descriptor.UsesResource()){
+                        entry.compressionResourceSize=file.attributes.at(ResourceFork).size;
+                        entry.resourceCompressionHeader=std::move(bytes);
+                    }
+                }
             }
         }
         return entry;
@@ -955,6 +962,16 @@ public:
                 else out.emplace(pair.first,AttributeData(attr.embedded));
             }
             return out;
+        });
+    }
+    void ReadCompressionResource(uint32_t id,uint64_t at,void* data,size_t size)override{
+        Access([&]{
+            const auto entry=Stat(id);
+            const auto& file=At(id);
+            Check(entry.compressionResourceSize&&Range(at,size,entry.compressionResourceSize),
+                  "Invalid APFS compression resource range");
+            ReadAttribute(file.mount,file.attributes.at(ResourceFork),at,data,size);
+            return true;
         });
     }
     void Read(uint32_t id,unsigned fork,uint64_t at,void* data,size_t size)override{
@@ -1452,7 +1469,14 @@ public:
         std::optional<HfsPlus::EncodedCompression> encoded;
         const Bytes* compression=nullptr;
         const auto inlineLimit=InlineCompressionCapacity();
-        if(entry.compressed&&!entry.inlineCompression.empty()&&entry.inlineCompression.size()<=inlineLimit){
+        if(entry.WritesStoredCompressionResource()){
+            ValidateResourceCompression(entry.resourceCompressionHeader,entry.forks[0].size,entry.forks[1].size,
+                [&](uint64_t offset,void* bytes,size_t size){
+                    if(job.cancelled())throw Storage::Cancelled();
+                    reader(1,offset,bytes,size);
+                });
+            compression=&entry.resourceCompressionHeader;
+        }else if(entry.compressed&&!entry.inlineCompression.empty()&&entry.inlineCompression.size()<=inlineLimit){
             ValidateInlineCompression(entry.inlineCompression,entry.forks[0].size);
             compression=&entry.inlineCompression;
         }else if(entry.compressed){

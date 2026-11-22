@@ -235,6 +235,16 @@ void ValidateInlineCompression(const Bytes& bytes,uint64_t logicalSize) {
     uint8_t tail;
     if(logicalSize)decoder.Read(logicalSize-1,&tail,1);
 }
+void ValidateResourceCompression(const Bytes& header,uint64_t logicalSize,uint64_t resourceSize,
+                                 const std::function<void(uint64_t,void*,size_t)>& read) {
+    Compression decoder(header,resourceSize,read);
+    Check(decoder.UsesResource()&&decoder.Size()==logicalSize&&logicalSize&&resourceSize,
+          "Invalid resource compression in transfer");
+    // Reading one byte validates the corresponding complete decmpfs unit.
+    uint8_t byte;
+    for(uint64_t at=0;at<logicalSize;at+=65536)
+        decoder.Read(at,&byte,1);
+}
 Bytes Compression::Resource(uint64_t offset, size_t n) {
     Check(Range(offset, n, resourceSize_), "decmpfs resource offset outside fork");
     Bytes b(n);

@@ -1563,6 +1563,16 @@ std::optional<Bytes> Volume::SymbolicLinkTarget(uint32_t id) {
     ValidateSymbolicLinkTarget(target);
     return target;
 }
+uint64_t Volume::CompressionResourceSize(uint32_t id) {
+    p_->source.CheckMedia();
+    Check(p_->usable,"Reopen HFS+ image after error");
+    const auto target=p_->Resolve(id);
+    return p_->IsCompressed(target)&&p_->Compressed(target).UsesResource()?p_->Get(target).forks[1].size:0;
+}
+void Volume::ReadCompressionResource(uint32_t id,uint64_t offset,void* buffer,size_t count) {
+    Check(CompressionResourceSize(id)!=0,"File has no stored compression resource");
+    ForkRead(p_->view,p_->Get(p_->Resolve(id)).forks[1],p_->bs,offset,buffer,count);
+}
 uint64_t Volume::Read(uint32_t id, unsigned fork, uint64_t offset, void *buffer, size_t n) {
     p_->source.CheckMedia();
     Check(p_->usable, "Reopen HFS+ image after error");
@@ -1620,8 +1630,8 @@ uint32_t Volume::Put(uint32_t parent, const std::u16string &name, uint64_t dataS
                      std::function<void(unsigned, uint64_t, void *, size_t)> read,
                      const std::array<uint8_t, 32> *finder, bool overwrite, const std::array<uint32_t,2> *dates,
                      const Attributes *attributes, CompressionMode compression, const std::array<uint64_t,2>*wideDates,
-                     std::optional<PosixMetadata> posix,OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* inlineCompression) {
-    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope,additionalDates,inlineCompression);
+                     std::optional<PosixMetadata> posix,OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* storedCompression,bool storedResource) {
+    return PutFile(parent,name,dataSize,resourceSize,read,finder,overwrite,dates,attributes,compression,wideDates,posix,false,scope,additionalDates,storedCompression,storedResource);
 }
 void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const Bytes& target,
                              const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
@@ -1631,14 +1641,14 @@ void Volume::PutSymbolicLink(uint32_t parent,const std::u16string& name,const By
     // the target bytes in its data fork.
     PutFile(parent,name,target.size()-1,0,[&](unsigned,uint64_t at,void* out,size_t size){
         memcpy(out,target.data()+at,size);
-    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode,additionalDates,nullptr);
+    },&finder,replace,nullptr,&attributes,CompressionMode::Uncompressed,dates,posix,true,OverwriteScope::SharedInode,additionalDates,nullptr,false);
 }
 uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dataSize,uint64_t resourceSize,
                          const std::function<void(unsigned,uint64_t,void*,size_t)>& read,
                          const std::array<uint8_t,32>* finder,bool overwrite,
                          const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
                          const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
-                         OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* inlineCompression) {
+                         OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* storedCompression,bool storedResource) {
     auto &p = *p_;
     p.Guard();
     Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
@@ -1705,10 +1715,12 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
     std::unique_ptr<EncodedCompression> encoded;
-    if(inlineCompression){
-        Check(compression==CompressionMode::CopyCompressed,"Inline compression requires a compressed copy");
-        ValidateInlineCompression(*inlineCompression,dataSize);
-        desired[u"com.apple.decmpfs"]=*inlineCompression;
+    if(storedCompression){
+        Check(compression==CompressionMode::CopyCompressed,"Stored compression requires a compressed copy");
+        if(storedResource)ValidateResourceCompression(*storedCompression,dataSize,resourceSize,
+            [&](uint64_t offset,void* output,size_t size){read(1,offset,output,size);});
+        else ValidateInlineCompression(*storedCompression,dataSize);
+        desired[u"com.apple.decmpfs"]=*storedCompression;
     }
     auto method=compression==CompressionMode::CopyCompressed?CompressionMode::Zlib:compression;
     if(method==CompressionMode::Preserve&&e.compressed){
@@ -1717,7 +1729,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         auto a=oldAttribute.data()+4;uint32_t type=uint32_t(a[0])|uint32_t(a[1])<<8|uint32_t(a[2])<<16|uint32_t(a[3])<<24;
         method=type==3||type==4?CompressionMode::Zlib:type==7||type==8?CompressionMode::Lzvn:type==11||type==12?CompressionMode::Lzfse:type==13||type==14?CompressionMode::Lzbitmap:type==1&&dataSize<=3786?CompressionMode::StoredInline:CompressionMode::Stored;
     }
-    if(!inlineCompression&&method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
+    if(!storedCompression&&method!=CompressionMode::Preserve&&method!=CompressionMode::Uncompressed){
         encoded.reset(new EncodedCompression(dataSize,[&](uint64_t at,void* output,size_t n){read(0,at,output,n);},method,
             resourceSize?EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource));
         if(encoded->Attribute().empty()){
@@ -1727,7 +1739,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         }
     }
     if(encoded)desired[u"com.apple.decmpfs"]=encoded->Attribute();
-    const bool compressedOutput=encoded||inlineCompression;
+    const bool compressedOutput=encoded||storedCompression;
     if (finder)
         e.finder = *finder;
     if(symbolicLink)memcpy(e.finder.data(),"slnkrhap",8);

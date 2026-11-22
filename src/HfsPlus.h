@@ -102,6 +102,8 @@ class Volume {
                          const std::array<uint8_t,32>& finder,bool replace,const Attributes& attributes,
                          const std::array<uint64_t,2>* dates,std::optional<PosixMetadata> posix={},AdditionalFileDates additionalDates={});
     uint64_t Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t);
+    uint64_t CompressionResourceSize(uint32_t id);
+    void ReadCompressionResource(uint32_t id, uint64_t offset, void *, size_t);
     uint32_t MakeDirectory(uint32_t parent, const std::u16string &name, const Attributes *attributes = nullptr);
     enum class CompressionMode { Preserve, Uncompressed, Zlib, Lzvn, Lzfse, Lzbitmap, Stored, StoredInline, CopyCompressed };
     void SetCompression(uint32_t id,CompressionMode,std::function<void(uint64_t,uint64_t)> progress = {});
@@ -115,7 +117,7 @@ class Volume {
                  const std::array<uint8_t, 32> *finder = nullptr, bool overwrite = false,
                  const std::array<uint32_t,2> *dates = nullptr, const Attributes *attributes = nullptr, CompressionMode compression = CompressionMode::Preserve, const std::array<uint64_t,2> *wideDates = nullptr,
                  std::optional<PosixMetadata> posix = {},OverwriteScope scope=OverwriteScope::SharedInode,
-                 AdditionalFileDates additionalDates={}, const Bytes* inlineCompression=nullptr);
+                 AdditionalFileDates additionalDates={}, const Bytes* storedCompression=nullptr,bool storedResource=false);
     void SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* finder,
                               const std::array<uint64_t,2>* dates,const Attributes* attributes,
                               std::optional<PosixMetadata> posix = {},AdditionalFileDates additionalDates={});
@@ -144,7 +146,7 @@ class Volume {
                      const std::array<uint8_t,32>* finder,bool overwrite,
                      const std::array<uint32_t,2>* dates,const Attributes* attributes,CompressionMode compression,
                      const std::array<uint64_t,2>* wideDates,std::optional<PosixMetadata> posix,bool symbolicLink,
-                     OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* inlineCompression);
+                     OverwriteScope scope,AdditionalFileDates additionalDates,const Bytes* storedCompression,bool storedResource);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

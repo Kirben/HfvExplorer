@@ -26,7 +26,13 @@ struct Entry {
     bool directory = false, protectedFile = false, compressed = false, hardLink = false;
     std::string readError;
     Fork forks[2];
-    HfsPlus::Bytes inlineCompression; // Exact decmpfs bytes supplied by Stat for transfers.
+    HfsPlus::Bytes inlineCompression; // Exact inline decmpfs bytes supplied by Stat.
+    HfsPlus::Bytes resourceCompressionHeader;
+    uint64_t compressionResourceSize=0;
+    bool WritesStoredCompressionResource() const {
+        return compressed&&compressionResourceSize&&forks[1].size==compressionResourceSize&&
+               !resourceCompressionHeader.empty();
+    }
     std::array<uint8_t,32> finder{};
     uint64_t created = 0, modified = 0; // canonical seconds since 1904, including expanded dates
     HfsPlus::AdditionalFileDates additionalDates;
@@ -143,6 +149,9 @@ public:
     virtual std::string PropertiesDetails(uint32_t) { return {}; }
     virtual bool FindChild(uint32_t parent,const std::u16string& name,Entry& found){for(auto& e:List(parent))if(HfsPlus::CompareNames(e.name,name,CaseSensitive())==0){found=e;return true;}return false;}
     virtual void Read(uint32_t id, unsigned fork, uint64_t offset, void *, size_t) = 0;
+    virtual void ReadCompressionResource(uint32_t, uint64_t, void*, size_t) {
+        throw HfsPlus::Error("This volume cannot read a stored compression resource");
+    }
     virtual bool FindTransferChild(uint32_t parent,const Entry& entry,Entry& found){return FindChild(parent,entry.name,found);}
     virtual bool GetClassicProperties(uint32_t, hfsdirent&) { return false; }
     virtual void SetClassicProperties(uint32_t, const hfsdirent&) { throw HfsPlus::Error("Classic Finder properties are unavailable"); }

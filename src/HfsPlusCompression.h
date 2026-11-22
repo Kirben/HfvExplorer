@@ -8,6 +8,8 @@ namespace HfsPlus {
 inline constexpr size_t InlineCompressionLimit = 3802;
 bool IsInlineCompression(const Bytes&, uint64_t logicalSize);
 void ValidateInlineCompression(const Bytes&, uint64_t logicalSize);
+void ValidateResourceCompression(const Bytes&, uint64_t logicalSize, uint64_t resourceSize,
+                                 const std::function<void(uint64_t,void*,size_t)>& read);
 
 class EncodedCompression {
 public:
