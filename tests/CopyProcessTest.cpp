@@ -8,6 +8,7 @@
 #include "ApfsWriteDisk.h"
 #include "ApfsVolume.h"
 #include "HfsPlusDisk.h"
+#include "HfsPlusTime.h"
 #include "HfsPlusCompression.h"
 #include "VolumeSession.h"
 #include "VolumeSessionProtocol.h"
@@ -2476,6 +2477,141 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
     fprintf(report,"PASS: APFS immutable overwrite and new hard-link copies keep HFS+/HFSX locks and both forks after reopening; cancellation preserves the original.\n");
 }
 
+void TestCrossFormatTimestamps(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    using Dates=std::array<uint64_t,2>;
+    constexpr auto epoch=HfsPlus::Time::Epoch, maximum=HfsPlus::Time::Maximum;
+    const Dates legacy{0,UINT32_MAX}, expanded{epoch,maximum};
+    const Dates tooLate{epoch,maximum+1}, fractional{epoch-1,epoch};
+    const Dates original{epoch+10,epoch+20};
+    const auto formatApfs=[](const std::wstring& path){
+        auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Timestamp transfer",true,job);
+    };
+    const auto dated=[](Volume& volume,const std::u16string& name,const Dates& dates,BYTE seed){
+        Entry entry;
+        entry.name=name;
+        entry.datesValid=true;
+        entry.created=dates[0];
+        entry.modified=dates[1];
+        entry.finder[0]=42;
+        entry.forks[0].size=5003;
+        entry.forks[1].size=173;
+        return volume.Put(2,entry,[seed](unsigned fork,uint64_t at,void* output,size_t count){
+            auto* bytes=static_cast<BYTE*>(output);
+            for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+seed);
+        },false);
+    };
+    const auto verify=[](Volume& volume,const std::u16string& name,const Dates& dates,BYTE seed){
+        Entry entry;
+        Check(volume.FindChild(2,name,entry)&&entry.datesValid&&entry.created==dates[0]&&entry.modified==dates[1],
+              "Creation or modification timestamp changed after reopening");
+        Verify(volume,entry.id,5003,seed);
+        return entry;
+    };
+    const auto sourcePath=Wide(root+"\\timestamp-apfs-source.img");
+    formatApfs(sourcePath);
+    {
+        auto source=OpenBrowserImage(sourcePath);
+        Check(bool(source),"Cannot open APFS timestamp source");
+        dated(*source,u"Legacy limits",legacy,47);
+        dated(*source,u"Expanded limits",expanded,48);
+        dated(*source,u"Too late",tooLate,49);
+        dated(*source,u"Fractional",Dates{epoch,epoch},50);
+    }
+    EditApfsFixtureLeaf(sourcePath,[](const auto& node,const auto* base,auto& leaf){
+        unsigned changed=0;
+        for(size_t i=0;i<node.Count();++i){
+            const auto record=node.At(i);
+            if(record.key.size!=8||Apfs::Le64(record.key.data)>>60!=3||record.value.size<84||
+               (Apfs::Le16(record.value.data+80)&0170000)!=0100000||
+               Apfs::Le64(record.value.data+16)||Apfs::Le64(record.value.data+24))continue;
+            auto* fields=leaf.data()+(record.value.data-base);
+            Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+16,UINT64_MAX,8); // -1 ns
+            Apfs::WriterDisk::Set(leaf,size_t(fields-leaf.data())+24,1,8);
+            ++changed;
+        }
+        Check(changed==1,"Expected exactly one fractional timestamp fixture");
+    });
+    auto source=OpenBrowserImage(sourcePath);
+    Check(bool(source),"Cannot reopen APFS date fixture");
+    verify(*source,u"Legacy limits",legacy,47);
+    verify(*source,u"Expanded limits",expanded,48);
+    verify(*source,u"Too late",tooLate,49);
+    verify(*source,u"Fractional",fractional,50);
+
+    const auto transfer=[](const std::shared_ptr<Volume>& from,const std::shared_ptr<Volume>& to,
+                           const std::vector<std::u16string>& names,bool cut,unsigned& prompts){
+        std::vector<Location> inputs;
+        for(const auto& name:names){
+            Entry entry;
+            Check(from->FindChild(2,name,entry),"Missing timestamp transfer source");
+            auto location=Native(from,entry.id);
+            location.cut=cut;
+            inputs.push_back(std::move(location));
+        }
+        Storage::Job job;
+        job.transport({},[&](const auto&){++prompts;return Storage::ConflictChoice::Replace;});
+        Completion completion;
+        return ExecuteInWorker(OrdinaryCopy{inputs,Native(to)},job,completion);
+    };
+    unsigned index=0;
+    for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
+        for(const bool wide:{false,true}){
+            const auto base=root+"\\timestamp-copy-"+std::to_string(index++);
+            const auto hfsPath=Wide(base+".dsk");
+            {
+                auto disk=HfsPlus::CreateImage(hfsPath.c_str(),16*1024*1024);
+                HfsPlus::Volume::Format(*disk,u"Timestamp transfer",true,kind,wide);
+            }
+            const auto* valid=wide?u"Expanded limits":u"Legacy limits";
+            const auto* invalid=wide?u"Too late":u"Expanded limits";
+            const auto validDates=wide?expanded:legacy;
+            const BYTE seed=wide?48:47;
+            auto hfs=OpenBrowserImage(hfsPath);
+            Check(bool(hfs),"Cannot open HFS date destination");
+            dated(*hfs,valid,original,32);
+            dated(*hfs,invalid,original,33);
+            unsigned prompts=0;
+            const auto rejected=transfer(source,hfs,{invalid},true,prompts);
+            Check(rejected.outcome==Storage::Outcome::Failed&&!rejected.partial&&!rejected.moved&&!prompts,
+                  "Unrepresentable date should fail preflight before overwrite or source removal");
+            hfs.reset();
+            source.reset();
+            hfs=OpenBrowserImage(hfsPath);
+            source=OpenBrowserImage(sourcePath);
+            Check(hfs&&source,"Cannot reopen rejected timestamp transfer");
+            verify(*hfs,invalid,original,33);
+            verify(*source,invalid,wide?tooLate:expanded,wide?49:48);
+            const auto copied=transfer(source,hfs,wide?std::vector<std::u16string>{valid}:
+                                                       std::vector<std::u16string>{valid,u"Fractional"},false,prompts);
+            Check(!copied.code&&prompts==1,copied.message.c_str());
+            hfs.reset();
+            hfs=OpenBrowserImage(hfsPath);
+            Check(bool(hfs),"Cannot reopen timestamp-rich HFS copy");
+            verify(*hfs,valid,validDates,seed);
+            if(!wide)verify(*hfs,u"Fractional",fractional,50);
+
+            const auto apfsPath=Wide(base+".img");
+            formatApfs(apfsPath);
+            auto apfs=OpenBrowserImage(apfsPath);
+            Check(bool(apfs),"Cannot open APFS timestamp destination");
+            dated(*apfs,valid,original,34);
+            const auto returned=transfer(hfs,apfs,wide?std::vector<std::u16string>{valid}:
+                                                        std::vector<std::u16string>{valid,u"Fractional"},false,prompts);
+            Check(!returned.code&&prompts==2,returned.message.c_str());
+            apfs.reset();
+            apfs=OpenBrowserImage(apfsPath);
+            Check(bool(apfs),"Cannot reopen APFS timestamp copy");
+            verify(*apfs,valid,validDates,seed);
+            if(!wide)verify(*apfs,u"Fractional",fractional,50);
+        }
+    }
+    fprintf(report,"PASS: APFS and HFS+/HFSX boundary timestamps and both forks survive copies and overwrites after reopening. Invalid cut/paste preserves the source and destination. Fractional dates floor to whole seconds.\n");
+}
+
 void TestSparseApfsCopy(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -2931,6 +3067,7 @@ int RunCopyProcessTest(const char *directory) {
     int result = 0;
     CopyProcess::enabled = true;
     try {
+        TestCrossFormatTimestamps(root,report);
         TestWorkerTransport();
         TestVolumeSessionProtocol();
         TestHfsToApfsPosix(root,report);

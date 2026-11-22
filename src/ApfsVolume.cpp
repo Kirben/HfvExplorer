@@ -39,7 +39,11 @@ std::u16string Name(const uint8_t* bytes,size_t size)
 }
 uint64_t Date(const uint8_t* p)
 {
-    return uint64_t(int64_t(Le64(p))/1000000000+2082844800);
+    constexpr int64_t NanosecondsPerSecond=1000000000;
+    const auto timestamp=int64_t(Le64(p));
+    const auto seconds=timestamp/NanosecondsPerSecond;
+    // Floor fractional instants on either side of the Unix epoch.
+    return uint64_t(seconds-(timestamp%NanosecondsPerSecond<0)+2082844800);
 }
 struct Mounted {
     uint64_t oid,xid,map,tree;
