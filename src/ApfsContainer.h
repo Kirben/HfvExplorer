@@ -40,6 +40,8 @@ struct CloneUnavailable : HfsPlus::Error {
 using FinderBytes=std::array<uint8_t,32>;
 inline constexpr uint32_t UserImmutable=0x00000002,SystemImmutable=0x00020000;
 inline constexpr uint32_t UserAppendOnly=0x00000004,SystemAppendOnly=0x00040000;
+inline constexpr uint32_t NoDump=0x00000001,Opaque=0x00000008,Archived=0x00010000;
+inline constexpr uint32_t BsdHintMask=NoDump|Opaque|Archived;
 inline constexpr uint32_t AppendOnlyMask=UserAppendOnly|SystemAppendOnly;
 inline constexpr uint32_t WriteProtectionMask=UserImmutable|SystemImmutable|AppendOnlyMask;
 inline uint32_t CopiedProtectionFlags(const std::optional<PosixMetadata>& posix)

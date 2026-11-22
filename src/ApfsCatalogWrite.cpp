@@ -33,6 +33,10 @@ void SetPosixMetadata(Bytes& inode,const std::optional<PosixMetadata>& metadata)
     Set(inode,72,metadata->uid,4);
     Set(inode,76,metadata->gid,4);
     Set(inode,80,(Le16(inode.data()+80)&0170000)|metadata->mode,2);
+    const uint32_t hints=((metadata->flags&PosixMetadata::NoDump)?NoDump:0)|
+                         ((metadata->flags&PosixMetadata::Opaque)?Opaque:0)|
+                         ((metadata->flags&PosixMetadata::Archived)?Archived:0);
+    Set(inode,68,(Le32(inode.data()+68)&~BsdHintMask)|hints,4);
 }
 
 void SetAdditionalDates(Bytes& inode,const HfsPlus::AdditionalFileDates& dates)
@@ -765,9 +769,9 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
                                                     uint32_t(count),size,finder?&*finder:nullptr);
                     SetResourceFlag(expected.value,link->second.resourceRecord.has_value());
                     if(hasSecurity)Set(expected.value,48,Le64(expected.value.data()+48)|HasSecurityAttribute,8);
-                    Set(expected.value,68,Le32(value+68)&WriteProtectionMask,4);
                     SetPosixMetadata(expected.value,PosixMetadata{
                         Le32(value+72),Le32(value+76),uint16_t(Le16(value+80)&PosixMetadata::ModeMask)});
+                    Set(expected.value,68,Le32(value+68)&(WriteProtectionMask|BsdHintMask),4);
                     const auto compression=link->second.compressionRecord;
                     if(compression){
                         Check(!size,"Compressed APFS files cannot have a data stream");
@@ -903,7 +907,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         records.insert(records.begin()+insertAt,std::move(added));
         records.push_back(WriterDisk::Inode(name,entryId,time,parent,isDirectory?0040755:symlink?0120777:0100644,isDirectory?0:1,dataSize,create->finder));
         SetPosixMetadata(records.back().value,create->posix);
-        if(create->locked)Set(records.back().value,68,CopiedProtectionFlags(create->posix),4);
+        if(create->locked)Set(records.back().value,68,Le32(records.back().value.data()+68)|CopiedProtectionFlags(create->posix),4);
         if(create->attributes)SetSecurityFlag(records.back().value,*create->attributes);
         copyDates(records.back().value);
         auto attributes=EncodeAttributes(entryId,create->attributes,resourceWrite,streams);
@@ -1080,7 +1084,7 @@ std::vector<OwnedRecord> EditCatalog(std::vector<OwnedRecord> records,const Cata
         Set(updated.value,32,time,8);
         if(replace){
             SetPosixMetadata(updated.value,replace->posix);
-            if(replace->locked)Set(updated.value,68,bsdFlags|CopiedProtectionFlags(replace->posix),4);
+            if(replace->locked)Set(updated.value,68,Le32(updated.value.data()+68)|CopiedProtectionFlags(replace->posix),4);
             if(!replace->preserveDates){
                 Set(updated.value,24,time,8);
                 copyDates(updated.value);
@@ -1999,7 +2003,7 @@ void ReplaceExternalSymlink(std::vector<OwnedRecord>& catalog,const CatalogRepla
     SetExternalFinderInfo(value,edit.finder);
     SetSecurityFlag(value,edit.attributes);
     SetPosixMetadata(value,edit.posix);
-    if(edit.locked)Set(value,68,flags|CopiedProtectionFlags(edit.posix),4);
+    if(edit.locked)Set(value,68,Le32(value.data()+68)|CopiedProtectionFlags(edit.posix),4);
     Set(value,24,edit.dates?CatalogTimestamp(edit.dates->modified):time,8);
     Set(value,32,time,8);
     if(edit.dates){
@@ -2977,7 +2981,7 @@ CatalogWritePlan PrepareCatalogMutation(
             SetAdditionalDates(inode.value,dates->additionalDates);
         }
         SetPosixMetadata(inode.value,create->posix);
-        if(create->locked)Set(inode.value,68,CopiedProtectionFlags(create->posix),4);
+        if(create->locked)Set(inode.value,68,Le32(inode.value.data()+68)|CopiedProtectionFlags(create->posix),4);
         if(clone){
             constexpr uint64_t wasCloned=0x10,wasEverCloned=0x400;
             Set(inode.value,48,Le64(inode.value.data()+48)|wasCloned|wasEverCloned,8);

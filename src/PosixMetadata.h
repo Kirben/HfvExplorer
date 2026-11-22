@@ -11,8 +11,10 @@ struct PosixMetadata {
     uint16_t mode; // Permission and special bits, with the file type stored separately.
 
     uint8_t protection = 0;
+    static constexpr uint8_t NoDump=1, Opaque=2, Archived=4, HintMask=NoDump|Opaque|Archived;
+    uint8_t flags = 0;
 
     bool operator==(const PosixMetadata& other) const {
-        return uid == other.uid && gid == other.gid && mode == other.mode && protection == other.protection;
+        return uid == other.uid && gid == other.gid && mode == other.mode && protection == other.protection && flags == other.flags;
     }
 };

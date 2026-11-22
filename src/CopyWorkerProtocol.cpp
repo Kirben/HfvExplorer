@@ -309,7 +309,7 @@ void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(reinterpret_cast<const char*>(e.finder.data()), e.finder.size()));
     d.put(e.posix.has_value());
-    if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);d.put(e.posix->protection);}
+    if(e.posix){d.put(e.posix->uid);d.put(e.posix->gid);d.put(e.posix->mode);d.put(e.posix->protection);d.put(e.posix->flags);}
 }
 Entry DecodeEntry(Data& d) {
     Entry e;
@@ -329,7 +329,9 @@ Entry DecodeEntry(Data& d) {
         Check(mode<=PosixMetadata::ModeMask,"Invalid POSIX permissions in worker metadata");
         const auto protection=d.get();
         Check(protection<=PosixMetadata::ProtectionMask,"Invalid BSD protection flags");
-        e.posix=PosixMetadata{uid,gid,uint16_t(mode),uint8_t(protection)};
+        const auto flags=d.get();
+        Check(flags<=PosixMetadata::HintMask,"Invalid BSD metadata flags");
+        e.posix=PosixMetadata{uid,gid,uint16_t(mode),uint8_t(protection),uint8_t(flags)};
     }
     return e;
 }

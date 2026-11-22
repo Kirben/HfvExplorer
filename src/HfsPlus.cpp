@@ -476,7 +476,10 @@ struct Volume::Impl {
                                       uint8_t(((r.value[41]&2)?PosixMetadata::UserImmutable:0)|
                                               ((r.value[40]&2)?PosixMetadata::SystemImmutable:0)|
                                               ((r.value[41]&4)?PosixMetadata::UserAppendOnly:0)|
-                                              ((r.value[40]&4)?PosixMetadata::SystemAppendOnly:0))};
+                                              ((r.value[40]&4)?PosixMetadata::SystemAppendOnly:0)),
+                                      uint8_t(((r.value[41]&1)?PosixMetadata::NoDump:0)|
+                                              ((r.value[41]&8)?PosixMetadata::Opaque:0)|
+                                              ((r.value[40]&1)?PosixMetadata::Archived:0))};
             e.compressed = !e.directory && (r.value[41] & 0x20);
             e.id = U32(r.value.data() + 8);
             e.created = Time::Decode(U32(r.value.data() + 12),(U16(r.value.data()+2)&0x1000)!=0);
@@ -790,7 +793,7 @@ struct Volume::Impl {
         const bool expanded=(U16(dates+2)&0x1000)!=0;
         result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
         const auto type=U16(dates+42)&0170000;
-        if(!result.directory&&(type==0010000||type==0020000||type==0060000||type==0140000))
+        if(!result.directory&&(type==0010000||type==0020000||type==0060000||type==0140000||type==0160000))
             result.readError="HFS+/HFSX special files cannot be copied";
         const bool catalogLocked=!result.directory&&(U16(dates+2)&1);
         if(catalogLocked&&result.posix)result.posix->protection|=PosixMetadata::UserImmutable;
@@ -1598,10 +1601,13 @@ static void SetPosixMetadata(Bytes& record, const PosixMetadata& metadata)
 {
     P32(record.data()+32,metadata.uid);
     P32(record.data()+36,metadata.gid);
-    record[40]=uint8_t((record[40]&~6)|((metadata.protection&PosixMetadata::SystemImmutable)?2:0)|
-                       ((metadata.protection&PosixMetadata::SystemAppendOnly)?4:0));
-    record[41]=uint8_t((record[41]&~6)|((metadata.protection&PosixMetadata::UserImmutable)?2:0)|
-                       ((metadata.protection&PosixMetadata::UserAppendOnly)?4:0));
+    record[40]=uint8_t((record[40]&~7)|((metadata.protection&PosixMetadata::SystemImmutable)?2:0)|
+                       ((metadata.protection&PosixMetadata::SystemAppendOnly)?4:0)|
+                       ((metadata.flags&PosixMetadata::Archived)?1:0));
+    record[41]=uint8_t((record[41]&~15)|((metadata.protection&PosixMetadata::UserImmutable)?2:0)|
+                       ((metadata.protection&PosixMetadata::UserAppendOnly)?4:0)|
+                       ((metadata.flags&PosixMetadata::NoDump)?1:0)|
+                       ((metadata.flags&PosixMetadata::Opaque)?8:0));
     const auto type=U16(record.data()+42)&0170000;
     P16(record.data()+42,uint16_t(type|metadata.mode));
 }

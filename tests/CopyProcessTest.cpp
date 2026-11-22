@@ -2783,6 +2783,12 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
     };
     lock(single);
     lock(original);
+    Entry opaque;
+    opaque.directory=true;
+    opaque.name=u"Opaque directory";
+    opaque.posix=PosixMetadata{123,456,0755,0,PosixMetadata::Opaque};
+    const auto opaqueId=source->MakeDirectoryWithAttributes(2,opaque);
+    Put(*source,opaqueId,u"Child",4097,65);
     source.reset();
     // Use both append-only flags, independently of immutability, on the single fixture file.
     EditApfsFixtureLeaf(sourcePath,[](const auto& node,const auto* base,auto& leaf){
@@ -2793,8 +2799,8 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
                !(Apfs::Le32(record.value.data+68)&Apfs::UserImmutable))continue;
             auto* flags=leaf.data()+size_t(record.value.data-base)+68;
             const auto single=Apfs::Le32(record.value.data+56)==1;
-            flags[0]=single?4:2;
-            flags[2]=single?4:2;
+            flags[0]=(single?4:2)|1;
+            flags[2]=(single?4:2)|1;
             ++patched;
         }
         Check(patched==2,"Expected a single file and a hard-link inode");
@@ -2811,6 +2817,10 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
               "Missing APFS immutable fixture");
         inputs.push_back(Native(source,file.id));
     }
+    Entry opaqueSource;
+    Check(source->FindChild(2,opaque.name,opaqueSource)&&opaqueSource.posix&&
+          opaqueSource.posix->flags==PosixMetadata::Opaque&&!opaqueSource.protectedFile,
+          "Incorrect APFS opaque-directory fixture");
     unsigned index=0;
     for(const auto kind:{Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive}){
         const auto path=Wide(root+"\\immutable-hfs-"+std::to_string(index++)+".dsk");
@@ -2846,17 +2856,31 @@ void TestApfsImmutableCopy(const std::string& root,FILE* report)
             Check(source->FindChild(2,names[i],origin),"Missing immutable source during verification");
             Entry entry;
             Check(target->FindChild(2,origin.name,entry)&&entry.protectedFile&&entry.posix&&
-                  entry.posix->protection==origin.posix->protection,"Copy lost immutable flags after reopening");
+                  entry.posix->protection==origin.posix->protection&&
+                  entry.posix->flags==(PosixMetadata::NoDump|PosixMetadata::Archived),
+                  "Copy lost BSD flags after reopening");
             Verify(*target,entry.id,i?8303:7901,i?25:24);
             if(i==1)inode=entry.resolvedId;
             if(i)Check(entry.hardLink&&entry.resolvedId==inode&&entry.linkCount==2,
                        "Copied locked names do not share an inode");
             bool refused=false;
             try{target->Remove(entry.id);}catch(const std::exception&){refused=true;}
-            Check(refused,"HFS allowed deletion of an immutable entry");
+            Check(refused,"HFS allowed deletion of a protected entry");
         }
+        Storage::Job job;
+        Completion completion;
+        const auto folderCopy=ExecuteInWorker(OrdinaryCopy{{Native(source,opaqueSource.id)},Native(target)},job,completion);
+        Check(!folderCopy.code,folderCopy.message.c_str());
+        target.reset();
+        target=OpenBrowserImage(path);
+        Entry folder,child;
+        Check(target&&target->FindChild(2,opaque.name,folder)&&folder.posix&&
+              folder.posix->flags==PosixMetadata::Opaque&&!folder.protectedFile&&
+              target->FindChild(folder.id,u"Child",child),"Opaque directory changed after reopening");
+        Verify(*target,child.id,4097,65);
+        target->Rename(folder.id,2,u"Opaque renamed");
     }
-    fprintf(report,"PASS: APFS append-only overwrite and new immutable hard-link copies keep HFS+/HFSX protection and both forks after reopening; cancellation preserves the original.\n");
+    fprintf(report,"PASS: APFS append-only overwrite and new immutable hard-link copies keep HFS+/HFSX BSD protection, no-dump, archived and both forks after reopening; cancellation preserves the original.\n");
 }
 
 void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
@@ -2882,14 +2906,14 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
                     for(size_t i=0;i<count;++i)bytes[i]=BYTE((at+i)*7+fork*13+seed);
                 },&finder,false,nullptr,nullptr,flags==both?HfsPlus::Volume::CompressionMode::Zlib:
                                                           HfsPlus::Volume::CompressionMode::Uncompressed,
-                nullptr,PosixMetadata{123,456,0644,flags});
+                nullptr,PosixMetadata{123,456,0644,flags,PosixMetadata::NoDump|PosixMetadata::Archived});
             };
             put(names[0],77,system);
             const auto member=put(names[1],78,both);
             volume.MakeHardLink(member,2,names[2],false,true);
             const auto folder=volume.MakeDirectory(2,names[3]);
             volume.MakeDirectory(folder,u"Child");
-            volume.SetDirectoryMetadata(folder,nullptr,nullptr,nullptr,PosixMetadata{123,456,0755,system});
+            volume.SetDirectoryMetadata(folder,nullptr,nullptr,nullptr,PosixMetadata{123,456,0755,system,PosixMetadata::Opaque});
         }
         auto source=OpenBrowserImage(sourcePath);
         Check(bool(source),"Cannot reopen HFS system-lock fixture");
@@ -2939,8 +2963,9 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
             uint32_t inode=0;
             for(size_t i=0;i<ARRAYSIZE(names);++i){
                 Check(target->FindChild(2,names[i],current)&&current.protectedFile&&current.posix&&
-                      current.posix->protection==(i==1||i==2?both:system),
-                      "APFS copy lost the exact immutable flags after reopening");
+                      current.posix->protection==(i==1||i==2?both:system)&&
+                      current.posix->flags==(i==3?PosixMetadata::Opaque:(PosixMetadata::NoDump|PosixMetadata::Archived)),
+                      "APFS copy lost exact BSD flags after reopening");
                 if(i==3){
                     Entry child;
                     Check(current.directory&&target->FindChild(current.id,u"Child",child),
@@ -2957,7 +2982,7 @@ void TestHfsSystemImmutableToApfs(const std::string& root,FILE* report)
             }
         }
     }
-    fprintf(report,"PASS: HFS+/HFSX append-only and combined protection flags survive APFS copy, overwrite, hard-link creation and reopen; cancelling preserves the original destination.\n");
+    fprintf(report,"PASS: HFS+/HFSX BSD protection, no-dump, archived and opaque flags survive APFS copy, overwrite, hard-link creation and reopen; cancelling preserves the original destination.\n");
     if(macos)fprintf(report,"PASS: system-immutable copies also passed on the macOS APFS compatibility writer.\n");
 }
 

@@ -284,7 +284,10 @@ Inode ReadInode(const Catalog& catalog,uint64_t oid)
                                      uint8_t(((Le32(p+68)&UserImmutable)?PosixMetadata::UserImmutable:0)|
                                              ((Le32(p+68)&SystemImmutable)?PosixMetadata::SystemImmutable:0)|
                                              ((Le32(p+68)&UserAppendOnly)?PosixMetadata::UserAppendOnly:0)|
-                                             ((Le32(p+68)&SystemAppendOnly)?PosixMetadata::SystemAppendOnly:0))};
+                                             ((Le32(p+68)&SystemAppendOnly)?PosixMetadata::SystemAppendOnly:0)),
+                                     uint8_t(((Le32(p+68)&NoDump)?PosixMetadata::NoDump:0)|
+                                             ((Le32(p+68)&Opaque)?PosixMetadata::Opaque:0)|
+                                             ((Le32(p+68)&Archived)?PosixMetadata::Archived:0))};
         entry.linkCount=entry.directory?1:Le32(p+56);
         entry.hardLink=entry.linkCount>1;
         entry.compressed=(Le32(p+68)&0x20)!=0;
