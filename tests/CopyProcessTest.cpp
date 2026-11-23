@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include <future>
+#include "ClassicCopyArchive.h"
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -2566,6 +2567,140 @@ void TestMfsTransferVersions(const std::string& root,FILE* report)
     fprintf(report,"PASS: ordinary MFS copies preserve distinct versions, identify the precise overwrite and reject nonzero versions on versionless targets before prompting or deleting; version zero still exports.\n");
 }
 
+void TestClassicMetadataCompanion(FILE* report)
+{
+    Entry source;
+    source.datesValid=true;
+    source.created=2082844800;
+    source.modified=2082844811;
+    source.additionalDates={2082844822,2082844833,2082844844};
+    source.apfsTimestamps=std::array<uint64_t,4>{1,11000000003,33000000005,22000000007};
+    source.posix=PosixMetadata{501,20,0750,PosixMetadata::UserImmutable,PosixMetadata::NoDump};
+    source.attributes[u"user.empty"]={};
+    source.attributes[u"user.large"]=HfsPlus::AttributeData::Snapshot(1024*1024+9,
+        [](uint64_t at,void* out,size_t count){
+            auto* bytes=static_cast<uint8_t*>(out);
+            for(size_t i=0;i<count;++i)bytes[i]=uint8_t((at+i)*13);
+        });
+    ClassicCopyArchive::Digest binding{};
+    binding[0]=12;
+    Storage::Job job;
+    const auto stored=ClassicCopyArchive::Encode(source,binding,job);
+    const auto restored=ClassicCopyArchive::Decode(stored,binding,job);
+    Check(restored&&restored->attributes==source.attributes&&restored->posix==source.posix&&
+          restored->apfsTimestamps==source.apfsTimestamps&&restored->created==source.created&&
+          restored->modified==source.modified&&restored->additionalDates.backup==source.additionalDates.backup,
+          "Classic companion lost source metadata");
+    auto stale=binding;
+    ++stale.front();
+    Check(!ClassicCopyArchive::Decode(stored,stale,job),"Stale classic companion was accepted");
+    uint8_t byte=0;
+    stored.Read(stored.size()-33,&byte,1);
+    const auto corrupted=stored.Patch(stored.size()-33,{uint8_t(byte^1)});
+    bool rejected=false;
+    try{ClassicCopyArchive::Decode(corrupted,binding,job);}catch(const HfsPlus::Error&){rejected=true;}
+    Check(rejected,"Corrupted classic companion was accepted");
+    fprintf(report,"PASS: classic metadata companion streams attributes and validates object binding and payload checksum.\n");
+}
+
+void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
+{
+    const auto base=root+"\\classic-archive";
+    const auto format=[&](const std::wstring& path){
+        auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+        Storage::Job job;
+        Apfs::Format(*disk,u"Classic archive test",true,job);
+    };
+    const auto sourcePath=Wide(base+"-source.img");
+    format(sourcePath);
+    auto source=OpenBrowserImage(sourcePath);
+    auto classic=ClassicImage(base+".dsk");
+    Check(source&&classic,"Cannot mount classic archive test fixtures");
+    Entry folder;
+    folder.name=u"Archived folder";
+    folder.directory=true;
+    folder.attributes[u"user.folder"]={7,1};
+    const auto folderId=source->MakeDirectoryWithAttributes(2,folder);
+    Entry file;
+    file.name=u"Archived file";
+    file.posix=PosixMetadata{501,20,0740,0,PosixMetadata::NoDump};
+    file.datesValid=true;
+    file.created=2082844800;
+    file.modified=2082844811;
+    file.additionalDates={2082844822,2082844833};
+    file.apfsTimestamps=std::array<uint64_t,4>{1,11000000003,33000000005,22000000007};
+    file.attributes[u"user.file"]={4,2};
+    HfsPlus::Bytes acl(68);
+    HfsPlus::Disk::P32(acl.data(),0x012cc16d);
+    acl[4]=1;
+    HfsPlus::Disk::P32(acl.data()+36,1);
+    acl[44]=2;
+    HfsPlus::Disk::P32(acl.data()+60,1);
+    HfsPlus::Disk::P32(acl.data()+64,2);
+    file.attributes[u"com.apple.system.Security"]=acl;
+    file.attributesKnown=true;
+    file.forks[0].size=4097;
+    file.forks[1].size=173;
+    const auto input=source->Put(folderId,file,[](unsigned fork,uint64_t at,void* out,size_t count){
+        auto* bytes=static_cast<uint8_t*>(out);
+        for(size_t i=0;i<count;++i)bytes[i]=uint8_t(at+i+fork);
+    },false);
+    const auto original=source->Stat(input);
+    auto archive=Submit(OrdinaryCopy{{Native(source,folderId)},Native(classic)});
+    Conflict(archive);
+    const auto prompt=archive.Job()->conflictState();
+    Check(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss,"Archive copy prompt missing");
+    archive.Job()->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+    Wait(archive);
+    auto archived=archive.Job()->result();
+    Check(!archived.code&&archive.Snapshot().complete,archived.message.c_str());
+    classic.reset();
+    classic=OpenBrowserImage(Wide(base+".dsk"));
+    Entry archivedFolder,archivedFile;
+    Check(classic&&classic->FindChild(2,folder.name,archivedFolder)&&
+          classic->FindChild(archivedFolder.id,file.name,archivedFile),"Classic archive did not reopen");
+    const auto returnPath=Wide(base+"-return.img");
+    format(returnPath);
+    auto returned=OpenBrowserImage(returnPath);
+    Check(bool(returned),"Cannot mount classic archive return image");
+    auto cutItem=Native(classic,archivedFolder.id);
+    cutItem.cut=true;
+    auto cut=Submit(OrdinaryCopy{{cutItem},Native(returned)});
+    Wait(cut);
+    const auto refused=cut.Job()->result();
+    Entry absent;
+    Check(refused.outcome==Storage::Outcome::Failed&&!refused.moved&&!refused.partial&&
+          !returned->FindChild(2,folder.name,absent)&&classic->FindChild(2,folder.name,archivedFolder),
+          "Classic archive Cut/Paste must retain the original tree");
+    auto restore=Submit(OrdinaryCopy{{Native(classic,archivedFolder.id)},Native(returned)});
+    Wait(restore);
+    const auto restored=restore.Job()->result();
+    Check(!restored.code&&restore.Snapshot().complete,restored.message.c_str());
+    returned.reset();
+    returned=OpenBrowserImage(returnPath);
+    Entry copiedFolder,copiedFile;
+    Check(returned&&returned->FindChild(2,folder.name,copiedFolder)&&
+          returned->FindChild(copiedFolder.id,file.name,copiedFile)&&
+          returned->List(copiedFolder.id).size()==1&&returned->GetAttributes(copiedFolder.id)==folder.attributes&&
+          returned->GetAttributes(copiedFile.id)==file.attributes&&copiedFile.posix==original.posix&&
+          returned->Stat(copiedFile.id).apfsTimestamps==original.apfsTimestamps,
+          "Archive round trip lost file or folder metadata");
+    for(unsigned fork=0;fork<2;++fork){
+        HfsPlus::Bytes before(size_t(file.forks[fork].size)),after(before.size());
+        source->Read(input,fork,0,before.data(),before.size());
+        returned->Read(copiedFile.id,fork,0,after.data(),after.size());
+        Check(before==after,"Archive round trip changed a fork");
+    }
+    hfsdirent properties{};
+    Check(classic->GetClassicProperties(archivedFile.id,properties),"Cannot read archive binding fixture");
+    properties.mddate+=3;
+    classic->SetClassicProperties(archivedFile.id,properties);
+    Storage::Job job;
+    Check(!ClassicCopyArchive::Load(*classic,classic->Stat(archivedFile.id),job),
+          "A modified classic file accepted stale archive metadata");
+    fprintf(report,"PASS: an opt-in classic HFS archive restores file and folder metadata and both forks, and rejects stale companions after reopening.\n");
+}
+
 void TestClassicBackupDates(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -4284,6 +4419,8 @@ int RunCopyProcessTest(const char *directory) {
         TestCopySpecialFiles(root,report);
         TestCopyDirectoryHardLinksToApfs(root,report);
         TestMfsTransferVersions(root,report);
+        TestClassicMetadataCompanion(report);
+        TestClassicArchiveRoundTrip(root,report);
         TestClassicBackupDates(root,report);
         TestClassicCopyLoss(root,report);
         TestClassicLockRoundTrip(root,report);

@@ -19,6 +19,7 @@
 #include "NdifImage.h"
 #include "ApfsVolume.h"
 #include "ApfsCatalogWrite.h"
+#include "ClassicCopyArchive.h"
 #include "DiskPartitions.h"
 #include "BrowserPresentation.h"
 #include "HfsPlusTime.h"
@@ -522,7 +523,7 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=EncodeMfsName(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<Entry> archivedMetadata; bool restoredMetadata=false; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -615,11 +616,11 @@ void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs
         std::array<uint64_t,4> seconds{entry.created,entry.modified,*entry.additionalDates.changed,*entry.additionalDates.accessed};
         const auto range=destination.HfsPlusDateRange();
         auto projected=seconds;
-        if(range&&fromApfs&&entry.apfsTimestamps)
+        if(range&&entry.apfsTimestamps)
             for(size_t i=0;i<projected.size();++i)
                 projected[i]=uint64_t(std::clamp(ApfsTimeInHfsSeconds((*entry.apfsTimestamps)[i]),
                                                 int64_t(range->first),int64_t(range->second)));
-        if(fromApfs&&range&&(entry.fractionalDates||projected!=seconds)&&entry.apfsTimestamps&&
+        if((fromApfs||entry.apfsTimestamps)&&range&&(entry.fractionalDates||projected!=seconds)&&entry.apfsTimestamps&&
            !entry.attributes.count(ApfsTimesAttribute)){
             HfsPlus::Bytes value{'H','F','V','T',1,0,0,0};
             for(const auto& values:{projected,*entry.apfsTimestamps})
@@ -659,6 +660,52 @@ void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs
 }
 using CopiedLinks=std::map<std::pair<std::string,uint32_t>,Entry>;
 void LinkedProgress(const Planned& plan,Storage::Progress& p){if(plan.entry.directory){for(auto& child:plan.children)LinkedProgress(child,p);}else{++p.files;p.processed+=plan.entry.forks[0].size+plan.entry.forks[1].size;}}
+void ValidateArchiveNames(const Planned& plan)
+{
+    Check(!ClassicCopyArchive::ReservedName(plan.entry.name),
+          "A selected name is reserved for classic HFS metadata companions");
+    for(const auto& child:plan.children)ValidateArchiveNames(child);
+}
+
+void PrepareClassicArchive(Planned& plan)
+{
+    plan.archivedMetadata=plan.entry;
+    auto& entry=plan.entry;
+    entry.attributes.clear();
+    entry.created=(std::min)(entry.created,uint64_t(UINT32_MAX));
+    entry.modified=(std::min)(entry.modified,uint64_t(UINT32_MAX));
+    if(entry.additionalDates.backup.value_or(0)>UINT32_MAX)entry.additionalDates.backup=0;
+    for(auto& child:plan.children)PrepareClassicArchive(child);
+}
+
+void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job)
+{
+    auto& entry=plan.entry;
+    if(auto metadata=ClassicCopyArchive::Load(source,entry,job)){
+        entry.datesValid=metadata->datesValid;
+        entry.created=metadata->created;
+        entry.modified=metadata->modified;
+        entry.additionalDates=metadata->additionalDates;
+        entry.apfsTimestamps=metadata->apfsTimestamps;
+        if(entry.apfsTimestamps)
+            for(auto raw:*entry.apfsTimestamps)entry.fractionalDates|=int64_t(raw)%1000000000!=0;
+        entry.posix=metadata->posix;
+        entry.attributes=std::move(metadata->attributes);
+        entry.attributesKnown=true;
+        plan.restoredMetadata=true;
+    }
+    for(auto& child:plan.children)RestoreClassicArchive(source,child,progress,job);
+    std::set<std::u16string> consumed;
+    for(const auto& child:plan.children)
+        if(child.restoredMetadata)consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
+    plan.children.erase(std::remove_if(plan.children.begin(),plan.children.end(),[&](const auto& child){
+        if(!consumed.count(child.entry.name))return false;
+        --progress.totalFiles;
+        progress.totalBytes-=child.entry.forks[0].size;
+        return true;
+    }),plan.children.end());
+}
+
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
               Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -683,7 +730,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
         // child creates/renames can change its dates even on Skip/cancellation.
-        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,entry,expected,false);noteDatePrecision();job.progress(progress);}}
+        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,entry,expected,false);if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);noteDatePrecision();job.progress(progress);}}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
         if(failure)std::rethrow_exception(failure);if(complete&&track&&(!plan.restoredDirectoryLink||!found))copies.emplace(key,dst.Stat(id));return complete;
     }
@@ -786,6 +833,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
+    if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,published,*plan.archivedMetadata,job);
     noteDatePrecision();
     progress.sparseHolesAllocated|=materializesHoles;
     progress.apfsCloneCopiedIndependently|=hfsPlus&&!plan.reader&&entry.apfsCloneMarked;
@@ -1246,7 +1294,8 @@ struct ClassicCopyLoss {
         protection|=entry.directory&&entry.protectedFile;
         if(entry.posix)
             protection|=(entry.posix->protection&~PosixMetadata::UserImmutable)!=0||entry.posix->flags!=0;
-        dates|=entry.fractionalDates||entry.additionalDates.accessed.has_value()||entry.additionalDates.changed.has_value();
+        dates|=entry.fractionalDates||entry.additionalDates.accessed.has_value()||entry.additionalDates.changed.has_value()||
+               entry.created>UINT32_MAX||entry.modified>UINT32_MAX||entry.additionalDates.backup.value_or(0)>UINT32_MAX;
         links|=entry.hardLink;
         compression|=entry.compressed;
         attributes|=!entry.attributes.empty();
@@ -1371,8 +1420,12 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     std::vector<Planned> plans;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
         plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));
+        const std::string_view kind=source.first->Kind();
+        if(moving&&kind=="HFS")ClassicCopyArchive::RefuseCut(*source.first,source.first->Stat(source.second),job);
         if(!adapter){
-            const std::string_view kind=source.first->Kind();
+            const std::string_view target=dst.Kind();
+            if(!moving&&kind=="HFS"&&(target=="APFS"||dst.HfsPlusDateRange()))
+                RestoreClassicArchive(*source.first,plans.back(),progress,job);
             PrepareCopyTimestamps(plans.back(),dst,kind=="APFS",kind=="HFS+"||kind=="HFSX");
         }
     }
@@ -1390,7 +1443,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     }
     Check(!moving||firstLinkedFolder.empty(),
           "APFS cannot preserve directory hard links during Cut/Paste. Use Copy to keep the linked source folders.");
-    ValidatePlans(dst,plans,parent,true);
+    bool archiveCopy=false;
     if(std::string_view(dst.Kind())=="HFS"&&!adapter){
         ClassicCopyLoss loss;
         for(size_t i=0;i<plans.size();++i){
@@ -1400,12 +1453,22 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         }
         const auto details=loss.Details(moving?", ":"\r\n");
         if(!details.empty()){
+            auto projected=plans;
+            for(auto& plan:projected)PrepareClassicArchive(plan);
+            ValidatePlans(dst,projected,parent,true);
             if(moving)
                 throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
-            if(job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details)!=Storage::ConflictChoice::Replace)
-                throw Storage::Cancelled();
+            const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details);
+            if(choice==Storage::ConflictChoice::ReplaceAll){
+                Check(!loss.links&&!loss.compression&&!loss.allocation,
+                      "Archive Copy currently preserves metadata for ordinary files and folders only");
+                for(const auto& plan:projected)ValidateArchiveNames(plan);
+                plans=std::move(projected);
+                archiveCopy=true;
+            }else if(choice!=Storage::ConflictChoice::Replace)throw Storage::Cancelled();
         }
     }
+    ValidatePlans(dst,plans,parent,true);
     if(!firstLinkedFolder.empty()&&
        job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace)
         throw Storage::Cancelled();
@@ -1417,7 +1480,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
             if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
         }
     };
-    if(!batchActive&&(plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory)))
+    if(!batchActive&&(archiveCopy||plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory)))
         dst.RunWriteBatch(job,transfer);
     else transfer(false);
     return complete;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "ClassicCopyArchive.h"
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
 #include "ClassicHfsRecovery.h"
@@ -88,6 +89,7 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  for(size_t i=0;i<sources.size();++i)if(!request.sources[i].cut||!target.CanMoveEntryFrom(*sources[i].first,sources[i].second,parent))return false;
  auto existing=target.List(parent);std::vector<Entry> entries;
  for(size_t i=0;i<sources.size();++i){auto& source=*sources[i].first;auto id=sources[i].second;Check(id!=2,"Select files or folders rather than a volume root");source.ValidateCopyTo(id,target,parent);auto entry=source.Stat(id);
+  if(!strcmp(source.Kind(),"HFS"))ClassicCopyArchive::RefuseCut(source,entry,job);
   for(auto& e:existing)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   for(auto& e:entries)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   if(request.sources[i].Volume()&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
