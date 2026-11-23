@@ -1123,6 +1123,13 @@ bool Transfer(Volume &src, Planned &plan, Volume &dst, uint32_t parent,
                 Check(!existing.hardLink,"Applying folder metadata would change other hard-link names");
                 if(plan.archivedMetadata){
                     Check(durable,"Replacing archived folder metadata requires classic HFS write recovery");
+                    const auto block=dst.ClassicAllocationBlockSize();
+                    Check(block,"Cannot determine classic HFS allocation block size");
+                    ArchiveSpace required{0,0,0,0,block,dst.FreeBytes()};
+                    required.Count(dst,parent,plan,job);
+                    const auto size=ClassicCopyArchive::EncodedSize(*plan.archivedMetadata,job);
+                    required.Payload(required.companions,size);
+                    Check(required.Fits(),"Insufficient classic HFS space for the selected source folder metadata");
                     previousFolderArchive=ClassicCopyArchive::RequireVerifiedPair(dst,existing,job);
                 }
             }
@@ -1786,6 +1793,86 @@ struct ClassicCopyLoss {
     }
 };
 
+void SuggestArchiveRestoreNames(Volume& destination,std::vector<Planned>& plans,uint32_t parent,bool parentExists,
+                                const std::u16string& folder,std::string& notes,Storage::Job& job)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    if(std::any_of(plans.begin(),plans.end(),[](const auto& plan){return plan.restoredNameChanged;})){
+        std::vector<Entry> entries;
+        for(const auto& plan:plans)entries.push_back(plan.entry);
+        bool collision=false;
+        try{destination.ValidateCopyNames(parent,entries,parentExists);}
+        catch(const HfsPlus::Error&){collision=true;}
+        if(collision){
+            // Validate single entries separately so other validation errors are never treated as name collisions.
+            for(const auto& entry:entries)destination.ValidateCopyNames(parent,{entry},parentExists);
+            const auto equivalent=[&](const Entry& first,const Entry& second){
+                try{destination.ValidateCopyNames(parent,{first,second},parentExists);return false;}
+                catch(const HfsPlus::Error&){return true;}
+            };
+            for(size_t index=0;index<plans.size();++index){
+                auto& plan=plans[index];
+                if(!plan.restoredNameChanged)continue;
+                if(job.cancelled())throw Storage::Cancelled();
+                bool needsAlternate=false;
+                for(size_t other=0;other<plans.size();++other)
+                    if(other!=index&&(other<index||!plans[other].restoredNameChanged)&&
+                       equivalent(entries[index],entries[other])){
+                        needsAlternate=true;
+                        break;
+                    }
+                if(!needsAlternate)continue;
+                const auto original=plan.entry.name;
+                for(unsigned suffix=2;;++suffix){
+                    if(job.cancelled())throw Storage::Cancelled();
+                    Check(suffix<UINT32_MAX,"No unused name for the restored item");
+                    const auto number=std::to_string(suffix);
+                    auto ending=u" (restored "+std::u16string(number.begin(),number.end())+u")";
+                    auto stem=original;
+                    const auto dot=original.find_last_of(u'.');
+                    if(dot!=std::u16string::npos&&dot>0&&
+                       BrowserPresentation::Utf8(ending+original.substr(dot)).size()<255){
+                        ending+=original.substr(dot);
+                        stem.resize(dot);
+                    }
+                    while(HfsPlus::Normalize(stem+ending,destination.CaseSensitive()).size()>255||
+                          BrowserPresentation::Utf8(stem+ending).size()>255){
+                        Check(!stem.empty(),"No room for an alternate restored name");
+                        stem.pop_back();
+                        if(!stem.empty()&&stem.back()>=0xd800&&stem.back()<=0xdbff)stem.pop_back();
+                    }
+                    auto candidate=entries[index];
+                    candidate.name=stem+ending;
+                    destination.ValidateCopyNames(parent,{candidate},parentExists);
+                    Entry existing;
+                    if(parentExists&&destination.FindTransferChild(parent,candidate,existing))continue;
+                    bool occupied=false;
+                    for(size_t other=0;other<entries.size();++other)
+                        if(other!=index&&equivalent(candidate,entries[other])){
+                            occupied=true;
+                            break;
+                        }
+                    if(occupied)continue;
+                    plan.entry.name=candidate.name;
+                    plan.projectedName=true;
+                    entries[index]=std::move(candidate);
+                    notes+="Name collision: "+BrowserPresentation::Utf8(folder+original)+"  ->  "+
+                        BrowserPresentation::Utf8(folder+plan.entry.name)+"\r\n";
+                    Check(notes.size()<900*1024,"Too many alternate names for one archive restore preview");
+                    break;
+                }
+            }
+        }
+    }
+    for(auto& plan:plans){
+        if(!plan.entry.directory)continue;
+        Entry existing;
+        const bool merge=parentExists&&destination.FindTransferChild(parent,plan.entry,existing)&&existing.directory;
+        SuggestArchiveRestoreNames(destination,plan.children,merge?existing.id:parent,merge,
+                                   folder+plan.entry.name+u"/",notes,job);
+    }
+}
+
 void AppendArchiveRestoreNotes(Volume& destination,const std::vector<Planned>& plans,uint32_t parent,bool parentExists,
                                const std::u16string& folder,std::string& notes,Storage::Job& job)
 {
@@ -2012,18 +2099,19 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
             plans=std::move(projected);
         }
     }
+    std::string restoreNotes;
+    const bool restoring=std::string_view(dst.Kind())!="HFS"&&!adapter&&
+        std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);});
+    if(restoring)SuggestArchiveRestoreNames(dst,plans,parent,true,{},restoreNotes,job);
     ValidatePlans(dst,plans,parent,true);
     const bool verifyArchiveMove=moving&&(archiveCopy||carried||
         std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);}));
 
-    const bool restoring=std::string_view(dst.Kind())!="HFS"&&!adapter&&
-        std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);});
     if(restoring){
-        std::string notes;
         if(!firstLinkedFolder.empty())
-            notes="APFS will restore directory hard links as independent folders. First linked folder: "+firstLinkedFolder+"\r\n";
-        AppendArchiveRestoreNotes(dst,plans,parent,true,{},notes,job);
-        if(!notes.empty()&&job.requestChoice(Storage::CopyPrompt::ClassicArchiveRestorePreview,notes)!=Storage::ConflictChoice::Replace)
+            restoreNotes+="APFS will restore directory hard links as independent folders. First linked folder: "+firstLinkedFolder+"\r\n";
+        AppendArchiveRestoreNotes(dst,plans,parent,true,{},restoreNotes,job);
+        if(!restoreNotes.empty()&&job.requestChoice(Storage::CopyPrompt::ClassicArchiveRestorePreview,restoreNotes)!=Storage::ConflictChoice::Replace)
             throw Storage::Cancelled();
     }else if(!firstLinkedFolder.empty()&&
              job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace){

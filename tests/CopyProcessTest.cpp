@@ -2956,7 +2956,12 @@ void TestArchiveFolderMerge(const std::string& root,FILE* report)
         Check(target->FindChild(merged.id,u"Incoming",file),"Archive merge lost incoming child");
         Verify(*target,file.id,4099,57);
     }
-    source->SetAttributes(origin,old.attributes);
+    auto large=old.attributes;
+    large[u"user.large-merge-companion"]=HfsPlus::Bytes(size_t(classic->FreeBytes()+1),7);
+    source->SetAttributes(origin,large);
+    const auto tooLarge=copy(source,origin,classic,true,Storage::ConflictChoice::Replace,false,true);
+    Check(tooLarge.code&&tooLarge.message.find("selected source folder metadata")!=std::string::npos&&
+          source->FindChild(2,original.name,folder),"Oversized folder metadata was accepted or the source was removed");
     const auto mergedMove=copy(source,origin,classic,true,Storage::ConflictChoice::Skip,true,true);
     Check(!mergedMove.code&&mergedMove.moved,mergedMove.message.c_str());
     Entry child;
@@ -3172,15 +3177,33 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
     Verify(*returned,b.id,4099,63);
     auto folded=Image(Wide(base+"-folded.dsk"),HfsPlus::Volume::FormatKind::HfsPlus);
     const auto originalCount=folded->List(2).size();
-    auto collision=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(folded)});
-    Wait(collision);
-    const auto blocked=collision.Job()->result();
-    if(!blocked.code||blocked.message.find("Report")==std::string::npos||
-       blocked.message.find("report")==std::string::npos||folded->List(2).size()!=originalCount||
-       folded->FindChild(2,folderName,absent))
-        throw HfsPlus::Error("Unexpected folded archive restore result "+std::to_string(blocked.code)+
-                             ", root entries "+std::to_string(folded->List(2).size())+": "+blocked.message);
-    fprintf(report,"PASS: archive restore previews existing conflicts, rejects colliding restored names and preserves the destination on cancellation.\n");
+    const auto restoreFolded=[&](Storage::ConflictChoice answer){
+        auto collision=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(folded)});
+        Conflict(collision);
+        const auto suggestion=collision.Job()->conflictState();
+        Check(suggestion.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview&&
+              suggestion.path.find("Name collision:")!=std::string::npos&&
+              suggestion.path.find("report (restored 2)")!=std::string::npos,
+              "Restore preview did not offer an alternate name under case-insensitive rules");
+        collision.Job()->resolve(suggestion.id,answer);
+        Wait(collision);
+        return collision.Job()->result();
+    };
+    Check(restoreFolded(Storage::ConflictChoice::Cancel).error==ERROR_CANCELLED&&
+          folded->List(2).size()==originalCount&&!folded->FindChild(2,folderName,absent),
+          "Declining alternate names wrote to the folded destination");
+    const auto renamedRestore=restoreFolded(Storage::ConflictChoice::Replace);
+    Check(!renamedRestore.code,renamedRestore.message.c_str());
+    folded.reset();
+    folded=OpenBrowserImage(Wide(base+"-folded.dsk"));
+    Entry foldedFolder;
+    Check(folded&&folded->FindChild(2,folderName,foldedFolder)&&
+          folded->FindChild(foldedFolder.id,u"Report",a)&&
+          folded->FindChild(foldedFolder.id,u"report (restored 2)",b)&&a.resolvedId!=b.resolvedId,
+          "Approved alternate name did not survive reopening");
+    Verify(*folded,a.id,4097,32);
+    Verify(*folded,b.id,4099,63);
+    fprintf(report,"PASS: archive restore previews and resolves case-insensitive collisions, preserving both forks and cancelling without writes.\n");
     fprintf(report,"PASS: archive move previews MacRoman truncation and collisions, retains the source on cancellation, and restores original names and both forks after reopening.\n");
 }
 
