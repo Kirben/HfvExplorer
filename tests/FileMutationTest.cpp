@@ -12,6 +12,7 @@
 #include "WindowsEntryIdentity.h"
 #include "MacBrowserModel.h"
 extern int fat_rename(char*,char*);
+extern std::function<void()> windowsDeleteEnumeratedForTest;
 extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
@@ -20,6 +21,7 @@ extern "C" {
 int do_delete_directory(hfsvol*,char*);
 }
 void RunClassicWriteFailureTests(const char*,FILE*);
+void RunDurableWindowsMutationTests(const char*,FILE*);
 namespace {
 bool junction(const CString& link,const CString& target) {
  if(!CreateDirectoryA(link,nullptr))return false;
@@ -109,6 +111,7 @@ int RunFileMutationTest(const char* directory) {
  CString root=directory,image=root+"\\mutations.dsk";FILE* report=nullptr;fopen_s(&report,(root+"\\file-mutations-report.txt"),"w");if(!report)return 2;
  int silent=HFSIFACE_silencer(1);
  try {
+  RunDurableWindowsMutationTests(directory,report);
   RunClassicWriteFailureTests(directory,report);
   checkClassicMountResolution(root,report);
   {CFile f;check(f.Open(image,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create HFS fixture");f.SetLength(4*1024*1024);}
@@ -191,6 +194,25 @@ int RunFileMutationTest(const char* directory) {
   };
   check(removeHost(selected,true)!=0,"delete selected tree containing a junction");
   check(GetFileAttributesA(selected)==INVALID_FILE_ATTRIBUTES&&load(external+"\\Keep")==std::vector<BYTE>({'O','U','T','S','I','D','E'}),"recursive Windows deletion followed a junction outside its target");
+  const CString swapFolder=root+"\\SwapChild",swapChild=swapFolder+"\\Document",savedChild=root+"\\OriginalChild";
+  check(CreateDirectoryA(swapFolder,nullptr)!=FALSE,"create replacement child fixture");
+  save(swapChild,"ORIGINAL");
+  {
+   bool replaced=false;
+   windowsDeleteEnumeratedForTest=[&]{
+    check(MoveFileA(swapChild,savedChild)!=FALSE,"move enumerated child out of the selected folder");
+    save(swapChild,"REPLACED");
+    replaced=true;
+   };
+   struct ClearFault{~ClearFault(){windowsDeleteEnumeratedForTest={};}} clear;
+   const auto result=removeHost(swapFolder,true);
+   check(replaced&&!result&&GetLastError()==ERROR_FILE_INVALID,
+         "recursive delete did not refuse a replaced child");
+  }
+  check(load(swapChild)==std::vector<BYTE>({'R','E','P','L','A','C','E','D'})&&
+        load(savedChild)==std::vector<BYTE>({'O','R','I','G','I','N','A','L'}),
+        "recursive delete removed either version of a changed child");
+  fprintf(report,"PASS: legacy recursive delete verifies enumerated children by handle and preserves replacements.\n");
   CString protectedDirectory=root+"\\Locked";check(CreateDirectoryA(protectedDirectory,nullptr)!=FALSE,"create locked deletion fixture");
   save(protectedDirectory+"\\Keep","LOCKED");check(SetFileAttributesA(protectedDirectory+"\\Keep",FILE_ATTRIBUTE_READONLY)!=FALSE,"protect deletion fixture");
   check(!removeHost(protectedDirectory,true)&&GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"protected child deletion must fail without repeated retries");

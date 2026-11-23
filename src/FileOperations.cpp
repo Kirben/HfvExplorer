@@ -479,7 +479,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      }
     },nullptr,classicSources);
    }else if(!moving&&target.IsWindows()&&
-            std::all_of(opened.begin(),opened.end(),[](const auto& item){return !strcmp(item.first->Kind(),"HFS");})&&
+            std::all_of(opened.begin(),opened.end(),[](const auto& item){return !ExecutionFor(*item.first).windowsPaths;})&&
             WindowsMoveUndo::Supported(destination.first->HostPath(2))){
     const auto previous=job.progress();
     Storage::Rollback rollback;
@@ -557,6 +557,41 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  result.moved=complete&&moving;
  return result;
 }
+void DeleteWindowsSelection(StorageLocation::ResolvedEntry& source,const Location& item,Storage::Job& job)
+{
+ const auto& entry=source.entry;
+ const bool paired=!entry.identity.companion.key.empty();
+ auto& volume=*source.volume;
+ const auto folder=volume.HostPath(2);
+ const bool durable=(paired||entry.directory)&&WindowsMoveUndo::Supported(folder);
+ Check(!paired||durable,
+       "Deleting an entry with an AppleDouble companion requires a local NTFS folder; both entries were kept");
+ if(durable){
+  WindowsCutPlan plan;
+  MacBrowser::Snapshot(volume,source.id,job,false,[&](Volume& owner,const Entry& child){
+   const auto path=owner.HostPath(child.id);
+   const auto flags=GetFileAttributesW(path.c_str());
+   Check(flags!=INVALID_FILE_ATTRIBUTES&&!(flags&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_REPARSE_POINT)),
+         "The selection contains a read-only entry or a link; the selection was kept");
+   plan.push_back({path,child.identity,child.directory});
+  });
+  Check(!plan.empty()&&plan.front().identity==entry.identity,
+        "The Windows selection changed before deletion; the selection was kept");
+  volume.Close();
+  WindowsMoveUndo::RunExport(folder,[&]{
+   Cancel(job);
+   WindowsMoveUndo::Session::Current()->StageCut(plan);
+   Cancel(job);
+  });
+  Storage::OutcomeEvidence::NoteRetainedChange();
+  return;
+ }
+ if(!DeleteHostSelectionJob(item.WindowsPath(),entry.directory,entry.identity,&job)){
+  Cancel(job);
+  throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");
+ }
+}
+
 Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t count,Storage::Job& job,Completion& completion){
  Storage::Progress progress;progress.fileCopy=false;progress.phase=rename?"Renaming":"Deleting";progress.scanning=false;progress.totalFiles=unsigned(count);progress.utf8=true;job.progress(progress);
  const auto process=[&](size_t index,bool grouped){const auto& item=items[index];Cancel(job);progress.path=item.Volume()?Utf8(item.expectedName):item.IsWindows()?Utf8(U16(item.WindowsPath())):Utf8(Ansi(item.ClassicPath()));job.progress(progress);
@@ -593,7 +628,7 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
    auto source=StorageLocation::ResolveEntry(item,true);Cancel(job);source.volume->Close();
    Mark(completion,item);
    if(rename){Location parent;parent.SetWindows(item.WindowsPath().substr(0,item.WindowsPath().find_last_of(L"\\/")+1));MarkChild(completion,parent,rename->name);Cancel(job);source.volume->Rename(source.id,source.entry.parent,rename->name);
-   }else if(!DeleteHostSelectionJob(item.WindowsPath(),source.entry.directory,source.entry.identity,&job)){Cancel(job);throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");}
+   }else DeleteWindowsSelection(source,item,job);
   }
   if(!grouped)++completion.completed;
   ++progress.files;

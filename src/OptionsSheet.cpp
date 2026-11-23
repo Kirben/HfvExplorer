@@ -35,10 +35,11 @@ static char THIS_FILE[] = __FILE__;
 IMPLEMENT_DYNAMIC(COptionsSheet, CPropertySheet)
 
 COptionsSheet::COptionsSheet(UINT nIDCaption, CWnd* pParentWnd, UINT iSelectPage)
-	:CPropertySheet(nIDCaption, pParentWnd, min(iSelectPage,4U))
+	:CPropertySheet(nIDCaption, pParentWnd, min(iSelectPage,UINT(PageCount-1)))
 {
-	m_last_active_page = min(iSelectPage,4U);
+	m_last_active_page = min(iSelectPage,UINT(PageCount-1));
 	AddPage(&m_Page1);
+	AddPage(&m_display);
 	AddPage(&m_Page2);
 	AddPage(&m_Page3);
 	m_basilisk = DocumentLaunch::EmulatorOptions(false);
@@ -48,10 +49,11 @@ COptionsSheet::COptionsSheet(UINT nIDCaption, CWnd* pParentWnd, UINT iSelectPage
 }
 
 COptionsSheet::COptionsSheet(LPCTSTR pszCaption, CWnd* pParentWnd, UINT iSelectPage)
-	:CPropertySheet(pszCaption, pParentWnd, min(iSelectPage,4U))
+	:CPropertySheet(pszCaption, pParentWnd, min(iSelectPage,UINT(PageCount-1)))
 {
-	m_last_active_page = min(iSelectPage,4U);
+	m_last_active_page = min(iSelectPage,UINT(PageCount-1));
 	AddPage(&m_Page1);
+	AddPage(&m_display);
 	AddPage(&m_Page2);
 	AddPage(&m_Page3);
 	m_basilisk = DocumentLaunch::EmulatorOptions(false);

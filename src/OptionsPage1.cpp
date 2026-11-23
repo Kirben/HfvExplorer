@@ -36,15 +36,11 @@ IMPLEMENT_DYNCREATE(COptionsPage1, CPropertyPage)
 COptionsPage1::COptionsPage1() : CPropertyPage(COptionsPage1::IDD)
 {
 	//{{AFX_DATA_INIT(COptionsPage1)
-	m_dosicons = -1;
 	m_mountall = FALSE;
 	m_startup_floppies = FALSE;
 	m_startup_cds = FALSE;
-	m_fat_icon_time_limit = 0;
-	m_psize = _T("");
-	m_font = _T("");
-	m_is_font_sjis = FALSE; /* noda */
 	m_startup_hds = FALSE;
+	m_confirm_quit = TRUE;
 	//}}AFX_DATA_INIT
 }
 
@@ -56,18 +52,11 @@ void COptionsPage1::DoDataExchange(CDataExchange* pDX)
 {
 	CPropertyPage::DoDataExchange(pDX);
 	//{{AFX_DATA_MAP(COptionsPage1)
-	DDX_CBIndex(pDX, IDC_DOSICONS, m_dosicons);
 	DDX_Check(pDX, IDC_OPTIONS_MOUNT_ALL, m_mountall);
 	DDX_Check(pDX, IDC_OPTIONS_STARTUP_FLOPPIES, m_startup_floppies);
 	DDX_Check(pDX, IDC_OPTIONS_STARTUP_CDS, m_startup_cds);
-	DDX_Text(pDX, IDC_FAT_ICON_TIME_LIMIT, m_fat_icon_time_limit);
-	DDV_MinMaxInt(pDX, m_fat_icon_time_limit, 0, 9999999);
-	DDX_CBString(pDX, IDC_PSIZE, m_psize);
-	DDV_MaxChars(pDX, m_psize, 10);
-	DDX_CBString(pDX, IDC_FONT, m_font);
-	DDV_MaxChars(pDX, m_font, 100);
-	DDX_Check(pDX, IDC_OPTIONS_IS_FONT_SJIS, m_is_font_sjis);
 	DDX_Check(pDX, IDC_OPTIONS_STARTUP_HDS, m_startup_hds);
+	DDX_Check(pDX, IDC_OPTIONS_CONFIRM_QUIT, m_confirm_quit);
 	//}}AFX_DATA_MAP
 }
 /* noda added IDC_OPTIONS_IS_FONT_SJIS (no comments inside AFX_DATA_MAP) */
@@ -97,10 +86,9 @@ static int CALLBACK EnumFontFamProc(
 	return(1);
 }
 
-BOOL COptionsPage1::OnInitDialog() 
+BOOL CDisplayOptions::OnInitDialog()
 {
 	CPropertyPage::OnInitDialog();
- GetDlgItem(IDC_OPTIONS_STARTUP_HDS)->EnableWindow(TRUE);
 
 	HDC hdc = ::GetDC( ::GetDesktopWindow() );
 	(void)EnumFontFamilies(
@@ -117,4 +105,19 @@ BOOL COptionsPage1::OnInitDialog()
 void COptionsPage1::OnOK() 
 {
 	CPropertyPage::OnOK();
+}
+
+CDisplayOptions::CDisplayOptions() : CPropertyPage(IDD_OPTIONS_DISPLAY) {}
+
+void CDisplayOptions::DoDataExchange(CDataExchange* pDX)
+{
+	CPropertyPage::DoDataExchange(pDX);
+	DDX_CBIndex(pDX, IDC_DOSICONS, m_dosicons);
+	DDX_Text(pDX, IDC_FAT_ICON_TIME_LIMIT, m_fat_icon_time_limit);
+	DDV_MinMaxInt(pDX, m_fat_icon_time_limit, 0, 9999999);
+	DDX_CBString(pDX, IDC_PSIZE, m_psize);
+	DDV_MaxChars(pDX, m_psize, 10);
+	DDX_CBString(pDX, IDC_FONT, m_font);
+	DDV_MaxChars(pDX, m_font, 100);
+	DDX_Check(pDX, IDC_OPTIONS_IS_FONT_SJIS, m_is_font_sjis);
 }

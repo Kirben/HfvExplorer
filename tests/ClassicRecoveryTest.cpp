@@ -14,6 +14,8 @@
 #include "ReadOnlyCdBackend.h"
 #include "DiskImageOpen.h"
 #include "DiskPartitions.h"
+#include "BrowserPresentation.h"
+#include "WindowsMoveUndo.h"
 #include "NdifImage.h"
 #include <cstdio>
 #include <vector>
@@ -1566,6 +1568,158 @@ void NdifRecovery(const CString& root,FILE* report,bool sibling=false)
 
 }
 
+Storage::Result DeleteWindowsFixture(const std::wstring& path,Storage::Job& job,
+                                     const wchar_t* leaf=L"Document")
+{
+    FileOperations::DeleteEntries request{{FileOperations::Location::Windows(path+L"\\"+leaf)}};
+    FileOperations::Completion completion;
+    return FileOperations::ExecuteInWorker(FileOperations::Request(std::move(request)),job,completion);
+}
+void RunDurableWindowsMutationTests(const char* directory,FILE* report)
+{
+    const CString root=directory;
+    for(unsigned phase:{7u,8u,9u,12u}){
+        CString folder;
+        folder.Format("%s\\paired-rename-%u",root.GetString(),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create paired rename fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        {
+            auto host=MacBrowser::OpenWindows(path);
+            Put(*host,false);
+            Put(*host,false,false,2,u"Neighbor");
+        }
+        CrashChild(folder,phase,L"paired-windows-rename");
+        auto host=MacBrowser::OpenWindows(path);
+        const auto* name=phase==9?u"Renamed":u"Document";
+        VerifyFile(*host,2,name,false);
+        VerifyFile(*host,2,u"Neighbor",false);
+        Check(host->List(2).size()==2,"paired Windows rename left a stray file or companion");
+        host->Rename(Find(*host,2,name),2,phase==9?u"RENAMED":u"DOCUMENT");
+        host=MacBrowser::OpenWindows(path);
+        VerifyFile(*host,2,phase==9?u"RENAMED":u"DOCUMENT",false);
+    }
+    fprintf(report,"PASS: paired NTFS file rename recovers both forks after companion publication, before commit and after commit, including case-only renames.\n");
+
+    for(unsigned phase:{0u,7u,8u,9u}){
+        CString folder;
+        folder.Format("%s\\paired-delete-%u",root.GetString(),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create paired delete fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        {
+            auto host=MacBrowser::OpenWindows(path);
+            Put(*host,false);
+            Put(*host,false,false,2,u"Neighbor");
+        }
+        if(phase==0){
+            Storage::Job job;
+            MacBrowser::windowsPublicationFault=[&](const char* step){
+                if(!strcmp(step,"delete-companion-staged"))job.cancel();
+            };
+            struct ClearFault{~ClearFault(){MacBrowser::windowsPublicationFault={};}} clear;
+            const auto result=DeleteWindowsFixture(path,job);
+            Check(result.error==ERROR_CANCELLED,"cancel after companion staging");
+        }else CrashChild(folder,phase,L"paired-windows-delete");
+        const auto canonical=BrowserPresentation::WindowsPath(path);
+        const auto child=path+L"\\Document";
+        if(phase==7){
+            const auto sibling=path+L"\\Neighbor";
+            const VolumeCoord::Lease lease({{VolumeCoord::PathKey(sibling),VolumeCoord::Mode::Read}});
+            bool deferred=false;
+            try{WindowsMoveUndo::RecoverExports(canonical);}
+            catch(const VolumeCoord::Busy&){deferred=true;}
+            Check(deferred&&GetFileAttributesW(child.c_str())!=INVALID_FILE_ATTRIBUTES&&
+                  GetFileAttributesW((path+L"\\%Document").c_str())==INVALID_FILE_ATTRIBUTES,
+                  "browse recovery wrote while another operation held a descendant lease");
+        }
+        auto host=MacBrowser::OpenWindows(path);
+        VerifyFile(*host,2,u"Neighbor",false);
+        if(phase==9){
+            Check(GetFileAttributesW(child.c_str())==INVALID_FILE_ATTRIBUTES&&
+                  GetFileAttributesW((path+L"\\%Document").c_str())==INVALID_FILE_ATTRIBUTES,
+                  "committed paired delete kept the primary or companion");
+        }else VerifyFile(*host,2,u"Document",false);
+        Check(host->List(2).size()==(phase==9?1:2),"paired delete left unexpected files");
+    }
+    fprintf(report,"PASS: paired NTFS Delete restores both forks on cancellation and interruption, completes after commit, and waits for an exclusive folder lease before recovery.\n");
+    for(unsigned phase:{0u,8u,9u}){
+        CString folder;
+        folder.Format("%s\\recursive-paired-delete-%u",root.GetString(),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create recursive paired delete fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        {
+            auto host=MacBrowser::OpenWindows(path);
+            const auto tree=host->MakeDirectory(2,u"Tree");
+            const auto nested=host->MakeDirectory(tree,u"Nested");
+            Put(*host,false,false,nested);
+            Put(*host,false,false,2,u"Neighbor");
+            Check(host->Stat(tree).identity.companion.key.empty(),"recursive test root unexpectedly has a companion");
+        }
+        const auto lateFile=folder+"\\Tree\\Nested\\Late";
+        const Bytes lateBytes{17, 29, 43};
+        if(phase==0){
+            bool injected=false;
+            MacBrowser::windowsPublicationFault=[&](const char* step){
+                if(!strcmp(step,"tree-inventoried-before-staging")){
+                    Save(lateFile,lateBytes);
+                    injected=true;
+                }
+            };
+            struct ClearFault{~ClearFault(){MacBrowser::windowsPublicationFault={};}} clear;
+            Storage::Job job;
+            const auto result=DeleteWindowsFixture(path,job,L"Tree");
+            Check(injected&&result.code&&result.message.find("changed while staging")!=std::string::npos&&
+                  Load(lateFile)==lateBytes,
+                  "late child was lost or left in staging");
+        }else CrashChild(folder,phase,L"recursive-windows-delete");
+        auto host=MacBrowser::OpenWindows(path);
+        VerifyFile(*host,2,u"Neighbor",false);
+        MacBrowser::Entry tree{};
+        if(phase!=9){
+            const auto nested=Find(*host,Find(*host,2,u"Tree"),u"Nested");
+            VerifyFile(*host,nested,u"Document",false);
+        }else Check(!host->FindChild(2,u"Tree",tree),"committed recursive delete retained the selected folder");
+        Check(host->List(2).size()==(phase==9?1:2),"recursive delete left unexpected files");
+    }
+    fprintf(report,"PASS: recursive NTFS Delete recovers nested AppleDouble pairs under an unpaired folder before commit removes the complete tree after commit, and rolls back a late addition to the original path.\n");
+    for(unsigned kind:{0u,1u,2u})for(unsigned phase:{7u,9u}){
+        CString image;
+        image.Format("%s\\modern-export-%u-%u.dsk",root.GetString(),kind,phase);
+        const auto path=VolumeCoord::Wide(image.GetString()),hostPath=path+L".windows";
+        auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+        Storage::Job format;
+        using Kind=HfsPlus::Volume::FormatKind;
+        if(kind==2)Apfs::Format(*disk,u"Export modern",true,format);
+        else HfsPlus::Volume::Format(*disk,u"Export modern",true,kind?Kind::HfsXCaseSensitive:Kind::HfsPlus);
+        disk.reset();
+        const auto classicPath=path+L".classic.dsk";
+        CString classicFile=image+".classic.dsk";
+        Save(classicFile,Bytes(4*1024*1024));
+        char label[]="Export classic";
+        const auto formatted=hfs_format(classicFile.GetBuffer(),0,label);
+        classicFile.ReleaseBuffer();
+        Check(formatted==0,"format classic mixed export fixture");
+        Check(CreateDirectoryW(hostPath.c_str(),nullptr)!=FALSE,"create modern export destination");
+        {
+            auto source=OpenCrossFormatFixture(path);
+            auto classic=MacBrowser::OpenImage(classicPath);
+            auto host=MacBrowser::OpenWindows(hostPath);
+            Put(*source,true);
+            Put(*classic,true,false,2,u"Second");
+            Put(*host,false);
+            Put(*host,false,false,2,u"Second");
+            Put(*host,false,false,2,u"Neighbor");
+        }
+        const auto sourceBefore=Load(image),classicBefore=Load(image+".classic.dsk");
+        CrashChild(image,phase,L"mixed-windows-export");
+        auto host=MacBrowser::OpenWindows(hostPath);
+        VerifyFile(*host,2,u"Document",phase==9);
+        VerifyFile(*host,2,u"Second",phase==9);
+        VerifyFile(*host,2,u"Neighbor",false);
+        Check(host->List(2).size()==3&&Load(image)==sourceBefore&&Load(image+".classic.dsk")==classicBefore,
+              "interrupted mixed export changed a source or kept unexpected destination entries");
+    }
+    fprintf(report,"PASS: mixed classic HFS and HFS+/HFSX/APFS exports recover interrupted NTFS overwrites and preserve both forks and untouched sources.\n");
+}
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
 {
     try{
@@ -1584,6 +1738,46 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        if(!strcmp(action,"recursive-windows-delete")){
+            Storage::Job job;
+            const auto result=DeleteWindowsFixture(VolumeCoord::Wide(image),job,L"Tree");
+            return result.code?4:3;
+        }
+        if(!strcmp(action,"paired-windows-delete")){
+            if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+                if(!strcmp(step,"delete-companion-staged"))ExitProcess(97);
+            };
+            Storage::Job job;
+            const auto result=DeleteWindowsFixture(VolumeCoord::Wide(image),job);
+            return result.code?4:3;
+        }
+        if(!strcmp(action,"paired-windows-rename")){
+            auto volume=MacBrowser::OpenWindows(VolumeCoord::Wide(image));
+            if(phase==7||phase==12)
+                MacBrowser::windowsPublicationFault=[phase](const char* step){
+                    if(!strcmp(step,"rename-companion-published"))ExitProcess(90+phase);
+                };
+            volume->Rename(Find(*volume,2,u"Document"),2,phase==12?u"DOCUMENT":u"Renamed");
+            return 3;
+        }
+        if(!strcmp(action,"mixed-windows-export")){
+            const auto path=VolumeCoord::Wide(image);
+            auto modern=OpenCrossFormatFixture(path);
+            auto classic=MacBrowser::OpenImage(path+L".classic.dsk");
+            if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+                if(!strcmp(step,"data-published"))ExitProcess(97);
+            };
+            Storage::Job job;
+            job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
+            FileOperations::Completion completion;
+            FileOperations::OrdinaryCopy request{{
+                FileOperations::Location::Mounted(modern,Find(*modern,2,u"Document")),
+                FileOperations::Location::Mounted(classic,Find(*classic,2,u"Second"))
+            },FileOperations::Location::Windows(path+L".windows")};
+            request.destination.directory=true;
+            const auto result=FileOperations::ExecuteInWorker(FileOperations::Request(std::move(request)),job,completion);
+            return result.code?4:3;
+        }
         const bool importing=!strcmp(action,"windows-import");
         const bool copyOnly=!strcmp(action,"export-only");
         if(importing||copyOnly||!strcmp(action,"windows-export")){

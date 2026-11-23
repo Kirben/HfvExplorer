@@ -57,7 +57,7 @@ BEGIN_MESSAGE_MAP(CHFVExplorerApp, CWinApp)
  ON_COMMAND(ID_TOOLS_NEW_BROWSER, OnNewBrowser)
  ON_UPDATE_COMMAND_UI(ID_TOOLS_NEW_BROWSER, OnUpdateNewBrowser)
  ON_UPDATE_COMMAND_UI(ID_FILE_NEW, OnUpdateNewBrowser)
- ON_COMMAND(ID_APP_EXIT, OnExitBrowsers)
+ ON_COMMAND(ID_APP_EXIT, ConfirmExitBrowsers)
 END_MESSAGE_MAP()
 
 
@@ -170,6 +170,7 @@ void CHFVExplorerApp::LoadSettings(void)
 	m_use_partial_names = GetProfileInt("Setup","UsePartialNames",0);
 	set_invalid_cd_hack( m_use_partial_names );
 
+	m_confirm_quit = GetProfileInt("Setup","ConfirmQuit",1) != 0;
 	m_disable_autofloppy = GetProfileInt("Setup","DisableAutoFloppy",1);
 
 
@@ -177,6 +178,7 @@ void CHFVExplorerApp::LoadSettings(void)
 
 void CHFVExplorerApp::SaveSettings(void)
 {
+	WriteProfileInt("Setup","ConfirmQuit",m_confirm_quit);
 	WriteProfileInt("Setup","DosIcons",m_dosicons);
 	WriteProfileInt("Setup","DosIconTimeLimit",m_fat_icon_time_limit);
 	WriteProfileInt("Setup","MountAllDisks",m_mountall);

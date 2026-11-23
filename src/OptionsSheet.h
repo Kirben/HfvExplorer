@@ -37,8 +37,10 @@ public:
 
 // Attributes
 public:
+	enum Page : UINT { General, Display, Copying, Attributes, Basilisk, MiniVMac, PageCount };
 	int m_last_active_page;
 	COptionsPage1 m_Page1;
+	CDisplayOptions m_display;
 	COptionsPage2 m_Page2;
 	COptionsPage3 m_Page3;
 	std::unique_ptr<CPropertyPage> m_basilisk;

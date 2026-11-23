@@ -44,6 +44,8 @@ bool Confirm(HWND window,Kind kind){
   kind==Kind::CopyMode?L"Cancel this copy operation before choosing a copy mode?":
   kind==Kind::Browser?L"Close this browser window?":
   kind==Kind::BackgroundBrowser?L"Close this browser window? Background file operations will continue in the remaining windows.":
+  kind==Kind::Quit?L"Quit HFVExplorer?":
+  kind==Kind::QuitWithWork?L"Quit HFVExplorer and cancel all outstanding file operations? HFVExplorer will wait for safe cleanup before exiting.":
   kind==Kind::LastBrowser?L"Close the last browser and cancel all outstanding file operations? HFVExplorer will wait for safe cleanup before exiting.":L"Close this dialog?";
  confirming=true;int answer=MessageBoxW(window,text,L"Confirm close",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2);confirming=false;return answer==IDYES;
 }

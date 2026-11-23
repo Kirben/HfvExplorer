@@ -393,7 +393,7 @@ int RunHfsPlusUiTest(const char *directory) {
         require(DocumentLaunch::ProbeEmulatorLaunchers(&owner, directory), "Emulator launcher paths and process errors");
         fprintf(report, "PASS: Basilisk II and Mini vMac Options tabs, Unicode arguments, missing paths and invalid executable.\n");
         {
-            COptionsSheet options("HFVExplorer Options", &owner, 1);
+            COptionsSheet options("HFVExplorer Options", &owner, COptionsSheet::Copying);
             auto& copying = options.m_Page2;
             copying.m_copyout_mode = 0;
             copying.m_copyin_mode = 1;
@@ -416,28 +416,39 @@ int RunHfsPlusUiTest(const char *directory) {
                     "Copying files selections did not round-trip");
 
             auto& general = options.m_Page1;
-            general.m_dosicons = 0;
-            general.m_fat_icon_time_limit = 17;
-            general.m_font = "Segoe UI";
-            general.m_psize = "12";
             require(options.SetActivePage(&general) != FALSE, "Open Options General page");
-            require(Text(general.m_hWnd, IDC_FAT_ICON_TIME_LIMIT) == L"17" &&
-                    Text(general.m_hWnd, IDC_FONT) == L"Segoe UI" &&
-                    Text(general.m_hWnd, IDC_PSIZE) == L"12" &&
-                    general.SendDlgItemMessage(IDC_DOSICONS, CB_GETCURSEL) == 0,
-                    "General icon and font settings changed");
+            require(general.IsDlgButtonChecked(IDC_OPTIONS_CONFIRM_QUIT) == BST_CHECKED &&
+                    !general.GetDlgItem(IDC_FONT) && !general.GetDlgItem(IDC_DOSICONS),
+                    "General quit confirmation or Display separation changed");
             for (const int id : {IDC_OPTIONS_MOUNT_ALL, IDC_OPTIONS_STARTUP_FLOPPIES,
-                                IDC_OPTIONS_STARTUP_CDS, IDC_OPTIONS_STARTUP_HDS, IDC_OPTIONS_IS_FONT_SJIS})
+                                IDC_OPTIONS_STARTUP_CDS, IDC_OPTIONS_STARTUP_HDS})
                 general.CheckDlgButton(id, BST_CHECKED);
-            general.SetDlgItemText(IDC_FAT_ICON_TIME_LIMIT, "23");
-            general.SetDlgItemText(IDC_FONT, "Tahoma");
-            general.SetDlgItemText(IDC_PSIZE, "10");
+            general.CheckDlgButton(IDC_OPTIONS_CONFIRM_QUIT, BST_UNCHECKED);
             require(general.UpdateData(TRUE) && general.m_mountall && general.m_startup_floppies &&
-                    general.m_startup_cds && general.m_startup_hds && general.m_is_font_sjis &&
-                    general.m_dosicons == 0 && general.m_fat_icon_time_limit == 23 &&
-                    general.m_font == "Tahoma" && general.m_psize == "10",
+                    general.m_startup_cds && general.m_startup_hds && !general.m_confirm_quit,
                     "General settings did not round-trip");
-            require(options.GetPageCount() == 5, "Options should show three settings pages and two emulator pages");
+
+            auto& display = options.m_display;
+            display.m_dosicons = 0;
+            display.m_fat_icon_time_limit = 17;
+            display.m_font = "Segoe UI";
+            display.m_psize = "12";
+            require(options.SetActivePage(&display) != FALSE, "Open Options Display page");
+            require(Text(display.m_hWnd, IDC_FAT_ICON_TIME_LIMIT) == L"17" &&
+                    Text(display.m_hWnd, IDC_FONT) == L"Segoe UI" &&
+                    Text(display.m_hWnd, IDC_PSIZE) == L"12" &&
+                    display.SendDlgItemMessage(IDC_DOSICONS, CB_GETCURSEL) == 0 &&
+                    display.SendDlgItemMessage(IDC_PSIZE, CB_GETCOUNT) > 0,
+                    "Display icon and font settings changed");
+            display.CheckDlgButton(IDC_OPTIONS_IS_FONT_SJIS, BST_CHECKED);
+            display.SetDlgItemText(IDC_FAT_ICON_TIME_LIMIT, "23");
+            display.SetDlgItemText(IDC_FONT, "Tahoma");
+            display.SetDlgItemText(IDC_PSIZE, "10");
+            require(display.UpdateData(TRUE) && display.m_is_font_sjis &&
+                    display.m_dosicons == 0 && display.m_fat_icon_time_limit == 23 &&
+                    display.m_font == "Tahoma" && display.m_psize == "10",
+                    "Display settings did not round-trip");
+            require(options.GetPageCount() == COptionsSheet::PageCount, "Options page count changed unexpectedly");
             auto& attributes = options.m_Page3;
             attributes.m_show_invisible_mac = TRUE;
             require(options.SetActivePage(&attributes) != FALSE &&
@@ -479,7 +490,7 @@ int RunHfsPlusUiTest(const char *directory) {
                     "Overwrite prompt path and footer are misaligned");
             conflict.DestroyWindow();
         }
-        fprintf(report, "PASS: Copying files and General settings round-trip, overwrite path and all four choices.\n");
+        fprintf(report, "PASS: Copying files, General and Display settings round-trip, overwrite path and all four choices.\n");
         NameDialog name(&owner);
         name.value = L"\x65e5\x672c \x03b1";
         require(name.Create(IDD_HPLUS_NAME, &owner) != FALSE, "Name dialog creation");

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "DialogClose.h"
 #include <afxadv.h>
 #include "BackgroundCopies.h"
 #include "HFVExplorer.h"
@@ -176,6 +177,16 @@ void CHFVExplorerApp::OpenRecentImage(UINT command,BrowserSession& session){
     path==(*m_pRecentFileList)[index])
   m_pRecentFileList->Remove(index);
 }
+void CHFVExplorerApp::ConfirmExitBrowsers()
+{
+ if(m_browsers.empty()||StorageUi::busy()||StorageUi::state().sessionOpen)return;
+ const bool active=BackgroundCopies::Active();
+ if((m_confirm_quit||active)&&
+    !DialogClose::Confirm(ActiveBrowser()?ActiveBrowser()->GetSafeHwnd():nullptr,
+        active?DialogClose::Kind::QuitWithWork:DialogClose::Kind::Quit))return;
+ OnExitBrowsers();
+}
+
 void CHFVExplorerApp::OnExitBrowsers(){
  if(BackgroundCopies::Active()){BackgroundCopies::CancelAll();for(auto frame:m_browsers)frame->SetTimer(9202,100,nullptr);return;}
  if(StorageUi::busy()||StorageUi::state().sessionOpen)return;

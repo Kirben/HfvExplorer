@@ -597,8 +597,8 @@ bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory)
         return false;
     int invalidField;
     for (const auto emulator : {Emulator::BasiliskII, Emulator::MiniVMac}) {
-        COptionsSheet options("Options", owner, emulator == Emulator::BasiliskII ? 3 : 4);
-        if (options.GetPageCount() != 5 || !options.Create(owner, WS_POPUP | WS_CAPTION))
+        COptionsSheet options("Options", owner, emulator == Emulator::BasiliskII ? COptionsSheet::Basilisk : COptionsSheet::MiniVMac);
+        if (options.GetPageCount() != COptionsSheet::PageCount || !options.Create(owner, WS_POPUP | WS_CAPTION))
             return false;
         const auto& dialog = *options.GetActivePage();
         const bool controls = IsWindowUnicode(::GetDlgItem(dialog.m_hWnd, IDC_EMULATOR_EXECUTABLE)) &&

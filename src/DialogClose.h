@@ -2,7 +2,7 @@
 #pragma once
 #include <windows.h>
 namespace DialogClose {
-enum class Kind {Dialog,Copy,CopyMode,Browser,BackgroundBrowser,LastBrowser};
+enum class Kind {Dialog,Copy,CopyMode,Browser,BackgroundBrowser,LastBrowser,Quit,QuitWithWork};
 void SetKind(HWND,Kind);
 bool Confirm(HWND,Kind);
 #ifdef HFV_TESTING

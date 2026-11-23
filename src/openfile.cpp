@@ -24,50 +24,100 @@
 #include "WindowsEntryIdentity.h"
 
 #include <vector>
+#include <array>
+#include <cstddef>
+#ifdef HFV_TESTING
+std::function<void()> windowsDeleteEnumeratedForTest;
+#endif
 
 namespace {
 struct DeleteHandle {
  HANDLE value=INVALID_HANDLE_VALUE;
  ~DeleteHandle(){DWORD error=GetLastError();if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);SetLastError(error);}
 };
-int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
-                     const MacBrowser::ObjectIdentity* selected=nullptr) {
- if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
- if(depth>128||path.size()>=32764){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
- DeleteHandle directory;
- // Pin the actual entry without following a junction, and prevent replacement
- // or reparse-point changes while enumerating its children.
- directory.value=CreateFileW(path.c_str(),DELETE|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
-   FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
- if(directory.value==INVALID_HANDLE_VALUE)return 0;
- BY_HANDLE_FILE_INFORMATION info;
- if(!GetFileInformationByHandle(directory.value,&info))return 0;
- if(selected&&(MacBrowser::WindowsIdentity(info)!=*selected||
-               (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))){
-  SetLastError(ERROR_FILE_INVALID);
-  return 0;
- }
- if(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)){SetLastError(ERROR_DIRECTORY);return 0;}
- if(!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {
-  WIN32_FIND_DATAW entry;HANDLE search=FindFirstFileW((path+L"\\*").c_str(),&entry);
-  if(search==INVALID_HANDLE_VALUE) {if(GetLastError()!=ERROR_FILE_NOT_FOUND)return 0;}
-  else {
-   int ok=1;DWORD error=ERROR_SUCCESS;
-   do {
-    if(!wcscmp(entry.cFileName,L".")||!wcscmp(entry.cFileName,L".."))continue;
-    if(job&&job->cancelled()){ok=0;error=ERROR_CANCELLED;break;}
-    auto child=path+L"\\"+entry.cFileName;
-    if(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ok=delete_host_tree(child,depth+1,job);
-    else {ok=DeleteFileW(child.c_str())!=FALSE;if(ok)Storage::OutcomeEvidence::NoteRetainedChange();}
-    if(!ok){error=GetLastError();break;}
-   }while(FindNextFileW(search,&entry));
-   if(ok&&GetLastError()!=ERROR_NO_MORE_FILES){ok=0;error=GetLastError();}
-   FindClose(search);if(!ok){SetLastError(error);return 0;}
+struct DeleteChild {
+ std::wstring name;
+ uint64_t id, created, modified, length;
+ DWORD attributes;
+};
+uint64_t FileTimeValue(FILETIME value)
+{
+ return (uint64_t(value.dwHighDateTime)<<32)|value.dwLowDateTime;
+}
+bool SnapshotDeleteChildren(HANDLE directory,Storage::Job* job,std::vector<DeleteChild>& children)
+{
+ alignas(8) std::array<BYTE,8192> buffer{};
+ constexpr size_t header=offsetof(FILE_ID_BOTH_DIR_INFO,FileName);
+ for(;;){
+  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return false;}
+  if(!GetFileInformationByHandleEx(directory,FileIdBothDirectoryInfo,buffer.data(),DWORD(buffer.size())))
+   return GetLastError()==ERROR_NO_MORE_FILES;
+  size_t offset=0;
+  for(;;){
+   const auto remaining=buffer.size()-offset;
+   if(remaining<header){SetLastError(ERROR_INVALID_DATA);return false;}
+   const auto& entry=*reinterpret_cast<const FILE_ID_BOTH_DIR_INFO*>(buffer.data()+offset);
+   const auto next=entry.NextEntryOffset;
+   const auto extent=next?next:remaining;
+   if(extent<header||extent>remaining||(next%8)!=0||!entry.FileNameLength||
+      entry.FileNameLength%sizeof(wchar_t)||entry.FileNameLength>extent-header){
+    SetLastError(ERROR_INVALID_DATA);return false;
+   }
+   std::wstring name(entry.FileName,entry.FileNameLength/sizeof(wchar_t));
+   if(name!=L"."&&name!=L".."){
+    if(!entry.FileId.QuadPart||name.find_first_of(L"\\/:",0)!=name.npos||
+       name.find(L'\0')!=name.npos){SetLastError(ERROR_FILE_INVALID);return false;}
+    children.push_back({std::move(name),uint64_t(entry.FileId.QuadPart),
+                        uint64_t(entry.CreationTime.QuadPart),uint64_t(entry.LastWriteTime.QuadPart),
+                        uint64_t(entry.EndOfFile.QuadPart),entry.FileAttributes});
+   }
+   if(!next)break;
+   offset+=next;
   }
  }
- // Remove precisely the pinned entry, including when it is a junction.
+}
+int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
+                     const MacBrowser::ObjectIdentity* selected=nullptr,
+                     const DeleteChild* child=nullptr,DWORD volumeSerial=0) {
+ if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
+ if(depth>128||path.size()>=32764){SetLastError(ERROR_FILENAME_EXCED_RANGE);return 0;}
+ DeleteHandle pinned;
+ const DWORD listAccess=!child||(child->attributes&FILE_ATTRIBUTE_DIRECTORY)?FILE_LIST_DIRECTORY:0;
+ // Keep the parent pinned while resolving child names. Open links as
+ // entries so the handle can never address their targets.
+ pinned.value=CreateFileW(path.c_str(),DELETE|FILE_READ_ATTRIBUTES|listAccess,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+   FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+ if(pinned.value==INVALID_HANDLE_VALUE)return 0;
+ BY_HANDLE_FILE_INFORMATION info{};
+ if(!GetFileInformationByHandle(pinned.value,&info))return 0;
+ const bool directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
+ if(selected&&(!directory||MacBrowser::WindowsIdentity(info)!=*selected||
+               (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))){
+  SetLastError(ERROR_FILE_INVALID);return 0;
+ }
+ if(child){
+  constexpr DWORD kind=FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT;
+  const auto id=(uint64_t(info.nFileIndexHigh)<<32)|info.nFileIndexLow;
+  const auto length=(uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
+  if(info.dwVolumeSerialNumber!=volumeSerial||id!=child->id||
+     (info.dwFileAttributes&kind)!=(child->attributes&kind)||
+     FileTimeValue(info.ftCreationTime)!=child->created||
+     FileTimeValue(info.ftLastWriteTime)!=child->modified||(!directory&&length!=child->length)){
+   SetLastError(ERROR_FILE_INVALID);return 0;
+  }
+ }
+ if(directory&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){
+  std::vector<DeleteChild> children;
+  if(!SnapshotDeleteChildren(pinned.value,job,children))return 0;
+#ifdef HFV_TESTING
+  if(windowsDeleteEnumeratedForTest)windowsDeleteEnumeratedForTest();
+#endif
+  for(const auto& entry:children)
+   if(!delete_host_tree(path+L"\\"+entry.name,depth+1,job,nullptr,&entry,info.dwVolumeSerialNumber))return 0;
+ }
+ if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  FILE_DISPOSITION_INFO disposition{TRUE};
- const bool removed=SetFileInformationByHandle(directory.value,FileDispositionInfo,
+ const bool removed=SetFileInformationByHandle(pinned.value,FileDispositionInfo,
                                                &disposition,sizeof(disposition))!=FALSE;
  if(removed)Storage::OutcomeEvidence::NoteRetainedChange();
  return removed;

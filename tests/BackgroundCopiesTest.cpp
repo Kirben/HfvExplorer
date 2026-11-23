@@ -437,6 +437,19 @@ int RunBackgroundWindowCloseTest(const char* directory){
   struct Sheet:CPropertySheet{Sheet():CPropertySheet("Hidden Options",CWnd::GetDesktopWindow()){}LRESULT WindowProc(UINT m,WPARAM w,LPARAM l)override{if(m==WM_CLOSE){DestroyWindow();return 0;}return CPropertySheet::WindowProc(m,w,l);}}sheet;CPropertyPage page(IDD_OPTIONS_PAGE_1);sheet.AddPage(&page);Check(sheet.Create(CWnd::GetDesktopWindow(),WS_POPUP|WS_CAPTION|WS_SYSMENU)!=FALSE,"create ordinary Options");HWND sheetWindow=sheet.GetSafeHwnd();DialogClose::test={};DialogClose::test.answer=IDNO;SendMessage(sheetWindow,WM_SYSCOMMAND,SC_CLOSE,0);Check(!IsWindow(sheetWindow)&&DialogClose::test.prompts==0,"Options still asks before closing");DialogClose::test={};
   fprintf(report,"PASS: About, General and Options property-sheet X closes normally without confirmation.\n");
   app.InstallBrowserTemplate(RUNTIME_CLASS(CopyDoc),RUNTIME_CLASS(CopyFrame));auto a=app.CreateBrowser(FALSE),b=app.CreateBrowser(FALSE);Check(a&&b,"create closing-copy browsers");
+  app.m_confirm_quit=TRUE;
+  DialogClose::test={};DialogClose::test.answer=IDNO;
+  app.ConfirmExitBrowsers();
+  Check(app.m_browsers.size()==2&&DialogClose::test.prompts==1&&DialogClose::test.kind==DialogClose::Kind::Quit,
+        "File Exit ignored the enabled quit confirmation");
+  auto noPrompt=app.CreateBrowser(FALSE);Check(noPrompt!=nullptr,"create browser for disabled quit confirmation");
+  HWND noPromptWindow=noPrompt->GetSafeHwnd();
+  app.m_confirm_quit=FALSE;
+  DialogClose::test={};DialogClose::test.answer=IDNO;
+  noPrompt->SendMessage(WM_SYSCOMMAND,SC_CLOSE);
+  Check(!IsWindow(noPromptWindow)&&app.m_browsers.size()==2&&DialogClose::test.prompts==0,
+        "ordinary browser close prompted with quit confirmation disabled");
+  app.m_confirm_quit=TRUE;
   auto idle=app.CreateBrowser(FALSE);Check(idle!=nullptr,"create idle close browser");HWND idleWindow=idle->GetSafeHwnd();DialogClose::test={};DialogClose::test.answer=IDNO;idle->SendMessage(WM_SYSCOMMAND,SC_CLOSE);Check(IsWindow(idleWindow)&&DialogClose::test.prompts==1&&DialogClose::test.kind==DialogClose::Kind::Browser,"idle browser X refusal ignored");DialogClose::test.answer=IDYES;idle->SendMessage(WM_SYSCOMMAND,SC_CLOSE);Check(!IsWindow(idleWindow)&&app.m_browsers.size()==2&&DialogClose::test.prompts==2,"idle browser X confirmation ignored");
   auto source=Image(host+"\\source.dsk"),target=Image(host+"\\target.dsk");auto slow=std::make_shared<Slow>(source,gate);
   auto noQuit=[&]{MSG message;Check(!PeekMessage(&message,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE),"closing a non-last browser posted WM_QUIT");};

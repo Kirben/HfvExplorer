@@ -33,15 +33,11 @@ public:
 // Dialog Data
 	//{{AFX_DATA(COptionsPage1)
 	enum { IDD = IDD_OPTIONS_PAGE_1 };
-	int		m_dosicons;
 	BOOL	m_mountall;
 	BOOL	m_startup_floppies;
 	BOOL	m_startup_cds;
-	int		m_fat_icon_time_limit;
-	CString	m_psize;
-	CString	m_font;
-	BOOL	m_is_font_sjis;
 	BOOL	m_startup_hds;
+	BOOL	m_confirm_quit;
 	//}}AFX_DATA
 
 /* noda added m_is_font_sjis (no comments inside AFX_DATA) */
@@ -60,7 +56,20 @@ public:
 protected:
 	// Generated message map functions
 	//{{AFX_MSG(COptionsPage1)
-	virtual BOOL OnInitDialog();
 	//}}AFX_MSG
 	DECLARE_MESSAGE_MAP()
+};
+
+class CDisplayOptions : public CPropertyPage
+{
+public:
+ CDisplayOptions();
+ int m_dosicons=-1;
+ int m_fat_icon_time_limit=0;
+ CString m_psize, m_font;
+ BOOL m_is_font_sjis=FALSE;
+
+protected:
+ void DoDataExchange(CDataExchange*) override;
+ BOOL OnInitDialog() override;
 };

@@ -18,7 +18,7 @@ class Session {
     std::unique_ptr<State> state_;
     void RenameChecked(const std::wstring& from,const std::wstring& to,
                        const MacBrowser::ObjectIdentity* expected,
-                       const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree);
+                       const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree,bool relabel=false);
 public:
     Session(const std::wstring& folder,const std::string& decision,bool exportOnly=false);
     ~Session();
@@ -29,6 +29,8 @@ public:
     std::wstring StageTemporary(const std::wstring& path,HANDLE created=INVALID_HANDLE_VALUE);
     void Rename(const std::wstring& from,const std::wstring& to,
                 const MacBrowser::ObjectIdentity* expected=nullptr);
+    void Relabel(const std::wstring& from,const std::wstring& to,
+                 const MacBrowser::ObjectIdentity& expected);
     void StageCut(const MacBrowser::WindowsCutPlan&);
     void PreserveDirectoryDates(const std::wstring& path);
     void Finish();

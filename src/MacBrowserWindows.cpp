@@ -843,17 +843,32 @@ private:
         Check(parent==entry.parent,"Rename must stay in the same Windows folder");
         auto path=Path(id),target=Child(Path(parent),Wide(name));if(path==target)return;
         auto oldResource=Companion(path),newResource=Companion(target);Double data;
-        bool resource=AppleDouble(oldResource,data);
+        const bool resource=AppleDouble(oldResource,data);
+        Check(resource==!entry.identity.companion.key.empty(),"The resource companion changed before rename");
         Check(!_wcsicmp(path.c_str(),target.c_str())||GetFileAttributesW(target.c_str())==INVALID_FILE_ATTRIBUTES,"Destination already exists");
         if(resource){Leaf(u"%"+name);Check(!_wcsicmp(oldResource.c_str(),newResource.c_str())||GetFileAttributesW(newResource.c_str())==INVALID_FILE_ATTRIBUTES,"An existing resource companion blocks rename; it was preserved");}
         // A copied directory can retain cached child readers. Its subtree lease
         // excludes other users, so release only those handles before renaming.
         auto descendant=[&](const std::wstring& child){return !_wcsicmp(child.c_str(),path.c_str())||(entry.directory&&child.size()>path.size()&&child[path.size()]==L'\\'&&!_wcsnicmp(child.c_str(),path.c_str(),path.size()));};
         for(const auto& item:paths_)if(descendant(item.second)){dataReaders_.erase(item.first);resourceReaders_.erase(item.first);}
-        if(resource)Check(MoveFileExW(oldResource.c_str(),newResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot rename resource companion; source retained");
-        if(!MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)){
-            if(resource){bool restored=MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE;Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);Check(restored,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");}
-            throw HfsPlus::Error("Cannot rename the selected Windows entry; source retained");
+        const auto folder=Path(parent);
+        if(resource&&WindowsMoveUndo::Supported(folder)){
+            const auto rename=[&]{
+                auto& transaction=*WindowsMoveUndo::Session::Current();
+                Check(!entry.identity.companion.key.empty(),"The resource companion changed before rename");
+                transaction.Relabel(oldResource,newResource,entry.identity.companion);
+                Publication("rename-companion-published");
+                transaction.Relabel(path,target,entry.identity.primary);
+                Publication("rename-primary-published");
+            };
+            if(WindowsMoveUndo::Session::Current())rename();
+            else WindowsMoveUndo::RunExport(folder,rename);
+        }else{
+            if(resource)Check(MoveFileExW(oldResource.c_str(),newResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot rename resource companion; source retained");
+            if(!MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)){
+                if(resource){bool restored=MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE;Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);Check(restored,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");}
+                throw HfsPlus::Error("Cannot rename the selected Windows entry; source retained");
+            }
         }
         for(auto& item:paths_)if(descendant(item.second))item.second=target+item.second.substr(path.size());
     }

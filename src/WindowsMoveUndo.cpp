@@ -5,6 +5,8 @@
 #include "ClassicHfsRecovery.h"
 #include "CopyWorkerProtocol.h"
 #include "StorageWorker.h"
+#include "VolumeCoordinator.h"
+#include "MacBrowserModel.h"
 #include <map>
 #include <set>
 #define Z_SOLO
@@ -109,6 +111,14 @@ void Paths(const std::wstring& root,const std::wstring& stage,const std::wstring
     Check(Under(from,root)&&Under(to,root)&&Under(from,stage)!=Under(to,stage),
           "Windows move rename escaped its recorded folder");
 }
+void RelabelPaths(const std::wstring& root,const std::wstring& stage,
+                  const std::wstring& from,const std::wstring& to)
+{
+    Check(Under(from,root)&&Under(to,root)&&Parent(from)==root&&Parent(to)==root&&
+          !Under(from,stage)&&!Under(to,stage)&&from!=stage&&to!=stage&&
+          _wcsicmp(from.c_str(),to.c_str())!=0,
+          "Windows rename escaped its recorded folder");
+}
 void Move(HANDLE from,const std::wstring& to)
 {
     if(!RenameWindowsHandle(from,to))
@@ -143,7 +153,7 @@ void Frame(HANDLE handle,const Data& data)
     WriteFrame(handle,data);
     Flush(handle);
 }
-enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry};
+enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel};
 uint64_t FileLength(const BY_HANDLE_FILE_INFORMATION& info)
 {
     return (uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
@@ -213,15 +223,18 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                 record.from=data.wide();
                 record.object=Identity::Decode(data);
                 Check(record.object.file!=0,"Invalid Windows move file identity");
-                if(record.op==Op::Rename){
+                if(record.op==Op::Rename||record.op==Op::Relabel){
                     record.to=data.wide();
                     record.fromParent=Identity::Decode(data);
                     record.toParent=Identity::Decode(data);
                     record.directory=data.flag();
                     record.modified=data.get();
                     record.length=data.get();
-                    Paths(log.root,stage,record.from,record.to);
-                    AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,{record.object});
+                    if(record.op==Op::Relabel)RelabelPaths(log.root,stage,record.from,record.to);
+                    else {
+                        Paths(log.root,stage,record.from,record.to);
+                        AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,{record.object});
+                    }
                 }else if(record.op==Op::Owned){
                     AddOwned(log,stage,record.from,{record.object});
                 }else if(record.op==Op::TreeEntry){
@@ -334,36 +347,41 @@ void ClearStagedEntries(const Loaded& log,const std::wstring& folder,unsigned de
         Remove(file.value,"Cannot remove Windows staging entry; remaining contents were retained");
     }
 }
-size_t RecordStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,
+size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,
                         const std::map<std::wstring,MacBrowser::ObjectIdentity>& expected,unsigned depth=0)
 {
     Check(depth<=128,"Windows staging tree is too deep");
-    size_t recorded=0;
-    for(const auto& name:Children(folder)){
+    const bool recording=journal!=INVALID_HANDLE_VALUE;
+    size_t inspected=0;
+    for(const auto& name:Children(recording?folder:slot)){
         const auto path=Child(folder,name),staged=Child(slot,name);
         Check(Under(staged,slot),"Invalid name in Windows move staging");
-        auto file=Open(path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ);
+        auto file=Open(recording?path:staged,FILE_READ_ATTRIBUTES,FILE_SHARE_READ);
         Check(bool(file),"Cannot protect an entry in the Windows move source");
         const auto info=Info(file.value);
         const auto known=expected.find(path);
+        Check(!(info.dwFileAttributes&FILE_ATTRIBUTE_READONLY),"The Windows source contains a read-only entry; it was retained");
         Check(known!=expected.end()&&MacBrowser::WindowsIdentity(info)==known->second,
-              "The Windows source folder changed after copying; it was retained");
-        ++recorded;
+              recording?"The Windows source folder changed after copying; it was retained":
+                        "The Windows source folder changed while staging; it was retained");
+        ++inspected;
         const bool directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
-        Data record;
-        record.put(uint64_t(Op::TreeEntry));
-        record.wide(staged);
-        IdentityOf(info).Encode(record);
-        record.put(uint64_t(directory));
-        if(!directory){
-            record.put(Date(info.ftLastWriteTime));
-            record.put(FileLength(info));
+        if(recording){
+            Data record;
+            record.put(uint64_t(Op::TreeEntry));
+            record.wide(staged);
+            IdentityOf(info).Encode(record);
+            record.put(uint64_t(directory));
+            if(!directory){
+                record.put(Date(info.ftLastWriteTime));
+                record.put(FileLength(info));
+            }
+            // The rename frame flushes the full inventory before the folder moves.
+            WriteFrame(journal,record);
         }
-        // The rename frame flushes the full inventory before the folder moves.
-        WriteFrame(journal,record);
-        if(directory)recorded+=RecordStagedTree(journal,path,staged,expected,depth+1);
+        if(directory)inspected+=InspectStagedTree(journal,path,staged,expected,depth+1);
     }
-    return recorded;
+    return inspected;
 }
 thread_local Session* current=nullptr;
 void RecoverJournal(const std::string& id,bool committed,const std::wstring* exportRoot,bool skipBusy);
@@ -454,6 +472,19 @@ void Session::Rename(const std::wstring& from,const std::wstring& to,
 {
     RenameChecked(from,to,expected,nullptr);
 }
+void Session::Relabel(const std::wstring& from,const std::wstring& to,
+                      const MacBrowser::ObjectIdentity& expected)
+{
+    if(_wcsicmp(from.c_str(),to.c_str())==0){
+        const auto temporary=Child(Parent(from),L".hfv-rename-"+
+            std::wstring(state_->decision.begin(),state_->decision.end())+
+            L"-"+std::to_wstring(++state_->next));
+        RelabelPaths(state_->root,state_->stage,from,temporary);
+        RelabelPaths(state_->root,state_->stage,temporary,to);
+        RenameChecked(from,temporary,&expected,nullptr,true);
+        RenameChecked(temporary,to,&expected,nullptr,true);
+    }else RenameChecked(from,to,&expected,nullptr,true);
+}
 void Session::StageCut(const MacBrowser::WindowsCutPlan& plan)
 {
     Check(!plan.empty(),"Cannot stage a Windows cut source without a snapshot");
@@ -468,37 +499,53 @@ void Session::StageCut(const MacBrowser::WindowsCutPlan& plan)
         if(!i->identity.companion.key.empty())
             Check(tree.emplace(companion(i->path),i->identity.companion).second,"Conflicting Windows cut companion");
     }
-    if(!root.identity.companion.key.empty())
+    if(!root.identity.companion.key.empty()){
         Rename(companion(root.path),Slot(),&root.identity.companion);
+#ifdef HFV_TESTING
+        if(state_->exportOnly&&MacBrowser::windowsPublicationFault)
+            MacBrowser::windowsPublicationFault("delete-companion-staged");
+#endif
+    }
     RenameChecked(root.path,Slot(),&root.identity.primary,root.directory?&tree:nullptr);
 }
 void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
                             const MacBrowser::ObjectIdentity* expected,
-                            const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree)
+                            const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree,bool relabel)
 {
-    Paths(state_->root,state_->stage,from,to);
+    if(relabel)RelabelPaths(state_->root,state_->stage,from,to);
+    else Paths(state_->root,state_->stage,from,to);
     auto handle=Open(from,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
     Check(bool(handle),"Cannot protect Windows move entry");
     const auto info=Info(handle.value);
     Check(!expected||MacBrowser::WindowsIdentity(info)==*expected,
           "A Windows move participant changed before publication; it was retained");
-    Check(Under(from,state_->stage)||!(info.dwFileAttributes&FILE_ATTRIBUTE_READONLY),
+    Check(relabel||Under(from,state_->stage)||!(info.dwFileAttributes&FILE_ATTRIBUTE_READONLY),
           "Cannot stage a read-only Windows move entry");
     const auto id=IdentityOf(info);
     const auto fromParent=Identify(Parent(from)),toParent=Identify(Parent(to));
     Check(id.file&&fromParent.file&&toParent.file&&id.serial==fromParent.serial&&
           id.serial==toParent.serial&&!Identify(to).file,"Windows move path changed");
-    if((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(to,state_->stage))
-        Check(tree&&RecordStagedTree(state_->journal.value,from,to,*tree)==tree->size(),
+    const bool stagingTree=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(to,state_->stage);
+    if(stagingTree)
+        Check(tree&&InspectStagedTree(state_->journal.value,from,to,*tree)==tree->size(),
               "The Windows source folder changed after copying; it was retained");
     Data record;
-    record.put(uint64_t(Op::Rename));
+    record.put(uint64_t(relabel?Op::Relabel:Op::Rename));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
     record.put(uint64_t((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0));
     record.put(Date(info.ftLastWriteTime));record.put(FileLength(info));
     Frame(state_->journal.value,record);
+#ifdef HFV_TESTING
+    if(stagingTree&&MacBrowser::windowsPublicationFault)
+        MacBrowser::windowsPublicationFault("tree-inventoried-before-staging");
+#endif
     Move(handle.value,to);
     Check(Identify(to)==id,"Windows move did not preserve entry identity");
+    // Renaming pins the directory entry, not its children. Verify the actual
+    // staged tree before permitting the caller to commit the decision.
+    if(stagingTree)
+        Check(InspectStagedTree(INVALID_HANDLE_VALUE,from,to,*tree)==tree->size(),
+              "The Windows source folder changed while staging; it was retained");
 }
 void Session::PreserveDirectoryDates(const std::wstring& path)
 {
@@ -562,7 +609,7 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                 if(!log.done){
                     if(!committed){
                         for(auto i=log.records.rbegin();i!=log.records.rend();++i){
-                            if(i->op==Op::Rename)UndoRename(stage,*i);
+                            if(i->op==Op::Rename||i->op==Op::Relabel)UndoRename(stage,*i);
                         }
                     }
                     LARGE_INTEGER at{};at.QuadPart=LONGLONG(log.end);
@@ -611,6 +658,7 @@ void RecoverExports(const std::wstring& folder)
     const auto search=FindFirstFileW(Child(root,std::wstring(ExportPrefix)+L"*").c_str(),&data);
     if(search==INVALID_HANDLE_VALUE)return;
     struct Search {HANDLE handle;~Search(){FindClose(handle);}} guard{search};
+    std::vector<std::string> candidates;
     do{
         std::wstring name=data.cFileName;
         if((data.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))!=FILE_ATTRIBUTE_DIRECTORY)
@@ -619,9 +667,25 @@ void RecoverExports(const std::wstring& folder)
         if(name.size()!=ClassicHfsRecovery::MoveIdSize||name.find_first_not_of(L"0123456789abcdef")!=name.npos)continue;
         std::string id;
         for(const auto digit:name)id.push_back(char(digit));
-        RecoverJournal(id,false,&root,true);
+        // A live transaction holds the journal without sharing. Leave it to
+        // its owner and keep ordinary listings available while it runs.
+        Handle pending(CreateFileW(Journal(id,false,true).c_str(),GENERIC_READ,Share,
+                                   nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+        if(!pending){
+            const auto error=GetLastError();
+            if(Missing(error)||error==ERROR_SHARING_VIOLATION)continue;
+            throw HfsPlus::Error("Cannot inspect Windows recovery journal");
+        }
+        candidates.push_back(std::move(id));
     }while(FindNextFileW(search,&data));
     Check(GetLastError()==ERROR_NO_MORE_FILES,"Cannot enumerate Windows export recovery");
+    if(candidates.empty())return;
+    const auto key=VolumeCoord::PathKey(root);
+    {
+        const VolumeCoord::OperationLease access({{key,VolumeCoord::Mode::Write}});
+        for(const auto& id:candidates)RecoverJournal(id,false,&root,true);
+    }
+    VolumeCoord::Changed({key});
 }
 
 void RunExport(const std::wstring& folder,const std::function<void()>& work)

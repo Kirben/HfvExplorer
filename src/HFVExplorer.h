@@ -58,7 +58,8 @@ public:
  CDocument* OpenDocumentFile(LPCTSTR path) override;
  afx_msg void OnNewBrowser();
  afx_msg void OnUpdateNewBrowser(CCmdUI*);
- afx_msg void OnExitBrowsers();
+ afx_msg void ConfirmExitBrowsers();
+ void OnExitBrowsers();
 	void LoadSettings(void);
 	void SaveSettings(void);
 	BOOL EnableTimer( BOOL onoff );
@@ -70,6 +71,7 @@ public:
 	int		m_dosicons;
 	int		m_fat_icon_time_limit;
 	BOOL	m_mountall;
+	BOOL	m_confirm_quit=TRUE;
 	BOOL	m_startup_floppies;
 	BOOL	m_startup_cds;
 	BOOL	m_startup_hds;

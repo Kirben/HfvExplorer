@@ -506,16 +506,17 @@ void CMainFrame::OnProgramProperties()
 	COptionsSheet propSheet( "HFVExplorer Options", this, page );
 
 	propSheet.m_Page1.m_mountall = pApp->m_mountall;
-	propSheet.m_Page1.m_dosicons = pApp->m_dosicons;
-	propSheet.m_Page1.m_fat_icon_time_limit = pApp->m_fat_icon_time_limit;
+	propSheet.m_Page1.m_confirm_quit = pApp->m_confirm_quit;
+	propSheet.m_display.m_dosicons = pApp->m_dosicons;
+	propSheet.m_display.m_fat_icon_time_limit = pApp->m_fat_icon_time_limit;
 
 	propSheet.m_Page1.m_startup_floppies = pApp->m_startup_floppies;
 	propSheet.m_Page1.m_startup_cds = pApp->m_startup_cds;
 	propSheet.m_Page1.m_startup_hds = pApp->m_startup_hds;
 
-	propSheet.m_Page1.m_psize.Format( "%d", point_size );
-	propSheet.m_Page1.m_font = CString(font_name);
-	propSheet.m_Page1.m_is_font_sjis = pApp->m_is_font_sjis;/* noda*/
+	propSheet.m_display.m_psize.Format( "%d", point_size );
+	propSheet.m_display.m_font = CString(font_name);
+	propSheet.m_display.m_is_font_sjis = pApp->m_is_font_sjis;/* noda*/
 
 	propSheet.m_Page2.m_copyout_mode = pApp->m_copyout_mode;
 	propSheet.m_Page2.m_copyin_mode = pApp->m_copyin_mode;
@@ -536,15 +537,16 @@ void CMainFrame::OnProgramProperties()
 	if (propSheet.DoModal() == IDOK) {
 		page = propSheet.m_last_active_page;
 		pApp->m_mountall = propSheet.m_Page1.m_mountall;
-		pApp->m_dosicons = propSheet.m_Page1.m_dosicons;
-		pApp->m_fat_icon_time_limit = propSheet.m_Page1.m_fat_icon_time_limit;
+		pApp->m_confirm_quit = propSheet.m_Page1.m_confirm_quit;
+		pApp->m_dosicons = propSheet.m_display.m_dosicons;
+		pApp->m_fat_icon_time_limit = propSheet.m_display.m_fat_icon_time_limit;
 		pApp->m_startup_floppies = propSheet.m_Page1.m_startup_floppies;
 		pApp->m_startup_cds = propSheet.m_Page1.m_startup_cds;
 		pApp->m_startup_hds = propSheet.m_Page1.m_startup_hds;
 
-		point_size = atoi( (LPCSTR)propSheet.m_Page1.m_psize );
-		lstrcpy( font_name, (LPCSTR)propSheet.m_Page1.m_font );
-		pApp->m_is_font_sjis = is_font_sjis = propSheet.m_Page1.m_is_font_sjis; /* noda */
+		point_size = atoi( (LPCSTR)propSheet.m_display.m_psize );
+		lstrcpy( font_name, (LPCSTR)propSheet.m_display.m_font );
+		pApp->m_is_font_sjis = is_font_sjis = propSheet.m_display.m_is_font_sjis; /* noda */
 
 		pApp->m_copyout_mode = propSheet.m_Page2.m_copyout_mode;
 		pApp->m_copyin_mode = propSheet.m_Page2.m_copyin_mode;
@@ -776,7 +778,9 @@ LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam)
  if(message==WM_SYSCOMMAND&&(wParam&0xfff0)==SC_CLOSE){
   if(StorageUi::busy()||StorageUi::state().sessionOpen)return 0;
   auto kind=!BackgroundCopies::Active()?DialogClose::Kind::Browser:static_cast<CHFVExplorerApp*>(AfxGetApp())->m_browsers.size()<=1?DialogClose::Kind::LastBrowser:DialogClose::Kind::BackgroundBrowser;
-  if(!DialogClose::Confirm(m_hWnd,kind))return 0;
+  const auto* app=static_cast<CHFVExplorerApp*>(AfxGetApp());
+  if((kind!=DialogClose::Kind::Browser||app->m_confirm_quit)&&
+     !DialogClose::Confirm(m_hWnd,kind))return 0;
  }
  if(message==WM_COMMAND&&!StorageUi::busy()){
   StorageAction storageAction;

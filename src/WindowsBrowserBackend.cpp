@@ -55,10 +55,6 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
  snapshot.folder=FileOperations::Location::Windows(directory);
  snapshot.folder.directory=true;
  snapshot.resourceKey=VolumeCoord::PathKey(directory);
- // Browsing the folder can overlap a write to a child file. Both idle and
- // busy listings take the same lease and tolerate briefly locked children.
- const VolumeCoord::Lease access({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});
- snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
  wchar_t root[MAX_PATH]{};
  const auto driveType=GetVolumePathNameW(directory.c_str(),root,ARRAYSIZE(root))?
      GetDriveTypeW(root):UINT(DRIVE_UNKNOWN);
@@ -70,6 +66,10 @@ BrowserDirectory::Snapshot BrowserFolderReader::read_windows_browser_directory(
  }else if(driveType==DRIVE_REMOVABLE||driveType==DRIVE_CDROM)
   media.BindWindowsMediaSerial(StorageLocation::WindowsSerial(directory));
  if(driveType==DRIVE_FIXED)WindowsMoveUndo::RecoverExports(ioFolder);
+ // Browsing the folder can overlap a write to a child file. Both idle and
+ // busy listings take the same lease and tolerate briefly locked children.
+ const VolumeCoord::Lease access({{snapshot.resourceKey,VolumeCoord::Mode::Browse}});
+ snapshot.revision=VolumeCoord::Revision(snapshot.resourceKey);
  try{media.expectedIdentity=MacBrowser::DescribeWindowsFile(directory).identity;}
  catch(const std::exception&){}
  snapshot.capabilitiesKnown=true;
