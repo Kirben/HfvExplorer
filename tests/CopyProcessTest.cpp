@@ -3145,6 +3145,29 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
           "Original Unicode and case-distinct names were not restored");
     Verify(*returned,a.id,4097,32);
     Verify(*returned,b.id,4099,63);
+    auto conflict=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(returned)});
+    Conflict(conflict);
+    const auto restorePreview=conflict.Job()->conflictState();
+    Check(restorePreview.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview&&
+          restorePreview.path.find(BrowserPresentation::Utf8(folderName))!=std::string::npos,
+          "Archive restore did not show the original name colliding with the destination");
+    conflict.Job()->resolve(restorePreview.id,Storage::ConflictChoice::Cancel);
+    Wait(conflict);
+    Check(conflict.Job()->result().outcome==Storage::Outcome::Cancelled,
+          "Declining the restore preview did not cancel");
+    Verify(*returned,a.id,4097,32);
+    Verify(*returned,b.id,4099,63);
+    auto folded=Image(Wide(base+"-folded.dsk"),HfsPlus::Volume::FormatKind::HfsPlus);
+    const auto originalCount=folded->List(2).size();
+    auto collision=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(folded)});
+    Wait(collision);
+    const auto blocked=collision.Job()->result();
+    if(!blocked.code||blocked.message.find("Report")==std::string::npos||
+       blocked.message.find("report")==std::string::npos||folded->List(2).size()!=originalCount||
+       folded->FindChild(2,folderName,absent))
+        throw HfsPlus::Error("Unexpected folded archive restore result "+std::to_string(blocked.code)+
+                             ", root entries "+std::to_string(folded->List(2).size())+": "+blocked.message);
+    fprintf(report,"PASS: archive restore previews existing conflicts, rejects colliding restored names and preserves the destination on cancellation.\n");
     fprintf(report,"PASS: archive move previews MacRoman truncation and collisions, retains the source on cancellation, and restores original names and both forks after reopening.\n");
 }
 
@@ -3209,7 +3232,8 @@ void TestClassicArchiveSpecialEntries(const std::string& root,FILE* report)
         if(apfs){
             Conflict(restore);
             const auto conversion=restore.Job()->conflictState();
-            Check(conversion.kind==Storage::CopyPrompt::IndependentFolders,"APFS directory archive needs approval");
+            Check(conversion.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview&&
+                  conversion.path.find("independent folders")!=std::string::npos,"APFS directory archive needs a restore preview");
             restore.Job()->resolve(conversion.id,Storage::ConflictChoice::Replace);
         }
         Wait(restore);

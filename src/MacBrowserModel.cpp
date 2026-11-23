@@ -526,7 +526,7 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=EncodeMfsName(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<ClassicCopyArchive::Metadata> archivedMetadata; bool restoredMetadata=false; bool projectedName=false; std::string archiveLinkGroup; uint64_t archivedDescriptionSize=0; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<ClassicCopyArchive::Metadata> archivedMetadata; bool restoredMetadata=false; bool projectedName=false; bool restoredNameChanged=false; std::string archiveLinkGroup; uint64_t archivedDescriptionSize=0; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -867,7 +867,10 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
                 entry.archivedCompressionType=archive->compressionType;
                 entry.inlineCompression=std::move(metadata->inlineCompression);
             }
-            if(!metadata->name.empty())entry.name=std::move(metadata->name);
+            if(!metadata->name.empty()){
+                plan.restoredNameChanged=metadata->name!=entry.name;
+                entry.name=std::move(metadata->name);
+            }
             entry.datesValid=metadata->datesValid;
             entry.created=metadata->created;
             entry.modified=metadata->modified;
@@ -1766,8 +1769,40 @@ struct ClassicCopyLoss {
     }
 };
 
+void AppendArchiveRestoreNotes(Volume& destination,const std::vector<Planned>& plans,uint32_t parent,bool parentExists,
+                               const std::u16string& folder,std::string& notes,Storage::Job& job)
+{
+    for(const auto& plan:plans){
+        if(job.cancelled())throw Storage::Cancelled();
+        if(notes.size()>=32*1024){
+            notes+="Additional entries are not shown.\r\n";
+            return;
+        }
+        const auto& entry=plan.entry;
+        const auto path=folder+entry.name;
+        Entry existing;
+        const bool found=parentExists&&destination.FindTransferChild(parent,entry,existing);
+        if(plan.restoredNameChanged&&found)
+            notes+="Restored name already exists: "+BrowserPresentation::Utf8(path)+"\r\n";
+        if(plan.restoredMetadata&&entry.compressed&&entry.forks[1].size&&entry.inlineCompression.empty())
+            notes+="May need an uncompressed copy to preserve the resource fork: "+BrowserPresentation::Utf8(path)+"\r\n";
+        if(entry.directory)
+            AppendArchiveRestoreNotes(destination,plan.children,found?existing.id:parent,found,path+u"/",notes,job);
+    }
+}
+
 void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent,bool parentExists){
- std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);dst.ValidateCopyNames(parent,names,parentExists);
+ std::vector<Entry> names;for(const auto& plan:plans)names.push_back(plan.entry);
+ try{dst.ValidateCopyNames(parent,names,parentExists);}
+ catch(const HfsPlus::Error& error){
+  if(std::none_of(plans.begin(),plans.end(),[](const auto& plan){return plan.restoredNameChanged;}))throw;
+  std::string message=std::string(error.what())+" Restored names in this folder:";
+  for(const auto& name:names){
+   if(message.size()>=512){message+=" ...";break;}
+   message+=" "+BrowserPresentation::Utf8(name.name);
+  }
+  throw HfsPlus::Error(message);
+ }
  for(const auto& plan:plans){
   if(plan.entry.version&&std::string_view(dst.Kind())!="MFS")
    throw HfsPlus::Error("The destination cannot preserve MFS file version "+
@@ -1970,9 +2005,19 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
                   "Cut/Paste cannot merge a folder while preserving its archive metadata. Source retained.");
         }
     }
-    if(!firstLinkedFolder.empty()&&
-       job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace)
+    const bool restoring=std::string_view(dst.Kind())!="HFS"&&!adapter&&
+        std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);});
+    if(restoring){
+        std::string notes;
+        if(!firstLinkedFolder.empty())
+            notes="APFS will restore directory hard links as independent folders. First linked folder: "+firstLinkedFolder+"\r\n";
+        AppendArchiveRestoreNotes(dst,plans,parent,true,{},notes,job);
+        if(!notes.empty()&&job.requestChoice(Storage::CopyPrompt::ClassicArchiveRestorePreview,notes)!=Storage::ConflictChoice::Replace)
+            throw Storage::Cancelled();
+    }else if(!firstLinkedFolder.empty()&&
+             job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace){
         throw Storage::Cancelled();
+    }
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     CopiedLinks copies;
     const auto transfer=[&](bool durable){
