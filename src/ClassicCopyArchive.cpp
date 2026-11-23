@@ -334,11 +334,14 @@ static Inspection Inspect(MacBrowser::Volume& volume,const Entry& item,Storage::
     }
 }
 
-std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job,const char** copyWarning)
 {
     auto result=Inspect(volume,item,job,true);
-    Check(result.health!=Health::Corrupt,"The classic metadata companion is corrupt. Source files were retained.");
-    Check(result.health!=Health::Stale,"The classic metadata companion is stale. Source files were retained.");
+    const char* warning=nullptr;
+    if(result.health==Health::Corrupt)warning="The classic metadata companion is corrupt.";
+    if(result.health==Health::Stale)warning="The classic metadata companion is stale.";
+    if(copyWarning)*copyWarning=warning;
+    else if(warning)throw HfsPlus::Error(std::string(warning)+" Source files were retained.");
     if(result.pair)return std::move(result.pair->metadata);
     return {};
 }

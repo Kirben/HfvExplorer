@@ -526,7 +526,7 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=EncodeMfsName(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::optional<Entry> keptFolder; bool mergedFolder=false, keptCompanion=false; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<ClassicCopyArchive::Metadata> archivedMetadata; bool restoredMetadata=false; bool projectedName=false; bool restoredNameChanged=false; std::string archiveLinkGroup; uint64_t archivedDescriptionSize=0; };
+struct Planned { Entry entry; std::optional<Entry> keptFolder; bool mergedFolder=false, keptCompanion=false; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<ClassicCopyArchive::Metadata> archivedMetadata; bool restoredMetadata=false, classicForkOnly=false; bool projectedName=false; bool restoredNameChanged=false; std::string archiveLinkGroup; uint64_t archivedDescriptionSize=0; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -854,10 +854,12 @@ struct ArchiveSpace {
     }
 };
 
-void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job,bool carry=false)
+void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job,
+                           bool carry,std::string* copyWarnings)
 {
     auto& entry=plan.entry;
-    if(auto archive=ClassicCopyArchive::Load(source,entry,job)){
+    const char* warning=nullptr;
+    if(auto archive=ClassicCopyArchive::Load(source,entry,job,copyWarnings?&warning:nullptr)){
         if(carry)plan.archivedMetadata=std::move(*archive);
         else{
             auto* metadata=&archive->entry;
@@ -895,12 +897,17 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
         }
         plan.restoredMetadata=true;
     }
-    for(auto& child:plan.children)RestoreClassicArchive(source,child,progress,job,carry);
+    if(warning){
+        plan.classicForkOnly=true;
+        if(copyWarnings->size()<32*1024)
+            *copyWarnings+=BrowserPresentation::Utf8(entry.name)+": "+warning+"\r\n";
+    }
+    for(auto& child:plan.children)RestoreClassicArchive(source,child,progress,job,carry,copyWarnings);
     std::set<std::u16string> consumed;
     for(const auto& child:plan.children)
-        if(child.restoredMetadata)consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
+        if(child.restoredMetadata||child.classicForkOnly)consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
     plan.children.erase(std::remove_if(plan.children.begin(),plan.children.end(),[&](const auto& child){
-        if(child.restoredMetadata||!consumed.count(child.entry.name))return false;
+        if(child.restoredMetadata||child.classicForkOnly||!consumed.count(child.entry.name))return false;
         --progress.totalFiles;
         progress.totalBytes-=child.entry.forks[0].size;
         return true;
@@ -2000,6 +2007,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
     Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
+    std::string copyWarnings;
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
         plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));
         const std::string_view kind=source.first->Kind();
@@ -2011,9 +2019,15 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
                   "The destination cannot preserve the archive during Cut/Paste. Source retained.");
         if(!adapter){
             if(kind=="HFS"&&(target=="APFS"||dst.HfsPlusDateRange()||(archiveSource&&target=="HFS")))
-                RestoreClassicArchive(*source.first,plans.back(),progress,job,target=="HFS");
+                RestoreClassicArchive(*source.first,plans.back(),progress,job,target=="HFS",moving?nullptr:&copyWarnings);
             PrepareCopyTimestamps(plans.back(),dst,kind=="APFS",kind=="HFS+"||kind=="HFSX");
         }
+    }
+    if(!copyWarnings.empty()){
+        const auto details="Copy the classic data and resource forks and native Finder metadata for the entries below? "
+            "Archived names, Unix permissions, extra timestamps, attributes, ACLs, compression and link relationships for these entries will be omitted. The originals and companions will stay in place.\r\n\r\n"+copyWarnings;
+        if(job.requestChoice(Storage::CopyPrompt::ClassicArchiveForkOnly,details)!=Storage::ConflictChoice::Replace)
+            throw Storage::Cancelled();
     }
     if(dst.Supports().CanCreateHardLinks()){
         RestoredArchiveGroups groups;

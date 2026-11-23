@@ -26,6 +26,6 @@ void RemoveCompanion(MacBrowser::Volume&,const MacBrowser::Entry&);
 bool ValidateCut(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 void RemoveArchive(MacBrowser::Volume&,uint32_t,Storage::Job&,bool batchActive,bool deletionProgress=false);
 void Save(MacBrowser::Volume&,uint32_t id,const Metadata&,Storage::Job&);
-std::optional<Metadata> Load(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
+std::optional<Metadata> Load(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&,const char** copyWarning=nullptr);
 std::optional<Metadata> Decode(const HfsPlus::AttributeData&,const Digest&,Storage::Job&);
 }

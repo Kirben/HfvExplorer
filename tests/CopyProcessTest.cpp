@@ -2732,13 +2732,69 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     try{ClassicCopyArchive::Load(*classic,edited,job);}
     catch(const HfsPlus::Error& error){stale=std::string_view(error.what()).find("stale")!=std::string_view::npos;}
     Check(stale,"A valid companion for a different item was treated as missing or corrupt");
+    const auto verifyForkOnly=[&](uint32_t companionId,const char* reason,bool nested){
+        const auto* targetName=nested?u"Corrupt fallback":u"Stale fallback";
+        returned->MakeDirectory(2,targetName);
+        const auto destination=[&]{
+            Entry target;
+            Check(returned->FindChild(2,targetName,target),"Cannot resolve fork-only destination folder");
+            return target.id;
+        };
+        const auto selected=nested?archivedFolder.id:edited.id;
+        auto input=Native(classic,selected);
+        input.cut=true;
+        auto cut=Submit(OrdinaryCopy{{input},Native(returned,destination())});
+        Wait(cut);
+        Check(cut.Job()->result().code&&!cut.Job()->result().moved&&returned->List(destination()).empty(),
+              "Cut/Paste accepted an invalid classic companion");
+        input.cut=false;
+        const auto copy=[&](Storage::ConflictChoice answer){
+            auto op=Submit(OrdinaryCopy{{input},Native(returned,destination())});
+            Conflict(op);
+            const auto prompt=op.Job()->conflictState();
+            Check(prompt.kind==Storage::CopyPrompt::ClassicArchiveForkOnly&&
+                  prompt.path.find(reason)!=std::string::npos&&prompt.path.find("will be omitted")!=std::string::npos,
+                  "Invalid companion copy did not explain which metadata would be omitted");
+            op.Job()->resolve(prompt.id,answer);
+            Wait(op);
+            return op.Job()->result();
+        };
+        Check(copy(Storage::ConflictChoice::Cancel).error==ERROR_CANCELLED&&returned->List(destination()).empty(),
+              "Declining fork-only copy changed the destination");
+        const auto copied=copy(Storage::ConflictChoice::Replace);
+        Check(!copied.code&&!copied.moved,copied.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(returnPath);
+        Entry fallbackFolder,item;
+        Check(returned&&returned->FindChild(2,nested?u"Corrupt fallback":u"Stale fallback",fallbackFolder),
+              "Fork-only destination did not reopen");
+        uint32_t parent=fallbackFolder.id;
+        if(nested){
+            Check(returned->FindChild(parent,folder.name,item),"Folder fallback lost the directory");
+            parent=item.id;
+        }
+        Check(returned->FindChild(parent,file.name,item)&&returned->List(parent).size()==1&&
+              returned->GetAttributes(item.id).empty(),"Fork-only copy restored unverified metadata or copied the companion");
+        for(unsigned fork=0;fork<2;++fork){
+            HfsPlus::Bytes expected(size_t(edited.forks[fork].size)),actual(expected.size());
+            classic->Read(edited.id,fork,0,expected.data(),expected.size());
+            returned->Read(item.id,fork,0,actual.data(),actual.size());
+            Check(item.forks[fork].size==expected.size()&&expected==actual,"Fork-only copy changed fork content");
+        }
+        Entry original;
+        Check(classic->FindChild(edited.parent,companion.name,original)&&original.id==companionId,
+              "Fork-only copy changed the source companion");
+    };
+    verifyForkOnly(staleId,"stale",false);
     classic->Remove(staleId);
     companion.forks[0].size=32;
-    classic->Put(edited.parent,companion,[](unsigned,uint64_t,void* out,size_t count){memset(out,0,count);},false);
+    const auto corruptId=classic->Put(edited.parent,companion,[](unsigned,uint64_t,void* out,size_t count){memset(out,0,count);},false);
     bool corrupt=false;
     try{ClassicCopyArchive::Load(*classic,edited,job);}
     catch(const HfsPlus::Error& error){corrupt=std::string_view(error.what()).find("corrupt")!=std::string_view::npos;}
     Check(corrupt,"A corrupt companion was treated as missing");
+    verifyForkOnly(corruptId,"corrupt",true);
+    fprintf(report,"PASS: stale and corrupt companions allow explicit fork-only copies; cancellation and refused Cut/Paste preserve both endpoints.\n");
     fprintf(report,"PASS: classic archive restore distinguishes missing, stale and corrupt companions and preserves verified metadata alongside a native timestamp edit.\n");
 }
 
