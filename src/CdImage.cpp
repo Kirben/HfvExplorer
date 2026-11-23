@@ -5,7 +5,7 @@
 #include "HfsPlus.h"
 #include "BrowserPresentation.h"
 #include "MacBrowserModel.h"
-#include "WindowsHandleRename.h"
+#include "WindowsMoveUndo.h"
 #include "DeviceWait.h"
 #include "ReadOnlyCd.h"
 #include "CdImageToc.h"
@@ -73,7 +73,8 @@ public:
 };
 struct DestinationGuard {
  HANDLE handle=INVALID_HANDLE_VALUE;
- ~DestinationGuard(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
+ ~DestinationGuard(){Close();}
+ void Close(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(std::exchange(handle,INVALID_HANDLE_VALUE));}
 };
 Storage::Result failure(DWORD error,const std::string& reason,unsigned long long offset=0) {
  if(!error)error=ERROR_IO_DEVICE;
@@ -98,11 +99,17 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
 #endif
   if(destination[1]==':' && (destination[0]==char('A'+drive)||destination[0]==char('a'+drive)))
    return failure(ERROR_INVALID_PARAMETER,"Save the image on a different drive from the source");
-  DWORD attributes=GetFileAttributesA(destination);bool replace=attributes!=INVALID_FILE_ATTRIBUTES;
   const auto outputPath=BrowserPresentation::WindowsPath(VolumeCoord::Wide(destination));
+  const auto slash=outputPath.find_last_of(L'\\');
+  const auto folder=outputPath.substr(0,slash==6?7:slash);
+  const bool durable=WindowsMoveUndo::Supported(folder);
+  if(durable)WindowsMoveUndo::RecoverExports(folder);
+  const bool replace=GetFileAttributesW(outputPath.c_str())!=INVALID_FILE_ATTRIBUTES;
   DestinationGuard original;
+  MacBrowser::ObjectIdentity approved;
   if(replace){
-   // Bind approval to this file and prevent competing writes or renames.
+   if(!durable)return failure(ERROR_NOT_SUPPORTED,"Replacing an image requires a local NTFS folder. Choose a new filename.");
+   // Bind approval to this file and prevent competing writes or renames during the dump.
    original.handle=CreateFileW(outputPath.c_str(),FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ,
        nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
    if(original.handle==INVALID_HANDLE_VALUE)return failure(GetLastError(),"Cannot protect the current destination");
@@ -110,6 +117,7 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
    if(!GetFileInformationByHandle(original.handle,&info)||
       (info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
     return failure(ERROR_ACCESS_DENIED,"Choose an ordinary output file");
+   approved=MacBrowser::WindowsIdentity(info);
    auto choice=job.replace(destination);
    if(choice==Storage::ConflictChoice::Skip)return {};
    if(choice==Storage::ConflictChoice::Cancel)throw Storage::Cancelled();
@@ -145,30 +153,33 @@ std::function<Storage::Result(Storage::Job&)> MakeMediaImageJob(int drive,std::s
   p.phase="Saving "+medium+" image";job.progress(p);
   file->Flush();
   if(job.cancelled())throw Storage::Cancelled();
-  std::wstring backup;
   if(replace){
-   backup=file->WorkerFiles().front().first+L".previous";
-   if(!RenameWindowsHandle(original.handle,backup))return failure(GetLastError(),"Could not retain the old image",size);
-  }
-  try{file->PublishTo(outputPath);}
-  catch(const HfsPlus::Error& error){
-   const auto code=GetLastError();
-   if(replace&&!RenameWindowsHandle(original.handle,outputPath)){
-    Storage::OutcomeEvidence::NoteRetainedChange();
-    return failure(code,std::string(error.what())+" The original image remains at "+
-                   BrowserPresentation::Utf8(MacBrowser::U16(backup)),size);
-   }
-   return failure(code,error.what(),size);
-  }
-  file->Keep();
-  if(replace){
-   FILE_DISPOSITION_INFO remove{TRUE};
-   if(!SetFileInformationByHandle(original.handle,FileDispositionInfo,&remove,sizeof(remove))){
-    const auto code=GetLastError();
-    Storage::OutcomeEvidence::NoteRetainedChange();
-    return failure(code,"The new image was saved. The original remains at "+
-                   BrowserPresentation::Utf8(MacBrowser::U16(backup)),size);
-   }
+   WindowsMoveUndo::RunExport(folder,[&]{
+    auto& transaction=*WindowsMoveUndo::Session::Current();
+    const auto stagedFile=file->WorkerFiles().front();
+    const auto handle=HANDLE(stagedFile.second);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if(!GetFileInformationByHandle(handle,&info))
+     throw HfsPlus::Error("Cannot identify the completed image");
+    const auto completed=MacBrowser::WindowsIdentity(info);
+    const auto staged=transaction.StageTemporary(stagedFile.first,handle);
+    file->Keep();
+    file.reset();
+    if(job.cancelled())throw Storage::Cancelled();
+    original.Close();
+    transaction.Rename(outputPath,transaction.Slot(),&approved);
+#ifdef HFV_TESTING
+    if(MacBrowser::windowsPublicationFault)
+     MacBrowser::windowsPublicationFault("media-image-original-staged");
+#endif
+    if(job.cancelled())throw Storage::Cancelled();
+    transaction.Rename(staged,outputPath,&completed);
+    if(job.cancelled())throw Storage::Cancelled();
+   });
+  }else{
+   try{file->PublishTo(outputPath);}
+   catch(const HfsPlus::Error& error){return failure(GetLastError(),error.what(),size);}
+   file->Keep();
   }
   p.phase=medium+" image saved";job.progress(p);return {};
  };

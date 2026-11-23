@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "MacBrowserModel.h"
+#include "ClassicHfsRecovery.h"
 #include "CdImage.h"
 #include "DeviceWait.h"
 #include "CdImageToc.h"
@@ -38,6 +40,24 @@ void save(const std::string& path,const std::vector<BYTE>& data){CFile file;chec
 std::vector<BYTE> load(const std::string& path){CFile file;check(file.Open(path.c_str(),CFile::modeRead)!=FALSE,"open image");std::vector<BYTE> data(size_t(file.GetLength()));check(file.Read(data.data(),UINT(data.size()))==data.size(),"read image");return data;}
 void noTemporary(const std::string& root){WIN32_FIND_DATAA found;HANDLE h=FindFirstFileA((root+"\\.hfv-image-*").c_str(),&found);if(h!=INVALID_HANDLE_VALUE)FindClose(h);check(h==INVALID_HANDLE_VALUE,"partial temporary image leaked");}
 }
+int RunMediaImageCrashChild(const char* directory,unsigned phase)
+{
+ auto source=std::make_shared<FakeCdImage>();
+ auto image=std::string(directory)+"\\Disc.iso";
+ auto job=Storage::worker().submit([&](Storage::Job& running){
+  ClassicHfsRecovery::Transaction::CrashAt(phase);
+  if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+   if(!strcmp(step,"media-image-original-staged"))ExitProcess(97);
+  };
+  return MakeCdImageJob(3,image,source)(running);
+ });
+ while(!job->done()){
+  if(!job->conflict().empty())job->resolve(Storage::ConflictChoice::Replace);
+  Sleep(1);
+ }
+ return job->result().code?4:3;
+}
+
 int RunCdImageTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;std::string root=directory;
  FILE* report=nullptr;if(fopen_s(&report,(root+"\\cd-image-report.txt").c_str(),"w")||!report)return 2;

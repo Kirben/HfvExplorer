@@ -1867,8 +1867,32 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
             }
         }
     }
+    for(unsigned phase:{7u,9u}){
+        CString folder;
+        folder.Format("%s\\media-overwrite-%u",root.GetString(),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create removable-image overwrite fixture");
+        const auto path=folder+"\\Disc.iso";
+        const Bytes original{3,7,11},neighbor{2,4,6};
+        Save(path,original);
+        Save(folder+"\\Neighbor",neighbor);
+        CrashChild(folder,phase,L"media-image-overwrite");
+        if(phase==7)Check(GetFileAttributesA(path)==INVALID_FILE_ATTRIBUTES,
+                          "overwrite did not stop between staging and publication");
+        auto windows=MacBrowser::OpenWindows(VolumeCoord::Wide(folder.GetString()));
+        Bytes expected=original;
+        if(phase==9){
+            expected.resize(3*65536+2048);
+            for(size_t i=0;i<expected.size();++i)expected[i]=BYTE(i*71+i/2048);
+            expected[0]='E';expected[1]='R';expected[512]='P';expected[513]='M';
+        }
+        Check(Load(path)==expected&&Load(folder+"\\Neighbor")==neighbor&&
+              StagedImages(folder)==0&&windows->List(2).size()==2,
+              "removable-image overwrite recovery failed or changed an unrelated file");
+    }
+    fprintf(report,"PASS: interrupted removable image overwrite restores the old image before commit and preserves the new image after commit.\n");
     fprintf(report,"PASS: interrupted MFS and HFSX formatting leaves final names absent; interrupted external-journal formatting recovers both outputs together.\n");
 }
+int RunMediaImageCrashChild(const char*,unsigned);
 int RunRawOpticalCrashChild(const char*,unsigned,bool);
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -1889,6 +1913,7 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        if(!strcmp(action,"media-image-overwrite"))return RunMediaImageCrashChild(image,phase);
         const bool formatMfs=!strcmp(action,"format-mfs-image");
         const bool formatHfsx=!strcmp(action,"format-hfsx-image");
         const bool formatExternal=!strcmp(action,"format-external-image");
