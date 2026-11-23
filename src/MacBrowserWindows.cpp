@@ -891,13 +891,17 @@ void ValidateWindowsCut(Volume& volume,uint32_t id,Storage::Job& job,bool window
             throw HfsPlus::Error("The move would discard alternate data streams. Use Copy to leave the source intact.");
         });
     };
+    const bool canJournal=WindowsMoveUndo::Supported(volume.HostPath(2));
     ApplyRemovalPlan(volume,id,job,false,[&](uint32_t child){
         const auto entry=volume.Stat(child);
         const auto path=volume.HostPath(child);
         // Windows copies transfer the primary file's named streams. Folder
         // streams and streams on an AppleDouble companion are separate.
         validate(path,windowsDestination&&!entry.directory);
-        if(!entry.identity.companion.key.empty())validate(Companion(path),false);
+        if(!entry.identity.companion.key.empty()){
+            Check(canJournal,"Moving an entry with an AppleDouble companion requires a local NTFS source. Use Copy to keep both source files.");
+            validate(Companion(path),false);
+        }
     });
 }
 
@@ -909,6 +913,22 @@ void FinishWindowsCut(Volume& volume,const WindowsCutPlan& plan,Storage::Job& jo
     if(auto move=WindowsMoveUndo::Session::Current()){
         move->StageCut(plan);
         Storage::OutcomeEvidence::NoteRetainedChange();
+        return;
+    }
+    const bool paired=std::any_of(plan.begin(),plan.end(),[](const auto& entry){
+        return !entry.identity.companion.key.empty();
+    });
+    if(paired){
+        const auto folder=volume.HostPath(2);
+        Check(WindowsMoveUndo::Supported(folder),"The Windows source cannot journal companion deletion. Both source files were kept.");
+        // The destination is already published. An interrupted cleanup may
+        // leave duplicates, but it must never split the Windows source pair.
+        Storage::OutcomeEvidence::NoteRetainedChange();
+        WindowsMoveUndo::RunExport(folder,[&]{
+            if(job.cancelled())throw Storage::Cancelled();
+            WindowsMoveUndo::Session::Current()->StageCut(plan);
+            if(job.cancelled())throw Storage::Cancelled();
+        });
         return;
     }
     // Snapshot visits parents before children. Remove only those entries in

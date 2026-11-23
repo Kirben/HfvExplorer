@@ -478,7 +478,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
       DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,true);
      }
     },nullptr,classicSources);
-   }else if(!moving&&target.IsWindows()&&
+   }else if(target.IsWindows()&&
             std::all_of(opened.begin(),opened.end(),[](const auto& item){return !ExecutionFor(*item.first).windowsPaths;})&&
             WindowsMoveUndo::Supported(destination.first->HostPath(2))){
     const auto previous=job.progress();
@@ -489,7 +489,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      Storage::OutcomeEvidence evidence;
      try{
       WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
-       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,false,true);
+       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true);
        destination.first->Close();
        Cancel(job);
       });

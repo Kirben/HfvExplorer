@@ -1704,9 +1704,9 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
         Check(host->List(2).size()==(phase==9?1:2),"recursive delete left unexpected files");
     }
     fprintf(report,"PASS: recursive NTFS Delete recovers nested AppleDouble pairs under an unpaired folder before commit removes the complete tree after commit, and rolls back a late addition to the original path.\n");
-    for(unsigned kind:{0u,1u,2u})for(unsigned phase:{7u,9u}){
+    for(unsigned kind:{0u,1u,2u})for(bool cut:{false,true})for(unsigned phase:{7u,9u}){
         CString image;
-        image.Format("%s\\modern-export-%u-%u.dsk",root.GetString(),kind,phase);
+        image.Format("%s\\modern-export-%u-%u-%u.dsk",root.GetString(),kind,unsigned(cut),phase);
         const auto path=VolumeCoord::Wide(image.GetString()),hostPath=path+L".windows";
         auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
         Storage::Job format;
@@ -1733,7 +1733,7 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
             Put(*host,false,false,2,u"Neighbor");
         }
         const auto sourceBefore=Load(image),classicBefore=Load(image+".classic.dsk");
-        CrashChild(image,phase,L"mixed-windows-export");
+        CrashChild(image,phase,cut?L"mixed-windows-cut":L"mixed-windows-export");
         auto host=MacBrowser::OpenWindows(hostPath);
         VerifyFile(*host,2,u"Document",phase==9);
         VerifyFile(*host,2,u"Second",phase==9);
@@ -1741,7 +1741,37 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
         Check(host->List(2).size()==3&&Load(image)==sourceBefore&&Load(image+".classic.dsk")==classicBefore,
               "interrupted mixed export changed a source or kept unexpected destination entries");
     }
-    fprintf(report,"PASS: mixed classic HFS and HFS+/HFSX/APFS exports recover interrupted NTFS overwrites and preserve both forks and untouched sources.\n");
+    fprintf(report,"PASS: mixed classic HFS and HFS+/HFSX/APFS Copy and Cut recover interrupted NTFS overwrites and preserve both forks and untouched sources.\n");
+    for(unsigned kind:{0u,1u,2u})for(unsigned phase:{7u,9u}){
+        CString image;
+        image.Format("%s\\windows-cut-modern-%u-%u.dsk",root.GetString(),kind,phase);
+        const auto path=VolumeCoord::Wide(image.GetString()),hostPath=path+L".windows";
+        auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+        Storage::Job format;
+        using Kind=HfsPlus::Volume::FormatKind;
+        if(kind==2)Apfs::Format(*disk,u"Cut destination",true,format);
+        else HfsPlus::Volume::Format(*disk,u"Cut destination",true,kind?Kind::HfsXCaseSensitive:Kind::HfsPlus);
+        disk.reset();
+        Check(CreateDirectoryW(hostPath.c_str(),nullptr)!=FALSE,"create paired Windows cut source");
+        {
+            auto host=MacBrowser::OpenWindows(hostPath);
+            Put(*host,true);
+            Put(*host,false,false,2,u"Neighbor");
+            auto destination=OpenCrossFormatFixture(path);
+            Put(*destination,false);
+        }
+        CrashChild(image,phase,L"windows-cut-to-modern");
+        auto destination=OpenCrossFormatFixture(path);
+        VerifyFile(*destination,2,u"Document",true);
+        auto host=MacBrowser::OpenWindows(hostPath);
+        VerifyFile(*host,2,u"Neighbor",false);
+        if(phase==7)VerifyFile(*host,2,u"Document",true);
+        else Check(GetFileAttributesW((hostPath+L"\\Document").c_str())==INVALID_FILE_ATTRIBUTES&&
+                   GetFileAttributesW((hostPath+L"\\%Document").c_str())==INVALID_FILE_ATTRIBUTES,
+                   "committed Windows cut left an orphaned source file");
+        Check(host->List(2).size()==(phase==7?2:1),"Windows cut recovery left unexpected entries");
+    }
+    fprintf(report,"PASS: Windows Cut to HFS+, HFSX and APFS restores both source files before cleanup commit and removes both after commit while preserving the destination forks.\n");
 }
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -1784,7 +1814,23 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             volume->Rename(Find(*volume,2,u"Document"),2,phase==12?u"DOCUMENT":u"Renamed");
             return 3;
         }
-        if(!strcmp(action,"mixed-windows-export")){
+        if(!strcmp(action,"windows-cut-to-modern")){
+            const auto path=VolumeCoord::Wide(image);
+            auto destination=OpenCrossFormatFixture(path);
+            if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+                if(!strcmp(step,"delete-companion-staged"))ExitProcess(97);
+            };
+            Storage::Job job;
+            job.transport({},[](const std::string&){return Storage::ConflictChoice::Replace;});
+            auto source=FileOperations::Location::Windows(path+L".windows\\Document");
+            source.cut=true;
+            FileOperations::OrdinaryCopy request{{std::move(source)},FileOperations::Location::Mounted(destination,2)};
+            request.destination.directory=true;
+            FileOperations::Completion completion;
+            const auto result=FileOperations::ExecuteInWorker(FileOperations::Request(std::move(request)),job,completion);
+            return result.code?4:3;
+        }
+        if(!strcmp(action,"mixed-windows-export")||!strcmp(action,"mixed-windows-cut")){
             const auto path=VolumeCoord::Wide(image);
             auto modern=OpenCrossFormatFixture(path);
             auto classic=MacBrowser::OpenImage(path+L".classic.dsk");
@@ -1799,6 +1845,7 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
                 FileOperations::Location::Mounted(classic,Find(*classic,2,u"Second"))
             },FileOperations::Location::Windows(path+L".windows")};
             request.destination.directory=true;
+            if(!strcmp(action,"mixed-windows-cut"))request.sources.front().cut=true;
             const auto result=FileOperations::ExecuteInWorker(FileOperations::Request(std::move(request)),job,completion);
             return result.code?4:3;
         }
