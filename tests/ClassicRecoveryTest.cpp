@@ -1802,6 +1802,24 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
               "Windows metadata recovery lost an alternate stream or left staging");
     }
     fprintf(report,"PASS: standalone Windows resource-fork replacement restores the old companion before commit and retains the new companion after commit, preserving the primary file and alternate streams.\n");
+    const Bytes exportBytes(2*1024*1024+29,0xb5),decoy{17,43,92};
+    for(bool attribute:{false,true})for(unsigned phase:{7u,9u,10u,11u}){
+        CString folder;
+        folder.Format("%s\\standalone-export-%u-%u",root.GetString(),unsigned(attribute),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create standalone export fixture");
+        Save(folder+"\\input.bin",phase==11?Bytes{}:exportBytes);
+        const CString output=folder+"\\output.bin";
+        CrashChild(folder,phase,attribute?L"atomic-attribute-export":L"atomic-fork-export");
+        if(phase==7)
+            Check(GetFileAttributesA(output)==INVALID_FILE_ATTRIBUTES&&StagedImages(folder)==1,
+                  "interrupted export exposed a partial final file");
+        else{
+            const auto expected=phase==10?decoy:phase==11?Bytes{}:exportBytes;
+            Check(Load(output)==expected&&StagedImages(folder)==0,
+                  "standalone export truncated its data, replaced an existing name, or leaked staging");
+        }
+    }
+    fprintf(report,"PASS: standalone fork and attribute exports publish only complete data, retain a late destination collision, and support empty exports.\n");
 }
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -1843,6 +1861,27 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
                 };
             volume->Rename(Find(*volume,2,u"Document"),2,phase==12?u"DOCUMENT":u"Renamed");
             return 3;
+        }
+        const bool attributeExport=!strcmp(action,"atomic-attribute-export");
+        if(attributeExport||!strcmp(action,"atomic-fork-export")){
+            const CString folder=image,input=folder+"\\input.bin",output=folder+"\\output.bin";
+            auto source=FileOperations::Location::Windows(VolumeCoord::Wide(input.GetString()));
+            auto destination=FileOperations::Location::Windows(VolumeCoord::Wide(output.GetString()));
+            FileOperations::Request request=attributeExport?
+                FileOperations::Request(FileOperations::ExportAttributeValue{destination,HfsPlus::AttributeData(Load(input))}):
+                FileOperations::Request(FileOperations::ExportFileFork{source,destination,FileOperations::ForkSelector::Data});
+            if(phase==7||phase==10)
+                HfsPlus::workerIoFault=[phase,output,writes=0u](bool write,uint64_t,size_t) mutable {
+                    if(write&&++writes==2){
+                        if(phase==7)ExitProcess(97);
+                        Save(output,Bytes{17,43,92});
+                    }
+                };
+            Storage::Job job;
+            FileOperations::Completion completion;
+            const auto result=FileOperations::ExecuteInWorker(request,job,completion);
+            if(phase==10?result.code!=0:!result.code)ExitProcess(90+phase);
+            return 4;
         }
         if(!strcmp(action,"windows-metadata-replace")){
             auto host=MacBrowser::OpenWindows(VolumeCoord::Wide(image));

@@ -655,25 +655,62 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
  }
  completion.complete=true;return {};
 }
-Storage::Result ExportFork(const ExportFileFork& request,Storage::Job& job,Completion& completion){
- const auto fork=static_cast<unsigned>(request.fork);auto source=Source(request.source);auto entry=source.first->Stat(source.second);Check(!entry.directory,"Select a file for fork export");
- source.first->Read(source.second,fork,0,nullptr,0);auto& path=request.output.WindowsPath();
- HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot create output; choose a new filename");
- try{Mark(completion,request.output);std::vector<uint8_t> bytes(1024*1024);Storage::Progress progress;progress.fileCopy=progress.byteTransfer=progress.utf8=true;progress.scanning=false;progress.phase="Exporting fork";progress.totalFiles=1;progress.path=Utf8(entry.name);progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
-  for(uint64_t at=0;at<entry.forks[fork].size;){Cancel(job);size_t n=size_t((std::min)(uint64_t(bytes.size()),entry.forks[fork].size-at));source.first->Read(source.second,fork,at,bytes.data(),n);DWORD written;if(!WriteFile(file,bytes.data(),DWORD(n),&written,nullptr)||written!=n)throw OperationError(GetLastError(),"Fork export write failed");at+=n;progress.bytes=progress.fileBytes=progress.processed=at;job.progress(progress);}
+template<class Read, class Progress>
+void PublishStandaloneExport(const Location& target,uint64_t size,Storage::Job& job,
+                             Completion& completion,Read read,Progress progress)
+{
+ const auto path=BrowserPresentation::WindowsPath(target.WindowsPath());
+ Cancel(job);
+ if(GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES)
+  throw OperationError(ERROR_FILE_EXISTS,"Choose a new export filename");
+ const auto error=GetLastError();
+ if(error!=ERROR_FILE_NOT_FOUND)throw OperationError(error,"Cannot create the export output");
+ auto output=HfsPlus::CreateStagedOutput(path,(std::max)(uint64_t{1},size),true);
+ try{
+  if(!size)output->Resize(0);
+  HfsPlus::Bytes buffer(size_t((std::min)(size,uint64_t{1024*1024})));
+  for(uint64_t offset=0;offset<size;){
+   Cancel(job);
+   const auto count=size_t((std::min)(size-offset,uint64_t(buffer.size())));
+   read(offset,buffer.data(),count);
+   output->Write(offset,buffer.data(),count);
+   offset+=count;
+   progress(offset);
+  }
   Cancel(job);
-  if(!FlushFileBuffers(file))throw OperationError(GetLastError(),"Fork export flush failed");
-  CloseHandle(file);
+  Mark(completion,target);
+  output->PublishTo(path);
+  output->Keep();
  }catch(...){
-  FILE_DISPOSITION_INFO remove{TRUE};
-  const bool deleted=SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove))!=FALSE;
-  const auto error=GetLastError();
-  CloseHandle(file);
-  if(!deleted){Storage::OutcomeEvidence::NoteRetainedChange();throw OperationError(error,"Could not remove the incomplete fork export");}
+  if(!output->Discard()){
+   Storage::OutcomeEvidence::NoteRetainedChange();
+   throw HfsPlus::Error("Could not remove the incomplete temporary export");
+  }
   throw;
  }
+}
+
+Storage::Result ExportFork(const ExportFileFork& request,Storage::Job& job,Completion& completion)
+{
+ const auto fork=static_cast<unsigned>(request.fork);
+ auto source=Source(request.source);
+ const auto entry=source.first->Stat(source.second);
+ Check(!entry.directory,"Select a file for fork export");
+ source.first->Read(source.second,fork,0,nullptr,0);
+
+ Storage::Progress progress;
+ progress.fileCopy=progress.byteTransfer=progress.utf8=true;
+ progress.scanning=false;
+ progress.phase="Exporting fork";
+ progress.totalFiles=1;
+ progress.path=Utf8(entry.name);
+ progress.totalBytes=progress.fileTotal=entry.forks[fork].size;
+ PublishStandaloneExport(request.output,progress.totalBytes,job,completion,
+  [&](uint64_t at,void* bytes,size_t count){source.first->Read(source.second,fork,at,bytes,count);},
+  [&](uint64_t written){progress.bytes=progress.fileBytes=progress.processed=written;job.progress(progress);});
  completion.complete=true;completion.completed=1;return {};
 }
+
 Storage::Result ReplaceResource(const ImportResourceFork& request,Storage::Job& job,Completion& completion){
  auto from=Source(request.input),target=Source(request.file);auto volume=target.first;uint32_t id=target.second;auto original=volume->Stat(id),replacement=original;Check(!original.directory,"Select a file for resource import");
  const auto input=from.first->Stat(from.second);
@@ -775,37 +812,11 @@ MetadataPlan DescribeMetadata(const ExportAttributeValue& output)
  Check(output.item.IsWindows(),"Choose a Windows output filename");
  // Attribute data is a standalone export and never creates a companion file.
  return {&output.item,Mode::Write,false,false,[&output](Storage::Job& job,Completion& result){
-  MetadataProgress(job,"Updating properties");
+  MetadataProgress(job,"Exporting attribute");
   const auto& bytes=output.value;
-  const auto& path=output.item.WindowsPath();
-  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE|DELETE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
-  if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot create attribute output; choose a new filename");
-  try{
-   Mark(result,output.item);
-   HfsPlus::Bytes buffer(65536);
-   for(uint64_t offset=0;offset<bytes.size();){
-    Cancel(job);
-    const auto count=size_t((std::min)(uint64_t(buffer.size()),bytes.size()-offset));
-    bytes.Read(offset,buffer.data(),count);
-    DWORD written=0;
-    if(!WriteFile(file,buffer.data(),DWORD(count),&written,nullptr)||written!=count)
-     throw OperationError(GetLastError(),"Attribute export write failed");
-    offset+=count;
-   }
-   Cancel(job);
-   if(!FlushFileBuffers(file))throw OperationError(GetLastError(),"Attribute export flush failed");
-   CloseHandle(file);
-  }catch(...){
-   FILE_DISPOSITION_INFO remove{TRUE};
-   const bool deleted=SetFileInformationByHandle(file,FileDispositionInfo,&remove,sizeof(remove))!=FALSE;
-   const auto error=GetLastError();
-   CloseHandle(file);
-   if(!deleted){
-    Storage::OutcomeEvidence::NoteRetainedChange();
-    throw OperationError(error,"Could not remove the incomplete attribute export");
-   }
-   throw;
-  }
+  PublishStandaloneExport(output.item,bytes.size(),job,result,
+   [&](uint64_t offset,void* data,size_t count){bytes.Read(offset,data,count);},
+   [](uint64_t){});
  }};
 }
 
