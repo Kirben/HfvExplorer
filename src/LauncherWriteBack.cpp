@@ -5,6 +5,7 @@
 #include "StorageJobDialog.h"
 #include "WindowsEntryIdentity.h"
 #include "CopyWorkerProtocol.h"
+#include "ClassicHfsRecovery.h"
 #include <shlobj.h>
 
 namespace {
@@ -175,7 +176,8 @@ bool LauncherWriteBack::SavePending()
     record.put(version_);
     record.put(baseline_);
     CopyWorkerProtocol::EncodeEndpoint(record,{original_,{},{}});
-    if(record.bytes.size()>MaximumRecord)return false;
+    if(record.bytes.size()+ClassicHfsRecovery::MoveIdSize>MaximumRecord)return false;
+    decisionOffset_=DWORD(record.bytes.size());
     pending_=CreateFile(temporary_.Left(separator)+RecordName,GENERIC_WRITE|DELETE,0,nullptr,
                         CREATE_NEW,FILE_ATTRIBUTE_HIDDEN|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
     if(pending_==INVALID_HANDLE_VALUE)return false;
@@ -198,7 +200,7 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
         if((info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))!=FILE_ATTRIBUTE_DIRECTORY)
             continue;
         const CString directory=root+"\\"+info.cFileName;
-        const auto handle=CreateFile(directory+RecordName,GENERIC_READ|DELETE,0,nullptr,OPEN_EXISTING,
+        const auto handle=CreateFile(directory+RecordName,GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,OPEN_EXISTING,
                                      FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
         if(handle==INVALID_HANDLE_VALUE)continue; // Another browser can already own this edit.
         struct FileLease {
@@ -219,7 +221,14 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
             auto leaf=record.text(),version=record.text();
             const auto baseline=record.get();
             auto original=CopyWorkerProtocol::ParseEndpoint(record,false).location;
-            record.end();
+            const auto decisionOffset=record.at;
+            const auto tail=record.bytes.size()-decisionOffset;
+            if(tail>ClassicHfsRecovery::MoveIdSize)continue;
+            std::string decision;
+            if(tail==ClassicHfsRecovery::MoveIdSize){
+                decision.assign(record.bytes.begin()+decisionOffset,record.bytes.end());
+                if(decision.find_first_not_of("0123456789abcdef")!=decision.npos)continue;
+            }
             if(leaf.empty()||leaf=="."||leaf==".."||leaf.find_first_of("\\/:")!=leaf.npos||
                leaf.find('\0')!=leaf.npos||version.empty()||!original.IsClassic()||original.directory||original.cut)
                 continue;
@@ -228,6 +237,8 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
             auto edit=std::make_unique<LauncherWriteBack>(std::move(original),std::move(version),
                                                           directory+"\\"+leaf.c_str());
             edit->baseline_=baseline;
+            edit->decisionOffset_=DWORD(decisionOffset);
+            edit->decisionId_=std::move(decision);
             edit->pending_=handle;
             lease.handle=INVALID_HANDLE_VALUE;
             edits.push_back(std::move(edit));
@@ -236,6 +247,33 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
         }
     }while(FindNextFile(search,&info));
     return edits;
+}
+
+bool LauncherWriteBack::Committed() const
+{
+    return !decisionId_.empty()&&ClassicHfsRecovery::MoveIsCommitted(decisionId_);
+}
+
+Storage::Result LauncherWriteBack::ApplyPending(const LauncherTemporaryDocument& document,Storage::Job& job)
+{
+    const auto streams=document.CheckWriteBackStreams();
+    if(streams.code)return streams;
+    const auto file=document.Handle();
+    if(original_.IsPhysical())
+        return FileOperations::ApplyLaunchEdit(original_,version_,file,job);
+    if(Committed())return {1,ERROR_ALREADY_EXISTS,"The Mac document was already updated."};
+    if(pending_==INVALID_HANDLE_VALUE||!decisionOffset_)
+        return {1,ERROR_INVALID_DATA,"The pending edit has no recovery record."};
+    ClassicHfsRecovery::MoveDecision decision;
+    LARGE_INTEGER offset{};
+    offset.QuadPart=decisionOffset_;
+    DWORD written=0;
+    if(!SetFilePointerEx(pending_,offset,nullptr,FILE_BEGIN)||
+       !WriteFile(pending_,decision.Id().data(),DWORD(decision.Id().size()),&written,nullptr)||
+       written!=decision.Id().size()||!FlushFileBuffers(pending_))
+        return {1,ERROR_WRITE_FAULT,"Cannot save the write-back recovery decision."};
+    decisionId_=decision.Id();
+    return FileOperations::ApplyLaunchEdit(original_,version_,file,job,&decision);
 }
 
 bool LauncherWriteBack::Forget()
@@ -254,6 +292,12 @@ bool LauncherWriteBack::Complete(BrowserSession& session)
         owner->MessageBox(reason+" The temporary document is still available at "+temporary_,
                           "HFVExplorer",MB_OK|MB_ICONWARNING);
     };
+    if(Committed()){
+        if(!RetireCommitted()){retain("The Mac document was already updated. Could not retire the pending edit record.");return false;}
+        // Recovery of the Mac image can still need the shared commit marker.
+        retain("The Mac document was already updated.");
+        return true;
+    }
     const auto path=VolumeCoord::Wide(static_cast<LPCSTR>(temporary_));
     LauncherTemporaryDocument document;
     uint64_t current=0;
@@ -281,13 +325,14 @@ bool LauncherWriteBack::Complete(BrowserSession& session)
                          "HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES)
         return false;
     auto result=ShowStorageJob([&](Storage::Job& job){
-        return FileOperations::ApplyLaunchEdit(original_,version_,document.Handle(),job);
+        return ApplyPending(document,job);
     },"Writing back the edited document",!owner->IsWindowVisible(),true,true,owner);
     if(result.code){
         retain(CString(result.message.c_str()));
         return false;
     }
     if(!Forget()){retain("Could not retire the pending edit record.");return false;}
+    if(!decisionId_.empty())ClassicHfsRecovery::ForgetMoveDecision(decisionId_);
     if(!document.Remove())retain("Could not remove the temporary copy.");
     return true;
 }

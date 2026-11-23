@@ -7,6 +7,7 @@
 extern "C" {
 #include "hfs/libhfs/hfs.h"
 }
+namespace ClassicHfsRecovery { class MoveDecision; }
 namespace FileOperations {
 enum class Kind {CreateHardLink,Copy,LegacyCopy,Rename,Delete,ExportFork,ReplaceResource,CreateFolder,Inspect,SetProperties,SetAttributes,ReadAttributeFile,ExportAttribute,SetBasicMetadata,SetCompression};
 
@@ -160,6 +161,7 @@ PlanAccessForTest InspectPlanForTest(const Request&,const std::string& key,bool 
 std::vector<Operation> Pending();
 void CancelPending();
 std::string CaptureLaunchVersion(const Location&, Storage::Job&);
-Storage::Result ApplyLaunchEdit(const Location&, const std::string&, HANDLE inspectedFile, Storage::Job&);
+Storage::Result ApplyLaunchEdit(const Location&, const std::string&, HANDLE inspectedFile, Storage::Job&,
+                               ClassicHfsRecovery::MoveDecision* decision=nullptr);
 
 }

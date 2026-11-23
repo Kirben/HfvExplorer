@@ -1552,7 +1552,7 @@ std::string CaptureLaunchVersion(const Location& item,Storage::Job& job)
 }
 
 Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
-                                HANDLE file,Storage::Job& job)
+                                HANDLE file,Storage::Job& job,ClassicHfsRecovery::MoveDecision* decision)
 {
  Storage::OperationCompletion outcome;
  Completion completion;
@@ -1578,6 +1578,7 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
    Cancel(job);
    Mark(completion,item);
    // The classic replacement stages both forks and preserves Finder metadata.
+   const auto write=[&]{
    volume.PutResourceReplacement(id,replacement,[&](unsigned fork,uint64_t offset,void* bytes,size_t count){
     Cancel(job);
     if(fork){volume.Read(id,1,offset,bytes,count);return;}
@@ -1587,6 +1588,15 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
        !ReadFile(file,bytes,DWORD(count),&received,nullptr)||received!=count)
      throw OperationError(GetLastError(),"Could not read the entire edited data fork");
    },{});
+   };
+   if(decision)volume.WithCopyTransaction([&](bool active){
+    Check(active,"This image cannot coordinate durable launcher write-back");
+    write();
+    volume.PrepareCopyTransaction();
+    Cancel(job);
+    decision->Commit();
+   },decision->Id());
+   else write();
    volume.Close();
   });
   completion.completed=1;

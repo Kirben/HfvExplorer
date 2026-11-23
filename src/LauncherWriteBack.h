@@ -43,6 +43,9 @@ public:
     ~LauncherWriteBack();
     bool CaptureBaseline(CWnd* owner);
     bool SavePending();
+    bool Committed() const;
+    Storage::Result ApplyPending(const LauncherTemporaryDocument&,Storage::Job&);
+    bool RetireCommitted() { return Committed()&&Forget(); }
     static std::vector<std::unique_ptr<LauncherWriteBack>> LoadPending(const CString& root);
     const CString& TemporaryPath() const { return temporary_; }
     bool Complete(BrowserSession&);
@@ -53,5 +56,7 @@ private:
     CString temporary_;
     bool Forget();
     HANDLE pending_=INVALID_HANDLE_VALUE;
+    DWORD decisionOffset_=0;
+    std::string decisionId_;
     uint64_t baseline_=0;
 };
