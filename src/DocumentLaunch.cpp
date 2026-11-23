@@ -467,6 +467,110 @@ bool EmulatorConfigured(Emulator emulator)
            ConfiguredPath(EmulatorPath(emulator, EmulatorInputKey(emulator)));
 }
 
+namespace {
+class EmulatorTemporaryEntry {
+    HANDLE identity_=INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION captured_{};
+    std::filesystem::path path_;
+
+    static constexpr DWORD ShareAll=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
+public:
+    EmulatorTemporaryEntry()=default;
+    EmulatorTemporaryEntry(const EmulatorTemporaryEntry&)=delete;
+    EmulatorTemporaryEntry& operator=(const EmulatorTemporaryEntry&)=delete;
+    ~EmulatorTemporaryEntry(){ReleaseIdentity();}
+    void ReleaseIdentity()
+    {
+        if(identity_!=INVALID_HANDLE_VALUE){
+            CloseHandle(identity_);
+            identity_=INVALID_HANDLE_VALUE;
+        }
+    }
+
+    bool Capture(const std::filesystem::path& path,bool directory=false)
+    {
+        path_=path;
+        identity_=CreateFileW(path_.c_str(),FILE_READ_ATTRIBUTES,ShareAll,nullptr,OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+        return identity_!=INVALID_HANDLE_VALUE&&GetFileInformationByHandle(identity_,&captured_)&&
+               (captured_.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))==
+                   (directory?FILE_ATTRIBUTE_DIRECTORY:0)&&
+               (captured_.nFileIndexHigh||captured_.nFileIndexLow);
+    }
+
+    HANDLE OpenForCleanup(bool directory=false) const
+    {
+        if(identity_==INVALID_HANDLE_VALUE||!(captured_.nFileIndexHigh||captured_.nFileIndexLow))
+            return INVALID_HANDLE_VALUE;
+        const DWORD access=DELETE|FILE_READ_ATTRIBUTES|(directory?0:FILE_WRITE_ATTRIBUTES);
+        const auto handle=CreateFileW(path_.c_str(),access,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                                      FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+        if(handle==INVALID_HANDLE_VALUE)return handle;
+        BY_HANDLE_FILE_INFORMATION info{};
+        if(GetFileInformationByHandle(handle,&info)&&
+           (info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))==
+               (directory?FILE_ATTRIBUTE_DIRECTORY:0)&&
+           (directory||info.nNumberOfLinks==1)&&info.dwVolumeSerialNumber==captured_.dwVolumeSerialNumber&&
+           info.nFileIndexHigh==captured_.nFileIndexHigh&&info.nFileIndexLow==captured_.nFileIndexLow)
+            return handle;
+        CloseHandle(handle);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    bool SetReadOnly() const
+    {
+        const auto handle=OpenForCleanup();
+        if(handle==INVALID_HANDLE_VALUE)return false;
+        FILE_BASIC_INFO info{};
+        bool done=false;
+        if(GetFileInformationByHandleEx(handle,FileBasicInfo,&info,sizeof(info))){
+            info.FileAttributes=(info.FileAttributes&~FILE_ATTRIBUTE_NORMAL)|FILE_ATTRIBUTE_READONLY;
+            done=SetFileInformationByHandle(handle,FileBasicInfo,&info,sizeof(info))!=FALSE;
+        }
+        CloseHandle(handle);
+        return done;
+    }
+
+    void RemoveFile()
+    {
+        const auto handle=OpenForCleanup();
+        if(handle==INVALID_HANDLE_VALUE)return;
+        FILE_BASIC_INFO original{};
+        if(GetFileInformationByHandleEx(handle,FileBasicInfo,&original,sizeof(original))){
+            auto writable=original;
+            if(writable.FileAttributes&FILE_ATTRIBUTE_READONLY){
+                writable.FileAttributes&=~FILE_ATTRIBUTE_READONLY;
+                if(!writable.FileAttributes)writable.FileAttributes=FILE_ATTRIBUTE_NORMAL;
+            }
+            const bool changed=writable.FileAttributes!=original.FileAttributes;
+            if(!changed||SetFileInformationByHandle(handle,FileBasicInfo,&writable,sizeof(writable))){
+                FILE_DISPOSITION_INFO remove{TRUE};
+                if(!SetFileInformationByHandle(handle,FileDispositionInfo,&remove,sizeof(remove))&&changed)
+                    SetFileInformationByHandle(handle,FileBasicInfo,&original,sizeof(original));
+            }
+        }
+        CloseHandle(handle);
+    }
+};
+
+struct EmulatorTemporaryFiles {
+    EmulatorTemporaryEntry folder,image,preferences;
+    void Clean()
+    {
+        const auto handle=folder.OpenForCleanup(true);
+        if(handle==INVALID_HANDLE_VALUE)return;
+        image.RemoveFile();
+        preferences.RemoveFile();
+        image.ReleaseIdentity();
+        preferences.ReleaseIdentity();
+        FILE_DISPOSITION_INFO remove{TRUE};
+        SetFileInformationByHandle(handle,FileDispositionInfo,&remove,sizeof(remove));
+        CloseHandle(handle);
+        folder.ReleaseIdentity();
+    }
+};
+}
+
 bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
 {
     auto* owner = session.Owner();
@@ -474,17 +578,7 @@ bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
     const auto input = EmulatorPath(emulator, EmulatorInputKey(emulator));
     if (!ConfiguredPath(executable) || !ConfiguredPath(input)) return false;
     std::filesystem::path folder, image, preferences;
-    const auto cleanup = [](const auto& directory, const auto& disk, const auto& config) {
-        if (!disk.empty()) {
-            SetFileAttributesW(disk.c_str(), FILE_ATTRIBUTE_NORMAL);
-            DeleteFileW(disk.c_str());
-        }
-        if (!config.empty()) {
-            SetFileAttributesW(config.c_str(), FILE_ATTRIBUTE_NORMAL);
-            DeleteFileW(config.c_str());
-        }
-        if (!directory.empty()) RemoveDirectoryW(directory.c_str());
-    };
+    auto files=std::make_shared<EmulatorTemporaryFiles>();
     try {
         StorageLocation::RequireCapturedIdentity(request.selection);
         constexpr uint64_t forkLimit = 0x7fffffffULL;
@@ -506,13 +600,15 @@ bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
         DeleteFileW(reservation);
         if (!created) throw HfsPlus::Error("Could not create the temporary transfer directory.");
         folder = directory;
+        if(!files->folder.Capture(folder,true)) throw HfsPlus::Error("Could not identify the temporary transfer directory.");
         image = folder / L"Transfer.dsk";
 
         auto format = ShowStorageWaitJob([&](Storage::Job& job) {
             FormatClassicImage(image.wstring(), "Transfer", bytes, &job);
+            if(!files->image.Capture(image)) throw HfsPlus::Error("Could not identify the temporary transfer disk.");
             return Storage::Result{};
         }, !owner->IsWindowVisible(), owner);
-        if (format.error == ERROR_CANCELLED) { cleanup(folder, image, preferences); return false; }
+        if (format.error == ERROR_CANCELLED) { files->Clean(); return false; }
         if (format.code) throw HfsPlus::Error(format.message);
 
         auto destination = Location::Classic(Location::Windows(image.wstring()).LegacyPath(), "Transfer:");
@@ -522,16 +618,17 @@ bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
         auto operation = FileOperations::Submit(FileOperations::Request(std::move(copy)));
         auto transferred = ShowSubmittedStorageJob(operation.Job(), "Preparing emulator disk",
             !owner->IsWindowVisible(), true, true, owner);
-        if (transferred.error == ERROR_CANCELLED) { cleanup(folder, image, preferences); return false; }
+        if (transferred.error == ERROR_CANCELLED) { files->Clean(); return false; }
         if (transferred.code || !operation.Snapshot().complete)
             throw HfsPlus::Error(transferred.message.empty() ? "Could not prepare the emulator disk." : transferred.message);
-        if (!SetFileAttributesW(image.c_str(), FILE_ATTRIBUTE_READONLY))
+        if (!files->image.SetReadOnly())
             throw HfsPlus::Error("Could not make the temporary transfer disk read-only.");
 
         if (emulator == Emulator::BasiliskII) {
             preferences = folder / L"BasiliskII_prefs";
             if (!CopyFileW(input.c_str(), preferences.c_str(), TRUE))
                 throw HfsPlus::Error("Could not copy the Basilisk II preferences.");
+            if(!files->preferences.Capture(preferences)) throw HfsPlus::Error("Could not identify the temporary preferences.");
         }
 
         int field = 0;
@@ -542,9 +639,9 @@ bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
         if (error != ERROR_SUCCESS)
             throw HfsPlus::Error("Could not start the emulator. Windows error " + std::to_string(error) + ".");
         try {
-            std::thread([child, folder, image, preferences, cleanup] {
+            std::thread([child, files] {
                 if (WaitForSingleObject(child, INFINITE) == WAIT_OBJECT_0)
-                    cleanup(folder, image, preferences);
+                    files->Clean();
                 CloseHandle(child);
             }).detach();
         } catch (...) {
@@ -554,7 +651,7 @@ bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
         }
         return true;
     } catch (const std::exception& error) {
-        cleanup(folder, image, preferences);
+        files->Clean();
         owner->MessageBox(error.what(), "HFVExplorer", MB_OK | MB_ICONERROR);
         return false;
     }
@@ -619,6 +716,43 @@ bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory)
         const bool wrote = fputs("fixture", file) >= 0;
         return fclose(file) == 0 && wrote;
     };
+    for(const auto scenario:{L"owned",L"files-replaced",L"folder-replaced"}){
+        const auto folder=base/scenario;
+        const auto disk=folder/L"Transfer.dsk",prefs=folder/L"BasiliskII_prefs";
+        EmulatorTemporaryFiles files;
+        if(!CreateDirectoryW(folder.c_str(),nullptr)||!files.folder.Capture(folder,true)||
+           !writeFixture(disk.wstring())||!files.image.Capture(disk)||
+           !writeFixture(prefs.wstring())||!files.preferences.Capture(prefs)||!files.image.SetReadOnly())
+            return false;
+        if(!wcscmp(scenario,L"files-replaced")){
+            if(!MoveFileW(disk.c_str(),(folder/L"Original.dsk").c_str())||
+               !MoveFileW(prefs.c_str(),(folder/L"Original.prefs").c_str())||
+               !writeFixture(disk.wstring())||!writeFixture(prefs.wstring())||
+               !SetFileAttributesW(disk.c_str(),FILE_ATTRIBUTE_READONLY))
+                return false;
+        }else if(!wcscmp(scenario,L"folder-replaced")){
+            // Windows can decline directory rename while descendants have open handles.
+            files.image.ReleaseIdentity();
+            files.preferences.ReleaseIdentity();
+            if(!MoveFileW(folder.c_str(),(base/L"original-folder").c_str())||
+               !CreateDirectoryW(folder.c_str(),nullptr)||!writeFixture(disk.wstring()))
+                return false;
+        }
+        files.Clean();
+        if(!wcscmp(scenario,L"owned")){
+            if(GetFileAttributesW(folder.c_str())!=INVALID_FILE_ATTRIBUTES)return false;
+        }else if(!wcscmp(scenario,L"files-replaced")){
+            const auto attributes=GetFileAttributesW(disk.c_str());
+            if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_READONLY)||
+               GetFileAttributesW(prefs.c_str())==INVALID_FILE_ATTRIBUTES||
+               GetFileAttributesW((folder/L"Original.dsk").c_str())==INVALID_FILE_ATTRIBUTES||
+               GetFileAttributesW((folder/L"Original.prefs").c_str())==INVALID_FILE_ATTRIBUTES)
+                return false;
+        }else if(GetFileAttributesW(disk.c_str())==INVALID_FILE_ATTRIBUTES||
+                 GetFileAttributesW((base/L"original-folder"/L"Transfer.dsk").c_str())==INVALID_FILE_ATTRIBUTES){
+            return false;
+        }
+    }
     if (!writeFixture(executable))
         return false;
     for (const auto emulator : {Emulator::BasiliskII, Emulator::MiniVMac}) {
