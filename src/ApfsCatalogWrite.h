@@ -92,6 +92,8 @@ struct ExternalCatalogEdit {
     const FinderBytes* finder=nullptr;
     uint64_t destinationParent=0;
     uint32_t lockFlags=UserImmutable;
+    const PosixMetadata* folderPosix=nullptr;
+    const HfsPlus::Attributes* folderAttributes=nullptr;
 };
 struct CatalogVolumeRename { const std::u16string& name; };
 struct CatalogSnapshot { const std::u16string& name; bool create; };

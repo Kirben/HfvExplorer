@@ -53,10 +53,25 @@ public:
   const bool uncompressed=prompt_.kind==Storage::CopyPrompt::Uncompressed;
   const bool folders=prompt_.kind==Storage::CopyPrompt::IndependentFolders;
   const bool discard=prompt_.kind==Storage::CopyPrompt::DiscardClassicArchive;
-  if(uncompressed||folders||discard||utf8_){
+  const bool merge=prompt_.kind==Storage::CopyPrompt::ArchiveFolderMerge;
+  if(uncompressed||folders||discard||merge||utf8_){
    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");
    SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
   }else SetDlgItemText(IDC_CONFLICT_PATH,prompt_.path.c_str());
+  if(merge){
+   SetWindowText("Merge archived folder");
+   SetDlgItemText(IDC_CONFLICT_FILE_LABEL,"Folder");
+   SetDlgItemText(IDC_CONFLICT_QUESTION,"Which folder metadata should the merged folder use?");
+   SetDlgItemText(IDC_REPLACE,"Use &source");
+   SetDlgItemText(IDC_SKIP,"Keep &destination");
+   GetDlgItem(IDC_REPLACE_ALL)->ShowWindow(SW_HIDE);
+   CRect button(179,72,278,90);
+   MapDialogRect(&button);
+   GetDlgItem(IDC_SKIP)->MoveWindow(&button);
+   SetDefID(IDC_SKIP);
+   GetDlgItem(IDC_SKIP)->SetFocus();
+   return FALSE;
+  }
   if(discard){
    SetWindowText("Replace archived file");
    SetDlgItemText(IDC_CONFLICT_QUESTION,"Replace this file and discard its archived metadata?");

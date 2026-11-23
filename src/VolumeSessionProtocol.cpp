@@ -356,6 +356,7 @@ Data EncodeDirectoryUpdate(const DirectoryUpdateHeader& header,const MacBrowser:
     payload.put(header.id);
     payload.put(header.merge);
     payload.put(header.attributesKnown);
+    payload.put(header.replaceAttributes);
     CopyWorkerProtocol::EncodeEntry(payload,desired);
     CopyWorkerProtocol::EncodeEntry(payload,expected);
     return payload;
@@ -363,7 +364,7 @@ Data EncodeDirectoryUpdate(const DirectoryUpdateHeader& header,const MacBrowser:
 
 DirectoryUpdate DecodeDirectoryUpdate(Data& packet)
 {
-    const DirectoryUpdateHeader header{CatalogNumber(packet),packet.flag(),packet.flag()};
+    const DirectoryUpdateHeader header{CatalogNumber(packet),packet.flag(),packet.flag(),packet.flag()};
     auto desired=CopyWorkerProtocol::DecodeEntry(packet);
     auto expected=CopyWorkerProtocol::DecodeEntry(packet);
     packet.end();

@@ -472,7 +472,7 @@ public:
         });
         return id;
     }
-    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge,bool)override{
         LegacyEngine::Scope engine(context_);
         if(!Writable())throw HfsPlus::Error("Classic destination is read-only");
         if(!merge)ValidateEntry(desired);

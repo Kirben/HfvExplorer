@@ -558,12 +558,13 @@ public:
         std::lock_guard<std::recursive_mutex> lock(self.mutex_);
         self.Call(SessionCommandCode::ValidateEntry,Protocol::EncodeEntryCheck(entry),false,[]{},&entry.attributes);
     }
-    void FinalizeDirectory(uint32_t id, const Entry& desired, const Entry& expected, bool merge) override {
+    void FinalizeDirectory(uint32_t id, const Entry& desired, const Entry& expected, bool merge,bool replaceAttributes) override {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        // HFS+/HFSX already wrote the attributes with the new folder.
+        // HFS+/HFSX already wrote attributes for a newly created folder.
         const HfsPlus::Attributes noAttributes;
-        const auto& attributes=Plus()?noAttributes:desired.attributes;
-        auto args=Protocol::EncodeDirectoryUpdate({id,merge,!Plus()&&desired.attributesKnown},desired,expected);
+        const bool sendAttributes=!Plus()||replaceAttributes;
+        const auto& attributes=sendAttributes?desired.attributes:noAttributes;
+        auto args=Protocol::EncodeDirectoryUpdate({id,merge,sendAttributes&&desired.attributesKnown,replaceAttributes},desired,expected);
         Call(SessionCommandCode::FinalizeDirectory,std::move(args),true,[]{},&attributes);
     }
     bool CanMoveFrom(const Volume& source) const override {
@@ -905,7 +906,7 @@ void ServeVolume(HANDLE input, HANDLE output, Volume& volume) {
             case SessionCommandCode::FinalizeDirectory: {
                 auto request=Protocol::DecodeDirectoryUpdate(packet);
                 request.desired.attributes=std::move(*attributes[0]);
-                volume.FinalizeDirectory(request.header.id,request.desired,request.expected,request.header.merge);
+                volume.FinalizeDirectory(request.header.id,request.desired,request.expected,request.header.merge,request.header.replaceAttributes);
                 break;
             }
             case SessionCommandCode::ValidateEntry: {

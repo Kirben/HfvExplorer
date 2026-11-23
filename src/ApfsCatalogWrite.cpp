@@ -2989,6 +2989,7 @@ CatalogWritePlan PrepareCatalogMutation(
     const bool externalResource=resourceEdit&&resourceEdit->external;
     const auto* attributeEdit=std::get_if<CatalogAttributes>(&request);
     const bool externalAttributes=attributeEdit&&attributeEdit->external;
+    const bool mergedFolderAttributes=properties&&properties->folderAttributes;
     const bool externalLinkReplace=linkReplacement&&linkReplacement->external;
     const auto* remove=std::get_if<CatalogDelete>(&request);
     const bool externalDelete=remove&&remove->external;
@@ -3032,7 +3033,8 @@ CatalogWritePlan PrepareCatalogMutation(
         resource->id=nextId+bool(create);
         plan.streams.back().id=resource->id;
     }
-    const auto* attributes=attributeEdit?&attributeEdit->attributes:replace?replace->attributes:
+    const auto* attributes=mergedFolderAttributes?properties->folderAttributes:
+                           attributeEdit?&attributeEdit->attributes:replace?replace->attributes:
                            create?create->attributes:linkReplacement?&linkReplacement->attributes:nullptr;
     AttributeStreams attributeIds;
     const auto addAttributeStream=[&](const std::u16string& name,const HfsPlus::AttributeData& value){
@@ -3282,6 +3284,12 @@ CatalogWritePlan PrepareCatalogMutation(
         if(properties->newName){
             replacement=EncodeCatalogName(*properties->newName);
         }
+        if(properties->folderPosix||mergedFolderAttributes){
+            Check(kind==CatalogKind::Directory&&!properties->newName,"APFS merge metadata requires an existing folder");
+            if(mergedFolderAttributes)
+                ReplaceExternalAttributes(catalog,properties->parent,entryOid,properties->folderAttributes,nullptr,
+                                          attributeIds,0,time,extentTree,externalRetired);
+        }
         bool edited=false;
         for(auto& record:catalog){
             if(record.key.size()!=8||Le64(record.key.data())!=((uint64_t(3)<<60)|entryOid))continue;
@@ -3303,6 +3311,7 @@ CatalogWritePlan PrepareCatalogMutation(
                 if(moving)Set(value,0,destination,8);
             }
             if(properties->finder)SetExternalFinderInfo(value,*properties->finder);
+            if(properties->folderPosix)SetPosixMetadata(value,*properties->folderPosix);
             Set(value,32,time,8);
             ApplyTimestampEdits(value,properties->dates);
             edited=true;
@@ -3404,7 +3413,8 @@ CatalogWritePlan PrepareCatalogMutation(
     const auto retiredInode=hardLink&&hardLink->replaced?hardLink->replaced:entryId;
     const auto retiredRun=[&](const FileRun& run){
         if(reconcileReferences)return reconciledRetired.count(run.block)!=0;
-        if(externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink)return externalRetired.count(run.block)!=0;
+        if(externalCreate||externalReplace||externalResource||externalAttributes||externalDelete||externalLinkReplace||externalHardLink||mergedFolderAttributes)
+            return externalRetired.count(run.block)!=0;
         return run.stream?retiredStreams.count(run.stream)!=0:retireFile&&run.owner==retiredInode;
     };
     std::vector<DataRun> retiredData;

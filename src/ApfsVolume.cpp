@@ -1391,10 +1391,10 @@ public:
         Check(entry.directory,"The APFS copy source is not a folder");
         return CreateFolder(parent,entry.name,CopyDates(entry),&entry.finder,&entry.attributes,entry.posix);
     }
-    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge,bool applyMetadata)override{
         const auto dates=CopyDates(desired);
         const bool lockAfterCopy=!merge&&desired.protectedFile;
-        if(!dates&&!lockAfterCopy)return;
+        if(!dates&&!lockAfterCopy&&!applyMetadata)return;
         WriteMount([&]{
             const auto& item=At(id);
             const auto& current=item.entry;
@@ -1409,6 +1409,11 @@ public:
             // Restore destination folder dates even if the transfer was cancelled.
             Storage::Job metadata;
             CommitMutation(parent,0,metadata,[&](auto& job){
+                if(applyMetadata)
+                    return SetExternalCatalogProperties(*source,WriteTarget(parent),parentOid,current.name,changes,job,
+                                                        lockAfterCopy,&desired.finder,CopiedProtectionFlags(desired.posix),
+                                                        desired.posix?&*desired.posix:nullptr,
+                                                        desired.attributesKnown?&desired.attributes:nullptr);
                 if(limitedEdits)
                     return SetExternalCatalogProperties(*source,WriteTarget(parent),parentOid,current.name,changes,job,
                                                         lockAfterCopy?std::optional<bool>(true):std::nullopt,nullptr,

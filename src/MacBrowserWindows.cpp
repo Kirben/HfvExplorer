@@ -611,7 +611,7 @@ public:
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e)override{
         ValidateEntry(e);auto path=Child(Path(parent),Wide(e.name));Check(GetFileAttributesW(Companion(path).c_str())==INVALID_FILE_ATTRIBUTES,"An unrelated companion blocks folder creation");return MakeDirectory(parent,e.name);
     }
-    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge,bool)override{
 #ifdef HFV_TESTING
         if(directoryMetadataFault)directoryMetadataFault("before-directory-metadata");
 #endif

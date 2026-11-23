@@ -401,11 +401,12 @@ uint64_t SetDirectoryDates(Source& source,const Container& expected,uint64_t par
 
 uint64_t SetExternalCatalogProperties(Source& source,const Container& expected,uint64_t parent,
                                   const std::u16string& name,TimestampEdits dates,Storage::Job& job,
-                                  std::optional<bool> locked,const FinderBytes* finder,uint32_t lockFlags)
+                                  std::optional<bool> locked,const FinderBytes* finder,uint32_t lockFlags,
+                                  const PosixMetadata* folderPosix,const HfsPlus::Attributes* folderAttributes)
 {
     Check(parent>=2&&parent<(uint64_t(1)<<60)&&(dates.created||dates.modified||dates.additionalDates.accessed||dates.additionalDates.changed||dates.exact||locked.has_value()||finder),
           "Select an APFS folder and at least one property to edit");
-    const CatalogMutation request=ExternalCatalogEdit{parent,name,dates,locked,nullptr,finder,0,lockFlags};
+    const CatalogMutation request=ExternalCatalogEdit{parent,name,dates,locked,nullptr,finder,0,lockFlags,folderPosix,folderAttributes};
     return Commit(source,expected,job,&request);
 }
 

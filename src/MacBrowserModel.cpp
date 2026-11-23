@@ -318,14 +318,15 @@ public:
         ValidateEntry(e);
         return Mutate([&]{return volume_->MakeDirectory(parent,e.name,e.attributes.empty()?nullptr:&e.attributes);});
     }
-    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge)override{
+    void FinalizeDirectory(uint32_t id,const Entry& desired,const Entry& expected,bool merge,bool replaceAttributes)override{
         Mutate([&]{
             const auto now=volume_->Stat(id);
             Check(now.directory&&now.id==expected.id&&now.parent==expected.parent&&now.name==expected.name,
                   "Destination folder changed during copying");
             const std::array<uint64_t,2> dates{desired.created,desired.modified};
             volume_->SetDirectoryMetadata(id,merge?nullptr:&desired.finder,desired.datesValid?&dates:nullptr,
-                                          nullptr,merge?std::nullopt:desired.posix,desired.additionalDates);
+                                          replaceAttributes&&desired.attributesKnown?&desired.attributes:nullptr,
+                                          merge?std::nullopt:desired.posix,desired.additionalDates);
         });
     }
     bool CaseSensitive() const override { return caseSensitive_; }
@@ -800,6 +801,7 @@ struct ArchiveSpace {
     uint64_t forks=0, companions=0, padding=0, catalog=0;
     uint64_t block;
     uint64_t available;
+    uint64_t mergeCompanions=0;
 
     static void Add(uint64_t& total,uint64_t value)
     {
@@ -820,8 +822,12 @@ struct ArchiveSpace {
         const bool merge=plan.entry.directory&&parent&&
             destination.FindTransferChild(*parent,plan.entry,existing)&&existing.directory;
         for(const auto& fork:plan.entry.forks)Payload(forks,fork.size);
-        if(!merge){
-            Payload(companions,ClassicCopyArchive::EncodedSize(*plan.archivedMetadata,job));
+        const auto companionSize=ClassicCopyArchive::EncodedSize(*plan.archivedMetadata,job);
+        if(merge){
+            Add(mergeCompanions,companionSize);
+            if(companionSize%block)Add(mergeCompanions,block-companionSize%block);
+        }else{
+            Payload(companions,companionSize);
             // Allow for growing catalog records for the item and its companion.
             Add(catalog,block);
         }
@@ -843,7 +849,8 @@ struct ArchiveSpace {
             "   Companions: "+std::to_string(companions)+
             "\r\nAllocation padding: "+std::to_string(padding)+
             "   Catalog allowance: "+std::to_string(catalog)+
-            "\r\nFree: "+std::to_string(available)+(Fits()?"":"   Insufficient archive space");
+            "\r\nFree: "+std::to_string(available)+(Fits()?"":"   Insufficient archive space")+
+            (mergeCompanions?"\r\nAdditional companions if source folder metadata is used: "+std::to_string(mergeCompanions):"");
     }
 };
 
@@ -1094,14 +1101,39 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
         auto outgoing=entry;
+        bool applySource=false;
+        std::optional<ClassicCopyArchive::Pair> previousFolderArchive;
+        if(found&&(plan.archivedMetadata||plan.restoredMetadata)){
+            const auto choice=job.requestChoice(Storage::CopyPrompt::ArchiveFolderMerge,BrowserPresentation::Utf8(entry.name));
+            if(choice!=Storage::ConflictChoice::Replace&&choice!=Storage::ConflictChoice::Skip)
+                throw Storage::Cancelled();
+            applySource=choice==Storage::ConflictChoice::Replace;
+            if(applySource){
+                Check(!existing.hardLink,"Applying folder metadata would change other hard-link names");
+                if(plan.archivedMetadata){
+                    Check(durable,"Replacing archived folder metadata requires classic HFS write recovery");
+                    previousFolderArchive=ClassicCopyArchive::RequireVerifiedPair(dst,existing,job);
+                }
+            }
+        }
         if(!found&&dst.HfsPlusDateRange())NoteArchiveRestoreGroup(outgoing,plan.archiveLinkGroup);
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, outgoing);
         if(!found)Storage::OutcomeEvidence::NoteRetainedChange();
         auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
         try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route,durable))complete=false;}catch(...){failure=std::current_exception();}
-        // Existing directory metadata belongs to the destination. In particular,
-        // child creates/renames can change its dates even on Skip/cancellation.
-        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,outgoing,expected,false);if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);noteDatePrecision();job.progress(progress);}}
+        if(!failure&&job.cancelled())failure=std::make_exception_ptr(Storage::Cancelled());
+        // Child writes can change directory dates even on Skip or cancellation.
+        try{
+            const bool apply=!failure&&complete&&(!found||applySource);
+            if(found&&!apply)dst.FinalizeDirectory(id,existing,expected,true);
+            if(apply){
+                dst.FinalizeDirectory(id,outgoing,expected,false,applySource);
+                if(previousFolderArchive)ClassicCopyArchive::RemoveCompanion(dst,previousFolderArchive->companion);
+                if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);
+                noteDatePrecision();
+                job.progress(progress);
+            }
+        }
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
         if(failure)std::rethrow_exception(failure);if(complete&&track&&(!plan.restoredDirectoryLink||!found))copies.emplace(key,dst.Stat(id));return complete;
     }

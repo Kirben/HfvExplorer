@@ -148,7 +148,7 @@ public:
         SetAttributes(id,attributes);
     }
     virtual void ValidateCopyNames(uint32_t,const std::vector<Entry>&,bool) {}
-    virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool) {}
+    virtual void FinalizeDirectory(uint32_t,const Entry&,const Entry&,bool,bool=false) {}
     virtual uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& e){ValidateEntry(e);return MakeDirectory(parent,e.name);}
     virtual void ValidateName(const std::u16string& name) const { HfsPlus::Normalize(name,CaseSensitive()); }
     virtual std::optional<std::pair<uint64_t,uint64_t>> HfsPlusDateRange() const { return {}; }

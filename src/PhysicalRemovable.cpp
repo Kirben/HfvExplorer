@@ -497,8 +497,8 @@ public:
     uint32_t MakeDirectoryWithAttributes(uint32_t parent,const Entry& entry)override{
         uint32_t id=0;Change([&]{id=backend_->MakeDirectoryWithAttributes(parent,entry);});return id;
     }
-    void FinalizeDirectory(uint32_t id,const Entry& source,const Entry& original,bool merge)override{
-        Change([&]{backend_->FinalizeDirectory(id,source,original,merge);});
+    void FinalizeDirectory(uint32_t id,const Entry& source,const Entry& original,bool merge,bool replaceAttributes)override{
+        Change([&]{backend_->FinalizeDirectory(id,source,original,merge,replaceAttributes);});
     }
     uint32_t Put(uint32_t parent,const Entry& entry,Reader read,bool replace)override{
         uint32_t id=0;Change([&]{id=backend_->Put(parent,DestinationEntry(entry),std::move(read),replace);});return id;

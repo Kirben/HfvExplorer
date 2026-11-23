@@ -32,7 +32,7 @@ struct PutHeader {
 };
 struct PutRequest {PutHeader header;MacBrowser::Entry entry;};
 struct SymbolicLinkRequest {std::optional<uint32_t> parent;MacBrowser::Entry entry;HfsPlus::Bytes target;};
-struct DirectoryUpdateHeader {uint32_t id;bool merge,attributesKnown;};
+struct DirectoryUpdateHeader {uint32_t id;bool merge,attributesKnown,replaceAttributes=false;};
 struct DirectoryUpdate {DirectoryUpdateHeader header;MacBrowser::Entry desired,expected;};
 struct BasicMetadataRequest {uint32_t id;MacBrowser::Entry entry;};
 struct ClassicPropertiesRequest {uint32_t id;hfsdirent properties;};

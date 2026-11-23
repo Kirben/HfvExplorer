@@ -2851,6 +2851,111 @@ void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
     fprintf(report,"PASS: %s cut/paste archives a folder, preserves pairs within and between classic HFS images, and verifies both forks and attributes before source cleanup.\n",apfs?"APFS":"HFSX");
 }
 
+void TestArchiveFolderMerge(const std::string& root,FILE* report)
+{
+    constexpr auto kind=HfsPlus::Volume::FormatKind::HfsXCaseSensitive;
+    const auto base=root+"\\archive-folder-merge";
+    auto source=Image(Wide(base+"-source.dsk"),kind);
+    auto classic=ClassicImage(base+"-classic.dsk");
+    Entry original;
+    original.directory=original.datesValid=true;
+    original.name=u"Merge folder";
+    original.created=3100000000;
+    original.modified=3100000101;
+    original.posix=PosixMetadata{501,20,0750};
+    original.finder[12]=21;
+    original.attributes[u"user.source"]={1,2,3};
+    original.attributesKnown=true;
+    const auto origin=source->MakeDirectoryWithAttributes(2,original);
+    Put(*source,origin,u"Incoming",4099,57);
+    source->FinalizeDirectory(origin,original,source->Stat(origin),false);
+
+    Entry old=original;
+    old.created-=200;
+    old.modified-=200;
+    old.posix=PosixMetadata{502,21,0700};
+    old.finder[12]=22;
+    old.attributes={{u"user.destination",HfsPlus::Bytes(8192,5)}};
+    const auto seed=[&](Volume& volume){
+        auto metadata=old;
+        if(std::string_view(volume.Kind())=="HFS"){
+            metadata.attributes.clear();
+            metadata.posix.reset();
+        }
+        const auto id=volume.MakeDirectoryWithAttributes(2,metadata);
+        const auto child=std::string_view(volume.Kind())=="HFS"?u"Unrelated":u"Destination only";
+        Put(volume,id,child,1231,61);
+        volume.FinalizeDirectory(id,metadata,volume.Stat(id),false);
+    };
+    seed(*classic);
+    const auto locate=[&](Volume& volume){
+        Entry folder;
+        Check(volume.FindChild(2,original.name,folder),"Cannot find merge folder");
+        return folder;
+    };
+    const auto copy=[&](const std::shared_ptr<Volume>& from,uint32_t id,const std::shared_ptr<Volume>& to,
+                        bool archive,Storage::ConflictChoice choice,bool overwrite){
+        auto op=Submit(OrdinaryCopy{{Native(from,id)},Native(to)});
+        uint64_t previousPrompt=0;
+        const auto answer=[&](Storage::CopyPrompt kind,Storage::ConflictChoice value){
+            Conflict(op,previousPrompt);
+            const auto prompt=op.Job()->conflictState();
+            Check(prompt.kind==kind,"Missing expected folder merge prompt");
+            previousPrompt=prompt.id;
+            op.Job()->resolve(prompt.id,value);
+        };
+        if(archive)answer(Storage::CopyPrompt::ClassicMetadataLoss,Storage::ConflictChoice::ReplaceAll);
+        answer(Storage::CopyPrompt::ArchiveFolderMerge,choice);
+        if(overwrite)answer(Storage::CopyPrompt::Overwrite,Storage::ConflictChoice::Replace);
+        Wait(op);
+        return op.Job()->result();
+    };
+    Storage::Job verify;
+    const auto cancelled=copy(source,origin,classic,true,Storage::ConflictChoice::Cancel,false);
+    Check(cancelled.outcome==Storage::Outcome::Cancelled&&classic->List(locate(*classic).id).size()==1,
+          "Cancelling the archive merge changed the destination");
+    const auto kept=copy(source,origin,classic,true,Storage::ConflictChoice::Skip,false);
+    auto folder=locate(*classic);
+    Check(!kept.code&&folder.modified==old.modified&&folder.finder==old.finder&&
+          !ClassicCopyArchive::Load(*classic,folder,verify),"Default archive merge changed destination folder metadata");
+    const auto applied=copy(source,origin,classic,true,Storage::ConflictChoice::Replace,true);
+    Check(!applied.code,applied.message.c_str());
+    classic.reset();
+    classic=OpenBrowserImage(Wide(base+"-classic.dsk"));
+    Check(bool(classic),"Could not reopen classic archive merge");
+    folder=locate(*classic);
+    const auto pair=ClassicCopyArchive::RequireVerifiedPair(*classic,folder,verify);
+    Check(pair&&folder.modified==original.modified&&folder.finder==original.finder&&
+          pair->metadata.entry.attributes==original.attributes,"Archive merge lost source metadata");
+    for(bool apfs:{false,true}){
+        const auto path=Wide(base+(apfs?"-restore.img":"-restore.dsk"));
+        std::shared_ptr<Volume> target;
+        if(apfs){
+            {
+                auto source=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+                Apfs::Format(*source,u"Archive merge",true,verify);
+            }
+            target=OpenBrowserImage(path);
+        }else target=Image(path,kind);
+        Check(bool(target),"Cannot open archive merge restore fixture");
+        seed(*target);
+        const auto restored=copy(classic,folder.id,target,false,Storage::ConflictChoice::Replace,false);
+        Check(!restored.code,restored.message.c_str());
+        target.reset();
+        target=OpenBrowserImage(path);
+        Check(bool(target),"Cannot reopen merged archive restore");
+        auto merged=locate(*target);
+        Entry file;
+        Check(merged.modified==original.modified&&merged.finder==original.finder&&merged.posix==original.posix&&
+              target->GetAttributes(merged.id)==original.attributes,"Restored folder merge lost source metadata");
+        Check(target->FindChild(merged.id,u"Destination only",file),"Archive merge deleted a destination child");
+        Verify(*target,file.id,1231,61);
+        Check(target->FindChild(merged.id,u"Incoming",file),"Archive merge lost incoming child");
+        Verify(*target,file.id,4099,57);
+    }
+    fprintf(report,"PASS: archive folder merges preserve destination metadata by default and can apply source metadata on classic HFS, HFSX and APFS.\n");
+}
+
 void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
 {
     const auto base=root+"\\classic-archive-pairs";
@@ -5017,6 +5122,7 @@ int RunCopyProcessTest(const char *directory) {
         TestWorkerReleasesStorageBeforeCompletion(report);
         TestClassicArchiveMoves(root,report,false);
         TestClassicArchiveMoves(root,report,true);
+        TestArchiveFolderMerge(root,report);
         TestClassicArchiveNamePreview(root,report);
         TestClassicArchiveSpecialEntries(root,report);
         TestClassicBackupDates(root,report);
