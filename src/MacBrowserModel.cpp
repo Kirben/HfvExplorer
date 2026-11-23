@@ -1609,7 +1609,8 @@ bool EquivalentDirectoryCopies(Volume& source,const Planned& lhs,const Planned& 
        a.protectedFile!=b.protectedFile||a.finder!=b.finder||!(a.posix==b.posix)||
        a.datesValid!=b.datesValid||a.apfsTimestamps!=b.apfsTimestamps||a.created!=b.created||
        a.modified!=b.modified||a.additionalDates.changed!=b.additionalDates.changed||
-       a.additionalDates.accessed!=b.additionalDates.accessed||a.compressed!=b.compressed||
+       a.additionalDates.accessed!=b.additionalDates.accessed||
+       a.additionalDates.backup.value_or(0)!=b.additionalDates.backup.value_or(0)||a.compressed!=b.compressed||
        a.inlineCompression!=b.inlineCompression||a.resourceCompressionHeader!=b.resourceCompressionHeader||
        a.compressionResourceSize!=b.compressionResourceSize||a.archivedCompressionType!=b.archivedCompressionType||
        a.attributes!=b.attributes||

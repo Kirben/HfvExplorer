@@ -3190,6 +3190,27 @@ void TestClassicArchiveSpecialEntries(const std::string& root,FILE* report)
             Verify(*returned,child.id,4011,33);
         }
     }
+    hfsdirent changed{};
+    Check(classic->GetClassicProperties(aliasArchive.id,changed),"Cannot read archived alias backup date");
+    changed.bkdate=1700000000;
+    classic->SetClassicProperties(aliasArchive.id,changed);
+    const auto backup=classic->Stat(aliasArchive.id).additionalDates.backup;
+    Check(backup.value_or(0)!=0,"Archived alias fixture has no backup date");
+    const auto path=Wide(base+"-different-backup.dsk");
+    auto destination=Image(path,Kind::HfsXCaseSensitive);
+    const auto backupRestore=Submit(OrdinaryCopy{{Native(classic,originalArchive.id),Native(classic,aliasArchive.id)},Native(destination)});
+    Wait(backupRestore);
+    const auto result=backupRestore.Job()->result();
+    Check(!result.code&&backupRestore.Snapshot().complete,result.message.c_str());
+    destination.reset();
+    destination=OpenBrowserImage(path);
+    Entry left,right;
+    Check(destination&&destination->FindChild(2,u"Original",left)&&destination->FindChild(2,u"Alias",right)&&
+          left.resolvedId!=right.resolvedId&&left.additionalDates.backup.value_or(0)==0&&
+          right.additionalDates.backup==backup,"Restore coalesced archived aliases with different backup dates");
+    Verify(*destination,left.id,4097,52);
+    Verify(*destination,right.id,4097,52);
+    fprintf(report,"PASS: restoring archived aliases with different backup dates preserves both dates and forks.\n");
     fprintf(report,"PASS: classic archives restore links and compression after reopening. Separate restores recover only matching prior hard-link inodes on HFSX and APFS.\n");
 }
 
