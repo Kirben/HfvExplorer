@@ -441,6 +441,32 @@ int RunFileOperationsTest(const char* directory){
    Check(Load(edited)==std::vector<BYTE>({'E','D','I','T'})&&
          Load(edited+":EditorState")==std::vector<BYTE>({'N','A','M','E','D'}),
          "write-back stream protection changed the staged document");
+   {
+    const auto pendingRoot=root+"\\launcher-recovery",folder=pendingRoot+"\\hfv123.tmp.dir";
+    Check(CreateDirectoryA(pendingRoot.c_str(),nullptr)&&CreateDirectoryA(folder.c_str(),nullptr),
+          "create launcher recovery fixture");
+    const auto pending=folder+"\\Edited copy";
+    Save(pending,"WINDOWS EDIT");
+    {
+     LauncherWriteBack edit(location,version,CString(pending.c_str()));
+     Check(edit.SavePending(),"write a durable edit record");
+     Check(LauncherWriteBack::LoadPending(CString(pendingRoot.c_str())).empty(),
+           "another browser claimed a live pending edit");
+    }
+    {
+     auto recovered=LauncherWriteBack::LoadPending(CString(pendingRoot.c_str()));
+     Check(recovered.size()==1&&recovered.front()->TemporaryPath()==pending.c_str()&&
+           Load(pending)==std::vector<BYTE>({'W','I','N','D','O','W','S',' ','E','D','I','T'}),
+           "pending edit did not survive reopening");
+    }
+    const auto record=folder+"\\.hfv-pending-edit";
+    Check(SetFileAttributesA(record.c_str(),FILE_ATTRIBUTE_NORMAL)!=FALSE,"prepare malformed recovery record");
+    Save(record,"TRUNCATED");
+    Check(LauncherWriteBack::LoadPending(CString(pendingRoot.c_str())).empty()&&
+          GetFileAttributesA(pending.c_str())!=INVALID_FILE_ATTRIBUTES,
+          "malformed pending record removed or claimed the staged edit");
+    fprintf(report,"PASS: a saved launcher edit survives reopening, cannot be claimed twice, and malformed records keep the staged copy.\n");
+   }
    Save(edited,"LATE");
    Storage::Job stale;
    LauncherTemporaryDocument lateEdit;

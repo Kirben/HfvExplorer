@@ -4,6 +4,33 @@
 #include "BrowserSession.h"
 #include "StorageJobDialog.h"
 #include "WindowsEntryIdentity.h"
+#include "CopyWorkerProtocol.h"
+#include <shlobj.h>
+
+namespace {
+constexpr char RecordName[]="\\.hfv-pending-edit";
+constexpr uint64_t RecordVersion=1;
+constexpr DWORD MaximumRecord=64*1024;
+
+bool PlainDirectory(const CString& path)
+{
+    const auto flags=GetFileAttributes(path);
+    return flags!=INVALID_FILE_ATTRIBUTES&&
+           (flags&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))==FILE_ATTRIBUTE_DIRECTORY;
+}
+}
+
+CString LauncherPendingRoot()
+{
+    char profile[MAX_PATH]{};
+    if(FAILED(SHGetFolderPathA(nullptr,CSIDL_LOCAL_APPDATA|CSIDL_FLAG_CREATE,nullptr,
+                               SHGFP_TYPE_CURRENT,profile)))return {};
+    CString root=CString(profile)+"\\HFVExplorer";
+    if(!CreateDirectory(root,nullptr)&&!PlainDirectory(root))return {};
+    root+="\\PendingEdits";
+    if(!CreateDirectory(root,nullptr)&&!PlainDirectory(root))return {};
+    return root;
+}
 
 LauncherTemporaryDocument::~LauncherTemporaryDocument()
 {
@@ -133,6 +160,93 @@ bool LauncherWriteBack::CaptureBaseline(CWnd* owner)
     return !result.code;
 }
 
+LauncherWriteBack::~LauncherWriteBack()
+{
+    if(pending_!=INVALID_HANDLE_VALUE)CloseHandle(pending_);
+}
+
+bool LauncherWriteBack::SavePending()
+{
+    const int separator=temporary_.ReverseFind('\\');
+    if(separator<0||!original_.IsClassic()||version_.empty())return false;
+    CopyWorkerProtocol::Data record;
+    record.put(RecordVersion);
+    record.put(std::string(static_cast<LPCSTR>(temporary_.Mid(separator+1))));
+    record.put(version_);
+    record.put(baseline_);
+    CopyWorkerProtocol::EncodeEndpoint(record,{original_,{},{}});
+    if(record.bytes.size()>MaximumRecord)return false;
+    pending_=CreateFile(temporary_.Left(separator)+RecordName,GENERIC_WRITE|DELETE,0,nullptr,
+                        CREATE_NEW,FILE_ATTRIBUTE_HIDDEN|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    if(pending_==INVALID_HANDLE_VALUE)return false;
+    DWORD written=0;
+    if(WriteFile(pending_,record.bytes.data(),DWORD(record.bytes.size()),&written,nullptr)&&
+       written==record.bytes.size()&&FlushFileBuffers(pending_))return true;
+    Forget();
+    return false;
+}
+
+std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(const CString& root)
+{
+    std::vector<std::unique_ptr<LauncherWriteBack>> edits;
+    if(root.IsEmpty()||!PlainDirectory(root))return edits;
+    WIN32_FIND_DATA info{};
+    const auto search=FindFirstFile(root+"\\hfv*.tmp.dir",&info);
+    if(search==INVALID_HANDLE_VALUE)return edits;
+    struct FindLease { HANDLE handle; ~FindLease(){FindClose(handle);} } searchLease{search};
+    do{
+        if((info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))!=FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        const CString directory=root+"\\"+info.cFileName;
+        const auto handle=CreateFile(directory+RecordName,GENERIC_READ|DELETE,0,nullptr,OPEN_EXISTING,
+                                     FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(handle==INVALID_HANDLE_VALUE)continue; // Another browser can already own this edit.
+        struct FileLease {
+            HANDLE handle;
+            ~FileLease(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
+        } lease{handle};
+        BY_HANDLE_FILE_INFORMATION file{};
+        if(!GetFileInformationByHandle(handle,&file)||
+           (file.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
+           file.nNumberOfLinks!=1||file.nFileSizeHigh||!file.nFileSizeLow||file.nFileSizeLow>MaximumRecord)
+            continue;
+        try{
+            CopyWorkerProtocol::Data record;
+            record.bytes.resize(file.nFileSizeLow);
+            DWORD received=0;
+            if(!ReadFile(handle,record.bytes.data(),file.nFileSizeLow,&received,nullptr)||received!=file.nFileSizeLow||
+               record.get()!=RecordVersion)continue;
+            auto leaf=record.text(),version=record.text();
+            const auto baseline=record.get();
+            auto original=CopyWorkerProtocol::ParseEndpoint(record,false).location;
+            record.end();
+            if(leaf.empty()||leaf=="."||leaf==".."||leaf.find_first_of("\\/:")!=leaf.npos||
+               leaf.find('\0')!=leaf.npos||version.empty()||!original.IsClassic()||original.directory||original.cut)
+                continue;
+            // A physical drive generation counter cannot be trusted across sessions.
+            if(original.IsPhysical())version.clear();
+            auto edit=std::make_unique<LauncherWriteBack>(std::move(original),std::move(version),
+                                                          directory+"\\"+leaf.c_str());
+            edit->baseline_=baseline;
+            edit->pending_=handle;
+            lease.handle=INVALID_HANDLE_VALUE;
+            edits.push_back(std::move(edit));
+        }catch(const std::exception&){
+            // Preserve malformed records and the accompanying documents for manual recovery.
+        }
+    }while(FindNextFile(search,&info));
+    return edits;
+}
+
+bool LauncherWriteBack::Forget()
+{
+    if(pending_==INVALID_HANDLE_VALUE)return true;
+    FILE_DISPOSITION_INFO remove{TRUE};
+    if(!SetFileInformationByHandle(pending_,FileDispositionInfo,&remove,sizeof(remove)))return false;
+    CloseHandle(std::exchange(pending_,INVALID_HANDLE_VALUE));
+    return true;
+}
+
 bool LauncherWriteBack::Complete(BrowserSession& session)
 {
     auto owner=session.Owner();
@@ -154,6 +268,7 @@ bool LauncherWriteBack::Complete(BrowserSession& session)
         return false;
     }
     if(current==baseline_){
+        if(!Forget()){retain("Could not retire the pending edit record.");return false;}
         if(document.Remove())return true;
         retain("Could not remove the temporary copy.");
         return false;
@@ -172,6 +287,7 @@ bool LauncherWriteBack::Complete(BrowserSession& session)
         retain(CString(result.message.c_str()));
         return false;
     }
+    if(!Forget()){retain("Could not retire the pending edit record.");return false;}
     if(!document.Remove())retain("Could not remove the temporary copy.");
     return true;
 }

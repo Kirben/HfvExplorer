@@ -711,12 +711,19 @@ void CMainFrame::TrackLaunchedDocument(std::unique_ptr<LauncherWriteBack> docume
 
 void CMainFrame::OnUpdateFinishWindowsEdit(CCmdUI* ui)
 {
- ui->Enable(!m_launchedDocuments.empty()&&!StorageUi::busy());
+ ui->Enable(!StorageUi::busy());
 }
 
 void CMainFrame::OnFinishWindowsEdit()
 {
  if(StorageUi::busy())return;
+ auto recovered=LauncherWriteBack::LoadPending(LauncherPendingRoot());
+ for(auto& edit:recovered)m_launchedDocuments.push_back(std::move(edit));
+ if(m_launchedDocuments.empty()){
+  MessageBox("There are no pending Windows document edits available in this window.",
+             "Finish editing Windows document",MB_OK|MB_ICONINFORMATION);
+  return;
+ }
  for(size_t i=m_launchedDocuments.size();i>0;--i){
   auto& edit=m_launchedDocuments[i-1];
   const int choice=MessageBox("Have you finished saving and closed this document in the Windows editor?\r\n\r\n"+

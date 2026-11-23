@@ -4,6 +4,7 @@
 #include "CopyProgress.h"
 #include "FileOperations.h"
 #include "StorageJobDialog.h"
+#include "LauncherWriteBack.h"
 extern "C" {
 #include "hfs/interface.h"
 }
@@ -11,10 +12,10 @@ LegacyCopyOptions CaptureLegacyCopyOptions(char output){LegacyCopyOptions option
 bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Location& source,CString& output,MacBrowser::ObjectIdentity& identity)
 {
  output.Empty();
- char temp[MAX_PATH], reservation[MAX_PATH];
- DWORD length=GetTempPath(ARRAYSIZE(temp),temp);
+ const auto root=LauncherPendingRoot();
+ char reservation[MAX_PATH];
  auto owner=session.Owner();
- if(!length||length>=ARRAYSIZE(temp)||!GetTempFileName(temp,"hfv",0,reservation)){
+ if(root.IsEmpty()||!GetTempFileName(root,"hfv",0,reservation)){
   owner->MessageBox("Could not reserve a directory for the temporary document.","HFVExplorer",MB_OK|MB_ICONERROR);
   return false;
  }

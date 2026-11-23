@@ -198,6 +198,11 @@ bool Launchers::OpenClassicDocument(CString type, CString creator)
  }
  auto writeBack=std::make_unique<LauncherWriteBack>(selection,std::move(version),staged);
  if(!writeBack->CaptureBaseline(owner))return FALSE;
+ if(!writeBack->SavePending()){
+  owner->MessageBox("Could not save the pending edit record. The staged copy remains at "+staged,
+                    "HFVExplorer",MB_OK|MB_ICONERROR);
+  return FALSE;
+ }
  SHELLEXECUTEINFO launch{};
  launch.cbSize=sizeof(launch);
  launch.hwnd=owner->GetSafeHwnd();

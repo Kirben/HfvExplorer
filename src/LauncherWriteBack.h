@@ -33,12 +33,17 @@ private:
     HANDLE file_=INVALID_HANDLE_VALUE;
 };
 
+CString LauncherPendingRoot();
+
 class LauncherWriteBack {
 public:
     LauncherWriteBack(FileOperations::Location original,std::string version,CString temporary);
     LauncherWriteBack(const LauncherWriteBack&) = delete;
     LauncherWriteBack& operator=(const LauncherWriteBack&) = delete;
+    ~LauncherWriteBack();
     bool CaptureBaseline(CWnd* owner);
+    bool SavePending();
+    static std::vector<std::unique_ptr<LauncherWriteBack>> LoadPending(const CString& root);
     const CString& TemporaryPath() const { return temporary_; }
     bool Complete(BrowserSession&);
 
@@ -46,5 +51,7 @@ private:
     FileOperations::Location original_;
     std::string version_;
     CString temporary_;
+    bool Forget();
+    HANDLE pending_=INVALID_HANDLE_VALUE;
     uint64_t baseline_=0;
 };
