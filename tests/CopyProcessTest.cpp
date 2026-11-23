@@ -2588,7 +2588,7 @@ void TestClassicMetadataCompanion(FILE* report)
     ClassicCopyArchive::Digest binding{};
     binding[0]=12;
     Storage::Job job;
-    const auto stored=ClassicCopyArchive::Encode(ClassicCopyArchive::Metadata(source),binding,job);
+    const auto stored=ClassicCopyArchive::Encode(ClassicCopyArchive::Metadata(source),binding,job,source);
     Check(stored.size()==ClassicCopyArchive::EncodedSize(ClassicCopyArchive::Metadata(source),job),
           "Companion size estimate differs from encoded size");
     const auto decoded=ClassicCopyArchive::Decode(stored,binding,job);
@@ -2702,9 +2702,53 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     properties.mddate+=3;
     classic->SetClassicProperties(archivedFile.id,properties);
     Storage::Job job;
-    Check(!ClassicCopyArchive::Load(*classic,classic->Stat(archivedFile.id),job),
-          "A modified classic file accepted stale archive metadata");
-    fprintf(report,"PASS: an opt-in classic HFS archive restores file and folder metadata and both forks, and rejects stale companions after reopening.\n");
+    const auto edited=classic->Stat(archivedFile.id);
+    const auto metadata=ClassicCopyArchive::Load(*classic,edited,job);
+    Check(metadata&&metadata->entry.modified==edited.modified&&metadata->entry.attributes==file.attributes&&
+          metadata->entry.apfsTimestamps&&(*metadata->entry.apfsTimestamps)[0]==(*original.apfsTimestamps)[0]&&
+          (*metadata->entry.apfsTimestamps)[1]==(edited.modified-2082844800)*1000000000,
+          "Classic archive did not preserve the native edit and separately verified metadata");
+
+    const auto verifyFolder=returned->MakeDirectory(2,u"Edited archive restore");
+    auto restoreEdited=Submit(OrdinaryCopy{{Native(classic,edited.id)},Native(returned,verifyFolder)});
+    Wait(restoreEdited);
+    const auto restoredEdits=restoreEdited.Job()->result();
+    Check(!restoredEdits.code&&restoreEdited.Snapshot().complete,restoredEdits.message.c_str());
+    returned.reset();
+    returned=OpenBrowserImage(returnPath);
+    Entry reopenedFolder;
+    Check(returned&&returned->FindChild(2,u"Edited archive restore",reopenedFolder)&&
+          returned->FindChild(reopenedFolder.id,file.name,copiedFile)&&
+          copiedFile.apfsTimestamps==metadata->entry.apfsTimestamps&&
+          returned->GetAttributes(copiedFile.id)==file.attributes,
+          "Worker restore dropped the native edit or other archived metadata after reopen");
+
+    Entry companion;
+    Check(classic->FindChild(edited.parent,ClassicCopyArchive::CompanionName(edited.resolvedId),companion),
+          "Missing classic companion fixture");
+    classic->Remove(companion.id);
+    Check(!ClassicCopyArchive::Load(*classic,edited,job),"A missing companion was treated as verified");
+    Entry wrongCompanion;
+    Check(classic->FindChild(2,ClassicCopyArchive::CompanionName(archivedFolder.resolvedId),wrongCompanion),
+          "Missing second classic companion fixture");
+    companion.forks[0].size=wrongCompanion.forks[0].size;
+    HfsPlus::Bytes wrong(size_t(companion.forks[0].size));
+    classic->Read(wrongCompanion.id,0,0,wrong.data(),wrong.size());
+    auto staleId=classic->Put(edited.parent,companion,[&](unsigned,uint64_t at,void* out,size_t count){
+        memcpy(out,wrong.data()+at,count);
+    },false);
+    bool stale=false;
+    try{ClassicCopyArchive::Load(*classic,edited,job);}
+    catch(const HfsPlus::Error& error){stale=std::string_view(error.what()).find("stale")!=std::string_view::npos;}
+    Check(stale,"A valid companion for a different item was treated as missing or corrupt");
+    classic->Remove(staleId);
+    companion.forks[0].size=32;
+    classic->Put(edited.parent,companion,[](unsigned,uint64_t,void* out,size_t count){memset(out,0,count);},false);
+    bool corrupt=false;
+    try{ClassicCopyArchive::Load(*classic,edited,job);}
+    catch(const HfsPlus::Error& error){corrupt=std::string_view(error.what()).find("corrupt")!=std::string_view::npos;}
+    Check(corrupt,"A corrupt companion was treated as missing");
+    fprintf(report,"PASS: classic archive restore distinguishes missing, stale and corrupt companions and preserves verified metadata alongside a native timestamp edit.\n");
 }
 
 void TestClassicArchivePairUpdates(const std::string& root,FILE* report)

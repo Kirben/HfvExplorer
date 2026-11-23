@@ -13,10 +13,8 @@ struct Metadata {
     explicit Metadata(const MacBrowser::Entry& source):entry(source){}
 };
 
-// Bind the saved metadata to the published classic HFS object and its logical forks.
-Digest Fingerprint(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 uint64_t EncodedSize(const Metadata&,Storage::Job&);
-HfsPlus::AttributeData Encode(const Metadata&,const Digest&,Storage::Job&);
+HfsPlus::AttributeData Encode(const Metadata&,const Digest&,Storage::Job&,const MacBrowser::Entry& projected);
 std::u16string CompanionName(uint32_t catalogId);
 bool ReservedName(std::u16string_view);
 struct Pair {

@@ -16,6 +16,7 @@ using HfsPlus::AttributeData;
 constexpr uint64_t signatureV1=0x3141564648534648;
 constexpr uint64_t signatureV2=0x3241564648534648;
 constexpr uint64_t signatureV3=0x3341564648534648;
+constexpr uint64_t signatureV4=0x3441564648534648;
 constexpr uint64_t maximumFork=0x7fffffff;
 constexpr uint64_t maximumHeader=1024*1024;
 
@@ -72,17 +73,19 @@ public:
 };
 }
 
-Digest Fingerprint(MacBrowser::Volume& volume,const Entry& entry,Storage::Job& job)
+static Digest Fingerprint(MacBrowser::Volume& volume,const Entry& entry,Storage::Job& job,bool nativeEdits)
 {
     Data identity;
     identity.put(entry.resolvedId);
     identity.u16(entry.name);
     identity.put(entry.directory);
-    identity.put(entry.protectedFile);
-    identity.put(entry.created);
-    identity.put(entry.modified);
-    PutDate(identity,entry.additionalDates.backup);
-    identity.put(std::string(reinterpret_cast<const char*>(entry.finder.data()),entry.finder.size()));
+    if(!nativeEdits){
+        identity.put(entry.protectedFile);
+        identity.put(entry.created);
+        identity.put(entry.modified);
+        PutDate(identity,entry.additionalDates.backup);
+        identity.put(std::string(reinterpret_cast<const char*>(entry.finder.data()),entry.finder.size()));
+    }
     for(const auto& fork:entry.forks)identity.put(fork.size);
     Hash hash;
     hash.Add(identity.bytes.data(),identity.bytes.size());
@@ -108,11 +111,16 @@ struct Envelope {
     uint64_t bodySize;
 };
 
-Envelope MakeEnvelope(const Metadata& metadata,const Digest& binding,Storage::Job& job)
+Envelope MakeEnvelope(const Metadata& metadata,const Digest& binding,const Entry& projected,Storage::Job& job)
 {
     const auto& entry=metadata.entry;
     Data header;
     header.put(std::string(reinterpret_cast<const char*>(binding.data()),binding.size()));
+    header.put(projected.created);
+    header.put(projected.modified);
+    header.put(projected.additionalDates.backup.value_or(0));
+    header.put(projected.protectedFile);
+    header.put(std::string(reinterpret_cast<const char*>(projected.finder.data()),projected.finder.size()));
     header.put(entry.directory);
     header.u16(entry.name);
     header.put(entry.datesValid);
@@ -150,7 +158,7 @@ Envelope MakeEnvelope(const Metadata& metadata,const Digest& binding,Storage::Jo
         Check(header.bytes.size()<=maximumHeader,"Classic metadata companion header is too large");
     }
     Data prefix;
-    prefix.put(signatureV3);
+    prefix.put(signatureV4);
     prefix.put(header.bytes.size());
     prefix.bytes.insert(prefix.bytes.end(),header.bytes.begin(),header.bytes.end());
     Check(payloadSize<=maximumFork-prefix.bytes.size()-Digest{}.size(),
@@ -162,12 +170,12 @@ Envelope MakeEnvelope(const Metadata& metadata,const Digest& binding,Storage::Jo
 
 uint64_t EncodedSize(const Metadata& metadata,Storage::Job& job)
 {
-    return MakeEnvelope(metadata,{},job).bodySize+Digest{}.size();
+    return MakeEnvelope(metadata,{},metadata.entry,job).bodySize+Digest{}.size();
 }
 
-AttributeData Encode(const Metadata& metadata,const Digest& binding,Storage::Job& job)
+AttributeData Encode(const Metadata& metadata,const Digest& binding,Storage::Job& job,const Entry& projected)
 {
-    const auto [prefix,bodySize]=MakeEnvelope(metadata,binding,job);
+    const auto [prefix,bodySize]=MakeEnvelope(metadata,binding,projected,job);
     const auto& entry=metadata.entry;
     auto next=entry.attributes.begin();
     uint64_t payloadOffset=0;
@@ -244,30 +252,63 @@ void RefuseCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
     CheckCut(volume,item,job,0);
 }
 
-std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+static std::optional<Metadata> DecodeArchive(const AttributeData&,Storage::Job&,
+    const Digest&,const Entry*,bool);
+
+enum class Health {Missing,Unrelated,Stale,Corrupt,Verified};
+
+struct Inspection {
+    Health health;
+    std::optional<Pair> pair;
+};
+
+static Inspection Inspect(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job,bool preserveEdits)
 {
     Entry companion;
-    if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion)||
-       companion.directory||companion.forks[1].size||companion.forks[0].size>maximumFork||
-       !CompanionType(companion))
-        return {};
+    if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion))
+        return {Health::Missing,{}};
+    if(!CompanionType(companion))return {Health::Unrelated,{}};
+    if(companion.forks[1].size||companion.forks[0].size>maximumFork)
+        return {Health::Corrupt,{}};
     const auto stored=AttributeData::Snapshot(companion.forks[0].size,[&](uint64_t at,void* out,size_t count){
         Cancel(job);
         volume.Read(companion.id,0,at,out,count);
     });
-    auto result=Decode(stored,Fingerprint(volume,item,job),job);
-    Check(!result||result->entry.directory==item.directory,"Classic companion does not match its object type");
-    return result;
+    // Compute the binding separately so failed reads of the native file stay I/O errors.
+    Data prefix;
+    if(stored.size()<16+Digest{}.size())return {Health::Corrupt,{}};
+    prefix.bytes.resize(8);
+    stored.Read(0,prefix.bytes.data(),prefix.bytes.size());
+    const auto signature=prefix.get();
+    if(signature!=signatureV1&&signature!=signatureV2&&signature!=signatureV3&&signature!=signatureV4)
+        return {Health::Corrupt,{}};
+    const auto binding=Fingerprint(volume,item,job,signature==signatureV4);
+    try{
+        auto result=DecodeArchive(stored,job,binding,&item,preserveEdits);
+        if(!result)return {Health::Stale,{}};
+        Check(result->entry.directory==item.directory,"Classic companion does not match its object type");
+        return {Health::Verified,Pair{std::move(companion),std::move(*result)}};
+    }catch(const HfsPlus::Error&){
+        return {Health::Corrupt,{}};
+    }
+}
+
+std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+{
+    auto result=Inspect(volume,item,job,true);
+    Check(result.health!=Health::Corrupt,"The classic metadata companion is corrupt. Source files were retained.");
+    Check(result.health!=Health::Stale,"The classic metadata companion is stale. Source files were retained.");
+    if(result.pair)return std::move(result.pair->metadata);
+    return {};
 }
 
 std::optional<Pair> RequireVerifiedPair(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
 {
-    Entry companion;
-    if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion))return {};
-    Check(CompanionType(companion),"An unrelated file occupies the classic metadata companion name");
-    auto metadata=Load(volume,item,job);
-    Check(metadata.has_value(),"The existing classic metadata companion is stale. Both files were retained.");
-    return Pair{std::move(companion),std::move(*metadata)};
+    auto result=Inspect(volume,item,job,false);
+    Check(result.health!=Health::Unrelated,"An unrelated file occupies the classic metadata companion name");
+    Check(result.health!=Health::Corrupt,"The existing classic metadata companion is corrupt. Both files were retained.");
+    Check(result.health!=Health::Stale,"The existing classic metadata companion is stale. Both files were retained.");
+    return std::move(result.pair);
 }
 
 void RemoveCompanion(MacBrowser::Volume& volume,const Entry& expected)
@@ -285,7 +326,7 @@ void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage:
     Entry companion,existing;
     companion.name=CompanionName(item.resolvedId);
     Check(!volume.FindChild(item.parent,companion.name,existing),"A file already uses the classic companion name");
-    const auto stored=Encode(source,Fingerprint(volume,item,job),job);
+    const auto stored=Encode(source,Fingerprint(volume,item,job,true),job,item);
     companion.forks[0].size=stored.size();
     memcpy(companion.finder.data(),"HFVMHFVE",8);
     volume.PutForTransfer(item.parent,companion,[&](unsigned fork,uint64_t at,void* out,size_t count){
@@ -296,7 +337,8 @@ void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage:
     Check(Load(volume,item,job).has_value(),"Classic metadata companion failed readback verification");
 }
 
-std::optional<Metadata> Decode(const AttributeData& archive,const Digest& binding,Storage::Job& job)
+static std::optional<Metadata> DecodeArchive(const AttributeData& archive,Storage::Job& job,
+    const Digest& binding,const Entry* current,bool preserveEdits)
 {
     constexpr auto digestSize=Digest{}.size();
     if(archive.size()<16+digestSize||archive.size()>maximumFork)return {};
@@ -305,14 +347,14 @@ std::optional<Metadata> Decode(const AttributeData& archive,const Digest& bindin
     prefix.bytes.resize(16);
     archive.Read(0,prefix.bytes.data(),prefix.bytes.size());
     const auto signature=prefix.get();
-    if(signature!=signatureV1&&signature!=signatureV2&&signature!=signatureV3)return {};
+    const bool projected=signature==signatureV4;
+    if(signature!=signatureV1&&signature!=signatureV2&&signature!=signatureV3&&!projected)return {};
     const auto headerSize=prefix.get();
     Check(headerSize<=maximumHeader&&headerSize<=bodySize-16,"Invalid classic metadata companion header");
     Data header;
     header.bytes.resize(size_t(headerSize));
     archive.Read(16,header.bytes.data(),header.bytes.size());
     const auto expected=header.text();
-    if(expected.size()!=binding.size()||memcmp(expected.data(),binding.data(),binding.size()))return {};
     Hash checksum;
     HfsPlus::Bytes buffer(64*1024);
     for(uint64_t at=0;at<bodySize;){
@@ -325,6 +367,18 @@ std::optional<Metadata> Decode(const AttributeData& archive,const Digest& bindin
     Digest stored{};
     archive.Read(bodySize,stored.data(),stored.size());
     Check(checksum.Finish()==stored,"Classic metadata companion checksum mismatch");
+    Check(expected.size()==binding.size(),"Invalid classic companion binding size");
+    if(memcmp(expected.data(),binding.data(),binding.size()))return {};
+    Entry baseline;
+    if(projected){
+        baseline.created=header.get();
+        baseline.modified=header.get();
+        baseline.additionalDates.backup=header.get();
+        baseline.protectedFile=header.flag();
+        const auto finder=header.text();
+        Check(finder.size()==baseline.finder.size(),"Invalid classic companion Finder baseline");
+        memcpy(baseline.finder.data(),finder.data(),finder.size());
+    }
     Metadata metadata;
     auto& entry=metadata.entry;
     entry.directory=header.flag();
@@ -345,7 +399,7 @@ std::optional<Metadata> Decode(const AttributeData& archive,const Digest& bindin
               protection<=PosixMetadata::ProtectionMask&&flags<=PosixMetadata::HintMask,
               "Invalid classic metadata companion permissions");
         entry.posix=PosixMetadata{uint32_t(uid),uint32_t(gid),uint16_t(mode),uint8_t(protection),uint8_t(flags)};
-        if(signature==signatureV3){
+        if(signature==signatureV3||projected){
             const auto kind=header.get(),device=header.get();
             Check(kind<=15&&(!kind||SpecialType(unsigned(kind))!=SpecialFileType::None)&&device<=UINT32_MAX,
                   "Invalid classic companion special-file type");
@@ -354,7 +408,7 @@ std::optional<Metadata> Decode(const AttributeData& archive,const Digest& bindin
             entry.posix->device=uint32_t(device);
         }
     }
-    if(signature==signatureV3){
+    if(signature==signatureV3||projected){
         if(header.flag()){
             const auto target=header.text();
             Check(!entry.directory&&(!entry.posix||!entry.posix->IsSpecial())&&!target.empty(),
@@ -393,6 +447,35 @@ std::optional<Metadata> Decode(const AttributeData& archive,const Digest& bindin
     header.end();
     Check(at==bodySize,"Trailing classic metadata companion payload");
     entry.attributesKnown=true;
+    if(projected&&current){
+        const bool created=current->created!=baseline.created;
+        const bool modified=current->modified!=baseline.modified;
+        const bool backup=current->additionalDates.backup.value_or(0)!=baseline.additionalDates.backup.value_or(0);
+        const bool locked=current->protectedFile!=baseline.protectedFile;
+        const bool finder=current->finder!=baseline.finder;
+        if(!preserveEdits&&(created||modified||backup||locked||finder))return {};
+        constexpr uint64_t epoch=2082844800;
+        constexpr uint64_t nanos=1000000000;
+        if(created){
+            entry.created=current->created;
+            if(entry.apfsTimestamps)(*entry.apfsTimestamps)[0]=(current->created-epoch)*nanos;
+        }
+        if(modified){
+            entry.modified=current->modified;
+            if(entry.apfsTimestamps)(*entry.apfsTimestamps)[1]=(current->modified-epoch)*nanos;
+        }
+        if(backup)entry.additionalDates.backup=current->additionalDates.backup;
+        if(finder)entry.finder=current->finder;
+        if(locked&&entry.posix){
+            if(current->protectedFile)entry.posix->protection|=PosixMetadata::UserImmutable;
+            else entry.posix->protection&=~PosixMetadata::UserImmutable;
+        }
+    }
     return metadata;
+}
+
+std::optional<Metadata> Decode(const AttributeData& archive,const Digest& binding,Storage::Job& job)
+{
+    return DecodeArchive(archive,job,binding,nullptr,false);
 }
 }
