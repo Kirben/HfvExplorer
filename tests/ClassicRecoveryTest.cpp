@@ -779,13 +779,13 @@ std::shared_ptr<MacBrowser::Volume> OpenCrossFormatFixture(const std::wstring& p
     return volume;
 }
 
-Storage::Result CrossFormatMove(const CString& sourcePath,Storage::Job& job)
+Storage::Result CrossFormatMove(const CString& sourcePath,Storage::Job& job,bool merge=false)
 {
     auto source=OpenCrossFormatFixture(VolumeCoord::Wide(sourcePath.GetString()));
     auto target=OpenCrossFormatFixture(VolumeCoord::Wide((sourcePath+".target.dsk").GetString()));
     Check(source&&target,"open both cross-format move participants");
     std::vector<FileOperations::Location> entries;
-    for(const auto* name:{u"First",u"Second"}){
+    for(const auto* name:merge?std::vector<const char16_t*>{u"Merge"}:std::vector<const char16_t*>{u"First",u"Second"}){
         auto location=FileOperations::Location::Mounted(source,Find(*source,2,name));
         location.cut=true;
         entries.push_back(std::move(location));
@@ -797,6 +797,8 @@ Storage::Result CrossFormatMove(const CString& sourcePath,Storage::Job& job)
             const auto prompt=job.conflictState();
             if(prompt.kind==Storage::CopyPrompt::ClassicArchiveMove&&!prompt.path.empty())
                 job.resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+            if(prompt.kind==Storage::CopyPrompt::ArchiveFolderMerge&&!prompt.path.empty())
+                job.resolve(prompt.id,Storage::ConflictChoice::Skip);
             Sleep(1);
         }
     });
@@ -858,6 +860,62 @@ void CrossFormatMoveRecovery(const CString& root,FILE* report)
         }
     }
     fprintf(report,"PASS: classic HFS moves with HFS+, HFSX and APFS retain verified destination forks and unprocessed sources when interrupted before and during source cleanup in either direction.\n");
+}
+
+void ArchiveMergeInterruption(const CString& root,FILE* report)
+{
+    for(unsigned formatKind:{0u,1u,2u})for(bool fromClassic:{false,true})for(bool crash:{false,true}){
+        CString from;
+        from.Format("%s\\archive-merge-%u-%u-%u.dsk",root.GetString(),formatKind,unsigned(fromClassic),unsigned(crash));
+        const CString to=from+".target.dsk";
+        const auto fromPath=VolumeCoord::Wide(from.GetString()),toPath=VolumeCoord::Wide(to.GetString());
+        FormatClassicImage((fromClassic?fromPath:toPath),"Merge classic",4*1024*1024);
+        const auto modern=fromClassic?toPath:fromPath;
+        auto disk=HfsPlus::CreateImage(modern.c_str(),16*1024*1024);
+        Storage::Job format;
+        using Kind=HfsPlus::Volume::FormatKind;
+        if(formatKind==2)Apfs::Format(*disk,u"Merge modern",true,format);
+        else HfsPlus::Volume::Format(*disk,u"Merge modern",true,formatKind?Kind::HfsXCaseSensitive:Kind::HfsPlus);
+        disk.reset();
+        {
+            auto source=OpenCrossFormatFixture(fromPath);
+            auto target=OpenCrossFormatFixture(toPath);
+            const auto fromFolder=source->MakeDirectory(2,u"Merge");
+            const auto toFolder=target->MakeDirectory(2,u"Merge");
+            Put(*source,true,false,fromFolder,u"First");
+            Put(*source,true,false,fromFolder,u"Second");
+            Put(*target,false,false,toFolder,u"First");
+            Put(*target,false,false,toFolder,u"Unrelated");
+            if(fromClassic){
+                auto folder=source->Stat(fromFolder);
+                ClassicCopyArchive::Save(*source,fromFolder,ClassicCopyArchive::Metadata(folder),format);
+            }
+        }
+        if(crash)CrashChild(from,19,L"archive-merge-move");
+        else{
+            Storage::Job cancel;
+            cancel.transport([&](const Storage::Progress& progress){
+                if(progress.phase=="Copying"&&progress.files==1)cancel.cancel();
+            },[](const std::string&){return Storage::ConflictChoice::Replace;});
+            const auto result=CrossFormatMove(from,cancel,true);
+            Check(result.error==ERROR_CANCELLED&&!result.moved&&result.partial==fromClassic&&
+                  result.completed==unsigned(fromClassic),
+                  "late archive merge cancellation did not report retained destination changes accurately");
+        }
+        auto source=OpenCrossFormatFixture(fromPath);
+        auto target=OpenCrossFormatFixture(toPath);
+        const auto fromFolder=Find(*source,2,u"Merge"),toFolder=Find(*target,2,u"Merge");
+        VerifyForks(*source,source->Stat(Find(*source,fromFolder,u"First")),true);
+        VerifyForks(*source,source->Stat(Find(*source,fromFolder,u"Second")),true);
+        if(fromClassic)
+            Check(ClassicCopyArchive::RequireVerifiedPair(*source,source->Stat(fromFolder),format).has_value(),
+                  "interruption broke the source archive companion");
+        VerifyForks(*target,target->Stat(Find(*target,toFolder,u"First")),fromClassic);
+        VerifyForks(*target,target->Stat(Find(*target,toFolder,u"Unrelated")),false);
+        MacBrowser::Entry absent;
+        Check(!target->FindChild(toFolder,u"Second",absent),"interrupted merge copied the second entry");
+    }
+    fprintf(report,"PASS: late archive merge cancellation and process loss preserve both source files, both forks and unrelated destination files. Classic HFS rolls back the replacement; APFS, HFS+ and HFSX retain the completed replacement.\n");
 }
 
 void ArchiveDeleteRecovery(const CString& root,const Bytes& original,FILE* report)
@@ -1545,13 +1603,14 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             const auto result=TransferTree(source,target,!strcmp(action,"folder-move"),job);
             return result.code?4:3;
         }
-        if(!strcmp(action,"cross-format-move")){
+        if(!strcmp(action,"cross-format-move")||!strcmp(action,"archive-merge-move")){
             Storage::Job job;
             job.transport([&](const Storage::Progress& progress){
-                if(progress.phase=="Removing moved sources"&&progress.path==(phase==17?"First":"Second"))
+                if((phase==19&&progress.phase=="Copying"&&progress.files==1)||
+                   (progress.phase=="Removing moved sources"&&progress.path==(phase==17?"First":"Second")))
                     ExitProcess(90+phase);
             },[](const std::string&){return Storage::ConflictChoice::ReplaceAll;});
-            const auto result=CrossFormatMove(image,job);
+            const auto result=CrossFormatMove(image,job,phase==19);
             if(result.code){
                 FILE* failure=nullptr;
                 if(!fopen_s(&failure,(std::string(image)+".cross-format-error.txt").c_str(),"w")){
@@ -1720,6 +1779,7 @@ int RunClassicRecoveryTest(const char* directory)
         DeleteRecovery(root,original,report);
         ArchiveDeleteRecovery(root,original,report);
         CrossFormatMoveRecovery(root,report);
+        ArchiveMergeInterruption(root,report);
         RenameRecovery(root,original,report);
         {
             const CString empty=root+"\\empty-transfer.dsk";
