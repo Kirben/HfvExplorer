@@ -5,6 +5,10 @@
 #include "HfsPlusDisk.h"
 #include "BrowserPresentation.h"
 #include "CommandStorage.h"
+#include "WindowsMoveUndo.h"
+#ifdef HFV_TESTING
+#include "MacBrowserModel.h"
+#endif
 #include <objbase.h>
 #include <cstddef>
 
@@ -96,6 +100,24 @@ public:
         file_->PublishTo(final_);
     }
     void Keep(){file_->Keep();}
+
+    std::pair<std::wstring,MacBrowser::ObjectIdentity> Stage(WindowsMoveUndo::Session& transaction){
+        Check(written_==file_->Size(),"The optical output is incomplete");
+        file_->Flush();
+        const auto files=file_->WorkerFiles();
+        Check(files.size()==1,"Cannot identify the staged optical output");
+        const auto handle=reinterpret_cast<HANDLE>(files.front().second);
+        BY_HANDLE_FILE_INFORMATION info{};
+        Check(GetFileInformationByHandle(handle,&info)!=FALSE,"Cannot identify the optical output");
+        auto identity=MacBrowser::WindowsIdentity(info);
+        auto staged=transaction.StageTemporary(files.front().first,handle);
+        // The journal owns this entry after its recorded rename.
+        file_->Keep();
+        file_.reset();
+        return {std::move(staged),std::move(identity)};
+    }
+
+    const std::wstring& Destination()const{return final_;}
 };
 
 std::string Time(uint64_t sectors)
@@ -170,6 +192,11 @@ Storage::Result Save(int drive,const std::wstring& base,const RawSelection& chos
     const bool wave=chosen.format==RawOutput::WaveTracks;
     const bool cue=chosen.format==RawOutput::BinCue;
     const bool form2=chosen.format==RawOutput::Form2Track;
+    const bool grouped=cue||(wave&&tracks.size()>1);
+    const auto separator=base.find_last_of(L"\\/");
+    const auto folder=base.substr(0,separator==6?7:separator);
+    if(grouped&&!WindowsMoveUndo::Supported(folder))
+        return Fail(ERROR_NOT_SUPPORTED,"Saving a BIN/CUE pair or multiple WAV tracks requires a local NTFS folder. Single-file exports can use other destinations.");
     const DWORD sectorBytes=form2?Form2Bytes:RawSectorBytes;
     uint64_t total=0;
     for(const auto& track:tracks)total+=track.sectors*sectorBytes;
@@ -240,10 +267,28 @@ Storage::Result Save(int drive,const std::wstring& base,const RawSelection& chos
     }
     if(job.cancelled())throw Storage::Cancelled();
     Verify(source,chosen.generation);
-    // Keep the owned handles open after rename so rollback removes only files
-    // this job created, including a BIN already published before its CUE.
-    for(auto& output:outputs)output->Publish();
-    for(auto& output:outputs)output->Keep();
+    if(grouped){
+        WindowsMoveUndo::RunExport(folder,[&]{
+            auto& transaction=*WindowsMoveUndo::Session::Current();
+            std::vector<std::pair<std::wstring,MacBrowser::ObjectIdentity>> staged;
+            for(auto& output:outputs){
+                if(job.cancelled())throw Storage::Cancelled();
+                staged.push_back(output->Stage(transaction));
+            }
+            for(size_t i=0;i<outputs.size();++i){
+                if(job.cancelled())throw Storage::Cancelled();
+                transaction.Rename(staged[i].first,outputs[i]->Destination(),&staged[i].second);
+#ifdef HFV_TESTING
+                if(MacBrowser::windowsPublicationFault)
+                    MacBrowser::windowsPublicationFault("optical-output-published");
+#endif
+            }
+            if(job.cancelled())throw Storage::Cancelled();
+        });
+    }else{
+        outputs.front()->Publish();
+        outputs.front()->Keep();
+    }
     return {};
 }
 }
@@ -290,7 +335,7 @@ std::function<Storage::Result(Storage::Job&)> SaveRawCd(int drive,std::wstring o
             if(chosen.format==RawOutput::BinCue)reserve(Extension(base,L".cue"));
         }
         return CommandStorage::Guard(std::move(access),[&](Storage::Job& running){
-            return Save(drive,base,chosen,*source,running);
+            return Save(drive,BrowserPresentation::WindowsPath(base),chosen,*source,running);
         },std::move(changed))(job);
     };
 }

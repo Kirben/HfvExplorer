@@ -95,12 +95,29 @@ void CheckFile(MacBrowser::Volume& volume)
 void NoTemps(const std::wstring& folder)
 {
     WIN32_FIND_DATAW info{};
-    auto found=FindFirstFileW((folder+L"\\.hfv-optical-*.tmp").c_str(),&info);
+    auto found=FindFirstFileW((folder+L"\\.hfv-image-*.tmp").c_str(),&info);
     if(found!=INVALID_HANDLE_VALUE)FindClose(found);
     Check(found==INVALID_HANDLE_VALUE,"Optical job leaked a staged file");
 }
 }
 
+int RunRawOpticalCrashChild(const char* directory,unsigned phase,bool wave)
+{
+    auto disc=std::make_shared<Disc>();
+    const Track audio{1,1,0,2,false,0};
+    const Track other{2,1,2,32,!wave,wave?0u:4u};
+    disc->tracks={audio,other};
+    disc->data[audio.number]=Bytes(audio.sectors*RawSectorBytes,0x12);
+    disc->data[other.number]=wave?Bytes(other.sectors*RawSectorBytes,0x34):IsoRaw();
+    if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+        if(!strcmp(step,"optical-output-published"))ExitProcess(97);
+    };
+    Storage::Job job;
+    const auto root=VolumeCoord::Wide(directory);
+    const auto result=SaveRawCd(3,root+(wave?L"\\Tracks.wav":L"\\Disc.cue"),
+        {wave?RawOutput::WaveTracks:RawOutput::BinCue,{audio,other},71},disc)(job);
+    return result.code?4:3;
+}
 int RunRawOpticalTest(const char* directory)
 {
     if(!CreateDirectoryA(directory,nullptr))return 2;

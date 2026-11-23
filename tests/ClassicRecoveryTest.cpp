@@ -1820,7 +1820,33 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
         }
     }
     fprintf(report,"PASS: standalone fork and attribute exports publish only complete data, retain a late destination collision, and support empty exports.\n");
+    for(bool wave:{false,true})for(unsigned phase:{7u,9u}){
+        CString folder;
+        folder.Format("%s\\optical-output-%u-%u",root.GetString(),unsigned(wave),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create interrupted optical export fixture");
+        const auto main=folder+(wave?"\\Tracks-01.wav":"\\Disc.bin");
+        const auto second=folder+(wave?"\\Tracks-02.wav":"\\Disc.cue");
+        const Bytes neighbor{5,9,13};
+        Save(folder+"\\Neighbor",neighbor);
+        CrashChild(folder,phase,wave?L"optical-wav-crash":L"optical-cue-crash");
+        Check(GetFileAttributesA(main)!=INVALID_FILE_ATTRIBUTES,"the optical subprocess never published its first output");
+        auto host=MacBrowser::OpenWindows(VolumeCoord::Wide(folder.GetString()));
+        if(phase==7){
+            Check(GetFileAttributesA(main)==INVALID_FILE_ATTRIBUTES&&GetFileAttributesA(second)==INVALID_FILE_ATTRIBUTES,
+                  "interrupted optical recovery retained a partial output set");
+        }else{
+            const auto first=Load(main),last=Load(second);
+            Check(first.size()==(wave?2u*2352+44:34u*2352),"committed optical recovery truncated the first output");
+            if(wave)Check(last.size()==32u*2352+44,"committed optical recovery truncated the second WAV");
+            else Check(std::string(last.begin(),last.end()).find("Disc.bin")!=std::string::npos,
+                       "committed CUE lost its BIN reference");
+        }
+        Check(Load(folder+"\\Neighbor")==neighbor&&StagedImages(folder)==0&&host->List(2).size()==(phase==7?1:3),
+              "optical recovery changed unrelated data or kept staging");
+    }
+    fprintf(report,"PASS: BIN/CUE and multi-WAV output sets roll back together before commit and survive together after commit.\n");
 }
+int RunRawOpticalCrashChild(const char*,unsigned,bool);
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
 {
@@ -1840,6 +1866,9 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        const bool opticalWave=!strcmp(action,"optical-wav-crash");
+        if(opticalWave||!strcmp(action,"optical-cue-crash"))
+            return RunRawOpticalCrashChild(image,phase,opticalWave);
         if(!strcmp(action,"recursive-windows-delete")){
             Storage::Job job;
             const auto result=DeleteWindowsFixture(VolumeCoord::Wide(image),job,L"Tree");
