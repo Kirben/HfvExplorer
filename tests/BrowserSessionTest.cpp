@@ -798,7 +798,8 @@ int RunBrowserSessionTest(const char* directory){
   auto launchB=b.Session().MacBrowser().CaptureItem(Find(b.list,L"second classic"));
   auto verifyExport=[&](Panes& origin,const FileOperations::Location& selected,const char* leaf){
    CString staged;
-   Check(StageWindowsLaunchDocument(origin.Session(),selected,staged),"could not stage the captured launcher document");
+   MacBrowser::ObjectIdentity exported;
+   Check(StageWindowsLaunchDocument(origin.Session(),selected,staged,exported)&&!exported.key.empty(),"could not stage the captured launcher document");
    int separator=staged.ReverseFind('\\');
    bool matches=staged.Mid(separator+1).Left(int(strlen(leaf)))==leaf&&GetFileAttributes(staged)!=INVALID_FILE_ATTRIBUTES;
    Check(matches,"launcher exported a selection from a different browser");

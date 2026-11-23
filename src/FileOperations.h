@@ -124,6 +124,7 @@ struct Completion {
  // Conservatively includes resources that may have changed on a partial failure.
  std::vector<Change> affected;
  std::wstring publishedWindowsExport;
+ MacBrowser::ObjectIdentity publishedWindowsIdentity;
 };
 class Operation {
  struct State;

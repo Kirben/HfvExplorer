@@ -457,6 +457,7 @@ class Windows final : public Volume, public WorkerEndpoint {
     mutable std::recursive_mutex mutex_;
     std::map<uint32_t,std::wstring> paths_;
     std::string resourceKey_;
+    std::pair<std::wstring,ObjectIdentity> lastPublication_;
     struct ForkReader {std::shared_ptr<File> file;uint64_t offset=0,size=0;};
     std::map<uint32_t,ForkReader> dataReaders_,resourceReaders_;
     uint32_t next_ = 3;
@@ -760,6 +761,10 @@ public:
         return PutFile(parent,e,std::move(read),replace,source,&job);
     }
 private:
+    std::pair<std::wstring,ObjectIdentity> LastHostPublication() const override {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        return lastPublication_;
+    }
     uint32_t PutFile(uint32_t parent,const Entry& e,Reader read,bool replace,
                      const std::wstring& source,Storage::Job* job) {
         Leaf(e.name);Leaf(u"%"+e.name);
@@ -849,6 +854,8 @@ private:
             if(backed)original.RemoveAt(backup);
             if(backedResource)originalResource.RemoveAt(backupResource);
         }
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        lastPublication_={path,newData->Identity()};
         return Id(path);
     }
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name) override {

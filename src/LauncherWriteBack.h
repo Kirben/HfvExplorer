@@ -19,6 +19,19 @@ private:
     HANDLE file_=INVALID_HANDLE_VALUE;
 };
 
+class LauncherHandoff {
+public:
+    LauncherHandoff()=default;
+    LauncherHandoff(const LauncherHandoff&)=delete;
+    LauncherHandoff& operator=(const LauncherHandoff&)=delete;
+    ~LauncherHandoff(){ Close(); }
+    Storage::Result Protect(const wchar_t* path,const MacBrowser::ObjectIdentity& expected,bool readOnly);
+    void Close();
+
+private:
+    HANDLE file_=INVALID_HANDLE_VALUE;
+};
+
 class LauncherWriteBack {
 public:
     LauncherWriteBack(FileOperations::Location original,std::string version,CString temporary);

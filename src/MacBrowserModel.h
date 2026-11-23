@@ -92,6 +92,7 @@ class Volume {
 public:
     virtual ~Volume() = default;
     virtual std::wstring HostPath(uint32_t)const{return {};}
+    virtual std::pair<std::wstring,ObjectIdentity> LastHostPublication() const { return {}; }
     virtual std::string ResourceKey()const{return "adapter:"+std::to_string(reinterpret_cast<uintptr_t>(this));}
     virtual std::u16string Name() const = 0;
     virtual const char *Kind() const = 0;

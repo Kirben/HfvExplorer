@@ -183,12 +183,19 @@ bool Launchers::OpenClassicDocument(CString type, CString creator)
   return FALSE;
  }
  CString staged;
- if(!StageWindowsLaunchDocument(session,selection,staged))return FALSE;
+ MacBrowser::ObjectIdentity exported;
+ if(!StageWindowsLaunchDocument(session,selection,staged,exported))return FALSE;
  CString directory=staged.Left(staged.ReverseFind(char(92)));
- DWORD attributes=FILE_ATTRIBUTE_TEMPORARY;
- if(mount_flags(const_cast<char*>(selection.ClassicImage().c_str()))==0)attributes|=FILE_ATTRIBUTE_READONLY;
- SetFileAttributes(staged,attributes);
-
+ LauncherHandoff handoff;
+ const auto path=VolumeCoord::Wide(static_cast<LPCSTR>(staged));
+ const auto protectedFile=handoff.Protect(path.c_str(),exported,
+     mount_flags(const_cast<char*>(selection.ClassicImage().c_str()))==0);
+ if(protectedFile.code){
+  handoff.Close();
+  owner->MessageBox(CString(protectedFile.message.c_str())+". Inspect the staged copy at "+staged,
+                    "HFVExplorer",MB_OK|MB_ICONERROR);
+  return FALSE;
+ }
  auto writeBack=std::make_unique<LauncherWriteBack>(selection,std::move(version),staged);
  if(!writeBack->CaptureBaseline(owner))return FALSE;
  SHELLEXECUTEINFO launch{};
@@ -200,6 +207,7 @@ bool Launchers::OpenClassicDocument(CString type, CString creator)
  launch.nShow=SW_SHOWNORMAL;
  launch.fMask=SEE_MASK_NOCLOSEPROCESS;
  BOOL launched=ShellExecuteEx(&launch);
+ handoff.Close();
  writeBack->Track(launch.hProcess);
  if(!launched||reinterpret_cast<INT_PTR>(launch.hInstApp)<=32){
   owner->MessageBox("Could not open the temporary document. Inspect the staged copy at "+staged,"HFVExplorer",MB_OK|MB_ICONERROR);

@@ -411,6 +411,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  bool complete=false,inPlace=false,windowsDestination=false,crossFormatMove=false;
  InterruptedMoveReport report;
  const bool reportExport=transfer.adapter&&target.IsWindows()&&!moving&&request.sources.size()==1&&!request.sources.front().directory;
+ std::pair<std::wstring,ObjectIdentity> exported;
  std::vector<std::u16string> publishedNames;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
@@ -490,7 +491,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      Storage::OutcomeEvidence evidence;
      try{
       WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
-       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true,reportExport?&publishedNames:nullptr);
+       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true);
        destination.first->Close();
        Cancel(job);
       });
@@ -513,11 +514,12 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      report.Append(planned);
     }
     const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
-                                        false,(report||reportExport)?&publishedNames:nullptr);};
+                                        false,report?&publishedNames:nullptr);};
     if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);
     else copy();
    }
   }
+  if(complete&&reportExport)exported=destination.first->LastHostPublication();
   if(!target.Volume())destination.first->Close();
   for(size_t i=0;i<request.sources.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
  };
@@ -552,8 +554,10 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
    if(report)report.Complete();
   }else if(report)report.Append("Transfer incomplete. Source cleanup did not start.\r\n");
  }
- if(complete&&reportExport&&publishedNames.size()==1)
-  completion.publishedWindowsExport=ChildPath(target.WindowsPath(),publishedNames.front());
+ if(complete&&!exported.first.empty()){
+  completion.publishedWindowsExport=std::move(exported.first);
+  completion.publishedWindowsIdentity=std::move(exported.second);
+ }
  completion.complete=complete;
  completion.completed=job.progress().files;
  Storage::Result result;

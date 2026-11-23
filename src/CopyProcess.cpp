@@ -407,6 +407,9 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                         handoff.MarkUnclean();
                     DecodeOutcome(d,result);
                     completion.publishedWindowsExport=d.wide();
+                    completion.publishedWindowsIdentity.key=d.text();
+                    if(!completion.publishedWindowsIdentity.key.empty())
+                        completion.publishedWindowsIdentity.version=d.get();
                     finished = true;
                 } else
                     throw HfsPlus::Error("Unexpected copy-worker response");
@@ -666,6 +669,9 @@ int Child(const char *inputText, const char *outputText) {
         result.Finalize(evidence,completion.completed,job.progress().skipped);
         EncodeOutcome(final,result);
         final.wide(completion.publishedWindowsExport);
+        final.put(completion.publishedWindowsIdentity.key);
+        if(!completion.publishedWindowsIdentity.key.empty())
+            final.put(completion.publishedWindowsIdentity.version.value());
         Send(output, Finished, std::move(final));
         return 0;
     } catch (const std::exception &error) {
@@ -682,6 +688,7 @@ int Child(const char *inputText, const char *outputText) {
             failed.outcome=Storage::Outcome::Failed;
             EncodeOutcome(final,failed);
             final.wide({});
+            final.put(std::string{});
             Send(output, Finished, std::move(final));
             return 0;
         } catch (...) {

@@ -8,7 +8,7 @@ extern "C" {
 #include "hfs/interface.h"
 }
 LegacyCopyOptions CaptureLegacyCopyOptions(char output){LegacyCopyOptions options;int ad;HFSIFACE_copy_settings(&options.output,&options.input,&ad);options.output=output;options.appledouble=ad!=0;return options;}
-bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Location& source,CString& output)
+bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Location& source,CString& output,MacBrowser::ObjectIdentity& identity)
 {
  output.Empty();
  char temp[MAX_PATH], reservation[MAX_PATH];
@@ -37,8 +37,12 @@ bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Lo
  }
 
  const auto completion=operation.Snapshot();
- if(completion.complete&&!completion.publishedWindowsExport.empty()){
-  output=FileOperations::Location::Windows(completion.publishedWindowsExport).LegacyPath().c_str();
+ if(completion.complete&&!completion.publishedWindowsExport.empty()&&!completion.publishedWindowsIdentity.key.empty()){
+  auto path=completion.publishedWindowsExport;
+  if(path.compare(0,8,L"\\\\?\\UNC\\")==0)path=L"\\\\"+path.substr(8);
+  else if(path.compare(0,4,L"\\\\?\\")==0)path.erase(0,4);
+  output=FileOperations::Location::Windows(std::move(path)).LegacyPath().c_str();
+  identity=completion.publishedWindowsIdentity;
   return true;
  }
  owner->MessageBox("Cannot identify the temporary document to launch. Export directory: "+folder,"HFVExplorer",MB_OK|MB_ICONERROR);

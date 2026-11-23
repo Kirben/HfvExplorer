@@ -5,4 +5,5 @@ struct LegacyCopyOptions {char output='a',input='a';bool appledouble=true,verify
 LegacyCopyOptions CaptureLegacyCopyOptions(char output);
 class BrowserSession;
 namespace FileOperations { class Location; }
-bool StageWindowsLaunchDocument(BrowserSession&,const FileOperations::Location&,CString& output);
+namespace MacBrowser { struct ObjectIdentity; }
+bool StageWindowsLaunchDocument(BrowserSession&,const FileOperations::Location&,CString& output,MacBrowser::ObjectIdentity& identity);

@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "LauncherWriteBack.h"
+#include "BrowserPresentation.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
@@ -510,9 +511,29 @@ int RunFileOperationsTest(const char* directory){
    conversion.Legacy().options.output='b';
    auto exported=Submit(conversion);
    Pass(exported);
-   const auto published=exported.Snapshot().publishedWindowsExport;
-   Check(published==W(folder+"\\Renamed.hqx")&&!Load(folder+"\\Renamed.hqx").empty(),
+   const auto publication=exported.Snapshot();
+   Check(publication.publishedWindowsExport==BrowserPresentation::WindowsPath(W(folder+"\\Renamed.hqx"))&&!Load(folder+"\\Renamed.hqx").empty(),
          "worker did not report the actual launcher export");
+   const auto path=W(folder+"\\Renamed.hqx"),moved=path+L".original";
+   Check(MoveFileW(path.c_str(),moved.c_str())!=FALSE,"replace a published launcher export");
+   Save(folder+"\\Renamed.hqx","DECOY");
+   {
+    LauncherHandoff handoff;
+    Check(handoff.Protect(path.c_str(),publication.publishedWindowsIdentity,true).code&&
+          !(GetFileAttributesW(path.c_str())&(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_TEMPORARY)),
+          "launcher accepted or modified a substituted file");
+   }
+   Check(DeleteFileW(path.c_str())&&MoveFileW(moved.c_str(),path.c_str()),"restore launcher export fixture");
+   {
+    LauncherHandoff handoff;
+    Check(!handoff.Protect(path.c_str(),publication.publishedWindowsIdentity,false).code,
+          "launcher refused its published file");
+    Check(!MoveFileW(path.c_str(),moved.c_str())&&
+          (GetFileAttributesW(path.c_str())&FILE_ATTRIBUTE_TEMPORARY),
+          "launcher failed to pin its staged pathname while applying attributes");
+    LauncherTemporaryDocument read;
+    Check(!read.Open(path.c_str(),false).code,"handoff pin blocked baseline capture");
+   }
    auto skipped=Submit(conversion);
    Conflict(skipped.Job());
    skipped.Job()->resolve(Storage::ConflictChoice::Skip);

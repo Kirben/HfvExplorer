@@ -4,6 +4,7 @@
 #include "BrowserSession.h"
 #include "StorageJobDialog.h"
 #include "utils.h"
+#include "WindowsEntryIdentity.h"
 
 LauncherTemporaryDocument::~LauncherTemporaryDocument()
 {
@@ -55,6 +56,29 @@ Storage::Result LauncherTemporaryDocument::ReadVersion(uint64_t& result,Storage:
     }
     result=hash;
     return {};
+}
+
+Storage::Result LauncherHandoff::Protect(const wchar_t* path,const MacBrowser::ObjectIdentity& expected,bool readOnly)
+{
+    file_=CreateFileW(path,GENERIC_READ|FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,
+                      nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    if(file_==INVALID_HANDLE_VALUE)return {1,GetLastError(),"Cannot protect the exported document"};
+    BY_HANDLE_FILE_INFORMATION actual{};
+    if(!GetFileInformationByHandle(file_,&actual)||
+       (actual.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
+       actual.nNumberOfLinks!=1||expected.key.empty()||MacBrowser::WindowsIdentity(actual)!=expected)
+        return {1,ERROR_FILE_INVALID,"The exported document changed before launch"};
+    FILE_BASIC_INFO attributes{};
+    attributes.FileAttributes=(actual.dwFileAttributes&~FILE_ATTRIBUTE_NORMAL)|FILE_ATTRIBUTE_TEMPORARY;
+    if(readOnly)attributes.FileAttributes|=FILE_ATTRIBUTE_READONLY;
+    if(!SetFileInformationByHandle(file_,FileBasicInfo,&attributes,sizeof(attributes)))
+        return {1,GetLastError(),"Cannot set the exported document attributes"};
+    return {};
+}
+
+void LauncherHandoff::Close()
+{
+    if(file_!=INVALID_HANDLE_VALUE)CloseHandle(std::exchange(file_,INVALID_HANDLE_VALUE));
 }
 
 LauncherWriteBack::LauncherWriteBack(FileOperations::Location original,std::string version,CString temporary)
