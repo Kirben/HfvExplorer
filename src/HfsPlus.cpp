@@ -793,7 +793,9 @@ struct Volume::Impl {
         result.hardLink = target != id;
         const auto* dates=CatalogRecord(target)->value.data();
         const bool expanded=(U16(dates+2)&0x1000)!=0;
-        result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded)};
+        const auto backup=U32(dates+28);
+        result.additionalDates={Time::Decode(U32(dates+24),expanded),Time::Decode(U32(dates+20),expanded),
+                                backup?Time::Decode(backup,expanded):0};
         const auto type=U16(dates+42)&0170000;
         if(!result.directory&&type&&type!=0100000&&type!=0120000&&
            SpecialType(type>>12)==SpecialFileType::None)
@@ -1092,7 +1094,7 @@ struct Volume::Impl {
         P16(r.value.data(), e.directory ? 1 : 2);
         P16(r.value.data() + 2, (e.directory ? (U16(header.data()) == 0x4858 ? 0x10 : 0) : 2)|((U32(header.data()+4)&0x20000000)?0x1000:0));
         P32(r.value.data() + 8, id);
-        for (unsigned i = 12; i <= 28; i += 4)
+        for (unsigned i = 12; i <= 24; i += 4)
             P32(r.value.data() + i, Time::Encode(e.created,(U16(r.value.data()+2)&0x1000)!=0));
         const uint16_t permissions=e.directory?0755:e.symbolicLink?0777:0644;
         const uint16_t type=e.directory?0040000:e.symbolicLink?0120000:0100000;
@@ -1719,10 +1721,11 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
     if(dates)desiredDates={(*dates)[0],(*dates)[1]};if(wideDates)desiredDates=*wideDates;
     bool expanded=existing?(U16(p.CatalogRecord(e.id)->value.data()+2)&0x1000)!=0:ExpandedTimes();
     bool convertTimes=false;if(!expanded&&(desiredDates[0]>UINT32_MAX||desiredDates[1]>UINT32_MAX||
-        additionalDates.accessed.value_or(0)>UINT32_MAX||additionalDates.changed.value_or(0)>UINT32_MAX)){Check(ExpandedTimes(),"Format this image with expanded timestamps to store dates after February 2040");expanded=convertTimes=true;}
+        additionalDates.accessed.value_or(0)>UINT32_MAX||additionalDates.changed.value_or(0)>UINT32_MAX||additionalDates.backup.value_or(0)>UINT32_MAX)){Check(ExpandedTimes(),"Format this image with expanded timestamps to store dates after February 2040");expanded=convertTimes=true;}
     for(auto date:desiredDates)(void)Time::Encode(date,expanded);
     if(additionalDates.accessed)(void)Time::Encode(*additionalDates.accessed,expanded);
     if(additionalDates.changed)(void)Time::Encode(*additionalDates.changed,expanded);
+    if(additionalDates.backup.value_or(0))Check(Time::Encode(*additionalDates.backup,expanded)!=0,"HFS Plus backup date encodes as unset");
     if(convertTimes)for(unsigned at=12;at<=28;at+=4){auto raw=U32(p.CatalogRecord(e.id)->value.data()+at);if(raw)(void)Time::Encode(raw,true);}
     auto desired=existing?p.GetAttributes(existing):Attributes{};desired.erase(u"com.apple.decmpfs");
     if(attributes)desired=*attributes;
@@ -1804,6 +1807,7 @@ uint32_t Volume::PutFile(uint32_t parent,const std::u16string& name,uint64_t dat
         P32(timeRecord->value.data()+12,Time::Encode(e.created,expanded));P32(timeRecord->value.data()+16,Time::Encode(e.modified,expanded));
         if(additionalDates.accessed)P32(timeRecord->value.data()+24,Time::Encode(*additionalDates.accessed,expanded));
         if(additionalDates.changed)P32(timeRecord->value.data()+20,Time::Encode(*additionalDates.changed,expanded));
+        if(additionalDates.backup)P32(timeRecord->value.data()+28,*additionalDates.backup?Time::Encode(*additionalDates.backup,expanded):0);
         e.compressed=compressedOutput;p.entries[e.id]=e;
         auto flags=p.CatalogRecord(e.id);flags->value[41]=uint8_t((flags->value[41]&~0x20)|(compressedOutput?0x20:0));
         p.ReplaceAttributes(e.id,desired,true);
@@ -1831,12 +1835,13 @@ void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* find
  Check(!posix||posix->mode<=PosixMetadata::ModeMask,"Invalid HFS+ POSIX permissions");
  auto record=p.CatalogRecord(id);bool expanded=(U16(record->value.data()+2)&0x1000)!=0,convert=false;
  if(!expanded&&((dates&&((*dates)[0]>UINT32_MAX||(*dates)[1]>UINT32_MAX))||
-    additionalDates.accessed.value_or(0)>UINT32_MAX||additionalDates.changed.value_or(0)>UINT32_MAX)){
+    additionalDates.accessed.value_or(0)>UINT32_MAX||additionalDates.changed.value_or(0)>UINT32_MAX||additionalDates.backup.value_or(0)>UINT32_MAX)){
   Check(ExpandedTimes(),"This folder requires expanded timestamps");expanded=convert=true;
  }
  if(dates)for(auto date:*dates)(void)Time::Encode(date,expanded);
  if(additionalDates.accessed)(void)Time::Encode(*additionalDates.accessed,expanded);
  if(additionalDates.changed)(void)Time::Encode(*additionalDates.changed,expanded);
+ if(additionalDates.backup.value_or(0))Check(Time::Encode(*additionalDates.backup,expanded)!=0,"HFS Plus backup date encodes as unset");
  if(convert)for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);if(raw)(void)Time::Encode(raw,true);}
  p.Mutate(fault,[&]{
   if(convert){for(unsigned at=12;at<=28;at+=4){auto raw=U32(record->value.data()+at);P32(record->value.data()+at,raw?Time::Encode(raw,true):0);}P16(record->value.data()+2,U16(record->value.data()+2)|0x1000);}
@@ -1845,6 +1850,7 @@ void Volume::SetDirectoryMetadata(uint32_t id,const std::array<uint8_t,32>* find
   if(dates){e.created=(*dates)[0];e.modified=(*dates)[1];P32(record->value.data()+12,Time::Encode(e.created,expanded));P32(record->value.data()+16,Time::Encode(e.modified,expanded));}
   if(additionalDates.accessed)P32(record->value.data()+24,Time::Encode(*additionalDates.accessed,expanded));
   if(additionalDates.changed)P32(record->value.data()+20,Time::Encode(*additionalDates.changed,expanded));
+  if(additionalDates.backup)P32(record->value.data()+28,*additionalDates.backup?Time::Encode(*additionalDates.backup,expanded):0);
   p.entries[id]=e;if(attributes){auto desired=*attributes;auto old=p.GetAttributes(id);if(old.count(u"com.apple.system.hfs.firstlink"))desired[u"com.apple.system.hfs.firstlink"]=old.at(u"com.apple.system.hfs.firstlink");p.ReplaceAttributes(id,desired,true,true);}
  });
 }
@@ -2017,7 +2023,7 @@ void Volume::Format(Source &source, const std::u16string &name, bool journaled, 
         P16(r.value.data(), folder ? 1 : 2);
         P16(r.value.data() + 2, (folder ? (hfsx ? 0x10 : 0) : 2)|(expandedTimes?0x1000:0));
         P32(r.value.data() + 8, id);
-        for (unsigned i = 12; i <= 28; i += 4)
+        for (unsigned i = 12; i <= 24; i += 4)
             P32(r.value.data() + i, Time::Encode(Now(),expandedTimes));
         P16(r.value.data() + 42, folder ? 0040755 : 0100600);
         if (!folder) {

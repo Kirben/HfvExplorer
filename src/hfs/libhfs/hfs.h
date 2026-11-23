@@ -170,7 +170,7 @@ int hfs_fsetattr(hfsfile *, hfsdirent *);
 /* Full on-disk Finder information, including extended folder/file fields. */
 int hfs_getfinderinfo(hfsvol *, char *, unsigned char *);
 int hfs_fsetfinderinfo(hfsfile *, const unsigned char *);
-int hfs_setdirmetadata(hfsvol *,char *,long,const unsigned char *,const time_t *);
+int hfs_setdirmetadata(hfsvol *,char *,long,const unsigned char *,const time_t *,const unsigned long *);
 
 int hfs_mkdir(hfsvol *, char *);
 int hfs_rmdir(hfsvol *, char *);

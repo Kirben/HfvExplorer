@@ -314,6 +314,8 @@ void EncodeEntry(Data& d, const Entry& e) {
     if(e.additionalDates.accessed)d.put(*e.additionalDates.accessed);
     d.put(e.additionalDates.changed.has_value());
     if(e.additionalDates.changed)d.put(*e.additionalDates.changed);
+    d.put(e.additionalDates.backup.has_value());
+    if(e.additionalDates.backup)d.put(*e.additionalDates.backup);
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(e.inlineCompression.begin(),e.inlineCompression.end()));
@@ -334,6 +336,7 @@ Entry DecodeEntry(Data& d) {
     }
     if(d.flag())e.additionalDates.accessed=d.get();
     if(d.flag())e.additionalDates.changed=d.get();
+    if(d.flag())e.additionalDates.backup=d.get();
     e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
     e.forks[0].size=d.get(); e.forks[1].size=d.get();
     const auto compression=d.text();

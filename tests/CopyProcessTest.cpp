@@ -2566,6 +2566,83 @@ void TestMfsTransferVersions(const std::string& root,FILE* report)
     fprintf(report,"PASS: ordinary MFS copies preserve distinct versions, identify the precise overwrite and reject nonzero versions on versionless targets before prompting or deleting; version zero still exports.\n");
 }
 
+void TestClassicBackupDates(const std::string& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    constexpr time_t fileBackup=1234567890,folderBackup=-61516800;
+    const auto prefix=root+"\\classic-backup";
+    auto source=ClassicImage(prefix+"-source.dsk");
+    const auto folder=source->MakeDirectory(2,u"Backup folder");
+    const auto file=Put(*source,folder,u"Backup file",4097,32);
+    for(const auto& [id,date]:{std::pair{folder,folderBackup},std::pair{file,fileBackup}}){
+        hfsdirent properties{};
+        Check(source->GetClassicProperties(id,properties),"Cannot read classic backup fixture Properties");
+        properties.bkdate=date;
+        source->SetClassicProperties(id,properties);
+    }
+    const auto verify=[&](Volume& volume,bool classic){
+        Entry directory,entry;
+        Check(volume.FindChild(2,u"Backup folder",directory)&&
+              volume.FindChild(directory.id,u"Backup file",entry),"Missing backup date round-trip entries");
+        if(classic){
+            hfsdirent folderProperties{},fileProperties{};
+            Check(volume.GetClassicProperties(directory.id,folderProperties)&&uint32_t(folderProperties.bkdate)==uint32_t(folderBackup)&&
+                  volume.GetClassicProperties(entry.id,fileProperties)&&uint32_t(fileProperties.bkdate)==uint32_t(fileBackup),
+                  "Classic folder or file backup date changed after reopening");
+        }
+        Verify(volume,entry.id,4097,32);
+        return directory.id;
+    };
+    for(unsigned i=0;i<5;++i){
+        const auto base=prefix+"-"+std::to_string(i);
+        const auto path=Wide(base+"-middle.img");
+        if(i==3){
+            auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"Classic backup dates",true,format);
+        }else if(i==4){
+            auto disk=HfsPlus::CreateImage(path.c_str(),16*1024*1024);
+            HfsPlus::Volume::Format(*disk,u"Expanded dates",true,Kind::HfsPlus,true);
+        }else{
+            const Kind formats[]={Kind::HfsPlus,Kind::HfsXCaseSensitive,Kind::HfsXCaseInsensitive};
+            Image(path,formats[i]);
+        }
+        auto middle=OpenBrowserImage(path);
+        Check(bool(middle),"Cannot open backup date intermediate image");
+        auto outbound=Submit(OrdinaryCopy{{Native(source,folder)},Native(middle)});
+        Wait(outbound);
+        const auto copied=outbound.Job()->result();
+        Check(!copied.code&&outbound.Snapshot().complete,copied.message.c_str());
+        middle.reset();
+        middle=OpenBrowserImage(path);
+        Check(bool(middle),"Cannot reopen backup date intermediate image");
+        const auto middleFolder=verify(*middle,false);
+        if(i<3){
+            Entry entry;
+            Check(middle->FindChild(middleFolder,u"Backup file",entry)&&
+                  middle->Stat(middleFolder).additionalDates.backup==source->Stat(folder).additionalDates.backup&&
+                  middle->Stat(entry.id).additionalDates.backup==source->Stat(file).additionalDates.backup,
+                  "HFS Plus did not store native backup dates");
+        }
+        const auto returned=base+"-returned.dsk";
+        auto classic=ClassicImage(returned);
+        auto copy=Submit(OrdinaryCopy{{Native(middle,middleFolder)},Native(classic)});
+        Conflict(copy);
+        const auto warning=copy.Job()->conflictState();
+        Check(warning.kind==Storage::CopyPrompt::ClassicMetadataLoss&&
+              warning.path.find("Extended attributes")==std::string::npos,"Backup dates triggered an attribute-loss warning");
+        copy.Job()->resolve(warning.id,Storage::ConflictChoice::Replace);
+        Wait(copy);
+        const auto restored=copy.Job()->result();
+        Check(!restored.code&&copy.Snapshot().complete,restored.message.c_str());
+        classic.reset();
+        classic=OpenBrowserImage(Wide(returned));
+        Check(bool(classic),"Cannot reopen classic backup date output");
+        verify(*classic,true);
+    }
+    fprintf(report,"PASS: classic HFS file and folder backup dates and both forks survive HFS+/HFSX and APFS round trips after reopening.\n");
+}
+
 void TestClassicCopyLoss(const std::string& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -4207,6 +4284,7 @@ int RunCopyProcessTest(const char *directory) {
         TestCopySpecialFiles(root,report);
         TestCopyDirectoryHardLinksToApfs(root,report);
         TestMfsTransferVersions(root,report);
+        TestClassicBackupDates(root,report);
         TestClassicCopyLoss(root,report);
         TestClassicLockRoundTrip(root,report);
         TestClassicAndMfsCopyNameCollisions(root,report);

@@ -574,9 +574,43 @@ int64_t ApfsTimeInHfsSeconds(uint64_t raw)
     return time/second-(time%second<0)+int64_t(HfsPlus::Time::Epoch);
 }
 
+void PrepareBackupDate(Entry& entry,const Volume& destination)
+{
+    constexpr auto key=u"org.hfvexplorer.hfs-backup-date";
+    constexpr std::array<uint8_t,8> header{'H','F','V','B',1,0,0,0};
+    const auto range=destination.HfsPlusDateRange();
+    const std::string_view kind=destination.Kind();
+    if(kind!="APFS"&&kind!="HFS"&&!range)return;
+    auto& backup=entry.additionalDates.backup;
+    const auto marker=entry.attributes.find(key);
+    const auto fits=[&](uint64_t date){
+        return range?date>range->first&&date<=range->second:kind=="HFS"&&date<=UINT32_MAX;
+    };
+    if((kind=="HFS"||range)&&!backup.value_or(0)&&marker!=entry.attributes.end()&&marker->second.size()==16){
+        const HfsPlus::Bytes value(marker->second);
+        if(std::equal(header.begin(),header.end(),value.begin())){
+            uint64_t date=0;
+            for(unsigned i=0;i<8;++i)date|=uint64_t(value[8+i])<<(8*i);
+            if(date&&fits(date)){
+                backup=date;
+                entry.attributes.erase(marker);
+                return;
+            }
+        }
+    }
+    if(!backup.value_or(0)||fits(*backup)||kind=="HFS")return;
+    HfsPlus::Bytes value(header.begin(),header.end());
+    for(unsigned i=0;i<8;++i)value.push_back(uint8_t(*backup>>(8*i)));
+    Check(marker==entry.attributes.end()||marker->second==value,
+          "An existing attribute conflicts with the HFS backup date");
+    entry.attributes.emplace(key,std::move(value));
+    if(range)backup=0;
+}
+
 void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs,bool fromHfsPlus)
 {
     auto& entry=plan.entry;
+    PrepareBackupDate(entry,destination);
     if(entry.datesValid&&entry.additionalDates.changed&&entry.additionalDates.accessed){
         std::array<uint64_t,4> seconds{entry.created,entry.modified,*entry.additionalDates.changed,*entry.additionalDates.accessed};
         const auto range=destination.HfsPlusDateRange();
@@ -594,7 +628,8 @@ void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs
             entry.attributes.emplace(ApfsTimesAttribute,std::move(value));
             entry.fractionalDates=true;
             entry.created=projected[0];entry.modified=projected[1];
-            entry.additionalDates={projected[3],projected[2]};
+            entry.additionalDates.accessed=projected[3];
+            entry.additionalDates.changed=projected[2];
         }else if(fromHfsPlus&&std::string_view(destination.Kind())=="APFS"){
             const auto marker=entry.attributes.find(ApfsTimesAttribute);
             if(marker!=entry.attributes.end()){
@@ -612,7 +647,8 @@ void PrepareCopyTimestamps(Planned& plan,const Volume& destination,bool fromApfs
                         seconds[i]=uint64_t(ApfsTimeInHfsSeconds(raw[i]));
                     }
                     entry.created=seconds[0];entry.modified=seconds[1];
-                    entry.additionalDates={seconds[3],seconds[2]};
+                    entry.additionalDates.accessed=seconds[3];
+                    entry.additionalDates.changed=seconds[2];
                     entry.apfsTimestamps=raw;
                     entry.attributes.erase(marker);
                 }
@@ -1079,6 +1115,8 @@ std::string Snapshot(Volume& v,uint32_t id,Storage::Job& job,bool requireRemovab
         const auto session=e.identity.session.value_or(0);
         bytes(&session,sizeof(session));bytes(e.name.data(),e.name.size()*2);
         bytes(&e.created,sizeof(e.created));bytes(&e.modified,sizeof(e.modified));bytes(e.finder.data(),e.finder.size());
+        const auto backup=e.additionalDates.backup.value_or(0);
+        bytes(&backup,sizeof(backup));
         const bool hasPosix=e.posix.has_value();
         bytes(&hasPosix,sizeof(hasPosix));
         if(e.posix){

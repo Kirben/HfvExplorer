@@ -17,6 +17,7 @@ extern "C" {
 #include "hfs/libhfs/internal.h"
 #include "hfs/Replacement.h"
 #include "hfs/libhfs/block.h"
+#include "hfs/libhfs/data.h"
 int hfs_recognizes_image_fd(int);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
@@ -142,6 +143,7 @@ class Classic final : public Volume, public WorkerEndpoint {
         e.name=Decode(in.name);e.identity=EntryIdentity(imageIdentity_+":"+std::to_string(uint32_t(in.cnid)));e.resolvedId=uint32_t(in.cnid);
         e.directory=(in.flags&HFS_ISDIR)!=0;e.protectedFile=(in.flags&HFS_ISLOCKED)!=0;
         e.created=uint32_t(int64_t(in.crdate)+2082844800LL);e.modified=uint32_t(int64_t(in.mddate)+2082844800LL);e.datesValid=true;
+        e.additionalDates.backup=uint32_t(d_tomtime(static_cast<unsigned long>(in.bkdate)));
         if(!e.directory){e.forks[0].size=in.u.file.dsize;e.forks[1].size=in.u.file.rsize;
             memcpy(e.finder.data(),in.u.file.type,4);memcpy(e.finder.data()+4,in.u.file.creator,4);}
         Check(hfs_getfinderinfo(volume_,const_cast<char*>(path.c_str()),e.finder.data())==0);return e;
@@ -294,7 +296,9 @@ public:
         ValidateClassicCopyNames(entries);
     }
     void ValidateEntry(const Entry& e)const override{
-        Volume::ValidateEntry(e);if(e.datesValid&&(e.created>UINT32_MAX||e.modified>UINT32_MAX))throw HfsPlus::Error("Classic HFS cannot preserve dates after February 2040");Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
+        Volume::ValidateEntry(e);if(e.datesValid&&(e.created>UINT32_MAX||e.modified>UINT32_MAX))throw HfsPlus::Error("Classic HFS cannot preserve dates after February 2040");
+        if(e.additionalDates.backup.value_or(0)>UINT32_MAX)throw HfsPlus::Error("Classic HFS cannot preserve this backup date");
+        Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
     }
     uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(volume_!=nullptr);Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
@@ -467,13 +471,15 @@ public:
         if(!merge)ValidateEntry(desired);
         time_t dates[2]={time_t(int64_t(desired.created)-2082844800LL),
                          time_t(int64_t(desired.modified)-2082844800LL)};
+        const auto backup=static_cast<unsigned long>(desired.additionalDates.backup.value_or(0));
         DurableMutation([&](bool){
             RootScope scope(volume_);
             auto path=Path(id);
             BeforeWrite();
             Check(hfs_setdirmetadata(volume_,path.data(),long(expected.resolvedId),
                                      merge?nullptr:desired.finder.data(),
-                                     desired.datesValid?dates:nullptr)==0);
+                                     desired.datesValid?dates:nullptr,
+                                     desired.additionalDates.backup?&backup:nullptr)==0);
         });
     }
     bool BeginCopyTransaction(const std::string& move) override {
@@ -554,6 +560,7 @@ private:
                 hfsdirent meta;Check(hfs_fstat(file,&meta)==0);meta.fdflags=HfsPlus::Disk::U16(e.finder.data()+8);
                 if(e.datesValid){meta.crdate=time_t(int64_t(e.created)-2082844800LL);meta.mddate=time_t(int64_t(e.modified)-2082844800LL);}
                 if(original)meta.bkdate=original->bkdate;
+                else if(e.additionalDates.backup)meta.bkdate=d_toutime(static_cast<unsigned long>(*e.additionalDates.backup));
                 const bool locked=original?(original->flags&HFS_ISLOCKED)!=0:e.protectedFile;
                 meta.flags=(meta.flags&~HFS_ISLOCKED)|(locked?HFS_ISLOCKED:0);
                 Check(hfs_fsetattr(file,&meta)==0);Check(hfs_fsetfinderinfo(file,e.finder.data())==0);

@@ -73,7 +73,7 @@ using Attributes = std::map<std::u16string, AttributeData>;
 // These are filesystem metadata, not Windows access-control enforcement.
 void ValidateAttributes(const Attributes &);
 struct AdditionalFileDates {
-    std::optional<uint64_t> accessed, changed; // Seconds since 1904.
+    std::optional<uint64_t> accessed, changed, backup; // Seconds since 1904.
 };
 struct Entry {
     uint32_t id = 0, parent = 0;

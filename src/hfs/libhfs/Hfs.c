@@ -2229,13 +2229,14 @@ int hfs_fsetfinderinfo(hfsfile *file,const unsigned char *finder) {
  if(file->vol->flags&HFS_READONLY){ERROR(EROFS,0);return -1;}
  r_packcatdata(&file->cat,raw,&length);memcpy(raw+4,finder,16);memcpy(raw+56,finder+16,16);r_unpackcatdata(raw,&file->cat);file->flags|=HFS_UPDATE_CATREC;return 0;
 }
-int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char *finder,const time_t *dates) {
+int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char *finder,const time_t *dates,const unsigned long *backup) {
  CatDataRec data;node n;unsigned char raw[70];int length=0,result=-1;
  if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
  if(v_resolve(vol,path,&data,0,0,&n)<=0)goto done;
  if(data.cdrType!=cdrDirRec||data.u.dir.dirDirID!=expected){ERROR(EINVAL,"Destination folder changed during copying");goto done;}
  if(finder){r_packcatdata(&data,raw,&length);memcpy(raw+22,finder,32);r_unpackcatdata(raw,&data);}
  if(dates){data.u.dir.dirCrDat=d_tomtime(dates[0]);data.u.dir.dirMdDat=d_tomtime(dates[1]);}
+ if(backup)data.u.dir.dirBkDat=*backup;
  result=v_putcatrec(&data,&n);
  done:return b_end_mutation(vol,result);
 }
