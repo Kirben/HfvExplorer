@@ -828,8 +828,8 @@ struct ArchiveSpace {
             if(companionSize%block)Add(mergeCompanions,block-companionSize%block);
         }else{
             Payload(companions,companionSize);
-            // Allow for growing catalog records for the item and its companion.
-            Add(catalog,block);
+            // Allow for catalog records for the item, companion and expectation.
+            Add(catalog,2*block);
         }
         for(const auto& child:plan.children)
             Count(destination,merge?std::optional<uint32_t>(existing.id):std::nullopt,child,job);
@@ -903,11 +903,15 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
             *copyWarnings+=BrowserPresentation::Utf8(entry.name)+": "+warning+"\r\n";
     }
     for(auto& child:plan.children)RestoreClassicArchive(source,child,progress,job,carry,copyWarnings);
-    std::set<std::u16string> consumed;
+    std::set<std::u16string> consumed,expectations;
     for(const auto& child:plan.children)
-        if(child.restoredMetadata||child.classicForkOnly)consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
+        if(child.restoredMetadata||child.classicForkOnly){
+            consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
+            expectations.insert(ClassicCopyArchive::ExpectationName(child.entry.resolvedId));
+        }
     plan.children.erase(std::remove_if(plan.children.begin(),plan.children.end(),[&](const auto& child){
-        if(child.restoredMetadata||child.classicForkOnly||!consumed.count(child.entry.name))return false;
+        const bool consumedExpectation=expectations.count(child.entry.name)&&ClassicCopyArchive::IsExpectationRecord(child.entry);
+        if(child.restoredMetadata||child.classicForkOnly||(!consumed.count(child.entry.name)&&!consumedExpectation))return false;
         --progress.totalFiles;
         progress.totalBytes-=child.entry.forks[0].size;
         return true;
@@ -1164,7 +1168,7 @@ bool Transfer(Volume &src, Planned &plan, Volume &dst, uint32_t parent,
             if(found&&!apply)dst.FinalizeDirectory(id,existing,expected,true);
             if(apply){
                 dst.FinalizeDirectory(id,outgoing,expected,false,applySource);
-                if(previousFolderArchive)ClassicCopyArchive::RemoveCompanion(dst,previousFolderArchive->companion);
+                if(previousFolderArchive)ClassicCopyArchive::RemoveCompanion(dst,*previousFolderArchive);
                 if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);
                 noteDatePrecision();
                 job.progress(progress);
@@ -1283,7 +1287,7 @@ bool Transfer(Volume &src, Planned &plan, Volume &dst, uint32_t parent,
             if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
             else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
         }
-        if(superseded)ClassicCopyArchive::RemoveCompanion(dst,superseded->companion);
+        if(superseded)ClassicCopyArchive::RemoveCompanion(dst,*superseded);
         if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,published,*plan.archivedMetadata,job);
     };
     if(superseded&&!durable)dst.RunWriteBatch(job,publish);

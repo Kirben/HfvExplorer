@@ -677,11 +677,15 @@ public:
             if(job.cancelled())throw Storage::Cancelled();
             RenameFrom(source,id,parent,name);
             const auto moved=Id(source.Path(id),before.resolvedId);
-            Entry companion;
-            if(!source.FindChild(before.parent,pair->companion.name,companion)||
-               companion.identity!=pair->companion.identity||companion.resolvedId!=pair->companion.resolvedId)
-                throw HfsPlus::Error("The archive companion changed before the move");
-            Remove(Id(source.Path(companion.id),companion.resolvedId));
+            const auto removeControl=[&](const Entry& expected){
+                Entry current;
+                if(!source.FindChild(expected.parent,expected.name,current)||
+                   current.identity!=expected.identity||current.resolvedId!=expected.resolvedId)
+                    throw HfsPlus::Error("An archive control file changed before the move");
+                Remove(Id(source.Path(current.id),current.resolvedId));
+            };
+            removeControl(pair->companion);
+            if(pair->expectation)removeControl(*pair->expectation);
             if(before.name!=name)pair->metadata.entry.name=name;
             ClassicCopyArchive::Save(*this,moved,pair->metadata,job);
         };

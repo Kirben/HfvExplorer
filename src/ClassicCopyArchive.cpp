@@ -219,13 +219,19 @@ std::u16string CompanionName(uint32_t catalogId)
     return name;
 }
 
+std::u16string ExpectationName(uint32_t catalogId)
+{
+    return u"HFV Expected "+CompanionName(catalogId).substr(13);
+}
+
 bool ReservedName(std::u16string_view name)
 {
-    constexpr std::u16string_view prefix=u"HFV Metadata ";
-    if(name.size()!=prefix.size()+8)return false;
-    if(HfsPlus::CompareNames(std::u16string(name.substr(0,prefix.size())),std::u16string(prefix),false)!=0)
-        return false;
-    return std::all_of(name.begin()+prefix.size(),name.end(),[](char16_t ch){
+    constexpr size_t prefixSize=13;
+    if(name.size()!=prefixSize+8)return false;
+    const auto prefix=std::u16string(name.substr(0,prefixSize));
+    if(HfsPlus::CompareNames(prefix,u"HFV Metadata ",false)!=0&&
+       HfsPlus::CompareNames(prefix,u"HFV Expected ",false)!=0)return false;
+    return std::all_of(name.begin()+prefixSize,name.end(),[](char16_t ch){
         return (ch>=u'0'&&ch<=u'9')||(ch>=u'A'&&ch<=u'F')||(ch>=u'a'&&ch<=u'f');
     });
 }
@@ -237,10 +243,30 @@ bool CompanionType(const Entry& entry)
     return !entry.directory&&std::equal(finderType.begin(),finderType.end(),entry.finder.begin());
 }
 
+bool ExpectationType(const Entry& entry)
+{
+    return !entry.directory&&!entry.forks[0].size&&!entry.forks[1].size&&
+           memcmp(entry.finder.data(),"HFVXHFVE",8)==0;
+}
+
+std::optional<Entry> FindExpectation(MacBrowser::Volume& volume,const Entry& item)
+{
+    Entry record;
+    if(volume.FindChild(item.parent,ExpectationName(item.resolvedId),record)&&ExpectationType(record))
+        return record;
+    return {};
+}
+
+bool ArchiveControlFile(const Entry& entry)
+{
+    return ReservedName(entry.name)&&(CompanionType(entry)||ExpectationType(entry));
+}
+
 std::optional<Pair> CutPair(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
 {
     Entry companion;
-    if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion)||!CompanionType(companion))return {};
+    if(!FindExpectation(volume,item)&&
+       (!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion)||!CompanionType(companion)))return {};
     return RequireVerifiedPair(volume,item,job);
 }
 
@@ -248,25 +274,32 @@ bool CheckCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job,uns
 {
     Cancel(job);
     Check(depth<=128,"Excessive directory depth while checking classic archive companions");
-    Check(!(ReservedName(item.name)&&CompanionType(item)),
+    Check(!ArchiveControlFile(item),
           "Select the archived item rather than its metadata companion. Source retained.");
     bool archived=CutPair(volume,item,job).has_value();
     if(!item.directory)return archived;
     const auto children=volume.List(item.id);
     std::set<std::string> expected;
     for(const auto& child:children){
-        if(ReservedName(child.name)&&CompanionType(child))continue;
+        if(ArchiveControlFile(child))continue;
         if(CheckCut(volume,child,job,depth+1)){
             expected.insert(MacBrowser::ClassicCopyNameKey(CompanionName(child.resolvedId)));
+            if(FindExpectation(volume,child))
+                expected.insert(MacBrowser::ClassicCopyNameKey(ExpectationName(child.resolvedId)));
             archived=true;
         }
     }
     for(const auto& child:children)
-        if(ReservedName(child.name)&&CompanionType(child))
+        if(ArchiveControlFile(child))
             Check(expected.count(MacBrowser::ClassicCopyNameKey(child.name))!=0,
                   "A classic metadata companion has no verified item. Source retained.");
     return archived;
 }
+}
+
+bool IsExpectationRecord(const Entry& entry)
+{
+    return ExpectationType(entry);
 }
 
 bool ValidateCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
@@ -286,7 +319,7 @@ void RemoveArchive(MacBrowser::Volume& volume,uint32_t id,Storage::Job& job,bool
         Check(durable,"Deleting a classic HFS archive requires write recovery");
         MacBrowser::RemoveTree(volume,id,job,deletionProgress);
         Cancel(job);
-        if(pair)RemoveCompanion(volume,pair->companion);
+        if(pair)RemoveCompanion(volume,*pair);
         Cancel(job);
     };
     if(batchActive)remove(true);
@@ -296,7 +329,7 @@ void RemoveArchive(MacBrowser::Volume& volume,uint32_t id,Storage::Job& job,bool
 static std::optional<Metadata> DecodeArchive(const AttributeData&,Storage::Job&,
     const Digest&,const Entry*,bool);
 
-enum class Health {Missing,Unrelated,Stale,Corrupt,Verified};
+enum class Health {Missing,ExpectedMissing,Unrelated,ExpectedUnrelated,Stale,Corrupt,Verified};
 
 struct Inspection {
     Health health;
@@ -305,10 +338,12 @@ struct Inspection {
 
 static Inspection Inspect(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job,bool preserveEdits)
 {
+    const auto expectation=FindExpectation(volume,item);
     Entry companion;
     if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion))
-        return {Health::Missing,{}};
-    if(!CompanionType(companion))return {Health::Unrelated,{}};
+        return {expectation?Health::ExpectedMissing:Health::Missing,{}};
+    if(!CompanionType(companion))
+        return {expectation?Health::ExpectedUnrelated:Health::Unrelated,{}};
     if(companion.forks[1].size||companion.forks[0].size>maximumFork)
         return {Health::Corrupt,{}};
     const auto stored=AttributeData::Snapshot(companion.forks[0].size,[&](uint64_t at,void* out,size_t count){
@@ -328,7 +363,7 @@ static Inspection Inspect(MacBrowser::Volume& volume,const Entry& item,Storage::
         auto result=DecodeArchive(stored,job,binding,&item,preserveEdits);
         if(!result)return {Health::Stale,{}};
         Check(result->entry.directory==item.directory,"Classic companion does not match its object type");
-        return {Health::Verified,Pair{std::move(companion),std::move(*result)}};
+        return {Health::Verified,Pair{std::move(companion),std::move(*result),expectation}};
     }catch(const HfsPlus::Error&){
         return {Health::Corrupt,{}};
     }
@@ -338,6 +373,7 @@ std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storag
 {
     auto result=Inspect(volume,item,job,true);
     const char* warning=nullptr;
+    if(result.health==Health::ExpectedMissing||result.health==Health::ExpectedUnrelated)warning="The expected classic metadata companion is missing.";
     if(result.health==Health::Corrupt)warning="The classic metadata companion is corrupt.";
     if(result.health==Health::Stale)warning="The classic metadata companion is stale.";
     if(copyWarning)*copyWarning=warning;
@@ -349,19 +385,25 @@ std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storag
 std::optional<Pair> RequireVerifiedPair(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
 {
     auto result=Inspect(volume,item,job,false);
-    Check(result.health!=Health::Unrelated,"An unrelated file occupies the classic metadata companion name");
+    Check(result.health!=Health::Unrelated&&result.health!=Health::ExpectedUnrelated,"An unrelated file occupies the classic metadata companion name");
+    Check(result.health!=Health::ExpectedMissing,"The expected classic metadata companion is missing. Source retained.");
     Check(result.health!=Health::Corrupt,"The existing classic metadata companion is corrupt. Both files were retained.");
     Check(result.health!=Health::Stale,"The existing classic metadata companion is stale. Both files were retained.");
     return std::move(result.pair);
 }
 
-void RemoveCompanion(MacBrowser::Volume& volume,const Entry& expected)
+void RemoveCompanion(MacBrowser::Volume& volume,const Pair& pair)
 {
-    Entry current;
-    Check(volume.FindChild(expected.parent,expected.name,current)&&current.identity==expected.identity&&
-          current.resolvedId==expected.resolvedId&&CompanionType(current),
-          "Classic metadata companion changed during the operation");
-    volume.Remove(current.id);
+    const auto remove=[&](const Entry& expected,bool expectation){
+        Entry current;
+        Check(volume.FindChild(expected.parent,expected.name,current)&&current.identity==expected.identity&&
+              current.resolvedId==expected.resolvedId&&
+              (expectation?ExpectationType(current):CompanionType(current)),
+              "Classic archive control file changed during the operation");
+        volume.Remove(current.id);
+    };
+    remove(pair.companion,false);
+    if(pair.expectation)remove(*pair.expectation,true);
 }
 
 void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage::Job& job)
@@ -369,6 +411,8 @@ void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage:
     const auto item=volume.Stat(id);
     Entry companion,existing;
     companion.name=CompanionName(item.resolvedId);
+    const auto expectationName=ExpectationName(item.resolvedId);
+    Check(!volume.FindChild(item.parent,expectationName,existing),"A file already uses the classic archive expectation name");
     Check(!volume.FindChild(item.parent,companion.name,existing),"A file already uses the classic companion name");
     const auto stored=Encode(source,Fingerprint(volume,item,job,true),job,item);
     companion.forks[0].size=stored.size();
@@ -378,7 +422,15 @@ void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage:
         Check(!fork,"Unexpected classic companion resource fork");
         stored.Read(at,out,count);
     },false,job);
-    Check(Load(volume,item,job).has_value(),"Classic metadata companion failed readback verification");
+    Entry expectation;
+    expectation.name=expectationName;
+    memcpy(expectation.finder.data(),"HFVXHFVE",8);
+    expectation.finder[8]=0x40; // Finder invisible, on the control file only.
+    volume.PutForTransfer(item.parent,expectation,[](unsigned,uint64_t,void*,size_t){
+        throw HfsPlus::Error("Unexpected classic archive expectation fork");
+    },false,job);
+    const auto pair=RequireVerifiedPair(volume,item,job);
+    Check(pair&&pair->expectation,"Classic archive pair failed readback verification");
 }
 
 static std::optional<Metadata> DecodeArchive(const AttributeData& archive,Storage::Job& job,

@@ -16,13 +16,16 @@ struct Metadata {
 uint64_t EncodedSize(const Metadata&,Storage::Job&);
 HfsPlus::AttributeData Encode(const Metadata&,const Digest&,Storage::Job&,const MacBrowser::Entry& projected);
 std::u16string CompanionName(uint32_t catalogId);
+std::u16string ExpectationName(uint32_t catalogId);
 bool ReservedName(std::u16string_view);
+bool IsExpectationRecord(const MacBrowser::Entry&);
 struct Pair {
     MacBrowser::Entry companion;
     Metadata metadata;
+    std::optional<MacBrowser::Entry> expectation;
 };
 std::optional<Pair> RequireVerifiedPair(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
-void RemoveCompanion(MacBrowser::Volume&,const MacBrowser::Entry&);
+void RemoveCompanion(MacBrowser::Volume&,const Pair&);
 bool ValidateCut(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 void RemoveArchive(MacBrowser::Volume&,uint32_t,Storage::Job&,bool batchActive,bool deletionProgress=false);
 void Save(MacBrowser::Volume&,uint32_t id,const Metadata&,Storage::Job&);

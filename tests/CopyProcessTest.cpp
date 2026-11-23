@@ -2717,8 +2717,14 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     Entry companion;
     Check(classic->FindChild(edited.parent,ClassicCopyArchive::CompanionName(edited.resolvedId),companion),
           "Missing classic companion fixture");
-    classic->Remove(companion.id);
-    Check(!ClassicCopyArchive::Load(*classic,edited,job),"A missing companion was treated as verified");
+    classic->Rename(companion.id,edited.parent,u"Detached companion");
+    const char* missing=nullptr;
+    Check(!ClassicCopyArchive::Load(*classic,edited,job,&missing)&&missing&&
+          std::string_view(missing).find("expected")!=std::string_view::npos,
+          "A renamed companion on a marked archive was not detected");
+    Entry detached;
+    Check(classic->FindChild(edited.parent,u"Detached companion",detached),"Missing detached companion fixture");
+    classic->Remove(detached.id);
     Entry wrongCompanion;
     Check(classic->FindChild(2,ClassicCopyArchive::CompanionName(archivedFolder.resolvedId),wrongCompanion),
           "Missing second classic companion fixture");
@@ -2732,8 +2738,8 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     try{ClassicCopyArchive::Load(*classic,edited,job);}
     catch(const HfsPlus::Error& error){stale=std::string_view(error.what()).find("stale")!=std::string_view::npos;}
     Check(stale,"A valid companion for a different item was treated as missing or corrupt");
-    const auto verifyForkOnly=[&](uint32_t companionId,const char* reason,bool nested){
-        const auto* targetName=nested?u"Corrupt fallback":u"Stale fallback";
+    const auto verifyForkOnly=[&](std::optional<uint32_t> companionId,const char* reason,bool nested){
+        const auto* targetName=companionId?(nested?u"Corrupt fallback":u"Stale fallback"):u"Missing fallback";
         returned->MakeDirectory(2,targetName);
         const auto destination=[&]{
             Entry target;
@@ -2766,7 +2772,7 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
         returned.reset();
         returned=OpenBrowserImage(returnPath);
         Entry fallbackFolder,item;
-        Check(returned&&returned->FindChild(2,nested?u"Corrupt fallback":u"Stale fallback",fallbackFolder),
+        Check(returned&&returned->FindChild(2,targetName,fallbackFolder),
               "Fork-only destination did not reopen");
         uint32_t parent=fallbackFolder.id;
         if(nested){
@@ -2782,11 +2788,16 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
             Check(item.forks[fork].size==expected.size()&&expected==actual,"Fork-only copy changed fork content");
         }
         Entry original;
-        Check(classic->FindChild(edited.parent,companion.name,original)&&original.id==companionId,
+        const bool present=classic->FindChild(edited.parent,companion.name,original);
+        Check(present==companionId.has_value()&&(!present||original.id==*companionId),
               "Fork-only copy changed the source companion");
+        Check(classic->FindChild(edited.parent,ClassicCopyArchive::ExpectationName(edited.resolvedId),original)&&
+              ClassicCopyArchive::IsExpectationRecord(original)&&classic->Stat(edited.id).finder==edited.finder,
+              "Fork-only copy lost the source expectation or changed native Finder metadata");
     };
     verifyForkOnly(staleId,"stale",false);
     classic->Remove(staleId);
+    verifyForkOnly({},"missing",false);
     companion.forks[0].size=32;
     const auto corruptId=classic->Put(edited.parent,companion,[](unsigned,uint64_t,void* out,size_t count){memset(out,0,count);},false);
     bool corrupt=false;
@@ -2887,7 +2898,7 @@ void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
     Check(first&&first->FindChild(2,u"Parking",parked)&&!first->FindChild(2,folder.name,from)&&
           first->FindChild(parked.id,folder.name,item)&&item.resolvedId==originalId&&
           ClassicCopyArchive::RequireVerifiedPair(*first,item,verify).has_value()&&
-          first->List(parked.id).size()==2,"In-place archive move lost the pair");
+          first->List(parked.id).size()==3,"In-place archive move lost the pair");
     result=move(first,item.id,second,2);
     Check(!result.code&&result.moved,result.message.c_str());
     Check(first->List(parked.id).empty()&&second->FindChild(2,folder.name,item)&&
@@ -3080,7 +3091,7 @@ void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
     Check(bool(classic),"Cannot reopen replaced classic pair");
     auto current=locate(u"Payload");
     pair=ClassicCopyArchive::RequireVerifiedPair(*classic,current,job);
-    Check(pair&&classic->List(2).size()==2,"Repeat archive left an extra companion");
+    Check(pair&&classic->List(2).size()==3,"Repeat archive left an extra companion");
     Verify(*classic,current.id,4097,49);
 
     classic->Rename(pair->companion.id,2,u"Saved companion");
@@ -3098,7 +3109,7 @@ void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
     Check(bool(classic),"Cannot reopen the renamed archive pair");
     current=locate(u"Renamed payload");
     pair=ClassicCopyArchive::RequireVerifiedPair(*classic,current,job);
-    Check(pair&&pair->metadata.entry.name==u"Renamed payload"&&classic->List(2).size()==2,
+    Check(pair&&pair->metadata.entry.name==u"Renamed payload"&&classic->List(2).size()==3,
           "Renaming did not rebind the existing companion");
     auto place=classic->MakeDirectory(2,u"Occupied folder");
     Put(*classic,place,pair->companion.name,2231,33);
