@@ -2993,7 +2993,65 @@ void TestClassicArchiveSpecialEntries(const std::string& root,FILE* report)
         returned->Read(encoded.id,0,0,actual.data(),actual.size());
         Check(actual==expected,"Classic archive compression changed the logical file contents");
     }
-    fprintf(report,"PASS: classic archive restores file and directory hard links, symbolic links, device metadata, and resource-backed LZVN after reopening.\n");
+    Entry originalArchive,aliasArchive;
+    Check(classic->FindChild(archived.id,u"Original",originalArchive)&&
+          classic->FindChild(archived.id,u"Alias",aliasArchive),"Missing separate-restore archive fixtures");
+    for(bool apfs:{false,true}){
+        const auto path=Wide(base+(apfs?"-separate.img":"-separate.dsk"));
+        if(apfs){
+            auto disk=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+            Apfs::Format(*disk,u"Separate archive restores",true,setup);
+        }else Image(path,Kind::HfsXCaseSensitive);
+        auto returned=OpenBrowserImage(path);
+        Check(bool(returned),"Cannot open separate-restore destination");
+        const auto restore=[&](uint32_t sourceId){
+            auto operation=Submit(OrdinaryCopy{{Native(classic,sourceId)},Native(returned)});
+            Wait(operation);
+            const auto result=operation.Job()->result();
+            Check(!result.code&&operation.Snapshot().complete,result.message.c_str());
+            returned.reset();
+            returned=OpenBrowserImage(path);
+            Check(bool(returned),"Cannot reopen separate-restore destination");
+        };
+        restore(originalArchive.id);
+        Entry first,alias;
+        Check(returned->FindChild(2,u"Original",first)&&!first.hardLink,"First restore fabricated an alias");
+        restore(aliasArchive.id);
+        Check(returned->FindChild(2,u"Original",first)&&returned->FindChild(2,u"Alias",alias)&&
+              first.hardLink&&alias.hardLink&&first.resolvedId==alias.resolvedId,
+              "A separate restore did not recover the previous hard-link inode");
+        Verify(*returned,first.id,4097,52);
+        Verify(*returned,alias.id,4097,52);
+
+        // Changing one attribute on the existing inode must prevent a later
+        // restore from reusing it, even though its provenance stamp remains.
+        returned->Remove(alias.id);
+        Check(returned->FindChild(2,u"Original",first),"Previous archive restore disappeared");
+        auto attrs=returned->GetAttributes(first.id);
+        attrs.emplace(u"user.changed",HfsPlus::Bytes{7});
+        returned->SetAttributes(first.id,attrs);
+        restore(aliasArchive.id);
+        Check(returned->FindChild(2,u"Original",first)&&returned->FindChild(2,u"Alias",alias)&&
+              first.resolvedId!=alias.resolvedId&&returned->GetAttributes(first.id).count(u"user.changed")&&
+              !returned->GetAttributes(alias.id).count(u"user.changed"),
+              "A modified earlier restore was reused as a hard-link partner");
+        Verify(*returned,first.id,4097,52);
+        Verify(*returned,alias.id,4097,52);
+        if(!apfs){
+            Entry branchArchive,branchAliasArchive,left,right,child;
+            Check(classic->FindChild(archived.id,u"Branch",branchArchive)&&
+                  classic->FindChild(archived.id,u"Branch alias",branchAliasArchive),
+                  "Missing separate directory-link restore fixture");
+            restore(branchArchive.id);
+            restore(branchAliasArchive.id);
+            Check(returned->FindChild(2,u"Branch",left)&&returned->FindChild(2,u"Branch alias",right)&&
+                  left.hardLink&&right.hardLink&&left.resolvedId==right.resolvedId&&
+                  returned->FindChild(right.id,u"Child",child),
+                  "Separate directory restores did not share the verified subtree");
+            Verify(*returned,child.id,4011,33);
+        }
+    }
+    fprintf(report,"PASS: classic archives restore links and compression after reopening. Separate restores recover only matching prior hard-link inodes on HFSX and APFS.\n");
 }
 
 void TestClassicBackupDates(const std::string& root,FILE* report)

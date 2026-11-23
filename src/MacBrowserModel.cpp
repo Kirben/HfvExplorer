@@ -894,6 +894,121 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
     }),plan.children.end());
 }
 
+constexpr auto ArchiveRestoreGroupAttribute=u"org.hfvexplorer.classic-archive-group";
+constexpr std::array<uint8_t,8> ArchiveGroupSignature{'H','F','V','G',1,0,0,0};
+
+bool ArchiveGroupMarker(const HfsPlus::AttributeData& value,const std::string* group=nullptr)
+{
+    std::array<uint8_t,24> bytes{};
+    if(value.size()!=bytes.size())return false;
+    value.Read(0,bytes.data(),bytes.size());
+    return std::equal(ArchiveGroupSignature.begin(),ArchiveGroupSignature.end(),bytes.begin())&&
+           (!group||(group->size()==16&&!memcmp(bytes.data()+ArchiveGroupSignature.size(),group->data(),group->size())));
+}
+
+void NoteArchiveRestoreGroup(Entry& entry,const std::string& group)
+{
+    if(group.empty())return;
+    const auto old=entry.attributes.find(ArchiveRestoreGroupAttribute);
+    if(old!=entry.attributes.end()&&!ArchiveGroupMarker(old->second))return;
+    HfsPlus::Bytes value(ArchiveGroupSignature.begin(),ArchiveGroupSignature.end());
+    value.insert(value.end(),group.begin(),group.end());
+    entry.attributes.insert_or_assign(ArchiveRestoreGroupAttribute,std::move(value));
+}
+
+bool MatchesArchivedEntry(Volume& source,const Planned& plan,Volume& destination,const Entry& candidate,
+                          Storage::Job& job,unsigned depth)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    const auto& entry=plan.entry;
+    if(depth>128||(depth&&(candidate.hardLink||!plan.archiveLinkGroup.empty()))||
+       !candidate.readError.empty()||entry.directory!=candidate.directory||
+       entry.symbolicLink!=candidate.symbolicLink||entry.finder!=candidate.finder||
+       !(entry.posix==candidate.posix)||entry.protectedFile!=candidate.protectedFile||
+       (entry.datesValid&&(!candidate.datesValid||entry.created!=candidate.created||entry.modified!=candidate.modified||
+        (entry.apfsTimestamps&&entry.apfsTimestamps!=candidate.apfsTimestamps)||
+        (entry.additionalDates.accessed&&entry.additionalDates.accessed!=candidate.additionalDates.accessed)||
+        (entry.additionalDates.changed&&entry.additionalDates.changed!=candidate.additionalDates.changed)||
+        entry.additionalDates.backup.value_or(0)!=candidate.additionalDates.backup.value_or(0)))||
+       entry.forks[0].size!=candidate.forks[0].size||entry.forks[1].size!=candidate.forks[1].size||
+       entry.compressed!=candidate.compressed)return false;
+
+    auto attributes=destination.GetAttributes(candidate.id);
+    auto expected=entry.attributes;
+    const auto forgetGroup=[](HfsPlus::Attributes& values){
+        const auto marker=values.find(ArchiveRestoreGroupAttribute);
+        if(marker!=values.end()&&ArchiveGroupMarker(marker->second))values.erase(marker);
+    };
+    forgetGroup(expected);
+    forgetGroup(attributes);
+    if(candidate.hardLink)attributes.erase(u"com.apple.system.hfs.firstlink");
+    if(candidate.compressed)attributes.erase(u"com.apple.decmpfs");
+    if(expected!=attributes)return false;
+
+    if(entry.directory){
+        if(destination.List(candidate.id).size()!=plan.children.size())return false;
+        for(const auto& child:plan.children){
+            Entry actual;
+            if(!destination.FindTransferChild(candidate.id,child.entry,actual)||actual.name!=child.entry.name||
+               !MatchesArchivedEntry(source,child,destination,destination.Stat(actual.id),job,depth+1))return false;
+        }
+        return true;
+    }
+    if(plan.linkTarget)return destination.SymbolicLinkTarget(candidate.id)==plan.linkTarget;
+    if(entry.posix&&entry.posix->IsSpecial())return true;
+    if(entry.compressed){
+        const auto& header=candidate.inlineCompression.empty()?candidate.resourceCompressionHeader:candidate.inlineCompression;
+        if(header.empty()||HfsPlus::Compression(header,0,{}).Type()!=entry.archivedCompressionType)return false;
+    }
+    HfsPlus::Bytes expectedBytes(64*1024),actualBytes(expectedBytes.size());
+    for(unsigned fork=0;fork<2;++fork){
+        for(uint64_t at=0;at<entry.forks[fork].size;){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto count=size_t((std::min)(uint64_t(expectedBytes.size()),entry.forks[fork].size-at));
+            source.Read(entry.id,fork,at,expectedBytes.data(),count);
+            destination.Read(candidate.id,fork,at,actualBytes.data(),count);
+            if(memcmp(expectedBytes.data(),actualBytes.data(),count))return false;
+            at+=count;
+        }
+    }
+    return true;
+}
+
+std::optional<Entry> FindArchiveRestorePartner(Volume& source,const Planned& plan,Volume& destination,
+                                              uint32_t parent,Storage::Job& job)
+{
+    if(plan.archiveLinkGroup.empty()||!destination.Supports().CanCreateHardLinks()||
+       (plan.entry.directory&&!destination.HfsPlusDateRange()))return {};
+    std::vector<uint32_t> pending{2};
+    std::set<uint32_t> visited;
+    std::set<uint32_t> ancestors;
+    if(plan.entry.directory){
+        for(auto current=destination.Stat(parent);ancestors.insert(current.resolvedId).second&&current.id!=2;
+            current=destination.Stat(current.parent)){}
+    }
+    std::optional<Entry> match;
+    while(!pending.empty()){
+        if(job.cancelled())throw Storage::Cancelled();
+        const auto folder=pending.back();
+        pending.pop_back();
+        for(const auto& child:destination.List(folder)){
+            if(job.cancelled())throw Storage::Cancelled();
+            if(child.directory&&visited.insert(child.resolvedId).second)pending.push_back(child.id);
+            if(child.directory!=plan.entry.directory||ancestors.count(child.resolvedId)||
+               child.forks[0].size!=plan.entry.forks[0].size||child.forks[1].size!=plan.entry.forks[1].size)continue;
+            if(match&&match->resolvedId==child.resolvedId)continue;
+            const auto attributes=destination.GetAttributes(child.id);
+            const auto stamp=attributes.find(ArchiveRestoreGroupAttribute);
+            if(stamp==attributes.end()||!ArchiveGroupMarker(stamp->second,&plan.archiveLinkGroup))continue;
+            auto current=destination.Stat(child.id);
+            if(!MatchesArchivedEntry(source,plan,destination,current,job,0))continue;
+            if(match)return {}; // Divergent copies can leave more than one matching inode.
+            match=std::move(current);
+        }
+    }
+    return match;
+}
+
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
               Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -906,20 +1021,30 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     found=dst.FindTransferChild(parent,entry,existing);
     Check(!plan.projectedName||!found,"An approved classic archive name is now occupied");
     bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
+    std::optional<Entry> previousRestore;
+    const Entry* partner=track&&prior!=copies.end()?&prior->second:nullptr;
+    if(!partner&&(!entry.directory||!found)){
+        previousRestore=FindArchiveRestorePartner(src,plan,dst,parent,job);
+        if(previousRestore)partner=&*previousRestore;
+    }
     const auto linkCopy=[&](const Entry* approvedDestination){
-        dst.MakeCopiedHardLinkForTransfer(prior->second,parent,entry.name,approvedDestination,job);
+        if(!approvedDestination||approvedDestination->resolvedId!=partner->resolvedId)
+            dst.MakeCopiedHardLinkForTransfer(*partner,parent,entry.name,approvedDestination,job);
+        if(track&&prior==copies.end())copies.emplace(key,*partner);
         LinkedProgress(plan,progress);
     };
-    if(track&&prior!=copies.end()&&entry.directory&&!found){linkCopy(nullptr);job.progress(progress);return true;}
+    if(partner&&entry.directory&&!found){linkCopy(nullptr);job.progress(progress);return true;}
     if (entry.directory) {
         Check(!found || existing.directory, "A file blocks the destination folder");
-        uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, entry);
+        auto outgoing=entry;
+        if(!found&&dst.HfsPlusDateRange())NoteArchiveRestoreGroup(outgoing,plan.archiveLinkGroup);
+        uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, outgoing);
         if(!found)Storage::OutcomeEvidence::NoteRetainedChange();
         auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
         try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
         // child creates/renames can change its dates even on Skip/cancellation.
-        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,entry,expected,false);if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);noteDatePrecision();job.progress(progress);}}
+        try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,outgoing,expected,false);if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);noteDatePrecision();job.progress(progress);}}
         catch(const std::exception& restore){if(failure){std::string original="Copy failed";try{std::rethrow_exception(failure);}catch(const std::exception& e){original=e.what();}catch(...){}throw HfsPlus::Error(original+"; folder metadata restoration failed: "+restore.what());}throw;}
         if(failure)std::rethrow_exception(failure);if(complete&&track&&(!plan.restoredDirectoryLink||!found))copies.emplace(key,dst.Stat(id));return complete;
     }
@@ -950,11 +1075,12 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
     if (job.cancelled()) throw Storage::Cancelled();
-    if(track&&prior!=copies.end()){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
+    if(partner){linkCopy(found?&existing:nullptr);progress.fileBytes=progress.fileTotal;job.progress(progress);return true;}
     const bool storedResource=!plan.reader&&(hfsPlus||destinationKind=="APFS")&&entry.compressed&&
                               entry.compressionResourceSize&&!entry.forks[1].size;
     uint64_t readThrough[2]={};
     auto outgoing=entry;
+    if(dst.Supports().CanCreateHardLinks())NoteArchiveRestoreGroup(outgoing,plan.archiveLinkGroup);
     const auto sparse=hfsPlus&&!plan.reader?src.SparseRanges(entry.id):SparseForks{};
     const bool materializesHoles=!sparse[0].empty()||!sparse[1].empty();
     if(materializesHoles)RecordApfsSparseRanges(outgoing,sparse);
