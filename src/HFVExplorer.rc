@@ -171,6 +171,7 @@ BEGIN
         MENUITEM "Manage APFS Snapshots...",      ID_TOOLS_APFS_SNAPSHOTS
         MENUITEM "Restore from APFS Snapshot",   ID_TOOLS_APFS_RESTORE
         MENUITEM "Rename APFS Volume...",        ID_TOOLS_APFS_RENAME_VOLUME
+        MENUITEM "Interrupted Move Reports...", ID_TOOLS_INTERRUPTED_MOVES
 
     END
     POPUP "&Help"

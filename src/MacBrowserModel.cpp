@@ -2007,7 +2007,7 @@ void Volume::RunWriteBatch(Storage::Job& job,const std::function<void(bool)>& wo
     if(failure)std::rethrow_exception(failure);
 }
 
-bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes,bool moving,bool batchActive){
+bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& dst,uint32_t parent,Storage::Job& job,const TransferAdapter& adapter,const std::vector<ForkSource>& routes,bool moving,bool batchActive,std::vector<std::u16string>* publishedNames){
     Check(routes.empty()||(!adapter&&routes.size()==sources.size()),"Invalid transfer routes");
     Check(dst.Supports().create,"The destination cannot create files");Storage::Progress progress;progress.fileCopy=progress.utf8=true;progress.phase="Scanning selected files";
     std::vector<Planned> plans;
@@ -2168,6 +2168,12 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     if(!batchActive&&(archiveCopy||carried||plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory)))
         dst.RunWriteBatch(job,transfer);
     else transfer(batchActive);
+    if(complete&&publishedNames)
+        for(const auto& plan:plans){
+            Entry actual;
+            Check(dst.FindTransferChild(parent,plan.entry,actual),"Cannot identify the published move destination");
+            publishedNames->push_back(std::move(actual.name));
+        }
     return complete;
 }
 bool Copy(Volume &src,uint32_t id,Volume &dst,uint32_t parent,Storage::Job& job,bool move){

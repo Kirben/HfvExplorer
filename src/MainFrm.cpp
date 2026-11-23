@@ -19,6 +19,7 @@
  */
 
 #include "stdafx.h"
+#include "InterruptedMoveReport.h"
 #include "BrowserPresentation.h"
 #include "LauncherWriteBack.h"
 #include "DocumentLaunch.h"
@@ -143,6 +144,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
  ON_COMMAND(ID_TOOLS_APFS_SNAPSHOTS, OnToolsApfsSnapshots)
  ON_COMMAND(ID_TOOLS_APFS_RESTORE, OnToolsApfsRestore)
  ON_COMMAND(ID_TOOLS_APFS_RENAME_VOLUME, OnToolsApfsRenameVolume)
+ ON_COMMAND(ID_TOOLS_INTERRUPTED_MOVES, OnToolsInterruptedMoves)
  ON_UPDATE_COMMAND_UI(ID_TOOLS_APFS_RENAME_VOLUME, OnUpdateApfsRenameVolume)
  ON_UPDATE_COMMAND_UI(ID_TOOLS_APFS_RESTORE, OnUpdateApfsRestore)
 	//}}AFX_MSG_MAP
@@ -1146,6 +1148,17 @@ void CMainFrame::OnFileVolumetofloppy()
  dialog.m_caption="Write a volume file to floppy";
  if(dialog.DoModal()!=IDOK)return;
  StartFloppyWrite(GetBrowserSession(),dialog.m_drive,ExistingFloppyImage{dialog.m_volname.GetString()});
+}
+
+void CMainFrame::OnToolsInterruptedMoves()
+{
+ const auto path=FileOperations::InterruptedMoveFolder();
+ if(path.empty()||GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES){
+  AfxMessageBox("There are no interrupted move reports.");
+  return;
+ }
+ if(reinterpret_cast<INT_PTR>(ShellExecuteW(m_hWnd,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+  AfxMessageBox("Could not open the interrupted move report folder.");
 }
 
 void CMainFrame::OnToolsApfsRenameVolume()

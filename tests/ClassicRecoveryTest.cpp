@@ -811,6 +811,19 @@ Storage::Result CrossFormatMove(const CString& sourcePath,Storage::Job& job,bool
     return result;
 }
 
+std::string ReadInterruptedMoveReport(const CString& path)
+{
+    WIN32_FIND_DATAA data{};
+    const auto search=FindFirstFileA(path+"\\Move *.txt",&data);
+    Check(search!=INVALID_HANDLE_VALUE,"interrupted move did not retain a report");
+    const CString name=data.cFileName;
+    const auto extra=FindNextFileA(search,&data);
+    FindClose(search);
+    Check(!extra,"unexpected extra interrupted move report");
+    const auto bytes=Load(path+"\\"+name);
+    return std::string(bytes.begin(),bytes.end());
+}
+
 void CrossFormatMoveRecovery(const CString& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -839,6 +852,9 @@ void CrossFormatMoveRecovery(const CString& root,FILE* report)
                 auto target=OpenCrossFormatFixture(toPath);
                 Put(*target,true,false,2,u"Unrelated");
             }
+            const CString reports=from+".reports";
+            Check(SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",VolumeCoord::Wide(reports.GetString()).c_str())!=FALSE,
+                  "set isolated interrupted move report directory");
             if(phase)CrashChild(from,phase,L"cross-format-move");
             else{
                 Storage::Job cancel;
@@ -859,6 +875,13 @@ void CrossFormatMoveRecovery(const CString& root,FILE* report)
             MacBrowser::Entry first;
             Check(source->FindChild(2,u"First",first)==(phase==17),"wrong source cleanup after interruption");
             if(phase==17)VerifyForks(*source,source->Stat(first.id),false);
+            const auto receipt=ReadInterruptedMoveReport(reports);
+            Check(receipt.find("\r\nDestination published.\r\n")!=std::string::npos&&
+                  receipt.find("Destination name for item 1: First")!=std::string::npos&&
+                  receipt.find("Destination name for item 2: Second")!=std::string::npos&&
+                  (receipt.find("Source removed for item 1.")!=std::string::npos)==(phase!=17)&&
+                  receipt.find("Source removed for item 2.")==std::string::npos,
+                  "interrupted move report did not distinguish verified copies from completed source removal");
         }
     }
     fprintf(report,"PASS: classic HFS moves with HFS+, HFSX and APFS retain verified destination forks and unprocessed sources when interrupted before and during source cleanup in either direction.\n");
@@ -893,6 +916,9 @@ void ArchiveMergeInterruption(const CString& root,FILE* report)
                 ClassicCopyArchive::Save(*source,fromFolder,ClassicCopyArchive::Metadata(folder),format);
             }
         }
+        const CString reports=from+".reports";
+        Check(SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",VolumeCoord::Wide(reports.GetString()).c_str())!=FALSE,
+              "set isolated archive merge report directory");
         if(crash)CrashChild(from,19,L"archive-merge-move");
         else{
             Storage::Job cancel;
@@ -916,7 +942,14 @@ void ArchiveMergeInterruption(const CString& root,FILE* report)
         VerifyForks(*target,target->Stat(Find(*target,toFolder,u"Unrelated")),false);
         MacBrowser::Entry absent;
         Check(!target->FindChild(toFolder,u"Second",absent),"interrupted merge copied the second entry");
+        const auto receipt=ReadInterruptedMoveReport(reports);
+        Check(receipt.find("Item 1 to move: Merge")!=std::string::npos&&
+              receipt.find("\r\nDestination published.\r\n")==std::string::npos&&
+              receipt.find("Source removal started for item")==std::string::npos,
+              "interrupted merge report incorrectly claimed complete publication or source removal");
     }
+    SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",nullptr);
+    fprintf(report,"PASS: interrupted move reports survive worker exit and distinguish unverified merges, verified destinations and completed source removals.\n");
     fprintf(report,"PASS: late archive merge cancellation and process loss preserve both source files, both forks and unrelated destination files. Classic HFS rolls back the replacement; APFS, HFS+ and HFSX retain the completed replacement.\n");
 }
 

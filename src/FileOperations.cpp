@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
+#include "InterruptedMoveReport.h"
 #include "ClassicCopyArchive.h"
 #include "AttributeReadScope.h"
 #include "FileOperations.h"
@@ -63,8 +64,68 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  }
  return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true,value.expectedResource),2};
 }
+class InterruptedMoveReport {
+    HANDLE file_=INVALID_HANDLE_VALUE;
+    std::wstring path_;
+
+    static void EnsureFolder(const std::wstring& path)
+    {
+        if(CreateDirectoryW(path.c_str(),nullptr))return;
+        const auto error=GetLastError();
+        const auto attributes=GetFileAttributesW(path.c_str());
+        if(error!=ERROR_ALREADY_EXISTS||attributes==INVALID_FILE_ATTRIBUTES||
+           !(attributes&FILE_ATTRIBUTE_DIRECTORY))
+            throw OperationError(error,"Cannot create the interrupted move report folder");
+    }
+public:
+    ~InterruptedMoveReport(){if(file_!=INVALID_HANDLE_VALUE)CloseHandle(file_);}
+    explicit operator bool()const{return file_!=INVALID_HANDLE_VALUE;}
+
+    void Open()
+    {
+        const auto folder=InterruptedMoveFolder();
+        Check(!folder.empty(),"Cannot locate the interrupted move report folder");
+        EnsureFolder(folder.substr(0,folder.find_last_of(L'\\')));
+        EnsureFolder(folder);
+        GUID id{};
+        wchar_t name[40]{};
+        Check(SUCCEEDED(CoCreateGuid(&id))&&StringFromGUID2(id,name,40),"Cannot name the interrupted move report");
+        path_=folder+L"\\Move "+name+L".txt";
+        file_=CreateFileW(path_.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,
+                          FILE_ATTRIBUTE_NORMAL|FILE_FLAG_WRITE_THROUGH,nullptr);
+        if(!*this)throw OperationError(GetLastError(),"Cannot create the interrupted move report");
+        Append("\xef\xbb\xbf" "HFVExplorer cross-format move\r\n"
+            "If the report ends before Destination published, check the destination for a partial copy. Source cleanup has not started.\r\n"
+            "A removal that started without a completion record may already have finished. Inspect both volumes before retrying.\r\n");
+    }
+    void Append(const std::string& line)
+    {
+        DWORD written=0;
+        if(line.size()>MAXDWORD||!WriteFile(file_,line.data(),DWORD(line.size()),&written,nullptr)||written!=line.size()||
+           !FlushFileBuffers(file_))
+            throw OperationError(ERROR_WRITE_FAULT,"Could not update the interrupted move report. Check both volumes. "+Path());
+    }
+    static std::string Describe(const Volume& volume,const Entry& entry)
+    {
+        const auto* endpoint=WorkerEndpoint::Find(volume);
+        const auto origin=endpoint?endpoint->WorkerDescription():WorkerOrigin{};
+        auto name=Utf8(entry.name)+" (volume "+Utf8(volume.Name())+
+                  (origin.path.empty()?"":", "+Utf8(U16(origin.path)))+")";
+        for(auto& ch:name)if(ch=='\r'||ch=='\n'||ch=='\t')ch=' ';
+        return name;
+    }
+    std::string Path()const{return Utf8(U16(path_));}
+    void Complete()
+    {
+        Append("Move complete.\r\n");
+        CloseHandle(file_);
+        file_=INVALID_HANDLE_VALUE;
+        DeleteFileW(path_.c_str());
+    }
+};
+
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
-                        Storage::Job& job,Completion& completion,bool windowsDestination,bool batchActive=false,bool reportCleanup=false){
+                        Storage::Job& job,Completion& completion,bool windowsDestination,bool batchActive=false,InterruptedMoveReport* report=nullptr){
  std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
  std::vector<WindowsCutPlan> windowsPlans(sources.size());
  for(size_t i=0;i<sources.size();++i)
@@ -79,13 +140,15 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
  size_t removed=0;
  for(size_t i=0;i<sources.size();++i){
   if(!sources[i].cut)continue;
-  if(reportCleanup){
+  if(report){
    auto progress=job.progress();
    progress.phase="Removing moved sources";
    progress.path=Utf8(checked[i].volume->Stat(checked[i].id).name);
    job.progress(progress);
    if(job.cancelled())
-    throw OperationError(ERROR_CANCELLED,"Destination copies were published. Source entries removed: "+std::to_string(removed)+".");
+    throw OperationError(ERROR_CANCELLED,"Destination copies were published. Source entries removed: "+std::to_string(removed)+
+                         ". See the interrupted move report at "+report->Path());
+   report->Append("Source removal started for item "+std::to_string(i+1)+".\r\n");
   }
   StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
     [&](Volume& volume,uint32_t id){
@@ -95,6 +158,7 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
      else RemoveTree(volume,id,job);
     });
   ++removed;
+  if(report)report->Append("Source removed for item "+std::to_string(i+1)+".\r\n");
  }
 }
 bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
@@ -345,6 +409,8 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
          return item.cut&&item.IsWindows();
      });
  bool complete=false,inPlace=false,windowsDestination=false,crossFormatMove=false;
+ InterruptedMoveReport report;
+ std::vector<std::u16string> publishedNames;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
@@ -436,7 +502,17 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
     if(failure)std::rethrow_exception(failure);
    }else{
-    const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving);};
+    if(crossFormatMove){
+     report.Open();
+     auto planned="Destination folder "+InterruptedMoveReport::Describe(*destination.first,
+                   destination.first->Stat(destination.second))+"\r\n";
+     for(size_t i=0;i<opened.size();++i)
+      planned+="Item "+std::to_string(i+1)+(request.sources[i].cut?" to move: ":" to copy: ")+
+               InterruptedMoveReport::Describe(*opened[i].first,opened[i].first->Stat(opened[i].second))+"\r\n";
+     report.Append(planned);
+    }
+    const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
+                                        false,report?&publishedNames:nullptr);};
     if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);
     else copy();
    }
@@ -461,7 +537,19 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   // Without a shared decision, keep the source through destination close and readback.
   for(const auto& source:request.sources)
    StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
-  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,false,crossFormatMove);
+  if(complete){
+   if(report){
+    std::string verified="Destination published.\r\n";
+    for(size_t i=0;i<publishedNames.size();++i){
+     auto name=Utf8(publishedNames[i]);
+     for(auto& ch:name)if(ch=='\r'||ch=='\n'||ch=='\t')ch=' ';
+     verified+="Destination name for item "+std::to_string(i+1)+": "+name+"\r\n";
+    }
+    report.Append(verified);
+   }
+   DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,false,report?&report:nullptr);
+   if(report)report.Complete();
+  }else if(report)report.Append("Transfer incomplete. Source cleanup did not start.\r\n");
  }
  completion.complete=complete;
  completion.completed=job.progress().files;

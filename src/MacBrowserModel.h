@@ -236,7 +236,7 @@ bool Copy(Volume &source, uint32_t id, Volume &target, uint32_t parent, Storage:
 enum class ForkSource { Stream, MountedWorker };
 bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>> &,
               Volume &target,uint32_t parent,Storage::Job &, const TransferAdapter & = {},
-              const std::vector<ForkSource>& routes = {},bool moving=false,bool batchActive=false);
+              const std::vector<ForkSource>& routes = {},bool moving=false,bool batchActive=false,std::vector<std::u16string>* publishedNames=nullptr);
 void RemoveTree(Volume &, uint32_t id, Storage::Job &,bool deletionProgress=false);
 void ApplyRemovalPlan(Volume&,uint32_t id,Storage::Job&,bool deletionProgress,
                       const std::function<void(uint32_t)>& removeEntry);
