@@ -4,6 +4,7 @@
 #include <future>
 #include "ClassicCopyArchive.h"
 #include "BrowserPresentation.h"
+#include "HfsPlusCompression.h"
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -457,13 +458,13 @@ void Denied(const std::wstring &path) {
                            nullptr, OPEN_EXISTING, 0, nullptr);
     Check(h == INVALID_HANDLE_VALUE, "image exclusivity lost during handoff");
 }
-std::shared_ptr<Volume> ClassicImage(const std::string &path) {
+std::shared_ptr<Volume> ClassicImage(const std::string &path,uint64_t size=4*1024*1024) {
     LegacyEngine::Scope engine;
     floppy_module_global_init();
     {
         CFile f;
         Check(f.Open(path.c_str(), CFile::modeCreate | CFile::modeWrite) != FALSE, "classic fixture");
-        f.SetLength(4 * 1024 * 1024);
+        f.SetLength(size);
     }
     char label[] = "Classic";
     Check(hfs_format(const_cast<char *>(path.c_str()), 0, label) == 0, "classic format");
@@ -2587,8 +2588,9 @@ void TestClassicMetadataCompanion(FILE* report)
     ClassicCopyArchive::Digest binding{};
     binding[0]=12;
     Storage::Job job;
-    const auto stored=ClassicCopyArchive::Encode(source,binding,job);
-    const auto restored=ClassicCopyArchive::Decode(stored,binding,job);
+    const auto stored=ClassicCopyArchive::Encode(ClassicCopyArchive::Metadata(source),binding,job);
+    const auto decoded=ClassicCopyArchive::Decode(stored,binding,job);
+    const auto* restored=decoded?&decoded->entry:nullptr;
     Check(restored&&restored->attributes==source.attributes&&restored->posix==source.posix&&
           restored->apfsTimestamps==source.apfsTimestamps&&restored->name==source.name&&restored->created==source.created&&
           restored->modified==source.modified&&restored->additionalDates.backup==source.additionalDates.backup,
@@ -2759,6 +2761,104 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
     Verify(*returned,a.id,4097,32);
     Verify(*returned,b.id,4099,63);
     fprintf(report,"PASS: classic archive previews MacRoman truncation and collisions, preserves occupied names, and restores original names and both forks after reopening.\n");
+}
+
+void TestClassicArchiveSpecialEntries(const std::string& root,FILE* report)
+{
+    using Mode=HfsPlus::Volume::CompressionMode;
+    using Kind=HfsPlus::Volume::FormatKind;
+    const auto base=root+"\\classic-archive-layout";
+    auto source=Image(Wide(base+"-source.dsk"),Kind::HfsXCaseSensitive);
+    auto classic=ClassicImage(base+".dsk");
+    const auto folder=source->MakeDirectory(2,u"Archive layout");
+    const auto original=Put(*source,folder,u"Original",4097,52);
+    source->MakeHardLink(original,folder,u"Alias");
+    const auto branch=source->MakeDirectory(folder,u"Branch");
+    Put(*source,branch,u"Child",4011,33);
+    source->MakeHardLink(branch,folder,u"Branch alias");
+    Storage::Job setup;
+    Entry link;
+    link.name=u"Pointer";
+    link.symbolicLink=true;
+    link.posix=PosixMetadata{501,20,0777};
+    const HfsPlus::Bytes target{'O','r','i','g','i','n','a','l',0};
+    source->PutSymbolicLink(folder,link,target,setup);
+    Entry device;
+    device.name=u"Device";
+    device.posix=PosixMetadata{501,20,0600,0,0,SpecialFileType::CharacterDevice,0x240001};
+    source->Put(folder,device,[](unsigned,uint64_t,void*,size_t){throw HfsPlus::Error("Device payload read");},false);
+    Entry compressed;
+    compressed.name=u"Compressed";
+    compressed.forks[0].size=100003;
+    const auto payload=[](unsigned,uint64_t at,void* out,size_t count){
+        auto* p=static_cast<uint8_t*>(out);
+        for(size_t i=0;i<count;++i)p[i]=uint8_t((at+i)*13+(at+i)/1024);
+    };
+    const auto compressedId=source->Put(folder,compressed,payload,false);
+    source->SetCompressionMethod(compressedId,Mode::Lzvn,{});
+    Check(source->Stat(compressedId).compressionResourceSize>0,"Expected resource-backed compression");
+    auto copy=Submit(OrdinaryCopy{{Native(source,folder)},Native(classic)});
+    Conflict(copy);
+    auto prompt=copy.Job()->conflictState();
+    Check(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss,"Missing archive layout prompt");
+    copy.Job()->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+    Wait(copy);
+    const auto copied=copy.Job()->result();
+    Check(!copied.code&&copy.Snapshot().complete,copied.message.c_str());
+    classic.reset();
+    classic=OpenBrowserImage(Wide(base+".dsk"));
+    Entry archived,placeholder;
+    Check(classic&&classic->FindChild(2,u"Archive layout",archived)&&
+          classic->FindChild(archived.id,u"Pointer",placeholder)&&!placeholder.symbolicLink&&
+          placeholder.forks[0].size>target.size(),"Archived symlink is not a readable classic description");
+    for(bool apfs:{false,true}){
+        const auto returnPath=Wide(base+(apfs?"-return.img":"-return.dsk"));
+        if(apfs){
+            auto disk=HfsPlus::CreateImage(returnPath.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"APFS archive return",true,format);
+        }else Image(returnPath,Kind::HfsXCaseSensitive);
+        auto returned=OpenBrowserImage(returnPath);
+        Check(bool(returned),"Cannot reopen the archive layout destination");
+        auto restore=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(returned)});
+        if(apfs){
+            Conflict(restore);
+            const auto conversion=restore.Job()->conflictState();
+            Check(conversion.kind==Storage::CopyPrompt::IndependentFolders,"APFS directory archive needs approval");
+            restore.Job()->resolve(conversion.id,Storage::ConflictChoice::Replace);
+        }
+        Wait(restore);
+        const auto restored=restore.Job()->result();
+        Check(!restored.code&&restore.Snapshot().complete,restored.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(returnPath);
+        Entry tree,a,b,d,e,child,symlink,node,encoded;
+        Check(returned&&returned->FindChild(2,u"Archive layout",tree)&&
+              returned->FindChild(tree.id,u"Original",a)&&returned->FindChild(tree.id,u"Alias",b)&&
+              a.hardLink&&b.hardLink&&a.resolvedId==b.resolvedId,
+              "Classic archive did not restore file hard-link identity");
+        Verify(*returned,a.id,4097,52);
+        Verify(*returned,b.id,4097,52);
+        Check(returned->FindChild(tree.id,u"Branch",d)&&returned->FindChild(tree.id,u"Branch alias",e)&&
+              d.directory&&e.directory&&d.hardLink==!apfs&&e.hardLink==!apfs&&
+              (d.resolvedId==e.resolvedId)==!apfs&&returned->FindChild(d.id,u"Child",child),
+              "Classic archive did not restore the supported directory link layout");
+        Verify(*returned,child.id,4011,33);
+        Check(returned->FindChild(tree.id,u"Pointer",symlink)&&returned->SymbolicLinkTarget(symlink.id)==target&&
+              returned->FindChild(tree.id,u"Device",node)&&node.posix==device.posix,
+              "Classic archive did not restore the symbolic link or device metadata");
+        Check(returned->FindChild(tree.id,u"Compressed",encoded)&&encoded.compressed,
+              "Classic archive did not restore compression");
+        encoded=returned->Stat(encoded.id);
+        const auto& header=encoded.inlineCompression.empty()?encoded.resourceCompressionHeader:encoded.inlineCompression;
+        Check(!header.empty()&&HfsPlus::Compression(header,0,{}).Type()==8,
+              "Classic archive did not restore the resource-backed LZVN method");
+        HfsPlus::Bytes expected(size_t(compressed.forks[0].size)),actual(expected.size());
+        payload(0,0,expected.data(),expected.size());
+        returned->Read(encoded.id,0,0,actual.data(),actual.size());
+        Check(actual==expected,"Classic archive compression changed the logical file contents");
+    }
+    fprintf(report,"PASS: classic archive restores file and directory hard links, symbolic links, device metadata, and resource-backed LZVN after reopening.\n");
 }
 
 void TestClassicBackupDates(const std::string& root,FILE* report)
@@ -4123,6 +4223,44 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
                   "Reopened APFS copy did not restore the exact holes in both forks");
         }
     }
+    {
+        auto source=OpenBrowserImage(sourcePath);
+        Check(bool(source),"Cannot reopen sparse classic archive fixture");
+        const auto sparse=verifySparse(*source);
+        const auto holes=source->SparseRanges(sparse.id);
+        const auto classicPath=root+"\\sparse-archive.dsk";
+        auto classic=ClassicImage(classicPath,16*1024*1024);
+        auto archive=Submit(OrdinaryCopy{{Native(source,sparse.id)},Native(classic)});
+        Conflict(archive);
+        const auto prompt=archive.Job()->conflictState();
+        Check(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss&&
+              prompt.path.find("Sparse allocation")!=std::string::npos,"Classic archive omitted sparse allocation");
+        archive.Job()->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+        Wait(archive);
+        const auto archived=archive.Job()->result();
+        Check(!archived.code&&archive.Snapshot().complete,archived.message.c_str());
+        classic.reset();
+        classic=OpenBrowserImage(Wide(classicPath));
+        Entry dense;
+        Check(classic&&classic->FindChild(2,sparse.name,dense),"Missing dense classic sparse archive");
+        const auto returnedPath=Wide(root+"\\sparse-classic-return.img");
+        {
+            auto disk=HfsPlus::CreateImage(returnedPath.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*disk,u"Classic sparse return",true,format);
+        }
+        auto returned=OpenBrowserImage(returnedPath);
+        auto restore=Submit(OrdinaryCopy{{Native(classic,dense.id)},Native(returned)});
+        Wait(restore);
+        const auto restored=restore.Job()->result();
+        Check(!restored.code&&restore.Snapshot().complete,restored.message.c_str());
+        returned.reset();
+        returned=OpenBrowserImage(returnedPath);
+        Check(bool(returned),"Cannot reopen the classic sparse return");
+        const auto actual=verifySparse(*returned);
+        Check(returned->SparseRanges(actual.id)==holes,"Classic archive did not restore holes in both forks");
+        fprintf(report,"PASS: classic HFS archives preserve APFS sparse data and resource layout across reopening.\n");
+    }
     fprintf(report,"PASS: sparse APFS data and resource forks survive HFS+ and HFSX reopen with a dense allocation notice; out-of-space copy and cut/paste stop before reading payload and retain both source and original destination forks and free space.\n");
 }
 
@@ -4499,6 +4637,7 @@ int RunCopyProcessTest(const char *directory) {
         TestClassicMetadataCompanion(report);
         TestClassicArchiveRoundTrip(root,report);
         TestClassicArchiveNamePreview(root,report);
+        TestClassicArchiveSpecialEntries(root,report);
         TestClassicBackupDates(root,report);
         TestClassicCopyLoss(root,report);
         TestClassicLockRoundTrip(root,report);

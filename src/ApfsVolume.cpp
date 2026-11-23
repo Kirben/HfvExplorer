@@ -1555,7 +1555,8 @@ public:
             encoded.emplace(entry.forks[0].size,[&](uint64_t offset,void* bytes,size_t count){
                 if(job.cancelled())throw Storage::Cancelled();
                 reader(0,offset,bytes,count);
-            },HfsPlus::Volume::CompressionMode::Zlib,entry.forks[1].size?
+            },entry.archivedCompressionType?HfsPlus::CompressionModeForType(entry.archivedCompressionType):
+                HfsPlus::Volume::CompressionMode::Zlib,entry.forks[1].size?
                 EncodedCompression::Layout::InlineOnly:EncodedCompression::Layout::InlineOrResource,
                 entry.forks[1].size?InlineCompressionLimit:inlineLimit);
             if(encoded->Attribute().empty()){

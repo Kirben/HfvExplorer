@@ -31,6 +31,7 @@ struct Entry {
     HfsPlus::Bytes inlineCompression; // Exact inline decmpfs bytes supplied by Stat.
     HfsPlus::Bytes resourceCompressionHeader;
     uint64_t compressionResourceSize=0;
+    uint32_t archivedCompressionType=0;
     bool WritesStoredCompressionResource() const {
         return compressed&&compressionResourceSize&&forks[1].size==compressionResourceSize&&
                !resourceCompressionHeader.empty();

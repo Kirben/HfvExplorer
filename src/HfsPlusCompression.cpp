@@ -224,6 +224,19 @@ Compression::Compression(Bytes attribute, uint64_t resourceSize, Reader resource
 bool Compression::UsesResource() const {
     return type_ == 4 || type_ == 8 || type_ == 10 || type_ == 12 || type_ == 14;
 }
+Volume::CompressionMode CompressionModeForType(uint32_t type)
+{
+    using Mode=Volume::CompressionMode;
+    switch(type){
+    case 1:return Mode::StoredInline;
+    case 3:case 4:return Mode::Zlib;
+    case 7:case 8:return Mode::Lzvn;
+    case 9:case 10:return Mode::Stored;
+    case 11:case 12:return Mode::Lzfse;
+    case 13:case 14:return Mode::Lzbitmap;
+    default:throw Error("Unsupported archived compression method");
+    }
+}
 bool IsInlineCompression(const Bytes& bytes,uint64_t logicalSize) {
     if(bytes.size()>InlineCompressionLimit)return false;
     Compression descriptor(bytes,0,{});

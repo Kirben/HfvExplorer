@@ -317,6 +317,7 @@ void EncodeEntry(Data& d, const Entry& e) {
     d.put(e.additionalDates.backup.has_value());
     if(e.additionalDates.backup)d.put(*e.additionalDates.backup);
     d.put(e.directory); d.put(e.protectedFile); d.put(e.compressed);
+    d.put(e.archivedCompressionType);
     d.put(e.forks[0].size); d.put(e.forks[1].size);
     d.put(std::string(e.inlineCompression.begin(),e.inlineCompression.end()));
     d.put(std::string(e.resourceCompressionHeader.begin(),e.resourceCompressionHeader.end()));
@@ -338,6 +339,10 @@ Entry DecodeEntry(Data& d) {
     if(d.flag())e.additionalDates.changed=d.get();
     if(d.flag())e.additionalDates.backup=d.get();
     e.directory=d.flag(); e.protectedFile=d.flag(); e.compressed=d.flag();
+    e.archivedCompressionType=CatalogNumber(d);
+    Check(!e.archivedCompressionType||(e.compressed&&e.archivedCompressionType<=14&&
+          e.archivedCompressionType!=2&&e.archivedCompressionType!=5&&e.archivedCompressionType!=6),
+          "Invalid archived compression method");
     e.forks[0].size=d.get(); e.forks[1].size=d.get();
     const auto compression=d.text();
     Check(compression.empty()||(e.compressed&&compression.size()<=HfsPlus::InlineCompressionLimit),

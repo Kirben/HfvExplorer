@@ -402,7 +402,9 @@ public:
     }
     uint32_t Put(uint32_t parent,const Entry& e,Reader read,bool replace) override {
         using Mode=HfsPlus::Volume::CompressionMode;
-        const auto compression=e.compressed?Mode::CopyCompressed:Mode::Preserve;
+        const auto compression=e.archivedCompressionType&&e.inlineCompression.empty()?
+            HfsPlus::CompressionModeForType(e.archivedCompressionType):
+            e.compressed?Mode::CopyCompressed:Mode::Preserve;
         const std::array<uint64_t,2> dates{e.created,e.modified};
         return Mutate([&]{
             auto posix=e.posix;
@@ -523,7 +525,7 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=EncodeMfsName(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<Entry> archivedMetadata; bool restoredMetadata=false; bool projectedName=false; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<ClassicCopyArchive::Metadata> archivedMetadata; bool restoredMetadata=false; bool projectedName=false; std::string archiveLinkGroup; uint64_t archivedDescriptionSize=0; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -712,8 +714,44 @@ void ProjectArchiveNames(std::vector<Planned>& plans,Volume& destination,uint32_
 
 void PrepareClassicArchive(Planned& plan)
 {
-    plan.archivedMetadata=plan.entry;
+    plan.archivedMetadata.emplace(plan.entry);
+    plan.archivedMetadata->symbolicLinkTarget=plan.linkTarget;
     auto& entry=plan.entry;
+    // Links and special nodes are represented by ordinary catalog records.
+    // Their descriptors are carried only in the verified companion.
+    if(plan.linkTarget||(entry.posix&&entry.posix->IsSpecial())){
+        std::string description;
+        if(plan.linkTarget){
+            description="Symbolic link target: ";
+            const auto end=plan.linkTarget->end()-(!plan.linkTarget->empty()&&plan.linkTarget->back()==0);
+            description.append(plan.linkTarget->begin(),end);
+        }else{
+            description="Special file type "+std::to_string(unsigned(entry.posix->special));
+            if(IsDevice(entry.posix->special))description+="; device "+std::to_string(entry.posix->device);
+        }
+        description+="\r";
+        plan.archivedDescriptionSize=description.size();
+        plan.reader=[description=std::move(description)](unsigned fork,uint64_t at,void* out,size_t count){
+            Check(!fork&&at<=description.size()&&count<=description.size()-at,"Invalid archive description read");
+            memcpy(out,description.data()+at,count);
+        };
+        plan.linkTarget.reset();
+        entry.symbolicLink=false;
+        entry.readError.clear();
+        entry.forks[0]={};
+        entry.forks[1]={};
+        entry.forks[0].size=plan.archivedDescriptionSize;
+        entry.finder={};
+        memcpy(entry.finder.data(),"TEXTHFVE",8);
+        entry.protectedFile=false;
+    }
+    entry.posix.reset();
+    entry.hardLink=false;
+    entry.linkCount=1;
+    entry.compressed=false;
+    entry.inlineCompression.clear();
+    entry.resourceCompressionHeader.clear();
+    entry.compressionResourceSize=0;
     entry.attributes.clear();
     entry.created=(std::min)(entry.created,uint64_t(UINT32_MAX));
     entry.modified=(std::min)(entry.modified,uint64_t(UINT32_MAX));
@@ -721,10 +759,54 @@ void PrepareClassicArchive(Planned& plan)
     for(auto& child:plan.children)PrepareClassicArchive(child);
 }
 
+using ArchiveLinkGroups=std::map<std::pair<std::string,uint32_t>,std::string>;
+
+void RecordArchiveLayout(Volume& source,Planned& plan,ArchiveLinkGroups& groups,Storage::Progress& progress,Storage::Job& job)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    auto& archive=*plan.archivedMetadata;
+    auto& entry=archive.entry;
+    if(plan.archivedDescriptionSize){
+        progress.totalBytes-=entry.forks[0].size+entry.forks[1].size;
+        Check(plan.archivedDescriptionSize<=UINT64_MAX-progress.totalBytes,"Copy size overflow");
+        progress.totalBytes+=plan.archivedDescriptionSize;
+    }
+    if(entry.compressed){
+        const auto& header=entry.inlineCompression.empty()?entry.resourceCompressionHeader:entry.inlineCompression;
+        Check(!header.empty(),"Cannot identify the original compression method for archiving");
+        archive.compressionType=HfsPlus::Compression(header,0,{}).Type();
+    }
+    if(entry.hardLink&&entry.linkCount>1){
+        auto [group,inserted]=groups.try_emplace({source.ResourceKey(),entry.resolvedId});
+        if(inserted){
+            GUID id{};
+            Check(SUCCEEDED(CoCreateGuid(&id)),"Cannot allocate a classic archive link group identifier");
+            group->second.assign(reinterpret_cast<const char*>(&id),sizeof(id));
+        }
+        archive.linkGroup=group->second;
+    }
+    if(!entry.directory&&!entry.symbolicLink&&(!entry.posix||!entry.posix->IsSpecial())){
+        const auto holes=source.SparseRanges(entry.id);
+        if(!holes[0].empty()||!holes[1].empty())RecordApfsSparseRanges(entry,holes);
+        if(entry.apfsCloneMarked&&!entry.attributes.count(ApfsCloneLayoutAttribute)){
+            auto layout=source.ApfsCloneLayout(entry.id);
+            if(!layout.empty())entry.attributes.emplace(ApfsCloneLayoutAttribute,std::move(layout));
+        }
+    }
+    for(auto& child:plan.children)RecordArchiveLayout(source,child,groups,progress,job);
+}
+
 void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job)
 {
     auto& entry=plan.entry;
-    if(auto metadata=ClassicCopyArchive::Load(source,entry,job)){
+    if(auto archive=ClassicCopyArchive::Load(source,entry,job)){
+        auto* metadata=&archive->entry;
+        plan.archiveLinkGroup=std::move(archive->linkGroup);
+        if(archive->compressionType){
+            entry.compressed=true;
+            entry.archivedCompressionType=archive->compressionType;
+            entry.inlineCompression=std::move(metadata->inlineCompression);
+        }
         if(!metadata->name.empty())entry.name=std::move(metadata->name);
         entry.datesValid=metadata->datesValid;
         entry.created=metadata->created;
@@ -734,6 +816,17 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
         if(entry.apfsTimestamps)
             for(auto raw:*entry.apfsTimestamps)entry.fractionalDates|=int64_t(raw)%1000000000!=0;
         entry.posix=metadata->posix;
+        if(entry.posix)entry.protectedFile|=(entry.posix->protection&PosixMetadata::ProtectionMask)!=0;
+        if(archive->symbolicLinkTarget||(entry.posix&&entry.posix->IsSpecial())){
+            progress.totalBytes-=entry.forks[0].size+entry.forks[1].size;
+            entry.forks[0]={};
+            entry.forks[1]={};
+            entry.finder=metadata->finder;
+            if(archive->symbolicLinkTarget){
+                plan.linkTarget=std::move(archive->symbolicLinkTarget);
+                entry.symbolicLink=true;
+            }
+        }
         entry.attributes=std::move(metadata->attributes);
         entry.attributesKnown=true;
         plan.restoredMetadata=true;
@@ -851,20 +944,22 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         job.progress(progress);
         return true;
     }
-    if(hfsPlus&&std::string_view(src.Kind())=="APFS"&&entry.compressed&&entry.forks[1].size&&entry.inlineCompression.empty()){
+    if(hfsPlus&&(std::string_view(src.Kind())=="APFS"||entry.archivedCompressionType)&&
+       entry.compressed&&entry.forks[1].size&&entry.inlineCompression.empty()){
         // Check before handing the write to a persistent HFS worker. Both
         // encoders see the same logical fork under the transfer's read lease.
         const HfsPlus::EncodedCompression inlineEncoding(entry.forks[0].size,
             [&](uint64_t offset,void* bytes,size_t count){
                 if(plan.reader)plan.reader(0,offset,bytes,count);
                 else src.Read(entry.id,0,offset,bytes,count);
-            },HfsPlus::Volume::CompressionMode::Zlib,HfsPlus::EncodedCompression::Layout::InlineOnly);
+            },entry.archivedCompressionType?HfsPlus::CompressionModeForType(entry.archivedCompressionType):
+                    HfsPlus::Volume::CompressionMode::Zlib,HfsPlus::EncodedCompression::Layout::InlineOnly);
         if(inlineEncoding.Attribute().empty()&&
            job.requestChoice(Storage::CopyPrompt::Uncompressed,progress.path)!=Storage::ConflictChoice::Replace)
             throw Storage::Cancelled();
         if(job.cancelled())throw Storage::Cancelled();
     }
-    if(route==ForkSource::MountedWorker)
+    if(route==ForkSource::MountedWorker&&!plan.reader)
         published=VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
     else {
         Reader reader=[&](unsigned fork,uint64_t offset,void* p,size_t count){
@@ -1270,7 +1365,8 @@ bool EquivalentDirectoryCopies(Volume& source,const Planned& lhs,const Planned& 
        a.modified!=b.modified||a.additionalDates.changed!=b.additionalDates.changed||
        a.additionalDates.accessed!=b.additionalDates.accessed||a.compressed!=b.compressed||
        a.inlineCompression!=b.inlineCompression||a.resourceCompressionHeader!=b.resourceCompressionHeader||
-       a.compressionResourceSize!=b.compressionResourceSize||a.attributes!=b.attributes||
+       a.compressionResourceSize!=b.compressionResourceSize||a.archivedCompressionType!=b.archivedCompressionType||
+       a.attributes!=b.attributes||
        lhs.linkTarget!=rhs.linkTarget||
        (!groupRoot&&(a.hardLink||b.hardLink)&&a.resolvedId!=b.resolvedId))return false;
     if(a.directory){
@@ -1306,6 +1402,24 @@ bool EquivalentDirectoryCopies(Volume& source,const Planned& lhs,const Planned& 
     });
 }
 
+using RestoredArchiveGroups=std::map<std::pair<std::string,std::string>,Planned*>;
+
+void RestoreArchiveLinks(Volume& source,Planned& plan,RestoredArchiveGroups& groups,Storage::Job& job)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    if(!plan.archiveLinkGroup.empty()){
+        const auto [group,inserted]=groups.try_emplace({source.ResourceKey(),plan.archiveLinkGroup},&plan);
+        auto& first=*group->second;
+        if(!inserted&&EquivalentDirectoryCopies(source,first,plan,job,true)){
+            first.restoredDirectoryLink=plan.restoredDirectoryLink=plan.entry.directory;
+            first.entry.hardLink=plan.entry.hardLink=true;
+            first.entry.linkCount=plan.entry.linkCount=2;
+            plan.entry.resolvedId=first.entry.resolvedId;
+        }
+    }
+    for(auto& child:plan.children)RestoreArchiveLinks(source,child,groups,job);
+}
+
 using SavedDirectoryLinks=std::map<std::pair<std::string,HfsPlus::Bytes>,Planned*>;
 
 void RestoreDirectoryLinks(Volume& source,Planned& plan,SavedDirectoryLinks& groups,Storage::Job& job)
@@ -1330,7 +1444,7 @@ void RestoreDirectoryLinks(Volume& source,Planned& plan,SavedDirectoryLinks& gro
 }
 
 struct ClassicCopyLoss {
-    bool permissions=false, protection=false, dates=false, links=false, compression=false, allocation=false, attributes=false;
+    bool permissions=false, protection=false, dates=false, links=false, compression=false, allocation=false, attributes=false, special=false;
 
     void Inspect(Volume& source,const Planned& plan,Storage::Job& job){
         if(job.cancelled())throw Storage::Cancelled();
@@ -1342,6 +1456,7 @@ struct ClassicCopyLoss {
         dates|=entry.fractionalDates||entry.additionalDates.accessed.has_value()||entry.additionalDates.changed.has_value()||
                entry.created>UINT32_MAX||entry.modified>UINT32_MAX||entry.additionalDates.backup.value_or(0)>UINT32_MAX;
         links|=entry.hardLink;
+        special|=entry.symbolicLink||(entry.posix&&entry.posix->IsSpecial());
         compression|=entry.compressed;
         attributes|=!entry.attributes.empty();
         if(!allocation&&!entry.directory&&!entry.symbolicLink){
@@ -1362,6 +1477,7 @@ struct ClassicCopyLoss {
         add(protection,"BSD protection flags");
         add(dates,"Access time, attribute-change time, or subsecond precision");
         add(links,"Hard-link relationships");
+        add(special,"Symbolic links or special files");
         add(compression,"Native filesystem compression");
         add(allocation,"Sparse allocation or clone sharing");
         add(attributes,"Extended attributes or ACLs");
@@ -1475,6 +1591,11 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
             PrepareCopyTimestamps(plans.back(),dst,kind=="APFS",kind=="HFS+"||kind=="HFSX");
         }
     }
+    if(dst.Supports().CanCreateHardLinks()){
+        RestoredArchiveGroups groups;
+        for(size_t i=0;i<plans.size();++i)
+            RestoreArchiveLinks(*sources[i].first,plans[i],groups,job);
+    }
     std::string firstLinkedFolder;
     if(std::string_view(dst.Kind())=="APFS"){
         DirectoryLinkGroups groups;
@@ -1506,21 +1627,21 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         if(moving&&!details.empty())
             throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
         if(!preview.empty()){
-            Check(!loss.links&&!loss.compression&&!loss.allocation,
-                  "Archive Copy currently preserves metadata for ordinary files and folders only");
             if(job.requestChoice(Storage::CopyPrompt::ClassicArchiveNames,preview)!=Storage::ConflictChoice::Replace)
                 throw Storage::Cancelled();
             archiveCopy=true;
         }else if(!details.empty()){
             const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details);
             if(choice==Storage::ConflictChoice::ReplaceAll){
-                Check(!loss.links&&!loss.compression&&!loss.allocation,
-                      "Archive Copy currently preserves metadata for ordinary files and folders only");
                 archiveCopy=true;
             }else if(choice!=Storage::ConflictChoice::Replace)throw Storage::Cancelled();
         }
         if(archiveCopy){
-            for(const auto& plan:projected)ValidateArchiveNames(plan);
+            ArchiveLinkGroups groups;
+            for(size_t i=0;i<projected.size();++i){
+                ValidateArchiveNames(projected[i]);
+                RecordArchiveLayout(*sources[i].first,projected[i],groups,progress,job);
+            }
             plans=std::move(projected);
         }
     }

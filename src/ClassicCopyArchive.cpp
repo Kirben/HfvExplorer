@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "ClassicCopyArchive.h"
 #include "CopyWorkerProtocol.h"
+#include "HfsPlusCompression.h"
 #include <bcrypt.h>
 #include <algorithm>
 
@@ -14,6 +15,7 @@ using HfsPlus::AttributeData;
 
 constexpr uint64_t signatureV1=0x3141564648534648;
 constexpr uint64_t signatureV2=0x3241564648534648;
+constexpr uint64_t signatureV3=0x3341564648534648;
 constexpr uint64_t maximumFork=0x7fffffff;
 constexpr uint64_t maximumHeader=1024*1024;
 
@@ -100,8 +102,9 @@ Digest Fingerprint(MacBrowser::Volume& volume,const Entry& entry,Storage::Job& j
     return hash.Finish();
 }
 
-AttributeData Encode(const Entry& entry,const Digest& binding,Storage::Job& job)
+AttributeData Encode(const Metadata& metadata,const Digest& binding,Storage::Job& job)
 {
+    const auto& entry=metadata.entry;
     Data header;
     header.put(std::string(reinterpret_cast<const char*>(binding.data()),binding.size()));
     header.put(entry.directory);
@@ -118,7 +121,18 @@ AttributeData Encode(const Entry& entry,const Digest& binding,Storage::Job& job)
     if(entry.posix){
         header.put(entry.posix->uid);header.put(entry.posix->gid);header.put(entry.posix->mode);
         header.put(entry.posix->protection);header.put(entry.posix->flags);
+        header.put(uint8_t(entry.posix->special));header.put(entry.posix->device);
     }
+    header.put(metadata.symbolicLinkTarget.has_value());
+    if(metadata.symbolicLinkTarget){
+        const auto& target=*metadata.symbolicLinkTarget;
+        header.put(std::string(reinterpret_cast<const char*>(target.data()),target.size()));
+    }
+    header.put(metadata.linkGroup);
+    header.put(metadata.compressionType);
+    header.put(std::string(entry.inlineCompression.begin(),entry.inlineCompression.end()));
+    header.put(std::string(reinterpret_cast<const char*>(entry.finder.data()),entry.finder.size()));
+    Check(header.bytes.size()<=maximumHeader,"Classic metadata companion header is too large");
     header.put(entry.attributes.size());
     uint64_t payloadSize=0;
     for(const auto& [name,value]:entry.attributes){
@@ -130,7 +144,7 @@ AttributeData Encode(const Entry& entry,const Digest& binding,Storage::Job& job)
         Check(header.bytes.size()<=maximumHeader,"Classic metadata companion header is too large");
     }
     Data prefix;
-    prefix.put(signatureV2);
+    prefix.put(signatureV3);
     prefix.put(header.bytes.size());
     prefix.bytes.insert(prefix.bytes.end(),header.bytes.begin(),header.bytes.end());
     Check(payloadSize<=maximumFork-prefix.bytes.size()-Digest{}.size(),
@@ -211,7 +225,7 @@ void RefuseCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
     CheckCut(volume,item,job,0);
 }
 
-std::optional<Entry> Load(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
 {
     Entry companion;
     if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion)||
@@ -223,11 +237,11 @@ std::optional<Entry> Load(MacBrowser::Volume& volume,const Entry& item,Storage::
         volume.Read(companion.id,0,at,out,count);
     });
     auto result=Decode(stored,Fingerprint(volume,item,job),job);
-    Check(!result||result->directory==item.directory,"Classic companion does not match its object type");
+    Check(!result||result->entry.directory==item.directory,"Classic companion does not match its object type");
     return result;
 }
 
-void Save(MacBrowser::Volume& volume,uint32_t id,const Entry& source,Storage::Job& job)
+void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage::Job& job)
 {
     const auto item=volume.Stat(id);
     Entry companion,existing;
@@ -244,7 +258,7 @@ void Save(MacBrowser::Volume& volume,uint32_t id,const Entry& source,Storage::Jo
     Check(Load(volume,item,job).has_value(),"Classic metadata companion failed readback verification");
 }
 
-std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,Storage::Job& job)
+std::optional<Metadata> Decode(const AttributeData& archive,const Digest& binding,Storage::Job& job)
 {
     constexpr auto digestSize=Digest{}.size();
     if(archive.size()<16+digestSize||archive.size()>maximumFork)return {};
@@ -253,7 +267,7 @@ std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,S
     prefix.bytes.resize(16);
     archive.Read(0,prefix.bytes.data(),prefix.bytes.size());
     const auto signature=prefix.get();
-    if(signature!=signatureV1&&signature!=signatureV2)return {};
+    if(signature!=signatureV1&&signature!=signatureV2&&signature!=signatureV3)return {};
     const auto headerSize=prefix.get();
     Check(headerSize<=maximumHeader&&headerSize<=bodySize-16,"Invalid classic metadata companion header");
     Data header;
@@ -273,9 +287,10 @@ std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,S
     Digest stored{};
     archive.Read(bodySize,stored.data(),stored.size());
     Check(checksum.Finish()==stored,"Classic metadata companion checksum mismatch");
-    Entry entry;
+    Metadata metadata;
+    auto& entry=metadata.entry;
     entry.directory=header.flag();
-    if(signature==signatureV2)entry.name=header.u16();
+    if(signature!=signatureV1)entry.name=header.u16();
     entry.datesValid=header.flag();
     entry.created=header.get();
     entry.modified=header.get();
@@ -292,6 +307,34 @@ std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,S
               protection<=PosixMetadata::ProtectionMask&&flags<=PosixMetadata::HintMask,
               "Invalid classic metadata companion permissions");
         entry.posix=PosixMetadata{uint32_t(uid),uint32_t(gid),uint16_t(mode),uint8_t(protection),uint8_t(flags)};
+        if(signature==signatureV3){
+            const auto kind=header.get(),device=header.get();
+            Check(kind<=15&&(!kind||SpecialType(unsigned(kind))!=SpecialFileType::None)&&device<=UINT32_MAX,
+                  "Invalid classic companion special-file type");
+            entry.posix->special=SpecialType(unsigned(kind));
+            Check(!device||IsDevice(entry.posix->special),"Unexpected classic companion device identifier");
+            entry.posix->device=uint32_t(device);
+        }
+    }
+    if(signature==signatureV3){
+        if(header.flag()){
+            const auto target=header.text();
+            Check(!entry.directory&&(!entry.posix||!entry.posix->IsSpecial())&&!target.empty(),
+                  "Invalid classic companion symbolic link");
+            metadata.symbolicLinkTarget.emplace(target.begin(),target.end());
+        }
+        metadata.linkGroup=header.text();
+        Check(metadata.linkGroup.empty()||metadata.linkGroup.size()==16,"Invalid classic companion link group");
+        const auto type=header.get();
+        Check(type<=14&&type!=2&&type!=5&&type!=6,"Invalid classic companion compression type");
+        metadata.compressionType=uint32_t(type);
+        const auto inlineBytes=header.text();
+        Check(inlineBytes.empty()||(type&&inlineBytes.size()<=HfsPlus::InlineCompressionLimit),
+              "Invalid classic companion inline compression");
+        entry.inlineCompression.assign(inlineBytes.begin(),inlineBytes.end());
+        const auto finder=header.text();
+        Check(finder.size()==entry.finder.size(),"Invalid classic companion Finder information");
+        memcpy(entry.finder.data(),finder.data(),finder.size());
     }
     const auto count=header.get();
     Check(count<=(header.bytes.size()-header.at)/16,"Invalid classic metadata companion attribute count");
@@ -312,6 +355,6 @@ std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,S
     header.end();
     Check(at==bodySize,"Trailing classic metadata companion payload");
     entry.attributesKnown=true;
-    return entry;
+    return metadata;
 }
 }

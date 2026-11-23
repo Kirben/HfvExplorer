@@ -6,6 +6,7 @@ namespace HfsPlus {
 // Re-encoding validates per-unit checksums so a changing input cannot publish
 // a resource table that describes different data. Memory is bounded by the table.
 inline constexpr size_t InlineCompressionLimit = 3802;
+Volume::CompressionMode CompressionModeForType(uint32_t);
 bool IsInlineCompression(const Bytes&, uint64_t logicalSize);
 void ValidateInlineCompression(const Bytes&, uint64_t logicalSize);
 void ValidateResourceCompression(const Bytes&, uint64_t logicalSize, uint64_t resourceSize,
@@ -37,6 +38,7 @@ class Compression {
     using Reader = std::function<void(uint64_t, void *, size_t)>;
     Compression(Bytes attribute, uint64_t resourceSize, Reader resource);
     uint64_t Size() const { return size_; }
+    uint32_t Type() const { return type_; }
     bool UsesResource() const;
     uint64_t Read(uint64_t offset, void *, size_t);
 
