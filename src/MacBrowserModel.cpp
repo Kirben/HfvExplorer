@@ -1035,9 +1035,11 @@ void VerifyMovedArchive(Volume& source,const Planned& plan,Volume& destination,u
     }
     Check(actual.directory==plan.entry.directory&&actual.name==plan.entry.name,
           "Published classic archive identity differs. Source retained.");
-    if(plan.archivedMetadata)
-        Check(ClassicCopyArchive::RequireVerifiedPair(destination,actual,job).has_value(),
-              "Published classic archive companion is missing. Source retained.");
+    if(plan.archivedMetadata){
+        const auto pair=ClassicCopyArchive::RequireVerifiedPair(destination,actual,job);
+        Check(pair&&pair->metadata.entry.name==plan.archivedMetadata->entry.name,
+              "Published classic archive lost the original name. Source retained.");
+    }
     if(actual.directory){
         for(const auto& child:plan.children)VerifyMovedArchive(source,child,destination,actual.id,true,job);
         return;
@@ -1915,7 +1917,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         auto projected=plans;
         for(auto& plan:projected)PrepareClassicArchive(plan);
         std::string preview;
-        if(!moving)ProjectArchiveNames(projected,dst,parent,true,{},preview,job);
+        ProjectArchiveNames(projected,dst,parent,true,{},preview,job);
         ValidatePlans(dst,projected,parent,true);
         std::optional<ArchiveSpace> space;
         auto archiveProgress=progress;
@@ -1939,7 +1941,8 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
             }
         }
         if(!preview.empty()){
-            if(job.requestChoice(Storage::CopyPrompt::ClassicArchiveNames,preview+spaceDetails)!=Storage::ConflictChoice::Replace)
+            const auto prompt=moving?Storage::CopyPrompt::ClassicArchiveMoveNames:Storage::CopyPrompt::ClassicArchiveNames;
+            if(job.requestChoice(prompt,preview+spaceDetails)!=Storage::ConflictChoice::Replace)
                 throw Storage::Cancelled();
             archiveCopy=true;
         }else if(!details.empty()){

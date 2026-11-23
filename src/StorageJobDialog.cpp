@@ -34,12 +34,18 @@ class ConflictDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
 public:
  ConflictDialog(const Storage::PendingCopyPrompt& prompt,CWnd* owner,bool utf8,std::shared_ptr<Storage::Job> job)
-  :CDialog(prompt.kind==Storage::CopyPrompt::ClassicArchiveNames?IDD_CLASSIC_ARCHIVE_NAMES:
+  :CDialog((prompt.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt.kind==Storage::CopyPrompt::ClassicArchiveMoveNames)?IDD_CLASSIC_ARCHIVE_NAMES:
            (prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss||prompt.kind==Storage::CopyPrompt::ClassicArchiveMove)?IDD_CLASSIC_COPY_WARNING:IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();
   if(job_)SetTimer(1,50,nullptr);
-  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss||
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveMoveNames){
+   SetWindowText("Preview classic HFS move");
+   SetDlgItemText(IDC_CONFLICT_QUESTION,"Archive Move uses these MacRoman names and removes the source after verification.");
+   SetDlgItemText(IDC_REPLACE,"&Archive move");
+  }
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt_.kind==Storage::CopyPrompt::ClassicArchiveMoveNames||
+     prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss||
      prompt_.kind==Storage::CopyPrompt::ClassicArchiveMove){
    if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveMove){
     SetWindowText("Move to classic HFS");

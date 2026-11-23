@@ -3097,11 +3097,15 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
     const auto initiallyProjected=ProjectClassicCopyName(folderName);
     const auto sentinel=Put(*classic,2,initiallyProjected,1024,91);
     const auto approvedFolder=ProjectClassicCopyName(folderName,1);
-    const auto run=[&]{return Submit(OrdinaryCopy{{Native(source,folder)},Native(classic)});};
-    auto declined=run();
+    const auto run=[&](bool moving){
+        auto origin=Native(source,folder);
+        origin.cut=moving;
+        return Submit(OrdinaryCopy{{origin},Native(classic)});
+    };
+    auto declined=run(true);
     Conflict(declined);
     auto preview=declined.Job()->conflictState();
-    Check(preview.kind==Storage::CopyPrompt::ClassicArchiveNames&&
+    Check(preview.kind==Storage::CopyPrompt::ClassicArchiveMoveNames&&
           preview.path.find(BrowserPresentation::Utf8(folderName))!=std::string::npos&&
           preview.path.find(BrowserPresentation::Utf8(approvedFolder))!=std::string::npos&&
           preview.path.find("~1")!=std::string::npos,
@@ -3110,15 +3114,17 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
     Wait(declined);
     Entry absent;
     Check(declined.Job()->result().outcome==Storage::Outcome::Cancelled&&
-          !classic->FindChild(2,approvedFolder,absent),"Declining the preview created the renamed directory");
-    auto copy=run();
+          !classic->FindChild(2,approvedFolder,absent)&&source->FindChild(2,folderName,absent),
+          "Declining the move preview changed source or destination");
+    auto copy=run(true);
     Conflict(copy);
     preview=copy.Job()->conflictState();
-    Check(preview.kind==Storage::CopyPrompt::ClassicArchiveNames,"Missing archive preview on retry");
+    Check(preview.kind==Storage::CopyPrompt::ClassicArchiveMoveNames,"Missing archive move preview on retry");
     copy.Job()->resolve(preview.id,Storage::ConflictChoice::Replace);
     Wait(copy);
     const auto copied=copy.Job()->result();
-    Check(!copied.code&&copy.Snapshot().complete,copied.message.c_str());
+    Check(!copied.code&&copied.moved&&copy.Snapshot().complete,copied.message.c_str());
+    Check(!source->FindChild(2,folderName,absent),"Verified archive move retained the source directory");
     Verify(*classic,sentinel,1024,91);
     classic.reset();
     classic=OpenBrowserImage(Wide(base+".dsk"));
@@ -3139,7 +3145,7 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
           "Original Unicode and case-distinct names were not restored");
     Verify(*returned,a.id,4097,32);
     Verify(*returned,b.id,4099,63);
-    fprintf(report,"PASS: classic archive previews MacRoman truncation and collisions, preserves occupied names, and restores original names and both forks after reopening.\n");
+    fprintf(report,"PASS: archive move previews MacRoman truncation and collisions, retains the source on cancellation, and restores original names and both forks after reopening.\n");
 }
 
 void TestClassicArchiveSpecialEntries(const std::string& root,FILE* report)
@@ -5103,7 +5109,7 @@ void TestCrossFormatAttributes(const std::string& root,FILE* report)
 }
 } // namespace
 
-int RunCopyProcessTest(const char *directory) {
+int RunCopyProcessTest(const char *directory,bool archivesOnly) {
     if (!CreateDirectoryA(directory, nullptr))
         return 2;
     std::string root = directory;
@@ -5125,6 +5131,10 @@ int RunCopyProcessTest(const char *directory) {
         TestArchiveFolderMerge(root,report);
         TestClassicArchiveNamePreview(root,report);
         TestClassicArchiveSpecialEntries(root,report);
+        if(archivesOnly){
+            fclose(report);
+            return 0;
+        }
         TestClassicBackupDates(root,report);
         TestClassicCopyLoss(root,report);
         TestClassicLockRoundTrip(root,report);

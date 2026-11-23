@@ -238,8 +238,9 @@ BOOL CHFVExplorerApp::InitInstance()
  if(__argc==3&&!strcmp(__argv[1],"--verify-copy-release"))ExitProcess(RunCopyReleaseTest(__argv[2]));
  extern int RunCopyParentExitTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-copy-parent-exit"))ExitProcess(RunCopyParentExitTest(__argv[2]));
- extern int RunCopyProcessTest(const char*);
- if(__argc==3&&!strcmp(__argv[1],"--verify-copy-process"))ExitProcess(RunCopyProcessTest(__argv[2]));
+ extern int RunCopyProcessTest(const char*,bool);
+ if(__argc==3&&!strcmp(__argv[1],"--verify-copy-process"))ExitProcess(RunCopyProcessTest(__argv[2],false));
+ if(__argc==3&&!strcmp(__argv[1],"--verify-classic-archive-transfers"))ExitProcess(RunCopyProcessTest(__argv[2],true));
  extern int RunWindowsPathCoordinationTest(const char*);
  if(__argc==3&&!strcmp(__argv[1],"--verify-windows-path-coordination"))ExitProcess(RunWindowsPathCoordinationTest(__argv[2]));
  extern int RunPerVolumeCommandsTest(const char*);
