@@ -103,6 +103,7 @@ public:
         Capabilities out; out.writable = out.create = out.rename = out.remove = Writable(); return out;
     }
     virtual bool CaseSensitive() const = 0;
+    virtual uint64_t ClassicAllocationBlockSize() const {return 0;}
     virtual uint64_t FreeBytes() const = 0;
     virtual void Reload() {}
     virtual void Close() {}

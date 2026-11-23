@@ -796,6 +796,57 @@ void RecordArchiveLayout(Volume& source,Planned& plan,ArchiveLinkGroups& groups,
     for(auto& child:plan.children)RecordArchiveLayout(source,child,groups,progress,job);
 }
 
+struct ArchiveSpace {
+    uint64_t forks=0, companions=0, padding=0, catalog=0;
+    uint64_t block;
+    uint64_t available;
+
+    static void Add(uint64_t& total,uint64_t value)
+    {
+        Check(value<=UINT64_MAX-total,"Archive space estimate overflow");
+        total+=value;
+    }
+
+    void Payload(uint64_t& total,uint64_t size)
+    {
+        Add(total,size);
+        if(size%block)Add(padding,block-size%block);
+    }
+
+    void Count(Volume& destination,std::optional<uint32_t> parent,const Planned& plan,Storage::Job& job)
+    {
+        if(job.cancelled())throw Storage::Cancelled();
+        Entry existing;
+        const bool merge=plan.entry.directory&&parent&&
+            destination.FindTransferChild(*parent,plan.entry,existing)&&existing.directory;
+        for(const auto& fork:plan.entry.forks)Payload(forks,fork.size);
+        if(!merge){
+            Payload(companions,ClassicCopyArchive::EncodedSize(*plan.archivedMetadata,job));
+            // Allow for growing catalog records for the item and its companion.
+            Add(catalog,block);
+        }
+        for(const auto& child:plan.children)
+            Count(destination,merge?std::optional<uint32_t>(existing.id):std::nullopt,child,job);
+    }
+
+    bool Fits()const
+    {
+        uint64_t minimum=forks;
+        Add(minimum,companions);
+        Add(minimum,padding);
+        return minimum<=available;
+    }
+
+    std::string Details()const
+    {
+        return "\r\n\r\nArchive space (bytes)\r\nDense forks: "+std::to_string(forks)+
+            "   Companions: "+std::to_string(companions)+
+            "\r\nAllocation padding: "+std::to_string(padding)+
+            "   Catalog allowance: "+std::to_string(catalog)+
+            "\r\nFree: "+std::to_string(available)+(Fits()?"":"   Insufficient archive space");
+    }
+};
+
 void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job)
 {
     auto& entry=plan.entry;
@@ -1631,22 +1682,41 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         ValidatePlans(dst,projected,parent,true);
         if(moving&&!details.empty())
             throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
+        std::optional<ArchiveSpace> space;
+        auto archiveProgress=progress;
+        std::string spaceError,spaceDetails;
+        if(!preview.empty()||!details.empty()){
+            try{
+                const auto block=dst.ClassicAllocationBlockSize();
+                Check(block!=0,"Cannot determine classic HFS allocation block size");
+                space=ArchiveSpace{0,0,0,0,block,dst.FreeBytes()};
+                ArchiveLinkGroups groups;
+                for(size_t i=0;i<projected.size();++i){
+                    ValidateArchiveNames(projected[i]);
+                    RecordArchiveLayout(*sources[i].first,projected[i],groups,archiveProgress,job);
+                    space->Count(dst,parent,projected[i],job);
+                }
+                spaceDetails=space->Details();
+            }catch(const HfsPlus::Error& error){
+                if(!preview.empty())throw;
+                spaceError=error.what();
+                spaceDetails="\r\n\r\nArchive Copy unavailable: "+spaceError;
+            }
+        }
         if(!preview.empty()){
-            if(job.requestChoice(Storage::CopyPrompt::ClassicArchiveNames,preview)!=Storage::ConflictChoice::Replace)
+            if(job.requestChoice(Storage::CopyPrompt::ClassicArchiveNames,preview+spaceDetails)!=Storage::ConflictChoice::Replace)
                 throw Storage::Cancelled();
             archiveCopy=true;
         }else if(!details.empty()){
-            const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details);
+            const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details+spaceDetails);
             if(choice==Storage::ConflictChoice::ReplaceAll){
                 archiveCopy=true;
             }else if(choice!=Storage::ConflictChoice::Replace)throw Storage::Cancelled();
         }
         if(archiveCopy){
-            ArchiveLinkGroups groups;
-            for(size_t i=0;i<projected.size();++i){
-                ValidateArchiveNames(projected[i]);
-                RecordArchiveLayout(*sources[i].first,projected[i],groups,progress,job);
-            }
+            if(!spaceError.empty())throw HfsPlus::Error(spaceError);
+            Check(space->Fits(),"Insufficient free space for the classic HFS archive");
+            progress=std::move(archiveProgress);
             plans=std::move(projected);
         }
     }

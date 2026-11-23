@@ -302,6 +302,12 @@ public:
         Encode(e.name);if(e.forks[0].size>HFS_MAX_FORK_SIZE||e.forks[1].size>HFS_MAX_FORK_SIZE)
             throw HfsPlus::Error("Fork exceeds the classic HFS 2 GiB minus one byte limit");
     }
+    uint64_t ClassicAllocationBlockSize()const override{
+        LegacyEngine::Scope engine(context_);
+        hfsvolent info{};
+        Check(volume_&&hfs_vstat(volume_,&info)==0);
+        return info.alblocksz;
+    }
     uint64_t FreeBytes()const override{LegacyEngine::Scope engine(context_);hfsvolent e;Check(volume_!=nullptr);Check(hfs_vstat(volume_,&e)==0);return e.freebytes;}
     Entry Stat(uint32_t id)override{LegacyEngine::Scope engine(context_);return Describe(Path(id),id);}
     void ValidateCopyTo(uint32_t id,Volume& target,uint32_t parent)override {LegacyEngine::Scope engine(context_);

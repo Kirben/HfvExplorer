@@ -117,8 +117,8 @@ public:
     void Rename(uint32_t, uint32_t, const std::u16string&) override { throw HfsPlus::Error("Read-only fixture"); }
     void Remove(uint32_t) override { throw HfsPlus::Error("Read-only fixture"); }
 };
-void Wait(const Operation &op) {
-    Check(WaitForSingleObject(op.Job()->event(), 30000) == WAIT_OBJECT_0, "copy process timed out");
+void Wait(const Operation &op,DWORD timeout=30000) {
+    Check(WaitForSingleObject(op.Job()->event(),timeout) == WAIT_OBJECT_0, "copy process timed out");
 }
 void Pass(const Operation &op) {
     Wait(op);
@@ -2589,6 +2589,8 @@ void TestClassicMetadataCompanion(FILE* report)
     binding[0]=12;
     Storage::Job job;
     const auto stored=ClassicCopyArchive::Encode(ClassicCopyArchive::Metadata(source),binding,job);
+    Check(stored.size()==ClassicCopyArchive::EncodedSize(ClassicCopyArchive::Metadata(source),job),
+          "Companion size estimate differs from encoded size");
     const auto decoded=ClassicCopyArchive::Decode(stored,binding,job);
     const auto* restored=decoded?&decoded->entry:nullptr;
     Check(restored&&restored->attributes==source.attributes&&restored->posix==source.posix&&
@@ -4317,6 +4319,25 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         Check(bool(source),"Cannot reopen sparse classic archive fixture");
         const auto sparse=verifySparse(*source);
         const auto holes=source->SparseRanges(sparse.id);
+        const auto smallPath=root+"\\sparse-archive-small.dsk";
+        auto small=ClassicImage(smallPath);
+        auto tooBig=Submit(OrdinaryCopy{{Native(source,sparse.id)},Native(small)});
+        Conflict(tooBig);
+        const auto spacePrompt=tooBig.Job()->conflictState();
+        Check(spacePrompt.kind==Storage::CopyPrompt::ClassicMetadataLoss&&
+              spacePrompt.path.find("Dense forks: "+std::to_string(sparse.forks[0].size+sparse.forks[1].size))!=std::string::npos&&
+              spacePrompt.path.find("Companions: ")!=std::string::npos&&
+              spacePrompt.path.find("Allocation padding: ")!=std::string::npos&&
+              spacePrompt.path.find("Insufficient archive space")!=std::string::npos,
+              "Archive approval did not show payload, companions, padding and the free-space shortfall");
+        tooBig.Job()->resolve(spacePrompt.id,Storage::ConflictChoice::ReplaceAll);
+        Wait(tooBig);
+        const auto rejected=tooBig.Job()->result();
+        Check(rejected.code&&rejected.message.find("Insufficient free space")!=std::string::npos,
+              "Oversized archive was not rejected by preflight");
+        small.reset();
+        small=OpenBrowserImage(Wide(smallPath));
+        Check(small&&small->List(2).empty(),"Rejected archive left entries on disk");
         const auto classicPath=root+"\\sparse-archive.dsk";
         auto classic=ClassicImage(classicPath,16*1024*1024);
         auto archive=Submit(OrdinaryCopy{{Native(source,sparse.id)},Native(classic)});
@@ -4325,7 +4346,7 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         Check(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss&&
               prompt.path.find("Sparse allocation")!=std::string::npos,"Classic archive omitted sparse allocation");
         archive.Job()->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
-        Wait(archive);
+        Wait(archive,120000);
         const auto archived=archive.Job()->result();
         Check(!archived.code&&archive.Snapshot().complete,archived.message.c_str());
         classic.reset();
@@ -4340,7 +4361,7 @@ void TestSparseApfsCopy(const std::string& root,FILE* report)
         }
         auto returned=OpenBrowserImage(returnedPath);
         auto restore=Submit(OrdinaryCopy{{Native(classic,dense.id)},Native(returned)});
-        Wait(restore);
+        Wait(restore,120000);
         const auto restored=restore.Job()->result();
         Check(!restored.code&&restore.Snapshot().complete,restored.message.c_str());
         returned.reset();

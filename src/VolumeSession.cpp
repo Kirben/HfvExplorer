@@ -65,6 +65,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
     bool Mfs()const{return format_==ImageFormat::Mfs||format_==ImageFormat::NdifMfs;}
     bool Plus()const{return !Classic()&&!Mfs();}
     std::optional<std::pair<uint64_t,uint64_t>> hfsPlusDateRange_;
+    uint64_t classicAllocationBlockSize_=0;
     bool hfsx_ = false, caseSensitive_ = false, journaled_ = false;
     bool writeAllowed_ = false, initialized_ = false;
     std::atomic<bool> writable_{false}, lost_{false};
@@ -187,6 +188,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
                 Check(Plus()&&minimum<=maximum,"Invalid volume timestamp range");
                 hfsPlusDateRange.emplace(minimum,maximum);
             }
+            const auto classicBlockSize=info.get();
             const auto capabilities = Protocol::DecodeCapabilities(info);
             info.end();
             Response(SessionResult);
@@ -198,6 +200,7 @@ class PersistentVolume final : public Volume, public WorkerEndpoint {
                 description_ = std::move(description);
                 hfsx_ = hfsx;
                 hfsPlusDateRange_ = hfsPlusDateRange;
+                classicAllocationBlockSize_=classicBlockSize;
                 caseSensitive_ = caseSensitive;
                 journaled_ = journaled;
                 capabilities_ = capabilities;
@@ -331,6 +334,7 @@ public:
         if (worker_) Lost();
         Start();
     }
+    uint64_t ClassicAllocationBlockSize()const override{return classicAllocationBlockSize_;}
     uint64_t FreeBytes() const override {
         auto& self = *const_cast<PersistentVolume*>(this);
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1018,6 +1022,7 @@ int Child(const char* inputText, const char* outputText) {
             const auto range=volume->HfsPlusDateRange();
             info.put(range.has_value());
             if(range){info.put(range->first);info.put(range->second);}
+            info.put(volume->ClassicAllocationBlockSize());
             Protocol::EncodeCapabilities(info,volume->Supports());
             Send(output, SessionBytes, std::move(info));
             SessionReply(output);

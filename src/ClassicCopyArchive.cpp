@@ -102,7 +102,13 @@ Digest Fingerprint(MacBrowser::Volume& volume,const Entry& entry,Storage::Job& j
     return hash.Finish();
 }
 
-AttributeData Encode(const Metadata& metadata,const Digest& binding,Storage::Job& job)
+namespace {
+struct Envelope {
+    Data prefix;
+    uint64_t bodySize;
+};
+
+Envelope MakeEnvelope(const Metadata& metadata,const Digest& binding,Storage::Job& job)
 {
     const auto& entry=metadata.entry;
     Data header;
@@ -150,6 +156,19 @@ AttributeData Encode(const Metadata& metadata,const Digest& binding,Storage::Job
     Check(payloadSize<=maximumFork-prefix.bytes.size()-Digest{}.size(),
           "Classic metadata companion exceeds the fork limit");
     const auto bodySize=payloadSize+prefix.bytes.size();
+    return {std::move(prefix),bodySize};
+}
+}
+
+uint64_t EncodedSize(const Metadata& metadata,Storage::Job& job)
+{
+    return MakeEnvelope(metadata,{},job).bodySize+Digest{}.size();
+}
+
+AttributeData Encode(const Metadata& metadata,const Digest& binding,Storage::Job& job)
+{
+    const auto [prefix,bodySize]=MakeEnvelope(metadata,binding,job);
+    const auto& entry=metadata.entry;
     auto next=entry.attributes.begin();
     uint64_t payloadOffset=0;
     Hash checksum;

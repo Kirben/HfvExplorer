@@ -39,13 +39,8 @@ public:
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();
   if(job_)SetTimer(1,50,nullptr);
-  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames){
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss){
    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"EDIT");
-   SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
-   return TRUE;
-  }
-  if(prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss){
-   BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");
    SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
    return TRUE;
   }
