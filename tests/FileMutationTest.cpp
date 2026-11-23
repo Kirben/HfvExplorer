@@ -248,6 +248,25 @@ int RunFileMutationTest(const char* directory) {
   save(protectedDirectory+"\\Keep","REPLACEMENT");
   check(!DeleteHostSelectionJob(hostPath(protectedDirectory),true,expectedFolder,nullptr)&&
         GetFileAttributesA(protectedDirectory+"\\Keep")!=INVALID_FILE_ATTRIBUTES,"stale folder deletion removed a replacement child");
+  const CString nonJournaled=root+"\\NonJournaled",nested=nonJournaled+"\\Nested";
+  check(CreateDirectoryA(nonJournaled,nullptr)&&CreateDirectoryA(nested,nullptr),
+        "create fallback recursive AppleDouble fixture");
+  save(nonJournaled+"\\Earlier","NEIGHBOR");
+  save(nested+"\\Document","PRIMARY");
+  {CFile f;check(f.Open(nested+"\\%Document",CFile::modeCreate|CFile::modeWrite)!=FALSE,
+                "create nested AppleDouble companion");
+   f.Write(appleDouble.data(),UINT(appleDouble.size()));}
+  const auto refused=removeHost(nonJournaled,true);
+  const auto refusedError=GetLastError();
+  if(refused||refusedError!=ERROR_NOT_SUPPORTED)
+   throw std::runtime_error("fallback recursive Delete returned "+std::to_string(refused)+
+                            " with Windows error "+std::to_string(refusedError)+" for a nested AppleDouble pair");
+  check(load(nonJournaled+"\\Earlier")==std::vector<BYTE>({'N','E','I','G','H','B','O','R'})&&
+        load(nested+"\\Document")==std::vector<BYTE>({'P','R','I','M','A','R','Y'})&&
+        load(nested+"\\%Document")==appleDouble,"preflight modified files before finding the nested companion");
+  save(nested+"\\%Document","UNRELATED");
+  check(removeHost(nonJournaled,true)!=0,"fallback refused an unrelated percent-prefixed file");
+  fprintf(report,"PASS: fallback recursive Delete refuses nested AppleDouble pairs before changing any entry and accepts ordinary percent-prefixed files.\n");
   fprintf(report,"PASS: Windows delete pins verified entries and refuses replaced primary files, folders and AppleDouble companions.\n");
   CString renameDirectory=root+"\\Rename",cwdDirectory=root+"\\Decoys";check(CreateDirectoryA(renameDirectory,nullptr)&&CreateDirectoryA(cwdDirectory,nullptr),"create rename fixtures");
   save(renameDirectory+"\\Before","SELECTED");save(cwdDirectory+"\\Before","DECOY");

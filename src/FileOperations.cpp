@@ -587,8 +587,11 @@ void DeleteWindowsSelection(StorageLocation::ResolvedEntry& source,const Locatio
   return;
  }
  if(!DeleteHostSelectionJob(item.WindowsPath(),entry.directory,entry.identity,&job)){
+  const auto error=GetLastError();
   Cancel(job);
-  throw OperationError(GetLastError(),"Could not completely delete the selected Windows entry; remaining files were retained");
+  if(entry.directory&&error==ERROR_NOT_SUPPORTED)
+   throw OperationError(error,"This folder cannot be safely deleted without journal or file identity support.");
+  throw OperationError(error,"Could not completely delete the selected Windows entry; remaining files were retained");
  }
 }
 

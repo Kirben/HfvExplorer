@@ -22,6 +22,8 @@
 #include "BrowserPresentation.h"
 #include "StorageWorker.h"
 #include "WindowsEntryIdentity.h"
+#include "MacBrowserModel.h"
+#include <set>
 
 #include <vector>
 #include <array>
@@ -39,6 +41,7 @@ struct DeleteChild {
  std::wstring name;
  uint64_t id, created, modified, length;
  DWORD attributes;
+ std::vector<DeleteChild> children;
 };
 uint64_t FileTimeValue(FILETIME value)
 {
@@ -76,7 +79,32 @@ bool SnapshotDeleteChildren(HANDLE directory,Storage::Job* job,std::vector<Delet
   }
  }
 }
+DWORD UnjournaledDeleteError(const std::wstring& folder,const std::vector<DeleteChild>& children)
+{
+ // Use the same percent-name convention as the Windows volume backend.
+ // Match names in the inventory so a newly created file is never added to
+ // the deletion plan and an unrelated percent-prefixed file can remain ordinary.
+ const auto less=[](const std::wstring& a,const std::wstring& b){
+  return CompareStringOrdinal(a.c_str(),-1,b.c_str(),-1,TRUE)==CSTR_LESS_THAN;
+ };
+ std::set<std::wstring,decltype(less)> names(less);
+ for(const auto& entry:children)names.insert(entry.name);
+ for(const auto& entry:children){
+  if(entry.name.size()<2||entry.name.front()!=L'%'||
+     (entry.attributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
+     names.find(entry.name.substr(1))==names.end())continue;
+  try{
+   if(MacBrowser::WindowsResourceCompanion(folder+L"\\"+entry.name))return ERROR_NOT_SUPPORTED;
+  }catch(const std::exception&){
+   return ERROR_FILE_INVALID;
+  }
+ }
+ return ERROR_SUCCESS;
+}
+
+enum class DeleteTreePhase { Inventory, Remove };
 int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
+                     std::vector<DeleteChild>& children,DeleteTreePhase phase,
                      const MacBrowser::ObjectIdentity* selected=nullptr,
                      const DeleteChild* child=nullptr,DWORD volumeSerial=0) {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
@@ -102,19 +130,24 @@ int delete_host_tree(const std::wstring& path,unsigned depth,Storage::Job* job,
   if(info.dwVolumeSerialNumber!=volumeSerial||id!=child->id||
      (info.dwFileAttributes&kind)!=(child->attributes&kind)||
      FileTimeValue(info.ftCreationTime)!=child->created||
-     FileTimeValue(info.ftLastWriteTime)!=child->modified||(!directory&&length!=child->length)){
+     (!directory&&(FileTimeValue(info.ftLastWriteTime)!=child->modified||length!=child->length))){
    SetLastError(ERROR_FILE_INVALID);return 0;
   }
  }
  if(directory&&!(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)){
-  std::vector<DeleteChild> children;
-  if(!SnapshotDeleteChildren(pinned.value,job,children))return 0;
+  if(phase==DeleteTreePhase::Inventory){
+   if(!SnapshotDeleteChildren(pinned.value,job,children))return 0;
+   const auto error=UnjournaledDeleteError(path,children);
+   if(error!=ERROR_SUCCESS){SetLastError(error);return 0;}
+  }
 #ifdef HFV_TESTING
-  if(windowsDeleteEnumeratedForTest)windowsDeleteEnumeratedForTest();
+  if(phase==DeleteTreePhase::Remove&&windowsDeleteEnumeratedForTest)windowsDeleteEnumeratedForTest();
 #endif
-  for(const auto& entry:children)
-   if(!delete_host_tree(path+L"\\"+entry.name,depth+1,job,nullptr,&entry,info.dwVolumeSerialNumber))return 0;
+  for(auto& entry:children)
+   if(!delete_host_tree(path+L"\\"+entry.name,depth+1,job,entry.children,phase,
+                        nullptr,&entry,info.dwVolumeSerialNumber))return 0;
  }
+ if(phase==DeleteTreePhase::Inventory)return 1;
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  FILE_DISPOSITION_INFO disposition{TRUE};
  const bool removed=SetFileInformationByHandle(pinned.value,FileDispositionInfo,
@@ -135,7 +168,16 @@ int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const MacBrow
  }else if(full.size()<=7||full[5]!=L':'||full[6]!=L'\\'){
   SetLastError(ERROR_ACCESS_DENIED);return 0;
  }
- return delete_host_tree(full,0,job,selected);
+ DWORD error=ERROR_SUCCESS;
+ int removed=0;
+ {
+  std::vector<DeleteChild> children;
+  if(delete_host_tree(full,0,job,children,DeleteTreePhase::Inventory,selected))
+   removed=delete_host_tree(full,0,job,children,DeleteTreePhase::Remove,selected);
+  if(!removed)error=GetLastError();
+ }
+ if(!removed)SetLastError(error);
+ return removed;
 }
 enum class DeleteMode { Selection, CutEntry };
 int DeleteHostEntry(const std::wstring& path,bool directory,const MacBrowser::EntryIdentity& expected,
