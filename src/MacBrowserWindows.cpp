@@ -528,11 +528,24 @@ public:
     HfsPlus::Attributes GetAttributes(uint32_t id)override{Double d;auto path=Companion(Path(id));return AppleDouble(path,d)?DoubleAttributes(path,d):HfsPlus::Attributes{};}
     void PublishMetadata(uint32_t id,const Entry& e,std::function<void()> finish={},
                          Reader newResource={},Storage::Job* job=nullptr){
-        auto header=DoubleHeader(e);auto path=Path(id),companion=Companion(path),root=path.substr(0,path.find_last_of(L"\\/"));
+        const auto path=Path(id),companion=Companion(path);
+        const auto separator=path.find_last_of(L"\\/");
+        const auto root=path.substr(0,separator==6?7:separator);
+        const bool standalone=!finish&&!WindowsMoveUndo::Session::Current();
+        if(standalone&&WindowsMoveUndo::Supported(root)){
+            WindowsMoveUndo::RunExport(root,[&]{
+                PublishMetadata(id,e,{},std::move(newResource),job);
+                if(job&&job->cancelled())throw Storage::Cancelled();
+            });
+            return;
+        }
+        auto header=DoubleHeader(e);
         DirectoryLease directory(root);FileVersion original(companion);std::unique_ptr<FileVersion> replacement,primary;std::unique_ptr<DirectoryLease> folder;
         if(e.directory){folder.reset(new DirectoryLease(path));Check(e.identity.primary.key==folder->identity.key,"Primary folder changed before metadata publication");}else{primary.reset(new FileVersion(path));Check(primary->Present()&&e.identity.primary==primary->Identity(),"Primary file changed before metadata publication");}
         Double old;
         const bool exists=original.Present();
+        Check(!standalone||!exists,
+              "Replacing an AppleDouble companion requires a local NTFS folder; the existing companion was kept");
         Check(!exists||AppleDouble(companion,old),"An unrelated companion blocks metadata changes; it was preserved");
         Check(original.Identity()==e.identity.companion,"The metadata companion changed before publication");
         Check(newResource||old.size==e.forks[1].size,"Resource fork changed before metadata publication");
@@ -576,6 +589,7 @@ public:
                 PublishRename(original,companion,backup,"Cannot preserve old metadata companion");
                 backed=true;
                 original.Verify(backup);
+                Publication("metadata-original-staged");
             }
             PublishRename(*replacement,staged.path,companion,"Cannot publish metadata companion");
             staged.path.clear();

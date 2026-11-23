@@ -1772,6 +1772,36 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
         Check(host->List(2).size()==(phase==7?2:1),"Windows cut recovery left unexpected entries");
     }
     fprintf(report,"PASS: Windows Cut to HFS+, HFSX and APFS restores both source files before cleanup commit and removes both after commit while preserving the destination forks.\n");
+    for(unsigned phase:{7u,8u,9u}){
+        CString folder;
+        folder.Format("%s\\windows-metadata-%u",root.GetString(),phase);
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create Windows metadata recovery fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        {
+            auto host=MacBrowser::OpenWindows(path);
+            Put(*host,false);
+            Put(*host,false,false,2,u"Neighbor");
+        }
+        const auto stream=folder+"\\%Document:Notes";
+        const Bytes notes{24,32,48,72};
+        Save(stream,notes);
+        CrashChild(folder,phase,L"windows-metadata-replace");
+        auto host=MacBrowser::OpenWindows(path);
+        VerifyFile(*host,2,u"Neighbor",false);
+        const auto entry=host->Stat(Find(*host,2,u"Document"));
+        const auto old=Entry(false),replacement=Entry(phase==9);
+        Check(entry.forks[0].size==old.forks[0].size&&entry.forks[1].size==replacement.forks[1].size&&
+              entry.finder==old.finder,"Windows metadata recovery changed the primary file or Finder information");
+        for(unsigned fork=0;fork<2;++fork){
+            Bytes data(size_t(entry.forks[fork].size));
+            host->Read(entry.id,fork,0,data.data(),data.size());
+            for(size_t at=0;at<data.size();++at)
+                Check(data[at]==Byte(fork==1&&phase==9,fork,at),"Windows metadata recovery restored the wrong fork bytes");
+        }
+        Check(Load(stream)==notes&&host->List(2).size()==2,
+              "Windows metadata recovery lost an alternate stream or left staging");
+    }
+    fprintf(report,"PASS: standalone Windows resource-fork replacement restores the old companion before commit and retains the new companion after commit, preserving the primary file and alternate streams.\n");
 }
 
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
@@ -1812,6 +1842,21 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
                     if(!strcmp(step,"rename-companion-published"))ExitProcess(90+phase);
                 };
             volume->Rename(Find(*volume,2,u"Document"),2,phase==12?u"DOCUMENT":u"Renamed");
+            return 3;
+        }
+        if(!strcmp(action,"windows-metadata-replace")){
+            auto host=MacBrowser::OpenWindows(VolumeCoord::Wide(image));
+            const auto id=Find(*host,2,u"Document");
+            auto entry=host->Stat(id);
+            entry.forks[1].size=Entry(true).forks[1].size;
+            if(phase==7)MacBrowser::windowsPublicationFault=[](const char* step){
+                if(!strcmp(step,"metadata-original-staged"))ExitProcess(97);
+            };
+            Storage::Job job;
+            host->PutResourceReplacementForJob(id,entry,[](unsigned fork,uint64_t at,void* data,size_t n){
+                auto out=static_cast<uint8_t*>(data);
+                for(size_t i=0;i<n;++i)out[i]=Byte(true,fork,at+i);
+            },{},job);
             return 3;
         }
         if(!strcmp(action,"windows-cut-to-modern")){

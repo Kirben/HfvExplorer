@@ -164,11 +164,21 @@ void WindowsStagingSafety(const std::string& root,FILE* report)
   struct Reset{~Reset(){windowsPublicationFault={};}} reset;
   windowsPublicationFault=[&](const char* current){
    if(strcmp(current,phase))return;
+   auto stagingDirectory=folder;
+   auto pattern="\\HFV*.tmp";
+   if(!strcmp(phase,"metadata-file-reserved")){
+    WIN32_FIND_DATAA journal{};
+    const auto search=FindFirstFileA((folder+"\\.hfv-export-*").c_str(),&journal);
+    Check(search!=INVALID_HANDLE_VALUE,"locate metadata recovery directory");
+    FindClose(search);
+    stagingDirectory+="\\"+std::string(journal.cFileName);
+    pattern="\\1"; // The companion is the first owned slot.
+   }
    WIN32_FIND_DATAA found{};
-   const auto search=FindFirstFileA((folder+"\\HFV*.tmp").c_str(),&found);
+   const auto search=FindFirstFileA((stagingDirectory+pattern).c_str(),&found);
    Check(search!=INVALID_HANDLE_VALUE,"locate reserved staging file");
    FindClose(search);
-   decoy=folder+"\\"+found.cFileName;
+   decoy=stagingDirectory+"\\"+found.cFileName;
    Check(MoveFileA(decoy.c_str(),(decoy+".original").c_str())!=FALSE,"move reserved staging file aside");
    Save(decoy,"UNRELATED");
    replaced=true;
