@@ -410,6 +410,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      });
  bool complete=false,inPlace=false,windowsDestination=false,crossFormatMove=false;
  InterruptedMoveReport report;
+ const bool reportExport=transfer.adapter&&target.IsWindows()&&!moving&&request.sources.size()==1&&!request.sources.front().directory;
  std::vector<std::u16string> publishedNames;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
@@ -489,7 +490,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      Storage::OutcomeEvidence evidence;
      try{
       WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
-       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true);
+       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true,reportExport?&publishedNames:nullptr);
        destination.first->Close();
        Cancel(job);
       });
@@ -512,7 +513,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      report.Append(planned);
     }
     const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
-                                        false,report?&publishedNames:nullptr);};
+                                        false,(report||reportExport)?&publishedNames:nullptr);};
     if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);
     else copy();
    }
@@ -551,6 +552,8 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
    if(report)report.Complete();
   }else if(report)report.Append("Transfer incomplete. Source cleanup did not start.\r\n");
  }
+ if(complete&&reportExport&&publishedNames.size()==1)
+  completion.publishedWindowsExport=ChildPath(target.WindowsPath(),publishedNames.front());
  completion.complete=complete;
  completion.completed=job.progress().files;
  Storage::Result result;

@@ -123,6 +123,7 @@ struct Completion {
  MacBrowser::Entry entry;hfsdirent properties{};bool classicProperties=false;std::string description,details;
  // Conservatively includes resources that may have changed on a partial failure.
  std::vector<Change> affected;
+ std::wstring publishedWindowsExport;
 };
 class Operation {
  struct State;

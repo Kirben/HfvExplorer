@@ -500,6 +500,29 @@ int RunFileOperationsTest(const char* directory){
   Request classicRename = FileOperations::RenameEntry{classicSource, u"Renamed"};Pass(Submit(classicRename));
   Request legacy;legacy = FileOperations::LegacyConversion{};legacy.Legacy().source=FileOperations::Location::FromLegacy(classic,"Classic:Renamed");legacy.Legacy().destination=FileOperations::Location::FromLegacy(root,root+"\\raw.dat");legacy.Legacy().options.output='r';legacy.Legacy().options.input='r';legacy.Legacy().options.appledouble=false;
   {Gate gate;auto captured=Submit(legacy);legacy.Legacy().options.output='5';HFSIFACE_restore_copy_settings('5','m',1);gate.Release();Pass(captured);char out,in;int ad;HFSIFACE_copy_settings(&out,&in,&ad);Check(out=='5'&&in=='m'&&ad==1&&Load(root+"\\raw.dat")==std::vector<BYTE>({'D','A','T','A'}),"queued conversion settings were not captured/restored");}
+  {
+   const auto folder=root+"\\launcher-export";
+   Check(CreateDirectoryA(folder.c_str(),nullptr)!=FALSE,"create launcher staging fixture");
+   Save(folder+"\\Decoy","UNRELATED");
+   auto conversion=legacy;
+   conversion.Legacy().destination=Location::Windows(W(folder));
+   conversion.Legacy().target=ConversionTarget::Folder;
+   conversion.Legacy().options.output='b';
+   auto exported=Submit(conversion);
+   Pass(exported);
+   const auto published=exported.Snapshot().publishedWindowsExport;
+   Check(published==W(folder+"\\Renamed.hqx")&&!Load(folder+"\\Renamed.hqx").empty(),
+         "worker did not report the actual launcher export");
+   auto skipped=Submit(conversion);
+   Conflict(skipped.Job());
+   skipped.Job()->resolve(Storage::ConflictChoice::Skip);
+   Wait(skipped);
+   Check(!skipped.Job()->result().code&&!skipped.Snapshot().complete&&
+         skipped.Snapshot().publishedWindowsExport.empty()&&
+         Load(folder+"\\Decoy")==std::vector<BYTE>({'U','N','R','E','L','A','T','E','D'}),
+         "skipped launcher export reported an existing file as published");
+   fprintf(report,"PASS: launcher conversion reports its exact published file and reports no file on Skip.\n");
+  }
   Save(root+"\\import.dat","HELLO");legacy.Legacy().source=FileOperations::Location::FromLegacy(root,root+"\\import.dat");legacy.Legacy().destination=FileOperations::Location::FromLegacy(classic,"Classic:Imported");legacy.Legacy().options.input='r';Pass(Submit(legacy));hfsdirent imported{};std::string importPath="Classic:Imported";Check(HFSIFACE_get_properties(&classic[0],&importPath[0],&imported)==0&&imported.u.file.dsize==5,"captured import mode ignored");
   classicSource.SetClassic(classicSource.ClassicImage(),"Classic:Renamed");Request classicRemove=DeleteEntries{{classicSource}};Pass(Submit(classicRemove));
   uint32_t moving=Put(*source,u"Move me"),moveFolder=target->MakeDirectory(2,u"Moves");auto movingEntry=source->Stat(moving);Request move;move.Copy().sources={Native(source,moving,&movingEntry)};move.Copy().sources[0].cut=true;move.Copy().destination=Native(target,moveFolder);auto moved=Submit(move);Pass(moved);bool removed=false;try{source->Stat(moving);}catch(const std::exception&){removed=true;}Check(removed&&moved.Job()->result().moved&&moved.Snapshot().affected.size()==2&&target->List(moveFolder).size()==1,"successful move did not finalize destination and remove source");

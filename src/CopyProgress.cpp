@@ -36,22 +36,9 @@ bool StageWindowsLaunchDocument(BrowserSession& session,const FileOperations::Lo
   return false;
  }
 
- // The export can add an extension. This directory belongs only to this launch.
- WIN32_FIND_DATA data{};
- HANDLE search=FindFirstFile(folder+"\\*",&data);
- CString leaf;
- bool complete=false;
- if(search!=INVALID_HANDLE_VALUE){
-  do{
-   if(data.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)continue;
-   if(!leaf.IsEmpty()){leaf.Empty();break;}
-   leaf=data.cFileName;
-  }while(FindNextFile(search,&data));
-  complete=GetLastError()==ERROR_NO_MORE_FILES;
-  FindClose(search);
- }
- if(complete&&!leaf.IsEmpty()&&folder.GetLength()+1+leaf.GetLength()<MAX_PATH){
-  output=folder+"\\"+leaf;
+ const auto completion=operation.Snapshot();
+ if(completion.complete&&!completion.publishedWindowsExport.empty()){
+  output=FileOperations::Location::Windows(completion.publishedWindowsExport).LegacyPath().c_str();
   return true;
  }
  owner->MessageBox("Cannot identify the temporary document to launch. Export directory: "+folder,"HFVExplorer",MB_OK|MB_ICONERROR);
