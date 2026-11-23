@@ -2937,6 +2937,45 @@ void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
     Check(stale.outcome==Storage::Outcome::Failed&&stale.message.find("stale")!=std::string::npos&&
           locate(u"Payload").resolvedId==current.resolvedId,"Stale previous companion did not retain the existing pair");
     Verify(*classic,current.id,4097,49);
+    auto plain=ClassicImage(root+"\\plain-overwrite.dsk");
+    const auto incoming=Put(*plain,2,u"Payload",4003,58);
+    const auto ordinary=[&](std::optional<Storage::ConflictChoice> answer){
+        auto copy=Submit(OrdinaryCopy{{Native(plain,incoming)},Native(classic)});
+        if(answer){
+            Conflict(copy);
+            const auto prompt=copy.Job()->conflictState();
+            Check(prompt.kind==Storage::CopyPrompt::DiscardClassicArchive,"Ordinary overwrite did not ask separately about archive metadata");
+            copy.Job()->resolve(prompt.id,*answer);
+        }
+        Wait(copy);
+        return copy.Job()->result();
+    };
+    Check(ordinary({}).code,"Ordinary overwrite accepted a stale companion");
+    native.mddate-=29;
+    classic->SetClassicProperties(current.id,native);
+    current=locate(u"Payload");
+    pair=ClassicCopyArchive::RequireVerifiedPair(*classic,current,job);
+    Check(pair.has_value(),"Could not recover the original companion fixture");
+    const auto companionName=pair->companion.name;
+    classic->Rename(pair->companion.id,2,u"Temporarily saved");
+    const auto unrelatedId=Put(*classic,2,companionName,1001,59);
+    const auto refused=ordinary({});
+    Check(refused.code&&refused.message.find("unrelated file")!=std::string::npos,
+          "Ordinary overwrite accepted an unrelated companion-name occupant");
+    Verify(*classic,unrelatedId,1001,59);
+    classic->Remove(unrelatedId);
+    classic->Rename(locate(u"Temporarily saved").id,2,companionName);
+    Check(ordinary(Storage::ConflictChoice::Cancel).outcome==Storage::Outcome::Cancelled&&
+          ClassicCopyArchive::RequireVerifiedPair(*classic,current,job).has_value(),
+          "Cancelling ordinary overwrite split the archive pair");
+    const auto ordinaryResult=ordinary(Storage::ConflictChoice::Replace);
+    Check(!ordinaryResult.code,ordinaryResult.message.c_str());
+    classic.reset();
+    classic=OpenBrowserImage(Wide(path));
+    Check(classic&&classic->FindChild(2,u"Payload",current),"Ordinary replacement did not reopen");
+    Verify(*classic,current.id,4003,58);
+    Entry retired;
+    Check(!classic->FindChild(2,pair->companion.name,retired),"Ordinary replacement left an orphan companion");
     fprintf(report,"PASS: classic archive replacement and rename keep verified pairs together; cancellation, stale data and unrelated occupants preserve both files.\n");
 }
 

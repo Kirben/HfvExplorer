@@ -52,10 +52,16 @@ public:
   }
   const bool uncompressed=prompt_.kind==Storage::CopyPrompt::Uncompressed;
   const bool folders=prompt_.kind==Storage::CopyPrompt::IndependentFolders;
-  if(uncompressed||folders||utf8_){
+  const bool discard=prompt_.kind==Storage::CopyPrompt::DiscardClassicArchive;
+  if(uncompressed||folders||discard||utf8_){
    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");
    SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
   }else SetDlgItemText(IDC_CONFLICT_PATH,prompt_.path.c_str());
+  if(discard){
+   SetWindowText("Replace archived file");
+   SetDlgItemText(IDC_CONFLICT_QUESTION,"Replace this file and discard its archived metadata?");
+   GetDlgItem(IDC_REPLACE_ALL)->ShowWindow(SW_HIDE);
+  }
   if(uncompressed||folders){
    SetWindowText(folders?"Copy linked folders":"Copy without compression");
    SetDlgItemText(IDC_CONFLICT_FILE_LABEL,folders?"First linked folder":"File");

@@ -1067,7 +1067,7 @@ void VerifyRestoredLinks(Volume& destination,uint32_t parent,const Planned& plan
 }
 
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
-              Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route) {
+              Storage::Job &job, Storage::Progress &progress,CopiedLinks& copies,ForkSource route,bool durable) {
     if (job.cancelled()) throw Storage::Cancelled();
     const auto &entry = plan.entry; Entry existing; bool found = false;
     const std::string_view destinationKind=dst.Kind();
@@ -1098,7 +1098,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         uint32_t id = found ? existing.id : dst.MakeDirectoryWithAttributes(parent, outgoing);
         if(!found)Storage::OutcomeEvidence::NoteRetainedChange();
         auto expected=dst.Stat(id);bool complete=true;std::exception_ptr failure;
-        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route))complete=false;}catch(...){failure=std::current_exception();}
+        try{for(const auto& child:plan.children)if(!Transfer(src,child,dst,id,job,progress,copies,route,durable))complete=false;}catch(...){failure=std::current_exception();}
         // Existing directory metadata belongs to the destination. In particular,
         // child creates/renames can change its dates even on Skip/cancellation.
         try{if(found)dst.FinalizeDirectory(id,existing,expected,true);else if(!failure&&complete){dst.FinalizeDirectory(id,outgoing,expected,false);if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,id,*plan.archivedMetadata,job);noteDatePrecision();job.progress(progress);}}
@@ -1114,6 +1114,9 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(existing.hardLink)hfsScope=Scope::SelectedName;
         else if(existing.symbolicLink)hfsScope=Scope::SymbolicLink;
     }
+    std::optional<ClassicCopyArchive::Pair> superseded;
+    if(found&&destinationKind=="HFS"&&!plan.archivedMetadata)
+        superseded=ClassicCopyArchive::RequireVerifiedPair(dst,existing,job);
     if (found) {
         auto label=BrowserPresentation::Utf8(entry.name);
         if(destinationKind=="MFS")label+=" [version "+std::to_string(entry.version)+"]";
@@ -1122,12 +1125,13 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
             label+=" (replace this hard-link name only)";
         else if(hfsScope==Scope::SymbolicLink)label+=" (replace the symbolic link itself)";
         else if(existing.hardLink)label+=" (shared by "+std::to_string(existing.linkCount)+" hard links)";
-        auto choice = job.replace(label);
+        auto choice = superseded?job.requestChoice(Storage::CopyPrompt::DiscardClassicArchive,label):job.replace(label);
+        if(superseded&&choice!=Storage::ConflictChoice::Replace&&choice!=Storage::ConflictChoice::Skip)
+            throw Storage::Cancelled();
         if (choice == Storage::ConflictChoice::Cancel) throw Storage::Cancelled();
         if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped;progress.processed+=entry.forks[0].size+entry.forks[1].size;job.progress(progress);return false; }
     }
     if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
-    std::optional<ClassicCopyArchive::Pair> superseded;
     if(found&&plan.archivedMetadata)superseded=ClassicCopyArchive::RequireVerifiedPair(dst,existing,job);
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
@@ -1195,24 +1199,27 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
             throw Storage::Cancelled();
         if(job.cancelled())throw Storage::Cancelled();
     }
-    if(route==ForkSource::MountedWorker&&!plan.reader)
-        published=VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
-    else {
-        Reader reader=[&](unsigned fork,uint64_t offset,void* p,size_t count){
-            if(job.cancelled())throw Storage::Cancelled();
-            if(plan.reader)plan.reader(fork,offset,p,count);
-            else if(storedResource&&fork==1)src.ReadCompressionResource(entry.id,offset,p,count);
-            else src.Read(entry.id,fork,offset,p,count);
-            advance(fork,offset,count);
-        };
-        auto hostPath=plan.reader?std::wstring{}:src.HostPath(entry.id);
-        if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
-        else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
-    }
-    if(plan.archivedMetadata){
+    const auto publish=[&](bool recovery){
+        Check(!superseded||recovery,"Replacing an archive companion requires classic HFS write recovery");
+        if(route==ForkSource::MountedWorker&&!plan.reader)
+            published=VolumeSession::PutFromMountedSource(dst,parent,outgoing,found,advance);
+        else {
+            Reader reader=[&](unsigned fork,uint64_t offset,void* p,size_t count){
+                if(job.cancelled())throw Storage::Cancelled();
+                if(plan.reader)plan.reader(fork,offset,p,count);
+                else if(storedResource&&fork==1)src.ReadCompressionResource(entry.id,offset,p,count);
+                else src.Read(entry.id,fork,offset,p,count);
+                advance(fork,offset,count);
+            };
+            auto hostPath=plan.reader?std::wstring{}:src.HostPath(entry.id);
+            if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
+            else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
+        }
         if(superseded)ClassicCopyArchive::RemoveCompanion(dst,superseded->companion);
-        ClassicCopyArchive::Save(dst,published,*plan.archivedMetadata,job);
-    }
+        if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,published,*plan.archivedMetadata,job);
+    };
+    if(superseded&&!durable)dst.RunWriteBatch(job,publish);
+    else publish(durable);
     noteDatePrecision();
     progress.sparseHolesAllocated|=materializesHoles;
     progress.apfsCloneCopiedIndependently|=hfsPlus&&!plan.reader&&entry.apfsCloneMarked;
@@ -1936,7 +1943,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         Check(!(archiveCopy||carried)||durable,"Archive Copy requires classic HFS write recovery");
         for(size_t i=0;i<plans.size();++i){
             const auto route=routes.empty()?ForkSource::Stream:routes[i];
-            if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
+            if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route,durable))complete=false;
         }
         if(verifyArchiveMove&&complete){
             progress.phase="Verifying archive before source cleanup";
