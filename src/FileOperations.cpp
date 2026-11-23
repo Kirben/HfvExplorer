@@ -81,7 +81,7 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
     [&](Volume& volume,uint32_t id){
      Mark(completion,sources[i]);
      if(!windowsPlans[i].empty())FinishWindowsCut(volume,windowsPlans[i],job);
-     else if(!strcmp(volume.Kind(),"HFS"))ClassicCopyArchive::RemoveMovedArchive(volume,id,job,batchActive);
+     else if(!strcmp(volume.Kind(),"HFS"))ClassicCopyArchive::RemoveArchive(volume,id,job,batchActive);
      else RemoveTree(volume,id,job);
     });
 }
@@ -469,7 +469,8 @@ Storage::Result Mutate(const RenameEntry* rename, const Location* items, size_t 
     }else{
      Check(volume.Supports().remove,"The selected entry cannot be deleted");
      Mark(completion,item);
-     RemoveTree(volume,source.id,job,true);
+     if(!strcmp(volume.Kind(),"HFS"))ClassicCopyArchive::RemoveArchive(volume,source.id,job,grouped,true);
+     else RemoveTree(volume,source.id,job,true);
     }
     if(item.IsClassic())volume.Close();
    };

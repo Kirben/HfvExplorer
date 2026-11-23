@@ -757,6 +757,74 @@ Storage::Result TransferSelection(const std::shared_ptr<MacBrowser::Volume>& sou
     return FileOperations::ExecuteInWorker(FileOperations::DeleteEntries{std::move(selected)},job,completion);
 }
 
+Storage::Result DeleteArchiveSelection(const std::shared_ptr<MacBrowser::Volume>& volume,uint32_t id,Storage::Job& job)
+{
+    FileOperations::Completion completion;
+    return FileOperations::ExecuteInWorker(FileOperations::DeleteEntries{
+        {FileOperations::Location::Mounted(volume,id)}},job,completion);
+}
+
+void ArchiveDeleteRecovery(const CString& root,const Bytes& original,FILE* report)
+{
+    const CString image=root+"\\archive-delete.dsk";
+    Save(image,original);
+    const auto path=VolumeCoord::Wide(image.GetString());
+    uint32_t companionId=0;
+    std::u16string companionName;
+    {
+        auto volume=MacBrowser::OpenImage(path);
+        auto item=volume->Stat(Find(*volume,2,u"Document"));
+        Put(*volume,true,false,2,u"Unrelated");
+        Storage::Job job;
+        ClassicCopyArchive::Save(*volume,item.id,ClassicCopyArchive::Metadata(item),job);
+        const auto pair=ClassicCopyArchive::RequireVerifiedPair(*volume,item,job);
+        Check(pair.has_value(),"archive delete fixture has no companion");
+        companionId=pair->companion.id;
+        companionName=pair->companion.name;
+        volume->Close();
+    }
+    const auto before=Load(image);
+    {
+        auto volume=MacBrowser::OpenImage(path);
+        Storage::Job isolated;
+        Check(DeleteArchiveSelection(volume,companionId,isolated).code!=0,
+              "ordinary Delete removed a companion by itself");
+        Storage::Job cancellation;
+        cancellation.transport([&](const Storage::Progress& progress){
+            if(!progress.scanning&&progress.files&&progress.path=="Document")cancellation.cancel();
+        },{});
+        const auto id=Find(*volume,2,u"Document");
+        const auto cancelled=DeleteArchiveSelection(volume,id,cancellation);
+        if(cancelled.error!=ERROR_CANCELLED||cancelled.rollback!=Storage::Rollback::Restored||cancelled.partial)
+            throw HfsPlus::Error("Archive cancellation returned "+std::to_string(cancelled.error)+": "+cancelled.message);
+        volume->Close();
+    }
+    Check(Load(image)==before&&!ClassicHfsRecovery::Pending(path),
+          "cancelled archive deletion did not restore both files");
+    for(const auto phase:{6u,2u,3u}){
+        Save(image,before);
+        CrashChild(image,phase,L"archive-delete");
+        Check(ClassicHfsRecovery::Pending(path),"archive deletion did not leave recoverable state");
+        auto volume=MacBrowser::OpenImage(path);
+        Check(volume&&volume->Writable(),"archive deletion did not recover writable");
+        VerifyFile(*volume,2,u"Unrelated",true);
+        MacBrowser::Entry item;
+        if(phase==3){
+            Check(!volume->FindChild(2,u"Document",item)&&!volume->FindChild(2,companionName,item),
+                  "committed archive deletion retained part of the pair");
+        }else{
+            VerifyFile(*volume,2,u"Document",false);
+            Storage::Job check;
+            Check(ClassicCopyArchive::RequireVerifiedPair(*volume,volume->Stat(Find(*volume,2,u"Document")),check).has_value(),
+                  "interrupted archive deletion did not restore the verified pair");
+        }
+        volume->Close();
+        Check(!ClassicHfsRecovery::Pending(path),"archive deletion recovery left a pending journal");
+        if(phase!=3)Check(Load(image)==before,"archive deletion rollback changed the original image");
+    }
+    fprintf(report,"PASS: classic archive Delete rejects direct companion deletion and recovers both files on cancellation or process loss.\n");
+}
+
 Storage::Result MoveSelection(const std::shared_ptr<MacBrowser::Volume>& volume,Storage::Job& job)
 {
     std::vector<FileOperations::Location> selected;
@@ -1385,6 +1453,11 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
         Check(bool(volume),"open classic HFS image in subprocess");
         const auto document=Find(*volume,2,u"Document");
         if(!strcmp(action,"delete"))volume->Remove(document);
+        else if(!strcmp(action,"archive-delete")){
+            Storage::Job job;
+            const auto result=DeleteArchiveSelection(volume,document,job);
+            if(result.code)throw HfsPlus::Error(result.message);
+        }
         else if(!strcmp(action,"rename"))volume->Rename(document,2,u"DOCUMENT");
         else if(!strcmp(action,"move")){
             const auto folder=Find(*volume,Find(*volume,2,u"From"),u"Bundle");
@@ -1533,6 +1606,7 @@ int RunClassicRecoveryTest(const char* directory)
         }
         fprintf(report,"PASS: interrupted recovery is repeatable through a hard-link alias; cancellation restores the original bytes.\n");
         DeleteRecovery(root,original,report);
+        ArchiveDeleteRecovery(root,original,report);
         RenameRecovery(root,original,report);
         {
             const CString empty=root+"\\empty-transfer.dsk";

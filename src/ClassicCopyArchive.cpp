@@ -274,17 +274,18 @@ bool ValidateCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
     return CheckCut(volume,item,job,0);
 }
 
-void RemoveMovedArchive(MacBrowser::Volume& volume,uint32_t id,Storage::Job& job,bool batchActive)
+void RemoveArchive(MacBrowser::Volume& volume,uint32_t id,Storage::Job& job,bool batchActive,bool deletionProgress)
 {
     const auto item=volume.Stat(id);
     if(!ValidateCut(volume,item,job)){
-        MacBrowser::RemoveTree(volume,id,job);
+        MacBrowser::RemoveTree(volume,id,job,deletionProgress);
         return;
     }
     const auto pair=CutPair(volume,item,job);
     const auto remove=[&](bool durable){
-        Check(durable,"Removing a moved archive requires classic HFS write recovery");
-        MacBrowser::RemoveTree(volume,id,job);
+        Check(durable,"Deleting a classic HFS archive requires write recovery");
+        MacBrowser::RemoveTree(volume,id,job,deletionProgress);
+        Cancel(job);
         if(pair)RemoveCompanion(volume,pair->companion);
         Cancel(job);
     };
