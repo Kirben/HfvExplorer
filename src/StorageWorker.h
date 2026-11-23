@@ -15,7 +15,7 @@
 #include <optional>
 namespace Storage {
 enum class ConflictChoice {None,Replace,ReplaceAll,Skip,Cancel};
-enum class CopyPrompt {Overwrite,Uncompressed,IndependentFolders,ClassicMetadataLoss,ClassicArchiveNames};
+enum class CopyPrompt {Overwrite,Uncompressed,IndependentFolders,ClassicMetadataLoss,ClassicArchiveNames,ClassicArchiveMove};
 struct PendingCopyPrompt {
  uint64_t id=0;
  std::string path;
@@ -129,6 +129,7 @@ class Worker {
   Work work;
   Ready ready;
   Prepare prepare;
+  void releaseCallbacks(){prepare=nullptr;ready=nullptr;work=nullptr;}
  };
  std::mutex mutex_;std::condition_variable condition_;std::deque<Entry> queue_;bool stopping_=false;
  std::vector<std::thread> threads_;
@@ -150,7 +151,7 @@ class Worker {
      condition_.wait_for(lock,std::chrono::milliseconds(10));
     }
    }
-   if(readinessError){entry.job->finish(std::move(*readinessError));continue;}
+   if(readinessError){entry.releaseCallbacks();entry.job->finish(std::move(*readinessError));continue;}
    if(entry.job->done())continue;
    Result result;
    OutcomeEvidence evidence;
@@ -159,6 +160,7 @@ class Worker {
      auto prepare=std::move(entry.prepare);
      entry.prepare=nullptr;
      prepare(*entry.job);
+     prepare=nullptr;
      // Preparation may do I/O. Publish the prepared entry under the
      // scheduler lock only after that I/O is complete.
      {
@@ -175,6 +177,9 @@ class Worker {
    catch(const MediaChanged& error){result={1,ERROR_MEDIA_CHANGED,error.what()};}
    catch(const std::exception& error){result={1,ERROR_UNHANDLED_EXCEPTION,error.what()};}
    catch(...){result={1,ERROR_UNHANDLED_EXCEPTION,"Unexpected storage error"};}
+   // Completion can immediately reopen the same storage. Drop the queued
+   // request and its mount references before notifying callers.
+   entry.releaseCallbacks();
    const auto progress=entry.job->progress();
    result.Finalize(evidence,progress.files,progress.skipped);
    entry.job->finish(std::move(result));condition_.notify_all();

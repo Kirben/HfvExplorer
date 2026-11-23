@@ -35,11 +35,17 @@ class ConflictDialog : public CDialog {
 public:
  ConflictDialog(const Storage::PendingCopyPrompt& prompt,CWnd* owner,bool utf8,std::shared_ptr<Storage::Job> job)
   :CDialog(prompt.kind==Storage::CopyPrompt::ClassicArchiveNames?IDD_CLASSIC_ARCHIVE_NAMES:
-           prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss?IDD_CLASSIC_COPY_WARNING:IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
+           (prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss||prompt.kind==Storage::CopyPrompt::ClassicArchiveMove)?IDD_CLASSIC_COPY_WARNING:IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();
   if(job_)SetTimer(1,50,nullptr);
-  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss){
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss||
+     prompt_.kind==Storage::CopyPrompt::ClassicArchiveMove){
+   if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveMove){
+    SetWindowText("Move to classic HFS");
+    GetDlgItem(IDC_REPLACE)->ShowWindow(SW_HIDE);
+    SetDlgItemText(IDC_REPLACE_ALL,"&Archive move");
+   }
    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"EDIT");
    SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
    return TRUE;

@@ -165,8 +165,12 @@ Location ResolveEndpoint(WireEndpoint endpoint, WorkerMounts &mounts) {
         found = mounts.volumes.emplace(key.bytes, OpenOrigin(origin)).first;
     auto volume = found->second;
     uint32_t id = 2;
-    const bool stable=ExecutionFor(*volume).stableCatalogIds;
-    Check(!stable || path.size() == 1, "Invalid stable catalog endpoint");
+    // A temporary worker may reopen a stable catalog from a sender
+    // that captured the selection as a path. Its path entries omit CNIDs.
+    const bool stable=!path.empty()&&path.front().resolvedId!=0;
+    Check((!path.empty()||selectedId==2)&&
+          (!stable||(ExecutionFor(*volume).stableCatalogIds&&path.size()==1)),
+          "Invalid stable catalog endpoint");
     for (auto &segment : path) {
         bool matched = false;
         auto candidates = stable ? std::vector<Entry>{volume->Stat(selectedId)} : volume->List(id);
@@ -379,7 +383,7 @@ Storage::Result Run(const Request &request, Storage::Job &job, Completion &compl
                     auto id = d.get();
                     auto path = d.text();
                     auto kind = d.get();
-                    Check(kind <= uint64_t(Storage::CopyPrompt::ClassicArchiveNames),"Invalid copy prompt");
+                    Check(kind <= uint64_t(Storage::CopyPrompt::ClassicArchiveMove),"Invalid copy prompt");
                     d.end();
                     auto choice = job.requestChoice(Storage::CopyPrompt(kind),path);
                     Data reply;

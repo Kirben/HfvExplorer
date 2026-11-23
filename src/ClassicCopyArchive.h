@@ -23,7 +23,8 @@ struct Pair {
 };
 std::optional<Pair> RequireVerifiedPair(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 void RemoveCompanion(MacBrowser::Volume&,const MacBrowser::Entry&);
-void RefuseCut(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
+bool ValidateCut(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
+void RemoveMovedArchive(MacBrowser::Volume&,uint32_t,Storage::Job&,bool batchActive);
 void Save(MacBrowser::Volume&,uint32_t id,const Metadata&,Storage::Job&);
 std::optional<Metadata> Load(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 std::optional<Metadata> Decode(const HfsPlus::AttributeData&,const Digest&,Storage::Job&);

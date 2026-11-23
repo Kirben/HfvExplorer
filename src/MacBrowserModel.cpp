@@ -847,42 +847,45 @@ struct ArchiveSpace {
     }
 };
 
-void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job)
+void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progress,Storage::Job& job,bool carry=false)
 {
     auto& entry=plan.entry;
     if(auto archive=ClassicCopyArchive::Load(source,entry,job)){
-        auto* metadata=&archive->entry;
-        plan.archiveLinkGroup=std::move(archive->linkGroup);
-        if(archive->compressionType){
-            entry.compressed=true;
-            entry.archivedCompressionType=archive->compressionType;
-            entry.inlineCompression=std::move(metadata->inlineCompression);
-        }
-        if(!metadata->name.empty())entry.name=std::move(metadata->name);
-        entry.datesValid=metadata->datesValid;
-        entry.created=metadata->created;
-        entry.modified=metadata->modified;
-        entry.additionalDates=metadata->additionalDates;
-        entry.apfsTimestamps=metadata->apfsTimestamps;
-        if(entry.apfsTimestamps)
-            for(auto raw:*entry.apfsTimestamps)entry.fractionalDates|=int64_t(raw)%1000000000!=0;
-        entry.posix=metadata->posix;
-        if(entry.posix)entry.protectedFile|=(entry.posix->protection&PosixMetadata::ProtectionMask)!=0;
-        if(archive->symbolicLinkTarget||(entry.posix&&entry.posix->IsSpecial())){
-            progress.totalBytes-=entry.forks[0].size+entry.forks[1].size;
-            entry.forks[0]={};
-            entry.forks[1]={};
-            entry.finder=metadata->finder;
-            if(archive->symbolicLinkTarget){
-                plan.linkTarget=std::move(archive->symbolicLinkTarget);
-                entry.symbolicLink=true;
+        if(carry)plan.archivedMetadata=std::move(*archive);
+        else{
+            auto* metadata=&archive->entry;
+            plan.archiveLinkGroup=std::move(archive->linkGroup);
+            if(archive->compressionType){
+                entry.compressed=true;
+                entry.archivedCompressionType=archive->compressionType;
+                entry.inlineCompression=std::move(metadata->inlineCompression);
             }
+            if(!metadata->name.empty())entry.name=std::move(metadata->name);
+            entry.datesValid=metadata->datesValid;
+            entry.created=metadata->created;
+            entry.modified=metadata->modified;
+            entry.additionalDates=metadata->additionalDates;
+            entry.apfsTimestamps=metadata->apfsTimestamps;
+            if(entry.apfsTimestamps)
+                for(auto raw:*entry.apfsTimestamps)entry.fractionalDates|=int64_t(raw)%1000000000!=0;
+            entry.posix=metadata->posix;
+            if(entry.posix)entry.protectedFile|=(entry.posix->protection&PosixMetadata::ProtectionMask)!=0;
+            if(archive->symbolicLinkTarget||(entry.posix&&entry.posix->IsSpecial())){
+                progress.totalBytes-=entry.forks[0].size+entry.forks[1].size;
+                entry.forks[0]={};
+                entry.forks[1]={};
+                entry.finder=metadata->finder;
+                if(archive->symbolicLinkTarget){
+                    plan.linkTarget=std::move(archive->symbolicLinkTarget);
+                    entry.symbolicLink=true;
+                }
+            }
+            entry.attributes=std::move(metadata->attributes);
+            entry.attributesKnown=true;
         }
-        entry.attributes=std::move(metadata->attributes);
-        entry.attributesKnown=true;
         plan.restoredMetadata=true;
     }
-    for(auto& child:plan.children)RestoreClassicArchive(source,child,progress,job);
+    for(auto& child:plan.children)RestoreClassicArchive(source,child,progress,job,carry);
     std::set<std::u16string> consumed;
     for(const auto& child:plan.children)
         if(child.restoredMetadata)consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
@@ -917,12 +920,13 @@ void NoteArchiveRestoreGroup(Entry& entry,const std::string& group)
 }
 
 bool MatchesArchivedEntry(Volume& source,const Planned& plan,Volume& destination,const Entry& candidate,
-                          Storage::Job& job,unsigned depth)
+                          Storage::Job& job,unsigned depth,bool validatePartner)
 {
     if(job.cancelled())throw Storage::Cancelled();
     const auto& entry=plan.entry;
-    if(depth>128||(depth&&(candidate.hardLink||!plan.archiveLinkGroup.empty()))||
-       !candidate.readError.empty()||entry.directory!=candidate.directory||
+    const bool special=plan.linkTarget||(entry.posix&&entry.posix->IsSpecial());
+    if(depth>128||(validatePartner&&depth&&(candidate.hardLink||!plan.archiveLinkGroup.empty()))||
+       (!special&&!candidate.readError.empty())||entry.directory!=candidate.directory||
        entry.symbolicLink!=candidate.symbolicLink||entry.finder!=candidate.finder||
        !(entry.posix==candidate.posix)||entry.protectedFile!=candidate.protectedFile||
        (entry.datesValid&&(!candidate.datesValid||entry.created!=candidate.created||entry.modified!=candidate.modified||
@@ -930,7 +934,7 @@ bool MatchesArchivedEntry(Volume& source,const Planned& plan,Volume& destination
         (entry.additionalDates.accessed&&entry.additionalDates.accessed!=candidate.additionalDates.accessed)||
         (entry.additionalDates.changed&&entry.additionalDates.changed!=candidate.additionalDates.changed)||
         entry.additionalDates.backup.value_or(0)!=candidate.additionalDates.backup.value_or(0)))||
-       entry.forks[0].size!=candidate.forks[0].size||entry.forks[1].size!=candidate.forks[1].size||
+       (!special&&(entry.forks[0].size!=candidate.forks[0].size||entry.forks[1].size!=candidate.forks[1].size))||
        entry.compressed!=candidate.compressed)return false;
 
     auto attributes=destination.GetAttributes(candidate.id);
@@ -950,7 +954,7 @@ bool MatchesArchivedEntry(Volume& source,const Planned& plan,Volume& destination
         for(const auto& child:plan.children){
             Entry actual;
             if(!destination.FindTransferChild(candidate.id,child.entry,actual)||actual.name!=child.entry.name||
-               !MatchesArchivedEntry(source,child,destination,destination.Stat(actual.id),job,depth+1))return false;
+               !MatchesArchivedEntry(source,child,destination,destination.Stat(actual.id),job,depth+1,validatePartner))return false;
         }
         return true;
     }
@@ -1001,12 +1005,65 @@ std::optional<Entry> FindArchiveRestorePartner(Volume& source,const Planned& pla
             const auto stamp=attributes.find(ArchiveRestoreGroupAttribute);
             if(stamp==attributes.end()||!ArchiveGroupMarker(stamp->second,&plan.archiveLinkGroup))continue;
             auto current=destination.Stat(child.id);
-            if(!MatchesArchivedEntry(source,plan,destination,current,job,0))continue;
+            if(!MatchesArchivedEntry(source,plan,destination,current,job,0,true))continue;
             if(match)return {}; // Divergent copies can leave more than one matching inode.
             match=std::move(current);
         }
     }
     return match;
+}
+
+void VerifyMovedArchive(Volume& source,const Planned& plan,Volume& destination,uint32_t parent,
+                        bool classic,Storage::Job& job)
+{
+    if(job.cancelled())throw Storage::Cancelled();
+    Entry actual;
+    Check(destination.FindTransferChild(parent,plan.entry,actual),
+          "The archive destination is missing after publication. Source retained.");
+    actual=destination.Stat(actual.id);
+    if(!classic){
+        Check(MatchesArchivedEntry(source,plan,destination,actual,job,0,false),
+              "Restored archive readback differs from the source. Source retained.");
+        return;
+    }
+    Check(actual.directory==plan.entry.directory&&actual.name==plan.entry.name,
+          "Published classic archive identity differs. Source retained.");
+    if(plan.archivedMetadata)
+        Check(ClassicCopyArchive::RequireVerifiedPair(destination,actual,job).has_value(),
+              "Published classic archive companion is missing. Source retained.");
+    if(actual.directory){
+        for(const auto& child:plan.children)VerifyMovedArchive(source,child,destination,actual.id,true,job);
+        return;
+    }
+    HfsPlus::Bytes expected(64*1024),readback(expected.size());
+    for(unsigned fork=0;fork<2;++fork){
+        Check(actual.forks[fork].size==plan.entry.forks[fork].size,
+              "Published classic archive fork size differs. Source retained.");
+        for(uint64_t at=0;at<actual.forks[fork].size;){
+            if(job.cancelled())throw Storage::Cancelled();
+            const auto count=size_t((std::min)(uint64_t(expected.size()),actual.forks[fork].size-at));
+            if(plan.reader)plan.reader(fork,at,expected.data(),count);
+            else source.Read(plan.entry.id,fork,at,expected.data(),count);
+            destination.Read(actual.id,fork,at,readback.data(),count);
+            Check(!memcmp(expected.data(),readback.data(),count),
+                  "Published classic archive fork differs. Source retained.");
+            at+=count;
+        }
+    }
+}
+
+void VerifyRestoredLinks(Volume& destination,uint32_t parent,const Planned& plan,const std::string& sourceKey,
+                         std::map<std::pair<std::string,uint32_t>,uint32_t>& groups)
+{
+    Entry actual;
+    Check(destination.FindTransferChild(parent,plan.entry,actual),
+          "An archive item disappeared during link verification. Source retained.");
+    if(plan.entry.hardLink&&!plan.archiveLinkGroup.empty()){
+        const auto [group,added]=groups.try_emplace({sourceKey,plan.entry.resolvedId},actual.resolvedId);
+        Check(added||(actual.hardLink&&actual.resolvedId==group->second),
+              "Restored archive aliases do not share the same inode. Source retained.");
+    }
+    for(const auto& child:plan.children)VerifyRestoredLinks(destination,actual.id,child,sourceKey,groups);
 }
 
 bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
@@ -1053,7 +1110,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
     using Scope=HfsPlus::Volume::OverwriteScope;
     auto hfsScope=Scope::SharedInode;
     if(found&&!plan.linkTarget&&hfsPlus&&
-       (std::string_view(src.Kind())=="APFS"||(entry.posix&&entry.posix->IsSpecial()))){
+       (plan.restoredMetadata||std::string_view(src.Kind())=="APFS"||(entry.posix&&entry.posix->IsSpecial()))){
         if(existing.hardLink)hfsScope=Scope::SelectedName;
         else if(existing.symbolicLink)hfsScope=Scope::SymbolicLink;
     }
@@ -1765,11 +1822,15 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     for(const auto& source:sources){ValidateCopy(*source.first,source.second,dst,parent);std::set<uint32_t> ancestors;
         plans.push_back(Scan(*source.first,source.second,job,progress,ancestors,0,false,true,adapter));
         const std::string_view kind=source.first->Kind();
-        if(moving&&kind=="HFS")ClassicCopyArchive::RefuseCut(*source.first,source.first->Stat(source.second),job);
+        const std::string_view target=dst.Kind();
+        const bool archiveSource=moving&&kind=="HFS"&&
+            ClassicCopyArchive::ValidateCut(*source.first,plans.back().entry,job);
+        if(archiveSource)
+            Check(!adapter&&(target=="HFS"||target=="APFS"||dst.HfsPlusDateRange()),
+                  "The destination cannot preserve the archive during Cut/Paste. Source retained.");
         if(!adapter){
-            const std::string_view target=dst.Kind();
-            if(!moving&&kind=="HFS"&&(target=="APFS"||dst.HfsPlusDateRange()))
-                RestoreClassicArchive(*source.first,plans.back(),progress,job);
+            if(kind=="HFS"&&(target=="APFS"||dst.HfsPlusDateRange()||(archiveSource&&target=="HFS")))
+                RestoreClassicArchive(*source.first,plans.back(),progress,job,target=="HFS");
             PrepareCopyTimestamps(plans.back(),dst,kind=="APFS",kind=="HFS+"||kind=="HFSX");
         }
     }
@@ -1793,7 +1854,17 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     Check(!moving||firstLinkedFolder.empty(),
           "APFS cannot preserve directory hard links during Cut/Paste. Use Copy to keep the linked source folders.");
     bool archiveCopy=false;
-    if(std::string_view(dst.Kind())=="HFS"&&!adapter){
+    const auto containsArchive=[](auto&& recurse,const Planned& plan)->bool {
+        if(plan.restoredMetadata)return true;
+        for(const auto& child:plan.children)if(recurse(recurse,child))return true;
+        return false;
+    };
+    const bool carried=moving&&std::string_view(dst.Kind())=="HFS"&&
+        std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);});
+    if(carried)
+        Check(std::all_of(sources.begin(),sources.end(),[](const auto& item){return std::string_view(item.first->Kind())=="HFS";}),
+              "Move classic archives separately from other formats. Source retained.");
+    if(std::string_view(dst.Kind())=="HFS"&&!adapter&&!carried){
         ClassicCopyLoss loss;
         for(size_t i=0;i<plans.size();++i){
             auto& source=*sources[i].first;
@@ -1806,8 +1877,6 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         std::string preview;
         if(!moving)ProjectArchiveNames(projected,dst,parent,true,{},preview,job);
         ValidatePlans(dst,projected,parent,true);
-        if(moving&&!details.empty())
-            throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
         std::optional<ArchiveSpace> space;
         auto archiveProgress=progress;
         std::string spaceError,spaceDetails;
@@ -1834,10 +1903,12 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
                 throw Storage::Cancelled();
             archiveCopy=true;
         }else if(!details.empty()){
-            const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details+spaceDetails);
+            const auto choice=job.requestChoice(moving?Storage::CopyPrompt::ClassicArchiveMove:Storage::CopyPrompt::ClassicMetadataLoss,
+                                                details+spaceDetails);
             if(choice==Storage::ConflictChoice::ReplaceAll){
                 archiveCopy=true;
             }else if(choice!=Storage::ConflictChoice::Replace)throw Storage::Cancelled();
+            else if(moving)throw HfsPlus::Error("Cut/Paste requires Archive Copy to preserve this selection. Source retained.");
         }
         if(archiveCopy){
             if(!spaceError.empty())throw HfsPlus::Error(spaceError);
@@ -1847,21 +1918,40 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         }
     }
     ValidatePlans(dst,plans,parent,true);
+    const bool verifyArchiveMove=moving&&(archiveCopy||carried||
+        std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);}));
+    if(verifyArchiveMove){
+        for(const auto& plan:plans){
+            Entry existing;
+            Check(!plan.entry.directory||!dst.FindTransferChild(parent,plan.entry,existing),
+                  "Cut/Paste cannot merge a folder while preserving its archive metadata. Source retained.");
+        }
+    }
     if(!firstLinkedFolder.empty()&&
        job.requestChoice(Storage::CopyPrompt::IndependentFolders,firstLinkedFolder)!=Storage::ConflictChoice::Replace)
         throw Storage::Cancelled();
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     CopiedLinks copies;
     const auto transfer=[&](bool durable){
-        Check(!archiveCopy||durable,"Archive Copy requires classic HFS write recovery");
+        Check(!(archiveCopy||carried)||durable,"Archive Copy requires classic HFS write recovery");
         for(size_t i=0;i<plans.size();++i){
             const auto route=routes.empty()?ForkSource::Stream:routes[i];
             if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;
         }
+        if(verifyArchiveMove&&complete){
+            progress.phase="Verifying archive before source cleanup";
+            job.progress(progress);
+            const bool classic=std::string_view(dst.Kind())=="HFS";
+            std::map<std::pair<std::string,uint32_t>,uint32_t> groups;
+            for(size_t i=0;i<plans.size();++i){
+                VerifyMovedArchive(*sources[i].first,plans[i],dst,parent,classic,job);
+                if(!classic)VerifyRestoredLinks(dst,parent,plans[i],sources[i].first->ResourceKey(),groups);
+            }
+        }
     };
-    if(!batchActive&&(archiveCopy||plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory)))
+    if(!batchActive&&(archiveCopy||carried||plans.size()>1||moving||(!plans.empty()&&plans.front().entry.directory)))
         dst.RunWriteBatch(job,transfer);
-    else transfer(false);
+    else transfer(batchActive);
     return complete;
 }
 bool Copy(Volume &src,uint32_t id,Volume &dst,uint32_t parent,Storage::Job& job,bool move){

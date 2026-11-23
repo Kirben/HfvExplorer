@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "ClassicCopyArchive.h"
 #include "ClassicHfsRecovery.h"
 #include "ClassicFormatCommand.h"
 #include "MacBrowserModel.h"
@@ -975,6 +976,54 @@ void FolderTransferRecovery(const CString& root,const Bytes& blank,FILE* report)
         if(!committed)Check(Load(sourceFile)==sourceBefore&&Load(targetFile)==targetBefore,
                             "aborted coordinated move changed either image");
     }
+
+    for(unsigned phase:{8u,9u}){
+        CString sourceFile;
+        sourceFile.Format("%s\\paired-transfer-%u.dsk",root.GetString(),phase);
+        const CString targetFile=sourceFile+".target.dsk";
+        const auto sourcePath=VolumeCoord::Wide(sourceFile.GetString());
+        const auto targetPath=VolumeCoord::Wide(targetFile.GetString());
+        Save(sourceFile,sourceBefore);
+        Save(targetFile,blank);
+        Storage::Job job;
+        {
+            auto source=MacBrowser::OpenImage(sourcePath);
+            const auto tree=Find(*source,2,u"Tree");
+            for(auto id:{Find(*source,tree,u"A File"),tree}){
+                ClassicCopyArchive::Metadata metadata(source->Stat(id));
+                metadata.entry.attributes[u"user.archive-verifier"]={8,9};
+                ClassicCopyArchive::Save(*source,id,metadata,job);
+            }
+            source->Close();
+        }
+        const auto pairedBefore=Load(sourceFile);
+        CrashChild(sourceFile,phase,L"folder-move");
+        auto source=MacBrowser::OpenImage(sourcePath);
+        auto target=MacBrowser::OpenImage(targetPath);
+        const bool committed=phase==9;
+        auto& kept=committed?*target:*source;
+        auto& empty=committed?*source:*target;
+        MacBrowser::Entry tree;
+        Check(kept.FindChild(2,u"Tree",tree)&&!empty.FindChild(2,u"Tree",tree),
+              "Crash recovery left the archive on the wrong volume");
+        Check(kept.FindChild(2,u"Tree",tree),"Missing recovered archive folder");
+        MacBrowser::Entry leftover;
+        Check(!empty.FindChild(2,ClassicCopyArchive::CompanionName(tree.resolvedId),leftover),
+              "Crash recovery left an unpaired companion");
+        const auto child=Find(kept,tree.id,u"A File");
+        for(const auto& item:{tree,kept.Stat(child)}){
+            const auto pair=ClassicCopyArchive::RequireVerifiedPair(kept,item,job);
+            Check(pair&&pair->metadata.entry.attributes.count(u"user.archive-verifier"),
+                  "Crash recovery dropped an archive companion or its attributes");
+        }
+        VerifyFile(kept,tree.id,u"A File",true);
+        source->Close();
+        target->Close();
+        if(!committed)
+            Check(Load(sourceFile)==pairedBefore&&Load(targetFile)==blank,
+                  "Uncommitted archive move did not restore both images byte for byte");
+    }
+    fprintf(report,"PASS: paired classic HFS Cut/Paste recovers both forks and companions before and after the shared commit.\n");
 
     for(bool crash:{false,true}){
         CString sourceFile;

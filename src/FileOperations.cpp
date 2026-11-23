@@ -64,7 +64,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true,value.expectedResource),2};
 }
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
-                        Storage::Job& job,Completion& completion,bool windowsDestination){
+                        Storage::Job& job,Completion& completion,bool windowsDestination,bool batchActive=false){
  std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
  std::vector<WindowsCutPlan> windowsPlans(sources.size());
  for(size_t i=0;i<sources.size();++i)
@@ -81,6 +81,7 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
     [&](Volume& volume,uint32_t id){
      Mark(completion,sources[i]);
      if(!windowsPlans[i].empty())FinishWindowsCut(volume,windowsPlans[i],job);
+     else if(!strcmp(volume.Kind(),"HFS"))ClassicCopyArchive::RemoveMovedArchive(volume,id,job,batchActive);
      else RemoveTree(volume,id,job);
     });
 }
@@ -89,7 +90,7 @@ bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::sh
  for(size_t i=0;i<sources.size();++i)if(!request.sources[i].cut||!target.CanMoveEntryFrom(*sources[i].first,sources[i].second,parent))return false;
  auto existing=target.List(parent);std::vector<Entry> entries;
  for(size_t i=0;i<sources.size();++i){auto& source=*sources[i].first;auto id=sources[i].second;Check(id!=2,"Select files or folders rather than a volume root");source.ValidateCopyTo(id,target,parent);auto entry=source.Stat(id);
-  if(!strcmp(source.Kind(),"HFS"))ClassicCopyArchive::RefuseCut(source,entry,job);
+  if(!strcmp(source.Kind(),"HFS"))ClassicCopyArchive::ValidateCut(source,entry,job);
   for(auto& e:existing)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   for(auto& e:entries)if(HfsPlus::CompareNames(e.name,entry.name,target.CaseSensitive())==0)return false;
   if(request.sources[i].Volume()&&entry.directory){std::set<uint32_t> visited;for(uint32_t at=parent;at!=1;at=target.Stat(at).parent){Check(at!=id&&visited.insert(at).second,"Cannot move a folder into itself or its descendants");}}
@@ -373,7 +374,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     // read mounts before reopening the floppy source for its final deletion.
     complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,true,true);
     for(size_t i=0;i<opened.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
-    if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination);
+    if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,true);
    }else if(coordinated){
     auto& source=*opened.front().first;
     auto& dest=*destination.first;
@@ -383,7 +384,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      complete=CopyMany(opened,dest,destination.second,job,transfer.adapter,routes,true,true);
      if(complete){
       if(windowsSource)for(const auto& entry:opened)entry.first->Close();
-      DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination);
+      DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,true);
      }
     },nullptr,classicSources);
    }else if(!moving&&target.IsWindows()&&

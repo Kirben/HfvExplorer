@@ -2669,15 +2669,6 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     format(returnPath);
     auto returned=OpenBrowserImage(returnPath);
     Check(bool(returned),"Cannot mount classic archive return image");
-    auto cutItem=Native(classic,archivedFolder.id);
-    cutItem.cut=true;
-    auto cut=Submit(OrdinaryCopy{{cutItem},Native(returned)});
-    Wait(cut);
-    const auto refused=cut.Job()->result();
-    Entry absent;
-    Check(refused.outcome==Storage::Outcome::Failed&&!refused.moved&&!refused.partial&&
-          !returned->FindChild(2,folder.name,absent)&&classic->FindChild(2,folder.name,archivedFolder),
-          "Classic archive Cut/Paste must retain the original tree");
     auto restore=Submit(OrdinaryCopy{{Native(classic,archivedFolder.id)},Native(returned)});
     Wait(restore);
     const auto restored=restore.Job()->result();
@@ -2749,6 +2740,115 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     catch(const HfsPlus::Error& error){corrupt=std::string_view(error.what()).find("corrupt")!=std::string_view::npos;}
     Check(corrupt,"A corrupt companion was treated as missing");
     fprintf(report,"PASS: classic archive restore distinguishes missing, stale and corrupt companions and preserves verified metadata alongside a native timestamp edit.\n");
+}
+
+void TestWorkerReleasesStorageBeforeCompletion(FILE* report)
+{
+    Storage::Worker worker;
+    auto captured=std::make_shared<int>(1);
+    std::weak_ptr<int> request=captured;
+    std::mutex gate;
+    std::unique_lock<std::mutex> held(gate);
+    auto job=worker.submitPrepared([captured](Storage::Job&){},
+        [captured](const std::shared_ptr<Storage::Job>&){return true;},
+        [captured,&gate](Storage::Job&){
+            std::lock_guard<std::mutex> lock(gate);
+            return Storage::Result{};
+        });
+    captured.reset();
+    bool released=false;
+    job->whenFinished([&]{released=request.expired();});
+    held.unlock();
+    worker.shutdown();
+    Check(released,"Completion notified callers before releasing the request's mount references");
+    fprintf(report,"PASS: worker releases queued mount references before completion observers can reopen storage.\n");
+}
+
+void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
+{
+    const auto base=root+(apfs?"\\classic-archive-move-apfs":"\\classic-archive-move-hfsx");
+    const auto modernPath=Wide(base+"-from.dsk");
+    const auto firstPath=base+"-first.dsk";
+    const auto secondPath=base+"-second.dsk";
+    const auto returnPath=Wide(base+"-return.dsk");
+    constexpr auto hfsx=HfsPlus::Volume::FormatKind::HfsXCaseSensitive;
+    const auto createModern=[&](const std::wstring& path){
+        if(!apfs)return Image(path,hfsx);
+        {
+            auto source=HfsPlus::CreateImage(path.c_str(),32*1024*1024);
+            Storage::Job format;
+            Apfs::Format(*source,u"Archive move fixture",true,format);
+        }
+        return OpenBrowserImage(path);
+    };
+    auto modern=createModern(modernPath);
+    auto first=ClassicImage(firstPath);
+    auto second=ClassicImage(secondPath);
+    auto restored=createModern(returnPath);
+    Check(modern&&restored,"Cannot open modern archive move fixtures");
+    Entry folder;
+    folder.name=u"Archived move";
+    folder.directory=true;
+    folder.attributes[u"user.folder"]={1,2,3};
+    auto folderId=modern->MakeDirectoryWithAttributes(2,folder);
+    Put(*modern,folderId,u"Dual fork",4099,52);
+    const auto parking=first->MakeDirectory(2,u"Parking");
+    const auto move=[&](const std::shared_ptr<Volume>& from,uint32_t id,const std::shared_ptr<Volume>& to,
+                        uint32_t parent, std::optional<Storage::ConflictChoice> answer={}){
+        auto location=Native(from,id);
+        location.cut=true;
+        auto op=Submit(OrdinaryCopy{{location},Native(to,parent)});
+        if(answer){
+            Conflict(op);
+            const auto prompt=op.Job()->conflictState();
+            Check(prompt.kind==Storage::CopyPrompt::ClassicArchiveMove,"Missing Archive Copy move warning");
+            op.Job()->resolve(prompt.id,*answer);
+        }
+        Wait(op);
+        return op.Job()->result();
+    };
+    const auto cancelled=move(modern,folderId,first,2,Storage::ConflictChoice::Cancel);
+    Entry from,item,child;
+    Check(cancelled.outcome==Storage::Outcome::Cancelled&&modern->FindChild(2,folder.name,from)&&
+          !first->FindChild(2,folder.name,item),"Cancelling an archive move changed either image");
+    auto result=move(modern,folderId,first,2,Storage::ConflictChoice::ReplaceAll);
+    Check(!result.code&&result.moved,result.message.c_str());
+    Check(!modern->FindChild(2,folder.name,from)&&first->FindChild(2,folder.name,item),
+          "Archive move did not publish before removing the modern source");
+    Storage::Job verify;
+    const auto originalId=item.resolvedId;
+    result=move(first,item.id,first,parking);
+    Check(!result.code&&result.moved,result.message.c_str());
+    first.reset();
+    first=OpenBrowserImage(Wide(firstPath));
+    Entry parked;
+    Check(first&&first->FindChild(2,u"Parking",parked)&&!first->FindChild(2,folder.name,from)&&
+          first->FindChild(parked.id,folder.name,item)&&item.resolvedId==originalId&&
+          ClassicCopyArchive::RequireVerifiedPair(*first,item,verify).has_value()&&
+          first->List(parked.id).size()==2,"In-place archive move lost the pair");
+    result=move(first,item.id,second,2);
+    Check(!result.code&&result.moved,result.message.c_str());
+    Check(first->List(parked.id).empty()&&second->FindChild(2,folder.name,item)&&
+          ClassicCopyArchive::RequireVerifiedPair(*second,item,verify).has_value(),
+          "Cross-image move split the classic archive");
+    restored->MakeDirectory(2,folder.name);
+    const auto rejected=move(second,item.id,restored,2);
+    Entry mergeFolder;
+    Check(rejected.code&&!rejected.moved&&rejected.message.find("cannot merge")!=std::string::npos&&
+          second->FindChild(2,folder.name,item)&&restored->FindChild(2,folder.name,mergeFolder)&&
+          restored->List(mergeFolder.id).empty(),"Refusing an archive merge changed either volume");
+    restored->Remove(mergeFolder.id);
+    result=move(second,item.id,restored,2);
+    Check(!result.code&&result.moved,result.message.c_str());
+    second.reset();
+    restored.reset();
+    second=OpenBrowserImage(Wide(secondPath));
+    restored=OpenBrowserImage(returnPath);
+    Check(second&&second->List(2).empty()&&restored&&restored->FindChild(2,folder.name,item)&&
+          restored->GetAttributes(item.id)==folder.attributes&&restored->FindChild(item.id,u"Dual fork",child),
+          "Archive restore move lost metadata or left a source companion");
+    Verify(*restored,child.id,4099,52);
+    fprintf(report,"PASS: %s cut/paste archives a folder, preserves pairs within and between classic HFS images, and verifies both forks and attributes before source cleanup.\n",apfs?"APFS":"HFSX");
 }
 
 void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
@@ -3166,10 +3266,15 @@ void TestClassicCopyLoss(const std::string& root,FILE* report)
 
         item.cut=true;
         auto cut=run();
+        Conflict(cut);
+        auto cutPrompt=cut.Job()->conflictState();
+        Check(cutPrompt.kind==Storage::CopyPrompt::ClassicArchiveMove&&
+              cutPrompt.path.find("Hard-link relationships")!=std::string::npos,"Missing archive move warning");
+        cut.Job()->resolve(cutPrompt.id,Storage::ConflictChoice::Replace);
         Wait(cut);
         const auto refused=cut.Job()->result();
         Check(refused.outcome==Storage::Outcome::Failed&&!refused.partial&&!refused.moved&&
-              refused.message.find("Hard-link relationships")!=std::string::npos,
+              refused.message.find("requires Archive Copy")!=std::string::npos,
               "Lossy classic Cut/Paste was not refused");
         Entry found;
         Check(destination->FreeBytes()==free&&!destination->FindChild(2,u"Linked files",found)&&
@@ -4849,6 +4954,9 @@ int RunCopyProcessTest(const char *directory) {
         TestClassicMetadataCompanion(report);
         TestClassicArchiveRoundTrip(root,report);
         TestClassicArchivePairUpdates(root,report);
+        TestWorkerReleasesStorageBeforeCompletion(report);
+        TestClassicArchiveMoves(root,report,false);
+        TestClassicArchiveMoves(root,report,true);
         TestClassicArchiveNamePreview(root,report);
         TestClassicArchiveSpecialEntries(root,report);
         TestClassicBackupDates(root,report);

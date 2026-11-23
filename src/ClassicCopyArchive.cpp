@@ -5,6 +5,7 @@
 #include "HfsPlusCompression.h"
 #include <bcrypt.h>
 #include <algorithm>
+#include <set>
 
 namespace ClassicCopyArchive {
 namespace {
@@ -236,20 +237,59 @@ bool CompanionType(const Entry& entry)
     return !entry.directory&&std::equal(finderType.begin(),finderType.end(),entry.finder.begin());
 }
 
-void CheckCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job,unsigned depth)
+std::optional<Pair> CutPair(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+{
+    Entry companion;
+    if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion)||!CompanionType(companion))return {};
+    return RequireVerifiedPair(volume,item,job);
+}
+
+bool CheckCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job,unsigned depth)
 {
     Cancel(job);
     Check(depth<=128,"Excessive directory depth while checking classic archive companions");
-    Entry companion;
-    const bool found=volume.FindChild(item.parent,CompanionName(item.resolvedId),companion)&&CompanionType(companion);
-    Check(!(ReservedName(item.name)&&CompanionType(item))&&!found,"Use Copy for classic HFS archived files. Source retained.");
-    if(item.directory)for(const auto& child:volume.List(item.id))CheckCut(volume,child,job,depth+1);
+    Check(!(ReservedName(item.name)&&CompanionType(item)),
+          "Select the archived item rather than its metadata companion. Source retained.");
+    bool archived=CutPair(volume,item,job).has_value();
+    if(!item.directory)return archived;
+    const auto children=volume.List(item.id);
+    std::set<std::string> expected;
+    for(const auto& child:children){
+        if(ReservedName(child.name)&&CompanionType(child))continue;
+        if(CheckCut(volume,child,job,depth+1)){
+            expected.insert(MacBrowser::ClassicCopyNameKey(CompanionName(child.resolvedId)));
+            archived=true;
+        }
+    }
+    for(const auto& child:children)
+        if(ReservedName(child.name)&&CompanionType(child))
+            Check(expected.count(MacBrowser::ClassicCopyNameKey(child.name))!=0,
+                  "A classic metadata companion has no verified item. Source retained.");
+    return archived;
 }
 }
 
-void RefuseCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+bool ValidateCut(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
 {
-    CheckCut(volume,item,job,0);
+    return CheckCut(volume,item,job,0);
+}
+
+void RemoveMovedArchive(MacBrowser::Volume& volume,uint32_t id,Storage::Job& job,bool batchActive)
+{
+    const auto item=volume.Stat(id);
+    if(!ValidateCut(volume,item,job)){
+        MacBrowser::RemoveTree(volume,id,job);
+        return;
+    }
+    const auto pair=CutPair(volume,item,job);
+    const auto remove=[&](bool durable){
+        Check(durable,"Removing a moved archive requires classic HFS write recovery");
+        MacBrowser::RemoveTree(volume,id,job);
+        if(pair)RemoveCompanion(volume,pair->companion);
+        Cancel(job);
+    };
+    if(batchActive)remove(true);
+    else volume.RunWriteBatch(job,remove);
 }
 
 static std::optional<Metadata> DecodeArchive(const AttributeData&,Storage::Job&,
