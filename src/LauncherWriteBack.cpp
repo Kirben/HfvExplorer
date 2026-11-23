@@ -84,6 +84,10 @@ void LauncherWriteBack::Complete(BrowserSession& session)
         Discard(temporary_);
         return;
     }
+    if(version_.empty()){
+        retain("Edits to this temporary copy cannot be written back to the Mac volume.");
+        return;
+    }
     if(owner->MessageBox("Write edits to the original Mac document? The temporary file is "+temporary_,
                          "HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES)
         return;

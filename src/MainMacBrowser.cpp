@@ -1320,6 +1320,7 @@ bool MainMacBrowser::ContextMenu(CPoint point){
     else{CRect rect;list.GetWindowRect(&rect);point=rect.CenterPoint();}
     bool selected=list.GetNextItem(-1,LVNI_SELECTED)>=0;
     CMenu menu;menu.CreatePopupMenu();menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_OPEN,"&Open");
+    session_.List()->AppendEmulatorCommands(menu);
     menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_EDIT_COPY,"&Copy");menu.AppendMenu(MF_STRING|(SelectionWritable()?MF_ENABLED:MF_GRAYED),ID_EDIT_CUT,"Cu&t");
     menu.AppendMenu(MF_STRING|(Writable()&&BrowserTransfers::Any()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE,"&Paste");menu.AppendMenu(MF_STRING|(CanPasteHardLink()?MF_ENABLED:MF_GRAYED),ID_EDIT_PASTE_HARD_LINK,"Paste hard &link...");menu.AppendMenu(MF_SEPARATOR);
     menu.AppendMenu(MF_STRING|(CanCreateFolder()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New &folder...");menu.AppendMenu(MF_STRING|(CanRename()?MF_ENABLED:MF_GRAYED),ID_EDIT_LABEL,"&Rename...");

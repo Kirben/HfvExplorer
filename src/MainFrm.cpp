@@ -139,8 +139,6 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_FILE_RELOAD, OnFileReload)
 	ON_COMMAND(ID_TOOLS_BURN, OnToolsBurn)
  ON_COMMAND(ID_TOOLS_FIND, OnToolsFind)
- ON_COMMAND(ID_TOOLS_BASILISK_II, OnToolsBasiliskII)
- ON_COMMAND(ID_TOOLS_MINI_VMAC, OnToolsMiniVMac)
  ON_COMMAND(ID_TOOLS_APFS_SNAPSHOTS, OnToolsApfsSnapshots)
  ON_COMMAND(ID_TOOLS_APFS_RESTORE, OnToolsApfsRestore)
  ON_COMMAND(ID_TOOLS_APFS_RENAME_VOLUME, OnToolsApfsRenameVolume)
@@ -1189,16 +1187,6 @@ void CMainFrame::OnToolsApfsSnapshots()
 {
   if(!StorageUi::busy()&&!StorageUi::state().sessionOpen)
      ManageApfsSnapshots(this,GetBrowserSession().MacBrowser().SelectedVolume());
-}
-
-void CMainFrame::OnToolsBasiliskII()
-{
- DocumentLaunch::ShowBasiliskII(this);
-}
-
-void CMainFrame::OnToolsMiniVMac()
-{
- DocumentLaunch::ShowMiniVMac(this);
 }
 
 void CMainFrame::OnToolsFind()

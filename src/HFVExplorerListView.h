@@ -142,6 +142,7 @@ public:
     std::optional<bool> BrowserItemCommandEnabled(UINT command) const;
     bool RunBrowserItemCommand(UINT command);
     void UpdateBrowserItemMenu(CMenu& menu) const;
+    void AppendEmulatorCommands(CMenu& menu) const;
     bool StorageSelectionAvailable(bool exclusive=false)const;
     int InsertBrowserRow(const BrowserDirectory::Row&,HTREEITEM);
     void SortBrowserRows(int column,bool ascending);

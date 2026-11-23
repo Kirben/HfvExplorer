@@ -101,7 +101,7 @@ int BrowserMountInventory::AddWindows(char letter,UINT type,CString path)
  int index=windowsCount++;
  auto& drive=windows[index];
  drive.m_letter=letter;
- if(path.IsEmpty())path.Format("%c:\\\\",letter);
+ if(path.IsEmpty())path.Format("%c:\\",letter);
  drive.m_volume_name=std::move(path);
  SetWindowsType(index,type);
  return index;

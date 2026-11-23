@@ -391,7 +391,7 @@ int RunHfsPlusUiTest(const char *directory) {
         AfxGetApp()->m_pMainWnd = &owner;
         InitializeStorageUi();
         require(DocumentLaunch::ProbeEmulatorLaunchers(&owner, directory), "Emulator launcher paths and process errors");
-        fprintf(report, "PASS: Basilisk II and Mini vMac dialogs, Unicode arguments, missing paths and invalid executable.\n");
+        fprintf(report, "PASS: Basilisk II and Mini vMac Options tabs, Unicode arguments, missing paths and invalid executable.\n");
         {
             COptionsSheet options("HFVExplorer Options", &owner, 1);
             auto& copying = options.m_Page2;
@@ -437,7 +437,7 @@ int RunHfsPlusUiTest(const char *directory) {
                     general.m_dosicons == 0 && general.m_fat_icon_time_limit == 23 &&
                     general.m_font == "Tahoma" && general.m_psize == "10",
                     "General settings did not round-trip");
-            require(options.GetPageCount() == 3, "Removed launcher Options pages are still exposed");
+            require(options.GetPageCount() == 5, "Options should show three settings pages and two emulator pages");
             auto& attributes = options.m_Page3;
             attributes.m_show_invisible_mac = TRUE;
             require(options.SetActivePage(&attributes) != FALSE &&

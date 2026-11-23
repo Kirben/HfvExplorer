@@ -423,6 +423,7 @@ int RunBrowserSessionTest(const char* directory){
          "a delayed classic listing could publish into a reused slot");
    Check(mounts.PublishClassic(*current,after),"a current mount could not publish without a tree");
    const auto drive=mounts.AddWindows('Y',DRIVE_REMOVABLE);
+   Check(mounts.WindowsAt(drive).m_volume_name=="Y:\\","Windows drive label must have one trailing separator");
    const auto priorDrive=mounts.FindWindowsDrive(24);
    mounts.SetWindowsType(drive,DRIVE_NO_ROOT_DIR);
    Check(mounts.FindWindowsSlot('y')==drive&&!mounts.FindWindowsDrive(24),

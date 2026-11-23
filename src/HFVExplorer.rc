@@ -162,8 +162,6 @@ BEGIN
     POPUP "&Tools"
     BEGIN
         MENUITEM "&Find...\tF3",                ID_TOOLS_FIND
-        MENUITEM "Launch Basilisk II...",         ID_TOOLS_BASILISK_II
-        MENUITEM "Launch Mini vMac...",           ID_TOOLS_MINI_VMAC
         MENUITEM "New browser\tCtrl+Enter",     ID_TOOLS_NEW_BROWSER
         MENUITEM SEPARATOR
         MENUITEM "Dump CD to file ...",         ID_TOOLS_DUMPCDDEBUG
@@ -289,34 +287,19 @@ BEGIN
                     BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,12,111,222,12
 END
 
-IDD_ABOUTBOX DIALOG DISCARDABLE  0, 0, 258, 194
-STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+IDD_ABOUTBOX DIALOGEX 0,0,258,128
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "About HFVExplorer"
-FONT 8, "Tahoma"
+FONT 9,"Segoe UI"
 BEGIN
-    ICON            IDR_MAINFRAME,IDC_STATIC,11,14,20,20
-    LTEXT           "HFVExplorer 2.0.0",IDC_STATIC,39,13,156,8,
-                    SS_NOPREFIX
-    LTEXT           "Copyright © 1997-1999 Anygraaf Oy. All rights reserved.",
-                    IDC_STATIC,39,25,205,8
-    DEFPUSHBUTTON   "OK",IDOK,197,7,54,15,WS_GROUP
-    LTEXT           "This program is freeware.   Anygraaf takes no responsibility of any damage caused by this program. Use at your own risk.",
-                    IDC_STATIC,39,56,194,19
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,38,51,191,1
-    LTEXT           "vMac is a copyright of vMac development team.",
-                    IDC_STATIC,39,84,182,11
-    LTEXT           "Executor © is a copyright of ARDI, Inc.",IDC_STATIC,39,
-                    96,161,10
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,38,76,191,1
-    LTEXT           "Portions of the code is from HFS tools by Marcus Better, original copyright by Robert Leslie, GNU GPL licensing terms apply (see file COPYING in distribution archive).",
-                    IDC_STATIC,39,109,198,27
-    LTEXT           "Resource bundle cache code from ARDI Browser.",
-                    IDC_STATIC,39,139,180,12
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,38,176,191,1
-    LTEXT           "Bug reports to: lpesonen@nic.fi (Lauri Pesonen)",
-                    IDC_STATIC,39,37,198,8
-    LTEXT           "HFS CD partition table handling from Paul Hargrove's Linux sources. GNU GPL as well.",
-                    IDC_STATIC,39,153,182,19
+    ICON            IDR_MAINFRAME,IDC_STATIC,11,11,20,20
+    LTEXT           "HFVExplorer 2.0.0",IDC_STATIC,39,10,208,11,SS_NOPREFIX
+    LTEXT           "Copyright © 1997-1999 Anygraaf Oy. All rights reserved.",IDC_STATIC,39,24,208,11
+    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,11,41,236,1
+    LTEXT           "This program is freeware.   Anygraaf takes no responsibility of any damage caused by this program. Use at your own risk.",IDC_STATIC,11,47,236,21
+    LTEXT           "Includes HFS Tools code by Robert Leslie and Marcus Better. GNU GPL licensing terms apply. See LICENSE.",IDC_STATIC,11,73,236,21
+    LTEXT           "Resource-bundle cache code from ARDI Browser.",IDC_STATIC,11,96,166,18
+    DEFPUSHBUTTON   "OK",IDOK,193,103,54,16,WS_GROUP
 END
 
 IDD_DYNAMIC_COPYMODE_SELECT DIALOGEX 0,0,320,119
@@ -1424,8 +1407,8 @@ BEGIN
 END
 
 IDD_BASILISK_II DIALOGEX 0,0,335,134
-STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Launch Basilisk II"
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD | WS_CAPTION
+CAPTION "Basilisk II"
 FONT 9,"Segoe UI"
 BEGIN
     LTEXT           "Basilisk II &executable",IDC_STATIC,12,10,310,10
@@ -1436,13 +1419,12 @@ BEGIN
     PUSHBUTTON      "B&rowse...",IDC_EMULATOR_BROWSE_INPUT,263,57,60,16
     LTEXT           "Basilisk II uses the ROM and disks configured in this file.",IDC_STATIC,12,81,311,11
     CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,101,311,1
-    DEFPUSHBUTTON   "&Launch",IDOK,194,109,62,16
-    PUSHBUTTON      "Cancel",IDCANCEL,263,109,60,16
+    PUSHBUTTON      "&Launch",IDC_EMULATOR_LAUNCH,263,109,60,16
 END
 
 IDD_MINI_VMAC DIALOGEX 0,0,335,134
-STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Launch Mini vMac"
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD | WS_CAPTION
+CAPTION "Mini vMac"
 FONT 9,"Segoe UI"
 BEGIN
     LTEXT           "Mini vMac &executable",IDC_STATIC,12,10,310,10
@@ -1453,6 +1435,5 @@ BEGIN
     PUSHBUTTON      "B&rowse...",IDC_EMULATOR_BROWSE_INPUT,263,57,60,16
     LTEXT           "Mini vMac finds its ROM and default disks beside the executable.",IDC_STATIC,12,81,311,11
     CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDHORZ,12,101,311,1
-    DEFPUSHBUTTON   "&Launch",IDOK,194,109,62,16
-    PUSHBUTTON      "Cancel",IDCANCEL,263,109,60,16
+    PUSHBUTTON      "&Launch",IDC_EMULATOR_LAUNCH,263,109,60,16
 END

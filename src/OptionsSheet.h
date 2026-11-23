@@ -21,6 +21,7 @@
 #include "OptionsPage1.h"
 #include "OptionsPage2.h"
 #include "OptionsPage3.h"
+#include <memory>
 
 /////////////////////////////////////////////////////////////////////////////
 // COptionsSheet
@@ -40,6 +41,8 @@ public:
 	COptionsPage1 m_Page1;
 	COptionsPage2 m_Page2;
 	COptionsPage3 m_Page3;
+	std::unique_ptr<CPropertyPage> m_basilisk;
+	std::unique_ptr<CPropertyPage> m_miniVMac;
 
 // Operations
 public:

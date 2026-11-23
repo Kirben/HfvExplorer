@@ -2,6 +2,12 @@
 // Includes HFVExplorer launcher code by Lauri Pesonen, Copyright 1997-1998 Anygraaf Oy.
 #include "stdafx.h"
 #include "DocumentLaunch.h"
+#include "ClassicFormatCommand.h"
+#include <thread>
+#ifdef HFV_TESTING
+#include "resource.h"
+#include "OptionsSheet.h"
+#endif
 #include "BrowserPresentation.h"
 #include "resource.h"
 #include <filesystem>
@@ -250,9 +256,9 @@ std::wstring WindowsArgument(const Location& source)
 
 namespace DocumentLaunch {
 namespace {
-enum class Emulator { BasiliskII, MiniVMac };
 
-std::wstring EmulatorCommand(Emulator emulator, const std::wstring& executable, const std::wstring& input)
+
+std::wstring EmulatorCommand(Emulator emulator, const std::wstring& executable, const std::wstring& input, const std::wstring& transfer = {})
 {
     // Validated file paths cannot end in a separator or contain a quote.
     auto command = L"\"" + executable + L"\"";
@@ -260,11 +266,16 @@ std::wstring EmulatorCommand(Emulator emulator, const std::wstring& executable, 
         command += L" --config";
     if (!input.empty())
         command += L" \"" + input + L"\"";
+    if (!transfer.empty()) {
+        if (emulator == Emulator::BasiliskII)
+            command += L" --disk";
+        command += L" \"" + transfer + L"\"";
+    }
     return command;
 }
 
 DWORD StartEmulator(Emulator emulator, const std::wstring& executable, const std::wstring& input,
-                    int& invalidField)
+                    int& invalidField, const std::wstring& transfer = {}, HANDLE* process = nullptr)
 {
     invalidField = 0;
     for (const auto& file : {std::pair{IDC_EMULATOR_EXECUTABLE, &executable},
@@ -301,7 +312,7 @@ DWORD StartEmulator(Emulator emulator, const std::wstring& executable, const std
         CloseHandle(file);
     }
 
-    auto command = EmulatorCommand(emulator, executable, input);
+    auto command = EmulatorCommand(emulator, executable, input, transfer);
     const auto directory = std::filesystem::path(executable).parent_path();
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -310,14 +321,37 @@ DWORD StartEmulator(Emulator emulator, const std::wstring& executable, const std
                         0, nullptr, directory.c_str(), &startup, &child))
         return GetLastError();
     CloseHandle(child.hThread);
-    CloseHandle(child.hProcess);
+    if (process) *process = child.hProcess;
+    else CloseHandle(child.hProcess);
     return ERROR_SUCCESS;
 }
 
-class EmulatorDialog final : public CDialog {
+const char* EmulatorProfile(Emulator emulator)
+{
+    return emulator == Emulator::MiniVMac ? "MiniVMac" : "BasiliskII";
+}
+
+const char* EmulatorInputKey(Emulator emulator)
+{
+    return emulator == Emulator::MiniVMac ? "DiskImage" : "Preferences";
+}
+
+std::wstring EmulatorPath(Emulator emulator, const char* key)
+{
+    const auto value = AfxGetApp()->GetProfileString(EmulatorProfile(emulator), key);
+    return BrowserPresentation::FromUtf8(static_cast<LPCSTR>(value));
+}
+
+bool ConfiguredPath(const std::wstring& path)
+{
+    return std::filesystem::path(path).is_absolute() &&
+           path.find_first_of(L"\"\r\n") == std::wstring::npos;
+}
+
+class EmulatorPage final : public CPropertyPage {
 public:
-    EmulatorDialog(Emulator emulator, CWnd* owner)
-        : CDialog(Template(emulator), owner), emulator_(emulator) {}
+    explicit EmulatorPage(Emulator emulator)
+        : CPropertyPage(Template(emulator)), emulator_(emulator) {}
 
     static UINT Template(Emulator emulator)
     {
@@ -327,7 +361,7 @@ public:
 protected:
     BOOL OnInitDialog() override
     {
-        CDialog::OnInitDialog();
+        CPropertyPage::OnInitDialog();
         InitPath(IDC_EMULATOR_EXECUTABLE, "Executable");
         InitPath(IDC_EMULATOR_INPUT, InputKey());
         return TRUE;
@@ -345,10 +379,24 @@ protected:
                 L"All files\0*.*\0");
             return TRUE;
         }
-        return CDialog::OnCommand(w, l);
+        if (HIWORD(w) == EN_CHANGE &&
+            (LOWORD(w) == IDC_EMULATOR_EXECUTABLE || LOWORD(w) == IDC_EMULATOR_INPUT))
+            SetModified();
+        if (HIWORD(w) == BN_CLICKED && LOWORD(w) == IDC_EMULATOR_LAUNCH) {
+            Start();
+            return TRUE;
+        }
+        return CPropertyPage::OnCommand(w, l);
     }
 
-    void OnOK() override
+    BOOL OnApply() override
+    {
+        SavePath("Executable", Path(IDC_EMULATOR_EXECUTABLE));
+        SavePath(InputKey(), Path(IDC_EMULATOR_INPUT));
+        return CPropertyPage::OnApply();
+    }
+
+    void Start()
     {
         const auto executable = Path(IDC_EMULATOR_EXECUTABLE);
         const auto input = Path(IDC_EMULATOR_INPUT);
@@ -370,16 +418,14 @@ protected:
                 GetDlgItem(invalidField)->SetFocus();
             return;
         }
-        SavePath("Executable", executable);
-        SavePath(InputKey(), input);
-        CDialog::OnOK();
+
     }
 
 private:
     Emulator emulator_;
     bool IsMini() const { return emulator_ == Emulator::MiniVMac; }
-    const char* Profile() const { return IsMini() ? "MiniVMac" : "BasiliskII"; }
-    const char* InputKey() const { return IsMini() ? "DiskImage" : "Preferences"; }
+    const char* Profile() const { return EmulatorProfile(emulator_); }
+    const char* InputKey() const { return EmulatorInputKey(emulator_); }
 
     void InitPath(int id, const char* key)
     {
@@ -415,16 +461,109 @@ private:
 };
 }
 
-void ShowBasiliskII(CWnd* owner)
+bool EmulatorConfigured(Emulator emulator)
 {
-    EmulatorDialog(Emulator::BasiliskII, owner).DoModal();
+    return ConfiguredPath(EmulatorPath(emulator, "Executable")) &&
+           ConfiguredPath(EmulatorPath(emulator, EmulatorInputKey(emulator)));
 }
 
-void ShowMiniVMac(CWnd* owner)
+bool OpenInEmulator(BrowserSession& session, Request request, Emulator emulator)
 {
-    EmulatorDialog(Emulator::MiniVMac, owner).DoModal();
+    auto* owner = session.Owner();
+    const auto executable = EmulatorPath(emulator, "Executable");
+    const auto input = EmulatorPath(emulator, EmulatorInputKey(emulator));
+    if (!ConfiguredPath(executable) || !ConfiguredPath(input)) return false;
+    std::filesystem::path folder, image, preferences;
+    const auto cleanup = [](const auto& directory, const auto& disk, const auto& config) {
+        if (!disk.empty()) {
+            SetFileAttributesW(disk.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(disk.c_str());
+        }
+        if (!config.empty()) {
+            SetFileAttributesW(config.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(config.c_str());
+        }
+        if (!directory.empty()) RemoveDirectoryW(directory.c_str());
+    };
+    try {
+        StorageLocation::RequireCapturedIdentity(request.selection);
+        constexpr uint64_t forkLimit = 0x7fffffffULL;
+        const auto data = request.entry.forks[0].size;
+        const auto resource = request.entry.WritesStoredCompressionResource() ? 0 : request.entry.forks[1].size;
+        if (data > forkLimit || resource > forkLimit)
+            throw HfsPlus::Error("A file fork is too large for the temporary classic HFS disk.");
+
+        const auto bytes = ((data + resource + 2 * 1024 * 1024 + 511) / 512) * 512;
+        if (emulator == Emulator::MiniVMac && bytes >= 0x80000000ULL)
+            throw HfsPlus::Error("Mini vMac requires a disk image smaller than 2 GiB.");
+
+        wchar_t temp[MAX_PATH]{}, reservation[MAX_PATH]{};
+        const auto length = GetTempPathW(ARRAYSIZE(temp), temp);
+        if (!length || length >= ARRAYSIZE(temp) || !GetTempFileNameW(temp, L"hfv", 0, reservation))
+            throw HfsPlus::Error("Could not reserve a temporary transfer disk.");
+        const auto directory = std::wstring(reservation) + L".dir";
+        const bool created = CreateDirectoryW(directory.c_str(), nullptr) != FALSE;
+        DeleteFileW(reservation);
+        if (!created) throw HfsPlus::Error("Could not create the temporary transfer directory.");
+        folder = directory;
+        image = folder / L"Transfer.dsk";
+
+        auto format = ShowStorageWaitJob([&](Storage::Job& job) {
+            FormatClassicImage(image.wstring(), "Transfer", bytes, &job);
+            return Storage::Result{};
+        }, !owner->IsWindowVisible(), owner);
+        if (format.error == ERROR_CANCELLED) { cleanup(folder, image, preferences); return false; }
+        if (format.code) throw HfsPlus::Error(format.message);
+
+        auto destination = Location::Classic(Location::Windows(image.wstring()).LegacyPath(), "Transfer:");
+        destination.directory = true;
+        request.selection.cut = false;
+        FileOperations::OrdinaryCopy copy{{std::move(request.selection)}, std::move(destination)};
+        auto operation = FileOperations::Submit(FileOperations::Request(std::move(copy)));
+        auto transferred = ShowSubmittedStorageJob(operation.Job(), "Preparing emulator disk",
+            !owner->IsWindowVisible(), true, true, owner);
+        if (transferred.error == ERROR_CANCELLED) { cleanup(folder, image, preferences); return false; }
+        if (transferred.code || !operation.Snapshot().complete)
+            throw HfsPlus::Error(transferred.message.empty() ? "Could not prepare the emulator disk." : transferred.message);
+        if (!SetFileAttributesW(image.c_str(), FILE_ATTRIBUTE_READONLY))
+            throw HfsPlus::Error("Could not make the temporary transfer disk read-only.");
+
+        if (emulator == Emulator::BasiliskII) {
+            preferences = folder / L"BasiliskII_prefs";
+            if (!CopyFileW(input.c_str(), preferences.c_str(), TRUE))
+                throw HfsPlus::Error("Could not copy the Basilisk II preferences.");
+        }
+
+        int field = 0;
+        HANDLE child = nullptr;
+        const auto diskArgument = (emulator == Emulator::BasiliskII ? L"*" : L"") + image.wstring();
+        const auto error = StartEmulator(emulator, executable,
+            preferences.empty() ? input : preferences.wstring(), field, diskArgument, &child);
+        if (error != ERROR_SUCCESS)
+            throw HfsPlus::Error("Could not start the emulator. Windows error " + std::to_string(error) + ".");
+        try {
+            std::thread([child, folder, image, preferences, cleanup] {
+                if (WaitForSingleObject(child, INFINITE) == WAIT_OBJECT_0)
+                    cleanup(folder, image, preferences);
+                CloseHandle(child);
+            }).detach();
+        } catch (...) {
+            CloseHandle(child);
+            owner->MessageBox("The emulator was started. Its temporary disk will be kept.",
+                              "HFVExplorer", MB_OK | MB_ICONINFORMATION);
+        }
+        return true;
+    } catch (const std::exception& error) {
+        cleanup(folder, image, preferences);
+        owner->MessageBox(error.what(), "HFVExplorer", MB_OK | MB_ICONERROR);
+        return false;
+    }
 }
 
+std::unique_ptr<CPropertyPage> EmulatorOptions(bool miniVMac)
+{
+    return std::make_unique<EmulatorPage>(miniVMac ? Emulator::MiniVMac : Emulator::BasiliskII);
+}
 #ifdef HFV_TESTING
 bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory)
 {
@@ -450,16 +589,24 @@ bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory)
                         {executable}))
         return false;
 
+    const auto transfer = (base / L"Transfer disk.dsk").wstring();
+    if (!checkArguments(EmulatorCommand(Emulator::BasiliskII, executable, input, L"*" + transfer),
+                        {executable, L"--config", input, L"--disk", L"*" + transfer}) ||
+        !checkArguments(EmulatorCommand(Emulator::MiniVMac, executable, input, transfer),
+                        {executable, input, transfer}))
+        return false;
     int invalidField;
     for (const auto emulator : {Emulator::BasiliskII, Emulator::MiniVMac}) {
-        EmulatorDialog dialog(emulator, owner);
-        if (!dialog.Create(EmulatorDialog::Template(emulator), owner))
+        COptionsSheet options("Options", owner, emulator == Emulator::BasiliskII ? 3 : 4);
+        if (options.GetPageCount() != 5 || !options.Create(owner, WS_POPUP | WS_CAPTION))
             return false;
+        const auto& dialog = *options.GetActivePage();
         const bool controls = IsWindowUnicode(::GetDlgItem(dialog.m_hWnd, IDC_EMULATOR_EXECUTABLE)) &&
                               IsWindowUnicode(::GetDlgItem(dialog.m_hWnd, IDC_EMULATOR_INPUT)) &&
                               dialog.GetDlgItem(IDC_EMULATOR_BROWSE_EXECUTABLE) &&
-                              dialog.GetDlgItem(IDC_EMULATOR_BROWSE_INPUT);
-        dialog.DestroyWindow();
+                              dialog.GetDlgItem(IDC_EMULATOR_BROWSE_INPUT) &&
+                              dialog.GetDlgItem(IDC_EMULATOR_LAUNCH);
+        options.DestroyWindow();
         if (!controls || StartEmulator(emulator, executable, input, invalidField) == ERROR_SUCCESS ||
             invalidField != IDC_EMULATOR_EXECUTABLE)
             return false;

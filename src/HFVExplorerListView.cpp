@@ -877,6 +877,12 @@ std::optional<bool> CHFVExplorerListView::BrowserItemCommandEnabled(UINT command
     case ID_OWN_FILE_OPEN:
     case ID_OWN_FOLDER_OPEN:
         return ready && ((row && !row->location.IsNone()) || IsParentRow(selected));
+    case ID_OWN_OPEN_WITH_BASILISK:
+    case ID_OWN_OPEN_WITH_MINI_VMAC:
+        return ready && m_cl->GetSelectedCount()==1 && row && !row->entry.directory &&
+               !row->location.IsNone() && !row->location.IsWindows() &&
+               DocumentLaunch::EmulatorConfigured(command == ID_OWN_OPEN_WITH_BASILISK ?
+                   DocumentLaunch::Emulator::BasiliskII : DocumentLaunch::Emulator::MiniVMac);
     case ID_OWN_FILE_PROPERTIES:
     case ID_OWN_FOLDER_PROPERTIES:
         return browser.CanInspectProperties(selected);
@@ -899,6 +905,14 @@ bool CHFVExplorerListView::RunBrowserItemCommand(UINT command)
     case ID_OWN_FOLDER_OPEN:
         activate_list_item(m_cl->GetNextItem(-1, LVNI_SELECTED), FALSE);
         break;
+    case ID_OWN_OPEN_WITH_BASILISK:
+    case ID_OWN_OPEN_WITH_MINI_VMAC: {
+        const auto& row = *BrowserRowAt(m_cl->GetNextItem(-1, LVNI_SELECTED));
+        const auto emulator = command == ID_OWN_OPEN_WITH_BASILISK ?
+            DocumentLaunch::Emulator::BasiliskII : DocumentLaunch::Emulator::MiniVMac;
+        DocumentLaunch::OpenInEmulator(GetBrowserSession(), {row.location, row.entry}, emulator);
+        break;
+    }
     case ID_OWN_FILE_PROPERTIES:
     case ID_OWN_FOLDER_PROPERTIES:
         on_properties(m_cl->GetNextItem(-1, LVNI_SELECTED));
@@ -923,6 +937,14 @@ void CHFVExplorerListView::UpdateBrowserItemMenu(CMenu& menu) const
     }
 }
 
+void CHFVExplorerListView::AppendEmulatorCommands(CMenu& menu) const
+{
+    if (BrowserItemCommandEnabled(ID_OWN_OPEN_WITH_BASILISK).value_or(false))
+        menu.AppendMenu(MF_STRING, ID_OWN_OPEN_WITH_BASILISK, "Open with Basilisk II");
+    if (BrowserItemCommandEnabled(ID_OWN_OPEN_WITH_MINI_VMAC).value_or(false))
+        menu.AppendMenu(MF_STRING, ID_OWN_OPEN_WITH_MINI_VMAC, "Open with Mini vMac");
+}
+
 void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point) 
 {
  if(GetBrowserSession().MacBrowser().ContextMenu(point))return;
@@ -935,6 +957,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
   menu.AppendMenu(MF_STRING|(BrowserDirectoryWritable()?MF_ENABLED:MF_GRAYED),ID_OWN_NEW_FOLDER,"New Folder...");
   menu.AppendMenu(MF_STRING|(selected?MF_ENABLED:MF_GRAYED),ID_OWN_FILE_PROPERTIES,"Properties...");
   menu.AppendMenu(MF_STRING|(selected&&BrowserSelectionAllows(false)?MF_ENABLED:MF_GRAYED),ID_OWN_DELETE,"Delete");
+  AppendEmulatorCommands(menu);
   UpdateBrowserItemMenu(menu);
   const auto command = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y,
                                            GetBrowserSession().Owner());
@@ -986,6 +1009,7 @@ void CHFVExplorerListView::OnContextMenu(CWnd* pWnd, CPoint point)
 				cm.AppendMenu( MF_STRING | MF_ENABLED, ID_OWN_FOLDER_PROPERTIES, "&Properties..." );
 			} else {
 				cm.AppendMenu(MF_STRING | MF_ENABLED, ID_OWN_FILE_OPEN, "&Open (Associated Windows program)\tEnter");
+                AppendEmulatorCommands(cm);
 				cm.AppendMenu(MF_STRING | MF_ENABLED, ID_OWN_DELETE, "&Delete\tDel");
 				cm.AppendMenu(MF_STRING | MF_ENABLED, ID_OWN_MAP_THIS, "&Map selected files..\tF4");
 				cm.AppendMenu( MF_SEPARATOR | MF_DISABLED | MF_GRAYED, 0, "" );

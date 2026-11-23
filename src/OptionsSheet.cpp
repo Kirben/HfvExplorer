@@ -21,6 +21,7 @@
 #include "stdafx.h"
 #include "HFVExplorer.h"
 #include "OptionsSheet.h"
+#include "DocumentLaunch.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -34,21 +35,29 @@ static char THIS_FILE[] = __FILE__;
 IMPLEMENT_DYNAMIC(COptionsSheet, CPropertySheet)
 
 COptionsSheet::COptionsSheet(UINT nIDCaption, CWnd* pParentWnd, UINT iSelectPage)
-	:CPropertySheet(nIDCaption, pParentWnd, min(iSelectPage,2U))
+	:CPropertySheet(nIDCaption, pParentWnd, min(iSelectPage,4U))
 {
-	m_last_active_page = min(iSelectPage,2U);
+	m_last_active_page = min(iSelectPage,4U);
 	AddPage(&m_Page1);
 	AddPage(&m_Page2);
 	AddPage(&m_Page3);
+	m_basilisk = DocumentLaunch::EmulatorOptions(false);
+	m_miniVMac = DocumentLaunch::EmulatorOptions(true);
+	AddPage(m_basilisk.get());
+	AddPage(m_miniVMac.get());
 }
 
 COptionsSheet::COptionsSheet(LPCTSTR pszCaption, CWnd* pParentWnd, UINT iSelectPage)
-	:CPropertySheet(pszCaption, pParentWnd, min(iSelectPage,2U))
+	:CPropertySheet(pszCaption, pParentWnd, min(iSelectPage,4U))
 {
-	m_last_active_page = min(iSelectPage,2U);
+	m_last_active_page = min(iSelectPage,4U);
 	AddPage(&m_Page1);
 	AddPage(&m_Page2);
 	AddPage(&m_Page3);
+	m_basilisk = DocumentLaunch::EmulatorOptions(false);
+	m_miniVMac = DocumentLaunch::EmulatorOptions(true);
+	AddPage(m_basilisk.get());
+	AddPage(m_miniVMac.get());
 }
 
 COptionsSheet::~COptionsSheet()

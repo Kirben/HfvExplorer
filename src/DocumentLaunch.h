@@ -10,8 +10,10 @@ struct Request {
  MacBrowser::Entry entry;
 };
 
-void ShowBasiliskII(CWnd* owner);
-void ShowMiniVMac(CWnd* owner);
+std::unique_ptr<CPropertyPage> EmulatorOptions(bool miniVMac);
+enum class Emulator { BasiliskII, MiniVMac };
+bool EmulatorConfigured(Emulator);
+bool OpenInEmulator(BrowserSession&, Request, Emulator);
 #ifdef HFV_TESTING
 bool ProbeEmulatorLaunchers(CWnd* owner, const char* directory);
 #endif
