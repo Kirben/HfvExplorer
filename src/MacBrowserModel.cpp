@@ -938,7 +938,7 @@ bool MatchesArchivedEntry(Volume& source,const Planned& plan,Volume& destination
     if(depth>128||(validatePartner&&depth&&(candidate.hardLink||!plan.archiveLinkGroup.empty()))||
        (!special&&!candidate.readError.empty())||entry.directory!=candidate.directory||
        entry.symbolicLink!=candidate.symbolicLink||entry.finder!=candidate.finder||
-       !(entry.posix==candidate.posix)||entry.protectedFile!=candidate.protectedFile||
+       ((validatePartner||entry.posix)&&!(entry.posix==candidate.posix))||entry.protectedFile!=candidate.protectedFile||
        (entry.datesValid&&(!candidate.datesValid||entry.created!=candidate.created||entry.modified!=candidate.modified||
         (entry.apfsTimestamps&&entry.apfsTimestamps!=candidate.apfsTimestamps)||
         (entry.additionalDates.accessed&&entry.additionalDates.accessed!=candidate.additionalDates.accessed)||
@@ -1033,7 +1033,7 @@ void VerifyMovedArchive(Volume& source,const Planned& plan,Volume& destination,u
     actual=destination.Stat(actual.id);
     if(!classic){
         Check(MatchesArchivedEntry(source,plan,destination,actual,job,0,false),
-              "Restored archive readback differs from the source. Source retained.");
+              ("Restored archive readback differs for "+BrowserPresentation::Utf8(plan.entry.name)+". Source retained.").c_str());
         return;
     }
     Check(actual.directory==plan.entry.directory&&actual.name==plan.entry.name,

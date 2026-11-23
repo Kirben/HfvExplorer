@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "ApfsFormat.h"
+#include "ApfsVolume.h"
 #include "ClassicCopyArchive.h"
 #include "ClassicHfsRecovery.h"
 #include "ClassicFormatCommand.h"
@@ -764,6 +766,100 @@ Storage::Result DeleteArchiveSelection(const std::shared_ptr<MacBrowser::Volume>
         {FileOperations::Location::Mounted(volume,id)}},job,completion);
 }
 
+std::shared_ptr<MacBrowser::Volume> OpenCrossFormatFixture(const std::wstring& path)
+{
+    auto volume=MacBrowser::OpenImage(path);
+    if(volume&&strcmp(volume->Kind(),"APFS")==0){
+        volume.reset();
+        const auto key=VolumeCoord::ImageKey(path);
+        auto disk=HfsPlus::OpenImage(path.c_str(),true);
+        volume=Apfs::OpenWritable(disk,key);
+    }
+    Check(volume&&volume->Writable(),"open a writable cross-format fixture");
+    return volume;
+}
+
+Storage::Result CrossFormatMove(const CString& sourcePath,Storage::Job& job)
+{
+    auto source=OpenCrossFormatFixture(VolumeCoord::Wide(sourcePath.GetString()));
+    auto target=OpenCrossFormatFixture(VolumeCoord::Wide((sourcePath+".target.dsk").GetString()));
+    Check(source&&target,"open both cross-format move participants");
+    std::vector<FileOperations::Location> entries;
+    for(const auto* name:{u"First",u"Second"}){
+        auto location=FileOperations::Location::Mounted(source,Find(*source,2,name));
+        location.cut=true;
+        entries.push_back(std::move(location));
+    }
+    FileOperations::Completion completion;
+    std::atomic<bool> finished{false};
+    std::thread approve([&]{
+        while(!finished){
+            const auto prompt=job.conflictState();
+            if(prompt.kind==Storage::CopyPrompt::ClassicArchiveMove&&!prompt.path.empty())
+                job.resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+            Sleep(1);
+        }
+    });
+    const auto result=FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        std::move(entries),FileOperations::Location::Mounted(target,2)},job,completion);
+    finished=true;
+    approve.join();
+    return result;
+}
+
+void CrossFormatMoveRecovery(const CString& root,FILE* report)
+{
+    using Kind=HfsPlus::Volume::FormatKind;
+    for(unsigned modern:{0u,1u,2u})for(bool fromClassic:{false,true}){
+        for(unsigned phase:{17u,18u,0u}){
+            CString from;
+            from.Format("%s\\cross-format-%u-%u-%u.dsk",root.GetString(),modern,unsigned(fromClassic),phase);
+            CString to=from+".target.dsk";
+            FormatClassicImage(VolumeCoord::Wide((fromClassic?from:to).GetString()),"Classic move",4*1024*1024);
+            auto disk=HfsPlus::CreateImage(VolumeCoord::Wide((fromClassic?to:from).GetString()).c_str(),16*1024*1024);
+            if(modern==2){
+                Storage::Job format;
+                Apfs::Format(*disk,u"Modern move",true,format);
+            }else HfsPlus::Volume::Format(*disk,u"Modern move",true,modern?Kind::HfsXCaseSensitive:Kind::HfsPlus);
+            disk.reset();
+            const auto fromPath=VolumeCoord::Wide(from.GetString()),toPath=VolumeCoord::Wide(to.GetString());
+            {
+                auto source=OpenCrossFormatFixture(fromPath);
+                Put(*source,false,false,2,u"First");
+                Put(*source,true,false,2,u"Second");
+                if(fromClassic){
+                    Storage::Job archive;
+                    const auto first=source->Stat(Find(*source,2,u"First"));
+                    ClassicCopyArchive::Save(*source,first.id,ClassicCopyArchive::Metadata(first),archive);
+                }
+                auto target=OpenCrossFormatFixture(toPath);
+                Put(*target,true,false,2,u"Unrelated");
+            }
+            if(phase)CrashChild(from,phase,L"cross-format-move");
+            else{
+                Storage::Job cancel;
+                cancel.transport([&](const Storage::Progress& progress){
+                    if(progress.phase=="Removing moved sources"&&progress.path=="Second")cancel.cancel();
+                },[](const std::string&){return Storage::ConflictChoice::ReplaceAll;});
+                const auto result=CrossFormatMove(from,cancel);
+                Check(result.error==ERROR_CANCELLED&&result.partial&&!result.moved&&result.completed==2&&
+                      result.message.find("Source entries removed: 1")!=std::string::npos,
+                      "cross-format cancellation did not report published copies and partial cleanup");
+            }
+            auto source=OpenCrossFormatFixture(fromPath);
+            auto target=OpenCrossFormatFixture(toPath);
+            VerifyForks(*target,target->Stat(Find(*target,2,u"First")),false);
+            VerifyForks(*target,target->Stat(Find(*target,2,u"Second")),true);
+            VerifyForks(*target,target->Stat(Find(*target,2,u"Unrelated")),true);
+            VerifyForks(*source,source->Stat(Find(*source,2,u"Second")),true);
+            MacBrowser::Entry first;
+            Check(source->FindChild(2,u"First",first)==(phase==17),"wrong source cleanup after interruption");
+            if(phase==17)VerifyForks(*source,source->Stat(first.id),false);
+        }
+    }
+    fprintf(report,"PASS: classic HFS moves with HFS+, HFSX and APFS retain verified destination forks and unprocessed sources when interrupted before and during source cleanup in either direction.\n");
+}
+
 void ArchiveDeleteRecovery(const CString& root,const Bytes& original,FILE* report)
 {
     const CString image=root+"\\archive-delete.dsk";
@@ -1449,6 +1545,22 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             const auto result=TransferTree(source,target,!strcmp(action,"folder-move"),job);
             return result.code?4:3;
         }
+        if(!strcmp(action,"cross-format-move")){
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){
+                if(progress.phase=="Removing moved sources"&&progress.path==(phase==17?"First":"Second"))
+                    ExitProcess(90+phase);
+            },[](const std::string&){return Storage::ConflictChoice::ReplaceAll;});
+            const auto result=CrossFormatMove(image,job);
+            if(result.code){
+                FILE* failure=nullptr;
+                if(!fopen_s(&failure,(std::string(image)+".cross-format-error.txt").c_str(),"w")){
+                    fprintf(failure,"%lu: %s\n",result.error,result.message.c_str());
+                    fclose(failure);
+                }
+            }
+            return result.code?4:3;
+        }
         auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image));
         Check(bool(volume),"open classic HFS image in subprocess");
         const auto document=Find(*volume,2,u"Document");
@@ -1607,6 +1719,7 @@ int RunClassicRecoveryTest(const char* directory)
         fprintf(report,"PASS: interrupted recovery is repeatable through a hard-link alias; cancellation restores the original bytes.\n");
         DeleteRecovery(root,original,report);
         ArchiveDeleteRecovery(root,original,report);
+        CrossFormatMoveRecovery(root,report);
         RenameRecovery(root,original,report);
         {
             const CString empty=root+"\\empty-transfer.dsk";

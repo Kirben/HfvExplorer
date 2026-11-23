@@ -64,7 +64,7 @@ std::pair<std::shared_ptr<Volume>,uint32_t> Destination(const Location& value){
  return {OpenClassic(value.ClassicImage(),value.ClassicPath(),true,value.expectedResource),2};
 }
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
-                        Storage::Job& job,Completion& completion,bool windowsDestination,bool batchActive=false){
+                        Storage::Job& job,Completion& completion,bool windowsDestination,bool batchActive=false,bool reportCleanup=false){
  std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
  std::vector<WindowsCutPlan> windowsPlans(sources.size());
  for(size_t i=0;i<sources.size();++i)
@@ -76,14 +76,26 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
    if(ExecutionFor(*checked[i].volume).windowsPaths)
     ValidateWindowsCut(*checked[i].volume,checked[i].id,job,windowsDestination);
   }
- for(size_t i=0;i<sources.size();++i)
-  if(sources[i].cut)StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
+ size_t removed=0;
+ for(size_t i=0;i<sources.size();++i){
+  if(!sources[i].cut)continue;
+  if(reportCleanup){
+   auto progress=job.progress();
+   progress.phase="Removing moved sources";
+   progress.path=Utf8(checked[i].volume->Stat(checked[i].id).name);
+   job.progress(progress);
+   if(job.cancelled())
+    throw OperationError(ERROR_CANCELLED,"Destination copies were published. Source entries removed: "+std::to_string(removed)+".");
+  }
+  StorageLocation::FinalizeCutSource(sources[i],std::move(checked[i]),snapshots[i],job,
     [&](Volume& volume,uint32_t id){
      Mark(completion,sources[i]);
      if(!windowsPlans[i].empty())FinishWindowsCut(volume,windowsPlans[i],job);
      else if(!strcmp(volume.Kind(),"HFS"))ClassicCopyArchive::RemoveArchive(volume,id,job,batchActive);
      else RemoveTree(volume,id,job);
     });
+  ++removed;
+ }
 }
 bool MoveInPlace(const OrdinaryCopy& request,const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& sources,Volume& target,uint32_t parent,Storage::Job& job,Completion& completion){
  if(!target.Supports().rename)return false;
@@ -332,7 +344,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      std::all_of(request.sources.begin(),request.sources.end(),[](const Location& item){
          return item.cut&&item.IsWindows();
      });
- bool complete=false,inPlace=false,windowsDestination=false;
+ bool complete=false,inPlace=false,windowsDestination=false,crossFormatMove=false;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
@@ -352,6 +364,19 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
          destination.first->CanMoveEntryFrom(*source.first,source.second,destination.second)),
          "A cut source is read-only");
    opened.push_back(std::move(source));
+  }
+  if(moving&&!transfer.adapter){
+   const auto modern=[](const Volume& volume){
+    const std::string_view kind=volume.Kind();
+    return kind=="APFS"||kind=="HFS+"||kind=="HFSX";
+   };
+   const auto& dest=*destination.first;
+   for(size_t i=0;i<opened.size();++i){
+    if(!request.sources[i].cut)continue;
+    const auto& source=*opened[i].first;
+    crossFormatMove|=(!strcmp(source.Kind(),"HFS")&&modern(dest))||
+                     (modern(source)&&!strcmp(dest.Kind(),"HFS"));
+   }
   }
   if(transfer.adapter)Mark(completion,target);
   else for(const auto& item:opened)MarkChild(completion,target,item.first->Stat(item.second).name);
@@ -436,7 +461,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   // Without a shared decision, keep the source through destination close and readback.
   for(const auto& source:request.sources)
    StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
-  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination);
+  if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,false,crossFormatMove);
  }
  completion.complete=complete;
  completion.completed=job.progress().files;
