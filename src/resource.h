@@ -164,6 +164,7 @@
 #define ID_TOOLS_APFS_RESTORE           32806
 #define ID_TOOLS_APFS_RENAME_VOLUME     32807
 #define ID_TOOLS_INTERRUPTED_MOVES     32808
+#define ID_FILE_FINISH_WINDOWS_EDIT     32809
 
 // Next default values for new objects
 // 
@@ -171,7 +172,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_3D_CONTROLS                     1
 #define _APS_NEXT_RESOURCE_VALUE        172
-#define _APS_NEXT_COMMAND_VALUE         32809
+#define _APS_NEXT_COMMAND_VALUE         32810
 #define _APS_NEXT_CONTROL_VALUE         1097
 #define _APS_NEXT_SYMED_VALUE           101
 #endif

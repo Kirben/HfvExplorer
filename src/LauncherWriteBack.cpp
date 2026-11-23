@@ -3,7 +3,6 @@
 #include "LauncherWriteBack.h"
 #include "BrowserSession.h"
 #include "StorageJobDialog.h"
-#include "utils.h"
 #include "WindowsEntryIdentity.h"
 
 LauncherTemporaryDocument::~LauncherTemporaryDocument()
@@ -134,31 +133,13 @@ bool LauncherWriteBack::CaptureBaseline(CWnd* owner)
     return !result.code;
 }
 
-LauncherWriteBack::~LauncherWriteBack()
-{
-    if(process_)CloseHandle(process_);
-}
-
-bool LauncherWriteBack::Ready() const
-{
-    if(!process_)return true;
-    if(WaitForSingleObject(process_,0)==WAIT_TIMEOUT)return false;
-    if(GetTickCount()-started_<2500)return true;
-    return GetFileAttributes(temporary_)==INVALID_FILE_ATTRIBUTES||can_have_exclusive_access(temporary_);
-}
-
-void LauncherWriteBack::Complete(BrowserSession& session)
+bool LauncherWriteBack::Complete(BrowserSession& session)
 {
     auto owner=session.Owner();
     auto retain=[&](const CString& reason) {
         owner->MessageBox(reason+" The temporary document is still available at "+temporary_,
                           "HFVExplorer",MB_OK|MB_ICONWARNING);
     };
-    DWORD code=STILL_ACTIVE;
-    if(!process_||!GetExitCodeProcess(process_,&code)||code==STILL_ACTIVE||GetTickCount()-started_<2500){
-        retain("Could not reliably track the application's editing session.");
-        return;
-    }
     const auto path=VolumeCoord::Wide(static_cast<LPCSTR>(temporary_));
     LauncherTemporaryDocument document;
     uint64_t current=0;
@@ -170,24 +151,27 @@ void LauncherWriteBack::Complete(BrowserSession& session)
     },!owner->IsWindowVisible(),owner);
     if(read.code){
         retain(CString(read.message.c_str()));
-        return;
+        return false;
     }
     if(current==baseline_){
-        if(!document.Remove())retain("Could not remove the temporary copy.");
-        return;
+        if(document.Remove())return true;
+        retain("Could not remove the temporary copy.");
+        return false;
     }
     if(version_.empty()){
         retain("Edits to this temporary copy cannot be written back to the Mac volume.");
-        return;
+        return false;
     }
     if(owner->MessageBox("Write edits to the original Mac document? The temporary file is "+temporary_,
                          "HFVExplorer",MB_YESNO|MB_ICONQUESTION)!=IDYES)
-        return;
+        return false;
     auto result=ShowStorageJob([&](Storage::Job& job){
         return FileOperations::ApplyLaunchEdit(original_,version_,document.Handle(),job);
     },"Writing back the edited document",!owner->IsWindowVisible(),true,true,owner);
-    if(result.code)
+    if(result.code){
         retain(CString(result.message.c_str()));
-    else
-        if(!document.Remove())retain("Could not remove the temporary copy.");
+        return false;
+    }
+    if(!document.Remove())retain("Could not remove the temporary copy.");
+    return true;
 }

@@ -123,6 +123,7 @@ BEGIN
         MENUITEM "&Write volume to floppy...",  ID_FILE_VOLUMETOFLOPPY
         MENUITEM "&Read volume from floppy...", ID_FILE_VOLUMEFROMFLOPPY
         MENUITEM SEPARATOR
+        MENUITEM "Finish editing Windows document...", ID_FILE_FINISH_WINDOWS_EDIT
         MENUITEM "&Eject media\tCtrl+E",        ID_FILE_EJECT
         MENUITEM "&Reload media\tCtrl+R",       ID_FILE_RELOAD
         MENUITEM SEPARATOR

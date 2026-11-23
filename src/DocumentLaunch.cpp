@@ -205,15 +205,14 @@ bool Launchers::OpenClassicDocument(CString type, CString creator)
  launch.lpFile=staged;
  launch.lpDirectory=directory;
  launch.nShow=SW_SHOWNORMAL;
- launch.fMask=SEE_MASK_NOCLOSEPROCESS;
  BOOL launched=ShellExecuteEx(&launch);
  handoff.Close();
- writeBack->Track(launch.hProcess);
  if(!launched||reinterpret_cast<INT_PTR>(launch.hInstApp)<=32){
   owner->MessageBox("Could not open the temporary document. Inspect the staged copy at "+staged,"HFVExplorer",MB_OK|MB_ICONERROR);
   return FALSE;
  }
  static_cast<CMainFrame*>(owner)->TrackLaunchedDocument(std::move(writeBack));
+ if(auto* status=session.Status())status->SetPaneText(0,"After closing the editor, choose File > Finish editing Windows document.");
  return TRUE;
 }
 

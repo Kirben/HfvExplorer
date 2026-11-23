@@ -173,6 +173,8 @@ protected:
 	afx_msg void OnEditSelectAll();
 	afx_msg BOOL OnQueryOpen();
 	afx_msg void OnClose();
+ afx_msg void OnFinishWindowsEdit();
+ afx_msg void OnUpdateFinishWindowsEdit(CCmdUI*);
 	afx_msg void OnFileEject();
 	afx_msg void OnFileReload();
 	afx_msg void OnToolsBurn();

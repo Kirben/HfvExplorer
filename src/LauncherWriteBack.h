@@ -36,19 +36,15 @@ private:
 class LauncherWriteBack {
 public:
     LauncherWriteBack(FileOperations::Location original,std::string version,CString temporary);
-    ~LauncherWriteBack();
     LauncherWriteBack(const LauncherWriteBack&) = delete;
     LauncherWriteBack& operator=(const LauncherWriteBack&) = delete;
     bool CaptureBaseline(CWnd* owner);
-    void Track(HANDLE process) { process_=process; started_=GetTickCount(); }
-    bool Ready() const;
-    void Complete(BrowserSession&);
+    const CString& TemporaryPath() const { return temporary_; }
+    bool Complete(BrowserSession&);
 
 private:
     FileOperations::Location original_;
     std::string version_;
     CString temporary_;
-    HANDLE process_=nullptr;
-    DWORD started_=0;
     uint64_t baseline_=0;
 };

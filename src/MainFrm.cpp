@@ -135,6 +135,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
 	ON_COMMAND(ID_EDIT_SELECT_ALL, OnEditSelectAll)
 	ON_WM_QUERYOPEN()
 	ON_WM_CLOSE()
+ ON_COMMAND(ID_FILE_FINISH_WINDOWS_EDIT, OnFinishWindowsEdit)
+ ON_UPDATE_COMMAND_UI(ID_FILE_FINISH_WINDOWS_EDIT, OnUpdateFinishWindowsEdit)
 	ON_COMMAND(ID_FILE_EJECT, OnFileEject)
 	ON_COMMAND(ID_FILE_RELOAD, OnFileReload)
 	ON_COMMAND(ID_TOOLS_BURN, OnToolsBurn)
@@ -686,16 +688,6 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 	m_handlingTimer=true;
  struct TimerGuard{bool& active;~TimerGuard(){active=false;}} guard{m_handlingTimer};
 
- if(!StorageUi::busy()){
-  for(size_t i=m_launchedDocuments.size();i>0;--i){
-   auto& item=m_launchedDocuments[i-1];
-   if(!item->Ready())continue;
-   auto completed=std::move(item);
-   m_launchedDocuments.erase(m_launchedDocuments.begin()+i-1);
-   completed->Complete(GetBrowserSession());
-   break;
-  }
- }
 
 	if(pApp->m_timer_enabled && m_volcheck_enabled) {
 		if(GetBrowserSession().Document() && GetBrowserSession().List() && GetBrowserSession().Tree()) {
@@ -715,6 +707,26 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
 void CMainFrame::TrackLaunchedDocument(std::unique_ptr<LauncherWriteBack> document)
 {
  m_launchedDocuments.push_back(std::move(document));
+}
+
+void CMainFrame::OnUpdateFinishWindowsEdit(CCmdUI* ui)
+{
+ ui->Enable(!m_launchedDocuments.empty()&&!StorageUi::busy());
+}
+
+void CMainFrame::OnFinishWindowsEdit()
+{
+ if(StorageUi::busy())return;
+ for(size_t i=m_launchedDocuments.size();i>0;--i){
+  auto& edit=m_launchedDocuments[i-1];
+  const int choice=MessageBox("Have you finished saving and closed this document in the Windows editor?\r\n\r\n"+
+                              edit->TemporaryPath(),
+                              "Finish editing Windows document",MB_YESNOCANCEL|MB_ICONQUESTION|MB_DEFBUTTON2);
+  if(choice==IDNO)continue;
+  if(choice==IDYES&&edit->Complete(GetBrowserSession()))
+   m_launchedDocuments.erase(m_launchedDocuments.begin()+i-1);
+  return;
+ }
 }
 
 BOOL CMainFrame::DestroyWindow() 
