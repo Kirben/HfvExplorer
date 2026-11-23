@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "LauncherWriteBack.h"
 #include "HFVExplorer.h"
 #include "BrowserSession.h"
 #include "MainMacBrowser.h"
@@ -411,11 +412,28 @@ int RunFileOperationsTest(const char* directory){
    auto edited=root+"\\edited-launch.txt";
    Save(edited,"EDIT");
    Storage::Job apply;
-   auto updated=ApplyLaunchEdit(location,version,W(edited),apply);
+   Storage::Result updated;
+   {
+    LauncherTemporaryDocument inspected;
+    Check(!inspected.Open(W(edited).c_str(),true).code,"protect temporary launcher edit");
+    uint64_t hash=0;
+    Check(!inspected.ReadVersion(hash,apply).code,"inspect pinned launcher edit");
+    auto writer=CreateFileA(edited.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,
+                           nullptr,OPEN_EXISTING,0,nullptr);
+    if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+    Check(writer==INVALID_HANDLE_VALUE&&!MoveFileA(edited.c_str(),(edited+".renamed").c_str()),
+          "a pending launcher write-back allowed the approved file to be changed or replaced");
+    updated=ApplyLaunchEdit(location,version,inspected.Handle(),apply);
+    Check(!updated.code,updated.message.c_str());
+    Check(inspected.Remove(),"remove only the imported launcher edit by handle");
+   }
+   Check(GetFileAttributesA(edited.c_str())==INVALID_FILE_ATTRIBUTES,"imported launcher edit was not removed");
    Check(!updated.code,updated.message.c_str());
    Save(edited,"LATE");
    Storage::Job stale;
-   Check(ApplyLaunchEdit(location,version,W(edited),stale).code&&
+   LauncherTemporaryDocument lateEdit;
+   Check(!lateEdit.Open(W(edited).c_str(),false).code,"protect stale launcher edit");
+   Check(ApplyLaunchEdit(location,version,lateEdit.Handle(),stale).code&&
          Load(edited)==std::vector<BYTE>({'L','A','T','E'}),
          "stale launcher write-back was accepted or discarded edits");
    auto reopened=OpenClassic(classic,"Classic:",false);
@@ -525,7 +543,9 @@ int RunFileOperationsTest(const char* directory){
    ++disk.disk.changeCount;
    auto writes=disk.writes;
    Storage::Job playback;
-   auto rejected=ApplyLaunchEdit(launch,version,W(root+"\\Duplicate"),playback);
+   LauncherTemporaryDocument edit;
+   Check(!edit.Open(W(root+"\\Duplicate").c_str(),false).code,"protect floppy launcher edit");
+   auto rejected=ApplyLaunchEdit(launch,version,edit.Handle(),playback);
    Check(rejected.error==ERROR_MEDIA_CHANGED&&disk.writes==writes&&!disk.locked&&
          Load(root+"\\Duplicate").size()==8,"launcher wrote to swapped floppy media or removed the edit");
    // Exercise the converted-move path without the physical-floppy wrapper's

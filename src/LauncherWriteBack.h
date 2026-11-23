@@ -4,6 +4,21 @@
 
 class BrowserSession;
 
+class LauncherTemporaryDocument {
+public:
+    LauncherTemporaryDocument() = default;
+    ~LauncherTemporaryDocument();
+    LauncherTemporaryDocument(const LauncherTemporaryDocument&) = delete;
+    LauncherTemporaryDocument& operator=(const LauncherTemporaryDocument&) = delete;
+    Storage::Result Open(const wchar_t* path,bool cleanup);
+    Storage::Result ReadVersion(uint64_t& result,Storage::Job& job) const;
+    bool Remove() const;
+    HANDLE Handle() const { return file_; }
+
+private:
+    HANDLE file_=INVALID_HANDLE_VALUE;
+};
+
 class LauncherWriteBack {
 public:
     LauncherWriteBack(FileOperations::Location original,std::string version,CString temporary);

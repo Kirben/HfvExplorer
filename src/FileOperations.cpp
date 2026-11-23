@@ -1545,7 +1545,7 @@ std::string CaptureLaunchVersion(const Location& item,Storage::Job& job)
 }
 
 Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
-                                const std::wstring& editedFile,Storage::Job& job)
+                                HANDLE file,Storage::Job& job)
 {
  Storage::OperationCompletion outcome;
  Completion completion;
@@ -1553,12 +1553,7 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
  auto result=outcome.Run([&]() -> Storage::Result {
   Check(item.IsClassic()&&!version.empty(),"The original launcher document could not be verified");
   LegacyEngine::Scope engine;
-  reservation.emplace(std::vector<VolumeCoord::Access>{{item.ResourceKey(),VolumeCoord::Mode::Write},
-                           {VolumeCoord::PathKey(editedFile),VolumeCoord::Mode::Read}});
-  HANDLE file=CreateFileW(editedFile.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
-                         FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
-  if(file==INVALID_HANDLE_VALUE)throw OperationError(GetLastError(),"Cannot read the edited temporary document");
-  struct CloseFile{HANDLE file;~CloseFile(){CloseHandle(file);}} close{file};
+  reservation.emplace(std::vector<VolumeCoord::Access>{{item.ResourceKey(),VolumeCoord::Mode::Write}});
   BY_HANDLE_FILE_INFORMATION info{};
   LARGE_INTEGER size{};
   Check(GetFileInformationByHandle(file,&info)&&
