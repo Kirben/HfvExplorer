@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "HfsPlusDialogs.h"
+#include "LauncherWriteBack.h"
 #include "ApfsFormat.h"
 #include "ApfsVolume.h"
 #include "ClassicCopyArchive.h"
@@ -1576,6 +1577,68 @@ Storage::Result DeleteWindowsFixture(const std::wstring& path,Storage::Job& job,
     FileOperations::Completion completion;
     return FileOperations::ExecuteInWorker(FileOperations::Request(std::move(request)),job,completion);
 }
+static void RunLauncherInterruptionTests(const CString& root,FILE* report)
+{
+    readonly_cd_backend_init();
+    for(unsigned phase:{8u,9u,10u,11u}){
+        CString folder;
+        folder.Format("%s\\launcher-%u",root.GetString(),phase);
+        const auto staged=folder+"\\hfv123.tmp.dir";
+        Check(CreateDirectoryA(folder,nullptr)&&CreateDirectoryA(staged,nullptr),"create launcher crash fixture");
+        const auto image=folder+"\\Launch.dsk";
+        const auto imagePath=VolumeCoord::Wide(image.GetString());
+        FormatClassicImage(imagePath,"Launch",4*1024*1024);
+        {
+            auto volume=MacBrowser::OpenImage(imagePath);
+            Put(*volume,false);
+            volume->Close();
+        }
+        const auto editPath=staged+"\\Edit.dat";
+        Save(editPath,Bytes{1,2,3});
+        auto location=FileOperations::Location::Image(image.GetString(),"Launch:Document");
+        location.expectedResource=location.ResourceKey();
+        Storage::Job job;
+        const auto version=FileOperations::CaptureLaunchVersion(location,job);
+        {
+            LauncherWriteBack edit(location,version,editPath);
+            Check(edit.SavePending(),"persist launcher crash fixture");
+        }
+        CrashChild(folder,phase==11?1:0,L"launcher-fake-editor");
+        const Bytes edited{9,8,7,6};
+        const auto start=GetTickCount();
+        while(GetFileAttributesA(staged+"\\editor-saved")==INVALID_FILE_ATTRIBUTES&&GetTickCount()-start<10000)
+            Sleep(10);
+        Check(Load(editPath)==edited,"delegated editor did not replace the temporary document");
+        CrashChild(folder,phase,L"launcher-write-back");
+        {
+            auto recovered=LauncherWriteBack::LoadPending(folder);
+            Check(phase==10?recovered.empty():(recovered.size()==1&&recovered.front()->Committed()==(phase==9)),
+                  "reopened launcher record has the wrong commit status");
+            if(phase==9||phase==10) {
+                auto volume=MacBrowser::OpenImage(imagePath);
+                const auto id=Find(*volume,2,u"Document");
+                const auto entry=volume->Stat(id);
+                Bytes data(edited.size()),resource(size_t(entry.forks[1].size));
+                volume->Read(id,0,0,data.data(),data.size());
+                volume->Read(id,1,0,resource.data(),resource.size());
+                Check(entry.forks[0].size==edited.size()&&data==edited&&resource.size()==Entry(false).forks[1].size,
+                      "committed launcher edit did not preserve both forks");
+                for(size_t i=0;i<resource.size();++i)
+                    Check(resource[i]==Byte(false,1,i),"launcher write-back changed the resource fork");
+                volume->Close();
+                if(phase==9)Check(recovered.front()->RetireCommitted(),"retire already committed edit");
+            }else{
+                auto volume=MacBrowser::OpenImage(imagePath);
+                VerifyFile(*volume,2,u"Document",false);
+                volume->Close();
+            }
+        }
+        Check(Load(editPath)==edited,"launcher interruption removed or changed the edited copy");
+        if(phase==11)Check(Load(editPath+":EditorState")==Bytes({4,2}),"launcher lost named stream");
+    }
+    fprintf(report,"PASS: delegated editor safe-save, named stream retention, and subprocess crashes before commit, after commit and during cleanup preserve launcher data.\n");
+}
+
 void RunDurableWindowsMutationTests(const char* directory,FILE* report)
 {
     const CString root=directory;
@@ -1891,6 +1954,7 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
     }
     fprintf(report,"PASS: interrupted removable image overwrite restores the old image before commit and preserves the new image after commit.\n");
     fprintf(report,"PASS: interrupted MFS and HFSX formatting leaves final names absent; interrupted external-journal formatting recovers both outputs together.\n");
+    RunLauncherInterruptionTests(root,report);
 }
 int RunMediaImageCrashChild(const char*,unsigned);
 int RunRawOpticalCrashChild(const char*,unsigned,bool);
@@ -1913,6 +1977,40 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        if(!strcmp(action,"launcher-fake-editor")){
+            char executable[MAX_PATH]{};
+            if(!GetModuleFileNameA(nullptr,executable,MAX_PATH))return 4;
+            std::string command="\""+std::string(executable)+"\" --classic-recovery-child \""+image+
+                "\" "+std::to_string(phase)+" launcher-editor-save";
+            STARTUPINFOA startup{sizeof(startup)};
+            PROCESS_INFORMATION child{};
+            if(!CreateProcessA(executable,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,
+                               nullptr,nullptr,&startup,&child))return 4;
+            CloseHandle(child.hThread);
+            CloseHandle(child.hProcess);
+            ExitProcess(90+phase);
+        }
+        if(!strcmp(action,"launcher-editor-save")){
+            const CString folder=CString(image)+"\\hfv123.tmp.dir";
+            const CString edit=folder+"\\Edit.dat",replacement=folder+"\\Editor.save";
+            Save(replacement,Bytes{9,8,7,6});
+            if(!MoveFileExA(replacement,edit,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))return 4;
+            if(phase==1)Save(edit+":EditorState",Bytes{4,2});
+            Save(folder+"\\editor-saved",Bytes{1});
+            return 0;
+        }
+        if(!strcmp(action,"launcher-write-back")){
+            auto pending=LauncherWriteBack::LoadPending(CString(image));
+            if(pending.size()!=1)return 4;
+            const auto path=VolumeCoord::Wide(pending.front()->TemporaryPath().GetString());
+            LauncherTemporaryDocument file;
+            if(file.Open(path.c_str(),true).code)return 4;
+            Storage::Job job;
+            const auto result=pending.front()->ApplyPending(file,job);
+            if(phase==11&&result.error==ERROR_NOT_SUPPORTED)ExitProcess(101);
+            if(phase==10&&!result.code&&pending.front()->RetireCommitted())ExitProcess(100);
+            return 4;
+        }
         if(!strcmp(action,"media-image-overwrite"))return RunMediaImageCrashChild(image,phase);
         const bool formatMfs=!strcmp(action,"format-mfs-image");
         const bool formatHfsx=!strcmp(action,"format-hfsx-image");
