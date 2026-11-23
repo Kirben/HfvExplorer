@@ -1599,6 +1599,29 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
         VerifyFile(*host,2,phase==9?u"RENAMED":u"DOCUMENT",false);
     }
     fprintf(report,"PASS: paired NTFS file rename recovers both forks after companion publication, before commit and after commit, including case-only renames.\n");
+    {
+        const CString folder=root+"\\unsupported-paired-rename";
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create unsupported paired rename fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        auto host=MacBrowser::OpenWindows(path);
+        Put(*host,false);
+        const CString plain=folder+"\\Plain";
+        Save(plain,Bytes{17});
+        struct Unsupported{
+            Unsupported(){WindowsMoveUndo::forceUnsupportedForTest=true;}
+            ~Unsupported(){WindowsMoveUndo::forceUnsupportedForTest=false;}
+        } unsupported;
+        bool refused=false;
+        try{host->Rename(Find(*host,2,u"Document"),2,u"Renamed");}
+        catch(const HfsPlus::Error& error){refused=std::string(error.what()).find("requires a local NTFS folder")!=std::string::npos;}
+        Check(refused&&GetFileAttributesW((path+L"\\Renamed").c_str())==INVALID_FILE_ATTRIBUTES&&
+              GetFileAttributesW((path+L"\\%Renamed").c_str())==INVALID_FILE_ATTRIBUTES,
+              "unsupported paired rename changed a name");
+        VerifyFile(*host,2,u"Document",false);
+        host->Rename(Find(*host,2,u"Plain"),2,u"Ordinary");
+        Check(Load(folder+"\\Ordinary")==Bytes{17},"unsupported media rejected an ordinary rename");
+    }
+    fprintf(report,"PASS: an unsupported Windows backend refuses paired rename before either name changes and permits ordinary rename.\n");
 
     for(unsigned phase:{0u,7u,8u,9u}){
         CString folder;
@@ -1720,6 +1743,7 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
     }
     fprintf(report,"PASS: mixed classic HFS and HFS+/HFSX/APFS exports recover interrupted NTFS overwrites and preserve both forks and untouched sources.\n");
 }
+
 int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
 {
     try{

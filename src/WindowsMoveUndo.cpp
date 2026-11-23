@@ -7,6 +7,8 @@
 #include "StorageWorker.h"
 #include "VolumeCoordinator.h"
 #include "MacBrowserModel.h"
+#include <bcrypt.h>
+#pragma comment(lib,"bcrypt.lib")
 #include <map>
 #include <set>
 #define Z_SOLO
@@ -153,7 +155,7 @@ void Frame(HANDLE handle,const Data& data)
     WriteFrame(handle,data);
     Flush(handle);
 }
-enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel};
+enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel,RenameWithStreams};
 uint64_t FileLength(const BY_HANDLE_FILE_INFORMATION& info)
 {
     return (uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
@@ -164,6 +166,7 @@ struct Record {
     Identity object,fromParent,toParent;
     uint64_t creation=0,modified=0,length=0;
     bool directory=false;
+    std::string namedStreams;
 };
 struct StagedEntry {
     Identity identity;
@@ -223,13 +226,18 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                 record.from=data.wide();
                 record.object=Identity::Decode(data);
                 Check(record.object.file!=0,"Invalid Windows move file identity");
-                if(record.op==Op::Rename||record.op==Op::Relabel){
+                if(record.op==Op::Rename||record.op==Op::Relabel||record.op==Op::RenameWithStreams){
                     record.to=data.wide();
                     record.fromParent=Identity::Decode(data);
                     record.toParent=Identity::Decode(data);
                     record.directory=data.flag();
                     record.modified=data.get();
                     record.length=data.get();
+                    if(record.op==Op::RenameWithStreams){
+                        record.namedStreams=data.text();
+                        Check(!record.directory&&Under(record.from,stage)&&record.namedStreams.size()==32,
+                              "Invalid Windows alternate stream recovery record");
+                    }
                     if(record.op==Op::Relabel)RelabelPaths(log.root,stage,record.from,record.to);
                     else {
                         Paths(log.root,stage,record.from,record.to);
@@ -257,6 +265,68 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
     }
     return log;
 }
+std::string NamedStreamDigest(const std::wstring& path)
+{
+    std::map<std::wstring,uint64_t> streams;
+    WIN32_FIND_STREAM_DATA entry{};
+    const auto search=FindFirstStreamW(path.c_str(),FindStreamInfoStandard,&entry,0);
+    if(search==INVALID_HANDLE_VALUE){
+        Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot inspect the Windows output streams");
+        return {};
+    }
+    {
+        struct Search {HANDLE handle;~Search(){FindClose(handle);}} guard{search};
+        do{
+            if(wcscmp(entry.cStreamName,L"::$DATA"))
+                Check(entry.StreamSize.QuadPart>=0&&
+                      streams.emplace(entry.cStreamName,uint64_t(entry.StreamSize.QuadPart)).second,
+                      "Invalid Windows alternate stream inventory");
+        }while(FindNextStreamW(search,&entry));
+        Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot verify the Windows output streams");
+    }
+    if(streams.empty())return {};
+    struct Hash {
+        BCRYPT_ALG_HANDLE algorithm=nullptr;
+        BCRYPT_HASH_HANDLE handle=nullptr;
+        Bytes object;
+        ~Hash(){if(handle)BCryptDestroyHash(handle);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);}
+    } hash;
+    Check(BCryptOpenAlgorithmProvider(&hash.algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,
+          "Cannot initialize Windows stream verification");
+    DWORD bytes=0,received=0;
+    Check(BCryptGetProperty(hash.algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<BYTE*>(&bytes),
+                           sizeof(bytes),&received,0)>=0&&received==sizeof(bytes)&&bytes,
+          "Cannot allocate Windows stream verification");
+    hash.object.resize(bytes);
+    Check(BCryptCreateHash(hash.algorithm,&hash.handle,hash.object.data(),bytes,nullptr,0,0)>=0,
+          "Cannot start Windows stream verification");
+    const auto add=[&](const void* data,DWORD count){
+        Check(BCryptHashData(hash.handle,const_cast<BYTE*>(static_cast<const BYTE*>(data)),count,0)>=0,
+              "Cannot hash Windows alternate stream data");
+    };
+    Bytes buffer(65536);
+    for(const auto& stream:streams){
+        const auto nameBytes=DWORD(stream.first.size()*sizeof(wchar_t));
+        add(&nameBytes,sizeof(nameBytes));add(stream.first.data(),nameBytes);add(&stream.second,sizeof(stream.second));
+        auto file=Open(path+stream.first,GENERIC_READ);
+        Check(bool(file),"Cannot open a Windows alternate stream for verification");
+        for(uint64_t left=stream.second;left;){
+            const auto count=DWORD((std::min)(left,uint64_t(buffer.size())));
+            DWORD got=0;
+            Check(ReadFile(file.value,buffer.data(),count,&got,nullptr)&&got==count,
+                  "Cannot read a Windows alternate stream for verification");
+            add(buffer.data(),count);
+            left-=count;
+        }
+        DWORD got=0;
+        Check(ReadFile(file.value,buffer.data(),1,&got,nullptr)&&!got,
+              "The Windows alternate stream changed during verification");
+    }
+    std::string digest(32,'\0');
+    Check(BCryptFinishHash(hash.handle,reinterpret_cast<BYTE*>(digest.data()),DWORD(digest.size()),0)>=0,
+          "Cannot finalize Windows stream verification");
+    return digest;
+}
 void UndoRename(const std::wstring& stage,const Record& record)
 {
     const auto original=Identify(record.from);
@@ -280,22 +350,9 @@ void UndoRename(const std::wstring& stage,const Record& record)
     }else{
         Check(!published||(Date(info.ftLastWriteTime)==record.modified&&FileLength(info)==record.length),
               "A Windows move output was edited before recovery; both versions were retained");
-        if(published){
-            // Classic HFS exports publish the unnamed file and an AppleDouble
-            // companion. A new NTFS stream is an edit even if the file's
-            // ordinary size and last-write timestamp still match the journal.
-            WIN32_FIND_STREAM_DATA stream{};
-            const auto search=FindFirstStreamW(record.to.c_str(),FindStreamInfoStandard,&stream,0);
-            if(search!=INVALID_HANDLE_VALUE){
-                bool unexpected=false;
-                do{if(wcscmp(stream.cStreamName,L"::$DATA")){unexpected=true;break;}}
-                while(FindNextStreamW(search,&stream));
-                const auto error=GetLastError();
-                FindClose(search);
-                Check(!unexpected,"A Windows move output has alternate streams; both versions were retained");
-                Check(error==ERROR_HANDLE_EOF,"Cannot verify the Windows move output streams");
-            }else Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot inspect the Windows move output streams");
-        }
+        if(published)
+            Check(NamedStreamDigest(record.to)==record.namedStreams,
+                  "A Windows output has changed alternate streams; both versions were retained");
         Move(file.value,record.from);
     }
 }
@@ -387,8 +444,15 @@ thread_local Session* current=nullptr;
 void RecoverJournal(const std::string& id,bool committed,const std::wstring* exportRoot,bool skipBusy);
 }
 
+#ifdef HFV_TESTING
+thread_local bool forceUnsupportedForTest=false;
+#endif
+
 bool Supported(const std::wstring& folder)
 {
+#ifdef HFV_TESTING
+    if(forceUnsupportedForTest)return false;
+#endif
     auto h=Open(folder,FILE_READ_ATTRIBUTES);
     wchar_t fs[16]{},path[8]{};
     if(!h)return false;
@@ -530,10 +594,13 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
         Check(tree&&InspectStagedTree(state_->journal.value,from,to,*tree)==tree->size(),
               "The Windows source folder changed after copying; it was retained");
     Data record;
-    record.put(uint64_t(relabel?Op::Relabel:Op::Rename));
+    const auto streams=!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(from,state_->stage)?
+                       NamedStreamDigest(from):std::string{};
+    record.put(uint64_t(relabel?Op::Relabel:streams.empty()?Op::Rename:Op::RenameWithStreams));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
     record.put(uint64_t((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0));
     record.put(Date(info.ftLastWriteTime));record.put(FileLength(info));
+    if(!streams.empty())record.put(streams);
     Frame(state_->journal.value,record);
 #ifdef HFV_TESTING
     if(stagingTree&&MacBrowser::windowsPublicationFault)
@@ -609,7 +676,7 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                 if(!log.done){
                     if(!committed){
                         for(auto i=log.records.rbegin();i!=log.records.rend();++i){
-                            if(i->op==Op::Rename||i->op==Op::Relabel)UndoRename(stage,*i);
+                            if(i->op==Op::Rename||i->op==Op::Relabel||i->op==Op::RenameWithStreams)UndoRename(stage,*i);
                         }
                     }
                     LARGE_INTEGER at{};at.QuadPart=LONGLONG(log.end);

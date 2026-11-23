@@ -852,7 +852,9 @@ private:
         auto descendant=[&](const std::wstring& child){return !_wcsicmp(child.c_str(),path.c_str())||(entry.directory&&child.size()>path.size()&&child[path.size()]==L'\\'&&!_wcsnicmp(child.c_str(),path.c_str(),path.size()));};
         for(const auto& item:paths_)if(descendant(item.second)){dataReaders_.erase(item.first);resourceReaders_.erase(item.first);}
         const auto folder=Path(parent);
-        if(resource&&WindowsMoveUndo::Supported(folder)){
+        if(resource){
+            Check(WindowsMoveUndo::Supported(folder),
+                  "Renaming an entry with an AppleDouble companion requires a local NTFS folder; both names were kept");
             const auto rename=[&]{
                 auto& transaction=*WindowsMoveUndo::Session::Current();
                 Check(!entry.identity.companion.key.empty(),"The resource companion changed before rename");
@@ -863,13 +865,8 @@ private:
             };
             if(WindowsMoveUndo::Session::Current())rename();
             else WindowsMoveUndo::RunExport(folder,rename);
-        }else{
-            if(resource)Check(MoveFileExW(oldResource.c_str(),newResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,"Cannot rename resource companion; source retained");
-            if(!MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)){
-                if(resource){bool restored=MoveFileExW(newResource.c_str(),oldResource.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE;Storage::OutcomeEvidence::NoteRollback(restored?Storage::Rollback::Restored:Storage::Rollback::Failed);Check(restored,"Rename rollback failed; data remains at the old name and the resource companion remains at the new name. Preserve both files.");}
-                throw HfsPlus::Error("Cannot rename the selected Windows entry; source retained");
-            }
-        }
+        }else Check(MoveFileExW(path.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE,
+                   "Cannot rename the selected Windows entry; source retained");
         for(auto& item:paths_)if(descendant(item.second))item.second=target+item.second.substr(path.size());
     }
     void Remove(uint32_t id) override {

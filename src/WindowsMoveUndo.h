@@ -8,6 +8,9 @@
 #include "WindowsEntryIdentity.h"
 
 namespace WindowsMoveUndo {
+#ifdef HFV_TESTING
+extern thread_local bool forceUnsupportedForTest;
+#endif
 bool Supported(const std::wstring& folder);
 void Recover(const std::string& decision,bool committed);
 void RecoverExports(const std::wstring& folder);
