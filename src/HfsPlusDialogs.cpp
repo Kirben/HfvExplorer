@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "stdafx.h"
 #include "CommandStorage.h"
+#include "WindowsMoveUndo.h"
 #include "MainMacBrowser.h"
 #include "BrowserSession.h"
 #include "resource.h"
@@ -304,45 +305,86 @@ std::function<Storage::Result(Storage::Job&)> MakeMacImageFormatJob(MacImageForm
         for(const auto& item:access)changed.push_back(item.key);
         return CommandStorage::Guard(std::move(access),[&](Storage::Job& job){
             constexpr uint64_t journalSize=64ULL*1024*1024;
-            std::unique_ptr<HfsPlus::NewImage> home,journal;
-            try{
+            const auto destination=BrowserPresentation::WindowsPath(request.path);
+            const auto parent=[](const std::wstring& path){
+                const auto slash=path.find_last_of(L'\\');
+                return path.substr(0,slash==6?7:slash);
+            };
+            const auto folder=parent(destination);
+            const auto journalDestination=external?BrowserPresentation::WindowsPath(request.externalJournal):std::wstring();
+            if(external&&(_wcsicmp(folder.c_str(),parent(journalDestination).c_str())||
+                         !WindowsMoveUndo::Supported(folder)))
+                return Storage::Result{1,ERROR_NOT_SUPPORTED,
+                    "Choose the same local NTFS folder for the image and external journal."};
+
+            const auto format=[&]{
                 const auto tags=request.dc42&&(request.size==400*1024||request.size==800*1024)?request.size/512*12:0;
                 const auto bytes=request.size+(request.dc42?84+tags:0);
-                home=apfs?HfsPlus::CreateStagedOutput(request.path,bytes):
-                     HfsPlus::CreateFormatOutput(request.path.c_str(),bytes,external?request.externalJournal.c_str():nullptr);
+                auto journal=external?HfsPlus::CreateStagedOutput(journalDestination,journalSize):nullptr;
+                const auto journalPath=journal?journal->WorkerFiles().front().first:std::wstring();
+                auto home=HfsPlus::CreateStagedOutput(destination,bytes,false,journal?journalPath.c_str():nullptr);
                 if(apfs){
                     Apfs::Format(*home,request.name,request.apfs==ApfsImageMode::CaseSensitive,job);
-                    if(job.cancelled())throw Storage::Cancelled();
-                    home->PublishTo(request.path);
                 }else if(request.mfs){
                     FormatMfsSource mfs(*home);
                     std::string name,error;
                     if(!MfsImage::EncodeName(MacBrowser::Wide(request.name),name,error,27)||
                        !MfsImage::Format(mfs,name,request.size,request.dc42,error))
                         throw HfsPlus::Error(error);
+                    MfsImage verification;
+                    if(!verification.Open(mfs)||verification.VolumeName()!=name||!verification.Entries().empty())
+                        throw HfsPlus::Error("The formatted MFS image could not be verified.");
                 }else{
                     HfsPlus::Volume::Format(*home,request.name,request.journaled,request.kind,request.expanded);
-                    if(external){
-                        journal=HfsPlus::CreateFormatOutput(request.externalJournal.c_str(),journalSize);
+                    if(journal){
                         const auto uuid=HfsPlus::InitializeExternalJournalImage(*journal);
                         const std::vector<ImageHandleTransfer::File> files{
-                            {request.externalJournal,HANDLE(journal->WorkerFiles().front().second),true}};
+                            {journalPath,HANDLE(journal->WorkerFiles().front().second),true}};
                         ImageHandleTransfer::Scope binding(files);
                         HfsPlus::Volume volume(*home,true);
                         volume.UseExternalJournal(uuid);
                     }
+                    HfsPlus::Volume verification(*home,false);
+                    if(verification.ExternalJournal()!=external||verification.Journaled()!=request.journaled||
+                       verification.IsHfsX()!=(request.kind!=HfsPlus::Volume::FormatKind::HfsPlus))
+                        throw HfsPlus::Error("The formatted HFS image could not be verified.");
                 }
-                home->Keep();
-                if(journal)journal->Keep();
-                return Storage::Result{};
-            }catch(...){
-                const bool homeRemoved=!home||home->Discard();
-                home.reset(); // Release any duplicate of the journal handle.
-                const bool journalRemoved=!journal||journal->Discard();
-                if(!homeRemoved||!journalRemoved)
-                    throw HfsPlus::Error("Formatting failed and Windows could not remove a partial output. Inspect the image and journal paths.");
-                throw;
-            }
+                if(job.cancelled())throw Storage::Cancelled();
+
+                if(journal){
+                    auto& transaction=*WindowsMoveUndo::Session::Current();
+                    const auto stage=[&](std::unique_ptr<HfsPlus::NewImage>& output){
+                        output->Flush();
+                        const auto file=output->WorkerFiles().front();
+                        const auto handle=HANDLE(file.second);
+                        BY_HANDLE_FILE_INFORMATION info{};
+                        if(!GetFileInformationByHandle(handle,&info))
+                            throw HfsPlus::Error("Cannot identify the formatted output.");
+                        auto path=transaction.StageTemporary(file.first,handle);
+                        output->Keep();
+                        output.reset();
+                        return std::make_pair(std::move(path),MacBrowser::WindowsIdentity(info));
+                    };
+                    // Close the image first to release its duplicate journal handle.
+                    const auto stagedHome=stage(home);
+                    const auto stagedJournal=stage(journal);
+                    if(job.cancelled())throw Storage::Cancelled();
+                    transaction.Rename(stagedJournal.first,journalDestination,&stagedJournal.second);
+#ifdef HFV_TESTING
+                    if(MacBrowser::windowsPublicationFault)
+                        MacBrowser::windowsPublicationFault("format-journal-published");
+#endif
+                    if(job.cancelled())throw Storage::Cancelled();
+                    transaction.Rename(stagedHome.first,destination,&stagedHome.second);
+                    if(job.cancelled())throw Storage::Cancelled();
+                }else{
+                    home->PublishTo(destination);
+                    home->Keep();
+                }
+            };
+            if(external)WindowsMoveUndo::RunExport(folder,format);
+            else format();
+            return Storage::Result{};
         },std::move(changed))(job);
     };
 }
@@ -739,7 +781,7 @@ int RunHfsPlusUiTest(const char *directory) {
         const auto failedJournal=folder+L"\\failed-journal.img";
         bool injected=false;
         HfsPlus::workerIoFault=[&](bool writing,uint64_t,size_t){
-            if(writing&&!injected&&GetFileAttributesW(failedJournal.c_str())!=INVALID_FILE_ATTRIBUTES){
+            if(writing&&!injected){
                 injected=true;
                 throw HfsPlus::Error("Injected external journal write failure");
             }

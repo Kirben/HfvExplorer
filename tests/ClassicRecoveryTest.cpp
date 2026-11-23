@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef HFV_TESTING
 #include "stdafx.h"
+#include "HfsPlusDialogs.h"
 #include "ApfsFormat.h"
 #include "ApfsVolume.h"
 #include "ClassicCopyArchive.h"
@@ -1845,6 +1846,28 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
               "optical recovery changed unrelated data or kept staging");
     }
     fprintf(report,"PASS: BIN/CUE and multi-WAV output sets roll back together before commit and survive together after commit.\n");
+    for(const auto* action:{L"format-mfs-image",L"format-hfsx-image",L"format-external-image"}){
+        const bool external=!wcscmp(action,L"format-external-image");
+        for(unsigned phase:{7u,9u}){
+            if(!external&&phase==9)continue;
+            CString folder;
+            folder.Format("%s\\%ls-%u",root.GetString(),action,phase);
+            Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create formatting crash fixture");
+            CrashChild(folder,phase,action);
+            auto windows=MacBrowser::OpenWindows(VolumeCoord::Wide(folder.GetString()));
+            const auto home=folder+"\\Format.dsk",journal=folder+"\\Journal.img";
+            if(phase==7){
+                Check(GetFileAttributesA(home)==INVALID_FILE_ATTRIBUTES&&
+                      GetFileAttributesA(journal)==INVALID_FILE_ATTRIBUTES,
+                      "interrupted formatting exposed incomplete final files");
+            }else{
+                const auto h=VolumeCoord::Wide(home.GetString()),j=VolumeCoord::Wide(journal.GetString());
+                auto image=HfsPlus::OpenImage(h.c_str(),false,j.c_str());
+                Check(HfsPlus::Volume(*image,false).ExternalJournal(),"committed external-journal format failed to reopen");
+            }
+        }
+    }
+    fprintf(report,"PASS: interrupted MFS and HFSX formatting leaves final names absent; interrupted external-journal formatting recovers both outputs together.\n");
 }
 int RunRawOpticalCrashChild(const char*,unsigned,bool);
 
@@ -1866,6 +1889,24 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             return 3;
         }
         ClassicHfsRecovery::Transaction::CrashAt(phase);
+        const bool formatMfs=!strcmp(action,"format-mfs-image");
+        const bool formatHfsx=!strcmp(action,"format-hfsx-image");
+        const bool formatExternal=!strcmp(action,"format-external-image");
+        if(formatMfs||formatHfsx||formatExternal){
+            if(formatExternal&&phase==7)
+                MacBrowser::windowsPublicationFault=[](const char* step){
+                    if(!strcmp(step,"format-journal-published"))ExitProcess(97);
+                };
+            if(!formatExternal)
+                HfsPlus::workerIoFault=[](bool write,uint64_t,size_t){if(write)ExitProcess(97);};
+            const auto root=VolumeCoord::Wide(image);
+            MacImageFormatRequest request{root+L"\\Format.dsk",formatExternal?root+L"\\Journal.img":L"",
+                u"Format Test",formatMfs?400ULL*1024:8ULL*1024*1024,
+                formatHfsx?HfsPlus::Volume::FormatKind::HfsXCaseSensitive:HfsPlus::Volume::FormatKind::HfsPlus,
+                !formatMfs,formatMfs,formatMfs};
+            Storage::Job job;
+            return MakeMacImageFormatJob(std::move(request))(job).code?4:3;
+        }
         const bool opticalWave=!strcmp(action,"optical-wav-crash");
         if(opticalWave||!strcmp(action,"optical-cue-crash"))
             return RunRawOpticalCrashChild(image,phase,opticalWave);

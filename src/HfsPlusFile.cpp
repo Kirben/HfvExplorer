@@ -174,7 +174,7 @@ std::unique_ptr<NewImage> CreateFormatOutput(const wchar_t* path,uint64_t size,c
  return std::make_unique<Image>(path,true,size,journal,true);
 }
 
-std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size,bool allowExisting)
+std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uint64_t size,bool allowExisting,const wchar_t* journal)
 {
     Disk::Check(allowExisting||(GetFileAttributesW(destination.c_str())==INVALID_FILE_ATTRIBUTES&&
                 GetLastError()==ERROR_FILE_NOT_FOUND),"An image output already exists or its folder is unavailable");
@@ -184,7 +184,7 @@ std::unique_ptr<NewImage> CreateStagedOutput(const std::wstring& destination,uin
     wchar_t name[40]{};
     Disk::Check(StringFromGUID2(guid,name,40)!=0,"Cannot create a temporary image name");
     const auto temporary=parent+L".hfv-image-"+name+L".tmp";
-    return CreateFormatOutput(temporary.c_str(),size);
+    return CreateFormatOutput(temporary.c_str(),size,journal);
 }
 std::string InitializeExternalJournalImage(Source& file)
 {
