@@ -34,10 +34,16 @@ class ConflictDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
 public:
  ConflictDialog(const Storage::PendingCopyPrompt& prompt,CWnd* owner,bool utf8,std::shared_ptr<Storage::Job> job)
-  :CDialog(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss?IDD_CLASSIC_COPY_WARNING:IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
+  :CDialog(prompt.kind==Storage::CopyPrompt::ClassicArchiveNames?IDD_CLASSIC_ARCHIVE_NAMES:
+           prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss?IDD_CLASSIC_COPY_WARNING:IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();
   if(job_)SetTimer(1,50,nullptr);
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames){
+   BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"EDIT");
+   SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());
+   return TRUE;
+  }
   if(prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss){
    BrowserPresentation::UnicodeControl(m_hWnd,IDC_CONFLICT_PATH,L"STATIC");
    SetDlgItemTextW(m_hWnd,IDC_CONFLICT_PATH,BrowserPresentation::FromUtf8(prompt_.path).c_str());

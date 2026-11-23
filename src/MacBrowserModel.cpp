@@ -523,7 +523,7 @@ public:
     void Remove(uint32_t id)override{Check(id!=2,"Cannot remove an MFS volume root");Mutate([&]{return image_.Remove(image_.Entries().at(entries_.at(id)).id);});}
     void SetBasicMetadata(uint32_t id,const Entry& e)override{Check(id!=2&&!e.directory,"Select an MFS file");ValidateEntry(e);auto name=EncodeMfsName(e.name);Mutate([&]{auto raw=image_.Entries().at(entries_.at(id));raw.name=name;raw.version=BYTE(e.version);raw.flags=BYTE((raw.flags&~1)|(e.protectedFile?1:0));raw.created=uint32_t(e.created);raw.modified=uint32_t(e.modified);memcpy(raw.finderInfo,e.finder.data(),16);return image_.SetMetadata(raw.id,raw);});}
 };
-struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<Entry> archivedMetadata; bool restoredMetadata=false; };
+struct Planned { Entry entry; std::vector<Planned> children; Reader reader; std::optional<HfsPlus::Bytes> linkTarget; bool restoredDirectoryLink=false; std::optional<Entry> archivedMetadata; bool restoredMetadata=false; bool projectedName=false; };
 Planned Scan(Volume &v, uint32_t id, Storage::Job &job, Storage::Progress &p,
              std::set<uint32_t> &ancestors, unsigned depth,bool removal,bool reportProgress,const TransferAdapter& adapter={}) {
     if (job.cancelled()) throw Storage::Cancelled();
@@ -667,6 +667,49 @@ void ValidateArchiveNames(const Planned& plan)
     for(const auto& child:plan.children)ValidateArchiveNames(child);
 }
 
+void ProjectArchiveNames(std::vector<Planned>& plans,Volume& destination,uint32_t parent,bool parentExists,
+                         const std::u16string& path,std::string& preview,Storage::Job& job)
+{
+    std::set<std::string> occupied,existing;
+    if(parentExists)
+        for(const auto& entry:destination.List(parent))existing.insert(ClassicCopyNameKey(entry.name));
+    const auto display=[](std::u16string name){
+        for(auto& ch:name)if(ch<32)ch=char16_t(0x2400+ch);
+        return BrowserPresentation::Utf8(name);
+    };
+    std::vector<bool> unchanged(plans.size());
+    for(size_t i=0;i<plans.size();++i){
+        const auto& name=plans[i].entry.name;
+        if(ProjectClassicCopyName(name)!=name||ClassicCopyArchive::ReservedName(name))continue;
+        unchanged[i]=occupied.insert(ClassicCopyNameKey(name)).second;
+    }
+    for(size_t i=0;i<plans.size();++i){
+        if(job.cancelled())throw Storage::Cancelled();
+        auto& plan=plans[i];
+        auto& name=plan.entry.name;
+        if(!unchanged[i]){
+            const auto original=name;
+            for(unsigned suffix=0;;++suffix){
+                Check(suffix<UINT32_MAX,"No available classic HFS name");
+                auto candidate=ProjectClassicCopyName(original,suffix);
+                const auto key=ClassicCopyNameKey(candidate);
+                if(ClassicCopyArchive::ReservedName(candidate)||existing.count(key)||!occupied.insert(key).second)
+                    continue;
+                name=std::move(candidate);
+                plan.projectedName=true;
+                break;
+            }
+            preview+=display(path+original)+"  ->  "+display(path+name)+"\r\n";
+            Check(preview.size()<900*1024,"Too many renamed entries for one classic HFS preview");
+        }
+        if(plan.entry.directory){
+            Entry current;
+            const bool merge=unchanged[i]&&parentExists&&destination.FindChild(parent,name,current)&&current.directory;
+            ProjectArchiveNames(plan.children,destination,merge?current.id:parent,merge,path+name+u"/",preview,job);
+        }
+    }
+}
+
 void PrepareClassicArchive(Planned& plan)
 {
     plan.archivedMetadata=plan.entry;
@@ -682,6 +725,7 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
 {
     auto& entry=plan.entry;
     if(auto metadata=ClassicCopyArchive::Load(source,entry,job)){
+        if(!metadata->name.empty())entry.name=std::move(metadata->name);
         entry.datesValid=metadata->datesValid;
         entry.created=metadata->created;
         entry.modified=metadata->modified;
@@ -699,7 +743,7 @@ void RestoreClassicArchive(Volume& source,Planned& plan,Storage::Progress& progr
     for(const auto& child:plan.children)
         if(child.restoredMetadata)consumed.insert(ClassicCopyArchive::CompanionName(child.entry.resolvedId));
     plan.children.erase(std::remove_if(plan.children.begin(),plan.children.end(),[&](const auto& child){
-        if(!consumed.count(child.entry.name))return false;
+        if(child.restoredMetadata||!consumed.count(child.entry.name))return false;
         --progress.totalFiles;
         progress.totalBytes-=child.entry.forks[0].size;
         return true;
@@ -716,6 +760,7 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(hfsPlus&&entry.datesValid&&entry.fractionalDates)progress.timestampPrecisionReduced=true;
     };
     found=dst.FindTransferChild(parent,entry,existing);
+    Check(!plan.projectedName||!found,"An approved classic archive name is now occupied");
     bool track=entry.hardLink&&entry.linkCount>1&&dst.Supports().CanCreateHardLinks();auto key=std::make_pair(src.ResourceKey(),entry.resolvedId);auto prior=copies.find(key);
     const auto linkCopy=[&](const Entry* approvedDestination){
         dst.MakeCopiedHardLinkForTransfer(prior->second,parent,entry.name,approvedDestination,job);
@@ -1332,6 +1377,7 @@ void ValidatePlans(Volume& dst,const std::vector<Planned>& plans,uint32_t parent
                         std::to_string(plan.entry.version)+" for "+BrowserPresentation::Utf8(plan.entry.name)+
                         ". Choose a writable MFS image.");
   Entry found;bool exists=parentExists&&dst.FindTransferChild(parent,plan.entry,found);
+  Check(!plan.projectedName||!exists,"An approved classic archive name is now occupied");
   const auto incomingType=plan.entry.posix?plan.entry.posix->special:SpecialFileType::None;
   if(exists){
    const auto existingType=found.posix?found.posix->special:SpecialFileType::None;
@@ -1452,20 +1498,30 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
             if(kind=="APFS"||kind=="HFS+"||kind=="HFSX")loss.Inspect(source,plans[i],job);
         }
         const auto details=loss.Details(moving?", ":"\r\n");
-        if(!details.empty()){
-            auto projected=plans;
-            for(auto& plan:projected)PrepareClassicArchive(plan);
-            ValidatePlans(dst,projected,parent,true);
-            if(moving)
-                throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
+        auto projected=plans;
+        for(auto& plan:projected)PrepareClassicArchive(plan);
+        std::string preview;
+        if(!moving)ProjectArchiveNames(projected,dst,parent,true,{},preview,job);
+        ValidatePlans(dst,projected,parent,true);
+        if(moving&&!details.empty())
+            throw HfsPlus::Error("Classic HFS cannot preserve this selection during Cut/Paste. Source retained. Use Copy instead. Affected metadata: "+details);
+        if(!preview.empty()){
+            Check(!loss.links&&!loss.compression&&!loss.allocation,
+                  "Archive Copy currently preserves metadata for ordinary files and folders only");
+            if(job.requestChoice(Storage::CopyPrompt::ClassicArchiveNames,preview)!=Storage::ConflictChoice::Replace)
+                throw Storage::Cancelled();
+            archiveCopy=true;
+        }else if(!details.empty()){
             const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicMetadataLoss,details);
             if(choice==Storage::ConflictChoice::ReplaceAll){
                 Check(!loss.links&&!loss.compression&&!loss.allocation,
                       "Archive Copy currently preserves metadata for ordinary files and folders only");
-                for(const auto& plan:projected)ValidateArchiveNames(plan);
-                plans=std::move(projected);
                 archiveCopy=true;
             }else if(choice!=Storage::ConflictChoice::Replace)throw Storage::Cancelled();
+        }
+        if(archiveCopy){
+            for(const auto& plan:projected)ValidateArchiveNames(plan);
+            plans=std::move(projected);
         }
     }
     ValidatePlans(dst,plans,parent,true);

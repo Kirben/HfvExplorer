@@ -54,6 +54,8 @@ struct Entry {
 };
 void ValidateHfsPlusCopyNames(const std::vector<Entry>& entries, bool caseSensitive);
 void ValidateClassicCopyNames(const std::vector<Entry>& entries);
+std::string ClassicCopyNameKey(const std::u16string& name);
+std::u16string ProjectClassicCopyName(const std::u16string& name,unsigned suffix=0);
 void ValidateMfsCopyNames(const std::vector<Entry>& entries);
 bool IsHfsPlusSymlinkReplacementFile(const Entry& entry);
 struct Capabilities {

@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include <future>
 #include "ClassicCopyArchive.h"
+#include "BrowserPresentation.h"
 #include "CopyProcess.h"
 #include "ApfsFormat.h"
 #include "ApfsContainer.h"
@@ -2570,6 +2571,7 @@ void TestMfsTransferVersions(const std::string& root,FILE* report)
 void TestClassicMetadataCompanion(FILE* report)
 {
     Entry source;
+    source.name=u"Original Unicode name \\u03A9";
     source.datesValid=true;
     source.created=2082844800;
     source.modified=2082844811;
@@ -2588,7 +2590,7 @@ void TestClassicMetadataCompanion(FILE* report)
     const auto stored=ClassicCopyArchive::Encode(source,binding,job);
     const auto restored=ClassicCopyArchive::Decode(stored,binding,job);
     Check(restored&&restored->attributes==source.attributes&&restored->posix==source.posix&&
-          restored->apfsTimestamps==source.apfsTimestamps&&restored->created==source.created&&
+          restored->apfsTimestamps==source.apfsTimestamps&&restored->name==source.name&&restored->created==source.created&&
           restored->modified==source.modified&&restored->additionalDates.backup==source.additionalDates.backup,
           "Classic companion lost source metadata");
     auto stale=binding;
@@ -2699,6 +2701,64 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     Check(!ClassicCopyArchive::Load(*classic,classic->Stat(archivedFile.id),job),
           "A modified classic file accepted stale archive metadata");
     fprintf(report,"PASS: an opt-in classic HFS archive restores file and folder metadata and both forks, and rejects stale companions after reopening.\n");
+}
+
+void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
+{
+    const auto base=root+"\\classic-name-archive";
+    const std::u16string folderName=u"Long folder \\u540D with a MacRoman filename overflow";
+    const auto sourcePath=Wide(base+"-source.dsk");
+    auto source=Image(sourcePath,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+    auto classic=ClassicImage(base+".dsk");
+    const auto folder=source->MakeDirectory(2,folderName);
+    Put(*source,folder,u"Report",4097,32);
+    Put(*source,folder,u"report",4099,63);
+    const auto initiallyProjected=ProjectClassicCopyName(folderName);
+    const auto sentinel=Put(*classic,2,initiallyProjected,1024,91);
+    const auto approvedFolder=ProjectClassicCopyName(folderName,1);
+    const auto run=[&]{return Submit(OrdinaryCopy{{Native(source,folder)},Native(classic)});};
+    auto declined=run();
+    Conflict(declined);
+    auto preview=declined.Job()->conflictState();
+    Check(preview.kind==Storage::CopyPrompt::ClassicArchiveNames&&
+          preview.path.find(BrowserPresentation::Utf8(folderName))!=std::string::npos&&
+          preview.path.find(BrowserPresentation::Utf8(approvedFolder))!=std::string::npos&&
+          preview.path.find("~1")!=std::string::npos,
+          "Classic archive preview omitted renamed or colliding files");
+    declined.Job()->resolve(preview.id,Storage::ConflictChoice::Cancel);
+    Wait(declined);
+    Entry absent;
+    Check(declined.Job()->result().outcome==Storage::Outcome::Cancelled&&
+          !classic->FindChild(2,approvedFolder,absent),"Declining the preview created the renamed directory");
+    auto copy=run();
+    Conflict(copy);
+    preview=copy.Job()->conflictState();
+    Check(preview.kind==Storage::CopyPrompt::ClassicArchiveNames,"Missing archive preview on retry");
+    copy.Job()->resolve(preview.id,Storage::ConflictChoice::Replace);
+    Wait(copy);
+    const auto copied=copy.Job()->result();
+    Check(!copied.code&&copy.Snapshot().complete,copied.message.c_str());
+    Verify(*classic,sentinel,1024,91);
+    classic.reset();
+    classic=OpenBrowserImage(Wide(base+".dsk"));
+    Entry archived;
+    Check(classic&&classic->FindChild(2,approvedFolder,archived),"Approved classic name was not used");
+    const auto returnPath=Wide(base+"-return.dsk");
+    auto returned=Image(returnPath,HfsPlus::Volume::FormatKind::HfsXCaseSensitive);
+    auto restore=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(returned)});
+    Wait(restore);
+    const auto restored=restore.Job()->result();
+    Check(!restored.code&&restore.Snapshot().complete,restored.message.c_str());
+    returned.reset();
+    returned=OpenBrowserImage(returnPath);
+    Entry roundTrip,a,b;
+    Check(returned&&returned->FindChild(2,folderName,roundTrip)&&
+          returned->FindChild(roundTrip.id,u"Report",a)&&returned->FindChild(roundTrip.id,u"report",b)&&
+          a.resolvedId!=b.resolvedId&&returned->List(roundTrip.id).size()==2,
+          "Original Unicode and case-distinct names were not restored");
+    Verify(*returned,a.id,4097,32);
+    Verify(*returned,b.id,4099,63);
+    fprintf(report,"PASS: classic archive previews MacRoman truncation and collisions, preserves occupied names, and restores original names and both forks after reopening.\n");
 }
 
 void TestClassicBackupDates(const std::string& root,FILE* report)
@@ -3007,6 +3067,23 @@ void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
                 inputs.push_back(std::move(item));
             };
             if(recursive)select(u"Tree");else{select(lower);select(upper);}
+            if(kind<2&&!cut){
+                auto copy=Submit(OrdinaryCopy{inputs,Native(target)});
+                Conflict(copy);
+                const auto preview=copy.Job()->conflictState();
+                Check(preview.kind==Storage::CopyPrompt::ClassicArchiveNames,
+                      "Classic name collision reached overwrite handling");
+                copy.Job()->resolve(preview.id,Storage::ConflictChoice::Cancel);
+                Wait(copy);
+                Check(copy.Job()->result().outcome==Storage::Outcome::Cancelled&&!copy.Snapshot().complete,
+                      "Declining the classic name preview published files");
+                inputs.clear();
+                target.reset();
+                source.reset();
+                Check(bytes(widePath)==targetBefore&&bytes(sourcePath)==sourceBefore,
+                      "Declining the name preview changed destination or source bytes");
+                return;
+            }
             unsigned prompts=0;
             bool copying=false;
             Storage::Job job;
@@ -3036,7 +3113,7 @@ void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
     second.name=upper;
     second.version=1;
     ValidateMfsCopyNames({first,second});
-    fprintf(report,"PASS: classic HFS and raw/DC42 MFS reject copy and cut/paste name collisions before Replace All or any image changes. Classic HFS also rejects nested collisions; MFS compares names within each version.\n");
+    fprintf(report,"PASS: classic HFS previews colliding copy names and refuses colliding Cut/Paste before writes; raw/DC42 MFS reject collisions within each version.\n");
 }
 
 void TestHfsxToApfsNameCollisions(const std::string& root,FILE* report)
@@ -4421,6 +4498,7 @@ int RunCopyProcessTest(const char *directory) {
         TestMfsTransferVersions(root,report);
         TestClassicMetadataCompanion(report);
         TestClassicArchiveRoundTrip(root,report);
+        TestClassicArchiveNamePreview(root,report);
         TestClassicBackupDates(root,report);
         TestClassicCopyLoss(root,report);
         TestClassicLockRoundTrip(root,report);

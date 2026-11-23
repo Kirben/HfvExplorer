@@ -12,7 +12,8 @@ using CopyWorkerProtocol::Check;
 using MacBrowser::Entry;
 using HfsPlus::AttributeData;
 
-constexpr uint64_t signature=0x3141564648534648;
+constexpr uint64_t signatureV1=0x3141564648534648;
+constexpr uint64_t signatureV2=0x3241564648534648;
 constexpr uint64_t maximumFork=0x7fffffff;
 constexpr uint64_t maximumHeader=1024*1024;
 
@@ -104,6 +105,7 @@ AttributeData Encode(const Entry& entry,const Digest& binding,Storage::Job& job)
     Data header;
     header.put(std::string(reinterpret_cast<const char*>(binding.data()),binding.size()));
     header.put(entry.directory);
+    header.u16(entry.name);
     header.put(entry.datesValid);
     header.put(entry.created);
     header.put(entry.modified);
@@ -128,7 +130,7 @@ AttributeData Encode(const Entry& entry,const Digest& binding,Storage::Job& job)
         Check(header.bytes.size()<=maximumHeader,"Classic metadata companion header is too large");
     }
     Data prefix;
-    prefix.put(signature);
+    prefix.put(signatureV2);
     prefix.put(header.bytes.size());
     prefix.bytes.insert(prefix.bytes.end(),header.bytes.begin(),header.bytes.end());
     Check(payloadSize<=maximumFork-prefix.bytes.size()-Digest{}.size(),
@@ -250,7 +252,8 @@ std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,S
     Data prefix;
     prefix.bytes.resize(16);
     archive.Read(0,prefix.bytes.data(),prefix.bytes.size());
-    if(prefix.get()!=signature)return {};
+    const auto signature=prefix.get();
+    if(signature!=signatureV1&&signature!=signatureV2)return {};
     const auto headerSize=prefix.get();
     Check(headerSize<=maximumHeader&&headerSize<=bodySize-16,"Invalid classic metadata companion header");
     Data header;
@@ -272,6 +275,7 @@ std::optional<Entry> Decode(const AttributeData& archive,const Digest& binding,S
     Check(checksum.Finish()==stored,"Classic metadata companion checksum mismatch");
     Entry entry;
     entry.directory=header.flag();
+    if(signature==signatureV2)entry.name=header.u16();
     entry.datesValid=header.flag();
     entry.created=header.get();
     entry.modified=header.get();

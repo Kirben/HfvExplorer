@@ -734,14 +734,35 @@ bool RecognizesClassicImage(HANDLE opened) {
     _close(fd);
     return recognized;
 }
+std::string ClassicCopyNameKey(const std::u16string& name)
+{
+    auto key=Encode(name);
+    // Match the catalog collation used by libhfs.
+    for(auto& byte:key)byte=char(hfs_charorder[static_cast<unsigned char>(byte)]);
+    return key;
+}
+
+std::u16string ProjectClassicCopyName(const std::u16string& name,unsigned suffix)
+{
+    auto wide=Wide(name);
+    for(auto& ch:wide)if(ch==L':'||ch==0)ch=L'_';
+    const auto count=WideCharToMultiByte(10000,WC_NO_BEST_FIT_CHARS,wide.data(),int(wide.size()),
+                                         nullptr,0,"_",nullptr);
+    std::string bytes(count,'_');
+    if(count&&!WideCharToMultiByte(10000,WC_NO_BEST_FIT_CHARS,wide.data(),int(wide.size()),
+                                  bytes.data(),count,"_",nullptr))
+        throw HfsPlus::Error("Cannot project the filename to MacRoman");
+    if(bytes.empty())bytes="Untitled";
+    const auto tail=suffix?"~"+std::to_string(suffix):std::string{};
+    if(bytes.size()+tail.size()>HFS_MAX_FLEN)bytes.resize(HFS_MAX_FLEN-tail.size());
+    return Decode(bytes+tail);
+}
+
 void ValidateClassicCopyNames(const std::vector<Entry>& entries)
 {
     std::set<std::string> names;
     for(const auto& entry:entries){
-        auto key=Encode(entry.name);
-        // libhfs compares MacRoman names by these catalog collation weights.
-        for(auto& byte:key)byte=char(hfs_charorder[static_cast<unsigned char>(byte)]);
-        if(!names.insert(std::move(key)).second)
+        if(!names.insert(ClassicCopyNameKey(entry.name)).second)
             throw HfsPlus::Error("Source names collide on the classic HFS destination. Rename one before copying.");
     }
 }
