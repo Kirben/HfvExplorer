@@ -430,6 +430,17 @@ int RunFileOperationsTest(const char* directory){
    }
    Check(GetFileAttributesA(edited.c_str())==INVALID_FILE_ATTRIBUTES,"imported launcher edit was not removed");
    Check(!updated.code,updated.message.c_str());
+   Save(edited,"EDIT");
+   Save(edited+":EditorState","NAMED");
+   {
+    LauncherTemporaryDocument inspected;
+    Check(!inspected.Open(W(edited).c_str(),true).code,"protect temporary document with an editor stream");
+    Check(inspected.CheckWriteBackStreams().error==ERROR_NOT_SUPPORTED&&!inspected.Remove(),
+          "write-back allowed cleanup to discard an editor stream");
+   }
+   Check(Load(edited)==std::vector<BYTE>({'E','D','I','T'})&&
+         Load(edited+":EditorState")==std::vector<BYTE>({'N','A','M','E','D'}),
+         "write-back stream protection changed the staged document");
    Save(edited,"LATE");
    Storage::Job stale;
    LauncherTemporaryDocument lateEdit;

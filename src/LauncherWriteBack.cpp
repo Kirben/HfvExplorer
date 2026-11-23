@@ -23,8 +23,43 @@ Storage::Result LauncherTemporaryDocument::Open(const wchar_t* path,bool cleanup
     return {};
 }
 
+Storage::Result LauncherTemporaryDocument::CheckWriteBackStreams() const
+{
+    DWORD flags=0;
+    if(!GetVolumeInformationByHandleW(file_,nullptr,0,nullptr,nullptr,&flags,nullptr,0))
+        return {1,GetLastError(),"Cannot determine whether the temporary document supports named streams."};
+    if(!(flags&FILE_NAMED_STREAMS))return {};
+
+    std::vector<BYTE> buffer(4096);
+    while(!GetFileInformationByHandleEx(file_,FileStreamInfo,buffer.data(),DWORD(buffer.size()))){
+        const auto error=GetLastError();
+        if(error==ERROR_HANDLE_EOF)return {};
+        if((error!=ERROR_MORE_DATA&&error!=ERROR_INSUFFICIENT_BUFFER)||buffer.size()>=1024*1024)
+            return {1,error,"Cannot verify the temporary document's named streams."};
+        buffer.resize(buffer.size()*2);
+    }
+    constexpr auto header=offsetof(FILE_STREAM_INFO,StreamName);
+    size_t offset=0;
+    for(;;){
+        const auto remaining=buffer.size()-offset;
+        if(remaining<header)break;
+        const auto& stream=*reinterpret_cast<const FILE_STREAM_INFO*>(buffer.data()+offset);
+        const auto span=stream.NextEntryOffset?stream.NextEntryOffset:remaining;
+        if(span>remaining||span<header||stream.StreamNameLength>span-header||
+           stream.StreamNameLength%sizeof(wchar_t))break;
+        const std::wstring_view name(stream.StreamName,stream.StreamNameLength/sizeof(wchar_t));
+        if(name!=L"::$DATA")
+            return {1,ERROR_NOT_SUPPORTED,"The temporary document contains named data streams that cannot be written back."};
+        if(!stream.NextEntryOffset)return {};
+        if(stream.NextEntryOffset%alignof(FILE_STREAM_INFO))break;
+        offset+=stream.NextEntryOffset;
+    }
+    return {1,ERROR_INVALID_DATA,"Cannot verify the temporary document's named streams."};
+}
+
 bool LauncherTemporaryDocument::Remove() const
 {
+    if(CheckWriteBackStreams().code)return false;
     FILE_BASIC_INFO original{};
     if(!GetFileInformationByHandleEx(file_,FileBasicInfo,&original,sizeof(original)))return false;
     if(original.FileAttributes&FILE_ATTRIBUTE_READONLY){
@@ -129,10 +164,12 @@ void LauncherWriteBack::Complete(BrowserSession& session)
     uint64_t current=0;
     auto read=ShowStorageWaitJob([&](Storage::Job& job){
         auto opened=document.Open(path.c_str(),true);
-        return opened.code?opened:document.ReadVersion(current,job);
+        if(opened.code)return opened;
+        const auto streams=document.CheckWriteBackStreams();
+        return streams.code?streams:document.ReadVersion(current,job);
     },!owner->IsWindowVisible(),owner);
     if(read.code){
-        retain("Could not check the temporary document for changes.");
+        retain(CString(read.message.c_str()));
         return;
     }
     if(current==baseline_){

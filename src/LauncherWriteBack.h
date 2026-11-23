@@ -12,6 +12,7 @@ public:
     LauncherTemporaryDocument& operator=(const LauncherTemporaryDocument&) = delete;
     Storage::Result Open(const wchar_t* path,bool cleanup);
     Storage::Result ReadVersion(uint64_t& result,Storage::Job& job) const;
+    Storage::Result CheckWriteBackStreams() const;
     bool Remove() const;
     HANDLE Handle() const { return file_; }
 
