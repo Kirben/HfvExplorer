@@ -2794,14 +2794,15 @@ void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
     Put(*modern,folderId,u"Dual fork",4099,52);
     const auto parking=first->MakeDirectory(2,u"Parking");
     const auto move=[&](const std::shared_ptr<Volume>& from,uint32_t id,const std::shared_ptr<Volume>& to,
-                        uint32_t parent, std::optional<Storage::ConflictChoice> answer={}){
+                        uint32_t parent, std::optional<Storage::ConflictChoice> answer={},
+                        Storage::CopyPrompt expected=Storage::CopyPrompt::ClassicArchiveMove){
         auto location=Native(from,id);
         location.cut=true;
         auto op=Submit(OrdinaryCopy{{location},Native(to,parent)});
         if(answer){
             Conflict(op);
             const auto prompt=op.Job()->conflictState();
-            Check(prompt.kind==Storage::CopyPrompt::ClassicArchiveMove,"Missing Archive Copy move warning");
+            Check(prompt.kind==expected,"Missing archive move prompt");
             op.Job()->resolve(prompt.id,*answer);
         }
         Wait(op);
@@ -2831,14 +2832,12 @@ void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
     Check(first->List(parked.id).empty()&&second->FindChild(2,folder.name,item)&&
           ClassicCopyArchive::RequireVerifiedPair(*second,item,verify).has_value(),
           "Cross-image move split the classic archive");
-    restored->MakeDirectory(2,folder.name);
-    const auto rejected=move(second,item.id,restored,2);
-    Entry mergeFolder;
-    Check(rejected.code&&!rejected.moved&&rejected.message.find("cannot merge")!=std::string::npos&&
-          second->FindChild(2,folder.name,item)&&restored->FindChild(2,folder.name,mergeFolder)&&
-          restored->List(mergeFolder.id).empty(),"Refusing an archive merge changed either volume");
-    restored->Remove(mergeFolder.id);
-    result=move(second,item.id,restored,2);
+    const auto mergeId=restored->MakeDirectory(2,folder.name);
+    Put(*restored,mergeId,u"Unrelated",1231,61);
+    const auto declined=move(second,item.id,restored,2,Storage::ConflictChoice::Cancel,Storage::CopyPrompt::ArchiveFolderMerge);
+    Check(declined.error==ERROR_CANCELLED&&second->FindChild(2,folder.name,item)&&
+          restored->List(mergeId).size()==1,"Cancelling an archive merge changed either volume");
+    result=move(second,item.id,restored,2,Storage::ConflictChoice::Replace,Storage::CopyPrompt::ArchiveFolderMerge);
     Check(!result.code&&result.moved,result.message.c_str());
     second.reset();
     restored.reset();
@@ -2848,6 +2847,8 @@ void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
           restored->GetAttributes(item.id)==folder.attributes&&restored->FindChild(item.id,u"Dual fork",child),
           "Archive restore move lost metadata or left a source companion");
     Verify(*restored,child.id,4099,52);
+    Check(restored->FindChild(item.id,u"Unrelated",child),"Merged archive move deleted an unrelated file");
+    Verify(*restored,child.id,1231,61);
     fprintf(report,"PASS: %s cut/paste archives a folder, preserves pairs within and between classic HFS images, and verifies both forks and attributes before source cleanup.\n",apfs?"APFS":"HFSX");
 }
 
@@ -2894,8 +2895,10 @@ void TestArchiveFolderMerge(const std::string& root,FILE* report)
         return folder;
     };
     const auto copy=[&](const std::shared_ptr<Volume>& from,uint32_t id,const std::shared_ptr<Volume>& to,
-                        bool archive,Storage::ConflictChoice choice,bool overwrite){
-        auto op=Submit(OrdinaryCopy{{Native(from,id)},Native(to)});
+                        bool archive,Storage::ConflictChoice choice,bool overwrite,bool moving=false){
+        auto location=Native(from,id);
+        location.cut=moving;
+        auto op=Submit(OrdinaryCopy{{location},Native(to)});
         uint64_t previousPrompt=0;
         const auto answer=[&](Storage::CopyPrompt kind,Storage::ConflictChoice value){
             Conflict(op,previousPrompt);
@@ -2904,7 +2907,7 @@ void TestArchiveFolderMerge(const std::string& root,FILE* report)
             previousPrompt=prompt.id;
             op.Job()->resolve(prompt.id,value);
         };
-        if(archive)answer(Storage::CopyPrompt::ClassicMetadataLoss,Storage::ConflictChoice::ReplaceAll);
+        if(archive)answer(moving?Storage::CopyPrompt::ClassicArchiveMove:Storage::CopyPrompt::ClassicMetadataLoss,Storage::ConflictChoice::ReplaceAll);
         answer(Storage::CopyPrompt::ArchiveFolderMerge,choice);
         if(overwrite)answer(Storage::CopyPrompt::Overwrite,Storage::ConflictChoice::Replace);
         Wait(op);
@@ -2953,7 +2956,17 @@ void TestArchiveFolderMerge(const std::string& root,FILE* report)
         Check(target->FindChild(merged.id,u"Incoming",file),"Archive merge lost incoming child");
         Verify(*target,file.id,4099,57);
     }
-    fprintf(report,"PASS: archive folder merges preserve destination metadata by default and can apply source metadata on classic HFS, HFSX and APFS.\n");
+    source->SetAttributes(origin,old.attributes);
+    const auto mergedMove=copy(source,origin,classic,true,Storage::ConflictChoice::Skip,true,true);
+    Check(!mergedMove.code&&mergedMove.moved,mergedMove.message.c_str());
+    Entry child;
+    Check(!source->FindChild(2,original.name,child),"Verified merge did not remove the source");
+    folder=locate(*classic);
+    const auto keptPair=ClassicCopyArchive::RequireVerifiedPair(*classic,folder,verify);
+    Check(keptPair&&keptPair->metadata.entry.attributes==original.attributes&&
+          classic->FindChild(folder.id,u"Unrelated",child),"Merge move replaced retained folder metadata or an unrelated child");
+    Verify(*classic,child.id,1231,61);
+    fprintf(report,"PASS: archive merge moves honor the folder metadata choice and preserve unrelated destination files in both directions.\n");
 }
 
 void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
