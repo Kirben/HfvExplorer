@@ -1794,16 +1794,16 @@ struct ClassicCopyLoss {
 };
 
 void SuggestArchiveRestoreNames(Volume& destination,std::vector<Planned>& plans,uint32_t parent,bool parentExists,
-                                const std::u16string& folder,std::string& notes,Storage::Job& job)
+                                const std::u16string& folder,std::string& notes,Storage::Job& job,bool keepBoth=false)
 {
     if(job.cancelled())throw Storage::Cancelled();
-    if(std::any_of(plans.begin(),plans.end(),[](const auto& plan){return plan.restoredNameChanged;})){
+    if((keepBoth&&parentExists)||std::any_of(plans.begin(),plans.end(),[](const auto& plan){return plan.restoredNameChanged;})){
         std::vector<Entry> entries;
         for(const auto& plan:plans)entries.push_back(plan.entry);
         bool collision=false;
         try{destination.ValidateCopyNames(parent,entries,parentExists);}
         catch(const HfsPlus::Error&){collision=true;}
-        if(collision){
+        if(collision||keepBoth){
             // Validate single entries separately so other validation errors are never treated as name collisions.
             for(const auto& entry:entries)destination.ValidateCopyNames(parent,{entry},parentExists);
             const auto equivalent=[&](const Entry& first,const Entry& second){
@@ -1812,10 +1812,13 @@ void SuggestArchiveRestoreNames(Volume& destination,std::vector<Planned>& plans,
             };
             for(size_t index=0;index<plans.size();++index){
                 auto& plan=plans[index];
-                if(!plan.restoredNameChanged)continue;
+                Entry existing;
+                const bool existingConflict=keepBoth&&parentExists&&plan.restoredMetadata&&
+                    destination.FindTransferChild(parent,plan.entry,existing);
+                if(!plan.restoredNameChanged&&!existingConflict)continue;
                 if(job.cancelled())throw Storage::Cancelled();
-                bool needsAlternate=false;
-                for(size_t other=0;other<plans.size();++other)
+                bool needsAlternate=existingConflict;
+                for(size_t other=0;collision&&!needsAlternate&&other<plans.size();++other)
                     if(other!=index&&(other<index||!plans[other].restoredNameChanged)&&
                        equivalent(entries[index],entries[other])){
                         needsAlternate=true;
@@ -1869,29 +1872,26 @@ void SuggestArchiveRestoreNames(Volume& destination,std::vector<Planned>& plans,
         Entry existing;
         const bool merge=parentExists&&destination.FindTransferChild(parent,plan.entry,existing)&&existing.directory;
         SuggestArchiveRestoreNames(destination,plan.children,merge?existing.id:parent,merge,
-                                   folder+plan.entry.name+u"/",notes,job);
+                                   folder+plan.entry.name+u"/",notes,job,keepBoth);
     }
 }
 
 void AppendArchiveRestoreNotes(Volume& destination,const std::vector<Planned>& plans,uint32_t parent,bool parentExists,
-                               const std::u16string& folder,std::string& notes,Storage::Job& job)
+                               const std::u16string& folder,std::string& notes,std::string& conflicts,Storage::Job& job)
 {
     for(const auto& plan:plans){
         if(job.cancelled())throw Storage::Cancelled();
-        if(notes.size()>=32*1024){
-            notes+="Additional entries are not shown.\r\n";
-            return;
-        }
+
         const auto& entry=plan.entry;
         const auto path=folder+entry.name;
         Entry existing;
         const bool found=parentExists&&destination.FindTransferChild(parent,entry,existing);
-        if(plan.restoredNameChanged&&found)
-            notes+="Restored name already exists: "+BrowserPresentation::Utf8(path)+"\r\n";
-        if(plan.restoredMetadata&&entry.compressed&&entry.forks[1].size&&entry.inlineCompression.empty())
+        if(plan.restoredMetadata&&found&&conflicts.size()<32*1024)
+            conflicts+="Restored name already exists: "+BrowserPresentation::Utf8(path)+"\r\n";
+        if(notes.size()<32*1024&&plan.restoredMetadata&&entry.compressed&&entry.forks[1].size&&entry.inlineCompression.empty())
             notes+="May need an uncompressed copy to preserve the resource fork: "+BrowserPresentation::Utf8(path)+"\r\n";
         if(entry.directory)
-            AppendArchiveRestoreNotes(destination,plan.children,found?existing.id:parent,found,path+u"/",notes,job);
+            AppendArchiveRestoreNotes(destination,plan.children,found?existing.id:parent,found&&existing.directory,path+u"/",notes,conflicts,job);
     }
 }
 
@@ -2102,7 +2102,18 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     std::string restoreNotes;
     const bool restoring=std::string_view(dst.Kind())!="HFS"&&!adapter&&
         std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);});
-    if(restoring)SuggestArchiveRestoreNames(dst,plans,parent,true,{},restoreNotes,job);
+    if(restoring){
+        SuggestArchiveRestoreNames(dst,plans,parent,true,{},restoreNotes,job);
+        std::string notes,conflicts;
+        AppendArchiveRestoreNotes(dst,plans,parent,true,{},notes,conflicts,job);
+        if(!conflicts.empty()){
+            const auto choice=job.requestChoice(Storage::CopyPrompt::ClassicArchiveRestoreConflicts,conflicts);
+            if(choice==Storage::ConflictChoice::ReplaceAll)
+                SuggestArchiveRestoreNames(dst,plans,parent,true,{},restoreNotes,job,true);
+            else if(choice!=Storage::ConflictChoice::Replace)throw Storage::Cancelled();
+        }
+        restoreNotes+=notes;
+    }
     ValidatePlans(dst,plans,parent,true);
     const bool verifyArchiveMove=moving&&(archiveCopy||carried||
         std::any_of(plans.begin(),plans.end(),[&](const auto& plan){return containsArchive(containsArchive,plan);}));
@@ -2110,7 +2121,7 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
     if(restoring){
         if(!firstLinkedFolder.empty())
             restoreNotes+="APFS will restore directory hard links as independent folders. First linked folder: "+firstLinkedFolder+"\r\n";
-        AppendArchiveRestoreNotes(dst,plans,parent,true,{},restoreNotes,job);
+
         if(!restoreNotes.empty()&&job.requestChoice(Storage::CopyPrompt::ClassicArchiveRestorePreview,restoreNotes)!=Storage::ConflictChoice::Replace)
             throw Storage::Cancelled();
     }else if(!firstLinkedFolder.empty()&&

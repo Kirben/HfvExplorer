@@ -34,7 +34,7 @@ class ConflictDialog : public CDialog {
  std::shared_ptr<Storage::Job> job_;
 public:
  ConflictDialog(const Storage::PendingCopyPrompt& prompt,CWnd* owner,bool utf8,std::shared_ptr<Storage::Job> job)
-  :CDialog((prompt.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt.kind==Storage::CopyPrompt::ClassicArchiveMoveNames||prompt.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview)?IDD_CLASSIC_ARCHIVE_NAMES:
+  :CDialog((prompt.kind==Storage::CopyPrompt::ClassicArchiveNames||prompt.kind==Storage::CopyPrompt::ClassicArchiveMoveNames||prompt.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview||prompt.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts)?IDD_CLASSIC_ARCHIVE_NAMES:
            (prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss||prompt.kind==Storage::CopyPrompt::ClassicArchiveMove)?IDD_CLASSIC_COPY_WARNING:IDD_COPY_CONFLICT,owner),prompt_(prompt),utf8_(utf8),job_(std::move(job)){}
  BOOL OnInitDialog() override {
   CDialog::OnInitDialog();
@@ -49,7 +49,17 @@ public:
    SetDlgItemText(IDC_CONFLICT_QUESTION,"Review the restored names and metadata before copying.");
    SetDlgItemText(IDC_REPLACE,"&Continue");
   }
-  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview||prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts){
+   SetWindowText("Archive restore conflicts");
+   SetDlgItemText(IDC_CONFLICT_QUESTION,"Keep both to preview alternate names, or continue to the usual overwrite and folder merge choices.");
+   SetDlgItemText(IDC_REPLACE,"&Continue");
+  }
+  if(prompt_.kind!=Storage::CopyPrompt::ClassicArchiveRestoreConflicts&&
+     (prompt_.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview||prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||
+      prompt_.kind==Storage::CopyPrompt::ClassicArchiveMoveNames))
+   GetDlgItem(IDC_REPLACE_ALL)->ShowWindow(SW_HIDE);
+  if(prompt_.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts||
+     prompt_.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview||prompt_.kind==Storage::CopyPrompt::ClassicArchiveNames||
      prompt_.kind==Storage::CopyPrompt::ClassicArchiveMoveNames||
      prompt_.kind==Storage::CopyPrompt::ClassicMetadataLoss||
      prompt_.kind==Storage::CopyPrompt::ClassicArchiveMove){

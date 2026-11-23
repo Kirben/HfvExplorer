@@ -2801,7 +2801,12 @@ void TestClassicArchiveMoves(const std::string& root,FILE* report,bool apfs)
         auto op=Submit(OrdinaryCopy{{location},Native(to,parent)});
         if(answer){
             Conflict(op);
-            const auto prompt=op.Job()->conflictState();
+            auto prompt=op.Job()->conflictState();
+            if(prompt.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts){
+                op.Job()->resolve(prompt.id,Storage::ConflictChoice::Replace);
+                Conflict(op,prompt.id);
+                prompt=op.Job()->conflictState();
+            }
             Check(prompt.kind==expected,"Missing archive move prompt");
             op.Job()->resolve(prompt.id,*answer);
         }
@@ -2908,6 +2913,7 @@ void TestArchiveFolderMerge(const std::string& root,FILE* report)
             op.Job()->resolve(prompt.id,value);
         };
         if(archive)answer(moving?Storage::CopyPrompt::ClassicArchiveMove:Storage::CopyPrompt::ClassicMetadataLoss,Storage::ConflictChoice::ReplaceAll);
+        if(!archive)answer(Storage::CopyPrompt::ClassicArchiveRestoreConflicts,Storage::ConflictChoice::Replace);
         answer(Storage::CopyPrompt::ArchiveFolderMerge,choice);
         if(overwrite)answer(Storage::CopyPrompt::Overwrite,Storage::ConflictChoice::Replace);
         Wait(op);
@@ -3166,7 +3172,7 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
     auto conflict=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(returned)});
     Conflict(conflict);
     const auto restorePreview=conflict.Job()->conflictState();
-    Check(restorePreview.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview&&
+    Check(restorePreview.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts&&
           restorePreview.path.find(BrowserPresentation::Utf8(folderName))!=std::string::npos,
           "Archive restore did not show the original name colliding with the destination");
     conflict.Job()->resolve(restorePreview.id,Storage::ConflictChoice::Cancel);
@@ -3175,6 +3181,26 @@ void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
           "Declining the restore preview did not cancel");
     Verify(*returned,a.id,4097,32);
     Verify(*returned,b.id,4099,63);
+    auto keepBoth=Submit(OrdinaryCopy{{Native(classic,archived.id)},Native(returned)});
+    Conflict(keepBoth);
+    auto offer=keepBoth.Job()->conflictState();
+    Check(offer.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts,"Keep Both was not offered");
+    keepBoth.Job()->resolve(offer.id,Storage::ConflictChoice::ReplaceAll);
+    Conflict(keepBoth,offer.id);
+    offer=keepBoth.Job()->conflictState();
+    Check(offer.kind==Storage::CopyPrompt::ClassicArchiveRestorePreview&&
+          offer.path.find("(restored 2)")!=std::string::npos,"Keep Both did not preview the alternate name");
+    keepBoth.Job()->resolve(offer.id,Storage::ConflictChoice::Replace);
+    Wait(keepBoth);
+    Check(!keepBoth.Job()->result().code,keepBoth.Job()->result().message.c_str());
+    Entry kept,keptFile;
+    Check(returned->FindChild(2,folderName,roundTrip)&&
+          returned->FindChild(2,folderName+u" (restored 2)",kept)&&kept.id!=roundTrip.id&&
+          returned->FindChild(kept.id,u"Report",keptFile),"Keep Both changed the original or lost the restored copy");
+    Verify(*returned,keptFile.id,4097,32);
+    Verify(*returned,a.id,4097,32);
+    Verify(*returned,b.id,4099,63);
+    fprintf(report,"PASS: Keep Both previews an alternate name and preserves the existing archive restore and both forks.\n");
     auto folded=Image(Wide(base+"-folded.dsk"),HfsPlus::Volume::FormatKind::HfsPlus);
     const auto originalCount=folded->List(2).size();
     const auto restoreFolded=[&](Storage::ConflictChoice answer){

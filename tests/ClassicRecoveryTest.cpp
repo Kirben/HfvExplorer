@@ -797,6 +797,8 @@ Storage::Result CrossFormatMove(const CString& sourcePath,Storage::Job& job,bool
             const auto prompt=job.conflictState();
             if(prompt.kind==Storage::CopyPrompt::ClassicArchiveMove&&!prompt.path.empty())
                 job.resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+            if(prompt.kind==Storage::CopyPrompt::ClassicArchiveRestoreConflicts&&!prompt.path.empty())
+                job.resolve(prompt.id,Storage::ConflictChoice::Replace);
             if(prompt.kind==Storage::CopyPrompt::ArchiveFolderMerge&&!prompt.path.empty())
                 job.resolve(prompt.id,Storage::ConflictChoice::Skip);
             Sleep(1);
