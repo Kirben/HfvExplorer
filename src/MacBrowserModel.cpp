@@ -894,6 +894,8 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if (choice == Storage::ConflictChoice::Skip) { ++progress.skipped;progress.processed+=entry.forks[0].size+entry.forks[1].size;job.progress(progress);return false; }
     }
     if(found){auto now=dst.Stat(existing.id);Check(now.identity==existing.identity&&now.name==existing.name&&now.directory==existing.directory&&now.modified==existing.modified&&now.forks[0].size==existing.forks[0].size&&now.forks[1].size==existing.forks[1].size,"Destination changed during overwrite confirmation; source retained");}
+    std::optional<ClassicCopyArchive::Pair> superseded;
+    if(found&&plan.archivedMetadata)superseded=ClassicCopyArchive::RequireVerifiedPair(dst,existing,job);
     progress.path = BrowserPresentation::Utf8(entry.name); progress.fileBytes = 0;
     progress.fileTotal = entry.forks[0].size + entry.forks[1].size; job.progress(progress);
     if (job.cancelled()) throw Storage::Cancelled();
@@ -973,7 +975,10 @@ bool Transfer(Volume &src, const Planned &plan, Volume &dst, uint32_t parent,
         if(hostPath.empty())published=dst.PutForTransfer(parent,outgoing,std::move(reader),found,job);
         else published=dst.PutFromHost(parent,outgoing,std::move(reader),found,hostPath,job);
     }
-    if(plan.archivedMetadata)ClassicCopyArchive::Save(dst,published,*plan.archivedMetadata,job);
+    if(plan.archivedMetadata){
+        if(superseded)ClassicCopyArchive::RemoveCompanion(dst,superseded->companion);
+        ClassicCopyArchive::Save(dst,published,*plan.archivedMetadata,job);
+    }
     noteDatePrecision();
     progress.sparseHolesAllocated|=materializesHoles;
     progress.apfsCloneCopiedIndependently|=hfsPlus&&!plan.reader&&entry.apfsCloneMarked;
@@ -1651,7 +1656,8 @@ bool CopyMany(const std::vector<std::pair<std::shared_ptr<Volume>,uint32_t>>& so
         throw Storage::Cancelled();
     progress.scanning=false;progress.byteTransfer=true;progress.phase="Copying";job.progress(progress);bool complete=true;
     CopiedLinks copies;
-    const auto transfer=[&](bool){
+    const auto transfer=[&](bool durable){
+        Check(!archiveCopy||durable,"Archive Copy requires classic HFS write recovery");
         for(size_t i=0;i<plans.size();++i){
             const auto route=routes.empty()?ForkSource::Stream:routes[i];
             if(!Transfer(*sources[i].first,plans[i],dst,parent,job,progress,copies,route))complete=false;

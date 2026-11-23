@@ -2705,6 +2705,95 @@ void TestClassicArchiveRoundTrip(const std::string& root,FILE* report)
     fprintf(report,"PASS: an opt-in classic HFS archive restores file and folder metadata and both forks, and rejects stale companions after reopening.\n");
 }
 
+void TestClassicArchivePairUpdates(const std::string& root,FILE* report)
+{
+    const auto base=root+"\\classic-archive-pairs";
+    auto source=Image(Wide(base+"-source.dsk"),HfsPlus::Volume::FormatKind::HfsPlus);
+    const auto input=Put(*source,2,u"Payload",4097,49);
+    source->SetAttributes(input,{{u"user.companion",{4,9}}});
+    const auto path=base+".dsk";
+    auto classic=ClassicImage(path);
+    const auto archive=[&](bool overwrite,Storage::ConflictChoice answer){
+        auto copy=Submit(OrdinaryCopy{{Native(source,input)},Native(classic)});
+        Conflict(copy);
+        const auto prompt=copy.Job()->conflictState();
+        Check(prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss,"Missing classic pair archive prompt");
+        copy.Job()->resolve(prompt.id,Storage::ConflictChoice::ReplaceAll);
+        if(overwrite){
+            Conflict(copy,prompt.id);
+            const auto replacement=copy.Job()->conflictState();
+            Check(replacement.kind==Storage::CopyPrompt::Overwrite,"Missing archive pair overwrite approval");
+            copy.Job()->resolve(replacement.id,answer);
+        }
+        Wait(copy);
+        return copy.Job()->result();
+    };
+    const auto initial=archive(false,Storage::ConflictChoice::Replace);
+    Check(!initial.code,initial.message.c_str());
+    const auto locate=[&](const std::u16string& name){
+        Entry entry;
+        Check(classic->FindChild(2,name,entry),"Missing classic archive pair payload");
+        return entry;
+    };
+    Storage::Job job;
+    const auto first=locate(u"Payload");
+    auto pair=ClassicCopyArchive::RequireVerifiedPair(*classic,first,job);
+    Check(pair.has_value(),"Missing initial verified companion");
+    const auto cancelled=archive(true,Storage::ConflictChoice::Cancel);
+    Check(cancelled.outcome==Storage::Outcome::Cancelled&&locate(u"Payload").resolvedId==first.resolvedId&&
+          ClassicCopyArchive::Load(*classic,first,job).has_value(),"Cancelling overwrite changed the old pair");
+    const auto replaced=archive(true,Storage::ConflictChoice::Replace);
+    Check(!replaced.code,replaced.message.c_str());
+    classic.reset();
+    classic=OpenBrowserImage(Wide(path));
+    Check(bool(classic),"Cannot reopen replaced classic pair");
+    auto current=locate(u"Payload");
+    pair=ClassicCopyArchive::RequireVerifiedPair(*classic,current,job);
+    Check(pair&&classic->List(2).size()==2,"Repeat archive left an extra companion");
+    Verify(*classic,current.id,4097,49);
+
+    classic->Rename(pair->companion.id,2,u"Saved companion");
+    const auto occupant=Put(*classic,2,ClassicCopyArchive::CompanionName(current.resolvedId),1001,72);
+    const auto blocked=archive(true,Storage::ConflictChoice::Replace);
+    Check(blocked.outcome==Storage::Outcome::Failed&&blocked.message.find("unrelated file")!=std::string::npos&&
+          locate(u"Payload").resolvedId==current.resolvedId,"An unrelated companion-name occupant did not block the update");
+    Verify(*classic,occupant,1001,72);
+    classic->Remove(occupant);
+    classic->Rename(locate(u"Saved companion").id,2,ClassicCopyArchive::CompanionName(current.resolvedId));
+
+    classic->Rename(current.id,2,u"Renamed payload");
+    classic.reset();
+    classic=OpenBrowserImage(Wide(path));
+    Check(bool(classic),"Cannot reopen the renamed archive pair");
+    current=locate(u"Renamed payload");
+    pair=ClassicCopyArchive::RequireVerifiedPair(*classic,current,job);
+    Check(pair&&pair->metadata.entry.name==u"Renamed payload"&&classic->List(2).size()==2,
+          "Renaming did not rebind the existing companion");
+    auto place=classic->MakeDirectory(2,u"Occupied folder");
+    Put(*classic,place,pair->companion.name,2231,33);
+    bool refusedMove=false;
+    try{classic->Rename(current.id,place,u"Renamed payload");}catch(const HfsPlus::Error&){refusedMove=true;}
+    Entry absent,unrelated;
+    Check(refusedMove&&classic->FindChild(2,u"Renamed payload",current)&&
+          !classic->FindChild(place,u"Renamed payload",absent)&&
+          classic->FindChild(place,pair->companion.name,unrelated)&&
+          ClassicCopyArchive::Load(*classic,current,job).has_value(),
+          "Destination companion collision did not roll back the pair rename");
+    Verify(*classic,unrelated.id,2231,33);
+
+    classic->Rename(current.id,2,u"Payload");
+    current=locate(u"Payload");
+    hfsdirent native{};
+    Check(classic->GetClassicProperties(current.id,native),"Cannot read archive stale fixture");
+    native.mddate+=29;
+    classic->SetClassicProperties(current.id,native);
+    const auto stale=archive(true,Storage::ConflictChoice::Replace);
+    Check(stale.outcome==Storage::Outcome::Failed&&stale.message.find("stale")!=std::string::npos&&
+          locate(u"Payload").resolvedId==current.resolvedId,"Stale previous companion did not retain the existing pair");
+    Verify(*classic,current.id,4097,49);
+    fprintf(report,"PASS: classic archive replacement and rename keep verified pairs together; cancellation, stale data and unrelated occupants preserve both files.\n");
+}
+
 void TestClassicArchiveNamePreview(const std::string& root,FILE* report)
 {
     const auto base=root+"\\classic-name-archive";
@@ -4636,6 +4725,7 @@ int RunCopyProcessTest(const char *directory) {
         TestMfsTransferVersions(root,report);
         TestClassicMetadataCompanion(report);
         TestClassicArchiveRoundTrip(root,report);
+        TestClassicArchivePairUpdates(root,report);
         TestClassicArchiveNamePreview(root,report);
         TestClassicArchiveSpecialEntries(root,report);
         TestClassicBackupDates(root,report);

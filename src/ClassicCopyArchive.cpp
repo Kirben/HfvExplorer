@@ -241,6 +241,25 @@ std::optional<Metadata> Load(MacBrowser::Volume& volume,const Entry& item,Storag
     return result;
 }
 
+std::optional<Pair> RequireVerifiedPair(MacBrowser::Volume& volume,const Entry& item,Storage::Job& job)
+{
+    Entry companion;
+    if(!volume.FindChild(item.parent,CompanionName(item.resolvedId),companion))return {};
+    Check(CompanionType(companion),"An unrelated file occupies the classic metadata companion name");
+    auto metadata=Load(volume,item,job);
+    Check(metadata.has_value(),"The existing classic metadata companion is stale. Both files were retained.");
+    return Pair{std::move(companion),std::move(*metadata)};
+}
+
+void RemoveCompanion(MacBrowser::Volume& volume,const Entry& expected)
+{
+    Entry current;
+    Check(volume.FindChild(expected.parent,expected.name,current)&&current.identity==expected.identity&&
+          current.resolvedId==expected.resolvedId&&CompanionType(current),
+          "Classic metadata companion changed during the operation");
+    volume.Remove(current.id);
+}
+
 void Save(MacBrowser::Volume& volume,uint32_t id,const Metadata& source,Storage::Job& job)
 {
     const auto item=volume.Stat(id);

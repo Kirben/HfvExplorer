@@ -22,6 +22,7 @@ int hfs_recognizes_image_fd(int);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
 #include "ClassicCatalog.h"
+#include "ClassicCopyArchive.h"
 #include "ClassicImagePath.h"
 #include "ClassicHfsRecovery.h"
 #include "ReadOnlyCdBackend.h"
@@ -644,7 +645,33 @@ public:
         RenameFrom(*from,id,parent,entry.name);
     }
     void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{
-        RenameFrom(*this,id,parent,name);
+        Storage::Job job;
+        RenameForJob(id,parent,name,job);
+    }
+    void RenameForJob(uint32_t id,uint32_t parent,const std::u16string& name,Storage::Job& job)override{
+        LegacyEngine::Scope engine(context_);
+        if(id==2)throw HfsPlus::Error("Cannot rename or move the classic HFS volume root");
+        if(job.cancelled())throw Storage::Cancelled();
+        const auto before=Stat(id);
+        auto pair=ClassicCopyArchive::RequireVerifiedPair(*this,before,job);
+        if(!pair){RenameFrom(*this,id,parent,name);return;}
+        if(before.parent==parent&&before.name==name)return;
+        if(ClassicCopyArchive::ReservedName(name))
+            throw HfsPlus::Error("This name is reserved for classic HFS metadata companions");
+        const auto oldPath=Path(id);
+        try{
+            RunWriteBatch(job,[&](bool durable){
+                if(!durable)throw HfsPlus::Error("Renaming archived files requires classic HFS write recovery");
+                if(job.cancelled())throw Storage::Cancelled();
+                RenameFrom(*this,id,parent,name);
+                ClassicCopyArchive::RemoveCompanion(*this,pair->companion);
+                pair->metadata.entry.name=name;
+                ClassicCopyArchive::Save(*this,id,pair->metadata,job);
+            });
+        }catch(...){
+            paths_[id]=oldPath;
+            throw;
+        }
     }
     void Remove(uint32_t id)override{
         LegacyEngine::Scope engine(context_);

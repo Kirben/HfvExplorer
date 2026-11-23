@@ -18,6 +18,12 @@ Digest Fingerprint(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 HfsPlus::AttributeData Encode(const Metadata&,const Digest&,Storage::Job&);
 std::u16string CompanionName(uint32_t catalogId);
 bool ReservedName(std::u16string_view);
+struct Pair {
+    MacBrowser::Entry companion;
+    Metadata metadata;
+};
+std::optional<Pair> RequireVerifiedPair(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
+void RemoveCompanion(MacBrowser::Volume&,const MacBrowser::Entry&);
 void RefuseCut(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
 void Save(MacBrowser::Volume&,uint32_t id,const Metadata&,Storage::Job&);
 std::optional<Metadata> Load(MacBrowser::Volume&,const MacBrowser::Entry&,Storage::Job&);
