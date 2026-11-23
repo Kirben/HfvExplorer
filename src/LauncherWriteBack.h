@@ -25,7 +25,6 @@ public:
     ~LauncherWriteBack();
     LauncherWriteBack(const LauncherWriteBack&) = delete;
     LauncherWriteBack& operator=(const LauncherWriteBack&) = delete;
-    static void Discard(const CString& temporary);
     bool CaptureBaseline(CWnd* owner);
     void Track(HANDLE process) { process_=process; started_=GetTickCount(); }
     bool Ready() const;

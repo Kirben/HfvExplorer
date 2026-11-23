@@ -69,19 +69,15 @@ bool LauncherWriteBack::CaptureBaseline(CWnd* owner)
         auto opened=document.Open(path.c_str(),false);
         return opened.code?opened:document.ReadVersion(baseline_,job);
     },!owner->IsWindowVisible(),owner);
-    if(result.code)owner->MessageBox(result.message.c_str(),"HFVExplorer",MB_OK|MB_ICONERROR);
+    if(result.code)
+        owner->MessageBox(CString(result.message.c_str())+" Inspect the staged copy at "+temporary_,
+                          "HFVExplorer",MB_OK|MB_ICONERROR);
     return !result.code;
 }
 
 LauncherWriteBack::~LauncherWriteBack()
 {
     if(process_)CloseHandle(process_);
-}
-
-void LauncherWriteBack::Discard(const CString& temporary)
-{
-    if(SetFileAttributes(temporary,FILE_ATTRIBUTE_NORMAL)&&DeleteFile(temporary))
-        RemoveDirectory(temporary.Left(temporary.ReverseFind(char(92))));
 }
 
 bool LauncherWriteBack::Ready() const

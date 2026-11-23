@@ -190,10 +190,7 @@ bool Launchers::OpenClassicDocument(CString type, CString creator)
  SetFileAttributes(staged,attributes);
 
  auto writeBack=std::make_unique<LauncherWriteBack>(selection,std::move(version),staged);
- if(!writeBack->CaptureBaseline(owner)){
-  LauncherWriteBack::Discard(staged);
-  return FALSE;
- }
+ if(!writeBack->CaptureBaseline(owner))return FALSE;
  SHELLEXECUTEINFO launch{};
  launch.cbSize=sizeof(launch);
  launch.hwnd=owner->GetSafeHwnd();
@@ -205,8 +202,7 @@ bool Launchers::OpenClassicDocument(CString type, CString creator)
  BOOL launched=ShellExecuteEx(&launch);
  writeBack->Track(launch.hProcess);
  if(!launched||reinterpret_cast<INT_PTR>(launch.hInstApp)<=32){
-  owner->MessageBox("Could not open "+staged,"HFVExplorer",MB_OK|MB_ICONERROR);
-  LauncherWriteBack::Discard(staged);
+  owner->MessageBox("Could not open the temporary document. Inspect the staged copy at "+staged,"HFVExplorer",MB_OK|MB_ICONERROR);
   return FALSE;
  }
  static_cast<CMainFrame*>(owner)->TrackLaunchedDocument(std::move(writeBack));
