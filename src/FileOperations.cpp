@@ -1552,7 +1552,8 @@ std::string CaptureLaunchVersion(const Location& item,Storage::Job& job)
 }
 
 Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
-                                HANDLE file,Storage::Job& job,ClassicHfsRecovery::MoveDecision* decision)
+                                HANDLE file,Storage::Job& job,
+                                const std::function<std::unique_ptr<ClassicHfsRecovery::MoveDecision>()>& prepareDecision)
 {
  Storage::OperationCompletion outcome;
  Completion completion;
@@ -1590,14 +1591,16 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
      throw OperationError(GetLastError(),"Could not read the entire edited data fork");
    },{});
    };
-   if(decision)volume.WithCopyTransaction([&](bool active){
-    Check(active,"This image cannot coordinate durable launcher write-back");
-    write();
-    volume.PrepareCopyTransaction();
-    Cancel(job);
-    decision->Commit();
-   },decision->Id());
-   else write();
+   if(prepareDecision){
+    auto decision=prepareDecision();
+    volume.WithCopyTransaction([&](bool active){
+     Check(active,"This image cannot coordinate durable launcher write-back");
+     write();
+     volume.PrepareCopyTransaction();
+     Cancel(job);
+     decision->Commit();
+    },decision->Id());
+   }else write();
    volume.Close();
   });
   completion.completed=1;

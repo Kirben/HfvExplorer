@@ -460,6 +460,18 @@ int RunFileOperationsTest(const char* directory){
            "pending edit did not survive reopening");
     }
     const auto record=folder+"\\.hfv-pending-edit";
+    const auto beforeRetry=Load(record);
+    {
+     auto recovered=LauncherWriteBack::LoadPending(CString(pendingRoot.c_str()));
+     LauncherTemporaryDocument inspected;
+     Check(recovered.size()==1&&!inspected.Open(W(pending).c_str(),true).code,"open stale edit for retry");
+     for(unsigned i=0;i<2;++i){
+      Storage::Job retry;
+      Check(recovered.front()->ApplyPending(inspected,retry).code,"stale launcher write succeeded");
+     }
+    }
+    Check(Load(record)==beforeRetry,"rejected write-back attempts allocated another decision");
+    fprintf(report,"PASS: stale launcher retries leave the recovery record unchanged.\n");
     const auto stream=pending+":CleanupState";
     Save(stream,"KEEP");
     {

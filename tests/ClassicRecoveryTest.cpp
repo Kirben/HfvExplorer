@@ -1610,6 +1610,15 @@ static void RunLauncherInterruptionTests(const CString& root,FILE* report)
             Sleep(10);
         Check(Load(editPath)==edited,"delegated editor did not replace the temporary document");
         CrashChild(folder,phase,L"launcher-write-back");
+        std::wstring previousMarker;
+        if(phase==8){
+            const auto record=Load(staged+"\\.hfv-pending-edit");
+            Check(record.size()>ClassicHfsRecovery::MoveIdSize,"interrupted launcher write did not persist its decision");
+            const std::string prior(record.end()-ClassicHfsRecovery::MoveIdSize,record.end());
+            previousMarker=ClassicHfsRecovery::MoveDecisionPath(prior);
+            Check(GetFileAttributesW(previousMarker.c_str())!=INVALID_FILE_ATTRIBUTES&&
+                  ClassicHfsRecovery::Pending(imagePath),"interrupted launcher write lost its decision or undo");
+        }
         {
             auto recovered=LauncherWriteBack::LoadPending(folder);
             bool committed=false;
@@ -1633,6 +1642,19 @@ static void RunLauncherInterruptionTests(const CString& root,FILE* report)
                 auto volume=MacBrowser::OpenImage(imagePath);
                 VerifyFile(*volume,2,u"Document",false);
                 volume->Close();
+                if(phase==8){
+                    const auto edit=VolumeCoord::Wide(editPath.GetString());
+                    LauncherTemporaryDocument document;
+                    Storage::Job retry;
+                    Check(!document.Open(edit.c_str(),true).code,"protect staged copy for retry");
+                    const auto result=recovered.front()->ApplyPending(document,retry);
+                    Check(!result.code,result.message.c_str());
+                    Check(GetFileAttributesW(previousMarker.c_str())==INVALID_FILE_ATTRIBUTES&&
+                          !ClassicHfsRecovery::Pending(imagePath),"retry orphaned the previous launcher marker or undo");
+                    bool committed=false;
+                    Check(!recovered.front()->CheckCommitStatus(committed).code&&committed,
+                          "cleaning the previous marker lost the successful retry decision");
+                }
             }
         }
         Check(Load(editPath)==edited,"launcher interruption removed or changed the edited copy");

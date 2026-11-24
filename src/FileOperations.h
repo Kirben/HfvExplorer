@@ -162,6 +162,6 @@ std::vector<Operation> Pending();
 void CancelPending();
 std::string CaptureLaunchVersion(const Location&, Storage::Job&);
 Storage::Result ApplyLaunchEdit(const Location&, const std::string&, HANDLE inspectedFile, Storage::Job&,
-                               ClassicHfsRecovery::MoveDecision* decision=nullptr);
+                               const std::function<std::unique_ptr<ClassicHfsRecovery::MoveDecision>()>& prepareDecision={});
 
 }

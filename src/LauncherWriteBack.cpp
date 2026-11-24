@@ -299,16 +299,21 @@ Storage::Result LauncherWriteBack::ApplyPending(const LauncherTemporaryDocument&
     if(committed)return {1,ERROR_ALREADY_EXISTS,"The Mac document was already updated."};
     if(pending_==INVALID_HANDLE_VALUE||!decisionOffset_)
         return {1,ERROR_INVALID_DATA,"The pending edit has no recovery record."};
-    ClassicHfsRecovery::MoveDecision decision;
-    LARGE_INTEGER offset{};
-    offset.QuadPart=decisionOffset_;
-    DWORD written=0;
-    if(!SetFilePointerEx(pending_,offset,nullptr,FILE_BEGIN)||
-       !WriteFile(pending_,decision.Id().data(),DWORD(decision.Id().size()),&written,nullptr)||
-       written!=decision.Id().size()||!FlushFileBuffers(pending_))
-        return {1,ERROR_WRITE_FAULT,"Cannot save the write-back recovery decision."};
-    decisionId_=decision.Id();
-    return FileOperations::ApplyLaunchEdit(original_,version_,file,job,&decision);
+    return FileOperations::ApplyLaunchEdit(original_,version_,file,job,[&]{
+        // The verified writable mount has already replayed any prior undo.
+        auto decision=std::make_unique<ClassicHfsRecovery::MoveDecision>();
+        LARGE_INTEGER offset{};
+        offset.QuadPart=decisionOffset_;
+        DWORD written=0;
+        const auto& id=decision->Id();
+        if(!SetFilePointerEx(pending_,offset,nullptr,FILE_BEGIN)||
+           !WriteFile(pending_,id.data(),DWORD(id.size()),&written,nullptr)||
+           written!=id.size()||!FlushFileBuffers(pending_))
+            throw HfsPlus::Error("Cannot save the write-back recovery decision.");
+        auto superseded=std::exchange(decisionId_,id);
+        if(!superseded.empty())ClassicHfsRecovery::ForgetMoveDecision(superseded);
+        return decision;
+    });
 }
 
 bool LauncherWriteBack::Forget()
