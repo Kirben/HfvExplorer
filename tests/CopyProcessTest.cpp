@@ -536,6 +536,133 @@ int RunCopyParentExitTest(const char *directory) {
         return 1;
     }
 }
+int RunCutCompetitor(const char* file,const char* mode)
+{
+    const std::string path=file;
+    if(!strcmp(mode,"replace")){
+        const auto backup=path+".saved";
+        const auto replacement=path+".replacement";
+        return CopyFileA(file,replacement.c_str(),TRUE)&&MoveFileA(file,backup.c_str())&&
+               MoveFileA(replacement.c_str(),file)?0:1;
+    }
+    if(strcmp(mode,"stream"))return 1;
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if(!GetFileAttributesExA(file,GetFileExInfoStandard,&info))return 1;
+    const auto stream=CreateFileA((path+":CutNotes").c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);
+    if(stream==INVALID_HANDLE_VALUE)return 1;
+    DWORD written=0;
+    const bool edited=WriteFile(stream,"NEW!",4,&written,nullptr)&&written==4&&FlushFileBuffers(stream);
+    CloseHandle(stream);
+    const auto primary=CreateFileA(file,FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                                   nullptr,OPEN_EXISTING,0,nullptr);
+    if(primary==INVALID_HANDLE_VALUE)return 1;
+    const bool dated=SetFileTime(primary,nullptr,nullptr,&info.ftLastWriteTime)!=FALSE;
+    CloseHandle(primary);
+    return edited&&dated?0:1;
+}
+
+namespace {
+void CompeteWithCut(const std::string& path,const char* mode)
+{
+    char exe[MAX_PATH]{};
+    Check(GetModuleFileNameA(nullptr,exe,MAX_PATH)!=0,"find competing test executable");
+    std::string command="\""+std::string(exe)+"\" --cut-test-competitor \""+path+"\" "+mode;
+    STARTUPINFOA info{sizeof(info)};
+    PROCESS_INFORMATION child{};
+    Check(CreateProcessA(exe,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&info,&child)!=FALSE,
+          "launch independent Cut competitor");
+    CloseHandle(child.hThread);
+    DWORD status=1;
+    const auto waited=WaitForSingleObject(child.hProcess,10000);
+    if(waited==WAIT_TIMEOUT)TerminateProcess(child.hProcess,1);
+    const bool exited=GetExitCodeProcess(child.hProcess,&status)!=FALSE;
+    CloseHandle(child.hProcess);
+    Check(waited==WAIT_OBJECT_0&&exited&&!status,"competing process could not modify Cut fixture");
+}
+
+void ShippingDirectoryCutRaces(const std::string& root,FILE* report)
+{
+    for(unsigned scenario:{0u,1u,2u}){
+        const auto folder=root+"\\cut-race-"+std::to_string(scenario);
+        const auto source=folder+"\\From",destination=folder+"\\To";
+        Check(CreateDirectoryA(folder.c_str(),nullptr)&&CreateDirectoryA(source.c_str(),nullptr)&&
+              CreateDirectoryA(destination.c_str(),nullptr),"create shipping Cut roots");
+        {
+            auto from=OpenWindows(Wide(source)),to=OpenWindows(Wide(destination));
+            const auto tree=from->MakeDirectory(2,u"Tree");
+            const auto nested=from->MakeDirectory(tree,u"Nested");
+            Put(*from,nested,u"A first",4096);
+            Put(*from,nested,u"Z barrier",4096,3);
+            const auto targetTree=to->MakeDirectory(2,u"Tree");
+            const auto targetNested=to->MakeDirectory(targetTree,u"Nested");
+            Put(*to,targetNested,u"Z barrier",4096,9);
+            Put(*to,2,u"Neighbor",4096,11);
+        }
+        const auto original=source+"\\Tree\\Nested\\A first";
+        const auto copied=destination+"\\Tree\\Nested\\A first";
+        const auto stream=original+":CutNotes";
+        if(scenario==2){
+            CFile output;
+            Check(output.Open(stream.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create source stream");
+            output.Write("OLD!",4);
+        }
+        auto cut=Location::Windows(Wide(source+"\\Tree"));
+        cut.cut=cut.directory=true;
+        auto target=Location::Windows(Wide(destination));
+        target.directory=true;
+        Request request=OrdinaryCopy{{cut},target};
+        request.background=true;
+        CopyProcess::lastProcess=0;
+        auto operation=Submit(std::move(request));
+        bool injected=false;
+        uint64_t last=0;
+        for(unsigned prompts=0;prompts<4&&!injected;++prompts){
+            Conflict(operation,last);
+            const auto current=operation.Job()->conflictState();
+            last=current.id;
+            if(current.path.find("Z barrier")!=std::string::npos){
+                Check(GetFileAttributesA(copied.c_str())!=INVALID_FILE_ATTRIBUTES,"worker reached the barrier before publishing the first nested file");
+                const auto replaced=scenario==0?copied:destination+"\\Tree\\Nested\\%A first";
+                CompeteWithCut(scenario==2?original:replaced,scenario==2?"stream":"replace");
+                injected=true;
+            }
+            operation.Job()->resolve(current.id,Storage::ConflictChoice::Replace);
+        }
+        Wait(operation);
+        Check(injected&&CopyProcess::lastProcess&&CopyProcess::lastProcess!=GetCurrentProcessId()&&
+              operation.Job()->result().code&&!operation.Job()->result().moved,
+              "shipping worker removed sources after a competing change");
+        auto from=OpenWindows(Wide(source+"\\Tree\\Nested")),to=OpenWindows(Wide(destination+"\\Tree\\Nested"));
+        Entry entry;
+        Check(from->FindChild(2,u"A first",entry),"Cut lost the first source");
+        Verify(*from,entry.id,4096);
+        Check(from->FindChild(2,u"Z barrier",entry),"Cut lost the second source");
+        Verify(*from,entry.id,4096,3);
+        Check(to->FindChild(2,u"A first",entry),"Cut lost the published or replacement destination");
+        Verify(*to,entry.id,4096);
+        auto parent=OpenWindows(Wide(destination));
+        Check(parent->FindChild(2,u"Neighbor",entry),"Cut removed unrelated destination data");
+        Verify(*parent,entry.id,4096,11);
+        if(scenario==2){
+            const auto verifyStream=[](const std::string& path,const char* expected){
+                CFile input;
+                char bytes[4]{};
+                Check(input.Open(path.c_str(),CFile::modeRead|CFile::shareDenyNone)&&
+                      input.GetLength()==4&&input.Read(bytes,4)==4&&!memcmp(bytes,expected,4),
+                      "Cut lost or changed alternate stream bytes");
+            };
+            verifyStream(stream,"NEW!");
+            verifyStream(copied+":CutNotes","OLD!");
+        }else{
+            const auto replaced=scenario==0?copied:destination+"\\Tree\\Nested\\%A first";
+            Check(GetFileAttributesA((replaced+".saved").c_str())!=INVALID_FILE_ATTRIBUTES,
+                  "Cut deleted the independent process's saved file");
+        }
+    }
+    fprintf(report,"PASS: shipping directory Cut retains both source forks after a nested data or AppleDouble replacement, or a same-size stream edit by a competing process.\n");
+}
+}
+
 int RunCopyReleaseTest(const char *directory) {
     if (!CreateDirectoryA(directory, nullptr))
         return 2;
@@ -548,6 +675,7 @@ int RunCopyReleaseTest(const char *directory) {
     try {
         Check(GetEnvironmentVariableW(L"HFV_COPY_WORKER_TEST_EXECUTABLE", nullptr, 0) > 0,
               "shipping worker executable not configured");
+        ShippingDirectoryCutRaces(root,report);
         {
             const auto path=Wide(root+"\\session.dsk");
             { auto seed=Image(path); Put(*seed,2,u"Mounted read",4096); }
