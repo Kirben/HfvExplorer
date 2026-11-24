@@ -393,6 +393,68 @@ FloppyMove FloppyMoveEndpoints(const OrdinaryCopy& copy)
  return {disk,std::move(folder),{}};
 }
 
+// Retain verified Windows files and their parent directories through Cut cleanup.
+class WindowsCutDestination {
+    std::vector<std::pair<std::u16string,std::string>> entries_;
+    std::vector<HANDLE> pins_;
+    ObjectIdentity folder_;
+
+    void Pin(const std::wstring& path,const ObjectIdentity& expected,bool folderOnly)
+    {
+        const auto handle=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(handle==INVALID_HANDLE_VALUE)
+            throw Storage::MediaChanged("Cannot protect the Windows destination; Cut sources were retained");
+        struct Close{HANDLE handle;~Close(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}} guard{handle};
+        BY_HANDLE_FILE_INFORMATION info{};
+        if(!GetFileInformationByHandle(handle,&info)||(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)||
+           (folderOnly?(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||WindowsIdentity(info).key!=expected.key):
+                       WindowsIdentity(info)!=expected))
+            throw Storage::MediaChanged("Windows destination changed before Cut cleanup; Cut sources were retained");
+        pins_.push_back(handle);
+        guard.handle=INVALID_HANDLE_VALUE;
+    }
+
+public:
+    ~WindowsCutDestination(){for(auto handle:pins_)CloseHandle(handle);}
+
+    void Capture(Volume& volume,uint32_t parent,const std::vector<std::u16string>& names,Storage::Job& job)
+    {
+        folder_=volume.Stat(parent).identity.primary;
+        Check(!folder_.key.empty(),"Cannot identify the Windows Cut destination folder");
+        for(const auto& name:names){
+            Entry entry;
+            Check(volume.FindChild(parent,name,entry),"Cannot identify a published Windows Cut destination");
+            entries_.emplace_back(name,Snapshot(volume,entry.id,job));
+        }
+    }
+
+    void Verify(const Location& target,Storage::Job& job)
+    {
+        if(entries_.empty())return;
+        auto destination=Destination(target);
+        const auto parent=destination.second;
+        auto& volume=*destination.first;
+        Pin(volume.HostPath(parent),folder_,true);
+        for(const auto& [name,expected]:entries_){
+            Entry actual;
+            if(!volume.FindChild(parent,name,actual))
+                throw Storage::MediaChanged("A published Windows destination is missing; Cut sources were retained");
+            const auto observed=Snapshot(volume,actual.id,job,false,[&](Volume& host,const Entry& entry){
+                const auto path=host.HostPath(entry.id);
+                Pin(path,entry.identity.primary,false);
+                if(!entry.identity.companion.key.empty()){
+                    const auto separator=path.find_last_of(L'\\');
+                    Pin(path.substr(0,separator+1)+L"%"+path.substr(separator+1),entry.identity.companion,false);
+                }
+            });
+            if(observed!=expected)
+                throw Storage::MediaChanged("Windows destination changed before Cut cleanup; Cut sources were retained");
+        }
+        volume.Close();
+    }
+};
+
 Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkSource>& routes,
                             Storage::Job& job,Completion& completion){
  const auto& request=transfer.endpoints;
@@ -413,6 +475,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  const bool reportExport=transfer.adapter&&target.IsWindows()&&!moving&&request.sources.size()==1&&!request.sources.front().directory;
  std::pair<std::wstring,ObjectIdentity> exported;
  std::vector<std::u16string> publishedNames;
+ WindowsCutDestination windowsReceipt;
  const auto run=[&]{
   if(!target.IsWindows())StorageLocation::ValidateMedia(target);
   if(target.IsClassic())StorageLocation::ValidateImage(VolumeCoord::Wide(target.ClassicImage()),target.expectedResource);
@@ -462,6 +525,13 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
    }
    const bool windows=CanCoordinateWindowsMove(request,opened,*destination.first);
    coordinated=coordinated||windows;
+   const bool verifyWindows=moving&&windowsDestination&&!coordinated;
+   const auto captureWindows=[&]{
+    if(complete&&verifyWindows){
+     Check(publishedNames.size()==opened.size(),"Cannot identify all published Windows Cut destinations");
+     windowsReceipt.Capture(*destination.first,destination.second,publishedNames,job);
+    }
+   };
    if(driveMove.floppy){
     // The shared floppy and Windows scopes are already open. Close the
     // read mounts before reopening the floppy source for its final deletion.
@@ -491,7 +561,9 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      Storage::OutcomeEvidence evidence;
      try{
       WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
-       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true);
+       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true,
+                         verifyWindows?&publishedNames:nullptr);
+       captureWindows();
        destination.first->Close();
        Cancel(job);
       });
@@ -514,7 +586,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      report.Append(planned);
     }
     const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
-                                        false,report?&publishedNames:nullptr);};
+                                        false,(report||verifyWindows)?&publishedNames:nullptr);captureWindows();};
     if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);
     else copy();
    }
@@ -541,6 +613,12 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
   for(const auto& source:request.sources)
    StorageLocation::ValidateMedia(source,StorageLocation::FloppyProbe::FreshHandle);
   if(complete){
+   if(moving&&windowsDestination){
+    auto progress=job.progress();
+    progress.phase="Verifying Windows destination before Cut cleanup";
+    job.progress(progress);
+    windowsReceipt.Verify(target,job);
+   }
    if(report){
     std::string verified="Destination published.\r\n";
     for(size_t i=0;i<publishedNames.size();++i){
